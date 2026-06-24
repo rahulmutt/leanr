@@ -1,2 +1,2 @@
 # leanr
-A high-performance implement of Lean, written in Rust.
+A high-performance implemention of Lean, written in Rust.
