@@ -1,0 +1,17 @@
+{
+  "name": "leanr",
+  "image": "ghcr.io/rahulmutt/dev:sha-42641e0",
+  "workspaceFolder": "/workspace",
+  "remoteUser": "dev",
+  "containerEnv": {
+    "CARGO_HOME": "/home/dev/.cargo",
+    "RUSTUP_HOME": "/home/dev/.rustup",
+    "INSTALL_DEVENV": "true",
+  },
+  "postCreateCommand": "post-create.sh",
+  "customizations": {
+    "devpod": {
+      "ide": "none"
+    }
+  }
+}
