@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/leanr_cli"]
+members = ["crates/leanr_cli", "crates/leanr_query"]
 
 [workspace.package]
 version = "0.1.0"
