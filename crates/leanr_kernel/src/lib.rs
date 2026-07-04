@@ -8,8 +8,12 @@
 //! value depth: traversals are loops or explicit stacks, and the `Arc`
 //! tree types implement iterative `Drop`.
 
+mod expr;
+mod level;
 mod name;
 mod num;
 
+pub use expr::{BinderInfo, DataValue, Expr, KVMap, Literal};
+pub use level::Level;
 pub use name::Name;
 pub use num::{Int, Nat};
