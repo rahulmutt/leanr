@@ -1,0 +1,143 @@
+//! Reader for official Lean `.olean` artifacts.
+//!
+//! Trust boundary: input bytes are UNTRUSTED (see docs/THREAT_MODEL.md).
+//! No code path may panic on arbitrary input.
+//!
+//! # Header layout
+//!
+//! The brief's hypothesized layout (16-byte `oleanfile!!!!!!!` magic followed
+//! by a 40-byte githash and a `u64` base address at offset 56, 64 bytes
+//! total) does NOT match the oracle toolchain pinned in `lean-toolchain`
+//! (`leanprover/lean4:v4.32.0-rc1`, commit `b4812ae5...`). That hypothesis
+//! predates a header format change in later Lean versions (a version/flags
+//! byte pair plus an embedded Lean version string were inserted between the
+//! magic and the githash).
+//!
+//! The actual on-disk layout was read directly from the oracle's C++ writer,
+//! `struct olean_header` in `src/library/module.cpp` at the pinned tag
+//! (lines 106-144 define the struct; lines 327-331 and 353-357 are the two
+//! write sites for the v2/v3 formats, which share this fixed header prefix;
+//! lines 482-499 are the read/validation side):
+//!
+//! ```text
+//! offset  0..5   marker:       5 bytes,  ASCII b"olean"
+//! offset  5      version:     1 byte,   2 = v2 (plain) olean, 3 = v3 (allows closures)
+//! offset  6      flags:       1 byte,   bit 0 = bignums use GMP encoding, bits 1-7 reserved
+//! offset  7..40  lean_version: 33 bytes, e.g. "4.32.0-rc1", NUL-padded, not
+//!                              necessarily NUL-terminated (unused by this parser)
+//! offset 40..80  githash:     40 bytes, build githash, NUL-padded, not
+//!                              necessarily NUL-terminated
+//! offset 80..88  base_addr:   8 bytes,  little-endian u64; the mmap address the
+//!                              file's compacted-object region was written to be
+//!                              loaded at
+//! offset 88..    start of the version-dependent body (v2: compacted data
+//!                              immediately; v3: a `size_t` data_size followed by
+//!                              compacted data and trailer sections) -- M1 territory.
+//! ```
+//!
+//! `static_assert(sizeof(olean_header) == 5 + 1 + 1 + 33 + 40 + sizeof(size_t), ...)`
+//! (module.cpp:144) confirms the 88-byte total (`size_t` is 8 bytes on every
+//! platform Lean ships for). This was cross-checked byte-for-byte against
+//! `tests/fixtures/Sample.olean`: bytes 0..5 are `olean`, byte 5 is `\x02`
+//! (v2), byte 6 is `\x01` (GMP), bytes 7.. spell `4.32.0-rc1` followed by
+//! zero padding to offset 40, and bytes 40..80 are exactly the 40 ASCII-hex
+//! githash bytes recorded in `tests/fixtures/oracle-githash.txt` with no
+//! padding (the hash happens to fill the field exactly).
+//!
+//! This parser deliberately does not gate on the `version` byte: the fields
+//! it reads (`marker`, `githash`, `base_addr`) live at the same fixed offsets
+//! in both the v2 and v3 formats (module.cpp:328/354), and full parsing of
+//! the version-dependent body beyond the header is out of scope for M0
+//! (tracked for M1's object-graph parsing).
+
+use thiserror::Error;
+
+/// Byte offset and length of the `marker` field (module.cpp:109).
+const MAGIC: &[u8; 5] = b"olean";
+/// Byte offset of the `githash` field (module.cpp:130): starts right after
+/// the 5-byte marker, 1-byte version, 1-byte flags, and 33-byte lean_version.
+const GITHASH_OFFSET: usize = 40;
+/// Length in bytes of the `githash` field (module.cpp:130).
+const GITHASH_LEN: usize = 40;
+/// Byte offset of the `base_addr` field (module.cpp:132): right after the
+/// githash field.
+const BASE_ADDR_OFFSET: usize = GITHASH_OFFSET + GITHASH_LEN;
+/// Total fixed-header length (module.cpp:144): `5 + 1 + 1 + 33 + 40 + 8`.
+const HEADER_LEN: usize = BASE_ADDR_OFFSET + 8;
+
+/// Parsed prefix of an `.olean` file's fixed header.
+///
+/// Only the two fields Task 7's CLI needs are exposed today; the full
+/// `olean_header` (version, flags, embedded Lean version string) and the
+/// object graph that follows are M1 territory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OleanHeader {
+    /// The build githash the file was produced by, as lowercase ASCII hex.
+    pub githash: String,
+    /// The mmap base address the compacted object region was written for.
+    ///
+    /// This is a real 64-bit pointer value chosen by the writer (derived
+    /// from hashing the module name; see `CompactedRegion.save`'s `key`
+    /// parameter), not a small integer -- it is expected to be nonzero for
+    /// every file the oracle produces.
+    pub base_addr: u64,
+}
+
+/// Failure parsing an `.olean` header from untrusted bytes.
+///
+/// `.olean` files are UNTRUSTED input at the trust boundary (see
+/// docs/THREAT_MODEL.md); every variant here corresponds to a defensive
+/// check on attacker-controlled bytes, and no combination of input bytes
+/// may cause a panic instead of one of these errors.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum OleanError {
+    /// Fewer than `HEADER_LEN` bytes were supplied; carries the actual length.
+    #[error("not an olean file: {0} bytes is smaller than the {HEADER_LEN}-byte header")]
+    Truncated(usize),
+    /// The first 5 bytes are not the `b"olean"` marker.
+    #[error("not an olean file: bad magic bytes")]
+    BadMagic,
+    /// The githash field is not (NUL-padded) ASCII hex.
+    #[error("olean header corrupt: githash is not ASCII hex")]
+    BadGithash,
+}
+
+impl OleanHeader {
+    /// Parse the fixed header prefix of an `.olean` file.
+    ///
+    /// `bytes` is untrusted input: every access is bounds-checked and no
+    /// path panics, whatever bytes are supplied (see the
+    /// `arbitrary_bytes_never_panic` proptest).
+    pub fn parse(bytes: &[u8]) -> Result<OleanHeader, OleanError> {
+        if bytes.len() < HEADER_LEN {
+            return Err(OleanError::Truncated(bytes.len()));
+        }
+        if &bytes[..MAGIC.len()] != MAGIC {
+            return Err(OleanError::BadMagic);
+        }
+
+        let githash_field = &bytes[GITHASH_OFFSET..GITHASH_OFFSET + GITHASH_LEN];
+        // `strncpy` (module.cpp:331/357) NUL-pads on the right; a hash that
+        // exactly fills the field (as in our fixture) has no NUL at all.
+        let hash_end = githash_field
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(githash_field.len());
+        let (hash_bytes, padding) = githash_field.split_at(hash_end);
+        if hash_bytes.is_empty()
+            || !hash_bytes.iter().all(u8::is_ascii_hexdigit)
+            || !padding.iter().all(|&b| b == 0)
+        {
+            return Err(OleanError::BadGithash);
+        }
+        // Every byte in `hash_bytes` was checked to be an ASCII hex digit above.
+        let githash = String::from_utf8(hash_bytes.to_vec()).expect("checked ASCII hex above");
+
+        let base_addr_bytes: [u8; 8] = bytes[BASE_ADDR_OFFSET..BASE_ADDR_OFFSET + 8]
+            .try_into()
+            .expect("slice is exactly 8 bytes by construction");
+        let base_addr = u64::from_le_bytes(base_addr_bytes);
+
+        Ok(OleanHeader { githash, base_addr })
+    }
+}
