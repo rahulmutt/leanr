@@ -43,7 +43,7 @@ fn olean_info_on_missing_file_fails_with_helpful_error() {
 
 #[test]
 fn olean_info_on_garbage_fails_without_panicking() {
-    let dir = std::env::temp_dir().join("leanr-cli-test");
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("leanr-cli-test");
     std::fs::create_dir_all(&dir).unwrap();
     let garbage = dir.join("garbage.olean");
     std::fs::write(&garbage, b"definitely not an olean").unwrap();
