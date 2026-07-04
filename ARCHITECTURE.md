@@ -9,10 +9,9 @@ implementation or a thin frontend. Full design:
 - `crates/leanr_query` — the salsa-based incremental engine. Everything
   computable is a memoized query; **early cutoff** (a recomputed query
   whose value is unchanged does not wake its dependents) is the
-  mechanism the whole incrementality story rests on. (landing this milestone)
+  mechanism the whole incrementality story rests on.
 - `crates/leanr_olean` — reader for official Lean `.olean` artifacts.
   Trust boundary: input bytes are untrusted (`docs/THREAT_MODEL.md`).
-  (landing this milestone)
 - `crates/leanr_cli` — the `leanr` binary. Thin: argument parsing and
   printing only, so CLI and (future) LSP can never diverge in behavior.
 
@@ -27,4 +26,4 @@ implementation or a thin frontend. Full design:
 
 `lean-toolchain` pins the official Lean version Mathlib uses — our
 differential-testing oracle. Golden fixtures live in `tests/fixtures/`
-(regenerate: `mise run fixtures:regen`). (landing this milestone)
+(regenerate: `mise run fixtures:regen`).
