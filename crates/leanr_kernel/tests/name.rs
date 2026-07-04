@@ -61,6 +61,8 @@ fn deep_chains_do_not_overflow_the_stack() {
     assert_eq!(hash_of(&a), hash_of(&b));
     let rendered = a.to_string();
     assert_eq!(rendered.len(), DEPTH * 2 - 1); // "x.x.....x"
+    let debug_rendered = format!("{:?}", &*a); // iterative Debug: must not overflow
+    assert!(!debug_rendered.is_empty());
     drop(a);
     drop(b); // iterative Drop: must not overflow
 }

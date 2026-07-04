@@ -10,10 +10,9 @@ use crate::Nat;
 /// field; we drop it on decode and recompute lazily when needed (M1b).
 ///
 /// INVARIANT (crate docs): parent chains can be untrusted-deep, so
-/// PartialEq/Hash/Display/Drop below are all loops, never recursion.
-/// Deriving any of them would reintroduce a stack overflow on
-/// adversarial input — do not "simplify" back to derives.
-#[derive(Debug)]
+/// PartialEq/Hash/Display/Debug/Drop below are all loops, never
+/// recursion. Deriving any of them would reintroduce a stack overflow
+/// on adversarial input — do not "simplify" back to derives.
 pub enum Name {
     Anonymous,
     Str { parent: Arc<Name>, part: String },
@@ -123,6 +122,15 @@ impl fmt::Display for Name {
             }
         }
         Ok(())
+    }
+}
+
+/// Manual (non-derived) impl: reuses `Display`'s iterative chain walk
+/// instead of recursing into `parent`, so it stays safe on
+/// adversarially deep chains. Renders as `Name("foo.bar.23")`.
+impl fmt::Debug for Name {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Name({:?})", self.to_string())
     }
 }
 
