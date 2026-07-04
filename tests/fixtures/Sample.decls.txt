@@ -1,0 +1,2 @@
+thm leanrFixtureIsAnswer
+def leanrFixture

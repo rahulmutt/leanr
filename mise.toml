@@ -45,5 +45,8 @@ description = "Regenerate oracle golden fixtures (requires the pinned Lean toolc
 depends = ["elan:bootstrap"]
 run = [
   "lean tests/fixtures/Sample.lean -o tests/fixtures/Sample.olean",
+  "lean tests/fixtures/SampleRich.lean -o tests/fixtures/SampleRich.olean",
+  "sh -c 'lean --run tests/fixtures/dump_decls.lean tests/fixtures/Sample.olean > tests/fixtures/Sample.decls.txt'",
+  "sh -c 'lean --run tests/fixtures/dump_decls.lean tests/fixtures/SampleRich.olean > tests/fixtures/SampleRich.decls.txt'",
   "sh -c 'lean --githash > tests/fixtures/oracle-githash.txt'",
 ]
