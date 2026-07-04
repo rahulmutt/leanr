@@ -12,4 +12,7 @@ jobs:
         with:
           fetch-depth: 0 # gitleaks scans full history
       - uses: jdx/mise-action@v2
+      # rustup installs missing components on first cargo invocation; warm it
+      # once here so the parallel ci tasks don't race the component download.
+      - run: mise exec -- cargo --version
       - run: mise run ci
