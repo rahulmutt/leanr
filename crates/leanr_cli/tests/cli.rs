@@ -56,3 +56,40 @@ fn olean_info_on_garbage_fails_without_panicking() {
         .failure()
         .stderr(predicates::str::contains("not an olean file"));
 }
+
+#[test]
+fn olean_decls_matches_the_oracle_dump() {
+    let expected = std::fs::read_to_string(fixture("SampleRich.decls.txt")).unwrap();
+    Command::cargo_bin("leanr")
+        .unwrap()
+        .args(["olean", "decls"])
+        .arg(fixture("SampleRich.olean"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
+fn olean_decls_on_garbage_fails_without_panicking() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let garbage = dir.join("garbage-decls.olean");
+    std::fs::write(&garbage, b"definitely not an olean").unwrap();
+
+    Command::cargo_bin("leanr")
+        .unwrap()
+        .args(["olean", "decls"])
+        .arg(&garbage)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not an olean file"));
+}
+
+#[test]
+fn olean_decls_on_missing_file_names_the_file() {
+    Command::cargo_bin("leanr")
+        .unwrap()
+        .args(["olean", "decls", "does-not-exist.olean"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("does-not-exist.olean"));
+}
