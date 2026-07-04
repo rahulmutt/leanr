@@ -1,4 +1,6 @@
 [tools]
+"github:EmbarkStudios/cargo-deny" = "0.19.9"
+gitleaks = "8.30.1"
 rust = "1.96.0"
 
 [tasks.build]
@@ -15,3 +17,12 @@ run = [
   "cargo fmt --all --check",
   "cargo clippy --workspace --all-targets -- -D warnings",
 ]
+
+[tasks."lint:deps"]
+run = "cargo deny check"
+
+[tasks."scan:secrets"]
+run = "gitleaks detect --redact"
+
+[tasks.ci]
+depends = ["lint", "test", "lint:deps", "scan:secrets"]
