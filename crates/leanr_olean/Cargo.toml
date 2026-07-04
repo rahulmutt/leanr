@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 thiserror = "2"
+num-bigint = { workspace = true }
 
 [dev-dependencies]
 proptest = "1"

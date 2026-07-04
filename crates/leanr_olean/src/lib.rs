@@ -63,15 +63,21 @@ const GITHASH_LEN: usize = 40;
 /// githash field.
 const BASE_ADDR_OFFSET: usize = GITHASH_OFFSET + GITHASH_LEN;
 /// Total fixed-header length (module.cpp:144): `5 + 1 + 1 + 33 + 40 + 8`.
-const HEADER_LEN: usize = BASE_ADDR_OFFSET + 8;
+pub(crate) const HEADER_LEN: usize = BASE_ADDR_OFFSET + 8;
 
 /// Parsed prefix of an `.olean` file's fixed header.
 ///
-/// Only the two fields Task 7's CLI needs are exposed today; the full
-/// `olean_header` (version, flags, embedded Lean version string) and the
-/// object graph that follows are M1 territory.
+/// The full `olean_header` (embedded Lean version string) minus the parts
+/// this crate has no use for; the object graph that follows the header is
+/// decoded by the `raw` module.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OleanHeader {
+    /// Format version (module.cpp:110-122, byte 5): 2 = v2 (plain) olean,
+    /// 3 = v3 (allows closures). The `raw` decoder only reads v2.
+    pub version: u8,
+    /// Format flags (module.cpp:110-122, byte 6): bit 0 = bignums use GMP
+    /// encoding, bits 1-7 reserved.
+    pub flags: u8,
     /// The build githash the file was produced by, as lowercase ASCII hex.
     pub githash: String,
     /// The mmap base address the compacted object region was written for.
@@ -100,6 +106,31 @@ pub enum OleanError {
     /// The githash field is not (NUL-padded) ASCII hex.
     #[error("olean header corrupt: githash is not ASCII hex")]
     BadGithash,
+    /// The version byte is not 2 (the plain module format). v3 regions
+    /// (allowClosures) and unknown future versions are out of scope.
+    #[error("unsupported olean format version {0} (leanr reads v2 module files)")]
+    UnsupportedVersion(u8),
+    /// A read past the end of the file (offset is the file offset).
+    #[error("olean corrupt: read past end of file at offset {offset:#x}")]
+    OutOfBounds { offset: u64 },
+    /// A pointer word that is not a boxed scalar and does not resolve
+    /// to an aligned in-bounds object (word is the raw pointer value).
+    #[error("olean corrupt: bad object pointer {word:#x}")]
+    BadPointer { word: u64 },
+    /// An object tag that cannot appear in a module's object graph.
+    #[error("olean corrupt: unexpected object tag {tag} at offset {offset:#x}")]
+    BadTag { offset: u64, tag: u8 },
+    /// The object graph contains a reference cycle (legitimate files
+    /// are acyclic; a crafted cycle must error, not hang).
+    #[error("olean corrupt: object cycle at offset {offset:#x}")]
+    Cycle { offset: u64 },
+    /// A structurally invalid object (bad sizes, bad UTF-8, bad enum
+    /// byte, ...). `what` names the check that failed.
+    #[error("olean corrupt: {what} at offset {offset:#x}")]
+    Malformed { offset: u64, what: &'static str },
+    /// A well-formed construct leanr does not read yet.
+    #[error("unsupported olean content: {what}")]
+    Unsupported { what: &'static str },
 }
 
 impl OleanHeader {
@@ -115,6 +146,9 @@ impl OleanHeader {
         if &bytes[..MAGIC.len()] != MAGIC {
             return Err(OleanError::BadMagic);
         }
+
+        let version = bytes[5];
+        let flags = bytes[6];
 
         let githash_field = &bytes[GITHASH_OFFSET..GITHASH_OFFSET + GITHASH_LEN];
         // `strncpy` (module.cpp:331/357) NUL-pads on the right; a hash that
@@ -138,6 +172,13 @@ impl OleanHeader {
             .expect("slice is exactly 8 bytes by construction");
         let base_addr = u64::from_le_bytes(base_addr_bytes);
 
-        Ok(OleanHeader { githash, base_addr })
+        Ok(OleanHeader {
+            version,
+            flags,
+            githash,
+            base_addr,
+        })
     }
 }
+
+mod raw;
