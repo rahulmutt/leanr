@@ -208,7 +208,10 @@ impl Region<'_> {
         let off = word
             .checked_sub(self.base_addr)
             .ok_or(OleanError::BadPointer { word })?;
-        if off < FIRST_OBJECT_OFFSET || off % 8 != 0 || off + 8 > self.len() {
+        if off < FIRST_OBJECT_OFFSET
+            || off % 8 != 0
+            || off.checked_add(8).is_none_or(|end| end > self.len())
+        {
             return Err(OleanError::BadPointer { word });
         }
         Ok(Word::ObjectAt(off))
@@ -338,7 +341,10 @@ fn read_object(region: &Region, off: u64) -> Result<Shape, OleanError> {
             let mp_size = region.u32(off + 12)? as i32;
             let data_ptr = region.word(off + 16)?;
             let nlimbs = mp_size.unsigned_abs() as u64;
-            if nlimbs == 0 || alloc != mp_size.abs() {
+            // Avoid `mp_size.abs()`, which panics on `i32::MIN` for this
+            // attacker-controlled value; compare magnitudes as `u64` instead
+            // (alloc must equal |mp_size| and be non-negative).
+            if nlimbs == 0 || alloc < 0 || alloc as u64 != nlimbs {
                 return Err(OleanError::Malformed {
                     offset: off,
                     what: "mpz limb count",
@@ -346,7 +352,11 @@ fn read_object(region: &Region, off: u64) -> Result<Shape, OleanError> {
             }
             // insert_mpz (compact.cpp:407-421) always points _mp_d at
             // the limbs directly following the 24-byte mpz_object.
-            if data_ptr != region.base_addr + off + 24 {
+            // `off + 24` cannot overflow (off + 8 <= file len, a usize,
+            // already checked by `resolve`/`region.word`), but
+            // `base_addr` is attacker-controlled and may be near
+            // `u64::MAX`, so the addition must be checked.
+            if region.base_addr.checked_add(off + 24) != Some(data_ptr) {
                 return Err(OleanError::Malformed {
                     offset: off,
                     what: "mpz data pointer",
@@ -508,6 +518,13 @@ mod tests {
 
         fn set_root(&mut self, word: u64) {
             self.bytes[88..96].copy_from_slice(&word.to_le_bytes());
+        }
+
+        /// Hand-patch the header's `base_addr` field (offset 80..88), for
+        /// tests that need a `base_addr` other than the fixed [`BASE`]
+        /// (e.g. one near `u64::MAX` to probe overflow windows).
+        fn set_base_addr(&mut self, addr: u64) {
+            self.bytes[80..88].copy_from_slice(&addr.to_le_bytes());
         }
 
         fn align(&mut self) {
@@ -676,6 +693,70 @@ mod tests {
         let closure = b.object(245, 0, 24, &[0; 24]);
         b.set_root(closure);
         assert!(matches!(parse(b), Err(OleanError::Unsupported { .. })));
+    }
+
+    #[test]
+    fn resolve_offset_near_u64_max_does_not_panic() {
+        // Regression for a `checked_sub`-then-raw-`+` overflow: with
+        // base_addr = 0, off = word - base_addr = word directly, so
+        // word = u64::MAX - 7 gives off = u64::MAX - 7 (aligned, well
+        // past FIRST_OBJECT_OFFSET). The old `off + 8 > self.len()`
+        // check overflowed `off + 8` in debug builds instead of
+        // rejecting the pointer.
+        let mut b = Builder::new();
+        b.set_base_addr(0);
+        b.set_root(u64::MAX - 7);
+        assert!(matches!(parse(b), Err(OleanError::BadPointer { .. })));
+    }
+
+    #[test]
+    fn mpz_size_i32_min_does_not_panic() {
+        // Regression: `_mp_size` is an attacker-controlled i32 read
+        // straight from the file; the old `mp_size.abs()` panicked for
+        // `i32::MIN` (which has no positive `i32` representation).
+        let mut b = Builder::new();
+        let mut body = Vec::new();
+        body.extend_from_slice(&0i32.to_le_bytes()); // _mp_alloc
+        body.extend_from_slice(&i32::MIN.to_le_bytes()); // _mp_size
+        body.extend_from_slice(&0u64.to_le_bytes()); // _mp_d (unreached: fails before use)
+        let obj = b.object(TAG_MPZ, 0, 24, &body);
+        b.set_root(obj);
+        assert!(matches!(
+            parse(b),
+            Err(OleanError::Malformed {
+                what: "mpz limb count",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn mpz_data_pointer_check_near_u64_max_does_not_panic() {
+        // Regression: `region.base_addr + off + 24` overflowed in debug
+        // builds when `base_addr` (attacker-controlled, from the header)
+        // sits close to `u64::MAX`. Pick base_addr so the first object's
+        // pointer word (off = 96, the first `FIRST_OBJECT_OFFSET`) both
+        // resolves cleanly *and* pushes `base_addr + off + 24` past
+        // `u64::MAX`.
+        let mut b = Builder::new();
+        let big = b.mpz(&[1], false); // gets past the limb-count check
+        assert_eq!(big - BASE, 96, "test assumes the mpz is the first object");
+        b.set_root(big); // patched below to the real base_addr-relative word
+        let base_addr = u64::MAX - 99;
+        b.set_base_addr(base_addr);
+        // off = 96 relative to base_addr; word = base_addr + 96, chosen
+        // even (not a boxed scalar) and distinct from NULL_SENTINEL.
+        let word = base_addr + 96;
+        assert_eq!(word, u64::MAX - 3);
+        assert_eq!(word % 2, 0);
+        b.set_root(word);
+        assert!(matches!(
+            parse(b),
+            Err(OleanError::Malformed {
+                what: "mpz data pointer",
+                ..
+            })
+        ));
     }
 
     #[test]
