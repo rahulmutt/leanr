@@ -12,7 +12,12 @@ jobs:
         with:
           fetch-depth: 0 # gitleaks scans full history
       - uses: jdx/mise-action@v2
-      # rustup installs missing components on first cargo invocation; warm it
-      # once here so the parallel ci tasks don't race the component download.
-      - run: mise exec -- cargo --version
+      # rustup lazily installs the toolchain's core components (rustc/cargo/
+      # rust-std) on first cargo invocation, but does not auto-install the
+      # optional rustfmt/clippy components `lint` needs. Provision both
+      # once here, serially, so the parallel ci tasks don't race the
+      # toolchain download or fail on a missing component.
+      - run: |
+          mise exec -- cargo --version
+          mise exec -- rustup component add rustfmt clippy
       - run: mise run ci
