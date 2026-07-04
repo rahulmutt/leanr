@@ -16,14 +16,6 @@
 //! Pointer words are `base_addr`-relative addresses of the file start;
 //! odd words are boxed scalars (lean.h:324-326).
 
-// This module lands (Task 4) ahead of its only consumer: Task 6's
-// `ModuleData::parse` is what calls `parse_bytes` from outside
-// `#[cfg(test)]`. Until that wiring exists, `clippy`'s dead_code lint
-// fires on every item here under `--all-targets` (the non-test build of
-// this `pub(crate)` module has no callers yet); suppressed here rather
-// than widening visibility or adding a placeholder caller.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::mem;
 use std::sync::Arc;

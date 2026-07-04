@@ -368,6 +368,7 @@ dependencies = [
 name = "leanr_olean"
 version = "0.1.0"
 dependencies = [
+ "leanr_kernel",
  "num-bigint",
  "proptest",
  "thiserror",

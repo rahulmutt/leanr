@@ -131,6 +131,11 @@ pub enum OleanError {
     /// A well-formed construct leanr does not read yet.
     #[error("unsupported olean content: {what}")]
     Unsupported { what: &'static str },
+    /// Phase B found a raw value whose shape does not match the kernel
+    /// type expected at that position (bad ctor tag, wrong field
+    /// count, scalar where an object belongs, ...).
+    #[error("olean module data malformed: expected {expected}")]
+    BadShape { expected: &'static str },
 }
 
 impl OleanHeader {
@@ -181,4 +186,8 @@ impl OleanHeader {
     }
 }
 
+mod interp;
+mod module_data;
 mod raw;
+
+pub use module_data::{Import, ModuleData};

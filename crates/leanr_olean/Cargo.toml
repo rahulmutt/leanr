@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 thiserror = "2"
 num-bigint = { workspace = true }
+leanr_kernel = { path = "../leanr_kernel" }
 
 [dev-dependencies]
 proptest = "1"
