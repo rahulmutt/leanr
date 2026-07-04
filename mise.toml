@@ -1,7 +1,20 @@
 [tools]
 "github:EmbarkStudios/cargo-deny" = "0.19.9"
+"github:leanprover/elan" = "4.2.3"
 gitleaks = "8.30.1"
 rust = { version = "1.96.0", profile = "default" }
+
+# leanprover/elan's GitHub release asset ships a self-installing binary named
+# `elan-init` (mise pins and verifies *that* exact binary above), not `elan`
+# itself. `elan-init` installs the real `elan`/`lean`/`lake` into ~/.elan/bin
+# on first run (elan's own toolchain-manager design, independent of mise).
+# This makes ~/.elan/bin available to mise-managed shells/tasks.
+[env]
+_.path = ["{{env.HOME}}/.elan/bin"]
+
+[tasks."elan:bootstrap"]
+description = "One-time (idempotent) install of the real elan/lean/lake binaries from the mise-pinned elan-init installer"
+run = "sh -c '\"$(mise which elan-init)\" -y --no-modify-path --default-toolchain none'"
 
 [tasks.build]
 run = "cargo build --workspace"
@@ -26,3 +39,11 @@ run = "gitleaks detect --redact"
 
 [tasks.ci]
 depends = ["lint", "test", "lint:deps", "scan:secrets"]
+
+[tasks."fixtures:regen"]
+description = "Regenerate oracle golden fixtures (requires the pinned Lean toolchain)"
+depends = ["elan:bootstrap"]
+run = [
+  "lean tests/fixtures/Sample.lean -o tests/fixtures/Sample.olean",
+  "sh -c 'lean --githash > tests/fixtures/oracle-githash.txt'",
+]
