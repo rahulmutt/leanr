@@ -85,7 +85,7 @@ pub fn replay(
     }
 
     let mut st = Replayer {
-        constants: &constants,
+        constants,
         env,
         remaining,
         pending: HashSet::new(),
@@ -134,8 +134,13 @@ fn is_partial(ci: &ConstantInfo) -> bool {
 }
 
 struct Replayer<'a> {
-    /// Read-only context (Replay.lean's `newConstants`).
-    constants: &'a HashMap<Arc<Name>, ConstantInfo>,
+    /// The working map (Replay.lean's `newConstants`). Owned so that each
+    /// constant can be released once it has been successfully admitted into
+    /// `env` (Change 2, M1b Task 16): as `env` grows the map shrinks, so the
+    /// stdlib-sized `ConstantInfo` spine is not retained twice at peak.
+    /// Constructors/recursors are never removed — they are re-read here for
+    /// the postponed structural checks.
+    constants: HashMap<Arc<Name>, ConstantInfo>,
     env: &'a mut crate::Environment,
     remaining: HashSet<Arc<Name>>,
     pending: HashSet<Arc<Name>>,
@@ -239,6 +244,9 @@ impl Replayer<'_> {
                         && names_eq(&existing.all, &v.all)
                     {
                         self.pending.remove(&name);
+                        // Change 2: the theorem is already in `env` (as the
+                        // tolerated duplicate); release the working copy.
+                        self.constants.remove(&name);
                         return Ok(());
                     }
                 }
@@ -267,6 +275,17 @@ impl Replayer<'_> {
         }
 
         self.pending.remove(&name);
+        // Change 2 (M1b Task 16): this constant is now in `env`; release the
+        // working copy so only `env` retains it. Constructors and recursors
+        // are the exception — they are never admitted here (only postponed)
+        // and `check_postponed_{constructors,recursors}` re-reads the decoded
+        // value from `constants` at the end, so they must stay. `is_todo`
+        // guarantees an already-admitted (hence removed) name is never read
+        // from `constants` again — its dependency lookups short-circuit
+        // before the `constants.get` on line ~206.
+        if !matches!(ci, ConstantInfo::Ctor(_) | ConstantInfo::Rec(_)) {
+            self.constants.remove(&name);
+        }
         Ok(())
     }
 
@@ -356,7 +375,17 @@ impl Replayer<'_> {
                 types,
                 is_unsafe: false,
             },
-        )
+        )?;
+        // Change 2 (M1b Task 16): the whole block's inductive infos are now
+        // in `env`; drop them from the working map. Their members were
+        // already removed from `remaining`/`pending` above, so no later
+        // `is_todo` will read them back. Constructors are NOT removed here —
+        // they remain in `remaining` (processed later, then postponed) and
+        // the postponed structural check re-reads them from `constants`.
+        for m in &members {
+            self.constants.remove(m.name());
+        }
+        Ok(())
     }
 
     /// `add_decl` wrapper that blames `name` on failure and counts the

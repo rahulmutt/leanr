@@ -255,6 +255,13 @@ fn check(modules: Vec<String>, all: bool, path: Vec<PathBuf>) -> ExitCode {
         }
     }
 
+    // `constants` already holds a clone of every `ConstantInfo` replay needs;
+    // release the decoded modules (~full-stdlib retention) before replay so
+    // they are not dead weight on the stack during the whole replay. `owner`
+    // is kept — it holds only `Arc<Name>`s, used for error attribution after
+    // replay returns. `loaded` is not referenced again below.
+    drop(loaded);
+
     let mut env = Environment::default();
     match leanr_kernel::replay(&mut env, constants) {
         Ok(stats) => {
