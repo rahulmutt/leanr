@@ -78,7 +78,7 @@ pub struct OleanHeader {
     /// Format flags (module.cpp:110-122, byte 6): bit 0 = bignums use GMP
     /// encoding, bits 1-7 reserved.
     pub flags: u8,
-    /// The build githash the file was produced by, as lowercase ASCII hex.
+    /// The build githash the file was produced by, as ASCII hex.
     pub githash: String,
     /// The mmap base address the compacted object region was written for.
     ///

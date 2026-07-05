@@ -336,6 +336,9 @@ fn read_object(region: &Region, off: u64) -> Result<Shape, OleanError> {
             // Avoid `mp_size.abs()`, which panics on `i32::MIN` for this
             // attacker-controlled value; compare magnitudes as `u64` instead
             // (alloc must equal |mp_size| and be non-negative).
+            // Note: this exactness check (alloc == |mp_size|) is an
+            // oracle-compactor invariant (insert_mpz writes alloc == |size|),
+            // not a general GMP guarantee (GMP permits alloc > |size|).
             if nlimbs == 0 || alloc < 0 || alloc as u64 != nlimbs {
                 return Err(OleanError::Malformed {
                     offset: off,

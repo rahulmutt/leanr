@@ -28,8 +28,8 @@ implementation or a thin frontend. Full design:
 
 ## Why the boundaries fall here
 
-- The (future) `leanr_kernel` is the trusted computing base — it will
-  depend on nothing in the workspace and nothing reaches into it.
+- The `leanr_kernel` is the trusted computing base — it depends on
+  nothing in the workspace and nothing reaches into it.
 - CLI and LSP are frontends over the same query engine by design;
   logic in `leanr_cli` is a bug.
 
