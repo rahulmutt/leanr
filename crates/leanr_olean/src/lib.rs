@@ -194,7 +194,9 @@ impl OleanHeader {
 }
 
 mod interp;
+mod loader;
 mod module_data;
 mod raw;
 
+pub use loader::{load_closure, LoadError, SearchPath};
 pub use module_data::{Import, ModuleData};
