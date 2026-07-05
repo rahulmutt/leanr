@@ -14,8 +14,9 @@ use std::sync::Arc;
 
 use leanr_kernel::{
     AxiomVal, BinderInfo, ConstantInfo, ConstantVal, ConstructorVal, DataValue, DefinitionSafety,
-    DefinitionVal, Expr, InductiveVal, Int, KVMap, Level, Literal, Name, Nat, OpaqueVal, QuotKind,
-    QuotVal, RecursorRule, RecursorVal, ReducibilityHints, TheoremVal,
+    DefinitionVal, Expr, InductiveVal, Int, KVMap, Level, Literal, Name, Nat, OpaqueVal,
+    Preresolved, QuotKind, QuotVal, RecursorRule, RecursorVal, ReducibilityHints, SourceInfo,
+    Substring, Syntax, TheoremVal,
 };
 use num_bigint::{BigInt, BigUint};
 
@@ -110,12 +111,52 @@ fn array(r: &Raw) -> Result<&[Raw], OleanError> {
     }
 }
 
+/// `Substring.Raw` (Init/Prelude.lean:3582): tag 0, 3 obj fields
+/// (`str`, `startPos`, `stopPos`). `startPos`/`stopPos` are
+/// `String.Pos.Raw` (Init/Prelude.lean:3557), a single-field struct
+/// over `byteIdx : Nat`, so each decodes directly as a `Nat`.
+fn substring(r: &Raw) -> Result<Substring, OleanError> {
+    let (fields, _) = ctor(r, 0, 3, "Substring")?;
+    Ok(Substring {
+        str: string(&fields[0])?,
+        start_pos: nat(&fields[1])?,
+        stop_pos: nat(&fields[2])?,
+    })
+}
+
+/// `SourceInfo` (Init/Prelude.lean:4827): `original` (tag 0, 4 obj
+/// fields), `synthetic` (tag 1, 2 obj fields + `canonical : Bool` u8 at
+/// scalar offset 0), `none` (fieldless → `box(2)`).
+fn source_info(r: &Raw) -> Result<SourceInfo, OleanError> {
+    match &**r {
+        RawValue::Scalar(2) => Ok(SourceInfo::None),
+        RawValue::Ctor { tag: 0, fields, .. } if fields.len() == 4 => Ok(SourceInfo::Original {
+            leading: substring(&fields[0])?,
+            pos: nat(&fields[1])?,
+            trailing: substring(&fields[2])?,
+            end_pos: nat(&fields[3])?,
+        }),
+        RawValue::Ctor {
+            tag: 1,
+            fields,
+            scalars,
+        } if fields.len() == 2 => Ok(SourceInfo::Synthetic {
+            pos: nat(&fields[0])?,
+            end_pos: nat(&fields[1])?,
+            canonical: boolean(scalars.first(), "SourceInfo.canonical")?,
+        }),
+        _ => Err(bad("SourceInfo")),
+    }
+}
+
 pub(crate) struct Interp {
     names: HashMap<*const RawValue, Arc<Name>>,
     levels: HashMap<*const RawValue, Arc<Level>>,
     exprs: HashMap<*const RawValue, Arc<Expr>>,
+    syntaxes: HashMap<*const RawValue, Arc<Syntax>>,
     anonymous: Arc<Name>,
     zero: Arc<Level>,
+    missing: Arc<Syntax>,
 }
 
 impl Interp {
@@ -124,8 +165,10 @@ impl Interp {
             names: HashMap::new(),
             levels: HashMap::new(),
             exprs: HashMap::new(),
+            syntaxes: HashMap::new(),
             anonymous: Arc::new(Name::Anonymous),
             zero: Arc::new(Level::Zero),
+            missing: Arc::new(Syntax::Missing),
         }
     }
 
@@ -427,15 +470,108 @@ impl Interp {
             RawValue::Ctor { tag: 4, fields, .. } if fields.len() == 1 => {
                 Ok(DataValue::OfInt(int(&fields[0])?))
             }
-            RawValue::Ctor { tag: 5, .. } => {
-                // Syntax values drag in the whole Syntax type family;
-                // the stdlib sweep decides if real kernel terms ever
-                // carry them (spec: deferred).
-                Err(OleanError::Unsupported {
-                    what: "Syntax in expression metadata",
-                })
+            RawValue::Ctor { tag: 5, fields, .. } if fields.len() == 1 => {
+                Ok(DataValue::OfSyntax(self.syntax(&fields[0])?))
             }
             _ => Err(bad("DataValue")),
+        }
+    }
+
+    fn sub_syntax(&self, r: &Raw) -> Result<Arc<Syntax>, OleanError> {
+        if let RawValue::Scalar(0) = &**r {
+            return Ok(Arc::clone(&self.missing));
+        }
+        self.syntaxes
+            .get(&key(r))
+            .cloned()
+            .ok_or_else(|| bad("Syntax subterm"))
+    }
+
+    /// `Syntax` (Init/Prelude.lean:4943): explicit-stack post-order walk
+    /// because node depth (`Node.args`) is attacker-controlled.
+    /// `missing` = `box(0)`; `node` (tag 1, 3 obj fields), `atom`
+    /// (tag 2, 2 obj fields), `ident` (tag 3, 4 obj fields). Only
+    /// `node.args` recurse into `Syntax`; the rest are leaves.
+    fn syntax(&mut self, root: &Raw) -> Result<Arc<Syntax>, OleanError> {
+        enum Step<'r> {
+            Visit(&'r Raw),
+            Build(&'r Raw),
+        }
+        let mut stack = vec![Step::Visit(root)];
+        while let Some(step) = stack.pop() {
+            match step {
+                Step::Visit(r) => {
+                    if matches!(&**r, RawValue::Scalar(0)) || self.syntaxes.contains_key(&key(r)) {
+                        continue;
+                    }
+                    match &**r {
+                        RawValue::Ctor { tag: 1, fields, .. } if fields.len() == 3 => {
+                            stack.push(Step::Build(r));
+                            for child in array(&fields[2])? {
+                                stack.push(Step::Visit(child));
+                            }
+                        }
+                        RawValue::Ctor { tag: 2, fields, .. } if fields.len() == 2 => {
+                            stack.push(Step::Build(r));
+                        }
+                        RawValue::Ctor { tag: 3, fields, .. } if fields.len() == 4 => {
+                            stack.push(Step::Build(r));
+                        }
+                        _ => return Err(bad("Syntax")),
+                    }
+                }
+                Step::Build(r) => {
+                    let s = self.build_syntax(r)?;
+                    self.syntaxes.insert(key(r), s);
+                }
+            }
+        }
+        self.sub_syntax(root)
+    }
+
+    fn build_syntax(&mut self, r: &Raw) -> Result<Arc<Syntax>, OleanError> {
+        let syntax = match &**r {
+            RawValue::Ctor { tag: 1, fields, .. } if fields.len() == 3 => Syntax::Node {
+                info: source_info(&fields[0])?,
+                kind: self.name(&fields[1])?,
+                args: array(&fields[2])?
+                    .iter()
+                    .map(|a| self.sub_syntax(a))
+                    .collect::<Result<_, _>>()?,
+            },
+            RawValue::Ctor { tag: 2, fields, .. } if fields.len() == 2 => Syntax::Atom {
+                info: source_info(&fields[0])?,
+                val: string(&fields[1])?,
+            },
+            RawValue::Ctor { tag: 3, fields, .. } if fields.len() == 4 => Syntax::Ident {
+                info: source_info(&fields[0])?,
+                raw_val: substring(&fields[1])?,
+                val: self.name(&fields[2])?,
+                preresolved: list(&fields[3])?
+                    .into_iter()
+                    .map(|p| self.preresolved(p))
+                    .collect::<Result<_, _>>()?,
+            },
+            _ => unreachable!("shape checked in Visit"),
+        };
+        Ok(Arc::new(syntax))
+    }
+
+    /// `Syntax.Preresolved` (Init/Prelude.lean:4930): `namespace`
+    /// (tag 0, 1 obj field), `decl` (tag 1, 2 obj fields).
+    fn preresolved(&mut self, r: &Raw) -> Result<Preresolved, OleanError> {
+        match &**r {
+            RawValue::Ctor { tag: 0, fields, .. } if fields.len() == 1 => {
+                Ok(Preresolved::Namespace(self.name(&fields[0])?))
+            }
+            RawValue::Ctor { tag: 1, fields, .. } if fields.len() == 2 => Ok(Preresolved::Decl {
+                name: self.name(&fields[0])?,
+                fields: list(&fields[1])?
+                    .into_iter()
+                    .map(string)
+                    .collect::<Result<_, _>>()?,
+            }),
+            _ => Err(bad("Preresolved")),
         }
     }
 
@@ -620,5 +756,105 @@ impl Interp {
                 .collect::<Result<_, _>>()?,
             num_entries: array(&f[4])?.len(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctor_raw(tag: u8, fields: Vec<Raw>, scalars: Vec<u8>) -> Raw {
+        Arc::new(RawValue::Ctor {
+            tag,
+            fields,
+            scalars,
+        })
+    }
+
+    fn scalar(v: u64) -> Raw {
+        Arc::new(RawValue::Scalar(v))
+    }
+
+    fn str_raw(s: &str) -> Raw {
+        Arc::new(RawValue::Str(s.to_string()))
+    }
+
+    // List cons/nil (nil = box(0), cons = tag 1, 2 fields).
+    fn cons(head: Raw, tail: Raw) -> Raw {
+        ctor_raw(1, vec![head, tail], vec![])
+    }
+
+    // Substring.Raw: tag 0, 3 obj fields.
+    fn substring_raw() -> Raw {
+        ctor_raw(0, vec![str_raw("x"), scalar(0), scalar(1)], vec![])
+    }
+
+    #[test]
+    fn decodes_ident_with_preresolved_list() {
+        // preresolved = [namespace(anon), decl(anon, ["f"])]
+        let ns = ctor_raw(0, vec![scalar(0)], vec![]);
+        let decl = ctor_raw(1, vec![scalar(0), cons(str_raw("f"), scalar(0))], vec![]);
+        let preresolved = cons(ns, cons(decl, scalar(0)));
+        // ident: tag 3, 4 obj fields (info=none, rawVal, val=anon, preresolved)
+        let ident = ctor_raw(
+            3,
+            vec![scalar(2), substring_raw(), scalar(0), preresolved],
+            vec![],
+        );
+        let mut interp = Interp::new();
+        let s = interp.syntax(&ident).expect("ident decodes");
+        match &*s {
+            Syntax::Ident {
+                info: SourceInfo::None,
+                raw_val,
+                preresolved,
+                ..
+            } => {
+                assert_eq!(raw_val.str, "x");
+                assert_eq!(preresolved.len(), 2);
+                assert!(matches!(preresolved[0], Preresolved::Namespace(_)));
+                match &preresolved[1] {
+                    Preresolved::Decl { fields, .. } => assert_eq!(fields, &["f".to_string()]),
+                    _ => panic!("expected decl"),
+                }
+            }
+            _ => panic!("expected ident"),
+        }
+    }
+
+    #[test]
+    fn shared_arg_child_decodes_to_one_shared_arc() {
+        // A node with two arg slots pointing at the SAME raw atom node:
+        // sharing must be preserved (one raw node → one Arc).
+        let atom = ctor_raw(2, vec![scalar(2), str_raw("+")], vec![]);
+        let args = Arc::new(RawValue::Array(vec![Arc::clone(&atom), Arc::clone(&atom)]));
+        let node = ctor_raw(1, vec![scalar(2), scalar(0), args], vec![]);
+        let mut interp = Interp::new();
+        let s = interp.syntax(&node).expect("node decodes");
+        match &*s {
+            Syntax::Node { args, .. } => {
+                assert_eq!(args.len(), 2);
+                assert!(Arc::ptr_eq(&args[0], &args[1]), "sharing not preserved");
+            }
+            _ => panic!("expected node"),
+        }
+    }
+
+    #[test]
+    fn synthetic_source_info_bad_canonical_byte_is_bad_shape() {
+        // synthetic: tag 1, 2 obj fields, canonical u8 at scalar 0.
+        // Byte 2 is neither false(0) nor true(1) → BadShape via boolean.
+        let synthetic = ctor_raw(1, vec![scalar(0), scalar(0)], vec![2]);
+        let err = source_info(&synthetic).expect_err("bad canonical byte");
+        assert!(matches!(err, OleanError::BadShape { .. }));
+    }
+
+    #[test]
+    fn wrong_field_count_node_is_bad_shape() {
+        // node requires 3 obj fields; give 2.
+        let node = ctor_raw(1, vec![scalar(2), scalar(0)], vec![]);
+        let mut interp = Interp::new();
+        let err = interp.syntax(&node).expect_err("wrong field count");
+        assert!(matches!(err, OleanError::BadShape { .. }));
     }
 }

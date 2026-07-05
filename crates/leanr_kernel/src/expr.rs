@@ -2,7 +2,7 @@ use std::fmt;
 use std::mem;
 use std::sync::Arc;
 
-use crate::{Int, Level, Name, Nat};
+use crate::{Int, Level, Name, Nat, Syntax};
 
 /// Binder annotation (oracle: src/Lean/Expr.lean:71-80).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,9 +21,10 @@ pub enum Literal {
 }
 
 /// A value in expression metadata (oracle: src/Lean/Data/KVMap.lean:18-25).
-/// `ofSyntax` is not represented: the decoder rejects it as unsupported
-/// in M1a; the stdlib sweep (Task 8) is the arbiter of whether real
-/// kernel-relevant terms ever carry Syntax metadata.
+/// The Task 8 stdlib sweep found real constants carrying `ofSyntax`
+/// metadata (5 of 2,433 modules), so it is represented faithfully via
+/// the kernel `Syntax` family (human-approved). `Syntax`'s `Debug` is
+/// non-recursive, so the derived `Debug` here stays depth-safe.
 #[derive(Debug, Clone)]
 pub enum DataValue {
     OfString(String),
@@ -31,6 +32,7 @@ pub enum DataValue {
     OfName(Arc<Name>),
     OfNat(Nat),
     OfInt(Int),
+    OfSyntax(Arc<Syntax>),
 }
 
 /// Expression metadata map (oracle: src/Lean/Data/KVMap.lean:71-73; a

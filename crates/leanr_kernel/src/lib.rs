@@ -14,6 +14,7 @@ mod expr;
 mod level;
 mod name;
 mod num;
+mod syntax;
 
 pub use decl::{
     AxiomVal, ConstantInfo, ConstantVal, ConstructorVal, DefinitionSafety, DefinitionVal,
@@ -25,3 +26,4 @@ pub use expr::{BinderInfo, DataValue, Expr, KVMap, Literal};
 pub use level::Level;
 pub use name::Name;
 pub use num::{Int, Nat};
+pub use syntax::{Preresolved, SourceInfo, Substring, Syntax};

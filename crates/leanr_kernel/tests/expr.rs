@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use leanr_kernel::{BinderInfo, Expr, Level, Literal, Name, Nat};
+use leanr_kernel::{BinderInfo, Expr, Level, Literal, Name, Nat, SourceInfo, Syntax};
 
 fn bvar(idx: u64) -> Arc<Expr> {
     Arc::new(Expr::BVar {
@@ -54,4 +54,24 @@ fn deep_expr_and_level_drops_do_not_overflow() {
     let debug_str = format!("{:?}", l);
     assert!(!debug_str.is_empty());
     drop(l);
+}
+
+/// `Syntax` is Arc-recursive through `Node.args`; like `Expr`, its Debug
+/// and Drop must not recurse into children (node depth is
+/// attacker-controlled in untrusted `.olean` bytes).
+#[test]
+fn deep_syntax_debug_and_drop_do_not_overflow() {
+    const DEPTH: usize = 200_000;
+    let mut s = Arc::new(Syntax::Missing);
+    for _ in 0..DEPTH {
+        s = Arc::new(Syntax::Node {
+            info: SourceInfo::None,
+            kind: Arc::new(Name::Anonymous),
+            args: vec![s],
+        });
+    }
+    // Debug must format without recursing into args.
+    let debug_str = format!("{:?}", s);
+    assert!(debug_str.starts_with("Syntax::Node"));
+    drop(s);
 }
