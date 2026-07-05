@@ -675,6 +675,18 @@ pub mod mini {
             axiom("bf", cst("B", vec![])),
         ];
         module.extend(special_decls());
-        Environment::from_modules(vec![module]).unwrap()
+        let mut env = Environment::from_modules(vec![module]).unwrap();
+        // The `Eq` above is intentionally simplified for iota-reduction
+        // testing (`BinderInfo::Default` on `α`, not the `Implicit`
+        // real quotient admission requires — see `eq_ty`'s doc comment
+        // above), so it does not satisfy `add_quot`'s `check_eq_type`.
+        // Set the flag directly (`pub(crate)`, same crate) so the
+        // Task 6/7 `Quot.lift`/`Quot.ind` iota-reduction tests
+        // (`tc/tests.rs`) keep working unchanged now that
+        // `quot_initialized()` reads a real flag (Task 11) instead of
+        // the old name-presence proxy. `add_quot` itself (with a
+        // properly-shaped `Eq`) is exercised by `quot/tests.rs`.
+        env.set_quot_initialized();
+        env
     }
 }

@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use crate::{Expr, Name, Nat};
+use crate::{Expr, KernelError, Name, Nat, RecGuard};
 
 /// oracle: Declaration.lean:95-99
 #[derive(Debug, Clone)]
@@ -202,5 +202,337 @@ impl ConstantInfo {
             ConstantInfo::Ctor(_) => "ctor",
             ConstantInfo::Rec(_) => "rec",
         }
+    }
+}
+
+/// `ConstantVal` structural equality: `name` and `level_params` via
+/// `Name`'s (non-recursive, adversarial-depth-safe) `PartialEq`, `ty`
+/// via `Expr::structural_eq` under the caller's `RecGuard`.
+fn constant_val_eq(
+    a: &ConstantVal,
+    b: &ConstantVal,
+    g: &mut RecGuard,
+) -> Result<bool, KernelError> {
+    Ok(a.name == b.name
+        && name_slice_eq(&a.level_params, &b.level_params)
+        && Expr::structural_eq(&a.ty, &b.ty, g)?)
+}
+
+/// Element-wise `Name` equality over a `Name` list (`all`/`ctors`/
+/// `level_params`): same length, same names in order.
+fn name_slice_eq(a: &[Arc<Name>], b: &[Arc<Name>]) -> bool {
+    a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x == y)
+}
+
+/// Structural equality over EVERY field of `ConstantInfo` (oracle:
+/// Lean's derived `BEq ConstantInfo` compares all fields of all 8
+/// kinds; this is a line-for-line field enumeration of that, not a
+/// `PartialEq` impl — see the module-level rationale in the Task 11
+/// brief: `PartialEq` can neither thread a `RecGuard` through the
+/// depth-bounded descent into `Expr`/`Name` trees, nor report
+/// `KernelError::DeepRecursion` on a guard-cap hit, so a trait impl
+/// would silently hide that path (panic or wrong answer) instead of
+/// surfacing it as `Err`. Task 12's replay uses this to compare a
+/// postponed constructor/recursor against the freshly regenerated one,
+/// so field coverage below must be complete — a skipped field would be
+/// a soundness hole in that check.
+///
+/// Field coverage (every variant, every field of its payload struct):
+/// - `ConstantVal` (`.val` on every kind): `name`, `level_params`, `ty`.
+/// - `AxiomVal`: `val`, `is_unsafe`.
+/// - `DefinitionVal`: `val`, `value`, `hints`, `safety`, `all`.
+/// - `TheoremVal`: `val`, `value`, `all`.
+/// - `OpaqueVal`: `val`, `value`, `is_unsafe`, `all`.
+/// - `QuotVal`: `val`, `kind`.
+/// - `InductiveVal`: `val`, `num_params`, `num_indices`, `all`,
+///   `ctors`, `num_nested`, `is_rec`, `is_unsafe`, `is_reflexive`.
+/// - `ConstructorVal`: `val`, `induct`, `cidx`, `num_params`,
+///   `num_fields`, `is_unsafe`.
+/// - `RecursorVal`: `val`, `all`, `num_params`, `num_indices`,
+///   `num_motives`, `num_minors`, `rules` (per `RecursorRule`: `ctor`,
+///   `nfields`, `rhs`), `k`, `is_unsafe`.
+///
+/// A kind mismatch (e.g. `Axiom` vs. `Defn`) is `Ok(false)`, never an
+/// error.
+pub fn constant_info_eq(
+    a: &ConstantInfo,
+    b: &ConstantInfo,
+    g: &mut RecGuard,
+) -> Result<bool, KernelError> {
+    match (a, b) {
+        (ConstantInfo::Axiom(x), ConstantInfo::Axiom(y)) => {
+            Ok(constant_val_eq(&x.val, &y.val, g)? && x.is_unsafe == y.is_unsafe)
+        }
+        (ConstantInfo::Defn(x), ConstantInfo::Defn(y)) => Ok(constant_val_eq(&x.val, &y.val, g)?
+            && Expr::structural_eq(&x.value, &y.value, g)?
+            && x.hints == y.hints
+            && x.safety == y.safety
+            && name_slice_eq(&x.all, &y.all)),
+        (ConstantInfo::Thm(x), ConstantInfo::Thm(y)) => Ok(constant_val_eq(&x.val, &y.val, g)?
+            && Expr::structural_eq(&x.value, &y.value, g)?
+            && name_slice_eq(&x.all, &y.all)),
+        (ConstantInfo::Opaque(x), ConstantInfo::Opaque(y)) => {
+            Ok(constant_val_eq(&x.val, &y.val, g)?
+                && Expr::structural_eq(&x.value, &y.value, g)?
+                && x.is_unsafe == y.is_unsafe
+                && name_slice_eq(&x.all, &y.all))
+        }
+        (ConstantInfo::Quot(x), ConstantInfo::Quot(y)) => {
+            Ok(constant_val_eq(&x.val, &y.val, g)? && x.kind == y.kind)
+        }
+        (ConstantInfo::Induct(x), ConstantInfo::Induct(y)) => {
+            Ok(constant_val_eq(&x.val, &y.val, g)?
+                && x.num_params == y.num_params
+                && x.num_indices == y.num_indices
+                && name_slice_eq(&x.all, &y.all)
+                && name_slice_eq(&x.ctors, &y.ctors)
+                && x.num_nested == y.num_nested
+                && x.is_rec == y.is_rec
+                && x.is_unsafe == y.is_unsafe
+                && x.is_reflexive == y.is_reflexive)
+        }
+        (ConstantInfo::Ctor(x), ConstantInfo::Ctor(y)) => Ok(constant_val_eq(&x.val, &y.val, g)?
+            && x.induct == y.induct
+            && x.cidx == y.cidx
+            && x.num_params == y.num_params
+            && x.num_fields == y.num_fields
+            && x.is_unsafe == y.is_unsafe),
+        (ConstantInfo::Rec(x), ConstantInfo::Rec(y)) => {
+            if !constant_val_eq(&x.val, &y.val, g)?
+                || !name_slice_eq(&x.all, &y.all)
+                || x.num_params != y.num_params
+                || x.num_indices != y.num_indices
+                || x.num_motives != y.num_motives
+                || x.num_minors != y.num_minors
+                || x.k != y.k
+                || x.is_unsafe != y.is_unsafe
+                || x.rules.len() != y.rules.len()
+            {
+                return Ok(false);
+            }
+            for (rx, ry) in x.rules.iter().zip(y.rules.iter()) {
+                if rx.ctor != ry.ctor || rx.nfields != ry.nfields {
+                    return Ok(false);
+                }
+                if !Expr::structural_eq(&rx.rhs, &ry.rhs, g)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        // Kind mismatch.
+        _ => Ok(false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Level;
+
+    fn nm(s: &str) -> Arc<Name> {
+        Arc::new(Name::Str {
+            parent: Arc::new(Name::Anonymous),
+            part: s.to_string(),
+        })
+    }
+
+    fn g() -> RecGuard {
+        RecGuard::new()
+    }
+
+    fn ty() -> Arc<Expr> {
+        Expr::sort(Arc::new(Level::Zero), &mut g()).unwrap()
+    }
+
+    fn cval(name: &str) -> ConstantVal {
+        ConstantVal {
+            name: nm(name),
+            level_params: vec![],
+            ty: ty(),
+        }
+    }
+
+    #[test]
+    fn constant_info_eq_discriminates() {
+        let mut g = g();
+
+        // Axiom: differing `is_unsafe`.
+        let ax1 = ConstantInfo::Axiom(AxiomVal {
+            val: cval("a"),
+            is_unsafe: false,
+        });
+        let ax2 = ConstantInfo::Axiom(AxiomVal {
+            val: cval("a"),
+            is_unsafe: false,
+        });
+        let ax3 = ConstantInfo::Axiom(AxiomVal {
+            val: cval("a"),
+            is_unsafe: true,
+        });
+        assert!(constant_info_eq(&ax1, &ax2, &mut g).unwrap());
+        assert!(!constant_info_eq(&ax1, &ax3, &mut g).unwrap());
+
+        // Defn: differing `hints`, differing `safety`.
+        let d1 = ConstantInfo::Defn(DefinitionVal {
+            val: cval("d"),
+            value: ty(),
+            hints: ReducibilityHints::Regular(0),
+            safety: DefinitionSafety::Safe,
+            all: vec![nm("d")],
+        });
+        let d2 = ConstantInfo::Defn(DefinitionVal {
+            val: cval("d"),
+            value: ty(),
+            hints: ReducibilityHints::Regular(0),
+            safety: DefinitionSafety::Safe,
+            all: vec![nm("d")],
+        });
+        let d_hints = ConstantInfo::Defn(DefinitionVal {
+            val: cval("d"),
+            value: ty(),
+            hints: ReducibilityHints::Opaque,
+            safety: DefinitionSafety::Safe,
+            all: vec![nm("d")],
+        });
+        let d_safety = ConstantInfo::Defn(DefinitionVal {
+            val: cval("d"),
+            value: ty(),
+            hints: ReducibilityHints::Regular(0),
+            safety: DefinitionSafety::Unsafe,
+            all: vec![nm("d")],
+        });
+        assert!(constant_info_eq(&d1, &d2, &mut g).unwrap());
+        assert!(!constant_info_eq(&d1, &d_hints, &mut g).unwrap());
+        assert!(!constant_info_eq(&d1, &d_safety, &mut g).unwrap());
+
+        // Thm: differing `all`.
+        let t1 = ConstantInfo::Thm(TheoremVal {
+            val: cval("t"),
+            value: ty(),
+            all: vec![nm("t")],
+        });
+        let t2 = ConstantInfo::Thm(TheoremVal {
+            val: cval("t"),
+            value: ty(),
+            all: vec![nm("t")],
+        });
+        let t3 = ConstantInfo::Thm(TheoremVal {
+            val: cval("t"),
+            value: ty(),
+            all: vec![nm("other")],
+        });
+        assert!(constant_info_eq(&t1, &t2, &mut g).unwrap());
+        assert!(!constant_info_eq(&t1, &t3, &mut g).unwrap());
+
+        // Opaque: differing `is_unsafe`.
+        let o1 = ConstantInfo::Opaque(OpaqueVal {
+            val: cval("o"),
+            value: ty(),
+            is_unsafe: false,
+            all: vec![nm("o")],
+        });
+        let o2 = ConstantInfo::Opaque(OpaqueVal {
+            val: cval("o"),
+            value: ty(),
+            is_unsafe: false,
+            all: vec![nm("o")],
+        });
+        let o3 = ConstantInfo::Opaque(OpaqueVal {
+            val: cval("o"),
+            value: ty(),
+            is_unsafe: true,
+            all: vec![nm("o")],
+        });
+        assert!(constant_info_eq(&o1, &o2, &mut g).unwrap());
+        assert!(!constant_info_eq(&o1, &o3, &mut g).unwrap());
+
+        // Quot: differing `kind`.
+        let q1 = ConstantInfo::Quot(QuotVal {
+            val: cval("q"),
+            kind: QuotKind::Type,
+        });
+        let q2 = ConstantInfo::Quot(QuotVal {
+            val: cval("q"),
+            kind: QuotKind::Type,
+        });
+        let q3 = ConstantInfo::Quot(QuotVal {
+            val: cval("q"),
+            kind: QuotKind::Ctor,
+        });
+        assert!(constant_info_eq(&q1, &q2, &mut g).unwrap());
+        assert!(!constant_info_eq(&q1, &q3, &mut g).unwrap());
+
+        // Induct: differing `is_rec`.
+        let mk_ind = |is_rec: bool| {
+            ConstantInfo::Induct(InductiveVal {
+                val: cval("I"),
+                num_params: Nat::from(0u64),
+                num_indices: Nat::from(0u64),
+                all: vec![nm("I")],
+                ctors: vec![nm("I.mk")],
+                num_nested: Nat::from(0u64),
+                is_rec,
+                is_unsafe: false,
+                is_reflexive: false,
+            })
+        };
+        let i1 = mk_ind(false);
+        let i2 = mk_ind(false);
+        let i3 = mk_ind(true);
+        assert!(constant_info_eq(&i1, &i2, &mut g).unwrap());
+        assert!(!constant_info_eq(&i1, &i3, &mut g).unwrap());
+
+        // Ctor: differing `cidx`.
+        let mk_ctor = |cidx: u64| {
+            ConstantInfo::Ctor(ConstructorVal {
+                val: cval("I.mk"),
+                induct: nm("I"),
+                cidx: Nat::from(cidx),
+                num_params: Nat::from(0u64),
+                num_fields: Nat::from(0u64),
+                is_unsafe: false,
+            })
+        };
+        let c1 = mk_ctor(0);
+        let c2 = mk_ctor(0);
+        let c3 = mk_ctor(1);
+        assert!(constant_info_eq(&c1, &c2, &mut g).unwrap());
+        assert!(!constant_info_eq(&c1, &c3, &mut g).unwrap());
+
+        // Rec: differing rule `nfields`, differing `k`.
+        let rule_a = RecursorRule {
+            ctor: nm("I.mk"),
+            nfields: Nat::from(0u64),
+            rhs: ty(),
+        };
+        let rule_b = RecursorRule {
+            ctor: nm("I.mk"),
+            nfields: Nat::from(1u64),
+            rhs: ty(),
+        };
+        let mk_rec = |rules: Vec<RecursorRule>, k: bool| {
+            ConstantInfo::Rec(RecursorVal {
+                val: cval("I.rec"),
+                all: vec![nm("I.rec")],
+                num_params: Nat::from(0u64),
+                num_indices: Nat::from(0u64),
+                num_motives: Nat::from(1u64),
+                num_minors: Nat::from(1u64),
+                rules,
+                k,
+                is_unsafe: false,
+            })
+        };
+        let r1 = mk_rec(vec![rule_a.clone()], false);
+        let r2 = mk_rec(vec![rule_a.clone()], false);
+        let r3 = mk_rec(vec![rule_b], false);
+        let r4 = mk_rec(vec![rule_a], true);
+        assert!(constant_info_eq(&r1, &r2, &mut g).unwrap());
+        assert!(!constant_info_eq(&r1, &r3, &mut g).unwrap());
+        assert!(!constant_info_eq(&r1, &r4, &mut g).unwrap());
+
+        // Kind mismatch => false, not an error.
+        assert!(!constant_info_eq(&ax1, &d1, &mut g).unwrap());
     }
 }

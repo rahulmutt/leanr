@@ -5,16 +5,6 @@ use crate::{
     ConstantInfo, ConstantVal, Declaration, DefinitionSafety, Expr, KernelError, Name, TypeChecker,
 };
 
-fn mk_name2(a: &str, b: &str) -> Arc<Name> {
-    Arc::new(Name::Str {
-        parent: Arc::new(Name::Str {
-            parent: Arc::new(Name::Anonymous),
-            part: a.to_string(),
-        }),
-        part: b.to_string(),
-    })
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub enum EnvironmentError {
     DuplicateName(Arc<Name>),
@@ -96,6 +86,13 @@ fn check_constant_val(
 #[derive(Debug, Default, Clone)]
 pub struct Environment {
     constants: HashMap<Arc<Name>, ConstantInfo>,
+    /// oracle: `environment::m_quot_initialized` (implicit in
+    /// `add_quot`/`is_quot_initialized`, quot.cpp:47-52). Set exactly
+    /// once, by `quot::add_quot` (Task 11), after `check_eq_type`
+    /// passes and the four quotient constants are admitted. Replaces
+    /// the Task-7 name-presence proxy this field's accessor
+    /// (`quot_initialized` below) used to implement.
+    quot_initialized: bool,
 }
 
 impl Environment {
@@ -115,7 +112,10 @@ impl Environment {
                 constants.insert(name, info);
             }
         }
-        Ok(Environment { constants })
+        Ok(Environment {
+            constants,
+            quot_initialized: false,
+        })
     }
 
     pub fn get(&self, name: &Arc<Name>) -> Option<&ConstantInfo> {
@@ -220,22 +220,15 @@ impl Environment {
                     }
                     ConstantInfo::Opaque(v)
                 }
-                // oracle: environment.cpp:266-267 dispatches Quot/Inductive
-                // to `add_quot`/`add_inductive`, ported in Tasks 11/9
-                // respectively. Placeholder rejections until then (never
-                // reached by anything that constructs a `Declaration`
-                // today). The brief's sketch cites `InvalidInductive` for
-                // both stubs but that variant requires a `name`, which a
-                // bare `Quot` declaration has none of; `InvalidQuot` (the
-                // oracle's own quot-admission error, quot.cpp:19-45) fits
-                // without inventing a placeholder name, so it is used here
-                // instead — documented deviation from the brief's literal
-                // syntax, not from any tested behavior (no corpus test
-                // exercises either stub).
+                // oracle: environment.cpp:266-267 → `add_quot`
+                // (quot.cpp:47-79, Task 11). `add_quot` does its own
+                // checking (`check_eq_type`) and env mutation (four
+                // `add_core` calls plus `mark_quot_initialized`), so —
+                // like the `Inductive` arm below — this returns directly
+                // rather than falling through to the shared
+                // `self.add_core(info)` at the end of this function.
                 Declaration::Quot => {
-                    return Err(KernelError::InvalidQuot {
-                        what: "not implemented",
-                    });
+                    return crate::quot::add_quot(self);
                 }
                 // oracle: environment.cpp:266-267 → `add_inductive`
                 // (inductive.cpp:1116). `add_inductive` first eliminates
@@ -280,17 +273,24 @@ impl Environment {
     /// quotient constants have been admitted, which gates
     /// `quot_reduce_rec` in `reduce_recursor` (type_checker.cpp:334).
     ///
-    /// M1a stored no such flag; as a temporary gate we treat the quotient
-    /// as initialized once its four constants are present. Task 11
-    /// (quotient admission) replaces this with an explicit flag set when
-    /// `Quot`/`Quot.mk`/`Quot.lift`/`Quot.ind` are added, matching the
-    /// oracle exactly. The proxy is sound in the interim: `quot_reduce_rec`
-    /// itself only fires on genuine `Quot.lift`/`Quot.ind` heads reducing
-    /// a fully-applied `Quot.mk`.
+    /// Backed by the real `quot_initialized` flag (Task 11), set exactly
+    /// once by `quot::add_quot` after `check_eq_type` passes and the
+    /// four quotient constants are admitted. This replaces the Task-7
+    /// temporary proxy (name presence of `Quot.mk`/`Quot.lift`/
+    /// `Quot.ind`), whose weakness the Task-7 report flagged: an
+    /// environment admitting unrelated constants under those exact
+    /// names would have enabled quot reduction unsoundly. `add_quot` is
+    /// the only place this flag is ever set.
     pub fn quot_initialized(&self) -> bool {
-        self.constants.contains_key(&mk_name2("Quot", "mk"))
-            && self.constants.contains_key(&mk_name2("Quot", "lift"))
-            && self.constants.contains_key(&mk_name2("Quot", "ind"))
+        self.quot_initialized
+    }
+
+    /// oracle: `environment::mark_quot_initialized` (quot.cpp:78,
+    /// `new_env.mark_quot_initialized()`). `pub(crate)`: only
+    /// `quot::add_quot` sets this, right after admitting the four
+    /// quotient constants.
+    pub(crate) fn set_quot_initialized(&mut self) {
+        self.quot_initialized = true;
     }
 
     pub fn len(&self) -> usize {

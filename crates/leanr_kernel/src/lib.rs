@@ -20,6 +20,7 @@ mod level;
 mod local_ctx;
 mod name;
 mod num;
+mod quot;
 mod quot_red;
 mod subst;
 mod syntax;
@@ -28,9 +29,9 @@ mod tc;
 mod testenv;
 
 pub use decl::{
-    AxiomVal, ConstantInfo, ConstantVal, ConstructorVal, Declaration, DefinitionSafety,
-    DefinitionVal, InductiveType, InductiveVal, OpaqueVal, QuotKind, QuotVal, RecursorRule,
-    RecursorVal, ReducibilityHints, TheoremVal,
+    constant_info_eq, AxiomVal, ConstantInfo, ConstantVal, ConstructorVal, Declaration,
+    DefinitionSafety, DefinitionVal, InductiveType, InductiveVal, OpaqueVal, QuotKind, QuotVal,
+    RecursorRule, RecursorVal, ReducibilityHints, TheoremVal,
 };
 pub use env::{Environment, EnvironmentError};
 pub use error::KernelError;
