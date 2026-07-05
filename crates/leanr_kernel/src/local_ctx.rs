@@ -7,15 +7,27 @@
 //! githash b4812ae53eea93439ad5dce5a5c26591c31cb697, toolchain
 //! leanprover/lean4:v4.32.0-rc1 — see ARCHITECTURE.md for the pin).
 //!
-//! `fvars` slices passed to `mk_pi`/`mk_lambda` are never attacker-
-//! decoded `.olean` bytes: a fresh fvar id only ever comes from this
-//! module's own `mk_local_decl`/`mk_let_decl` (the decoder never
-//! produces `Expr::fvar` — see `leanr_olean`'s shape table), so every
-//! caller in this codebase passes back exactly what it was handed. That
-//! invariant is what lets `mk_binding` below treat a mismatched entry as
-//! a kernel-internal contract violation (documented panic, per the same
+//! Panic-path safety (`decl_for` below): the invariant is one of SLICE
+//! provenance, not fvar-node absence. The decoder CAN produce
+//! `Expr::fvar` from attacker bytes (leanr_olean's interp.rs decodes
+//! ctor tag 1 as `Expr::fvar(name)` with no rejection), so decoded
+//! expressions may contain arbitrary FVar nodes. But the `fvars` SLICES
+//! passed to `mk_pi`/`mk_lambda` are built exclusively by
+//! kernel-internal callers (the type checker) out of the return values
+//! of this module's own `mk_local_decl`/`mk_let_decl` — never out of
+//! decoded expressions. A decoded FVar reaching the checker is looked up
+//! via `LocalContext::get`, whose `None` feeds a `KernelError` path in
+//! the caller; it never lands in an `fvars` slice. Additionally, the
+//! admission pipeline rejects any declaration whose type/value contains
+//! ANY fvar before checking begins (`KernelError::HasFVars`; oracle:
+//! environment.cpp:87-100 `check_no_metavar_no_fvar`), so decoded FVar
+//! nodes are stopped at admission. That two-layer invariant is what lets
+//! `mk_binding` below treat a mismatched `fvars` entry as a
+//! kernel-internal contract violation (documented panic, per the same
 //! precedent as `name.rs`'s `.expect(...)` and `level.rs`'s
-//! `unreachable!(...)`) rather than untrusted input needing a `Result`.
+//! `unreachable!(...)`) rather than untrusted input needing a `Result`
+//! (no existing `KernelError` variant fits, and the variant list is
+//! frozen by Task 1's error.rs port).
 
 use std::collections::HashMap;
 use std::sync::Arc;
