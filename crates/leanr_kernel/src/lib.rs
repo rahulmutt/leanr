@@ -5,12 +5,16 @@
 //! Values of these types are built from UNTRUSTED `.olean` bytes by
 //! `leanr_olean`, so they can be adversarially shaped (e.g. 100k-deep
 //! `Name` parent chains). Nothing here may recurse proportionally to
-//! value depth: traversals are loops or explicit stacks, and the `Arc`
-//! tree types implement iterative `Drop`.
+//! value depth EXCEPT through `RecGuard::enter` (guard.rs), which
+//! bounds depth (error at the cap, never a panic) and grows the stack
+//! via `stacker` beneath it. Everything else stays loops or explicit
+//! stacks, and the `Arc` tree types implement iterative `Drop`.
 
 mod decl;
 mod env;
+mod error;
 mod expr;
+mod guard;
 mod level;
 mod name;
 mod num;
@@ -22,7 +26,9 @@ pub use decl::{
     TheoremVal,
 };
 pub use env::{Environment, EnvironmentError};
+pub use error::KernelError;
 pub use expr::{BinderInfo, DataValue, Expr, KVMap, Literal};
+pub use guard::{RecGuard, MAX_REC_DEPTH};
 pub use level::Level;
 pub use name::Name;
 pub use num::{Int, Nat};
