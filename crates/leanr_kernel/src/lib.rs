@@ -23,11 +23,13 @@ mod quot_red;
 mod subst;
 mod syntax;
 mod tc;
+#[cfg(test)]
+mod testenv;
 
 pub use decl::{
-    AxiomVal, ConstantInfo, ConstantVal, ConstructorVal, DefinitionSafety, DefinitionVal,
-    InductiveVal, OpaqueVal, QuotKind, QuotVal, RecursorRule, RecursorVal, ReducibilityHints,
-    TheoremVal,
+    AxiomVal, ConstantInfo, ConstantVal, ConstructorVal, Declaration, DefinitionSafety,
+    DefinitionVal, InductiveType, InductiveVal, OpaqueVal, QuotKind, QuotVal, RecursorRule,
+    RecursorVal, ReducibilityHints, TheoremVal,
 };
 pub use env::{Environment, EnvironmentError};
 pub use error::KernelError;

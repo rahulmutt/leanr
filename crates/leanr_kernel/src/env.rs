@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::{ConstantInfo, KernelError, Name};
+use crate::{
+    ConstantInfo, ConstantVal, Declaration, DefinitionSafety, Expr, KernelError, Name, TypeChecker,
+};
 
 fn mk_name2(a: &str, b: &str) -> Arc<Name> {
     Arc::new(Name::Str {
@@ -16,6 +18,60 @@ fn mk_name2(a: &str, b: &str) -> Arc<Name> {
 #[derive(Debug, PartialEq, Eq)]
 pub enum EnvironmentError {
     DuplicateName(Arc<Name>),
+}
+
+/// oracle: environment.cpp:102-105 (`check_name`) — `AlreadyDeclared` if
+/// `n` is already bound.
+fn check_name(env: &Environment, n: &Arc<Name>) -> Result<(), KernelError> {
+    if env.get(n).is_some() {
+        return Err(KernelError::AlreadyDeclared(Arc::clone(n)));
+    }
+    Ok(())
+}
+
+/// oracle: environment.cpp:111-121 (`check_duplicated_univ_params`) — the
+/// first level param that recurs later in the list, else `Ok`. `Name`
+/// lists here are the declaration's own `level_params` (small, no
+/// attacker-controlled blowup), so the O(n^2) scan is fine.
+fn check_duplicated_univ_params(ls: &[Arc<Name>]) -> Result<(), KernelError> {
+    for (i, p) in ls.iter().enumerate() {
+        if ls[i + 1..].iter().any(|q| q == p) {
+            return Err(KernelError::DuplicateUnivParam(Arc::clone(p)));
+        }
+    }
+    Ok(())
+}
+
+/// oracle: environment.cpp:87-100 (`check_no_metavar_no_fvar`). O(1) via
+/// the cached `ExprData` flags (`has_expr_mvar`/`has_level_mvar` →
+/// `HasMetavars`, `has_fvar` → `HasFVars`) rather than a tree walk —
+/// metavar check first, matching the oracle's order.
+fn check_no_metavar_no_fvar(n: &Arc<Name>, e: &Arc<Expr>) -> Result<(), KernelError> {
+    let d = e.data();
+    if d.has_expr_mvar() || d.has_level_mvar() {
+        return Err(KernelError::HasMetavars(Arc::clone(n)));
+    }
+    if d.has_fvar() {
+        return Err(KernelError::HasFVars(Arc::clone(n)));
+    }
+    Ok(())
+}
+
+/// oracle: environment.cpp:127-133 (`check_constant_val`): name +
+/// univ-param + mvar/fvar checks on the declared type, then `checker`
+/// infers the type's own type and `ensure_sort`s it (`TypeExpected` on
+/// failure).
+fn check_constant_val(
+    env: &Environment,
+    v: &ConstantVal,
+    checker: &mut TypeChecker,
+) -> Result<(), KernelError> {
+    check_name(env, &v.name)?;
+    check_duplicated_univ_params(&v.level_params)?;
+    check_no_metavar_no_fvar(&v.name, &v.ty)?;
+    let sort = checker.check(&v.ty, &v.level_params)?;
+    checker.ensure_sort(&sort)?;
+    Ok(())
 }
 
 /// The constant map the checker (M1b) will consult. M1a ships only
@@ -62,13 +118,108 @@ impl Environment {
 
     /// oracle: environment.cpp:144 (`environment::add`, the unchecked
     /// insert used AFTER a declaration has already been checked). Used by
-    /// the admission pipeline in Tasks 8-11; `pub(crate)` because callers
-    /// outside the kernel must go through the checking `add` (a later
-    /// task), never this raw insert.
-    #[allow(dead_code)] // first consumer lands in Task 8's admission pipeline
+    /// the admission pipeline (`add_decl`, Tasks 8-11); `pub(crate)`
+    /// because callers outside the kernel must go through the checking
+    /// `add_decl`, never this raw insert.
     pub(crate) fn add_core(&mut self, info: ConstantInfo) {
         let name = Arc::clone(info.name());
         self.constants.insert(name, info);
+    }
+
+    /// oracle: environment.cpp:261-273 (`environment::add`, the
+    /// dispatch-then-check-then-extend entry) plus the per-kind
+    /// `add_axiom`/`add_definition`/`add_theorem`/`add_opaque`
+    /// (environment.cpp:152-223). Checks the declaration against the
+    /// PRE-extension environment (this method's `&self` borrow, taken
+    /// only for the checking phase and dropped before `add_core`
+    /// extends), then admits it. On any check failure the environment is
+    /// left completely unchanged (`get`/`len` identical to before the
+    /// call).
+    pub fn add_decl(&mut self, d: Declaration) -> Result<(), KernelError> {
+        let info = {
+            let env: &Environment = &*self;
+            match d {
+                Declaration::Axiom(v) => {
+                    let mut checker = TypeChecker::new(env);
+                    check_constant_val(env, &v.val, &mut checker)?;
+                    ConstantInfo::Axiom(v)
+                }
+                Declaration::Defn(v) => {
+                    // oracle: environment.cpp:163 (`v.is_unsafe()`) picks the
+                    // unsafe/recursive-checking branch (179-189 is the safe
+                    // branch we port; 163-178 is unreachable for us — see
+                    // the brief's `Declaration` doc comment: replay never
+                    // sends an unsafe/partial `Defn`). Total & documented:
+                    // reject rather than silently mis-check.
+                    if v.safety != DefinitionSafety::Safe {
+                        return Err(KernelError::UnsafeConstInSafeDecl(Arc::clone(&v.val.name)));
+                    }
+                    let mut checker = TypeChecker::new(env);
+                    check_constant_val(env, &v.val, &mut checker)?;
+                    check_no_metavar_no_fvar(&v.val.name, &v.value)?;
+                    let val_type = checker.check(&v.value, &v.val.level_params)?;
+                    if !checker.is_def_eq(&val_type, &v.val.ty)? {
+                        return Err(KernelError::DefTypeMismatch(Arc::clone(&v.val.name)));
+                    }
+                    ConstantInfo::Defn(v)
+                }
+                Declaration::Thm(v) => {
+                    let mut checker = TypeChecker::new(env);
+                    check_constant_val(env, &v.val, &mut checker)?;
+                    if !checker.is_prop(&v.val.ty)? {
+                        return Err(KernelError::TheoremTypeNotProp(Arc::clone(&v.val.name)));
+                    }
+                    check_no_metavar_no_fvar(&v.val.name, &v.value)?;
+                    let val_type = checker.check(&v.value, &v.val.level_params)?;
+                    if !checker.is_def_eq(&val_type, &v.val.ty)? {
+                        return Err(KernelError::DefTypeMismatch(Arc::clone(&v.val.name)));
+                    }
+                    ConstantInfo::Thm(v)
+                }
+                Declaration::Opaque(v) => {
+                    // oracle (environment.cpp:211-222): no
+                    // `check_no_metavar_no_fvar` on the value here — unlike
+                    // Defn/Thm, add_opaque relies solely on the `checker.check`
+                    // walk below to reject a malformed value. Ported as-is.
+                    let mut checker = TypeChecker::new(env);
+                    check_constant_val(env, &v.val, &mut checker)?;
+                    let val_type = checker.check(&v.value, &v.val.level_params)?;
+                    if !checker.is_def_eq(&val_type, &v.val.ty)? {
+                        return Err(KernelError::DefTypeMismatch(Arc::clone(&v.val.name)));
+                    }
+                    ConstantInfo::Opaque(v)
+                }
+                // oracle: environment.cpp:266-267 dispatches Quot/Inductive
+                // to `add_quot`/`add_inductive`, ported in Tasks 11/9
+                // respectively. Placeholder rejections until then (never
+                // reached by anything that constructs a `Declaration`
+                // today). The brief's sketch cites `InvalidInductive` for
+                // both stubs but that variant requires a `name`, which a
+                // bare `Quot` declaration has none of; `InvalidQuot` (the
+                // oracle's own quot-admission error, quot.cpp:19-45) fits
+                // without inventing a placeholder name, so it is used here
+                // instead — documented deviation from the brief's literal
+                // syntax, not from any tested behavior (no corpus test
+                // exercises either stub).
+                Declaration::Quot => {
+                    return Err(KernelError::InvalidQuot {
+                        what: "not implemented",
+                    });
+                }
+                Declaration::Inductive { types, .. } => {
+                    let name = types
+                        .first()
+                        .map(|t| Arc::clone(&t.name))
+                        .unwrap_or_else(|| Arc::new(Name::Anonymous));
+                    return Err(KernelError::InvalidInductive {
+                        name,
+                        what: "not implemented",
+                    });
+                }
+            }
+        };
+        self.add_core(info);
+        Ok(())
     }
 
     /// oracle: inductive.cpp:27 (`is_non_rec_structure`) — the query the
@@ -111,3 +262,6 @@ impl Environment {
         self.constants.is_empty()
     }
 }
+
+#[cfg(test)]
+mod tests;

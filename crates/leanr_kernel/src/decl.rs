@@ -142,6 +142,34 @@ pub enum ConstantInfo {
     Rec(RecursorVal),
 }
 
+/// Kernel admission INPUT (oracle declaration.h:201; Lean `Declaration`).
+/// No `MutualDefinition` variant: replay skips unsafe/partial constants
+/// (Replay.lean:176-181), which are the only legal mutual defs
+/// (environment.cpp:224-232), so the variant is unreachable for us.
+#[derive(Debug, Clone)]
+pub enum Declaration {
+    Axiom(AxiomVal),
+    Defn(DefinitionVal),
+    Thm(TheoremVal),
+    Opaque(OpaqueVal),
+    Quot,
+    /// oracle: inductive_decl (declaration.h:266+): the mutual block's
+    /// level params, num params, and per-type name/type/ctors.
+    Inductive {
+        lparams: Vec<Arc<Name>>,
+        nparams: Nat,
+        types: Vec<InductiveType>,
+        is_unsafe: bool, // always false from replay
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct InductiveType {
+    pub name: Arc<Name>,
+    pub ty: Arc<Expr>,
+    pub ctors: Vec<(Arc<Name>, Arc<Expr>)>, // (ctor name, ctor type)
+}
+
 impl ConstantInfo {
     pub fn constant_val(&self) -> &ConstantVal {
         match self {
