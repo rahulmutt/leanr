@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::{ConstantInfo, Name};
+use crate::{ConstantInfo, KernelError, Name};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum EnvironmentError {
@@ -37,6 +37,28 @@ impl Environment {
 
     pub fn get(&self, name: &Arc<Name>) -> Option<&ConstantInfo> {
         self.constants.get(name)
+    }
+
+    /// oracle: environment.cpp `environment::get` — like `get`, but a
+    /// miss is the kernel's `unknown_constant_exception`
+    /// (`KernelError::UnknownConstant`) rather than a silent `None`. This
+    /// is the form the M1b type checker consults (type_checker.cpp:93
+    /// `env().get(const_name(e))`).
+    pub fn get_with(&self, name: &Arc<Name>) -> Result<&ConstantInfo, KernelError> {
+        self.constants
+            .get(name)
+            .ok_or_else(|| KernelError::UnknownConstant(Arc::clone(name)))
+    }
+
+    /// oracle: environment.cpp:144 (`environment::add`, the unchecked
+    /// insert used AFTER a declaration has already been checked). Used by
+    /// the admission pipeline in Tasks 8-11; `pub(crate)` because callers
+    /// outside the kernel must go through the checking `add` (a later
+    /// task), never this raw insert.
+    #[allow(dead_code)] // first consumer lands in Task 8's admission pipeline
+    pub(crate) fn add_core(&mut self, info: ConstantInfo) {
+        let name = Arc::clone(info.name());
+        self.constants.insert(name, info);
     }
 
     pub fn len(&self) -> usize {

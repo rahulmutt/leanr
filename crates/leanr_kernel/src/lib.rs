@@ -21,6 +21,7 @@ mod name;
 mod num;
 mod subst;
 mod syntax;
+mod tc;
 
 pub use decl::{
     AxiomVal, ConstantInfo, ConstantVal, ConstructorVal, DefinitionSafety, DefinitionVal,
@@ -40,3 +41,4 @@ pub use subst::{
     lift_loose_bvars,
 };
 pub use syntax::{Preresolved, SourceInfo, Substring, Syntax};
+pub use tc::{Lbool, TypeChecker};

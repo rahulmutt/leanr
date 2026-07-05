@@ -144,6 +144,25 @@ impl LocalContext {
         self.index.get(fvar_id).map(|&i| &self.decls[i])
     }
 
+    /// Support for the type checker's `flet<local_ctx> save_lctx(m_lctx,
+    /// m_lctx)` idiom (type_checker.cpp:117/135/199/693 etc.): the checker
+    /// extends the context under a binder and must pop those decls again
+    /// on the way out. `save` records the current decl count; `restore`
+    /// drops every decl added since (fvar ids are globally unique via
+    /// `FVarIdGen`, so a dropped id is never reintroduced — the truncation
+    /// is exact). `pub(crate)`: only the in-crate checker uses it.
+    pub(crate) fn save(&self) -> usize {
+        self.decls.len()
+    }
+
+    /// Restore to a `save` checkpoint, removing later decls from both the
+    /// insertion-ordered `decls` and the id `index`.
+    pub(crate) fn restore(&mut self, checkpoint: usize) {
+        for decl in self.decls.drain(checkpoint..) {
+            self.index.remove(&decl.id);
+        }
+    }
+
     /// Look up the declaration for a telescope entry, or panic — see the
     /// module doc comment for why this is a documented internal-contract
     /// panic rather than a `Result`.
