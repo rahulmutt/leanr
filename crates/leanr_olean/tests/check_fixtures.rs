@@ -43,6 +43,39 @@ fn prelude0_replays_from_empty_env() {
     assert_eq!(stats.skipped_unsafe, 0);
 }
 
+/// TDD anchor for M1b Task 14 (`leanr check`): exercises the exact library
+/// path the CLI subcommand drives — `SearchPath::new` + `load_closure` +
+/// `replay` — over the committed, import-free `Prelude0` fixture from an
+/// explicit root (the fixtures dir), mirroring
+/// `leanr check Prelude0 --path tests/fixtures`. Hermetic (runs in CI): no
+/// toolchain needed, the committed `.olean` is the entire input.
+#[test]
+fn check_library_path_replays_prelude0_from_explicit_root() {
+    let sp = SearchPath::new(vec![fixtures_dir()]);
+    let modules = load_closure(&sp, &[name("Prelude0")]).unwrap();
+    assert_eq!(
+        modules.len(),
+        1,
+        "Prelude0 has no imports, so its closure is itself"
+    );
+
+    let mut constants: HashMap<Arc<Name>, ConstantInfo> = HashMap::new();
+    for (_, md) in modules {
+        for c in md.constants {
+            constants.entry(Arc::clone(c.name())).or_insert(c);
+        }
+    }
+
+    let mut env = Environment::default();
+    let stats = leanr_kernel::replay(&mut env, constants).unwrap();
+    assert!(
+        stats.checked >= 3,
+        "expected >= 3 checked, got {}",
+        stats.checked
+    );
+    assert_eq!(stats.skipped_unsafe, 0);
+}
+
 /// Hermetic (runs in CI): the `module`-mode `ModPriv` fixture decodes from
 /// its committed companion parts and replays from an empty environment.
 ///

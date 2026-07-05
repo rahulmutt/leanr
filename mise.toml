@@ -46,6 +46,11 @@ description = "Decode every .olean shipped with the pinned toolchain (local; CI 
 depends = ["elan:bootstrap"]
 run = "sh -c 'LEANR_SWEEP_DIR=\"$(lean --print-libdir)\" cargo test --release --package leanr_olean --test stdlib_sweep -- --ignored --nocapture'"
 
+[tasks."check:stdlib"]
+description = "Kernel-check every .olean shipped with the pinned toolchain (local; CI has no Lean)"
+depends = ["elan:bootstrap"]
+run = "sh -c 'cargo run --release -p leanr_cli -- check --all --path \"$(lean --print-libdir)\"'"
+
 [tasks.fuzz]
 description = "Fuzz the olean decoder (local; needs nightly-2026-07-01, sanitizer flags require a nightly rustc). mise's rust core plugin holds only one rust version at a time (a second `mise use --pin rust@...` silently replaces the pinned 1.96.0 instead of layering a second channel alongside it, which would break `mise run test`), so the nightly is installed and invoked directly via rustup instead of mise: run `rustup toolchain install nightly-2026-07-01` once, then this task uses `cargo +nightly-2026-07-01`. detect_leaks=0: this sandbox drops CAP_SYS_PTRACE, which makes LeakSanitizer's own end-of-run leak check abort (\"LeakSanitizer has encountered a fatal error\", zero-byte artifact) independent of the target; leak detection isn't part of the never-panic guarantee we're fuzzing for."
 dir = "crates/leanr_olean"
