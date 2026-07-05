@@ -117,7 +117,10 @@ struct UnionFind {
 }
 
 impl UnionFind {
-    /// oracle: `equiv_manager::mk_node` + `to_node`.
+    /// oracle: `equiv_manager::mk_node` + `to_node`. Named for the oracle;
+    /// it interns (mutates), so `&mut self` is required despite the `to_`
+    /// prefix clippy associates with by-value conversions.
+    #[allow(clippy::wrong_self_convention)]
     fn to_node(&mut self, e: &Arc<Expr>) -> usize {
         if let Some(i) = self.index.get(&ExprPtr(Arc::clone(e))) {
             return *i;
@@ -219,10 +222,9 @@ impl UnionFind {
             }
             (ExprNode::MVar { id: i1 }, ExprNode::MVar { id: i2 }) => Ok(i1 == i2),
             (ExprNode::FVar { id: i1 }, ExprNode::FVar { id: i2 }) => Ok(i1 == i2),
-            (ExprNode::App { f: f1, arg: a1 }, ExprNode::App { f: f2, arg: a2 }) => {
-                Ok(self.is_equiv_core(f1, f2, use_hash, g)?
-                    && self.is_equiv_core(a1, a2, use_hash, g)?)
-            }
+            (ExprNode::App { f: f1, arg: a1 }, ExprNode::App { f: f2, arg: a2 }) => Ok(self
+                .is_equiv_core(f1, f2, use_hash, g)?
+                && self.is_equiv_core(a1, a2, use_hash, g)?),
             (
                 ExprNode::Lam {
                     binder_type: d1,

@@ -6,6 +6,10 @@ yanked = "deny"
 version = 2
 allow = [
   "Apache-2.0",
+  # LLVM exception is a permissive addition to Apache-2.0; pulled in by
+  # `ar_archive_writer`, a build-dependency of `psm`/`stacker` (the
+  # sanctioned kernel TCB recursion dep).
+  "Apache-2.0 WITH LLVM-exception",
   "MIT",
   "BSD-3-Clause",
   "ISC",
