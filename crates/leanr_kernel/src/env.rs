@@ -83,7 +83,17 @@ fn check_constant_val(
 
 /// The constant map the checker (M1b) will consult. M1a ships only
 /// construction and lookup.
-#[derive(Debug, Default)]
+///
+/// `Clone` is used ONLY by the nested-inductive admission path
+/// (inductive.rs `add_inductive`): the oracle runs `add_inductive_fn` on
+/// the enlarged aux block in a scratch environment
+/// (`environment::add_inductive`, inductive.cpp:1119-1120's
+/// `scoped_diagnostics`/`aux_env`), then selectively copies the restored
+/// real-named decls into a fresh copy of the caller's env. We mirror that
+/// by cloning the real env into a scratch env for the aux run; the
+/// non-nested path never clones (it mutates in place with rollback, see
+/// `remove_core`).
+#[derive(Debug, Default, Clone)]
 pub struct Environment {
     constants: HashMap<Arc<Name>, ConstantInfo>,
 }
@@ -228,11 +238,13 @@ impl Environment {
                     });
                 }
                 // oracle: environment.cpp:266-267 → `add_inductive`
-                // (inductive.cpp:1116). Task 9 ports the non-nested
-                // machinery; `nnested` is 0 here (Task 10 threads a
-                // nonzero value once nested-inductive elimination lands).
-                // `add_inductive` does its own checking and env mutation
-                // (with failure rollback), so this arm returns directly.
+                // (inductive.cpp:1116). `add_inductive` first eliminates
+                // nested occurrences (Task 10), runs the ordinary
+                // machinery (Task 9) on the enlarged block in a scratch
+                // env, and restores nested inductives back into the real
+                // env — computing `nnested` internally. It does its own
+                // checking and env mutation (with failure rollback), so
+                // this arm returns directly.
                 Declaration::Inductive {
                     lparams,
                     nparams,
@@ -240,12 +252,7 @@ impl Environment {
                     is_unsafe,
                 } => {
                     return crate::inductive::add_inductive(
-                        self,
-                        lparams,
-                        nparams,
-                        types,
-                        is_unsafe,
-                        crate::Nat::from(0),
+                        self, lparams, nparams, types, is_unsafe,
                     );
                 }
             }
@@ -292,6 +299,14 @@ impl Environment {
 
     pub fn is_empty(&self) -> bool {
         self.constants.is_empty()
+    }
+
+    /// Test-only: every declared constant name (used by the
+    /// nested-inductive tests to prove the `_nested.*` aux decls never
+    /// leak into the final environment).
+    #[cfg(test)]
+    pub(crate) fn constant_names(&self) -> Vec<Arc<Name>> {
+        self.constants.keys().map(Arc::clone).collect()
     }
 }
 

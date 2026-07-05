@@ -646,3 +646,274 @@ fn iota_now_reduces_declared_recursor() {
     );
     assert_eq!(Expr::get_app_num_args(&reduced), 2);
 }
+
+// ---- Task 10: nested inductives -----------------------------------------
+//
+// All four tests hand-build the block from the `#print`/`run_cmd`
+// transcriptions taken under leanprover/lean4:v4.32.0-rc1:
+//
+//   inductive Tree where | node : List Tree → Tree
+//     Tree: numNested=1  all=[Tree]
+//     Tree.node : List.{0} Tree → Tree
+//     Tree.rec.{u} : numMotives=2 numMinors=3 numParams=0 numIndices=0
+//         rules: for Tree.node (1 field)
+//     Tree.rec_1.{u} (the restored aux List recursor): numMotives=2
+//         rules: for List.nil (0), for List.cons (2)
+//
+//   inductive Stx where | node : Array Stx → Stx | leaf : Stx
+//     Stx: numNested=2  all=[Stx]         (Array nests, and Array's
+//     Stx.rec.{u} : numMotives=3 numMinors=5   underlying List nests too)
+
+/// `Type u` = `Sort (u+1)`.
+fn type_u() -> Arc<Expr> {
+    Expr::sort(
+        Level::mk_succ(Arc::new(Level::Param(nm("u")))),
+        &mut RecGuard::new(),
+    )
+    .unwrap()
+}
+
+/// Does any component of `n` equal `s`? (Leak scan for `_nested`.)
+fn name_has_component(n: &Arc<Name>, s: &str) -> bool {
+    let mut cur = Arc::clone(n);
+    loop {
+        match cur.as_ref() {
+            Name::Anonymous => return false,
+            Name::Str { parent, part } => {
+                if part == s {
+                    return true;
+                }
+                cur = Arc::clone(parent);
+            }
+            Name::Num { parent, .. } => cur = Arc::clone(parent),
+        }
+    }
+}
+
+fn assert_no_nested_leak(env: &Environment) {
+    for n in env.constant_names() {
+        assert!(
+            !name_has_component(&n, "_nested"),
+            "aux `_nested` name leaked into final env: {n}"
+        );
+    }
+}
+
+/// `inductive Tree where | node : List Tree → Tree`.
+fn tree_decl() -> Declaration {
+    // Tree.node : List.{0} Tree → Tree
+    let list0_tree = mini::app(
+        mini::cstn(nm("List"), vec![Arc::new(Level::Zero)]),
+        mini::cstn(nm("Tree"), vec![]),
+    );
+    let node_ty = mini::pi("a", list0_tree, mini::cstn(nm("Tree"), vec![]));
+    decl(
+        vec![],
+        0,
+        vec![ind(
+            "Tree",
+            mini::type1(),
+            vec![(nm2("Tree", "node"), node_ty)],
+        )],
+    )
+}
+
+#[test]
+fn admits_nested_via_list() {
+    let mut env = mini::env();
+    env.add_decl(tree_decl()).expect("Tree admits via nesting");
+
+    // InductiveVal: one nested aux type, `all` fixed to just [Tree].
+    let tree = induct(&env, &nm("Tree"));
+    assert_eq!(tree.num_nested, Nat::from(1), "one aux nested type (List)");
+    assert_eq!(tree.all, vec![nm("Tree")], "all restored to the real block");
+    assert_eq!(tree.ctors, vec![nm2("Tree", "node")]);
+    assert!(tree.is_rec, "Tree is recursive");
+
+    // Constructor: type restored to `List.{0} Tree → Tree`.
+    let node = ctor(&env, &nm2("Tree", "node"));
+    assert_eq!(node.num_params, Nat::from(0));
+    assert_eq!(node.num_fields, Nat::from(1));
+    let list0_tree = mini::app(
+        mini::cstn(nm("List"), vec![Arc::new(Level::Zero)]),
+        mini::cstn(nm("Tree"), vec![]),
+    );
+    let expected_node_ty = mini::pi("a", list0_tree, mini::cstn(nm("Tree"), vec![]));
+    assert!(
+        eq_structural(&node.val.ty, &expected_node_ty),
+        "Tree.node type restored to `List.{{0}} Tree → Tree`, got {:?}",
+        node.val.ty
+    );
+
+    // Recursor Tree.rec: gains a motive for the aux List type ⇒ 2 motives.
+    let rec = recursor(&env, &nm2("Tree", "rec"));
+    assert_eq!(rec.num_motives, Nat::from(2), "motive for Tree + aux List");
+    assert_eq!(rec.num_minors, Nat::from(3), "node + nil + cons minors");
+    assert_eq!(rec.num_params, Nat::from(0));
+    assert_eq!(rec.num_indices, Nat::from(0));
+    assert_eq!(rec.all, vec![nm("Tree")], "recursor all = real block");
+    assert_eq!(rec.val.level_params, vec![nm("u")]);
+    // Tree.rec's own rules are for Tree's constructors only.
+    assert_eq!(rec.rules.len(), 1);
+    assert_eq!(rec.rules[0].ctor, nm2("Tree", "node"));
+    assert_eq!(rec.rules[0].nfields, Nat::from(1));
+
+    // The restored aux recursor Tree.rec_1: rules reference the REAL
+    // List.nil / List.cons names (restore_constructor_name).
+    let rec1 = recursor(&env, &nm2("Tree", "rec_1"));
+    assert_eq!(rec1.num_motives, Nat::from(2));
+    assert_eq!(rec1.all, vec![nm("Tree")]);
+    assert_eq!(rec1.rules.len(), 2);
+    assert_eq!(rec1.rules[0].ctor, nm2("List", "nil"));
+    assert_eq!(rec1.rules[0].nfields, Nat::from(0));
+    assert_eq!(rec1.rules[1].ctor, nm2("List", "cons"));
+    assert_eq!(rec1.rules[1].nfields, Nat::from(2));
+
+    // No aux `_nested.*` declaration leaks into the final environment.
+    assert_no_nested_leak(&env);
+}
+
+#[test]
+fn nested_iota_reduces() {
+    let mut env = mini::env();
+    env.add_decl(tree_decl()).expect("Tree admits");
+    // Opaque stand-ins for the recursor's motives/minors + a List Tree
+    // value; whnf's iota is untyped, so any well-typed constants suffice.
+    let list0_tree = mini::app(
+        mini::cstn(nm("List"), vec![Arc::new(Level::Zero)]),
+        mini::cstn(nm("Tree"), vec![]),
+    );
+    for (n, ty) in [
+        ("m1", mini::type1()),
+        ("m2", mini::type1()),
+        ("node_min", mini::type1()),
+        ("nil_min", mini::type1()),
+        ("cons_min", mini::type1()),
+    ] {
+        env.add_decl(axiom(n, ty)).unwrap();
+    }
+    env.add_decl(axiom("lst", list0_tree)).unwrap();
+
+    // Tree.rec.{1} m1 m2 node_min nil_min cons_min (Tree.node lst).
+    let one = Level::mk_succ(Arc::new(Level::Zero));
+    let tree_rec = mini::cstn(nm2("Tree", "rec"), vec![one]);
+    let node_app = mini::app(
+        mini::cstn(nm2("Tree", "node"), vec![]),
+        mini::cst("lst", vec![]),
+    );
+    let major = mini::appn(
+        tree_rec,
+        vec![
+            mini::cst("m1", vec![]),
+            mini::cst("m2", vec![]),
+            mini::cst("node_min", vec![]),
+            mini::cst("nil_min", vec![]),
+            mini::cst("cons_min", vec![]),
+            node_app,
+        ],
+    );
+
+    let mut tc = crate::TypeChecker::new(&env);
+    let reduced = tc.whnf(&major).expect("nested iota reduces");
+    // RHS of the Tree.node rule is `node_min lst (Tree.rec_1 … lst)`.
+    let head = Expr::get_app_fn(&reduced);
+    assert!(
+        matches!(head.node(), ExprNode::Const { name, .. } if name.as_ref() == nm("node_min").as_ref()),
+        "reduced head is the node minor, got {:?}",
+        head.node()
+    );
+    assert_eq!(Expr::get_app_num_args(&reduced), 2);
+}
+
+#[test]
+fn rejects_nested_positivity_violation() {
+    // inductive T where | mk : List (T → T) → T
+    // After elimination the aux List copy carries a field `T → T`; the
+    // domain occurrence of `T` is non-positive ⇒ rejected.
+    let mut env = mini::env();
+    let t = mini::cstn(nm("T"), vec![]);
+    let t_to_t = mini::pi("x", Arc::clone(&t), Arc::clone(&t)); // T → T
+    let list_tt = mini::app(mini::cstn(nm("List"), vec![Arc::new(Level::Zero)]), t_to_t);
+    let mk_ty = mini::pi("a", list_tt, t); // List (T → T) → T
+    let err = env
+        .add_decl(decl(
+            vec![],
+            0,
+            vec![ind("T", mini::type1(), vec![(nm2("T", "mk"), mk_ty)])],
+        ))
+        .unwrap_err();
+    match err {
+        crate::KernelError::InvalidInductive { what, .. } => assert_eq!(what, "positivity"),
+        other => panic!("expected positivity error, got {other:?}"),
+    }
+    // Rollback: neither the real names nor any aux `_nested.*` remain.
+    assert!(env.get(&nm("T")).is_none());
+    assert!(env.get(&nm2("T", "mk")).is_none());
+    assert_no_nested_leak(&env);
+}
+
+/// `structure Array.{u} (α : Type u) where mk :: (toList : List.{u} α)`.
+fn array_decl() -> Declaration {
+    let array_ty = mini::pi("α", type_u(), type_u());
+    let listu = mini::cstn(nm("List"), vec![Arc::new(Level::Param(nm("u")))]);
+    let arrayu = mini::cstn(nm("Array"), vec![Arc::new(Level::Param(nm("u")))]);
+    // Array.mk.{u} : {α : Type u} → List.{u} α → Array.{u} α
+    let mk_ty = mini::pi(
+        "α",
+        type_u(),
+        mini::pi(
+            "toList",
+            mini::app(listu, mini::bvar(0)),
+            mini::app(arrayu, mini::bvar(1)),
+        ),
+    );
+    decl(
+        vec![nm("u")],
+        1,
+        vec![ind("Array", array_ty, vec![(nm2("Array", "mk"), mk_ty)])],
+    )
+}
+
+#[test]
+fn stdlib_shape_smoke() {
+    // The heaviest nested consumer shape in the stdlib: Lean.Syntax nests
+    // `Array Syntax`, which pulls in Array *and* its underlying List. A
+    // faithful minimal analogue:
+    //   inductive Stx where | node : Array Stx → Stx | leaf : Stx
+    let mut env = mini::env();
+    env.add_decl(array_decl()).expect("Array admits");
+
+    let array0_stx = mini::app(
+        mini::cstn(nm("Array"), vec![Arc::new(Level::Zero)]),
+        mini::cstn(nm("Stx"), vec![]),
+    );
+    let node_ty = mini::pi("a", array0_stx, mini::cstn(nm("Stx"), vec![]));
+    let leaf_ty = mini::cstn(nm("Stx"), vec![]);
+    env.add_decl(decl(
+        vec![],
+        0,
+        vec![ind(
+            "Stx",
+            mini::type1(),
+            vec![(nm2("Stx", "node"), node_ty), (nm2("Stx", "leaf"), leaf_ty)],
+        )],
+    ))
+    .expect("Stx admits via double nesting (Array + List)");
+
+    let stx = induct(&env, &nm("Stx"));
+    // Array nests, and Array's underlying List nests ⇒ two aux types.
+    assert_eq!(stx.num_nested, Nat::from(2));
+    assert_eq!(stx.all, vec![nm("Stx")]);
+    assert_eq!(stx.ctors, vec![nm2("Stx", "node"), nm2("Stx", "leaf")]);
+
+    let rec = recursor(&env, &nm2("Stx", "rec"));
+    assert_eq!(rec.num_motives, Nat::from(3), "Stx + Array-aux + List-aux");
+    assert_eq!(rec.num_minors, Nat::from(5), "node+leaf + mk + nil+cons");
+    assert_eq!(rec.all, vec![nm("Stx")]);
+
+    // The two restored aux recursors are present under real names …
+    assert!(env.get(&nm2("Stx", "rec_1")).is_some());
+    assert!(env.get(&nm2("Stx", "rec_2")).is_some());
+    // … and no aux `_nested.*` declaration leaked.
+    assert_no_nested_leak(&env);
+}

@@ -47,14 +47,15 @@
 //!   inductive's declared types/ctors are decoded from untrusted oleans.
 //!   Telescope walks are iterative loops over `LocalContext` fvars.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::env::{check_duplicated_univ_params, check_name, check_no_metavar_no_fvar};
 use crate::{
-    instantiate, BinderInfo, ConstantInfo, ConstantVal, ConstructorVal, Environment, Expr,
-    ExprNode, FVarIdGen, InductiveType, InductiveVal, KernelError, Level, LocalContext, Name, Nat,
-    RecGuard, RecursorRule, RecursorVal, TypeChecker,
+    abstract_fvars, instantiate, instantiate_level_params, instantiate_rev, BinderInfo,
+    ConstantInfo, ConstantVal, ConstructorVal, Environment, Expr, ExprNode, FVarIdGen,
+    InductiveType, InductiveVal, KernelError, Level, LocalContext, Name, Nat, RecGuard,
+    RecursorRule, RecursorVal, TypeChecker,
 };
 
 // ---------------------------------------------------------------------
@@ -470,11 +471,12 @@ struct AddInductiveFn {
     added: Vec<Arc<Name>>,
 }
 
-/// The pipeline entry (oracle: `environment::add_inductive`,
-/// inductive.cpp:1116-1123, minus nested-inductive elimination — Task
-/// 10). `nnested` is threaded from the caller (0 for the non-nested
-/// admissions Task 9 handles).
-pub(crate) fn add_inductive(
+/// Runs the ordinary (Task-9) `add_inductive_fn` machinery on an already
+/// nesting-eliminated block (oracle: `add_inductive_fn(env, diag, decl,
+/// nnested)`, inductive.cpp:1120). `nnested` is the count of auxiliary
+/// nested types the caller lifted into the block (0 for a genuinely
+/// non-nested declaration). Rolls back every added constant on failure.
+fn run_add_inductive_fn(
     env: &mut Environment,
     lparams: Vec<Arc<Name>>,
     nparams: Nat,
@@ -505,6 +507,1115 @@ pub(crate) fn add_inductive(
                 env.remove_core(n);
             }
             Err(e)
+        }
+    }
+}
+
+// =====================================================================
+// Nested-inductive elimination (oracle: inductive.cpp:792-1181).
+//
+// A constructor field mentioning some OTHER (already-declared) inductive
+// `I` applied to a parameter that contains one of the block's own types
+// (e.g. `List Tree` inside `Tree`, or `Array Syntax` inside `Syntax`) is
+// not directly admissible: `I Ds` is not a valid recursive occurrence.
+// The oracle lifts each such `I Ds` to a fresh auxiliary inductive type
+// (name under the reserved `_nested` prefix) in the mutual block,
+// rewriting occurrences, runs the ordinary machinery on the enlarged
+// block in a scratch environment, and then `restore_nested` maps the aux
+// constants back to the real nested applications, copying the resulting
+// decls into the real env under their real names.
+//
+// Deviations forced by Rust, same spirit as `AddInductiveFn`'s module
+// docs:
+//   - The oracle threads its own `name_generator(*g_nested_fresh)` (a
+//     `_nested_fresh` prefix distinct from the checker's `_kernel_fresh`).
+//     We reuse `FVarIdGen` (`_kernel_fresh.<n>`): every fvar minted here
+//     is abstracted away (into bvars) before any term leaves elimination
+//     — the aux block's declared types are closed, and `restore_nested`
+//     re-abstracts its peeled binders — so elimination fvars never
+//     coexist with the scratch `add_inductive_fn`'s own fvars. No
+//     collision is possible.
+//   - `RecGuard` is threaded as an explicit `&mut` parameter (not a
+//     struct field) so the value-depth `replace`/`find` walks below can
+//     recurse via `g.enter(|g| self.method(g, ..))` while still mutating
+//     `self` (the guard being a separate binding, not a field of `self`).
+// =====================================================================
+
+/// oracle: `name("_nested")` (inductive.cpp:1216 `g_nested`).
+fn nested_prefix() -> Arc<Name> {
+    mk_simple_name("_nested")
+}
+
+/// oracle: util/name.cpp:302-318 (`operator+`) — append every component
+/// of `n2` (root→leaf) onto `n1`. Iterative (walks `n2`'s parent chain),
+/// safe on adversarially deep names.
+fn name_append(n1: &Arc<Name>, n2: &Arc<Name>) -> Arc<Name> {
+    let mut comps: Vec<NameComp> = Vec::new();
+    let mut cur = Arc::clone(n2);
+    loop {
+        match cur.as_ref() {
+            Name::Anonymous => break,
+            Name::Str { parent, part } => {
+                comps.push(NameComp::Str(part.clone()));
+                cur = Arc::clone(parent);
+            }
+            Name::Num { parent, part } => {
+                comps.push(NameComp::Num(part.clone()));
+                cur = Arc::clone(parent);
+            }
+        }
+    }
+    let mut result = Arc::clone(n1);
+    for c in comps.into_iter().rev() {
+        result = match c {
+            NameComp::Str(s) => Arc::new(Name::Str {
+                parent: result,
+                part: s,
+            }),
+            NameComp::Num(v) => Arc::new(Name::Num {
+                parent: result,
+                part: v,
+            }),
+        };
+    }
+    result
+}
+
+/// oracle: inductive.cpp:936-944 — does `e` contain a `Const` whose name
+/// is one of the block's (current) type names? (The oracle's `find`
+/// predicate, checking every subterm.) Guarded walk.
+fn expr_contains_new_type(
+    e: &Arc<Expr>,
+    names: &HashSet<Arc<Name>>,
+    g: &mut RecGuard,
+) -> Result<bool, KernelError> {
+    match e.node() {
+        ExprNode::Const { name, .. } => Ok(names.contains(name)),
+        ExprNode::App { f, arg } => {
+            let (f, arg) = (Arc::clone(f), Arc::clone(arg));
+            g.enter(|g| {
+                Ok(
+                    expr_contains_new_type(&f, names, g)?
+                        || expr_contains_new_type(&arg, names, g)?,
+                )
+            })
+        }
+        ExprNode::Lam {
+            binder_type, body, ..
+        }
+        | ExprNode::ForallE {
+            binder_type, body, ..
+        } => {
+            let (bt, bd) = (Arc::clone(binder_type), Arc::clone(body));
+            g.enter(|g| {
+                Ok(
+                    expr_contains_new_type(&bt, names, g)?
+                        || expr_contains_new_type(&bd, names, g)?,
+                )
+            })
+        }
+        ExprNode::LetE {
+            ty, value, body, ..
+        } => {
+            let (t, v, b) = (Arc::clone(ty), Arc::clone(value), Arc::clone(body));
+            g.enter(|g| {
+                Ok(expr_contains_new_type(&t, names, g)?
+                    || expr_contains_new_type(&v, names, g)?
+                    || expr_contains_new_type(&b, names, g)?)
+            })
+        }
+        ExprNode::MData { expr, .. }
+        | ExprNode::Proj {
+            structure: expr, ..
+        } => {
+            let inner = Arc::clone(expr);
+            g.enter(|g| expr_contains_new_type(&inner, names, g))
+        }
+        _ => Ok(false),
+    }
+}
+
+/// The head const's `(name, levels)`, or `None` if the head is not a
+/// `Const`.
+fn head_const(e: &Arc<Expr>) -> Option<(Arc<Name>, Vec<Arc<Level>>)> {
+    match Expr::get_app_fn(e).node() {
+        ExprNode::Const { name, levels } => Some((Arc::clone(name), levels.clone())),
+        _ => None,
+    }
+}
+
+/// The elimination pass (oracle: `elim_nested_inductive_fn`,
+/// inductive.cpp:882-1077).
+struct ElimNestedInductiveFn<'e> {
+    env: &'e Environment,
+    ngen: FVarIdGen,
+    /// oracle `m_params_lctx`: holds the block params' fvar decls.
+    params_lctx: LocalContext,
+    /// oracle `m_params`: the block parameters (fvars), re-used as the
+    /// canonical form when comparing/canonicalizing nested occurrences.
+    params: Vec<Arc<Expr>>,
+    /// oracle `m_nested_aux`: `(I Ds canonicalized over m_params, auxName)`.
+    nested_aux: Vec<(Arc<Expr>, Arc<Name>)>,
+    /// oracle `m_lvls`: `lparams_to_levels` of the block's level params.
+    lvls: Vec<Arc<Level>>,
+    /// oracle `m_new_types`: the (growing) enlarged block.
+    new_types: Vec<InductiveType>,
+    /// Names in `new_types`, for the `is_nested_inductive_app` membership
+    /// test (kept in sync as aux types are pushed).
+    new_type_names: HashSet<Arc<Name>>,
+    /// oracle `m_next_idx`: counter for `mk_unique_name`.
+    next_idx: u64,
+    nparams: usize,
+    name0: Arc<Name>,
+}
+
+/// oracle: `elim_nested_inductive_result` (inductive.cpp:796-873) — the
+/// value elimination hands back, plus the `restore_*` methods.
+struct ElimResult {
+    /// oracle `m_params`.
+    params: Vec<Arc<Expr>>,
+    /// oracle `m_aux2nested`: auxName → `I Ds` (canonical over m_params).
+    aux2nested: HashMap<Arc<Name>, Arc<Expr>>,
+    /// The enlarged (aux) block's types.
+    aux_types: Vec<InductiveType>,
+    /// oracle `m_ngen`, advanced as `restore_nested` mints peel fvars.
+    ngen: FVarIdGen,
+}
+
+impl<'e> ElimNestedInductiveFn<'e> {
+    fn new(
+        env: &'e Environment,
+        lparams: &[Arc<Name>],
+        nparams: usize,
+        types: &[InductiveType],
+        _is_unsafe: bool,
+    ) -> ElimNestedInductiveFn<'e> {
+        let name0 = types
+            .first()
+            .map(|t| Arc::clone(&t.name))
+            .unwrap_or_else(|| Arc::new(Name::Anonymous));
+        let new_types = types.to_vec();
+        let new_type_names = new_types.iter().map(|t| Arc::clone(&t.name)).collect();
+        ElimNestedInductiveFn {
+            env,
+            ngen: FVarIdGen::default(),
+            params_lctx: LocalContext::default(),
+            params: Vec::new(),
+            nested_aux: Vec::new(),
+            lvls: lparams_to_levels(lparams),
+            new_types,
+            new_type_names,
+            next_idx: 1,
+            nparams,
+            name0,
+        }
+    }
+
+    fn ill_formed(&self) -> KernelError {
+        // oracle: inductive.cpp:906-908 (`throw_ill_formed`).
+        KernelError::InvalidInductive {
+            name: Arc::clone(&self.name0),
+            what: "invalid nested inductive datatype, ill-formed declaration",
+        }
+    }
+
+    /// oracle: inductive.cpp:898-904 (`mk_unique_name`) — append indices
+    /// to `base` until the name is free in the (original) environment.
+    fn mk_unique_name(&mut self, base: &Arc<Name>) -> Arc<Name> {
+        loop {
+            let r = append_index_after(base, self.next_idx as usize);
+            self.next_idx += 1;
+            if self.env.get(&r).is_none() {
+                return r;
+            }
+        }
+    }
+
+    /// oracle: inductive.cpp:1035-1043 (`get_params`) — peel `nparams`
+    /// Π-binders into fresh fvars recorded in `lctx`. Returns the peeled
+    /// body and the fvars. Explicit field-refs (not `&mut self`) so a
+    /// caller may point `lctx` at `self.params_lctx`.
+    fn get_params(
+        ngen: &mut FVarIdGen,
+        nparams: usize,
+        name0: &Arc<Name>,
+        lctx: &mut LocalContext,
+        mut ty: Arc<Expr>,
+        g: &mut RecGuard,
+    ) -> Result<(Arc<Expr>, Vec<Arc<Expr>>), KernelError> {
+        let mut params = Vec::with_capacity(nparams);
+        for _ in 0..nparams {
+            let (bn, bt, body, bi) = match ty.node() {
+                ExprNode::ForallE {
+                    binder_name,
+                    binder_type,
+                    body,
+                    binder_info,
+                } => (
+                    Arc::clone(binder_name),
+                    Arc::clone(binder_type),
+                    Arc::clone(body),
+                    *binder_info,
+                ),
+                _ => {
+                    return Err(KernelError::InvalidInductive {
+                        name: Arc::clone(name0),
+                        what: "incorrect number of parameters",
+                    })
+                }
+            };
+            let fv = lctx.mk_local_decl(ngen, &bn, bt, bi);
+            params.push(Arc::clone(&fv));
+            ty = instantiate(&body, &fv, g)?;
+        }
+        Ok((ty, params))
+    }
+
+    /// oracle: inductive.cpp:910-913 (`replace_params`) — rewrite the
+    /// per-constructor params `as_` back to the canonical `m_params`.
+    fn replace_params(
+        &self,
+        e: &Arc<Expr>,
+        as_: &[Arc<Expr>],
+        g: &mut RecGuard,
+    ) -> Result<Arc<Expr>, KernelError> {
+        let t = abstract_fvars(e, as_, g)?;
+        instantiate_rev(&t, &self.params, g)
+    }
+
+    /// oracle: inductive.cpp:954-960 (`instantiate_pi_params`) — drop
+    /// `params.len()` Π-domains then instantiate the body with `params`.
+    fn instantiate_pi_params(
+        &self,
+        mut e: Arc<Expr>,
+        params: &[Arc<Expr>],
+        g: &mut RecGuard,
+    ) -> Result<Arc<Expr>, KernelError> {
+        for _ in 0..params.len() {
+            match e.node() {
+                ExprNode::ForallE { body, .. } => e = Arc::clone(body),
+                _ => return Err(self.ill_formed()),
+            }
+        }
+        instantiate_rev(&e, params, g)
+    }
+
+    /// oracle: inductive.cpp:920-952 (`is_nested_inductive_app`).
+    fn is_nested_inductive_app(
+        &mut self,
+        e: &Arc<Expr>,
+        g: &mut RecGuard,
+    ) -> Result<Option<InductiveVal>, KernelError> {
+        let env = self.env;
+        if !e.is_app() {
+            return Ok(None);
+        }
+        let fn_name = match head_const(e) {
+            Some((n, _)) => n,
+            None => return Ok(None),
+        };
+        let info = match env.get(&fn_name) {
+            Some(ConstantInfo::Induct(v)) => v.clone(),
+            _ => return Ok(None),
+        };
+        let args = Expr::get_app_args(e);
+        let nparams = info
+            .num_params
+            .to_usize()
+            .ok_or_else(|| self.ill_formed())?;
+        if nparams > args.len() {
+            return Ok(None);
+        }
+        let mut is_nested = false;
+        let mut loose = false;
+        for a in &args[0..nparams] {
+            // `has_loose_bvars(a)`: exact iff the packed range is 0 (a
+            // saturated range is still nonzero — reported as loose).
+            if a.data().loose_bvar_range() != 0 {
+                loose = true;
+            }
+            if expr_contains_new_type(a, &self.new_type_names, g)? {
+                is_nested = true;
+            }
+        }
+        if !is_nested {
+            return Ok(None);
+        }
+        if loose {
+            // oracle: inductive.cpp:949-950.
+            return Err(KernelError::InvalidInductive {
+                name: fn_name,
+                what: "nested inductive parameters cannot contain local variables",
+            });
+        }
+        Ok(Some(info))
+    }
+
+    /// oracle: inductive.cpp:963-1028 (`replace_if_nested`). If `e` is a
+    /// nested occurrence `I Ds is`, return `Iaux As is` (creating aux
+    /// types on first encounter), else `None`.
+    fn replace_if_nested(
+        &mut self,
+        lctx: &LocalContext,
+        as_: &[Arc<Expr>],
+        e: &Arc<Expr>,
+        g: &mut RecGuard,
+    ) -> Result<Option<Arc<Expr>>, KernelError> {
+        let env = self.env;
+        let i_val = match self.is_nested_inductive_app(e, g)? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let args = Expr::get_app_args(e);
+        let fn0 = Arc::clone(Expr::get_app_fn(e));
+        let (i_name, i_lvls) = match head_const(e) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let i_nparams = i_val
+            .num_params
+            .to_usize()
+            .ok_or_else(|| self.ill_formed())?;
+        // IAs = I Ds (the parametric prefix).
+        let i_as = Expr::mk_app_spine(fn0, &args[0..i_nparams]);
+        let i_params = self.replace_params(&i_as, as_, g)?;
+        // Already lifted?
+        let mut found: Option<Arc<Name>> = None;
+        for (p_expr, p_name) in &self.nested_aux {
+            if Expr::structural_eq(p_expr, &i_params, g)? {
+                found = Some(Arc::clone(p_name));
+                break;
+            }
+        }
+        if let Some(aux_name) = found {
+            let aux_i = Expr::const_(aux_name, self.lvls.clone(), g)?;
+            let aux_i = Expr::mk_app_spine(aux_i, as_);
+            return Ok(Some(Expr::mk_app_spine(aux_i, &args[i_nparams..])));
+        }
+        // Copy every inductive `J` mutual with `I` into the block.
+        let mut result: Option<Arc<Expr>> = None;
+        let all = i_val.all.clone();
+        for j_name in &all {
+            let j_ind = match env.get(j_name) {
+                Some(ConstantInfo::Induct(v)) => v.clone(),
+                _ => return Err(self.ill_formed()),
+            };
+            let j_const = Expr::const_(Arc::clone(j_name), i_lvls.clone(), g)?;
+            let j_as = Expr::mk_app_spine(j_const, &args[0..i_nparams]);
+            let aux_j_name = self.mk_unique_name(&name_append(&nested_prefix(), j_name));
+            // auxJ_type = (Π As, J's index telescope with Ds substituted).
+            let mut aux_j_type =
+                instantiate_level_params(&j_ind.val.ty, &j_ind.val.level_params, &i_lvls, g)?;
+            aux_j_type = self.instantiate_pi_params(aux_j_type, &args[0..i_nparams], g)?;
+            aux_j_type = lctx.mk_pi(as_, &aux_j_type, g)?;
+            let j_as_canon = self.replace_params(&j_as, as_, g)?;
+            self.nested_aux.push((j_as_canon, Arc::clone(&aux_j_name)));
+            if j_name.as_ref() == i_name.as_ref() {
+                let aux_i = Expr::const_(Arc::clone(&aux_j_name), self.lvls.clone(), g)?;
+                let aux_i = Expr::mk_app_spine(aux_i, as_);
+                result = Some(Expr::mk_app_spine(aux_i, &args[i_nparams..]));
+            }
+            // Copy J's constructors (still referencing J; fixed when the
+            // aux type is itself dequeued in the main loop).
+            let mut aux_ctors: Vec<(Arc<Name>, Arc<Expr>)> = Vec::with_capacity(j_ind.ctors.len());
+            for j_cnstr_name in &j_ind.ctors {
+                let c_val = match env.get(j_cnstr_name) {
+                    Some(ConstantInfo::Ctor(v)) => v.clone(),
+                    _ => return Err(self.ill_formed()),
+                };
+                let aux_c_name = replace_prefix(j_cnstr_name, j_name, &aux_j_name);
+                let mut aux_c_type =
+                    instantiate_level_params(&c_val.val.ty, &c_val.val.level_params, &i_lvls, g)?;
+                aux_c_type = self.instantiate_pi_params(aux_c_type, &args[0..i_nparams], g)?;
+                aux_c_type = lctx.mk_pi(as_, &aux_c_type, g)?;
+                aux_ctors.push((aux_c_name, aux_c_type));
+            }
+            self.new_type_names.insert(Arc::clone(&aux_j_name));
+            self.new_types.push(InductiveType {
+                name: aux_j_name,
+                ty: aux_j_type,
+                ctors: aux_ctors,
+            });
+        }
+        match result {
+            Some(r) => Ok(Some(r)),
+            // `I` is always in `I_val.all`, so `result` is set — but never
+            // panic on decoded input if some malformed `all` omits it.
+            None => Err(self.ill_formed()),
+        }
+    }
+
+    /// oracle: inductive.cpp:1030-1033 (`replace_all_nested`) — the
+    /// top-down `replace` walk. Value-depth ⇒ guarded.
+    fn replace_all_nested(
+        &mut self,
+        lctx: &LocalContext,
+        as_: &[Arc<Expr>],
+        e: &Arc<Expr>,
+        g: &mut RecGuard,
+    ) -> Result<Arc<Expr>, KernelError> {
+        if let Some(r) = self.replace_if_nested(lctx, as_, e, g)? {
+            return Ok(r);
+        }
+        match e.node() {
+            ExprNode::App { f, arg } => {
+                let (f, arg) = (Arc::clone(f), Arc::clone(arg));
+                let (f2, a2) = g.enter(|g| {
+                    Ok((
+                        self.replace_all_nested(lctx, as_, &f, g)?,
+                        self.replace_all_nested(lctx, as_, &arg, g)?,
+                    ))
+                })?;
+                Ok(Expr::app(f2, a2))
+            }
+            ExprNode::Lam {
+                binder_name,
+                binder_type,
+                body,
+                binder_info,
+            } => {
+                let (bn, bi) = (Arc::clone(binder_name), *binder_info);
+                let (bt, bd) = (Arc::clone(binder_type), Arc::clone(body));
+                let (bt2, bd2) = g.enter(|g| {
+                    Ok((
+                        self.replace_all_nested(lctx, as_, &bt, g)?,
+                        self.replace_all_nested(lctx, as_, &bd, g)?,
+                    ))
+                })?;
+                Ok(Expr::lam(bn, bt2, bd2, bi))
+            }
+            ExprNode::ForallE {
+                binder_name,
+                binder_type,
+                body,
+                binder_info,
+            } => {
+                let (bn, bi) = (Arc::clone(binder_name), *binder_info);
+                let (bt, bd) = (Arc::clone(binder_type), Arc::clone(body));
+                let (bt2, bd2) = g.enter(|g| {
+                    Ok((
+                        self.replace_all_nested(lctx, as_, &bt, g)?,
+                        self.replace_all_nested(lctx, as_, &bd, g)?,
+                    ))
+                })?;
+                Ok(Expr::forall_e(bn, bt2, bd2, bi))
+            }
+            ExprNode::LetE {
+                decl_name,
+                ty,
+                value,
+                body,
+                non_dep,
+            } => {
+                let (dn, nd) = (Arc::clone(decl_name), *non_dep);
+                let (t, v, b) = (Arc::clone(ty), Arc::clone(value), Arc::clone(body));
+                let (t2, v2, b2) = g.enter(|g| {
+                    Ok((
+                        self.replace_all_nested(lctx, as_, &t, g)?,
+                        self.replace_all_nested(lctx, as_, &v, g)?,
+                        self.replace_all_nested(lctx, as_, &b, g)?,
+                    ))
+                })?;
+                Ok(Expr::let_e(dn, t2, v2, b2, nd))
+            }
+            ExprNode::MData { data, expr } => {
+                let (data, inner) = (data.clone(), Arc::clone(expr));
+                let inner2 = g.enter(|g| self.replace_all_nested(lctx, as_, &inner, g))?;
+                Ok(Expr::mdata(data, inner2))
+            }
+            ExprNode::Proj {
+                type_name,
+                idx,
+                structure,
+            } => {
+                let (tn, ix, st) = (Arc::clone(type_name), idx.clone(), Arc::clone(structure));
+                let st2 = g.enter(|g| self.replace_all_nested(lctx, as_, &st, g))?;
+                Ok(Expr::proj(tn, ix, st2))
+            }
+            _ => Ok(Arc::clone(e)),
+        }
+    }
+
+    /// oracle: inductive.cpp:1045-1076 (`operator()`).
+    fn run(&mut self, g: &mut RecGuard) -> Result<ElimResult, KernelError> {
+        if self.new_types.is_empty() {
+            // oracle: inductive.cpp:1050. Same error the Task-9 guard in
+            // `AddInductiveFn::run` reports, so `rejects_empty_inductive_
+            // block` still fires here (this pass now runs first).
+            return Err(KernelError::InvalidInductive {
+                name: Arc::new(Name::Anonymous),
+                what: "empty inductive block",
+            });
+        }
+        // Initialize m_params / m_params_lctx from the first type.
+        let type0 = Arc::clone(&self.new_types[0].ty);
+        let (_, params) = Self::get_params(
+            &mut self.ngen,
+            self.nparams,
+            &self.name0,
+            &mut self.params_lctx,
+            type0,
+            g,
+        )?;
+        self.params = params;
+        // Main elimination loop — `new_types` grows as aux types are
+        // pushed, so re-read `.len()` each iteration.
+        let mut qhead = 0;
+        while qhead < self.new_types.len() {
+            let ind_type = self.new_types[qhead].clone();
+            let mut new_cnstrs: Vec<(Arc<Name>, Arc<Expr>)> =
+                Vec::with_capacity(ind_type.ctors.len());
+            for (cn, ct) in &ind_type.ctors {
+                let mut lctx = LocalContext::default();
+                // Re-create the params per constructor to preserve
+                // binding_info (oracle comment inductive.cpp:1062-1064).
+                let (cnstr_type, as_) = Self::get_params(
+                    &mut self.ngen,
+                    self.nparams,
+                    &self.name0,
+                    &mut lctx,
+                    Arc::clone(ct),
+                    g,
+                )?;
+                let new_ct = self.replace_all_nested(&lctx, &as_, &cnstr_type, g)?;
+                let new_ct = lctx.mk_pi(&as_, &new_ct, g)?;
+                new_cnstrs.push((Arc::clone(cn), new_ct));
+            }
+            self.new_types[qhead] = InductiveType {
+                name: Arc::clone(&ind_type.name),
+                ty: Arc::clone(&ind_type.ty),
+                ctors: new_cnstrs,
+            };
+            qhead += 1;
+        }
+        let aux2nested = self
+            .nested_aux
+            .iter()
+            .map(|(e, n)| (Arc::clone(n), Arc::clone(e)))
+            .collect();
+        Ok(ElimResult {
+            params: self.params.clone(),
+            aux2nested,
+            aux_types: self.new_types.clone(),
+            ngen: std::mem::take(&mut self.ngen),
+        })
+    }
+}
+
+/// oracle: inductive.cpp:811-818 (`get_nested_if_aux_constructor`) — if
+/// `c` is a constructor of an aux inductive type, return its real nested
+/// application and the aux type name.
+fn get_nested_if_aux_constructor(
+    aux_env: &Environment,
+    c: &Arc<Name>,
+    aux2nested: &HashMap<Arc<Name>, Arc<Expr>>,
+) -> Option<(Arc<Expr>, Arc<Name>)> {
+    let cv = match aux_env.get(c) {
+        Some(ConstantInfo::Ctor(v)) => v,
+        _ => return None,
+    };
+    let aux_i_name = &cv.induct;
+    let nested = aux2nested.get(aux_i_name)?;
+    Some((Arc::clone(nested), Arc::clone(aux_i_name)))
+}
+
+impl ElimResult {
+    /// oracle: inductive.cpp:820-826 (`restore_constructor_name`).
+    fn restore_constructor_name(
+        &self,
+        aux_env: &Environment,
+        cnstr_name: &Arc<Name>,
+    ) -> Result<Arc<Name>, KernelError> {
+        let (nested, aux_i_name) =
+            get_nested_if_aux_constructor(aux_env, cnstr_name, &self.aux2nested).ok_or(
+                KernelError::InvalidInductive {
+                    name: Arc::clone(cnstr_name),
+                    what: "invalid nested constructor",
+                },
+            )?;
+        let i_name = match head_const(&nested) {
+            Some((n, _)) => n,
+            None => {
+                return Err(KernelError::InvalidInductive {
+                    name: Arc::clone(cnstr_name),
+                    what: "invalid nested constructor",
+                })
+            }
+        };
+        Ok(replace_prefix(cnstr_name, &aux_i_name, &i_name))
+    }
+
+    /// oracle: inductive.cpp:837-870 (the `restore_nested` `replace`
+    /// callback). Returns the rewritten node or `None` to keep descending.
+    fn restore_node(
+        &self,
+        t: &Arc<Expr>,
+        as_: &[Arc<Expr>],
+        aux_env: &Environment,
+        rec_map: &HashMap<Arc<Name>, Arc<Name>>,
+        g: &mut RecGuard,
+    ) -> Result<Option<Arc<Expr>>, KernelError> {
+        // Aux recursor constant → renamed real recursor.
+        if let ExprNode::Const { name, levels } = t.node() {
+            if let Some(rec_name) = rec_map.get(name) {
+                return Ok(Some(Expr::const_(Arc::clone(rec_name), levels.clone(), g)?));
+            }
+        }
+        let fn_name = match head_const(t) {
+            Some((n, _)) => n,
+            None => return Ok(None),
+        };
+        // Aux type application `Iaux As is` → `I Ds is`.
+        if let Some(nested) = self.aux2nested.get(&fn_name) {
+            let args = Expr::get_app_args(t);
+            if args.len() < self.params.len() {
+                return Err(KernelError::InvalidInductive {
+                    name: Arc::clone(&fn_name),
+                    what: "ill-formed nested application",
+                });
+            }
+            let tmp = abstract_fvars(nested, &self.params, g)?;
+            let new_head = instantiate_rev(&tmp, as_, g)?;
+            return Ok(Some(Expr::mk_app_spine(
+                new_head,
+                &args[self.params.len()..],
+            )));
+        }
+        // Aux constructor application `Iaux.c As is` → `I.c Ds is`.
+        if let Some((nested, aux_i_name)) =
+            get_nested_if_aux_constructor(aux_env, &fn_name, &self.aux2nested)
+        {
+            let args = Expr::get_app_args(t);
+            if args.len() < self.params.len() {
+                return Err(KernelError::InvalidInductive {
+                    name: Arc::clone(&fn_name),
+                    what: "ill-formed nested application",
+                });
+            }
+            let tmp = abstract_fvars(&nested, &self.params, g)?;
+            let new_nested = instantiate_rev(&tmp, as_, g)?;
+            let (i_name, i_lvls) = match head_const(&new_nested) {
+                Some(p) => p,
+                None => {
+                    return Err(KernelError::InvalidInductive {
+                        name: Arc::clone(&fn_name),
+                        what: "ill-formed nested application",
+                    })
+                }
+            };
+            let i_args = Expr::get_app_args(&new_nested);
+            let new_fn_name = replace_prefix(&fn_name, &aux_i_name, &i_name);
+            let new_fn = Expr::const_(new_fn_name, i_lvls, g)?;
+            let head = Expr::mk_app_spine(new_fn, &i_args);
+            return Ok(Some(Expr::mk_app_spine(head, &args[self.params.len()..])));
+        }
+        Ok(None)
+    }
+
+    /// The `replace` walk of `restore_nested` (top-down, value-depth ⇒
+    /// guarded); `&self` throughout (no mutation), so the recursion needs
+    /// no borrow gymnastics.
+    fn restore_replace(
+        &self,
+        e: &Arc<Expr>,
+        as_: &[Arc<Expr>],
+        aux_env: &Environment,
+        rec_map: &HashMap<Arc<Name>, Arc<Name>>,
+        g: &mut RecGuard,
+    ) -> Result<Arc<Expr>, KernelError> {
+        if let Some(r) = self.restore_node(e, as_, aux_env, rec_map, g)? {
+            return Ok(r);
+        }
+        match e.node() {
+            ExprNode::App { f, arg } => {
+                let (f, arg) = (Arc::clone(f), Arc::clone(arg));
+                let (f2, a2) = g.enter(|g| {
+                    Ok((
+                        self.restore_replace(&f, as_, aux_env, rec_map, g)?,
+                        self.restore_replace(&arg, as_, aux_env, rec_map, g)?,
+                    ))
+                })?;
+                Ok(Expr::app(f2, a2))
+            }
+            ExprNode::Lam {
+                binder_name,
+                binder_type,
+                body,
+                binder_info,
+            } => {
+                let (bn, bi) = (Arc::clone(binder_name), *binder_info);
+                let (bt, bd) = (Arc::clone(binder_type), Arc::clone(body));
+                let (bt2, bd2) = g.enter(|g| {
+                    Ok((
+                        self.restore_replace(&bt, as_, aux_env, rec_map, g)?,
+                        self.restore_replace(&bd, as_, aux_env, rec_map, g)?,
+                    ))
+                })?;
+                Ok(Expr::lam(bn, bt2, bd2, bi))
+            }
+            ExprNode::ForallE {
+                binder_name,
+                binder_type,
+                body,
+                binder_info,
+            } => {
+                let (bn, bi) = (Arc::clone(binder_name), *binder_info);
+                let (bt, bd) = (Arc::clone(binder_type), Arc::clone(body));
+                let (bt2, bd2) = g.enter(|g| {
+                    Ok((
+                        self.restore_replace(&bt, as_, aux_env, rec_map, g)?,
+                        self.restore_replace(&bd, as_, aux_env, rec_map, g)?,
+                    ))
+                })?;
+                Ok(Expr::forall_e(bn, bt2, bd2, bi))
+            }
+            ExprNode::LetE {
+                decl_name,
+                ty,
+                value,
+                body,
+                non_dep,
+            } => {
+                let (dn, nd) = (Arc::clone(decl_name), *non_dep);
+                let (t, v, b) = (Arc::clone(ty), Arc::clone(value), Arc::clone(body));
+                let (t2, v2, b2) = g.enter(|g| {
+                    Ok((
+                        self.restore_replace(&t, as_, aux_env, rec_map, g)?,
+                        self.restore_replace(&v, as_, aux_env, rec_map, g)?,
+                        self.restore_replace(&b, as_, aux_env, rec_map, g)?,
+                    ))
+                })?;
+                Ok(Expr::let_e(dn, t2, v2, b2, nd))
+            }
+            ExprNode::MData { data, expr } => {
+                let (data, inner) = (data.clone(), Arc::clone(expr));
+                let inner2 = g.enter(|g| self.restore_replace(&inner, as_, aux_env, rec_map, g))?;
+                Ok(Expr::mdata(data, inner2))
+            }
+            ExprNode::Proj {
+                type_name,
+                idx,
+                structure,
+            } => {
+                let (tn, ix, st) = (Arc::clone(type_name), idx.clone(), Arc::clone(structure));
+                let st2 = g.enter(|g| self.restore_replace(&st, as_, aux_env, rec_map, g))?;
+                Ok(Expr::proj(tn, ix, st2))
+            }
+            _ => Ok(Arc::clone(e)),
+        }
+    }
+
+    /// oracle: inductive.cpp:828-872 (`restore_nested`) — peel the block
+    /// params, rewrite aux occurrences, re-wrap the telescope.
+    fn restore_nested(
+        &mut self,
+        e: &Arc<Expr>,
+        aux_env: &Environment,
+        rec_map: &HashMap<Arc<Name>, Arc<Name>>,
+        g: &mut RecGuard,
+    ) -> Result<Arc<Expr>, KernelError> {
+        let mut lctx = LocalContext::default();
+        let mut as_: Vec<Arc<Expr>> = Vec::with_capacity(self.params.len());
+        let pi = e.is_forall();
+        let mut cur = Arc::clone(e);
+        for _ in 0..self.params.len() {
+            let (bn, bt, body, bi) = match cur.node() {
+                ExprNode::ForallE {
+                    binder_name,
+                    binder_type,
+                    body,
+                    binder_info,
+                }
+                | ExprNode::Lam {
+                    binder_name,
+                    binder_type,
+                    body,
+                    binder_info,
+                } => (
+                    Arc::clone(binder_name),
+                    Arc::clone(binder_type),
+                    Arc::clone(body),
+                    *binder_info,
+                ),
+                _ => {
+                    return Err(KernelError::InvalidInductive {
+                        name: Arc::new(Name::Anonymous),
+                        what: "ill-formed nested declaration",
+                    })
+                }
+            };
+            let fv = lctx.mk_local_decl(&mut self.ngen, &bn, bt, bi);
+            as_.push(Arc::clone(&fv));
+            cur = instantiate(&body, &fv, g)?;
+        }
+        let body2 = self.restore_replace(&cur, &as_, aux_env, rec_map, g)?;
+        if pi {
+            lctx.mk_pi(&as_, &body2, g)
+        } else {
+            lctx.mk_lambda(&as_, &body2, g)
+        }
+    }
+}
+
+/// `(aux recursor names, aux_rec_name → new_rec_name map)`.
+type AuxRecNames = (Vec<Arc<Name>>, HashMap<Arc<Name>, Arc<Name>>);
+
+/// oracle: inductive.cpp:1088-1114 (`mk_aux_rec_name_map`). Only called
+/// when aux types were created (`all_names.len() > ntypes`), so the
+/// recursors for indices `>= ntypes` are the aux ones to rename.
+fn mk_aux_rec_name_map(
+    aux_env: &Environment,
+    orig_types: &[InductiveType],
+) -> Result<AuxRecNames, KernelError> {
+    let ntypes = orig_types.len();
+    let main_name = &orig_types[0].name;
+    let main_iv = match aux_env.get(main_name) {
+        Some(ConstantInfo::Induct(v)) => v,
+        _ => {
+            return Err(KernelError::InvalidInductive {
+                name: Arc::clone(main_name),
+                what: "missing aux inductive",
+            })
+        }
+    };
+    let mut old_rec_names = Vec::new();
+    let mut rec_map = HashMap::new();
+    let mut next_idx = 1usize;
+    for (i, ind_name) in main_iv.all.iter().enumerate() {
+        if i >= ntypes {
+            let old = mk_rec_name(ind_name);
+            let new = append_index_after(&mk_rec_name(main_name), next_idx);
+            next_idx += 1;
+            old_rec_names.push(Arc::clone(&old));
+            rec_map.insert(old, new);
+        }
+    }
+    Ok((old_rec_names, rec_map))
+}
+
+/// oracle: inductive.cpp:1131-1153 (`process_rec`) — restore one
+/// recursor (main or aux) into the real env.
+#[allow(clippy::too_many_arguments)]
+fn process_rec(
+    env: &mut Environment,
+    aux_env: &Environment,
+    res: &mut ElimResult,
+    rec_name: &Arc<Name>,
+    rec_map: &HashMap<Arc<Name>, Arc<Name>>,
+    all_ind_names: &[Arc<Name>],
+    added: &mut Vec<Arc<Name>>,
+    g: &mut RecGuard,
+) -> Result<(), KernelError> {
+    let new_rec_name = rec_map
+        .get(rec_name)
+        .cloned()
+        .unwrap_or_else(|| Arc::clone(rec_name));
+    let rv = match aux_env.get(rec_name) {
+        Some(ConstantInfo::Rec(v)) => v.clone(),
+        _ => {
+            return Err(KernelError::InvalidInductive {
+                name: Arc::clone(rec_name),
+                what: "missing aux recursor",
+            })
+        }
+    };
+    let new_rec_type = res.restore_nested(&rv.val.ty, aux_env, rec_map, g)?;
+    let renamed = new_rec_name.as_ref() != rec_name.as_ref();
+    let mut new_rules = Vec::with_capacity(rv.rules.len());
+    for rule in &rv.rules {
+        let new_rhs = res.restore_nested(&rule.rhs, aux_env, rec_map, g)?;
+        let new_cnstr = if renamed {
+            res.restore_constructor_name(aux_env, &rule.ctor)?
+        } else {
+            Arc::clone(&rule.ctor)
+        };
+        new_rules.push(RecursorRule {
+            ctor: new_cnstr,
+            nfields: rule.nfields.clone(),
+            rhs: new_rhs,
+        });
+    }
+    check_name(env, &new_rec_name)?;
+    let new_rv = RecursorVal {
+        val: ConstantVal {
+            name: Arc::clone(&new_rec_name),
+            level_params: rv.val.level_params.clone(),
+            ty: new_rec_type,
+        },
+        all: all_ind_names.to_vec(),
+        num_params: rv.num_params.clone(),
+        num_indices: rv.num_indices.clone(),
+        num_motives: rv.num_motives.clone(),
+        num_minors: rv.num_minors.clone(),
+        rules: new_rules,
+        k: rv.k,
+        is_unsafe: rv.is_unsafe,
+    };
+    added.push(Arc::clone(&new_rec_name));
+    env.add_core(ConstantInfo::Rec(new_rv));
+    Ok(())
+}
+
+/// oracle: inductive.cpp:1124-1180 (the nested branch of
+/// `environment::add_inductive`). Copies the restored inductives, their
+/// constructors, and their recursors (main + renamed aux) into the real
+/// env. `added` tracks names for the caller's rollback.
+fn restore_nested_inductives(
+    env: &mut Environment,
+    aux_env: &Environment,
+    res: &mut ElimResult,
+    orig_types: &[InductiveType],
+    added: &mut Vec<Arc<Name>>,
+    g: &mut RecGuard,
+) -> Result<(), KernelError> {
+    let all_ind_names: Vec<Arc<Name>> = orig_types.iter().map(|t| Arc::clone(&t.name)).collect();
+    let (aux_rec_names, rec_map) = mk_aux_rec_name_map(aux_env, orig_types)?;
+    let empty_map: HashMap<Arc<Name>, Arc<Name>> = HashMap::new();
+    for ind_type in orig_types {
+        let iv = match aux_env.get(&ind_type.name) {
+            Some(ConstantInfo::Induct(v)) => v.clone(),
+            _ => {
+                return Err(KernelError::InvalidInductive {
+                    name: Arc::clone(&ind_type.name),
+                    what: "missing aux inductive",
+                })
+            }
+        };
+        // oracle: only the `all` field needs fixing on the inductive_val.
+        check_name(env, &ind_type.name)?;
+        let new_iv = InductiveVal {
+            val: ConstantVal {
+                name: Arc::clone(&iv.val.name),
+                level_params: iv.val.level_params.clone(),
+                ty: Arc::clone(&iv.val.ty),
+            },
+            num_params: iv.num_params.clone(),
+            num_indices: iv.num_indices.clone(),
+            all: all_ind_names.clone(),
+            ctors: iv.ctors.clone(),
+            num_nested: iv.num_nested.clone(),
+            is_rec: iv.is_rec,
+            is_unsafe: iv.is_unsafe,
+            is_reflexive: iv.is_reflexive,
+        };
+        added.push(Arc::clone(&ind_type.name));
+        env.add_core(ConstantInfo::Induct(new_iv));
+        for cnstr_name in &iv.ctors {
+            let cv = match aux_env.get(cnstr_name) {
+                Some(ConstantInfo::Ctor(v)) => v.clone(),
+                _ => {
+                    return Err(KernelError::InvalidInductive {
+                        name: Arc::clone(cnstr_name),
+                        what: "missing aux constructor",
+                    })
+                }
+            };
+            let new_type = res.restore_nested(&cv.val.ty, aux_env, &empty_map, g)?;
+            check_name(env, cnstr_name)?;
+            let new_cv = ConstructorVal {
+                val: ConstantVal {
+                    name: Arc::clone(&cv.val.name),
+                    level_params: cv.val.level_params.clone(),
+                    ty: new_type,
+                },
+                induct: Arc::clone(&cv.induct),
+                cidx: cv.cidx.clone(),
+                num_params: cv.num_params.clone(),
+                num_fields: cv.num_fields.clone(),
+                is_unsafe: cv.is_unsafe,
+            };
+            added.push(Arc::clone(cnstr_name));
+            env.add_core(ConstantInfo::Ctor(new_cv));
+        }
+        process_rec(
+            env,
+            aux_env,
+            res,
+            &mk_rec_name(&ind_type.name),
+            &rec_map,
+            &all_ind_names,
+            added,
+            g,
+        )?;
+    }
+    for aux_rec in &aux_rec_names {
+        process_rec(
+            env,
+            aux_env,
+            res,
+            aux_rec,
+            &rec_map,
+            &all_ind_names,
+            added,
+            g,
+        )?;
+    }
+    Ok(())
+}
+
+/// The pipeline entry (oracle: `environment::add_inductive`,
+/// inductive.cpp:1116-1181). Eliminates nested occurrences, runs the
+/// ordinary machinery on the enlarged block, and (when nesting occurred)
+/// restores the real nested inductives.
+pub(crate) fn add_inductive(
+    env: &mut Environment,
+    lparams: Vec<Arc<Name>>,
+    nparams: Nat,
+    types: Vec<InductiveType>,
+    is_unsafe: bool,
+) -> Result<(), KernelError> {
+    let name0 = types
+        .first()
+        .map(|t| Arc::clone(&t.name))
+        .unwrap_or_else(|| Arc::new(Name::Anonymous));
+    let nparams_usize = match nparams.to_usize() {
+        Some(v) => v,
+        None => {
+            return Err(KernelError::InvalidInductive {
+                name: name0,
+                what: "too many parameters",
+            })
+        }
+    };
+    let mut g = RecGuard::new();
+    // Eliminate nested occurrences (borrow of `env` released with `elim`).
+    let mut res = {
+        let mut elim = ElimNestedInductiveFn::new(env, &lparams, nparams_usize, &types, is_unsafe);
+        elim.run(&mut g)?
+    };
+    let nnested = res.aux2nested.len();
+    if nnested == 0 {
+        // No nesting: the aux block is the (rebuilt, structurally
+        // identical) original. Admit it in place, as Task 9 did.
+        run_add_inductive_fn(
+            env,
+            lparams,
+            nparams,
+            res.aux_types.clone(),
+            is_unsafe,
+            Nat::from(0),
+        )
+    } else {
+        // Nesting: run the machinery on the enlarged block in a scratch
+        // env, then restore the real nested inductives into `env`.
+        let mut scratch = env.clone();
+        run_add_inductive_fn(
+            &mut scratch,
+            lparams,
+            nparams,
+            res.aux_types.clone(),
+            is_unsafe,
+            Nat::from(nnested as u64),
+        )?;
+        let mut added: Vec<Arc<Name>> = Vec::new();
+        match restore_nested_inductives(env, &scratch, &mut res, &types, &mut added, &mut g) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                for n in added.iter().rev() {
+                    env.remove_core(n);
+                }
+                Err(e)
+            }
         }
     }
 }
@@ -563,15 +1674,6 @@ impl AddInductiveFn {
             return Err(KernelError::InvalidInductive {
                 name: Arc::new(Name::Anonymous),
                 what: "empty inductive block",
-            });
-        }
-        // Nested inductives (num_nested > 0) are handled by Task 10; until
-        // then reject rather than mis-process (the caller passes 0, so this
-        // is defensive — no Task 9 corpus exercises it).
-        if !self.nnested.is_zero() {
-            return Err(KernelError::InvalidInductive {
-                name: self.name0(),
-                what: "nested inductive",
             });
         }
         check_duplicated_univ_params(&self.lparams)?;
