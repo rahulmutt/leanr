@@ -543,3 +543,32 @@ fn string_lit_expansion() {
     let expanded = mini::app(string_of_list, list);
     assert!(deq(&mut tc, &str_lit, &expanded));
 }
+
+#[test]
+fn equiv_manager_memoizes_structural_equality() {
+    // (1) Two pointer-distinct but structurally-equal `f a` applications
+    // must compare equal: the old pointer-only cache would have said
+    // `false` here, since neither the `Const`s nor the `App` node are
+    // shared `Arc`s.
+    let app1 = Expr::app(mini::cst("f", vec![]), mini::cst("a", vec![]));
+    let app2 = Expr::app(mini::cst("f", vec![]), mini::cst("a", vec![]));
+    assert!(!Arc::ptr_eq(&app1, &app2));
+    let mut uf = UnionFind::default();
+    assert_eq!(uf.is_equiv(&app1, &app2, false, &mut g()), Ok(true));
+
+    // (2) A genuine structural mismatch (`f a` vs `f b`) is still `false`.
+    let app3 = Expr::app(mini::cst("f", vec![]), mini::cst("b", vec![]));
+    assert_eq!(uf.is_equiv(&app1, &app3, false, &mut g()), Ok(false));
+
+    // (3) Class short-circuit: `p` and `q` are structurally unequal
+    // consts, so a fresh `UnionFind` reports them unequal. Once `merge`
+    // records them as equivalent, `is_equiv` reports `true` for the same
+    // pair via the union-find class lookup alone — the structural compare
+    // never runs again. This is the memoization the rewrite added.
+    let p = mini::cst("p", vec![]);
+    let q = mini::cst("q", vec![]);
+    let mut uf2 = UnionFind::default();
+    assert_eq!(uf2.is_equiv(&p, &q, false, &mut g()), Ok(false));
+    uf2.merge(&p, &q);
+    assert_eq!(uf2.is_equiv(&p, &q, false, &mut g()), Ok(true));
+}

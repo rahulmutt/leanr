@@ -268,6 +268,10 @@ impl UnionFind {
                     structure: s2,
                     ..
                 },
+                // `type_name` (`..`) is deliberately ignored here, per the
+                // oracle's `equiv_manager`; `ExprData::hash` DOES fold it
+                // in, so `use_hash = true` can only false-*reject* on this
+                // arm (incompleteness, never unsoundness) — don't "fix" it.
             ) => Ok(self.is_equiv_core(s1, s2, use_hash, g)? && ix1 == ix2),
             (
                 ExprNode::LetE {
