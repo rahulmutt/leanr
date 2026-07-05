@@ -1,0 +1,23 @@
+[package]
+name = "leanr_olean-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.leanr_olean]
+path = ".."
+
+[[bin]]
+name = "module_data"
+path = "fuzz_targets/module_data.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
