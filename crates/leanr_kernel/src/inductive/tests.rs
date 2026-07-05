@@ -582,6 +582,27 @@ fn rejects_param_mismatch_across_block() {
 }
 
 #[test]
+fn rejects_empty_inductive_block() {
+    // A crafted Declaration::Inductive with no types must be rejected
+    // (never panic): the pipeline indexes `ind_types[0]` in
+    // elim_only_at_universe_zero / init_k_target, so the guard at the
+    // head of `run` must fire first. Also asserts the env is unchanged.
+    let mut env = Environment::default();
+    env.add_decl(axiom("marker", sort_n(1))).unwrap();
+    let before = env.len();
+    let err = env.add_decl(decl(vec![], 0, vec![])).unwrap_err();
+    match err {
+        crate::KernelError::InvalidInductive { name, what } => {
+            assert_eq!(what, "empty inductive block");
+            assert!(matches!(name.as_ref(), Name::Anonymous));
+        }
+        other => panic!("expected empty-inductive-block error, got {other:?}"),
+    }
+    assert_eq!(env.len(), before, "environment unchanged on rejection");
+    assert!(env.get(&nm("marker")).is_some());
+}
+
+#[test]
 fn iota_now_reduces_declared_recursor() {
     // Admit Nat, then reduce `Nat.rec.{1} motive z s (Nat.succ k)` using
     // the REGENERATED recursor + rules. This ties Task 7's iota reduction

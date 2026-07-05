@@ -549,6 +549,22 @@ impl AddInductiveFn {
 
     /// oracle: inductive.cpp:778-789 (`operator()`).
     fn run(&mut self, env: &mut Environment) -> Result<(), KernelError> {
+        // oracle: inductive.cpp:1050 — the oracle rejects an empty types
+        // list in `elim_nested_inductive_fn::operator()`, which runs
+        // BEFORE `add_inductive_fn` ("invalid empty (mutual) inductive
+        // datatype declaration"); `add_inductive_fn` itself then assumes
+        // non-emptiness (e.g. `m_ind_types[0]` in
+        // elim_only_at_universe_zero:491/509 and init_K_target:558).
+        // Task 9 has no nested-elimination pass, so the guard lives here
+        // instead: `run` is the sole entry to the pipeline, so this
+        // check dominates every `ind_types[0]` index below (no-panic
+        // mandate — `types` comes from decoded olean content via replay).
+        if self.ind_types.is_empty() {
+            return Err(KernelError::InvalidInductive {
+                name: Arc::new(Name::Anonymous),
+                what: "empty inductive block",
+            });
+        }
         // Nested inductives (num_nested > 0) are handled by Task 10; until
         // then reject rather than mis-process (the caller passes 0, so this
         // is defensive — no Task 9 corpus exercises it).
