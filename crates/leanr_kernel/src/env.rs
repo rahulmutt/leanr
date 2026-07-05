@@ -21,8 +21,10 @@ pub enum EnvironmentError {
 }
 
 /// oracle: environment.cpp:102-105 (`check_name`) — `AlreadyDeclared` if
-/// `n` is already bound.
-fn check_name(env: &Environment, n: &Arc<Name>) -> Result<(), KernelError> {
+/// `n` is already bound. `pub(crate)` so the inductive-admission
+/// pipeline (inductive.rs, Task 9) can reuse the exact same check the
+/// oracle's `m_env.check_name` performs at every `add_core` site.
+pub(crate) fn check_name(env: &Environment, n: &Arc<Name>) -> Result<(), KernelError> {
     if env.get(n).is_some() {
         return Err(KernelError::AlreadyDeclared(Arc::clone(n)));
     }
@@ -32,8 +34,10 @@ fn check_name(env: &Environment, n: &Arc<Name>) -> Result<(), KernelError> {
 /// oracle: environment.cpp:111-121 (`check_duplicated_univ_params`) — the
 /// first level param that recurs later in the list, else `Ok`. `Name`
 /// lists here are the declaration's own `level_params` (small, no
-/// attacker-controlled blowup), so the O(n^2) scan is fine.
-fn check_duplicated_univ_params(ls: &[Arc<Name>]) -> Result<(), KernelError> {
+/// attacker-controlled blowup), so the O(n^2) scan is fine. `pub(crate)`
+/// for the inductive pipeline (Task 9), which runs it at the head of
+/// `operator()` (inductive.cpp:779).
+pub(crate) fn check_duplicated_univ_params(ls: &[Arc<Name>]) -> Result<(), KernelError> {
     for (i, p) in ls.iter().enumerate() {
         if ls[i + 1..].iter().any(|q| q == p) {
             return Err(KernelError::DuplicateUnivParam(Arc::clone(p)));
@@ -45,8 +49,11 @@ fn check_duplicated_univ_params(ls: &[Arc<Name>]) -> Result<(), KernelError> {
 /// oracle: environment.cpp:87-100 (`check_no_metavar_no_fvar`). O(1) via
 /// the cached `ExprData` flags (`has_expr_mvar`/`has_level_mvar` →
 /// `HasMetavars`, `has_fvar` → `HasFVars`) rather than a tree walk —
-/// metavar check first, matching the oracle's order.
-fn check_no_metavar_no_fvar(n: &Arc<Name>, e: &Arc<Expr>) -> Result<(), KernelError> {
+/// metavar check first, matching the oracle's order. `pub(crate)` so the
+/// inductive pipeline (Task 9) can reuse it on the per-type/per-ctor
+/// declared types exactly where the oracle calls it (inductive.cpp:218,
+/// 425).
+pub(crate) fn check_no_metavar_no_fvar(n: &Arc<Name>, e: &Arc<Expr>) -> Result<(), KernelError> {
     let d = e.data();
     if d.has_expr_mvar() || d.has_level_mvar() {
         return Err(KernelError::HasMetavars(Arc::clone(n)));
@@ -124,6 +131,20 @@ impl Environment {
     pub(crate) fn add_core(&mut self, info: ConstantInfo) {
         let name = Arc::clone(info.name());
         self.constants.insert(name, info);
+    }
+
+    /// Remove a previously `add_core`d constant. Used only by the
+    /// inductive-admission pipeline's failure rollback (inductive.rs):
+    /// the oracle mutates a *copy* of the environment (`m_env`) and
+    /// discards it on any error, leaving the caller's environment
+    /// untouched (inductive.cpp:1120-1123). We instead mutate the real
+    /// environment in place for performance (no full-map clone per
+    /// inductive during whole-stdlib replay) and undo every `add_core`
+    /// we performed if a later phase fails — restoring the exact
+    /// pre-admission state, since every added name was fresh (guaranteed
+    /// by the `check_name` that precedes each `add_core`).
+    pub(crate) fn remove_core(&mut self, name: &Arc<Name>) {
+        self.constants.remove(name);
     }
 
     /// oracle: environment.cpp:261-273 (`environment::add`, the
@@ -206,15 +227,26 @@ impl Environment {
                         what: "not implemented",
                     });
                 }
-                Declaration::Inductive { types, .. } => {
-                    let name = types
-                        .first()
-                        .map(|t| Arc::clone(&t.name))
-                        .unwrap_or_else(|| Arc::new(Name::Anonymous));
-                    return Err(KernelError::InvalidInductive {
-                        name,
-                        what: "not implemented",
-                    });
+                // oracle: environment.cpp:266-267 → `add_inductive`
+                // (inductive.cpp:1116). Task 9 ports the non-nested
+                // machinery; `nnested` is 0 here (Task 10 threads a
+                // nonzero value once nested-inductive elimination lands).
+                // `add_inductive` does its own checking and env mutation
+                // (with failure rollback), so this arm returns directly.
+                Declaration::Inductive {
+                    lparams,
+                    nparams,
+                    types,
+                    is_unsafe,
+                } => {
+                    return crate::inductive::add_inductive(
+                        self,
+                        lparams,
+                        nparams,
+                        types,
+                        is_unsafe,
+                        crate::Nat::from(0),
+                    );
                 }
             }
         };

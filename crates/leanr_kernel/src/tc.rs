@@ -512,6 +512,37 @@ impl<'e> TypeChecker<'e> {
         }
     }
 
+    /// Build a checker seeded with a pre-populated local context and
+    /// fvar generator. The inductive-admission pipeline (inductive.rs,
+    /// Task 9) owns the persistent `local_ctx`/`name_generator` that the
+    /// oracle's `add_inductive_fn` keeps in `m_lctx`/`m_ngen` and shares
+    /// with each freshly-constructed `type_checker(m_env, m_lctx, ...)`
+    /// (inductive.cpp:171). Rust cannot let `add_inductive_fn` hold both
+    /// `&mut Environment` and a borrowing `TypeChecker` at once, so it
+    /// instead *moves* its context in here per checker op and moves it
+    /// back out via `into_parts`, keeping the `FVarIdGen` counter
+    /// monotonic across both producers (so ids never collide even though
+    /// both mint the same `_kernel_fresh.<n>` prefix — the oracle uses a
+    /// distinct `_ind_fresh` prefix instead; a monotonic shared counter
+    /// is an equivalent uniqueness guarantee, documented in inductive.rs).
+    pub(crate) fn new_with(
+        env: &'e Environment,
+        lctx: LocalContext,
+        fvar_gen: FVarIdGen,
+    ) -> TypeChecker<'e> {
+        let mut tc = TypeChecker::new(env);
+        tc.lctx = lctx;
+        tc.fvar_gen = fvar_gen;
+        tc
+    }
+
+    /// Reclaim the (possibly-extended, then save/restore-trimmed) local
+    /// context and the advanced fvar generator after a checker op. See
+    /// `new_with`.
+    pub(crate) fn into_parts(self) -> (LocalContext, FVarIdGen) {
+        (self.lctx, self.fvar_gen)
+    }
+
     /// The checker's own guarded frame (see the module doc comment for
     /// why this cannot reuse `self.guard`). Same constants as `RecGuard`.
     fn guarded<R>(
