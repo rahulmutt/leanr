@@ -92,67 +92,210 @@ impl Hash for ExprPtr {
 }
 
 /// Path-compressing union-find over expressions by pointer identity.
-/// Port of the role `equiv_manager` plays in `quick_is_def_eq`
-/// (type_checker.cpp:741) and `is_def_eq` (1136): `is_equiv` hit ⇒ known
-/// equal; a successful `is_def_eq` merges the two classes. Keyed by `Arc`
-/// pointer identity (see `ExprPtr`), so it only ever *under*-reports
-/// equivalence — never over-reports (soundness).
+/// Port of `equiv_manager` (kernel/equiv_manager.{h,cpp}), the structure
+/// backing `quick_is_def_eq` (type_checker.cpp:741) and `is_def_eq`'s
+/// success merge (1136). `is_equiv` is a *structural* (alpha-,
+/// binder-name-/info-insensitive) equality test memoised in a union-find:
+/// once two subterms are proven equal their nodes are merged, so a later
+/// pointer-distinct-but-structurally-equal comparison short-circuits at
+/// the class lookup. This memoisation — absent from a pointer-only cache —
+/// is what makes defeq of terms that reduce through the same stuck
+/// sub-expression (e.g. `List.reverse`/`Poly.norm` on a symbolic list)
+/// terminate instead of re-descending indefinitely.
+///
+/// Soundness: the structural comparison is exact (it never reports two
+/// unequal terms as equal); `merge` only records pairs it just proved
+/// equal. The `use_hash` fast-reject is sound because structurally equal
+/// terms share a hash — a hash mismatch proves inequality.
 #[derive(Default)]
 struct UnionFind {
-    index: HashMap<ExprPtr, usize>,
+    /// `equiv_manager::m_nodes` — parent + rank, indexed by `node_ref`.
     parent: Vec<usize>,
+    rank: Vec<u32>,
+    /// `equiv_manager::m_to_node` — `Arc`-pointer-keyed node handles.
+    index: HashMap<ExprPtr, usize>,
 }
 
 impl UnionFind {
-    fn node_of(&self, e: &Arc<Expr>) -> Option<usize> {
-        self.index.get(&ExprPtr(Arc::clone(e))).copied()
-    }
-
-    fn add_node(&mut self, e: &Arc<Expr>) -> usize {
-        if let Some(i) = self.node_of(e) {
-            return i;
+    /// oracle: `equiv_manager::mk_node` + `to_node`.
+    fn to_node(&mut self, e: &Arc<Expr>) -> usize {
+        if let Some(i) = self.index.get(&ExprPtr(Arc::clone(e))) {
+            return *i;
         }
         let i = self.parent.len();
         self.parent.push(i);
+        self.rank.push(0);
         self.index.insert(ExprPtr(Arc::clone(e)), i);
         i
     }
 
-    fn find(&mut self, mut x: usize) -> usize {
-        while self.parent[x] != x {
-            let g = self.parent[self.parent[x]];
-            self.parent[x] = g; // path halving
-            x = g;
+    /// oracle: `equiv_manager::find` (no path compression, matching the
+    /// oracle's plain parent walk).
+    fn find(&self, mut n: usize) -> usize {
+        while self.parent[n] != n {
+            n = self.parent[n];
         }
-        x
+        n
     }
 
-    /// oracle: `equiv_manager::is_equiv`. Cheap pointer-eq fast path, then
-    /// same-class lookup (absent nodes ⇒ not known equal).
-    fn is_equiv(&mut self, t: &Arc<Expr>, s: &Arc<Expr>) -> bool {
-        if Arc::ptr_eq(t, s) {
-            return true;
+    /// oracle: `equiv_manager::merge` — union by rank.
+    fn merge_refs(&mut self, n1: usize, n2: usize) {
+        let r1 = self.find(n1);
+        let r2 = self.find(n2);
+        if r1 == r2 {
+            return;
         }
-        let a = match self.node_of(t) {
-            Some(a) => a,
-            None => return false,
-        };
-        let b = match self.node_of(s) {
-            Some(b) => b,
-            None => return false,
-        };
-        self.find(a) == self.find(b)
+        match self.rank[r1].cmp(&self.rank[r2]) {
+            std::cmp::Ordering::Less => self.parent[r1] = r2,
+            std::cmp::Ordering::Greater => self.parent[r2] = r1,
+            std::cmp::Ordering::Equal => {
+                self.parent[r2] = r1;
+                self.rank[r1] += 1;
+            }
+        }
+    }
+
+    /// oracle: `equiv_manager::is_equiv` — sets the hash flag and delegates.
+    fn is_equiv(
+        &mut self,
+        a: &Arc<Expr>,
+        b: &Arc<Expr>,
+        use_hash: bool,
+        g: &mut RecGuard,
+    ) -> Result<bool, KernelError> {
+        self.is_equiv_core(a, b, use_hash, g)
+    }
+
+    /// oracle: `equiv_manager::is_equiv_core`. Structural equality up to
+    /// alpha (binder names/infos ignored) and level `==`, short-circuited
+    /// by pointer identity, the optional hash fast-reject, and the
+    /// union-find class. Recursion threads `RecGuard` (the one sanctioned
+    /// pattern): depth-capped and OS-stack-safe via `stacker`.
+    fn is_equiv_core(
+        &mut self,
+        a: &Arc<Expr>,
+        b: &Arc<Expr>,
+        use_hash: bool,
+        g: &mut RecGuard,
+    ) -> Result<bool, KernelError> {
+        if Arc::ptr_eq(a, b) {
+            return Ok(true);
+        }
+        if use_hash && a.data().hash() != b.data().hash() {
+            return Ok(false);
+        }
+        if let (ExprNode::BVar { idx: ia }, ExprNode::BVar { idx: ib }) = (a.node(), b.node()) {
+            return Ok(ia == ib);
+        }
+        let na = self.to_node(a);
+        let nb = self.to_node(b);
+        let r1 = self.find(na);
+        let r2 = self.find(nb);
+        if r1 == r2 {
+            return Ok(true);
+        }
+        // Fall back to structural equality (kind mismatch ⇒ not equal).
+        let result = g.enter(|g| match (a.node(), b.node()) {
+            (ExprNode::BVar { .. }, ExprNode::BVar { .. }) => unreachable!(),
+            (
+                ExprNode::Const {
+                    name: n1,
+                    levels: l1,
+                },
+                ExprNode::Const {
+                    name: n2,
+                    levels: l2,
+                },
+            ) => {
+                if n1 != n2 || l1.len() != l2.len() {
+                    return Ok(false);
+                }
+                for (x, y) in l1.iter().zip(l2.iter()) {
+                    if !Level::structural_eq(x, y, g)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            (ExprNode::MVar { id: i1 }, ExprNode::MVar { id: i2 }) => Ok(i1 == i2),
+            (ExprNode::FVar { id: i1 }, ExprNode::FVar { id: i2 }) => Ok(i1 == i2),
+            (ExprNode::App { f: f1, arg: a1 }, ExprNode::App { f: f2, arg: a2 }) => {
+                Ok(self.is_equiv_core(f1, f2, use_hash, g)?
+                    && self.is_equiv_core(a1, a2, use_hash, g)?)
+            }
+            (
+                ExprNode::Lam {
+                    binder_type: d1,
+                    body: b1,
+                    ..
+                },
+                ExprNode::Lam {
+                    binder_type: d2,
+                    body: b2,
+                    ..
+                },
+            )
+            | (
+                ExprNode::ForallE {
+                    binder_type: d1,
+                    body: b1,
+                    ..
+                },
+                ExprNode::ForallE {
+                    binder_type: d2,
+                    body: b2,
+                    ..
+                },
+            ) => Ok(self.is_equiv_core(d1, d2, use_hash, g)?
+                && self.is_equiv_core(b1, b2, use_hash, g)?),
+            (ExprNode::Sort { level: l1 }, ExprNode::Sort { level: l2 }) => {
+                Level::structural_eq(l1, l2, g)
+            }
+            (ExprNode::Lit(v1), ExprNode::Lit(v2)) => Ok(v1 == v2),
+            (ExprNode::MData { expr: e1, .. }, ExprNode::MData { expr: e2, .. }) => {
+                self.is_equiv_core(e1, e2, use_hash, g)
+            }
+            (
+                ExprNode::Proj {
+                    idx: ix1,
+                    structure: s1,
+                    ..
+                },
+                ExprNode::Proj {
+                    idx: ix2,
+                    structure: s2,
+                    ..
+                },
+            ) => Ok(self.is_equiv_core(s1, s2, use_hash, g)? && ix1 == ix2),
+            (
+                ExprNode::LetE {
+                    ty: t1,
+                    value: v1,
+                    body: b1,
+                    ..
+                },
+                ExprNode::LetE {
+                    ty: t2,
+                    value: v2,
+                    body: b2,
+                    ..
+                },
+            ) => Ok(self.is_equiv_core(t1, t2, use_hash, g)?
+                && self.is_equiv_core(v1, v2, use_hash, g)?
+                && self.is_equiv_core(b1, b2, use_hash, g)?),
+            _ => Ok(false),
+        })?;
+        if result {
+            self.merge_refs(r1, r2);
+        }
+        Ok(result)
     }
 
     /// oracle: `equiv_manager::add_equiv`.
     fn merge(&mut self, t: &Arc<Expr>, s: &Arc<Expr>) {
-        let a = self.add_node(t);
-        let b = self.add_node(s);
-        let ra = self.find(a);
-        let rb = self.find(b);
-        if ra != rb {
-            self.parent[ra] = rb;
-        }
+        let a = self.to_node(t);
+        let b = self.to_node(s);
+        self.merge_refs(a, b);
     }
 }
 
@@ -1935,8 +2078,13 @@ impl<'e> TypeChecker<'e> {
     /// cases". No hash fast-reject here (the oracle has none at this
     /// point, and defeq-unequal hashes prove nothing — defeq ≠
     /// structural).
-    fn quick_is_def_eq(&mut self, t: &Arc<Expr>, s: &Arc<Expr>) -> Result<Lbool, KernelError> {
-        if self.eqv_cache.is_equiv(t, s) {
+    fn quick_is_def_eq(
+        &mut self,
+        t: &Arc<Expr>,
+        s: &Arc<Expr>,
+        use_hash: bool,
+    ) -> Result<Lbool, KernelError> {
+        if self.eqv_cache.is_equiv(t, s, use_hash, &mut self.guard)? {
             return Ok(Lbool::True);
         }
         match (t.node(), s.node()) {
@@ -2184,7 +2332,7 @@ impl<'e> TypeChecker<'e> {
                 }
             }
         }
-        match self.quick_is_def_eq(t_n, s_n)? {
+        match self.quick_is_def_eq(t_n, s_n, false)? {
             Lbool::True => Ok(ReductionStatus::DefEqual),
             Lbool::False => Ok(ReductionStatus::DefDiff),
             Lbool::Undef => Ok(ReductionStatus::Continue),
@@ -2272,8 +2420,8 @@ impl<'e> TypeChecker<'e> {
     /// follows the oracle literally.
     fn is_def_eq_core(&mut self, t: &Arc<Expr>, s: &Arc<Expr>) -> Result<bool, KernelError> {
         self.guarded(|slf| {
-            // type_checker.cpp:1058-1060.
-            let r = slf.quick_is_def_eq(t, s)?;
+            // type_checker.cpp:1058-1060 (`use_hash = true`).
+            let r = slf.quick_is_def_eq(t, s, true)?;
             if r != Lbool::Undef {
                 return Ok(r == Lbool::True);
             }
@@ -2291,7 +2439,7 @@ impl<'e> TypeChecker<'e> {
             let mut t_n = slf.whnf_core(t, false, true)?;
             let mut s_n = slf.whnf_core(s, false, true)?;
             if !Arc::ptr_eq(&t_n, t) || !Arc::ptr_eq(&s_n, s) {
-                let r = slf.quick_is_def_eq(&t_n, &s_n)?;
+                let r = slf.quick_is_def_eq(&t_n, &s_n, false)?;
                 if r != Lbool::Undef {
                     return Ok(r == Lbool::True);
                 }
