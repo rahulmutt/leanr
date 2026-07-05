@@ -77,25 +77,32 @@ impl ModuleData {
     /// (`readModuleDataPartsOfMod`, Environment.lean:2042-2055 loads
     /// `[base, server, private]`), though resolution itself is order-free.
     ///
-    /// Constants from every part are merged into one constant map. The
-    /// `.private` part is the AUTHORITATIVE full constant set: the oracle's
-    /// `finalizeImport` builds the kernel constant map from each module's
-    /// `.private` part alone (`mainModule?`, Environment.lean:1999-2001 →
-    /// `getData? .private`; used at 2251-2276). The base (`.exported`) part
-    /// stores only a public *interface*: a public `def`/`theorem` whose body
-    /// is not exposed is written as a bare **axiom** stub there (verified on
-    /// the pinned toolchain — `bump`/`triv` are `axiom` in `ModPriv.olean`
-    /// but the real `def`/`thm` in `ModPriv.olean.private`). Replay needs the
-    /// checkable bodies, so this merge prefers the most authoritative part
-    /// (`.private` > `.server` > base) for each name.
+    /// Constants from every part are merged into one constant map, preferring
+    /// the most authoritative part (`.private` > `.server` > base) for each
+    /// name. Rationale: the oracle picks ONE part per module for the kernel
+    /// constant map — `mainModule?` (Environment.lean:1999-2003) is
+    /// `getData? (if self.importAll then .private else .exported)`, so an
+    /// `import all` consumer gets the `.private` part (the full, checkable
+    /// constant set) while a plain importer deliberately gets the base
+    /// (`.exported`) interface. The base part stores only that public
+    /// *interface*: a public `def`/`theorem` whose body is not exposed is
+    /// written as a bare **axiom** stub there (verified on the pinned
+    /// toolchain — `bump`/`triv` are `axiom` in `ModPriv.olean` but the real
+    /// `def`/`thm` in `ModPriv.olean.private`). leanr's consumer is a full
+    /// fresh-check (replay needs checkable bodies), i.e. the `importAll`
+    /// semantics, so `.private` wins here.
     ///
     /// A name therefore legitimately appears in several parts with DIFFERENT
-    /// infos (axiom stub vs. full def). The oracle tolerates exactly this via
-    /// `subsumesInfo` (Environment.lean:2209-2224), which requires the two to
-    /// share `type` and `levelParams` but permits the value/kind to differ.
-    /// We keep the authoritative version and enforce that same invariant on
-    /// every shadowed duplicate; a `type`/`levelParams` disagreement is real
-    /// corruption and a decode error.
+    /// infos (axiom stub vs. full def). Note the oracle never *reconciles*
+    /// such cross-part pairs — `mainModule?` picks exactly one part, so a
+    /// module's parts never meet in its constant map (its `subsumesInfo`,
+    /// Environment.lean:2209-2225, reconciles cross-MODULE duplicates only,
+    /// and its arms would reject a def/axiom pair via `| _, _ => false`).
+    /// The shadowed-duplicate guard below is therefore leanr's own
+    /// conservative check, consistent with the oracle's one-part-per-module
+    /// model: a shadowed duplicate must share `type` and `levelParams` with
+    /// the kept version (the invariant every `subsumesInfo` arm also
+    /// requires); a disagreement is real corruption and a decode error.
     ///
     /// The module's non-constant fields (`is_module`, `imports`,
     /// `num_entries`) are taken from the base part. Requires exactly one
@@ -152,9 +159,11 @@ impl ModuleData {
                     }
                     Some(&existing) => {
                         // Shadowed duplicate: the authoritative version is
-                        // already kept. It must share `type` + `levelParams`
-                        // with this one (oracle `subsumesInfo` invariant);
-                        // anything else is corruption.
+                        // already kept. Conservative own-design guard (the
+                        // oracle never compares cross-part duplicates; see
+                        // the doc comment): it must share `type` +
+                        // `levelParams` with the kept version; anything else
+                        // is corruption.
                         let kept = constants[existing].constant_val();
                         let dup = c.constant_val();
                         let compatible = kept.level_params == dup.level_params
