@@ -117,6 +117,13 @@ pub enum OleanError {
     /// to an aligned in-bounds object (word is the raw pointer value).
     #[error("olean corrupt: bad object pointer {word:#x}")]
     BadPointer { word: u64 },
+    /// Two companion parts declare overlapping logical address ranges, so a
+    /// cross-part pointer could resolve into the wrong region. Rejected up
+    /// front, mirroring the oracle (`region_reader::sort_and_validate_dep_regions`,
+    /// src/runtime/compact.cpp:538-562). Carries the two colliding base
+    /// addresses.
+    #[error("olean corrupt: companion parts overlap (base {base_a:#x} vs {base_b:#x})")]
+    RegionOverlap { base_a: u64, base_b: u64 },
     /// An object tag that cannot appear in a module's object graph.
     #[error("olean corrupt: unexpected object tag {tag} at offset {offset:#x}")]
     BadTag { offset: u64, tag: u8 },
@@ -131,6 +138,12 @@ pub enum OleanError {
     /// A well-formed construct leanr does not read yet.
     #[error("unsupported olean content: {what}")]
     Unsupported { what: &'static str },
+    /// The same constant name appears in more than one companion part with
+    /// structurally different `ConstantInfo`s. Legitimate parts only ever
+    /// re-list a shared constant identically (the `.private` part is a
+    /// superset of the base part); a genuine disagreement is corruption.
+    #[error("olean module data malformed: constant '{name}' differs across parts")]
+    DuplicateConstant { name: String },
     /// Phase B found a raw value whose shape does not match the kernel
     /// type expected at that position (bad ctor tag, wrong field
     /// count, scalar where an object belongs, ...).
@@ -199,4 +212,4 @@ mod module_data;
 mod raw;
 
 pub use loader::{load_closure, LoadError, SearchPath};
-pub use module_data::{Import, ModuleData};
+pub use module_data::{Import, ModuleData, PartKind};

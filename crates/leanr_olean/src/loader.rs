@@ -10,14 +10,14 @@
 //! an iterative DFS with an explicit stack and an on-path set so an
 //! attacker-crafted import graph can neither overflow the stack nor hang.
 //!
-//! # Multi-part modules (`.olean.private` / `.olean.server`) — KNOWN LIMITATION
+//! # Multi-part modules (`.olean.private` / `.olean.server`)
 //!
-//! The oracle's new module system (pinned toolchain v4.32.0-rc1) can split
-//! one module into a base `Foo.olean` plus companion parts `Foo.olean.private`
-//! and `Foo.olean.server` (oracle: `OLeanLevel.adjustFileName`,
+//! The oracle's module system (pinned toolchain v4.32.0-rc1) can split one
+//! module into a base `Foo.olean` plus companion parts `Foo.olean.server`
+//! and `Foo.olean.private` (oracle: `OLeanLevel.adjustFileName`,
 //! src/Lean/Environment.lean:1793-1796). Only the base part is a
-//! self-contained compacted region. The companion parts deduplicate objects
-//! against the base part and store cross-region pointers into it:
+//! self-contained compacted region; the companion parts deduplicate objects
+//! against the earlier parts and store cross-region pointers into them:
 //!
 //! * `saveModuleDataParts` (Environment.lean:1739-1749): "Objects shared with
 //!   prior parts are not duplicated. Thus the data cannot be loaded with
@@ -27,33 +27,17 @@
 //!   accumulating each part's `CompactedRegion` into a `depRegions` array that
 //!   the next part is read against, so a part's pointers can target objects in
 //!   an earlier part's mapping.
-//! * The C++ reader relocates such pointers across regions
-//!   (`extract_dep_regions`, src/library/module.cpp:194-207; and :187-192: "root
-//!   may legitimately sit below the mapping base (its object can be deduplicated
-//!   into a lower-addressed dep)").
+//! * The base part carries only the module's public *interface* (a public
+//!   `def`/`theorem` with an unexported body is a bare `axiom` stub there);
+//!   the `.private` part carries the module's FULL, checkable constant set
+//!   (`mkModuleData`, Environment.lean:1843-1852).
 //!
-//! Verified empirically against the pinned toolchain: `Init.olean` has
-//! base_addr `0x03c8b30c0000` and decodes standalone, but `Init.olean.private`
-//! has base_addr `0x03c8b30e0000` while its root pointer word is
-//! `0x03c8b30c1660` — an address *inside the base part's* region, i.e. below
-//! the private part's own base. Feeding it to [`ModuleData::parse`] fails with
-//! `OleanError::BadPointer { word: 0x3c8b30c1660 }`, because `word - base_addr`
-//! underflows in the single-region decoder (`raw::Region::resolve`).
-//!
-//! Decoding companion parts therefore requires NEW multi-region decoder
-//! capability (load the base region first, keep it mapped at its base address,
-//! then resolve the private part's pointers against both regions) that leanr's
-//! M1a single-region decoder does not have. Building it is out of this task's
-//! scope. This loader loads **base parts only**.
-//!
-//! What this breaks: a public constant in a base module can reference a
-//! `_private.*` helper constant that lives only in that module's
-//! `.olean.private` part. A kernel check/replay over a base-only closure will
-//! then report `UnknownConstant` for that helper (see
-//! `crates/leanr_olean/tests/check_fixtures.rs`, `fixture_modules_replay_clean_with_closure`).
-//! The loader itself succeeds on any base-part closure; the gap is the private
-//! constants it cannot see. The hermetic, import-free `Prelude0` path and the
-//! whole loader interface are unaffected.
+//! [`FileSource`] loads all present parts of a found module together via
+//! [`ModuleData::parse_parts`] (M1b Task 13a's multi-region decoder), so a
+//! public constant that references a `_private.*` helper living in the
+//! `.olean.private` part now resolves during replay. Missing companion parts
+//! are fine (pre-module-system oleans have none); a malformed companion is a
+//! [`LoadError::Decode`] carrying the offending part's path.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -62,7 +46,7 @@ use std::sync::Arc;
 
 use leanr_kernel::Name;
 
-use crate::{ModuleData, OleanError};
+use crate::{ModuleData, OleanError, PartKind};
 
 /// An ordered list of directories to resolve module names against.
 ///
@@ -233,11 +217,7 @@ impl ModuleSource for FileSource<'_> {
             .search_path
             .find(module)
             .ok_or_else(|| LoadError::ModuleNotFound(module.to_string()))?;
-        let bytes = std::fs::read(&path).map_err(|source| LoadError::Io {
-            path: path.clone(),
-            source,
-        })?;
-        ModuleData::parse(&bytes).map_err(|source| LoadError::Decode { path, source })
+        load_module_at(&path)
     }
 
     fn imports(module: &ModuleData) -> Vec<Arc<Name>> {
@@ -247,6 +227,88 @@ impl ModuleSource for FileSource<'_> {
             .map(|i| Arc::clone(&i.module))
             .collect()
     }
+}
+
+/// The companion-part file for an ALREADY-VALIDATED base `.olean` path:
+/// `Foo.olean` + `"private"` → `Foo.olean.private` (oracle:
+/// `OLeanLevel.adjustFileName`, src/Lean/Environment.lean:1793-1796, which
+/// is `base.addExtension ext`). The base path came from [`SearchPath::find`]
+/// (its module name was already traversal-checked), so appending a fixed
+/// literal suffix introduces no new untrusted component — no re-validation
+/// needed.
+fn companion_path(base: &Path, ext: &str) -> PathBuf {
+    let mut os = base.as_os_str().to_os_string();
+    os.push(".");
+    os.push(ext);
+    PathBuf::from(os)
+}
+
+/// Read and decode the module rooted at base `.olean` path `base`, pulling
+/// in its `.olean.server`/`.olean.private` companion parts when they exist.
+///
+/// Mirrors the oracle's fresh-check consumer (`ImportArtifacts.oleanParts`
+/// with `inServer := false`, src/Lean/Setup.lean:92-103): the base is always
+/// loaded; the `.private` part is loaded when present; the `.server` part is
+/// loaded only as a dependency of `.private` (a `.private` part's pointers
+/// can target objects deduplicated into the `.server` region). A missing
+/// companion is fine — pre-module-system oleans have none.
+fn load_module_at(base: &Path) -> Result<ModuleData, LoadError> {
+    let base_bytes = read_part(base)?;
+
+    let private = companion_path(base, "private");
+    if !private.is_file() {
+        // No `.private` companion: a plain single-region module.
+        return ModuleData::parse(&base_bytes).map_err(|source| LoadError::Decode {
+            path: base.to_path_buf(),
+            source,
+        });
+    }
+
+    // Base first, then `.server` (dep region for `.private`) if present, then
+    // `.private` — the oracle's load order (readModuleDataPartsOfMod,
+    // Environment.lean:2042-2055).
+    let server = companion_path(base, "server");
+    let server_bytes = if server.is_file() {
+        Some(read_part(&server)?)
+    } else {
+        None
+    };
+    let private_bytes = read_part(&private)?;
+
+    // Attribute a malformed companion HEADER (truncated/bad magic/version/
+    // githash) to that companion's own path. A deeper cross-region pointer
+    // failure is a property of the whole part set, so it falls through to the
+    // base path in the `parse_parts` call below.
+    for (path, bytes) in [
+        (&server, server_bytes.as_deref()),
+        (&private, Some(private_bytes.as_slice())),
+    ] {
+        if let Some(bytes) = bytes {
+            crate::OleanHeader::parse(bytes).map_err(|source| LoadError::Decode {
+                path: path.clone(),
+                source,
+            })?;
+        }
+    }
+
+    let mut parts: Vec<(PartKind, &[u8])> = vec![(PartKind::Base, &base_bytes)];
+    if let Some(sb) = &server_bytes {
+        parts.push((PartKind::Server, sb));
+    }
+    parts.push((PartKind::Private, &private_bytes));
+
+    ModuleData::parse_parts(&parts).map_err(|source| LoadError::Decode {
+        path: base.to_path_buf(),
+        source,
+    })
+}
+
+/// Read one part file, mapping I/O failure to [`LoadError::Io`] with its path.
+fn read_part(path: &Path) -> Result<Vec<u8>, LoadError> {
+    std::fs::read(path).map_err(|source| LoadError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 /// Load `targets` plus the transitive closure of their imports, returned

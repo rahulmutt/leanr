@@ -130,25 +130,48 @@ fn take_raw_children(v: &mut RawValue, stack: &mut Vec<Arc<RawValue>>) {
     }
 }
 
-/// Parse a whole `.olean` file into its root value (phase A entry;
-/// Task 6's `ModuleData::parse` is the public wrapper).
+/// Parse a whole single-region `.olean` file into its root value (phase A
+/// entry; Task 6's `ModuleData::parse` is the public wrapper).
+///
+/// This is the single-file path (M1a); it is exactly `parse_parts_bytes`
+/// with one region, and produces byte-for-byte identical output. It is
+/// kept as a distinct entry so the M1a golden path has no behavioral
+/// dependence on the multi-region machinery.
 pub(crate) fn parse_bytes(bytes: &[u8]) -> Result<Arc<RawValue>, OleanError> {
-    let header = OleanHeader::parse(bytes)?;
-    // v3 moves the object data (module.cpp:133-140); everything this
-    // decoder assumes below is the v2 layout.
-    if header.version != 2 {
-        return Err(OleanError::UnsupportedVersion(header.version));
-    }
-    let region = Region {
-        bytes,
-        base_addr: header.base_addr,
-        // flags bit 0: GMP vs Lean-native bignum encoding (module.cpp:114-122).
-        gmp: header.flags & 1 == 1,
-    };
-    match region.resolve(region.word(ROOT_PTR_OFFSET)?)? {
-        Word::Scalar(v) => Ok(Arc::new(RawValue::Scalar(v))),
-        Word::ObjectAt(off) => decode_graph(&region, off),
-    }
+    let regions = Regions::new(&[bytes])?;
+    regions.decode_root(0, &mut Memo::new())
+}
+
+/// Parse a module split across ordered companion parts (M1b Task 13a).
+///
+/// Each element of `parts` is one part's whole file bytes (base first, then
+/// `.olean.server`/`.olean.private` if present — order is not load-bearing
+/// for resolution, since every part occupies a disjoint logical address
+/// range, but is preserved for the caller). All parts are mapped into one
+/// logical address space at their header-declared `base_addr`s; a pointer
+/// word is resolved by locating the region whose `[base_addr, base_addr +
+/// len)` range contains it, exactly as the oracle's `region_reader`
+/// resolves cross-region pointers (src/runtime/compact.cpp:566-587
+/// `fix_object_ptr`: check own region, then binary-search the dep regions'
+/// `base_addr` ranges). This is what lets a `.olean.private` part reference
+/// objects deduplicated into the base part.
+///
+/// Returns one decoded root per part, in the given order. Object sharing is
+/// preserved *across* parts (a single `Memo`), mirroring the oracle: parts
+/// share a compactor so an object shared between parts is emitted once
+/// (`saveModuleDataParts`, src/Lean/Environment.lean:1739-1749) and decodes
+/// to a single `Arc`.
+///
+/// Overlapping regions (two parts whose logical address ranges intersect)
+/// are a decode error, never UB — the oracle likewise rejects them
+/// (`region_reader::sort_and_validate_dep_regions`,
+/// src/runtime/compact.cpp:538-562).
+pub(crate) fn parse_parts_bytes(parts: &[&[u8]]) -> Result<Vec<Arc<RawValue>>, OleanError> {
+    let regions = Regions::new(parts)?;
+    let mut memo = Memo::new();
+    (0..regions.regions.len())
+        .map(|i| regions.decode_root(i, &mut memo))
+        .collect()
 }
 
 struct Region<'a> {
@@ -157,14 +180,18 @@ struct Region<'a> {
     gmp: bool,
 }
 
-enum Word {
-    Scalar(u64),
-    ObjectAt(u64),
-}
-
 impl Region<'_> {
     fn len(&self) -> u64 {
         self.bytes.len() as u64
+    }
+
+    /// Logical address range `[base_addr, base_addr + len)` this region is
+    /// mapped at. Computed in `u128` so an attacker-controlled `base_addr`
+    /// near `u64::MAX` cannot overflow (the oracle's `region_view` spans the
+    /// whole mapping; header/trailer slack is harmless, module.cpp:203-207).
+    fn addr_range(&self) -> (u128, u128) {
+        let base = self.base_addr as u128;
+        (base, base + self.len() as u128)
     }
 
     fn slice(&self, off: u64, len: u64) -> Result<&[u8], OleanError> {
@@ -188,8 +215,73 @@ impl Region<'_> {
             self.slice(off, 4)?.try_into().expect("4 bytes"),
         ))
     }
+}
 
-    /// Classify a pointer word (lean.h:324-326; layout reference).
+/// A resolved object location: which region, and the byte offset within it.
+/// Doubles as the cross-part memo key (regions are disjoint, so the pair is
+/// globally unique).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct Loc {
+    region: usize,
+    off: u64,
+}
+
+enum Word {
+    Scalar(u64),
+    Object(Loc),
+}
+
+/// One or more compacted regions sharing a single logical address space.
+/// The single-file path is just `Regions` with one element.
+struct Regions<'a> {
+    regions: Vec<Region<'a>>,
+}
+
+impl<'a> Regions<'a> {
+    /// Build the region set from each part's whole file bytes, validating
+    /// every part's header (v2 only) and rejecting overlapping logical
+    /// address ranges.
+    fn new(parts: &[&'a [u8]]) -> Result<Regions<'a>, OleanError> {
+        let mut regions = Vec::with_capacity(parts.len());
+        for bytes in parts {
+            let header = OleanHeader::parse(bytes)?;
+            // v3 moves the object data (module.cpp:133-140); everything this
+            // decoder assumes below is the v2 layout.
+            if header.version != 2 {
+                return Err(OleanError::UnsupportedVersion(header.version));
+            }
+            regions.push(Region {
+                bytes,
+                base_addr: header.base_addr,
+                // flags bit 0: GMP vs Lean-native bignum (module.cpp:114-122).
+                gmp: header.flags & 1 == 1,
+            });
+        }
+        // Reject overlapping logical ranges (oracle: compact.cpp:538-562).
+        // Quadratic over `regions`, but a module has at most 3 parts.
+        for i in 0..regions.len() {
+            let (bi, ei) = regions[i].addr_range();
+            for j in (i + 1)..regions.len() {
+                let (bj, ej) = regions[j].addr_range();
+                if bi < ej && bj < ei {
+                    return Err(OleanError::RegionOverlap {
+                        base_a: regions[i].base_addr,
+                        base_b: regions[j].base_addr,
+                    });
+                }
+            }
+        }
+        Ok(Regions { regions })
+    }
+
+    fn region(&self, idx: usize) -> &Region<'a> {
+        &self.regions[idx]
+    }
+
+    /// Classify a pointer word (lean.h:324-326) against all regions. Boxed
+    /// scalars stay scalars; every non-scalar pointer must land, aligned and
+    /// in-bounds, inside exactly one region's data area — otherwise it is a
+    /// bad pointer (never UB, never a panic).
     fn resolve(&self, word: u64) -> Result<Word, OleanError> {
         if word & 1 == 1 {
             return Ok(Word::Scalar(word >> 1));
@@ -197,16 +289,33 @@ impl Region<'_> {
         if word == NULL_SENTINEL {
             return Err(OleanError::BadPointer { word });
         }
-        let off = word
-            .checked_sub(self.base_addr)
-            .ok_or(OleanError::BadPointer { word })?;
-        if off < FIRST_OBJECT_OFFSET
-            || off % 8 != 0
-            || off.checked_add(8).is_none_or(|end| end > self.len())
-        {
-            return Err(OleanError::BadPointer { word });
+        let addr = word as u128;
+        for (idx, region) in self.regions.iter().enumerate() {
+            let (base, end) = region.addr_range();
+            if addr < base || addr >= end {
+                continue;
+            }
+            // `word >= base_addr` here, so `checked_sub` cannot underflow.
+            let off = word - region.base_addr;
+            if off < FIRST_OBJECT_OFFSET
+                || !off.is_multiple_of(8)
+                || off.checked_add(8).is_none_or(|e| e > region.len())
+            {
+                return Err(OleanError::BadPointer { word });
+            }
+            return Ok(Word::Object(Loc { region: idx, off }));
         }
-        Ok(Word::ObjectAt(off))
+        Err(OleanError::BadPointer { word })
+    }
+
+    /// Decode the root object of part `idx` (its root pointer word lives at
+    /// `ROOT_PTR_OFFSET` within that part's own region), resolving pointers
+    /// against every region and sharing already-decoded objects via `memo`.
+    fn decode_root(&self, idx: usize, memo: &mut Memo) -> Result<Arc<RawValue>, OleanError> {
+        match self.resolve(self.region(idx).word(ROOT_PTR_OFFSET)?)? {
+            Word::Scalar(v) => Ok(Arc::new(RawValue::Scalar(v))),
+            Word::Object(loc) => decode_graph(self, memo, loc),
+        }
     }
 }
 
@@ -249,7 +358,9 @@ impl Shape {
 /// Header word decode: `m_rc` is bytes 0-3, `m_cs_sz` bytes 4-5,
 /// `m_other` byte 6, `m_tag` byte 7 (lean.h:143-148, little-endian) —
 /// the shifts below implement exactly that.
-fn read_object(region: &Region, off: u64) -> Result<Shape, OleanError> {
+fn read_object(regions: &Regions, loc: Loc) -> Result<Shape, OleanError> {
+    let region = regions.region(loc.region);
+    let off = loc.off;
     let header = region.word(off)?;
     let rc = header as u32;
     let cs_sz = (header >> 32) as u16;
@@ -403,42 +514,59 @@ enum Slot {
     Done(Arc<RawValue>),
 }
 
-/// Iterative post-order DFS with offset memoization. `InProgress` on
-/// re-visit means the offset is on the current DFS path → cycle.
-fn decode_graph(region: &Region, root_off: u64) -> Result<Arc<RawValue>, OleanError> {
+/// Cross-part object memo, keyed by resolved [`Loc`]. Shared across every
+/// part's root decode so an object shared between parts (the oracle emits it
+/// once) decodes to a single `Arc`, and `InProgress` marks the current DFS
+/// path for cycle detection.
+type Memo = HashMap<Loc, Slot>;
+
+/// Iterative post-order DFS with location memoization. `InProgress` on
+/// re-visit means the location is on the current DFS path → cycle. The
+/// `memo` is shared across the module's parts (see [`Memo`]).
+fn decode_graph(
+    regions: &Regions,
+    memo: &mut Memo,
+    root: Loc,
+) -> Result<Arc<RawValue>, OleanError> {
     enum Step {
-        Visit(u64),
-        Build(u64, Shape),
+        Visit(Loc),
+        Build(Loc, Shape),
     }
-    let mut memo: HashMap<u64, Slot> = HashMap::new();
-    let mut stack = vec![Step::Visit(root_off)];
+    // Already decoded in an earlier part's walk: reuse the shared `Arc`.
+    if let Some(Slot::Done(v)) = memo.get(&root) {
+        return Ok(Arc::clone(v));
+    }
+    let mut stack = vec![Step::Visit(root)];
     while let Some(step) = stack.pop() {
         match step {
-            Step::Visit(off) => match memo.get(&off) {
+            Step::Visit(loc) => match memo.get(&loc) {
                 Some(Slot::Done(_)) => {}
-                Some(Slot::InProgress) => return Err(OleanError::Cycle { offset: off }),
+                Some(Slot::InProgress) => return Err(OleanError::Cycle { offset: loc.off }),
                 None => {
-                    memo.insert(off, Slot::InProgress);
-                    let shape = read_object(region, off)?;
+                    memo.insert(loc, Slot::InProgress);
+                    let shape = read_object(regions, loc)?;
                     let children: Vec<u64> = shape.child_words().to_vec();
-                    stack.push(Step::Build(off, shape));
+                    stack.push(Step::Build(loc, shape));
                     for word in children {
-                        if let Word::ObjectAt(child) = region.resolve(word)? {
+                        if let Word::Object(child) = regions.resolve(word)? {
                             stack.push(Step::Visit(child));
                         }
                     }
                 }
             },
-            Step::Build(off, shape) => {
+            Step::Build(loc, shape) => {
                 let resolve_child = |word: u64| -> Result<Arc<RawValue>, OleanError> {
-                    match region.resolve(word)? {
+                    match regions.resolve(word)? {
                         Word::Scalar(v) => Ok(Arc::new(RawValue::Scalar(v))),
-                        Word::ObjectAt(o) => match memo.get(&o) {
+                        Word::Object(o) => match memo.get(&o) {
                             Some(Slot::Done(v)) => Ok(Arc::clone(v)),
                             // Post-order guarantees children are built;
                             // reaching this is a decoder bug, and the
                             // spec says internal errors panic loudly.
-                            _ => unreachable!("child at {o:#x} not built before parent"),
+                            _ => unreachable!(
+                                "child at region {} off {:#x} not built before parent",
+                                o.region, o.off
+                            ),
                         },
                     }
                 };
@@ -470,12 +598,13 @@ fn decode_graph(region: &Region, root_off: u64) -> Result<Arc<RawValue>, OleanEr
                         RawValue::Indirect(resolve_child(value_word)?)
                     }
                 };
-                memo.insert(off, Slot::Done(Arc::new(value)));
+                memo.insert(loc, Slot::Done(Arc::new(value)));
             }
         }
     }
-    match memo.remove(&root_off) {
-        Some(Slot::Done(v)) => Ok(v),
+    // Keep `memo` intact (it is shared across parts): clone the root out.
+    match memo.get(&root) {
+        Some(Slot::Done(v)) => Ok(Arc::clone(v)),
         _ => unreachable!("root not built by the DFS"),
     }
 }
@@ -598,6 +727,112 @@ mod tests {
 
     fn parse(b: Builder) -> Result<Arc<RawValue>, OleanError> {
         parse_bytes(&b.finish())
+    }
+
+    // A distinct, non-overlapping logical base for a companion part. `Builder`
+    // always emits its *objects* at `BASE`-relative words, so a companion is
+    // modelled as header + root only (no own objects), its root pointing into
+    // the base part's `BASE` region — exactly the real `.olean.private` shape.
+    const BASE_B: u64 = BASE + 0x0001_0000;
+
+    #[test]
+    fn cross_part_pointer_resolves_into_base_region() {
+        // Base part owns a shared string; the companion's root points at it —
+        // an address inside the BASE region, below the companion's own base.
+        let mut base = Builder::new();
+        let s = base.string("shared");
+        base.set_root(s);
+        let base_bytes = base.finish();
+
+        let mut comp = Builder::new();
+        comp.set_base_addr(BASE_B); // distinct, non-overlapping region
+        comp.set_root(s); // cross-part pointer into the base region
+        let comp_bytes = comp.finish();
+
+        let roots = parse_parts_bytes(&[&base_bytes, &comp_bytes]).unwrap();
+        assert_eq!(roots.len(), 2);
+        assert!(matches!(&*roots[0], RawValue::Str(x) if x == "shared"));
+        assert!(matches!(&*roots[1], RawValue::Str(x) if x == "shared"));
+        // Shared across parts via the single cross-part memo (the oracle emits
+        // the object once): both roots are the same `Arc`.
+        assert!(
+            Arc::ptr_eq(&roots[0], &roots[1]),
+            "object shared between parts must decode to one Arc"
+        );
+    }
+
+    #[test]
+    fn overlapping_regions_are_rejected() {
+        let mut base = Builder::new();
+        base.set_root(boxed(0));
+        let base_bytes = base.finish();
+
+        // Companion whose base sits *inside* the base part's range → overlap.
+        let mut comp = Builder::new();
+        comp.set_base_addr(BASE + 8);
+        comp.set_root(boxed(0));
+        let comp_bytes = comp.finish();
+
+        assert!(matches!(
+            parse_parts_bytes(&[&base_bytes, &comp_bytes]),
+            Err(OleanError::RegionOverlap { .. })
+        ));
+    }
+
+    #[test]
+    fn truncated_companion_errors_not_panics() {
+        let mut base = Builder::new();
+        base.set_root(boxed(0));
+        let base_bytes = base.finish();
+
+        let mut comp = Builder::new();
+        comp.set_base_addr(BASE_B);
+        comp.set_root(boxed(0));
+        let comp_bytes = comp.finish();
+
+        // Chop the companion below the fixed header length.
+        let truncated = &comp_bytes[..HEADER_LEN - 1];
+        assert!(matches!(
+            parse_parts_bytes(&[&base_bytes, truncated]),
+            Err(OleanError::Truncated(_))
+        ));
+    }
+
+    #[test]
+    fn wrong_base_companion_pointer_is_bad_pointer() {
+        let mut base = Builder::new();
+        let s = base.string("x");
+        base.set_root(s);
+        let base_bytes = base.finish();
+
+        // Companion root points at an address in NO region (neither its own
+        // tiny header region nor the base region).
+        let mut comp = Builder::new();
+        comp.set_base_addr(BASE_B);
+        comp.set_root(BASE_B + 0x0005_0000);
+        let comp_bytes = comp.finish();
+
+        assert!(matches!(
+            parse_parts_bytes(&[&base_bytes, &comp_bytes]),
+            Err(OleanError::BadPointer { .. })
+        ));
+    }
+
+    #[test]
+    fn single_part_parse_parts_matches_parse_bytes() {
+        // The single-file path is exactly `parse_parts_bytes` with one region.
+        let mut b = Builder::new();
+        let s = b.string("hi");
+        let root = b.ctor(0, &[s, s], &[7]);
+        b.set_root(root);
+        let bytes = b.finish();
+
+        let via_parts = parse_parts_bytes(&[&bytes]).unwrap();
+        assert_eq!(via_parts.len(), 1);
+        let RawValue::Ctor { tag: 0, fields, .. } = &*via_parts[0] else {
+            panic!("expected ctor")
+        };
+        assert!(Arc::ptr_eq(&fields[0], &fields[1]));
     }
 
     #[test]

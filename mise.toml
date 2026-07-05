@@ -60,6 +60,12 @@ run = [
   # `prelude`-mode, import-free fixture the kernel replays from an empty
   # environment (crates/leanr_olean/tests/check_fixtures.rs).
   "lean tests/fixtures/Prelude0.lean -o tests/fixtures/Prelude0.olean",
+  # `module`-mode, `prelude` fixture: emits companion parts
+  # `ModPriv.olean{,.server,.private}` (multi-region decode; M1b Task 13a).
+  # The single `lean` invocation writes all three parts.
+  "lean tests/fixtures/ModPriv.lean -o tests/fixtures/ModPriv.olean",
+  # module mode also emits an unused `.ir` companion; drop it (not decoded).
+  "rm -f tests/fixtures/ModPriv.ir",
   "sh -c 'lean --run tests/fixtures/dump_decls.lean tests/fixtures/Sample.olean > tests/fixtures/Sample.decls.txt'",
   "sh -c 'lean --run tests/fixtures/dump_decls.lean tests/fixtures/SampleRich.olean > tests/fixtures/SampleRich.decls.txt'",
   "sh -c 'lean --githash > tests/fixtures/oracle-githash.txt'",
