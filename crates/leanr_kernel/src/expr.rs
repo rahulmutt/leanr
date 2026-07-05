@@ -247,6 +247,28 @@ impl ExprData {
         (self.0 >> RANGE_SHIFT) as u32
     }
 
+    /// The exact loose-bvar range when the packed word proves it, or
+    /// `None` when the packed value is the saturation sentinel
+    /// (`LOOSE_BVAR_SAT`). `bvar_loose_range`/`close_one` above pack
+    /// `min(actual, LOOSE_BVAR_SAT)`, so an *exact* (non-saturated)
+    /// value is a real bound — but once a subtree saturates, `close_one`
+    /// keeps it stuck at the cap even as enclosing binders close over
+    /// it, so the saturated value no longer bounds the actual range from
+    /// either side (M1b Task 4's `subst.rs` port found this: a
+    /// substitution's "closed enough, skip this subtree" optimization
+    /// must never trust a `<=` comparison against a saturated word,
+    /// since the true range could by then be either far larger or far
+    /// smaller). Callers doing that optimization must treat `None` as
+    /// "must walk the real (bignum) indices to know."
+    pub(crate) fn loose_bvar_range_exact(self) -> Option<u32> {
+        let r = self.loose_bvar_range();
+        if r < LOOSE_BVAR_SAT {
+            Some(r)
+        } else {
+            None
+        }
+    }
+
     pub fn has_fvar(self) -> bool {
         (self.0 >> HAS_FVAR_BIT) & 1 == 1
     }

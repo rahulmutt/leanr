@@ -18,6 +18,7 @@ mod guard;
 mod level;
 mod name;
 mod num;
+mod subst;
 mod syntax;
 
 pub use decl::{
@@ -32,4 +33,8 @@ pub use guard::{RecGuard, MAX_REC_DEPTH};
 pub use level::Level;
 pub use name::Name;
 pub use num::{Int, Nat};
+pub use subst::{
+    abstract_fvars, instantiate, instantiate_core, instantiate_level_params, instantiate_rev,
+    lift_loose_bvars,
+};
 pub use syntax::{Preresolved, SourceInfo, Substring, Syntax};
