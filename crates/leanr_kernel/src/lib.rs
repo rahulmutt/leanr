@@ -16,6 +16,7 @@ mod error;
 mod expr;
 mod guard;
 mod level;
+mod local_ctx;
 mod name;
 mod num;
 mod subst;
@@ -31,6 +32,7 @@ pub use error::KernelError;
 pub use expr::{BinderInfo, DataValue, Expr, ExprData, ExprNode, KVMap, Literal};
 pub use guard::{RecGuard, MAX_REC_DEPTH};
 pub use level::Level;
+pub use local_ctx::{FVarIdGen, LocalContext, LocalDecl};
 pub use name::Name;
 pub use num::{Int, Nat};
 pub use subst::{
