@@ -3,6 +3,16 @@ use std::sync::Arc;
 
 use crate::{ConstantInfo, KernelError, Name};
 
+fn mk_name2(a: &str, b: &str) -> Arc<Name> {
+    Arc::new(Name::Str {
+        parent: Arc::new(Name::Str {
+            parent: Arc::new(Name::Anonymous),
+            part: a.to_string(),
+        }),
+        part: b.to_string(),
+    })
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum EnvironmentError {
     DuplicateName(Arc<Name>),
@@ -59,6 +69,38 @@ impl Environment {
     pub(crate) fn add_core(&mut self, info: ConstantInfo) {
         let name = Arc::clone(info.name());
         self.constants.insert(name, info);
+    }
+
+    /// oracle: inductive.cpp:27 (`is_non_rec_structure`) — the query the
+    /// checker uses for structure-eta / unit-like / eta-when-structure.
+    /// True iff `name` is an inductive with exactly one constructor, no
+    /// indices, and is not recursive. (The Task-7 brief paraphrases this
+    /// as "inductive, one ctor, no indices"; the oracle additionally
+    /// excludes recursive inductives, and the oracle is normative.)
+    pub fn is_structure_like(&self, name: &Arc<Name>) -> bool {
+        match self.constants.get(name) {
+            Some(ConstantInfo::Induct(v)) => {
+                v.ctors.len() == 1 && v.num_indices == crate::Nat::from(0) && !v.is_rec
+            }
+            _ => false,
+        }
+    }
+
+    /// oracle: `environment::is_quot_initialized` — whether the built-in
+    /// quotient constants have been admitted, which gates
+    /// `quot_reduce_rec` in `reduce_recursor` (type_checker.cpp:334).
+    ///
+    /// M1a stored no such flag; as a temporary gate we treat the quotient
+    /// as initialized once its four constants are present. Task 11
+    /// (quotient admission) replaces this with an explicit flag set when
+    /// `Quot`/`Quot.mk`/`Quot.lift`/`Quot.ind` are added, matching the
+    /// oracle exactly. The proxy is sound in the interim: `quot_reduce_rec`
+    /// itself only fires on genuine `Quot.lift`/`Quot.ind` heads reducing
+    /// a fully-applied `Quot.mk`.
+    pub fn quot_initialized(&self) -> bool {
+        self.constants.contains_key(&mk_name2("Quot", "mk"))
+            && self.constants.contains_key(&mk_name2("Quot", "lift"))
+            && self.constants.contains_key(&mk_name2("Quot", "ind"))
     }
 
     pub fn len(&self) -> usize {

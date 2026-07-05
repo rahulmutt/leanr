@@ -19,6 +19,7 @@ mod level;
 mod local_ctx;
 mod name;
 mod num;
+mod quot_red;
 mod subst;
 mod syntax;
 mod tc;

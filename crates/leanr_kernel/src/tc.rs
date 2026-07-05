@@ -5,12 +5,12 @@
 //! leanprover/lean4:v4.32.0-rc1). Every method cites its oracle line
 //! range; port order and branch order follow the oracle literally.
 //!
-//! Task 7 fills the special-reduction branches (iota/quot recursor
-//! reduction, nat/native literal reduction, offset defeq, eta / struct
-//! eta / unit-like / string-lit expansion). Those branches are present
-//! here with their FINAL signatures at the exact oracle sequence
-//! positions, returning the neutral stub value (`Ok(None)` /
-//! `Lbool::Undef` / `Ok(false)`) and marked `// M1b Task 7:`.
+//! Task 7 filled the special-reduction branches (iota / quot recursor
+//! reduction, Nat literal folding, offset defeq, eta / struct eta /
+//! unit-like / string-lit expansion). `reduce_native` (Lean's
+//! `reduceBool`/`reduceNat`) remains a permanent skip-stub: it needs the
+//! Lean compiler/runtime, out of scope for the pure-Rust kernel — terms
+//! using it fail to reduce (incompleteness, never unsoundness).
 //!
 //! Recursion discipline (crate-wide invariant, see lib.rs/guard.rs):
 //! every mutually-recursive checker entry (`infer_type_core`,
@@ -29,10 +29,11 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use crate::quot_red::quot_reduce_rec;
 use crate::{
     instantiate, instantiate_level_params, instantiate_rev, BinderInfo, ConstantInfo,
     DefinitionSafety, Environment, Expr, ExprNode, FVarIdGen, KernelError, Level, Literal,
-    LocalContext, Name, Nat, RecGuard, ReducibilityHints, MAX_REC_DEPTH,
+    LocalContext, Name, Nat, RecGuard, RecursorRule, ReducibilityHints, MAX_REC_DEPTH,
 };
 
 /// Stack-growth constants: identical to `RecGuard`'s (guard.rs), which
@@ -40,6 +41,11 @@ use crate::{
 /// with the same red-zone/chunk sizes rustc's own `stacker` use employs.
 const RED_ZONE: usize = 128 * 1024;
 const STACK_CHUNK: usize = 4 * 1024 * 1024;
+
+/// oracle: type_checker.cpp:586 (`#define ReducePowMaxExp 1<<24`) — the
+/// exact exponent above which `reduce_pow` refuses to fold, so untrusted
+/// literals cannot force an unbounded `Nat.pow` computation.
+const REDUCE_POW_MAX_EXP: usize = 1 << 24;
 
 /// Three-valued result, oracle `lbool` (type_checker.cpp passim,
 /// util/lbool.h). `Undef` = "this method could not decide".
@@ -191,6 +197,16 @@ pub struct TypeChecker<'e> {
     /// expr.cpp — `Nat`/`String` constants).
     nat_name: Arc<Name>,
     string_name: Arc<Name>,
+    /// `Bool.false` (oracle: `g_bool_false`) — `Nat.beq`/`Nat.ble`
+    /// falsehood result in `reduce_nat`.
+    bool_false: Arc<Name>,
+    /// `Nat.zero` / `Nat.succ` (oracle: `g_nat_zero` / `g_nat_succ`) —
+    /// consulted by `is_nat_lit_ext`, `reduce_nat` and offset defeq.
+    nat_zero: Arc<Name>,
+    nat_succ: Arc<Name>,
+    /// `String.ofList` (oracle: `g_string_mk`, type_checker.cpp:1028) —
+    /// the head `try_string_lit_expansion` matches against.
+    string_mk: Arc<Name>,
 }
 
 fn mk_name1(part: &str) -> Arc<Name> {
@@ -313,6 +329,85 @@ fn string_lit_to_constructor(s: &str, g: &mut RecGuard) -> Result<Arc<Expr>, Ker
     Ok(Expr::app(string_mk, r))
 }
 
+/// oracle: inductive.cpp:1191-1198 (`nat_lit_to_constructor`) — a nat
+/// literal in constructor form: `0 ↦ Nat.zero`, `n+1 ↦ Nat.succ n`.
+fn nat_lit_to_constructor(
+    e: &Arc<Expr>,
+    nat_zero: &Arc<Name>,
+    nat_succ: &Arc<Name>,
+    g: &mut RecGuard,
+) -> Result<Arc<Expr>, KernelError> {
+    let v = match e.node() {
+        ExprNode::Lit(Literal::NatVal(v)) => v,
+        _ => return Ok(Arc::clone(e)),
+    };
+    if v.is_zero() {
+        Expr::const_(Arc::clone(nat_zero), vec![], g)
+    } else {
+        let pred = Expr::lit(Literal::NatVal(v.sub(&Nat::from(1))));
+        let succ = Expr::const_(Arc::clone(nat_succ), vec![], g)?;
+        Ok(Expr::app(succ, pred))
+    }
+}
+
+/// oracle: inductive.cpp:113-121 (`get_rec_rule_for`) — the recursor rule
+/// whose constructor matches `major`'s head constant.
+fn get_rec_rule_for<'a>(rules: &'a [RecursorRule], major: &Arc<Expr>) -> Option<&'a RecursorRule> {
+    let fn0 = Expr::get_app_fn(major);
+    let name = fn0.const_name()?;
+    rules.iter().find(|r| &r.ctor == name)
+}
+
+/// oracle: declaration.cpp:145-154 (`recursor_val::get_major_induct`) —
+/// the inductive being recursed on: skip `major_idx` binders of the
+/// recursor's type, then read the head constant of the next binder's
+/// domain (the major premise's type).
+fn get_major_induct(ty: &Arc<Expr>, major_idx: usize) -> Option<Arc<Name>> {
+    let mut t = Arc::clone(ty);
+    for _ in 0..major_idx {
+        t = match t.node() {
+            ExprNode::ForallE { body, .. } => Arc::clone(body),
+            _ => return None,
+        };
+    }
+    let dom = match t.node() {
+        ExprNode::ForallE { binder_type, .. } => Arc::clone(binder_type),
+        _ => return None,
+    };
+    match Expr::get_app_fn(&dom).node() {
+        ExprNode::Const { name, .. } => Some(Arc::clone(name)),
+        _ => None,
+    }
+}
+
+/// oracle: inductive.cpp:52-59 (`is_constructor_app`) — `e`'s head is a
+/// `Const` naming a constructor of `env`.
+fn is_constructor_app(env: &Environment, e: &Arc<Expr>) -> bool {
+    if let ExprNode::Const { name, .. } = Expr::get_app_fn(e).node() {
+        matches!(env.get(name), Some(ConstantInfo::Ctor(_)))
+    } else {
+        false
+    }
+}
+
+/// The `Nat.<op>` builtin named by `name`, if any (oracle: `g_nat_*`
+/// constants, type_checker.cpp:28-43). Recognizes a two-component name
+/// `Nat.op` and returns `op`.
+fn nat_binop(name: &Name) -> Option<&str> {
+    if let Name::Str { parent, part } = name {
+        if let Name::Str {
+            parent: grand,
+            part: ns,
+        } = parent.as_ref()
+        {
+            if matches!(grand.as_ref(), Name::Anonymous) && ns == "Nat" {
+                return Some(part.as_str());
+            }
+        }
+    }
+    None
+}
+
 /// oracle: level.cpp:274 (`get_undef_param`) — first `Param` in `l` not
 /// present in `ps`, else `None`. Guarded structural walk (the oracle's
 /// `for_each` with a `has_param` short-circuit; we visit all, same
@@ -410,6 +505,10 @@ impl<'e> TypeChecker<'e> {
             bool_true: mk_name2("Bool", "true"),
             nat_name: mk_name1("Nat"),
             string_name: mk_name1("String"),
+            bool_false: mk_name2("Bool", "false"),
+            nat_zero: mk_name2("Nat", "zero"),
+            nat_succ: mk_name2("Nat", "succ"),
+            string_mk: mk_name2("String", "ofList"),
         }
     }
 
@@ -1192,64 +1291,601 @@ impl<'e> TypeChecker<'e> {
         }
     }
 
-    // -- Task 7 stubs (final signatures, exact oracle positions) ------
+    // -- Task 7: special reductions -----------------------------------
 
-    /// oracle: type_checker.cpp:333-346 (`reduce_recursor`) — iota + quot.
+    /// `cheap_rec ? whnf_core(e, cheap_rec, cheap_proj) : whnf(e)` — the
+    /// whnf callback `reduce_recursor` hands to `inductive_reduce_rec`
+    /// (type_checker.cpp:340). `quot_reduce_rec` always gets full `whnf`
+    /// (type_checker.cpp:335), never the cheap form.
+    fn rec_whnf(
+        &mut self,
+        e: &Arc<Expr>,
+        cheap_rec: bool,
+        cheap_proj: bool,
+    ) -> Result<Arc<Expr>, KernelError> {
+        if cheap_rec {
+            self.whnf_core(e, cheap_rec, cheap_proj)
+        } else {
+            self.whnf(e)
+        }
+    }
+
+    /// oracle: type_checker.cpp:333-346 (`reduce_recursor`) — apply the
+    /// quotient and inductive normalizer extensions.
     fn reduce_recursor(
         &mut self,
-        _e: &Arc<Expr>,
-        _cheap_rec: bool,
-        _cheap_proj: bool,
+        e: &Arc<Expr>,
+        cheap_rec: bool,
+        cheap_proj: bool,
     ) -> Result<Option<Arc<Expr>>, KernelError> {
-        // M1b Task 7: iota-reduction (inductive recursors) and quotient
-        // reduction.
-        Ok(None)
+        // type_checker.cpp:334-338: quotient reduction (full whnf).
+        if self.env.quot_initialized() {
+            // Split the &mut borrow: `quot_reduce_rec` calls back into
+            // `self.whnf`, so `self` is captured only by the closure.
+            let r = quot_reduce_rec(e, |x| self.whnf(x))?;
+            if r.is_some() {
+                return Ok(r);
+            }
+        }
+        // type_checker.cpp:339-344: inductive iota reduction.
+        self.inductive_reduce_rec(e, cheap_rec, cheap_proj)
     }
 
-    /// oracle: type_checker.cpp:609-638 (`reduce_nat`).
-    fn reduce_nat(&mut self, _e: &Arc<Expr>) -> Result<Option<Arc<Expr>>, KernelError> {
-        // M1b Task 7: Nat literal built-in reductions.
-        Ok(None)
+    /// oracle: inductive.h:76-119 (`inductive_reduce_rec`). Iota-reduce a
+    /// recursor application: whnf (and, for K-recursors / literal majors,
+    /// canonicalize) the major premise to a constructor application, pick
+    /// the matching rule, and beta-apply its `rhs` to the recursor's
+    /// params/motives/minors followed by the constructor's fields.
+    fn inductive_reduce_rec(
+        &mut self,
+        e: &Arc<Expr>,
+        cheap_rec: bool,
+        cheap_proj: bool,
+    ) -> Result<Option<Arc<Expr>>, KernelError> {
+        // inductive.h:78-84.
+        let rec_fn = Arc::clone(Expr::get_app_fn(e));
+        let (rec_name, rec_levels) = match rec_fn.node() {
+            ExprNode::Const { name, levels } => (Arc::clone(name), levels.clone()),
+            _ => return Ok(None),
+        };
+        let env = self.env;
+        let rec_val = match env.get(&rec_name) {
+            Some(ConstantInfo::Rec(v)) => v,
+            _ => return Ok(None),
+        };
+        // Extract everything needed before re-borrowing `self` mutably.
+        let nparams = match nat_to_usize(&rec_val.num_params) {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let nmotives = match nat_to_usize(&rec_val.num_motives) {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let nminors = match nat_to_usize(&rec_val.num_minors) {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let nindices = match nat_to_usize(&rec_val.num_indices) {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let major_idx = nparams + nmotives + nminors + nindices;
+        let is_k = rec_val.k;
+        let lparams = rec_val.val.level_params.clone();
+        let rules = rec_val.rules.clone();
+        let rec_ty = Arc::clone(&rec_val.val.ty);
+
+        // inductive.h:82-87.
+        let rec_args = Expr::get_app_args(e);
+        if major_idx >= rec_args.len() {
+            return Ok(None); // major premise is missing
+        }
+        // recursor_val::get_major_induct (declaration.cpp:145-154).
+        let major_induct = match get_major_induct(&rec_ty, major_idx) {
+            Some(n) => n,
+            None => return Ok(None),
+        };
+        let mut major = Arc::clone(&rec_args[major_idx]);
+        // inductive.h:88-90: K-recursor major canonicalization.
+        if is_k {
+            major = self.to_cnstr_when_K(&major_induct, nparams, &major, cheap_rec, cheap_proj)?;
+        }
+        // inductive.h:91-97.
+        major = self.rec_whnf(&major, cheap_rec, cheap_proj)?;
+        major = match major.node() {
+            ExprNode::Lit(Literal::NatVal(_)) => {
+                nat_lit_to_constructor(&major, &self.nat_zero, &self.nat_succ, &mut self.guard)?
+            }
+            ExprNode::Lit(Literal::StrVal(s)) => {
+                let c = string_lit_to_constructor(s, &mut self.guard)?;
+                self.rec_whnf(&c, cheap_rec, cheap_proj)?
+            }
+            _ => self.to_cnstr_when_structure(&major_induct, &major, cheap_rec, cheap_proj)?,
+        };
+        // inductive.h:98-103.
+        let rule = match get_rec_rule_for(&rules, &major) {
+            Some(r) => r.clone(),
+            None => return Ok(None),
+        };
+        let major_args = Expr::get_app_args(&major);
+        let nfields = match nat_to_usize(&rule.nfields) {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        if nfields > major_args.len() {
+            return Ok(None);
+        }
+        if rec_levels.len() != lparams.len() {
+            return Ok(None);
+        }
+        // inductive.h:104-117: build the reduced right-hand side.
+        let mut rhs = instantiate_level_params(&rule.rhs, &lparams, &rec_levels, &mut self.guard)?;
+        // Params, motives and minor premises from the recursor application.
+        let pmm = nparams + nmotives + nminors;
+        rhs = Expr::mk_app_spine(rhs, &rec_args[..pmm]);
+        // Fields from the major premise (the constructor's own params —
+        // which for nested inductives may differ from the recursor's — are
+        // dropped by taking the LAST `nfields` args).
+        let nctor_params = major_args.len() - nfields;
+        rhs = Expr::mk_app_spine(rhs, &major_args[nctor_params..]);
+        // Reapply any surplus recursor-application args past the major.
+        if rec_args.len() > major_idx + 1 {
+            rhs = Expr::mk_app_spine(rhs, &rec_args[major_idx + 1..]);
+        }
+        Ok(Some(rhs))
     }
 
-    /// oracle: type_checker.cpp:546-567 (`reduce_native`).
+    /// oracle: inductive.h:31-50 (`to_cnstr_when_K`). For a K-supporting
+    /// datatype, replace `e` by the datatype's unique constructor
+    /// application when `e`'s type matches (e.g. `e : a = a` ↦ `Eq.refl
+    /// a`). `rval.is_k()` is guaranteed by the caller.
+    #[allow(non_snake_case)] // mirrors the oracle's `to_cnstr_when_K`
+    #[allow(clippy::wrong_self_convention)] // oracle name; reduces `self`
+    fn to_cnstr_when_K(
+        &mut self,
+        major_induct: &Arc<Name>,
+        nparams: usize,
+        e: &Arc<Expr>,
+        cheap_rec: bool,
+        cheap_proj: bool,
+    ) -> Result<Arc<Expr>, KernelError> {
+        // inductive.h:34-36.
+        let it = self.infer_type(e)?;
+        let app_type = self.rec_whnf(&it, cheap_rec, cheap_proj)?;
+        let app_type_i = Expr::get_app_fn(&app_type);
+        if !is_const_named(app_type_i, major_induct) {
+            return Ok(Arc::clone(e)); // type incorrect
+        }
+        // inductive.h:37-44: bail if an index carries a metavariable. Our
+        // admitted terms are mvar-free, but the guard is ported for parity.
+        if app_type.data().has_expr_mvar() {
+            let app_type_args = Expr::get_app_args(&app_type);
+            for arg in app_type_args.iter().skip(nparams) {
+                if arg.data().has_expr_mvar() {
+                    return Ok(Arc::clone(e));
+                }
+            }
+        }
+        // inductive.h:45-49.
+        let new_cnstr_app = match self.mk_nullary_cnstr(&app_type, nparams)? {
+            Some(c) => c,
+            None => return Ok(Arc::clone(e)),
+        };
+        let new_type = self.infer_type(&new_cnstr_app)?;
+        if !self.is_def_eq(&app_type, &new_type)? {
+            return Ok(Arc::clone(e));
+        }
+        Ok(new_cnstr_app)
+    }
+
+    /// oracle: inductive.cpp:87-96 (`mk_nullary_cnstr`). Build the head
+    /// constructor of `type`'s inductive applied to `type`'s first
+    /// `num_params` arguments.
+    fn mk_nullary_cnstr(
+        &mut self,
+        type_: &Arc<Expr>,
+        num_params: usize,
+    ) -> Result<Option<Arc<Expr>>, KernelError> {
+        let args = Expr::get_app_args(type_);
+        let d = Expr::get_app_fn(type_);
+        let (d_name, d_levels) = match d.node() {
+            ExprNode::Const { name, levels } => (Arc::clone(name), levels.clone()),
+            _ => return Ok(None),
+        };
+        let cnstr_name = match self.first_cnstr(&d_name) {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+        if args.len() < num_params {
+            return Ok(None);
+        }
+        let cnstr = Expr::const_(cnstr_name, d_levels, &mut self.guard)?;
+        Ok(Some(Expr::mk_app_spine(cnstr, &args[..num_params])))
+    }
+
+    /// oracle: inductive.h:62-73 (`to_cnstr_when_structure`). If `e` is not
+    /// a constructor application and its type is a non-recursive, non-Prop
+    /// structure `induct_name ...`, expand it via `expand_eta_struct`.
+    #[allow(clippy::wrong_self_convention)] // oracle name; reduces `self`
+    fn to_cnstr_when_structure(
+        &mut self,
+        induct_name: &Arc<Name>,
+        e: &Arc<Expr>,
+        cheap_rec: bool,
+        cheap_proj: bool,
+    ) -> Result<Arc<Expr>, KernelError> {
+        if !self.env.is_structure_like(induct_name) || is_constructor_app(self.env, e) {
+            return Ok(Arc::clone(e));
+        }
+        let it = self.infer_type(e)?;
+        let e_type = self.rec_whnf(&it, cheap_rec, cheap_proj)?;
+        if !is_const_named(Expr::get_app_fn(&e_type), induct_name) {
+            return Ok(Arc::clone(e));
+        }
+        // inductive.h:70-71: skip Prop-valued structures.
+        let et = self.infer_type(&e_type)?;
+        let etw = self.rec_whnf(&et, cheap_rec, cheap_proj)?;
+        if matches!(etw.node(), ExprNode::Sort { level } if level.is_zero()) {
+            return Ok(Arc::clone(e));
+        }
+        self.expand_eta_struct(&e_type, e)
+    }
+
+    /// oracle: inductive.cpp:98-111 (`expand_eta_struct`). Convert `e` into
+    /// `mk e.0 … e.(n-1)` where `mk` is `e_type`'s constructor.
+    fn expand_eta_struct(
+        &mut self,
+        e_type: &Arc<Expr>,
+        e: &Arc<Expr>,
+    ) -> Result<Arc<Expr>, KernelError> {
+        let args = Expr::get_app_args(e_type);
+        let i = Expr::get_app_fn(e_type);
+        let (i_name, i_levels) = match i.node() {
+            ExprNode::Const { name, levels } => (Arc::clone(name), levels.clone()),
+            _ => return Ok(Arc::clone(e)),
+        };
+        let ctor_name = match self.first_cnstr(&i_name) {
+            Some(c) => c,
+            None => return Ok(Arc::clone(e)),
+        };
+        let (nparams, nfields) = match self.env.get(&ctor_name) {
+            Some(ConstantInfo::Ctor(v)) => {
+                (nat_to_usize(&v.num_params), nat_to_usize(&v.num_fields))
+            }
+            _ => return Ok(Arc::clone(e)),
+        };
+        let (nparams, nfields) = match (nparams, nfields) {
+            (Some(p), Some(f)) => (p, f),
+            _ => return Ok(Arc::clone(e)),
+        };
+        if args.len() < nparams {
+            return Ok(Arc::clone(e));
+        }
+        let ctor = Expr::const_(ctor_name, i_levels, &mut self.guard)?;
+        let mut result = Expr::mk_app_spine(ctor, &args[..nparams]);
+        for f in 0..nfields {
+            let proj = Expr::proj(Arc::clone(&i_name), Nat::from(f as u64), Arc::clone(e));
+            result = Expr::app(result, proj);
+        }
+        Ok(result)
+    }
+
+    /// oracle: inductive.cpp:79-85 (`get_first_cnstr`) — first constructor
+    /// of the (non-empty) inductive `name`.
+    fn first_cnstr(&self, name: &Arc<Name>) -> Option<Arc<Name>> {
+        match self.env.get(name) {
+            Some(ConstantInfo::Induct(v)) => v.ctors.first().map(Arc::clone),
+            _ => None,
+        }
+    }
+
+    /// oracle: type_checker.cpp:609-638 (`reduce_nat`). Fold built-in
+    /// `Nat.succ` / binary `Nat.*` operations on whnf-literal arguments.
+    fn reduce_nat(&mut self, e: &Arc<Expr>) -> Result<Option<Arc<Expr>>, KernelError> {
+        let nargs = Expr::get_app_num_args(e);
+        if nargs == 1 {
+            // type_checker.cpp:611-618: `Nat.succ lit → lit+1`.
+            let (f, arg) = match e.node() {
+                ExprNode::App { f, arg } => (f, arg),
+                _ => return Ok(None),
+            };
+            if is_const_named(f, &self.nat_succ) {
+                let arg = Arc::clone(arg);
+                let v = match self.get_nat_lit_ext(&arg)? {
+                    Some(v) => v,
+                    None => return Ok(None),
+                };
+                return Ok(Some(Expr::lit(Literal::NatVal(v.add(&Nat::from(1))))));
+            }
+            return Ok(None);
+        }
+        if nargs != 2 {
+            return Ok(None);
+        }
+        // type_checker.cpp:619-635: binary op dispatch on the head const.
+        let (ff, a2) = match e.node() {
+            ExprNode::App { f, arg } => (f, Arc::clone(arg)),
+            _ => return Ok(None),
+        };
+        let (head, a1) = match ff.node() {
+            ExprNode::App { f, arg } => (f, Arc::clone(arg)),
+            _ => return Ok(None),
+        };
+        let op = match head.node() {
+            ExprNode::Const { name, .. } => match nat_binop(name) {
+                Some(o) => o,
+                None => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+        // Both operands must whnf to nat literals (`is_nat_lit_ext`).
+        let v1 = match self.get_nat_lit_ext(&a1)? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let v2 = match self.get_nat_lit_ext(&a2)? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let lit = |n: Nat| Expr::lit(Literal::NatVal(n));
+        let r = match op {
+            "add" => lit(v1.add(&v2)),
+            "sub" => lit(v1.sub(&v2)),
+            "mul" => lit(v1.mul(&v2)),
+            "gcd" => lit(v1.gcd(&v2)),
+            "mod" => lit(v1.modulo(&v2)),
+            "div" => lit(v1.div(&v2)),
+            "land" => lit(v1.land(&v2)),
+            "lor" => lit(v1.lor(&v2)),
+            "xor" => lit(v1.lxor(&v2)),
+            // type_checker.cpp:586-597: refuse huge exponents.
+            "pow" => match v2.to_usize() {
+                Some(exp) if exp <= REDUCE_POW_MAX_EXP => lit(v1.pow(exp as u32)),
+                _ => return Ok(None),
+            },
+            // A shift amount that does not fit `usize` cannot be
+            // materialized (`Nat.shiftLeft`) — leave the term un-reduced
+            // rather than attempt an unbounded allocation.
+            "shiftLeft" => match v2.to_usize() {
+                Some(k) => lit(v1.shiftl(k)),
+                None => return Ok(None),
+            },
+            // A shift wider than the value's bit length is `0`.
+            "shiftRight" => lit(v1.shiftr(v2.to_usize().unwrap_or(usize::MAX))),
+            "beq" => self.bool_const(v1.beq(&v2))?,
+            "ble" => self.bool_const(v1.ble(&v2))?,
+            _ => return Ok(None),
+        };
+        Ok(Some(r))
+    }
+
+    /// `Bool.true` / `Bool.false` const (oracle: `mk_bool_true` /
+    /// `mk_bool_false`).
+    fn bool_const(&mut self, b: bool) -> Result<Arc<Expr>, KernelError> {
+        let name = if b {
+            Arc::clone(&self.bool_true)
+        } else {
+            Arc::clone(&self.bool_false)
+        };
+        Expr::const_(name, vec![], &mut self.guard)
+    }
+
+    /// oracle: type_checker.cpp:569-574 (`is_nat_lit_ext` / `get_nat_val`).
+    /// whnf `e`, then read its `Nat` value if it is a nat literal or the
+    /// `Nat.zero` constant, else `None`.
+    fn get_nat_lit_ext(&mut self, e: &Arc<Expr>) -> Result<Option<Nat>, KernelError> {
+        let w = self.whnf(e)?;
+        match w.node() {
+            ExprNode::Lit(Literal::NatVal(v)) => Ok(Some(v.clone())),
+            ExprNode::Const { name, .. } if name == &self.nat_zero => Ok(Some(Nat::from(0))),
+            _ => Ok(None),
+        }
+    }
+
+    /// oracle: type_checker.cpp:546-567 (`reduce_native`). Native
+    /// `Lean.reduceBool` / `Lean.reduceNat` compile-and-run reduction. A
+    /// permanent skip-stub: it requires the Lean compiler/runtime, which
+    /// is out of scope for the pure-Rust kernel. Terms using it fail to
+    /// reduce here (incompleteness, never unsoundness); documented in the
+    /// codebase map.
     fn reduce_native(&mut self, _e: &Arc<Expr>) -> Result<Option<Arc<Expr>>, KernelError> {
-        // M1b Task 7: Lean.reduceBool / Lean.reduceNat native reduction.
         Ok(None)
     }
 
-    /// oracle: type_checker.cpp:961-970 (`is_def_eq_offset`).
-    fn is_def_eq_offset(&mut self, _t: &Arc<Expr>, _s: &Arc<Expr>) -> Result<Lbool, KernelError> {
-        // M1b Task 7: Nat succ/zero offset defeq.
+    /// oracle: type_checker.cpp:961-969 (`is_def_eq_offset`). Peel
+    /// `Nat.succ`/literal towers off both sides and compare the stems.
+    fn is_def_eq_offset(&mut self, t: &Arc<Expr>, s: &Arc<Expr>) -> Result<Lbool, KernelError> {
+        if self.is_nat_zero(t) && self.is_nat_zero(s) {
+            return Ok(Lbool::True);
+        }
+        let pred_t = self.is_nat_succ(t);
+        let pred_s = self.is_nat_succ(s);
+        if let (Some(pt), Some(ps)) = (pred_t, pred_s) {
+            return Ok(to_lbool(self.is_def_eq_core(&pt, &ps)?));
+        }
         Ok(Lbool::Undef)
     }
 
-    /// oracle: type_checker.cpp:778-790 (`try_eta_expansion`).
-    fn try_eta_expansion(&mut self, _t: &Arc<Expr>, _s: &Arc<Expr>) -> Result<bool, KernelError> {
-        // M1b Task 7: eta-expansion for functions.
-        Ok(false)
+    /// oracle: type_checker.cpp:943-945 (`is_nat_zero`).
+    fn is_nat_zero(&self, t: &Arc<Expr>) -> bool {
+        is_const_named(t, &self.nat_zero)
+            || matches!(t.node(), ExprNode::Lit(Literal::NatVal(v)) if v.is_zero())
     }
 
-    /// oracle: type_checker.cpp:793-809 (`try_eta_struct`).
-    fn try_eta_struct(&mut self, _t: &Arc<Expr>, _s: &Arc<Expr>) -> Result<bool, KernelError> {
-        // M1b Task 7: structure eta.
-        Ok(false)
+    /// oracle: type_checker.cpp:947-959 (`is_nat_succ`) — the predecessor
+    /// of `t`, from either a positive nat literal or a `Nat.succ _` app.
+    fn is_nat_succ(&self, t: &Arc<Expr>) -> Option<Arc<Expr>> {
+        if let ExprNode::Lit(Literal::NatVal(v)) = t.node() {
+            if !v.is_zero() {
+                return Some(Expr::lit(Literal::NatVal(v.sub(&Nat::from(1)))));
+            }
+        }
+        if is_const_named(Expr::get_app_fn(t), &self.nat_succ) && Expr::get_app_num_args(t) == 1 {
+            if let ExprNode::App { arg, .. } = t.node() {
+                return Some(Arc::clone(arg));
+            }
+        }
+        None
     }
 
-    /// oracle: type_checker.cpp:1030-1041 (`try_string_lit_expansion`).
+    /// oracle: type_checker.h:87-89 / type_checker.cpp:778-790
+    /// (`try_eta_expansion` + `_core`). Tries both argument orders.
+    fn try_eta_expansion(&mut self, t: &Arc<Expr>, s: &Arc<Expr>) -> Result<bool, KernelError> {
+        if self.try_eta_expansion_core(t, s)? {
+            return Ok(true);
+        }
+        self.try_eta_expansion_core(s, t)
+    }
+
+    /// oracle: type_checker.cpp:778-790 (`try_eta_expansion_core`). Solve
+    /// `(λ x, _) =?= s` by comparing against `λ x, s x`.
+    fn try_eta_expansion_core(
+        &mut self,
+        t: &Arc<Expr>,
+        s: &Arc<Expr>,
+    ) -> Result<bool, KernelError> {
+        if !t.is_lambda() || s.is_lambda() {
+            return Ok(false);
+        }
+        let st = self.infer_type(s)?;
+        let s_type = self.whnf(&st)?;
+        let (bn, dom, bi) = match s_type.node() {
+            ExprNode::ForallE {
+                binder_name,
+                binder_type,
+                binder_info,
+                ..
+            } => (
+                Arc::clone(binder_name),
+                Arc::clone(binder_type),
+                *binder_info,
+            ),
+            _ => return Ok(false),
+        };
+        // `s` is loose-bvar-free here, so placing it under the new binder
+        // and applying `bvar 0` needs no lifting (oracle: `mk_app(s,
+        // mk_bvar(0))`).
+        let body = Expr::app(Arc::clone(s), Expr::bvar(Nat::from(0)));
+        let new_s = Expr::lam(bn, dom, body, bi);
+        self.is_def_eq(t, &new_s)
+    }
+
+    /// oracle: type_checker.h:91-93 / type_checker.cpp:793-809
+    /// (`try_eta_struct` + `_core`). Tries both argument orders.
+    fn try_eta_struct(&mut self, t: &Arc<Expr>, s: &Arc<Expr>) -> Result<bool, KernelError> {
+        if self.try_eta_struct_core(t, s)? {
+            return Ok(true);
+        }
+        self.try_eta_struct_core(s, t)
+    }
+
+    /// oracle: type_checker.cpp:793-809 (`try_eta_struct_core`). Check
+    /// whether `s` is `mk t.0 … t.n` for a non-recursive structure and, if
+    /// so, compare fieldwise via projections on `t`.
+    fn try_eta_struct_core(&mut self, t: &Arc<Expr>, s: &Arc<Expr>) -> Result<bool, KernelError> {
+        let f = Expr::get_app_fn(s);
+        let fname = match f.node() {
+            ExprNode::Const { name, .. } => name,
+            _ => return Ok(false),
+        };
+        let env = self.env;
+        let (nparams, nfields, induct) = match env.get(fname) {
+            Some(ConstantInfo::Ctor(v)) => (
+                nat_to_usize(&v.num_params),
+                nat_to_usize(&v.num_fields),
+                Arc::clone(&v.induct),
+            ),
+            _ => return Ok(false),
+        };
+        let (nparams, nfields) = match (nparams, nfields) {
+            (Some(p), Some(f)) => (p, f),
+            _ => return Ok(false),
+        };
+        if Expr::get_app_num_args(s) != nparams + nfields {
+            return Ok(false);
+        }
+        if !self.env.is_structure_like(&induct) {
+            return Ok(false);
+        }
+        let tt = self.infer_type(t)?;
+        let ss = self.infer_type(s)?;
+        if !self.is_def_eq(&tt, &ss)? {
+            return Ok(false);
+        }
+        let s_args = Expr::get_app_args(s);
+        for (i, sa) in s_args.iter().enumerate().skip(nparams) {
+            let proj = Expr::proj(
+                Arc::clone(&induct),
+                Nat::from((i - nparams) as u64),
+                Arc::clone(t),
+            );
+            if !self.is_def_eq(&proj, sa)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// oracle: type_checker.cpp:1037-1041 (`try_string_lit_expansion`).
+    /// Tries both argument orders.
     fn try_string_lit_expansion(
         &mut self,
-        _t: &Arc<Expr>,
-        _s: &Arc<Expr>,
+        t: &Arc<Expr>,
+        s: &Arc<Expr>,
     ) -> Result<Lbool, KernelError> {
-        // M1b Task 7: string literal vs String.ofList constructor.
+        let r = self.try_string_lit_expansion_core(t, s)?;
+        if r != Lbool::Undef {
+            return Ok(r);
+        }
+        self.try_string_lit_expansion_core(s, t)
+    }
+
+    /// oracle: type_checker.cpp:1030-1035 (`try_string_lit_expansion_core`).
+    /// `strLit =?= String.ofList _` reduces the literal to its `String.ofList`
+    /// char-list form and compares.
+    fn try_string_lit_expansion_core(
+        &mut self,
+        t: &Arc<Expr>,
+        s: &Arc<Expr>,
+    ) -> Result<Lbool, KernelError> {
+        if let ExprNode::Lit(Literal::StrVal(str_val)) = t.node() {
+            if s.is_app() && is_const_named(Expr::get_app_fn(s), &self.string_mk) {
+                let ctor = string_lit_to_constructor(str_val, &mut self.guard)?;
+                let w = self.whnf(&ctor)?;
+                return Ok(to_lbool(self.is_def_eq_core(&w, s)?));
+            }
+        }
         Ok(Lbool::Undef)
     }
 
-    /// oracle: type_checker.cpp:1044-1054 (`is_def_eq_unit_like`).
-    fn is_def_eq_unit_like(&mut self, _t: &Arc<Expr>, _s: &Arc<Expr>) -> Result<bool, KernelError> {
-        // M1b Task 7: unit-like (single fieldless constructor) defeq.
-        Ok(false)
+    /// oracle: type_checker.cpp:1044-1054 (`is_def_eq_unit_like`). Two
+    /// terms whose types whnf to the same fieldless structure inductive
+    /// are equal.
+    fn is_def_eq_unit_like(&mut self, t: &Arc<Expr>, s: &Arc<Expr>) -> Result<bool, KernelError> {
+        let tt = self.infer_type(t)?;
+        let t_type = self.whnf(&tt)?;
+        let i = Expr::get_app_fn(&t_type);
+        let i_name = match i.node() {
+            ExprNode::Const { name, .. } => Arc::clone(name),
+            _ => return Ok(false),
+        };
+        if !self.env.is_structure_like(&i_name) {
+            return Ok(false);
+        }
+        let ctor_name = match self.first_cnstr(&i_name) {
+            Some(c) => c,
+            None => return Ok(false),
+        };
+        let nfields = match self.env.get(&ctor_name) {
+            Some(ConstantInfo::Ctor(v)) => nat_to_usize(&v.num_fields),
+            _ => return Ok(false),
+        };
+        if nfields != Some(0) {
+            return Ok(false);
+        }
+        let st = self.infer_type(s)?;
+        self.is_def_eq_core(&t_type, &st)
     }
 
     // -- is_def_eq ----------------------------------------------------
