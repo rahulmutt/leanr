@@ -22,11 +22,13 @@ mod name;
 mod num;
 mod quot;
 mod quot_red;
+mod replay;
 mod subst;
 mod syntax;
 mod tc;
 #[cfg(test)]
 mod testenv;
+mod used_consts;
 
 pub use decl::{
     constant_info_eq, AxiomVal, ConstantInfo, ConstantVal, ConstructorVal, Declaration,
@@ -41,9 +43,11 @@ pub use level::Level;
 pub use local_ctx::{FVarIdGen, LocalContext, LocalDecl};
 pub use name::Name;
 pub use num::{Int, Nat};
+pub use replay::{replay, ReplayError, ReplayStats};
 pub use subst::{
     abstract_fvars, instantiate, instantiate_core, instantiate_level_params, instantiate_rev,
     lift_loose_bvars,
 };
 pub use syntax::{Preresolved, SourceInfo, Substring, Syntax};
 pub use tc::{Lbool, TypeChecker};
+pub use used_consts::used_constants;

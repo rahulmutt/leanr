@@ -57,6 +57,9 @@ depends = ["elan:bootstrap"]
 run = [
   "lean tests/fixtures/Sample.lean -o tests/fixtures/Sample.olean",
   "lean tests/fixtures/SampleRich.lean -o tests/fixtures/SampleRich.olean",
+  # `prelude`-mode, import-free fixture the kernel replays from an empty
+  # environment (crates/leanr_olean/tests/check_fixtures.rs).
+  "lean tests/fixtures/Prelude0.lean -o tests/fixtures/Prelude0.olean",
   "sh -c 'lean --run tests/fixtures/dump_decls.lean tests/fixtures/Sample.olean > tests/fixtures/Sample.decls.txt'",
   "sh -c 'lean --run tests/fixtures/dump_decls.lean tests/fixtures/SampleRich.olean > tests/fixtures/SampleRich.decls.txt'",
   "sh -c 'lean --githash > tests/fixtures/oracle-githash.txt'",

@@ -85,36 +85,101 @@ fn lparams_to_levels(ps: &[Arc<Name>]) -> Vec<Arc<Level>> {
         .collect()
 }
 
-/// oracle: Init/Meta/Defs.lean:317-320 (`Name.appendAfter`), macro-scope
-/// case omitted (kernel-generated names carry no macro scopes):
-/// `str p s => mkStr p (s ++ suffix)`, else `mkStr n suffix`.
+/// oracle: Init/Prelude.lean:5599-5602 (`Name.hasMacroScopes`) — a name
+/// carries hygienic macro scopes iff, skipping trailing numeric scope
+/// components, its first string component is exactly `_hyg`. Iterative
+/// (leaf→root) so it is safe on adversarially deep names.
+fn has_macro_scopes(n: &Arc<Name>) -> bool {
+    let mut cur = n;
+    loop {
+        match cur.as_ref() {
+            Name::Str { part, .. } => return part == "_hyg",
+            Name::Num { parent, .. } => cur = parent,
+            Name::Anonymous => return false,
+        }
+    }
+}
+
+/// oracle: Init/Prelude.lean:5604-5609 (`eraseMacroScopesAux`) — the base
+/// name obtained by dropping the whole `._@.<…>._hyg.<scopes>` suffix, i.e.
+/// everything from the `_@` delimiter onward. Only meaningful when
+/// `has_macro_scopes` holds. Iterative for adversarial-depth safety.
+fn erase_macro_scopes_aux(n: &Arc<Name>) -> Arc<Name> {
+    let mut cur = Arc::clone(n);
+    loop {
+        match cur.as_ref() {
+            Name::Str { parent, part } => {
+                if part == "_@" {
+                    return Arc::clone(parent);
+                }
+                let p = Arc::clone(parent);
+                cur = p;
+            }
+            Name::Num { parent, .. } => {
+                let p = Arc::clone(parent);
+                cur = p;
+            }
+            Name::Anonymous => return Arc::new(Name::Anonymous),
+        }
+    }
+}
+
+/// oracle: Init/Meta/Defs.lean:309-314 (`Name.modifyBase`) — when `n`
+/// carries macro scopes, strip them, apply `f` to the base name, and
+/// re-attach the scopes; otherwise apply `f` directly. The oracle does
+/// this via `extractMacroScopes`/`.review`; since `.review` re-encodes
+/// the untouched `imported`/`ctx`/`scopes` verbatim onto the (modified)
+/// base, the round-trip is exactly "replace the base prefix of `n` with
+/// `f base`", which `replace_prefix` performs.
+///
+/// This is the piece the original Task-9 port of `appendAfter`/
+/// `appendIndexAfter` was missing: constructor *field* binders in real
+/// modules are hygienic (`a._@.<ctx>._hyg.0`), and the recursor's
+/// induction-hypothesis binder must be `a_ih._@.<ctx>._hyg.0` (base
+/// `a`→`a_ih`, scopes preserved), NOT `a._@.<ctx>._hyg.0._ih` (which a
+/// plain suffix-append produces). The old code matched the oracle only
+/// for scope-free names, so the inductive unit tests (which used simple
+/// field names like `n`) passed while real oleans mismatched on replay.
+fn modify_base(n: &Arc<Name>, f: impl FnOnce(&Arc<Name>) -> Arc<Name>) -> Arc<Name> {
+    if has_macro_scopes(n) {
+        let base = erase_macro_scopes_aux(n);
+        let new_base = f(&base);
+        replace_prefix(n, &base, &new_base)
+    } else {
+        f(n)
+    }
+}
+
+/// oracle: Init/Meta/Defs.lean:315-318 (`Name.appendAfter`) via
+/// `modifyBase`: on the base name, `str p s => mkStr p (s ++ suffix)`,
+/// else `mkStr base suffix`.
 fn append_after_str(n: &Arc<Name>, suffix: &str) -> Arc<Name> {
-    match n.as_ref() {
+    modify_base(n, |base| match base.as_ref() {
         Name::Str { parent, part } => Arc::new(Name::Str {
             parent: Arc::clone(parent),
             part: format!("{part}{suffix}"),
         }),
         _ => Arc::new(Name::Str {
-            parent: Arc::clone(n),
+            parent: Arc::clone(base),
             part: suffix.to_string(),
         }),
-    }
+    })
 }
 
-/// oracle: Init/Meta/Defs.lean:322-326 (`Name.appendIndexAfter`):
-/// `str p s => mkStr p (s ++ "_" ++ toString idx)`, else `mkStr n
-/// ("_" ++ toString idx)`.
+/// oracle: Init/Meta/Defs.lean:320-323 (`Name.appendIndexAfter`) via
+/// `modifyBase`: on the base name, `str p s => mkStr p (s ++ "_" ++
+/// toString idx)`, else `mkStr base ("_" ++ toString idx)`.
 fn append_index_after(n: &Arc<Name>, idx: usize) -> Arc<Name> {
-    match n.as_ref() {
+    modify_base(n, |base| match base.as_ref() {
         Name::Str { parent, part } => Arc::new(Name::Str {
             parent: Arc::clone(parent),
             part: format!("{part}_{idx}"),
         }),
         _ => Arc::new(Name::Str {
-            parent: Arc::clone(n),
+            parent: Arc::clone(base),
             part: format!("_{idx}"),
         }),
-    }
+    })
 }
 
 /// Suffix component captured while walking a name toward its root.
