@@ -56,7 +56,8 @@
 //! whole loader interface are unaffected.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::ffi::OsStr;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use leanr_kernel::Name;
@@ -122,16 +123,41 @@ fn module_rel_path(module: &Name) -> Option<PathBuf> {
         return None;
     }
     parts.reverse();
-    // Path-traversal hardening: reject any component that could escape the
-    // root or otherwise not be a single well-formed path segment.
+    // Path-traversal hardening, in two layers:
+    //
+    // 1. ALLOW-LIST (load-bearing on the platform we run on): the component
+    //    must parse as exactly one `Component::Normal` equal to itself. This
+    //    structurally guarantees `PathBuf::push`/`Path::join` can only append
+    //    a single ordinary segment — it can never replace the accumulated
+    //    path or the search root, which `push` is documented to do for
+    //    absolute paths and for Windows prefixed paths ("if `path` has a
+    //    prefix but no root, it replaces `self`", e.g. `C:` or `\\?\...`).
+    //    Whatever separator/prefix syntax the current platform has,
+    //    `components()` speaks it, so nothing platform-specific can slip
+    //    through as `Normal`.
+    //
+    // 2. Explicit rejects for FOREIGN platform syntax: on Unix, `\`, `:`,
+    //    and `..`-containing strings are ordinary filename bytes and would
+    //    pass check 1, but they are Windows separators/drive-prefix syntax
+    //    (`a\b`, `C:`) or traversal material. Rejecting them here keeps the
+    //    accept/reject decision identical on every platform (and these names
+    //    never occur in real Lean modules). `/` and NUL are also listed for
+    //    explicitness even though check 1 (`/`) and the OS (`NUL`) already
+    //    exclude them.
     for part in &parts {
         if part.is_empty()
             || part.contains('/')
             || part.contains('\\')
+            || part.contains(':')
             || part.contains("..")
             || part.contains('\0')
         {
             return None;
+        }
+        let mut components = Path::new(part).components();
+        match (components.next(), components.next()) {
+            (Some(Component::Normal(c)), None) if c == OsStr::new(part) => {}
+            _ => return None,
         }
     }
     let mut rel = PathBuf::new();
@@ -471,6 +497,22 @@ mod tests {
         // Backslash and NUL components.
         assert!(module_rel_path(&str_child(name("Init"), "a\\b")).is_none());
         assert!(module_rel_path(&str_child(name("Init"), "a\0b")).is_none());
+
+        // Empty STRING component (distinct from the zero-component anonymous
+        // name below: this exercises the per-component reject, not the
+        // empty-parts early return).
+        let empty = str_child(name("Init"), "");
+        assert!(module_rel_path(&empty).is_none());
+        assert!(sp.find(&empty).is_none());
+
+        // Windows drive prefix: on Windows, `PathBuf::push("C:")` REPLACES
+        // the accumulated path/root instead of appending (documented `push`
+        // semantics for prefixed paths), so `C:` must be rejected on every
+        // platform, not just where it parses as a prefix.
+        let drive = str_child(Arc::new(Name::Anonymous), "C:");
+        assert!(module_rel_path(&drive).is_none());
+        assert!(sp.find(&drive).is_none());
+        assert!(module_rel_path(&str_child(name("Init"), "C:evil")).is_none());
 
         // A numeric component is unmappable.
         let numeric = Arc::new(Name::Num {
