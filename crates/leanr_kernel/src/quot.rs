@@ -78,6 +78,24 @@ fn arrow(dom: Arc<Expr>, body: Arc<Expr>) -> Arc<Expr> {
 /// (the variant list is frozen, Task 1), and from `add_quot`'s caller's
 /// point of view both cases mean the same thing — quotient admission
 /// cannot proceed — so both fold into `InvalidQuot { what: "Eq" }`.
+///
+/// The two shape checks below (`expected_eq_type`/`expected_refl_type`
+/// against the environment's actual `Eq`/`Eq.refl` types) use
+/// `Expr::alpha_eq`, not `Expr::structural_eq`: quot.cpp:33 and :42
+/// compare with `expected != info.get_type()`, and `operator!=(expr)`
+/// is `!is_equal(a, b)` = `!expr_eq_fn<false>()(a, b)`
+/// (kernel/expr_eq_fn.cpp:140-142, kernel/expr.h). `expr_eq_fn<false>`
+/// ignores binder name and `BinderInfo` on `Lam`/`Pi` nodes
+/// (expr_eq_fn.cpp:113-119) — a real Lean-produced `Eq` may spell its
+/// bound variables differently from the hard-coded names used to build
+/// `expected_eq_type`/`expected_refl_type` above (`"α"`/`"a"`) and must
+/// still be accepted. `Expr::structural_eq` is binder-name/info
+/// sensitive (it is `expr_eq_fn<true>`/`is_bi_equal`, used elsewhere for
+/// e.g. `ConstantInfo`'s derived-`BEq` mirror), so using it here would
+/// reject correctly-shaped `Eq` declarations whose binder names differ
+/// from ours — see `Expr::alpha_eq`'s doc comment in `expr.rs` for the
+/// full oracle citation and the packed-data-word fast-reject soundness
+/// argument.
 fn check_eq_type(env: &Environment, g: &mut RecGuard) -> Result<(), KernelError> {
     const WHAT: &str = "Eq";
     let fail = || KernelError::InvalidQuot { what: WHAT };
@@ -108,7 +126,7 @@ fn check_eq_type(env: &Environment, g: &mut RecGuard) -> Result<(), KernelError>
         &arrow(Arc::clone(&alpha), arrow(Arc::clone(&alpha), prop)),
         g,
     )?;
-    if !Expr::structural_eq(&expected_eq_type, &eq_val.val.ty, g)? {
+    if !Expr::alpha_eq(&expected_eq_type, &eq_val.val.ty, g)? {
         return Err(fail());
     }
 
@@ -138,7 +156,7 @@ fn check_eq_type(env: &Environment, g: &mut RecGuard) -> Result<(), KernelError>
         &[Arc::clone(&alpha2), Arc::clone(&a2), Arc::clone(&a2)],
     );
     let expected_refl_type = lctx2.mk_pi(&[Arc::clone(&alpha2), Arc::clone(&a2)], &eq_app, g)?;
-    if !Expr::structural_eq(&expected_refl_type, &refl_val.val.ty, g)? {
+    if !Expr::alpha_eq(&expected_refl_type, &refl_val.val.ty, g)? {
         return Err(fail());
     }
     Ok(())

@@ -82,6 +82,103 @@ fn well_shaped_eq() -> Vec<ConstantInfo> {
     vec![eq_ind, refl]
 }
 
+/// Same shape as `well_shaped_eq`, but every binder is spelled and
+/// annotated differently from `check_eq_type`'s hard-coded expectation
+/// (`"α"`/`"a"`, both `BinderInfo::Implicit`/`Default`): `Eq`'s Sort
+/// binder is named `"x"` (a real Lean-produced `Eq` need not match our
+/// literal choice of name), and `Eq.refl`'s value binder is named
+/// `"z"` AND given `BinderInfo::StrictImplicit` instead of `Default`
+/// (a binder-info difference, independent of the name difference).
+/// This mirrors a real-Lean-produced `Eq`/`Eq.refl` whose source names
+/// differ from ours — exactly the closure-replay failure this fix
+/// resolves (see `check_eq_type`'s doc comment in `quot.rs`). Regressed
+/// against `Expr::structural_eq`, `add_quot` would reject this env
+/// (`na != nb || ia != ib` at expr.rs); with `Expr::alpha_eq` it must
+/// be accepted.
+fn alpha_equivalent_eq() -> Vec<ConstantInfo> {
+    let mut g = RecGuard::new();
+    let u1 = nm("u_1");
+    let prop = Expr::sort(Arc::new(Level::Zero), &mut g).unwrap();
+
+    let mut lctx = LocalContext::default();
+    let mut gen = FVarIdGen::default();
+    let sort_u1 = Expr::sort(Arc::new(Level::Param(Arc::clone(&u1))), &mut g).unwrap();
+    // Renamed from "α" -> "x"; binder info unchanged here (the info
+    // difference below is on the *other* binder, so the two kinds of
+    // divergence are each exercised independently).
+    let alpha = lctx.mk_local_decl(&mut gen, &nm("x"), sort_u1, BinderInfo::Implicit);
+    let eq_ty = lctx
+        .mk_pi(
+            &[Arc::clone(&alpha)],
+            &arrow(
+                Arc::clone(&alpha),
+                arrow(Arc::clone(&alpha), Arc::clone(&prop)),
+            ),
+            &mut g,
+        )
+        .unwrap();
+    let eq_ind = ConstantInfo::Induct(InductiveVal {
+        val: cval(nm("Eq"), vec![Arc::clone(&u1)], eq_ty),
+        num_params: Nat::from(2u64),
+        num_indices: Nat::from(1u64),
+        all: vec![nm("Eq")],
+        ctors: vec![nm2("Eq", "refl")],
+        num_nested: Nat::from(0u64),
+        is_rec: false,
+        is_unsafe: false,
+        is_reflexive: false,
+    });
+
+    let mut lctx2 = LocalContext::default();
+    let mut gen2 = FVarIdGen::default();
+    let sort_u1_2 = Expr::sort(Arc::new(Level::Param(Arc::clone(&u1))), &mut g).unwrap();
+    let alpha2 = lctx2.mk_local_decl(&mut gen2, &nm("x"), sort_u1_2, BinderInfo::Implicit);
+    // Renamed from "a" -> "z", AND `BinderInfo::StrictImplicit` instead
+    // of the expected `Default`.
+    let a2 = lctx2.mk_local_decl(
+        &mut gen2,
+        &nm("z"),
+        Arc::clone(&alpha2),
+        BinderInfo::StrictImplicit,
+    );
+    let eq_const = Expr::const_(
+        nm("Eq"),
+        vec![Arc::new(Level::Param(Arc::clone(&u1)))],
+        &mut g,
+    )
+    .unwrap();
+    let eq_app = Expr::mk_app_spine(
+        eq_const,
+        &[Arc::clone(&alpha2), Arc::clone(&a2), Arc::clone(&a2)],
+    );
+    let refl_ty = lctx2
+        .mk_pi(&[Arc::clone(&alpha2), Arc::clone(&a2)], &eq_app, &mut g)
+        .unwrap();
+    let refl = ConstantInfo::Ctor(ConstructorVal {
+        val: cval(nm2("Eq", "refl"), vec![u1], refl_ty),
+        induct: nm("Eq"),
+        cidx: Nat::from(0u64),
+        num_params: Nat::from(2u64),
+        num_fields: Nat::from(0u64),
+        is_unsafe: false,
+    });
+
+    vec![eq_ind, refl]
+}
+
+#[test]
+fn add_quot_accepts_alpha_equivalent_eq_shape() {
+    // RED without the fix: `Expr::structural_eq`'s `na != nb || ia !=
+    // ib` guard (expr.rs, Lam/ForallE arm) would reject this env since
+    // both an `Eq` binder name AND an `Eq.refl` binder's `BinderInfo`
+    // differ from `check_eq_type`'s hard-coded expectation. GREEN with
+    // the fix: `check_eq_type` uses `Expr::alpha_eq`, which is
+    // insensitive to both, so `add_quot` succeeds.
+    let mut env = Environment::from_modules(vec![alpha_equivalent_eq()]).unwrap();
+    add_quot(&mut env).unwrap();
+    assert!(env.quot_initialized());
+}
+
 #[test]
 fn add_quot_without_eq_fails() {
     let mut env = Environment::default();

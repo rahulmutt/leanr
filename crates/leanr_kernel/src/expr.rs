@@ -750,10 +750,52 @@ impl Expr {
     /// compared structurally (including its `KVMap`, per
     /// `DataValue::OfSyntax`'s documented ptr-eq rule below) because the
     /// oracle's own equality does not skip metadata.
+    ///
+    /// This is `expr_eq_fn<true>` (`is_bi_equal`, kernel/expr_eq_fn.cpp:
+    /// 141) — binder names AND `BinderInfo` are compared. See
+    /// `alpha_eq` below for the `expr_eq_fn<false>` (`is_equal`) variant
+    /// used by `operator!=`.
     pub fn structural_eq(
         a: &Arc<Expr>,
         b: &Arc<Expr>,
         g: &mut RecGuard,
+    ) -> Result<bool, KernelError> {
+        Self::eq_impl(a, b, g, true)
+    }
+
+    /// oracle: `expr_eq_fn<false>` (kernel/expr_eq_fn.cpp:22-131),
+    /// exposed as `is_equal`/`operator!=` (expr_eq_fn.cpp:140-142,
+    /// `bool operator!=(expr const & a, expr const & b) { return
+    /// !is_equal(a, b); }` in kernel/expr.h). Identical to
+    /// `structural_eq` except binder names and `BinderInfo` are ignored
+    /// for `Lam`/`ForallE` (expr_eq_fn.cpp:113-119: `(!CompareBinderInfo
+    /// || binding_name(a) == binding_name(b)) && (!CompareBinderInfo ||
+    /// binding_info(a) == binding_info(b))`) and the declaration name is
+    /// ignored for `LetE` (expr_eq_fn.cpp:126-129, same
+    /// `!CompareBinderInfo ||` guard on `let_name`).
+    ///
+    /// Sharing `structural_eq`'s data-word fast-reject (below) is sound:
+    /// `ExprData`'s packed hash/depth/flags/loose-bvar-range are built by
+    /// `combine_binder`/`combine_app`/`combine_let` (above) purely from
+    /// the *children's* already-computed `ExprData` words — binder names
+    /// and `BinderInfo` are never folded into the packed word at the
+    /// binder's own node (verified by reading every `ExprData::pack`
+    /// call site above before writing this fn: none takes a name or
+    /// `BinderInfo` as input). So two trees that are alpha-equal (equal
+    /// up to binder name/info) always carry equal packed data words,
+    /// exactly as the oracle's own `hash(a) != hash(b)` fast-reject
+    /// relies on `Expr::hash` excluding binder names/info
+    /// (Lean/Expr.lean:486-503's `mkDataForBinder`/`mkDataForLet` fold
+    /// only the child hashes, never the name).
+    pub fn alpha_eq(a: &Arc<Expr>, b: &Arc<Expr>, g: &mut RecGuard) -> Result<bool, KernelError> {
+        Self::eq_impl(a, b, g, false)
+    }
+
+    fn eq_impl(
+        a: &Arc<Expr>,
+        b: &Arc<Expr>,
+        g: &mut RecGuard,
+        compare_binders: bool,
     ) -> Result<bool, KernelError> {
         if Arc::ptr_eq(a, b) {
             return Ok(true);
@@ -796,7 +838,8 @@ impl Expr {
                     Arc::clone(ab),
                 );
                 g.enter(|g| {
-                    Ok(Expr::structural_eq(&fa, &fb, g)? && Expr::structural_eq(&aa, &ab, g)?)
+                    Ok(Expr::eq_impl(&fa, &fb, g, compare_binders)?
+                        && Expr::eq_impl(&aa, &ab, g, compare_binders)?)
                 })
             }
             (
@@ -827,7 +870,10 @@ impl Expr {
                     binder_info: ib,
                 },
             ) => {
-                if na != nb || ia != ib {
+                // expr_eq_fn.cpp:113-119: binder name/info are only
+                // compared under `CompareBinderInfo` (i.e. `structural_eq`,
+                // `compare_binders == true`); `alpha_eq` skips both.
+                if compare_binders && (na != nb || ia != ib) {
                     return Ok(false);
                 }
                 let (ta, ba, tb, bb) = (
@@ -837,7 +883,8 @@ impl Expr {
                     Arc::clone(bb),
                 );
                 g.enter(|g| {
-                    Ok(Expr::structural_eq(&ta, &tb, g)? && Expr::structural_eq(&ba, &bb, g)?)
+                    Ok(Expr::eq_impl(&ta, &tb, g, compare_binders)?
+                        && Expr::eq_impl(&ba, &bb, g, compare_binders)?)
                 })
             }
             (
@@ -856,7 +903,10 @@ impl Expr {
                     non_dep: db,
                 },
             ) => {
-                if na != nb || da != db {
+                // expr_eq_fn.cpp:126-129: `let_name` is likewise only
+                // compared under `CompareBinderInfo`; `non_dep`
+                // (`let_nondep`) is always compared.
+                if da != db || (compare_binders && na != nb) {
                     return Ok(false);
                 }
                 let (ta, va, ba, tb, vb, bb) = (
@@ -868,9 +918,9 @@ impl Expr {
                     Arc::clone(bb),
                 );
                 g.enter(|g| {
-                    Ok(Expr::structural_eq(&ta, &tb, g)?
-                        && Expr::structural_eq(&va, &vb, g)?
-                        && Expr::structural_eq(&ba, &bb, g)?)
+                    Ok(Expr::eq_impl(&ta, &tb, g, compare_binders)?
+                        && Expr::eq_impl(&va, &vb, g, compare_binders)?
+                        && Expr::eq_impl(&ba, &bb, g, compare_binders)?)
                 })
             }
             (ExprNode::Lit(la), ExprNode::Lit(lb)) => Ok(la == lb),
@@ -879,7 +929,7 @@ impl Expr {
                     return Ok(false);
                 }
                 let (ea, eb) = (Arc::clone(ea), Arc::clone(eb));
-                g.enter(|g| Expr::structural_eq(&ea, &eb, g))
+                g.enter(|g| Expr::eq_impl(&ea, &eb, g, compare_binders))
             }
             (
                 ExprNode::Proj {
@@ -893,11 +943,13 @@ impl Expr {
                     structure: sb,
                 },
             ) => {
+                // Proj has no binder; `type_name`/`idx` are always
+                // compared regardless of `compare_binders`.
                 if na != nb || ia != ib {
                     return Ok(false);
                 }
                 let (sa, sb) = (Arc::clone(sa), Arc::clone(sb));
-                g.enter(|g| Expr::structural_eq(&sa, &sb, g))
+                g.enter(|g| Expr::eq_impl(&sa, &sb, g, compare_binders))
             }
             _ => Ok(false),
         }
@@ -1113,6 +1165,55 @@ mod m1b_tests {
         assert!(!Arc::ptr_eq(&a, &b));
         assert!(Expr::structural_eq(&a, &b, &mut g).unwrap());
         assert_eq!(a.data().hash(), b.data().hash());
+    }
+
+    #[test]
+    fn alpha_eq_true_for_name_and_info_differing_binders() {
+        // `Π (x : Nat), #0` vs `Π (y : Nat), #0` with `BinderInfo`
+        // additionally flipped (Default vs Implicit): `structural_eq`
+        // (expr_eq_fn<true>/is_bi_equal) must reject on both counts,
+        // but `alpha_eq` (expr_eq_fn<false>/is_equal, quot.cpp:33/42's
+        // `operator!=`) must accept — binder name and info are exactly
+        // what it's insensitive to (expr_eq_fn.cpp:113-119).
+        let mut g = RecGuard::new();
+        let n = Expr::const_(nm("Nat"), vec![], &mut g).unwrap();
+        let a = Expr::forall_e(
+            nm("x"),
+            Arc::clone(&n),
+            Expr::bvar(Nat::from(0u64)),
+            BinderInfo::Default,
+        );
+        let b = Expr::forall_e(
+            nm("y"),
+            Arc::clone(&n),
+            Expr::bvar(Nat::from(0u64)),
+            BinderInfo::Implicit,
+        );
+        assert!(!Expr::structural_eq(&a, &b, &mut g).unwrap());
+        assert!(Expr::alpha_eq(&a, &b, &mut g).unwrap());
+    }
+
+    #[test]
+    fn alpha_eq_false_for_genuine_structural_difference() {
+        // Same binder name/info on both sides, but the bodies differ
+        // (`#0` vs a literal): a real structural difference, which
+        // `alpha_eq` must still catch (it only ignores binder name/
+        // info, nothing else).
+        let mut g = RecGuard::new();
+        let n = Expr::const_(nm("Nat"), vec![], &mut g).unwrap();
+        let a = Expr::forall_e(
+            nm("x"),
+            Arc::clone(&n),
+            Expr::bvar(Nat::from(0u64)),
+            BinderInfo::Default,
+        );
+        let b = Expr::forall_e(
+            nm("x"),
+            Arc::clone(&n),
+            Expr::lit(Literal::NatVal(Nat::from(0u64))),
+            BinderInfo::Default,
+        );
+        assert!(!Expr::alpha_eq(&a, &b, &mut g).unwrap());
     }
 
     #[test]
