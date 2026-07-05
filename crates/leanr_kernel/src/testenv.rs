@@ -6,9 +6,9 @@
 //! nothing in this file needs its own `#[cfg(test)]`.
 
 use crate::{
-    AxiomVal, BinderInfo, ConstantInfo, ConstantVal, ConstructorVal, DefinitionSafety,
-    DefinitionVal, Environment, Expr, InductiveVal, Level, Name, Nat, OpaqueVal, QuotKind, QuotVal,
-    RecGuard, RecursorRule, RecursorVal, ReducibilityHints,
+    AxiomVal, BinderInfo, ConstantInfo, ConstantVal, ConstructorVal, Declaration, DefinitionSafety,
+    DefinitionVal, Environment, Expr, InductiveVal, Level, Name, Nat, OpaqueVal, RecGuard,
+    RecursorRule, RecursorVal, ReducibilityHints,
 };
 use std::sync::Arc;
 
@@ -309,21 +309,30 @@ pub mod mini {
     // these from the real inductive machinery).
 
     fn eq_ty() -> Arc<Expr> {
-        // Π (α : Sort u_1), α → α → Prop
-        pi(
-            "α",
+        // Π {α : Sort u_1}, α → α → Prop — α IMPLICIT, per the real
+        // `#print Eq` transcript above (Task 7 mis-transcribed it as
+        // explicit; fixed in Task 11 so `add_quot`'s `check_eq_type`
+        // accepts this fixture). The two arrow binders carry the
+        // kernel's `mk_arrow` default name "a" (oracle expr.cpp:180-182,
+        // `g_default_name = "a"`), which `check_eq_type`'s structural
+        // comparison also pins.
+        Expr::forall_e(
+            nm("α"),
             sort_param("u_1"),
-            pi("_", bvar(0), pi("_", bvar(1), sort0())),
+            pi("a", bvar(0), pi("a", bvar(1), sort0())),
+            BinderInfo::Implicit,
         )
     }
 
     fn eq_refl_ty() -> Arc<Expr> {
-        // Π {α : Sort u_1} (a : α), @Eq.{u_1} α a a
+        // Π {α : Sort u_1} (a : α), @Eq.{u_1} α a a — α IMPLICIT (same
+        // Task 11 fix as `eq_ty`).
         let eq = cstn(nm("Eq"), vec![Arc::new(Level::Param(nm("u_1")))]);
-        pi(
-            "α",
+        Expr::forall_e(
+            nm("α"),
             sort_param("u_1"),
             pi("a", bvar(0), appn(eq, vec![bvar(1), bvar(0), bvar(0)])),
+            BinderInfo::Implicit,
         )
     }
 
@@ -593,25 +602,6 @@ pub mod mini {
         ]
     }
 
-    // ---- Quotient constants -----------------------------------------
-
-    fn quot_decls() -> Vec<ConstantInfo> {
-        // Minimal QuotVals: reduction consults only the head names and the
-        // env's `quot_initialized` gate, never these types.
-        let q = |name: Arc<Name>, kind: QuotKind, lparams: Vec<Arc<Name>>| {
-            ConstantInfo::Quot(QuotVal {
-                val: cvaln(name, lparams, type1()),
-                kind,
-            })
-        };
-        vec![
-            q(nm("Quot"), QuotKind::Type, vec![nm("u")]),
-            q(nm2("Quot", "mk"), QuotKind::Ctor, vec![nm("u")]),
-            q(nm2("Quot", "lift"), QuotKind::Lift, vec![nm("u"), nm("v")]),
-            q(nm2("Quot", "ind"), QuotKind::Ind, vec![nm("u")]),
-        ]
-    }
-
     fn special_decls() -> Vec<ConstantInfo> {
         let mut v = Vec::new();
         v.extend(nat_decls());
@@ -620,7 +610,6 @@ pub mod mini {
         v.extend(prod_decls());
         v.extend(unit_decls());
         v.extend(string_decls());
-        v.extend(quot_decls());
         v
     }
 
@@ -676,17 +665,12 @@ pub mod mini {
         ];
         module.extend(special_decls());
         let mut env = Environment::from_modules(vec![module]).unwrap();
-        // The `Eq` above is intentionally simplified for iota-reduction
-        // testing (`BinderInfo::Default` on `α`, not the `Implicit`
-        // real quotient admission requires — see `eq_ty`'s doc comment
-        // above), so it does not satisfy `add_quot`'s `check_eq_type`.
-        // Set the flag directly (`pub(crate)`, same crate) so the
-        // Task 6/7 `Quot.lift`/`Quot.ind` iota-reduction tests
-        // (`tc/tests.rs`) keep working unchanged now that
-        // `quot_initialized()` reads a real flag (Task 11) instead of
-        // the old name-presence proxy. `add_quot` itself (with a
-        // properly-shaped `Eq`) is exercised by `quot/tests.rs`.
-        env.set_quot_initialized();
+        // Quotient constants come from the REAL admission path (Task
+        // 11): `Declaration::Quot` → `quot::add_quot`, which runs
+        // `check_eq_type` against the `Eq` transcription above (this is
+        // why `eq_ty`/`eq_refl_ty` carry the faithful implicit-α shape)
+        // and is the only code that sets `quot_initialized`.
+        env.add_decl(Declaration::Quot).unwrap();
         env
     }
 }

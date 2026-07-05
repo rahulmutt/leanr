@@ -286,9 +286,18 @@ impl Environment {
     }
 
     /// oracle: `environment::mark_quot_initialized` (quot.cpp:78,
-    /// `new_env.mark_quot_initialized()`). `pub(crate)`: only
-    /// `quot::add_quot` sets this, right after admitting the four
-    /// quotient constants.
+    /// `new_env.mark_quot_initialized()`).
+    ///
+    /// INVARIANT: `quot::add_quot` is the ONLY caller — the flag is set
+    /// exactly once, after `check_eq_type` passes and the four quotient
+    /// constants are admitted. Do not call this from anywhere else,
+    /// tests included (the shared test fixture goes through
+    /// `add_decl(Declaration::Quot)`, i.e. the real admission path).
+    /// It cannot be `fn` (private): `quot.rs` is a sibling module, so
+    /// `pub(crate)` is the tightest visibility Rust offers here — the
+    /// single-caller invariant is enforced by this comment plus review,
+    /// mirroring the oracle where `mark_quot_initialized` is private to
+    /// `environment` and `add_quot` is its sole caller.
     pub(crate) fn set_quot_initialized(&mut self) {
         self.quot_initialized = true;
     }

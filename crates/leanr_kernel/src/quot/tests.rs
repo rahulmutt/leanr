@@ -4,14 +4,11 @@
 //! quot-specific).
 //!
 //! NOTE: these tests build their own tiny environments rather than
-//! reusing `crate::testenv::mini::env()` — that fixture's `Eq` (Task 7,
-//! `testenv.rs`) is intentionally simplified for iota-reduction testing
-//! and uses `BinderInfo::Default` for `α`, not the `Implicit` the real
-//! `check_eq_type` (quot.cpp:19-45) requires, so it does not satisfy
-//! `add_quot`'s admission check. `testenv::mini::env()` instead calls
-//! `Environment::set_quot_initialized()` directly (bypassing `add_quot`)
-//! to keep its own quotient-reduction tests (Task 6/7, `tc/tests.rs`)
-//! working unchanged now that `quot_initialized()` reads a real flag.
+//! reusing `crate::testenv::mini::env()` — that fixture already runs
+//! `add_decl(Declaration::Quot)` (i.e. `add_quot`) itself, so a
+//! pre-initialized env would mask exactly what these tests must
+//! observe: the uninitialized-before / initialized-after transition
+//! and the failure paths of `check_eq_type`.
 
 use super::*;
 use crate::{ConstructorVal, InductiveVal, Nat, TypeChecker};
