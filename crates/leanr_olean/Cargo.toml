@@ -11,3 +11,4 @@ leanr_kernel = { path = "../leanr_kernel" }
 
 [dev-dependencies]
 proptest = "1"
+serde_json = "1"

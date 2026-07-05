@@ -2,10 +2,11 @@
 //! kernel (Task 12). This is where decoded modules meet the checker.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use leanr_kernel::{ConstantInfo, Environment, Name};
+use leanr_kernel::{ConstantInfo, Declaration, Environment, Name};
 use leanr_olean::{load_closure, ModuleData, PartKind, SearchPath};
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -185,6 +186,156 @@ fn fixture_modules_replay_clean_with_closure() {
     let stats = leanr_kernel::replay(&mut env, constants)
         .unwrap_or_else(|e| panic!("closure failed to replay: {e}"));
     assert!(stats.checked > 0, "checked nothing");
+}
+
+// ---------------------------------------------------------------------------
+// M1b Task 15: mutation-differential harness vs the oracle kernel.
+//
+// `tests/fixtures/mutate.lean` (run via `mise run fixtures:mutations`)
+// generates, from a target module, a set of structurally mutated defs/theorems,
+// records the REAL Lean kernel's per-mutant accept/reject verdict
+// (`Environment.addDeclCore … doCheck := true`, the `lean_add_decl` extern),
+// and writes them into a single-region `.olean` plus a `…-verdicts.jsonl`.
+// These tests decode that `.olean` and, for each verdict line, replay JUST that
+// mutant against the (trusted) import base through leanr's `Environment::add_decl`
+// and assert leanr's verdict matches the oracle's, name by name. Any mismatch is
+// a REAL FINDING (a kernel-port bug), not something to paper over.
+// ---------------------------------------------------------------------------
+
+/// A committed mutant is always a def or theorem (the harness only mutates
+/// those); turn its decoded `ConstantInfo` back into the `Declaration` the
+/// oracle handed to `addDeclCore`.
+fn mutant_to_declaration(ci: &ConstantInfo) -> Declaration {
+    match ci {
+        ConstantInfo::Defn(v) => Declaration::Defn(v.clone()),
+        ConstantInfo::Thm(v) => Declaration::Thm(v.clone()),
+        other => panic!("mutant {} is {}, not a def/thm", other.name(), other.kind()),
+    }
+}
+
+/// Parse a `…-verdicts.jsonl`: skip the header object (no `"name"` field),
+/// return `(mutant name, oracle verdict)` for every mutant line.
+fn parse_verdicts(text: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(line).unwrap_or_else(|e| panic!("bad jsonl line {line:?}: {e}"));
+        if let (Some(n), Some(verd)) = (v.get("name"), v.get("verdict")) {
+            out.push((
+                n.as_str().expect("name is a string").to_string(),
+                verd.as_str().expect("verdict is a string").to_string(),
+            ));
+        }
+        // otherwise it's the header line — skip.
+    }
+    out
+}
+
+/// The differential core: build a trusted base env from `base` (the mutated
+/// module's import closure — imported, not re-checked, exactly like the
+/// oracle's `kenv`), then for each verdict line clone the base, admit ONLY that
+/// mutant through leanr's checking `add_decl`, and require leanr's accept/reject
+/// to equal the oracle's. Also enforces the harness invariant of >= 5 accepts
+/// and >= 5 rejects.
+fn assert_verdicts_match(base: Vec<ConstantInfo>, mutants: Vec<ConstantInfo>, text: &str) {
+    let verdicts = parse_verdicts(text);
+    assert!(!verdicts.is_empty(), "no mutant verdict lines in jsonl");
+
+    let base_env = Environment::from_modules([base]).expect("base env builds from import closure");
+    let by_name: HashMap<String, &ConstantInfo> =
+        mutants.iter().map(|c| (c.name().to_string(), c)).collect();
+
+    let mut accepts = 0usize;
+    let mut rejects = 0usize;
+    let mut disagreements: Vec<String> = Vec::new();
+    for (name, oracle) in &verdicts {
+        let ci = by_name
+            .get(name)
+            .unwrap_or_else(|| panic!("mutant {name} is in the jsonl but missing from the olean"));
+        let decl = mutant_to_declaration(ci);
+        let mut env = base_env.clone();
+        let leanr = match env.add_decl(decl) {
+            Ok(()) => "accept",
+            Err(_) => "reject",
+        };
+        match oracle.as_str() {
+            "accept" => accepts += 1,
+            "reject" => rejects += 1,
+            other => panic!("mutant {name}: unknown oracle verdict {other:?}"),
+        }
+        if leanr != oracle {
+            disagreements.push(format!("  {name}: leanr={leanr} oracle={oracle}"));
+        }
+    }
+
+    assert!(
+        disagreements.is_empty(),
+        "leanr disagreed with the oracle kernel on {} mutant(s):\n{}",
+        disagreements.len(),
+        disagreements.join("\n")
+    );
+    assert!(accepts >= 5, "harness needs >= 5 accepts, got {accepts}");
+    assert!(rejects >= 5, "harness needs >= 5 rejects, got {rejects}");
+}
+
+/// Hermetic (runs in CI): mutate the import-free `MutBase` module and check
+/// leanr agrees with the oracle on every mutant. No toolchain needed at test
+/// time — `MutBase.olean` (base), `Mutations0.olean` (mutants) and
+/// `mutations0-verdicts.jsonl` (oracle verdicts) are the entire input.
+#[test]
+fn mutation_verdicts_hermetic() {
+    let base_bytes = std::fs::read(fixture_path("MutBase.olean"))
+        .expect("MutBase.olean missing — run `mise run fixtures:mutations`");
+    let mut_bytes = std::fs::read(fixture_path("Mutations0.olean"))
+        .expect("Mutations0.olean missing — run `mise run fixtures:mutations`");
+    let text = std::fs::read_to_string(fixture_path("mutations0-verdicts.jsonl"))
+        .expect("mutations0-verdicts.jsonl missing — run `mise run fixtures:mutations`");
+
+    let base = ModuleData::parse(&base_bytes)
+        .expect("MutBase decodes")
+        .constants;
+    let mutants = ModuleData::parse(&mut_bytes)
+        .expect("Mutations0 decodes")
+        .constants;
+    assert_verdicts_match(base, mutants, &text);
+}
+
+/// Toolchain-dependent (local, like the M1a sweep): mutate `Init.Core` and
+/// check leanr agrees with the oracle. The base is `Init.Core`'s whole import
+/// closure, loaded as trusted context from the pinned toolchain lib dir (never
+/// re-checked — so the Task-16 deep-recursion blocker, which only bites when a
+/// deep definition is *type-checked*, is not exercised here; only the shallow
+/// renamed mutants are checked). Skipped when `LEANR_SWEEP_DIR` is unset (CI);
+/// run locally with `LEANR_SWEEP_DIR=$(lean --print-libdir)`.
+#[test]
+#[ignore = "needs the pinned toolchain (LEANR_SWEEP_DIR); the hermetic variant is the CI acceptance"]
+fn mutation_verdicts_toolchain() {
+    let dir = std::env::var("LEANR_SWEEP_DIR")
+        .expect("LEANR_SWEEP_DIR must point at the toolchain lib/lean dir");
+    let mut_bytes = std::fs::read(fixture_path("Mutations.olean"))
+        .expect("Mutations.olean missing — run `mise run fixtures:mutations`");
+    let text = std::fs::read_to_string(fixture_path("mutations-verdicts.jsonl"))
+        .expect("mutations-verdicts.jsonl missing — run `mise run fixtures:mutations`");
+
+    let sp = SearchPath::new(vec![PathBuf::from(&dir)]);
+    let modules = load_closure(&sp, &[name("Init.Core")]).expect("Init.Core closure loads");
+    let mut base: Vec<ConstantInfo> = Vec::new();
+    let mut seen: HashSet<Arc<Name>> = HashSet::new();
+    for (_, md) in modules {
+        for c in md.constants {
+            if seen.insert(Arc::clone(c.name())) {
+                base.push(c);
+            }
+        }
+    }
+    let mutants = ModuleData::parse(&mut_bytes)
+        .expect("Mutations decodes")
+        .constants;
+    assert_verdicts_match(base, mutants, &text);
 }
 
 /// Build a dotted module name, e.g. `Init.Data.Nat`.

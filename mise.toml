@@ -75,3 +75,18 @@ run = [
   "sh -c 'lean --run tests/fixtures/dump_decls.lean tests/fixtures/SampleRich.olean > tests/fixtures/SampleRich.decls.txt'",
   "sh -c 'lean --githash > tests/fixtures/oracle-githash.txt'",
 ]
+
+[tasks."fixtures:mutations"]
+description = "Regenerate the mutation-differential fixtures (requires the pinned toolchain)"
+depends = ["elan:bootstrap"]
+run = [
+  # Hermetic base: an import-free `prelude` module whose whole constant set
+  # replays from an empty kernel env (no toolchain needed at test time).
+  "lean tests/fixtures/MutBase.lean -o tests/fixtures/MutBase.olean",
+  # Hermetic mutation set (committed, CI-green): mutate `MutBase`, emit
+  # `Mutations0.olean` + `mutations0-verdicts.jsonl`.
+  "sh -c 'lean --run tests/fixtures/mutate.lean MutBase tests/fixtures/Mutations0.olean > tests/fixtures/mutations0-verdicts.jsonl'",
+  # Toolchain-dependent mutation set (committed; diff test is #[ignore]d):
+  # mutate `Init.Core`, emit `Mutations.olean` + `mutations-verdicts.jsonl`.
+  "sh -c 'lean --run tests/fixtures/mutate.lean Init.Core tests/fixtures/Mutations.olean > tests/fixtures/mutations-verdicts.jsonl'",
+]
