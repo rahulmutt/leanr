@@ -27,7 +27,7 @@ pub use decl::{
 };
 pub use env::{Environment, EnvironmentError};
 pub use error::KernelError;
-pub use expr::{BinderInfo, DataValue, Expr, KVMap, Literal};
+pub use expr::{BinderInfo, DataValue, Expr, ExprData, ExprNode, KVMap, Literal};
 pub use guard::{RecGuard, MAX_REC_DEPTH};
 pub use level::Level;
 pub use name::Name;

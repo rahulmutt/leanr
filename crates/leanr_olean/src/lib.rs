@@ -136,6 +136,13 @@ pub enum OleanError {
     /// count, scalar where an object belongs, ...).
     #[error("olean module data malformed: expected {expected}")]
     BadShape { expected: &'static str },
+    /// Building an `Expr::sort`/`Expr::const_` node hit
+    /// `leanr_kernel::RecGuard`'s recursion depth cap while hashing an
+    /// attacker-depth `Level` (M1b `ExprData`). Legitimate files never
+    /// approach this; only a crafted file with extreme universe-level
+    /// nesting can trigger it — incompleteness, never unsoundness.
+    #[error("olean module data malformed: expression exceeds maximum recursion depth")]
+    DeepRecursion,
 }
 
 impl OleanHeader {

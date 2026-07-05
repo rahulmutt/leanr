@@ -15,8 +15,8 @@ use std::sync::Arc;
 use leanr_kernel::{
     AxiomVal, BinderInfo, ConstantInfo, ConstantVal, ConstructorVal, DataValue, DefinitionSafety,
     DefinitionVal, Expr, InductiveVal, Int, KVMap, Level, Literal, Name, Nat, OpaqueVal,
-    Preresolved, QuotKind, QuotVal, RecursorRule, RecursorVal, ReducibilityHints, SourceInfo,
-    Substring, Syntax, TheoremVal,
+    Preresolved, QuotKind, QuotVal, RecGuard, RecursorRule, RecursorVal, ReducibilityHints,
+    SourceInfo, Substring, Syntax, TheoremVal,
 };
 use num_bigint::{BigInt, BigUint};
 
@@ -157,6 +157,12 @@ pub(crate) struct Interp {
     anonymous: Arc<Name>,
     zero: Arc<Level>,
     missing: Arc<Syntax>,
+    /// `Expr::sort`/`Expr::const_` (M1b `ExprData`) hash the `Level`
+    /// they're given, which needs a `RecGuard` (levels can be
+    /// attacker-deep); reused across the whole decode since the guard's
+    /// depth always returns to 0 between calls (`RecGuard::enter` is
+    /// balanced).
+    guard: RecGuard,
 }
 
 impl Interp {
@@ -169,6 +175,7 @@ impl Interp {
             anonymous: Arc::new(Name::Anonymous),
             zero: Arc::new(Level::Zero),
             missing: Arc::new(Syntax::Missing),
+            guard: RecGuard::new(),
         }
     }
 
@@ -348,32 +355,31 @@ impl Interp {
         else {
             unreachable!()
         };
-        // Scalar area: computed `data` u64 first (ignored; recomputed
-        // in M1b), then u8 flags (kernel/expr.h:265 proves the order).
-        let expr = match tag {
-            0 => Expr::BVar {
-                idx: nat(&fields[0])?,
-            },
-            1 => Expr::FVar {
-                id: self.name(&fields[0])?,
-            },
-            2 => Expr::MVar {
-                id: self.name(&fields[0])?,
-            },
-            3 => Expr::Sort {
-                level: self.level(&fields[0])?,
-            },
-            4 => Expr::Const {
-                name: self.name(&fields[0])?,
-                levels: list(&fields[1])?
+        // Scalar area: computed `data` u64 first (ignored; the M1b smart
+        // constructors below recompute an equivalent `ExprData`), then
+        // u8 flags (kernel/expr.h:265 proves the order).
+        let expr: Arc<Expr> = match tag {
+            0 => Expr::bvar(nat(&fields[0])?),
+            1 => Expr::fvar(self.name(&fields[0])?),
+            2 => Expr::mvar(self.name(&fields[0])?),
+            3 => {
+                let level = self.level(&fields[0])?;
+                Expr::sort(level, &mut self.guard).map_err(|_| OleanError::DeepRecursion)?
+            }
+            4 => {
+                let name = self.name(&fields[0])?;
+                let levels = list(&fields[1])?
                     .into_iter()
                     .map(|l| self.level(l))
-                    .collect::<Result<_, _>>()?,
-            },
-            5 => Expr::App {
-                f: self.sub_expr(&fields[0])?,
-                arg: self.sub_expr(&fields[1])?,
-            },
+                    .collect::<Result<_, _>>()?;
+                Expr::const_(name, levels, &mut self.guard)
+                    .map_err(|_| OleanError::DeepRecursion)?
+            }
+            5 => {
+                let f = self.sub_expr(&fields[0])?;
+                let arg = self.sub_expr(&fields[1])?;
+                Expr::app(f, arg)
+            }
             6 | 7 => {
                 let binder_info = match scalars.get(8).copied() {
                     Some(0) => BinderInfo::Default,
@@ -382,47 +388,38 @@ impl Interp {
                     Some(3) => BinderInfo::InstImplicit,
                     _ => return Err(bad("BinderInfo")),
                 };
-                let (binder_name, binder_type, body) = (
-                    self.name(&fields[0])?,
-                    self.sub_expr(&fields[1])?,
-                    self.sub_expr(&fields[2])?,
-                );
+                let binder_name = self.name(&fields[0])?;
+                let binder_type = self.sub_expr(&fields[1])?;
+                let body = self.sub_expr(&fields[2])?;
                 if *tag == 6 {
-                    Expr::Lam {
-                        binder_name,
-                        binder_type,
-                        body,
-                        binder_info,
-                    }
+                    Expr::lam(binder_name, binder_type, body, binder_info)
                 } else {
-                    Expr::ForallE {
-                        binder_name,
-                        binder_type,
-                        body,
-                        binder_info,
-                    }
+                    Expr::forall_e(binder_name, binder_type, body, binder_info)
                 }
             }
-            8 => Expr::LetE {
-                decl_name: self.name(&fields[0])?,
-                ty: self.sub_expr(&fields[1])?,
-                value: self.sub_expr(&fields[2])?,
-                body: self.sub_expr(&fields[3])?,
-                non_dep: boolean(scalars.get(8), "letE nondep")?,
-            },
-            9 => Expr::Lit(self.literal(&fields[0])?),
-            10 => Expr::MData {
-                data: self.kvmap(&fields[0])?,
-                expr: self.sub_expr(&fields[1])?,
-            },
-            11 => Expr::Proj {
-                type_name: self.name(&fields[0])?,
-                idx: nat(&fields[1])?,
-                structure: self.sub_expr(&fields[2])?,
-            },
+            8 => {
+                let decl_name = self.name(&fields[0])?;
+                let ty = self.sub_expr(&fields[1])?;
+                let value = self.sub_expr(&fields[2])?;
+                let body = self.sub_expr(&fields[3])?;
+                let non_dep = boolean(scalars.get(8), "letE nondep")?;
+                Expr::let_e(decl_name, ty, value, body, non_dep)
+            }
+            9 => Expr::lit(self.literal(&fields[0])?),
+            10 => {
+                let data = self.kvmap(&fields[0])?;
+                let sub = self.sub_expr(&fields[1])?;
+                Expr::mdata(data, sub)
+            }
+            11 => {
+                let type_name = self.name(&fields[0])?;
+                let idx = nat(&fields[1])?;
+                let structure = self.sub_expr(&fields[2])?;
+                Expr::proj(type_name, idx, structure)
+            }
             _ => unreachable!("tag checked in Visit"),
         };
-        Ok(Arc::new(expr))
+        Ok(expr)
     }
 
     fn literal(&mut self, r: &Raw) -> Result<Literal, OleanError> {

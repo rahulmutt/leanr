@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use leanr_kernel::{
-    AxiomVal, ConstantInfo, ConstantVal, Environment, EnvironmentError, Expr, Level, Name,
+    AxiomVal, ConstantInfo, ConstantVal, Environment, EnvironmentError, Expr, Level, Name, RecGuard,
 };
 
 fn name(s: &str) -> Arc<Name> {
@@ -16,9 +16,7 @@ fn axiom_named(s: &str) -> ConstantInfo {
         val: ConstantVal {
             name: name(s),
             level_params: Vec::new(),
-            ty: Arc::new(Expr::Sort {
-                level: Arc::new(Level::Zero),
-            }),
+            ty: Expr::sort(Arc::new(Level::Zero), &mut RecGuard::new()).unwrap(),
         },
         is_unsafe: false,
     })
