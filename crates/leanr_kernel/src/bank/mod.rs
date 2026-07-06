@@ -11,6 +11,7 @@ pub mod levels;
 pub mod names;
 pub mod pools;
 pub mod probe;
+pub mod scratch;
 pub mod terms;
 
 use std::num::NonZeroU32;
@@ -117,6 +118,12 @@ impl Store {
             spills: ValuePool::new(region),
             terms: terms::TermBank::new(region),
         }
+    }
+
+    /// Number of expr rows this store holds (own region only — used by
+    /// tests to check that scratch interning never mutates `base`).
+    pub fn terms_len(&self) -> usize {
+        self.terms.len()
     }
 
     /// Route an id to the store owning its region. `base` is `None`
