@@ -10,7 +10,7 @@
 //! via `stacker` beneath it. Everything else stays loops or explicit
 //! stacks, and the `Arc` tree types implement iterative `Drop`.
 
-mod bank;
+pub mod bank;
 mod decl;
 mod env;
 mod error;

@@ -4,10 +4,8 @@
 //! Phase 1: standalone next to the `Arc<Expr>` representation; nothing
 //! in the production kernel path uses this module yet. Every id type
 //! carries a region bit (persistent env bank vs per-declaration
-//! scratch); raw bits are never 0, so probe tables can use 0 as the
-//! empty sentinel.
-
-#![allow(dead_code)]
+//! scratch); the low 31 bits of the raw bits are never 0, so probe
+//! tables can use 0 as the empty sentinel.
 
 pub mod probe;
 
@@ -34,6 +32,12 @@ macro_rules! id_type {
                 NonZeroU32::new(bits).map($name)
             }
             pub fn from_bits(bits: u32) -> Option<$name> {
+                // Reject bits whose low 31 bits are all zero: `index()`
+                // subtracts 1 from them and would underflow (only the
+                // region bit may be set, e.g. plain 0 or `REGION_BIT`).
+                if bits & !REGION_BIT == 0 {
+                    return None;
+                }
                 NonZeroU32::new(bits).map($name)
             }
             pub fn bits(self) -> u32 {
@@ -83,5 +87,22 @@ mod tests {
     #[test]
     fn zero_bits_is_no_id() {
         assert_eq!(ExprId::from_bits(0), None);
+    }
+
+    #[test]
+    fn region_bit_alone_is_no_id() {
+        // REGION_BIT set but the low 31 bits are all zero: `index()` would
+        // underflow on this value, so `from_bits` must reject it just like
+        // it rejects 0.
+        assert_eq!(ExprId::from_bits(REGION_BIT), None);
+    }
+
+    #[test]
+    fn from_bits_round_trips_valid_bits() {
+        let p = ExprId::from_index(0, false).unwrap();
+        let s = ExprId::from_index(12345, true).unwrap();
+        assert_eq!(ExprId::from_bits(p.bits()).unwrap().index(), p.index());
+        assert_eq!(ExprId::from_bits(s.bits()).unwrap().index(), s.index());
+        assert!(ExprId::from_bits(s.bits()).unwrap().is_scratch());
     }
 }
