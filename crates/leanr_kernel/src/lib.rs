@@ -17,7 +17,6 @@ mod error;
 mod expr;
 mod guard;
 mod inductive;
-mod intern;
 mod level;
 mod local_ctx;
 mod name;
@@ -33,9 +32,12 @@ mod testenv;
 mod used_consts;
 
 pub use decl::{
-    constant_info_eq, AxiomVal, ConstantInfo, ConstantVal, ConstructorVal, Declaration,
-    DefinitionSafety, DefinitionVal, InductiveType, InductiveVal, OpaqueVal, QuotKind, QuotVal,
-    RecursorRule, RecursorVal, ReducibilityHints, TheoremVal,
+    arc_constant_info_eq, constant_info_eq, to_constant_info, ArcAxiomVal, ArcConstantInfo,
+    ArcConstantVal, ArcConstructorVal, ArcDeclaration, ArcDefinitionVal, ArcInductiveType,
+    ArcInductiveVal, ArcOpaqueVal, ArcQuotVal, ArcRecursorRule, ArcRecursorVal, ArcTheoremVal,
+    AxiomVal, ConstantInfo, ConstantVal, ConstructorVal, Declaration, DefinitionSafety,
+    DefinitionVal, InductiveType, InductiveVal, OpaqueVal, QuotKind, QuotVal, RecursorRule,
+    RecursorVal, ReducibilityHints, TheoremVal,
 };
 pub use env::{Environment, EnvironmentError};
 pub use error::KernelError;

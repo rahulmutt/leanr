@@ -13,7 +13,7 @@ use crate::KernelError;
 /// id passes through unchanged (no work, no base mutation); a scratch id
 /// is rebuilt via `to_name` (routes through `base` for any persistent
 /// segments of the chain) and re-interned into `base` alone. `pub` per
-/// the migration Task 6 brief — `bank::env::promote_constant_info` calls
+/// the migration Task 6 brief — `env::promote_constant_info` calls
 /// this directly on `ConstantInfo`'s (never-anonymous, see `decl.rs`'s
 /// module doc) declaration-position `NameId` fields, which is why the
 /// signature takes a plain `NameId` rather than the `Option<NameId>`

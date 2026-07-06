@@ -1,121 +1,38 @@
-//! Tests for inductive admission + recursor generation (Task 9).
-//!
-//! Each test hand-builds a `Declaration::Inductive`, admits it into a
-//! fresh environment via `add_decl`, and compares the RESULTING
-//! `ConstantInfo`s structurally against hand-transcribed oracle output
-//! (`#print` under leanprover/lean4:v4.32.0-rc1). Where the Task 7
-//! `testenv` already carries a matching transcription (Nat.rec's rule
-//! RHSs), we reuse it as the expected value.
+//! Unit tests for the id-native `inductive::add_inductive` (migration
+//! Task 8: ported from the pre-flip `crate::inductive::tests`, which
+//! hand-built a `Declaration::Inductive`, admitted it via the Arc
+//! `Environment::add_decl`, and compared the resulting `ConstantInfo`s
+//! against hand-transcribed oracle output — see that file's history,
+//! `git show 9b1c773:crates/leanr_kernel/src/inductive/tests.rs`). The
+//! Arc checker (old `env.rs`/`inductive.rs`) this migration deletes is
+//! gone, so every test below drives the id-native entry point directly
+//! (`inductive::add_inductive(scratch, view, ...)`, exactly the
+//! low-level call the pre-migration dual-harness file already used for
+//! its "id side") instead of going through `Environment::add_decl` —
+//! `add_decl` requires every id in its input already interned into the
+//! `Environment`'s own PRIVATE persistent store (see its doc comment),
+//! which is unreachable from outside `env.rs`; `add_inductive` has no
+//! such requirement; it takes a caller-supplied scratch `Store` plus an
+//! `EnvView` borrowing the real environment's store read-only, and folds
+//! its results into an `extra` overlay (the exact "not yet in a real
+//! `Environment`, but visible to this run's checker" pattern
+//! `inductive.rs`'s own nested-admission code uses internally — see its
+//! module doc point 3). Every expected value below is the SAME concrete
+//! value the pre-flip file pinned.
 
+use super::*;
+use crate::bank::NameId;
+use crate::decl::intern_constant_info;
+use crate::testenv::{mini, nm, nm2};
+use crate::{
+    ArcAxiomVal, ArcConstantInfo, ArcConstantVal, ArcDeclaration, ArcInductiveType, BinderInfo,
+    Environment, Expr, Level, Name, Nat, RecGuard,
+};
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::testenv::mini;
-use crate::testenv::{nm, nm2};
-use crate::{
-    AxiomVal, BinderInfo, ConstantInfo, ConstantVal, Declaration, Environment, Expr, ExprNode,
-    InductiveType, Level, Name, Nat, RecGuard,
-};
-
-// ---- expr helpers -------------------------------------------------------
-
-fn level_eq(a: &Arc<Level>, b: &Arc<Level>) -> bool {
-    Level::structural_eq(a, b, &mut RecGuard::new()).unwrap()
-}
-
-/// Structural (de-Bruijn) equality ignoring binder *names* and
-/// binder_info (small closed terms → bounded recursion; tests only).
-///
-/// Two cosmetic differences between the regenerated output and the Task
-/// 7 `testenv` transcriptions make a byte-exact term compare impossible,
-/// even though the regenerated terms are the ones that match REAL Lean
-/// (verified below via targeted assertions):
-///   - the transcriptions mark every binder `Default`, whereas the
-///     regenerated recursor *type* correctly marks the motive `Implicit`
-///     (ported `infer_implicit`);
-///   - the transcriptions name the induction-hypothesis binder `ih`,
-///     whereas the oracle (and this port) names it `<field>_ih`
-///     (`#print Nat.rec` shows `n_ih : motive n`).
-///
-/// Everything else — the de-Bruijn skeleton, every `Const`, level, and
-/// literal — must still match exactly.
-fn eq_structural(a: &Arc<Expr>, b: &Arc<Expr>) -> bool {
-    match (a.node(), b.node()) {
-        (ExprNode::BVar { idx: x }, ExprNode::BVar { idx: y }) => x == y,
-        (ExprNode::FVar { id: x }, ExprNode::FVar { id: y }) => x == y,
-        (ExprNode::Sort { level: x }, ExprNode::Sort { level: y }) => level_eq(x, y),
-        (
-            ExprNode::Const {
-                name: n1,
-                levels: l1,
-            },
-            ExprNode::Const {
-                name: n2,
-                levels: l2,
-            },
-        ) => n1 == n2 && l1.len() == l2.len() && l1.iter().zip(l2).all(|(a, b)| level_eq(a, b)),
-        (ExprNode::App { f: f1, arg: a1 }, ExprNode::App { f: f2, arg: a2 }) => {
-            eq_structural(f1, f2) && eq_structural(a1, a2)
-        }
-        (
-            ExprNode::Lam {
-                binder_type: t1,
-                body: b1,
-                ..
-            },
-            ExprNode::Lam {
-                binder_type: t2,
-                body: b2,
-                ..
-            },
-        )
-        | (
-            ExprNode::ForallE {
-                binder_type: t1,
-                body: b1,
-                ..
-            },
-            ExprNode::ForallE {
-                binder_type: t2,
-                body: b2,
-                ..
-            },
-        ) => eq_structural(t1, t2) && eq_structural(b1, b2),
-        (ExprNode::Lit(x), ExprNode::Lit(y)) => x == y,
-        _ => false,
-    }
-}
-
-/// Collect every binder name appearing in `e` (tests only).
-fn binder_names(e: &Arc<Expr>) -> Vec<String> {
-    let mut out = Vec::new();
-    fn go(e: &Arc<Expr>, out: &mut Vec<String>) {
-        match e.node() {
-            ExprNode::Lam {
-                binder_name,
-                binder_type,
-                body,
-                ..
-            }
-            | ExprNode::ForallE {
-                binder_name,
-                binder_type,
-                body,
-                ..
-            } => {
-                out.push(binder_name.to_string());
-                go(binder_type, out);
-                go(body, out);
-            }
-            ExprNode::App { f, arg } => {
-                go(f, out);
-                go(arg, out);
-            }
-            _ => {}
-        }
-    }
-    go(e, &mut out);
-    out
-}
+// ---- Arc-side fixture helpers (verbatim from `crate::inductive::tests`,
+// only the declaration DTOs renamed `Arc*` — see `decl.rs`'s module doc) ----
 
 fn sort_n(n: u64) -> Arc<Expr> {
     let mut l = Arc::new(Level::Zero);
@@ -125,16 +42,16 @@ fn sort_n(n: u64) -> Arc<Expr> {
     Expr::sort(l, &mut RecGuard::new()).unwrap()
 }
 
-fn ind(name: &str, ty: Arc<Expr>, ctors: Vec<(Arc<Name>, Arc<Expr>)>) -> InductiveType {
-    InductiveType {
+fn ind(name: &str, ty: Arc<Expr>, ctors: Vec<(Arc<Name>, Arc<Expr>)>) -> ArcInductiveType {
+    ArcInductiveType {
         name: nm(name),
         ty,
         ctors,
     }
 }
 
-fn decl(lparams: Vec<Arc<Name>>, nparams: u64, types: Vec<InductiveType>) -> Declaration {
-    Declaration::Inductive {
+fn decl(lparams: Vec<Arc<Name>>, nparams: u64, types: Vec<ArcInductiveType>) -> ArcDeclaration {
+    ArcDeclaration::Inductive {
         lparams,
         nparams: Nat::from(nparams),
         types,
@@ -142,9 +59,9 @@ fn decl(lparams: Vec<Arc<Name>>, nparams: u64, types: Vec<InductiveType>) -> Dec
     }
 }
 
-fn axiom(name: &str, ty: Arc<Expr>) -> Declaration {
-    Declaration::Axiom(AxiomVal {
-        val: ConstantVal {
+fn axiom(name: &str, ty: Arc<Expr>) -> ArcConstantInfo {
+    ArcConstantInfo::Axiom(ArcAxiomVal {
+        val: ArcConstantVal {
             name: nm(name),
             level_params: vec![],
             ty,
@@ -153,32 +70,34 @@ fn axiom(name: &str, ty: Arc<Expr>) -> Declaration {
     })
 }
 
-fn induct(env: &Environment, name: &Arc<Name>) -> crate::InductiveVal {
-    match env.get(name) {
-        Some(ConstantInfo::Induct(v)) => v.clone(),
-        other => panic!("expected inductive {name}, got {other:?}"),
+/// `Type u` = `Sort (u+1)`.
+fn type_u() -> Arc<Expr> {
+    Expr::sort(
+        Level::mk_succ(Arc::new(Level::Param(nm("u")))),
+        &mut RecGuard::new(),
+    )
+    .unwrap()
+}
+
+fn name_has_component(n: &Arc<Name>, s: &str) -> bool {
+    let mut cur = Arc::clone(n);
+    loop {
+        match cur.as_ref() {
+            Name::Anonymous => return false,
+            Name::Str { parent, part } => {
+                if part == s {
+                    return true;
+                }
+                cur = Arc::clone(parent);
+            }
+            Name::Num { parent, .. } => cur = Arc::clone(parent),
+        }
     }
 }
 
-fn ctor(env: &Environment, name: &Arc<Name>) -> crate::ConstructorVal {
-    match env.get(name) {
-        Some(ConstantInfo::Ctor(v)) => v.clone(),
-        other => panic!("expected ctor {name}, got {other:?}"),
-    }
-}
-
-fn recursor(env: &Environment, name: &Arc<Name>) -> crate::RecursorVal {
-    match env.get(name) {
-        Some(ConstantInfo::Rec(v)) => v.clone(),
-        other => panic!("expected recursor {name}, got {other:?}"),
-    }
-}
-
-// ---- Declaration builders for the test inductives -----------------------
-
-/// Nat: `inductive Nat where | zero | succ (n : Nat)` — exactly the
-/// testenv shape.
-fn nat_decl() -> Declaration {
+/// `inductive Nat where | zero | succ (n : Nat)` — exactly the testenv
+/// shape.
+fn nat_decl() -> ArcDeclaration {
     decl(
         vec![],
         0,
@@ -193,69 +112,457 @@ fn nat_decl() -> Declaration {
     )
 }
 
-// ---- Tests --------------------------------------------------------------
+/// `inductive Tree where | node : List Tree → Tree`.
+fn tree_decl() -> ArcDeclaration {
+    let list0_tree = mini::app(
+        mini::cstn(nm("List"), vec![Arc::new(Level::Zero)]),
+        mini::cstn(nm("Tree"), vec![]),
+    );
+    let node_ty = mini::pi("a", list0_tree, mini::cstn(nm("Tree"), vec![]));
+    decl(
+        vec![],
+        0,
+        vec![ind(
+            "Tree",
+            mini::type1(),
+            vec![(nm2("Tree", "node"), node_ty)],
+        )],
+    )
+}
+
+/// `structure Array.{u} (α : Type u) where mk :: (toList : List.{u} α)`.
+fn array_decl() -> ArcDeclaration {
+    let array_ty = mini::pi("α", type_u(), type_u());
+    let listu = mini::cstn(nm("List"), vec![Arc::new(Level::Param(nm("u")))]);
+    let arrayu = mini::cstn(nm("Array"), vec![Arc::new(Level::Param(nm("u")))]);
+    let mk_ty = mini::pi(
+        "α",
+        type_u(),
+        mini::pi(
+            "toList",
+            mini::app(listu, mini::bvar(0)),
+            mini::app(arrayu, mini::bvar(1)),
+        ),
+    );
+    decl(
+        vec![nm("u")],
+        1,
+        vec![ind("Array", array_ty, vec![(nm2("Array", "mk"), mk_ty)])],
+    )
+}
+
+/// Eq: `inductive Eq {α : Sort u_1} (a : α) : α → Prop | refl : Eq a a`
+/// — the canonical K-like, large-eliminating singleton in Prop.
+fn eq_decl() -> ArcDeclaration {
+    let eq_ty = mini::pi(
+        "α",
+        mini::sort_param("u_1"),
+        mini::pi(
+            "a",
+            mini::bvar(0),
+            mini::pi("b", mini::bvar(1), mini::sort0()),
+        ),
+    );
+    let eq = mini::cstn(nm("Eq"), vec![Arc::new(Level::Param(nm("u_1")))]);
+    let refl_ty = mini::pi(
+        "α",
+        mini::sort_param("u_1"),
+        mini::pi(
+            "a",
+            mini::bvar(0),
+            mini::appn(eq, vec![mini::bvar(1), mini::bvar(0), mini::bvar(0)]),
+        ),
+    );
+    decl(
+        vec![nm("u_1")],
+        2,
+        vec![ind("Eq", eq_ty, vec![(nm2("Eq", "refl"), refl_ty)])],
+    )
+}
+
+// ---------------------------------------------------------------------
+// Id-native admission harness. `extra` plays the role `inductive.rs`'s
+// own nested-admission code gives it: constants admitted by an earlier
+// `admit` call in the SAME test but not (and never, in these tests)
+// promoted into a real `Environment` — visible to a later `admit`/
+// `TypeChecker` call via `EnvView::extra`.
+// ---------------------------------------------------------------------
+
+fn intern_lparams(scratch: &mut Store, base: &Store, lparams: &[Arc<Name>]) -> Vec<NameId> {
+    lparams
+        .iter()
+        .map(|p| scratch.intern_name(Some(base), p).unwrap().unwrap())
+        .collect()
+}
+
+fn intern_types(
+    scratch: &mut Store,
+    base: &Store,
+    types: &[ArcInductiveType],
+) -> Vec<InductiveType> {
+    types
+        .iter()
+        .map(|t| {
+            let name = scratch.intern_name(Some(base), &t.name).unwrap().unwrap();
+            let ty = scratch.intern_expr(Some(base), &t.ty).unwrap();
+            let ctors = t
+                .ctors
+                .iter()
+                .map(|(cn, ct)| {
+                    (
+                        scratch.intern_name(Some(base), cn).unwrap().unwrap(),
+                        scratch.intern_expr(Some(base), ct).unwrap(),
+                    )
+                })
+                .collect();
+            InductiveType { name, ty, ctors }
+        })
+        .collect()
+}
+
+/// Run `add_inductive` against `env`'s real persistent store, with
+/// `extra` as the not-yet-admitted overlay.
+fn admit(
+    scratch: &mut Store,
+    env: &Environment,
+    extra: &HashMap<NameId, ConstantInfo>,
+    d: ArcDeclaration,
+) -> Result<Vec<ConstantInfo>, KernelError> {
+    let (lparams, nparams, types, is_unsafe) = match d {
+        ArcDeclaration::Inductive {
+            lparams,
+            nparams,
+            types,
+            is_unsafe,
+        } => (lparams, nparams, types, is_unsafe),
+        _ => panic!("harness expects ArcDeclaration::Inductive"),
+    };
+    let base = env.view().store;
+    let lparam_ids = intern_lparams(scratch, base, &lparams);
+    let id_types = intern_types(scratch, base, &types);
+    let view = EnvView {
+        consts: env.view().consts,
+        extra: Some(extra),
+        quot_initialized: env.quot_initialized(),
+        store: base,
+    };
+    add_inductive(scratch, &view, lparam_ids, nparams, id_types, is_unsafe)
+}
+
+/// Admit `d` and fold every result into `extra` (the multi-step-test
+/// convenience `admit` alone doesn't provide).
+fn admit_into(
+    scratch: &mut Store,
+    env: &Environment,
+    extra: &mut HashMap<NameId, ConstantInfo>,
+    d: ArcDeclaration,
+) -> Result<(), KernelError> {
+    let added = admit(scratch, env, extra, d)?;
+    for ci in added {
+        extra.insert(ci.name(), ci);
+    }
+    Ok(())
+}
+
+/// Bridge an Arc-side `ConstantInfo` directly into `extra` (no
+/// checking — the established "opaque stand-in axiom" pattern for
+/// whnf-only tests, matching the pre-migration file's own comment on
+/// `iota_now_reduces_declared_recursor`: the subject is iota reduction,
+/// not axiom-checking).
+fn bridge_into(
+    scratch: &mut Store,
+    env: &Environment,
+    extra: &mut HashMap<NameId, ConstantInfo>,
+    ci: &ArcConstantInfo,
+) {
+    let idci = intern_constant_info(scratch, Some(env.view().store), ci).unwrap();
+    extra.insert(idci.name(), idci);
+}
+
+fn find<'a>(
+    scratch: &Store,
+    base: &Store,
+    added: &'a [ConstantInfo],
+    name: &Arc<Name>,
+) -> &'a ConstantInfo {
+    added
+        .iter()
+        .find(|ci| &scratch.to_name(Some(base), Some(ci.name())) == name)
+        .unwrap_or_else(|| panic!("expected {name} among admitted constants"))
+}
+
+fn as_induct(ci: &ConstantInfo) -> InductiveVal {
+    match ci {
+        ConstantInfo::Induct(v) => v.clone(),
+        other => panic!("expected inductive, got {other:?}"),
+    }
+}
+
+fn as_ctor(ci: &ConstantInfo) -> ConstructorVal {
+    match ci {
+        ConstantInfo::Ctor(v) => v.clone(),
+        other => panic!("expected ctor, got {other:?}"),
+    }
+}
+
+fn as_rec(ci: &ConstantInfo) -> RecursorVal {
+    match ci {
+        ConstantInfo::Rec(v) => v.clone(),
+        other => panic!("expected recursor, got {other:?}"),
+    }
+}
+
+fn to_names(scratch: &Store, base: &Store, ids: &[NameId]) -> Vec<Arc<Name>> {
+    ids.iter()
+        .map(|&id| scratch.to_name(Some(base), Some(id)))
+        .collect()
+}
+
+/// Look up a constant already admitted into a real `Environment` (e.g.
+/// `mini::env()`'s hand-transcribed fixtures) by name.
+fn env_const(env: &Environment, n: &Arc<Name>) -> ConstantInfo {
+    let mut probe = Store::scratch();
+    let id = probe
+        .intern_name(Some(env.view().store), n)
+        .unwrap()
+        .unwrap();
+    env.get(id)
+        .unwrap_or_else(|| panic!("expected {n} in env"))
+        .clone()
+}
+
+fn env_name_id(scratch: &mut Store, env: &Environment, n: &Arc<Name>) -> NameId {
+    scratch
+        .intern_name(Some(env.view().store), n)
+        .unwrap()
+        .unwrap()
+}
+
+// ---- Structural (de-Bruijn) equality ignoring binder *names* and
+// `binder_info`, across two possibly-different (store, base) pairs —
+// id-native port of the Arc test file's `eq_structural`/`level_eq`. See
+// that file's doc comment for why a byte-exact compare isn't the right
+// bar for the recursor-shape checks below: the regenerated recursor
+// type correctly marks the motive `Implicit` (ported `infer_implicit`)
+// and names the induction-hypothesis binder `<field>_ih`, whereas the
+// `testenv` transcriptions mark every binder `Default` and use `ih`. ----
+
+fn name_opt_eq(
+    sa: &Store,
+    ba: Option<&Store>,
+    x: Option<NameId>,
+    sb: &Store,
+    bb: Option<&Store>,
+    y: Option<NameId>,
+) -> bool {
+    sa.to_name(ba, x) == sb.to_name(bb, y)
+}
+
+fn level_eq_id(
+    sa: &Store,
+    ba: Option<&Store>,
+    a: LevelId,
+    sb: &Store,
+    bb: Option<&Store>,
+    b: LevelId,
+) -> bool {
+    use crate::bank::levels::LevelRow;
+    match (*sa.level_row(ba, a), *sb.level_row(bb, b)) {
+        (LevelRow::Zero, LevelRow::Zero) => true,
+        (LevelRow::Succ(x), LevelRow::Succ(y)) => level_eq_id(sa, ba, x, sb, bb, y),
+        (LevelRow::Max(x1, y1), LevelRow::Max(x2, y2))
+        | (LevelRow::IMax(x1, y1), LevelRow::IMax(x2, y2)) => {
+            level_eq_id(sa, ba, x1, sb, bb, x2) && level_eq_id(sa, ba, y1, sb, bb, y2)
+        }
+        (LevelRow::Param(x), LevelRow::Param(y)) | (LevelRow::MVar(x), LevelRow::MVar(y)) => {
+            name_opt_eq(sa, ba, x, sb, bb, y)
+        }
+        _ => false,
+    }
+}
+
+fn eq_structural_id(
+    sa: &Store,
+    ba: Option<&Store>,
+    a: ExprId,
+    sb: &Store,
+    bb: Option<&Store>,
+    b: ExprId,
+) -> bool {
+    match (sa.expr_node(ba, a), sb.expr_node(bb, b)) {
+        (Node::BVar { idx: x }, Node::BVar { idx: y }) => x == y,
+        (Node::FVar { id: x }, Node::FVar { id: y }) => name_opt_eq(sa, ba, x, sb, bb, y),
+        (Node::Sort { level: x }, Node::Sort { level: y }) => level_eq_id(sa, ba, x, sb, bb, y),
+        (
+            Node::Const {
+                name: n1,
+                levels: l1,
+            },
+            Node::Const {
+                name: n2,
+                levels: l2,
+            },
+        ) => {
+            let ls1 = sa.level_list_at(ba, l1);
+            let ls2 = sb.level_list_at(bb, l2);
+            name_opt_eq(sa, ba, n1, sb, bb, n2)
+                && ls1.len() == ls2.len()
+                && ls1
+                    .iter()
+                    .zip(ls2)
+                    .all(|(&x, &y)| level_eq_id(sa, ba, x, sb, bb, y))
+        }
+        (Node::App { f: f1, arg: a1 }, Node::App { f: f2, arg: a2 }) => {
+            eq_structural_id(sa, ba, f1, sb, bb, f2) && eq_structural_id(sa, ba, a1, sb, bb, a2)
+        }
+        (
+            Node::Lam {
+                binder_type: t1,
+                body: b1,
+                ..
+            },
+            Node::Lam {
+                binder_type: t2,
+                body: b2,
+                ..
+            },
+        )
+        | (
+            Node::Forall {
+                binder_type: t1,
+                body: b1,
+                ..
+            },
+            Node::Forall {
+                binder_type: t2,
+                body: b2,
+                ..
+            },
+        ) => eq_structural_id(sa, ba, t1, sb, bb, t2) && eq_structural_id(sa, ba, b1, sb, bb, b2),
+        (Node::LitNat { v: x }, Node::LitNat { v: y }) => sa.nat_at(ba, x) == sb.nat_at(bb, y),
+        (Node::LitStr { v: x }, Node::LitStr { v: y }) => sa.str_at(ba, x) == sb.str_at(bb, y),
+        _ => false,
+    }
+}
+
+/// Collect every binder name appearing in `e` (tests only).
+fn binder_names_id(st: &Store, base: Option<&Store>, e: ExprId, out: &mut Vec<String>) {
+    match st.expr_node(base, e) {
+        Node::Lam {
+            binder_name,
+            binder_type,
+            body,
+            ..
+        }
+        | Node::Forall {
+            binder_name,
+            binder_type,
+            body,
+            ..
+        } => {
+            out.push(st.to_name(base, binder_name).to_string());
+            binder_names_id(st, base, binder_type, out);
+            binder_names_id(st, base, body, out);
+        }
+        Node::App { f, arg } => {
+            binder_names_id(st, base, f, out);
+            binder_names_id(st, base, arg, out);
+        }
+        _ => {}
+    }
+}
+
+fn assert_no_nested_leak(scratch: &Store, base: &Store, extra: &HashMap<NameId, ConstantInfo>) {
+    for &id in extra.keys() {
+        let n = scratch.to_name(Some(base), Some(id));
+        assert!(
+            !name_has_component(&n, "_nested"),
+            "aux `_nested` name leaked into final env: {n}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
+// Tests.
+// ---------------------------------------------------------------------
 
 #[test]
 fn admits_nat_and_regenerates_m1a_shapes() {
-    let mut env = Environment::default();
-    env.add_decl(nat_decl()).expect("Nat admits");
+    let env = Environment::default();
+    let extra = HashMap::new();
+    let mut scratch = Store::scratch();
+    let base = env.view().store;
+    let added = admit(&mut scratch, &env, &extra, nat_decl()).expect("Nat admits");
 
-    // InductiveVal.
-    let nat = induct(&env, &nm("Nat"));
+    let nat = as_induct(find(&scratch, base, &added, &nm("Nat")));
     assert!(nat.is_rec, "Nat is recursive");
     assert!(!nat.is_reflexive);
     assert_eq!(nat.num_params, Nat::from(0));
     assert_eq!(nat.num_indices, Nat::from(0));
     assert_eq!(nat.num_nested, Nat::from(0));
-    assert_eq!(nat.all, vec![nm("Nat")]);
-    assert_eq!(nat.ctors, vec![nm2("Nat", "zero"), nm2("Nat", "succ")]);
+    assert_eq!(to_names(&scratch, base, &nat.all), vec![nm("Nat")]);
+    assert_eq!(
+        to_names(&scratch, base, &nat.ctors),
+        vec![nm2("Nat", "zero"), nm2("Nat", "succ")]
+    );
 
-    // ConstructorVals.
-    let zero = ctor(&env, &nm2("Nat", "zero"));
+    let zero = as_ctor(find(&scratch, base, &added, &nm2("Nat", "zero")));
     assert_eq!(zero.cidx, Nat::from(0));
     assert_eq!(zero.num_fields, Nat::from(0));
-    let succ = ctor(&env, &nm2("Nat", "succ"));
+    let succ = as_ctor(find(&scratch, base, &added, &nm2("Nat", "succ")));
     assert_eq!(succ.cidx, Nat::from(1));
     assert_eq!(succ.num_fields, Nat::from(1));
 
-    // RecursorVal — compare against the testenv transcription.
-    let got = recursor(&env, &nm2("Nat", "rec"));
-    let expected = recursor(&mini::env(), &nm2("Nat", "rec"));
+    let got = as_rec(find(&scratch, base, &added, &nm2("Nat", "rec")));
+    let mini_env = mini::env();
+    let expected_ci = env_const(&mini_env, &nm2("Nat", "rec"));
+    let expected = as_rec(&expected_ci);
+    let mini_base = mini_env.view().store;
     assert!(!got.k, "Nat.rec is not K-like");
     assert_eq!(got.num_params, Nat::from(0));
     assert_eq!(got.num_indices, Nat::from(0));
     assert_eq!(got.num_motives, Nat::from(1));
     assert_eq!(got.num_minors, Nat::from(2));
-    // level params: [u] ++ lparams, [u].
-    assert_eq!(got.val.level_params, vec![nm("u")]);
-    // recursor's `all` is the inductive-type names (NOT the rec names —
-    // the testenv transcription's `[Nat.rec]` is a Task-7 error).
-    assert_eq!(got.all, vec![nm("Nat")]);
-    // rules: same order, ctors, nfields, and de-Bruijn RHS skeleton.
+    assert_eq!(
+        to_names(&scratch, base, &got.val.level_params),
+        vec![nm("u")]
+    );
+    assert_eq!(to_names(&scratch, base, &got.all), vec![nm("Nat")]);
     assert_eq!(got.rules.len(), 2);
-    for (g, e) in got.rules.iter().zip(expected.rules.iter()) {
-        assert_eq!(g.ctor, e.ctor);
-        assert_eq!(g.nfields, e.nfields);
+    for (gr, er) in got.rules.iter().zip(expected.rules.iter()) {
+        assert_eq!(
+            scratch.to_name(Some(base), Some(gr.ctor)),
+            mini_base.to_name(None, Some(er.ctor))
+        );
+        assert_eq!(gr.nfields, er.nfields);
         assert!(
-            eq_structural(&g.rhs, &e.rhs),
+            eq_structural_id(&scratch, Some(base), gr.rhs, mini_base, None, er.rhs),
             "rule rhs for {} matches",
-            g.ctor
+            scratch.to_name(Some(base), Some(gr.ctor))
         );
     }
-    // recursor type matches the transcription's de-Bruijn skeleton.
     assert!(
-        eq_structural(&got.val.ty, &expected.val.ty),
+        eq_structural_id(
+            &scratch,
+            Some(base),
+            got.val.ty,
+            mini_base,
+            None,
+            expected.val.ty
+        ),
         "Nat.rec type matches structurally"
     );
-    // Targeted checks that the regenerated output matches REAL Lean where
-    // the testenv transcription is simplified:
-    //   - the motive binder became Implicit (via infer_implicit),
-    let ExprNode::ForallE { binder_info, .. } = got.val.ty.node() else {
+    let Node::Forall { binder_info, .. } = scratch.expr_node(Some(base), got.val.ty) else {
         panic!("recursor type is a Pi");
     };
-    assert_eq!(*binder_info, BinderInfo::Implicit);
-    //   - the induction hypothesis binder is named `n_ih`, not `ih`.
-    let succ_rhs_binders = binder_names(&got.rules[1].rhs);
+    assert_eq!(binder_info, BinderInfo::Implicit);
+    let mut succ_rhs_binders = Vec::new();
+    binder_names_id(
+        &scratch,
+        Some(base),
+        got.rules[1].rhs,
+        &mut succ_rhs_binders,
+    );
     assert!(
         succ_rhs_binders.iter().any(|n| n == "n_ih"),
         "IH binder is `n_ih`, got {succ_rhs_binders:?}"
@@ -264,13 +571,11 @@ fn admits_nat_and_regenerates_m1a_shapes() {
 
 #[test]
 fn admits_prod_structure_like() {
-    // Monomorphic Prod : Type → Type → Type, one ctor, no indices.
     let prod_ty = mini::pi(
         "α",
         mini::type1(),
         mini::pi("β", mini::type1(), mini::type1()),
     );
-    // Prod.mk : Π (α β : Type) (fst : α) (snd : β), Prod α β
     let mk_ty = mini::pi(
         "α",
         mini::type1(),
@@ -291,25 +596,28 @@ fn admits_prod_structure_like() {
             ),
         ),
     );
-    let mut env = Environment::default();
-    env.add_decl(decl(
+    let d = decl(
         vec![],
         2,
         vec![ind("Prod", prod_ty, vec![(nm2("Prod", "mk"), mk_ty)])],
-    ))
-    .expect("Prod admits");
+    );
+    let env = Environment::default();
+    let extra = HashMap::new();
+    let mut scratch = Store::scratch();
+    let base = env.view().store;
+    let added = admit(&mut scratch, &env, &extra, d).expect("Prod admits");
 
-    let prod = induct(&env, &nm("Prod"));
+    let prod = as_induct(find(&scratch, base, &added, &nm("Prod")));
     assert_eq!(prod.num_params, Nat::from(2));
     assert_eq!(prod.num_indices, Nat::from(0));
     assert_eq!(prod.ctors.len(), 1);
     assert!(!prod.is_rec);
 
-    let mk = ctor(&env, &nm2("Prod", "mk"));
+    let mk = as_ctor(find(&scratch, base, &added, &nm2("Prod", "mk")));
     assert_eq!(mk.num_params, Nat::from(2));
     assert_eq!(mk.num_fields, Nat::from(2));
 
-    let rec = recursor(&env, &nm2("Prod", "rec"));
+    let rec = as_rec(find(&scratch, base, &added, &nm2("Prod", "rec")));
     assert_eq!(rec.num_minors, Nat::from(1));
     assert_eq!(rec.num_motives, Nat::from(1));
     assert_eq!(rec.num_params, Nat::from(2));
@@ -317,47 +625,19 @@ fn admits_prod_structure_like() {
     assert!(!rec.k);
 }
 
-/// Eq: `inductive Eq {α : Sort u_1} (a : α) : α → Prop | refl : Eq a a`
-/// — the canonical K-like, large-eliminating singleton in Prop.
-fn eq_decl() -> Declaration {
-    // Eq.{u_1} : Π (α : Sort u_1), α → α → Prop
-    let eq_ty = mini::pi(
-        "α",
-        mini::sort_param("u_1"),
-        mini::pi(
-            "a",
-            mini::bvar(0),
-            mini::pi("b", mini::bvar(1), mini::sort0()),
-        ),
-    );
-    // Eq.refl.{u_1} : Π (α : Sort u_1) (a : α), @Eq α a a
-    let eq = mini::cstn(nm("Eq"), vec![Arc::new(Level::Param(nm("u_1")))]);
-    let refl_ty = mini::pi(
-        "α",
-        mini::sort_param("u_1"),
-        mini::pi(
-            "a",
-            mini::bvar(0),
-            mini::appn(eq, vec![mini::bvar(1), mini::bvar(0), mini::bvar(0)]),
-        ),
-    );
-    decl(
-        vec![nm("u_1")],
-        2,
-        vec![ind("Eq", eq_ty, vec![(nm2("Eq", "refl"), refl_ty)])],
-    )
-}
-
 #[test]
 fn admits_eq_with_k() {
-    let mut env = Environment::default();
-    env.add_decl(eq_decl()).expect("Eq admits");
+    let env = Environment::default();
+    let extra = HashMap::new();
+    let mut scratch = Store::scratch();
+    let base = env.view().store;
+    let added = admit(&mut scratch, &env, &extra, eq_decl()).expect("Eq admits");
 
-    let eq = induct(&env, &nm("Eq"));
+    let eq = as_induct(find(&scratch, base, &added, &nm("Eq")));
     assert_eq!(eq.num_params, Nat::from(2));
     assert_eq!(eq.num_indices, Nat::from(1));
 
-    let rec = recursor(&env, &nm2("Eq", "rec"));
+    let rec = as_rec(find(&scratch, base, &added, &nm2("Eq", "rec")));
     assert!(rec.k, "Eq.rec is K-like");
     assert_eq!(rec.num_minors, Nat::from(1));
     assert_eq!(rec.num_motives, Nat::from(1));
@@ -367,25 +647,26 @@ fn admits_eq_with_k() {
 
 #[test]
 fn large_elim_singleton() {
-    // Eq is a Prop-valued singleton whose recursor nevertheless
-    // large-eliminates: its motive lives at a fresh universe `u`, so the
-    // recursor's level params are [u, u_1] (u prepended).
-    let mut env = Environment::default();
-    env.add_decl(eq_decl()).expect("Eq admits");
-    let rec = recursor(&env, &nm2("Eq", "rec"));
-    assert_eq!(rec.val.level_params, vec![nm("u"), nm("u_1")]);
+    let env = Environment::default();
+    let extra = HashMap::new();
+    let mut scratch = Store::scratch();
+    let base = env.view().store;
+    let added = admit(&mut scratch, &env, &extra, eq_decl()).expect("Eq admits");
+    let rec = as_rec(find(&scratch, base, &added, &nm2("Eq", "rec")));
+    assert_eq!(
+        to_names(&scratch, base, &rec.val.level_params),
+        vec![nm("u"), nm("u_1")]
+    );
 }
 
 #[test]
 fn prop_only_elim_small() {
-    // Or : Prop → Prop → Prop with two ctors ⇒ eliminates only into Prop.
     let or = mini::cstn(nm("Or"), vec![]);
     let or_ty = mini::pi(
         "a",
         mini::sort0(),
         mini::pi("b", mini::sort0(), mini::sort0()),
     );
-    // Or.inl : Π (a b : Prop) (h : a), @Or a b
     let inl_ty = mini::pi(
         "a",
         mini::sort0(),
@@ -394,12 +675,11 @@ fn prop_only_elim_small() {
             mini::sort0(),
             mini::pi(
                 "h",
-                mini::bvar(1), // a
+                mini::bvar(1),
                 mini::appn(Arc::clone(&or), vec![mini::bvar(2), mini::bvar(1)]),
             ),
         ),
     );
-    // Or.inr : Π (a b : Prop) (h : b), @Or a b
     let inr_ty = mini::pi(
         "a",
         mini::sort0(),
@@ -408,13 +688,12 @@ fn prop_only_elim_small() {
             mini::sort0(),
             mini::pi(
                 "h",
-                mini::bvar(0), // b
+                mini::bvar(0),
                 mini::appn(or, vec![mini::bvar(2), mini::bvar(1)]),
             ),
         ),
     );
-    let mut env = Environment::default();
-    env.add_decl(decl(
+    let d = decl(
         vec![],
         2,
         vec![ind(
@@ -422,13 +701,16 @@ fn prop_only_elim_small() {
             or_ty,
             vec![(nm2("Or", "inl"), inl_ty), (nm2("Or", "inr"), inr_ty)],
         )],
-    ))
-    .expect("Or admits");
+    );
+    let env = Environment::default();
+    let extra = HashMap::new();
+    let mut scratch = Store::scratch();
+    let base = env.view().store;
+    let added = admit(&mut scratch, &env, &extra, d).expect("Or admits");
 
-    let or_ind = induct(&env, &nm("Or"));
+    let or_ind = as_induct(find(&scratch, base, &added, &nm("Or")));
     assert!(!or_ind.is_rec);
-    let rec = recursor(&env, &nm2("Or", "rec"));
-    // small elim: elim level is 0, so NO fresh universe param prepended.
+    let rec = as_rec(find(&scratch, base, &added, &nm2("Or", "rec")));
     assert!(rec.val.level_params.is_empty(), "Or.rec small-eliminates");
     assert_eq!(rec.num_minors, Nat::from(2));
     assert_eq!(rec.num_motives, Nat::from(1));
@@ -437,79 +719,74 @@ fn prop_only_elim_small() {
 
 #[test]
 fn admits_mutual_pair() {
-    // Mutually recursive A/B in Type:
-    //   inductive A | mk : B → A
-    //   inductive B | mk : A → B
     let ca = mini::cstn(nm("A"), vec![]);
     let cb = mini::cstn(nm("B"), vec![]);
-    let a_mk = mini::pi("b", Arc::clone(&cb), Arc::clone(&ca)); // B → A
-    let b_mk = mini::pi("a", Arc::clone(&ca), Arc::clone(&cb)); // A → B
-    let mut env = Environment::default();
-    env.add_decl(decl(
+    let a_mk = mini::pi("b", Arc::clone(&cb), Arc::clone(&ca));
+    let b_mk = mini::pi("a", Arc::clone(&ca), Arc::clone(&cb));
+    let d = decl(
         vec![],
         0,
         vec![
             ind("A", mini::type1(), vec![(nm2("A", "mk"), a_mk)]),
             ind("B", mini::type1(), vec![(nm2("B", "mk"), b_mk)]),
         ],
-    ))
-    .expect("mutual A/B admits");
+    );
+    let env = Environment::default();
+    let extra = HashMap::new();
+    let mut scratch = Store::scratch();
+    let base = env.view().store;
+    let added = admit(&mut scratch, &env, &extra, d).expect("mutual A/B admits");
 
-    let a = induct(&env, &nm("A"));
-    let b = induct(&env, &nm("B"));
-    assert_eq!(a.all, vec![nm("A"), nm("B")]);
-    assert_eq!(b.all, vec![nm("A"), nm("B")]);
+    let a = as_induct(find(&scratch, base, &added, &nm("A")));
+    let b = as_induct(find(&scratch, base, &added, &nm("B")));
+    assert_eq!(to_names(&scratch, base, &a.all), vec![nm("A"), nm("B")]);
+    assert_eq!(to_names(&scratch, base, &b.all), vec![nm("A"), nm("B")]);
     assert!(a.is_rec && b.is_rec, "mutual block is recursive");
 
-    let a_rec = recursor(&env, &nm2("A", "rec"));
-    let b_rec = recursor(&env, &nm2("B", "rec"));
-    // Both recursors take a motive for EACH type in the block.
+    let a_rec = as_rec(find(&scratch, base, &added, &nm2("A", "rec")));
+    let b_rec = as_rec(find(&scratch, base, &added, &nm2("B", "rec")));
     assert_eq!(a_rec.num_motives, Nat::from(2));
     assert_eq!(b_rec.num_motives, Nat::from(2));
-    // One minor per constructor across the whole block.
     assert_eq!(a_rec.num_minors, Nat::from(2));
     assert_eq!(b_rec.num_minors, Nat::from(2));
-    // recursor `all` is the inductive-type names, listing both types.
-    assert_eq!(a_rec.all, vec![nm("A"), nm("B")]);
+    assert_eq!(to_names(&scratch, base, &a_rec.all), vec![nm("A"), nm("B")]);
 }
 
 #[test]
 fn rejects_positivity_violation() {
-    // T : Type with a ctor field of type ((T → T) → T): a non-positive
-    // occurrence of T in the domain (T → T).
     let ct = mini::cstn(nm("T"), vec![]);
-    let t_to_t = mini::pi("x", Arc::clone(&ct), Arc::clone(&ct)); // T → T
-    let field = mini::pi("h", t_to_t, Arc::clone(&ct)); // (T → T) → T
-    let mk_ty = mini::pi("f", field, ct); // ((T → T) → T) → T
-    let mut env = Environment::default();
-    let err = env
-        .add_decl(decl(
-            vec![],
-            0,
-            vec![ind("T", mini::type1(), vec![(nm2("T", "mk"), mk_ty)])],
-        ))
-        .unwrap_err();
+    let t_to_t = mini::pi("x", Arc::clone(&ct), Arc::clone(&ct));
+    let field = mini::pi("h", t_to_t, Arc::clone(&ct));
+    let mk_ty = mini::pi("f", field, ct);
+    let d = decl(
+        vec![],
+        0,
+        vec![ind("T", mini::type1(), vec![(nm2("T", "mk"), mk_ty)])],
+    );
+    let env = Environment::default();
+    let extra = HashMap::new();
+    let mut scratch = Store::scratch();
+    let err = admit(&mut scratch, &env, &extra, d).unwrap_err();
     match err {
         crate::KernelError::InvalidInductive { what, .. } => assert_eq!(what, "positivity"),
         other => panic!("expected positivity error, got {other:?}"),
     }
-    // rollback: nothing admitted.
-    assert!(env.get(&nm("T")).is_none());
-    assert!(env.get(&nm2("T", "mk")).is_none());
+    // Rollback: nothing was ever inserted into `extra`.
+    assert!(extra.is_empty());
 }
 
 #[test]
 fn rejects_wrong_codomain() {
-    // A ctor whose result type is not an application of the inductive.
-    let mk_ty = sort_n(1); // `mk : Sort 1`, codomain not `T ...`
-    let mut env = Environment::default();
-    let err = env
-        .add_decl(decl(
-            vec![],
-            0,
-            vec![ind("T", mini::type1(), vec![(nm2("T", "mk"), mk_ty)])],
-        ))
-        .unwrap_err();
+    let mk_ty = sort_n(1);
+    let d = decl(
+        vec![],
+        0,
+        vec![ind("T", mini::type1(), vec![(nm2("T", "mk"), mk_ty)])],
+    );
+    let env = Environment::default();
+    let extra = HashMap::new();
+    let mut scratch = Store::scratch();
+    let err = admit(&mut scratch, &env, &extra, d).unwrap_err();
     match err {
         crate::KernelError::InvalidInductive { what, .. } => {
             assert_eq!(what, "invalid return type")
@@ -520,36 +797,29 @@ fn rejects_wrong_codomain() {
 
 #[test]
 fn rejects_universe_too_small() {
-    // NOTE (oracle over brief): the brief's literal example is "Sort 0
-    // packing a Type", but a Prop-valued inductive (result level 0) is
-    // exempt from the universe bound (inductive.cpp:439 `|| is_zero(
-    // m_result_level)`), so that example would ADMIT. We therefore use a
-    // non-Prop type: T : Type 0 with a field of type `Type 1`, whose
-    // type `Sort 3` exceeds the inductive's level (1).
-    let field_ty = sort_n(2); // Type 1 = Sort 2
+    let field_ty = sort_n(2);
     let mk_ty = mini::pi("α", field_ty, mini::cstn(nm("T"), vec![]));
-    let mut env = Environment::default();
-    let err = env
-        .add_decl(decl(
-            vec![],
-            0,
-            vec![ind("T", mini::type1(), vec![(nm2("T", "mk"), mk_ty)])],
-        ))
-        .unwrap_err();
+    let d = decl(
+        vec![],
+        0,
+        vec![ind("T", mini::type1(), vec![(nm2("T", "mk"), mk_ty)])],
+    );
+    let env = Environment::default();
+    let extra = HashMap::new();
+    let mut scratch = Store::scratch();
+    let err = admit(&mut scratch, &env, &extra, d).unwrap_err();
     match err {
-        crate::KernelError::InvalidInductive { what, .. } => assert_eq!(what, "universe too small"),
+        crate::KernelError::InvalidInductive { what, .. } => {
+            assert_eq!(what, "universe too small")
+        }
         other => panic!("expected universe-too-small error, got {other:?}"),
     }
 }
 
 #[test]
 fn rejects_param_mismatch_across_block() {
-    // Two-type block with nparams=1 but incompatible parameter types
-    // (Type 1 vs Prop).
     let a_ty = mini::pi("α", mini::type1(), mini::type1());
     let b_ty = mini::pi("α", mini::sort0(), mini::type1());
-    // ctors are never reached (the param mismatch is caught in
-    // check_inductive_types) but must be structurally present.
     let a_mk = mini::pi(
         "α",
         mini::type1(),
@@ -560,37 +830,42 @@ fn rejects_param_mismatch_across_block() {
         mini::sort0(),
         mini::appn(mini::cstn(nm("B"), vec![]), vec![mini::bvar(0)]),
     );
-    let mut env = Environment::default();
-    let err = env
-        .add_decl(decl(
-            vec![],
-            1,
-            vec![
-                ind("A", a_ty, vec![(nm2("A", "mk"), a_mk)]),
-                ind("B", b_ty, vec![(nm2("B", "mk"), b_mk)]),
-            ],
-        ))
-        .unwrap_err();
+    let d = decl(
+        vec![],
+        1,
+        vec![
+            ind("A", a_ty, vec![(nm2("A", "mk"), a_mk)]),
+            ind("B", b_ty, vec![(nm2("B", "mk"), b_mk)]),
+        ],
+    );
+    let env = Environment::default();
+    let extra = HashMap::new();
+    let mut scratch = Store::scratch();
+    let err = admit(&mut scratch, &env, &extra, d).unwrap_err();
     match err {
         crate::KernelError::InvalidInductive { what, .. } => {
             assert_eq!(what, "parameters must match")
         }
         other => panic!("expected parameter-mismatch error, got {other:?}"),
     }
-    // rollback: A (added before the mismatch on B) is gone.
-    assert!(env.get(&nm("A")).is_none());
+    assert!(extra.is_empty(), "rollback: nothing admitted");
 }
 
 #[test]
 fn rejects_empty_inductive_block() {
-    // A crafted Declaration::Inductive with no types must be rejected
-    // (never panic): the pipeline indexes `ind_types[0]` in
-    // elim_only_at_universe_zero / init_k_target, so the guard at the
-    // head of `run` must fire first. Also asserts the env is unchanged.
-    let mut env = Environment::default();
-    env.add_decl(axiom("marker", sort_n(1))).unwrap();
+    // A crafted `Inductive` with no types must be rejected (never
+    // panic): the pipeline indexes `types[0]` in
+    // `elim_only_at_universe_zero`/`init_k_target`, so the guard at the
+    // head of `run` must fire first. Also asserts the environment is
+    // unchanged: `env` here is a REAL `Environment` (built via
+    // `from_modules`, matching `mini::env()`'s own "trusted, unchecked
+    // base" pattern) holding a `marker` axiom untouched by this test's
+    // (never even attempted) mutation of `env` itself.
+    let env = Environment::from_modules([vec![axiom("marker", sort_n(1))]]).unwrap();
+    let extra = HashMap::new();
     let before = env.len();
-    let err = env.add_decl(decl(vec![], 0, vec![])).unwrap_err();
+    let mut scratch = Store::scratch();
+    let err = admit(&mut scratch, &env, &extra, decl(vec![], 0, vec![])).unwrap_err();
     match err {
         crate::KernelError::InvalidInductive { name, what } => {
             assert_eq!(what, "empty inductive block");
@@ -599,23 +874,33 @@ fn rejects_empty_inductive_block() {
         other => panic!("expected empty-inductive-block error, got {other:?}"),
     }
     assert_eq!(env.len(), before, "environment unchanged on rejection");
-    assert!(env.get(&nm("marker")).is_some());
+    let marker_id = env_name_id(&mut scratch, &env, &nm("marker"));
+    assert!(env.get(marker_id).is_some());
 }
 
 #[test]
 fn iota_now_reduces_declared_recursor() {
     // Admit Nat, then reduce `Nat.rec.{1} motive z s (Nat.succ k)` using
-    // the REGENERATED recursor + rules. This ties Task 7's iota reduction
-    // to the rules produced here.
-    let mut env = Environment::default();
-    env.add_decl(nat_decl()).expect("Nat admits");
-    env.add_decl(axiom("z", mini::nat())).unwrap();
-    env.add_decl(axiom(
-        "s",
-        mini::pi("n", mini::nat(), mini::pi("ih", mini::nat(), mini::nat())),
-    ))
-    .unwrap();
-    env.add_decl(axiom("k", mini::nat())).unwrap();
+    // the REGENERATED recursor + rules — ties this file's iota reduction
+    // to the rules produced here. `z`/`s`/`k` are bridged directly into
+    // `extra` (no checking — the test's subject is the recursor's iota
+    // reduction, not axiom-checking, matching the pre-migration file's
+    // own ordering: `nat_decl()` first, then the axioms).
+    let env = Environment::default();
+    let mut extra = HashMap::new();
+    let mut scratch = Store::scratch();
+    admit_into(&mut scratch, &env, &mut extra, nat_decl()).expect("Nat admits");
+    bridge_into(&mut scratch, &env, &mut extra, &axiom("z", mini::nat()));
+    bridge_into(
+        &mut scratch,
+        &env,
+        &mut extra,
+        &axiom(
+            "s",
+            mini::pi("n", mini::nat(), mini::pi("ih", mini::nat(), mini::nat())),
+        ),
+    );
+    bridge_into(&mut scratch, &env, &mut extra, &axiom("k", mini::nat()));
 
     // motive := fun _ : Nat => Nat  (a `Nat → Sort 1` motive ⇒ u := 1).
     let motive = mini::lam("x", mini::nat(), mini::nat());
@@ -635,103 +920,53 @@ fn iota_now_reduces_declared_recursor() {
         ],
     );
 
-    let mut tc = crate::TypeChecker::new(&env);
-    let reduced = tc.whnf(&major).expect("iota reduces");
+    let base = env.view().store;
+    let major_id = scratch.intern_expr(Some(base), &major).unwrap();
+    let view = EnvView {
+        consts: env.view().consts,
+        extra: Some(&extra),
+        quot_initialized: env.quot_initialized(),
+        store: base,
+    };
+    let mut tc = TypeChecker::new(view, &mut scratch);
+    let reduced = tc.whnf(major_id).expect("iota reduces");
     // Expect `s k (Nat.rec.{1} motive z s k)`: head is `s` with 2 args.
-    let head = Expr::get_app_fn(&reduced);
-    assert!(
-        matches!(head.node(), ExprNode::Const { name, .. } if name.as_ref() == nm("s").as_ref()),
-        "reduced head is the succ minor `s`, got {:?}",
-        head.node()
-    );
-    assert_eq!(Expr::get_app_num_args(&reduced), 2);
-}
-
-// ---- Task 10: nested inductives -----------------------------------------
-//
-// All four tests hand-build the block from the `#print`/`run_cmd`
-// transcriptions taken under leanprover/lean4:v4.32.0-rc1:
-//
-//   inductive Tree where | node : List Tree → Tree
-//     Tree: numNested=1  all=[Tree]
-//     Tree.node : List.{0} Tree → Tree
-//     Tree.rec.{u} : numMotives=2 numMinors=3 numParams=0 numIndices=0
-//         rules: for Tree.node (1 field)
-//     Tree.rec_1.{u} (the restored aux List recursor): numMotives=2
-//         rules: for List.nil (0), for List.cons (2)
-//
-//   inductive Stx where | node : Array Stx → Stx | leaf : Stx
-//     Stx: numNested=2  all=[Stx]         (Array nests, and Array's
-//     Stx.rec.{u} : numMotives=3 numMinors=5   underlying List nests too)
-
-/// `Type u` = `Sort (u+1)`.
-fn type_u() -> Arc<Expr> {
-    Expr::sort(
-        Level::mk_succ(Arc::new(Level::Param(nm("u")))),
-        &mut RecGuard::new(),
-    )
-    .unwrap()
-}
-
-/// Does any component of `n` equal `s`? (Leak scan for `_nested`.)
-fn name_has_component(n: &Arc<Name>, s: &str) -> bool {
-    let mut cur = Arc::clone(n);
-    loop {
-        match cur.as_ref() {
-            Name::Anonymous => return false,
-            Name::Str { parent, part } => {
-                if part == s {
-                    return true;
-                }
-                cur = Arc::clone(parent);
-            }
-            Name::Num { parent, .. } => cur = Arc::clone(parent),
+    let head = get_app_fn(&scratch, Some(base), reduced);
+    match scratch.expr_node(Some(base), head) {
+        Node::Const { name, .. } => {
+            assert_eq!(
+                scratch.to_name(Some(base), name),
+                nm("s"),
+                "reduced head is the succ minor `s`"
+            );
         }
+        other => panic!("reduced head is not a Const, got {other:?}"),
     }
-}
-
-fn assert_no_nested_leak(env: &Environment) {
-    for n in env.constant_names() {
-        assert!(
-            !name_has_component(&n, "_nested"),
-            "aux `_nested` name leaked into final env: {n}"
-        );
-    }
-}
-
-/// `inductive Tree where | node : List Tree → Tree`.
-fn tree_decl() -> Declaration {
-    // Tree.node : List.{0} Tree → Tree
-    let list0_tree = mini::app(
-        mini::cstn(nm("List"), vec![Arc::new(Level::Zero)]),
-        mini::cstn(nm("Tree"), vec![]),
-    );
-    let node_ty = mini::pi("a", list0_tree, mini::cstn(nm("Tree"), vec![]));
-    decl(
-        vec![],
-        0,
-        vec![ind(
-            "Tree",
-            mini::type1(),
-            vec![(nm2("Tree", "node"), node_ty)],
-        )],
-    )
+    assert_eq!(get_app_num_args(&scratch, Some(base), reduced), 2);
 }
 
 #[test]
 fn admits_nested_via_list() {
-    let mut env = mini::env();
-    env.add_decl(tree_decl()).expect("Tree admits via nesting");
+    let env = mini::env();
+    let extra = HashMap::new();
+    let mut scratch = Store::scratch();
+    let base = env.view().store;
+    let added = admit(&mut scratch, &env, &extra, tree_decl()).expect("Tree admits via nesting");
 
-    // InductiveVal: one nested aux type, `all` fixed to just [Tree].
-    let tree = induct(&env, &nm("Tree"));
+    let tree = as_induct(find(&scratch, base, &added, &nm("Tree")));
     assert_eq!(tree.num_nested, Nat::from(1), "one aux nested type (List)");
-    assert_eq!(tree.all, vec![nm("Tree")], "all restored to the real block");
-    assert_eq!(tree.ctors, vec![nm2("Tree", "node")]);
+    assert_eq!(
+        to_names(&scratch, base, &tree.all),
+        vec![nm("Tree")],
+        "all restored to the real block"
+    );
+    assert_eq!(
+        to_names(&scratch, base, &tree.ctors),
+        vec![nm2("Tree", "node")]
+    );
     assert!(tree.is_rec, "Tree is recursive");
 
-    // Constructor: type restored to `List.{0} Tree → Tree`.
-    let node = ctor(&env, &nm2("Tree", "node"));
+    let node = as_ctor(find(&scratch, base, &added, &nm2("Tree", "node")));
     assert_eq!(node.num_params, Nat::from(0));
     assert_eq!(node.num_fields, Nat::from(1));
     let list0_tree = mini::app(
@@ -739,44 +974,69 @@ fn admits_nested_via_list() {
         mini::cstn(nm("Tree"), vec![]),
     );
     let expected_node_ty = mini::pi("a", list0_tree, mini::cstn(nm("Tree"), vec![]));
+    let expected_node_ty_id = scratch.intern_expr(Some(base), &expected_node_ty).unwrap();
     assert!(
-        eq_structural(&node.val.ty, &expected_node_ty),
+        eq_structural_id(
+            &scratch,
+            Some(base),
+            node.val.ty,
+            &scratch,
+            Some(base),
+            expected_node_ty_id
+        ),
         "Tree.node type restored to `List.{{0}} Tree → Tree`, got {:?}",
         node.val.ty
     );
 
-    // Recursor Tree.rec: gains a motive for the aux List type ⇒ 2 motives.
-    let rec = recursor(&env, &nm2("Tree", "rec"));
+    let rec = as_rec(find(&scratch, base, &added, &nm2("Tree", "rec")));
     assert_eq!(rec.num_motives, Nat::from(2), "motive for Tree + aux List");
     assert_eq!(rec.num_minors, Nat::from(3), "node + nil + cons minors");
     assert_eq!(rec.num_params, Nat::from(0));
     assert_eq!(rec.num_indices, Nat::from(0));
-    assert_eq!(rec.all, vec![nm("Tree")], "recursor all = real block");
-    assert_eq!(rec.val.level_params, vec![nm("u")]);
-    // Tree.rec's own rules are for Tree's constructors only.
+    assert_eq!(
+        to_names(&scratch, base, &rec.all),
+        vec![nm("Tree")],
+        "recursor all = real block"
+    );
+    assert_eq!(
+        to_names(&scratch, base, &rec.val.level_params),
+        vec![nm("u")]
+    );
     assert_eq!(rec.rules.len(), 1);
-    assert_eq!(rec.rules[0].ctor, nm2("Tree", "node"));
+    assert_eq!(
+        scratch.to_name(Some(base), Some(rec.rules[0].ctor)),
+        nm2("Tree", "node")
+    );
     assert_eq!(rec.rules[0].nfields, Nat::from(1));
 
-    // The restored aux recursor Tree.rec_1: rules reference the REAL
-    // List.nil / List.cons names (restore_constructor_name).
-    let rec1 = recursor(&env, &nm2("Tree", "rec_1"));
+    let rec1 = as_rec(find(&scratch, base, &added, &nm2("Tree", "rec_1")));
     assert_eq!(rec1.num_motives, Nat::from(2));
-    assert_eq!(rec1.all, vec![nm("Tree")]);
+    assert_eq!(to_names(&scratch, base, &rec1.all), vec![nm("Tree")]);
     assert_eq!(rec1.rules.len(), 2);
-    assert_eq!(rec1.rules[0].ctor, nm2("List", "nil"));
+    assert_eq!(
+        scratch.to_name(Some(base), Some(rec1.rules[0].ctor)),
+        nm2("List", "nil")
+    );
     assert_eq!(rec1.rules[0].nfields, Nat::from(0));
-    assert_eq!(rec1.rules[1].ctor, nm2("List", "cons"));
+    assert_eq!(
+        scratch.to_name(Some(base), Some(rec1.rules[1].ctor)),
+        nm2("List", "cons")
+    );
     assert_eq!(rec1.rules[1].nfields, Nat::from(2));
 
-    // No aux `_nested.*` declaration leaks into the final environment.
-    assert_no_nested_leak(&env);
+    let mut extra_map = HashMap::new();
+    for ci in &added {
+        extra_map.insert(ci.name(), ci.clone());
+    }
+    assert_no_nested_leak(&scratch, base, &extra_map);
 }
 
 #[test]
 fn nested_iota_reduces() {
-    let mut env = mini::env();
-    env.add_decl(tree_decl()).expect("Tree admits");
+    let env = mini::env();
+    let mut extra = HashMap::new();
+    let mut scratch = Store::scratch();
+    admit_into(&mut scratch, &env, &mut extra, tree_decl()).expect("Tree admits");
     // Opaque stand-ins for the recursor's motives/minors + a List Tree
     // value; whnf's iota is untyped, so any well-typed constants suffice.
     let list0_tree = mini::app(
@@ -790,9 +1050,9 @@ fn nested_iota_reduces() {
         ("nil_min", mini::type1()),
         ("cons_min", mini::type1()),
     ] {
-        env.add_decl(axiom(n, ty)).unwrap();
+        bridge_into(&mut scratch, &env, &mut extra, &axiom(n, ty));
     }
-    env.add_decl(axiom("lst", list0_tree)).unwrap();
+    bridge_into(&mut scratch, &env, &mut extra, &axiom("lst", list0_tree));
 
     // Tree.rec.{1} m1 m2 node_min nil_min cons_min (Tree.node lst).
     let one = Level::mk_succ(Arc::new(Level::Zero));
@@ -813,75 +1073,62 @@ fn nested_iota_reduces() {
         ],
     );
 
-    let mut tc = crate::TypeChecker::new(&env);
-    let reduced = tc.whnf(&major).expect("nested iota reduces");
+    let base = env.view().store;
+    let major_id = scratch.intern_expr(Some(base), &major).unwrap();
+    let view = EnvView {
+        consts: env.view().consts,
+        extra: Some(&extra),
+        quot_initialized: env.quot_initialized(),
+        store: base,
+    };
+    let mut tc = TypeChecker::new(view, &mut scratch);
+    let reduced = tc.whnf(major_id).expect("nested iota reduces");
     // RHS of the Tree.node rule is `node_min lst (Tree.rec_1 … lst)`.
-    let head = Expr::get_app_fn(&reduced);
-    assert!(
-        matches!(head.node(), ExprNode::Const { name, .. } if name.as_ref() == nm("node_min").as_ref()),
-        "reduced head is the node minor, got {:?}",
-        head.node()
-    );
-    assert_eq!(Expr::get_app_num_args(&reduced), 2);
+    let head = get_app_fn(&scratch, Some(base), reduced);
+    match scratch.expr_node(Some(base), head) {
+        Node::Const { name, .. } => {
+            assert_eq!(
+                scratch.to_name(Some(base), name),
+                nm("node_min"),
+                "reduced head is the node minor"
+            );
+        }
+        other => panic!("reduced head is not a Const, got {other:?}"),
+    }
+    assert_eq!(get_app_num_args(&scratch, Some(base), reduced), 2);
 }
 
 #[test]
 fn rejects_nested_positivity_violation() {
-    // inductive T where | mk : List (T → T) → T
-    // After elimination the aux List copy carries a field `T → T`; the
-    // domain occurrence of `T` is non-positive ⇒ rejected.
-    let mut env = mini::env();
+    let env = mini::env();
+    let extra = HashMap::new();
+    let mut scratch = Store::scratch();
     let t = mini::cstn(nm("T"), vec![]);
-    let t_to_t = mini::pi("x", Arc::clone(&t), Arc::clone(&t)); // T → T
+    let t_to_t = mini::pi("x", Arc::clone(&t), Arc::clone(&t));
     let list_tt = mini::app(mini::cstn(nm("List"), vec![Arc::new(Level::Zero)]), t_to_t);
-    let mk_ty = mini::pi("a", list_tt, t); // List (T → T) → T
-    let err = env
-        .add_decl(decl(
-            vec![],
-            0,
-            vec![ind("T", mini::type1(), vec![(nm2("T", "mk"), mk_ty)])],
-        ))
-        .unwrap_err();
+    let mk_ty = mini::pi("a", list_tt, t);
+    let d = decl(
+        vec![],
+        0,
+        vec![ind("T", mini::type1(), vec![(nm2("T", "mk"), mk_ty)])],
+    );
+    let err = admit(&mut scratch, &env, &extra, d).unwrap_err();
     match err {
         crate::KernelError::InvalidInductive { what, .. } => assert_eq!(what, "positivity"),
         other => panic!("expected positivity error, got {other:?}"),
     }
-    // Rollback: neither the real names nor any aux `_nested.*` remain.
-    assert!(env.get(&nm("T")).is_none());
-    assert!(env.get(&nm2("T", "mk")).is_none());
-    assert_no_nested_leak(&env);
-}
-
-/// `structure Array.{u} (α : Type u) where mk :: (toList : List.{u} α)`.
-fn array_decl() -> Declaration {
-    let array_ty = mini::pi("α", type_u(), type_u());
-    let listu = mini::cstn(nm("List"), vec![Arc::new(Level::Param(nm("u")))]);
-    let arrayu = mini::cstn(nm("Array"), vec![Arc::new(Level::Param(nm("u")))]);
-    // Array.mk.{u} : {α : Type u} → List.{u} α → Array.{u} α
-    let mk_ty = mini::pi(
-        "α",
-        type_u(),
-        mini::pi(
-            "toList",
-            mini::app(listu, mini::bvar(0)),
-            mini::app(arrayu, mini::bvar(1)),
-        ),
+    assert!(
+        extra.is_empty(),
+        "rollback: nothing admitted, no aux leak possible"
     );
-    decl(
-        vec![nm("u")],
-        1,
-        vec![ind("Array", array_ty, vec![(nm2("Array", "mk"), mk_ty)])],
-    )
 }
 
 #[test]
 fn stdlib_shape_smoke() {
-    // The heaviest nested consumer shape in the stdlib: Lean.Syntax nests
-    // `Array Syntax`, which pulls in Array *and* its underlying List. A
-    // faithful minimal analogue:
-    //   inductive Stx where | node : Array Stx → Stx | leaf : Stx
-    let mut env = mini::env();
-    env.add_decl(array_decl()).expect("Array admits");
+    let env = mini::env();
+    let mut extra = HashMap::new();
+    let mut scratch = Store::scratch();
+    admit_into(&mut scratch, &env, &mut extra, array_decl()).expect("Array admits");
 
     let array0_stx = mini::app(
         mini::cstn(nm("Array"), vec![Arc::new(Level::Zero)]),
@@ -889,7 +1136,7 @@ fn stdlib_shape_smoke() {
     );
     let node_ty = mini::pi("a", array0_stx, mini::cstn(nm("Stx"), vec![]));
     let leaf_ty = mini::cstn(nm("Stx"), vec![]);
-    env.add_decl(decl(
+    let d = decl(
         vec![],
         0,
         vec![ind(
@@ -897,23 +1144,31 @@ fn stdlib_shape_smoke() {
             mini::type1(),
             vec![(nm2("Stx", "node"), node_ty), (nm2("Stx", "leaf"), leaf_ty)],
         )],
-    ))
-    .expect("Stx admits via double nesting (Array + List)");
+    );
+    let base = env.view().store;
+    let added =
+        admit(&mut scratch, &env, &extra, d).expect("Stx admits via double nesting (Array + List)");
 
-    let stx = induct(&env, &nm("Stx"));
-    // Array nests, and Array's underlying List nests ⇒ two aux types.
+    let stx = as_induct(find(&scratch, base, &added, &nm("Stx")));
     assert_eq!(stx.num_nested, Nat::from(2));
-    assert_eq!(stx.all, vec![nm("Stx")]);
-    assert_eq!(stx.ctors, vec![nm2("Stx", "node"), nm2("Stx", "leaf")]);
+    assert_eq!(to_names(&scratch, base, &stx.all), vec![nm("Stx")]);
+    assert_eq!(
+        to_names(&scratch, base, &stx.ctors),
+        vec![nm2("Stx", "node"), nm2("Stx", "leaf")]
+    );
 
-    let rec = recursor(&env, &nm2("Stx", "rec"));
+    let rec = as_rec(find(&scratch, base, &added, &nm2("Stx", "rec")));
     assert_eq!(rec.num_motives, Nat::from(3), "Stx + Array-aux + List-aux");
     assert_eq!(rec.num_minors, Nat::from(5), "node+leaf + mk + nil+cons");
-    assert_eq!(rec.all, vec![nm("Stx")]);
+    assert_eq!(to_names(&scratch, base, &rec.all), vec![nm("Stx")]);
 
-    // The two restored aux recursors are present under real names …
-    assert!(env.get(&nm2("Stx", "rec_1")).is_some());
-    assert!(env.get(&nm2("Stx", "rec_2")).is_some());
-    // … and no aux `_nested.*` declaration leaked.
-    assert_no_nested_leak(&env);
+    // The two restored aux recursors are present under real names
+    // (`find` panics on a miss, so reaching the next line proves it).
+    find(&scratch, base, &added, &nm2("Stx", "rec_1"));
+    find(&scratch, base, &added, &nm2("Stx", "rec_2"));
+
+    for ci in &added {
+        extra.insert(ci.name(), ci.clone());
+    }
+    assert_no_nested_leak(&scratch, base, &extra);
 }
