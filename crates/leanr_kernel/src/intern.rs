@@ -13,6 +13,20 @@
 //! fast path), so no verdict can change. Bucket comparison uses the
 //! existing `structural_eq`, which compares every field (binder names,
 //! `BinderInfo`, `non_dep`, `KVMap`), so merged nodes are fully identical.
+//!
+//! The address-keyed memos (`expr_memo`/`level_memo`) are only sound
+//! *within* a single `intern_constant_info` call: the input `ConstantInfo`
+//! borrowed by that call keeps every `Arc` it reaches alive, so addresses
+//! can't be reused for a structurally-different node during the call. Once
+//! the call returns, `intern_constants` drops that constant's original
+//! entry, freeing its interior `Arc`s; a later constant can then allocate a
+//! *different* node at a freed address. A memo keyed only on address (with
+//! no structural check) would return the stale canonical for that reused
+//! address — wrong. So `intern_constant_info` clears both memos at entry,
+//! keeping intra-constant dedup while never trusting an address across
+//! constants. The bucket tables (`exprs`/`levels`) remain valid across the
+//! whole pass because they always confirm with `structural_eq` before
+//! reusing a canonical `Arc`.
 
 use crate::{ConstantInfo, Expr, ExprNode, KernelError, Level, Name, RecGuard};
 use std::collections::HashMap;
@@ -23,11 +37,14 @@ pub struct Interner {
     /// Canonical levels, bucketed by `Level::hash_val`.
     levels: HashMap<u64, Vec<Arc<Level>>>,
     /// Input-`Arc`-address → canonical level, so a shared input subtree is
-    /// interned once. Keys are live for the pass's lifetime only.
+    /// interned once. Valid only within a single `intern_constant_info`
+    /// call (see module docs); cleared at the start of every call.
     level_memo: HashMap<usize, Arc<Level>>,
     /// Canonical exprs, bucketed by `ExprData::hash()` (structural hash).
     exprs: HashMap<u32, Vec<Arc<Expr>>>,
-    /// Input-`Arc`-address → canonical expr (per-pass lifetime only).
+    /// Input-`Arc`-address → canonical expr. Valid only within a single
+    /// `intern_constant_info` call (see module docs); cleared at the start
+    /// of every call.
     expr_memo: HashMap<usize, Arc<Expr>>,
 }
 
@@ -178,6 +195,16 @@ impl Interner {
         ci: &ConstantInfo,
         g: &mut RecGuard,
     ) -> Result<ConstantInfo, KernelError> {
+        // Address-keyed memos are only sound while `ci` (and everything it
+        // reaches) is alive, which is exactly the duration of this call.
+        // Once `intern_constants` drops this constant's input, its interior
+        // `Arc` addresses can be reused by a later, structurally-different
+        // constant; a stale entry here would then be returned without a
+        // `structural_eq` check. Clearing both memos per constant closes
+        // that hazard while keeping intra-constant dedup (the `exprs`/
+        // `levels` buckets still provide cross-constant sharing, safely).
+        self.expr_memo.clear();
+        self.level_memo.clear();
         let mut out = ci.clone();
         match &mut out {
             ConstantInfo::Axiom(v) => {
@@ -240,7 +267,11 @@ pub fn intern_constants(
     let mut out = HashMap::with_capacity(constants.len());
     for (name, ci) in constants {
         let interned = it.intern_constant_info(&ci, &mut g)?;
-        drop(ci); // release the original entry as we go
+        // `ci` (the by-value loop binding) drops here, at the end of the
+        // iteration, releasing this constant's original interior `Arc`s —
+        // freeing their addresses for reuse by a later constant. That's
+        // fine: `intern_constant_info` clears the address-keyed memos per
+        // call, so no stale entry can outlive this iteration.
         out.insert(name, interned);
     }
     Ok(out)
@@ -426,5 +457,37 @@ mod tests {
         map.insert(name("A"), ci);
         let out = intern_constants(map).unwrap();
         assert!(Expr::structural_eq(&orig, &out[&name("A")].constant_val().ty, &mut g).unwrap());
+    }
+
+    #[test]
+    fn memo_does_not_persist_across_constants() {
+        // Two single-node axioms with DISTINCT types. Interning both through
+        // one Interner must leave expr_memo holding only the SECOND
+        // constant's node(s) — proof the per-constant reset happened. Without
+        // the reset, the memo would retain the first constant's freed-address
+        // entries too (the Critical bug).
+        let mut it = Interner::new();
+        let mut g = RecGuard::new();
+        let mk = |nm: &str, g: &mut RecGuard| {
+            ConstantInfo::Axiom(crate::AxiomVal {
+                val: crate::ConstantVal {
+                    name: name(nm),
+                    level_params: vec![],
+                    ty: Expr::const_(name(nm), vec![], g).unwrap(),
+                },
+                is_unsafe: false,
+            })
+        };
+        let a = mk("A", &mut g);
+        let b = mk("B", &mut g);
+        it.intern_constant_info(&a, &mut g).unwrap();
+        it.intern_constant_info(&b, &mut g).unwrap();
+        // `B`'s type is a single Const node → exactly one expr_memo entry.
+        assert_eq!(
+            it.expr_memo.len(),
+            1,
+            "expr_memo must be reset per constant; found {} entries",
+            it.expr_memo.len()
+        );
     }
 }
