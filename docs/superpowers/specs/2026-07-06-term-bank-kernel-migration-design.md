@@ -116,9 +116,12 @@ calls phase-1 `promote()` on exactly the kernel-generated values that
 outlive the declaration (inductive/constructor/recursor
 `ConstantInfo`s including `RecursorRule.rhs`). On `TypeChecker` drop,
 the scratch store, its probe table, and every id-keyed cache free
-wholesale. The nested-inductive scratch-env clone shares the persistent
-bank (append-only during a declaration; cloning the constants map
-suffices — the empty-interner clone hack disappears).
+wholesale. The nested-inductive scratch env becomes a delta over the
+real one: it borrows the persistent bank read-only, clones only the
+constants map, and interns its transient declarations' terms into the
+checker's scratch region (they drop with the declaration; the real
+admission still promotes at `add_core`). The empty-interner clone hack
+disappears.
 
 **Names, levels, FVars.** `ConstantVal` level params become `LevelId`;
 `LocalContext` and FVar identities become `NameId`; `FVarIdGen` mints
@@ -138,8 +141,8 @@ invariants (a loose FVar in a promoted value is a bug today too).
   integration test decodes every fixture module, builds both
   environments (Arc and id), replays every declaration through both
   `TypeChecker`s, and requires identical verdicts — including the
-  hermetic mutation fixtures, rejected by both with the same error
-  class. Must pass before the flip task may start.
+  hermetic mutation fixtures, rejected by both with the same
+  `KernelError` variant. Must pass before the flip task may start.
 - **Flip:** `tests/check_fixtures.rs` ports to the id kernel — same
   fixtures, same verdicts ("green unmodified in spirit").
   `leanr_olean`/CLI call sites rewire; `lib.rs` exports go id-based.
