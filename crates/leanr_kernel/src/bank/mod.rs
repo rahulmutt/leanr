@@ -679,45 +679,4 @@ impl Store {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn id_roundtrips_index_and_region() {
-        let p = ExprId::from_index(0, false).unwrap();
-        assert_eq!(p.index(), 0);
-        assert!(!p.is_scratch());
-        let s = ExprId::from_index(12345, true).unwrap();
-        assert_eq!(s.index(), 12345);
-        assert!(s.is_scratch());
-        assert_eq!(ExprId::from_bits(s.bits()), Some(s));
-    }
-
-    #[test]
-    fn id_max_index_is_bounded() {
-        assert!(ExprId::from_index(MAX_INDEX, false).is_some());
-        assert!(ExprId::from_index(MAX_INDEX + 1, false).is_none());
-    }
-
-    #[test]
-    fn zero_bits_is_no_id() {
-        assert_eq!(ExprId::from_bits(0), None);
-    }
-
-    #[test]
-    fn region_bit_alone_is_no_id() {
-        // REGION_BIT set but the low 31 bits are all zero: `index()` would
-        // underflow on this value, so `from_bits` must reject it just like
-        // it rejects 0.
-        assert_eq!(ExprId::from_bits(REGION_BIT), None);
-    }
-
-    #[test]
-    fn from_bits_round_trips_valid_bits() {
-        let p = ExprId::from_index(0, false).unwrap();
-        let s = ExprId::from_index(12345, true).unwrap();
-        assert_eq!(ExprId::from_bits(p.bits()).unwrap().index(), p.index());
-        assert_eq!(ExprId::from_bits(s.bits()).unwrap().index(), s.index());
-        assert!(ExprId::from_bits(s.bits()).unwrap().is_scratch());
-    }
-}
+mod tests;
