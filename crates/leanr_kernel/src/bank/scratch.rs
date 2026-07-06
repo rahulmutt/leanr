@@ -48,6 +48,19 @@ fn promote_level(base: &mut Store, scratch: &Store, id: LevelId) -> Result<Level
 /// attacker-depth scratch terms can't blow the native stack; a memo
 /// keyed by scratch `ExprId` gives dedup/stability (same scratch id ⇒
 /// same promoted id every time).
+///
+/// Lifecycle contract: once `promote` has run, the ids it minted in
+/// `scratch` are no longer canonical with respect to this
+/// `(base, scratch)` pair — `base` now holds a *persistent* id for the
+/// same term that `scratch` still answers with a *scratch* id, so the
+/// two stores disagree and must not both be consulted afterward.
+/// Callers must not keep interning through `scratch` against this
+/// `base` past this point; per spec §2's "drop wholesale" lifecycle,
+/// `scratch` (its table and all id-keyed caches) must be dropped at
+/// declaration completion. `promote` is meant to be the last operation
+/// performed on a scratch region before that drop — phase 2's
+/// `add_core` calls it once per admitted root and then discards the
+/// scratch store.
 pub fn promote(base: &mut Store, scratch: &Store, id: ExprId) -> Result<ExprId, KernelError> {
     use std::collections::HashMap;
     enum Frame {
@@ -229,7 +242,6 @@ mod tests {
 
     #[test]
     fn scratch_reuses_persistent_ids() {
-        let mut g = RecGuard::new();
         let mut base = Store::persistent();
         let e = Expr::app(Expr::bvar(Nat::from(0u64)), Expr::bvar(Nat::from(1u64)));
         let pid = base.intern_expr(None, &e).unwrap();
@@ -237,7 +249,6 @@ mod tests {
         let sid = scr.intern_expr(Some(&base), &e).unwrap();
         assert_eq!(sid, pid, "term already in base ⇒ base id, no scratch row");
         assert!(!sid.is_scratch());
-        let _ = &mut g;
     }
 
     #[test]

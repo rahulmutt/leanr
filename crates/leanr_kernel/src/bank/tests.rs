@@ -3,7 +3,7 @@
 //! The existing `Arc<Expr>` representation is the oracle.
 
 use super::*;
-use crate::{BinderInfo, Expr, Level, Literal, Name, Nat, RecGuard};
+use crate::{BinderInfo, DataValue, Expr, KVMap, Level, Literal, Name, Nat, RecGuard};
 use std::sync::Arc;
 
 #[test]
@@ -70,14 +70,15 @@ fn nm(s: &str) -> Arc<Name> {
 /// Random term over a tiny vocabulary; `depth` bounds recursion.
 fn gen_expr(r: &mut Rng, depth: u32, g: &mut RecGuard) -> Arc<Expr> {
     if depth == 0 {
-        return match r.below(4) {
+        return match r.below(5) {
             0 => Expr::bvar(Nat::from(r.below(3))),
             1 => Expr::lit(Literal::NatVal(Nat::from(r.below(5)))),
             2 => Expr::const_(nm(["A", "B"][r.below(2) as usize]), vec![], g).unwrap(),
-            _ => Expr::sort(Arc::new(Level::Succ(Arc::new(Level::Zero))), g).unwrap(),
+            3 => Expr::sort(Arc::new(Level::Succ(Arc::new(Level::Zero))), g).unwrap(),
+            _ => Expr::fvar(nm(["fv1", "fv2"][r.below(2) as usize])),
         };
     }
-    match r.below(5) {
+    match r.below(6) {
         0 => Expr::app(gen_expr(r, depth - 1, g), gen_expr(r, depth - 1, g)),
         1 => Expr::lam(
             nm(["x", "y"][r.below(2) as usize]),
@@ -98,7 +99,11 @@ fn gen_expr(r: &mut Rng, depth: u32, g: &mut RecGuard) -> Arc<Expr> {
             gen_expr(r, depth - 1, g),
             r.below(2) == 0,
         ),
-        _ => Expr::proj(nm("S"), Nat::from(r.below(3)), gen_expr(r, depth - 1, g)),
+        4 => Expr::proj(nm("S"), Nat::from(r.below(3)), gen_expr(r, depth - 1, g)),
+        _ => Expr::mdata(
+            KVMap(vec![(nm("k"), DataValue::OfBool(r.below(2) == 0))]),
+            gen_expr(r, depth - 1, g),
+        ),
     }
 }
 
@@ -143,6 +148,76 @@ fn roundtrip_preserves_structure_and_data_word() {
             "seed {seed}"
         );
         assert_eq!(back.data(), e.data(), "seed {seed}");
+    }
+}
+
+#[test]
+fn scratch_and_promote_preserve_the_interning_invariant() {
+    let mut g = RecGuard::new();
+
+    // Seed a persistent store from seeds 0..30.
+    let mut base = Store::persistent();
+    let mut persistent_terms: Vec<Arc<Expr>> = Vec::new();
+    let mut persistent_ids: Vec<ExprId> = Vec::new();
+    for seed in 0..30u64 {
+        let mut r = Rng(seed);
+        let e = gen_expr(&mut r, 4, &mut g);
+        let id = base.intern_expr(None, &e).unwrap();
+        persistent_ids.push(id);
+        persistent_terms.push(e);
+    }
+
+    // Intern terms from seeds 0..60 (repeats guarantee scratch/base and
+    // scratch/scratch structural duplicates) through a scratch overlay.
+    let mut scr = Store::scratch();
+    let mut scratch_terms: Vec<Arc<Expr>> = Vec::new();
+    let mut scratch_ids: Vec<ExprId> = Vec::new();
+    for seed in 0..60u64 {
+        let mut r = Rng(seed % 30);
+        let e = gen_expr(&mut r, 4, &mut g);
+        let id = scr.intern_expr(Some(&base), &e).unwrap();
+        scratch_ids.push(id);
+        scratch_terms.push(e);
+    }
+
+    // Ids are globally canonical across regions: pairwise id equality
+    // (direct `==`, no region-aware translation) must agree with
+    // `Expr::structural_eq` across BOTH id sets together.
+    let all_terms: Vec<&Arc<Expr>> = persistent_terms
+        .iter()
+        .chain(scratch_terms.iter())
+        .collect();
+    let all_ids: Vec<ExprId> = persistent_ids
+        .iter()
+        .copied()
+        .chain(scratch_ids.iter().copied())
+        .collect();
+    for i in 0..all_terms.len() {
+        for j in i..all_terms.len() {
+            let structural = Expr::structural_eq(all_terms[i], all_terms[j], &mut g).unwrap();
+            assert_eq!(
+                all_ids[i] == all_ids[j],
+                structural,
+                "invariant violated between term {i} and term {j}"
+            );
+        }
+    }
+
+    // Promote every scratch-region root id into base; the promoted
+    // term must read back from base ALONE structurally equal to the
+    // original, and promoting the same sid twice must be idempotent.
+    for (i, &sid) in scratch_ids.iter().enumerate() {
+        let pid1 = scratch::promote(&mut base, &scr, sid).unwrap();
+        let back = base.to_expr(None, pid1, &mut g).unwrap();
+        assert!(
+            Expr::structural_eq(&back, &scratch_terms[i], &mut g).unwrap(),
+            "promoted term {i} does not read back structurally equal from base alone"
+        );
+        let pid2 = scratch::promote(&mut base, &scr, sid).unwrap();
+        assert_eq!(
+            pid1, pid2,
+            "promoting scratch id {i} twice must be idempotent"
+        );
     }
 }
 

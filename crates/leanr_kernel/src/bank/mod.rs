@@ -129,6 +129,16 @@ impl Store {
     /// Route an id to the store owning its region. `base` is `None`
     /// only when `self` IS the persistent store.
     fn store_for<'a>(&'a self, base: Option<&'a Store>, scratch_bit: bool) -> &'a Store {
+        // Misroute guard: a persistent-region id (`!scratch_bit`) can
+        // only be resolved against `self` directly when `self` IS the
+        // persistent store. If `self` is a scratch store and no `base`
+        // was supplied, falling through to `self` would silently read
+        // the wrong row (scratch's own pool row at that index) instead
+        // of erroring or routing to the real persistent store.
+        debug_assert!(
+            scratch_bit || base.is_some() || self.region == 0,
+            "store_for: persistent-region id resolved on a scratch store with base = None (silent wrong-row read)"
+        );
         if scratch_bit {
             self
         } else {
