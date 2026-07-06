@@ -9,28 +9,54 @@ use super::terms::Node;
 use super::{ExprId, LevelId, NameId, Store};
 use crate::KernelError;
 
-/// Translate one leaf `NameId` from `scratch` into `base`: persistent
-/// ids pass through unchanged (no work, no base mutation); scratch ids
-/// are rebuilt via `to_name` (routes through `base` for any persistent
-/// segments of the chain) and re-interned into `base` alone.
-fn promote_name(
+/// Translate one leaf `NameId` from `scratch` into `base`: a persistent
+/// id passes through unchanged (no work, no base mutation); a scratch id
+/// is rebuilt via `to_name` (routes through `base` for any persistent
+/// segments of the chain) and re-interned into `base` alone. `pub` per
+/// the migration Task 6 brief — `bank::env::promote_constant_info` calls
+/// this directly on `ConstantInfo`'s (never-anonymous, see `decl.rs`'s
+/// module doc) declaration-position `NameId` fields, which is why the
+/// signature takes a plain `NameId` rather than the `Option<NameId>`
+/// leaves an expression tree can carry (`promote_name_opt` below handles
+/// those, and is defined in terms of this function).
+pub fn promote_name(base: &mut Store, scratch: &Store, id: NameId) -> Result<NameId, KernelError> {
+    if !id.is_scratch() {
+        return Ok(id);
+    }
+    let name = scratch.to_name(Some(base), Some(id));
+    // `name` is non-`Anonymous` (it was rebuilt from a real `NameRow`),
+    // so `intern_name` always returns `Some` here — mirrors `decl.rs`'s
+    // `intern_name_req`'s identical "reject, don't assert" posture on
+    // the same never-actually-`None` case.
+    base.intern_name(None, &name)?
+        .ok_or(KernelError::BankExhausted)
+}
+
+/// `promote_name`, but for the `Option<NameId>` leaves an expression
+/// tree can carry (`Name::Anonymous` fvar/mvar ids, binder names, proj
+/// type names) — `None` (anonymous) passes through untouched.
+fn promote_name_opt(
     base: &mut Store,
     scratch: &Store,
     id: Option<NameId>,
 ) -> Result<Option<NameId>, KernelError> {
     match id {
         None => Ok(None),
-        Some(nid) if !nid.is_scratch() => Ok(Some(nid)),
-        Some(nid) => {
-            let name = scratch.to_name(Some(base), Some(nid));
-            base.intern_name(None, &name)
-        }
+        Some(nid) => promote_name(base, scratch, nid).map(Some),
     }
 }
 
-/// Translate one leaf `LevelId` from `scratch` into `base`, same
-/// pass-through-if-persistent shape as `promote_name`.
-fn promote_level(base: &mut Store, scratch: &Store, id: LevelId) -> Result<LevelId, KernelError> {
+/// Translate one `LevelId` from `scratch` into `base`, same
+/// pass-through-if-persistent shape as `promote_name`. `pub` per the
+/// migration Task 6 brief (exact signature specified there); already
+/// took a plain `LevelId` (no `Option` — a level tree is never
+/// "anonymous" the way a name leaf can be), so no `_opt` variant is
+/// needed here.
+pub fn promote_level(
+    base: &mut Store,
+    scratch: &Store,
+    id: LevelId,
+) -> Result<LevelId, KernelError> {
     if !id.is_scratch() {
         return Ok(id);
     }
@@ -135,11 +161,11 @@ pub fn promote(base: &mut Store, scratch: &Store, id: ExprId) -> Result<ExprId, 
                         base.expr_bvar(None, &n)?
                     }
                     Node::FVar { id: n } => {
-                        let n = promote_name(base, scratch, n)?;
+                        let n = promote_name_opt(base, scratch, n)?;
                         base.expr_fvar(None, n)?
                     }
                     Node::MVar { id: n } => {
-                        let n = promote_name(base, scratch, n)?;
+                        let n = promote_name_opt(base, scratch, n)?;
                         base.expr_mvar(None, n)?
                     }
                     Node::Sort { level } => {
@@ -147,7 +173,7 @@ pub fn promote(base: &mut Store, scratch: &Store, id: ExprId) -> Result<ExprId, 
                         base.expr_sort(None, l)?
                     }
                     Node::Const { name, levels } => {
-                        let n = promote_name(base, scratch, name)?;
+                        let n = promote_name_opt(base, scratch, name)?;
                         // Copy the pooled list out first: `level_list_at`
                         // borrows `base` immutably (routing), which must
                         // end before `promote_level`'s `&mut base` calls.
@@ -171,7 +197,7 @@ pub fn promote(base: &mut Store, scratch: &Store, id: ExprId) -> Result<ExprId, 
                     } => {
                         let body = out.pop().expect("child pushed by Enter");
                         let binder_type = out.pop().expect("child pushed by Enter");
-                        let n = promote_name(base, scratch, binder_name)?;
+                        let n = promote_name_opt(base, scratch, binder_name)?;
                         base.expr_lam(None, n, binder_type, body, binder_info)?
                     }
                     Node::Forall {
@@ -181,7 +207,7 @@ pub fn promote(base: &mut Store, scratch: &Store, id: ExprId) -> Result<ExprId, 
                     } => {
                         let body = out.pop().expect("child pushed by Enter");
                         let binder_type = out.pop().expect("child pushed by Enter");
-                        let n = promote_name(base, scratch, binder_name)?;
+                        let n = promote_name_opt(base, scratch, binder_name)?;
                         base.expr_forall(None, n, binder_type, body, binder_info)?
                     }
                     Node::LetE {
@@ -196,7 +222,7 @@ pub fn promote(base: &mut Store, scratch: &Store, id: ExprId) -> Result<ExprId, 
                         let body = out.pop().expect("child pushed by Enter");
                         let value = out.pop().expect("child pushed by Enter");
                         let ty = out.pop().expect("child pushed by Enter");
-                        let n = promote_name(base, scratch, decl_name)?;
+                        let n = promote_name_opt(base, scratch, decl_name)?;
                         base.expr_let(None, n, ty, value, body, non_dep)?
                     }
                     Node::LitNat { v } => {
@@ -215,12 +241,12 @@ pub fn promote(base: &mut Store, scratch: &Store, id: ExprId) -> Result<ExprId, 
                     }
                     Node::Proj { type_name, idx, .. } => {
                         let structure = out.pop().expect("child pushed by Enter");
-                        let n = promote_name(base, scratch, type_name)?;
+                        let n = promote_name_opt(base, scratch, type_name)?;
                         base.expr_proj(None, n, &crate::Nat::from(idx as u64), structure)?
                     }
                     Node::ProjBig { type_name, idx, .. } => {
                         let structure = out.pop().expect("child pushed by Enter");
-                        let n = promote_name(base, scratch, type_name)?;
+                        let n = promote_name_opt(base, scratch, type_name)?;
                         let idx = scratch.nat_at(Some(base), idx).clone();
                         base.expr_proj(None, n, &idx, structure)?
                     }

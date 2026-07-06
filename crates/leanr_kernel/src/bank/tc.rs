@@ -784,6 +784,26 @@ impl<'e> TypeChecker<'e> {
         self.scratch.to_name(Some(self.view.store), Some(id))
     }
 
+    /// oracle: environment.cpp:87-100 (`check_no_metavar_no_fvar`) — same
+    /// check as `bank::env`'s free-function port of the same name, but
+    /// exposed as a checker method (migration Task 6) so the admission
+    /// pipeline can run it on a declaration's VALUE while a `TypeChecker`
+    /// already holds the scratch store's only mutable borrow (`add_decl`'s
+    /// `Defn`/`Thm` arms interleave this check between two `checker`
+    /// calls; going through a free function needing its own `&Store`
+    /// would conflict with `checker`'s `&mut Store` borrow). `pub(crate)`
+    /// for `bank::env::Environment::add_decl`.
+    pub(crate) fn check_no_metavar_no_fvar(&self, n: NameId, e: ExprId) -> Result<(), KernelError> {
+        let d = self.data(e);
+        if d.has_expr_mvar() || d.has_level_mvar() {
+            return Err(KernelError::HasMetavars(self.to_name(n)));
+        }
+        if d.has_fvar() {
+            return Err(KernelError::HasFVars(self.to_name(n)));
+        }
+        Ok(())
+    }
+
     /// The `Nat.<op>` builtin named by `name`, if any (oracle: `g_nat_*`
     /// constants). Recognizes a two-component name `Nat.op` and returns
     /// `op`.

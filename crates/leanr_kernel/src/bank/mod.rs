@@ -8,6 +8,7 @@
 //! tables can use 0 as the empty sentinel.
 
 pub mod decl;
+pub mod env;
 pub mod inductive;
 pub mod levels;
 pub mod local_ctx;
@@ -16,10 +17,12 @@ pub mod pools;
 pub mod probe;
 pub mod quot;
 pub mod quot_red;
+pub mod replay;
 pub mod scratch;
 pub mod subst;
 pub mod tc;
 pub mod terms;
+pub mod used_consts;
 
 use std::num::NonZeroU32;
 

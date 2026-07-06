@@ -85,11 +85,12 @@
 //!    same store, which the interning invariant makes exactly
 //!    structural — no guard, no `Result`, no re-derivation needed.
 //! 7. **`check_name`/`check_duplicated_univ_params`/
-//!    `check_no_metavar_no_fvar`** are ported id-natively as private
-//!    free functions INSIDE this file (they belong to `bank/env.rs`
-//!    conceptually — Arc's `env.rs:18-56` — but that module doesn't
-//!    exist until Task 6; a later task should hoist/re-export them from
-//!    there). Region correctness matters: declaration-position
+//!    `check_no_metavar_no_fvar`** are id-native ports of `crate::env`'s
+//!    admission-pipeline helpers (Arc's `env.rs:18-56`). They now live in
+//!    `bank/env.rs` (Task 6 hoisted them out of this file, per this
+//!    file's own note in the version that predated `bank/env.rs`), and
+//!    this module imports them (`pub(crate)` there) rather than defining
+//!    its own copies. Region correctness matters: declaration-position
 //!    `NameId`s here may be scratch-region (freshly bridged admission
 //!    input), so error construction always goes through
 //!    `scratch.to_name(Some(view.store), Some(n))` (never
@@ -733,53 +734,11 @@ fn expr_contains_new_type(
 
 // ---------------------------------------------------------------------
 // `check_name`/`check_duplicated_univ_params`/`check_no_metavar_no_fvar`
-// — id-native ports of `crate::env`'s admission-pipeline helpers
-// (module doc point 7). Region-correct: `n` may be a scratch-region id.
+// now live in `bank/env.rs` (migration Task 6 hoisted them out of this
+// file per this module's own doc point 7, which flagged the move as a
+// Task 6 follow-up once `bank/env.rs` existed) — imported below.
 // ---------------------------------------------------------------------
-
-fn check_name(scratch: &Store, view: &EnvView, n: NameId) -> Result<(), KernelError> {
-    if view.get(n).is_some() {
-        return Err(KernelError::AlreadyDeclared(
-            scratch.to_name(Some(view.store), Some(n)),
-        ));
-    }
-    Ok(())
-}
-
-fn check_duplicated_univ_params(
-    scratch: &Store,
-    view: &EnvView,
-    ls: &[NameId],
-) -> Result<(), KernelError> {
-    for (i, &p) in ls.iter().enumerate() {
-        if ls[i + 1..].contains(&p) {
-            return Err(KernelError::DuplicateUnivParam(
-                scratch.to_name(Some(view.store), Some(p)),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn check_no_metavar_no_fvar(
-    scratch: &Store,
-    view: &EnvView,
-    n: NameId,
-    e: ExprId,
-) -> Result<(), KernelError> {
-    let d = scratch.expr_data(Some(view.store), e);
-    if d.has_expr_mvar() || d.has_level_mvar() {
-        return Err(KernelError::HasMetavars(
-            scratch.to_name(Some(view.store), Some(n)),
-        ));
-    }
-    if d.has_fvar() {
-        return Err(KernelError::HasFVars(
-            scratch.to_name(Some(view.store), Some(n)),
-        ));
-    }
-    Ok(())
-}
+use super::env::{check_duplicated_univ_params, check_name, check_no_metavar_no_fvar};
 
 /// Extend `view` with an additional `extra` layer without disturbing its
 /// other fields — a free function (not a `&self` method) so callers can
