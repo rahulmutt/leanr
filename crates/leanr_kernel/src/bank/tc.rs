@@ -296,9 +296,20 @@ impl<'a> EnvView<'a> {
             .or_else(|| self.consts.get(&n))
     }
 
+    /// Lookup with error on miss; **callers must pass a PERSISTENT-region `NameId`**.
+    ///
+    /// This method's error path calls `to_name(None, ...)`, which reads the
+    /// persistent `store` only. A scratch-region `NameId` resolved that way
+    /// reads the WRONG row out of `store`'s own pools, yielding a wrong name
+    /// or out-of-bounds panic. Callers must ensure `n` is from the persistent
+    /// region; if the id may come from scratch, use region-correct resolution
+    /// instead (see `TypeChecker::env_get_with` for the pattern).
     pub fn get_with(&self, n: NameId) -> Result<&'a ConstantInfo, KernelError> {
         self.get(n)
-            .ok_or_else(|| KernelError::UnknownConstant(self.store.to_name(None, Some(n))))
+            .ok_or_else(|| {
+                debug_assert!(!n.is_scratch(), "EnvView::get_with: passed scratch-region NameId; see doc comment for region contract");
+                KernelError::UnknownConstant(self.store.to_name(None, Some(n)))
+            })
     }
 
     /// oracle: inductive.cpp:27 (`is_non_rec_structure`) — mirrors
