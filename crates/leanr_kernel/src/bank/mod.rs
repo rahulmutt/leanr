@@ -13,6 +13,7 @@ pub mod local_ctx;
 pub mod names;
 pub mod pools;
 pub mod probe;
+pub mod quot_red;
 pub mod scratch;
 pub mod subst;
 pub mod terms;
