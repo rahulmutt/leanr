@@ -14,15 +14,11 @@
 //! existing `structural_eq`, which compares every field (binder names,
 //! `BinderInfo`, `non_dep`, `KVMap`), so merged nodes are fully identical.
 
-use crate::{Expr, ExprNode, KernelError, Level, RecGuard};
+use crate::{ConstantInfo, Expr, ExprNode, KernelError, Level, Name, RecGuard};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-// `Interner` and its methods are only reachable from `#[cfg(test)]` until
-// Task 3 wires up `intern_constants` as the crate's public entry point (see
-// lib.rs); `allow(dead_code)` here is temporary scaffolding removed in Task 3.
 #[derive(Default)]
-#[allow(dead_code)]
 pub struct Interner {
     /// Canonical levels, bucketed by `Level::hash_val`.
     levels: HashMap<u64, Vec<Arc<Level>>>,
@@ -35,7 +31,6 @@ pub struct Interner {
     expr_memo: HashMap<usize, Arc<Expr>>,
 }
 
-#[allow(dead_code)]
 impl Interner {
     pub fn new() -> Interner {
         Interner::default()
@@ -176,6 +171,79 @@ impl Interner {
         self.expr_memo.insert(key, Arc::clone(&canon));
         Ok(canon)
     }
+
+    /// Canonicalize every `Arc<Expr>` reachable from a `ConstantInfo`.
+    fn intern_constant_info(
+        &mut self,
+        ci: &ConstantInfo,
+        g: &mut RecGuard,
+    ) -> Result<ConstantInfo, KernelError> {
+        let mut out = ci.clone();
+        match &mut out {
+            ConstantInfo::Axiom(v) => {
+                let t = self.intern_expr(&v.val.ty, g)?;
+                v.val.ty = t;
+            }
+            ConstantInfo::Defn(v) => {
+                let t = self.intern_expr(&v.val.ty, g)?;
+                v.val.ty = t;
+                let val = self.intern_expr(&v.value, g)?;
+                v.value = val;
+            }
+            ConstantInfo::Thm(v) => {
+                let t = self.intern_expr(&v.val.ty, g)?;
+                v.val.ty = t;
+                let val = self.intern_expr(&v.value, g)?;
+                v.value = val;
+            }
+            ConstantInfo::Opaque(v) => {
+                let t = self.intern_expr(&v.val.ty, g)?;
+                v.val.ty = t;
+                let val = self.intern_expr(&v.value, g)?;
+                v.value = val;
+            }
+            ConstantInfo::Quot(v) => {
+                let t = self.intern_expr(&v.val.ty, g)?;
+                v.val.ty = t;
+            }
+            ConstantInfo::Induct(v) => {
+                let t = self.intern_expr(&v.val.ty, g)?;
+                v.val.ty = t;
+            }
+            ConstantInfo::Ctor(v) => {
+                let t = self.intern_expr(&v.val.ty, g)?;
+                v.val.ty = t;
+            }
+            ConstantInfo::Rec(v) => {
+                let t = self.intern_expr(&v.val.ty, g)?;
+                v.val.ty = t;
+                for rule in &mut v.rules {
+                    let rhs = self.intern_expr(&rule.rhs, g)?;
+                    rule.rhs = rhs;
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Batch-canonicalize a decoded constants map. Structurally-identical
+/// subterms across all entries collapse to one shared `Arc`; the returned
+/// map's `Arc` graph carries that sharing (the `Interner` itself is dropped
+/// here). Verdict-preserving (see module docs). Errors only on
+/// `KernelError::DeepRecursion` for adversarially deep input.
+pub fn intern_constants(
+    constants: HashMap<Arc<Name>, ConstantInfo>,
+) -> Result<HashMap<Arc<Name>, ConstantInfo>, KernelError> {
+    let mut it = Interner::new();
+    let mut g = RecGuard::new();
+    let mut out = HashMap::with_capacity(constants.len());
+    for (name, ci) in constants {
+        let interned = it.intern_constant_info(&ci, &mut g)?;
+        drop(ci); // release the original entry as we go
+        out.insert(name, interned);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -308,5 +376,55 @@ mod tests {
         let ca = it.intern_expr(&a, &mut g).unwrap();
         let cb = it.intern_expr(&b, &mut g).unwrap();
         assert!(Arc::ptr_eq(&ca, &cb));
+    }
+
+    use crate::{ConstantInfo, Name};
+
+    // Build two axioms in two "modules" whose types are the SAME structure
+    // (App(Nat, Nat)) but distinct Arcs, then intern the whole map and
+    // assert the two types now share one canonical Arc.
+    #[test]
+    fn constants_map_shares_across_entries() {
+        let mut g = RecGuard::new();
+        let mk_axiom = |g: &mut RecGuard| {
+            let ty = Expr::app(nat_const(g), nat_const(g));
+            ConstantInfo::Axiom(crate::AxiomVal {
+                val: crate::ConstantVal {
+                    name: name("A"),
+                    level_params: vec![],
+                    ty,
+                },
+                is_unsafe: false,
+            })
+        };
+        let mut map: HashMap<Arc<Name>, ConstantInfo> = HashMap::new();
+        map.insert(name("A"), mk_axiom(&mut g));
+        map.insert(name("B"), mk_axiom(&mut g));
+        let out = intern_constants(map).unwrap();
+        let ta = &out[&name("A")].constant_val().ty;
+        let tb = &out[&name("B")].constant_val().ty;
+        assert!(
+            Arc::ptr_eq(ta, tb),
+            "identical types across entries collapse to one Arc"
+        );
+    }
+
+    #[test]
+    fn constants_map_preserves_each_type() {
+        let mut g = RecGuard::new();
+        let ty = Expr::app(nat_const(&mut g), nat_const(&mut g));
+        let orig = ty.clone();
+        let ci = ConstantInfo::Axiom(crate::AxiomVal {
+            val: crate::ConstantVal {
+                name: name("A"),
+                level_params: vec![],
+                ty,
+            },
+            is_unsafe: false,
+        });
+        let mut map = HashMap::new();
+        map.insert(name("A"), ci);
+        let out = intern_constants(map).unwrap();
+        assert!(Expr::structural_eq(&orig, &out[&name("A")].constant_val().ty, &mut g).unwrap());
     }
 }
