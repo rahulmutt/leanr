@@ -11,6 +11,7 @@ pub mod levels;
 pub mod names;
 pub mod pools;
 pub mod probe;
+pub mod terms;
 
 use std::num::NonZeroU32;
 
@@ -93,7 +94,7 @@ pub struct Store {
     pub level_lists: ValuePool<Box<[LevelId]>>,
     pub kvmaps: ValuePool<KVMapRow>,
     pub spills: ValuePool<SpillRow>,
-    // Extended by Task 6: terms.
+    pub terms: terms::TermBank,
 }
 
 impl Store {
@@ -114,6 +115,7 @@ impl Store {
             level_lists: ValuePool::new(region),
             kvmaps: ValuePool::new(region),
             spills: ValuePool::new(region),
+            terms: terms::TermBank::new(region),
         }
     }
 
