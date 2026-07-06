@@ -18,11 +18,29 @@
 //! own `combine_binder`/`combine_let` asymmetry in expr.rs). Every
 //! function below threads that same `offset` explicitly since Rust has
 //! no closure-capturing tree-rewrite helper to hide it behind.
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use num_bigint::BigUint;
 
 use crate::{Expr, ExprNode, KernelError, Level, Name, Nat, RecGuard};
+
+/// Per-top-level-call visit cache, the other half of the oracle's
+/// `replace_fn.cpp` machinery: `replace_rec_fn` memoizes every visited
+/// node keyed by (pointer, offset) (replace_fn.cpp:27-30), so a subterm
+/// the input DAG shares is rewritten ONCE and the output keeps sharing
+/// it. Without this, traversal work and output size are proportional to
+/// the term's *tree* expansion rather than its DAG size — exponential on
+/// the maximally-shared terms the env interner produces (the
+/// `check --all` single-declaration memory/time blowup).
+///
+/// Soundness of the raw-address key: the cache lives only for one
+/// top-level call, every key points into the root's subtree (or the
+/// substitution slice), and the caller's borrows keep all of those alive
+/// for the whole call — an address can't be reused for a different node
+/// while the cache can still be consulted (same argument as the
+/// interner's per-constant memo, intern.rs module docs).
+type VisitCache = HashMap<(usize, u32), Arc<Expr>>;
 
 /// Exact `usize` extraction for a `BigUint` proven small elsewhere by
 /// the caller (bounded by a real slice length) — never truncates via an
@@ -64,7 +82,7 @@ pub fn instantiate_core(
     if subst.is_empty() {
         return Ok(Arc::clone(e));
     }
-    instantiate_go(e, s, 0, subst, false, g)
+    instantiate_go(e, s, 0, subst, false, g, &mut VisitCache::new())
 }
 
 /// oracle: instantiate.cpp:42 (`expr instantiate(expr const & e, expr
@@ -96,7 +114,7 @@ pub fn instantiate_rev(
     if subst.is_empty() {
         return Ok(Arc::clone(e));
     }
-    instantiate_go(e, 0, 0, subst, true, g)
+    instantiate_go(e, 0, 0, subst, true, g, &mut VisitCache::new())
 }
 
 /// Shared walker for `instantiate_core`/`instantiate_rev` (oracle:
@@ -118,6 +136,7 @@ fn instantiate_go(
     subst: &[Arc<Expr>],
     rev: bool,
     g: &mut RecGuard,
+    cache: &mut VisitCache,
 ) -> Result<Arc<Expr>, KernelError> {
     // instantiate.cpp:19-21 (`s1 = s + offset; if (s1 < s) ...`): an
     // overflow past `u32::MAX` means no real vidx can be `>= s1`, so
@@ -136,7 +155,13 @@ fn instantiate_go(
             return Ok(Arc::clone(e));
         }
     }
-    match e.node() {
+    // replace_fn.cpp:27-28 — visit-cache lookup (after the cheap skips,
+    // which allocate nothing and would only bloat the cache).
+    let key = (Arc::as_ptr(e) as usize, offset);
+    if let Some(r) = cache.get(&key) {
+        return Ok(Arc::clone(r));
+    }
+    let r = match e.node() {
         ExprNode::BVar { idx } => instantiate_bvar(e, idx, s1, offset, subst, rev, g),
         // Atoms with no children and (per the smart constructors in
         // expr.rs) an always-exact range of 0: the skip check above
@@ -154,8 +179,8 @@ fn instantiate_go(
             let (f, arg) = (Arc::clone(f), Arc::clone(arg));
             let (f2, arg2) = g.enter(|g| {
                 Ok((
-                    instantiate_go(&f, s, offset, subst, rev, g)?,
-                    instantiate_go(&arg, s, offset, subst, rev, g)?,
+                    instantiate_go(&f, s, offset, subst, rev, g, cache)?,
+                    instantiate_go(&arg, s, offset, subst, rev, g, cache)?,
                 ))
             })?;
             if Arc::ptr_eq(&f2, &f) && Arc::ptr_eq(&arg2, &arg) {
@@ -174,8 +199,8 @@ fn instantiate_go(
             let (bt, bd) = (Arc::clone(binder_type), Arc::clone(body));
             let (bt2, bd2) = g.enter(|g| {
                 Ok((
-                    instantiate_go(&bt, s, offset, subst, rev, g)?,
-                    instantiate_go(&bd, s, offset + 1, subst, rev, g)?,
+                    instantiate_go(&bt, s, offset, subst, rev, g, cache)?,
+                    instantiate_go(&bd, s, offset + 1, subst, rev, g, cache)?,
                 ))
             })?;
             if Arc::ptr_eq(&bt2, &bt) && Arc::ptr_eq(&bd2, &bd) {
@@ -194,8 +219,8 @@ fn instantiate_go(
             let (bt, bd) = (Arc::clone(binder_type), Arc::clone(body));
             let (bt2, bd2) = g.enter(|g| {
                 Ok((
-                    instantiate_go(&bt, s, offset, subst, rev, g)?,
-                    instantiate_go(&bd, s, offset + 1, subst, rev, g)?,
+                    instantiate_go(&bt, s, offset, subst, rev, g, cache)?,
+                    instantiate_go(&bd, s, offset + 1, subst, rev, g, cache)?,
                 ))
             })?;
             if Arc::ptr_eq(&bt2, &bt) && Arc::ptr_eq(&bd2, &bd) {
@@ -216,9 +241,9 @@ fn instantiate_go(
             let (t, v, b) = (Arc::clone(ty), Arc::clone(value), Arc::clone(body));
             let (t2, v2, b2) = g.enter(|g| {
                 Ok((
-                    instantiate_go(&t, s, offset, subst, rev, g)?,
-                    instantiate_go(&v, s, offset, subst, rev, g)?,
-                    instantiate_go(&b, s, offset + 1, subst, rev, g)?,
+                    instantiate_go(&t, s, offset, subst, rev, g, cache)?,
+                    instantiate_go(&v, s, offset, subst, rev, g, cache)?,
+                    instantiate_go(&b, s, offset + 1, subst, rev, g, cache)?,
                 ))
             })?;
             if Arc::ptr_eq(&t2, &t) && Arc::ptr_eq(&v2, &v) && Arc::ptr_eq(&b2, &b) {
@@ -229,7 +254,7 @@ fn instantiate_go(
         }
         ExprNode::MData { data, expr } => {
             let inner = Arc::clone(expr);
-            let inner2 = g.enter(|g| instantiate_go(&inner, s, offset, subst, rev, g))?;
+            let inner2 = g.enter(|g| instantiate_go(&inner, s, offset, subst, rev, g, cache))?;
             if Arc::ptr_eq(&inner2, &inner) {
                 Ok(Arc::clone(e))
             } else {
@@ -243,14 +268,17 @@ fn instantiate_go(
         } => {
             let (tn, ix) = (Arc::clone(type_name), idx.clone());
             let st = Arc::clone(structure);
-            let st2 = g.enter(|g| instantiate_go(&st, s, offset, subst, rev, g))?;
+            let st2 = g.enter(|g| instantiate_go(&st, s, offset, subst, rev, g, cache))?;
             if Arc::ptr_eq(&st2, &st) {
                 Ok(Arc::clone(e))
             } else {
                 Ok(Expr::proj(tn, ix, st2))
             }
         }
-    }
+    }?;
+    // replace_fn.cpp:30 (`save_result`) — memoize this node's rewrite.
+    cache.insert(key, Arc::clone(&r));
+    Ok(r)
 }
 
 /// The `is_bvar(m)` branch shared by `instantiate_go`'s two callers
@@ -314,7 +342,7 @@ pub fn lift_loose_bvars(
     if d == 0 {
         return Ok(Arc::clone(e));
     }
-    lift_go(e, s, 0, d, g)
+    lift_go(e, s, 0, d, g, &mut VisitCache::new())
 }
 
 /// `offset` tracks binder depth crossed by this call, same convention as
@@ -327,6 +355,7 @@ fn lift_go(
     offset: u32,
     d: u32,
     g: &mut RecGuard,
+    cache: &mut VisitCache,
 ) -> Result<Arc<Expr>, KernelError> {
     let s1 = match s.checked_add(offset) {
         Some(v) => v,
@@ -337,7 +366,12 @@ fn lift_go(
             return Ok(Arc::clone(e));
         }
     }
-    match e.node() {
+    // replace_fn.cpp:27-30 — visit cache (see `VisitCache`).
+    let key = (Arc::as_ptr(e) as usize, offset);
+    if let Some(r) = cache.get(&key) {
+        return Ok(Arc::clone(r));
+    }
+    let r = match e.node() {
         ExprNode::BVar { idx } => {
             let s1_big = BigUint::from(s1);
             if idx.0 >= s1_big {
@@ -357,8 +391,8 @@ fn lift_go(
             let (f, arg) = (Arc::clone(f), Arc::clone(arg));
             let (f2, arg2) = g.enter(|g| {
                 Ok((
-                    lift_go(&f, s, offset, d, g)?,
-                    lift_go(&arg, s, offset, d, g)?,
+                    lift_go(&f, s, offset, d, g, cache)?,
+                    lift_go(&arg, s, offset, d, g, cache)?,
                 ))
             })?;
             if Arc::ptr_eq(&f2, &f) && Arc::ptr_eq(&arg2, &arg) {
@@ -377,8 +411,8 @@ fn lift_go(
             let (bt, bd) = (Arc::clone(binder_type), Arc::clone(body));
             let (bt2, bd2) = g.enter(|g| {
                 Ok((
-                    lift_go(&bt, s, offset, d, g)?,
-                    lift_go(&bd, s, offset + 1, d, g)?,
+                    lift_go(&bt, s, offset, d, g, cache)?,
+                    lift_go(&bd, s, offset + 1, d, g, cache)?,
                 ))
             })?;
             if Arc::ptr_eq(&bt2, &bt) && Arc::ptr_eq(&bd2, &bd) {
@@ -397,8 +431,8 @@ fn lift_go(
             let (bt, bd) = (Arc::clone(binder_type), Arc::clone(body));
             let (bt2, bd2) = g.enter(|g| {
                 Ok((
-                    lift_go(&bt, s, offset, d, g)?,
-                    lift_go(&bd, s, offset + 1, d, g)?,
+                    lift_go(&bt, s, offset, d, g, cache)?,
+                    lift_go(&bd, s, offset + 1, d, g, cache)?,
                 ))
             })?;
             if Arc::ptr_eq(&bt2, &bt) && Arc::ptr_eq(&bd2, &bd) {
@@ -419,9 +453,9 @@ fn lift_go(
             let (t, v, b) = (Arc::clone(ty), Arc::clone(value), Arc::clone(body));
             let (t2, v2, b2) = g.enter(|g| {
                 Ok((
-                    lift_go(&t, s, offset, d, g)?,
-                    lift_go(&v, s, offset, d, g)?,
-                    lift_go(&b, s, offset + 1, d, g)?,
+                    lift_go(&t, s, offset, d, g, cache)?,
+                    lift_go(&v, s, offset, d, g, cache)?,
+                    lift_go(&b, s, offset + 1, d, g, cache)?,
                 ))
             })?;
             if Arc::ptr_eq(&t2, &t) && Arc::ptr_eq(&v2, &v) && Arc::ptr_eq(&b2, &b) {
@@ -432,7 +466,7 @@ fn lift_go(
         }
         ExprNode::MData { data, expr } => {
             let inner = Arc::clone(expr);
-            let inner2 = g.enter(|g| lift_go(&inner, s, offset, d, g))?;
+            let inner2 = g.enter(|g| lift_go(&inner, s, offset, d, g, cache))?;
             if Arc::ptr_eq(&inner2, &inner) {
                 Ok(Arc::clone(e))
             } else {
@@ -446,14 +480,17 @@ fn lift_go(
         } => {
             let (tn, ix) = (Arc::clone(type_name), idx.clone());
             let st = Arc::clone(structure);
-            let st2 = g.enter(|g| lift_go(&st, s, offset, d, g))?;
+            let st2 = g.enter(|g| lift_go(&st, s, offset, d, g, cache))?;
             if Arc::ptr_eq(&st2, &st) {
                 Ok(Arc::clone(e))
             } else {
                 Ok(Expr::proj(tn, ix, st2))
             }
         }
-    }
+    }?;
+    // replace_fn.cpp:30 (`save_result`) — memoize this node's rewrite.
+    cache.insert(key, Arc::clone(&r));
+    Ok(r)
 }
 
 // ---------------------------------------------------------------------
@@ -475,7 +512,7 @@ pub fn abstract_fvars(
     if fvars.is_empty() || !e.data().has_fvar() {
         return Ok(Arc::clone(e));
     }
-    abstract_go(e, 0, fvars, g)
+    abstract_go(e, 0, fvars, g, &mut VisitCache::new())
 }
 
 fn abstract_go(
@@ -483,6 +520,7 @@ fn abstract_go(
     offset: u32,
     fvars: &[Arc<Expr>],
     g: &mut RecGuard,
+    cache: &mut VisitCache,
 ) -> Result<Arc<Expr>, KernelError> {
     // abstract.cpp:18-19: per-node skip — `has_fvar` is an exact boolean
     // flag (no saturation concern, unlike `loose_bvar_range`), so this
@@ -490,7 +528,12 @@ fn abstract_go(
     if !e.data().has_fvar() {
         return Ok(Arc::clone(e));
     }
-    match e.node() {
+    // replace_fn.cpp:27-30 — visit cache (see `VisitCache`).
+    let key = (Arc::as_ptr(e) as usize, offset);
+    if let Some(r) = cache.get(&key) {
+        return Ok(Arc::clone(r));
+    }
+    let r = match e.node() {
         ExprNode::FVar { id } => {
             let n = fvars.len();
             for i in (0..n).rev() {
@@ -518,8 +561,8 @@ fn abstract_go(
             let (f, arg) = (Arc::clone(f), Arc::clone(arg));
             let (f2, arg2) = g.enter(|g| {
                 Ok((
-                    abstract_go(&f, offset, fvars, g)?,
-                    abstract_go(&arg, offset, fvars, g)?,
+                    abstract_go(&f, offset, fvars, g, cache)?,
+                    abstract_go(&arg, offset, fvars, g, cache)?,
                 ))
             })?;
             if Arc::ptr_eq(&f2, &f) && Arc::ptr_eq(&arg2, &arg) {
@@ -538,8 +581,8 @@ fn abstract_go(
             let (bt, bd) = (Arc::clone(binder_type), Arc::clone(body));
             let (bt2, bd2) = g.enter(|g| {
                 Ok((
-                    abstract_go(&bt, offset, fvars, g)?,
-                    abstract_go(&bd, offset + 1, fvars, g)?,
+                    abstract_go(&bt, offset, fvars, g, cache)?,
+                    abstract_go(&bd, offset + 1, fvars, g, cache)?,
                 ))
             })?;
             if Arc::ptr_eq(&bt2, &bt) && Arc::ptr_eq(&bd2, &bd) {
@@ -558,8 +601,8 @@ fn abstract_go(
             let (bt, bd) = (Arc::clone(binder_type), Arc::clone(body));
             let (bt2, bd2) = g.enter(|g| {
                 Ok((
-                    abstract_go(&bt, offset, fvars, g)?,
-                    abstract_go(&bd, offset + 1, fvars, g)?,
+                    abstract_go(&bt, offset, fvars, g, cache)?,
+                    abstract_go(&bd, offset + 1, fvars, g, cache)?,
                 ))
             })?;
             if Arc::ptr_eq(&bt2, &bt) && Arc::ptr_eq(&bd2, &bd) {
@@ -580,9 +623,9 @@ fn abstract_go(
             let (t, v, b) = (Arc::clone(ty), Arc::clone(value), Arc::clone(body));
             let (t2, v2, b2) = g.enter(|g| {
                 Ok((
-                    abstract_go(&t, offset, fvars, g)?,
-                    abstract_go(&v, offset, fvars, g)?,
-                    abstract_go(&b, offset + 1, fvars, g)?,
+                    abstract_go(&t, offset, fvars, g, cache)?,
+                    abstract_go(&v, offset, fvars, g, cache)?,
+                    abstract_go(&b, offset + 1, fvars, g, cache)?,
                 ))
             })?;
             if Arc::ptr_eq(&t2, &t) && Arc::ptr_eq(&v2, &v) && Arc::ptr_eq(&b2, &b) {
@@ -593,7 +636,7 @@ fn abstract_go(
         }
         ExprNode::MData { data, expr } => {
             let inner = Arc::clone(expr);
-            let inner2 = g.enter(|g| abstract_go(&inner, offset, fvars, g))?;
+            let inner2 = g.enter(|g| abstract_go(&inner, offset, fvars, g, cache))?;
             if Arc::ptr_eq(&inner2, &inner) {
                 Ok(Arc::clone(e))
             } else {
@@ -607,14 +650,17 @@ fn abstract_go(
         } => {
             let (tn, ix) = (Arc::clone(type_name), idx.clone());
             let st = Arc::clone(structure);
-            let st2 = g.enter(|g| abstract_go(&st, offset, fvars, g))?;
+            let st2 = g.enter(|g| abstract_go(&st, offset, fvars, g, cache))?;
             if Arc::ptr_eq(&st2, &st) {
                 Ok(Arc::clone(e))
             } else {
                 Ok(Expr::proj(tn, ix, st2))
             }
         }
-    }
+    }?;
+    // replace_fn.cpp:30 (`save_result`) — memoize this node's rewrite.
+    cache.insert(key, Arc::clone(&r));
+    Ok(r)
 }
 
 // ---------------------------------------------------------------------
@@ -635,7 +681,7 @@ pub fn instantiate_level_params(
     if !e.data().has_level_param() {
         return Ok(Arc::clone(e));
     }
-    lparams_go(e, params, args, g)
+    lparams_go(e, params, args, g, &mut VisitCache::new())
 }
 
 fn lparams_go(
@@ -643,12 +689,21 @@ fn lparams_go(
     params: &[Arc<Name>],
     args: &[Arc<Level>],
     g: &mut RecGuard,
+    cache: &mut VisitCache,
 ) -> Result<Arc<Expr>, KernelError> {
     // instantiate.cpp:236-237: per-node skip, exact boolean flag.
     if !e.data().has_level_param() {
         return Ok(Arc::clone(e));
     }
-    match e.node() {
+    // replace_fn.cpp:27-30 — visit cache (see `VisitCache`). Level-param
+    // substitution is offset-independent (no bvar bookkeeping), so the
+    // key's offset component is fixed at 0 (mirroring the oracle's
+    // pointer-only `replace_fn` cache, replace_fn.cpp:79-84).
+    let key = (Arc::as_ptr(e) as usize, 0);
+    if let Some(r) = cache.get(&key) {
+        return Ok(Arc::clone(r));
+    }
+    let r = match e.node() {
         // instantiate.cpp:240-241 (`is_sort(e)` branch).
         ExprNode::Sort { level } => {
             let l = Arc::clone(level);
@@ -689,8 +744,8 @@ fn lparams_go(
             let (f, arg) = (Arc::clone(f), Arc::clone(arg));
             let (f2, arg2) = g.enter(|g| {
                 Ok((
-                    lparams_go(&f, params, args, g)?,
-                    lparams_go(&arg, params, args, g)?,
+                    lparams_go(&f, params, args, g, cache)?,
+                    lparams_go(&arg, params, args, g, cache)?,
                 ))
             })?;
             if Arc::ptr_eq(&f2, &f) && Arc::ptr_eq(&arg2, &arg) {
@@ -709,8 +764,8 @@ fn lparams_go(
             let (bt, bd) = (Arc::clone(binder_type), Arc::clone(body));
             let (bt2, bd2) = g.enter(|g| {
                 Ok((
-                    lparams_go(&bt, params, args, g)?,
-                    lparams_go(&bd, params, args, g)?,
+                    lparams_go(&bt, params, args, g, cache)?,
+                    lparams_go(&bd, params, args, g, cache)?,
                 ))
             })?;
             if Arc::ptr_eq(&bt2, &bt) && Arc::ptr_eq(&bd2, &bd) {
@@ -729,8 +784,8 @@ fn lparams_go(
             let (bt, bd) = (Arc::clone(binder_type), Arc::clone(body));
             let (bt2, bd2) = g.enter(|g| {
                 Ok((
-                    lparams_go(&bt, params, args, g)?,
-                    lparams_go(&bd, params, args, g)?,
+                    lparams_go(&bt, params, args, g, cache)?,
+                    lparams_go(&bd, params, args, g, cache)?,
                 ))
             })?;
             if Arc::ptr_eq(&bt2, &bt) && Arc::ptr_eq(&bd2, &bd) {
@@ -751,9 +806,9 @@ fn lparams_go(
             let (t, v, b) = (Arc::clone(ty), Arc::clone(value), Arc::clone(body));
             let (t2, v2, b2) = g.enter(|g| {
                 Ok((
-                    lparams_go(&t, params, args, g)?,
-                    lparams_go(&v, params, args, g)?,
-                    lparams_go(&b, params, args, g)?,
+                    lparams_go(&t, params, args, g, cache)?,
+                    lparams_go(&v, params, args, g, cache)?,
+                    lparams_go(&b, params, args, g, cache)?,
                 ))
             })?;
             if Arc::ptr_eq(&t2, &t) && Arc::ptr_eq(&v2, &v) && Arc::ptr_eq(&b2, &b) {
@@ -764,7 +819,7 @@ fn lparams_go(
         }
         ExprNode::MData { data, expr } => {
             let inner = Arc::clone(expr);
-            let inner2 = g.enter(|g| lparams_go(&inner, params, args, g))?;
+            let inner2 = g.enter(|g| lparams_go(&inner, params, args, g, cache))?;
             if Arc::ptr_eq(&inner2, &inner) {
                 Ok(Arc::clone(e))
             } else {
@@ -778,14 +833,17 @@ fn lparams_go(
         } => {
             let (tn, ix) = (Arc::clone(type_name), idx.clone());
             let st = Arc::clone(structure);
-            let st2 = g.enter(|g| lparams_go(&st, params, args, g))?;
+            let st2 = g.enter(|g| lparams_go(&st, params, args, g, cache))?;
             if Arc::ptr_eq(&st2, &st) {
                 Ok(Arc::clone(e))
             } else {
                 Ok(Expr::proj(tn, ix, st2))
             }
         }
-    }
+    }?;
+    // replace_fn.cpp:30 (`save_result`) — memoize this node's rewrite.
+    cache.insert(key, Arc::clone(&r));
+    Ok(r)
 }
 
 #[cfg(test)]
@@ -877,6 +935,102 @@ mod tests {
         };
         assert!(Expr::structural_eq(f, &lit(20), &mut g).unwrap());
         assert!(Expr::structural_eq(arg, &lit(10), &mut g).unwrap());
+    }
+
+    // ------------------------------------------------------------------
+    // Sharing preservation (oracle: kernel/replace_fn.cpp:27-30 — the
+    // (pointer, offset)-keyed visit cache in `replace_rec_fn`). A term
+    // that uses one Arc twice must keep using ONE Arc for the rewritten
+    // subterm in the output; without the cache each occurrence is
+    // rebuilt separately and a shared DAG tree-expands (exponential
+    // work/allocation on deep DAGs — the `check --all` memory spike).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn instantiate_preserves_dag_sharing() {
+        let mut g = RecGuard::new();
+        // x contains a loose bvar so instantiate must rewrite it.
+        let x = Expr::app(bv(0), lit(1));
+        let e = Expr::app(Arc::clone(&x), Arc::clone(&x));
+        let r = instantiate(&e, &lit(7), &mut g).unwrap();
+        let ExprNode::App { f, arg } = r.node() else {
+            panic!()
+        };
+        assert!(
+            Arc::ptr_eq(f, arg),
+            "instantiate must rewrite a shared subterm once, not once per path"
+        );
+    }
+
+    #[test]
+    fn abstract_preserves_dag_sharing() {
+        let mut g = RecGuard::new();
+        let fv = Expr::fvar(nm("h"));
+        // x contains the fvar so abstract must rewrite it.
+        let x = Expr::app(Arc::clone(&fv), lit(1));
+        let e = Expr::app(Arc::clone(&x), Arc::clone(&x));
+        let r = abstract_fvars(&e, &[fv], &mut g).unwrap();
+        let ExprNode::App { f, arg } = r.node() else {
+            panic!()
+        };
+        assert!(
+            Arc::ptr_eq(f, arg),
+            "abstract_fvars must rewrite a shared subterm once, not once per path"
+        );
+    }
+
+    #[test]
+    fn instantiate_deep_dag_is_linear_not_exponential() {
+        let mut g = RecGuard::new();
+        // 64 levels of App(x, x) doubling over a loose bvar: a 64-node
+        // DAG whose tree expansion is ~2^64 nodes. Only a DAG-sized
+        // (visit-cached) traversal can finish this in any lifetime.
+        let mut x = bv(0);
+        for _ in 0..64 {
+            x = Expr::app(Arc::clone(&x), x);
+        }
+        let r = instantiate(&x, &lit(7), &mut g).unwrap();
+        assert_eq!(r.data().loose_bvar_range(), 0);
+    }
+
+    #[test]
+    fn lift_preserves_dag_sharing() {
+        let mut g = RecGuard::new();
+        // x contains a loose bvar so the lift must rewrite it.
+        let x = Expr::app(bv(0), lit(1));
+        let e = Expr::app(Arc::clone(&x), Arc::clone(&x));
+        let r = lift_loose_bvars(&e, 0, 1, &mut g).unwrap();
+        let ExprNode::App { f, arg } = r.node() else {
+            panic!()
+        };
+        assert!(
+            Arc::ptr_eq(f, arg),
+            "lift_loose_bvars must rewrite a shared subterm once, not once per path"
+        );
+    }
+
+    #[test]
+    fn level_params_preserve_dag_sharing() {
+        let mut g = RecGuard::new();
+        let u = nm("u");
+        let c = Expr::const_(
+            nm("f"),
+            vec![Arc::new(crate::Level::Param(Arc::clone(&u)))],
+            &mut g,
+        )
+        .unwrap();
+        // x carries a level param so instantiate_level_params must rewrite it.
+        let x = Expr::app(Arc::clone(&c), lit(1));
+        let e = Expr::app(Arc::clone(&x), Arc::clone(&x));
+        let r =
+            instantiate_level_params(&e, &[u], &[Arc::new(crate::Level::Zero)], &mut g).unwrap();
+        let ExprNode::App { f, arg } = r.node() else {
+            panic!()
+        };
+        assert!(
+            Arc::ptr_eq(f, arg),
+            "instantiate_level_params must rewrite a shared subterm once, not once per path"
+        );
     }
 
     #[test]
