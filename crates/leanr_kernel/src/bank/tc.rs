@@ -549,6 +549,39 @@ impl<'e> TypeChecker<'e> {
         }
     }
 
+    /// Build a checker seeded with a pre-populated local context and
+    /// fvar generator. The inductive-admission pipeline (`bank/
+    /// inductive.rs`, Task 5) owns the persistent `lctx`/`fvar_gen` that
+    /// the oracle's `add_inductive_fn` keeps in `m_lctx`/`m_ngen` and
+    /// shares with each freshly-constructed `type_checker(m_env, m_lctx,
+    /// ...)` (inductive.cpp:171). Rust cannot let `AddInductiveFn` hold
+    /// both a `&mut Store` (for its own term-building) and a
+    /// `TypeChecker` borrowing that same store at once, so it instead
+    /// *moves* its context in here per checker op and moves it back out
+    /// via `into_parts`, keeping the `FVarIdGen` counter monotonic across
+    /// both producers (id-twin of the Arc `TypeChecker::new_with`,
+    /// `crate::tc.rs:687-696` — same rationale, same doc comment,
+    /// `Arc<Expr>`/`Arc<Name>` swapped for `ExprId`/`NameId` throughout).
+    pub(crate) fn new_with(
+        view: EnvView<'e>,
+        scratch: &'e mut Store,
+        lctx: LocalContext,
+        fvar_gen: FVarIdGen,
+    ) -> TypeChecker<'e> {
+        let mut tc = TypeChecker::new(view, scratch);
+        tc.lctx = lctx;
+        tc.fvar_gen = fvar_gen;
+        tc
+    }
+
+    /// Reclaim the (possibly-extended, then save/restore-trimmed) local
+    /// context and the advanced fvar generator after a checker op. See
+    /// `new_with`. Id-twin of the Arc `TypeChecker::into_parts`
+    /// (`crate::tc.rs:698-703`).
+    pub(crate) fn into_parts(self) -> (LocalContext, FVarIdGen) {
+        (self.lctx, self.fvar_gen)
+    }
+
     /// The checker's own guarded frame — same constants as `RecGuard`;
     /// cannot reuse `self.guard` (already threaded to Tasks 2-5's free
     /// functions) because it cannot be borrowed while `self` is also
