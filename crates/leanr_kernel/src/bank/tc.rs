@@ -550,18 +550,22 @@ impl<'e> TypeChecker<'e> {
     }
 
     /// Build a checker seeded with a pre-populated local context and
-    /// fvar generator. The inductive-admission pipeline (`bank/
-    /// inductive.rs`, Task 5) owns the persistent `lctx`/`fvar_gen` that
-    /// the oracle's `add_inductive_fn` keeps in `m_lctx`/`m_ngen` and
-    /// shares with each freshly-constructed `type_checker(m_env, m_lctx,
-    /// ...)` (inductive.cpp:171). Rust cannot let `AddInductiveFn` hold
-    /// both a `&mut Store` (for its own term-building) and a
-    /// `TypeChecker` borrowing that same store at once, so it instead
-    /// *moves* its context in here per checker op and moves it back out
-    /// via `into_parts`, keeping the `FVarIdGen` counter monotonic across
-    /// both producers (id-twin of the Arc `TypeChecker::new_with`,
-    /// `crate::tc.rs:687-696` — same rationale, same doc comment,
-    /// `Arc<Expr>`/`Arc<Name>` swapped for `ExprId`/`NameId` throughout).
+    /// fvar generator. The consumer is the inductive-admission pipeline's
+    /// `bank::inductive::run_tc`, which owns the persistent
+    /// `lctx`/`fvar_gen` that the oracle's `add_inductive_fn` keeps in
+    /// `m_lctx`/`m_ngen` and shares with each freshly-constructed
+    /// `type_checker(m_env, m_lctx, ...)` (inductive.cpp:171). Rust
+    /// cannot let `AddInductiveFn` hold both a `&mut Store` (for its own
+    /// term-building) and a `TypeChecker` borrowing that same store at
+    /// once, so it instead *moves* its context in here per checker op
+    /// and moves it back out via `into_parts`, keeping the `FVarIdGen`
+    /// counter monotonic across both producers (id-twin of the Arc
+    /// `TypeChecker::new_with`, `crate::tc.rs:687-696` — same rationale,
+    /// same doc comment, `Arc<Expr>`/`Arc<Name>` swapped for
+    /// `ExprId`/`NameId` throughout; that Arc doc names the same
+    /// consumer via the Arc kernel's own task numbering, "Task 9" —
+    /// a different scheme from this migration's own tasks, not a
+    /// second, different consumer).
     pub(crate) fn new_with(
         view: EnvView<'e>,
         scratch: &'e mut Store,
@@ -575,8 +579,9 @@ impl<'e> TypeChecker<'e> {
     }
 
     /// Reclaim the (possibly-extended, then save/restore-trimmed) local
-    /// context and the advanced fvar generator after a checker op. See
-    /// `new_with`. Id-twin of the Arc `TypeChecker::into_parts`
+    /// context and the advanced fvar generator after a checker op, for
+    /// the same consumer as `new_with` (`bank::inductive::run_tc`).
+    /// Id-twin of the Arc `TypeChecker::into_parts`
     /// (`crate::tc.rs:698-703`).
     pub(crate) fn into_parts(self) -> (LocalContext, FVarIdGen) {
         (self.lctx, self.fvar_gen)

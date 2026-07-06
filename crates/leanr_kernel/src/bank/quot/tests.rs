@@ -197,13 +197,27 @@ fn bridge_consts(
     (st, map)
 }
 
+/// Everything a test needs after a dual `add_quot` run: the ARC env
+/// (post-admission, for the ported test's own Arc-only assertions), plus
+/// the raw id-side verdict (`id_result`) and the bridging stores
+/// (`scratch`/`persistent`) so rejection/acceptance tests can assert
+/// their own independent checks on top of the harness's already-pinned
+/// arc==id agreement.
+struct DualQuot {
+    arc_env: Environment,
+    id_result: Result<Vec<crate::bank::decl::ConstantInfo>, crate::KernelError>,
+    scratch: Store,
+    persistent: Store,
+}
+
 /// Run both kernels' `add_quot` against the same starting `consts`,
 /// assert identical verdicts: both-Err ⇒ the exact same `KernelError`;
 /// both-Ok ⇒ the four returned id `ConstantInfo`s bridge-match the Arc
 /// env's post-admission constants (same intern-both-sides-into-one-store
 /// technique `bank::decl`'s own `assert_eq_ci` uses). Returns the ARC env
-/// (post-admission) for tests that need further Arc-only assertions.
-fn assert_add_quot_matches(consts: Vec<ConstantInfo>) -> Environment {
+/// (post-admission) plus the id-side verdict for tests that need further
+/// independent assertions.
+fn assert_add_quot_matches(consts: Vec<ConstantInfo>) -> DualQuot {
     let mut arc_env = Environment::from_modules(vec![consts.clone()]).unwrap();
     let arc_result = crate::quot::add_quot(&mut arc_env);
 
@@ -217,10 +231,10 @@ fn assert_add_quot_matches(consts: Vec<ConstantInfo>) -> Environment {
     };
     let id_result = add_quot(&mut scratch, &view);
 
-    match (arc_result, id_result) {
+    match (&arc_result, &id_result) {
         (Ok(()), Ok(added)) => {
             assert_eq!(added.len(), 4, "add_quot admits exactly 4 constants");
-            for ci in &added {
+            for ci in added {
                 let arc_name = scratch.to_name(Some(&persistent), Some(ci.name()));
                 let arc_ci = arc_env
                     .get(&arc_name)
@@ -233,19 +247,28 @@ fn assert_add_quot_matches(consts: Vec<ConstantInfo>) -> Environment {
         (Err(a), Err(b)) => assert_eq!(a, b),
         (a, b) => panic!("verdict split: arc={a:?} id={b:?}"),
     }
-    arc_env
+    DualQuot {
+        arc_env,
+        id_result,
+        scratch,
+        persistent,
+    }
 }
 
 #[test]
 fn add_quot_accepts_alpha_equivalent_eq_shape() {
-    let env = assert_add_quot_matches(alpha_equivalent_eq());
-    assert!(env.quot_initialized());
+    let res = assert_add_quot_matches(alpha_equivalent_eq());
+    assert!(res.arc_env.quot_initialized());
 }
 
 #[test]
 fn add_quot_without_eq_fails() {
-    let env = assert_add_quot_matches(vec![]);
-    assert!(!env.quot_initialized());
+    let res = assert_add_quot_matches(vec![]);
+    assert!(!res.arc_env.quot_initialized());
+    match res.id_result {
+        Err(crate::KernelError::InvalidQuot { what }) => assert_eq!(what, "Eq"),
+        other => panic!("expected InvalidQuot{{what: \"Eq\"}}, got {other:?}"),
+    }
 }
 
 #[test]
@@ -255,28 +278,234 @@ fn add_quot_wrong_eq_shape_fails() {
         ConstantInfo::Induct(v) => v.ctors.push(nm2("Eq", "other")),
         _ => unreachable!(),
     }
-    let env = assert_add_quot_matches(consts);
-    assert!(!env.quot_initialized());
+    let res = assert_add_quot_matches(consts);
+    assert!(!res.arc_env.quot_initialized());
+    assert!(matches!(
+        res.id_result,
+        Err(crate::KernelError::InvalidQuot { .. })
+    ));
 }
 
 #[test]
 fn add_quot_after_eq_succeeds() {
-    let env = assert_add_quot_matches(well_shaped_eq());
-    assert!(env.quot_initialized());
+    let res = assert_add_quot_matches(well_shaped_eq());
+    assert!(res.arc_env.quot_initialized());
+    let DualQuot {
+        scratch,
+        persistent,
+        id_result,
+        ..
+    } = res;
+    let added = id_result.expect("add_quot succeeds on well-shaped Eq");
 
     // Idempotent: a second (id-native) call on an already-initialized
     // view is a documented no-op success (quot.cpp:48-49) — nothing left
     // to admit.
-    let (persistent, map) = bridge_consts(&well_shaped_eq());
-    let mut scratch = Store::scratch();
+    let (persistent2, map2) = bridge_consts(&well_shaped_eq());
+    let mut scratch2 = Store::scratch();
     let view = EnvView {
-        consts: &map,
+        consts: &map2,
         extra: None,
         quot_initialized: true,
-        store: &persistent,
+        store: &persistent2,
     };
-    let added = add_quot(&mut scratch, &view).unwrap();
-    assert!(added.is_empty(), "already-initialized add_quot is a no-op");
+    let added_again = add_quot(&mut scratch2, &view).unwrap();
+    assert!(
+        added_again.is_empty(),
+        "already-initialized add_quot is a no-op"
+    );
+
+    // Independent structural checks on the four returned constants
+    // (ported from `crate::quot::tests::add_quot_after_eq_succeeds`):
+    // kind, level-params, and the expected hard-coded type for each of
+    // `Quot`/`Quot.mk`/`Quot.lift`/`Quot.ind`, bridged out to `Arc<Expr>`
+    // and compared structurally against the same expected shapes the
+    // Arc test builds.
+    let mut rg = RecGuard::new();
+    let u_name = nm("u");
+    let u = Arc::new(Level::Param(Arc::clone(&u_name)));
+    let sort_u = Expr::sort(Arc::clone(&u), &mut rg).unwrap();
+    let prop = Expr::sort(Arc::new(Level::Zero), &mut rg).unwrap();
+
+    // constant {u} Quot {α : Sort u} (r : α → α → Prop) : Sort u
+    let mut lctx = LocalContext::default();
+    let mut gen = FVarIdGen::default();
+    let alpha = lctx.mk_local_decl(
+        &mut gen,
+        &nm("α"),
+        Arc::clone(&sort_u),
+        BinderInfo::Implicit,
+    );
+    let r = lctx.mk_local_decl(
+        &mut gen,
+        &nm("r"),
+        arrow(
+            Arc::clone(&alpha),
+            arrow(Arc::clone(&alpha), Arc::clone(&prop)),
+        ),
+        BinderInfo::Default,
+    );
+    let expected_quot_type = lctx
+        .mk_pi(&[Arc::clone(&alpha), Arc::clone(&r)], &sort_u, &mut rg)
+        .unwrap();
+
+    let quot_u = Expr::const_(nm("Quot"), vec![Arc::clone(&u)], &mut rg).unwrap();
+    let quot_r = Expr::mk_app_spine(Arc::clone(&quot_u), &[Arc::clone(&alpha), Arc::clone(&r)]);
+    let a = lctx.mk_local_decl(&mut gen, &nm("a"), Arc::clone(&alpha), BinderInfo::Default);
+    // constant {u} Quot.mk {α : Sort u} (r : α → α → Prop) (a : α) : @Quot.{u} α r
+    let expected_mk_type = lctx
+        .mk_pi(
+            &[Arc::clone(&alpha), Arc::clone(&r), Arc::clone(&a)],
+            &quot_r,
+            &mut rg,
+        )
+        .unwrap();
+
+    // constant {u v} Quot.lift {α : Sort u} {r : α → α → Prop} {β : Sort v} (f : α → β)
+    //                          : (∀ a b : α, r a b → f a = f b) → @Quot.{u} α r → β
+    let mut lctx2 = LocalContext::default();
+    let mut gen2 = FVarIdGen::default();
+    let alpha2 = lctx2.mk_local_decl(
+        &mut gen2,
+        &nm("α"),
+        Arc::clone(&sort_u),
+        BinderInfo::Implicit,
+    );
+    let r2 = lctx2.mk_local_decl(
+        &mut gen2,
+        &nm("r"),
+        arrow(
+            Arc::clone(&alpha2),
+            arrow(Arc::clone(&alpha2), Arc::clone(&prop)),
+        ),
+        BinderInfo::Implicit,
+    );
+    let quot_r2 = Expr::mk_app_spine(Arc::clone(&quot_u), &[Arc::clone(&alpha2), Arc::clone(&r2)]);
+    let v_name = nm("v");
+    let v = Arc::new(Level::Param(Arc::clone(&v_name)));
+    let sort_v = Expr::sort(Arc::clone(&v), &mut rg).unwrap();
+    let beta2 = lctx2.mk_local_decl(&mut gen2, &nm("β"), sort_v, BinderInfo::Implicit);
+    let f2 = lctx2.mk_local_decl(
+        &mut gen2,
+        &nm("f"),
+        arrow(Arc::clone(&alpha2), Arc::clone(&beta2)),
+        BinderInfo::Default,
+    );
+    let a2 = lctx2.mk_local_decl(
+        &mut gen2,
+        &nm("a"),
+        Arc::clone(&alpha2),
+        BinderInfo::Default,
+    );
+    let b2 = lctx2.mk_local_decl(
+        &mut gen2,
+        &nm("b"),
+        Arc::clone(&alpha2),
+        BinderInfo::Default,
+    );
+    let r_a_b2 = Expr::mk_app_spine(Arc::clone(&r2), &[Arc::clone(&a2), Arc::clone(&b2)]);
+    let eq_v2 = Expr::const_(nm("Eq"), vec![Arc::clone(&v)], &mut rg).unwrap();
+    let f_a2 = Expr::app(Arc::clone(&f2), Arc::clone(&a2));
+    let f_b2 = Expr::app(Arc::clone(&f2), Arc::clone(&b2));
+    let f_a_eq_f_b2 = Expr::mk_app_spine(eq_v2, &[Arc::clone(&beta2), f_a2, f_b2]);
+    let sanity2 = lctx2
+        .mk_pi(
+            &[Arc::clone(&a2), Arc::clone(&b2)],
+            &arrow(r_a_b2, f_a_eq_f_b2),
+            &mut rg,
+        )
+        .unwrap();
+    let expected_lift_type = lctx2
+        .mk_pi(
+            &[
+                Arc::clone(&alpha2),
+                Arc::clone(&r2),
+                Arc::clone(&beta2),
+                Arc::clone(&f2),
+            ],
+            &arrow(sanity2, arrow(Arc::clone(&quot_r2), Arc::clone(&beta2))),
+            &mut rg,
+        )
+        .unwrap();
+
+    // constant {u} Quot.ind {α : Sort u} {r : α → α → Prop} {β : @Quot.{u} α r → Prop}
+    //               : (∀ a : α, β (@Quot.mk.{u} α r a)) → ∀ q : @Quot.{u} α r, β q
+    let beta_ind2 = lctx2.mk_local_decl(
+        &mut gen2,
+        &nm("β"),
+        arrow(Arc::clone(&quot_r2), Arc::clone(&prop)),
+        BinderInfo::Implicit,
+    );
+    let quot_mk_u = Expr::const_(nm2("Quot", "mk"), vec![Arc::clone(&u)], &mut rg).unwrap();
+    let quot_mk_a2 = Expr::mk_app_spine(
+        quot_mk_u,
+        &[Arc::clone(&alpha2), Arc::clone(&r2), Arc::clone(&a2)],
+    );
+    let all_quot2 = lctx2
+        .mk_pi(
+            &[Arc::clone(&a2)],
+            &Expr::app(Arc::clone(&beta_ind2), quot_mk_a2),
+            &mut rg,
+        )
+        .unwrap();
+    let q2 = lctx2.mk_local_decl(
+        &mut gen2,
+        &nm("q"),
+        Arc::clone(&quot_r2),
+        BinderInfo::Default,
+    );
+    let q_pi2 = lctx2
+        .mk_pi(
+            &[Arc::clone(&q2)],
+            &Expr::app(Arc::clone(&beta_ind2), Arc::clone(&q2)),
+            &mut rg,
+        )
+        .unwrap();
+    let mk_node2 = Expr::forall_e(nm("mk"), all_quot2, q_pi2, BinderInfo::Default);
+    let expected_ind_type = lctx2
+        .mk_pi(
+            &[Arc::clone(&alpha2), Arc::clone(&r2), Arc::clone(&beta_ind2)],
+            &mk_node2,
+            &mut rg,
+        )
+        .unwrap();
+
+    for ci in &added {
+        let name = scratch.to_name(Some(&persistent), Some(ci.name()));
+        let (kind, level_params, ty) = match ci {
+            crate::bank::decl::ConstantInfo::Quot(v) => (
+                v.kind,
+                v.val
+                    .level_params
+                    .iter()
+                    .map(|lp| scratch.to_name(Some(&persistent), Some(*lp)))
+                    .collect::<Vec<_>>(),
+                scratch
+                    .to_expr(Some(&persistent), v.val.ty, &mut g())
+                    .unwrap(),
+            ),
+            other => panic!("expected Quot, got {other:?}"),
+        };
+        if name.as_ref() == nm("Quot").as_ref() {
+            assert_eq!(kind, QuotKind::Type);
+            assert_eq!(level_params, vec![Arc::clone(&u_name)]);
+            assert!(Expr::structural_eq(&ty, &expected_quot_type, &mut rg).unwrap());
+        } else if name.as_ref() == nm2("Quot", "mk").as_ref() {
+            assert_eq!(kind, QuotKind::Ctor);
+            assert_eq!(level_params, vec![Arc::clone(&u_name)]);
+            assert!(Expr::structural_eq(&ty, &expected_mk_type, &mut rg).unwrap());
+        } else if name.as_ref() == nm2("Quot", "lift").as_ref() {
+            assert_eq!(kind, QuotKind::Lift);
+            assert_eq!(level_params, vec![Arc::clone(&u_name), Arc::clone(&v_name)]);
+            assert!(Expr::structural_eq(&ty, &expected_lift_type, &mut rg).unwrap());
+        } else if name.as_ref() == nm2("Quot", "ind").as_ref() {
+            assert_eq!(kind, QuotKind::Ind);
+            assert_eq!(level_params, vec![Arc::clone(&u_name)]);
+            assert!(Expr::structural_eq(&ty, &expected_ind_type, &mut rg).unwrap());
+        } else {
+            panic!("unexpected admitted constant {name}");
+        }
+    }
 }
 
 #[test]

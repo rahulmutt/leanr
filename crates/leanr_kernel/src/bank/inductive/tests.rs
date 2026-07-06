@@ -262,12 +262,16 @@ fn array_decl() -> Declaration {
 /// (post-admission, for the ported test's own Arc-only assertions), plus
 /// the id-side ingredients (`scratch` — holds the admitted `ExprId`s;
 /// `persistent`/`consts` — the full bridged base+admitted map) for tests
-/// that additionally need a dual `whnf` check.
+/// that additionally need a dual `whnf` check, plus the raw id-side
+/// verdict (`id_result`) so rejection tests can assert their own
+/// independent `KernelError` variant/`what`-string check on top of the
+/// harness's already-pinned arc==id agreement.
 struct DualAdmit {
     arc_env: Environment,
     scratch: Store,
     persistent: Store,
     consts: HashMap<NameId, crate::bank::decl::ConstantInfo>,
+    id_result: Result<Vec<crate::bank::decl::ConstantInfo>, crate::KernelError>,
 }
 
 /// Bridge an Arc-kernel test env into (persistent store, consts map) —
@@ -386,6 +390,7 @@ fn assert_inductive_admission_matches(
         scratch,
         persistent,
         consts: full_consts,
+        id_result,
     }
 }
 
@@ -698,6 +703,15 @@ fn rejects_wrong_codomain() {
     );
     let res = assert_inductive_admission_matches(Environment::default, d);
     assert!(res.arc_env.get(&nm("T")).is_none());
+    // Verdict (including exact-`KernelError` agreement) was already
+    // pinned by the harness; re-check the specific reason for
+    // readability, on the id-side error (harness proved arc==id).
+    match res.id_result {
+        Err(crate::KernelError::InvalidInductive { what, .. }) => {
+            assert_eq!(what, "invalid return type")
+        }
+        other => panic!("expected invalid-return-type error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -709,7 +723,13 @@ fn rejects_universe_too_small() {
         0,
         vec![ind("T", mini::type1(), vec![(nm2("T", "mk"), mk_ty)])],
     );
-    assert_inductive_admission_matches(Environment::default, d);
+    let res = assert_inductive_admission_matches(Environment::default, d);
+    match res.id_result {
+        Err(crate::KernelError::InvalidInductive { what, .. }) => {
+            assert_eq!(what, "universe too small")
+        }
+        other => panic!("expected universe-too-small error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -736,6 +756,12 @@ fn rejects_param_mismatch_across_block() {
     );
     let res = assert_inductive_admission_matches(Environment::default, d);
     assert!(res.arc_env.get(&nm("A")).is_none());
+    match res.id_result {
+        Err(crate::KernelError::InvalidInductive { what, .. }) => {
+            assert_eq!(what, "parameters must match")
+        }
+        other => panic!("expected parameter-mismatch error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -756,6 +782,13 @@ fn rejects_empty_inductive_block() {
         before,
         "environment unchanged on rejection"
     );
+    match res.id_result {
+        Err(crate::KernelError::InvalidInductive { name, what }) => {
+            assert_eq!(what, "empty inductive block");
+            assert!(matches!(name.as_ref(), Name::Anonymous));
+        }
+        other => panic!("expected empty-inductive-block error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -991,6 +1024,10 @@ fn rejects_nested_positivity_violation() {
     assert!(res.arc_env.get(&nm("T")).is_none());
     assert!(res.arc_env.get(&nm2("T", "mk")).is_none());
     assert_no_nested_leak(&res.arc_env);
+    match res.id_result {
+        Err(crate::KernelError::InvalidInductive { what, .. }) => assert_eq!(what, "positivity"),
+        other => panic!("expected positivity error, got {other:?}"),
+    }
 }
 
 #[test]
