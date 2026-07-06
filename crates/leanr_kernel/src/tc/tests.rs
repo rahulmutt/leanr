@@ -133,6 +133,28 @@ fn check_rejects_univ_arity() {
     );
 }
 
+/// Not a port of an Arc `tc/tests.rs` case — regression coverage for a
+/// bug this task's review caught: a `Const` naming something NEVER
+/// interned into the persistent store mints a fresh SCRATCH-region
+/// `NameId` (the whole point of "unknown constant"), and
+/// `EnvView::get_with`'s own `to_name(None, ...)` call resolves a miss
+/// against `store` alone — wrong for a scratch id (see `store_for`'s
+/// doc comment) and, depending on index sizes, either reports the WRONG
+/// name or panics on an out-of-bounds row read. `TypeChecker::env_get_with`
+/// does not delegate to `EnvView::get_with` for exactly this reason; this
+/// test exercises it end-to-end through `infer_type`, referencing a name
+/// that is `Anonymous`-free and provably absent from `mini::env()`.
+#[test]
+fn unknown_constant_from_a_fresh_scratch_name_reports_correctly() {
+    let env = mini::env();
+    let mut scratch = Store::scratch();
+    let e = mini::cst("TotallyUnknownDeclaration", vec![]);
+    assert_eq!(
+        infer(&env, &mut scratch, &e).unwrap_err(),
+        KernelError::UnknownConstant(nm("TotallyUnknownDeclaration"))
+    );
+}
+
 #[test]
 fn app_type_mismatch_rejected() {
     let env = mini::env();

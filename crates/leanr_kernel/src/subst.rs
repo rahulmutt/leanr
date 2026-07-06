@@ -1356,4 +1356,167 @@ mod tests {
         assert_eq!(st.expr_data(None, bt2).loose_bvar_range(), 1); // Vec #0
         assert_eq!(st.expr_data(None, b2).loose_bvar_range(), 2); // #0 #1
     }
+
+    // ------------------------------------------------------------------
+    // Fix round 1 (Task 8 review): id-only SELF-CONSISTENCY property
+    // suite, replacing the deleted 500-seed Arc-vs-id differential tests
+    // (`git show 9b1c773:crates/leanr_kernel/src/bank/subst.rs`, the
+    // `*_matches_arc_kernel` tests) whose oracle — the Arc kernel — the
+    // flip deletes. Each property below is a law this module's own doc
+    // comments state (cited per-test), checked against this file's SOLE
+    // remaining implementation rather than a second implementation.
+    // Every generated term is deterministic in `seed` alone, via
+    // `bank::testgen`.
+    // ------------------------------------------------------------------
+
+    use crate::bank::testgen;
+
+    #[test]
+    fn prop_abstract_then_instantiate_rev_roundtrips() {
+        // Law: `instantiate_rev(abstract_fvars(e, fvars), fvars) == e`.
+        // `abstract_fvars`'s doc (above, this file): fvars[i] becomes
+        // `bvar(offset + fvars.len() - i - 1)` — the LAST fvar in the
+        // list is innermost (bvar #0 at the point of use).
+        // `instantiate_rev`'s doc (above, this file): `subst[subst.len()
+        // - 1]` replaces `#0` — the SAME "last is innermost" convention,
+        // so instantiating back with the identical `fvars` list exactly
+        // inverts the abstraction. This generalizes the pre-flip
+        // differential test `abstract_then_instantiate_roundtrips` (single
+        // fvar via plain `instantiate`) to a variable-length fvar list
+        // via `instantiate_rev`.
+        //
+        // `e` must come from `gen_closed_expr` (no raw `BVar` node): a
+        // preexisting loose bvar in `e` would occupy the same small
+        // indices abstraction mints for the fvars, and the two would be
+        // indistinguishable to `instantiate_rev`, breaking the roundtrip.
+        for seed in 0u64..500 {
+            let mut r = testgen::Rng(seed);
+            let mut g = RecGuard::new();
+            let e_arc = testgen::gen_closed_expr(&mut r, 4, &mut g);
+            let candidates = [nm("fv1"), nm("fv2"), nm("fv3")];
+            let n = r.below(4) as usize;
+            let fvar_names: Vec<Arc<Name>> = (0..n)
+                .map(|_| Arc::clone(&candidates[r.below(3) as usize]))
+                .collect();
+
+            let mut st = Store::persistent();
+            let e = st.intern_expr(None, &e_arc).unwrap();
+            let fvars: Vec<_> = fvar_names
+                .iter()
+                .map(|n| {
+                    let nid = st.intern_name(None, n).unwrap();
+                    st.expr_fvar(None, nid).unwrap()
+                })
+                .collect();
+
+            let abs = abstract_fvars(&mut st, None, e, &fvars, &mut g).unwrap();
+            let back = instantiate_rev(&mut st, None, abs, &fvars, &mut g).unwrap();
+            assert_eq!(back, e, "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn prop_instantiate_on_closed_expr_is_identity() {
+        // `instantiate_go`'s first check (above, this file — oracle:
+        // instantiate.cpp:22-23): "skip the whole subtree once its
+        // packed range proves no loose bvar >= s1 survives in it". At
+        // the top call `s1 == 0`, so any `e` with `loose_bvar_range() ==
+        // 0` returns unchanged (the SAME id) no matter what is
+        // substituted — the closed fast path.
+        for seed in 0u64..400 {
+            let mut r = testgen::Rng(seed);
+            let mut g = RecGuard::new();
+            let e_arc = testgen::gen_closed_expr(&mut r, 4, &mut g);
+            let sub_arc = testgen::gen_expr(&mut r, 2, &mut g);
+            let mut st = Store::persistent();
+            let e = st.intern_expr(None, &e_arc).unwrap();
+            let sub = st.intern_expr(None, &sub_arc).unwrap();
+            assert_eq!(st.expr_data(None, e).loose_bvar_range(), 0);
+            let r2 = instantiate(&mut st, None, e, sub, &mut g).unwrap();
+            assert_eq!(r2, e, "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn prop_lift_by_zero_is_identity() {
+        // `lift_loose_bvars`'s own doc comment (above, this file —
+        // oracle: expr.cpp:449, `d == 0` guard): "lifting by nothing is
+        // the identity; preserves the id exactly like the oracle's early
+        // return."
+        for seed in 0u64..400 {
+            let mut r = testgen::Rng(seed);
+            let mut g = RecGuard::new();
+            let e_arc = testgen::gen_expr(&mut r, 4, &mut g);
+            let s = r.below(4) as u32;
+            let mut st = Store::persistent();
+            let e = st.intern_expr(None, &e_arc).unwrap();
+            let r2 = lift_loose_bvars(&mut st, None, e, s, 0, &mut g).unwrap();
+            assert_eq!(r2, e, "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn prop_lift_composition_at_same_cutoff() {
+        // `lift_loose_bvars`'s doc (above, this file — oracle:
+        // expr.cpp:448-460): "Lifts every loose bvar >= s by d." Applying
+        // it twice at the SAME cutoff `s` — first by `a`, then by `b` —
+        // shifts every bvar `>= s` by `a` and then by `b` again (lifting
+        // only increases indices, so a once-lifted bvar stays `>= s`):
+        // total `a + b`. Every bvar `< s` is left untouched by both
+        // calls. Same net effect as lifting once by `a + b`.
+        for seed in 0u64..400 {
+            let mut r = testgen::Rng(seed);
+            let mut g = RecGuard::new();
+            let e_arc = testgen::gen_expr(&mut r, 4, &mut g);
+            let s = r.below(4) as u32;
+            let a = r.below(5) as u32;
+            let b = r.below(5) as u32;
+            let mut st = Store::persistent();
+            let e = st.intern_expr(None, &e_arc).unwrap();
+            let step1 = lift_loose_bvars(&mut st, None, e, s, a, &mut g).unwrap();
+            let composed = lift_loose_bvars(&mut st, None, step1, s, b, &mut g).unwrap();
+            let direct = lift_loose_bvars(&mut st, None, e, s, a + b, &mut g).unwrap();
+            assert_eq!(composed, direct, "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn prop_instantiate_level_params_idempotent_after_first_application() {
+        // `instantiate_level_params`'s doc (above, this file — oracle:
+        // instantiate.cpp:233-234/236-237): the substitution is total
+        // for names occurring in `params` — every `Level::Param` node
+        // naming a `params` entry is fully replaced by the matching
+        // `args` entry. `args` here reference only the name `w`, which
+        // is DISJOINT from `params = [u, v]`, so no `u`/`v` occurrence
+        // survives the first application. A second application with the
+        // SAME `params`/`args` therefore has nothing left to substitute
+        // and is a no-op (the per-node `has_level_param`-guided skip /
+        // `Level::instantiate_params`'s own no-match fast path).
+        for seed in 0u64..400 {
+            let mut r = testgen::Rng(seed);
+            let mut g = RecGuard::new();
+            let params_arc = vec![nm("u"), nm("v")];
+            let args_arc = [
+                Arc::new(Level::Zero),
+                Arc::new(Level::Succ(Arc::new(Level::Param(nm("w"))))),
+            ];
+            let e_arc = testgen::gen_expr_with_params(&mut r, 4, &params_arc, &mut g);
+
+            let mut st = Store::persistent();
+            let e = st.intern_expr(None, &e_arc).unwrap();
+            let params: Vec<_> = params_arc
+                .iter()
+                .map(|n| st.intern_name(None, n).unwrap().unwrap())
+                .collect();
+            let args: Vec<_> = args_arc
+                .iter()
+                .map(|a| st.intern_level(None, a).unwrap())
+                .collect();
+
+            let once = instantiate_level_params(&mut st, None, e, &params, &args, &mut g).unwrap();
+            let twice =
+                instantiate_level_params(&mut st, None, once, &params, &args, &mut g).unwrap();
+            assert_eq!(once, twice, "seed {seed}");
+        }
+    }
 }
