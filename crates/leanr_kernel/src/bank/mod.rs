@@ -7,6 +7,7 @@
 //! scratch); the low 31 bits of the raw bits are never 0, so probe
 //! tables can use 0 as the empty sentinel.
 
+pub mod pools;
 pub mod probe;
 
 use std::num::NonZeroU32;
@@ -62,6 +63,115 @@ id_type!(/** Int (bignum) pool id. */ IntId);
 id_type!(/** Level-list pool id (Const's levels). */ LevelsId);
 id_type!(/** KVMap pool id. */ KVMapId);
 id_type!(/** LetE spill pool id. */ SpillId);
+
+use crate::{Int, KernelError, Nat};
+use pools::ValuePool;
+
+/// Stable sip-style hash for pool values (DefaultHasher is fine: hashes
+/// never persist and only feed in-process probe tables).
+pub(crate) fn sip<T: std::hash::Hash + ?Sized>(x: &T) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::Hasher;
+    let mut h = DefaultHasher::new();
+    x.hash(&mut h);
+    h.finish()
+}
+
+/// One region's complete storage (spec §2). The persistent `Store` is
+/// phase 2's `Environment` bank; a scratch `Store` is a per-declaration
+/// overlay whose intern methods consult `base` first.
+pub struct Store {
+    pub region: u32,
+    pub strs: ValuePool<Box<str>>,
+    pub nats: ValuePool<Nat>,
+    pub ints: ValuePool<Int>,
+    // Extended by Tasks 3-6: names, levels, level_lists, kvmaps,
+    // spills, terms.
+}
+
+impl Store {
+    pub fn persistent() -> Store {
+        Store::new(0)
+    }
+    pub fn scratch() -> Store {
+        Store::new(REGION_BIT)
+    }
+    fn new(region: u32) -> Store {
+        Store {
+            region,
+            strs: ValuePool::new(region),
+            nats: ValuePool::new(region),
+            ints: ValuePool::new(region),
+        }
+    }
+
+    /// Route an id to the store owning its region. `base` is `None`
+    /// only when `self` IS the persistent store.
+    fn store_for<'a>(&'a self, base: Option<&'a Store>, scratch_bit: bool) -> &'a Store {
+        if scratch_bit {
+            self
+        } else {
+            base.unwrap_or(self)
+        }
+    }
+
+    pub fn intern_str(&mut self, base: Option<&Store>, s: &str) -> Result<StrId, KernelError> {
+        let h = sip(s);
+        if let Some(b) = base {
+            if let Some(bits) = b.strs.lookup(h, |t| &**t == s) {
+                return StrId::from_bits(bits).ok_or(KernelError::BankExhausted);
+            }
+        }
+        let bits = self
+            .strs
+            .intern(h, |t| &**t == s, || s.into(), |t| sip(&**t))?;
+        StrId::from_bits(bits).ok_or(KernelError::BankExhausted)
+    }
+
+    pub fn str_at<'a>(&'a self, base: Option<&'a Store>, id: StrId) -> &'a str {
+        self.store_for(base, id.is_scratch())
+            .strs
+            .get(id.index())
+            .map(|b| &**b)
+            .expect("StrId minted by intern ⇒ valid")
+    }
+
+    pub fn intern_nat(&mut self, base: Option<&Store>, n: &Nat) -> Result<NatId, KernelError> {
+        let h = sip(n);
+        if let Some(b) = base {
+            if let Some(bits) = b.nats.lookup(h, |t| t == n) {
+                return NatId::from_bits(bits).ok_or(KernelError::BankExhausted);
+            }
+        }
+        let bits = self.nats.intern(h, |t| t == n, || n.clone(), sip)?;
+        NatId::from_bits(bits).ok_or(KernelError::BankExhausted)
+    }
+
+    pub fn nat_at<'a>(&'a self, base: Option<&'a Store>, id: NatId) -> &'a Nat {
+        self.store_for(base, id.is_scratch())
+            .nats
+            .get(id.index())
+            .expect("NatId minted by intern ⇒ valid")
+    }
+
+    pub fn intern_int(&mut self, base: Option<&Store>, i: &Int) -> Result<IntId, KernelError> {
+        let h = sip(i);
+        if let Some(b) = base {
+            if let Some(bits) = b.ints.lookup(h, |t| t == i) {
+                return IntId::from_bits(bits).ok_or(KernelError::BankExhausted);
+            }
+        }
+        let bits = self.ints.intern(h, |t| t == i, || i.clone(), sip)?;
+        IntId::from_bits(bits).ok_or(KernelError::BankExhausted)
+    }
+
+    pub fn int_at<'a>(&'a self, base: Option<&'a Store>, id: IntId) -> &'a Int {
+        self.store_for(base, id.is_scratch())
+            .ints
+            .get(id.index())
+            .expect("IntId minted by intern ⇒ valid")
+    }
+}
 
 #[cfg(test)]
 mod tests {
