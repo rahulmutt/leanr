@@ -1,10 +1,11 @@
 //! Structural interning (hash-consing) for `Expr`/`Level`.
 //!
-//! A *transient* batch canonicalizer: build an `Interner`, rewrite the
-//! decoded constants through it, then drop it. Structurally-identical
-//! subterms collapse to one shared `Arc`, so the resulting `Arc` graph
-//! (and the `Environment` built from it) holds each distinct subterm once.
-//! No global state, no `Weak` refs, no hot-path cost (see
+//! `Interner` is owned persistently by `Environment` (Task 5) and driven one
+//! `ConstantInfo` at a time by `Environment::add_core`, the single choke
+//! point every admission (decoded or kernel-generated) passes through.
+//! Structurally-identical subterms collapse to one shared `Arc`, so the
+//! `Environment`'s `Arc` graph holds each distinct subterm once. No global
+//! state, no `Weak` refs, no hot-path cost (see
 //! docs/superpowers/specs/2026-07-06-expr-hash-consing-design.md).
 //!
 //! Soundness: interning only ever replaces an `Arc<Expr>`/`Arc<Level>` with
@@ -18,21 +19,22 @@
 //! *within* a single `intern_constant_info` call: the input `ConstantInfo`
 //! borrowed by that call keeps every `Arc` it reaches alive, so addresses
 //! can't be reused for a structurally-different node during the call. Once
-//! the call returns, `intern_constants` drops that constant's original
-//! entry, freeing its interior `Arc`s; a later constant can then allocate a
-//! *different* node at a freed address. A memo keyed only on address (with
-//! no structural check) would return the stale canonical for that reused
-//! address — wrong. So `intern_constant_info` clears both memos at entry,
-//! keeping intra-constant dedup while never trusting an address across
-//! constants. The bucket tables (`exprs`/`levels`) remain valid across the
-//! whole pass because they always confirm with `structural_eq` before
-//! reusing a canonical `Arc`.
+//! the call returns, the caller (`Environment::add_core`) drops that
+//! constant's original, un-interned `ConstantInfo`, freeing its interior
+//! `Arc`s; a later `add_core` call can then allocate a *different* node at a
+//! freed address. A memo keyed only on address (with no structural check)
+//! would return the stale canonical for that reused address — wrong. So
+//! `intern_constant_info` clears both memos at entry, keeping intra-constant
+//! dedup while never trusting an address across constants. The bucket
+//! tables (`exprs`/`levels`) remain valid across the whole
+//! `Environment`'s lifetime because they always confirm with
+//! `structural_eq` before reusing a canonical `Arc`.
 
-use crate::{ConstantInfo, Expr, ExprNode, KernelError, Level, Name, RecGuard};
+use crate::{ConstantInfo, Expr, ExprNode, KernelError, Level, RecGuard};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Interner {
     /// Canonical levels, bucketed by `Level::hash_val`.
     levels: HashMap<u64, Vec<Arc<Level>>>,
@@ -49,7 +51,11 @@ pub struct Interner {
 }
 
 impl Interner {
-    pub fn new() -> Interner {
+    // Task 5: production code builds an `Interner` via `#[derive(Default)]`
+    // (owned persistently by `Environment`); `new` now only serves this
+    // file's unit tests, which predate that and spell it as `Interner::new()`.
+    #[cfg(test)]
+    pub(crate) fn new() -> Interner {
         Interner::default()
     }
 
@@ -190,19 +196,20 @@ impl Interner {
     }
 
     /// Canonicalize every `Arc<Expr>` reachable from a `ConstantInfo`.
-    fn intern_constant_info(
+    pub(crate) fn intern_constant_info(
         &mut self,
         ci: &ConstantInfo,
         g: &mut RecGuard,
     ) -> Result<ConstantInfo, KernelError> {
         // Address-keyed memos are only sound while `ci` (and everything it
         // reaches) is alive, which is exactly the duration of this call.
-        // Once `intern_constants` drops this constant's input, its interior
-        // `Arc` addresses can be reused by a later, structurally-different
-        // constant; a stale entry here would then be returned without a
-        // `structural_eq` check. Clearing both memos per constant closes
-        // that hazard while keeping intra-constant dedup (the `exprs`/
-        // `levels` buckets still provide cross-constant sharing, safely).
+        // Once the caller drops this constant's original (un-interned)
+        // input, its interior `Arc` addresses can be reused by a later,
+        // structurally-different constant; a stale entry here would then be
+        // returned without a `structural_eq` check. Clearing both memos per
+        // constant closes that hazard while keeping intra-constant dedup
+        // (the `exprs`/`levels` buckets still provide cross-constant
+        // sharing, safely).
         self.expr_memo.clear();
         self.level_memo.clear();
         let mut out = ci.clone();
@@ -252,29 +259,6 @@ impl Interner {
         }
         Ok(out)
     }
-}
-
-/// Batch-canonicalize a decoded constants map. Structurally-identical
-/// subterms across all entries collapse to one shared `Arc`; the returned
-/// map's `Arc` graph carries that sharing (the `Interner` itself is dropped
-/// here). Verdict-preserving (see module docs). Errors only on
-/// `KernelError::DeepRecursion` for adversarially deep input.
-pub fn intern_constants(
-    constants: HashMap<Arc<Name>, ConstantInfo>,
-) -> Result<HashMap<Arc<Name>, ConstantInfo>, KernelError> {
-    let mut it = Interner::new();
-    let mut g = RecGuard::new();
-    let mut out = HashMap::with_capacity(constants.len());
-    for (name, ci) in constants {
-        let interned = it.intern_constant_info(&ci, &mut g)?;
-        // `ci` (the by-value loop binding) drops here, at the end of the
-        // iteration, releasing this constant's original interior `Arc`s —
-        // freeing their addresses for reuse by a later constant. That's
-        // fine: `intern_constant_info` clears the address-keyed memos per
-        // call, so no stale entry can outlive this iteration.
-        out.insert(name, interned);
-    }
-    Ok(out)
 }
 
 #[cfg(test)]
@@ -431,7 +415,15 @@ mod tests {
         let mut map: HashMap<Arc<Name>, ConstantInfo> = HashMap::new();
         map.insert(name("A"), mk_axiom(&mut g));
         map.insert(name("B"), mk_axiom(&mut g));
-        let out = intern_constants(map).unwrap();
+        // Task 5: the batch `intern_constants` free fn is gone (the
+        // persistent `Environment`-owned `Interner` now drives this one
+        // `ConstantInfo` at a time via `add_core`); drive the same sequence
+        // directly through `intern_constant_info` here.
+        let mut it = Interner::new();
+        let mut out: HashMap<Arc<Name>, ConstantInfo> = HashMap::with_capacity(map.len());
+        for (n, ci) in map {
+            out.insert(n, it.intern_constant_info(&ci, &mut g).unwrap());
+        }
         let ta = &out[&name("A")].constant_val().ty;
         let tb = &out[&name("B")].constant_val().ty;
         assert!(
@@ -453,10 +445,9 @@ mod tests {
             },
             is_unsafe: false,
         });
-        let mut map = HashMap::new();
-        map.insert(name("A"), ci);
-        let out = intern_constants(map).unwrap();
-        assert!(Expr::structural_eq(&orig, &out[&name("A")].constant_val().ty, &mut g).unwrap());
+        let mut it = Interner::new();
+        let out = it.intern_constant_info(&ci, &mut g).unwrap();
+        assert!(Expr::structural_eq(&orig, &out.constant_val().ty, &mut g).unwrap());
     }
 
     #[test]

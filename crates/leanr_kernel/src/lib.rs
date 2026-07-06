@@ -40,7 +40,6 @@ pub use env::{Environment, EnvironmentError};
 pub use error::KernelError;
 pub use expr::{BinderInfo, DataValue, Expr, ExprData, ExprNode, KVMap, Literal};
 pub use guard::{RecGuard, MAX_REC_DEPTH};
-pub use intern::intern_constants;
 pub use level::Level;
 pub use local_ctx::{FVarIdGen, LocalContext, LocalDecl};
 pub use name::Name;

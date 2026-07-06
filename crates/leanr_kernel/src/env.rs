@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::{
-    ConstantInfo, ConstantVal, Declaration, DefinitionSafety, Expr, KernelError, Name, TypeChecker,
+    ConstantInfo, ConstantVal, Declaration, DefinitionSafety, Expr, KernelError, Name, RecGuard,
+    TypeChecker,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -83,7 +84,7 @@ fn check_constant_val(
 /// by cloning the real env into a scratch env for the aux run; the
 /// non-nested path never clones (it mutates in place with rollback, see
 /// `remove_core`).
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub struct Environment {
     constants: HashMap<Arc<Name>, ConstantInfo>,
     /// oracle: `environment::m_quot_initialized` (implicit in
@@ -93,6 +94,29 @@ pub struct Environment {
     /// the Task-7 name-presence proxy this field's accessor
     /// (`quot_initialized` below) used to implement.
     quot_initialized: bool,
+    /// Structural interner (hash-consing Task 5): persistent, owned by
+    /// the `Environment`, driven one `ConstantInfo` at a time by
+    /// `add_core` — the single choke point every admission (decoded or
+    /// kernel-generated, e.g. recursor types/rules built fresh during
+    /// inductive admission) passes through. See `intern.rs` module docs
+    /// for the soundness argument (interning only ever merges
+    /// structurally-identical `Arc`s, so no verdict can change).
+    interner: crate::intern::Interner,
+}
+
+/// The interner is a dedup cache, not state: a clone (only the transient
+/// nested-inductive scratch env, see the struct docs above) may safely
+/// start empty — restored decls are re-interned into the real env's
+/// interner via `add_core`. Cloning the (potentially large) interner
+/// would be pure cost with no correctness benefit.
+impl Clone for Environment {
+    fn clone(&self) -> Self {
+        Environment {
+            constants: self.constants.clone(),
+            quot_initialized: self.quot_initialized,
+            interner: crate::intern::Interner::default(),
+        }
+    }
 }
 
 impl Environment {
@@ -115,6 +139,7 @@ impl Environment {
         Ok(Environment {
             constants,
             quot_initialized: false,
+            interner: crate::intern::Interner::default(),
         })
     }
 
@@ -138,9 +163,18 @@ impl Environment {
     /// the admission pipeline (`add_decl`, Tasks 8-11); `pub(crate)`
     /// because callers outside the kernel must go through the checking
     /// `add_decl`, never this raw insert.
-    pub(crate) fn add_core(&mut self, info: ConstantInfo) {
+    pub(crate) fn add_core(&mut self, info: ConstantInfo) -> Result<(), KernelError> {
+        // Structurally intern every admitted constant (decoded and
+        // kernel-generated recursors alike) into the env's persistent
+        // interner, so identical subterms share one Arc. Verdict-preserving
+        // (only structurally-identical exprs merge); this is the single
+        // choke point all admissions pass through. Fresh RecGuard: interning
+        // one constant is an independent bounded recursion.
+        let mut g = RecGuard::new();
+        let info = self.interner.intern_constant_info(&info, &mut g)?;
         let name = Arc::clone(info.name());
         self.constants.insert(name, info);
+        Ok(())
     }
 
     /// Remove a previously `add_core`d constant. Used only by the
@@ -250,7 +284,7 @@ impl Environment {
                 }
             }
         };
-        self.add_core(info);
+        self.add_core(info)?;
         Ok(())
     }
 
@@ -321,3 +355,46 @@ impl Environment {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod intern_on_admit_tests {
+    use super::*;
+    use crate::{Expr, RecGuard};
+    use std::sync::Arc;
+
+    fn nm(s: &str) -> Arc<crate::Name> {
+        Arc::new(crate::Name::Str {
+            parent: Arc::new(crate::Name::Anonymous),
+            part: s.to_string(),
+        })
+    }
+
+    #[test]
+    fn add_core_interns_across_constants() {
+        let mut g = RecGuard::new();
+        let mut env = Environment::default();
+        // Two axioms whose types are structurally equal but distinct Arcs.
+        let mk = |who: &str, g: &mut RecGuard| {
+            let ty = Expr::app(
+                Expr::const_(nm("Nat"), vec![], g).unwrap(),
+                Expr::const_(nm("Nat"), vec![], g).unwrap(),
+            );
+            ConstantInfo::Axiom(crate::AxiomVal {
+                val: crate::ConstantVal {
+                    name: nm(who),
+                    level_params: vec![],
+                    ty,
+                },
+                is_unsafe: false,
+            })
+        };
+        env.add_core(mk("A", &mut g)).unwrap();
+        env.add_core(mk("B", &mut g)).unwrap();
+        let ta = &env.get(&nm("A")).unwrap().constant_val().ty;
+        let tb = &env.get(&nm("B")).unwrap().constant_val().ty;
+        assert!(
+            Arc::ptr_eq(ta, tb),
+            "add_core must intern admitted constants into one shared Arc"
+        );
+    }
+}

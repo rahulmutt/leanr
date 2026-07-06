@@ -197,7 +197,7 @@ pub(crate) fn add_quot(env: &mut Environment) -> Result<(), KernelError> {
     env.add_core(ConstantInfo::Quot(QuotVal {
         val: cval(nm("Quot"), vec![Arc::clone(&u_name)], quot_type),
         kind: QuotKind::Type,
-    }));
+    }))?;
 
     let quot_const_u = Expr::const_(nm("Quot"), vec![Arc::clone(&u)], &mut g)?;
     let quot_r = Expr::mk_app_spine(
@@ -215,7 +215,7 @@ pub(crate) fn add_quot(env: &mut Environment) -> Result<(), KernelError> {
     env.add_core(ConstantInfo::Quot(QuotVal {
         val: cval(nm2("Quot", "mk"), vec![Arc::clone(&u_name)], quot_mk_type),
         kind: QuotKind::Ctor,
-    }));
+    }))?;
 
     // ---- Quot.lift, Quot.ind: fresh local context; r/α re-declared ---
     // ---- (r is implicit here, unlike Quot/Quot.mk) (quot.cpp:67-96) --
@@ -278,7 +278,7 @@ pub(crate) fn add_quot(env: &mut Environment) -> Result<(), KernelError> {
             lift_type,
         ),
         kind: QuotKind::Lift,
-    }));
+    }))?;
 
     // { β : @Quot.{u} α r → Prop } — Quot.ind's own β (re-declared).
     let beta_ind_dom = arrow(Arc::clone(&quot_r), Arc::clone(&prop));
@@ -317,7 +317,7 @@ pub(crate) fn add_quot(env: &mut Environment) -> Result<(), KernelError> {
     env.add_core(ConstantInfo::Quot(QuotVal {
         val: cval(nm2("Quot", "ind"), vec![u_name], ind_type),
         kind: QuotKind::Ind,
-    }));
+    }))?;
 
     env.set_quot_initialized();
     Ok(())

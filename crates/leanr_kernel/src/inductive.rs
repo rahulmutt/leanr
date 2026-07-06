@@ -1517,7 +1517,7 @@ fn process_rec(
         is_unsafe: rv.is_unsafe,
     };
     added.push(Arc::clone(&new_rec_name));
-    env.add_core(ConstantInfo::Rec(new_rv));
+    env.add_core(ConstantInfo::Rec(new_rv))?;
     Ok(())
 }
 
@@ -1564,7 +1564,7 @@ fn restore_nested_inductives(
             is_reflexive: iv.is_reflexive,
         };
         added.push(Arc::clone(&ind_type.name));
-        env.add_core(ConstantInfo::Induct(new_iv));
+        env.add_core(ConstantInfo::Induct(new_iv))?;
         for cnstr_name in &iv.ctors {
             let cv = match aux_env.get(cnstr_name) {
                 Some(ConstantInfo::Ctor(v)) => v.clone(),
@@ -1590,7 +1590,7 @@ fn restore_nested_inductives(
                 is_unsafe: cv.is_unsafe,
             };
             added.push(Arc::clone(cnstr_name));
-            env.add_core(ConstantInfo::Ctor(new_cv));
+            env.add_core(ConstantInfo::Ctor(new_cv))?;
         }
         process_rec(
             env,
@@ -1799,9 +1799,9 @@ impl AddInductiveFn {
         expr_has_ind_occ(e, &self.ind_names, &mut self.guard)
     }
 
-    fn add(&mut self, env: &mut Environment, info: ConstantInfo) {
+    fn add(&mut self, env: &mut Environment, info: ConstantInfo) -> Result<(), KernelError> {
         self.added.push(Arc::clone(info.name()));
-        env.add_core(info);
+        env.add_core(info)
     }
 
     /// oracle: inductive.cpp:211-262 (`check_inductive_types`).
@@ -1952,7 +1952,7 @@ impl AddInductiveFn {
                 is_unsafe: self.is_unsafe,
                 is_reflexive: reflexive,
             };
-            self.add(env, ConstantInfo::Induct(val));
+            self.add(env, ConstantInfo::Induct(val))?;
         }
         Ok(())
     }
@@ -2170,7 +2170,7 @@ impl AddInductiveFn {
                     num_fields: Nat::from(nfields as u64),
                     is_unsafe: self.is_unsafe,
                 };
-                self.add(env, ConstantInfo::Ctor(val));
+                self.add(env, ConstantInfo::Ctor(val))?;
             }
         }
         Ok(())
@@ -2626,7 +2626,7 @@ impl AddInductiveFn {
                 k: self.k_target,
                 is_unsafe: self.is_unsafe,
             };
-            self.add(env, ConstantInfo::Rec(val));
+            self.add(env, ConstantInfo::Rec(val))?;
         }
         Ok(())
     }

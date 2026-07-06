@@ -262,18 +262,6 @@ fn check(modules: Vec<String>, all: bool, path: Vec<PathBuf>) -> ExitCode {
     // replay returns. `loaded` is not referenced again below.
     drop(loaded);
 
-    // Structurally intern the decoded constants before replay: collapse
-    // duplicate subterms (Nat, Prop, common signatures) shared across the
-    // whole module set into one Arc each, cutting the Environment's peak
-    // memory. Verdict-preserving (leanr_kernel::intern; hash-consing spec).
-    let constants = match leanr_kernel::intern_constants(constants) {
-        Ok(c) => c,
-        Err(err) => {
-            eprintln!("error: interning decoded constants failed: {err}");
-            return ExitCode::FAILURE;
-        }
-    };
-
     let mut env = Environment::default();
     match leanr_kernel::replay(&mut env, constants) {
         Ok(stats) => {
