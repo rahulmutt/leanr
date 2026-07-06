@@ -84,6 +84,26 @@ pub fn replay(
         }
     }
 
+    let mut g = RecGuard::new();
+
+    // Pre-intern the whole input through the env's interner so the input map
+    // shares `Arc`s with what admission stores (`add_core` interns into the
+    // same interner). Verdict-preserving. This eliminates the un-interned-
+    // input double-count that otherwise peaks when the largest modules admit
+    // last: their still-resident input would hold separate copies of subterms
+    // the env already holds interned.
+    let constants: HashMap<Arc<Name>, ConstantInfo> = {
+        let mut interned = HashMap::with_capacity(constants.len());
+        for (n, ci) in constants {
+            let ci = env.intern_input(&ci, &mut g).map_err(|e| ReplayError {
+                decl: Arc::clone(&n),
+                error: e,
+            })?;
+            interned.insert(n, ci);
+        }
+        interned
+    };
+
     let mut st = Replayer {
         constants,
         env,
@@ -94,7 +114,6 @@ pub fn replay(
         checked: 0,
         failing_decl: None,
     };
-    let mut g = RecGuard::new();
 
     // Replay.lean:185-186 — iterate the initial `remaining` snapshot.
     // Each `replay_constant` moves names out of `remaining`; a name a

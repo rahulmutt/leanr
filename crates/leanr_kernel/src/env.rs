@@ -177,6 +177,22 @@ impl Environment {
         Ok(())
     }
 
+    /// Structurally intern a decoded `ConstantInfo` through this env's
+    /// interner, WITHOUT admitting it. `replay` calls this on the whole
+    /// input set before admission so the still-un-admitted input shares
+    /// `Arc`s with what `add_core` later stores (both go through the same
+    /// interner). Without it the un-interned input double-counts against the
+    /// growing interned env — worst at the very end, when the largest
+    /// modules' input is still resident alongside a near-complete env.
+    /// Pure interning: no verdict effect (same rule as `add_core`).
+    pub(crate) fn intern_input(
+        &mut self,
+        ci: &ConstantInfo,
+        g: &mut RecGuard,
+    ) -> Result<ConstantInfo, KernelError> {
+        self.interner.intern_constant_info(ci, g)
+    }
+
     /// Remove a previously `add_core`d constant. Used only by the
     /// inductive-admission pipeline's failure rollback (inductive.rs):
     /// the oracle mutates a *copy* of the environment (`m_env`) and
