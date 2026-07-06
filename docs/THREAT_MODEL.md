@@ -17,6 +17,16 @@
 | Cargo dependencies | Upstream maintainers | `cargo deny` in CI (advisories, sources, licenses); minimal dependency policy |
 | Committed secrets | Contributors | gitleaks in CI over full history |
 
+## Resource bounds (memory/DoS)
+
+`leanr check` structurally interns (hash-conses) decoded constants in one
+bounded batch pass before replay, collapsing structurally-identical subterms
+shared across the whole module set into a single `Arc` each. Like all term
+recursion, the pass runs under `RecGuard` (`MAX_REC_DEPTH` cap, no unguarded
+recursion on untrusted `.olean`-derived structure) and only merges terms
+identical in every field, so it is verdict-preserving — it exists purely to
+reduce the resident footprint of a whole-environment check.
+
 ## Out of scope (for now)
 
 - Sandboxing `lakefile.lean`/tactic execution (revisit at M4).
