@@ -8,15 +8,20 @@
 //! `subst.rs`. Every oracle citation below is copied verbatim from the
 //! Arc source.
 //!
-//! `params`/`args` in `instantiate_level_params` stay `Arc<Name>`/
-//! `Arc<Level>` (NOT converted to `NameId`/`LevelId`): the brief's
-//! conversion rule only names `Arc<Expr>` -> `ExprId`, and the
-//! substitution itself is delegated to `Level::instantiate_params`
-//! (`crate::level`), which also renormalizes (`mk_succ`/`mk_max_pair`/
-//! `mk_imax_pair`) — logic this task's scope (one new file, the six
-//! `Expr`-tree walkers) does not re-host in id space. Sort/Const level
-//! children bridge out via `to_level`, get substituted through the
-//! already-proven Arc walker, and bridge back in via `intern_level`.
+//! `instantiate_level_params`'s public signature takes `params: &[NameId]`/
+//! `args: &[LevelId]` (ids throughout, matching every other bank-native
+//! entry point — Task 4's TypeChecker call sites hold `Vec<NameId>` /
+//! `LevelId` lists straight off `ConstantVal`/`Const` nodes). The ids are
+//! loop-invariant across the traversal, so the entry point bridges each
+//! one to `Arc<Name>`/`Arc<Level>` exactly once, up front, via
+//! `to_name`/`to_level`; the traversal itself (`lparams_go`) still passes
+//! those `Arc` slices down unchanged, because the substitution is
+//! delegated to `Level::instantiate_params` (`crate::level`), which also
+//! renormalizes (`mk_succ`/`mk_max_pair`/`mk_imax_pair`) — logic this
+//! task's scope (one new file, the six `Expr`-tree walkers) does not
+//! re-host in id space. Sort/Const level children bridge out via
+//! `to_level`, get substituted through the already-proven Arc walker,
+//! and bridge back in via `intern_level`.
 //!
 //! Recursion discipline (crate-wide invariant, see lib.rs/guard.rs): the
 //! only sanctioned recursive descent is through `RecGuard::enter`.
@@ -35,7 +40,7 @@ use num_bigint::BigUint;
 
 use super::local_ctx::LocalContext;
 use super::terms::Node;
-use super::{ExprId, LevelId, Store};
+use super::{ExprId, LevelId, NameId, Store};
 use crate::{KernelError, Level, Name, Nat, RecGuard};
 use std::sync::Arc;
 
@@ -598,7 +603,12 @@ fn abstract_go(
                 }
             }
             match hit {
-                Some(new_idx) => st.expr_bvar(base, &Nat::from(new_idx))?,
+                // abstract.cpp's FVar-hit case returns straight from the
+                // rewrite (crate::subst's Arc `abstract_go`, subst.rs:546)
+                // without going through `save_result` — match that
+                // control flow exactly (verbatim-port constraint) rather
+                // than falling through to this function's cache insert.
+                Some(new_idx) => return st.expr_bvar(base, &Nat::from(new_idx)),
                 None => e,
             }
         }
@@ -736,15 +746,23 @@ pub fn instantiate_level_params(
     st: &mut Store,
     base: Option<&Store>,
     e: ExprId,
-    params: &[Arc<Name>],
-    args: &[Arc<Level>],
+    params: &[NameId],
+    args: &[LevelId],
     g: &mut RecGuard,
 ) -> Result<ExprId, KernelError> {
     // instantiate.cpp:233-234 (`!has_param_univ(e)` guard).
     if !st.expr_data(base, e).has_level_param() {
         return Ok(e);
     }
-    lparams_go(st, base, e, params, args, g, &mut VisitCache::new())
+    // `params`/`args` are loop-invariant across the traversal below, so
+    // bridge each id to its `Arc` form exactly once here rather than per
+    // visited node (see this module's doc comment).
+    let params: Vec<Arc<Name>> = params
+        .iter()
+        .map(|&id| st.to_name(base, Some(id)))
+        .collect();
+    let args: Vec<Arc<Level>> = args.iter().map(|&id| st.to_level(base, id)).collect();
+    lparams_go(st, base, e, &params, &args, g, &mut VisitCache::new())
 }
 
 fn lparams_go(
@@ -1247,8 +1265,9 @@ mod tests {
         let l1 = st.expr_lit_nat(None, &Nat::from(1u64)).unwrap();
         let x = st.expr_app(None, c, l1).unwrap();
         let e = st.expr_app(None, x, x).unwrap();
-        let r = instantiate_level_params(&mut st, None, e, &[u], &[Arc::new(Level::Zero)], &mut g)
-            .unwrap();
+        let u_id = st.intern_name(None, &u).unwrap().unwrap();
+        let zero_id = st.intern_level(None, &Arc::new(Level::Zero)).unwrap();
+        let r = instantiate_level_params(&mut st, None, e, &[u_id], &[zero_id], &mut g).unwrap();
         let Node::App { f, arg } = st.expr_node(None, r) else {
             panic!()
         };
@@ -1269,8 +1288,9 @@ mod tests {
         let f_name = st.intern_name(None, &nm("f")).unwrap();
         let levels = st.intern_level_list(None, &[lu]).unwrap();
         let c = st.expr_const(None, f_name, levels).unwrap();
-        let r = instantiate_level_params(&mut st, None, c, &[u], &[Arc::new(Level::Zero)], &mut g)
-            .unwrap();
+        let u_id = st.intern_name(None, &u).unwrap().unwrap();
+        let zero_id = st.intern_level(None, &Arc::new(Level::Zero)).unwrap();
+        let r = instantiate_level_params(&mut st, None, c, &[u_id], &[zero_id], &mut g).unwrap();
         let Node::Const {
             levels: levels2, ..
         } = st.expr_node(None, r)
@@ -1451,9 +1471,23 @@ mod tests {
             let mut st = Store::scratch();
             let base = Store::persistent();
             let e = st.intern_expr(Some(&base), &arc_e).unwrap();
-            let got =
-                super::instantiate_level_params(&mut st, Some(&base), e, &params, &args, &mut g())
-                    .unwrap();
+            let param_ids: Vec<_> = params
+                .iter()
+                .map(|p| st.intern_name(Some(&base), p).unwrap().unwrap())
+                .collect();
+            let arg_ids: Vec<_> = args
+                .iter()
+                .map(|a| st.intern_level(Some(&base), a).unwrap())
+                .collect();
+            let got = super::instantiate_level_params(
+                &mut st,
+                Some(&base),
+                e,
+                &param_ids,
+                &arg_ids,
+                &mut g(),
+            )
+            .unwrap();
             let want = crate::instantiate_level_params(&arc_e, &params, &args, &mut g()).unwrap();
             let got_arc = st.to_expr(Some(&base), got, &mut g()).unwrap();
             assert!(
