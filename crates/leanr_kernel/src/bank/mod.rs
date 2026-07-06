@@ -7,6 +7,7 @@
 //! scratch); the low 31 bits of the raw bits are never 0, so probe
 //! tables can use 0 as the empty sentinel.
 
+pub mod decl;
 pub mod levels;
 pub mod names;
 pub mod pools;

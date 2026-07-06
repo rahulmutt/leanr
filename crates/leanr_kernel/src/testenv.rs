@@ -33,6 +33,19 @@ pub fn g() -> RecGuard {
     RecGuard::new()
 }
 
+/// `axiom A.{u} : Sort u` — the small fixture Task 1's bank/decl.rs
+/// bridge tests round-trip through `Store`.
+pub fn axiom_u() -> ConstantInfo {
+    ConstantInfo::Axiom(AxiomVal {
+        val: ConstantVal {
+            name: nm("A"),
+            level_params: vec![nm("u")],
+            ty: mini::sort_u(),
+        },
+        is_unsafe: false,
+    })
+}
+
 /// The hand-rolled kernel environment shared by the tests below.
 pub mod mini {
     use super::*;
