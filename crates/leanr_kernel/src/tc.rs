@@ -336,6 +336,15 @@ pub struct TypeChecker<'e> {
     eqv_cache: UnionFind,
     /// oracle: `m_failure` (type_checker.cpp:845-861).
     failure_cache: HashSet<(ExprPtr, ExprPtr)>,
+    /// oracle: `m_unfold` (type_checker.cpp:505-511) — memoizes
+    /// `unfold_definition_core` for universe-polymorphic constants so a
+    /// repeated unfold of one `Const` returns the SAME expr. Not just a
+    /// speed cache: pointer-stable unfolds are what let the other
+    /// pointer-keyed caches above hit on re-reduced terms; without it a
+    /// reduction-heavy proof re-instantiates the same definition values
+    /// millions of times (fresh pointers → every downstream cache
+    /// misses → unbounded allocation churn).
+    unfold_memo: HashMap<ExprPtr, Arc<Expr>>,
     /// `mk_const("dontcare")` placeholder for unused `is_def_eq_binding`
     /// telescope slots (oracle: `g_dont_care`, type_checker.cpp:1196).
     dont_care: Arc<Expr>,
@@ -650,6 +659,7 @@ impl<'e> TypeChecker<'e> {
             whnf_core_cache: HashMap::new(),
             eqv_cache: UnionFind::default(),
             failure_cache: HashSet::new(),
+            unfold_memo: HashMap::new(),
             dont_care,
             bool_true: mk_name2("Bool", "true"),
             nat_name: mk_name1("Nat"),
@@ -1443,11 +1453,25 @@ impl<'e> TypeChecker<'e> {
             let env = self.env;
             if let Some(info) = env.get(name) {
                 if info_has_value(info) && info.constant_val().level_params.len() == levels.len() {
+                    // type_checker.cpp:505-511 — memoize the polymorphic
+                    // (`len > 0`) case so a repeated unfold returns the
+                    // SAME expr (see `unfold_memo`). The monomorphic case
+                    // is already pointer-stable: `instantiate_level_params`
+                    // returns `value` itself when nothing substitutes.
+                    if !levels.is_empty() {
+                        if let Some(r) = self.unfold_memo.get(&ExprPtr(Arc::clone(e))) {
+                            return Ok(Some(Arc::clone(r)));
+                        }
+                    }
                     let value = info_value(info).expect("has_value ⇒ Some value");
                     let params = info.constant_val().level_params.clone();
-                    let levels = levels.clone();
+                    let levels_owned = levels.clone();
                     let result =
-                        instantiate_level_params(value, &params, &levels, &mut self.guard)?;
+                        instantiate_level_params(value, &params, &levels_owned, &mut self.guard)?;
+                    if !levels_owned.is_empty() {
+                        self.unfold_memo
+                            .insert(ExprPtr(Arc::clone(e)), Arc::clone(&result));
+                    }
                     return Ok(Some(result));
                 }
             }

@@ -572,3 +572,23 @@ fn equiv_manager_memoizes_structural_equality() {
     uf2.merge(&p, &q);
     assert_eq!(uf2.is_equiv(&p, &q, false, &mut g()), Ok(true));
 }
+
+#[test]
+fn unfold_definition_memoizes_polymorphic_unfolds() {
+    // oracle: type_checker.cpp:497-518 — `m_unfold` returns the SAME
+    // expr for a repeated unfold of one `Const` (levels non-empty), so
+    // downstream pointer-keyed caches (whnf/infer/failure) hit instead
+    // of re-reducing a fresh copy of the definition's value each time.
+    // Without the memo, reduction-heavy proofs re-instantiate the same
+    // definitions millions of times (the `check --all` allocation
+    // blowup on grind-generated proofs).
+    let env = mini::env();
+    let mut tc = TypeChecker::new(&env);
+    let c = mini::cst("id1", vec![Arc::new(Level::Zero)]);
+    let u1 = tc.unfold_definition(&c).unwrap().unwrap();
+    let u2 = tc.unfold_definition(&c).unwrap().unwrap();
+    assert!(
+        Arc::ptr_eq(&u1, &u2),
+        "repeated unfold of one Const must be memoized (oracle m_unfold)"
+    );
+}
