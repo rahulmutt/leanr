@@ -367,7 +367,7 @@ fn take_expr_children(e: &mut ExprNode, stack: &mut Vec<Arc<Expr>>) {
 // "we do NOT promise oracle-identical hash values"; only
 // `structural_eq ⇒ equal hashes` is required, which holds here because
 // every hash below is a pure function of already-computed child data).
-fn mix(a: u64, b: u64) -> u64 {
+pub(crate) fn mix(a: u64, b: u64) -> u64 {
     let mut h = a ^ b.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     h ^= h >> 33;
     h = h.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
