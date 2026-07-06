@@ -9,7 +9,8 @@ use crate::expr::{
     bvar_loose_range, combine_app, combine_binder, combine_let, depth_of, literal_hash, mix,
     nat_lossy_u64, TAG_BVAR, TAG_CONST, TAG_FVAR, TAG_LIT, TAG_MVAR, TAG_SORT,
 };
-use crate::{BinderInfo, ExprData, KernelError, Literal, Nat};
+use crate::{BinderInfo, Expr, ExprData, ExprNode, KernelError, Literal, Nat, RecGuard};
+use std::sync::Arc;
 
 /// Per-row shape discriminant (bits 0-3 of the packed tag byte).
 /// `#[repr(u8)]`, 15 ≤ 16 so it fits alongside `BinderInfo` (bits 4-5)
@@ -692,10 +693,315 @@ impl Store {
     }
 }
 
+impl Store {
+    /// Bridge: intern an `Arc<Expr>` tree (Task 7). Iterative two-phase
+    /// stack — exactly `intern_level`'s `Enter`/`Exit` shape one level
+    /// up — with an in-call memo keyed by `Arc::as_ptr` (sound for the
+    /// call's duration only: the borrowed root keeps every interior
+    /// `Arc` alive, same argument `intern_level` documents). Each
+    /// `Exit` arm maps one `ExprNode` variant onto its Task 6
+    /// constructor; children are recovered from `out` in the reverse of
+    /// the order their `Enter` frames were pushed (mirrors
+    /// `intern_level`'s `Max`/`IMax` pop order).
+    pub fn intern_expr(
+        &mut self,
+        base: Option<&Store>,
+        e: &Arc<Expr>,
+    ) -> Result<ExprId, KernelError> {
+        use std::collections::HashMap;
+        enum Frame<'a> {
+            Enter(&'a Arc<Expr>),
+            Exit(&'a Arc<Expr>),
+        }
+        let mut memo: HashMap<usize, ExprId> = HashMap::new();
+        let mut out: Vec<ExprId> = Vec::new();
+        let mut stack = vec![Frame::Enter(e)];
+        while let Some(fr) = stack.pop() {
+            match fr {
+                Frame::Enter(e) => {
+                    if let Some(&id) = memo.get(&(Arc::as_ptr(e) as usize)) {
+                        out.push(id);
+                        continue;
+                    }
+                    match e.node() {
+                        ExprNode::BVar { .. }
+                        | ExprNode::FVar { .. }
+                        | ExprNode::MVar { .. }
+                        | ExprNode::Sort { .. }
+                        | ExprNode::Const { .. }
+                        | ExprNode::Lit(_) => stack.push(Frame::Exit(e)),
+                        ExprNode::App { f, arg } => {
+                            stack.push(Frame::Exit(e));
+                            stack.push(Frame::Enter(arg));
+                            stack.push(Frame::Enter(f));
+                        }
+                        ExprNode::Lam {
+                            binder_type, body, ..
+                        }
+                        | ExprNode::ForallE {
+                            binder_type, body, ..
+                        } => {
+                            stack.push(Frame::Exit(e));
+                            stack.push(Frame::Enter(body));
+                            stack.push(Frame::Enter(binder_type));
+                        }
+                        ExprNode::LetE {
+                            ty, value, body, ..
+                        } => {
+                            stack.push(Frame::Exit(e));
+                            stack.push(Frame::Enter(body));
+                            stack.push(Frame::Enter(value));
+                            stack.push(Frame::Enter(ty));
+                        }
+                        ExprNode::MData { expr, .. } => {
+                            stack.push(Frame::Exit(e));
+                            stack.push(Frame::Enter(expr));
+                        }
+                        ExprNode::Proj { structure, .. } => {
+                            stack.push(Frame::Exit(e));
+                            stack.push(Frame::Enter(structure));
+                        }
+                    }
+                }
+                Frame::Exit(e) => {
+                    let id = match e.node() {
+                        ExprNode::BVar { idx } => self.expr_bvar(base, idx)?,
+                        ExprNode::FVar { id } => {
+                            let n = self.intern_name(base, id)?;
+                            self.expr_fvar(base, n)?
+                        }
+                        ExprNode::MVar { id } => {
+                            let n = self.intern_name(base, id)?;
+                            self.expr_mvar(base, n)?
+                        }
+                        ExprNode::Sort { level } => {
+                            let l = self.intern_level(base, level)?;
+                            self.expr_sort(base, l)?
+                        }
+                        ExprNode::Const { name, levels } => {
+                            let n = self.intern_name(base, name)?;
+                            let mut level_ids = Vec::with_capacity(levels.len());
+                            for l in levels {
+                                level_ids.push(self.intern_level(base, l)?);
+                            }
+                            let ls = self.intern_level_list(base, &level_ids)?;
+                            self.expr_const(base, n, ls)?
+                        }
+                        ExprNode::App { .. } => {
+                            let arg = out.pop().expect("child pushed by Enter");
+                            let f = out.pop().expect("child pushed by Enter");
+                            self.expr_app(base, f, arg)?
+                        }
+                        ExprNode::Lam {
+                            binder_name,
+                            binder_info,
+                            ..
+                        } => {
+                            let body = out.pop().expect("child pushed by Enter");
+                            let binder_type = out.pop().expect("child pushed by Enter");
+                            let n = self.intern_name(base, binder_name)?;
+                            self.expr_lam(base, n, binder_type, body, *binder_info)?
+                        }
+                        ExprNode::ForallE {
+                            binder_name,
+                            binder_info,
+                            ..
+                        } => {
+                            let body = out.pop().expect("child pushed by Enter");
+                            let binder_type = out.pop().expect("child pushed by Enter");
+                            let n = self.intern_name(base, binder_name)?;
+                            self.expr_forall(base, n, binder_type, body, *binder_info)?
+                        }
+                        ExprNode::LetE {
+                            decl_name, non_dep, ..
+                        } => {
+                            let body = out.pop().expect("child pushed by Enter");
+                            let value = out.pop().expect("child pushed by Enter");
+                            let ty = out.pop().expect("child pushed by Enter");
+                            let n = self.intern_name(base, decl_name)?;
+                            self.expr_let(base, n, ty, value, body, *non_dep)?
+                        }
+                        ExprNode::Lit(lit) => match lit {
+                            Literal::NatVal(n) => self.expr_lit_nat(base, n)?,
+                            Literal::StrVal(s) => self.expr_lit_str(base, s)?,
+                        },
+                        ExprNode::MData { data, .. } => {
+                            let child = out.pop().expect("child pushed by Enter");
+                            let d = self.intern_kvmap(base, data)?;
+                            self.expr_mdata(base, d, child)?
+                        }
+                        ExprNode::Proj { type_name, idx, .. } => {
+                            let structure = out.pop().expect("child pushed by Enter");
+                            let n = self.intern_name(base, type_name)?;
+                            self.expr_proj(base, n, idx, structure)?
+                        }
+                    };
+                    memo.insert(Arc::as_ptr(e) as usize, id);
+                    out.push(id);
+                }
+            }
+        }
+        Ok(out.pop().expect("root"))
+    }
+
+    /// Bridge: rebuild an `Arc<Expr>` from the bank (Task 7). Same
+    /// iterative two-phase stack as `intern_expr`, run in reverse, with
+    /// an in-call memo keyed by `ExprId` (dedup means many parents can
+    /// share one child row — same argument `to_level` documents).
+    /// Rebuilds through the existing smart constructors; `Sort`/`Const`
+    /// need `g` because `Expr::sort`/`Expr::const_` walk the rebuilt
+    /// `Level` tree under `RecGuard`.
+    pub fn to_expr(
+        &self,
+        base: Option<&Store>,
+        id: ExprId,
+        g: &mut RecGuard,
+    ) -> Result<Arc<Expr>, KernelError> {
+        use std::collections::HashMap;
+        enum Frame {
+            Enter(ExprId),
+            Exit(ExprId),
+        }
+        let mut memo: HashMap<ExprId, Arc<Expr>> = HashMap::new();
+        let mut out: Vec<Arc<Expr>> = Vec::new();
+        let mut stack = vec![Frame::Enter(id)];
+        while let Some(fr) = stack.pop() {
+            match fr {
+                Frame::Enter(id) => {
+                    if let Some(e) = memo.get(&id) {
+                        out.push(Arc::clone(e));
+                        continue;
+                    }
+                    match self.expr_node(base, id) {
+                        Node::BVar { .. }
+                        | Node::BVarBig { .. }
+                        | Node::FVar { .. }
+                        | Node::MVar { .. }
+                        | Node::Sort { .. }
+                        | Node::Const { .. }
+                        | Node::LitNat { .. }
+                        | Node::LitStr { .. } => stack.push(Frame::Exit(id)),
+                        Node::App { f, arg } => {
+                            stack.push(Frame::Exit(id));
+                            stack.push(Frame::Enter(arg));
+                            stack.push(Frame::Enter(f));
+                        }
+                        Node::Lam {
+                            binder_type, body, ..
+                        }
+                        | Node::Forall {
+                            binder_type, body, ..
+                        } => {
+                            stack.push(Frame::Exit(id));
+                            stack.push(Frame::Enter(body));
+                            stack.push(Frame::Enter(binder_type));
+                        }
+                        Node::LetE {
+                            ty, value, body, ..
+                        } => {
+                            stack.push(Frame::Exit(id));
+                            stack.push(Frame::Enter(body));
+                            stack.push(Frame::Enter(value));
+                            stack.push(Frame::Enter(ty));
+                        }
+                        Node::MData { expr, .. } => {
+                            stack.push(Frame::Exit(id));
+                            stack.push(Frame::Enter(expr));
+                        }
+                        Node::Proj { structure, .. } | Node::ProjBig { structure, .. } => {
+                            stack.push(Frame::Exit(id));
+                            stack.push(Frame::Enter(structure));
+                        }
+                    }
+                }
+                Frame::Exit(id) => {
+                    let e = match self.expr_node(base, id) {
+                        Node::BVar { idx } => Expr::bvar(Nat::from(idx as u64)),
+                        Node::BVarBig { idx } => Expr::bvar(self.nat_at(base, idx).clone()),
+                        Node::FVar { id: n } => Expr::fvar(self.to_name(base, n)),
+                        Node::MVar { id: n } => Expr::mvar(self.to_name(base, n)),
+                        Node::Sort { level } => {
+                            let l = self.to_level(base, level);
+                            Expr::sort(l, g)?
+                        }
+                        Node::Const { name, levels } => {
+                            let n = self.to_name(base, name);
+                            let ls = self
+                                .level_list_at(base, levels)
+                                .iter()
+                                .map(|&l| self.to_level(base, l))
+                                .collect();
+                            Expr::const_(n, ls, g)?
+                        }
+                        Node::App { .. } => {
+                            let arg = out.pop().expect("child pushed by Enter");
+                            let f = out.pop().expect("child pushed by Enter");
+                            Expr::app(f, arg)
+                        }
+                        Node::Lam {
+                            binder_name,
+                            binder_info,
+                            ..
+                        } => {
+                            let body = out.pop().expect("child pushed by Enter");
+                            let binder_type = out.pop().expect("child pushed by Enter");
+                            let n = self.to_name(base, binder_name);
+                            Expr::lam(n, binder_type, body, binder_info)
+                        }
+                        Node::Forall {
+                            binder_name,
+                            binder_info,
+                            ..
+                        } => {
+                            let body = out.pop().expect("child pushed by Enter");
+                            let binder_type = out.pop().expect("child pushed by Enter");
+                            let n = self.to_name(base, binder_name);
+                            Expr::forall_e(n, binder_type, body, binder_info)
+                        }
+                        Node::LetE {
+                            decl_name, non_dep, ..
+                        } => {
+                            let body = out.pop().expect("child pushed by Enter");
+                            let value = out.pop().expect("child pushed by Enter");
+                            let ty = out.pop().expect("child pushed by Enter");
+                            let n = self.to_name(base, decl_name);
+                            Expr::let_e(n, ty, value, body, non_dep)
+                        }
+                        Node::LitNat { v } => {
+                            Expr::lit(Literal::NatVal(self.nat_at(base, v).clone()))
+                        }
+                        Node::LitStr { v } => {
+                            Expr::lit(Literal::StrVal(self.str_at(base, v).to_string()))
+                        }
+                        Node::MData { data, .. } => {
+                            let child = out.pop().expect("child pushed by Enter");
+                            let m = self.to_kvmap(base, data);
+                            Expr::mdata(m, child)
+                        }
+                        Node::Proj { type_name, idx, .. } => {
+                            let structure = out.pop().expect("child pushed by Enter");
+                            let n = self.to_name(base, type_name);
+                            Expr::proj(n, Nat::from(idx as u64), structure)
+                        }
+                        Node::ProjBig { type_name, idx, .. } => {
+                            let structure = out.pop().expect("child pushed by Enter");
+                            let n = self.to_name(base, type_name);
+                            Expr::proj(n, self.nat_at(base, idx).clone(), structure)
+                        }
+                    };
+                    memo.insert(id, Arc::clone(&e));
+                    out.push(e);
+                }
+            }
+        }
+        Ok(out.pop().expect("root"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::bank::Store;
-    use crate::{BinderInfo, Expr, Nat};
+    use crate::{BinderInfo, Expr, Nat, RecGuard};
     use std::sync::Arc;
 
     #[test]
@@ -800,5 +1106,70 @@ mod tests {
         assert!(d.has_level_param());
         assert!(!d.has_level_mvar());
         assert_eq!(d.loose_bvar_range(), 0);
+    }
+
+    #[test]
+    fn bridge_roundtrip_preserves_structure_and_data() {
+        let mut s = Store::persistent();
+        let mut g = RecGuard::new();
+        // λ (x : Nat), f x x  — exercises lam/app/const/fvar-free path.
+        let nat = Expr::const_(
+            Arc::new(crate::Name::Str {
+                parent: Arc::new(crate::Name::Anonymous),
+                part: "Nat".to_string(),
+            }),
+            vec![],
+            &mut g,
+        )
+        .unwrap();
+        let f = Expr::const_(
+            Arc::new(crate::Name::Str {
+                parent: Arc::new(crate::Name::Anonymous),
+                part: "f".to_string(),
+            }),
+            vec![],
+            &mut g,
+        )
+        .unwrap();
+        let body = Expr::app(
+            Expr::app(f, Expr::bvar(Nat::from(0u64))),
+            Expr::bvar(Nat::from(0u64)),
+        );
+        let e = Expr::lam(
+            Arc::new(crate::Name::Str {
+                parent: Arc::new(crate::Name::Anonymous),
+                part: "x".to_string(),
+            }),
+            nat,
+            body,
+            BinderInfo::Default,
+        );
+        let id = s.intern_expr(None, &e).unwrap();
+        let back = s.to_expr(None, id, &mut g).unwrap();
+        assert!(Expr::structural_eq(&e, &back, &mut g).unwrap());
+        assert_eq!(back.data(), e.data());
+    }
+
+    #[test]
+    fn bridge_intern_is_idempotent_and_dedups() {
+        let mut s = Store::persistent();
+        let e1 = Expr::app(Expr::bvar(Nat::from(0u64)), Expr::bvar(Nat::from(1u64)));
+        let e2 = Expr::app(Expr::bvar(Nat::from(0u64)), Expr::bvar(Nat::from(1u64)));
+        let a = s.intern_expr(None, &e1).unwrap();
+        let b = s.intern_expr(None, &e2).unwrap();
+        assert_eq!(a, b, "structurally equal Arc trees intern to one id");
+    }
+
+    #[test]
+    fn bridge_survives_deep_chains() {
+        let mut s = Store::persistent();
+        let mut g = RecGuard::new();
+        let mut e = Expr::bvar(Nat::from(0u64));
+        for _ in 0..20_000 {
+            e = Expr::app(e, Expr::bvar(Nat::from(0u64)));
+        }
+        let id = s.intern_expr(None, &e).unwrap();
+        let back = s.to_expr(None, id, &mut g).unwrap();
+        assert!(Expr::structural_eq(&e, &back, &mut g).unwrap());
     }
 }
