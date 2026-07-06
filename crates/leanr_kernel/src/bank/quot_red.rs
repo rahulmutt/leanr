@@ -19,12 +19,8 @@
 use super::{ExprId, NameId};
 use crate::KernelError;
 
-/// The capability `quot_reduce_rec` needs from its caller (`TypeChecker`
-/// implements this in `bank/tc.rs`).
-// `#[allow(dead_code)]`: this module lands one commit (4a) before its
-// only consumer (`bank::tc::TypeChecker`, migration Task 4's main
-// commit) — dropped once that impl exists.
-#[allow(dead_code)]
+/// The capability `quot_reduce_rec` needs from its caller (`TypeChecker`,
+/// which implements this in `bank/tc.rs`).
 pub(crate) trait QuotCtx {
     fn get_app_fn(&self, e: ExprId) -> ExprId;
     fn get_app_args(&self, e: ExprId) -> Vec<ExprId>;
@@ -48,7 +44,6 @@ pub(crate) trait QuotCtx {
 /// (`Quot.mk`) argument. Argument positions are the header's
 /// `mk_pos`/`arg_pos` (lift: `mk` at arg 5, `f` at arg 3; ind: `mk` at
 /// arg 4, `f` at arg 3 — all 0-based).
-#[allow(dead_code)] // see `QuotCtx`'s doc comment above
 pub(crate) fn quot_reduce_rec<C: QuotCtx>(
     ctx: &mut C,
     e: ExprId,

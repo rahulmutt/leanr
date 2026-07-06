@@ -16,6 +16,7 @@ pub mod probe;
 pub mod quot_red;
 pub mod scratch;
 pub mod subst;
+pub mod tc;
 pub mod terms;
 
 use std::num::NonZeroU32;

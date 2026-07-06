@@ -160,6 +160,31 @@ impl LocalContext {
     pub fn get(&self, fvar_id: NameId) -> Option<&LocalDecl> {
         self.index.get(&fvar_id).map(|&i| &self.decls[i])
     }
+
+    /// Support for the type checker's `flet<local_ctx> save_lctx(m_lctx,
+    /// m_lctx)` idiom (type_checker.cpp:117/135/199/693 etc.): the
+    /// checker extends the context under a binder and must pop those
+    /// decls again on the way out. `save` records the current decl
+    /// count; `restore` drops every decl added since (fvar ids are
+    /// globally unique via `FVarIdGen`, so a dropped id is never
+    /// reintroduced — the truncation is exact). Id-twin of the Arc
+    /// port's `LocalContext::save`/`restore`
+    /// (`crate::local_ctx.rs:154-164`) — NOT ported in Task 2 (that
+    /// task's `LocalContext` doesn't need them; the checker, Task 4,
+    /// does), added here per the module's own precedent rather than
+    /// duplicated inside `bank/tc.rs`. `pub(crate)`: only the in-crate
+    /// checker uses it.
+    pub(crate) fn save(&self) -> usize {
+        self.decls.len()
+    }
+
+    /// Restore to a `save` checkpoint, removing later decls from both
+    /// the insertion-ordered `decls` and the id `index`.
+    pub(crate) fn restore(&mut self, checkpoint: usize) {
+        for decl in self.decls.drain(checkpoint..) {
+            self.index.remove(&decl.id);
+        }
+    }
 }
 
 #[cfg(test)]

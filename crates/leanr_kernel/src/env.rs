@@ -367,6 +367,14 @@ impl Environment {
     pub(crate) fn constant_names(&self) -> Vec<Arc<Name>> {
         self.constants.keys().map(Arc::clone).collect()
     }
+
+    /// Test-only: every declared `ConstantInfo`, for bridging a whole
+    /// Arc-kernel test environment into the term bank (`bank::tc::tests`'
+    /// dual-checker harness — migration Task 4).
+    #[cfg(test)]
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &ConstantInfo> {
+        self.constants.values()
+    }
 }
 
 #[cfg(test)]
