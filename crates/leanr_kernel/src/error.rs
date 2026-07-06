@@ -7,6 +7,12 @@ use crate::Name;
 /// being admitted where known; the CLI adds module context.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KernelError {
+    /// The term bank's 2³¹-per-region id space (or a side pool) is
+    /// exhausted. Ids are minted once per *distinct* interned row, so
+    /// reaching this bound requires input of comparable size —
+    /// rejection is incompleteness on absurd input, never unsoundness
+    /// (same posture as `DeepRecursion`).
+    BankExhausted,
     /// Recursion guard cap (guard.rs). Rejection here is incompleteness,
     /// never unsoundness: we refuse, we never accept unchecked.
     DeepRecursion,
@@ -69,6 +75,7 @@ pub enum KernelError {
 impl std::fmt::Display for KernelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            KernelError::BankExhausted => write!(f, "term bank id space exhausted"),
             KernelError::DeepRecursion => write!(f, "maximum recursion depth exceeded"),
             KernelError::UnknownConstant(n) => write!(f, "unknown constant '{n}'"),
             KernelError::AlreadyDeclared(n) => write!(f, "'{n}' has already been declared"),
