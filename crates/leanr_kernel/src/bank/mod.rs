@@ -66,8 +66,8 @@ id_type!(/** Level-list pool id (Const's levels). */ LevelsId);
 id_type!(/** KVMap pool id. */ KVMapId);
 id_type!(/** LetE spill pool id. */ SpillId);
 
-use crate::{Int, KernelError, Level, Name, Nat};
-use pools::ValuePool;
+use crate::{DataValue, Int, KVMap, KernelError, Level, Name, Nat};
+use pools::{kvmap_row_hash, DataValueRow, KVMapRow, SpillRow, ValuePool};
 use std::sync::Arc;
 
 /// Stable sip-style hash for pool values (DefaultHasher is fine: hashes
@@ -91,7 +91,9 @@ pub struct Store {
     pub names: names::NameBank,
     pub levels: levels::LevelBank,
     pub level_lists: ValuePool<Box<[LevelId]>>,
-    // Extended by Tasks 5-6: kvmaps, spills, terms.
+    pub kvmaps: ValuePool<KVMapRow>,
+    pub spills: ValuePool<SpillRow>,
+    // Extended by Task 6: terms.
 }
 
 impl Store {
@@ -110,6 +112,8 @@ impl Store {
             names: names::NameBank::new(region),
             levels: levels::LevelBank::new(region),
             level_lists: ValuePool::new(region),
+            kvmaps: ValuePool::new(region),
+            spills: ValuePool::new(region),
         }
     }
 
@@ -561,6 +565,114 @@ impl Store {
             .get(id.index())
             .map(|b| &**b)
             .expect("LevelsId minted by intern ⇒ valid")
+    }
+
+    /// Bridge: intern a single `DataValue` (used by `intern_kvmap`).
+    /// `OfSyntax` is kept as the caller's exact `Arc` — never re-interned
+    /// into a pool of its own — so `Arc::ptr_eq` stays exact.
+    fn intern_data_value(
+        &mut self,
+        base: Option<&Store>,
+        v: &DataValue,
+    ) -> Result<DataValueRow, KernelError> {
+        Ok(match v {
+            DataValue::OfString(s) => DataValueRow::Str(self.intern_str(base, s)?),
+            DataValue::OfBool(b) => DataValueRow::Bool(*b),
+            DataValue::OfName(n) => DataValueRow::Name(self.intern_name(base, n)?),
+            DataValue::OfNat(n) => DataValueRow::Nat(self.intern_nat(base, n)?),
+            DataValue::OfInt(i) => DataValueRow::Int(self.intern_int(base, i)?),
+            DataValue::OfSyntax(s) => DataValueRow::Syntax(Arc::clone(s)),
+        })
+    }
+
+    /// Bridge: rebuild a single `DataValue` from a stored `DataValueRow`
+    /// (used by `to_kvmap`). The `Syntax` arm clones the stored `Arc`,
+    /// preserving the exact ptr-eq semantics `data_value_eq` uses.
+    fn data_value_of(&self, base: Option<&Store>, v: &DataValueRow) -> DataValue {
+        match v {
+            DataValueRow::Str(id) => DataValue::OfString(self.str_at(base, *id).to_string()),
+            DataValueRow::Bool(b) => DataValue::OfBool(*b),
+            DataValueRow::Name(id) => DataValue::OfName(self.to_name(base, *id)),
+            DataValueRow::Nat(id) => DataValue::OfNat(self.nat_at(base, *id).clone()),
+            DataValueRow::Int(id) => DataValue::OfInt(self.int_at(base, *id).clone()),
+            DataValueRow::Syntax(s) => DataValue::OfSyntax(Arc::clone(s)),
+        }
+    }
+
+    /// Bridge: intern a `KVMap` (base lookup → own intern, following
+    /// `intern_str`/`intern_nat`'s pattern). Each entry is bridged
+    /// through `intern_name` and the leaf pools first, then the
+    /// resulting row is interned as a whole.
+    pub fn intern_kvmap(
+        &mut self,
+        base: Option<&Store>,
+        m: &KVMap,
+    ) -> Result<KVMapId, KernelError> {
+        let mut entries: Vec<(Option<NameId>, DataValueRow)> = Vec::with_capacity(m.0.len());
+        for (name, value) in m.0.iter() {
+            let n = self.intern_name(base, name)?;
+            let v = self.intern_data_value(base, value)?;
+            entries.push((n, v));
+        }
+        let row = KVMapRow(entries.into_boxed_slice());
+        let h = kvmap_row_hash(&row);
+        if let Some(b) = base {
+            if let Some(bits) = b.kvmaps.lookup(h, |t| *t == row) {
+                return KVMapId::from_bits(bits).ok_or(KernelError::BankExhausted);
+            }
+        }
+        let bits = self
+            .kvmaps
+            .intern(h, |t| *t == row, || row.clone(), kvmap_row_hash)?;
+        KVMapId::from_bits(bits).ok_or(KernelError::BankExhausted)
+    }
+
+    pub fn kvmap_at<'a>(&'a self, base: Option<&'a Store>, id: KVMapId) -> &'a KVMapRow {
+        self.store_for(base, id.is_scratch())
+            .kvmaps
+            .get(id.index())
+            .expect("KVMapId minted by intern ⇒ valid")
+    }
+
+    /// Bridge: rebuild a `KVMap` from its stored row.
+    pub fn to_kvmap(&self, base: Option<&Store>, id: KVMapId) -> KVMap {
+        let row = self.kvmap_at(base, id);
+        KVMap(
+            row.0
+                .iter()
+                .map(|(n, v)| (self.to_name(base, *n), self.data_value_of(base, v)))
+                .collect(),
+        )
+    }
+
+    /// Bridge: intern a phase-1 `LetE` spill row (`terms.rs`/Task 6 is
+    /// the only writer of real data here; `body_bits` is an `ExprId`'s
+    /// raw bits, opaque at this layer).
+    pub fn intern_spill(
+        &mut self,
+        base: Option<&Store>,
+        name: Option<NameId>,
+        body_bits: u32,
+    ) -> Result<SpillId, KernelError> {
+        let row = SpillRow {
+            name,
+            body_or_aux: body_bits,
+        };
+        let h = sip(&row);
+        if let Some(b) = base {
+            if let Some(bits) = b.spills.lookup(h, |t| *t == row) {
+                return SpillId::from_bits(bits).ok_or(KernelError::BankExhausted);
+            }
+        }
+        let bits = self.spills.intern(h, |t| *t == row, || row, sip)?;
+        SpillId::from_bits(bits).ok_or(KernelError::BankExhausted)
+    }
+
+    pub fn spill_at<'a>(&'a self, base: Option<&'a Store>, id: SpillId) -> &'a SpillRow {
+        self.store_for(base, id.is_scratch())
+            .spills
+            .get(id.index())
+            .expect("SpillId minted by intern ⇒ valid")
     }
 }
 

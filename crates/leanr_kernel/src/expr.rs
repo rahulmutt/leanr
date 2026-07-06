@@ -1053,7 +1053,7 @@ impl Expr {
 /// `KVMap` equality: same length, same entries in order (the decoder
 /// builds these deterministically from the file's own entry order, so
 /// order-sensitive comparison is exact for our one producer).
-fn kvmap_eq(a: &KVMap, b: &KVMap) -> bool {
+pub(crate) fn kvmap_eq(a: &KVMap, b: &KVMap) -> bool {
     a.0.len() == b.0.len()
         && a.0
             .iter()
@@ -1070,7 +1070,7 @@ fn kvmap_eq(a: &KVMap, b: &KVMap) -> bool {
 /// they are structurally equal. So `Arc::ptr_eq` is exact for the one
 /// producer of `Expr` values in this codebase, and is what we use here
 /// (human-approved rationale, per the task brief).
-fn data_value_eq(a: &DataValue, b: &DataValue) -> bool {
+pub(crate) fn data_value_eq(a: &DataValue, b: &DataValue) -> bool {
     match (a, b) {
         (DataValue::OfString(x), DataValue::OfString(y)) => x == y,
         (DataValue::OfBool(x), DataValue::OfBool(y)) => x == y,
