@@ -617,16 +617,125 @@ git commit -m "perf: intern decoded constants in leanr check before replay (hash
 
 ---
 
-### Task 5 (GATED — do only if Task 4 Step 6's measured peak lacks comfortable headroom under 32 GiB)
+### Task 5 (TRIGGERED — Task 4's measured peak was ~25.9 GiB, no headroom)
 
-**Rationale:** Task 4 interns *decoded* constants. Kernel-*generated* recursors (from inductive admission) are built fresh during replay and are not interned, so their internal subterms don't share with the canonicalized pool. If the decoded-constant pass alone does not free enough, extend interning to those.
+**Rationale (confirmed by measurement + investigation):** Task 4 interns *decoded* constants — that got the pre-replay footprint to ~9 GiB. But the full sweep still plateaus at ~25.9 GiB: replay grows the `Environment` by ~17 GiB, and the investigation pinned that to **kernel-generated recursors** (recursor types + every `RecursorRule.rhs`), built fresh via smart constructors during inductive admission with no interning (plain def/thm/axiom/opaque store the same interned Arc, contributing ~0; the type checker stores nothing long-lived). Fix: intern every `ConstantInfo` at the single point it enters the environment — `Environment::add_core` — with a **persistent interner owned by the `Environment`**, so generated recursors dedup against each other and against the decoded pool.
+
+This SUPERSEDES the Task 4 batch pre-pass: once `add_core` interns everything admitted, interning the decoded constants a second time before replay is redundant. **Task 5 removes the pre-pass.**
 
 **Files:**
-- Modify: `crates/leanr_kernel/src/intern.rs` (expose a persistent per-replay interner or a `intern_expr` entry usable mid-replay), `crates/leanr_kernel/src/env.rs` and/or `crates/leanr_kernel/src/inductive.rs` (intern generated `ConstantInfo` exprs as they are inserted into the `Environment`), `crates/leanr_kernel/src/replay.rs` (thread the interner through admission).
+- Modify: `crates/leanr_kernel/src/env.rs` (Environment gains an `interner` field; `add_core` interns + becomes fallible; manual `Clone`), `crates/leanr_kernel/src/intern.rs` (visibility + `Debug` derive), `crates/leanr_kernel/src/inductive.rs` + `crates/leanr_kernel/src/quot.rs` (`?`-propagate the now-fallible `add_core`), `crates/leanr_kernel/src/lib.rs` + `crates/leanr_cli/src/main.rs` (remove the redundant batch pre-pass), `crates/leanr_kernel/src/intern.rs` (remove the now-unused `intern_constants` free fn).
 
-- [ ] **Step 1:** Design the threading first (write it into this task before coding): the `replay` driver owns one `Interner` for the whole run; `add_decl`/inductive admission interns each generated expr before storing it in `env`. Keep it an explicit value (no global state), guarded recursion throughout. Re-confirm verdict preservation (`cargo test --workspace` green) since this now touches the trusted admission path.
-- [ ] **Step 2-5:** TDD each interning site (unit test: a generated recursor's shared subterms collapse), implement, `cargo test --workspace` green, `mise run lint`, commit `perf: intern kernel-generated exprs during replay (hash-consing Task 5)`.
-- [ ] **Step 6:** Controller re-runs the acceptance sweep; confirm comfortable headroom.
+**Interfaces:**
+- Consumes: `Interner`, `intern_constant_info` (Tasks 1-3).
+- Produces: `Environment::add_core(&mut self, info) -> Result<(), KernelError>` (was infallible `()`), now interning-on-insert.
+
+**Key facts (verified):** `Environment { constants: HashMap<Arc<Name>, ConstantInfo>, quot_initialized: bool }` (env.rs:86-96), currently `#[derive(Debug, Default, Clone)]`. `add_core` is `pub(crate) fn add_core(&mut self, info: ConstantInfo)` (env.rs:141-144). The **real** replay env is always mutated in place; only the nested-inductive path clones it into a transient `aux_env` scratch (env.rs:80-85; restore adds real decls back to the real env in place, inductive.rs:1520/1567/1593/1804). `add_core` call sites, all in `Result<_, KernelError>`-returning fns: env.rs:253 (`add_decl`), quot.rs:197/215/274/317 (`add_quot`), inductive.rs:1520/1567/1593 (`restore_*`), inductive.rs:1804 (`AddInductiveFn::add`, currently returns `()` — must become fallible and its ~3 callers `?`-propagate). `intern_constant_info` is currently a private `fn` (intern.rs:193); `Interner` is `#[derive(Default)] pub struct` (intern.rs:35). `from_modules` (env.rs) builds `Environment { constants, quot_initialized: false }` via struct literal.
+
+- [ ] **Step 1: Write the failing test** — add to `crates/leanr_kernel/src/env.rs` a `#[cfg(test)]` test proving admitted constants are interned (structurally-equal exprs across two admitted constants share one `Arc`). Since building a full inductive is heavy, test at the `add_core` level via a small helper if `add_core` is reachable from tests in-crate (it is `pub(crate)`), OR add the assertion to an existing inductive-admission test in `inductive.rs` (e.g. after admitting `Nat`, two references to the same generated subterm are `Arc::ptr_eq`). Prefer a direct `add_core` test:
+
+```rust
+#[cfg(test)]
+mod intern_on_admit_tests {
+    use super::*;
+    use crate::{Expr, RecGuard};
+    use std::sync::Arc;
+
+    fn nm(s: &str) -> Arc<crate::Name> {
+        Arc::new(crate::Name::Str { parent: Arc::new(crate::Name::Anonymous), part: s.to_string() })
+    }
+
+    #[test]
+    fn add_core_interns_across_constants() {
+        let mut g = RecGuard::new();
+        let mut env = Environment::default();
+        // Two axioms whose types are structurally equal but distinct Arcs.
+        let mk = |who: &str, g: &mut RecGuard| {
+            let ty = Expr::app(
+                Expr::const_(nm("Nat"), vec![], g).unwrap(),
+                Expr::const_(nm("Nat"), vec![], g).unwrap(),
+            );
+            ConstantInfo::Axiom(crate::AxiomVal {
+                val: crate::ConstantVal { name: nm(who), level_params: vec![], ty },
+                is_unsafe: false,
+            })
+        };
+        env.add_core(mk("A", &mut g)).unwrap();
+        env.add_core(mk("B", &mut g)).unwrap();
+        let ta = &env.get(&nm("A")).unwrap().constant_val().ty;
+        let tb = &env.get(&nm("B")).unwrap().constant_val().ty;
+        assert!(Arc::ptr_eq(ta, tb), "add_core must intern admitted constants into one shared Arc");
+    }
+}
+```
+
+- [ ] **Step 2: Run to verify failure** — `cargo test -p leanr_kernel add_core_interns` → fails to compile (`add_core` returns `()`, not `Result`) / assertion fails (no interning yet).
+
+- [ ] **Step 3: Implement.**
+  - `intern.rs`: change `#[derive(Default)]` to `#[derive(Debug, Default)]` on `Interner`; change `fn intern_constant_info` to `pub(crate) fn intern_constant_info`. Remove the `pub fn intern_constants` free function (Step 6 removes its callers).
+  - `env.rs`: add field `interner: crate::intern::Interner` to `Environment`. Change `#[derive(Debug, Default, Clone)]` to `#[derive(Debug, Default)]` and add a manual `Clone` that gives clones a **fresh** interner (the interner is a pure cache; only the transient nested scratch env is ever cloned, and it re-interns restored decls into the real env's interner):
+
+```rust
+impl Clone for Environment {
+    fn clone(&self) -> Self {
+        // The interner is a dedup cache, not state: a clone (only the
+        // transient nested-inductive scratch env, env.rs module docs) may
+        // safely start empty — restored decls are re-interned into the real
+        // env's interner via add_core. Cloning the (large) interner would be
+        // pure cost.
+        Environment {
+            constants: self.constants.clone(),
+            quot_initialized: self.quot_initialized,
+            interner: crate::intern::Interner::default(),
+        }
+    }
+}
+```
+
+  - `env.rs`: add `interner: crate::intern::Interner::default()` to the `from_modules` struct literal.
+  - `env.rs`: change `add_core` to intern on insert (creates its own fresh `RecGuard`, so no caller needs to thread one):
+
+```rust
+    pub(crate) fn add_core(&mut self, info: ConstantInfo) -> Result<(), KernelError> {
+        // Structurally intern every admitted constant (decoded and
+        // kernel-generated recursors alike) into the env's persistent
+        // interner, so identical subterms share one Arc. Verdict-preserving
+        // (only structurally-identical exprs merge); this is the single
+        // choke point all admissions pass through. Fresh RecGuard: interning
+        // one constant is an independent bounded recursion.
+        let mut g = RecGuard::new();
+        let info = self.interner.intern_constant_info(&info, &mut g)?;
+        let name = Arc::clone(info.name());
+        self.constants.insert(name, info);
+        Ok(())
+    }
+```
+
+  - Add `use crate::RecGuard;` to env.rs if not present. Ensure `KernelError` is in scope for the return type (it is — env.rs already uses it).
+  - `env.rs:253` (`add_decl`): `self.add_core(info)?;` (was `self.add_core(info);`).
+  - `quot.rs:197,215,274,317`: append `?` to each `env.add_core(...)` call.
+  - `inductive.rs:1520,1567,1593`: append `?` to each `env.add_core(...)`.
+  - `inductive.rs` `fn add(&mut self, env, info)`: change to `fn add(&mut self, env: &mut Environment, info: ConstantInfo) -> Result<(), KernelError> { self.added.push(Arc::clone(info.name())); env.add_core(info) }`, and `?`-propagate at its callers (declare_inductive_types/declare_constructors/declare_recursors — the `self.add(env, ...)` calls become `self.add(env, ...)?;`).
+
+- [ ] **Step 4: Run tests** — `cargo test -p leanr_kernel` → all PASS including the new `add_core_interns_across_constants`.
+
+- [ ] **Step 5: Verdict gate** — `cargo test --workspace` → all PASS, especially `crates/leanr_olean/tests/check_fixtures.rs` (real replay + hermetic mutation-differential). This now touches the trusted admission path, so zero verdict drift is mandatory. If anything fails, STOP and debug (do not adjust tests).
+
+- [ ] **Step 6: Remove the redundant batch pre-pass.**
+  - `crates/leanr_cli/src/main.rs`: delete the `let constants = match leanr_kernel::intern_constants(constants) { ... };` block added in Task 4 (the decoded constants now get interned at admission). Keep the preceding `drop(loaded);`.
+  - `crates/leanr_kernel/src/lib.rs`: remove `pub use intern::intern_constants;`.
+  - Confirm the `intern_constants` free fn was removed in Step 3. `cargo build --workspace` clean (no dead-code/unused-import warnings under `-D warnings`).
+
+- [ ] **Step 7: Lint and commit**
+
+```bash
+cargo test --workspace   # re-confirm green after the pre-pass removal
+mise run lint
+git add crates/leanr_kernel/src/{env,intern,inductive,quot,lib}.rs crates/leanr_cli/src/main.rs
+git commit -m "perf: intern constants at Environment::add_core; drop redundant pre-pass (hash-consing Task 5)"
+```
+
+- [ ] **Step 8: ACCEPTANCE (controller-run).** The controller re-runs the full stdlib sweep under the watchdog and confirms exit 0 with peak comfortably under 32 GiB (expected: the ~17 GiB recursor bloat collapses; target well under 20 GiB), recording peak + wall-clock + declaration count.
 
 ---
 
