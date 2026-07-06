@@ -16,6 +16,7 @@ mod error;
 mod expr;
 mod guard;
 mod inductive;
+mod intern;
 mod level;
 mod local_ctx;
 mod name;
