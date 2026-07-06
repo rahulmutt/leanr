@@ -206,7 +206,7 @@ const RANGE_SHIFT: u32 = 44;
 pub struct ExprData(u64);
 
 impl ExprData {
-    fn pack(
+    pub(crate) fn pack(
         hash64: u64,
         loose_bvar_range: u32,
         approx_depth: u8,
@@ -367,7 +367,7 @@ fn take_expr_children(e: &mut ExprNode, stack: &mut Vec<Arc<Expr>>) {
 // "we do NOT promise oracle-identical hash values"; only
 // `structural_eq ⇒ equal hashes` is required, which holds here because
 // every hash below is a pure function of already-computed child data).
-fn mix(a: u64, b: u64) -> u64 {
+pub(crate) fn mix(a: u64, b: u64) -> u64 {
     let mut h = a ^ b.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     h ^= h >> 33;
     h = h.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
@@ -383,12 +383,12 @@ fn mix(a: u64, b: u64) -> u64 {
 // matches the oracle, even though the mixer itself (`mix` above) does
 // not reproduce the oracle's own bit-mixing constants (see `mix`'s doc
 // comment above).
-const TAG_CONST: u64 = 5;
-const TAG_BVAR: u64 = 7;
-const TAG_SORT: u64 = 11;
-const TAG_FVAR: u64 = 13;
-const TAG_MVAR: u64 = 17;
-const TAG_LIT: u64 = 3;
+pub(crate) const TAG_CONST: u64 = 5;
+pub(crate) const TAG_BVAR: u64 = 7;
+pub(crate) const TAG_SORT: u64 = 11;
+pub(crate) const TAG_FVAR: u64 = 13;
+pub(crate) const TAG_MVAR: u64 = 17;
+pub(crate) const TAG_LIT: u64 = 3;
 
 fn name_hash(n: &Arc<Name>) -> u64 {
     use std::collections::hash_map::DefaultHasher;
@@ -398,7 +398,7 @@ fn name_hash(n: &Arc<Name>) -> u64 {
     h.finish()
 }
 
-fn literal_hash(l: &Literal) -> u64 {
+pub(crate) fn literal_hash(l: &Literal) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut h = DefaultHasher::new();
@@ -413,7 +413,7 @@ fn literal_hash(l: &Literal) -> u64 {
 /// lossy truncation for `bvar`'s hash; we reuse it for `Proj`'s index
 /// for the same reason (both are attacker-sized `Nat`s feeding a hash
 /// that must stay O(1)).
-fn nat_lossy_u64(n: &Nat) -> u64 {
+pub(crate) fn nat_lossy_u64(n: &Nat) -> u64 {
     n.0.to_u64_digits().first().copied().unwrap_or(0)
 }
 
@@ -426,7 +426,7 @@ fn nat_lossy_u64(n: &Nat) -> u64 {
 /// beyond the cap means "treat as open, skip no optimizations" (task
 /// brief), so once saturated it is a sticky ceiling, not a precise
 /// count.
-fn bvar_loose_range(idx: &Nat) -> u32 {
+pub(crate) fn bvar_loose_range(idx: &Nat) -> u32 {
     let digits = idx.0.to_u64_digits();
     if digits.len() > 1 {
         return LOOSE_BVAR_SAT;
@@ -450,7 +450,7 @@ fn close_one(range: u32) -> u32 {
     }
 }
 
-fn depth_of(children_max: u8) -> u8 {
+pub(crate) fn depth_of(children_max: u8) -> u8 {
     children_max.saturating_add(1)
 }
 
@@ -459,7 +459,7 @@ fn depth_of(children_max: u8) -> u8 {
 /// (kernel/expr.cpp:116-122): depth and loose-bvar-range both take the
 /// max of the two children (an application binds nothing, so neither
 /// child's range is decremented).
-fn combine_app(fd: ExprData, ad: ExprData) -> ExprData {
+pub(crate) fn combine_app(fd: ExprData, ad: ExprData) -> ExprData {
     let depth = depth_of(fd.approx_depth().max(ad.approx_depth()));
     let range = fd.loose_bvar_range().max(ad.loose_bvar_range());
     let h = mix(depth as u64, mix(fd.hash() as u64, ad.hash() as u64));
@@ -482,7 +482,7 @@ fn combine_app(fd: ExprData, ad: ExprData) -> ExprData {
 /// of escaping reference) — asymmetric on purpose, matching
 /// `max t.data.looseBVarRange.toNat (b.data.looseBVarRange.toNat - 1)`
 /// literally.
-fn combine_binder(td: ExprData, bd: ExprData) -> ExprData {
+pub(crate) fn combine_binder(td: ExprData, bd: ExprData) -> ExprData {
     let depth = depth_of(td.approx_depth().max(bd.approx_depth()));
     let range = td.loose_bvar_range().max(close_one(bd.loose_bvar_range()));
     let h = mix(depth as u64, mix(td.hash() as u64, bd.hash() as u64));
@@ -500,7 +500,7 @@ fn combine_binder(td: ExprData, bd: ExprData) -> ExprData {
 /// oracle: Lean/Expr.lean:504-512 (`.letE`) — same asymmetry as
 /// `combine_binder`, with a third (`value`) child that, like `ty`,
 /// lives in the outer scope and so is not decremented.
-fn combine_let(td: ExprData, vd: ExprData, bd: ExprData) -> ExprData {
+pub(crate) fn combine_let(td: ExprData, vd: ExprData, bd: ExprData) -> ExprData {
     let depth = depth_of(
         td.approx_depth()
             .max(vd.approx_depth())
@@ -1053,7 +1053,7 @@ impl Expr {
 /// `KVMap` equality: same length, same entries in order (the decoder
 /// builds these deterministically from the file's own entry order, so
 /// order-sensitive comparison is exact for our one producer).
-fn kvmap_eq(a: &KVMap, b: &KVMap) -> bool {
+pub(crate) fn kvmap_eq(a: &KVMap, b: &KVMap) -> bool {
     a.0.len() == b.0.len()
         && a.0
             .iter()
@@ -1070,7 +1070,7 @@ fn kvmap_eq(a: &KVMap, b: &KVMap) -> bool {
 /// they are structurally equal. So `Arc::ptr_eq` is exact for the one
 /// producer of `Expr` values in this codebase, and is what we use here
 /// (human-approved rationale, per the task brief).
-fn data_value_eq(a: &DataValue, b: &DataValue) -> bool {
+pub(crate) fn data_value_eq(a: &DataValue, b: &DataValue) -> bool {
     match (a, b) {
         (DataValue::OfString(x), DataValue::OfString(y)) => x == y,
         (DataValue::OfBool(x), DataValue::OfBool(y)) => x == y,

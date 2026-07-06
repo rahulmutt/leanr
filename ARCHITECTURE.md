@@ -11,6 +11,14 @@ implementation or a thin frontend. Full design:
   Depends on nothing in the workspace; nothing reaches into it. Data
   only until M1b adds the checker. Values can originate from untrusted
   bytes, so all traversals (including `Drop`) are iterative.
+  `crates/leanr_kernel/src/bank/` is phase 1 of a compact index-based
+  `Expr` representation (id types, probe table, value/name/level
+  banks, kvmap/spill pools, and a scratch region with promotion),
+  built to close the ~30 GiB whole-stdlib memory wall of the
+  Arc-per-node representation; see
+  `docs/superpowers/specs/2026-07-06-compact-expr-term-bank-design.md`
+  for the full 3-phase design. It is a standalone module today — not
+  yet wired into the kernel or any production path.
 - `crates/leanr_query` — the salsa-based incremental engine. Everything
   computable is a memoized query; **early cutoff** (a recomputed query
   whose value is unchanged does not wake its dependents) is the
