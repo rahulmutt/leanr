@@ -7,6 +7,7 @@
 //! scratch); the low 31 bits of the raw bits are never 0, so probe
 //! tables can use 0 as the empty sentinel.
 
+pub mod levels;
 pub mod names;
 pub mod pools;
 pub mod probe;
@@ -65,7 +66,7 @@ id_type!(/** Level-list pool id (Const's levels). */ LevelsId);
 id_type!(/** KVMap pool id. */ KVMapId);
 id_type!(/** LetE spill pool id. */ SpillId);
 
-use crate::{Int, KernelError, Name, Nat};
+use crate::{Int, KernelError, Level, Name, Nat};
 use pools::ValuePool;
 use std::sync::Arc;
 
@@ -88,7 +89,9 @@ pub struct Store {
     pub nats: ValuePool<Nat>,
     pub ints: ValuePool<Int>,
     pub names: names::NameBank,
-    // Extended by Tasks 4-6: levels, level_lists, kvmaps, spills, terms.
+    pub levels: levels::LevelBank,
+    pub level_lists: ValuePool<Box<[LevelId]>>,
+    // Extended by Tasks 5-6: kvmaps, spills, terms.
 }
 
 impl Store {
@@ -105,6 +108,8 @@ impl Store {
             nats: ValuePool::new(region),
             ints: ValuePool::new(region),
             names: names::NameBank::new(region),
+            levels: levels::LevelBank::new(region),
+            level_lists: ValuePool::new(region),
         }
     }
 
@@ -294,6 +299,268 @@ impl Store {
             };
         }
         out
+    }
+
+    fn level_hash(&self, base: Option<&Store>, id: LevelId) -> u64 {
+        self.store_for(base, id.is_scratch())
+            .levels
+            .hash_of(id.index())
+    }
+
+    pub fn level_flags(&self, base: Option<&Store>, id: LevelId) -> u8 {
+        self.store_for(base, id.is_scratch())
+            .levels
+            .flags_of(id.index())
+    }
+
+    pub fn level_row<'a>(&'a self, base: Option<&'a Store>, id: LevelId) -> &'a levels::LevelRow {
+        self.store_for(base, id.is_scratch())
+            .levels
+            .row(id.index())
+            .expect("LevelId minted by intern ⇒ valid")
+    }
+
+    fn level_intern_row(
+        &mut self,
+        base: Option<&Store>,
+        hash: u64,
+        flags: u8,
+        row: levels::LevelRow,
+    ) -> Result<LevelId, KernelError> {
+        if let Some(b) = base {
+            if let Some(bits) = b.levels.lookup(hash, &row) {
+                return LevelId::from_bits(bits).ok_or(KernelError::BankExhausted);
+            }
+        }
+        if let Some(bits) = self.levels.lookup(hash, &row) {
+            return LevelId::from_bits(bits).ok_or(KernelError::BankExhausted);
+        }
+        let bits = self.levels.insert(hash, flags, row)?;
+        LevelId::from_bits(bits).ok_or(KernelError::BankExhausted)
+    }
+
+    pub fn level_zero(&mut self, base: Option<&Store>) -> Result<LevelId, KernelError> {
+        self.level_intern_row(base, 11, 0, levels::LevelRow::Zero)
+    }
+
+    pub fn level_succ(&mut self, base: Option<&Store>, a: LevelId) -> Result<LevelId, KernelError> {
+        let h = crate::expr::mix(12, self.level_hash(base, a));
+        let f = self.level_flags(base, a);
+        self.level_intern_row(base, h, f, levels::LevelRow::Succ(a))
+    }
+
+    pub fn level_max(
+        &mut self,
+        base: Option<&Store>,
+        a: LevelId,
+        b: LevelId,
+    ) -> Result<LevelId, KernelError> {
+        let h = crate::expr::mix(
+            13,
+            crate::expr::mix(self.level_hash(base, a), self.level_hash(base, b)),
+        );
+        let f = self.level_flags(base, a) | self.level_flags(base, b);
+        self.level_intern_row(base, h, f, levels::LevelRow::Max(a, b))
+    }
+
+    pub fn level_imax(
+        &mut self,
+        base: Option<&Store>,
+        a: LevelId,
+        b: LevelId,
+    ) -> Result<LevelId, KernelError> {
+        let h = crate::expr::mix(
+            14,
+            crate::expr::mix(self.level_hash(base, a), self.level_hash(base, b)),
+        );
+        let f = self.level_flags(base, a) | self.level_flags(base, b);
+        self.level_intern_row(base, h, f, levels::LevelRow::IMax(a, b))
+    }
+
+    pub fn level_param(
+        &mut self,
+        base: Option<&Store>,
+        n: Option<NameId>,
+    ) -> Result<LevelId, KernelError> {
+        let h = crate::expr::mix(15, self.name_hash_of(base, n));
+        self.level_intern_row(base, h, 0b01, levels::LevelRow::Param(n))
+    }
+
+    pub fn level_mvar(
+        &mut self,
+        base: Option<&Store>,
+        n: Option<NameId>,
+    ) -> Result<LevelId, KernelError> {
+        let h = crate::expr::mix(16, self.name_hash_of(base, n));
+        self.level_intern_row(base, h, 0b10, levels::LevelRow::MVar(n))
+    }
+
+    /// Bridge: intern an `Arc<Level>` tree (iterative post-order with an
+    /// in-call memo keyed by `Arc::as_ptr` — sound for the call duration
+    /// only, exactly as `intern_name`'s attacker-depth handling and
+    /// `intern.rs`'s expr bridges document; adversarial `Succ` chains are
+    /// attacker-depth).
+    pub fn intern_level(
+        &mut self,
+        base: Option<&Store>,
+        l: &Arc<Level>,
+    ) -> Result<LevelId, KernelError> {
+        use std::collections::HashMap;
+        enum Frame<'a> {
+            Enter(&'a Arc<Level>),
+            Exit(&'a Arc<Level>),
+        }
+        let mut memo: HashMap<usize, LevelId> = HashMap::new();
+        let mut out: Vec<LevelId> = Vec::new();
+        let mut stack = vec![Frame::Enter(l)];
+        while let Some(fr) = stack.pop() {
+            match fr {
+                Frame::Enter(l) => {
+                    if let Some(&id) = memo.get(&(Arc::as_ptr(l) as usize)) {
+                        out.push(id);
+                        continue;
+                    }
+                    match l.as_ref() {
+                        Level::Zero | Level::Param(_) | Level::MVar(_) => {
+                            stack.push(Frame::Exit(l))
+                        }
+                        Level::Succ(a) => {
+                            stack.push(Frame::Exit(l));
+                            stack.push(Frame::Enter(a));
+                        }
+                        Level::Max(a, b) | Level::IMax(a, b) => {
+                            stack.push(Frame::Exit(l));
+                            stack.push(Frame::Enter(b));
+                            stack.push(Frame::Enter(a));
+                        }
+                    }
+                }
+                Frame::Exit(l) => {
+                    let id = match l.as_ref() {
+                        Level::Zero => self.level_zero(base)?,
+                        Level::Succ(_) => {
+                            let a = out.pop().expect("child pushed by Enter");
+                            self.level_succ(base, a)?
+                        }
+                        Level::Max(_, _) => {
+                            let b = out.pop().expect("child");
+                            let a = out.pop().expect("child");
+                            self.level_max(base, a, b)?
+                        }
+                        Level::IMax(_, _) => {
+                            let b = out.pop().expect("child");
+                            let a = out.pop().expect("child");
+                            self.level_imax(base, a, b)?
+                        }
+                        Level::Param(n) => {
+                            let n = self.intern_name(base, n)?;
+                            self.level_param(base, n)?
+                        }
+                        Level::MVar(n) => {
+                            let n = self.intern_name(base, n)?;
+                            self.level_mvar(base, n)?
+                        }
+                    };
+                    memo.insert(Arc::as_ptr(l) as usize, id);
+                    out.push(id);
+                }
+            }
+        }
+        Ok(out.pop().expect("root"))
+    }
+
+    /// Bridge: rebuild an `Arc<Level>` (iterative — same two-phase stack
+    /// as `intern_level`, run in reverse, with an in-call memo keyed by
+    /// `LevelId` since dedup means many parents can share one child row).
+    pub fn to_level(&self, base: Option<&Store>, id: LevelId) -> Arc<Level> {
+        use std::collections::HashMap;
+        enum Frame {
+            Enter(LevelId),
+            Exit(LevelId),
+        }
+        let mut memo: HashMap<LevelId, Arc<Level>> = HashMap::new();
+        let mut out: Vec<Arc<Level>> = Vec::new();
+        let mut stack = vec![Frame::Enter(id)];
+        while let Some(fr) = stack.pop() {
+            match fr {
+                Frame::Enter(id) => {
+                    if let Some(l) = memo.get(&id) {
+                        out.push(Arc::clone(l));
+                        continue;
+                    }
+                    match *self.level_row(base, id) {
+                        levels::LevelRow::Zero
+                        | levels::LevelRow::Param(_)
+                        | levels::LevelRow::MVar(_) => {
+                            stack.push(Frame::Exit(id));
+                        }
+                        levels::LevelRow::Succ(a) => {
+                            stack.push(Frame::Exit(id));
+                            stack.push(Frame::Enter(a));
+                        }
+                        levels::LevelRow::Max(a, b) | levels::LevelRow::IMax(a, b) => {
+                            stack.push(Frame::Exit(id));
+                            stack.push(Frame::Enter(b));
+                            stack.push(Frame::Enter(a));
+                        }
+                    }
+                }
+                Frame::Exit(id) => {
+                    let l = match *self.level_row(base, id) {
+                        levels::LevelRow::Zero => Arc::new(Level::Zero),
+                        levels::LevelRow::Succ(_) => {
+                            let a = out.pop().expect("child pushed by Enter");
+                            Arc::new(Level::Succ(a))
+                        }
+                        levels::LevelRow::Max(_, _) => {
+                            let b = out.pop().expect("child");
+                            let a = out.pop().expect("child");
+                            Arc::new(Level::Max(a, b))
+                        }
+                        levels::LevelRow::IMax(_, _) => {
+                            let b = out.pop().expect("child");
+                            let a = out.pop().expect("child");
+                            Arc::new(Level::IMax(a, b))
+                        }
+                        levels::LevelRow::Param(n) => Arc::new(Level::Param(self.to_name(base, n))),
+                        levels::LevelRow::MVar(n) => Arc::new(Level::MVar(self.to_name(base, n))),
+                    };
+                    memo.insert(id, Arc::clone(&l));
+                    out.push(l);
+                }
+            }
+        }
+        out.pop().expect("root")
+    }
+
+    pub fn intern_level_list(
+        &mut self,
+        base: Option<&Store>,
+        ids: &[LevelId],
+    ) -> Result<LevelsId, KernelError> {
+        let h = sip(&ids.iter().map(|i| i.bits()).collect::<Vec<u32>>());
+        if let Some(b) = base {
+            if let Some(bits) = b.level_lists.lookup(h, |t| {
+                t.len() == ids.len() && t.iter().zip(ids).all(|(a, b)| a == b)
+            }) {
+                return LevelsId::from_bits(bits).ok_or(KernelError::BankExhausted);
+            }
+        }
+        let bits = self.level_lists.intern(
+            h,
+            |t| t.len() == ids.len() && t.iter().zip(ids).all(|(a, b)| a == b),
+            || ids.to_vec().into_boxed_slice(),
+            |t| sip(&t.iter().map(|i| i.bits()).collect::<Vec<u32>>()),
+        )?;
+        LevelsId::from_bits(bits).ok_or(KernelError::BankExhausted)
+    }
+
+    pub fn level_list_at<'a>(&'a self, base: Option<&'a Store>, id: LevelsId) -> &'a [LevelId] {
+        self.store_for(base, id.is_scratch())
+            .level_lists
+            .get(id.index())
+            .map(|b| &**b)
+            .expect("LevelsId minted by intern ⇒ valid")
     }
 }
 
