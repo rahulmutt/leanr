@@ -9,6 +9,7 @@
 
 pub mod decl;
 pub mod levels;
+pub mod local_ctx;
 pub mod names;
 pub mod pools;
 pub mod probe;
