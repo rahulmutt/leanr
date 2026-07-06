@@ -14,6 +14,7 @@ pub mod names;
 pub mod pools;
 pub mod probe;
 pub mod scratch;
+pub mod subst;
 pub mod terms;
 
 use std::num::NonZeroU32;
@@ -697,5 +698,7 @@ impl Store {
     }
 }
 
+#[cfg(test)]
+pub(crate) mod testgen;
 #[cfg(test)]
 mod tests;
