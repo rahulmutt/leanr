@@ -1,6 +1,6 @@
 {
   "name": "leanr",
-  "image": "ghcr.io/rahulmutt/dev:sha-5fa51d8",
+  "image": "ghcr.io/rahulmutt/dev:sha-48b0258",
   "workspaceFolder": "/workspace",
   "remoteUser": "dev",
   "containerEnv": {
