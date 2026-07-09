@@ -185,3 +185,82 @@ over unchanged.
   where a task says so; conventional-commit prefixes.
 - Wall-clock: regression acceptable only if the sweep completes within
   the pod limit; improvement expected (structural hits, no refcounts).
+
+---
+
+## Phase-2 Acceptance Findings (Task 9, 2026-07-08/09)
+
+Task 9 ran the canary (`leanr check Init.Data.Char.Ordinal`) under a
+memory watchdog (the prior session's canary OOM-killed the *container*
+because it ran without one). Two independent results came out of it.
+
+### Result A — the migration's representational goal is MET (env memory)
+
+The id-native kernel's **persistent environment is tiny**. Checking the
+226-module import closure of `Init.Data.Char.Ordinal` (15,642 declarations),
+the id kernel's process RSS stays **flat at ~0.55 GiB** across the whole
+env; the pre-flip Arc kernel holds **~15–23 GiB** for the same env. That is
+the ~30–40× env-storage reduction this phase set out to buy, and it is what
+phase-1 hash-consing could not achieve (phase-1 plateau was ~21–24 GiB).
+Every declaration checks with correct verdicts; no verdict drift.
+
+### Result B — a PRE-EXISTING kernel reduction divergence blocks the sweep
+
+One declaration, `_private.Init.Data.Char.Ordinal.0.Char.ofOrdinal._proof_3`
+(a `by grind` proof), blows the **checking transient** from 0.55 GiB to
+~25 GiB and never finishes. This is **not** caused by the migration:
+
+- The pre-flip **Arc** kernel (commit `9b1c773`) hits the same ~23–25 GiB
+  on the same declaration. Both Rust kernels share the same reduction
+  engine, so both diverge from real Lean the same way. The plan's own
+  Task-9 note ("old behavior was a >25 GiB kill on one declaration")
+  already recorded this.
+- Real Lean kernel-checks this proof in **<1 s** (the module compiles in
+  ~1–2 s). Our kernel performs **100M+ interned reduction steps** and
+  OOMs. Kernel whnf runs at ~1–10M steps/s, so real Lean physically
+  cannot be doing the same walk — **it truncates a reduction chain our
+  kernel walks in full. This is a divergence, not an inherent cost.**
+
+**Mechanism (diagnosed):** `grind`/`omega` discharge the bound via the
+linear-arithmetic normalizer `Nat.Linear.Poly.cancel`, which calls
+`cancelAux` with `hugeFuel = 1_000_000` (`def hugeFuel := 1000000 -- any
+big number should work`). `cancelAux` recurses structurally on `fuel`,
+compiled via `Nat.brecOn`/`Nat.rec` + `Nat.below`. Our kernel walks that
+recursion chain (a linearly-growing set of distinct `Nat.rec` reductions),
+materializing `Nat.below` course-of-values structure real Lean never
+forces.
+
+**What it is NOT** (ruled out by measurement):
+
+- **Not smart unfolding.** `smartUnfolding`/`_sunfold` live in
+  `Lean/Meta/WHNF.lean` (elaborator, not kernel); real Lean stays fast
+  with `set_option smartUnfolding false`.
+- **Not a sharing/recomputation (memoization) bug.** A per-major-value
+  tally on the real blowup showed `max_repeats = 5` (no level reduced
+  more than 5×) with *distinct* majors growing linearly — a linear walk,
+  not exponential recomputation.
+- **Not transient-retention alone.** The timing argument above shows real
+  Lean does far fewer reductions; it truncates rather than "walks + frees".
+
+`reduce_recursor`, `reduce_proj`, and `is_def_eq` each look lazy in
+isolation, so the missing short-circuit is a subtle interaction not yet
+pinned to a line. A simple single-recursion analogue (`loop fuel xs`
+with an empty-list base case) checks in ~0.4 ms in our kernel — the
+blowup needs `cancelAux`'s specific shape (body accesses `below` for its
+recursive calls). Minimal `grind`/`omega` bound proofs re-derived by hand
+did **not** reproduce it (the elaborated proof term is context-sensitive),
+so the only confirmed reproducer is the real `_proof_3` (via the CLI's
+per-declaration isolation).
+
+### Disposition
+
+- The migration lands as the **representational win it is** (Result A);
+  its correctness is unchanged (Task 1–8 reviews clean, dual-checker gate
+  green at Task 7).
+- The **full-stdlib acceptance sweep (peak RSS < 32 GiB) remains gated**
+  on fixing Result B, which is a **pre-existing kernel-reduction
+  divergence** (present in the Arc kernel too), tracked as its own
+  focused, TCB-sensitive effort: find and add the reduction short-circuit
+  real Lean uses so `Nat.brecOn`/`Nat.below` over large `fuel` does not
+  walk in full. It is verdict-preserving by construction (a reduction
+  optimization, not a semantics change).
