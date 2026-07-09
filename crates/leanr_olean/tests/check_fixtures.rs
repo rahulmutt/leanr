@@ -1,25 +1,28 @@
 //! Integration: decode fixture `.olean`s and replay them through the
 //! kernel (Task 12). This is where decoded modules meet the checker.
+//!
+//! Id-native port (migration Task 8): every `Vec<ArcConstantInfo>` a
+//! decoded module hands back is bridge-interned into the environment's
+//! persistent bank via `Environment::intern_module` (module-mode) or
+//! `Environment::intern_declaration` (single-declaration mode, the
+//! mutation-differential harness below), dropping each Arc module/decl
+//! as it goes — the memory-win line the migration buys (spec:
+//! docs/superpowers/specs/2026-07-06-term-bank-kernel-migration-design.md
+//! §2 "Load").
 
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use leanr_kernel::{ConstantInfo, Declaration, Environment, Name};
+use leanr_kernel::bank::NameId;
+use leanr_kernel::{ArcConstantInfo, ArcDeclaration, ConstantInfo, Environment, Name};
 use leanr_olean::{load_closure, ModuleData, PartKind, SearchPath};
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures")
         .join(name)
-}
-
-fn constants_of(md: ModuleData) -> HashMap<Arc<Name>, ConstantInfo> {
-    md.constants
-        .into_iter()
-        .map(|c| (Arc::clone(c.name()), c))
-        .collect()
 }
 
 /// Hermetic (runs in CI): the import-free `Prelude0` fixture replays from
@@ -31,8 +34,8 @@ fn prelude0_replays_from_empty_env() {
     let m = ModuleData::parse(&bytes).unwrap();
     assert!(m.imports.is_empty(), "Prelude0 imports nothing");
 
-    let constants = constants_of(m);
     let mut env = Environment::default();
+    let constants = env.intern_module(m.constants).unwrap();
     let stats = leanr_kernel::replay(&mut env, constants).unwrap();
     // N block, Truth block, N.add, triv, and the two generated `recOn`
     // definitions — at least the three the fixture explicitly declares.
@@ -60,14 +63,15 @@ fn check_library_path_replays_prelude0_from_explicit_root() {
         "Prelude0 has no imports, so its closure is itself"
     );
 
-    let mut constants: HashMap<Arc<Name>, ConstantInfo> = HashMap::new();
+    let mut env = Environment::default();
+    let mut constants: HashMap<NameId, ConstantInfo> = HashMap::new();
     for (_, md) in modules {
-        for c in md.constants {
-            constants.entry(Arc::clone(c.name())).or_insert(c);
+        let interned = env.intern_module(md.constants).unwrap();
+        for (n, ci) in interned {
+            constants.entry(n).or_insert(ci);
         }
     }
 
-    let mut env = Environment::default();
     let stats = leanr_kernel::replay(&mut env, constants).unwrap();
     assert!(
         stats.checked >= 3,
@@ -121,8 +125,8 @@ fn modpriv_parts_replay_from_empty_env() {
         "bump must be the private `def`, not an axiom stub"
     );
 
-    let constants = constants_of(md);
     let mut env = Environment::default();
+    let constants = env.intern_module(md.constants).unwrap();
     let stats = leanr_kernel::replay(&mut env, constants).unwrap();
     assert!(
         stats.checked >= 5,
@@ -173,16 +177,18 @@ fn fixture_modules_replay_clean_with_closure() {
     let targets = [name("Sample"), name("SampleRich")];
     let modules = load_closure(&sp, &targets).expect("closure loads");
 
-    // Union every module's constants (module oleans carry only their own
-    // module's constants, so the closure's constant sets are disjoint).
-    let mut constants: HashMap<Arc<Name>, ConstantInfo> = HashMap::new();
+    // Bridge-intern every module's constants, one module at a time
+    // (module oleans carry only their own module's constants, so the
+    // closure's constant sets are disjoint).
+    let mut env = Environment::default();
+    let mut constants: HashMap<NameId, ConstantInfo> = HashMap::new();
     for (_, md) in modules {
-        for c in md.constants {
-            constants.entry(Arc::clone(c.name())).or_insert(c);
+        let interned = env.intern_module(md.constants).unwrap();
+        for (n, ci) in interned {
+            constants.entry(n).or_insert(ci);
         }
     }
 
-    let mut env = Environment::default();
     let stats = leanr_kernel::replay(&mut env, constants)
         .unwrap_or_else(|e| panic!("closure failed to replay: {e}"));
     assert!(stats.checked > 0, "checked nothing");
@@ -203,12 +209,12 @@ fn fixture_modules_replay_clean_with_closure() {
 // ---------------------------------------------------------------------------
 
 /// A committed mutant is always a def or theorem (the harness only mutates
-/// those); turn its decoded `ConstantInfo` back into the `Declaration` the
-/// oracle handed to `addDeclCore`.
-fn mutant_to_declaration(ci: &ConstantInfo) -> Declaration {
+/// those); turn its decoded `ArcConstantInfo` back into the `ArcDeclaration`
+/// the oracle handed to `addDeclCore`.
+fn mutant_to_declaration(ci: &ArcConstantInfo) -> ArcDeclaration {
     match ci {
-        ConstantInfo::Defn(v) => Declaration::Defn(v.clone()),
-        ConstantInfo::Thm(v) => Declaration::Thm(v.clone()),
+        ArcConstantInfo::Defn(v) => ArcDeclaration::Defn(v.clone()),
+        ArcConstantInfo::Thm(v) => ArcDeclaration::Thm(v.clone()),
         other => panic!("mutant {} is {}, not a def/thm", other.name(), other.kind()),
     }
 }
@@ -237,16 +243,24 @@ fn parse_verdicts(text: &str) -> Vec<(String, String)> {
 
 /// The differential core: build a trusted base env from `base` (the mutated
 /// module's import closure — imported, not re-checked, exactly like the
-/// oracle's `kenv`), then for each verdict line clone the base, admit ONLY that
-/// mutant through leanr's checking `add_decl`, and require leanr's accept/reject
-/// to equal the oracle's. Also enforces the harness invariant of >= 5 accepts
-/// and >= 5 rejects.
-fn assert_verdicts_match(base: Vec<ConstantInfo>, mutants: Vec<ConstantInfo>, text: &str) {
+/// oracle's `kenv`), then for each verdict line rebuild a FRESH base env and
+/// admit ONLY that mutant through leanr's checking `add_decl`, and require
+/// leanr's accept/reject to equal the oracle's. Also enforces the harness
+/// invariant of >= 5 accepts and >= 5 rejects.
+///
+/// Rebuilding the base per mutant (rather than `.clone()`-ing a
+/// once-built `Environment`) is this test's adaptation to the id-native
+/// `Environment` not implementing `Clone` (its persistent bank holds
+/// several `bank`-internal types that don't either — see `env.rs`'s
+/// module doc). `Environment::from_modules` is a pure function of
+/// `base`, so a fresh rebuild per mutant is behaviorally identical to
+/// cloning a single built copy, just less efficient — acceptable for a
+/// differential test over a handful of mutants.
+fn assert_verdicts_match(base: Vec<ArcConstantInfo>, mutants: Vec<ArcConstantInfo>, text: &str) {
     let verdicts = parse_verdicts(text);
     assert!(!verdicts.is_empty(), "no mutant verdict lines in jsonl");
 
-    let base_env = Environment::from_modules([base]).expect("base env builds from import closure");
-    let by_name: HashMap<String, &ConstantInfo> =
+    let by_name: HashMap<String, &ArcConstantInfo> =
         mutants.iter().map(|c| (c.name().to_string(), c)).collect();
 
     let mut accepts = 0usize;
@@ -256,8 +270,12 @@ fn assert_verdicts_match(base: Vec<ConstantInfo>, mutants: Vec<ConstantInfo>, te
         let ci = by_name
             .get(name)
             .unwrap_or_else(|| panic!("mutant {name} is in the jsonl but missing from the olean"));
-        let decl = mutant_to_declaration(ci);
-        let mut env = base_env.clone();
+        let arc_decl = mutant_to_declaration(ci);
+        let mut env =
+            Environment::from_modules([base.clone()]).expect("base env builds from import closure");
+        let decl = env
+            .intern_declaration(&arc_decl)
+            .expect("mutant declaration interns");
         let leanr = match env.add_decl(decl) {
             Ok(()) => "accept",
             Err(_) => "reject",
@@ -323,7 +341,7 @@ fn mutation_verdicts_toolchain() {
 
     let sp = SearchPath::new(vec![PathBuf::from(&dir)]);
     let modules = load_closure(&sp, &[name("Init.Core")]).expect("Init.Core closure loads");
-    let mut base: Vec<ConstantInfo> = Vec::new();
+    let mut base: Vec<ArcConstantInfo> = Vec::new();
     let mut seen: HashSet<Arc<Name>> = HashSet::new();
     for (_, md) in modules {
         for c in md.constants {

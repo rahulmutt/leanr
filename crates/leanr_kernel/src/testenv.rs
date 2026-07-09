@@ -6,9 +6,9 @@
 //! nothing in this file needs its own `#[cfg(test)]`.
 
 use crate::{
-    AxiomVal, BinderInfo, ConstantInfo, ConstantVal, ConstructorVal, Declaration, DefinitionSafety,
-    DefinitionVal, Environment, Expr, InductiveVal, Level, Name, Nat, OpaqueVal, RecGuard,
-    RecursorRule, RecursorVal, ReducibilityHints,
+    ArcAxiomVal, ArcConstantInfo, ArcConstantVal, ArcConstructorVal, ArcDefinitionVal,
+    ArcInductiveVal, ArcOpaqueVal, ArcRecursorRule, ArcRecursorVal, BinderInfo, Declaration,
+    DefinitionSafety, Environment, Expr, Level, Name, Nat, RecGuard, ReducibilityHints,
 };
 use std::sync::Arc;
 
@@ -31,6 +31,19 @@ pub fn nm2(a: &str, b: &str) -> Arc<Name> {
 
 pub fn g() -> RecGuard {
     RecGuard::new()
+}
+
+/// `axiom A.{u} : Sort u` — the small fixture Task 1's bank/decl.rs
+/// bridge tests round-trip through `Store`.
+pub fn axiom_u() -> ArcConstantInfo {
+    ArcConstantInfo::Axiom(ArcAxiomVal {
+        val: ArcConstantVal {
+            name: nm("A"),
+            level_params: vec![nm("u")],
+            ty: mini::sort_u(),
+        },
+        is_unsafe: false,
+    })
 }
 
 /// The hand-rolled kernel environment shared by the tests below.
@@ -61,16 +74,16 @@ pub mod mini {
         Expr::const_(nm(name), levels, &mut g()).unwrap()
     }
 
-    fn cval(name: &str, level_params: Vec<Arc<Name>>, ty: Arc<Expr>) -> ConstantVal {
-        ConstantVal {
+    fn cval(name: &str, level_params: Vec<Arc<Name>>, ty: Arc<Expr>) -> ArcConstantVal {
+        ArcConstantVal {
             name: nm(name),
             level_params,
             ty,
         }
     }
 
-    fn axiom(name: &str, ty: Arc<Expr>) -> ConstantInfo {
-        ConstantInfo::Axiom(AxiomVal {
+    fn axiom(name: &str, ty: Arc<Expr>) -> ArcConstantInfo {
+        ArcConstantInfo::Axiom(ArcAxiomVal {
             val: cval(name, vec![], ty),
             is_unsafe: false,
         })
@@ -78,17 +91,17 @@ pub mod mini {
 
     // ---- Task 7 helpers: dotted names, de Bruijn builders ------------
 
-    /// `ConstantVal` for a (possibly dotted) `Name`.
-    fn cvaln(name: Arc<Name>, level_params: Vec<Arc<Name>>, ty: Arc<Expr>) -> ConstantVal {
-        ConstantVal {
+    /// `ArcConstantVal` for a (possibly dotted) `Name`.
+    fn cvaln(name: Arc<Name>, level_params: Vec<Arc<Name>>, ty: Arc<Expr>) -> ArcConstantVal {
+        ArcConstantVal {
             name,
             level_params,
             ty,
         }
     }
 
-    fn axiomn(name: Arc<Name>, ty: Arc<Expr>) -> ConstantInfo {
-        ConstantInfo::Axiom(AxiomVal {
+    fn axiomn(name: Arc<Name>, ty: Arc<Expr>) -> ArcConstantInfo {
+        ArcConstantInfo::Axiom(ArcAxiomVal {
             val: cvaln(name, vec![], ty),
             is_unsafe: false,
         })
@@ -175,7 +188,7 @@ pub mod mini {
         )
     }
 
-    fn nat_rec_rules() -> Vec<RecursorRule> {
+    fn nat_rec_rules() -> Vec<ArcRecursorRule> {
         // Nat.zero: fun motive zero succ => zero
         let zero_rhs = lam(
             "motive",
@@ -202,12 +215,12 @@ pub mod mini {
             ),
         );
         vec![
-            RecursorRule {
+            ArcRecursorRule {
                 ctor: nm2("Nat", "zero"),
                 nfields: Nat::from(0),
                 rhs: zero_rhs,
             },
-            RecursorRule {
+            ArcRecursorRule {
                 ctor: nm2("Nat", "succ"),
                 nfields: Nat::from(1),
                 rhs: succ_rhs,
@@ -215,8 +228,12 @@ pub mod mini {
         ]
     }
 
-    fn nat_decls() -> Vec<ConstantInfo> {
-        let nat_ind = ConstantInfo::Induct(InductiveVal {
+    /// `pub(crate)`: also reused by `replay::tests`' `nat_world` fixture
+    /// (migration Task 8 — stands in for a second kernel's regenerated
+    /// ctors/recursor now that there is only one kernel; see that
+    /// module's doc comment).
+    pub(crate) fn nat_decls() -> Vec<ArcConstantInfo> {
+        let nat_ind = ArcConstantInfo::Induct(ArcInductiveVal {
             val: cvaln(nm("Nat"), vec![], type1()),
             num_params: Nat::from(0),
             num_indices: Nat::from(0),
@@ -227,7 +244,7 @@ pub mod mini {
             is_unsafe: false,
             is_reflexive: false,
         });
-        let zero = ConstantInfo::Ctor(ConstructorVal {
+        let zero = ArcConstantInfo::Ctor(ArcConstructorVal {
             val: cvaln(nm2("Nat", "zero"), vec![], nat()),
             induct: nm("Nat"),
             cidx: Nat::from(0),
@@ -235,7 +252,7 @@ pub mod mini {
             num_fields: Nat::from(0),
             is_unsafe: false,
         });
-        let succ = ConstantInfo::Ctor(ConstructorVal {
+        let succ = ArcConstantInfo::Ctor(ArcConstructorVal {
             val: cvaln(nm2("Nat", "succ"), vec![], pi("n", nat(), nat())),
             induct: nm("Nat"),
             cidx: Nat::from(1),
@@ -243,7 +260,7 @@ pub mod mini {
             num_fields: Nat::from(1),
             is_unsafe: false,
         });
-        let rec = ConstantInfo::Rec(RecursorVal {
+        let rec = ArcConstantInfo::Rec(ArcRecursorVal {
             val: cvaln(nm2("Nat", "rec"), vec![nm("u")], nat_rec_type()),
             all: vec![nm2("Nat", "rec")],
             num_params: Nat::from(0),
@@ -259,8 +276,8 @@ pub mod mini {
 
     // ---- Bool --------------------------------------------------------
 
-    fn bool_decls() -> Vec<ConstantInfo> {
-        let bool_ind = ConstantInfo::Induct(InductiveVal {
+    fn bool_decls() -> Vec<ArcConstantInfo> {
+        let bool_ind = ArcConstantInfo::Induct(ArcInductiveVal {
             val: cvaln(nm("Bool"), vec![], type1()),
             num_params: Nat::from(0),
             num_indices: Nat::from(0),
@@ -271,7 +288,7 @@ pub mod mini {
             is_unsafe: false,
             is_reflexive: false,
         });
-        let bfalse = ConstantInfo::Ctor(ConstructorVal {
+        let bfalse = ArcConstantInfo::Ctor(ArcConstructorVal {
             val: cvaln(nm2("Bool", "false"), vec![], cstn(nm("Bool"), vec![])),
             induct: nm("Bool"),
             cidx: Nat::from(0),
@@ -279,7 +296,7 @@ pub mod mini {
             num_fields: Nat::from(0),
             is_unsafe: false,
         });
-        let btrue = ConstantInfo::Ctor(ConstructorVal {
+        let btrue = ArcConstantInfo::Ctor(ArcConstructorVal {
             val: cvaln(nm2("Bool", "true"), vec![], cstn(nm("Bool"), vec![])),
             induct: nm("Bool"),
             cidx: Nat::from(1),
@@ -366,8 +383,8 @@ pub mod mini {
         )
     }
 
-    fn eq_decls() -> Vec<ConstantInfo> {
-        let eq_ind = ConstantInfo::Induct(InductiveVal {
+    fn eq_decls() -> Vec<ArcConstantInfo> {
+        let eq_ind = ArcConstantInfo::Induct(ArcInductiveVal {
             val: cvaln(nm("Eq"), vec![nm("u_1")], eq_ty()),
             num_params: Nat::from(2),
             num_indices: Nat::from(1),
@@ -378,7 +395,7 @@ pub mod mini {
             is_unsafe: false,
             is_reflexive: false,
         });
-        let refl = ConstantInfo::Ctor(ConstructorVal {
+        let refl = ArcConstantInfo::Ctor(ArcConstructorVal {
             val: cvaln(nm2("Eq", "refl"), vec![nm("u_1")], eq_refl_ty()),
             induct: nm("Eq"),
             cidx: Nat::from(0),
@@ -400,14 +417,14 @@ pub mod mini {
                 ),
             ),
         );
-        let rec = ConstantInfo::Rec(RecursorVal {
+        let rec = ArcConstantInfo::Rec(ArcRecursorVal {
             val: cvaln(nm2("Eq", "rec"), vec![nm("u"), nm("u_1")], eq_rec_ty()),
             all: vec![nm2("Eq", "rec")],
             num_params: Nat::from(2),
             num_indices: Nat::from(1),
             num_motives: Nat::from(1),
             num_minors: Nat::from(1),
-            rules: vec![RecursorRule {
+            rules: vec![ArcRecursorRule {
                 ctor: nm2("Eq", "refl"),
                 nfields: Nat::from(0),
                 rhs: refl_rhs,
@@ -435,10 +452,10 @@ pub mod mini {
 
     // ---- Prod (structure eta) & Unit (unit-like) --------------------
 
-    fn prod_decls() -> Vec<ConstantInfo> {
+    fn prod_decls() -> Vec<ArcConstantInfo> {
         // Monomorphic Prod : Sort 1 → Sort 1 → Sort 1 (universes are
         // irrelevant to is_structure_like / eta).
-        let prod_ind = ConstantInfo::Induct(InductiveVal {
+        let prod_ind = ArcConstantInfo::Induct(ArcInductiveVal {
             val: cvaln(
                 nm("Prod"),
                 vec![],
@@ -471,7 +488,7 @@ pub mod mini {
                 ),
             ),
         );
-        let mk = ConstantInfo::Ctor(ConstructorVal {
+        let mk = ArcConstantInfo::Ctor(ArcConstructorVal {
             val: cvaln(nm2("Prod", "mk"), vec![], mk_ty),
             induct: nm("Prod"),
             cidx: Nat::from(0),
@@ -493,8 +510,8 @@ pub mod mini {
         ]
     }
 
-    fn unit_decls() -> Vec<ConstantInfo> {
-        let unit_ind = ConstantInfo::Induct(InductiveVal {
+    fn unit_decls() -> Vec<ArcConstantInfo> {
+        let unit_ind = ArcConstantInfo::Induct(ArcInductiveVal {
             val: cvaln(nm("Unit"), vec![], type1()),
             num_params: Nat::from(0),
             num_indices: Nat::from(0),
@@ -505,7 +522,7 @@ pub mod mini {
             is_unsafe: false,
             is_reflexive: false,
         });
-        let unit_ctor = ConstantInfo::Ctor(ConstructorVal {
+        let unit_ctor = ArcConstantInfo::Ctor(ArcConstructorVal {
             val: cvaln(nm2("Unit", "unit"), vec![], cstn(nm("Unit"), vec![])),
             induct: nm("Unit"),
             cidx: Nat::from(0),
@@ -528,7 +545,7 @@ pub mod mini {
         Expr::sort(Level::mk_succ(Arc::new(Level::Param(nm("u")))), &mut g()).unwrap()
     }
 
-    fn string_decls() -> Vec<ConstantInfo> {
+    fn string_decls() -> Vec<ArcConstantInfo> {
         // String : Type ; String.ofList : List.{0} Char → String. The
         // expanded literal is `String.ofList (List.cons … Char.ofNat …)`;
         // `is_def_eq` infers the char-list sub-terms, so List/Char/
@@ -539,7 +556,7 @@ pub mod mini {
             vec![cstn(nm("Char"), vec![])],
         );
         // List.{u} : Type u → Type u
-        let list_ind = ConstantInfo::Induct(InductiveVal {
+        let list_ind = ArcConstantInfo::Induct(ArcInductiveVal {
             val: cvaln(nm("List"), vec![nm("u")], pi("α", type_u(), type_u())),
             num_params: Nat::from(1),
             num_indices: Nat::from(0),
@@ -551,7 +568,7 @@ pub mod mini {
             is_reflexive: false,
         });
         // List.nil.{u} : {α : Type u} → List.{u} α
-        let list_nil = ConstantInfo::Ctor(ConstructorVal {
+        let list_nil = ArcConstantInfo::Ctor(ArcConstructorVal {
             val: cvaln(
                 nm2("List", "nil"),
                 vec![nm("u")],
@@ -577,7 +594,7 @@ pub mod mini {
                 ),
             ),
         );
-        let list_cons = ConstantInfo::Ctor(ConstructorVal {
+        let list_cons = ArcConstantInfo::Ctor(ArcConstructorVal {
             val: cvaln(nm2("List", "cons"), vec![nm("u")], list_cons_ty),
             induct: nm("List"),
             cidx: Nat::from(1),
@@ -602,7 +619,7 @@ pub mod mini {
         ]
     }
 
-    fn special_decls() -> Vec<ConstantInfo> {
+    fn special_decls() -> Vec<ArcConstantInfo> {
         let mut v = Vec::new();
         v.extend(nat_decls());
         v.extend(bool_decls());
@@ -641,14 +658,14 @@ pub mod mini {
     ///   opaque w : A := a
     ///   axiom B : Type        axiom bt : B       axiom bf : B
     pub fn env() -> Environment {
-        let id1 = ConstantInfo::Defn(DefinitionVal {
+        let id1 = ArcConstantInfo::Defn(ArcDefinitionVal {
             val: cval("id1", vec![u()], id1_type()),
             value: id1_value(),
             hints: ReducibilityHints::Regular(0),
             safety: DefinitionSafety::Safe,
             all: vec![nm("id1")],
         });
-        let w = ConstantInfo::Opaque(OpaqueVal {
+        let w = ArcConstantInfo::Opaque(ArcOpaqueVal {
             val: cval("w", vec![], cst("A", vec![])),
             value: cst("a", vec![]),
             is_unsafe: false,

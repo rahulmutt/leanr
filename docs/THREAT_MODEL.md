@@ -19,13 +19,20 @@
 
 ## Resource bounds (memory/DoS)
 
-`leanr check` structurally interns (hash-conses) decoded constants in one
-bounded batch pass before replay, collapsing structurally-identical subterms
-shared across the whole module set into a single `Arc` each. Like all term
-recursion, the pass runs under `RecGuard` (`MAX_REC_DEPTH` cap, no unguarded
-recursion on untrusted `.olean`-derived structure) and only merges terms
-identical in every field, so it is verdict-preserving — it exists purely to
-reduce the resident footprint of a whole-environment check.
+`leanr check` structurally interns (hash-conses) decoded constants
+AT INPUT: `Environment::intern_module` bridges each decoded module's
+`Arc`-based constants into the kernel's id-native term bank
+(`crates/leanr_kernel/src/bank/`) one module at a time, deduplicating
+every name/level/expr into a shared row as it goes, then drops that
+module's `Arc` graph before the next is touched. This replaced a
+separate post-decode batch-interning pass (`intern.rs`, a structural
+`Arc`-hash-consing pass run once before replay) that the term-bank
+kernel migration deleted as redundant once interning happens at the
+point of entry instead. Like all term recursion, the walk runs under
+`RecGuard` (`MAX_REC_DEPTH` cap, no unguarded recursion on untrusted
+`.olean`-derived structure) and only merges rows identical in every
+field, so it is verdict-preserving — it exists purely to reduce the
+resident footprint of a whole-environment check.
 
 ## Out of scope (for now)
 

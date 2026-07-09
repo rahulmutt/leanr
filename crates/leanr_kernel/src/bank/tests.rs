@@ -2,8 +2,9 @@
 //! interning invariant (spec §1): equal ids ⇔ `Expr::structural_eq`.
 //! The existing `Arc<Expr>` representation is the oracle.
 
+use super::testgen::{gen_expr, Rng};
 use super::*;
-use crate::{BinderInfo, DataValue, Expr, KVMap, Level, Literal, Name, Nat, RecGuard};
+use crate::{Expr, RecGuard};
 use std::sync::Arc;
 
 #[test]
@@ -43,68 +44,6 @@ fn from_bits_round_trips_valid_bits() {
     assert_eq!(ExprId::from_bits(p.bits()).unwrap().index(), p.index());
     assert_eq!(ExprId::from_bits(s.bits()).unwrap().index(), s.index());
     assert!(ExprId::from_bits(s.bits()).unwrap().is_scratch());
-}
-
-/// SplitMix64 — deterministic, dependency-free.
-struct Rng(u64);
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-    fn below(&mut self, n: u64) -> u64 {
-        self.next() % n
-    }
-}
-
-fn nm(s: &str) -> Arc<Name> {
-    Arc::new(Name::Str {
-        parent: Arc::new(Name::Anonymous),
-        part: s.to_string(),
-    })
-}
-
-/// Random term over a tiny vocabulary; `depth` bounds recursion.
-fn gen_expr(r: &mut Rng, depth: u32, g: &mut RecGuard) -> Arc<Expr> {
-    if depth == 0 {
-        return match r.below(5) {
-            0 => Expr::bvar(Nat::from(r.below(3))),
-            1 => Expr::lit(Literal::NatVal(Nat::from(r.below(5)))),
-            2 => Expr::const_(nm(["A", "B"][r.below(2) as usize]), vec![], g).unwrap(),
-            3 => Expr::sort(Arc::new(Level::Succ(Arc::new(Level::Zero))), g).unwrap(),
-            _ => Expr::fvar(nm(["fv1", "fv2"][r.below(2) as usize])),
-        };
-    }
-    match r.below(6) {
-        0 => Expr::app(gen_expr(r, depth - 1, g), gen_expr(r, depth - 1, g)),
-        1 => Expr::lam(
-            nm(["x", "y"][r.below(2) as usize]),
-            gen_expr(r, depth - 1, g),
-            gen_expr(r, depth - 1, g),
-            [BinderInfo::Default, BinderInfo::Implicit][r.below(2) as usize],
-        ),
-        2 => Expr::forall_e(
-            nm("x"),
-            gen_expr(r, depth - 1, g),
-            gen_expr(r, depth - 1, g),
-            BinderInfo::Default,
-        ),
-        3 => Expr::let_e(
-            nm("z"),
-            gen_expr(r, depth - 1, g),
-            gen_expr(r, depth - 1, g),
-            gen_expr(r, depth - 1, g),
-            r.below(2) == 0,
-        ),
-        4 => Expr::proj(nm("S"), Nat::from(r.below(3)), gen_expr(r, depth - 1, g)),
-        _ => Expr::mdata(
-            KVMap(vec![(nm("k"), DataValue::OfBool(r.below(2) == 0))]),
-            gen_expr(r, depth - 1, g),
-        ),
-    }
 }
 
 #[test]

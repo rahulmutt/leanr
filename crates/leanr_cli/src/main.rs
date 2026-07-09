@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
+use leanr_kernel::bank::NameId;
 use leanr_kernel::{ConstantInfo, Environment, Name};
 use leanr_olean::SearchPath;
 
@@ -238,31 +239,39 @@ fn check(modules: Vec<String>, all: bool, path: Vec<PathBuf>) -> ExitCode {
         }
     };
 
-    // Per-module progress (stderr) while building the union of constants
+    // Per-module progress (stderr) while interning the union of constants
     // to replay, and the module that first supplies each constant (so a
     // replay failure can be attributed back to the module it came from).
+    // Each module's `Vec<ConstantInfo>` is bridge-interned into the
+    // environment's persistent bank via `intern_module` and consumed
+    // (dropped) as it goes — `loaded.into_iter()` never holds more than
+    // one decoded module's Arc graph alive at a time, which is the
+    // memory win the migration to the id-native kernel buys (spec:
+    // docs/superpowers/specs/2026-07-06-term-bank-kernel-migration-design.md
+    // §2 "Load").
     let n = loaded.len();
-    let mut constants: HashMap<Arc<Name>, ConstantInfo> = HashMap::new();
+    let mut env = Environment::default();
+    let mut constants: HashMap<NameId, ConstantInfo> = HashMap::new();
     let mut owner: HashMap<Arc<Name>, Arc<Name>> = HashMap::new();
-    for (i, (mod_name, md)) in loaded.iter().enumerate() {
+    for (i, (mod_name, md)) in loaded.into_iter().enumerate() {
         eprintln!("checking {mod_name} ({}/{n})", i + 1);
         for c in &md.constants {
-            let cn = Arc::clone(c.name());
             owner
-                .entry(Arc::clone(&cn))
-                .or_insert_with(|| Arc::clone(mod_name));
-            constants.entry(cn).or_insert_with(|| c.clone());
+                .entry(Arc::clone(c.name()))
+                .or_insert_with(|| Arc::clone(&mod_name));
+        }
+        let interned = match env.intern_module(md.constants) {
+            Ok(interned) => interned,
+            Err(err) => {
+                eprintln!("error: {mod_name}: {err}");
+                return ExitCode::FAILURE;
+            }
+        };
+        for (name, ci) in interned {
+            constants.entry(name).or_insert(ci);
         }
     }
 
-    // `constants` already holds a clone of every `ConstantInfo` replay needs;
-    // release the decoded modules (~full-stdlib retention) before replay so
-    // they are not dead weight on the stack during the whole replay. `owner`
-    // is kept — it holds only `Arc<Name>`s, used for error attribution after
-    // replay returns. `loaded` is not referenced again below.
-    drop(loaded);
-
-    let mut env = Environment::default();
     match leanr_kernel::replay(&mut env, constants) {
         Ok(stats) => {
             println!(

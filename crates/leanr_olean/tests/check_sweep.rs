@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
+use leanr_kernel::bank::NameId;
 use leanr_kernel::{ConstantInfo, Environment, Name};
 use leanr_olean::{load_closure, SearchPath};
 
@@ -82,25 +83,32 @@ fn check_all_stdlib_oleans() {
 
     let sp = SearchPath::new(vec![root]);
     let modules = load_closure(&sp, &targets).expect("closure loads");
+    let module_count = modules.len();
 
-    // Union every module's constants (module oleans carry only their own
-    // module's constants, so the closure's constant sets are disjoint).
-    let mut constants: HashMap<Arc<Name>, ConstantInfo> = HashMap::new();
-    for (_, md) in &modules {
-        for c in &md.constants {
-            constants
-                .entry(Arc::clone(c.name()))
-                .or_insert_with(|| c.clone());
+    // Bridge-intern every module's constants into the environment's
+    // persistent bank one module at a time, dropping each decoded
+    // module's Arc graph before the next (the id-native kernel's
+    // memory-win line — spec:
+    // docs/superpowers/specs/2026-07-06-term-bank-kernel-migration-design.md
+    // §2 "Load"). Module oleans carry only their own module's constants,
+    // so the closure's constant sets are disjoint; first-seen wins on
+    // the rare cross-module name collision, matching the pre-migration
+    // Arc `HashMap::entry(...).or_insert(...)` fold this replaces.
+    let mut env = Environment::default();
+    let mut constants: HashMap<NameId, ConstantInfo> = HashMap::new();
+    for (_, md) in modules {
+        let interned = env
+            .intern_module(md.constants)
+            .unwrap_or_else(|e| panic!("stdlib interning failed: {e}"));
+        for (name, ci) in interned {
+            constants.entry(name).or_insert(ci);
         }
     }
 
-    let mut env = Environment::default();
     let stats = leanr_kernel::replay(&mut env, constants)
         .unwrap_or_else(|e| panic!("stdlib replay failed: {e}"));
     println!(
         "checked {} modules, {} declarations (skipped {} unsafe/partial)",
-        modules.len(),
-        stats.checked,
-        stats.skipped_unsafe
+        module_count, stats.checked, stats.skipped_unsafe
     );
 }

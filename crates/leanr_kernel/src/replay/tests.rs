@@ -1,54 +1,61 @@
-//! Unit tests for oracle-faithful replay (Task 12).
+//! Unit tests for oracle-faithful replay (migration Task 8: ported from
+//! the pre-flip `crate::replay::tests`, which dual-compared against the
+//! Arc replay this migration deletes — see that file's history,
+//! `git show 9b1c773:crates/leanr_kernel/src/replay/tests.rs`). Every
+//! test asserts the SAME `ReplayStats`/errors that file pinned, now
+//! directly against the id-native `replay`: fixtures are built as
+//! `ArcConstantInfo` (the decoder-boundary shape) and bridged into id
+//! form via `Environment::intern_module` — the real production bridge,
+//! not a test-only shortcut.
 //!
-//! These build small `ConstantInfo` maps and replay them from a fresh
-//! (or lightly pre-seeded) `Environment`. Where a test needs a real
-//! inductive with a regenerated constructor/recursor, it admits `Nat`
-//! once into a scratch env and reuses the KERNEL-regenerated infos as
-//! the "decoded" ones (`nat_world`) — so the postponed structural check
-//! compares like against like, and a deliberate tamper is the only thing
-//! that makes it fail.
+//! `nat_world` reproduces the old file's "kernel-regenerated `Nat`
+//! ctors/recursor" fixture the same way the old file did: admit `Nat`
+//! for real (`Environment::add_decl`), then bridge the KERNEL-REGENERATED
+//! ctor/recursor `ConstantInfo`s back to `Arc` form via `to_constant_info`
+//! so they can be fed back into `intern_module` as the "decoded" input —
+//! guaranteeing the postponed structural check compares like against
+//! like, so a deliberate tamper is the only thing that makes it fail
+//! (a hand-rolled fixture, even an oracle-faithful one, is not
+//! guaranteed to be byte-identical to what `add_inductive` computes —
+//! e.g. `testenv::mini::nat_decls()`'s recursor rules are NOT, which is
+//! why this doesn't just reuse them directly).
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
-use super::replay;
+use super::*;
 use crate::testenv::mini;
 use crate::testenv::{nm, nm2};
 use crate::{
-    AxiomVal, ConstantInfo, ConstantVal, Declaration, DefinitionSafety, DefinitionVal, Environment,
-    InductiveType, InductiveVal, KernelError, Name, Nat, OpaqueVal, TheoremVal,
+    to_constant_info, ArcAxiomVal, ArcConstantInfo, ArcConstantVal, ArcDeclaration,
+    ArcDefinitionVal, ArcInductiveType, ArcInductiveVal, ArcOpaqueVal, ArcTheoremVal,
+    DefinitionSafety, Environment, KernelError, Name, Nat, RecGuard,
 };
+use std::sync::Arc;
 
-// ---- builders -----------------------------------------------------------
+// ---- builders (Arc-side; bridged into id form via `intern_module`) ----
 
-fn cval(name: Arc<Name>, ty: Arc<crate::Expr>) -> ConstantVal {
-    ConstantVal {
+fn cval(name: Arc<Name>, ty: Arc<crate::Expr>) -> ArcConstantVal {
+    ArcConstantVal {
         name,
         level_params: vec![],
         ty,
     }
 }
 
-fn axiom(name: &str, ty: Arc<crate::Expr>, is_unsafe: bool) -> ConstantInfo {
-    ConstantInfo::Axiom(AxiomVal {
+fn axiom(name: &str, ty: Arc<crate::Expr>, is_unsafe: bool) -> ArcConstantInfo {
+    ArcConstantInfo::Axiom(ArcAxiomVal {
         val: cval(nm(name), ty),
         is_unsafe,
     })
 }
 
-fn map_of(infos: Vec<ConstantInfo>) -> HashMap<Arc<Name>, ConstantInfo> {
-    infos
-        .into_iter()
-        .map(|c| (Arc::clone(c.name()), c))
-        .collect()
-}
-
-/// `inductive Nat where | zero | succ (n : Nat)` — the testenv shape.
-fn nat_decl() -> Declaration {
-    Declaration::Inductive {
+/// `inductive Nat where | zero | succ (n : Nat)` — the testenv shape
+/// (`mini::nat()`/`mini::pi`), admitted for real so the resulting
+/// ctor/recursor `ConstantInfo`s are the KERNEL's own regenerated ones
+/// (see this module's doc comment).
+fn nat_decl_arc() -> ArcDeclaration {
+    ArcDeclaration::Inductive {
         lparams: vec![],
         nparams: Nat::from(0u64),
-        types: vec![InductiveType {
+        types: vec![ArcInductiveType {
             name: nm("Nat"),
             ty: mini::type1(),
             ctors: vec![
@@ -60,39 +67,79 @@ fn nat_decl() -> Declaration {
     }
 }
 
-/// The four constants the kernel produces when it admits `Nat`, keyed by
-/// name. Using the REGENERATED infos as the decoded ones guarantees the
-/// postponed ctor/recursor checks pass unless a test tampers with them.
-fn nat_world() -> HashMap<Arc<Name>, ConstantInfo> {
+/// The four constants the kernel produces when it admits `Nat`, bridged
+/// back to `Arc` form (the decoder-boundary shape `intern_module`
+/// expects) so they can be replayed as if freshly decoded. Using the
+/// REGENERATED infos as the decoded ones guarantees the postponed ctor/
+/// recursor checks pass unless a test tampers with them.
+fn nat_world() -> Vec<ArcConstantInfo> {
     let mut env = Environment::default();
-    env.add_decl(nat_decl()).expect("Nat admits");
+    let decl = env.intern_declaration(&nat_decl_arc()).unwrap();
+    env.add_decl(decl).expect("Nat admits");
     let names = [
         nm("Nat"),
         nm2("Nat", "zero"),
         nm2("Nat", "succ"),
         nm2("Nat", "rec"),
     ];
-    let mut m = HashMap::new();
-    for n in names {
-        let info = env.get(&n).expect("regenerated").clone();
-        m.insert(n, info);
-    }
-    m
+    let mut g = RecGuard::new();
+    names
+        .iter()
+        .map(|n| {
+            let nid = id_name(&mut env, n);
+            let ci = env.get(nid).expect("regenerated").clone();
+            to_constant_info(env.view().store, None, &ci, &mut g).unwrap()
+        })
+        .collect()
 }
 
-// ---- tests --------------------------------------------------------------
+fn tampered_nat_ctor_zero() -> Vec<ArcConstantInfo> {
+    let mut infos = nat_world();
+    for ci in infos.iter_mut() {
+        if let ArcConstantInfo::Ctor(v) = ci {
+            if *v.val.name == *nm2("Nat", "zero") {
+                v.num_fields = Nat::from(99u64);
+            }
+        }
+    }
+    infos
+}
+
+fn tampered_nat_rec() -> Vec<ArcConstantInfo> {
+    let mut infos = nat_world();
+    for ci in infos.iter_mut() {
+        if let ArcConstantInfo::Rec(v) = ci {
+            v.rules[0].rhs = mini::cst("bogus", vec![]);
+        }
+    }
+    infos
+}
+
+/// Look up a name already admitted into `env`'s persistent store.
+/// `Environment::intern_name` is `pub(crate)` — same-crate test code may
+/// call it directly; re-interning an already-present name is a no-op
+/// lookup (the interning invariant), never a fresh row.
+fn id_name(env: &mut Environment, n: &Arc<Name>) -> NameId {
+    env.intern_name(n).unwrap().unwrap()
+}
+
+// ---- ported replay tests ------------------------------------------------
 
 #[test]
 fn replays_nat_world_from_empty_env() {
     let mut env = Environment::default();
-    let stats = replay(&mut env, nat_world()).expect("Nat world replays");
+    let map = env.intern_module(nat_world()).unwrap();
+    let stats = replay(&mut env, map).expect("Nat world replays");
     // Only the inductive block is sent to the kernel; the constructors
     // and recursor are checked structurally, not counted.
     assert_eq!(stats.checked, 1);
     assert_eq!(stats.skipped_unsafe, 0);
-    assert!(env.get(&nm("Nat")).is_some());
-    assert!(env.get(&nm2("Nat", "zero")).is_some());
-    assert!(env.get(&nm2("Nat", "rec")).is_some());
+    let nat_id = id_name(&mut env, &nm("Nat"));
+    let nat_zero_id = id_name(&mut env, &nm2("Nat", "zero"));
+    let nat_rec_id = id_name(&mut env, &nm2("Nat", "rec"));
+    assert!(env.get(nat_id).is_some());
+    assert!(env.get(nat_zero_id).is_some());
+    assert!(env.get(nat_rec_id).is_some());
 }
 
 #[test]
@@ -102,7 +149,7 @@ fn replays_out_of_order_deps() {
     // `used_constants`.
     let a_ty = axiom("A", mini::sort0(), false);
     let a_val = axiom("a", mini::cst("A", vec![]), false);
-    let d = ConstantInfo::Defn(DefinitionVal {
+    let d = ArcConstantInfo::Defn(ArcDefinitionVal {
         val: cval(nm("d"), mini::cst("A", vec![])),
         value: mini::cst("a", vec![]),
         hints: crate::ReducibilityHints::Regular(0),
@@ -111,14 +158,16 @@ fn replays_out_of_order_deps() {
     });
     // Insert value-first so at least one iteration order starts at a
     // dependent — the outcome must not depend on it.
-    let map = map_of(vec![d, a_val, a_ty]);
+    let module = vec![d, a_val, a_ty];
 
     let mut env = Environment::default();
+    let map = env.intern_module(module).unwrap();
     let stats = replay(&mut env, map).expect("chain replays");
     assert_eq!(stats.checked, 3);
-    assert!(env.get(&nm("A")).is_some());
-    assert!(env.get(&nm("a")).is_some());
-    assert!(env.get(&nm("d")).is_some());
+    for n in [nm("A"), nm("a"), nm("d")] {
+        let id = id_name(&mut env, &n);
+        assert!(env.get(id).is_some(), "{n} missing from env");
+    }
 }
 
 #[test]
@@ -126,60 +175,64 @@ fn skips_unsafe_and_partial() {
     let safe = axiom("s", mini::sort0(), false);
     let unsafe_ax = axiom("u", mini::sort0(), true);
     // A partial def is never checked, so its (bogus) value is irrelevant.
-    let partial = ConstantInfo::Defn(DefinitionVal {
+    let partial = ArcConstantInfo::Defn(ArcDefinitionVal {
         val: cval(nm("p"), mini::type1()),
         value: mini::sort0(),
         hints: crate::ReducibilityHints::Regular(0),
         safety: DefinitionSafety::Partial,
         all: vec![nm("p")],
     });
-    let map = map_of(vec![safe, unsafe_ax, partial]);
+    let module = vec![safe, unsafe_ax, partial];
 
     let mut env = Environment::default();
+    let map = env.intern_module(module).unwrap();
     let stats = replay(&mut env, map).expect("safe part replays");
     assert_eq!(stats.checked, 1);
     assert_eq!(stats.skipped_unsafe, 2);
-    assert!(env.get(&nm("s")).is_some());
-    assert!(env.get(&nm("u")).is_none(), "unsafe never admitted");
-    assert!(env.get(&nm("p")).is_none(), "partial never admitted");
+    let s_id = id_name(&mut env, &nm("s"));
+    let u_id = id_name(&mut env, &nm("u"));
+    let p_id = id_name(&mut env, &nm("p"));
+    assert!(env.get(s_id).is_some());
+    assert!(env.get(u_id).is_none(), "unsafe never admitted");
+    assert!(env.get(p_id).is_none(), "partial never admitted");
 }
 
 #[test]
 fn thm_duplicate_tolerated() {
-    // Pre-seed an env with `A : Prop`, `a : A`, and theorem `T : A := a`.
-    let mut env = Environment::default();
-    env.add_decl(Declaration::Axiom(AxiomVal {
-        val: cval(nm("A"), mini::sort0()),
-        is_unsafe: false,
-    }))
-    .unwrap();
-    env.add_decl(Declaration::Axiom(AxiomVal {
-        val: cval(nm("a"), mini::cst("A", vec![])),
-        is_unsafe: false,
-    }))
-    .unwrap();
-    let thm = |all: Vec<Arc<Name>>| {
-        ConstantInfo::Thm(TheoremVal {
+    // Pre-seed an env with `A : Prop`, `a : A`, and theorem `T : A := a`,
+    // via `replay` itself (exercising the same public bridge/admission
+    // surface the actual test payload below uses).
+    fn seed_constants() -> Vec<ArcConstantInfo> {
+        vec![
+            axiom("A", mini::sort0(), false),
+            axiom("a", mini::cst("A", vec![]), false),
+            thm_ci(vec![nm("T")]),
+        ]
+    }
+    fn thm_ci(all: Vec<Arc<Name>>) -> ArcConstantInfo {
+        ArcConstantInfo::Thm(ArcTheoremVal {
             val: cval(nm("T"), mini::cst("A", vec![])),
             value: mini::cst("a", vec![]),
             all,
         })
-    };
-    let ConstantInfo::Thm(seed) = thm(vec![nm("T")]) else {
-        unreachable!()
-    };
-    env.add_decl(Declaration::Thm(seed)).unwrap();
+    }
+
+    let mut env = Environment::default();
+    let seed_map = env.intern_module(seed_constants()).unwrap();
+    replay(&mut env, seed_map).expect("seed replays");
 
     // Replaying a STRUCTURALLY IDENTICAL theorem is tolerated: no
     // re-admission (checked stays 0), no `AlreadyDeclared`.
-    let dup = map_of(vec![thm(vec![nm("T")])]);
-    let stats = replay(&mut env, dup).expect("duplicate theorem tolerated");
+    let dup_map = env.intern_module(vec![thm_ci(vec![nm("T")])]).unwrap();
+    let stats = replay(&mut env, dup_map).expect("duplicate theorem tolerated");
     assert_eq!(stats.checked, 0, "duplicate not re-sent to the kernel");
 
-    // A theorem with the same name but a different `all` is NOT tolerated:
-    // it hits `add_decl`, which rejects the name clash.
-    let differing = map_of(vec![thm(vec![nm("T"), nm("Other")])]);
-    let err = replay(&mut env, differing).expect_err("non-identical duplicate rejected");
+    // A theorem with the same name but a different `all` is NOT
+    // tolerated: it hits `add_decl`, which rejects the name clash.
+    let differing_map = env
+        .intern_module(vec![thm_ci(vec![nm("T"), nm("Other")])])
+        .unwrap();
+    let err = replay(&mut env, differing_map).expect_err("non-identical duplicate rejected");
     assert_eq!(err.error, KernelError::AlreadyDeclared(nm("T")));
     assert_eq!(err.decl, nm("T"));
 }
@@ -189,7 +242,7 @@ fn missing_dep_is_error() {
     // An inductive whose constructor name is absent from the module set:
     // the oracle's `newConstants[n]!` panic becomes a clean
     // `MissingConstant` for us (untrusted input).
-    let foo = ConstantInfo::Induct(InductiveVal {
+    let module = vec![ArcConstantInfo::Induct(ArcInductiveVal {
         val: cval(nm("Foo"), mini::type1()),
         num_params: Nat::from(0u64),
         num_indices: Nat::from(0u64),
@@ -199,32 +252,25 @@ fn missing_dep_is_error() {
         is_rec: false,
         is_unsafe: false,
         is_reflexive: false,
-    });
-    let map = map_of(vec![foo]);
+    })];
 
     let mut env = Environment::default();
+    let map = env.intern_module(module).unwrap();
     let err = replay(&mut env, map).expect_err("missing ctor is an error");
     assert_eq!(err.error, KernelError::MissingConstant(nm2("Foo", "mk")));
     // No panic, and the env is untouched by the failed block.
-    assert!(env.get(&nm("Foo")).is_none());
+    let foo_id = id_name(&mut env, &nm("Foo"));
+    assert!(env.get(foo_id).is_none());
 }
 
 #[test]
 fn postponed_ctor_mismatch_detected() {
-    // Tamper the decoded `Nat.zero`'s `num_fields`. The kernel regenerates
-    // the real ctor (num_fields = 0) when it admits `Nat`; the postponed
-    // structural check then rejects the tampered decoded one.
-    let mut map = nat_world();
-    let tampered = match map.get(&nm2("Nat", "zero")).unwrap().clone() {
-        ConstantInfo::Ctor(mut v) => {
-            v.num_fields = Nat::from(99u64);
-            ConstantInfo::Ctor(v)
-        }
-        _ => unreachable!(),
-    };
-    map.insert(nm2("Nat", "zero"), tampered);
-
+    // Tamper the decoded `Nat.zero`'s `num_fields`. The kernel
+    // regenerates the real ctor (num_fields = 0) when it admits `Nat`;
+    // the postponed structural check then rejects the tampered decoded
+    // one.
     let mut env = Environment::default();
+    let map = env.intern_module(tampered_nat_ctor_zero()).unwrap();
     let err = replay(&mut env, map).expect_err("tampered ctor rejected");
     assert_eq!(
         err.error,
@@ -235,17 +281,8 @@ fn postponed_ctor_mismatch_detected() {
 #[test]
 fn postponed_rec_mismatch_detected() {
     // Tamper the decoded `Nat.rec`'s first rule rhs.
-    let mut map = nat_world();
-    let tampered = match map.get(&nm2("Nat", "rec")).unwrap().clone() {
-        ConstantInfo::Rec(mut v) => {
-            v.rules[0].rhs = mini::cst("bogus", vec![]);
-            ConstantInfo::Rec(v)
-        }
-        _ => unreachable!(),
-    };
-    map.insert(nm2("Nat", "rec"), tampered);
-
     let mut env = Environment::default();
+    let map = env.intern_module(tampered_nat_rec()).unwrap();
     let err = replay(&mut env, map).expect_err("tampered recursor rejected");
     assert_eq!(err.error, KernelError::RecursorMismatch(nm2("Nat", "rec")));
 }
@@ -255,15 +292,17 @@ fn opaque_replays() {
     // Sanity: the opaque arm goes through `add_decl` and is counted.
     let a_ty = axiom("A", mini::sort0(), false);
     let a_val = axiom("a", mini::cst("A", vec![]), false);
-    let w = ConstantInfo::Opaque(OpaqueVal {
+    let w = ArcConstantInfo::Opaque(ArcOpaqueVal {
         val: cval(nm("w"), mini::cst("A", vec![])),
         value: mini::cst("a", vec![]),
         is_unsafe: false,
         all: vec![nm("w")],
     });
-    let map = map_of(vec![a_ty, a_val, w]);
+    let module = vec![a_ty, a_val, w];
     let mut env = Environment::default();
+    let map = env.intern_module(module).unwrap();
     let stats = replay(&mut env, map).expect("opaque replays");
     assert_eq!(stats.checked, 3);
-    assert!(env.get(&nm("w")).is_some());
+    let w_id = id_name(&mut env, &nm("w"));
+    assert!(env.get(w_id).is_some());
 }

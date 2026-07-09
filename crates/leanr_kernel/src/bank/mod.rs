@@ -1,11 +1,16 @@
 //! Index-based term bank (spec:
 //! docs/superpowers/specs/2026-07-06-compact-expr-term-bank-design.md).
 //!
-//! Phase 1: standalone next to the `Arc<Expr>` representation; nothing
-//! in the production kernel path uses this module yet. Every id type
-//! carries a region bit (persistent env bank vs per-declaration
-//! scratch); the low 31 bits of the raw bits are never 0, so probe
-//! tables can use 0 as the empty sentinel.
+//! Phase 2 (kernel-migration flip, `docs/superpowers/specs/
+//! 2026-07-06-term-bank-kernel-migration-design.md`): this bank IS the
+//! kernel's term representation. `decl.rs`, `local_ctx.rs`, `subst.rs`,
+//! `tc.rs`, `quot.rs`/`quot_red.rs`, `inductive.rs`, `env.rs`, and
+//! `replay.rs` (all one level up, at the crate root) run entirely on
+//! `ExprId`/`NameId`/`LevelId`; only the phase-1 storage primitives
+//! (`Store` and its side pools/probe table/scratch machinery) live in
+//! this module. Every id type carries a region bit (persistent env bank
+//! vs per-declaration scratch); the low 31 bits of the raw bits are
+//! never 0, so probe tables can use 0 as the empty sentinel.
 
 pub mod levels;
 pub mod names;
@@ -695,5 +700,7 @@ impl Store {
     }
 }
 
+#[cfg(test)]
+pub(crate) mod testgen;
 #[cfg(test)]
 mod tests;

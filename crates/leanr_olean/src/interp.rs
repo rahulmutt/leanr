@@ -12,11 +12,19 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+// `Arc*` aliased to their pre-migration bare names: this module decodes
+// `.olean` bytes into the `Arc`-based decoder-boundary `ConstantInfo`
+// (kernel migration Task 8 renamed the Arc-side declaration types with
+// an `Arc` prefix since the plain names now name the id-native kernel
+// types — see `leanr_kernel::decl`'s module doc). Aliasing keeps this
+// file's decode logic byte-for-byte unchanged.
 use leanr_kernel::{
-    AxiomVal, BinderInfo, ConstantInfo, ConstantVal, ConstructorVal, DataValue, DefinitionSafety,
-    DefinitionVal, Expr, InductiveVal, Int, KVMap, Level, Literal, Name, Nat, OpaqueVal,
-    Preresolved, QuotKind, QuotVal, RecGuard, RecursorRule, RecursorVal, ReducibilityHints,
-    SourceInfo, Substring, Syntax, TheoremVal,
+    ArcAxiomVal as AxiomVal, ArcConstantInfo as ConstantInfo, ArcConstantVal as ConstantVal,
+    ArcConstructorVal as ConstructorVal, ArcDefinitionVal as DefinitionVal,
+    ArcInductiveVal as InductiveVal, ArcOpaqueVal as OpaqueVal, ArcQuotVal as QuotVal,
+    ArcRecursorRule as RecursorRule, ArcRecursorVal as RecursorVal, ArcTheoremVal as TheoremVal,
+    BinderInfo, DataValue, DefinitionSafety, Expr, Int, KVMap, Level, Literal, Name, Nat,
+    Preresolved, QuotKind, RecGuard, ReducibilityHints, SourceInfo, Substring, Syntax,
 };
 use num_bigint::{BigInt, BigUint};
 

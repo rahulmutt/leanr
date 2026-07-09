@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use leanr_kernel::{ConstantInfo, Expr, Name, RecGuard};
+use leanr_kernel::{ArcConstantInfo as ConstantInfo, Expr, Name, RecGuard};
 
 use crate::{interp::Interp, raw, OleanError};
 
