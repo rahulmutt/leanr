@@ -7,3 +7,8 @@ license.workspace = true
 [dependencies]
 num-bigint = { workspace = true }
 stacker = "0.1"
+
+[features]
+# Off by default: gates reduction-step instrumentation used only by the
+# Result-B diagnosis spike. The shipped TCB compiles with this off.
+trace-reductions = []

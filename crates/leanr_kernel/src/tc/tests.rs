@@ -416,6 +416,37 @@ fn iota_on_literal_major() {
     assert_eq!(r, xid(&mut scratch, base, &expected));
 }
 
+#[cfg(feature = "trace-reductions")]
+#[test]
+fn trace_counts_nat_rec_reductions() {
+    use crate::tc::trace;
+    trace::reset();
+    let env = mini::env();
+    let mut scratch = Store::scratch();
+    let base = env.view().store;
+    let (cc, z, s) = (
+        mini::cst("C", vec![]),
+        mini::cst("z", vec![]),
+        mini::cst("s", vec![]),
+    );
+    let natrec = mini::cstn(nm2("Nat", "rec"), vec![zero_lvl()]);
+    let e = mini::appn(natrec, vec![cc, z, s, lit_nat(3)]);
+    let mut cur = xid(&mut scratch, base, &e);
+    let mut checker = TypeChecker::new(env.view(), &mut scratch);
+    // `whnf` fires the recursor exactly once per call (weak head normal
+    // form does not recurse into the minor premise's arguments; see
+    // `iota_on_literal_major` above, which pins `whnf(rec ... 2) = s 1
+    // (rec ... 1)` — the nested `rec` stays unreduced). Walking literal
+    // 3 down through 2, 1, 0 by re-`whnf`-ing the nested `Nat.rec`
+    // argument three times gives 3 real recursor firings.
+    for _ in 0..3 {
+        let r = checker.whnf(cur).unwrap();
+        let args = checker.get_app_args(r);
+        cur = *args.last().expect("succ minor applied to (n, ih)");
+    }
+    assert!(trace::total() >= 3, "snapshot: {:?}", trace::snapshot());
+}
+
 #[test]
 fn k_like_rec_on_eq() {
     // whnf(Eq.rec.{0,1} A a0 Mot req a0 h) = req, where h : @Eq.{1} A a0 a0

@@ -31,6 +31,8 @@ use crate::{
     MAX_REC_DEPTH,
 };
 
+pub(crate) mod trace;
+
 /// Stack-growth constants: identical to `RecGuard`'s (guard.rs), which
 /// are private there.
 const RED_ZONE: usize = 128 * 1024;
@@ -1810,6 +1812,19 @@ impl<'e> TypeChecker<'e> {
             Some(r) => r.clone(),
             None => return Ok(None),
         };
+        {
+            let callee = self
+                .scratch
+                .to_name(Some(self.view.store), rec_name)
+                .to_string();
+            let kind = match self.node(major) {
+                Node::App { .. } => "app-ctor",
+                Node::Const { .. } => "const-ctor",
+                Node::LitNat { .. } => "lit-nat",
+                _ => "other",
+            };
+            trace::record(&callee, kind);
+        }
         let major_args = self.get_app_args(major);
         let nfields = match nat_to_usize(&rule.nfields) {
             Some(v) => v,
