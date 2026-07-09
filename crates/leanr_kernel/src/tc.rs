@@ -1812,11 +1812,21 @@ impl<'e> TypeChecker<'e> {
             Some(r) => r.clone(),
             None => return Ok(None),
         };
+        // Gated in its ENTIRETY (not just the `trace::record` call): the
+        // name rendering below allocates a String + `Arc<Name>` per name
+        // component (the cold-path-only construction tc.rs:785-787
+        // documents), so it must not run on this hot recursor path when
+        // the feature is off. Feature-off ⇒ zero new runtime work here.
+        #[cfg(feature = "trace-reductions")]
         {
             let callee = self
                 .scratch
                 .to_name(Some(self.view.store), rec_name)
                 .to_string();
+            // `major` is already normalized to constructor form above
+            // (nat_lit_to_constructor / to_cnstr_when_structure), so the
+            // `LitNat` arm can never fire here; kept for defensiveness so
+            // an unexpected shape lands in a labeled bucket, not a panic.
             let kind = match self.node(major) {
                 Node::App { .. } => "app-ctor",
                 Node::Const { .. } => "const-ctor",
