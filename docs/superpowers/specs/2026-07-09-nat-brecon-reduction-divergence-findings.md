@@ -11,11 +11,12 @@
 ## TL;DR
 
 - **Pinned eager-force site:** the `lazy_delta_reduction` loop at
-  **`tc.rs:2813`**, whose per-iteration force is **`unfold_and_whnf` at
-  `tc.rs:2800`** (its `whnf_core(u, false, /*cheap_proj=*/true)` at
-  `tc.rs:2802`). Recursors fire beneath it at `whnf_core`'s recursor
-  dispatch **`tc.rs:1506`** → `reduce_recursor` (`tc.rs:1748`) →
-  `inductive_reduce_rec` (`tc.rs:1752`).
+  **`tc.rs:2713`** (fn at `tc.rs:2708`), whose per-iteration force is
+  **`unfold_and_whnf` at `tc.rs:2700`** (its
+  `whnf_core(u, false, /*cheap_proj=*/true)` at `tc.rs:2702`). Recursors
+  fire beneath it at `whnf_core`'s recursor dispatch **`tc.rs:1506`** →
+  `reduce_recursor` (`tc.rs:1748`) → `inductive_reduce_rec`
+  (`tc.rs:1752`).
 - **Offending `(callee, major_kind, count)`:** `(Nat.rec, "app-ctor",
   ≥ 6_164_429 and climbing linearly)`. It splits ~2:1 into two
   co-descending walks: a `Nat.beq` Bool-valued recursion (~2/3) and its
@@ -61,17 +62,17 @@ and one `std::backtrace` capture — all since reverted) established:
    A deep whnf/recursor Rust recursion would have shown depth growing
    into the hundreds of thousands (the `MAX_REC_DEPTH` cap is 1e6). The
    captured backtrace confirmed the driver frame is a single
-   `lazy_delta_reduction` `loop {}` at `tc.rs:2813`:
+   `lazy_delta_reduction` `loop {}` at `tc.rs:2713`:
 
    ```
    inductive_reduce_rec (record site)
    reduce_recursor           tc.rs:1748
    whnf_core (recursor fire)  tc.rs:1506
    whnf_core (beta)           tc.rs:1504
-   unfold_and_whnf            tc.rs:2802
-   lazy_delta_reduction_step  tc.rs:2832
-   lazy_delta_reduction  (LOOP) tc.rs:2813
-   is_def_eq_core             tc.rs:2896
+   unfold_and_whnf            tc.rs:2702
+   lazy_delta_reduction_step  tc.rs:2642
+   lazy_delta_reduction  (LOOP) tc.rs:2713
+   is_def_eq_core             tc.rs:2768
    … is_def_eq / infer_app / infer_type_core (deep proof term) …
    ```
 
@@ -102,15 +103,16 @@ large `Nat` values via `Nat.beq`. `Nat.beq` is compiled with structural
 recursion through `Nat.brecOn` / `Nat.rec` + `Nat.below`. Real Lean's
 kernel evaluates `Nat.beq a b` on literal-reducible operands **natively**
 (GMP, O(1)) and never forces the `Nat.below` course-of-values tower. Our
-kernel's native short-circuit (`reduce_nat`, `tc.rs:2107`, which handles
-`"beq"`/`"ble"` at `tc.rs:2196-2197`) is only reachable from the
+kernel's native short-circuit (`reduce_nat`, `tc.rs:2005`, which handles
+`"beq"`/`"ble"` at `tc.rs:2094-2095`) is only reachable from the
 top-level `whnf` (`tc.rs:1420`) and from `lazy_delta_reduction`'s
-`!has_fvar` branch (`tc.rs:2850`) — **both key on the `Nat.beq` const**.
+`!has_fvar` branch (`tc.rs:2718`, calls at `tc.rs:2719`/`tc.rs:2722`) —
+**both key on the `Nat.beq` const**.
 On the `is_def_eq` path the term is reduced with `whnf_core` (which never
 consults `reduce_nat`) and, once one `lazy_delta_reduction_step` delta-
 unfolds `Nat.beq` into its `Nat.beq._f`/`brecOn` body, the native
 fast-path can no longer match it. From there `lazy_delta_reduction`
-(`tc.rs:2813`) walks the `Nat.below` tower one level per iteration —
+(`tc.rs:2713`) walks the `Nat.below` tower one level per iteration —
 ~1e6 iterations, ~4 `Nat.rec` fires each — blowing the transient from
 ~0.55 GiB to ~25 GiB and never finishing. Nothing forces the tower
 except this bypass; the walk is a lockstep descent of the value recursion
@@ -132,7 +134,7 @@ Task 4; the gated tally + periodic dump make it observable.
 
 **Justification (per the design's selection criterion):** the over-force
 lives in **shared whnf / `is_def_eq` machinery** —
-`lazy_delta_reduction` (`tc.rs:2813`) + `unfold_and_whnf` (`tc.rs:2800`)
+`lazy_delta_reduction` (`tc.rs:2713`) + `unfold_and_whnf` (`tc.rs:2700`)
 walking a `Nat`-native operation's `brecOn` body — not in a dedicated
 `Nat.below` reducer. The below tower is materialized *only because* the
 native `Nat.beq`/`Nat.ble` reduction is not applied on this path; once it
@@ -145,7 +147,7 @@ ruled out by the linear (`max_repeats = 5`) walk.
 
 **Oracle anchor for Task 4.** The reduction that must reach this path is
 Lean's native `Nat` reduction (`src/kernel/type_checker.cpp` `reduce_nat`,
-mirrored here at `tc.rs:2107`), applied to `Nat.beq`/`Nat.ble` before the
+mirrored here at `tc.rs:2005`), applied to `Nat.beq`/`Nat.ble` before the
 `brecOn` body is walked. Invariant preserved: the *reduction result* is
 unchanged (`Nat.beq a b` and its `brecOn` unfolding are definitionally
 the bool); only force-order / laziness changes — verdict-preserving by
@@ -162,7 +164,7 @@ it; and/or (ii) guard `lazy_delta_reduction_step` / `unfold_definition`
 so a `Nat.beq`/`Nat.ble` const with literal-reducible, fvar-free operands
 is natively reduced rather than delta-unfolded. **Residual to resolve in
 Task 4:** the precise reason the *first* unfold escaped the existing
-`reduce_nat` guards (`tc.rs:1420` / `tc.rs:2850`) — i.e., whether an
+`reduce_nat` guards (`tc.rs:1420` / `tc.rs:2718`) — i.e., whether an
 operand was not yet literal-reducible at that instant — which decides
 between (i) and (ii). The site and branch (F1) are firm; only the exact
 insertion point remains a fix-design choice.
