@@ -1,7 +1,7 @@
 //! Integration: decode fixture `.olean`s and replay them through the
 //! kernel (Task 12). This is where decoded modules meet the checker.
 //!
-//! Direct-to-id port (M1b Task 6): `ModuleDataId::{parse, parse_parts}`
+//! Direct-to-id port (M1b Task 6): `ModuleData::{parse, parse_parts}`
 //! and `load_closure` decode straight into the caller's `Environment`
 //! store — decode IS interning (phase 3, term-bank kernel migration).
 //! No bridge/intern step remains between decode and replay.
@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use leanr_kernel::bank::NameId;
 use leanr_kernel::{ConstantInfo, Declaration, Environment, Name};
-use leanr_olean::{load_closure, ModuleDataId, PartKind, SearchPath};
+use leanr_olean::{load_closure, ModuleData, PartKind, SearchPath};
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -27,7 +27,7 @@ fn fixture_path(name: &str) -> PathBuf {
 fn prelude0_replays_from_empty_env() {
     let bytes = std::fs::read(fixture_path("Prelude0.olean")).unwrap();
     let mut env = Environment::default();
-    let m = ModuleDataId::parse(&bytes, env.store_mut()).unwrap();
+    let m = ModuleData::parse(&bytes, env.store_mut()).unwrap();
     assert!(m.imports.is_empty(), "Prelude0 imports nothing");
     let constants: HashMap<NameId, ConstantInfo> =
         m.constants.into_iter().map(|c| (c.name(), c)).collect();
@@ -93,7 +93,7 @@ fn modpriv_parts_replay_from_empty_env() {
     let private = read("ModPriv.olean.private");
 
     let mut env = Environment::default();
-    let md = ModuleDataId::parse_parts(
+    let md = ModuleData::parse_parts(
         &[
             (PartKind::Base, &base),
             (PartKind::Server, &server),
@@ -259,7 +259,7 @@ fn assert_verdicts_match(build_base: impl Fn(&mut Environment), mutant_bytes: &[
     for (name, oracle) in &verdicts {
         let mut env = Environment::default();
         build_base(&mut env);
-        let mutants = ModuleDataId::parse(mutant_bytes, env.store_mut())
+        let mutants = ModuleData::parse(mutant_bytes, env.store_mut())
             .expect("mutants decode")
             .constants;
         let ci = mutants
@@ -306,7 +306,7 @@ fn mutation_verdicts_hermetic() {
 
     assert_verdicts_match(
         |env| {
-            let base = ModuleDataId::parse(&base_bytes, env.store_mut())
+            let base = ModuleData::parse(&base_bytes, env.store_mut())
                 .expect("MutBase decodes")
                 .constants;
             for ci in base {

@@ -33,7 +33,7 @@
 //!   (`mkModuleData`, Environment.lean:1843-1852).
 //!
 //! [`FileSource`] loads all present parts of a found module together via
-//! [`ModuleDataId::parse_parts`] (M1b Task 13a's multi-region decoder), so a
+//! [`ModuleData::parse_parts`] (M1b Task 13a's multi-region decoder), so a
 //! public constant that references a `_private.*` helper living in the
 //! `.olean.private` part now resolves during replay. Missing companion parts
 //! are fine (pre-module-system oleans have none); a malformed companion is a
@@ -47,7 +47,7 @@ use std::sync::Arc;
 use leanr_kernel::bank::Store;
 use leanr_kernel::Name;
 
-use crate::{ModuleDataId, OleanError, PartKind};
+use crate::{ModuleData, OleanError, PartKind};
 
 /// An ordered list of directories to resolve module names against.
 ///
@@ -205,7 +205,7 @@ trait ModuleSource {
 }
 
 /// Production [`ModuleSource`]: resolve names on a [`SearchPath`], read the
-/// bytes, and decode with [`ModuleDataId::parse`] directly into `st` (the
+/// bytes, and decode with [`ModuleData::parse`] directly into `st` (the
 /// caller's store — direct-to-id decode, phase 3).
 struct FileSource<'a> {
     search_path: &'a SearchPath,
@@ -213,9 +213,9 @@ struct FileSource<'a> {
 }
 
 impl ModuleSource for FileSource<'_> {
-    type Module = ModuleDataId;
+    type Module = ModuleData;
 
-    fn load(&mut self, module: &Name) -> Result<ModuleDataId, LoadError> {
+    fn load(&mut self, module: &Name) -> Result<ModuleData, LoadError> {
         let path = self
             .search_path
             .find(module)
@@ -223,7 +223,7 @@ impl ModuleSource for FileSource<'_> {
         load_module_at(&path, self.st)
     }
 
-    fn imports(module: &ModuleDataId) -> Vec<Arc<Name>> {
+    fn imports(module: &ModuleData) -> Vec<Arc<Name>> {
         module
             .imports
             .iter()
@@ -255,13 +255,13 @@ fn companion_path(base: &Path, ext: &str) -> PathBuf {
 /// loaded only as a dependency of `.private` (a `.private` part's pointers
 /// can target objects deduplicated into the `.server` region). A missing
 /// companion is fine — pre-module-system oleans have none.
-fn load_module_at(base: &Path, st: &mut Store) -> Result<ModuleDataId, LoadError> {
+fn load_module_at(base: &Path, st: &mut Store) -> Result<ModuleData, LoadError> {
     let base_bytes = read_part(base)?;
 
     let private = companion_path(base, "private");
     if !private.is_file() {
         // No `.private` companion: a plain single-region module.
-        return ModuleDataId::parse(&base_bytes, st).map_err(|source| LoadError::Decode {
+        return ModuleData::parse(&base_bytes, st).map_err(|source| LoadError::Decode {
             path: base.to_path_buf(),
             source,
         });
@@ -300,7 +300,7 @@ fn load_module_at(base: &Path, st: &mut Store) -> Result<ModuleDataId, LoadError
     }
     parts.push((PartKind::Private, &private_bytes));
 
-    ModuleDataId::parse_parts(&parts, st).map_err(|source| LoadError::Decode {
+    ModuleData::parse_parts(&parts, st).map_err(|source| LoadError::Decode {
         path: base.to_path_buf(),
         source,
     })
@@ -328,7 +328,7 @@ pub fn load_closure(
     sp: &SearchPath,
     targets: &[Arc<Name>],
     st: &mut Store,
-) -> Result<LoadedModules<ModuleDataId>, LoadError> {
+) -> Result<LoadedModules<ModuleData>, LoadError> {
     load_closure_with(
         &mut FileSource {
             search_path: sp,
@@ -656,7 +656,7 @@ mod tests {
     #[test]
     fn load_closure_reads_and_decodes_real_olean() {
         // `Prelude0` is the committed import-free fixture, so its closure is
-        // just itself — this exercises find → read → ModuleDataId::parse.
+        // just itself — this exercises find → read → ModuleData::parse.
         let sp = SearchPath::new(vec![fixtures_dir()]);
         let mut st = Store::persistent();
         let result = load_closure(&sp, &[name("Prelude0")], &mut st).unwrap();

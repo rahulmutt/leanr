@@ -1,11 +1,11 @@
 //! Phase B, id-emitting (term-bank phase 3): interpret the validated
-//! [`RawValue`] DAG directly into term-bank ids. Mirrors `interp.rs`
-//! conversion-for-conversion (same oracle citations, same shape
-//! checks); only the output representation differs — decoding IS
-//! interning, with per-type memos mapping one file offset to one id.
-//! `Syntax` subtrees remain Arc trees (opaque kernel payload, ptr-eq
-//! semantics — spec non-goal) and are decoded by the embedded Arc
-//! [`Interp`].
+//! [`RawValue`] DAG directly into term-bank ids. This is the ONLY
+//! decode path (the differential-gated Arc path it was checked against
+//! is deleted; see `interp.rs`'s module doc) — decoding IS interning,
+//! with per-type memos mapping one file offset to one id. `Syntax`
+//! subtrees remain Arc trees (opaque kernel payload, ptr-eq semantics —
+//! spec non-goal) and are decoded by the embedded Arc [`Interp`], which
+//! also supplies `Name` decoding for `Import.module`.
 
 use std::collections::HashMap;
 
@@ -36,17 +36,9 @@ pub(crate) struct InterpId<'s> {
 
 impl<'s> InterpId<'s> {
     pub(crate) fn new(st: &'s mut Store) -> InterpId<'s> {
-        InterpId::with_arc(st, Interp::new())
-    }
-
-    /// Differential-gate constructor: adopt an Arc interpreter whose
-    /// memos are already populated, so `Syntax` payloads are the SAME
-    /// `Arc`s the Arc path produced (kvmap rows compare `Syntax` by
-    /// ptr-eq — required for exact id-for-id equality in the gate).
-    pub(crate) fn with_arc(st: &'s mut Store, arc: Interp) -> InterpId<'s> {
         InterpId {
             st,
-            arc,
+            arc: Interp::new(),
             names: HashMap::new(),
             levels: HashMap::new(),
             exprs: HashMap::new(),
@@ -524,9 +516,9 @@ impl<'s> InterpId<'s> {
     }
 
     /// ModuleData (Environment.lean:109-129).
-    pub(crate) fn module_data(&mut self, root: &Raw) -> Result<crate::ModuleDataId, OleanError> {
+    pub(crate) fn module_data(&mut self, root: &Raw) -> Result<crate::ModuleData, OleanError> {
         let (f, s) = ctor(root, 0, 5, "ModuleData")?;
-        Ok(crate::ModuleDataId {
+        Ok(crate::ModuleData {
             is_module: boolean(s.first(), "ModuleData.isModule")?,
             imports: array(&f[0])?
                 .iter()
@@ -546,153 +538,5 @@ impl<'s> InterpId<'s> {
                 .collect::<Result<_, _>>()?,
             num_entries: array(&f[4])?.len(),
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::interp::Interp;
-    use leanr_kernel::{constant_info_eq, Environment};
-    use std::path::PathBuf;
-    use std::sync::Arc;
-
-    fn fixture(name: &str) -> Vec<u8> {
-        std::fs::read(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../tests/fixtures")
-                .join(name),
-        )
-        .unwrap()
-    }
-
-    /// The phase-3 differential gate, single-store exact form (spec:
-    /// 2026-07-10-direct-to-id-decode-design.md, "Differential gate"):
-    /// Arc-decode-then-bridge and direct-decode into the SAME store
-    /// must yield id-for-id identical constants. The Arc interpreter
-    /// is handed on to the id interpreter so `Syntax` payloads are
-    /// pointer-identical — kvmap rows compare `Syntax` by ptr-eq, so
-    /// without sharing, syntax-bearing mdata would spuriously mint
-    /// distinct KVMapIds. Returns the constant count for sweep totals.
-    pub(super) fn assert_paths_agree(bytes: &[u8]) -> usize {
-        let root = crate::raw::parse_bytes(bytes).expect("raw parses");
-
-        // Arc path first (populates the shared syntax/name memos).
-        let mut arc_interp = Interp::new();
-        let arc_md = arc_interp.module_data(&root).expect("arc decodes");
-        let arc_names: Vec<Arc<leanr_kernel::Name>> = arc_md
-            .constants
-            .iter()
-            .map(|c| Arc::clone(c.name()))
-            .collect();
-
-        let mut env = Environment::default();
-        let bridged = env.intern_module(arc_md.constants).expect("bridge interns");
-
-        // Direct path, same store, shared Arc interpreter.
-        let direct = {
-            let mut interp = InterpId::with_arc(env.store_mut(), arc_interp);
-            interp.module_data(&root).expect("direct decodes")
-        };
-
-        assert_eq!(
-            direct.constants.len(),
-            arc_names.len(),
-            "constant counts differ between decode paths"
-        );
-        for (ci, arc_name) in direct.constants.iter().zip(&arc_names) {
-            let expect_name = env
-                .store_mut()
-                .intern_name(None, arc_name)
-                .expect("name interns")
-                .expect("declaration names are never anonymous");
-            assert_eq!(
-                ci.name(),
-                expect_name,
-                "constant order/name differs: {arc_name}"
-            );
-            let b = bridged
-                .get(&ci.name())
-                .unwrap_or_else(|| panic!("{arc_name} missing from bridged map"));
-            assert!(
-                constant_info_eq(ci, b),
-                "constant {arc_name} differs id-for-id between decode paths"
-            );
-        }
-        // const_names must be the constants' names, same order/ids.
-        for (n, c) in direct.const_names.iter().zip(direct.constants.iter()) {
-            assert_eq!(*n, c.name(), "const_names not shared with constants");
-        }
-        direct.constants.len()
-    }
-
-    #[test]
-    fn prelude0_paths_agree() {
-        assert!(assert_paths_agree(&fixture("Prelude0.olean")) >= 3);
-    }
-
-    #[test]
-    fn sample_paths_agree() {
-        assert!(assert_paths_agree(&fixture("Sample.olean")) > 0);
-    }
-
-    #[test]
-    fn sample_rich_paths_agree() {
-        assert!(assert_paths_agree(&fixture("SampleRich.olean")) > 0);
-    }
-
-    #[test]
-    fn mutbase_paths_agree() {
-        assert!(assert_paths_agree(&fixture("MutBase.olean")) > 0);
-    }
-
-    #[test]
-    fn mutations0_paths_agree() {
-        assert!(assert_paths_agree(&fixture("Mutations0.olean")) > 0);
-    }
-
-    fn collect_oleans(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                collect_oleans(&path, out);
-            } else if path.extension().is_some_and(|e| e == "olean") {
-                // Base parts only: `.olean.server`/`.olean.private`
-                // have extension "server"/"private". Companion parts
-                // are not self-contained regions, so the single-file
-                // gate covers base parts; the parts MERGE is covered
-                // by the id parse_parts tests + ModPriv replay.
-                out.push(path);
-            }
-        }
-    }
-
-    /// TEMPORARY (phase 3): the full-stdlib id-for-id differential
-    /// gate. Deleted, along with the Arc decode path it compares
-    /// against, once the flip lands. Run via
-    /// `mise run gate:direct-decode`.
-    #[test]
-    #[ignore = "phase-3 pre-flip gate; needs the pinned toolchain (LEANR_SWEEP_DIR)"]
-    fn stdlib_paths_agree() {
-        let dir = std::env::var("LEANR_SWEEP_DIR")
-            .expect("LEANR_SWEEP_DIR must point at the toolchain lib/lean dir");
-        let mut files = Vec::new();
-        collect_oleans(std::path::Path::new(&dir), &mut files);
-        files.sort();
-        assert!(
-            files.len() > 1000,
-            "suspiciously few .olean files ({}) under {dir} — wrong directory?",
-            files.len()
-        );
-        let mut constants = 0usize;
-        for path in &files {
-            let bytes = std::fs::read(path).unwrap();
-            constants += assert_paths_agree(&bytes);
-        }
-        println!(
-            "gate: {} modules, {} constants id-for-id identical across decode paths",
-            files.len(),
-            constants
-        );
     }
 }

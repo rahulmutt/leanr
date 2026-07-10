@@ -46,11 +46,6 @@ description = "Decode every .olean shipped with the pinned toolchain (local; CI 
 depends = ["elan:bootstrap"]
 run = "sh -c 'LEANR_SWEEP_DIR=\"$(lean --print-libdir)\" cargo test --release --package leanr_olean --test stdlib_sweep -- --ignored --nocapture'"
 
-[tasks."gate:direct-decode"]
-description = "TEMPORARY (term-bank phase 3): id-for-id differential decode gate over every stdlib .olean (local; needs toolchain). Deleted with the Arc decode path."
-depends = ["elan:bootstrap"]
-run = "sh -c 'LEANR_SWEEP_DIR=\"$(lean --print-libdir)\" cargo test --release --package leanr_olean --lib -- --ignored --nocapture stdlib_paths_agree'"
-
 [tasks."check:stdlib"]
 description = "Kernel-check every .olean shipped with the pinned toolchain (local; CI has no Lean)"
 depends = ["elan:bootstrap"]

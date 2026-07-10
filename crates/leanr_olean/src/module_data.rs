@@ -4,10 +4,10 @@
 use std::sync::Arc;
 
 use leanr_kernel::bank::{NameId, Store};
-use leanr_kernel::{ArcConstantInfo, ConstantInfo, Expr, Name, RecGuard};
+use leanr_kernel::{ConstantInfo, Name};
 
 use crate::interp_id::InterpId;
-use crate::{interp::Interp, raw, OleanError};
+use crate::{raw, OleanError};
 
 /// oracle: src/Lean/Setup.lean:25-32
 #[derive(Debug, Clone)]
@@ -43,28 +43,38 @@ pub enum PartKind {
     Private,
 }
 
+/// The decoded contents of one `.olean` module, decoded directly into
+/// term-bank ids (term-bank phase 3 — the Arc decode path this used to
+/// have a twin of is deleted, along with the differential gate that
+/// checked the two agreed id-for-id; see `interp.rs`'s module doc).
+/// Ids live in the `&mut Store` handed to `parse`/`parse_parts` — the
+/// caller's `Environment::store_mut()` in the check pipeline, or a
+/// standalone `Store::persistent()` for inspection commands.
 #[derive(Debug)]
 pub struct ModuleData {
     pub is_module: bool,
     pub imports: Vec<Import>,
-    pub const_names: Vec<Arc<Name>>,
-    pub constants: Vec<ArcConstantInfo>,
-    pub extra_const_names: Vec<Arc<Name>>,
+    pub const_names: Vec<NameId>,
+    pub constants: Vec<ConstantInfo>,
+    pub extra_const_names: Vec<NameId>,
     /// Environment-extension entries are validated by phase A but kept
     /// opaque (spec: interpreted by the elaborator in M4).
     pub num_entries: usize,
 }
 
 impl ModuleData {
-    /// Decode a whole single-region `.olean` file. `bytes` is untrusted
-    /// input; every failure mode is an `OleanError`, never a panic (see
-    /// docs/THREAT_MODEL.md and the raw-module docs).
+    /// Decode a whole single-region `.olean` file directly into `st`.
+    /// `bytes` is untrusted input; every failure mode is an
+    /// `OleanError`, never a panic. A failed decode may leave
+    /// already-interned rows in `st` — sound (interning is append-only
+    /// and canonical; unreachable ids are inert) and decode failure is
+    /// fatal for the run.
     ///
     /// This is the M1a single-file path and is unchanged: byte-for-byte the
     /// same as decoding one part with [`ModuleData::parse_parts`].
-    pub fn parse(bytes: &[u8]) -> Result<ModuleData, OleanError> {
+    pub fn parse(bytes: &[u8], st: &mut Store) -> Result<ModuleData, OleanError> {
         let root = raw::parse_bytes(bytes)?;
-        Interp::new().module_data(&root)
+        InterpId::new(st).module_data(&root)
     }
 
     /// Decode a module split across its ordered companion parts, producing
@@ -109,138 +119,10 @@ impl ModuleData {
     /// The module's non-constant fields (`is_module`, `imports`,
     /// `num_entries`) are taken from the base part. Requires exactly one
     /// [`PartKind::Base`] part.
-    pub fn parse_parts(parts: &[(PartKind, &[u8])]) -> Result<ModuleData, OleanError> {
-        let base_positions: Vec<usize> = parts
-            .iter()
-            .enumerate()
-            .filter(|(_, (k, _))| *k == PartKind::Base)
-            .map(|(i, _)| i)
-            .collect();
-        let [base_idx] = base_positions[..] else {
-            return Err(OleanError::BadShape {
-                expected: "exactly one Base part in parse_parts",
-            });
-        };
-
-        let byte_slices: Vec<&[u8]> = parts.iter().map(|(_, b)| *b).collect();
-        let roots = raw::parse_parts_bytes(&byte_slices)?;
-
-        // One shared interpreter: objects shared across parts decode to the
-        // same `Arc<RawValue>` (see `raw::parse_parts_bytes`), and the
-        // per-type memos then map them to a single kernel value.
-        let mut interp = Interp::new();
-        let mut modules: Vec<ModuleData> = roots
-            .iter()
-            .map(|r| interp.module_data(r))
-            .collect::<Result<_, _>>()?;
-
-        // Visit parts most-authoritative first so the checkable `.private`
-        // version of a name wins over the base part's axiom stub. Ties keep
-        // input order (stable sort).
-        let authority = |k: PartKind| match k {
-            PartKind::Private => 0,
-            PartKind::Server => 1,
-            PartKind::Base => 2,
-        };
-        let mut order: Vec<usize> = (0..modules.len()).collect();
-        order.sort_by_key(|&i| authority(parts[i].0));
-
-        let mut guard = RecGuard::new();
-        let mut const_names: Vec<Arc<Name>> = Vec::new();
-        let mut constants: Vec<ArcConstantInfo> = Vec::new();
-        let mut seen: std::collections::HashMap<Arc<Name>, usize> =
-            std::collections::HashMap::new();
-        for &i in &order {
-            for c in &modules[i].constants {
-                let name = Arc::clone(c.name());
-                match seen.get(&name) {
-                    None => {
-                        seen.insert(Arc::clone(&name), constants.len());
-                        const_names.push(name);
-                        constants.push(c.clone());
-                    }
-                    Some(&existing) => {
-                        // Shadowed duplicate: the authoritative version is
-                        // already kept. Conservative own-design guard (the
-                        // oracle never compares cross-part duplicates; see
-                        // the doc comment): it must share `type` +
-                        // `levelParams` with the kept version; anything else
-                        // is corruption.
-                        let kept = constants[existing].constant_val();
-                        let dup = c.constant_val();
-                        let compatible = kept.level_params == dup.level_params
-                            && Expr::structural_eq(&kept.ty, &dup.ty, &mut guard)
-                                .map_err(|_| OleanError::DeepRecursion)?;
-                        if !compatible {
-                            return Err(OleanError::DuplicateConstant {
-                                name: name.to_string(),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-
-        // Extra const names: union preserving first-seen (authoritative) order.
-        let mut extra_seen: std::collections::HashSet<Arc<Name>> = std::collections::HashSet::new();
-        let mut extra_const_names: Vec<Arc<Name>> = Vec::new();
-        for &i in &order {
-            for n in &modules[i].extra_const_names {
-                if extra_seen.insert(Arc::clone(n)) {
-                    extra_const_names.push(Arc::clone(n));
-                }
-            }
-        }
-
-        let base = &mut modules[base_idx];
-        Ok(ModuleData {
-            is_module: base.is_module,
-            imports: std::mem::take(&mut base.imports),
-            const_names,
-            constants,
-            extra_const_names,
-            num_entries: base.num_entries,
-        })
-    }
-}
-
-/// The id-native decoded module (term-bank phase 3): what `ModuleData`
-/// becomes once the Arc decode path is deleted. Ids live in the
-/// `&mut Store` handed to `parse`/`parse_parts` — the caller's
-/// `Environment::store_mut()` in the check pipeline, or a standalone
-/// `Store::persistent()` for inspection commands.
-#[derive(Debug)]
-pub struct ModuleDataId {
-    pub is_module: bool,
-    pub imports: Vec<Import>,
-    pub const_names: Vec<NameId>,
-    pub constants: Vec<ConstantInfo>,
-    pub extra_const_names: Vec<NameId>,
-    /// Environment-extension entries are validated by phase A but kept
-    /// opaque (spec: interpreted by the elaborator in M4).
-    pub num_entries: usize,
-}
-
-impl ModuleDataId {
-    /// Decode a whole single-region `.olean` file directly into `st`.
-    /// `bytes` is untrusted input; every failure mode is an
-    /// `OleanError`, never a panic. A failed decode may leave
-    /// already-interned rows in `st` — sound (interning is append-only
-    /// and canonical; unreachable ids are inert) and decode failure is
-    /// fatal for the run.
-    pub fn parse(bytes: &[u8], st: &mut Store) -> Result<ModuleDataId, OleanError> {
-        let root = raw::parse_bytes(bytes)?;
-        InterpId::new(st).module_data(&root)
-    }
-
-    /// Decode a module split across its ordered companion parts — id-native
-    /// twin of `ModuleData::parse_parts` (see its doc comment for the oracle
-    /// rationale on part authority and the shadowed-duplicate guard;
-    /// semantics are identical).
     pub fn parse_parts(
         parts: &[(PartKind, &[u8])],
         st: &mut Store,
-    ) -> Result<ModuleDataId, OleanError> {
+    ) -> Result<ModuleData, OleanError> {
         let base_positions: Vec<usize> = parts
             .iter()
             .enumerate()
@@ -257,10 +139,10 @@ impl ModuleDataId {
         let roots = raw::parse_parts_bytes(&byte_slices)?;
 
         // One shared interpreter: objects shared across parts decode to
-        // the same id (memos keyed by raw node address, exactly like
-        // the Arc version). The block scopes the &mut Store borrow so
-        // `st` is usable for error rendering below.
-        let mut modules: Vec<ModuleDataId> = {
+        // the same id (memos keyed by raw node address). The block
+        // scopes the &mut Store borrow so `st` is usable for error
+        // rendering below.
+        let mut modules: Vec<ModuleData> = {
             let mut interp = InterpId::new(st);
             roots
                 .iter()
@@ -320,7 +202,7 @@ impl ModuleDataId {
         }
 
         let base = &mut modules[base_idx];
-        Ok(ModuleDataId {
+        Ok(ModuleData {
             is_module: base.is_module,
             imports: std::mem::take(&mut base.imports),
             const_names,
@@ -359,7 +241,7 @@ mod tests {
         let private = fixture("ModPriv.olean.private");
 
         let mut env = Environment::default();
-        let md = ModuleDataId::parse_parts(
+        let md = ModuleData::parse_parts(
             &[
                 (PartKind::Base, &base),
                 (PartKind::Server, &server),
@@ -404,7 +286,7 @@ mod tests {
     fn parse_parts_requires_exactly_one_base() {
         let base = fixture("ModPriv.olean");
         let mut env = Environment::default();
-        let err = ModuleDataId::parse_parts(&[(PartKind::Private, &base)], env.store_mut())
+        let err = ModuleData::parse_parts(&[(PartKind::Private, &base)], env.store_mut())
             .expect_err("no base part");
         assert!(matches!(err, OleanError::BadShape { .. }));
     }

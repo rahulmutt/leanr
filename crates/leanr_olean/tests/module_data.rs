@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use leanr_kernel::bank::Store;
-use leanr_olean::{ModuleDataId, OleanError};
+use leanr_olean::{ModuleData, OleanError};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -9,13 +9,13 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn parse_fixture(name: &str) -> (Store, ModuleDataId) {
+fn parse_fixture(name: &str) -> (Store, ModuleData) {
     let mut st = Store::persistent();
-    let md = ModuleDataId::parse(&std::fs::read(fixture(name)).unwrap(), &mut st).unwrap();
+    let md = ModuleData::parse(&std::fs::read(fixture(name)).unwrap(), &mut st).unwrap();
     (st, md)
 }
 
-fn decls_lines(st: &Store, md: &ModuleDataId) -> Vec<String> {
+fn decls_lines(st: &Store, md: &ModuleData) -> Vec<String> {
     md.constants
         .iter()
         .map(|c| format!("{} {}", c.kind(), st.to_name(None, Some(c.name()))))
@@ -76,7 +76,7 @@ fn decoding_preserves_object_sharing() {
 fn garbage_still_fails_cleanly() {
     let mut st = Store::persistent();
     assert!(matches!(
-        ModuleDataId::parse(b"definitely not an olean", &mut st),
+        ModuleData::parse(b"definitely not an olean", &mut st),
         Err(OleanError::Truncated(_))
     ));
 }

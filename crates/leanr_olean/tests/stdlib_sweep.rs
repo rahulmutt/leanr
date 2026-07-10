@@ -39,7 +39,7 @@ fn every_stdlib_olean_decodes() {
     for path in &files {
         let bytes = std::fs::read(path).unwrap();
         let mut st = leanr_kernel::bank::Store::persistent();
-        match leanr_olean::ModuleDataId::parse(&bytes, &mut st) {
+        match leanr_olean::ModuleData::parse(&bytes, &mut st) {
             Ok(md) => constants += md.constants.len(),
             Err(err) => failures.push(format!("{}: {err}", path.display())),
         }
