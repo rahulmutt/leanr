@@ -92,13 +92,18 @@ fn olean_decls(path: &std::path::Path) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match leanr_olean::ModuleData::parse(&bytes) {
+    let mut store = leanr_kernel::bank::Store::persistent();
+    match leanr_olean::ModuleDataId::parse(&bytes, &mut store) {
         Ok(module) => {
             // Same line format as the oracle-side dump script
             // (tests/fixtures/dump_decls.lean) — golden-compared in CI.
             let mut out = String::new();
             for c in &module.constants {
-                out.push_str(&format!("{} {}\n", c.kind(), c.name()));
+                out.push_str(&format!(
+                    "{} {}\n",
+                    c.kind(),
+                    store.to_name(None, Some(c.name()))
+                ));
             }
             print!("{out}");
             ExitCode::SUCCESS

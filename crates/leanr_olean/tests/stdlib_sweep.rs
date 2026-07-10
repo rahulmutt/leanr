@@ -5,8 +5,6 @@
 
 use std::path::{Path, PathBuf};
 
-use leanr_olean::ModuleData;
-
 fn collect_oleans(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
@@ -40,7 +38,8 @@ fn every_stdlib_olean_decodes() {
     let mut constants = 0usize;
     for path in &files {
         let bytes = std::fs::read(path).unwrap();
-        match ModuleData::parse(&bytes) {
+        let mut st = leanr_kernel::bank::Store::persistent();
+        match leanr_olean::ModuleDataId::parse(&bytes, &mut st) {
             Ok(md) => constants += md.constants.len(),
             Err(err) => failures.push(format!("{}: {err}", path.display())),
         }
