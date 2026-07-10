@@ -209,6 +209,7 @@ impl ModuleData {
 /// `&mut Store` handed to `parse`/`parse_parts` — the caller's
 /// `Environment::store_mut()` in the check pipeline, or a standalone
 /// `Store::persistent()` for inspection commands.
+#[derive(Debug)]
 pub struct ModuleDataId {
     pub is_module: bool,
     pub imports: Vec<Import>,
@@ -230,5 +231,181 @@ impl ModuleDataId {
     pub fn parse(bytes: &[u8], st: &mut Store) -> Result<ModuleDataId, OleanError> {
         let root = raw::parse_bytes(bytes)?;
         InterpId::new(st).module_data(&root)
+    }
+
+    /// Decode a module split across its ordered companion parts — id-native
+    /// twin of `ModuleData::parse_parts` (see its doc comment for the oracle
+    /// rationale on part authority and the shadowed-duplicate guard;
+    /// semantics are identical).
+    pub fn parse_parts(
+        parts: &[(PartKind, &[u8])],
+        st: &mut Store,
+    ) -> Result<ModuleDataId, OleanError> {
+        let base_positions: Vec<usize> = parts
+            .iter()
+            .enumerate()
+            .filter(|(_, (k, _))| *k == PartKind::Base)
+            .map(|(i, _)| i)
+            .collect();
+        let [base_idx] = base_positions[..] else {
+            return Err(OleanError::BadShape {
+                expected: "exactly one Base part in parse_parts",
+            });
+        };
+
+        let byte_slices: Vec<&[u8]> = parts.iter().map(|(_, b)| *b).collect();
+        let roots = raw::parse_parts_bytes(&byte_slices)?;
+
+        // One shared interpreter: objects shared across parts decode to
+        // the same id (memos keyed by raw node address, exactly like
+        // the Arc version). The block scopes the &mut Store borrow so
+        // `st` is usable for error rendering below.
+        let mut modules: Vec<ModuleDataId> = {
+            let mut interp = InterpId::new(st);
+            roots
+                .iter()
+                .map(|r| interp.module_data(r))
+                .collect::<Result<_, _>>()?
+        };
+
+        // Most-authoritative first: `.private` > `.server` > base.
+        let authority = |k: PartKind| match k {
+            PartKind::Private => 0,
+            PartKind::Server => 1,
+            PartKind::Base => 2,
+        };
+        let mut order: Vec<usize> = (0..modules.len()).collect();
+        order.sort_by_key(|&i| authority(parts[i].0));
+
+        let mut const_names: Vec<NameId> = Vec::new();
+        let mut constants: Vec<ConstantInfo> = Vec::new();
+        let mut seen: std::collections::HashMap<NameId, usize> = std::collections::HashMap::new();
+        for &i in &order {
+            for c in &modules[i].constants {
+                let name = c.name();
+                match seen.get(&name) {
+                    None => {
+                        seen.insert(name, constants.len());
+                        const_names.push(name);
+                        constants.push(c.clone());
+                    }
+                    Some(&existing) => {
+                        // Shadowed duplicate must share `type` +
+                        // `levelParams` with the kept version. By the
+                        // interning invariant id equality IS the Arc
+                        // version's guarded structural_eq, so this is
+                        // plain `==` — no RecGuard, no DeepRecursion.
+                        let kept = constants[existing].constant_val();
+                        let dup = c.constant_val();
+                        let compatible = kept.level_params == dup.level_params && kept.ty == dup.ty;
+                        if !compatible {
+                            return Err(OleanError::DuplicateConstant {
+                                name: st.to_name(None, Some(name)).to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Extra const names: union preserving first-seen order.
+        let mut extra_seen: std::collections::HashSet<NameId> = std::collections::HashSet::new();
+        let mut extra_const_names: Vec<NameId> = Vec::new();
+        for &i in &order {
+            for &n in &modules[i].extra_const_names {
+                if extra_seen.insert(n) {
+                    extra_const_names.push(n);
+                }
+            }
+        }
+
+        let base = &mut modules[base_idx];
+        Ok(ModuleDataId {
+            is_module: base.is_module,
+            imports: std::mem::take(&mut base.imports),
+            const_names,
+            constants,
+            extra_const_names,
+            num_entries: base.num_entries,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use leanr_kernel::bank::NameId;
+    use leanr_kernel::{ConstantInfo, Environment};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn fixture(name: &str) -> Vec<u8> {
+        std::fs::read(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures")
+                .join(name),
+        )
+        .unwrap()
+    }
+
+    /// Id-path mirror of `check_fixtures.rs`'s
+    /// `modpriv_parts_replay_from_empty_env`: multi-region merge on the
+    /// id path — `.private` wins over the base axiom stub, the private
+    /// helper is present, and the merged set replays clean.
+    #[test]
+    fn modpriv_parts_id_decode_and_replay() {
+        let base = fixture("ModPriv.olean");
+        let server = fixture("ModPriv.olean.server");
+        let private = fixture("ModPriv.olean.private");
+
+        let mut env = Environment::default();
+        let md = ModuleDataId::parse_parts(
+            &[
+                (PartKind::Base, &base),
+                (PartKind::Server, &server),
+                (PartKind::Private, &private),
+            ],
+            env.store_mut(),
+        )
+        .expect("parts decode");
+        assert!(md.is_module);
+        assert!(md.imports.is_empty());
+
+        let render = |env: &Environment, n: NameId| env.store().to_name(None, Some(n)).to_string();
+        assert!(
+            md.constants
+                .iter()
+                .any(|c| render(&env, c.name()) == "_private.ModPriv.0.secret"),
+            "private helper missing from merged constants"
+        );
+        let bump = md
+            .constants
+            .iter()
+            .find(|c| render(&env, c.name()) == "bump")
+            .expect("bump present");
+        assert_eq!(
+            bump.kind(),
+            "def",
+            "bump must be the private def, not an axiom stub"
+        );
+
+        let constants: HashMap<NameId, ConstantInfo> =
+            md.constants.into_iter().map(|c| (c.name(), c)).collect();
+        let stats = leanr_kernel::replay(&mut env, constants).expect("replays clean");
+        assert!(
+            stats.checked >= 5,
+            "expected >= 5 checked, got {}",
+            stats.checked
+        );
+        assert_eq!(stats.skipped_unsafe, 0);
+    }
+
+    #[test]
+    fn parse_parts_requires_exactly_one_base() {
+        let base = fixture("ModPriv.olean");
+        let mut env = Environment::default();
+        let err = ModuleDataId::parse_parts(&[(PartKind::Private, &base)], env.store_mut())
+            .expect_err("no base part");
+        assert!(matches!(err, OleanError::BadShape { .. }));
     }
 }
