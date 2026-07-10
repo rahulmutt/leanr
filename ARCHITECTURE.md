@@ -22,11 +22,18 @@ implementation or a thin frontend. Full design:
   phase 2), the bank IS the kernel's representation: `subst`,
   `local_ctx`, `tc`, `quot`, `inductive`, `env`, and `replay` all run
   on `bank::{ExprId, NameId, LevelId}`, and `Environment`/`ConstantInfo`
-  are id-native. `Arc<Expr>`/`Arc<Name>`/`Arc<Level>`/`Syntax` remain as
-  the decoder-boundary types (`leanr_olean` decodes `.olean` bytes into
-  them, e.g. `ArcConstantInfo`) and bridge in via `Environment::
-  intern_module`/`intern_declaration`; that boundary lifts in phase 3
-  (direct-to-id decode).
+  are id-native. As of the direct-to-id decode flip
+  (`docs/superpowers/specs/2026-07-10-direct-to-id-decode-design.md`,
+  phase 3), `leanr_olean` decodes `.olean` bytes straight into the
+  caller's term-bank store — `interp`'s only remaining Arc-emitting
+  decode is the `Syntax` metadata family (`Syntax`, `SourceInfo`,
+  `Substring`, `Preresolved`), an opaque payload the kernel never
+  inspects. The Arc declaration family (`ArcConstantInfo`,
+  `ArcDeclaration`, the `Arc*Val` structs, and the `intern_module`/
+  `intern_declaration` bridges) has no production caller left; it
+  survives solely as `#[cfg(test)]` kernel test support (hand-rolled
+  fixture `Environment`s in `testenv.rs`, `quot`/`inductive` unit
+  tests, and the replay differential harness).
 - `crates/leanr_query` — the salsa-based incremental engine. Everything
   computable is a memoized query; **early cutoff** (a recomputed query
   whose value is unchanged does not wake its dependents) is the
@@ -35,9 +42,12 @@ implementation or a thin frontend. Full design:
   Trust boundary: input bytes are untrusted (`docs/THREAT_MODEL.md`).
   Two phases: `raw` walks the compacted region into a validated,
   offset-memoized DAG (the entire untrusted-bytes surface, fuzzed via
-  `mise run fuzz`); `interp` shapes it into `leanr_kernel` types,
-  including the Syntax metadata family. Golden-tested against the
-  oracle (`mise run fixtures:regen`) and swept over the full toolchain
+  `mise run fuzz`); `interp` decodes it directly into the caller's
+  term-bank `Store` via the bank's typed intern-constructors
+  (explicit-stack walk, olean-offset → id memo), yielding id-native
+  `ConstantInfo`s — only the Syntax metadata family is still built as
+  Arc trees, as an opaque payload. Golden-tested against the oracle
+  (`mise run fixtures:regen`) and swept over the full toolchain
   stdlib (`mise run sweep:stdlib`).
 - `crates/leanr_cli` — the `leanr` binary. Thin: argument parsing and
   printing only, so CLI and (future) LSP can never diverge in behavior.

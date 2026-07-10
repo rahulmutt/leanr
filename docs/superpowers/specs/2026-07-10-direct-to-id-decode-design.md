@@ -172,9 +172,39 @@ type. No panics anywhere on the decode path.
    declarations checked); peak RSS and wall-clock recorded against
    the 2 GiB / 367.62 s baseline — flat-or-better expected, the pod
    memory limit is the only hard bound.
+   - **Recorded 2026-07-10** (`mise run check:stdlib:watched`,
+     pinned toolchain v4.32.0-rc1, 30 GiB watchdog): exit 0;
+     `checked 2433 modules, 203134 declarations (skipped 3611
+     unsafe/partial)` — coverage figures match the baseline exactly.
+     Peak RSS 1 GiB (1,072,356 kB) vs the 2 GiB (2,669,156 kB)
+     baseline — a ~60% reduction, consistent with the per-module
+     Arc transient and bridge walk being gone. Wall time 337.00 s
+     vs 367.62 s. Flat-or-better on every axis; the win is a
+     recorded side effect per the Goal, not a gate.
 3. Deletion verified: the Arc declaration family and bridges are
    gone; `leanr_kernel` still has zero workspace deps; the build
    proves nothing reached for the deleted types.
+   - **Recorded 2026-07-10** (from Task 7, commit `8dedb19`):
+     **DELETED** — `leanr_olean`'s Arc-emitting interp decode fns,
+     `InterpId::with_arc`, the differential-gate test harness
+     (`collect_oleans`/`stdlib_paths_agree`/fixture gate tests),
+     the Arc `ModuleData` struct + `parse`/`parse_parts` (renamed:
+     `ModuleDataId` → `ModuleData`), the `gate:direct-decode` mise
+     task, `OleanError::DeepRecursion`. **GATED `#[cfg(test)]`** —
+     the kernel Arc declaration family (`ArcConstantInfo`,
+     `ArcDeclaration`, the `Arc*Val` structs), its `intern_*`/`to_*`
+     bridges, `arc_constant_info_eq`/`to_constant_info`,
+     `Environment::{from_modules, intern_module,
+     intern_declaration}` — now kernel test support only (fixture
+     `Environment`s in `testenv.rs`, `quot`/`inductive` unit tests,
+     the replay differential harness). **KEPT UNGATED** —
+     `Store::{to_expr, intern_kvmap}` and tree `Expr` (production
+     callers: `quot.rs`'s `alpha_eq` via `to_expr`,
+     `scratch.rs`'s promotion walk via `intern_kvmap`);
+     `Store::intern_expr` has no non-test caller found but was left
+     ungated, flagged for a future reachability pass. `leanr_kernel`
+     still has zero workspace deps (verified: `cargo build
+     --workspace` clean, `cargo tree` unchanged).
 
 ## Sequencing (for writing-plans)
 
