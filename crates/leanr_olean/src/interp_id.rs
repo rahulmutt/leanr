@@ -650,4 +650,49 @@ mod tests {
     fn mutations0_paths_agree() {
         assert!(assert_paths_agree(&fixture("Mutations0.olean")) > 0);
     }
+
+    fn collect_oleans(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect_oleans(&path, out);
+            } else if path.extension().is_some_and(|e| e == "olean") {
+                // Base parts only: `.olean.server`/`.olean.private`
+                // have extension "server"/"private". Companion parts
+                // are not self-contained regions, so the single-file
+                // gate covers base parts; the parts MERGE is covered
+                // by the id parse_parts tests + ModPriv replay.
+                out.push(path);
+            }
+        }
+    }
+
+    /// TEMPORARY (phase 3): the full-stdlib id-for-id differential
+    /// gate. Deleted, along with the Arc decode path it compares
+    /// against, once the flip lands. Run via
+    /// `mise run gate:direct-decode`.
+    #[test]
+    #[ignore = "phase-3 pre-flip gate; needs the pinned toolchain (LEANR_SWEEP_DIR)"]
+    fn stdlib_paths_agree() {
+        let dir = std::env::var("LEANR_SWEEP_DIR")
+            .expect("LEANR_SWEEP_DIR must point at the toolchain lib/lean dir");
+        let mut files = Vec::new();
+        collect_oleans(std::path::Path::new(&dir), &mut files);
+        files.sort();
+        assert!(
+            files.len() > 1000,
+            "suspiciously few .olean files ({}) under {dir} — wrong directory?",
+            files.len()
+        );
+        let mut constants = 0usize;
+        for path in &files {
+            let bytes = std::fs::read(path).unwrap();
+            constants += assert_paths_agree(&bytes);
+        }
+        println!(
+            "gate: {} modules, {} constants id-for-id identical across decode paths",
+            files.len(),
+            constants
+        );
+    }
 }

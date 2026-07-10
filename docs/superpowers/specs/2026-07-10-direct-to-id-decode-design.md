@@ -163,6 +163,10 @@ type. No panics anywhere on the decode path.
 
 1. Differential gate green over all fixtures and the full stdlib
    sweep (pre-flip; record the run).
+   - **Recorded 2026-07-10** (`mise run gate:direct-decode`, pinned
+     toolchain v4.32.0-rc1): `gate: 2433 modules, 158608 constants
+     id-for-id identical across decode paths`; wall time 11.63 s
+     (release build pre-warmed); exit status 0.
 2. Post-flip: full fixture suite and goldens green; `check --all`
    exits 0 with the same coverage figures (2,433 modules / 203,134
    declarations checked); peak RSS and wall-clock recorded against
