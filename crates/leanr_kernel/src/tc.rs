@@ -2695,9 +2695,38 @@ impl<'e> TypeChecker<'e> {
         }
     }
 
-    /// `whnf_core(unfold_definition(e), false, true)` — the delta-unfold
-    /// step.
+    /// The per-side force step of `lazy_delta_reduction_step`:
+    /// `whnf_core(unfold_definition(e), false, true)`, with the kernel's
+    /// native `Nat` reduction consulted FIRST.
+    ///
+    /// Native-before-delta mirrors the reduction ORDER of the oracle's
+    /// `whnf` loop (type_checker.cpp:641-681 `whnf`: `whnf_core` →
+    /// `reduce_native` → `reduce_nat` → `unfold_definition`; v4.32.0-rc1,
+    /// cited by function/line from knowledge — the Lean source is not
+    /// vendored). `reduce_nat` itself (type_checker.cpp:609-638, mirrored
+    /// at `reduce_nat` below) carries no `has_fvar` precondition: its
+    /// literal-operand check (`get_nat_lit_ext`) runs full `whnf`, which
+    /// zeta-expands let-bound fvars. Oracle-cross-checked against the real
+    /// kernel: `Kernel.whnf` reduces `Nat.beq 4293853185 (Nat.sub x 5)`
+    /// (`x` let-bound to a literal) straight to `Bool.true` in O(1).
+    ///
+    /// Without this (Result B), the `is_def_eq` path reaches such a term
+    /// only through `lazy_delta_reduction`, whose joint
+    /// `!has_fvar(t) && !has_fvar(s)` fast-path guard skips `reduce_nat`
+    /// for it, so `Nat.beq`/`Nat.ble` were delta-unfolded into their
+    /// `brecOn` bodies and the `Nat.below` course-of-values tower walked
+    /// one level per loop iteration (~1e9 levels / >25 GiB for
+    /// `Char.ofOrdinal._proof_3`, never terminating).
+    ///
+    /// Invariant: the reduction RESULT is unchanged — when `reduce_nat`
+    /// fires it returns exactly the value the unfolded body reduces to
+    /// (both are definitional reductions of `e`); only force-order /
+    /// laziness changes, so every previously-terminating verdict is
+    /// preserved.
     fn unfold_and_whnf(&mut self, e: ExprId) -> Result<ExprId, KernelError> {
+        if let Some(v) = self.reduce_nat(e)? {
+            return Ok(v);
+        }
         match self.unfold_definition(e)? {
             Some(u) => self.whnf_core(u, false, true),
             None => Ok(e),

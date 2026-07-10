@@ -652,12 +652,75 @@ pub mod mini {
         Expr::lam(nm("α"), sort_u(), inner, BinderInfo::Default)
     }
 
+    /// Result-B regression decls (consumed by `tc/tests.rs`
+    /// `nat_beq_native_reduction_fires_on_is_def_eq_path_with_let_fvar`):
+    ///
+    ///   axiom Nat.beqAux : Nat → Nat → Bool
+    ///   def   Nat.beq    : Nat → Nat → Bool := fun a b => Nat.beqAux a b
+    ///   axiom P      : Bool → Prop
+    ///   axiom hPtrue : P Bool.true
+    ///   axiom useP   : Π (x : Nat), P (Nat.beq 4 x) → B
+    ///
+    /// `Nat.beq`'s BODY is deliberately an opaque stub so a test can tell
+    /// WHICH reduction answered a defeq query: the kernel's native
+    /// `reduce_nat` (keys on the NAME `Nat.beq`, computes the real beq)
+    /// yields `Bool.true`, while delta-unfolding the body gets stuck on
+    /// the `Nat.beqAux` axiom.
+    pub fn nat_beq_regression_decls() -> Vec<ArcConstantInfo> {
+        let bool_ = || cstn(nm("Bool"), vec![]);
+        let beq_ty = || pi("a", nat(), pi("b", nat(), bool_()));
+        let beq_aux = axiomn(nm2("Nat", "beqAux"), beq_ty());
+        let beq = ArcConstantInfo::Defn(ArcDefinitionVal {
+            val: cvaln(nm2("Nat", "beq"), vec![], beq_ty()),
+            value: lam(
+                "a",
+                nat(),
+                lam(
+                    "b",
+                    nat(),
+                    appn(cstn(nm2("Nat", "beqAux"), vec![]), vec![bvar(1), bvar(0)]),
+                ),
+            ),
+            hints: ReducibilityHints::Regular(1),
+            safety: DefinitionSafety::Safe,
+            all: vec![nm2("Nat", "beq")],
+        });
+        let p = axiomn(nm("P"), pi("b", bool_(), sort0()));
+        let hp_true = axiomn(
+            nm("hPtrue"),
+            app(cstn(nm("P"), vec![]), cstn(nm2("Bool", "true"), vec![])),
+        );
+        let four = Expr::lit(crate::Literal::NatVal(Nat::from(4u64)));
+        let use_p = axiomn(
+            nm("useP"),
+            pi(
+                "x",
+                nat(),
+                pi(
+                    "h",
+                    app(
+                        cstn(nm("P"), vec![]),
+                        appn(cstn(nm2("Nat", "beq"), vec![]), vec![four, bvar(0)]),
+                    ),
+                    cst("B", vec![]),
+                ),
+            ),
+        );
+        vec![beq_aux, beq, p, hp_true, use_p]
+    }
+
     /// The shared environment:
     ///   axiom A : Prop        axiom a : A
     ///   def   id₁ : Π (α : Sort u), α → α := λ α x, x   (Regular hints)
     ///   opaque w : A := a
     ///   axiom B : Type        axiom bt : B       axiom bf : B
     pub fn env() -> Environment {
+        env_with(vec![])
+    }
+
+    /// `env()` plus caller-supplied extra decls (trusted insertion, same
+    /// `from_modules` path the base fixture uses).
+    pub fn env_with(extra: Vec<ArcConstantInfo>) -> Environment {
         let id1 = ArcConstantInfo::Defn(ArcDefinitionVal {
             val: cval("id1", vec![u()], id1_type()),
             value: id1_value(),
@@ -681,6 +744,7 @@ pub mod mini {
             axiom("bf", cst("B", vec![])),
         ];
         module.extend(special_decls());
+        module.extend(extra);
         let mut env = Environment::from_modules(vec![module]).unwrap();
         // Quotient constants come from the REAL admission path (Task
         // 11): `Declaration::Quot` → `quot::add_quot`, which runs

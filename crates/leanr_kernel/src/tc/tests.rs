@@ -616,6 +616,39 @@ fn nat_beq_folds_to_bool() {
     );
 }
 
+/// Result-B regression (fix: `unfold_and_whnf` consults `reduce_nat`
+/// before delta-unfolding — tc.rs, `Nat.brecOn`/`Nat.below` divergence).
+///
+/// Drives the kernel into deciding `P Bool.true =?= P (Nat.beq 4 x)`
+/// where `x` is a LET-BOUND fvar whose value is a literal: `Nat.beq 4 x`
+/// then has `has_fvar == true`, so BOTH pre-existing `reduce_nat` guards
+/// miss it — the top-level `whnf` loop is never consulted on this
+/// `is_def_eq` route, and `lazy_delta_reduction`'s joint
+/// `!has_fvar(t) && !has_fvar(s)` fast-path guard skips it — leaving the
+/// `lazy_delta_reduction_step` unfold as the only route to an answer
+/// (exactly how `Char.ofOrdinal._proof_3` escaped into the `Nat.below`
+/// tower walk). The fixture `Nat.beq` body is an opaque stub, so
+/// delta-unfolding CANNOT decide the pair: the check succeeds iff the
+/// native reduction fired on the unfold step, matching the oracle's
+/// native behavior (real `Kernel.whnf` reduces `Nat.beq big (Nat.sub x
+/// 5)` with a let-bound `x` straight to `Bool.true`).
+#[test]
+fn nat_beq_native_reduction_fires_on_is_def_eq_path_with_let_fvar() {
+    let env = mini::env_with(mini::nat_beq_regression_decls());
+    let mut scratch = Store::scratch();
+    // let x : Nat := 4; useP x hPtrue
+    //   useP x : P (Nat.beq 4 x) → B,  hPtrue : P Bool.true
+    let body = mini::appn(
+        mini::cst("useP", vec![]),
+        vec![mini::bvar(0), mini::cst("hPtrue", vec![])],
+    );
+    let e = Expr::let_e(nm("x"), mini::nat(), lit_nat(4), body, false);
+    // Pre-fix: Err(AppTypeMismatch) — the stub unfold sticks at
+    // `Nat.beqAux 4 x` and the pair is (wrongly) undecidable. Post-fix:
+    // the unfold step natively collapses `Nat.beq 4 x` to `Bool.true`.
+    check(&env, &mut scratch, &e, &[]).unwrap();
+}
+
 #[test]
 fn succ_folds() {
     // whnf(Nat.succ 4) = 5
