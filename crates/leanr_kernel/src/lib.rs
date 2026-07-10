@@ -61,7 +61,7 @@ pub use level::Level;
 pub use local_ctx::{FVarIdGen, LocalContext, LocalDecl};
 pub use name::Name;
 pub use num::{Int, Nat};
-pub use replay::{build_inductive_types, replay, ReplayError, ReplayStats};
+pub use replay::{build_inductive_types, is_unsafe_or_partial, replay, ReplayError, ReplayStats};
 pub use subst::{
     abstract_fvars, instantiate, instantiate_core, instantiate_level_params, instantiate_rev,
     lift_loose_bvars,

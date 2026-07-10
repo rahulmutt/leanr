@@ -325,6 +325,17 @@ impl Environment {
         &mut self.store
     }
 
+    /// Consume `self` and take ownership of the persistent store — the CLI's
+    /// parallel path freezes it into an `Arc<Store>` for `leanr_check` (the
+    /// checker half no longer needs a live `Environment`, only its store and
+    /// the decoded constant table). `Store` deliberately isn't `Default`
+    /// (every `Store` is minted via `Store::persistent`/`Store::scratch`
+    /// with an explicit region), so this consuming accessor — rather than
+    /// `std::mem::take` — is the minimal way to move it out.
+    pub fn into_store(self) -> Store {
+        self.store
+    }
+
     /// Trusted-import insert (the decode path's replacement for the
     /// Arc-era `from_modules` loop body): duplicate-check + insert,
     /// no type checking. `ci`'s ids must live in `self.store` —

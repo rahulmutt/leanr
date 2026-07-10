@@ -147,6 +147,16 @@ fn is_partial(ci: &ConstantInfo) -> bool {
     )
 }
 
+/// Public wrapper over this module's `is_unsafe`/`is_partial` (Replay.lean's
+/// skip predicate): the CLI's `check` uses this to filter unsafe/partial
+/// constants OUT of the table it hands to the parallel driver, before that
+/// table is ever built — the driver itself never sees them, mirroring
+/// `replay`'s own skip rule (`is_unsafe(ci) || is_partial(ci)` above) without
+/// duplicating its match arms at the call site.
+pub fn is_unsafe_or_partial(ci: &ConstantInfo) -> bool {
+    is_unsafe(ci) || is_partial(ci)
+}
+
 /// Reconstruct the `Vec<InductiveType>` of a mutual inductive block from
 /// its member names (`InductiveVal.all`). Each member must resolve — via
 /// `get` — to an `Induct` constant, and each of that member's

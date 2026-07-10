@@ -391,6 +391,7 @@ version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "clap",
+ "leanr_check",
  "leanr_kernel",
  "leanr_olean",
  "predicates",
