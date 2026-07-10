@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use leanr_kernel::bank::{NameId, Store};
-use leanr_kernel::{used_constants, CheckedConstants, ConstantInfo, KernelError, RecGuard};
+use leanr_kernel::{used_constants, CheckedConstants, ConstantInfo, KernelError};
 
 pub type TaskId = usize;
 
@@ -50,7 +50,6 @@ pub fn build_graph(store: &Store, table: &CheckedConstants) -> Result<DepGraph, 
     //    `name_to_task` maps members, ctors, AND recursors to their block.
     let mut name_to_task: HashMap<NameId, TaskId> = HashMap::new();
     let mut tasks: Vec<Task> = Vec::new();
-    let mut g = RecGuard::new();
 
     for &n in &names {
         if name_to_task.contains_key(&n) {
@@ -153,13 +152,16 @@ pub fn build_graph(store: &Store, table: &CheckedConstants) -> Result<DepGraph, 
             continue;
         }
         let ci = table.get_decoded(n).expect("name from table");
-        let block = resolve_block(store, table, &name_to_task, n, ci, &mut g)?;
+        let block = resolve_block(store, table, &name_to_task, n, ci)?;
         name_to_task.insert(n, block);
         // Also record it in the block's `admits` so its flag is set.
         tasks[block].admits.push(n);
     }
 
     // 2. Edges: for every name, its used_constants → the owning task.
+    //    `used_constants` is internally an explicit-stack (iterative) walk,
+    //    bounded by input size — no external `RecGuard` is needed here, so
+    //    none is threaded through this file.
     for &n in &names {
         let ci = table.get_decoded(n).expect("name from table");
         let owner = name_to_task[&n];
@@ -173,35 +175,57 @@ pub fn build_graph(store: &Store, table: &CheckedConstants) -> Result<DepGraph, 
         }
     }
 
+    // 2b. Quotient init needs an EXPLICIT edge to `Eq` (spec: "one [task]
+    //     for quotient init with an explicit edge to `Eq`"). Pass 2's
+    //     generic `used_constants` walk only produces this edge
+    //     incidentally (because `Quot.lift`'s type embeds a `Const Eq`
+    //     node); make it a guaranteed dependency and fail safely with
+    //     `MissingConstant` if `Eq` is absent from the table.
+    for (id, task) in tasks.iter_mut().enumerate() {
+        let TaskKind::Quot { eq, .. } = task.kind else {
+            continue;
+        };
+        // `eq: NameId` is `Copy`, so the destructure above copies it out.
+        let eq_task = *name_to_task
+            .get(&eq)
+            .ok_or_else(|| KernelError::MissingConstant(store.to_name(None, Some(eq))))?;
+        if eq_task != id && !task.deps.contains(&eq_task) {
+            task.deps.push(eq_task);
+        }
+    }
+
     Ok(DepGraph {
         tasks,
         name_to_task,
     })
 }
 
-/// Resolve a stray constructor/recursor to its inductive block: its
-/// `used_constants` intersect the members of exactly one block.
+/// Resolve a stray constructor/recursor to its inductive block.
 fn resolve_block(
     store: &Store,
     _table: &CheckedConstants,
     name_to_task: &HashMap<NameId, TaskId>,
     n: NameId,
     ci: &ConstantInfo,
-    _g: &mut RecGuard,
 ) -> Result<TaskId, KernelError> {
     match ci {
+        // A constructor names its inductive directly.
         ConstantInfo::Ctor(cv) => name_to_task
             .get(&cv.induct)
             .copied()
             .ok_or_else(|| KernelError::MissingConstant(store.to_name(None, Some(cv.induct)))),
-        ConstantInfo::Rec(_) => {
-            for dep in used_constants(store, None, ci) {
-                if let Some(&t) = name_to_task.get(&dep) {
-                    return Ok(t); // first inductive-owned dep is its block
-                }
-            }
-            Err(KernelError::MissingConstant(store.to_name(None, Some(n))))
-        }
+        // A recursor carries `rv.all` — the mutual inductives it recurses
+        // over. Every member of `rv.all` was claimed into the SAME
+        // `InductiveBlock` task in pass 1, so its block is the one owning
+        // `rv.all[0]`. (Resolving via `used_constants` instead would grab
+        // the first dep with any task entry — possibly an unrelated
+        // `Simple` — and silently misassign the recursor.)
+        ConstantInfo::Rec(rv) => rv
+            .all
+            .first()
+            .and_then(|m| name_to_task.get(m))
+            .copied()
+            .ok_or_else(|| KernelError::MissingConstant(store.to_name(None, Some(n)))),
         _ => Err(KernelError::MissingConstant(store.to_name(None, Some(n)))),
     }
 }
