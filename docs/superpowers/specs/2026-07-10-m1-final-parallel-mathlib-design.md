@@ -72,9 +72,28 @@ and discards the decoded ones; the pre-populated table keeps the
 decoded ones, so they must be proven identical). This is a strict
 strengthening — see Soundness.
 
+**Lock-free for the majority; one serialized point.** Defs, axioms,
+theorems, and opaques never promote and need no post-check comparison —
+their decoded `ConstantInfo` is already the survivor, already in the
+table, so a worker simply checks and flips the flag, fully lock-free.
+Constructors, recursors, and inductive blocks are different: the
+kernel *regenerates* them in the worker's scratch region, and
+comparing a regenerated info against its decoded twin by
+`constant_info_eq` is id equality, which is only meaningful when both
+sides live in the **same** store. So an inductive/quotient block's
+regenerated survivors must be promoted (interned) into the shared
+persistent store to canonicalize their ids before comparison — a write
+to the otherwise-frozen store. That promotion-and-compare step is
+serialized behind a single mutex (design decision, 2026-07-10):
+inductive/quot tasks are a minority, promotion of an identical info is
+idempotent and fast, and this reuses the existing, proven
+`constant_info_eq` verbatim rather than adding a new cross-region
+comparison primitive to the TCB. The def/axiom/theorem/opaque hot path
+takes no lock.
+
 The kernel's only interior mutability is a `#[cfg(test)]`/debug trace
 tally (`tc/trace.rs`); `&Store` and `&EnvView` are otherwise plain
-`Sync` data. There is no lock on the checking hot path.
+`Sync` data.
 
 ## Architecture
 
@@ -106,8 +125,11 @@ Two workstreams sharing one acceptance gate.
    frozen base → run the *check half* of admission against the gated
    table → on success set the admitted flag(s) (`Release`), decrement
    dependents' atomic counters, push newly-ready tasks → drop scratch.
-   Inductive-block tasks run the postponed ctor/recursor comparisons
-   **and** the new inductive-info comparison inline before flag-setting.
+   Def/axiom/theorem/opaque tasks take no lock. Inductive-block and
+   quotient tasks, after checking, take a single shared promotion mutex
+   to intern their regenerated survivors into the persistent store and
+   run the postponed ctor/recursor comparisons **and** the new
+   inductive-info comparison via `constant_info_eq`, before flag-setting.
 6. **Verdict.** All tasks green → the same final stats line as today
    (`checked`/`skipped` counts are order-independent → deterministic
    output). Any failure → cancel and report (see Error handling).
@@ -179,8 +201,12 @@ Stated once, relied on throughout:
   that die with the check — a hostile module cannot accumulate scratch
   across tasks.
 - The *only* cross-thread communication is the admitted flags, the
-  per-task dependency counters, and the ready queue. Writers store
-  `Release`, readers load `Acquire`.
+  per-task dependency counters, the ready queue, and the promotion
+  mutex. Writers store `Release`, readers load `Acquire`.
+- The promotion mutex guards the sole writer of the persistent store
+  after freeze: inductive/quotient survivors are interned + compared
+  under it, so no two workers mutate the store concurrently. The
+  def/axiom/theorem/opaque hot path never takes it.
 - A declaration's check observes an environment of exactly its
   transitively-checked dependencies — a valid sequential prefix.
 - Theorem duplicate-tolerance (`replay.rs`'s Thm arm) needs no code:
@@ -202,7 +228,11 @@ Mathlib's edge count) + bounded per-worker scratch.
   than sequential replay (which never compared them), so it can only
   ever *reject* — and the stdlib differential gate proves it never
   rejects a real declaration (a divergence would surface as the
-  parallel path erroring where sequential passed).
+  parallel path erroring where sequential passed). No new comparison
+  code enters the TCB: the regenerated survivors are promoted into the
+  persistent store (under the promotion mutex) exactly as sequential
+  replay promotes them, then compared with the same `constant_info_eq`
+  the sequential path uses.
 - **Untrusted input.** Constants, cross-references, and therefore the
   task graph are attacker-shaped. No panics; no `unwrap`/index on
   untrusted-derived values; the dependency walk stays `RecGuard`-bounded.
