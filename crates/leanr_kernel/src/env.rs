@@ -330,7 +330,7 @@ impl Environment {
     /// `inductive` and never surfaces at this boundary.
     pub fn view(&self) -> EnvView<'_> {
         EnvView {
-            consts: &self.constants,
+            consts: crate::ConstSource::Plain(&self.constants),
             extra: None,
             quot_initialized: self.quot_initialized,
             store: &self.store,

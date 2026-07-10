@@ -11,6 +11,7 @@
 //! stacks, and the `Arc` tree types implement iterative `Drop`.
 
 pub mod bank;
+pub mod checked;
 mod decl;
 mod env;
 mod error;
@@ -31,6 +32,7 @@ mod tc;
 mod testenv;
 mod used_consts;
 
+pub use checked::{CheckedConstants, ConstSource};
 pub use decl::{
     constant_info_eq, AxiomVal, ConstantInfo, ConstantVal, ConstructorVal, Declaration,
     DefinitionSafety, DefinitionVal, InductiveType, InductiveVal, OpaqueVal, QuotKind, QuotVal,

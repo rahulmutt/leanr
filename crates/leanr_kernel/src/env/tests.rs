@@ -575,7 +575,10 @@ fn axiom_named(s: &str) -> crate::ArcConstantInfo {
 /// construction uses internally).
 fn has_name(env: &Environment, s: &str) -> bool {
     let view = env.view();
-    view.consts
+    let crate::ConstSource::Plain(consts) = view.consts else {
+        unreachable!("has_name: test helper assumes Environment::view()'s Plain source")
+    };
+    consts
         .values()
         .any(|ci| view.store.to_name(None, Some(ci.name())).to_string() == s)
 }

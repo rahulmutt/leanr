@@ -284,8 +284,9 @@ fn proj_parts_of(st: &Store, base: Option<&Store>, node: Node) -> (Option<NameId
 /// The environment view the checker consults (brief's Task 4 interface;
 /// Task 6's `Environment::view()` will produce one of these from the
 /// real persistent + scratch banks).
+#[derive(Clone, Copy)]
 pub struct EnvView<'a> {
-    pub consts: &'a std::collections::HashMap<NameId, ConstantInfo>,
+    pub consts: crate::ConstSource<'a>,
     pub extra: Option<&'a std::collections::HashMap<NameId, ConstantInfo>>,
     pub quot_initialized: bool,
     pub store: &'a Store,
@@ -295,7 +296,7 @@ impl<'a> EnvView<'a> {
     pub fn get(&self, n: NameId) -> Option<&'a ConstantInfo> {
         self.extra
             .and_then(|e| e.get(&n))
-            .or_else(|| self.consts.get(&n))
+            .or_else(|| self.consts.get(n))
     }
 
     /// Lookup with error on miss; **callers must pass a PERSISTENT-region `NameId`**.
