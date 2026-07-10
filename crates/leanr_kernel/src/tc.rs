@@ -1661,6 +1661,39 @@ impl<'e> TypeChecker<'e> {
 
     /// oracle: type_checker.cpp:521-534 (`unfold_definition`).
     fn unfold_definition(&mut self, e: ExprId) -> Result<Option<ExprId>, KernelError> {
+        #[cfg(feature = "trace-reductions")]
+        {
+            let f0 = self.get_app_fn(e);
+            if let Node::Const { name, .. } = self.node(f0) {
+                let nm = name.map(|n| self.to_name(n).to_string()).unwrap_or_default();
+                if (nm == "Nat.beq" || nm == "Nat.ble") && self.is_app(e) && self.get_app_num_args(e) == 2 {
+                    use std::cell::Cell;
+                    thread_local! { static U: Cell<u64> = const { Cell::new(0) }; }
+                    let u = U.with(|c| { let u = c.get() + 1; c.set(u); u });
+                    let args = self.get_app_args(e);
+                    let a1 = args[0]; let a2 = args[1];
+                    if u <= 120 {
+                        eprintln!("[UNFOLD-DEF-beq #{u} total={}] {nm} termfvar={} a1={} fvar={} | a2={} fvar={}",
+                            trace::total(), self.data(e).has_fvar(),
+                            self.describe(a1), self.data(a1).has_fvar(),
+                            self.describe(a2), self.data(a2).has_fvar());
+                    }
+                    // Backtrace the FIRST one whose second operand is a big literal (the fuel-scale walk trigger).
+                    if let Node::LitNat { v } = self.node(a2) {
+                        if self.scratch.nat_at(Some(self.view.store), v).to_usize().unwrap_or(0) > 5000 {
+                            eprintln!("[UNFOLD-DEF-beq BIG a2] BACKTRACE:\n{}", std::backtrace::Backtrace::force_capture());
+                            std::process::exit(7);
+                        }
+                    }
+                    if let Node::LitNat { v } = self.node(a1) {
+                        if self.scratch.nat_at(Some(self.view.store), v).to_usize().unwrap_or(0) > 5000 {
+                            eprintln!("[UNFOLD-DEF-beq BIG a1] BACKTRACE:\n{}", std::backtrace::Backtrace::force_capture());
+                            std::process::exit(7);
+                        }
+                    }
+                }
+            }
+        }
         if self.is_app(e) {
             let f0 = self.get_app_fn(e);
             match self.unfold_definition_core(f0)? {
@@ -2039,13 +2072,36 @@ impl<'e> TypeChecker<'e> {
             },
             _ => return Ok(None),
         };
+        #[cfg(feature = "trace-reductions")]
+        let _probe_beq = (op == "beq" || op == "ble") && {
+            use std::cell::Cell;
+            thread_local! { static M: Cell<u64> = const { Cell::new(0) }; }
+            let m = M.with(|c| { let m = c.get() + 1; c.set(m); m });
+            if m <= 60 {
+                eprintln!(
+                    "[reduce_nat CONST {op} #{m} total={}] termfvar={} a1={} fvar={} | a2={} fvar={}",
+                    trace::total(), self.data(e).has_fvar(),
+                    self.describe(a1), self.data(a1).has_fvar(),
+                    self.describe(a2), self.data(a2).has_fvar()
+                );
+            }
+            m <= 60
+        };
         let v1 = match self.get_nat_lit_ext(a1)? {
             Some(v) => v,
-            None => return Ok(None),
+            None => {
+                #[cfg(feature = "trace-reductions")]
+                if _probe_beq { eprintln!("[reduce_nat CONST {op}] -> None (a1 not literal)"); }
+                return Ok(None);
+            }
         };
         let v2 = match self.get_nat_lit_ext(a2)? {
             Some(v) => v,
-            None => return Ok(None),
+            None => {
+                #[cfg(feature = "trace-reductions")]
+                if _probe_beq { eprintln!("[reduce_nat CONST {op}] -> None (a2 not literal)"); }
+                return Ok(None);
+            }
         };
         let r = match op.as_str() {
             "add" => self
@@ -2729,6 +2785,10 @@ impl<'e> TypeChecker<'e> {
             if let Some(sv) = slf.reduce_native(*s_n)? {
                 return Ok(to_lbool(slf.is_def_eq_core(*t_n, sv)?));
             }
+            #[cfg(feature = "trace-reductions")]
+            {
+                slf.probe_ldr(*t_n, *s_n)?;
+            }
             match slf.lazy_delta_reduction_step(t_n, s_n)? {
                 ReductionStatus::Continue => {}
                 ReductionStatus::DefUnknown => return Ok(Lbool::Undef),
@@ -2736,6 +2796,67 @@ impl<'e> TypeChecker<'e> {
                 ReductionStatus::DefDiff => return Ok(Lbool::False),
             }
         })
+    }
+
+    /// TEMPORARY spike probe (Task 4 residual). Gated; reverted before commit.
+    #[cfg(feature = "trace-reductions")]
+    fn probe_ldr(&mut self, t_n: ExprId, s_n: ExprId) -> Result<(), KernelError> {
+        use std::cell::Cell;
+        thread_local! { static N: Cell<u64> = const { Cell::new(0) }; }
+        // Disabled for the reduce_nat-CONST probe run.
+        if trace::total() < u64::MAX {
+            return Ok(());
+        }
+        let head_name = |slf: &Self, e: ExprId| -> Option<String> {
+            let f = slf.get_app_fn(e);
+            match slf.node(f) {
+                Node::Const { name: Some(n), .. } => Some(slf.to_name(n).to_string()),
+                _ => None,
+            }
+        };
+        let ht = head_name(self, t_n);
+        let hs = head_name(self, s_n);
+        let n = N.with(|c| { let n = c.get() + 1; c.set(n); n });
+        if n > 25 {
+            eprintln!("[probe_ldr] done, exiting to avoid OOM");
+            std::process::exit(7);
+        }
+        eprintln!(
+            "[probe_ldr #{n} total={}] t: head={:?} nargs={} fvar={} | s: head={:?} nargs={} fvar={}",
+            trace::total(), ht, self.get_app_num_args(t_n), self.data(t_n).has_fvar(),
+            hs, self.get_app_num_args(s_n), self.data(s_n).has_fvar()
+        );
+        for (label, e, h) in [("t", t_n, &ht), ("s", s_n, &hs)] {
+            let hn = match h { Some(x) => x.as_str(), None => continue };
+            if hn.starts_with("Nat.beq") || hn.starts_with("Nat.ble") {
+                let args = self.get_app_args(e);
+                for (i, &a) in args.iter().enumerate() {
+                    eprintln!("    {label} arg{i}: {} fvar={}", self.describe(a), self.data(a).has_fvar());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// TEMPORARY: shallow syntactic description of an expr head (no forcing).
+    #[cfg(feature = "trace-reductions")]
+    fn describe(&self, e: ExprId) -> String {
+        match self.node(e) {
+            Node::LitNat { v } => format!("lit({})", self.scratch.nat_at(Some(self.view.store), v)),
+            Node::Const { name, .. } => format!("const:{}", name.map(|n| self.to_name(n).to_string()).unwrap_or_default()),
+            Node::FVar { .. } => "FVAR".to_string(),
+            Node::App { .. } => {
+                let f = self.get_app_fn(e);
+                let fd = match self.node(f) {
+                    Node::Const { name, .. } => format!("const:{}", name.map(|n| self.to_name(n).to_string()).unwrap_or_default()),
+                    Node::FVar { .. } => "FVAR".to_string(),
+                    _ => "?".to_string(),
+                };
+                format!("app<{}>[{}args]", fd, self.get_app_num_args(e))
+            }
+            Node::Lam { .. } => "lam".to_string(),
+            other => format!("{:?}", std::mem::discriminant(&other)),
+        }
     }
 
     /// oracle: type_checker.cpp:1008-1025 (`lazy_delta_proj_reduction`).
