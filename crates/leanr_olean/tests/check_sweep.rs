@@ -82,26 +82,20 @@ fn check_all_stdlib_oleans() {
         .collect();
 
     let sp = SearchPath::new(vec![root]);
-    let modules = load_closure(&sp, &targets).expect("closure loads");
+    let mut env = Environment::default();
+    let modules = load_closure(&sp, &targets, env.store_mut()).expect("closure loads");
     let module_count = modules.len();
 
-    // Bridge-intern every module's constants into the environment's
-    // persistent bank one module at a time, dropping each decoded
-    // module's Arc graph before the next (the id-native kernel's
-    // memory-win line — spec:
-    // docs/superpowers/specs/2026-07-06-term-bank-kernel-migration-design.md
-    // §2 "Load"). Module oleans carry only their own module's constants,
-    // so the closure's constant sets are disjoint; first-seen wins on
-    // the rare cross-module name collision, matching the pre-migration
-    // Arc `HashMap::entry(...).or_insert(...)` fold this replaces.
-    let mut env = Environment::default();
+    // Decoding already interned everything (phase 3, direct-to-id
+    // decode); this loop just folds the union of constants to replay.
+    // Module oleans carry only their own module's constants, so the
+    // closure's constant sets are disjoint; first-seen wins on the rare
+    // cross-module name collision, matching the pre-migration
+    // `HashMap::entry(...).or_insert(...)` fold this replaces.
     let mut constants: HashMap<NameId, ConstantInfo> = HashMap::new();
     for (_, md) in modules {
-        let interned = env
-            .intern_module(md.constants)
-            .unwrap_or_else(|e| panic!("stdlib interning failed: {e}"));
-        for (name, ci) in interned {
-            constants.entry(name).or_insert(ci);
+        for ci in md.constants {
+            constants.entry(ci.name()).or_insert(ci);
         }
     }
 
