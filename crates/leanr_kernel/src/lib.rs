@@ -53,7 +53,7 @@ pub use decl::{
     ArcConstructorVal, ArcDeclaration, ArcDefinitionVal, ArcInductiveType, ArcInductiveVal,
     ArcOpaqueVal, ArcQuotVal, ArcRecursorRule, ArcRecursorVal, ArcTheoremVal,
 };
-pub use env::{check_declaration, Admitted, Environment, EnvironmentError};
+pub use env::{check_declaration, resolve_constant_info, Admitted, Environment, EnvironmentError};
 pub use error::KernelError;
 pub use expr::{BinderInfo, DataValue, Expr, ExprData, ExprNode, KVMap, Literal};
 pub use guard::{RecGuard, MAX_REC_DEPTH};

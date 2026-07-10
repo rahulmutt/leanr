@@ -547,32 +547,128 @@ impl Environment {
 // enumeration (every field of every variant accounted for).
 // ---------------------------------------------------------------------
 
-fn promote_name_vec(
-    base: &mut Store,
+/// Terminal leaf translation for the shared `ConstantInfo` field walk
+/// (`xlate_constant_info`): `promote` interns each name/expr into `base`
+/// (append; always `Some`), while `resolve` looks each one up in the
+/// frozen `base` (read-only; `Ok(None)` on any miss). Single-sourcing the
+/// field enumeration behind this one trait keeps `promote_constant_info`
+/// and `resolve_constant_info` from silently diverging in field coverage —
+/// a skipped field is a soundness hole in BOTH (a leaked scratch id on the
+/// promote side; a missed sub-value on the resolve side). The two impls
+/// (`Promoter`, `Resolver`) are the only place the intern-vs-lookup
+/// behavior differs; the walk that calls them is written exactly once.
+trait Xlate {
+    /// Translate a declaration-position `NameId` (never anonymous — those
+    /// are the `Option<NameId>` leaves inside expression trees, handled
+    /// entirely by the `expr` walk below). Persistent ids pass through.
+    fn name(&mut self, scratch: &Store, id: NameId) -> Result<Option<NameId>, KernelError>;
+    /// Translate an `ExprId` (and every name/level/pool row it references).
+    fn expr(&mut self, scratch: &Store, id: ExprId) -> Result<Option<ExprId>, KernelError>;
+}
+
+/// Promote leaf: intern into `base`. Appends canonical rows and therefore
+/// never misses, so every method returns `Ok(Some(..))`. This preserves
+/// `promote_constant_info`'s original append behavior byte-for-byte — the
+/// `Option` is inert here.
+struct Promoter<'a>(&'a mut Store);
+
+impl Xlate for Promoter<'_> {
+    fn name(&mut self, scratch: &Store, id: NameId) -> Result<Option<NameId>, KernelError> {
+        Ok(Some(promote_name(self.0, scratch, id)?))
+    }
+    fn expr(&mut self, scratch: &Store, id: ExprId) -> Result<Option<ExprId>, KernelError> {
+        Ok(Some(promote(self.0, scratch, id)?))
+    }
+}
+
+/// Resolve leaf: read-only lookup against the frozen `base` (spec: the
+/// 2026-07-10 execution amendment). `base` is `&Store` and is NEVER
+/// appended. A throwaway `probe` scratch region reconstructs each leaf
+/// structurally (via the audited `to_name`/`to_expr` walks) and interns
+/// it *through* `base` (via `intern_name`/`intern_expr` with `Some(base)`)
+/// — the injective hash-cons routing returns `base`'s own canonical id
+/// when the structure is already interned, or a `probe`-region (scratch)
+/// id when it is absent. A scratch-region result therefore means "absent
+/// from base" ⇒ `Ok(None)`. Crucially this re-derives presence from
+/// STRUCTURE rather than trusting that a scratch-region survivor id
+/// implies base-absence, so it stays correct (no false reject) even if a
+/// future construction site fails to canonicalize an in-base subterm to a
+/// base id — the fragility the amendment calls out. Persistent
+/// (base-region) survivor ids pass straight through, already canonical.
+struct Resolver<'a> {
+    base: &'a Store,
+    probe: Store,
+}
+
+impl Xlate for Resolver<'_> {
+    fn name(&mut self, scratch: &Store, id: NameId) -> Result<Option<NameId>, KernelError> {
+        if !id.is_scratch() {
+            return Ok(Some(id));
+        }
+        let n = scratch.to_name(Some(self.base), Some(id));
+        // `n` is non-anonymous (rebuilt from a real scratch `NameId`), so
+        // `intern_name` yields `Some`; a base-region id ⇒ hit, a
+        // scratch-region id ⇒ absent from base ⇒ miss.
+        Ok(match self.probe.intern_name(Some(self.base), &n)? {
+            Some(nid) if !nid.is_scratch() => Some(nid),
+            _ => None,
+        })
+    }
+    fn expr(&mut self, scratch: &Store, id: ExprId) -> Result<Option<ExprId>, KernelError> {
+        if !id.is_scratch() {
+            return Ok(Some(id));
+        }
+        let mut g = crate::RecGuard::new();
+        let e = scratch.to_expr(Some(self.base), id, &mut g)?;
+        let pid = self.probe.intern_expr(Some(self.base), &e)?;
+        Ok(if pid.is_scratch() { None } else { Some(pid) })
+    }
+}
+
+/// Short-circuit a `Result<Option<_>>` leaf: on `Ok(None)` (a resolve
+/// miss), abandon the whole walk with `Ok(None)`.
+macro_rules! xlate_or_bail {
+    ($e:expr) => {
+        match $e? {
+            Some(v) => v,
+            None => return Ok(None),
+        }
+    };
+}
+
+fn xlate_name_vec<X: Xlate>(
+    x: &mut X,
     scratch: &Store,
     ns: &[NameId],
-) -> Result<Vec<NameId>, KernelError> {
-    ns.iter().map(|&n| promote_name(base, scratch, n)).collect()
+) -> Result<Option<Vec<NameId>>, KernelError> {
+    let mut out = Vec::with_capacity(ns.len());
+    for &n in ns {
+        out.push(xlate_or_bail!(x.name(scratch, n)));
+    }
+    Ok(Some(out))
 }
 
-fn promote_constant_val(
-    base: &mut Store,
+fn xlate_constant_val<X: Xlate>(
+    x: &mut X,
     scratch: &Store,
     v: &ConstantVal,
-) -> Result<ConstantVal, KernelError> {
-    Ok(ConstantVal {
-        name: promote_name(base, scratch, v.name)?,
-        level_params: promote_name_vec(base, scratch, &v.level_params)?,
-        ty: promote(base, scratch, v.ty)?,
-    })
+) -> Result<Option<ConstantVal>, KernelError> {
+    Ok(Some(ConstantVal {
+        name: xlate_or_bail!(x.name(scratch, v.name)),
+        level_params: xlate_or_bail!(xlate_name_vec(x, scratch, &v.level_params)),
+        ty: xlate_or_bail!(x.expr(scratch, v.ty)),
+    }))
 }
 
-/// Translate a scratch-region `ConstantInfo` into an equivalent one
-/// whose every id is persistent (`base`-region), per `add_core`'s
-/// choke-point contract. Every field of every variant is enumerated
-/// below (same coverage discipline as `decl.rs`'s `constant_info_eq`
-/// doc comment); a skipped field would leak a scratch id into the
-/// persistent environment.
+/// The single, audited field-by-field `ConstantInfo` walk shared by
+/// `promote_constant_info` (intern leaf) and `resolve_constant_info`
+/// (read-only base-lookup leaf). Every field of every variant is
+/// enumerated below (same coverage discipline as `decl.rs`'s
+/// `constant_info_eq` doc comment); the compiler additionally enforces
+/// completeness because each arm is a full struct literal. On the promote
+/// side a skipped id-field would leak a scratch id into the persistent
+/// environment; on the resolve side it would skip a base-lookup and could
+/// wrongly accept a survivor — so this MUST stay complete.
 ///
 /// Field coverage (every variant, every field of its payload struct):
 /// - `ConstantVal` (`.val` on every kind): `name`, `level_params`, `ty`.
@@ -588,80 +684,124 @@ fn promote_constant_val(
 /// - `RecursorVal`: `val`, `all`, `rules` (per `RecursorRule`: `ctor`,
 ///   `rhs`, + `nfields` copied) (+ `num_params`/`num_indices`/
 ///   `num_motives`/`num_minors`/`k`/`is_unsafe` copied, no ids).
-pub(crate) fn promote_constant_info(
-    base: &mut Store,
+fn xlate_constant_info<X: Xlate>(
+    x: &mut X,
     scratch: &Store,
     ci: &ConstantInfo,
-) -> Result<ConstantInfo, KernelError> {
-    Ok(match ci {
+) -> Result<Option<ConstantInfo>, KernelError> {
+    Ok(Some(match ci {
         ConstantInfo::Axiom(v) => ConstantInfo::Axiom(AxiomVal {
-            val: promote_constant_val(base, scratch, &v.val)?,
+            val: xlate_or_bail!(xlate_constant_val(x, scratch, &v.val)),
             is_unsafe: v.is_unsafe,
         }),
         ConstantInfo::Defn(v) => ConstantInfo::Defn(DefinitionVal {
-            val: promote_constant_val(base, scratch, &v.val)?,
-            value: promote(base, scratch, v.value)?,
+            val: xlate_or_bail!(xlate_constant_val(x, scratch, &v.val)),
+            value: xlate_or_bail!(x.expr(scratch, v.value)),
             hints: v.hints,
             safety: v.safety,
-            all: promote_name_vec(base, scratch, &v.all)?,
+            all: xlate_or_bail!(xlate_name_vec(x, scratch, &v.all)),
         }),
         ConstantInfo::Thm(v) => ConstantInfo::Thm(TheoremVal {
-            val: promote_constant_val(base, scratch, &v.val)?,
-            value: promote(base, scratch, v.value)?,
-            all: promote_name_vec(base, scratch, &v.all)?,
+            val: xlate_or_bail!(xlate_constant_val(x, scratch, &v.val)),
+            value: xlate_or_bail!(x.expr(scratch, v.value)),
+            all: xlate_or_bail!(xlate_name_vec(x, scratch, &v.all)),
         }),
         ConstantInfo::Opaque(v) => ConstantInfo::Opaque(OpaqueVal {
-            val: promote_constant_val(base, scratch, &v.val)?,
-            value: promote(base, scratch, v.value)?,
+            val: xlate_or_bail!(xlate_constant_val(x, scratch, &v.val)),
+            value: xlate_or_bail!(x.expr(scratch, v.value)),
             is_unsafe: v.is_unsafe,
-            all: promote_name_vec(base, scratch, &v.all)?,
+            all: xlate_or_bail!(xlate_name_vec(x, scratch, &v.all)),
         }),
         ConstantInfo::Quot(v) => ConstantInfo::Quot(QuotVal {
-            val: promote_constant_val(base, scratch, &v.val)?,
+            val: xlate_or_bail!(xlate_constant_val(x, scratch, &v.val)),
             kind: v.kind,
         }),
         ConstantInfo::Induct(v) => ConstantInfo::Induct(InductiveVal {
-            val: promote_constant_val(base, scratch, &v.val)?,
+            val: xlate_or_bail!(xlate_constant_val(x, scratch, &v.val)),
             num_params: v.num_params.clone(),
             num_indices: v.num_indices.clone(),
-            all: promote_name_vec(base, scratch, &v.all)?,
-            ctors: promote_name_vec(base, scratch, &v.ctors)?,
+            all: xlate_or_bail!(xlate_name_vec(x, scratch, &v.all)),
+            ctors: xlate_or_bail!(xlate_name_vec(x, scratch, &v.ctors)),
             num_nested: v.num_nested.clone(),
             is_rec: v.is_rec,
             is_unsafe: v.is_unsafe,
             is_reflexive: v.is_reflexive,
         }),
         ConstantInfo::Ctor(v) => ConstantInfo::Ctor(ConstructorVal {
-            val: promote_constant_val(base, scratch, &v.val)?,
-            induct: promote_name(base, scratch, v.induct)?,
+            val: xlate_or_bail!(xlate_constant_val(x, scratch, &v.val)),
+            induct: xlate_or_bail!(x.name(scratch, v.induct)),
             cidx: v.cidx.clone(),
             num_params: v.num_params.clone(),
             num_fields: v.num_fields.clone(),
             is_unsafe: v.is_unsafe,
         }),
         ConstantInfo::Rec(v) => ConstantInfo::Rec(RecursorVal {
-            val: promote_constant_val(base, scratch, &v.val)?,
-            all: promote_name_vec(base, scratch, &v.all)?,
+            val: xlate_or_bail!(xlate_constant_val(x, scratch, &v.val)),
+            all: xlate_or_bail!(xlate_name_vec(x, scratch, &v.all)),
             num_params: v.num_params.clone(),
             num_indices: v.num_indices.clone(),
             num_motives: v.num_motives.clone(),
             num_minors: v.num_minors.clone(),
-            rules: v
-                .rules
-                .iter()
-                .map(|r| {
-                    Ok(RecursorRule {
-                        ctor: promote_name(base, scratch, r.ctor)?,
+            rules: {
+                let mut rules = Vec::with_capacity(v.rules.len());
+                for r in &v.rules {
+                    rules.push(RecursorRule {
+                        ctor: xlate_or_bail!(x.name(scratch, r.ctor)),
                         nfields: r.nfields.clone(),
-                        rhs: promote(base, scratch, r.rhs)?,
-                    })
-                })
-                .collect::<Result<Vec<_>, KernelError>>()?,
+                        rhs: xlate_or_bail!(x.expr(scratch, r.rhs)),
+                    });
+                }
+                rules
+            },
             k: v.k,
             is_unsafe: v.is_unsafe,
         }),
-    })
+    }))
 }
 
+/// Translate a scratch-region `ConstantInfo` into an equivalent one whose
+/// every id is persistent (`base`-region), per `add_core`'s choke-point
+/// contract. Delegates to the shared `xlate_constant_info` walk with the
+/// intern (`Promoter`) leaf. The leaf always appends, so `xlate` never
+/// yields `None`; the `ok_or` maps that unreachable case to the same
+/// reject-not-panic posture `promote_name` already uses for an
+/// anonymous-name intern — behavior is unchanged from the pre-refactor
+/// hand-written enumeration.
+pub(crate) fn promote_constant_info(
+    base: &mut Store,
+    scratch: &Store,
+    ci: &ConstantInfo,
+) -> Result<ConstantInfo, KernelError> {
+    xlate_constant_info(&mut Promoter(base), scratch, ci)?.ok_or(KernelError::BankExhausted)
+}
+
+/// Read-only twin of `promote_constant_info`. Translates a scratch-region
+/// survivor `ci` into an equivalent persistent-region `ConstantInfo` by
+/// LOOKING UP each of its names/levels/terms in the frozen `base` store —
+/// never appending. Returns `Ok(None)` if ANY sub-value is absent from
+/// `base` (⇒ the survivor is structurally different from anything
+/// interned; since the decoded twin IS interned, a miss means survivor ≠
+/// twin ⇒ the caller rejects). On all-hits, returns `Ok(Some(resolved))`
+/// whose ids are `base`-canonical, so the caller compares it against the
+/// decoded twin with `constant_info_eq` verbatim (id equality = structural
+/// equality in one store). Read-only: takes `&Store` (no `&mut`, no
+/// interior mutability, no `unsafe`) — the sole mutation is into a
+/// throwaway per-call `probe` scratch region, which dies with the call.
+/// Spec: `docs/superpowers/specs/2026-07-10-m1-final-parallel-mathlib-design.md`,
+/// "Amendment (2026-07-10, execution)".
+pub fn resolve_constant_info(
+    base: &Store,
+    scratch: &Store,
+    ci: &ConstantInfo,
+) -> Result<Option<ConstantInfo>, KernelError> {
+    let mut resolver = Resolver {
+        base,
+        probe: Store::scratch(),
+    };
+    xlate_constant_info(&mut resolver, scratch, ci)
+}
+
+#[cfg(test)]
+mod resolve_tests;
 #[cfg(test)]
 mod tests;
