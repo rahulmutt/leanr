@@ -91,6 +91,34 @@ idempotent and fast, and this reuses the existing, proven
 comparison primitive to the TCB. The def/axiom/theorem/opaque hot path
 takes no lock.
 
+> **Amendment (2026-07-10, execution — supersedes the mutex mechanism
+> above).** Step 4a arena analysis showed the "promote (intern) under a
+> mutex" mechanism is both unnecessary and unsafe: def-workers read the
+> frozen store lock-free while a promoting worker would append, and a
+> `Vec`/probe-table reallocation mid-read is a use-after-free — making it
+> sound would require bespoke `unsafe` stable-address arenas + a
+> lock-free-readable hash table in the TCB. Instead, because the store is
+> an injective hash-cons and every survivor's decoded twin is **already
+> interned** during decode, the compare is done **read-only**: translate
+> each regenerated survivor id by *looking it up* in the frozen store
+> (never appending) via a new read-only kernel primitive
+> `resolve_constant_info(base: &Store, scratch: &Store, ci) ->
+> Result<Option<ConstantInfo>, KernelError>`; a lookup miss ⇒ the survivor
+> differs from anything interned ⇒ (since the twin is interned) survivor ≠
+> twin ⇒ reject. On all-hits, compare the resolved ids against the twin
+> with `constant_info_eq` **verbatim**. This is verdict-equivalent to
+> promote-then-compare (proven by cases over the hash-cons invariant),
+> keeps the store genuinely `&Store`-immutable (**no interior mutability,
+> no `unsafe`, no promotion mutex — the inductive/quot path is lock-free
+> too**), and reuses `constant_info_eq` unchanged (no new *comparison*
+> primitive; `resolve_constant_info` is a read-only *translation*
+> primitive, ideally sharing the existing `promote` walk parameterized
+> over intern-vs-lookup). Scope note: resolve-or-reject only re-checks
+> declarations present in the decoded union — exactly M1-final's scope —
+> and the §Testing differential gate validates verdict-equivalence before
+> the flip. Everywhere below that says "promote under the mutex" now reads
+> "resolve read-only; no mutex."
+
 The kernel's only interior mutability is a `#[cfg(test)]`/debug trace
 tally (`tc/trace.rs`); `&Store` and `&EnvView` are otherwise plain
 `Sync` data.
