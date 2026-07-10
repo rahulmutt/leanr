@@ -416,6 +416,37 @@ fn iota_on_literal_major() {
     assert_eq!(r, xid(&mut scratch, base, &expected));
 }
 
+#[cfg(feature = "trace-reductions")]
+#[test]
+fn trace_counts_nat_rec_reductions() {
+    use crate::tc::trace;
+    trace::reset();
+    let env = mini::env();
+    let mut scratch = Store::scratch();
+    let base = env.view().store;
+    let (cc, z, s) = (
+        mini::cst("C", vec![]),
+        mini::cst("z", vec![]),
+        mini::cst("s", vec![]),
+    );
+    let natrec = mini::cstn(nm2("Nat", "rec"), vec![zero_lvl()]);
+    let e = mini::appn(natrec, vec![cc, z, s, lit_nat(3)]);
+    let mut cur = xid(&mut scratch, base, &e);
+    let mut checker = TypeChecker::new(env.view(), &mut scratch);
+    // `whnf` fires the recursor exactly once per call (weak head normal
+    // form does not recurse into the minor premise's arguments; see
+    // `iota_on_literal_major` above, which pins `whnf(rec ... 2) = s 1
+    // (rec ... 1)` — the nested `rec` stays unreduced). Walking literal
+    // 3 down through 2, 1, 0 by re-`whnf`-ing the nested `Nat.rec`
+    // argument three times gives 3 real recursor firings.
+    for _ in 0..3 {
+        let r = checker.whnf(cur).unwrap();
+        let args = checker.get_app_args(r);
+        cur = *args.last().expect("succ minor applied to (n, ih)");
+    }
+    assert!(trace::total() >= 3, "snapshot: {:?}", trace::snapshot());
+}
+
 #[test]
 fn k_like_rec_on_eq() {
     // whnf(Eq.rec.{0,1} A a0 Mot req a0 h) = req, where h : @Eq.{1} A a0 a0
@@ -583,6 +614,39 @@ fn nat_beq_folds_to_bool() {
         r3,
         xid(&mut scratch, base, &mini::cstn(nm2("Bool", "true"), vec![]))
     );
+}
+
+/// Result-B regression (fix: `unfold_and_whnf` consults `reduce_nat`
+/// before delta-unfolding — tc.rs, `Nat.brecOn`/`Nat.below` divergence).
+///
+/// Drives the kernel into deciding `P Bool.true =?= P (Nat.beq 4 x)`
+/// where `x` is a LET-BOUND fvar whose value is a literal: `Nat.beq 4 x`
+/// then has `has_fvar == true`, so BOTH pre-existing `reduce_nat` guards
+/// miss it — the top-level `whnf` loop is never consulted on this
+/// `is_def_eq` route, and `lazy_delta_reduction`'s joint
+/// `!has_fvar(t) && !has_fvar(s)` fast-path guard skips it — leaving the
+/// `lazy_delta_reduction_step` unfold as the only route to an answer
+/// (exactly how `Char.ofOrdinal._proof_3` escaped into the `Nat.below`
+/// tower walk). The fixture `Nat.beq` body is an opaque stub, so
+/// delta-unfolding CANNOT decide the pair: the check succeeds iff the
+/// native reduction fired on the unfold step, matching the oracle's
+/// native behavior (real `Kernel.whnf` reduces `Nat.beq big (Nat.sub x
+/// 5)` with a let-bound `x` straight to `Bool.true`).
+#[test]
+fn nat_beq_native_reduction_fires_on_is_def_eq_path_with_let_fvar() {
+    let env = mini::env_with(mini::nat_beq_regression_decls());
+    let mut scratch = Store::scratch();
+    // let x : Nat := 4; useP x hPtrue
+    //   useP x : P (Nat.beq 4 x) → B,  hPtrue : P Bool.true
+    let body = mini::appn(
+        mini::cst("useP", vec![]),
+        vec![mini::bvar(0), mini::cst("hPtrue", vec![])],
+    );
+    let e = Expr::let_e(nm("x"), mini::nat(), lit_nat(4), body, false);
+    // Pre-fix: Err(AppTypeMismatch) — the stub unfold sticks at
+    // `Nat.beqAux 4 x` and the pair is (wrongly) undecidable. Post-fix:
+    // the unfold step natively collapses `Nat.beq 4 x` to `Bool.true`.
+    check(&env, &mut scratch, &e, &[]).unwrap();
 }
 
 #[test]
