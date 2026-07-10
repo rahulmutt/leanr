@@ -70,6 +70,15 @@ pub enum KernelError {
     /// module set (Replay.lean uses `unreachable!`; untrusted input
     /// makes it a real error for us).
     MissingConstant(Arc<Name>),
+    /// The parallel driver's dependency DAG has a cycle (impossible from a
+    /// well-formed `.olean`, constructible by an attacker). Reported by
+    /// the scheduler's drain-detection naming a member of a still-pending
+    /// task, so a hostile graph is rejected rather than hanging — the
+    /// parallel twin of `RecGuard` bounding the sequential descent. Spec:
+    /// docs/superpowers/specs/2026-07-10-m1-final-parallel-mathlib-design.md
+    /// §Error handling ("Cycles / starvation"). Appended (KernelError is
+    /// never serialized to disk, so variant order is free).
+    DependencyCycle(Arc<Name>),
 }
 
 impl std::fmt::Display for KernelError {
@@ -109,6 +118,7 @@ impl std::fmt::Display for KernelError {
             KernelError::ConstructorMismatch(n) => write!(f, "invalid constructor '{n}'"),
             KernelError::RecursorMismatch(n) => write!(f, "invalid recursor '{n}'"),
             KernelError::MissingConstant(n) => write!(f, "constant '{n}' missing from module set"),
+            KernelError::DependencyCycle(n) => write!(f, "dependency cycle involving '{n}'"),
         }
     }
 }

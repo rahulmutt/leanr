@@ -61,11 +61,11 @@ pub use level::Level;
 pub use local_ctx::{FVarIdGen, LocalContext, LocalDecl};
 pub use name::Name;
 pub use num::{Int, Nat};
-pub use replay::{replay, ReplayError, ReplayStats};
+pub use replay::{build_inductive_types, replay, ReplayError, ReplayStats};
 pub use subst::{
     abstract_fvars, instantiate, instantiate_core, instantiate_level_params, instantiate_rev,
     lift_loose_bvars,
 };
 pub use syntax::{Preresolved, SourceInfo, Substring, Syntax};
-pub use tc::{Lbool, TypeChecker};
+pub use tc::{EnvView, Lbool, TypeChecker};
 pub use used_consts::used_constants;
