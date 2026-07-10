@@ -149,13 +149,12 @@ pub enum OleanError {
     /// count, scalar where an object belongs, ...).
     #[error("olean module data malformed: expected {expected}")]
     BadShape { expected: &'static str },
-    /// Building an `Expr::sort`/`Expr::const_` node hit
-    /// `leanr_kernel::RecGuard`'s recursion depth cap while hashing an
-    /// attacker-depth `Level` (M1b `ExprData`). Legitimate files never
-    /// approach this; only a crafted file with extreme universe-level
-    /// nesting can trigger it — incompleteness, never unsoundness.
-    #[error("olean module data malformed: expression exceeds maximum recursion depth")]
-    DeepRecursion,
+    /// Interning into the term bank failed while decoding directly to
+    /// ids (phase 3) — e.g. a bank's u32 id space exhausted
+    /// (`KernelError::BankExhausted`). Not reachable from legitimate
+    /// files; incompleteness, never unsoundness.
+    #[error("olean decode: kernel interning failed: {0}")]
+    Kernel(#[from] leanr_kernel::KernelError),
 }
 
 impl OleanHeader {
@@ -207,6 +206,7 @@ impl OleanHeader {
 }
 
 mod interp;
+mod interp_id;
 mod loader;
 mod module_data;
 mod raw;

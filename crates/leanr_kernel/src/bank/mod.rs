@@ -623,6 +623,28 @@ impl Store {
         }
     }
 
+    /// Id-native kvmap intern (phase 3, direct decode): the caller has
+    /// already interned every entry's leaves and hands the finished
+    /// rows. `intern_kvmap` (the Arc bridge) reduces to leaf-bridging
+    /// plus this.
+    pub fn intern_kvmap_rows(
+        &mut self,
+        base: Option<&Store>,
+        entries: Vec<(Option<NameId>, DataValueRow)>,
+    ) -> Result<KVMapId, KernelError> {
+        let row = KVMapRow(entries.into_boxed_slice());
+        let h = kvmap_row_hash(&row);
+        if let Some(b) = base {
+            if let Some(bits) = b.kvmaps.lookup(h, |t| *t == row) {
+                return KVMapId::from_bits(bits).ok_or(KernelError::BankExhausted);
+            }
+        }
+        let bits = self
+            .kvmaps
+            .intern(h, |t| *t == row, || row.clone(), kvmap_row_hash)?;
+        KVMapId::from_bits(bits).ok_or(KernelError::BankExhausted)
+    }
+
     /// Bridge: intern a `KVMap` (base lookup → own intern, following
     /// `intern_str`/`intern_nat`'s pattern). Each entry is bridged
     /// through `intern_name` and the leaf pools first, then the
@@ -638,17 +660,7 @@ impl Store {
             let v = self.intern_data_value(base, value)?;
             entries.push((n, v));
         }
-        let row = KVMapRow(entries.into_boxed_slice());
-        let h = kvmap_row_hash(&row);
-        if let Some(b) = base {
-            if let Some(bits) = b.kvmaps.lookup(h, |t| *t == row) {
-                return KVMapId::from_bits(bits).ok_or(KernelError::BankExhausted);
-            }
-        }
-        let bits = self
-            .kvmaps
-            .intern(h, |t| *t == row, || row.clone(), kvmap_row_hash)?;
-        KVMapId::from_bits(bits).ok_or(KernelError::BankExhausted)
+        self.intern_kvmap_rows(base, entries)
     }
 
     pub fn kvmap_at<'a>(&'a self, base: Option<&'a Store>, id: KVMapId) -> &'a KVMapRow {

@@ -44,6 +44,7 @@ use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
+use leanr_kernel::bank::Store;
 use leanr_kernel::Name;
 
 use crate::{ModuleData, OleanError, PartKind};
@@ -198,26 +199,28 @@ trait ModuleSource {
     /// The loaded representation of one module.
     type Module;
     /// Load a single module by name.
-    fn load(&self, module: &Name) -> Result<Self::Module, LoadError>;
+    fn load(&mut self, module: &Name) -> Result<Self::Module, LoadError>;
     /// The direct imports of a loaded module.
     fn imports(module: &Self::Module) -> Vec<Arc<Name>>;
 }
 
 /// Production [`ModuleSource`]: resolve names on a [`SearchPath`], read the
-/// bytes, and decode with [`ModuleData::parse`].
+/// bytes, and decode with [`ModuleData::parse`] directly into `st` (the
+/// caller's store — direct-to-id decode, phase 3).
 struct FileSource<'a> {
     search_path: &'a SearchPath,
+    st: &'a mut Store,
 }
 
 impl ModuleSource for FileSource<'_> {
     type Module = ModuleData;
 
-    fn load(&self, module: &Name) -> Result<ModuleData, LoadError> {
+    fn load(&mut self, module: &Name) -> Result<ModuleData, LoadError> {
         let path = self
             .search_path
             .find(module)
             .ok_or_else(|| LoadError::ModuleNotFound(module.to_string()))?;
-        load_module_at(&path)
+        load_module_at(&path, self.st)
     }
 
     fn imports(module: &ModuleData) -> Vec<Arc<Name>> {
@@ -252,13 +255,13 @@ fn companion_path(base: &Path, ext: &str) -> PathBuf {
 /// loaded only as a dependency of `.private` (a `.private` part's pointers
 /// can target objects deduplicated into the `.server` region). A missing
 /// companion is fine — pre-module-system oleans have none.
-fn load_module_at(base: &Path) -> Result<ModuleData, LoadError> {
+fn load_module_at(base: &Path, st: &mut Store) -> Result<ModuleData, LoadError> {
     let base_bytes = read_part(base)?;
 
     let private = companion_path(base, "private");
     if !private.is_file() {
         // No `.private` companion: a plain single-region module.
-        return ModuleData::parse(&base_bytes).map_err(|source| LoadError::Decode {
+        return ModuleData::parse(&base_bytes, st).map_err(|source| LoadError::Decode {
             path: base.to_path_buf(),
             source,
         });
@@ -297,7 +300,7 @@ fn load_module_at(base: &Path) -> Result<ModuleData, LoadError> {
     }
     parts.push((PartKind::Private, &private_bytes));
 
-    ModuleData::parse_parts(&parts).map_err(|source| LoadError::Decode {
+    ModuleData::parse_parts(&parts, st).map_err(|source| LoadError::Decode {
         path: base.to_path_buf(),
         source,
     })
@@ -324,8 +327,15 @@ fn read_part(path: &Path) -> Result<Vec<u8>, LoadError> {
 pub fn load_closure(
     sp: &SearchPath,
     targets: &[Arc<Name>],
+    st: &mut Store,
 ) -> Result<LoadedModules<ModuleData>, LoadError> {
-    load_closure_with(&FileSource { search_path: sp }, targets)
+    load_closure_with(
+        &mut FileSource {
+            search_path: sp,
+            st,
+        },
+        targets,
+    )
 }
 
 /// A loaded closure: `(module name, loaded module)` pairs in
@@ -343,7 +353,7 @@ enum Status {
 /// `Exit` runs only after all its imports are `Done`, so pushing at `Exit`
 /// yields dependencies-first order.
 fn load_closure_with<S: ModuleSource>(
-    src: &S,
+    src: &mut S,
     targets: &[Arc<Name>],
 ) -> Result<LoadedModules<S::Module>, LoadError> {
     enum Frame {
@@ -495,7 +505,7 @@ mod tests {
     impl ModuleSource for GraphSource {
         type Module = Vec<Arc<Name>>;
 
-        fn load(&self, module: &Name) -> Result<Vec<Arc<Name>>, LoadError> {
+        fn load(&mut self, module: &Name) -> Result<Vec<Arc<Name>>, LoadError> {
             self.edges
                 .get(&module.to_string())
                 .cloned()
@@ -589,7 +599,8 @@ mod tests {
 
         // Through the public API a rejected name is a `ModuleNotFound`, and
         // the planted sibling file is never reached.
-        let err = load_closure(&sp, &[dotdot]).unwrap_err();
+        let mut st = Store::persistent();
+        let err = load_closure(&sp, &[dotdot], &mut st).unwrap_err();
         assert!(matches!(err, LoadError::ModuleNotFound(_)), "got {err:?}");
     }
 
@@ -598,24 +609,25 @@ mod tests {
     #[test]
     fn loads_closure_topo_sorted() {
         // A imports B imports C  →  [C, B, A], each exactly once.
-        let src = GraphSource::new(&[("A", &["B"]), ("B", &["C"]), ("C", &[])]);
-        let result = load_closure_with(&src, &[name("A")]).unwrap();
+        let mut src = GraphSource::new(&[("A", &["B"]), ("B", &["C"]), ("C", &[])]);
+        let result = load_closure_with(&mut src, &[name("A")]).unwrap();
         assert_eq!(order(&result), vec!["C", "B", "A"]);
     }
 
     #[test]
     fn detects_cycle() {
         // A → B → A must error, not hang or overflow.
-        let src = GraphSource::new(&[("A", &["B"]), ("B", &["A"])]);
-        let err = load_closure_with(&src, &[name("A")]).unwrap_err();
+        let mut src = GraphSource::new(&[("A", &["B"]), ("B", &["A"])]);
+        let err = load_closure_with(&mut src, &[name("A")]).unwrap_err();
         assert!(matches!(err, LoadError::ImportCycle(_)), "got {err:?}");
     }
 
     #[test]
     fn diamond_imports_loaded_once() {
         // A → {B, C}, B → D, C → D: D is loaded exactly once and before B/C.
-        let src = GraphSource::new(&[("A", &["B", "C"]), ("B", &["D"]), ("C", &["D"]), ("D", &[])]);
-        let result = load_closure_with(&src, &[name("A")]).unwrap();
+        let mut src =
+            GraphSource::new(&[("A", &["B", "C"]), ("B", &["D"]), ("C", &["D"]), ("D", &[])]);
+        let result = load_closure_with(&mut src, &[name("A")]).unwrap();
         let names = order(&result);
         assert_eq!(names, vec!["D", "B", "C", "A"]);
         assert_eq!(names.iter().filter(|n| *n == "D").count(), 1);
@@ -624,16 +636,16 @@ mod tests {
     #[test]
     fn self_cycle_detected() {
         // Degenerate 1-node cycle A → A.
-        let src = GraphSource::new(&[("A", &["A"])]);
-        let err = load_closure_with(&src, &[name("A")]).unwrap_err();
+        let mut src = GraphSource::new(&[("A", &["A"])]);
+        let err = load_closure_with(&mut src, &[name("A")]).unwrap_err();
         assert!(matches!(err, LoadError::ImportCycle(_)), "got {err:?}");
     }
 
     #[test]
     fn shared_dependency_across_targets_loaded_once() {
         // Two targets that share a dependency: closure emits it once.
-        let src = GraphSource::new(&[("A", &["C"]), ("B", &["C"]), ("C", &[])]);
-        let result = load_closure_with(&src, &[name("A"), name("B")]).unwrap();
+        let mut src = GraphSource::new(&[("A", &["C"]), ("B", &["C"]), ("C", &[])]);
+        let result = load_closure_with(&mut src, &[name("A"), name("B")]).unwrap();
         let names = order(&result);
         assert_eq!(names, vec!["C", "A", "B"]);
         assert_eq!(names.iter().filter(|n| *n == "C").count(), 1);
@@ -646,7 +658,8 @@ mod tests {
         // `Prelude0` is the committed import-free fixture, so its closure is
         // just itself — this exercises find → read → ModuleData::parse.
         let sp = SearchPath::new(vec![fixtures_dir()]);
-        let result = load_closure(&sp, &[name("Prelude0")]).unwrap();
+        let mut st = Store::persistent();
+        let result = load_closure(&sp, &[name("Prelude0")], &mut st).unwrap();
         assert_eq!(result.len(), 1);
         let (n, md) = &result[0];
         assert_eq!(n.to_string(), "Prelude0");
@@ -657,7 +670,8 @@ mod tests {
     #[test]
     fn missing_module_is_module_not_found() {
         let sp = SearchPath::new(vec![fixtures_dir()]);
-        let err = load_closure(&sp, &[name("No.Such.Module")]).unwrap_err();
+        let mut st = Store::persistent();
+        let err = load_closure(&sp, &[name("No.Such.Module")], &mut st).unwrap_err();
         assert!(matches!(err, LoadError::ModuleNotFound(_)), "got {err:?}");
     }
 
@@ -666,7 +680,8 @@ mod tests {
         let tmp = TempDir::new();
         tmp.write("Garbage.olean", b"definitely not an olean file");
         let sp = SearchPath::new(vec![tmp.path.clone()]);
-        let err = load_closure(&sp, &[name("Garbage")]).unwrap_err();
+        let mut st = Store::persistent();
+        let err = load_closure(&sp, &[name("Garbage")], &mut st).unwrap_err();
         assert!(matches!(err, LoadError::Decode { .. }), "got {err:?}");
     }
 
@@ -684,7 +699,8 @@ mod tests {
         let dir = std::env::var("LEANR_SWEEP_DIR")
             .expect("LEANR_SWEEP_DIR must point at the toolchain lib/lean dir");
         let sp = SearchPath::new(vec![PathBuf::from(dir)]);
-        let result = load_closure(&sp, &[name("Init.Data.Nat")]).unwrap();
+        let mut st = Store::persistent();
+        let result = load_closure(&sp, &[name("Init.Data.Nat")], &mut st).unwrap();
 
         let names: Vec<String> = result.iter().map(|(n, _)| n.to_string()).collect();
         // A real multi-level closure: `Init.Data.Nat` pulls in well over a

@@ -13,6 +13,9 @@ libfuzzer-sys = "0.4"
 [dependencies.leanr_olean]
 path = ".."
 
+[dependencies.leanr_kernel]
+path = "../../leanr_kernel"
+
 [[bin]]
 name = "module_data"
 path = "fuzz_targets/module_data.rs"

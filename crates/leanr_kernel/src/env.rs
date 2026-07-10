@@ -24,10 +24,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::decl::{
-    intern_constant_info, intern_declaration, AxiomVal, ConstantInfo, ConstantVal, ConstructorVal,
-    Declaration, DefinitionVal, InductiveVal, OpaqueVal, QuotVal, RecursorRule, RecursorVal,
-    TheoremVal,
+    AxiomVal, ConstantInfo, ConstantVal, ConstructorVal, Declaration, DefinitionVal, InductiveVal,
+    OpaqueVal, QuotVal, RecursorRule, RecursorVal, TheoremVal,
 };
+// `intern_constant_info`/`intern_declaration` are `#[cfg(test)]` in
+// `decl.rs` (term-bank phase 3's demotion — see its module doc); only
+// this module's own `#[cfg(test)]`-gated bridge methods below use them.
+#[cfg(test)]
+use super::decl::{intern_constant_info, intern_declaration};
 use super::tc::{EnvView, TypeChecker};
 use crate::bank::scratch::{promote, promote_name};
 use crate::bank::{ExprId, NameId, Store};
@@ -177,11 +181,45 @@ impl Default for Environment {
 }
 
 impl Environment {
+    /// The persistent store, read-only (rendering ids for output).
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+
+    /// The persistent store, mutable — the direct-to-id decoder's
+    /// intern target (phase 3). Interning cannot violate any kernel
+    /// invariant: ids are minted canonically and `constants` is only
+    /// written through checked/trusted insert paths.
+    pub fn store_mut(&mut self) -> &mut Store {
+        &mut self.store
+    }
+
+    /// Trusted-import insert (the decode path's replacement for the
+    /// Arc-era `from_modules` loop body): duplicate-check + insert,
+    /// no type checking. `ci`'s ids must live in `self.store` —
+    /// i.e. it was decoded/interned against `self.store_mut()`.
+    pub fn admit_unchecked(&mut self, ci: ConstantInfo) -> Result<(), EnvironmentError> {
+        let name = ci.name();
+        if self.constants.contains_key(&name) {
+            let dup = self.store.to_name(None, Some(name));
+            return Err(EnvironmentError::DuplicateName(dup));
+        }
+        self.constants.insert(name, ci);
+        Ok(())
+    }
+
     /// oracle: `Environment::from_modules` (Arc env.rs:125). Interns
     /// each module's constants directly into `self.store`
     /// (`intern_constant_info(&mut self.store, None, ..)`), dropping
     /// each module's Arc graph before pulling the next module from the
     /// iterator (already lazy — this loop never collects `modules`).
+    ///
+    /// `#[cfg(test)]`: production code decodes/interns directly (the
+    /// direct-to-id decode flip, term-bank phase 3), so the only
+    /// remaining callers are this crate's own test fixtures (`testenv`,
+    /// `quot`/`inductive`'s test modules) — a convenient one-shot
+    /// "trusted-admit a hand-rolled Arc module" constructor for them.
+    #[cfg(test)]
     pub fn from_modules<I>(modules: I) -> Result<Environment, EnvironmentError>
     where
         I: IntoIterator<Item = Vec<crate::ArcConstantInfo>>,
@@ -209,6 +247,11 @@ impl Environment {
     /// (`replay`'s test harness, or a real decoder driver) fold
     /// the returned maps from successive modules together before calling
     /// `replay::replay`.
+    ///
+    /// `#[cfg(test)]`: the real decoder (`leanr_olean`'s `interp_id.rs`)
+    /// interns directly, never through this Arc bridge — only
+    /// `replay::tests` still builds fixtures as `ArcConstantInfo` this way.
+    #[cfg(test)]
     pub fn intern_module(
         &mut self,
         module: Vec<crate::ArcConstantInfo>,
@@ -229,6 +272,11 @@ impl Environment {
     /// (e.g. a mutation-differential harness re-checking a single
     /// mutant against a trusted base) use this instead of building a
     /// whole module.
+    ///
+    /// `#[cfg(test)]`: same rationale as `intern_module` — only this
+    /// crate's own test fixtures (`replay::tests`'s `nat_decl_arc`)
+    /// still build an `ArcDeclaration` to admit.
+    #[cfg(test)]
     pub fn intern_declaration(
         &mut self,
         d: &crate::ArcDeclaration,

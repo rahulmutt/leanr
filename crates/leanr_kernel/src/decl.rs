@@ -1,28 +1,32 @@
 //! Constant declarations as the kernel sees them (oracle:
 //! src/Lean/Declaration.lean; per-type line cites below). This module
-//! hosts BOTH representations that meet at the decoder boundary (spec:
+//! hosts BOTH representations that met at the decoder boundary before
+//! the direct-to-id decode flip (spec:
 //! docs/superpowers/specs/2026-07-06-compact-expr-term-bank-design.md,
 //! "the bridge seam is `ConstantInfo` <-> id-twin"):
 //!
-//! - The `Arc`-based `Arc*` types below (`ArcConstantInfo`,
-//!   `ArcConstantVal`, …) are what `leanr_olean`'s decoder builds
-//!   directly from `.olean` bytes (using the surviving `Arc<Name>`/
-//!   `Arc<Expr>` decoder-boundary types) — unchanged since before the
-//!   migration flip (migration Task 8) except for the `Arc` prefix,
-//!   needed because the plain names below now name the id-native kernel
-//!   types instead. They remain the decoder boundary until phase 3
-//!   (direct-to-id decode).
 //! - The plain-named types (`ConstantInfo`, `ConstantVal`, …) are the
 //!   id-native kernel-native representation: `Arc<Name>`/`Arc<Expr>`
-//!   become `NameId`/`ExprId` via the phase-1 bank. Field names and
-//!   order mirror the `Arc*` twins/the oracle so the two representations
-//!   read side-by-side. Porting is representation-only: no algorithmic
-//!   change from the pre-migration `decl.rs`.
+//!   become `NameId`/`ExprId` via the phase-1 bank. This is the ONLY
+//!   representation `leanr_olean`'s decoder builds (`interp_id.rs`
+//!   decodes straight to ids — decoding IS interning).
+//! - The `Arc`-based `Arc*` types below (`ArcConstantInfo`,
+//!   `ArcConstantVal`, …) were the pre-flip decoder-boundary shape.
+//!   Now that nothing outside this crate's own tests reaches them
+//!   (term-bank phase 3's flip, migration Task 8 renamed them with the
+//!   `Arc` prefix; this task demoted them), they and their
+//!   `intern_*`/`to_*` bridges are `#[cfg(test)]`: test support for this
+//!   crate's own suites (hand-rolled fixtures are far more readable
+//!   built as Arc trees than as raw bank rows), never a production
+//!   dependency.
 //!
 //! `intern_constant_info`/`intern_declaration` bridge `Arc* -> id`
-//! (decode -> kernel); `to_constant_info` bridges `id -> Arc*` (kernel
-//! internals that still need to hand back an `Arc` value, e.g. error
-//! construction/differential checks).
+//! (test fixture -> kernel); `to_constant_info` bridges `id -> Arc*`
+//! (kernel-regenerated value -> `Arc`, for differential test
+//! comparisons). Field names and order mirror the `Arc*` twins/the
+//! oracle so the two representations read side-by-side. Porting was
+//! representation-only: no algorithmic change from the pre-migration
+//! `decl.rs`.
 //!
 //! Declaration-position names (`ConstantVal.name`, level-param names,
 //! `induct`, `ctor`, inductive/constructor names, `lparams`) are never
@@ -42,10 +46,20 @@
 //! unchanged (see `constant_info_round_trip_with_anonymous_name_in_type`
 //! below).
 
-use std::sync::Arc;
+use crate::bank::{ExprId, NameId};
+use crate::Nat;
 
-use crate::bank::{ExprId, NameId, Store};
-use crate::{Expr, KernelError, Name, Nat, RecGuard};
+// `Arc`/`Store`/`Expr`/`KernelError`/`Name`/`RecGuard` are only named by
+// the `#[cfg(test)]` Arc-side types and bridges below (term-bank phase
+// 3's demotion — see the module doc); a non-test build never names
+// them here (`Store::intern_expr`/`to_expr` themselves are still used
+// by production code, just not from this file).
+#[cfg(test)]
+use crate::bank::Store;
+#[cfg(test)]
+use crate::{Expr, KernelError, Name, RecGuard};
+#[cfg(test)]
+use std::sync::Arc;
 
 /// oracle: Declaration.lean:46-50. Representation-agnostic (no
 /// `Arc`/id-specific fields), so both `ArcConstantInfo` and
@@ -254,6 +268,7 @@ impl ConstantInfo {
 /// module-level doc comment). `Store::intern_name` maps
 /// `Name::Anonymous` to `None`; that has no `NameId`, so it surfaces as
 /// `KernelError::BankExhausted` rather than a fabricated id or a panic.
+#[cfg(test)]
 fn intern_name_req(
     st: &mut Store,
     base: Option<&Store>,
@@ -262,6 +277,7 @@ fn intern_name_req(
     st.intern_name(base, n)?.ok_or(KernelError::BankExhausted)
 }
 
+#[cfg(test)]
 fn intern_name_vec(
     st: &mut Store,
     base: Option<&Store>,
@@ -270,6 +286,7 @@ fn intern_name_vec(
     ns.iter().map(|n| intern_name_req(st, base, n)).collect()
 }
 
+#[cfg(test)]
 fn intern_constant_val(
     st: &mut Store,
     base: Option<&Store>,
@@ -282,6 +299,7 @@ fn intern_constant_val(
     })
 }
 
+#[cfg(test)]
 fn intern_axiom_val(
     st: &mut Store,
     base: Option<&Store>,
@@ -293,6 +311,7 @@ fn intern_axiom_val(
     })
 }
 
+#[cfg(test)]
 fn intern_definition_val(
     st: &mut Store,
     base: Option<&Store>,
@@ -307,6 +326,7 @@ fn intern_definition_val(
     })
 }
 
+#[cfg(test)]
 fn intern_theorem_val(
     st: &mut Store,
     base: Option<&Store>,
@@ -319,6 +339,7 @@ fn intern_theorem_val(
     })
 }
 
+#[cfg(test)]
 fn intern_opaque_val(
     st: &mut Store,
     base: Option<&Store>,
@@ -332,6 +353,7 @@ fn intern_opaque_val(
     })
 }
 
+#[cfg(test)]
 fn intern_quot_val(
     st: &mut Store,
     base: Option<&Store>,
@@ -343,6 +365,7 @@ fn intern_quot_val(
     })
 }
 
+#[cfg(test)]
 fn intern_inductive_val(
     st: &mut Store,
     base: Option<&Store>,
@@ -361,6 +384,7 @@ fn intern_inductive_val(
     })
 }
 
+#[cfg(test)]
 fn intern_constructor_val(
     st: &mut Store,
     base: Option<&Store>,
@@ -376,6 +400,7 @@ fn intern_constructor_val(
     })
 }
 
+#[cfg(test)]
 fn intern_recursor_rule(
     st: &mut Store,
     base: Option<&Store>,
@@ -388,6 +413,7 @@ fn intern_recursor_rule(
     })
 }
 
+#[cfg(test)]
 fn intern_recursor_val(
     st: &mut Store,
     base: Option<&Store>,
@@ -413,6 +439,7 @@ fn intern_recursor_val(
 /// Bridge: intern an `Arc`-side `ConstantInfo` into the bank
 /// (field-by-field; exprs delegate to `Store::intern_expr`, which is
 /// already iterative).
+#[cfg(test)]
 pub fn intern_constant_info(
     st: &mut Store,
     base: Option<&Store>,
@@ -430,6 +457,7 @@ pub fn intern_constant_info(
     })
 }
 
+#[cfg(test)]
 fn intern_inductive_type(
     st: &mut Store,
     base: Option<&Store>,
@@ -448,6 +476,7 @@ fn intern_inductive_type(
 
 /// Bridge: intern an `Arc`-side `Declaration` (admission input) into
 /// the bank.
+#[cfg(test)]
 pub fn intern_declaration(
     st: &mut Store,
     base: Option<&Store>,
@@ -482,14 +511,17 @@ pub fn intern_declaration(
 /// was produced by `intern_name_req`, which never stores the sentinel
 /// for `Name::Anonymous` (it errors instead — see the module doc), so
 /// this is always a real `Some(id)` lookup.
+#[cfg(test)]
 fn to_name_req(st: &Store, base: Option<&Store>, id: NameId) -> Arc<Name> {
     st.to_name(base, Some(id))
 }
 
+#[cfg(test)]
 fn to_name_vec(st: &Store, base: Option<&Store>, ids: &[NameId]) -> Vec<Arc<Name>> {
     ids.iter().map(|&id| to_name_req(st, base, id)).collect()
 }
 
+#[cfg(test)]
 fn to_constant_val(
     st: &Store,
     base: Option<&Store>,
@@ -503,6 +535,7 @@ fn to_constant_val(
     })
 }
 
+#[cfg(test)]
 fn to_axiom_val(
     st: &Store,
     base: Option<&Store>,
@@ -515,6 +548,7 @@ fn to_axiom_val(
     })
 }
 
+#[cfg(test)]
 fn to_definition_val(
     st: &Store,
     base: Option<&Store>,
@@ -530,6 +564,7 @@ fn to_definition_val(
     })
 }
 
+#[cfg(test)]
 fn to_theorem_val(
     st: &Store,
     base: Option<&Store>,
@@ -543,6 +578,7 @@ fn to_theorem_val(
     })
 }
 
+#[cfg(test)]
 fn to_opaque_val(
     st: &Store,
     base: Option<&Store>,
@@ -557,6 +593,7 @@ fn to_opaque_val(
     })
 }
 
+#[cfg(test)]
 fn to_quot_val(
     st: &Store,
     base: Option<&Store>,
@@ -569,6 +606,7 @@ fn to_quot_val(
     })
 }
 
+#[cfg(test)]
 fn to_inductive_val(
     st: &Store,
     base: Option<&Store>,
@@ -588,6 +626,7 @@ fn to_inductive_val(
     })
 }
 
+#[cfg(test)]
 fn to_constructor_val(
     st: &Store,
     base: Option<&Store>,
@@ -604,6 +643,7 @@ fn to_constructor_val(
     })
 }
 
+#[cfg(test)]
 fn to_recursor_rule(
     st: &Store,
     base: Option<&Store>,
@@ -617,6 +657,7 @@ fn to_recursor_rule(
     })
 }
 
+#[cfg(test)]
 fn to_recursor_val(
     st: &Store,
     base: Option<&Store>,
@@ -643,6 +684,7 @@ fn to_recursor_val(
 /// Bridge: rebuild an `Arc`-side `ConstantInfo` from its id-twin
 /// (field-by-field; exprs delegate to `Store::to_expr`, which is
 /// already iterative and needs the caller's `RecGuard`).
+#[cfg(test)]
 pub fn to_constant_info(
     st: &Store,
     base: Option<&Store>,
@@ -769,12 +811,15 @@ pub fn constant_info_eq(a: &ConstantInfo, b: &ConstantInfo) -> bool {
 //
 // Unchanged from the pre-flip `decl.rs` other than the `Arc` prefix
 // (needed since the plain names above now name the id-native types).
-// `leanr_olean`'s decoder builds these directly from `.olean` bytes;
-// `intern_constant_info`/`intern_declaration` above bridge them into the
-// id-native kernel types.
+// Pre-flip, `leanr_olean`'s decoder built these directly from `.olean`
+// bytes; post-flip (term-bank phase 3) it decodes straight to ids
+// instead, so these are `#[cfg(test)]`: hand-rolled fixtures for this
+// crate's own suites, bridged to/from the id-native types above via
+// `intern_constant_info`/`intern_declaration`/`to_constant_info`.
 
 /// oracle: Declaration.lean:95-99
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub struct ArcConstantVal {
     pub name: Arc<Name>,
     pub level_params: Vec<Arc<Name>>,
@@ -783,6 +828,7 @@ pub struct ArcConstantVal {
 
 /// oracle: Declaration.lean:101-103
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub struct ArcAxiomVal {
     pub val: ArcConstantVal,
     pub is_unsafe: bool,
@@ -790,6 +836,7 @@ pub struct ArcAxiomVal {
 
 /// oracle: Declaration.lean:120-133
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub struct ArcDefinitionVal {
     pub val: ArcConstantVal,
     pub value: Arc<Expr>,
@@ -800,6 +847,7 @@ pub struct ArcDefinitionVal {
 
 /// oracle: Declaration.lean:142-146
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub struct ArcTheoremVal {
     pub val: ArcConstantVal,
     pub value: Arc<Expr>,
@@ -808,6 +856,7 @@ pub struct ArcTheoremVal {
 
 /// oracle: Declaration.lean:156-160
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub struct ArcOpaqueVal {
     pub val: ArcConstantVal,
     pub value: Arc<Expr>,
@@ -817,6 +866,7 @@ pub struct ArcOpaqueVal {
 
 /// oracle: Declaration.lean:417-421
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub struct ArcQuotVal {
     pub val: ArcConstantVal,
     pub kind: QuotKind,
@@ -824,6 +874,7 @@ pub struct ArcQuotVal {
 
 /// oracle: Declaration.lean:261-301
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub struct ArcInductiveVal {
     pub val: ArcConstantVal,
     pub num_params: Nat,
@@ -838,6 +889,7 @@ pub struct ArcInductiveVal {
 
 /// oracle: Declaration.lean:328-334
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub struct ArcConstructorVal {
     pub val: ArcConstantVal,
     pub induct: Arc<Name>,
@@ -849,6 +901,7 @@ pub struct ArcConstructorVal {
 
 /// oracle: Declaration.lean:348-356
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub struct ArcRecursorRule {
     pub ctor: Arc<Name>,
     pub nfields: Nat,
@@ -857,6 +910,7 @@ pub struct ArcRecursorRule {
 
 /// oracle: Declaration.lean:357-379
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub struct ArcRecursorVal {
     pub val: ArcConstantVal,
     pub all: Vec<Arc<Name>>,
@@ -872,6 +926,7 @@ pub struct ArcRecursorVal {
 /// oracle: Declaration.lean:429-437; variant order is the on-disk ctor
 /// tag order, do not reorder.
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub enum ArcConstantInfo {
     Axiom(ArcAxiomVal),
     Defn(ArcDefinitionVal),
@@ -888,6 +943,7 @@ pub enum ArcConstantInfo {
 /// (Replay.lean:176-181), which are the only legal mutual defs
 /// (environment.cpp:224-232), so the variant is unreachable for us.
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub enum ArcDeclaration {
     Axiom(ArcAxiomVal),
     Defn(ArcDefinitionVal),
@@ -905,12 +961,14 @@ pub enum ArcDeclaration {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub struct ArcInductiveType {
     pub name: Arc<Name>,
     pub ty: Arc<Expr>,
     pub ctors: Vec<(Arc<Name>, Arc<Expr>)>, // (ctor name, ctor type)
 }
 
+#[cfg(test)]
 impl ArcConstantInfo {
     pub fn constant_val(&self) -> &ArcConstantVal {
         match self {
@@ -949,6 +1007,7 @@ impl ArcConstantInfo {
 /// `ArcConstantVal` structural equality: `name` and `level_params` via
 /// `Name`'s (non-recursive, adversarial-depth-safe) `PartialEq`, `ty`
 /// via `Expr::structural_eq` under the caller's `RecGuard`.
+#[cfg(test)]
 fn arc_constant_val_eq(
     a: &ArcConstantVal,
     b: &ArcConstantVal,
@@ -961,6 +1020,7 @@ fn arc_constant_val_eq(
 
 /// Element-wise `Name` equality over a `Name` list (`all`/`ctors`/
 /// `level_params`): same length, same names in order.
+#[cfg(test)]
 fn arc_name_slice_eq(a: &[Arc<Name>], b: &[Arc<Name>]) -> bool {
     a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x == y)
 }
@@ -981,6 +1041,7 @@ fn arc_name_slice_eq(a: &[Arc<Name>], b: &[Arc<Name>]) -> bool {
 ///
 /// A kind mismatch (e.g. `Axiom` vs. `Defn`) is `Ok(false)`, never an
 /// error.
+#[cfg(test)]
 pub fn arc_constant_info_eq(
     a: &ArcConstantInfo,
     b: &ArcConstantInfo,

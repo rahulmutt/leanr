@@ -92,13 +92,18 @@ fn olean_decls(path: &std::path::Path) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match leanr_olean::ModuleData::parse(&bytes) {
+    let mut store = leanr_kernel::bank::Store::persistent();
+    match leanr_olean::ModuleData::parse(&bytes, &mut store) {
         Ok(module) => {
             // Same line format as the oracle-side dump script
             // (tests/fixtures/dump_decls.lean) — golden-compared in CI.
             let mut out = String::new();
             for c in &module.constants {
-                out.push_str(&format!("{} {}\n", c.kind(), c.name()));
+                out.push_str(&format!(
+                    "{} {}\n",
+                    c.kind(),
+                    store.to_name(None, Some(c.name()))
+                ));
             }
             print!("{out}");
             ExitCode::SUCCESS
@@ -231,7 +236,8 @@ fn check(modules: Vec<String>, all: bool, path: Vec<PathBuf>) -> ExitCode {
     }
 
     let sp = SearchPath::new(roots);
-    let loaded = match leanr_olean::load_closure(&sp, &targets) {
+    let mut env = Environment::default();
+    let loaded = match leanr_olean::load_closure(&sp, &targets, env.store_mut()) {
         Ok(loaded) => loaded,
         Err(err) => {
             eprintln!("error: {err}");
@@ -239,35 +245,19 @@ fn check(modules: Vec<String>, all: bool, path: Vec<PathBuf>) -> ExitCode {
         }
     };
 
-    // Per-module progress (stderr) while interning the union of constants
+    // Per-module progress (stderr) while folding the union of constants
     // to replay, and the module that first supplies each constant (so a
-    // replay failure can be attributed back to the module it came from).
-    // Each module's `Vec<ConstantInfo>` is bridge-interned into the
-    // environment's persistent bank via `intern_module` and consumed
-    // (dropped) as it goes — `loaded.into_iter()` never holds more than
-    // one decoded module's Arc graph alive at a time, which is the
-    // memory win the migration to the id-native kernel buys (spec:
-    // docs/superpowers/specs/2026-07-06-term-bank-kernel-migration-design.md
-    // §2 "Load").
+    // replay failure can be attributed back to its module). Decoding
+    // already interned everything (phase 3, direct-to-id decode) — this
+    // loop just builds maps of ids.
     let n = loaded.len();
-    let mut env = Environment::default();
     let mut constants: HashMap<NameId, ConstantInfo> = HashMap::new();
-    let mut owner: HashMap<Arc<Name>, Arc<Name>> = HashMap::new();
+    let mut owner: HashMap<NameId, Arc<Name>> = HashMap::new();
     for (i, (mod_name, md)) in loaded.into_iter().enumerate() {
         eprintln!("checking {mod_name} ({}/{n})", i + 1);
-        for c in &md.constants {
-            owner
-                .entry(Arc::clone(c.name()))
-                .or_insert_with(|| Arc::clone(&mod_name));
-        }
-        let interned = match env.intern_module(md.constants) {
-            Ok(interned) => interned,
-            Err(err) => {
-                eprintln!("error: {mod_name}: {err}");
-                return ExitCode::FAILURE;
-            }
-        };
-        for (name, ci) in interned {
+        for ci in md.constants {
+            let name = ci.name();
+            owner.entry(name).or_insert_with(|| Arc::clone(&mod_name));
             constants.entry(name).or_insert(ci);
         }
     }
@@ -281,8 +271,14 @@ fn check(modules: Vec<String>, all: bool, path: Vec<PathBuf>) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(err) => {
-            let module = owner
-                .get(&err.decl)
+            // `ReplayError.decl` is an Arc<Name> render; map it back to
+            // an id to look up the owning module.
+            let module = env
+                .store_mut()
+                .intern_name(None, &err.decl)
+                .ok()
+                .flatten()
+                .and_then(|id| owner.get(&id))
                 .map(|m| m.to_string())
                 .unwrap_or_else(|| "?".to_string());
             eprintln!(

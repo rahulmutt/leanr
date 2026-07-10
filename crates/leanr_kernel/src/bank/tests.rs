@@ -2,9 +2,9 @@
 //! interning invariant (spec §1): equal ids ⇔ `Expr::structural_eq`.
 //! The existing `Arc<Expr>` representation is the oracle.
 
-use super::testgen::{gen_expr, Rng};
+use super::testgen::{gen_expr, nm, Rng};
 use super::*;
-use crate::{Expr, RecGuard};
+use crate::{DataValue, Expr, KVMap, Nat, RecGuard};
 use std::sync::Arc;
 
 #[test]
@@ -172,4 +172,21 @@ fn reinterning_a_roundtripped_term_is_id_stable() {
         let id2 = s.intern_expr(None, &back).unwrap();
         assert_eq!(id, id2, "seed {seed}");
     }
+}
+
+/// Interning a kvmap via pre-built rows must hit the same canonical
+/// KVMapId as the Arc-bridge `intern_kvmap` on the same logical map —
+/// this equivalence is what makes the phase-3 direct decoder's kvmaps
+/// id-identical to the bridge's.
+#[test]
+fn kvmap_rows_and_arc_bridge_agree() {
+    let mut st = Store::persistent();
+    let name = st.intern_name(None, &nm("k")).unwrap();
+    let map = KVMap(vec![(nm("k"), DataValue::OfNat(Nat::from(7u64)))]);
+    let via_arc = st.intern_kvmap(None, &map).unwrap();
+    let nat = st.intern_nat(None, &Nat::from(7u64)).unwrap();
+    let via_rows = st
+        .intern_kvmap_rows(None, vec![(name, pools::DataValueRow::Nat(nat))])
+        .unwrap();
+    assert_eq!(via_arc, via_rows);
 }

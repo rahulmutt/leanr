@@ -32,12 +32,24 @@ mod testenv;
 mod used_consts;
 
 pub use decl::{
-    arc_constant_info_eq, constant_info_eq, to_constant_info, ArcAxiomVal, ArcConstantInfo,
-    ArcConstantVal, ArcConstructorVal, ArcDeclaration, ArcDefinitionVal, ArcInductiveType,
-    ArcInductiveVal, ArcOpaqueVal, ArcQuotVal, ArcRecursorRule, ArcRecursorVal, ArcTheoremVal,
-    AxiomVal, ConstantInfo, ConstantVal, ConstructorVal, Declaration, DefinitionSafety,
-    DefinitionVal, InductiveType, InductiveVal, OpaqueVal, QuotKind, QuotVal, RecursorRule,
-    RecursorVal, ReducibilityHints, TheoremVal,
+    constant_info_eq, AxiomVal, ConstantInfo, ConstantVal, ConstructorVal, Declaration,
+    DefinitionSafety, DefinitionVal, InductiveType, InductiveVal, OpaqueVal, QuotKind, QuotVal,
+    RecursorRule, RecursorVal, ReducibilityHints, TheoremVal,
+};
+// Pre-flip decoder-boundary `Arc*` twins + their bridges: demoted to
+// kernel test support (term-bank phase 3's direct-to-id decode flip —
+// see `decl.rs`'s module doc). `#[cfg(test)] pub use` only takes effect
+// when THIS crate is compiled under test (`cargo test -p leanr_kernel`,
+// or any of its own `#[cfg(test)] mod`s); an external crate — including
+// every `leanr_olean`/`leanr_cli` build, test or not — never sees these
+// names, matching the fact that nothing outside this crate's own suites
+// names them (verified via `grep -rn` for every Arc-decl symbol across
+// `crates/*/src`, non-test call sites only).
+#[cfg(test)]
+pub use decl::{
+    arc_constant_info_eq, to_constant_info, ArcAxiomVal, ArcConstantInfo, ArcConstantVal,
+    ArcConstructorVal, ArcDeclaration, ArcDefinitionVal, ArcInductiveType, ArcInductiveVal,
+    ArcOpaqueVal, ArcQuotVal, ArcRecursorRule, ArcRecursorVal, ArcTheoremVal,
 };
 pub use env::{Environment, EnvironmentError};
 pub use error::KernelError;

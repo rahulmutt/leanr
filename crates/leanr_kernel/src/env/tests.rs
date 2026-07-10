@@ -498,3 +498,84 @@ fn walk_expr_ids(st: &Store, root: ExprId) {
         }
     }
 }
+
+#[test]
+fn admit_unchecked_inserts_and_rejects_duplicates() {
+    let mut env = Environment::default();
+    let arc_ci = crate::testenv::axiom_u();
+    let ci = crate::decl::intern_constant_info(env.store_mut(), None, &arc_ci).unwrap();
+    let name = ci.name();
+    env.admit_unchecked(ci.clone()).unwrap();
+    assert!(env.get(name).is_some());
+    assert!(matches!(
+        env.admit_unchecked(ci),
+        Err(EnvironmentError::DuplicateName(_))
+    ));
+}
+
+// ---- ported from the pre-flip `crates/leanr_kernel/tests/env.rs` ------
+//
+// That was an external integration-test crate exercising
+// `Environment::from_modules` as a "production" bridge entry point.
+// Term-bank phase 3's flip made `from_modules`/`intern_module`/
+// `intern_declaration` (and the `Arc*` decl types they take) test-only
+// (`#[cfg(test)]` — see `decl.rs`'s module doc): an external integration
+// test crate compiles the library WITHOUT `--cfg test`, so it can no
+// longer see any of them. Moved in-crate, where `#[cfg(test)]` is in
+// effect, unchanged otherwise.
+
+#[test]
+fn kind_strings_match_the_oracle_dump_script() {
+    // Must stay in lockstep with kindStr in tests/fixtures/dump_decls.lean.
+    assert_eq!(axiom_named("a").kind(), "axiom");
+}
+
+#[test]
+fn from_modules_merges_and_indexes_by_name() {
+    let env = Environment::from_modules([
+        vec![axiom_named("a"), axiom_named("b")],
+        vec![axiom_named("c")],
+    ])
+    .unwrap();
+    assert_eq!(env.len(), 3);
+    assert!(has_name(&env, "b"));
+    assert!(!has_name(&env, "zzz"));
+}
+
+#[test]
+fn from_modules_rejects_duplicate_names() {
+    // Not `.unwrap_err()`: the id-native `Environment` does not derive
+    // `Debug` (its persistent bank holds several `bank`-internal types
+    // that don't either), so a plain match avoids requiring it just for
+    // this assertion.
+    let err = match Environment::from_modules([vec![axiom_named("a")], vec![axiom_named("a")]]) {
+        Ok(_) => panic!("expected a duplicate-name error"),
+        Err(e) => e,
+    };
+    let msg = format!("{err:?}");
+    let EnvironmentError::DuplicateName(n) = err else {
+        panic!("expected DuplicateName, got {msg}");
+    };
+    assert_eq!(n.to_string(), "a");
+}
+
+fn axiom_named(s: &str) -> crate::ArcConstantInfo {
+    crate::ArcConstantInfo::Axiom(crate::ArcAxiomVal {
+        val: crate::ArcConstantVal {
+            name: nm(s),
+            level_params: Vec::new(),
+            ty: Expr::sort(Arc::new(crate::Level::Zero), &mut crate::RecGuard::new()).unwrap(),
+        },
+        is_unsafe: false,
+    })
+}
+
+/// Bridge-side name lookup: `env.view()`/`store.to_name` are the public
+/// id -> `Arc<Name>` path (same one `EnvView::get_with`'s error
+/// construction uses internally).
+fn has_name(env: &Environment, s: &str) -> bool {
+    let view = env.view();
+    view.consts
+        .values()
+        .any(|ci| view.store.to_name(None, Some(ci.name())).to_string() == s)
+}

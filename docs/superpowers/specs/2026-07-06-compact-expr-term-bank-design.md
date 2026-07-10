@@ -166,6 +166,26 @@ property-tested). Equal row ⇒ same id, hence:
   (`constant_info_eq`) reduce to id comparisons — same relation as today's
   `structural_eq` by the interning invariant.
 
+**Phase-3 disposition (2026-07-10).** Landed per
+`2026-07-10-direct-to-id-decode-design.md`: `leanr_olean` decodes
+`.olean` bytes straight into the persistent bank as sketched above —
+`interp` calls the bank's typed intern-constructors directly instead
+of building an `Arc` tree and bridging it in. The decoder is fully
+id-native; the Arc declaration family (`ArcConstantInfo`,
+`ArcDeclaration`, the `Arc*Val` structs) and its bridges
+(`Environment::intern_module`/`intern_declaration`,
+`decl.rs::intern_constant_info`/`intern_declaration`) are deleted from
+production and survive only as `#[cfg(test)]` kernel test support; the
+temporary differential gate that proved the flip is deleted with it.
+Post-flip acceptance sweep: exit 0, 2,433 modules / 203,134
+declarations checked (3,611 unsafe/partial skipped, same coverage as
+pre-flip), peak RSS 1 GiB (1,072,356 kB) vs the 2 GiB (2,669,156 kB)
+baseline (~60% reduction — the per-module Arc transient and bridge
+walk are gone), wall 337.00 s vs 367.62 s — flat-or-better on every
+axis, well inside the §6 ≤ 6 GiB acceptance bar. Full figures and the
+deletion/demotion summary are recorded in
+`2026-07-10-direct-to-id-decode-design.md`'s Acceptance section.
+
 ## §5 Soundness and TCB discipline
 
 - **Verdict preservation.** Kernel algorithm logic is untouched; only
