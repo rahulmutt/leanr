@@ -1,12 +1,40 @@
 #!/bin/sh
-# Run a command under an RSS ceiling. Polls /proc once a second and
-# SIGKILLs the whole process group if summed RSS exceeds <max_gib> GiB.
+# Run a command under an RSS ceiling. Polls /proc and SIGKILLs the whole
+# process group if summed RSS exceeds <max_gib> GiB, or if the cgroup's own
+# memory.current exceeds its limit minus a 2 GiB safety margin (protects the
+# container even when the summed pgid RSS undercounts, e.g. processes that
+# escape the pgid or allocations elsewhere in the container).
 # Rust reserves large *virtual* memory, so `ulimit -v` is unusable here;
-# we watch resident set instead. Exit 137 == killed for exceeding the cap.
+# we watch resident set instead. Exit 137 == killed for exceeding a cap.
+# Known limitation: a command that allocates and exits before the first poll
+# reports peak RSS 0.
 set -eu
+
+cgroup_dir="${MEM_WATCHDOG_CGROUP_DIR:-/sys/fs/cgroup}"
+margin_kib=$((2 * 1024 * 1024))
 
 max_gib="$1"; shift
 max_kib=$((max_gib * 1024 * 1024))
+
+# Clamp the requested cap to the cgroup limit (minus the safety margin), so
+# the watchdog fires before the kernel OOM-killer takes the whole container.
+# Leave the cap unchanged if memory.max is absent, unreadable, or "max"
+# (unlimited).
+cgroup_limit_kib=""
+if [ -r "$cgroup_dir/memory.max" ]; then
+    cgroup_limit_raw=$(cat "$cgroup_dir/memory.max" 2>/dev/null || true)
+    case "$cgroup_limit_raw" in
+        ''|*[!0-9]*) : ;; # absent, unreadable, or literal "max": leave unset
+        *)
+            cgroup_limit_kib=$((cgroup_limit_raw / 1024))
+            cgroup_cap_kib=$((cgroup_limit_kib - margin_kib))
+            if [ "$cgroup_cap_kib" -lt "$max_kib" ]; then
+                max_kib=$cgroup_cap_kib
+                echo "mem-watchdog: cap clamped to ${max_kib} kB (cgroup limit - 2 GiB)" >&2
+            fi
+            ;;
+    esac
+fi
 
 setsid "$@" &
 child=$!
@@ -25,7 +53,26 @@ while kill -0 "$child" 2>/dev/null; do
         echo "mem-watchdog: peak RSS $((peak_kib / 1024 / 1024)) GiB (${peak_kib} kB)" >&2
         exit 137
     fi
-    sleep 1
+    # Second, independent signal straight from the cgroup: catches memory the
+    # pgid-RSS sum above misses (escaped processes, non-RSS charges, etc.).
+    if [ -n "$cgroup_limit_kib" ] && [ -r "$cgroup_dir/memory.current" ]; then
+        current_raw=$(cat "$cgroup_dir/memory.current" 2>/dev/null || true)
+        case "$current_raw" in
+            ''|*[!0-9]*) : ;; # absent, unreadable, or non-numeric: skip
+            *)
+                current_kib=$((current_raw / 1024))
+                cgroup_cap_kib=$((cgroup_limit_kib - margin_kib))
+                if [ "$current_kib" -gt "$cgroup_cap_kib" ]; then
+                    echo "mem-watchdog: memory.current ${current_kib} kB > cgroup limit - 2 GiB (${cgroup_cap_kib} kB) — killing" >&2
+                    kill -KILL -"$pgid" 2>/dev/null || true
+                    wait "$child" 2>/dev/null || true
+                    echo "mem-watchdog: peak RSS $((peak_kib / 1024 / 1024)) GiB (${peak_kib} kB)" >&2
+                    exit 137
+                fi
+                ;;
+        esac
+    fi
+    sleep "${MEM_WATCHDOG_POLL_SECS:-0.25}"
 done
 wait "$child" || status=$?
 echo "mem-watchdog: peak RSS $((peak_kib / 1024 / 1024)) GiB (${peak_kib} kB)" >&2
