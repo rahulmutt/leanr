@@ -180,6 +180,137 @@ impl Default for Environment {
     }
 }
 
+/// What `check_declaration` produces: the survivor `ConstantInfo`(s) to
+/// promote+insert (scratch-region ids), and whether the declaration
+/// initialized quotients. Splitting the check from the commit lets the
+/// parallel driver (`leanr_check`) run the check half against a frozen
+/// store and admit via flag flips instead of mutating a shared env.
+pub struct Admitted {
+    pub survivors: Vec<ConstantInfo>,
+    pub quot_init: bool,
+}
+
+/// The check half of `Environment::add_decl` (oracle: environment.cpp
+/// per-kind add_* ). Runs every kernel check against `view` + a caller-
+/// owned per-declaration `scratch` store, and returns the survivor
+/// `ConstantInfo`(s) to admit — WITHOUT promoting them or touching any
+/// environment state. `Environment::add_decl` is the check+commit
+/// wrapper; `leanr_check` calls this directly.
+pub fn check_declaration(
+    view: EnvView,
+    scratch: &mut Store,
+    d: Declaration,
+) -> Result<Admitted, KernelError> {
+    let info = {
+        match d {
+            Declaration::Axiom(v) => {
+                check_constant_val_pre(&*scratch, &view, &v.val)?;
+                let mut checker = TypeChecker::new(view, scratch);
+                check_constant_val_sort(&mut checker, &v.val)?;
+                ConstantInfo::Axiom(v)
+            }
+            Declaration::Defn(v) => {
+                // oracle: environment.cpp:163 (`v.is_unsafe()`); the
+                // unsafe/partial branch is unreachable for us (see
+                // the brief's `Declaration` doc comment — replay
+                // never sends an unsafe/partial `Defn`). Total &
+                // documented: reject rather than silently mis-check.
+                if v.safety != DefinitionSafety::Safe {
+                    let name = view.store.to_name(None, Some(v.val.name));
+                    return Err(KernelError::UnsafeConstInSafeDecl(name));
+                }
+                check_constant_val_pre(&*scratch, &view, &v.val)?;
+                let mut checker = TypeChecker::new(view, scratch);
+                check_constant_val_sort(&mut checker, &v.val)?;
+                checker.check_no_metavar_no_fvar(v.val.name, v.value)?;
+                let val_type = checker.check(v.value, &v.val.level_params)?;
+                if !checker.is_def_eq(val_type, v.val.ty)? {
+                    let name = view.store.to_name(None, Some(v.val.name));
+                    return Err(KernelError::DefTypeMismatch(name));
+                }
+                ConstantInfo::Defn(v)
+            }
+            Declaration::Thm(v) => {
+                check_constant_val_pre(&*scratch, &view, &v.val)?;
+                let mut checker = TypeChecker::new(view, scratch);
+                check_constant_val_sort(&mut checker, &v.val)?;
+                if !checker.is_prop(v.val.ty)? {
+                    let name = view.store.to_name(None, Some(v.val.name));
+                    return Err(KernelError::TheoremTypeNotProp(name));
+                }
+                checker.check_no_metavar_no_fvar(v.val.name, v.value)?;
+                let val_type = checker.check(v.value, &v.val.level_params)?;
+                if !checker.is_def_eq(val_type, v.val.ty)? {
+                    let name = view.store.to_name(None, Some(v.val.name));
+                    return Err(KernelError::DefTypeMismatch(name));
+                }
+                ConstantInfo::Thm(v)
+            }
+            Declaration::Opaque(v) => {
+                // oracle (environment.cpp:211-222): no
+                // `check_no_metavar_no_fvar` on the value here —
+                // unlike Defn/Thm, `add_opaque` relies solely on the
+                // `checker.check` walk below. Ported as-is.
+                check_constant_val_pre(&*scratch, &view, &v.val)?;
+                let mut checker = TypeChecker::new(view, scratch);
+                check_constant_val_sort(&mut checker, &v.val)?;
+                let val_type = checker.check(v.value, &v.val.level_params)?;
+                if !checker.is_def_eq(val_type, v.val.ty)? {
+                    let name = view.store.to_name(None, Some(v.val.name));
+                    return Err(KernelError::DefTypeMismatch(name));
+                }
+                ConstantInfo::Opaque(v)
+            }
+            // oracle: environment.cpp:266-267 -> `add_quot`
+            // (quot.cpp:47-79). `quot::add_quot` does its own
+            // checking against `scratch`/`view` and returns every
+            // survivor to admit rather than mutating a shared
+            // environment (Task 5's `scratch`/`view`-only signature).
+            // This arm returns those survivors together with
+            // `quot_init: true`; the `add_decl` check+commit wrapper
+            // is what promotes them via `add_core` and performs the
+            // `quot_initialized` write — this function never touches
+            // environment state.
+            Declaration::Quot => {
+                let admitted = super::quot::add_quot(scratch, &view)?;
+                return Ok(Admitted {
+                    survivors: admitted,
+                    quot_init: true,
+                });
+            }
+            // oracle: environment.cpp:266-267 -> `add_inductive`
+            // (inductive.cpp:1116). `inductive::add_inductive`
+            // eliminates nested occurrences, runs the ordinary
+            // machinery, and (when nesting occurred) restores the
+            // real nested inductives — returning every survivor to
+            // admit (with `quot_init: false`). Promotion happens later
+            // in the `add_decl` wrapper's `add_core` loop; that loop's
+            // per-entry promote-then-insert is independent of the
+            // `Vec`'s order, so the nondeterministic
+            // `HashMap::into_values()` order `add_inductive` returns is
+            // safe for the wrapper to consume as-is.
+            Declaration::Inductive {
+                lparams,
+                nparams,
+                types,
+                is_unsafe,
+            } => {
+                let admitted = super::inductive::add_inductive(
+                    scratch, &view, lparams, nparams, types, is_unsafe,
+                )?;
+                return Ok(Admitted {
+                    survivors: admitted,
+                    quot_init: false,
+                });
+            }
+        }
+    };
+    Ok(Admitted {
+        survivors: vec![info],
+        quot_init: false,
+    })
+}
+
 impl Environment {
     /// The persistent store, read-only (rendering ids for output).
     pub fn store(&self) -> &Store {
@@ -365,124 +496,19 @@ impl Environment {
     /// caller may have used to build `d`.
     pub fn add_decl(&mut self, d: Declaration) -> Result<(), KernelError> {
         let mut scratch = Store::scratch();
-        let info = {
-            match d {
-                Declaration::Axiom(v) => {
-                    let view = self.view();
-                    check_constant_val_pre(&scratch, &view, &v.val)?;
-                    let mut checker = TypeChecker::new(self.view(), &mut scratch);
-                    check_constant_val_sort(&mut checker, &v.val)?;
-                    ConstantInfo::Axiom(v)
-                }
-                Declaration::Defn(v) => {
-                    // oracle: environment.cpp:163 (`v.is_unsafe()`); the
-                    // unsafe/partial branch is unreachable for us (see
-                    // the brief's `Declaration` doc comment — replay
-                    // never sends an unsafe/partial `Defn`). Total &
-                    // documented: reject rather than silently mis-check.
-                    if v.safety != DefinitionSafety::Safe {
-                        let name = self.store.to_name(None, Some(v.val.name));
-                        return Err(KernelError::UnsafeConstInSafeDecl(name));
-                    }
-                    let view = self.view();
-                    check_constant_val_pre(&scratch, &view, &v.val)?;
-                    let mut checker = TypeChecker::new(self.view(), &mut scratch);
-                    check_constant_val_sort(&mut checker, &v.val)?;
-                    checker.check_no_metavar_no_fvar(v.val.name, v.value)?;
-                    let val_type = checker.check(v.value, &v.val.level_params)?;
-                    if !checker.is_def_eq(val_type, v.val.ty)? {
-                        let name = self.store.to_name(None, Some(v.val.name));
-                        return Err(KernelError::DefTypeMismatch(name));
-                    }
-                    ConstantInfo::Defn(v)
-                }
-                Declaration::Thm(v) => {
-                    let view = self.view();
-                    check_constant_val_pre(&scratch, &view, &v.val)?;
-                    let mut checker = TypeChecker::new(self.view(), &mut scratch);
-                    check_constant_val_sort(&mut checker, &v.val)?;
-                    if !checker.is_prop(v.val.ty)? {
-                        let name = self.store.to_name(None, Some(v.val.name));
-                        return Err(KernelError::TheoremTypeNotProp(name));
-                    }
-                    checker.check_no_metavar_no_fvar(v.val.name, v.value)?;
-                    let val_type = checker.check(v.value, &v.val.level_params)?;
-                    if !checker.is_def_eq(val_type, v.val.ty)? {
-                        let name = self.store.to_name(None, Some(v.val.name));
-                        return Err(KernelError::DefTypeMismatch(name));
-                    }
-                    ConstantInfo::Thm(v)
-                }
-                Declaration::Opaque(v) => {
-                    // oracle (environment.cpp:211-222): no
-                    // `check_no_metavar_no_fvar` on the value here —
-                    // unlike Defn/Thm, `add_opaque` relies solely on the
-                    // `checker.check` walk below. Ported as-is.
-                    let view = self.view();
-                    check_constant_val_pre(&scratch, &view, &v.val)?;
-                    let mut checker = TypeChecker::new(self.view(), &mut scratch);
-                    check_constant_val_sort(&mut checker, &v.val)?;
-                    let val_type = checker.check(v.value, &v.val.level_params)?;
-                    if !checker.is_def_eq(val_type, v.val.ty)? {
-                        let name = self.store.to_name(None, Some(v.val.name));
-                        return Err(KernelError::DefTypeMismatch(name));
-                    }
-                    ConstantInfo::Opaque(v)
-                }
-                // oracle: environment.cpp:266-267 -> `add_quot`
-                // (quot.cpp:47-79). `quot::add_quot` does its own
-                // checking and returns every survivor to admit rather
-                // than mutating a shared environment (Task 5's
-                // `scratch`/`view`-only signature) — this arm admits
-                // them via `add_core` itself and sets the flag, then
-                // returns directly rather than falling through to the
-                // shared `self.add_core(info)` at the end.
-                Declaration::Quot => {
-                    let admitted = {
-                        let view = self.view();
-                        super::quot::add_quot(&mut scratch, &view)?
-                    };
-                    for ci in admitted {
-                        self.add_core(&scratch, ci)?;
-                    }
-                    self.quot_initialized = true;
-                    return Ok(());
-                }
-                // oracle: environment.cpp:266-267 -> `add_inductive`
-                // (inductive.cpp:1116). `inductive::add_inductive`
-                // eliminates nested occurrences, runs the ordinary
-                // machinery, and (when nesting occurred) restores the
-                // real nested inductives — returning every survivor to
-                // admit. See this function's own doc comment for the
-                // arrival-order analysis: `add_core`'s per-entry
-                // promote-then-insert is independent of the `Vec`'s
-                // order, so the nondeterministic `HashMap::into_values()`
-                // order `add_inductive` returns is safe to consume as-is.
-                Declaration::Inductive {
-                    lparams,
-                    nparams,
-                    types,
-                    is_unsafe,
-                } => {
-                    let admitted = {
-                        let view = self.view();
-                        super::inductive::add_inductive(
-                            &mut scratch,
-                            &view,
-                            lparams,
-                            nparams,
-                            types,
-                            is_unsafe,
-                        )?
-                    };
-                    for ci in admitted {
-                        self.add_core(&scratch, ci)?;
-                    }
-                    return Ok(());
-                }
-            }
+        let Admitted {
+            survivors,
+            quot_init,
+        } = {
+            let view = self.view();
+            check_declaration(view, &mut scratch, d)?
         };
-        self.add_core(&scratch, info)?;
+        for ci in survivors {
+            self.add_core(&scratch, ci)?;
+        }
+        if quot_init {
+            self.quot_initialized = true;
+        }
         Ok(())
     }
 

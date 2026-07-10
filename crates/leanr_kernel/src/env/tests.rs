@@ -582,3 +582,24 @@ fn has_name(env: &Environment, s: &str) -> bool {
         .values()
         .any(|ci| view.store.to_name(None, Some(ci.name())).to_string() == s)
 }
+
+#[test]
+fn check_declaration_returns_survivor_without_mutating_env() {
+    // A trusted base env with `Nat` admitted, and a simple axiom decl
+    // referencing only already-admitted constants.
+    let mut env = mini::env();
+    let before = env.len();
+    let val = cv(&mut env, "myAxiom", vec![], mini::sort0());
+    let d = Declaration::Axiom(AxiomVal {
+        val,
+        is_unsafe: false,
+    });
+
+    let mut scratch = crate::bank::Store::scratch();
+    let admitted = crate::check_declaration(env.view(), &mut scratch, d).unwrap();
+
+    assert_eq!(admitted.survivors.len(), 1);
+    assert!(!admitted.quot_init);
+    // check_declaration must NOT have inserted anything into env.
+    assert_eq!(env.len(), before);
+}
