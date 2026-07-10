@@ -1,6 +1,6 @@
 [tools]
 "cargo:cargo-fuzz" = "0.13.2"
-"github:EmbarkStudios/cargo-deny" = "0.19.9"
+"github:EmbarkStudios/cargo-deny" = "0.20.2"
 "github:leanprover/elan" = "4.2.3"
 gitleaks = "8.30.1"
 rust = { version = "1.96.1", profile = "default" }
