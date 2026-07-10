@@ -126,6 +126,7 @@ pub fn check_parallel(
         cv: Condvar::new(),
         cancelled: AtomicBool::new(false),
         failure: Mutex::new(None),
+        checked: AtomicUsize::new(0),
         quot_initialized: AtomicBool::new(false),
     };
 
@@ -167,7 +168,7 @@ pub fn check_parallel(
         });
     }
     Ok(CheckStats {
-        checked: done,
+        checked: shared.checked.into_inner(),
         skipped_unsafe,
     })
 }
@@ -184,6 +185,17 @@ struct Shared<'a> {
     cv: Condvar,
     cancelled: AtomicBool,
     failure: Mutex<Option<CheckFailure>>,
+    /// Accumulated `checked` count in **replay-equivalent units** (one per
+    /// `add_decl` the sequential `replay` would issue): a `Simple` task adds
+    /// 1, an `InductiveBlock` adds 1 (replay issues one `add_decl` per
+    /// block, not per member/ctor/rec), and a `Quot` task adds
+    /// `names.len()` — replay's `Quot` arm calls `add_decl(Declaration::Quot)`
+    /// once per quotient constant in the module set (`is_todo` keys off the
+    /// `remaining` set, so all four of `Quot`/`Quot.mk`/`Quot.lift`/`Quot.ind`
+    /// reach it and each returns `Ok`). This is distinct from
+    /// `ReadyState::done` (completed *tasks*, used for drain/cycle
+    /// detection), which must stay task-count based.
+    checked: AtomicUsize,
     /// Set exactly once, by the single quotient task after it successfully
     /// checks+admits (`Release`); every task's view reads it (`Acquire`) so
     /// quotient-using declarations reduce `Quot.lift`/`Quot.ind` just as the
@@ -248,6 +260,13 @@ fn worker<P: Fn(usize) + Sync>(
             &shared.quot_initialized,
         ) {
             Ok(()) => {
+                // Tally this task's replay-equivalent checked count (Simple
+                // +1, InductiveBlock +1, Quot +names.len()). Read only after
+                // join, so `Relaxed` accumulation is sufficient.
+                shared.checked.fetch_add(
+                    task_checked_count(&shared.tasks[task_id].kind),
+                    Ordering::Relaxed,
+                );
                 // Decrement dependents' counters; a 1->0 transition means
                 // that dependent is now ready. `fetch_sub` is atomic, so at
                 // most one decrementer observes the transition.
@@ -520,6 +539,22 @@ fn resolve_and_compare(
     Ok(())
 }
 
+/// A task's contribution to `CheckStats.checked`, in the same units the
+/// sequential `replay` counts: one per `add_decl`. `Simple` and
+/// `InductiveBlock` each map to a single `add_decl` (replay counts one per
+/// block, never per member/ctor/rec). A `Quot` task maps to one `add_decl`
+/// **per quotient constant** — replay's `Quot` arm runs
+/// `add_decl(Declaration::Quot)` once for each of `Quot`/`Quot.mk`/
+/// `Quot.lift`/`Quot.ind` present in the module set — so it contributes
+/// `names.len()` (exactly the quotient constants build_graph put in the
+/// task, correct for partial closures too).
+fn task_checked_count(kind: &TaskKind) -> usize {
+    match kind {
+        TaskKind::Simple(_) | TaskKind::InductiveBlock { .. } => 1,
+        TaskKind::Quot { names, .. } => names.len(),
+    }
+}
+
 /// Find a still-pending task (a member of a cycle) and return a name to
 /// blame. Returns `None` only if no pending task carries a name.
 fn stuck_decl(graph: &DepGraph, pending: &[AtomicUsize]) -> Option<NameId> {
@@ -619,6 +654,45 @@ mod tests {
         assert_eq!(
             err.decl, principal,
             "blame must be the base-region principal, not the scratch survivor name"
+        );
+    }
+
+    /// Counting regression: a `Quot` task contributes one checked unit PER
+    /// quotient constant (`names.len()`), matching sequential `replay`'s
+    /// per-quotient-constant `add_decl(Declaration::Quot)` calls — not 1 for
+    /// the whole grouped task. `Simple`/`InductiveBlock` each contribute
+    /// exactly 1 (replay: one `add_decl` per block, never per member/ctor).
+    ///
+    /// This pins the arithmetic directly; a full `check_parallel`-level
+    /// repro is infeasible hermetically because a genuine `Quot` check needs
+    /// the toolchain's `Eq` (quotient constants live in Init/Core, and even
+    /// there a known kernel `check_eq_type` issue blocks hermetic replay —
+    /// see `crates/leanr_olean/tests/check_fixtures.rs`). The authoritative
+    /// regression is the controller's full-stdlib differential gate.
+    #[test]
+    fn quot_task_counts_each_quotient_constant() {
+        let mut st = Store::persistent();
+        let a = st.intern_name(None, &name("Quot")).unwrap().unwrap();
+        let b = st.intern_name(None, &name("Quot.mk")).unwrap().unwrap();
+        let c = st.intern_name(None, &name("Quot.lift")).unwrap().unwrap();
+        let d = st.intern_name(None, &name("Quot.ind")).unwrap().unwrap();
+        let eq = st.intern_name(None, &name("Eq")).unwrap().unwrap();
+
+        // The single grouped Quot task carries all four quotient constants →
+        // contributes 4, not 1 (the bug the stdlib gate caught: undercount 3).
+        let quot = TaskKind::Quot {
+            names: vec![a, b, c, d],
+            eq,
+        };
+        assert_eq!(task_checked_count(&quot), 4);
+
+        assert_eq!(task_checked_count(&TaskKind::Simple(a)), 1);
+        assert_eq!(
+            task_checked_count(&TaskKind::InductiveBlock {
+                members: vec![a, b],
+                ctors: vec![c, d],
+            }),
+            1
         );
     }
 }
