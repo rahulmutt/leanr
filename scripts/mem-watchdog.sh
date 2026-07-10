@@ -19,8 +19,8 @@ max_kib=$((max_gib * 1024 * 1024))
 # Clamp the requested cap to the cgroup limit (minus the safety margin), so
 # the watchdog fires before the kernel OOM-killer takes the whole container.
 # Leave the cap unchanged if memory.max is absent, unreadable, or "max"
-# (unlimited).
-cgroup_limit_kib=""
+# (unlimited). cgroup_cap_kib is also the memory.current kill threshold below.
+cgroup_cap_kib=""
 if [ -r "$cgroup_dir/memory.max" ]; then
     cgroup_limit_raw=$(cat "$cgroup_dir/memory.max" 2>/dev/null || true)
     case "$cgroup_limit_raw" in
@@ -28,7 +28,14 @@ if [ -r "$cgroup_dir/memory.max" ]; then
         *)
             cgroup_limit_kib=$((cgroup_limit_raw / 1024))
             cgroup_cap_kib=$((cgroup_limit_kib - margin_kib))
-            if [ "$cgroup_cap_kib" -lt "$max_kib" ]; then
+            if [ "$cgroup_cap_kib" -le 0 ]; then
+                # Degenerate: the whole cgroup limit fits inside the safety
+                # margin. Floor the cap at 0 (fail-safe — any resident child
+                # is killed on the first poll) instead of going negative.
+                cgroup_cap_kib=0
+                max_kib=0
+                echo "mem-watchdog: cgroup limit ${cgroup_limit_kib} kB is within the 2 GiB safety margin — effective cap 0 kB, nothing can run under this watchdog" >&2
+            elif [ "$cgroup_cap_kib" -lt "$max_kib" ]; then
                 max_kib=$cgroup_cap_kib
                 echo "mem-watchdog: cap clamped to ${max_kib} kB (cgroup limit - 2 GiB)" >&2
             fi
@@ -55,13 +62,12 @@ while kill -0 "$child" 2>/dev/null; do
     fi
     # Second, independent signal straight from the cgroup: catches memory the
     # pgid-RSS sum above misses (escaped processes, non-RSS charges, etc.).
-    if [ -n "$cgroup_limit_kib" ] && [ -r "$cgroup_dir/memory.current" ]; then
+    if [ -n "$cgroup_cap_kib" ] && [ -r "$cgroup_dir/memory.current" ]; then
         current_raw=$(cat "$cgroup_dir/memory.current" 2>/dev/null || true)
         case "$current_raw" in
             ''|*[!0-9]*) : ;; # absent, unreadable, or non-numeric: skip
             *)
                 current_kib=$((current_raw / 1024))
-                cgroup_cap_kib=$((cgroup_limit_kib - margin_kib))
                 if [ "$current_kib" -gt "$cgroup_cap_kib" ]; then
                     echo "mem-watchdog: memory.current ${current_kib} kB > cgroup limit - 2 GiB (${cgroup_cap_kib} kB) — killing" >&2
                     kill -KILL -"$pgid" 2>/dev/null || true
