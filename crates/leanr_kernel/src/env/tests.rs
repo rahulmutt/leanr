@@ -498,3 +498,17 @@ fn walk_expr_ids(st: &Store, root: ExprId) {
         }
     }
 }
+
+#[test]
+fn admit_unchecked_inserts_and_rejects_duplicates() {
+    let mut env = Environment::default();
+    let arc_ci = crate::testenv::axiom_u();
+    let ci = crate::decl::intern_constant_info(env.store_mut(), None, &arc_ci).unwrap();
+    let name = ci.name();
+    env.admit_unchecked(ci.clone()).unwrap();
+    assert!(env.get(name).is_some());
+    assert!(matches!(
+        env.admit_unchecked(ci),
+        Err(EnvironmentError::DuplicateName(_))
+    ));
+}

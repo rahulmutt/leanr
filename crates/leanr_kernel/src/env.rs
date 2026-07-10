@@ -177,6 +177,33 @@ impl Default for Environment {
 }
 
 impl Environment {
+    /// The persistent store, read-only (rendering ids for output).
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+
+    /// The persistent store, mutable — the direct-to-id decoder's
+    /// intern target (phase 3). Interning cannot violate any kernel
+    /// invariant: ids are minted canonically and `constants` is only
+    /// written through checked/trusted insert paths.
+    pub fn store_mut(&mut self) -> &mut Store {
+        &mut self.store
+    }
+
+    /// Trusted-import insert (the decode path's replacement for the
+    /// Arc-era `from_modules` loop body): duplicate-check + insert,
+    /// no type checking. `ci`'s ids must live in `self.store` —
+    /// i.e. it was decoded/interned against `self.store_mut()`.
+    pub fn admit_unchecked(&mut self, ci: ConstantInfo) -> Result<(), EnvironmentError> {
+        let name = ci.name();
+        if self.constants.contains_key(&name) {
+            let dup = self.store.to_name(None, Some(name));
+            return Err(EnvironmentError::DuplicateName(dup));
+        }
+        self.constants.insert(name, ci);
+        Ok(())
+    }
+
     /// oracle: `Environment::from_modules` (Arc env.rs:125). Interns
     /// each module's constants directly into `self.store`
     /// (`intern_constant_info(&mut self.store, None, ..)`), dropping
