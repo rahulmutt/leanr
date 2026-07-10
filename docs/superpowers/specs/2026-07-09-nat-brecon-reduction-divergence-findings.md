@@ -182,3 +182,43 @@ insertion point remains a fix-design choice.
   probe, the per-`unfold_and_whnf` fire counter, and the one-shot
   backtrace capture. `tc.rs` and `guard.rs` are back to their pre-spike
   state (`git diff` on both is empty).
+
+## Acceptance result (Task 5, 2026-07-10)
+
+With the F1 fix landed (commit `19f51dd`, native `Nat.beq`/`Nat.ble`
+reduction consulted before delta-unfold on the `is_def_eq` /
+`lazy_delta_reduction` path), the full stdlib acceptance sweep ran
+under the memory watchdog (`mise run check:stdlib:watched`, 30 GiB cap,
+cgroup-clamped) and **passed clean**:
+
+- **Exit status:** 0 — no watchdog kill, no declaration failures, no
+  residual to triage (Step-2 residual policy not invoked).
+- **Coverage:** 2433 modules, 203,134 declarations checked
+  (3,611 unsafe/partial skipped).
+- **Peak RSS:** 2 GiB (2,669,156 kB) — the pre-fix run climbed past
+  25 GiB on `_proof_3` alone and never finished.
+- **Wall time:** 367.62 s.
+
+Disposition: **pass** (no logged residual). The Result-B disposition in
+`2026-07-06-term-bank-kernel-migration-design.md` is closed with the
+same figures.
+
+## Open follow-ups (tracked, out of this branch's scope)
+
+**Upstream-ordering question.** Our checker decides an `is_def_eq` pair
+(the `_proof_3` trigger) that real Lean's `isDefEq` never faces: handed
+that pair directly, real Lean's kernel diverges too — its own `whnf`
+answers the query natively before `isDefEq` ever sees it. Why our
+admission path reaches this pair where Lean's does not is unexplained
+and worth a scoped look. It is not a soundness issue — the Task 4
+review verified no terminating-verdict drift (the fix is
+verdict-preserving; only force-order changed) — but the ordering
+difference between our pipeline and Lean's is an open question.
+
+**`reduce_nat` shiftLeft magnitude guard.** The Task 4 review flagged a
+pre-existing sharp edge: `reduce_nat`'s `shiftLeft` branch has no
+magnitude guard, while `pow` is bounded by `REDUCE_POW_MAX_EXP`
+(`tc.rs`). A huge literal shift would materialize an enormous `Nat` in
+one step. The full sweep completing under the watchdog is the practical
+evidence that no stdlib term hits an unbounded `shiftLeft`; a guard
+symmetric to `pow`'s is tracked as a follow-up.

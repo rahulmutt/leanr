@@ -264,3 +264,25 @@ per-declaration isolation).
   real Lean uses so `Nat.brecOn`/`Nat.below` over large `fuel` does not
   walk in full. It is verdict-preserving by construction (a reduction
   optimization, not a semantics change).
+
+### Result-B disposition — CLOSED (2026-07-10)
+
+The divergence was fixed on branch `nat-brecon-reduction-divergence`
+(fix commit `19f51dd`: the kernel's native `Nat.beq`/`Nat.ble`
+reduction is consulted before delta-unfold on the `is_def_eq` /
+`lazy_delta_reduction` path; diagnosis and fix rationale in
+`2026-07-09-nat-brecon-reduction-divergence-findings.md`). The full
+stdlib acceptance sweep then ran under the memory watchdog
+(`mise run check:stdlib:watched`, 30 GiB cap, cgroup-clamped):
+
+- **Exit status:** 0 (clean pass — no watchdog kill, no declaration
+  failures).
+- **Coverage:** 2433 modules, 203,134 declarations checked
+  (3,611 unsafe/partial skipped).
+- **Peak RSS:** 2 GiB (2,669,156 kB) — versus the pre-fix ~25 GiB
+  transient-and-climbing on `_proof_3` alone.
+- **Wall time:** 367.62 s.
+
+The phase-2 acceptance bar (`check --all` completes inside the pod
+memory limit) is met with an order-of-magnitude margin. No residual
+divergence surfaced: the disposition is **pass**, not logged-residual.
