@@ -31,20 +31,20 @@ use num_bigint::{BigInt, BigUint};
 use crate::raw::RawValue;
 use crate::OleanError;
 
-type Raw = Arc<RawValue>;
+pub(crate) type Raw = Arc<RawValue>;
 
-fn key(r: &Raw) -> *const RawValue {
+pub(crate) fn key(r: &Raw) -> *const RawValue {
     Arc::as_ptr(r)
 }
 
-fn bad(expected: &'static str) -> OleanError {
+pub(crate) fn bad(expected: &'static str) -> OleanError {
     OleanError::BadShape { expected }
 }
 
 /// Exact-count ctor accessor: `m_other` is the writer's exact pointer
 /// field count, so field counts are exact; scalar areas may be padded
 /// (layout reference), so those are minimum checks at use sites.
-fn ctor<'r>(
+pub(crate) fn ctor<'r>(
     r: &'r Raw,
     tag: u8,
     fields: usize,
@@ -60,7 +60,7 @@ fn ctor<'r>(
     }
 }
 
-fn boolean(byte: Option<&u8>, expected: &'static str) -> Result<bool, OleanError> {
+pub(crate) fn boolean(byte: Option<&u8>, expected: &'static str) -> Result<bool, OleanError> {
     match byte.copied() {
         Some(0) => Ok(false),
         Some(1) => Ok(true),
@@ -68,7 +68,7 @@ fn boolean(byte: Option<&u8>, expected: &'static str) -> Result<bool, OleanError
     }
 }
 
-fn nat(r: &Raw) -> Result<Nat, OleanError> {
+pub(crate) fn nat(r: &Raw) -> Result<Nat, OleanError> {
     match &**r {
         RawValue::Scalar(v) => Ok(Nat::from(*v)),
         RawValue::BigInt(i) => {
@@ -79,7 +79,7 @@ fn nat(r: &Raw) -> Result<Nat, OleanError> {
     }
 }
 
-fn int(r: &Raw) -> Result<Int, OleanError> {
+pub(crate) fn int(r: &Raw) -> Result<Int, OleanError> {
     match &**r {
         // Boxed Int scalars are 63-bit two's complement (lean.h
         // lean_scalar_to_int): sign-extend from bit 62.
@@ -89,7 +89,7 @@ fn int(r: &Raw) -> Result<Int, OleanError> {
     }
 }
 
-fn string(r: &Raw) -> Result<String, OleanError> {
+pub(crate) fn string(r: &Raw) -> Result<String, OleanError> {
     match &**r {
         RawValue::Str(s) => Ok(s.clone()),
         _ => Err(bad("String")),
@@ -97,7 +97,7 @@ fn string(r: &Raw) -> Result<String, OleanError> {
 }
 
 /// `List α` → element raw nodes (nil = box(0), cons = tag 1).
-fn list(r: &Raw) -> Result<Vec<&Raw>, OleanError> {
+pub(crate) fn list(r: &Raw) -> Result<Vec<&Raw>, OleanError> {
     let mut items = Vec::new();
     let mut cur = r;
     loop {
@@ -112,7 +112,7 @@ fn list(r: &Raw) -> Result<Vec<&Raw>, OleanError> {
     }
 }
 
-fn array(r: &Raw) -> Result<&[Raw], OleanError> {
+pub(crate) fn array(r: &Raw) -> Result<&[Raw], OleanError> {
     match &**r {
         RawValue::Array(elems) => Ok(elems),
         _ => Err(bad("Array")),
@@ -135,7 +135,7 @@ fn substring(r: &Raw) -> Result<Substring, OleanError> {
 /// `SourceInfo` (Init/Prelude.lean:4827): `original` (tag 0, 4 obj
 /// fields), `synthetic` (tag 1, 2 obj fields + `canonical : Bool` u8 at
 /// scalar offset 0), `none` (fieldless → `box(2)`).
-fn source_info(r: &Raw) -> Result<SourceInfo, OleanError> {
+pub(crate) fn source_info(r: &Raw) -> Result<SourceInfo, OleanError> {
     match &**r {
         RawValue::Scalar(2) => Ok(SourceInfo::None),
         RawValue::Ctor { tag: 0, fields, .. } if fields.len() == 4 => Ok(SourceInfo::Original {
@@ -154,6 +154,26 @@ fn source_info(r: &Raw) -> Result<SourceInfo, OleanError> {
             canonical: boolean(scalars.first(), "SourceInfo.canonical")?,
         }),
         _ => Err(bad("SourceInfo")),
+    }
+}
+
+/// ReducibilityHints (Declaration.lean:46-50). Representation-agnostic
+/// (returns a plain enum) — shared by the Arc and id decode paths.
+pub(crate) fn reducibility(r: &Raw) -> Result<ReducibilityHints, OleanError> {
+    match &**r {
+        RawValue::Scalar(0) => Ok(ReducibilityHints::Opaque),
+        RawValue::Scalar(1) => Ok(ReducibilityHints::Abbrev),
+        RawValue::Ctor {
+            tag: 2,
+            fields,
+            scalars,
+        } if fields.is_empty() => {
+            let bytes = scalars.get(..4).ok_or_else(|| bad("regular height"))?;
+            Ok(ReducibilityHints::Regular(u32::from_le_bytes(
+                bytes.try_into().expect("4 bytes"),
+            )))
+        }
+        _ => Err(bad("ReducibilityHints")),
     }
 }
 
@@ -189,7 +209,7 @@ impl Interp {
 
     /// Name (Init/Prelude.lean:4693-4717): walk the parent chain down
     /// iteratively, then build back up, memoizing each node.
-    fn name(&mut self, r: &Raw) -> Result<Arc<Name>, OleanError> {
+    pub(crate) fn name(&mut self, r: &Raw) -> Result<Arc<Name>, OleanError> {
         let mut chain: Vec<&Raw> = Vec::new();
         let mut cur = r;
         let mut built = loop {
@@ -497,7 +517,7 @@ impl Interp {
     /// `missing` = `box(0)`; `node` (tag 1, 3 obj fields), `atom`
     /// (tag 2, 2 obj fields), `ident` (tag 3, 4 obj fields). Only
     /// `node.args` recurse into `Syntax`; the rest are leaves.
-    fn syntax(&mut self, root: &Raw) -> Result<Arc<Syntax>, OleanError> {
+    pub(crate) fn syntax(&mut self, root: &Raw) -> Result<Arc<Syntax>, OleanError> {
         enum Step<'r> {
             Visit(&'r Raw),
             Build(&'r Raw),
@@ -594,25 +614,6 @@ impl Interp {
         })
     }
 
-    /// ReducibilityHints (Declaration.lean:46-50).
-    fn reducibility(&mut self, r: &Raw) -> Result<ReducibilityHints, OleanError> {
-        match &**r {
-            RawValue::Scalar(0) => Ok(ReducibilityHints::Opaque),
-            RawValue::Scalar(1) => Ok(ReducibilityHints::Abbrev),
-            RawValue::Ctor {
-                tag: 2,
-                fields,
-                scalars,
-            } if fields.is_empty() => {
-                let bytes = scalars.get(..4).ok_or_else(|| bad("regular height"))?;
-                Ok(ReducibilityHints::Regular(u32::from_le_bytes(
-                    bytes.try_into().expect("4 bytes"),
-                )))
-            }
-            _ => Err(bad("ReducibilityHints")),
-        }
-    }
-
     /// ConstantInfo (Declaration.lean:429-437) and its Val payloads.
     fn constant_info(&mut self, r: &Raw) -> Result<ConstantInfo, OleanError> {
         let RawValue::Ctor { tag, fields, .. } = &**r else {
@@ -635,7 +636,7 @@ impl Interp {
                 ConstantInfo::Defn(DefinitionVal {
                     val: self.constant_val(&f[0])?,
                     value: self.expr(&f[1])?,
-                    hints: self.reducibility(&f[2])?,
+                    hints: reducibility(&f[2])?,
                     safety: match s.first().copied() {
                         Some(0) => DefinitionSafety::Unsafe,
                         Some(1) => DefinitionSafety::Safe,

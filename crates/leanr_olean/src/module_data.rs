@@ -3,8 +3,10 @@
 
 use std::sync::Arc;
 
-use leanr_kernel::{ArcConstantInfo as ConstantInfo, Expr, Name, RecGuard};
+use leanr_kernel::bank::{NameId, Store};
+use leanr_kernel::{ArcConstantInfo, ConstantInfo, Expr, Name, RecGuard};
 
+use crate::interp_id::InterpId;
 use crate::{interp::Interp, raw, OleanError};
 
 /// oracle: src/Lean/Setup.lean:25-32
@@ -46,7 +48,7 @@ pub struct ModuleData {
     pub is_module: bool,
     pub imports: Vec<Import>,
     pub const_names: Vec<Arc<Name>>,
-    pub constants: Vec<ConstantInfo>,
+    pub constants: Vec<ArcConstantInfo>,
     pub extra_const_names: Vec<Arc<Name>>,
     /// Environment-extension entries are validated by phase A but kept
     /// opaque (spec: interpreted by the elaborator in M4).
@@ -145,7 +147,7 @@ impl ModuleData {
 
         let mut guard = RecGuard::new();
         let mut const_names: Vec<Arc<Name>> = Vec::new();
-        let mut constants: Vec<ConstantInfo> = Vec::new();
+        let mut constants: Vec<ArcConstantInfo> = Vec::new();
         let mut seen: std::collections::HashMap<Arc<Name>, usize> =
             std::collections::HashMap::new();
         for &i in &order {
@@ -199,5 +201,34 @@ impl ModuleData {
             extra_const_names,
             num_entries: base.num_entries,
         })
+    }
+}
+
+/// The id-native decoded module (term-bank phase 3): what `ModuleData`
+/// becomes once the Arc decode path is deleted. Ids live in the
+/// `&mut Store` handed to `parse`/`parse_parts` — the caller's
+/// `Environment::store_mut()` in the check pipeline, or a standalone
+/// `Store::persistent()` for inspection commands.
+pub struct ModuleDataId {
+    pub is_module: bool,
+    pub imports: Vec<Import>,
+    pub const_names: Vec<NameId>,
+    pub constants: Vec<ConstantInfo>,
+    pub extra_const_names: Vec<NameId>,
+    /// Environment-extension entries are validated by phase A but kept
+    /// opaque (spec: interpreted by the elaborator in M4).
+    pub num_entries: usize,
+}
+
+impl ModuleDataId {
+    /// Decode a whole single-region `.olean` file directly into `st`.
+    /// `bytes` is untrusted input; every failure mode is an
+    /// `OleanError`, never a panic. A failed decode may leave
+    /// already-interned rows in `st` — sound (interning is append-only
+    /// and canonical; unreachable ids are inert) and decode failure is
+    /// fatal for the run.
+    pub fn parse(bytes: &[u8], st: &mut Store) -> Result<ModuleDataId, OleanError> {
+        let root = raw::parse_bytes(bytes)?;
+        InterpId::new(st).module_data(&root)
     }
 }

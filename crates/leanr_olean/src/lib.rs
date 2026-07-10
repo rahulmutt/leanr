@@ -156,6 +156,12 @@ pub enum OleanError {
     /// nesting can trigger it — incompleteness, never unsoundness.
     #[error("olean module data malformed: expression exceeds maximum recursion depth")]
     DeepRecursion,
+    /// Interning into the term bank failed while decoding directly to
+    /// ids (phase 3) — e.g. a bank's u32 id space exhausted
+    /// (`KernelError::BankExhausted`). Not reachable from legitimate
+    /// files; incompleteness, never unsoundness.
+    #[error("olean decode: kernel interning failed: {0}")]
+    Kernel(#[from] leanr_kernel::KernelError),
 }
 
 impl OleanHeader {
@@ -207,9 +213,10 @@ impl OleanHeader {
 }
 
 mod interp;
+mod interp_id;
 mod loader;
 mod module_data;
 mod raw;
 
 pub use loader::{load_closure, LoadError, SearchPath};
-pub use module_data::{Import, ModuleData, PartKind};
+pub use module_data::{Import, ModuleData, ModuleDataId, PartKind};
