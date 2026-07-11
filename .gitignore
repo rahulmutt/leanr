@@ -24,3 +24,10 @@ target
 crates/leanr_olean/fuzz/artifacts/
 crates/leanr_olean/fuzz/target/
 crates/leanr_olean/fuzz/Cargo.lock
+
+# Mathlib checkout + prebuilt .oleans (M1-final Mathlib-scale acceptance
+# sweep). Cloned by `scripts/mathlib-fetch.sh`; local, network-fetched, not
+# committed. (No separate `.lean4checker/` clone: `scripts/bench-mathlib.sh`
+# benchmarks against the toolchain-bundled `leanchecker` binary instead —
+# see that script for why.)
+.mathlib/

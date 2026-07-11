@@ -56,6 +56,46 @@ interned rows behind in the persistent store; this is sound because
 interning is append-only and canonical, so the unreachable partial
 rows are inert residue, not a corrupted or exploitable state.
 
+## Parallel checker resource/DoS surface (M1-final)
+
+`leanr check`'s default path (`crates/leanr_check`) replaces sequential
+`replay` with a worker pool over a dependency DAG built from decoded
+(untrusted) declarations, so the DoS surface a hostile `.olean` can
+reach through scheduling is threat-modeled explicitly:
+
+- **Cyclic dependency graphs cannot hang the checker.** A well-formed
+  `.olean` never has one, but an attacker can forge declaration
+  references that do. A cycle leaves its tasks permanently un-ready:
+  once the ready queue drains and no task is in flight, the worker pool
+  joins, and `done != n_tasks` is detected and reported as
+  `KernelError::DependencyCycle` naming a still-pending declaration —
+  never a hang, deadlock, or livelock. This is the parallel scheduler's
+  twin of `RecGuard`'s `MAX_REC_DEPTH` bound on sequential recursion:
+  both convert an attacker-controlled unbounded structure into a
+  reported error instead of unbounded resource consumption.
+- **Per-task scratch cannot accumulate.** Each task (declaration or
+  inductive/quotient block) checks against a fresh per-worker scratch
+  `Store` that is dropped when the task finishes, so a hostile module
+  set with many large or many failing declarations cannot grow scratch
+  state across tasks — peak scratch memory is bounded by the largest
+  single task, not by the number of tasks.
+- **The persistent store is read-only during checking.** The `Store` is
+  frozen behind an `Arc` after decode and never mutated again for the
+  rest of the check — no promotion step, no interior mutability, no
+  `unsafe`. Inductive/quotient survivors are canonicalized by *looking
+  up* their regenerated ids in the frozen store (`resolve_constant_info`,
+  read-only; a miss rejects the check) rather than by writing them in.
+  Because nothing writes to the shared store while workers read it
+  concurrently, there is no store-corruption surface introduced by
+  parallelism.
+- **Task-graph memory is bounded by the input it derives from.** The
+  DAG (one node per def/axiom/theorem/opaque, one per mutual-inductive
+  block, one for quotient init) plus its dependency counters and
+  reverse-adjacency lists are O(total term size) — the same order as
+  the decode pass that already ran over the same `.olean` bytes, so the
+  scheduler adds no new order of magnitude to the resource bound
+  established in "Resource bounds" above.
+
 ## Out of scope (for now)
 
 - Sandboxing `lakefile.lean`/tactic execution (revisit at M4).

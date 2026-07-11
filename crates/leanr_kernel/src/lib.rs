@@ -11,6 +11,7 @@
 //! stacks, and the `Arc` tree types implement iterative `Drop`.
 
 pub mod bank;
+pub mod checked;
 mod decl;
 mod env;
 mod error;
@@ -31,6 +32,7 @@ mod tc;
 mod testenv;
 mod used_consts;
 
+pub use checked::{CheckedConstants, ConstSource};
 pub use decl::{
     constant_info_eq, AxiomVal, ConstantInfo, ConstantVal, ConstructorVal, Declaration,
     DefinitionSafety, DefinitionVal, InductiveType, InductiveVal, OpaqueVal, QuotKind, QuotVal,
@@ -51,7 +53,7 @@ pub use decl::{
     ArcConstructorVal, ArcDeclaration, ArcDefinitionVal, ArcInductiveType, ArcInductiveVal,
     ArcOpaqueVal, ArcQuotVal, ArcRecursorRule, ArcRecursorVal, ArcTheoremVal,
 };
-pub use env::{Environment, EnvironmentError};
+pub use env::{check_declaration, resolve_constant_info, Admitted, Environment, EnvironmentError};
 pub use error::KernelError;
 pub use expr::{BinderInfo, DataValue, Expr, ExprData, ExprNode, KVMap, Literal};
 pub use guard::{RecGuard, MAX_REC_DEPTH};
@@ -59,11 +61,11 @@ pub use level::Level;
 pub use local_ctx::{FVarIdGen, LocalContext, LocalDecl};
 pub use name::Name;
 pub use num::{Int, Nat};
-pub use replay::{replay, ReplayError, ReplayStats};
+pub use replay::{build_inductive_types, is_unsafe_or_partial, replay, ReplayError, ReplayStats};
 pub use subst::{
     abstract_fvars, instantiate, instantiate_core, instantiate_level_params, instantiate_rev,
     lift_loose_bvars,
 };
 pub use syntax::{Preresolved, SourceInfo, Substring, Syntax};
-pub use tc::{Lbool, TypeChecker};
+pub use tc::{EnvView, Lbool, TypeChecker};
 pub use used_consts::used_constants;

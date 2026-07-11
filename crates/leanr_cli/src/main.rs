@@ -39,6 +39,12 @@ enum Command {
         /// `lean --print-libdir` (if resolvable), in that order.
         #[arg(long = "path")]
         path: Vec<PathBuf>,
+        /// Worker threads (default: available parallelism).
+        #[arg(long)]
+        jobs: Option<usize>,
+        /// use the sequential reference checker (replay) — differential/debugging only.
+        #[arg(long)]
+        sequential: bool,
     },
 }
 
@@ -59,7 +65,13 @@ fn main() -> ExitCode {
         Command::Olean {
             command: OleanCommand::Decls { path },
         } => olean_decls(&path),
-        Command::Check { modules, all, path } => check(modules, all, path),
+        Command::Check {
+            modules,
+            all,
+            path,
+            jobs,
+            sequential,
+        } => check(modules, all, path, jobs, sequential),
     }
 }
 
@@ -218,7 +230,13 @@ fn enumerate_all(roots: &[PathBuf]) -> Vec<Arc<Name>> {
     names
 }
 
-fn check(modules: Vec<String>, all: bool, path: Vec<PathBuf>) -> ExitCode {
+fn check(
+    modules: Vec<String>,
+    all: bool,
+    path: Vec<PathBuf>,
+    jobs: Option<usize>,
+    sequential: bool,
+) -> ExitCode {
     let roots = discover_roots(path);
     if roots.is_empty() {
         eprintln!("error: no search roots (pass --path, set LEAN_PATH, or install `lean` on PATH)");
@@ -262,28 +280,89 @@ fn check(modules: Vec<String>, all: bool, path: Vec<PathBuf>) -> ExitCode {
         }
     }
 
-    match leanr_kernel::replay(&mut env, constants) {
+    if sequential {
+        // Faithful reference path: unchanged from before `--jobs` existed.
+        // `replay` does its own unsafe/partial skipping, so it gets the
+        // UNFILTERED `constants` map, and the store stays live (`&mut
+        // env`) rather than being frozen.
+        return match leanr_kernel::replay(&mut env, constants) {
+            Ok(stats) => {
+                println!(
+                    "checked {n} modules, {} declarations (skipped {} unsafe/partial)",
+                    stats.checked, stats.skipped_unsafe
+                );
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                // `ReplayError.decl` is an Arc<Name> render; map it back to
+                // an id to look up the owning module.
+                let module = env
+                    .store_mut()
+                    .intern_name(None, &err.decl)
+                    .ok()
+                    .flatten()
+                    .and_then(|id| owner.get(&id))
+                    .map(|m| m.to_string())
+                    .unwrap_or_else(|| "?".to_string());
+                eprintln!(
+                    "error: {module}: while replaying '{}': {}",
+                    err.decl, err.error
+                );
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    // Exclude unsafe/partial exactly as replay does, BEFORE building the
+    // table the parallel driver consults — the driver never sees them, so
+    // `CheckStats.skipped_unsafe` from `check_parallel` is always 0 here;
+    // this loop's `skipped_unsafe` is the one that goes on the stats line.
+    let mut skipped_unsafe = 0usize;
+    let mut table_map: HashMap<NameId, ConstantInfo> = HashMap::new();
+    for (name, ci) in constants {
+        if leanr_kernel::is_unsafe_or_partial(&ci) {
+            skipped_unsafe += 1;
+        } else {
+            table_map.insert(name, ci);
+        }
+    }
+
+    let jobs = jobs.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    });
+    let store = Arc::new(env.into_store());
+    let table = Arc::new(leanr_kernel::CheckedConstants::new(table_map));
+    let graph = match leanr_check::graph::build_graph(&store, &table) {
+        Ok(g) => g,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match leanr_check::check_parallel(store.clone(), table, graph, jobs, |done| {
+        if done % 1000 == 0 {
+            eprintln!("checked {done} declarations");
+        }
+    }) {
         Ok(stats) => {
             println!(
                 "checked {n} modules, {} declarations (skipped {} unsafe/partial)",
-                stats.checked, stats.skipped_unsafe
+                stats.checked, skipped_unsafe
             );
             ExitCode::SUCCESS
         }
-        Err(err) => {
-            // `ReplayError.decl` is an Arc<Name> render; map it back to
-            // an id to look up the owning module.
-            let module = env
-                .store_mut()
-                .intern_name(None, &err.decl)
-                .ok()
-                .flatten()
-                .and_then(|id| owner.get(&id))
+        Err(f) => {
+            let module = owner
+                .get(&f.decl)
                 .map(|m| m.to_string())
                 .unwrap_or_else(|| "?".to_string());
             eprintln!(
                 "error: {module}: while replaying '{}': {}",
-                err.decl, err.error
+                store.to_name(None, Some(f.decl)),
+                f.error
             );
             ExitCode::FAILURE
         }

@@ -39,15 +39,39 @@ use crate::bank::{ExprId, NameId, Store};
 pub fn used_constants(st: &Store, base: Option<&Store>, info: &ConstantInfo) -> Vec<NameId> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
+    // Memoizes every `ExprId` walked by any `collect_expr_consts` call
+    // below, across the whole `used_constants` invocation. The term
+    // bank is a hash-consed DAG — a subterm shared K times is one
+    // `ExprId` — so without this, `collect_expr_consts` re-walks shared
+    // subterms once per reference, unfolding the DAG into its full tree
+    // shape (exponential on heavily-shared Mathlib proof terms). Sharing
+    // one `visited` set across the `ty`/`value`/rule-`rhs` calls is
+    // correct: a node's `Const` names are collected the first time it's
+    // reached and `seen` already dedups names, so skipping a later
+    // revisit (here or in a sibling call) can't drop or reorder output.
+    let mut visited = HashSet::new();
 
     // (a) constants in the declared type — always.
-    collect_expr_consts(st, base, info.constant_val().ty, &mut out, &mut seen);
+    collect_expr_consts(
+        st,
+        base,
+        info.constant_val().ty,
+        &mut out,
+        &mut seen,
+        &mut visited,
+    );
 
     // (b)/(c) value consts when present, else the per-kind name set.
     match info {
-        ConstantInfo::Defn(v) => collect_expr_consts(st, base, v.value, &mut out, &mut seen),
-        ConstantInfo::Thm(v) => collect_expr_consts(st, base, v.value, &mut out, &mut seen),
-        ConstantInfo::Opaque(v) => collect_expr_consts(st, base, v.value, &mut out, &mut seen),
+        ConstantInfo::Defn(v) => {
+            collect_expr_consts(st, base, v.value, &mut out, &mut seen, &mut visited)
+        }
+        ConstantInfo::Thm(v) => {
+            collect_expr_consts(st, base, v.value, &mut out, &mut seen, &mut visited)
+        }
+        ConstantInfo::Opaque(v) => {
+            collect_expr_consts(st, base, v.value, &mut out, &mut seen, &mut visited)
+        }
         // No value: the oracle's `getUsedConstantsAsSet` else-branch.
         ConstantInfo::Induct(v) => {
             for &ctor in &v.ctors {
@@ -62,7 +86,7 @@ pub fn used_constants(st: &Store, base: Option<&Store>, info: &ConstantInfo) -> 
             // Superset over the oracle: also the rule right-hand sides
             // (see module doc). Harmless and satisfies the brief.
             for rule in &v.rules {
-                collect_expr_consts(st, base, rule.rhs, &mut out, &mut seen);
+                collect_expr_consts(st, base, rule.rhs, &mut out, &mut seen, &mut visited);
             }
         }
         // Axiom / Quot carry no value and no extra names.
@@ -85,15 +109,26 @@ fn push_name(name: NameId, out: &mut Vec<NameId>, seen: &mut HashSet<NameId>) {
 /// real dependency — the id-native analog of the Arc walk never having
 /// this case at all (`ExprNode::Const.name` is a plain `Arc<Name>`
 /// there).
+///
+/// `visited` memoizes every `ExprId` already popped off the stack (by
+/// any call sharing this set, see `used_constants`), so a DAG node
+/// reached through more than one parent — the term bank hash-conses
+/// shared subterms to one `ExprId` — is walked exactly once. This makes
+/// the walk O(DAG nodes) instead of O(unfolded-tree nodes); the two can
+/// differ exponentially on heavily-shared terms.
 fn collect_expr_consts(
     st: &Store,
     base: Option<&Store>,
     root: ExprId,
     out: &mut Vec<NameId>,
     seen: &mut HashSet<NameId>,
+    visited: &mut HashSet<ExprId>,
 ) {
     let mut stack: Vec<ExprId> = vec![root];
     while let Some(e) = stack.pop() {
+        if !visited.insert(e) {
+            continue;
+        }
         match st.expr_node(base, e) {
             Node::Const { name, .. } => {
                 if let Some(n) = name {
@@ -283,6 +318,34 @@ mod tests {
         let (st, used) = used(&info);
         assert!(contains(&st, &used, "head"));
         assert!(contains(&st, &used, "x"));
+    }
+
+    #[test]
+    fn exponential_sharing_is_visited_once() {
+        // The term bank is a hash-consed DAG: `Expr::app(e.clone(),
+        // e.clone())` shares one `ExprId` for both children (interning
+        // memoizes by `Arc::as_ptr`, and both children here are literal
+        // clones of the same `Arc`). Doubling this way for `DEPTH`
+        // levels makes the *DAG* O(DEPTH) nodes but the *tree
+        // unfolding* 2^DEPTH nodes. Without memoizing visited `ExprId`s,
+        // `collect_expr_consts` re-walks the shared subterm
+        // exponentially: at DEPTH=35 that's 2^35 (~34 billion)
+        // unfoldings — effectively non-terminating. With the fix, the
+        // walk is O(DAG nodes) and returns instantly.
+        const DEPTH: usize = 35;
+        let mut e = Expr::app(cst("A"), cst("B"));
+        for _ in 0..DEPTH {
+            e = Expr::app(e.clone(), e.clone());
+        }
+        let info = ArcConstantInfo::Axiom(ArcAxiomVal {
+            val: cval("ax", e),
+            is_unsafe: false,
+        });
+        let (st, used) = used(&info);
+        // Exactly the two distinct axiom names, each collected once.
+        assert_eq!(used.len(), 2);
+        assert!(contains(&st, &used, "A"));
+        assert!(contains(&st, &used, "B"));
     }
 
     #[test]

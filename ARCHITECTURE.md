@@ -49,6 +49,27 @@ implementation or a thin frontend. Full design:
   Arc trees, as an opaque payload. Golden-tested against the oracle
   (`mise run fixtures:regen`) and swept over the full toolchain
   stdlib (`mise run sweep:stdlib`).
+- `crates/leanr_check` — the parallel kernel-check driver (default as of
+  M1-final; `leanr check`'s `--sequential` flag opts back into the
+  single-threaded `replay` reference path). Builds a dependency DAG over
+  a frozen `Arc<CheckedConstants>` (decoded declarations gated by
+  per-entry admitted flags) and drives it with a std-thread worker pool
+  (a ready-queue `Mutex`+`Condvar`, per-task atomic dependency counters,
+  a cancellation flag, a first-failure slot — no rayon). Def/axiom/
+  theorem/opaque tasks are fully lock-free: a worker checks against the
+  gated table and flips the entry's flag. Inductive/quotient blocks are
+  *also* lock-free — the kernel regenerates their constructors/
+  recursors/inductive-infos in per-worker scratch, then each survivor is
+  translated by `resolve_constant_info`, a **read-only** lookup against
+  the frozen store (a miss means the survivor differs from its decoded
+  twin and the check is rejected; on all-hits the resolved ids are
+  compared to the twin with `constant_info_eq`). The persistent `Store`
+  is `Arc`-frozen after decode and never mutated again — no promotion,
+  no interior mutability, no `unsafe`. Verdict-equivalent to sequential
+  `replay`, proved by the full-stdlib differential gate
+  (`mise run check:stdlib:differential`, kept as a permanent regression
+  gate). Spec:
+  `docs/superpowers/specs/2026-07-10-m1-final-parallel-mathlib-design.md`.
 - `crates/leanr_cli` — the `leanr` binary. Thin: argument parsing and
   printing only, so CLI and (future) LSP can never diverge in behavior.
 
@@ -56,6 +77,14 @@ implementation or a thin frontend. Full design:
 
 - The `leanr_kernel` is the trusted computing base — it depends on
   nothing in the workspace and nothing reaches into it.
+- `leanr_check` depends on `leanr_kernel` (its check-only API:
+  `CheckedConstants`, `check_declaration`, `resolve_constant_info`,
+  `constant_info_eq`) and `leanr_olean` (loaded modules), and sits
+  between them and `leanr_cli` in the crate order. It is outside the
+  TCB: every kernel-check verdict it produces is one a sequential
+  `replay()` over the kernel alone could have produced, so all `std`
+  threading, scheduling, and cancellation logic lives here rather than
+  in `leanr_kernel`.
 - CLI and LSP are frontends over the same query engine by design;
   logic in `leanr_cli` is a bug.
 

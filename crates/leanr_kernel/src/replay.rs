@@ -36,7 +36,7 @@ use std::sync::Arc;
 
 use super::decl::{constant_info_eq, ConstantInfo, Declaration, InductiveType};
 use super::env::Environment;
-use crate::bank::{ExprId, NameId};
+use crate::bank::{ExprId, NameId, Store};
 use crate::{DefinitionSafety, KernelError, Name, RecGuard};
 
 /// `KernelError` plus the declaration being replayed when it fired,
@@ -145,6 +145,75 @@ fn is_partial(ci: &ConstantInfo) -> bool {
         ci,
         ConstantInfo::Defn(v) if v.safety == DefinitionSafety::Partial
     )
+}
+
+/// Public wrapper over this module's `is_unsafe`/`is_partial` (Replay.lean's
+/// skip predicate): the CLI's `check` uses this to filter unsafe/partial
+/// constants OUT of the table it hands to the parallel driver, before that
+/// table is ever built — the driver itself never sees them, mirroring
+/// `replay`'s own skip rule (`is_unsafe(ci) || is_partial(ci)` above) without
+/// duplicating its match arms at the call site.
+pub fn is_unsafe_or_partial(ci: &ConstantInfo) -> bool {
+    is_unsafe(ci) || is_partial(ci)
+}
+
+/// Reconstruct the `Vec<InductiveType>` of a mutual inductive block from
+/// its member names (`InductiveVal.all`). Each member must resolve — via
+/// `get` — to an `Induct` constant, and each of that member's
+/// constructors must resolve to a constant, contributing its
+/// `(name, type)` to the member's `InductiveType`.
+///
+/// Single-sources block reconstruction across the sequential
+/// `Replayer::replay_inductive` and the parallel driver
+/// (`leanr_check::schedule`), so the two can never drift (spec
+/// §Sequencing step 5 / the M1-final plan's Step 5 "direct copy" note —
+/// extracted rather than duplicated). This is exactly the `types`/
+/// `ctor_pairs` construction that used to be inline in `replay_inductive`
+/// (Replay.lean:105-119).
+///
+/// Errors are bare (`MissingConstant` on an absent member/ctor,
+/// `InvalidInductive` on a present-but-non-inductive member); the caller
+/// attributes blame (`Replayer::blame` / the driver's `CheckFailure`).
+/// `store` renders those error names: both callers hold the persistent
+/// store the member/ctor `NameId`s live in, and the shared spec signature
+/// (`get`/`members`) carries no store, so it is threaded explicitly here.
+pub fn build_inductive_types(
+    store: &Store,
+    get: impl Fn(NameId) -> Option<ConstantInfo>,
+    members: &[NameId],
+) -> Result<Vec<InductiveType>, KernelError> {
+    // Replay.lean:105-108 — every member must be present. Checked up front
+    // (matching the old `replay_inductive` member-gathering loop) so error
+    // selection order over a malformed block is unchanged.
+    let mut member_infos: Vec<ConstantInfo> = Vec::with_capacity(members.len());
+    for &m in members {
+        member_infos.push(
+            get(m).ok_or_else(|| KernelError::MissingConstant(store.to_name(None, Some(m))))?,
+        );
+    }
+    // Replay.lean:109-119 — per member (which must be an `Induct`), gather
+    // its constructors' `(name, type)` pairs in declared order.
+    let mut types: Vec<InductiveType> = Vec::with_capacity(member_infos.len());
+    for member in &member_infos {
+        let ConstantInfo::Induct(miv) = member else {
+            return Err(KernelError::InvalidInductive {
+                name: store.to_name(None, Some(member.name())),
+                what: "mutual block member is not an inductive",
+            });
+        };
+        let mut ctor_pairs: Vec<(NameId, ExprId)> = Vec::with_capacity(miv.ctors.len());
+        for &cn in &miv.ctors {
+            let cinfo = get(cn)
+                .ok_or_else(|| KernelError::MissingConstant(store.to_name(None, Some(cn))))?;
+            ctor_pairs.push((cinfo.name(), cinfo.constant_val().ty));
+        }
+        types.push(InductiveType {
+            name: miv.val.name,
+            ty: miv.val.ty,
+            ctors: ctor_pairs,
+        });
+    }
+    Ok(types)
 }
 
 struct Replayer<'a> {
@@ -320,49 +389,36 @@ impl Replayer<'_> {
         let lparams = info.val.level_params.clone();
         let nparams = info.num_params.clone();
 
-        // Replay.lean:105-108 — gather every block member's info and drop
-        // ALL of them from `remaining`/`pending` at once (the mutual
-        // block is admitted as a unit). A missing member is untrusted-
-        // input malformation, so `MissingConstant`.
-        let mut members: Vec<ConstantInfo> = Vec::with_capacity(info.all.len());
-        for &n in &info.all {
-            let member = match self.constants.get(&n).cloned() {
-                Some(m) => m,
-                None => {
-                    let dn = self.to_name(n);
-                    return Err(self.blame(name, KernelError::MissingConstant(dn)));
-                }
-            };
-            members.push(member);
-        }
-        for m in &members {
-            let mn = m.name();
-            self.remaining.remove(&mn);
-            self.pending.remove(&mn);
+        // Replay.lean:105-119 — reconstruct the block's `InductiveType`s.
+        // Shared with the parallel driver via `build_inductive_types` (the
+        // former inline `types`/`ctor_pairs` loops), so the two stay in
+        // lockstep. A missing member/ctor (`MissingConstant`) or a non-
+        // inductive member (`InvalidInductive`) is untrusted-input
+        // malformation; wrap the bare error with this block's blame.
+        let types = {
+            let store = self.env.view().store;
+            build_inductive_types(store, |n| self.constants.get(&n).cloned(), &info.all)
+                .map_err(|e| self.blame(name, e))?
+        };
+
+        // Replay.lean:105-108 — the mutual block is admitted as a unit, so
+        // drop every member from `remaining`/`pending` at once. (Ordering
+        // vs. reconstruction is immaterial: on any reconstruction error
+        // above we return before this, leaving the discarded `Replayer`
+        // state — and `env` — untouched.)
+        for &m in &info.all {
+            self.remaining.remove(&m);
+            self.pending.remove(&m);
         }
 
-        // Replay.lean:109-119 — per member, gather its constructor infos
-        // (in declared order) and build the `InductiveType`.
-        let mut types: Vec<InductiveType> = Vec::with_capacity(members.len());
-        let mut all_ctor_infos: Vec<ConstantInfo> = Vec::new();
-        for member in &members {
-            // Replay.lean:110 `ci.inductiveVal!` — a non-inductive member
-            // is malformed; reject rather than panic.
-            let miv = match member {
-                ConstantInfo::Induct(miv) => miv,
-                _ => {
-                    let dn = self.to_name(member.name());
-                    return Err(self.blame(
-                        name,
-                        KernelError::InvalidInductive {
-                            name: dn,
-                            what: "mutual block member is not an inductive",
-                        },
-                    ));
-                }
-            };
-            let mut ctor_pairs: Vec<(NameId, ExprId)> = Vec::with_capacity(miv.ctors.len());
-            for &cn in &miv.ctors {
+        // Replay.lean:112-115 — make sure the constructors' own
+        // dependencies are replayed before we admit the block. The ctor
+        // names come from the reconstructed `types` (declared order, same
+        // sequence the old inline `all_ctor_infos` produced); each ctor is
+        // still present in `constants` (ctors are never removed here), so
+        // the `None` arm is a defensive reject, not a reachable path.
+        for t in &types {
+            for &(cn, _) in &t.ctors {
                 let cinfo = match self.constants.get(&cn).cloned() {
                     Some(c) => c,
                     None => {
@@ -370,22 +426,10 @@ impl Replayer<'_> {
                         return Err(self.blame(name, KernelError::MissingConstant(dn)));
                     }
                 };
-                ctor_pairs.push((cinfo.name(), cinfo.constant_val().ty));
-                all_ctor_infos.push(cinfo);
-            }
-            types.push(InductiveType {
-                name: miv.val.name,
-                ty: miv.val.ty,
-                ctors: ctor_pairs,
-            });
-        }
-
-        // Replay.lean:112-115 — make sure the constructors' own
-        // dependencies are replayed before we admit the block.
-        for cinfo in &all_ctor_infos {
-            let deps = crate::used_consts::used_constants(self.env.view().store, None, cinfo);
-            for dep in deps {
-                self.replay_constant(dep, g)?;
+                let deps = crate::used_consts::used_constants(self.env.view().store, None, &cinfo);
+                for dep in deps {
+                    self.replay_constant(dep, g)?;
+                }
             }
         }
 
@@ -407,8 +451,8 @@ impl Replayer<'_> {
         // them back. Constructors are NOT removed here — they remain in
         // `remaining` (processed later, then postponed) and the postponed
         // structural check re-reads them from `constants`.
-        for m in &members {
-            self.constants.remove(&m.name());
+        for &m in &info.all {
+            self.constants.remove(&m);
         }
         Ok(())
     }

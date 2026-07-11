@@ -68,8 +68,24 @@ while kill -0 "$child" 2>/dev/null; do
             ''|*[!0-9]*) : ;; # absent, unreadable, or non-numeric: skip
             *)
                 current_kib=$((current_raw / 1024))
+                # memory.current counts reclaimable page cache ("file" in
+                # memory.stat). Clean file pages are reclaimed by the kernel
+                # under pressure long before the OOM-killer fires, so they
+                # are not a container-death risk — subtract them, or a tree
+                # of ~11k cached oleans (Mathlib) trips this kill while
+                # genuine (anon) usage is far below the limit.
+                file_kib=0
+                if [ -r "$cgroup_dir/memory.stat" ]; then
+                    file_raw=$(awk '$1=="file"{print $2; exit}' "$cgroup_dir/memory.stat" 2>/dev/null || true)
+                    case "$file_raw" in
+                        ''|*[!0-9]*) : ;;
+                        *) file_kib=$((file_raw / 1024)) ;;
+                    esac
+                fi
+                current_kib=$((current_kib - file_kib))
+                [ "$current_kib" -lt 0 ] && current_kib=0
                 if [ "$current_kib" -gt "$cgroup_cap_kib" ]; then
-                    echo "mem-watchdog: memory.current ${current_kib} kB > cgroup limit - 2 GiB (${cgroup_cap_kib} kB) — killing" >&2
+                    echo "mem-watchdog: memory.current - file cache ${current_kib} kB > cgroup limit - 2 GiB (${cgroup_cap_kib} kB) — killing" >&2
                     kill -KILL -"$pgid" 2>/dev/null || true
                     wait "$child" 2>/dev/null || true
                     echo "mem-watchdog: peak RSS $((peak_kib / 1024 / 1024)) GiB (${peak_kib} kB)" >&2
