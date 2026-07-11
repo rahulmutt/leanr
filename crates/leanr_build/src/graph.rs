@@ -107,6 +107,30 @@ fn scan_chunk_size(len: usize, parallelism: usize) -> usize {
     len.div_ceil(parallelism).max(1)
 }
 
+/// Implicit-`Init` rule (differential tier, task-10; oracle:
+/// `HeaderSyntax.imports`, src/lean/Lean/Elab/Import.lean:29-40, pinned
+/// toolchain v4.32.0-rc1): unless a module declares `prelude`, the
+/// toolchain unconditionally prepends `Init` to its import list —
+/// regardless of whether the header text has any other imports. Scanner
+/// output is purely textual (component 5's contract), so this synthetic
+/// edge is added here, once, right after scanning; it flows into both the
+/// frontier walk (so `Init` gets classified as toolchain-external) and the
+/// stored `ModuleInfo.imports`.
+///
+/// This is *not* the naive "only if the header had zero imports" rule: the
+/// Mathlib differential sweep found 8,532-of-~10,900 modules where a
+/// non-prelude module had other explicit imports and *still* needed `Init`
+/// appended — the toolchain's rule has no such condition.
+fn add_implicit_init(header: &mut Header) {
+    if header.prelude {
+        return;
+    }
+    let init = ModuleName::parse("Init").expect("`Init` is a valid module name");
+    if !header.imports.contains(&init) {
+        header.imports.push(init);
+    }
+}
+
 pub fn build_graph(
     seeds: &[ModuleName],
     resolver: &ModuleResolver,
@@ -178,7 +202,8 @@ pub fn build_graph(
                     .collect()
             });
         for r in results {
-            let (m, pkg, file, header) = r?;
+            let (m, pkg, file, mut header) = r?;
+            add_implicit_init(&mut header);
             for imp in &header.imports {
                 frontier.push((imp.clone(), m.to_string()));
             }
@@ -330,6 +355,58 @@ mod tests {
             },
         ]);
         (tmp, resolver)
+    }
+
+    /// Oracle discipline (differential tier, task-10): the pinned
+    /// toolchain's `HeaderSyntax.imports` (oracle:
+    /// src/lean/Lean/Elab/Import.lean:29-40, v4.32.0-rc1) unconditionally
+    /// prepends `Init` to every module's import list unless the module
+    /// declares `prelude` — regardless of whether the module has other
+    /// imports. An earlier version of this rule only injected `Init` when
+    /// the header listed no imports at all; the Mathlib differential sweep
+    /// found 8,532 modules (of ~10,900 checked) where that was wrong — any
+    /// non-prelude module with explicit imports was still missing the
+    /// implicit `Init` edge. Regression-tests all three cases the real
+    /// closure exercises.
+    #[test]
+    fn build_graph_injects_implicit_init_for_every_non_prelude_module() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "app/App.lean",
+            "import App.WithImports\nimport App.Bare\nimport App.Prelude\n",
+        );
+        // Non-prelude, has other explicit imports: Init is *also* implicit.
+        write(tmp.path(), "app/App/WithImports.lean", "import App.Bare\n");
+        // Non-prelude, no explicit imports: Init is implicit (old rule's case).
+        write(tmp.path(), "app/App/Bare.lean", "");
+        // Declares prelude: no implicit Init, even with zero imports.
+        write(tmp.path(), "app/App/Prelude.lean", "prelude\n");
+        let r = ModuleResolver::new(vec![LibUnit {
+            package: "app".into(),
+            src_dir: tmp.path().join("app"),
+            root: mn("App"),
+        }]);
+        let g = build_graph(&[mn("App")], &r, &fake_toolchain()).unwrap();
+        let imports_of = |name: &str| -> HashSet<String> {
+            g.modules[g.id_of(&mn(name)).unwrap().0 as usize]
+                .imports
+                .iter()
+                .map(|m| m.to_string())
+                .collect()
+        };
+        assert_eq!(
+            imports_of("App.WithImports"),
+            ["App.Bare", "Init"].iter().map(|s| s.to_string()).collect()
+        );
+        assert_eq!(
+            imports_of("App.Bare"),
+            ["Init"].iter().map(|s| s.to_string()).collect()
+        );
+        assert_eq!(imports_of("App.Prelude"), HashSet::new());
+        // Init never becomes a workspace dep edge (it's toolchain-external).
+        let with_imports = &g.modules[g.id_of(&mn("App.WithImports")).unwrap().0 as usize];
+        assert_eq!(with_imports.deps.len(), 1); // App.Bare only
     }
 
     #[test]

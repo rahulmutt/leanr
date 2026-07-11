@@ -21,8 +21,12 @@ fn setup() -> tempfile::TempDir {
         "lake-manifest.json",
         r#"{"version": "1.2.0", "packages": []}"#,
     );
-    // Fake toolchain dir for --toolchain-dir.
-    std::fs::create_dir_all(tmp.path().join("fake-toolchain")).unwrap();
+    // Fake toolchain dir for --toolchain-dir: a real toolchain always ships
+    // Init.olean, implicitly imported by every non-prelude module (see
+    // leanr_build::graph::add_implicit_init).
+    let fake_toolchain = tmp.path().join("fake-toolchain");
+    std::fs::create_dir_all(&fake_toolchain).unwrap();
+    std::fs::write(fake_toolchain.join("Init.olean"), "").unwrap();
     tmp
 }
 
@@ -133,7 +137,9 @@ fn setup_with_path_dependency() -> tempfile::TempDir {
                           "manifestFile": "lake-manifest.json", "inherited": false,
                           "configFile": "lakefile.toml"}]}"#,
     );
-    std::fs::create_dir_all(tmp.path().join("app/fake-toolchain")).unwrap();
+    let fake_toolchain = tmp.path().join("app/fake-toolchain");
+    std::fs::create_dir_all(&fake_toolchain).unwrap();
+    std::fs::write(fake_toolchain.join("Init.olean"), "").unwrap();
     tmp
 }
 

@@ -71,10 +71,14 @@ fn setup() -> (tempfile::TempDir, PathBuf) {
     (tmp, app)
 }
 
-/// Fake toolchain: a dir containing Init/Core.olean.
+/// Fake toolchain: a dir containing Init.olean and Init/Core.olean — a
+/// real toolchain always ships the former (every non-prelude module
+/// implicitly imports it; see `graph::add_implicit_init`), not just
+/// submodules under it.
 fn fake_toolchain(tmp: &Path) -> PathBuf {
     let dir = tmp.join("toolchain-lib");
     std::fs::create_dir_all(dir.join("Init")).unwrap();
+    std::fs::write(dir.join("Init.olean"), "").unwrap();
     std::fs::write(dir.join("Init/Core.olean"), "").unwrap();
     dir
 }
