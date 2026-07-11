@@ -30,11 +30,6 @@ if [ ! -d "$mathlib_dir" ]; then
     exit 1
 fi
 
-if ! command -v /usr/bin/time >/dev/null 2>&1; then
-    echo "bench-mathlib: /usr/bin/time not found on this pod (needed for the lean4checker/leanchecker row's wall-clock + peak RSS; install the 'time' package, e.g. \`apt-get install time\`)" >&2
-    exit 1
-fi
-
 if ! command -v leanchecker >/dev/null 2>&1; then
     echo "bench-mathlib: 'leanchecker' not found on PATH. Since Lean v4.28.0 lean4checker ships inside the toolchain as 'leanchecker' — ensure the pinned toolchain (./lean-toolchain) is installed and active (\`mise run elan:bootstrap\`)." >&2
     exit 1
@@ -71,34 +66,35 @@ if [ "$leanr_status" -ne 0 ]; then
 fi
 
 # --- leanchecker (lean4checker, toolchain-bundled) --------------------------
-echo "bench-mathlib: running leanchecker (its native multi-threaded mode) ..." >&2
+# Same measurement path as leanr: mem-watchdog.sh reports peak RSS (no
+# dependency on GNU /usr/bin/time, which isn't installable without root on
+# this pod), shell timing gives wall-clock. leanchecker runs from INSIDE
+# .mathlib (its native multi-threaded mode replays every module of the
+# current project); the watchdog also caps the OOM risk of a bare run.
+echo "bench-mathlib: running leanchecker (its native multi-threaded mode, under a 30 GiB watchdog) ..." >&2
 leanchecker_log="$work_dir/leanchecker.log"
-leanchecker_time_log="$work_dir/leanchecker.time"
 leanchecker_status=0
-(
-    cd "$mathlib_dir" &&
-    LEAN_PATH="$lean_path" /usr/bin/time -v leanchecker
-) >"$leanchecker_log" 2>"$leanchecker_time_log" || leanchecker_status=$?
-
-leanchecker_wall=$(grep 'Elapsed (wall clock) time' "$leanchecker_time_log" | sed 's/.*: //' || true)
-leanchecker_peak_kib=$(grep 'Maximum resident set size' "$leanchecker_time_log" | sed 's/[^0-9]*//g' || true)
-if [ -n "${leanchecker_peak_kib:-}" ]; then
-    leanchecker_peak_gib=$(awk -v k="$leanchecker_peak_kib" 'BEGIN { printf "%.1f", k / 1024 / 1024 }')
-else
-    leanchecker_peak_gib="unknown"
-fi
-leanchecker_wall=${leanchecker_wall:-unknown}
+leanchecker_start=$(date +%s)
+LEAN_PATH="$lean_path" "$repo_root/scripts/mem-watchdog.sh" 30 sh -c "
+    cd '$mathlib_dir' &&
+    leanchecker
+" >"$leanchecker_log" 2>&1 || leanchecker_status=$?
+leanchecker_end=$(date +%s)
+leanchecker_wall=$((leanchecker_end - leanchecker_start))
+leanchecker_peak_gib=$(grep -o 'peak RSS [0-9]* GiB' "$leanchecker_log" | tail -1 | awk '{print $3}')
+leanchecker_peak_gib=${leanchecker_peak_gib:-unknown}
 
 if [ "$leanchecker_status" -ne 0 ]; then
     echo "bench-mathlib: leanchecker FAILED (exit $leanchecker_status) — see log below" >&2
-    cat "$leanchecker_log" "$leanchecker_time_log" >&2
+    cat "$leanchecker_log" >&2
+    cp "$leanchecker_log" "$repo_root/bench-mathlib-leanchecker.log"
 fi
 
 # --- report ------------------------------------------------------------
 echo
 echo "checker      wall_clock       peak_rss"
 echo "leanr        ${leanr_wall}s (status $leanr_status)   ${leanr_peak_gib} GiB"
-echo "leanchecker  ${leanchecker_wall} (status $leanchecker_status)   ${leanchecker_peak_gib} GiB"
+echo "leanchecker  ${leanchecker_wall}s (status $leanchecker_status)   ${leanchecker_peak_gib} GiB"
 
 if [ "$leanr_status" -ne 0 ] || [ "$leanchecker_status" -ne 0 ]; then
     exit 1
