@@ -16,6 +16,12 @@ pub struct Header {
 
 /// Total over arbitrary bytes: invalid UTF-8 is decoded lossily and the
 /// replacement characters end the header at the first token they corrupt.
+// The `lx.pos = mark` rewinds right before each `break` are dead stores
+// by the compiler's reckoning (nothing reads `lx` again before `h` is
+// returned), but they document the intended "unconsumed trailing token"
+// invariant and keep the lexer correct if code is later added after the
+// loop that inspects `lx`. Hence the blanket allow rather than deleting
+// the assignments.
 #[allow(unused_assignments)]
 pub fn scan_header(bytes: &[u8]) -> Header {
     let text = String::from_utf8_lossy(bytes);
@@ -43,19 +49,30 @@ pub fn scan_header(bytes: &[u8]) -> Header {
             break;
         }
         lx.skip_trivia();
-        // `import all Foo`: `all` is a keyword iff a name follows it;
-        // otherwise `all` itself is the imported module.
+        // `import all Foo`: `all` is a keyword iff a following token parses
+        // as a module name that isn't itself a Lean declaration keyword;
+        // otherwise `all` is the imported module. Note module names may be
+        // lowercase (`runLinter` is real Lean), so the discriminator is
+        // "is this a reserved keyword", not "is this capitalized". If the
+        // candidate is rejected, the lexer is rewound so the rejected token
+        // is left for the next iteration (or to end the header), never
+        // silently dropped.
         let mut name = lx.module_name();
         if name.as_ref().map(|m| m.to_string()).as_deref() == Some("all") {
             lx.skip_trivia();
-            if let Some(real) = lx.module_name() {
-                // Only use the real name if it starts with uppercase or guillemet (Lean convention).
-                // This prevents parsing declaration keywords like 'def' as module names.
-                let real_str = real.to_string();
-                let first_char = real_str.chars().next();
-                if first_char == Some('«') || first_char.map(|c| c.is_uppercase()).unwrap_or(false)
-                {
-                    name = Some(real);
+            let after_all = lx.pos;
+            match lx.module_name() {
+                Some(real) => {
+                    let comps = real.components();
+                    let is_bare_keyword = comps.len() == 1 && is_lean_keyword(&comps[0]);
+                    if is_bare_keyword {
+                        lx.pos = after_all;
+                    } else {
+                        name = Some(real);
+                    }
+                }
+                None => {
+                    lx.pos = after_all;
                 }
             }
         }
@@ -69,6 +86,61 @@ pub fn scan_header(bytes: &[u8]) -> Header {
         lx.skip_trivia();
     }
     h
+}
+
+/// Lean 4 command/declaration-starting keywords. Used only to disambiguate
+/// `import all <word>`: a single-component candidate name that is one of
+/// these cannot be a real module name in that position — it's the start of
+/// the next declaration, so `all` itself must be the import. Not an
+/// exhaustive Lean keyword list; a dotted candidate (`def.foo`) can never
+/// be a declaration start, so the table is checked only against a
+/// single-component candidate's raw text.
+const LEAN_KEYWORDS: &[&str] = &[
+    "def",
+    "theorem",
+    "lemma",
+    "abbrev",
+    "example",
+    "instance",
+    "class",
+    "structure",
+    "inductive",
+    "axiom",
+    "opaque",
+    "mutual",
+    "namespace",
+    "section",
+    "end",
+    "open",
+    "universe",
+    "variable",
+    "set_option",
+    "attribute",
+    "macro",
+    "macro_rules",
+    "syntax",
+    "notation",
+    "infix",
+    "infixl",
+    "infixr",
+    "prefix",
+    "postfix",
+    "deriving",
+    "noncomputable",
+    "unsafe",
+    "partial",
+    "private",
+    "protected",
+    "public",
+    "meta",
+    "initialize",
+    "builtin_initialize",
+    "run_cmd",
+    "in",
+];
+
+fn is_lean_keyword(word: &str) -> bool {
+    LEAN_KEYWORDS.contains(&word)
 }
 
 struct Lexer<'a> {
@@ -260,6 +332,24 @@ mod tests {
         assert_eq!(imports("import all Mathlib.X\n"), ["Mathlib.X"]);
         // `all` with no name after it is the imported module itself.
         assert_eq!(imports("import all\ndef x := 1"), ["all"]);
+    }
+
+    #[test]
+    fn import_all_with_lowercase_module_name() {
+        // lowercase module names are legal (e.g. runLinter); `all` must not eat them
+        assert_eq!(
+            imports("import all runLinter\nimport Bar\n"),
+            ["runLinter", "Bar"]
+        );
+    }
+
+    #[test]
+    fn import_all_followed_by_declaration_keywords() {
+        assert_eq!(imports("import all\nopen Foo\n"), ["all"]);
+        assert_eq!(
+            imports("import all\ntheorem t : True := trivial\n"),
+            ["all"]
+        );
     }
 
     #[test]
