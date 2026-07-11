@@ -10,8 +10,11 @@
 //! so we hand it a fresh temp path and rename into the cache.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 use crate::config::{parse_lakefile_toml, ParsedConfig};
 use crate::error::BuildError;
@@ -36,9 +39,36 @@ impl Default for LakeInvoker {
     }
 }
 
+/// Kill the child and its whole process-group subtree, then reap it.
+/// Plain `Child::kill` only signals the immediate process; if it has
+/// spawned children of its own, they keep running and keep any inherited
+/// pipe (e.g. stderr) open, which would otherwise hang a reader thread
+/// waiting on that pipe to reach EOF.
+fn kill_child_tree(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        // SAFETY: signaling a process group by pid is a plain libc call;
+        // negating the pid targets the group we created via
+        // `process_group(0)` above rather than a single process.
+        unsafe {
+            libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+}
+
 /// Run `lake [+tc] translate-config toml <out>` with cwd `pkg_dir`.
+///
+/// `lakefile` is the package's config file path (e.g. `<pkg_dir>/lakefile.lean`),
+/// used only to name the file in error messages — the subprocess itself never
+/// reads it directly (lake finds it via `cwd = pkg_dir`).
 pub fn translate_lakefile(
     pkg_dir: &Path,
+    lakefile: &Path,
     lake: &LakeInvoker,
     out: &Path,
 ) -> Result<(), BuildError> {
@@ -51,41 +81,90 @@ pub fn translate_lakefile(
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+    // Put the child in its own process group so a timeout kill takes down
+    // its whole subtree (lake may itself spawn `lean`/etc.), not just the
+    // immediate process. A lone `child.kill()` would leave grandchildren
+    // running with the stderr pipe's write end still open, which hangs the
+    // reader-thread join below indefinitely instead of returning promptly.
+    #[cfg(unix)]
+    cmd.process_group(0);
     let display = format!("{} translate-config toml", lake.program.display());
     let sub = |reason: String, stderr: String| BuildError::Subprocess {
         cmd: display.clone(),
         reason,
         stderr,
     };
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| sub(format!("failed to start: {e}"), String::new()))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        sub(
+            format!(
+                "failed to start for {} ({e}); check that `lake` is installed and on PATH",
+                lakefile.display()
+            ),
+            String::new(),
+        )
+    })?;
+    // Take stderr immediately and drain it on a dedicated thread. If we only
+    // read it after try_wait observes exit, a child that writes >64KB to
+    // stderr blocks on the pipe write and never exits — burning the whole
+    // timeout and then reporting "timed out" with an empty stderr, losing
+    // the real diagnostic. stdout stays `Stdio::null()`, so it needs no
+    // equivalent drain.
+    let stderr_pipe = child.stderr.take();
+    let stderr_thread = stderr_pipe.map(|mut s| {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let _ = s.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let join_stderr = |thread: Option<std::thread::JoinHandle<Vec<u8>>>| -> String {
+        thread
+            .and_then(|t| t.join().ok())
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default()
+    };
     let deadline = std::time::Instant::now() + lake.timeout;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut stderr = String::new();
-                if let Some(mut s) = child.stderr.take() {
-                    use std::io::Read;
-                    let _ = s.read_to_string(&mut stderr);
-                }
+                let stderr = join_stderr(stderr_thread);
                 if status.success() {
                     return Ok(());
                 }
-                return Err(sub(format!("failed ({status})"), stderr));
+                return Err(sub(
+                    format!(
+                        "failed for {} (exit status: {status}); fix the lakefile or run \
+                         `lake translate-config toml` there to reproduce",
+                        lakefile.display()
+                    ),
+                    stderr,
+                ));
             }
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_child_tree(&mut child);
+                    let stderr = join_stderr(stderr_thread);
                     return Err(sub(
-                        format!("timed out after {}s", lake.timeout.as_secs()),
-                        String::new(),
+                        format!(
+                            "timed out after {}s translating {}; re-run, and if the machine is \
+                             slow this timeout may need raising",
+                            lake.timeout.as_secs(),
+                            lakefile.display()
+                        ),
+                        stderr,
                     ));
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
-            Err(e) => return Err(sub(format!("wait failed: {e}"), String::new())),
+            Err(e) => {
+                kill_child_tree(&mut child);
+                let stderr = join_stderr(stderr_thread);
+                return Err(sub(
+                    format!("wait failed for {}: {e}", lakefile.display()),
+                    stderr,
+                ));
+            }
         }
     }
 }
@@ -109,6 +188,12 @@ pub fn load_config(
         let text = String::from_utf8_lossy(&read(&config_path)?).into_owned();
         return parse_lakefile_toml(&text, &config_path);
     }
+    // Known limitation (design spec cache-key definition,
+    // docs/superpowers/specs/2026-07-11-m2a-package-model-design.md): the
+    // cache key is content-only — it does not fold in the toolchain. A
+    // toolchain bump can therefore serve a stale translation until
+    // `.leanr/config-cache` is cleared. Deliberate for M2a, where the
+    // toolchain is pinned; revisit if the pin ever becomes movable.
     let hash = blake3::hash(&read(&config_path)?).to_hex();
     let cached = cache_dir.join(format!("{hash}.toml"));
     if !cached.is_file() {
@@ -117,8 +202,9 @@ pub fn load_config(
             err: e.to_string(),
         })?;
         let tmp = cache_dir.join(format!("{hash}.toml.tmp{}", std::process::id()));
-        let _ = std::fs::remove_file(&tmp); // stale tmp from a killed run
-                                            // Absolute out path: lake runs with cwd = pkg_dir, not cache_dir.
+        // Stale tmp left behind by a killed run; fine if it's not there.
+        let _ = std::fs::remove_file(&tmp);
+        // Absolute out path: lake runs with cwd = pkg_dir, not cache_dir.
         let tmp_abs = if tmp.is_absolute() {
             tmp.clone()
         } else {
@@ -129,7 +215,7 @@ pub fn load_config(
                 })?
                 .join(&tmp)
         };
-        translate_lakefile(pkg_dir, lake, &tmp_abs)?;
+        translate_lakefile(pkg_dir, &config_path, lake, &tmp_abs)?;
         std::fs::rename(&tmp, &cached).map_err(|e| BuildError::Io {
             path: cached.clone(),
             err: e.to_string(),
@@ -239,6 +325,36 @@ mod tests {
         let err =
             load_config(pkg.path(), Path::new("lakefile.lean"), cache.path(), &lake).unwrap_err();
         assert!(err.to_string().contains("ill-formed configuration file"));
+    }
+
+    #[test]
+    fn bridge_drains_large_stderr_without_waiting_out_the_timeout() {
+        let pkg = pkg_with_lakefile_lean();
+        let cache = tempfile::TempDir::new().unwrap();
+        let lake = LakeInvoker {
+            program: fake("fake-lake-big-stderr.sh"),
+            // Generous timeout: if the stderr pipe deadlocks the poll loop,
+            // the call will not return until this elapses.
+            timeout: Duration::from_secs(30),
+            ..LakeInvoker::default()
+        };
+        let start = std::time::Instant::now();
+        let err =
+            load_config(pkg.path(), Path::new("lakefile.lean"), cache.path(), &lake).unwrap_err();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "expected prompt failure, took {elapsed:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ill-formed configuration file"),
+            "error should carry (partial) stderr, got: {msg}"
+        );
+        assert!(
+            !msg.contains("timed out"),
+            "this is a fast nonzero exit, not a timeout: {msg}"
+        );
     }
 
     #[test]
