@@ -2,7 +2,7 @@
 //! Schema 1.x observed at the pinned toolchain; unknown major versions
 //! error clearly rather than mis-resolving.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -64,6 +64,45 @@ struct RawPackage {
     inherited: bool,
 }
 
+/// Reject `subDir` values that could escape `packages_dir/<name>` when
+/// `resolve()` composes them via `base.join(sub_dir)` (dep-composition
+/// step, crates/leanr_build/src/lib.rs): an absolute value replaces the
+/// base entirely (`Path::join` semantics) and a `..` component walks back
+/// up out of it. Same trust-boundary discipline as
+/// `fetch::validate_package_name` / `fetch::validate_rev`, applied to the
+/// one other manifest-supplied path leanr joins onto a filesystem base.
+fn validate_sub_dir(sub_dir: &Path) -> Result<(), String> {
+    if sub_dir.is_absolute() {
+        return Err(format!("`{}` is an absolute path", sub_dir.display()));
+    }
+    for comp in sub_dir.components() {
+        match comp {
+            Component::ParentDir => {
+                return Err(format!("`{}` contains a `..` component", sub_dir.display()));
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(format!("`{}` is an absolute path", sub_dir.display()));
+            }
+            Component::Normal(part) => {
+                let part = part
+                    .to_str()
+                    .ok_or_else(|| format!("`{}` contains non-UTF-8 bytes", sub_dir.display()))?;
+                if part.starts_with('-') {
+                    return Err(format!(
+                        "`{}` has a component starting with `-`: `{part}`",
+                        sub_dir.display()
+                    ));
+                }
+                if part.contains('\0') {
+                    return Err(format!("`{}` contains a NUL byte", sub_dir.display()));
+                }
+            }
+            Component::CurDir => {}
+        }
+    }
+    Ok(())
+}
+
 pub fn parse_manifest(text: &str, path: &Path) -> Result<Manifest, BuildError> {
     let err = |msg: String| BuildError::Manifest {
         path: path.to_path_buf(),
@@ -86,15 +125,26 @@ pub fn parse_manifest(text: &str, path: &Path) -> Result<Manifest, BuildError> {
     let mut packages = Vec::new();
     for p in raw.packages {
         let source = match p.kind.as_str() {
-            "git" => PackageSource::Git {
-                url: p
-                    .url
-                    .ok_or_else(|| err(format!("package `{}`: missing url; regenerate the manifest with `lake update`", p.name)))?,
-                rev: p
-                    .rev
-                    .ok_or_else(|| err(format!("package `{}`: missing rev; regenerate the manifest with `lake update`", p.name)))?,
-                sub_dir: p.sub_dir,
-            },
+            "git" => {
+                if let Some(sd) = &p.sub_dir {
+                    validate_sub_dir(sd).map_err(|msg| {
+                        err(format!(
+                            "package `{}`: subDir {msg} (from lake-manifest.json); \
+                             fix the entry or regenerate with `lake update`",
+                            p.name
+                        ))
+                    })?;
+                }
+                PackageSource::Git {
+                    url: p
+                        .url
+                        .ok_or_else(|| err(format!("package `{}`: missing url; regenerate the manifest with `lake update`", p.name)))?,
+                    rev: p
+                        .rev
+                        .ok_or_else(|| err(format!("package `{}`: missing rev; regenerate the manifest with `lake update`", p.name)))?,
+                    sub_dir: p.sub_dir,
+                }
+            }
             "path" => PackageSource::Path {
                 dir: p
                     .dir
@@ -193,5 +243,60 @@ mod tests {
                           "configFile": "lakefile.toml", "inherited": false}]}"#;
         let err = parse_manifest(text, Path::new("m.json")).unwrap_err();
         assert!(err.to_string().contains("rev"));
+    }
+
+    // -- Finding 1: subDir traversal --------------------------------------
+
+    #[test]
+    fn git_sub_dir_traversal_is_rejected() {
+        let text = r#"{"version": "1.2.0",
+            "packages": [{"type": "git", "name": "evil", "url": "https://e.com/x",
+                          "rev": "0123456789abcdef0123456789abcdef01234567",
+                          "subDir": "../escape",
+                          "configFile": "lakefile.toml", "inherited": false}]}"#;
+        let err = parse_manifest(text, Path::new("lake-manifest.json")).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("evil") && msg.contains("lake-manifest.json") && msg.contains(".."),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn git_sub_dir_absolute_path_is_rejected() {
+        let text = r#"{"version": "1.2.0",
+            "packages": [{"type": "git", "name": "evil", "url": "https://e.com/x",
+                          "rev": "0123456789abcdef0123456789abcdef01234567",
+                          "subDir": "/etc",
+                          "configFile": "lakefile.toml", "inherited": false}]}"#;
+        let err = parse_manifest(text, Path::new("lake-manifest.json")).unwrap_err();
+        assert!(err.to_string().contains("evil"));
+    }
+
+    #[test]
+    fn git_sub_dir_leading_dash_component_is_rejected() {
+        let text = r#"{"version": "1.2.0",
+            "packages": [{"type": "git", "name": "evil", "url": "https://e.com/x",
+                          "rev": "0123456789abcdef0123456789abcdef01234567",
+                          "subDir": "-x",
+                          "configFile": "lakefile.toml", "inherited": false}]}"#;
+        let err = parse_manifest(text, Path::new("lake-manifest.json")).unwrap_err();
+        assert!(err.to_string().contains("evil"));
+    }
+
+    #[test]
+    fn git_sub_dir_legitimate_value_is_accepted() {
+        let text = r#"{"version": "1.2.0",
+            "packages": [{"type": "git", "name": "dep", "url": "https://e.com/x",
+                          "rev": "0123456789abcdef0123456789abcdef01234567",
+                          "subDir": "sub/pkg",
+                          "configFile": "lakefile.toml", "inherited": false}]}"#;
+        let m = parse_manifest(text, Path::new("lake-manifest.json")).unwrap();
+        match &m.packages[0].source {
+            PackageSource::Git { sub_dir, .. } => {
+                assert_eq!(sub_dir.as_deref(), Some(Path::new("sub/pkg")))
+            }
+            other => panic!("expected git source, got {other:?}"),
+        }
     }
 }
