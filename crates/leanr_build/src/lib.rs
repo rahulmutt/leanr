@@ -3,6 +3,7 @@
 
 pub mod config;
 mod error;
+pub mod manifest;
 pub mod modules;
 
 pub use error::BuildError;
