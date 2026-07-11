@@ -4,6 +4,7 @@
 pub mod bridge;
 pub mod config;
 mod error;
+pub mod fetch;
 pub mod graph;
 pub mod manifest;
 pub mod modules;

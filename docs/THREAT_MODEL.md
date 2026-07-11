@@ -96,6 +96,25 @@ reach through scheduling is threat-modeled explicitly:
   scheduler adds no new order of magnitude to the resource bound
   established in "Resource bounds" above.
 
+## M2a: package resolution surface
+
+New in M2a (`leanr build --dry-run`), all matching lake's own trust
+posture:
+
+- **Executing lakefiles.** The translate-config bridge runs pinned
+  official `lake` on a package's `lakefile.lean` — arbitrary code
+  execution by design, exactly as `lake build` would. leanr adds no
+  sandbox in M2a (the M4 VM is the natural place for one). Subprocesses
+  get explicit argument vectors, captured stderr, and a timeout.
+- **Manifest-supplied git URLs.** `lake-manifest.json` is trusted like
+  the lakefile (it lives in the project), but URLs are validated before
+  reaching git: no leading `-` (option injection), scheme whitelist
+  (https/http/ssh/git/file, scp-like, local paths), `--` separator on
+  `git clone`. Materialization never overwrites local modifications.
+- **Header scanning.** `scan_header` is a total function over arbitrary
+  bytes (property-tested): never panics, never recurses, allocation
+  bounded by input size — same discipline as the `.olean` decoder.
+
 ## Out of scope (for now)
 
 - Sandboxing `lakefile.lean`/tactic execution (revisit at M4).
