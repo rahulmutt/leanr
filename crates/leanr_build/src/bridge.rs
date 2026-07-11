@@ -11,6 +11,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::config::{parse_lakefile_toml, ParsedConfig};
@@ -135,7 +136,18 @@ pub fn load_config(
             path: cache_dir.to_path_buf(),
             err: e.to_string(),
         })?;
-        let tmp = cache_dir.join(format!("{hash}.toml.tmp{}", std::process::id()));
+        // Unique per call, not just per process: `resolve()` bridges the
+        // root config and every dep's config, and callers (e.g. the
+        // differential tier's tests, which run several #[ignore] tests in
+        // parallel within one process) may call `load_config` for the same
+        // lakefile from multiple threads concurrently. A tmp name keyed
+        // only on `process::id()` collides across those threads, and real
+        // lake refuses to overwrite an existing out-file ("output
+        // configuration file already exists") — so fold in a
+        // process-lifetime atomic counter to guarantee uniqueness per call.
+        static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp = cache_dir.join(format!("{hash}.toml.tmp{}-{unique}", std::process::id()));
         // Stale tmp left behind by a killed run; fine if it's not there.
         let _ = std::fs::remove_file(&tmp);
         // Absolute out path: lake runs with cwd = pkg_dir, not cache_dir.
@@ -288,6 +300,49 @@ mod tests {
         assert!(
             !msg.contains("timed out"),
             "this is a fast nonzero exit, not a timeout: {msg}"
+        );
+    }
+
+    #[test]
+    fn concurrent_load_config_calls_on_the_same_lakefile_never_collide_on_tmp_path() {
+        // Reproduces the differential tier's real failure mode: several
+        // #[ignore] tests in one process each call `resolve()` on the same
+        // workspace root, so `load_config` bridges the *same* lakefile
+        // (same content hash, same cache_dir) from multiple threads at
+        // once. Before the fix, the tmp filename was keyed only on
+        // `process::id()`, so concurrent calls raced to the same tmp path
+        // and real lake's "output configuration file already exists"
+        // refusal surfaced as a spurious bridge failure.
+        let pkg = pkg_with_lakefile_lean();
+        let cache = tempfile::TempDir::new().unwrap();
+        let lake = LakeInvoker {
+            program: fake("fake-lake-strict-out.sh"),
+            ..LakeInvoker::default()
+        };
+        let results: Vec<Result<ParsedConfig, BuildError>> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..16)
+                .map(|_| {
+                    s.spawn(|| {
+                        load_config(pkg.path(), Path::new("lakefile.lean"), cache.path(), &lake)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for r in &results {
+            assert!(r.is_ok(), "concurrent load_config call failed: {r:?}");
+        }
+        // Exactly one cache entry: all 16 calls converged on the same
+        // content-hash key, no leftover tmp files.
+        let entries: Vec<_> = std::fs::read_dir(cache.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(
+            entries.len(),
+            1,
+            "expected exactly one cache entry, got: {:?}",
+            entries.iter().map(|e| e.path()).collect::<Vec<_>>()
         );
     }
 
