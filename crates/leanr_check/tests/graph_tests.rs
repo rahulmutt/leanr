@@ -80,3 +80,42 @@ fn recursor_groups_into_its_inductive_block() {
     // The recursor's flag must flip with the block → it is in `admits`.
     assert!(g.tasks[tfoo].admits.contains(&n.foo_rec));
 }
+
+#[test]
+fn high_degree_deps_are_deduplicated() {
+    // A declaration whose type references 500 distinct axioms, each twice
+    // (a 1000-element duplicate-heavy `used_constants` list). The old
+    // `Vec::contains` dedup was quadratic on exactly this shape; the
+    // HashSet dedup must yield exactly the 500 distinct dep-tasks, once
+    // each, in first-occurrence order.
+    let n_deps = 500;
+    let (store, table, h) = fixture::high_degree(n_deps);
+    let g = build_graph(&store, &table).unwrap();
+    let tdecl = g.name_to_task[&h.decl];
+    let deps = &g.tasks[tdecl].deps;
+
+    // Exactly one edge per distinct dep — no duplicates.
+    assert_eq!(deps.len(), n_deps, "expected one edge per distinct dep");
+    let unique: std::collections::HashSet<_> = deps.iter().copied().collect();
+    assert_eq!(unique.len(), deps.len(), "deps must contain no duplicates");
+
+    // Every distinct dep's task is present.
+    for dep in &h.deps {
+        let td = g.name_to_task[dep];
+        assert!(deps.contains(&td), "missing edge to a distinct dep's task");
+    }
+
+    // First-occurrence order preserved: `deps` must equal the distinct
+    // dep-tasks in the exact order `used_constants` first sees each name
+    // (its own deterministic, already-deduplicated walk order) — this is
+    // the property the HashSet `seen.insert` guard preserves versus the
+    // old `!Vec::contains` guard. Derived from `used_constants` directly
+    // rather than a hardcoded order, so it is independent of the walk's
+    // internal traversal direction.
+    let ci = table.get_decoded(h.decl).unwrap();
+    let expected: Vec<_> = leanr_kernel::used_constants(&store, None, ci)
+        .iter()
+        .map(|name| g.name_to_task[name])
+        .collect();
+    assert_eq!(*deps, expected, "deps must be in first-occurrence order");
+}

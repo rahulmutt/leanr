@@ -43,6 +43,75 @@ pub struct ChainNames {
     pub b: NameId,
 }
 
+/// Result of [`high_degree`].
+pub struct HighDegree {
+    pub decl: NameId,
+    /// The distinct axioms `decl`'s type references (each referenced
+    /// twice in the type, so `used_constants` yields a duplicate-heavy
+    /// list — the dedup path the HashSet fix must collapse).
+    pub deps: Vec<NameId>,
+}
+
+/// `n_deps` axioms `Dep0..Dep{n}` (each `: Sort 0`) plus one axiom `D`
+/// whose type is an application spine referencing EVERY dep TWICE:
+/// `App(App(... App(Dep0, Dep0), Dep1), Dep1) ...`. So
+/// `used_constants(D)` returns `2 * n_deps` names (duplicate-heavy), and
+/// `build_graph` must produce exactly `n_deps` distinct dep-edges with no
+/// duplicates. This is the high fan-out shape the old `Vec::contains`
+/// dedup was quadratic on.
+pub fn high_degree(n_deps: usize) -> (Store, CheckedConstants, HighDegree) {
+    let mut st = Store::persistent();
+    let zero = st.level_zero(None).unwrap();
+    let sort0 = st.expr_sort(None, zero).unwrap();
+    let no_levels = st.intern_level_list(None, &[]).unwrap();
+
+    let mut map = HashMap::new();
+    let mut deps: Vec<NameId> = Vec::with_capacity(n_deps);
+    let mut dep_refs: Vec<leanr_kernel::bank::ExprId> = Vec::with_capacity(n_deps);
+    for i in 0..n_deps {
+        let name = st
+            .intern_name(None, &nm(&format!("Dep{i}")))
+            .unwrap()
+            .unwrap();
+        let cref = st.expr_const(None, Some(name), no_levels).unwrap();
+        deps.push(name);
+        dep_refs.push(cref);
+        map.insert(
+            name,
+            ConstantInfo::Axiom(AxiomVal {
+                val: ConstantVal {
+                    name,
+                    level_params: vec![],
+                    ty: sort0,
+                },
+                is_unsafe: false,
+            }),
+        );
+    }
+
+    // Build the spine, referencing each dep twice (interleaved duplicates).
+    let mut ty = sort0;
+    for &cref in &dep_refs {
+        ty = st.expr_app(None, ty, cref).unwrap();
+        ty = st.expr_app(None, ty, cref).unwrap();
+    }
+
+    let decl = st.intern_name(None, &nm("D")).unwrap().unwrap();
+    map.insert(
+        decl,
+        ConstantInfo::Axiom(AxiomVal {
+            val: ConstantVal {
+                name: decl,
+                level_params: vec![],
+                ty,
+            },
+            is_unsafe: false,
+        }),
+    );
+
+    (st, CheckedConstants::new(map), HighDegree { decl, deps })
+}
+
 /// `axiom A : Sort 0` and `axiom B : A` — `B`'s type is literally
 /// `Const A []`, so `used_constants(B)` yields `A` and `build_graph`
 /// must record an edge `B -> A`'s task.

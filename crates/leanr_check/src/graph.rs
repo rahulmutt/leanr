@@ -4,7 +4,8 @@
 //! §Architecture Workstream 1 step 4. Built single-threaded and
 //! deterministically (names sorted) so the task set is reproducible.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use leanr_kernel::bank::{NameId, Store};
 use leanr_kernel::{used_constants, CheckedConstants, ConstantInfo, KernelError};
@@ -43,11 +44,18 @@ pub struct DepGraph {
 
 pub fn build_graph(store: &Store, table: &CheckedConstants) -> Result<DepGraph, KernelError> {
     // Deterministic iteration: sort names by raw bits.
+    let t = Instant::now();
     let mut names: Vec<NameId> = table.iter_decoded().map(|(&n, _)| n).collect();
     names.sort_by_key(|n| n.bits());
+    eprintln!(
+        "build_graph: sort {} names in {:.1}s",
+        names.len(),
+        t.elapsed().as_secs_f64()
+    );
 
     // 1. Assign every name to exactly one task, grouping inductive blocks.
     //    `name_to_task` maps members, ctors, AND recursors to their block.
+    let t = Instant::now();
     let mut name_to_task: HashMap<NameId, TaskId> = HashMap::new();
     let mut tasks: Vec<Task> = Vec::new();
 
@@ -146,7 +154,14 @@ pub fn build_graph(store: &Store, table: &CheckedConstants) -> Result<DepGraph, 
         }
     }
 
+    eprintln!(
+        "build_graph: pass1 (tasks) {} tasks in {:.1}s",
+        tasks.len(),
+        t.elapsed().as_secs_f64()
+    );
+
     // Pass 1b: claim any not-yet-claimed ctor/rec by resolving to a block.
+    let t = Instant::now();
     for &n in &names {
         if name_to_task.contains_key(&n) {
             continue;
@@ -157,19 +172,37 @@ pub fn build_graph(store: &Store, table: &CheckedConstants) -> Result<DepGraph, 
         // Also record it in the block's `admits` so its flag is set.
         tasks[block].admits.push(n);
     }
+    eprintln!(
+        "build_graph: pass1b (ctor/rec claim) in {:.1}s",
+        t.elapsed().as_secs_f64()
+    );
 
     // 2. Edges: for every name, its used_constants → the owning task.
     //    `used_constants` is internally an explicit-stack (iterative) walk,
     //    bounded by input size — no external `RecGuard` is needed here, so
     //    none is threaded through this file.
+    //
+    //    `used_constants` returns a RAW, duplicate-heavy list (a constant
+    //    referenced N times in a term appears N times), so dedup with a
+    //    `HashSet<TaskId>` (O(1) membership) instead of `Vec::contains`
+    //    (O(current deps)) — the latter made this pass
+    //    O(term_size × unique_deps) per task, quadratic on Mathlib's
+    //    large proof terms. `seen.insert` returns `true` only on first
+    //    sight, so we still push each distinct dep exactly once in
+    //    first-occurrence order (identical `deps` to the old `!contains`
+    //    guard). One `HashSet` is reused across names, cleared per name
+    //    to avoid reallocation.
+    let t = Instant::now();
+    let mut seen: HashSet<TaskId> = HashSet::new();
     for &n in &names {
         let ci = table.get_decoded(n).expect("name from table");
         let owner = name_to_task[&n];
+        seen.clear();
         for dep in used_constants(store, None, ci) {
             let Some(&dep_task) = name_to_task.get(&dep) else {
                 return Err(KernelError::MissingConstant(store.to_name(None, Some(dep))));
             };
-            if dep_task != owner && !tasks[owner].deps.contains(&dep_task) {
+            if dep_task != owner && seen.insert(dep_task) {
                 tasks[owner].deps.push(dep_task);
             }
         }
@@ -180,7 +213,9 @@ pub fn build_graph(store: &Store, table: &CheckedConstants) -> Result<DepGraph, 
     //     generic `used_constants` walk only produces this edge
     //     incidentally (because `Quot.lift`'s type embeds a `Const Eq`
     //     node); make it a guaranteed dependency and fail safely with
-    //     `MissingConstant` if `Eq` is absent from the table.
+    //     `MissingConstant` if `Eq` is absent from the table. Reuse the
+    //     `seen` set (seeded from the task's existing deps) so the
+    //     membership check stays O(1), matching pass 2.
     for (id, task) in tasks.iter_mut().enumerate() {
         let TaskKind::Quot { eq, .. } = task.kind else {
             continue;
@@ -189,10 +224,17 @@ pub fn build_graph(store: &Store, table: &CheckedConstants) -> Result<DepGraph, 
         let eq_task = *name_to_task
             .get(&eq)
             .ok_or_else(|| KernelError::MissingConstant(store.to_name(None, Some(eq))))?;
-        if eq_task != id && !task.deps.contains(&eq_task) {
+        seen.clear();
+        seen.extend(task.deps.iter().copied());
+        if eq_task != id && seen.insert(eq_task) {
             task.deps.push(eq_task);
         }
     }
+    eprintln!(
+        "build_graph: pass2 (edges) {} tasks in {:.1}s",
+        tasks.len(),
+        t.elapsed().as_secs_f64()
+    );
 
     Ok(DepGraph {
         tasks,
