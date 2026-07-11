@@ -91,6 +91,22 @@ impl ModuleGraph {
     }
 }
 
+/// Chunk size for splitting a frontier round of `len` files across
+/// `parallelism` scanner threads (ceiling division, minimum chunk size 1
+/// whenever `len > 0`). Bounds the thread count to `parallelism` regardless
+/// of frontier size: at Mathlib scale a single frontier round can hold
+/// thousands of files, and spawning one thread per file well past the core
+/// count adds scheduling/allocation overhead with no parallelism gain
+/// (Task 5's deferred follow-up, absorbed into Task 10's differential
+/// sweep prep).
+fn scan_chunk_size(len: usize, parallelism: usize) -> usize {
+    let parallelism = parallelism.max(1);
+    if len == 0 {
+        return 1;
+    }
+    len.div_ceil(parallelism).max(1)
+}
+
 pub fn build_graph(
     seeds: &[ModuleName],
     resolver: &ModuleResolver,
@@ -128,24 +144,37 @@ pub fn build_graph(
                 }
             }
         }
-        // Scan the frontier's files in parallel (scoped threads).
+        // Scan the frontier's files in parallel: chunked across at most
+        // `available_parallelism` scoped threads (not one thread per file —
+        // see `scan_chunk_size`), each thread scanning its chunk in a plain
+        // loop.
+        let parallelism = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        let chunk_size = scan_chunk_size(to_scan.len(), parallelism);
         let results: Vec<Result<(ModuleName, String, PathBuf, Header), BuildError>> =
             std::thread::scope(|s| {
                 let handles: Vec<_> = to_scan
-                    .into_iter()
-                    .map(|(m, pkg, file)| {
+                    .chunks(chunk_size)
+                    .map(|chunk| {
                         s.spawn(move || {
-                            let bytes = std::fs::read(&file).map_err(|e| BuildError::Io {
-                                path: file.clone(),
-                                err: e.to_string(),
-                            })?;
-                            Ok((m, pkg, file, scan_header(&bytes)))
+                            chunk
+                                .iter()
+                                .map(|(m, pkg, file)| {
+                                    let bytes =
+                                        std::fs::read(file).map_err(|e| BuildError::Io {
+                                            path: file.clone(),
+                                            err: e.to_string(),
+                                        })?;
+                                    Ok((m.clone(), pkg.clone(), file.clone(), scan_header(&bytes)))
+                                })
+                                .collect::<Vec<Result<(ModuleName, String, PathBuf, Header), BuildError>>>()
                         })
                     })
                     .collect();
                 handles
                     .into_iter()
-                    .map(|h| h.join().expect("scan thread"))
+                    .flat_map(|h| h.join().expect("scan thread"))
                     .collect()
             });
         for r in results {
@@ -381,6 +410,74 @@ mod tests {
         let err = topo_waves(&g).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("cycle") && msg.contains("App.B"), "got: {msg}");
+    }
+
+    #[test]
+    fn scan_chunk_size_bounds_thread_count_and_covers_every_item() {
+        // Empty frontier: any positive chunk size is fine, never zero
+        // (a zero chunk size would make `slice::chunks` panic).
+        assert_eq!(scan_chunk_size(0, 8), 1);
+        // Fewer files than cores: one file per thread, never more threads
+        // than files.
+        assert_eq!(scan_chunk_size(3, 8), 1);
+        // More files than cores: chunk so at most `parallelism` threads run,
+        // covering every item (ceiling division).
+        assert_eq!(scan_chunk_size(11_000, 8), 1375);
+        let chunks = (11_000usize).div_ceil(scan_chunk_size(11_000, 8));
+        assert!(chunks <= 8, "expected <= 8 chunks, got {chunks}");
+        // Degenerate parallelism (0 reported, or 1 core) never panics and
+        // still produces a usable chunk size.
+        assert_eq!(scan_chunk_size(10, 0), 10);
+        assert_eq!(scan_chunk_size(10, 1), 10);
+    }
+
+    #[test]
+    fn build_graph_at_thousand_module_scale_is_chunked_and_still_correct() {
+        // Not Mathlib-scale (that's the differential tier's job), but large
+        // enough to exercise multiple scan chunks under
+        // `available_parallelism` and confirm chunking didn't change
+        // correctness: every generated module is present, sorted, deduped,
+        // with the right toolchain-external edge dropped.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let n = 1500;
+        for i in 0..n {
+            write(
+                tmp.path(),
+                &format!("app/App/M{i}.lean"),
+                "import Init.Core\n",
+            );
+        }
+        let roots: Vec<String> = (0..n).map(|i| format!("App.M{i}")).collect();
+        write(
+            tmp.path(),
+            "app/App.lean",
+            &roots
+                .iter()
+                .map(|r| format!("import {r}\n"))
+                .collect::<String>(),
+        );
+        let r = ModuleResolver::new(vec![LibUnit {
+            package: "app".into(),
+            src_dir: tmp.path().join("app"),
+            root: mn("App"),
+        }]);
+        let g = build_graph(&[mn("App")], &r, &fake_toolchain()).unwrap();
+        assert_eq!(g.modules.len(), n + 1); // App + App.M0..App.M{n-1}
+        let mut names: Vec<String> = g.modules.iter().map(|m| m.name.to_string()).collect();
+        let sorted = {
+            let mut s = names.clone();
+            s.sort();
+            s
+        };
+        assert_eq!(
+            names, sorted,
+            "modules must stay name-sorted after chunking"
+        );
+        names.dedup();
+        assert_eq!(names.len(), g.modules.len(), "no duplicate modules");
+        let leaf = &g.modules[g.id_of(&mn("App.M0")).unwrap().0 as usize];
+        assert!(leaf.imports.contains(&mn("Init.Core")));
+        assert!(leaf.deps.is_empty(), "toolchain import is not a dep edge");
     }
 
     #[test]
