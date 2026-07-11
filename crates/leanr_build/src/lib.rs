@@ -5,5 +5,6 @@ pub mod config;
 mod error;
 pub mod manifest;
 pub mod modules;
+pub mod scanner;
 
 pub use error::BuildError;
