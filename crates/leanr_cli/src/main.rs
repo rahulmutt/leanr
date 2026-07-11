@@ -419,12 +419,21 @@ struct JsonPlan<'a> {
 
 /// Workspace-relative path with forward slashes (JSON byte-identity
 /// across checkouts; see the plan's Task 9 interface note).
-fn rel_display(path: &std::path::Path, root: &std::path::Path) -> String {
-    let rel = path.strip_prefix(root).unwrap_or(path);
-    rel.components()
+///
+/// Errs with the offending absolute path when `path` doesn't resolve
+/// under `root` — this happens when a lake-manifest.json path-dependency's
+/// `dir` is itself absolute, which *replaces* (rather than joins) the
+/// workspace root when composed with it. Silently falling back to the raw
+/// path would leak a machine-specific absolute path into the plan, which
+/// must be byte-identical across checkouts; callers turn this into a loud
+/// CLI error naming the package/module and the fix instead.
+fn rel_display(path: &std::path::Path, root: &std::path::Path) -> Result<String, PathBuf> {
+    let rel = path.strip_prefix(root).map_err(|_| path.to_path_buf())?;
+    Ok(rel
+        .components()
         .map(|c| c.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
-        .join("/")
+        .join("/"))
 }
 
 fn build(
@@ -473,7 +482,7 @@ fn build(
             targets
         };
         if json {
-            print_json_plan(&ws, &effective_targets);
+            print_json_plan(&ws, &effective_targets)?;
         } else {
             print_text_plan(&ws);
         }
@@ -509,24 +518,40 @@ fn lean_print_libdir() -> Result<PathBuf, String> {
     ))
 }
 
-fn print_json_plan(ws: &leanr_build::Workspace, targets: &[String]) {
-    let packages = ws
-        .deps
-        .iter()
-        .map(|d| JsonPackage {
+fn print_json_plan(ws: &leanr_build::Workspace, targets: &[String]) -> Result<(), String> {
+    let mut packages = Vec::with_capacity(ws.deps.len());
+    for d in &ws.deps {
+        let dir = rel_display(&d.dir, &ws.root_dir).map_err(|abs| {
+            format!(
+                "dependency `{}` resolves to an absolute path {} outside the workspace; \
+                 use a workspace-relative `dir` in lake-manifest.json",
+                d.name,
+                abs.display()
+            )
+        })?;
+        packages.push(JsonPackage {
             name: &d.name,
             rev: d.rev.as_deref(),
-            dir: rel_display(&d.dir, &ws.root_dir),
-        })
-        .collect();
+            dir,
+        });
+    }
     let mut modules = Vec::new();
     for (wave, ids) in ws.waves.iter().enumerate() {
         for id in ids {
             let m = &ws.graph.modules[id.0 as usize];
+            let file = rel_display(&m.file, &ws.root_dir).map_err(|abs| {
+                format!(
+                    "module `{}` (package `{}`) resolves to an absolute path {} outside the \
+                     workspace; use a workspace-relative `dir` in lake-manifest.json",
+                    m.name,
+                    m.package,
+                    abs.display()
+                )
+            })?;
             modules.push(JsonModule {
                 name: m.name.to_string(),
                 package: m.package.clone(),
-                file: rel_display(&m.file, &ws.root_dir),
+                file,
                 wave,
             });
         }
@@ -541,6 +566,7 @@ fn print_json_plan(ws: &leanr_build::Workspace, targets: &[String]) {
         "{}",
         serde_json::to_string_pretty(&plan).expect("plan serializes")
     );
+    Ok(())
 }
 
 fn print_text_plan(ws: &leanr_build::Workspace) {
@@ -555,5 +581,40 @@ fn print_text_plan(ws: &leanr_build::Workspace) {
         for id in w {
             println!("    {}", ws.graph.modules[id.0 as usize].name);
         }
+    }
+}
+
+#[cfg(test)]
+mod rel_display_tests {
+    use super::rel_display;
+    use std::path::Path;
+
+    #[test]
+    fn ordinary_nested_path_is_relative() {
+        let root = Path::new("/ws");
+        let path = Path::new("/ws/App/Sub.lean");
+        assert_eq!(rel_display(path, root).unwrap(), "App/Sub.lean");
+    }
+
+    #[test]
+    fn dotdot_style_relative_dep_dir_keeps_working() {
+        // A lake-manifest path dependency with `"dir": "../local"`, joined
+        // onto the workspace root, still strips cleanly to a relative
+        // display form (components-wise, without resolving `..`).
+        let root = Path::new("/ws/app");
+        let path = root.join("../local");
+        assert_eq!(rel_display(&path, root).unwrap(), "../local");
+    }
+
+    #[test]
+    fn absolute_dir_outside_workspace_errs_loudly() {
+        // Simulates a lake-manifest path dependency whose `dir` is itself
+        // absolute: `root_dir.join(dir)` replaces the root entirely, so
+        // strip_prefix must fail rather than silently falling back to the
+        // raw (machine-specific) absolute path.
+        let root = Path::new("/ws/app");
+        let outside = Path::new("/somewhere/else");
+        let err = rel_display(outside, root).unwrap_err();
+        assert_eq!(err, outside);
     }
 }

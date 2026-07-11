@@ -90,3 +90,86 @@ fn resolution_error_is_reported_not_panicked() {
         .failure()
         .stderr(predicate::str::contains("lake update"));
 }
+
+#[test]
+fn json_without_dry_run_is_a_clap_error() {
+    let tmp = setup();
+    Command::cargo_bin("leanr")
+        .unwrap()
+        .current_dir(tmp.path())
+        .args(["build", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--dry-run"));
+}
+
+/// A real path dependency: a sibling `dep/` directory (its own
+/// lakefile.toml + one module), wired via `[[require]]` in the root
+/// lakefile and a `"type": "path"` entry in lake-manifest.json. Exercises
+/// the frozen `packages[]` JSON schema's actual field content — every
+/// other CLI test workspace has `"packages": []`.
+fn setup_with_path_dependency() -> tempfile::TempDir {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let write = |rel: &str, text: &str| {
+        let p = tmp.path().join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    };
+    write(
+        "app/lakefile.toml",
+        "name = \"app\"\ndefaultTargets = [\"App\"]\n\n[[require]]\nname = \"dep\"\n\n\
+         [[lean_lib]]\nname = \"App\"\n",
+    );
+    write("app/App.lean", "import Dep\n");
+    write(
+        "dep/lakefile.toml",
+        "name = \"dep\"\ndefaultTargets = [\"Dep\"]\n\n[[lean_lib]]\nname = \"Dep\"\n",
+    );
+    write("dep/Dep.lean", "");
+    write(
+        "app/lake-manifest.json",
+        r#"{"version": "1.2.0", "packagesDir": ".lake/packages",
+            "packages": [{"type": "path", "name": "dep", "dir": "../dep",
+                          "manifestFile": "lake-manifest.json", "inherited": false,
+                          "configFile": "lakefile.toml"}]}"#,
+    );
+    std::fs::create_dir_all(tmp.path().join("app/fake-toolchain")).unwrap();
+    tmp
+}
+
+#[test]
+fn json_output_carries_path_dependency_package_and_module() {
+    let tmp = setup_with_path_dependency();
+    let app = tmp.path().join("app");
+    let out = Command::cargo_bin("leanr")
+        .unwrap()
+        .current_dir(&app)
+        .args(["build", "--dry-run", "--json"])
+        .args([
+            "--toolchain-dir",
+            app.join("fake-toolchain").to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+
+    let packages = v["packages"].as_array().unwrap();
+    assert_eq!(packages.len(), 1);
+    assert_eq!(packages[0]["name"], "dep");
+    // Path-source packages carry no manifest rev.
+    assert_eq!(packages[0]["rev"], serde_json::Value::Null);
+    // Workspace-relative (from `app/`), forward slashes, `..`-form kept
+    // as-is (not resolved) rather than leaked as an absolute path.
+    assert_eq!(packages[0]["dir"], "../dep");
+
+    let modules = v["modules"].as_array().unwrap();
+    let dep_module = modules
+        .iter()
+        .find(|m| m["name"] == "Dep")
+        .expect("Dep module present");
+    assert_eq!(dep_module["package"], "dep");
+    assert_eq!(dep_module["file"], "../dep/Dep.lean");
+}
