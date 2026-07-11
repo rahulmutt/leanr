@@ -422,7 +422,7 @@ fn run_block(
             error,
         })?;
 
-    resolve_and_compare(store, table, scratch, principal, &survivors)?;
+    let resolved_names = resolve_and_compare(store, table, scratch, principal, &survivors)?;
 
     for &m in members {
         table.admit(m);
@@ -430,8 +430,14 @@ fn run_block(
     for &c in ctors {
         table.admit(c);
     }
-    for surv in &survivors {
-        table.admit(surv.name());
+    // Admit by the resolved (base-canonical) name `resolve_and_compare` just
+    // keyed its gated-table lookup/blame on — not the raw, possibly
+    // scratch-region `surv.name()`. Provably the same name in the success
+    // path (see `resolve_and_compare`'s doc comment), but this keeps the
+    // admit site tied to the same name the compare used rather than
+    // re-deriving the invariant here.
+    for &n in &resolved_names {
+        table.admit(n);
     }
     Ok(())
 }
@@ -457,13 +463,15 @@ fn run_quot(
             error,
         })?;
 
-    resolve_and_compare(store, table, scratch, principal, &survivors)?;
+    let resolved_names = resolve_and_compare(store, table, scratch, principal, &survivors)?;
 
     for &n in names {
         table.admit(n);
     }
-    for surv in &survivors {
-        table.admit(surv.name());
+    // Admit by the resolved (base-canonical) name — see the matching note
+    // in `run_block` and `resolve_and_compare`'s doc comment.
+    for &n in &resolved_names {
+        table.admit(n);
     }
     // Publish AFTER the admits: a task observing this `true` (via its view's
     // Acquire load, ordered after this thread's ready-queue unlock) is
@@ -481,6 +489,11 @@ fn run_quot(
 /// `constant_info_eq` verbatim (id equality = structural equality in one
 /// store). No lock, no mutation of the shared store.
 ///
+/// Returns the resolved (base-canonical) name of every survivor, in input
+/// order, so callers can admit by the SAME name this function used to key
+/// the gated-table lookup/blame — see the "region symmetry" note on the
+/// `Some` arm below.
+///
 /// **Region discipline (untrusted input).** A regenerated survivor's name
 /// may be SCRATCH-region — e.g. a recursor whose name is absent from the
 /// frozen store gets a fresh scratch `NameId`. Such an id is meaningless to
@@ -492,13 +505,28 @@ fn run_quot(
 /// a valid table/owner key), never a possibly-scratch survivor name. The
 /// `Some` arm's `resolved.name()` IS base-region (it resolved into the
 /// frozen store), so it renders/attributes fine.
+///
+/// **Safe-reject asymmetry.** On an adversarial *partial* quotient/recursor
+/// closure — e.g. the module set contains `Quot` but omits `Quot.ind` while
+/// the string `"Quot.ind"` happens to be interned elsewhere in the frozen
+/// store — a regenerated `Quot.ind` survivor resolves (`Some(resolved)`,
+/// since its name IS present in `store`) but has no entry in the gated
+/// `table` (it was never part of the decoded module), so `get_decoded`
+/// misses and this path REJECTS with `MissingConstant`, where sequential
+/// `replay` — which checks the whole quotient/recursor group as one unit
+/// with no such cross-table lookup — would admit the full regenerated
+/// group. This is a deliberate safe over-strict reject (never a wrong
+/// accept), and unreachable for well-formed exports: quotient/recursor
+/// groups are always exported whole, so `table` either has every member of
+/// the group or none of them.
 fn resolve_and_compare(
     store: &Store,
     table: &CheckedConstants,
     scratch: &Store,
     principal: NameId,
     survivors: &[ConstantInfo],
-) -> Result<(), CheckFailure> {
+) -> Result<Vec<NameId>, CheckFailure> {
+    let mut resolved_names = Vec::with_capacity(survivors.len());
     for surv in survivors {
         match resolve_constant_info(store, scratch, surv).map_err(|error| CheckFailure {
             decl: principal,
@@ -521,6 +549,17 @@ fn resolve_and_compare(
                         ),
                     });
                 }
+                // Region symmetry (defensive; see module doc "region
+                // discipline" above): `resolved.name()` is what we just
+                // keyed the gated-table lookup/blame on, so callers admit
+                // by THIS name, never the raw (possibly scratch-region)
+                // `surv.name()`. In the success path the two are provably
+                // the same id — a scratch `surv.name()` absent from `store`
+                // would have failed the `.name` leaf of `resolve_constant_info`
+                // and returned `None` below, never reaching here — but
+                // returning `resolved.name()` keeps that invariant explicit
+                // in the type rather than relying on callers re-deriving it.
+                resolved_names.push(resolved.name());
             }
             None => {
                 // Survivor absent from the frozen store ⇒ differs from its
@@ -536,7 +575,7 @@ fn resolve_and_compare(
             }
         }
     }
-    Ok(())
+    Ok(resolved_names)
 }
 
 /// A task's contribution to `CheckStats.checked`, in the same units the

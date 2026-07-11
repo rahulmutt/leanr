@@ -34,7 +34,7 @@
 **`leanr_check` (new crate):**
 - Create `crates/leanr_check/Cargo.toml`, `crates/leanr_check/src/lib.rs` — public entry `check_parallel`.
 - Create `crates/leanr_check/src/graph.rs` — `DepGraph`, `Task`, `TaskKind`, block grouping (single-threaded, deterministic).
-- Create `crates/leanr_check/src/schedule.rs` — worker pool, ready queue, cancellation, promotion mutex, stats.
+- Create `crates/leanr_check/src/schedule.rs` — worker pool, ready queue, cancellation, promotion mutex, stats. [**SUPERSEDED 2026-07-10: promotion mutex replaced by read-only resolve-or-reject — see the design spec's Amendment block and RESUME NOTES**]
 - Create `crates/leanr_check/tests/graph_tests.rs`, `crates/leanr_check/tests/schedule_tests.rs`.
 
 **`leanr_cli` (modified):**
@@ -799,6 +799,8 @@ git commit -m "feat(check): leanr_check crate + dependency DAG with inductive-bl
 
 ## Task 5: Worker-pool scheduler + serialized promote-and-compare
 
+> **[SUPERSEDED 2026-07-10: promotion mutex replaced by read-only resolve-or-reject — see the design spec's Amendment block and RESUME NOTES]**
+
 **Files:**
 - Create: `crates/leanr_check/src/schedule.rs`
 - Modify: `crates/leanr_check/src/lib.rs` (add `mod schedule;` + public `check_parallel`)
@@ -812,6 +814,8 @@ git commit -m "feat(check): leanr_check crate + dependency DAG with inductive-bl
   - `fn check_parallel(store: Arc<Store>, table: Arc<CheckedConstants>, graph: DepGraph, jobs: usize, progress: impl Fn(usize) + Send + Sync) -> Result<CheckStats, CheckFailure>`
 
 - [ ] **Step 1: Add a kernel entry point for promotion + a parallel-admit helper**
+
+> **[SUPERSEDED 2026-07-10: promotion mutex replaced by read-only resolve-or-reject — see the design spec's Amendment block and RESUME NOTES]**
 
 The parallel driver needs to, under a mutex: promote an inductive/quot block's scratch survivors into the shared persistent store and compare each against its decoded twin. Add to `env.rs` a small free function (keeps promotion logic in the TCB):
 
@@ -880,6 +884,8 @@ Run: `cargo test -p leanr_check --test schedule_tests`
 Expected: FAIL to compile.
 
 - [ ] **Step 4: Implement `schedule.rs`**
+
+> **[SUPERSEDED 2026-07-10: promotion mutex replaced by read-only resolve-or-reject — see the design spec's Amendment block and RESUME NOTES]**
 
 Create `crates/leanr_check/src/schedule.rs`:
 
@@ -1094,6 +1100,8 @@ fn run_task(shared: &Shared, id: TaskId) -> Result<(), CheckFailure> {
 ```
 
 Then implement `run_block` and `run_quot` (both take the promotion mutex to canonicalize survivors and compare):
+
+> **[SUPERSEDED 2026-07-10: promotion mutex replaced by read-only resolve-or-reject — see the design spec's Amendment block and RESUME NOTES]**
 
 ```rust
 fn run_block(
@@ -1349,6 +1357,8 @@ Expected: three identical stats lines; exit 0. Record the line in the spec's Acc
 Task 6 made the parallel path the default (`--sequential` opt-in). Verify `check:stdlib` (which runs `check --all` with no flag) now uses the parallel driver.
 
 - [ ] **Step 2: Update ARCHITECTURE.md**
+
+> **[SUPERSEDED 2026-07-10: promotion mutex replaced by read-only resolve-or-reject — see the design spec's Amendment block and RESUME NOTES]**
 
 Add `leanr_check` to the crate map (between `leanr_olean` and `leanr_cli`): one paragraph — "the parallel kernel-check driver: dependency DAG + worker pool over a frozen `CheckedConstants`; def/thm checks lock-free, inductive/quot serialized behind a promotion mutex; verdict-equivalent to sequential `replay`."
 
