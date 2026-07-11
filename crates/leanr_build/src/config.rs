@@ -101,6 +101,12 @@ pub struct LeanLibConfig {
     pub lean_options: LeanOptions,
     #[serde(default)]
     pub default_facets: Option<toml::Value>,
+    // Parsed-but-unused (observed in the Mathlib closure — ProofWidgets'
+    // `lean_lib` targets declare extra facet dependencies, e.g. a JS build
+    // step, via `needs`; irrelevant to leanr's module resolution but must
+    // not warn as an unknown key).
+    #[serde(default)]
+    pub needs: Option<Vec<String>>,
     #[serde(flatten)]
     pub unknown: BTreeMap<String, toml::Value>,
 }
@@ -181,6 +187,15 @@ pub struct PackageConfig {
     pub license_files: Option<Vec<String>>,
     #[serde(default)]
     pub test_runner: Option<String>,
+    // Parsed-but-unused (observed in the Mathlib closure: ProofWidgets
+    // declares its bundled JS/TS sources via these array-of-table facet
+    // declarations — snake_case in Lake's own TOML schema, unlike its other
+    // camelCase keys, hence the explicit `rename`s below). Irrelevant to
+    // leanr's module resolution.
+    #[serde(default, rename = "input_file")]
+    pub input_file: Option<Vec<toml::Value>>,
+    #[serde(default, rename = "input_dir")]
+    pub input_dir: Option<Vec<toml::Value>>,
     #[serde(default, rename = "require")]
     pub requires: Vec<Require>,
     #[serde(default, rename = "lean_lib")]

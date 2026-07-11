@@ -114,3 +114,60 @@ fn toml_syntax_error_names_the_file() {
     let err = parse_lakefile_toml("name = ", Path::new("pkg/lakefile.toml")).unwrap_err();
     assert!(err.to_string().contains("pkg/lakefile.toml"));
 }
+
+/// Regression (differential tier, `closure_resolves_without_warnings`):
+/// ProofWidgets' bridged lakefile.lean carries `needs` on its `lean_lib`
+/// targets and top-level `input_file`/`input_dir` facet declarations
+/// (Lake's own snake_case keys, unlike its otherwise-camelCase schema).
+/// None of these affect module resolution; they must parse as
+/// parsed-but-unused, not warn as unknown keys.
+#[test]
+fn proofwidgets_needs_and_input_facets_do_not_warn() {
+    let text = r#"
+name = "proofwidgets"
+testDriver = "test"
+defaultTargets = ["ProofWidgets"]
+
+[[lean_lib]]
+name = "ProofWidgets"
+needs = ["widgetJsAll"]
+
+[[lean_lib]]
+name = "ProofWidgets.Demos"
+globs = ["ProofWidgets.Demos.+"]
+needs = ["widgetJsAll"]
+
+[[lean_lib]]
+name = "test"
+globs = ["test.+"]
+
+[[input_file]]
+name = "widgetPackageJson"
+path = "widget/package.json"
+text = true
+
+[[input_dir]]
+name = "widgetJsSrcs"
+path = "widget/src"
+text = true
+filter = {extension = ["ts", "tsx", "js", "jsx"]}
+"#;
+    let parsed = parse_lakefile_toml(text, Path::new("lakefile.toml")).unwrap();
+    assert!(
+        parsed.warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        parsed.warnings
+    );
+    let lib = parsed
+        .config
+        .lean_libs
+        .iter()
+        .find(|l| l.name == "ProofWidgets")
+        .unwrap();
+    assert_eq!(
+        lib.needs.as_deref(),
+        Some(["widgetJsAll".to_string()].as_slice())
+    );
+    assert!(parsed.config.input_file.is_some());
+    assert!(parsed.config.input_dir.is_some());
+}
