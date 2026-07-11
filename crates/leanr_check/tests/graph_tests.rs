@@ -119,3 +119,57 @@ fn high_degree_deps_are_deduplicated() {
         .collect();
     assert_eq!(*deps, expected, "deps must be in first-occurrence order");
 }
+
+fn count(deps: &[usize], target: usize) -> usize {
+    deps.iter().filter(|&&d| d == target).count()
+}
+
+#[test]
+fn multi_name_task_dedups_shared_dep_across_names() {
+    // An InductiveBlock task (Foo + Foo.mk) and a Quot task (QuotA +
+    // QuotB) each reach the same external `Shared` axiom through MORE
+    // THAN ONE of their names. Global (owner, dep) dedup must push the
+    // shared edge exactly once per task; a per-name `seen.clear()` would
+    // push it twice (once per contributing name).
+    let (store, table, n) = fixture::block_and_quot_share_dep();
+    let g = build_graph(&store, &table).unwrap();
+
+    let tshared = g.name_to_task[&n.shared];
+    let teq = g.name_to_task[&n.qeq];
+
+    // Foo and Foo.mk share ONE block task.
+    let tblock = g.name_to_task[&n.foo];
+    assert_eq!(g.name_to_task[&n.foo_mk], tblock);
+    assert_eq!(
+        count(&g.tasks[tblock].deps, tshared),
+        1,
+        "block task must depend on Shared exactly once (not once per member/ctor)"
+    );
+
+    // QuotA and QuotB share ONE quot task.
+    let tquot = g.name_to_task[&n.quot_a];
+    assert_eq!(g.name_to_task[&n.quot_b], tquot);
+    assert_eq!(
+        count(&g.tasks[tquot].deps, tshared),
+        1,
+        "quot task must depend on Shared exactly once (not once per quotient constant)"
+    );
+    // The explicit Eq edge must also appear exactly once.
+    assert_eq!(
+        count(&g.tasks[tquot].deps, teq),
+        1,
+        "quot task must depend on Eq exactly once"
+    );
+
+    // No task has any duplicated dep at all.
+    for task in &g.tasks {
+        let unique: std::collections::HashSet<_> = task.deps.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            task.deps.len(),
+            "task {} has duplicate deps: {:?}",
+            task.id,
+            task.deps
+        );
+    }
+}

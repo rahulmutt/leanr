@@ -379,3 +379,128 @@ pub fn inductive_foo_with_rec() -> (Store, CheckedConstants, RecNames) {
         },
     )
 }
+
+/// Names produced by [`block_and_quot_share_dep`].
+pub struct SharedDepNames {
+    pub shared: NameId,
+    pub foo: NameId,
+    pub foo_mk: NameId,
+    pub qeq: NameId,
+    pub quot_a: NameId,
+    pub quot_b: NameId,
+}
+
+/// Two MULTI-NAME tasks that each reach a shared external dep through
+/// more than one of their names — the cross-name dedup path a per-name
+/// `seen.clear()` breaks:
+///
+/// - `axiom Shared : Sort 0`.
+/// - `inductive Foo` (type = `App(Type, Const Shared)`) with ctor
+///   `Foo.mk` (type = `App(Const Foo, Const Shared)`). Both `Foo` and
+///   `Foo.mk` map to the ONE InductiveBlock task, and BOTH reference
+///   `Shared`, so the block task must end up with the `Shared` edge
+///   exactly once.
+/// - `axiom Eq : Sort 0` plus two quotient constants `QuotA`/`QuotB`,
+///   whose types BOTH reference `Shared` (`App(Sort0, Const Shared)`).
+///   Both map to the ONE Quot task, which must likewise get the `Shared`
+///   edge exactly once (and its explicit `Eq` edge exactly once).
+///
+/// The recursor case is covered by [`inductive_foo_with_rec`]; a member
+/// and its ctor sharing a dep is enough to exercise the inductive-block
+/// cross-name path here.
+pub fn block_and_quot_share_dep() -> (Store, CheckedConstants, SharedDepNames) {
+    let mut st = Store::persistent();
+    let shared = st.intern_name(None, &nm("Shared")).unwrap().unwrap();
+    let foo_id = st.intern_name(None, &nm("Foo")).unwrap().unwrap();
+    let foo_mk = st.intern_name(None, &nm2("Foo", "mk")).unwrap().unwrap();
+    let qeq = st.intern_name(None, &nm("Eq")).unwrap().unwrap();
+    let quot_a = st.intern_name(None, &nm("QuotA")).unwrap().unwrap();
+    let quot_b = st.intern_name(None, &nm("QuotB")).unwrap().unwrap();
+
+    let zero = st.level_zero(None).unwrap();
+    let one = st.level_succ(None, zero).unwrap();
+    let type1 = st.expr_sort(None, one).unwrap();
+    let sort0 = st.expr_sort(None, zero).unwrap();
+    let no_levels = st.intern_level_list(None, &[]).unwrap();
+    let shared_ref = st.expr_const(None, Some(shared), no_levels).unwrap();
+    let foo_ref = st.expr_const(None, Some(foo_id), no_levels).unwrap();
+
+    // Types that reference `Shared`.
+    let foo_ty = st.expr_app(None, type1, shared_ref).unwrap(); // App(Type, Shared)
+    let mk_ty = st.expr_app(None, foo_ref, shared_ref).unwrap(); // App(Foo, Shared)
+    let quot_ty = st.expr_app(None, sort0, shared_ref).unwrap(); // App(Sort0, Shared)
+
+    let axiom_shared = ConstantInfo::Axiom(AxiomVal {
+        val: ConstantVal {
+            name: shared,
+            level_params: vec![],
+            ty: sort0,
+        },
+        is_unsafe: false,
+    });
+    let ind = ConstantInfo::Induct(InductiveVal {
+        val: ConstantVal {
+            name: foo_id,
+            level_params: vec![],
+            ty: foo_ty,
+        },
+        num_params: Nat::from(0u64),
+        num_indices: Nat::from(0u64),
+        all: vec![foo_id],
+        ctors: vec![foo_mk],
+        num_nested: Nat::from(0u64),
+        is_rec: false,
+        is_unsafe: false,
+        is_reflexive: false,
+    });
+    let ctor = ConstantInfo::Ctor(ConstructorVal {
+        val: ConstantVal {
+            name: foo_mk,
+            level_params: vec![],
+            ty: mk_ty,
+        },
+        induct: foo_id,
+        cidx: Nat::from(0u64),
+        num_params: Nat::from(0u64),
+        num_fields: Nat::from(0u64),
+        is_unsafe: false,
+    });
+    let axiom_eq = ConstantInfo::Axiom(AxiomVal {
+        val: ConstantVal {
+            name: qeq,
+            level_params: vec![],
+            ty: sort0,
+        },
+        is_unsafe: false,
+    });
+    let mk_quot = |name: NameId| {
+        ConstantInfo::Quot(QuotVal {
+            val: ConstantVal {
+                name,
+                level_params: vec![],
+                ty: quot_ty,
+            },
+            kind: QuotKind::Type,
+        })
+    };
+
+    let mut map = HashMap::new();
+    map.insert(shared, axiom_shared);
+    map.insert(foo_id, ind);
+    map.insert(foo_mk, ctor);
+    map.insert(qeq, axiom_eq);
+    map.insert(quot_a, mk_quot(quot_a));
+    map.insert(quot_b, mk_quot(quot_b));
+    (
+        st,
+        CheckedConstants::new(map),
+        SharedDepNames {
+            shared,
+            foo: foo_id,
+            foo_mk,
+            qeq,
+            quot_a,
+            quot_b,
+        },
+    )
+}

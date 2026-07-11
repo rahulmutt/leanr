@@ -183,26 +183,29 @@ pub fn build_graph(store: &Store, table: &CheckedConstants) -> Result<DepGraph, 
     //    none is threaded through this file.
     //
     //    `used_constants` returns a RAW, duplicate-heavy list (a constant
-    //    referenced N times in a term appears N times), so dedup with a
-    //    `HashSet<TaskId>` (O(1) membership) instead of `Vec::contains`
-    //    (O(current deps)) — the latter made this pass
-    //    O(term_size × unique_deps) per task, quadratic on Mathlib's
-    //    large proof terms. `seen.insert` returns `true` only on first
-    //    sight, so we still push each distinct dep exactly once in
-    //    first-occurrence order (identical `deps` to the old `!contains`
-    //    guard). One `HashSet` is reused across names, cleared per name
-    //    to avoid reallocation.
+    //    referenced N times in a term appears N times), AND multiple names
+    //    map to the SAME owner task (every member/ctor/recursor of an
+    //    inductive block → the one block task; every quotient constant →
+    //    the one quot task). So dedup GLOBALLY by the `(owner, dep_task)`
+    //    edge in one `HashSet` spanning the whole pass — NOT a per-name
+    //    set — otherwise a shared dependency reached through a second name
+    //    of the same block/quot task would be pushed twice. `insert`
+    //    returns `true` only the first time an edge is seen across all
+    //    names, so each distinct edge is pushed exactly once in
+    //    first-occurrence order: byte-identical `deps` to the old
+    //    `!tasks[owner].deps.contains(&dep_task)` guard (which deduped
+    //    against the task's full accumulated deps), but O(1) per dep
+    //    instead of O(current deps).
     let t = Instant::now();
-    let mut seen: HashSet<TaskId> = HashSet::new();
+    let mut seen_edges: HashSet<(TaskId, TaskId)> = HashSet::new();
     for &n in &names {
         let ci = table.get_decoded(n).expect("name from table");
         let owner = name_to_task[&n];
-        seen.clear();
         for dep in used_constants(store, None, ci) {
             let Some(&dep_task) = name_to_task.get(&dep) else {
                 return Err(KernelError::MissingConstant(store.to_name(None, Some(dep))));
             };
-            if dep_task != owner && seen.insert(dep_task) {
+            if dep_task != owner && seen_edges.insert((owner, dep_task)) {
                 tasks[owner].deps.push(dep_task);
             }
         }
@@ -213,9 +216,9 @@ pub fn build_graph(store: &Store, table: &CheckedConstants) -> Result<DepGraph, 
     //     generic `used_constants` walk only produces this edge
     //     incidentally (because `Quot.lift`'s type embeds a `Const Eq`
     //     node); make it a guaranteed dependency and fail safely with
-    //     `MissingConstant` if `Eq` is absent from the table. Reuse the
-    //     `seen` set (seeded from the task's existing deps) so the
-    //     membership check stays O(1), matching pass 2.
+    //     `MissingConstant` if `Eq` is absent from the table. Dedup
+    //     against the SAME `seen_edges` set so an `(quot_task, eq_task)`
+    //     edge already produced by pass 2 is not pushed again.
     for (id, task) in tasks.iter_mut().enumerate() {
         let TaskKind::Quot { eq, .. } = task.kind else {
             continue;
@@ -224,9 +227,7 @@ pub fn build_graph(store: &Store, table: &CheckedConstants) -> Result<DepGraph, 
         let eq_task = *name_to_task
             .get(&eq)
             .ok_or_else(|| KernelError::MissingConstant(store.to_name(None, Some(eq))))?;
-        seen.clear();
-        seen.extend(task.deps.iter().copied());
-        if eq_task != id && seen.insert(eq_task) {
+        if eq_task != id && seen_edges.insert((id, eq_task)) {
             task.deps.push(eq_task);
         }
     }
