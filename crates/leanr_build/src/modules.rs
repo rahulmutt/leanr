@@ -1,9 +1,11 @@
 //! Module names, globs, and glob expansion (spec §Architecture, component 5).
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+
+use crate::error::BuildError;
 
 /// A dot-separated Lean module name. Guillemet components (`«a.b»`) are
 /// stored unquoted; a component never contains `«»` and is never empty.
@@ -110,6 +112,61 @@ impl<'de> Deserialize<'de> for Glob {
     }
 }
 
+/// Expand a glob against a library source directory (spec component 5).
+/// `One` is purely nominal (existence is checked later, at resolve time);
+/// the directory walks are iterative (explicit stack — untrusted-deep
+/// trees must not overflow) and results are sorted for determinism.
+pub fn expand_glob(glob: &Glob, src_dir: &Path) -> Result<Vec<ModuleName>, BuildError> {
+    match glob {
+        Glob::One(m) => Ok(vec![m.clone()]),
+        Glob::Submodules(m) => walk_submodules(m, src_dir),
+        Glob::AndSubmodules(m) => {
+            let mut out = vec![m.clone()];
+            out.extend(walk_submodules(m, src_dir)?);
+            out.sort();
+            out.dedup();
+            Ok(out)
+        }
+    }
+}
+
+fn walk_submodules(root: &ModuleName, src_dir: &Path) -> Result<Vec<ModuleName>, BuildError> {
+    let base: PathBuf = src_dir.join(root.components().iter().collect::<PathBuf>());
+    let mut out = Vec::new();
+    if !base.is_dir() {
+        return Ok(out); // no submodule directory — an empty glob, like lake
+    }
+    let mut stack = vec![(base.clone(), root.clone())];
+    while let Some((dir, prefix)) = stack.pop() {
+        let entries = std::fs::read_dir(&dir).map_err(|e| BuildError::Io {
+            path: dir.clone(),
+            err: e.to_string(),
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|e| BuildError::Io {
+                path: dir.clone(),
+                err: e.to_string(),
+            })?;
+            let path = entry.path();
+            let Some(stem) = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+            else {
+                continue; // non-UTF-8 file name: not a Lean module
+            };
+            if path.is_dir() {
+                stack.push((path, prefix.child(&stem)));
+            } else if path.extension().and_then(|e| e.to_str()) == Some("lean") {
+                out.push(prefix.child(&stem));
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,5 +222,49 @@ mod tests {
             Glob::One(ModuleName::parse("Cache").unwrap())
         );
         assert!(Glob::parse("").is_err());
+    }
+
+    fn touch(dir: &std::path::Path, rel: &str) {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, "").unwrap();
+    }
+
+    #[test]
+    fn expand_one_yields_the_module_without_touching_disk() {
+        let m = ModuleName::parse("Mathlib").unwrap();
+        let got = expand_glob(&Glob::One(m.clone()), std::path::Path::new("/nonexistent")).unwrap();
+        assert_eq!(got, [m]);
+    }
+
+    #[test]
+    fn expand_submodules_walks_the_directory() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        touch(tmp.path(), "Cache/IO.lean");
+        touch(tmp.path(), "Cache/Requests/Sub.lean");
+        touch(tmp.path(), "Cache/README.md"); // ignored: not .lean
+        touch(tmp.path(), "Cache.lean"); // ignored: Submodules is strict
+        let g = Glob::Submodules(ModuleName::parse("Cache").unwrap());
+        let got = expand_glob(&g, tmp.path()).unwrap();
+        let names: Vec<String> = got.iter().map(|m| m.to_string()).collect();
+        assert_eq!(names, ["Cache.IO", "Cache.Requests.Sub"]); // sorted
+    }
+
+    #[test]
+    fn expand_and_submodules_includes_the_root_module() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        touch(tmp.path(), "Cache.lean");
+        touch(tmp.path(), "Cache/IO.lean");
+        let g = Glob::AndSubmodules(ModuleName::parse("Cache").unwrap());
+        let got = expand_glob(&g, tmp.path()).unwrap();
+        let names: Vec<String> = got.iter().map(|m| m.to_string()).collect();
+        assert_eq!(names, ["Cache", "Cache.IO"]);
+    }
+
+    #[test]
+    fn expand_submodules_of_missing_dir_is_empty_not_an_error() {
+        let g = Glob::Submodules(ModuleName::parse("Nope").unwrap());
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert_eq!(expand_glob(&g, tmp.path()).unwrap(), []);
     }
 }
