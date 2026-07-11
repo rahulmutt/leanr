@@ -170,8 +170,12 @@ Five components, each independently testable:
 
 New dependencies (justified per AGENTS.md): `toml` (the config
 format), `serde`/`serde_json` (manifest), `blake3` (bridge cache key,
-and the hash M2c standardizes on). Git and lake are subprocesses, not
-linked deps.
+and the hash M2c standardizes on), `thiserror` (error type derives),
+unix-only `libc` (`std::process` has no API to SIGKILL a process
+group; needed so a timed-out `lake translate-config` and any
+grandchildren holding the stderr pipe are reliably killed;
+`cfg(not(unix))` falls back to `Child::kill`). Git and lake are
+subprocesses, not linked deps.
 
 ## Data flow
 

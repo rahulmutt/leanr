@@ -161,7 +161,11 @@ pub fn translate_lakefile(
                 kill_child_tree(&mut child);
                 let stderr = join_stderr(stderr_thread);
                 return Err(sub(
-                    format!("wait failed for {}: {e}", lakefile.display()),
+                    format!(
+                        "wait failed for {}: {e}; this is unusual — re-run, and report a leanr \
+                         bug if it persists",
+                        lakefile.display()
+                    ),
                     stderr,
                 ));
             }
