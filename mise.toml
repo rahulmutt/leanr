@@ -100,3 +100,18 @@ run = [
   # mutate `Init.Core`, emit `Mutations.olean` + `mutations-verdicts.jsonl`.
   "sh -c 'lean --run tests/fixtures/mutate.lean Init.Core tests/fixtures/Mutations.olean > tests/fixtures/mutations-verdicts.jsonl'",
 ]
+
+[tasks."mathlib:fetch"]
+description = "One-time: clone Mathlib at ./mathlib-pin and `lake exe cache get` its prebuilt .oleans (network; local only)"
+depends = ["elan:bootstrap"]
+run = "scripts/mathlib-fetch.sh"
+
+[tasks."check:mathlib"]
+description = "Kernel-check all of pinned Mathlib in parallel (needs mathlib:fetch first). Verified empirically: a package's oleans land at <pkg>/.lake/build/lib/lean (not .../lib), and each of Mathlib's ~15 dependencies (Batteries, Aesop, Qq, ...) builds separately under .mathlib/.lake/packages/<dep>/.lake/build/lib/lean — so this uses `lake env printenv LEAN_PATH` (run from inside .mathlib) to get Lake's own resolved closure instead of a single hardcoded --path."
+depends = ["elan:bootstrap"]
+run = "sh -c 'LEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo run --release -p leanr_cli -- check --all'"
+
+[tasks."bench:mathlib"]
+description = "Benchmark leanr vs lean4checker over pinned Mathlib on this pod (needs mathlib:fetch)"
+depends = ["elan:bootstrap"]
+run = "scripts/bench-mathlib.sh"
