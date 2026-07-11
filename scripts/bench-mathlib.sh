@@ -23,7 +23,19 @@ set -eu
 
 repo_root=$(cd "$(dirname "$0")/.." && pwd)
 mathlib_dir="$repo_root/.mathlib"
+# Effective CPU budget: this container's cgroup v2 cpu.max quota (quota /
+# period), NOT nproc — nproc reports the host's 24 cores but the cgroup caps
+# us at fewer (e.g. 8). Oversubscribing past the quota causes CFS throttling
+# and an unfair, noisy benchmark. Fall back to nproc if cpu.max is
+# absent/"max" (unlimited).
 jobs=$(nproc)
+if [ -r /sys/fs/cgroup/cpu.max ]; then
+    read -r _q _p < /sys/fs/cgroup/cpu.max || true
+    case "$_q" in
+        ''|max|*[!0-9]*) : ;; # unlimited or unreadable: keep nproc
+        *) _n=$(( _q / _p )); [ "$_n" -ge 1 ] && jobs=$_n ;;
+    esac
+fi
 
 if [ ! -d "$mathlib_dir" ]; then
     echo "bench-mathlib: $mathlib_dir not found — run \`mise run mathlib:fetch\` first" >&2
