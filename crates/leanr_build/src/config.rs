@@ -209,7 +209,11 @@ pub struct PackageConfig {
 #[derive(Debug)]
 pub struct ParsedConfig {
     pub config: PackageConfig,
-    /// Unknown-key warnings, in document order: "path: unknown key `k` (ignored)".
+    /// Unknown-key warnings: "path: unknown key `k` (ignored)". Grouped by
+    /// section in call order (package, then each `lean_lib`/`lean_exe`/
+    /// `require` in the order it appears in `config`'s `Vec`s), but *within*
+    /// each section the keys are alphabetical (`BTreeMap` iteration order
+    /// over that section's `unknown` map) — not the document's key order.
     pub warnings: Vec<String>,
 }
 

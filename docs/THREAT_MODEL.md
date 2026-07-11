@@ -111,6 +111,21 @@ posture:
   reaching git: no leading `-` (option injection), scheme whitelist
   (https/http/ssh/git/file, scp-like, local paths), `--` separator on
   `git clone`. Materialization never overwrites local modifications.
+  Beyond the URL, every manifest field leanr composes into a filesystem
+  path or subprocess argument is validated the same way before use:
+  package `name` and `rev` (no path separators, no leading `-`, no
+  NUL — `fetch::validate_package_name`/`validate_rev`) and a git
+  dependency's `subDir` (must be relative, no `..` components, no
+  leading `-`, no NUL — `manifest::validate_sub_dir`), since `subDir`
+  is joined onto the materialized checkout directory in `resolve()`.
+- **`packagesDir` and per-package `configFile` are not traversal-
+  validated.** Both are consumed as paths straight from the same
+  committed, root-trusted `lake-manifest.json` (joined onto the
+  workspace root and the package directory respectively) without the
+  relative/no-`..` checks applied to `subDir` above. Accepted on the
+  same root-trusted basis as lakefile execution above (the manifest's
+  author already controls what code runs); revisit if
+  `lake-manifest.json` ever becomes untrusted input.
 - **Header scanning.** `scan_header` is a total function over arbitrary
   bytes (property-tested): never panics, never recurses, allocation
   bounded by input size — same discipline as the `.olean` decoder.

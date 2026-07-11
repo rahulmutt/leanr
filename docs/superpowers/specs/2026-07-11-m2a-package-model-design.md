@@ -257,9 +257,10 @@ verified); plan module count matches the recorded constant; output
 byte-identical to the plan computed on the pre-materialized
 `.mathlib` checkout.
 
-New mise tasks: `build:dryrun-mathlib` (differential tier); fixture
-regeneration folded into `fixtures:regen`. CI runs the unit tier
-only, matching the existing split.
+New mise tasks: `build:differential` (differential tier) and
+`build:acceptance` (fresh-clone acceptance); fixture regeneration
+folded into `fixtures:regen`. CI runs the unit tier only, matching
+the existing split.
 
 ## Acceptance (recorded on completion)
 
