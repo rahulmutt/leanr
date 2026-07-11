@@ -315,17 +315,42 @@ Mathlib's edge count) + bounded per-worker scratch.
 
 ## Acceptance (controller-run, under the 32 GiB watchdog)
 
-> **Status (2026-07-11): IN PROGRESS — figures not yet recorded.** Tasks
-> 1–7 done + reviewed; correctness proven by the stdlib differential gate
-> (`checked 2433 modules, 203134 declarations (skipped 3611
-> unsafe/partial)`, `--sequential`==`--jobs 1`==`--jobs 8`). The Mathlib
-> sweep uncovered and fixed three perf bugs (quotient count, `build_graph`
-> O(deps²), `used_constants` exponential-DAG-walk — all RED-verified, none
-> soundness). The full Mathlib sweep + `leanchecker` benchmark still need a
-> clean end-to-end run and their figures recorded here. **Resume checklist,
-> environment quirks (8-CPU cgroup cap; Mathlib already fetched at
-> `.mathlib`; bundled `leanchecker`), and open risks are in the plan's
-> "## RESUME NOTES" section** (`docs/superpowers/plans/2026-07-10-m1-final-parallel-mathlib.md`).
+> **Status (2026-07-11): PASSED — figures recorded below.** All runs on
+> this pod (8-CPU cgroup quota, 32 GiB cgroup memory limit, rust 1.97.0,
+> toolchain `leanprover/lean4:v4.32.0-rc1`, Mathlib pin
+> `360da6fa66c1273b76b6b2d8c5666fd5ac2e3b56`), under
+> `scripts/mem-watchdog.sh` (30 GiB effective cap).
+>
+> 1. **Canaries** (`--jobs 8`, exit 0): `Init.Data.Char.Ordinal` — 226
+>    modules, 37,519 declarations (430 skipped unsafe/partial);
+>    `Mathlib.Analysis.Calculus.MeanValue` — 3,496 modules, 333,620
+>    declarations (3,477 skipped).
+> 2. **Full stdlib sweep**: `--sequential` 295 s / 1.03 GiB peak RSS vs
+>    `--jobs 8` 121 s / 1.24 GiB peak — **2.4× speedup, peak +0.2 GiB**
+>    (no meaningful regression). Verdict equivalence: the differential
+>    gate (`--sequential` == `--jobs 1` == `--jobs 8`) is byte-identical —
+>    `checked 2433 modules, 203134 declarations (skipped 3611
+>    unsafe/partial)` — re-run green after the perf fixes and the
+>    rust 1.96.1→1.97.0 bump.
+> 3. **Mathlib sweep + benchmark** (the milestone bar): `leanr check --all
+>    --jobs 8` — **exit 0, `checked 11007 modules, 770162 declarations
+>    (skipped 5300 unsafe/partial)`, 878 s wall, 6.2 GiB peak RSS**
+>    (6,546,084 kB) — comfortably under the 32 GiB bar. Reference checker
+>    `leanchecker` (lean4checker, toolchain-bundled) on the same pod: **DNF
+>    at the pod's memory budget in both configurations** — default run
+>    killed at 28 s with unreclaimable cgroup usage 31.8 GB (own RSS 29
+>    GiB, still climbing); best-configured run (`LEAN_NUM_THREADS=8`,
+>    matching the CPU quota) killed at 2,842 s crossing the 30 GiB RSS
+>    cap, output not yet produced. leanr is ≥3.2× faster than
+>    leanchecker's unfinished lower bound at ~5× less memory; the
+>    wall-clock bar is met by completion vs. DNF rather than a
+>    finished-run comparison, recorded honestly as such.
+>
+> The Mathlib acceptance uncovered and fixed four bugs along the way
+> (quotient count `8d80eec`, `build_graph` O(deps²) `60a1763`+`16af7f2`,
+> `used_constants` exponential DAG-walk `6e59823`, watchdog false-kill on
+> reclaimable page cache `dba075c` — all RED/hermetically verified, none
+> soundness).
 
 1. **Canary.** `leanr check Init.Data.Char.Ordinal --jobs N` — exit 0,
    bounded.

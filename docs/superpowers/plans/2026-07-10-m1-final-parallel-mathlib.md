@@ -1480,7 +1480,7 @@ git commit -m "feat: Mathlib pin + parallel sweep + lean4checker benchmark (M1-f
 
 Branch `m1-final-parallel-mathlib` (local only, ahead of `origin/main`). Executed via subagent-driven-development. The `.superpowers/sdd/progress.md` ledger has blow-by-blow detail but is **gitignored** — this section is the durable handoff.
 
-### Status: Tasks 1–7 DONE + reviewed clean. Task 8 (acceptance) IN PROGRESS.
+### Status: ALL 8 TASKS DONE (2026-07-11). Task 8 acceptance PASSED — figures in the design spec's "## Acceptance" section. Awaiting final whole-branch review.
 
 **Key design change (user-approved) vs. this plan's Task 5:** Step 4a's promotion-mutex + interior-mutable store write was SUPERSEDED. Analysis found it had a real concurrent-read-during-append data race and was unnecessary. Replaced with **read-only "resolve-or-reject"**: the frozen store is never written during checking; inductive/quot survivors are compared by looking their ids up read-only in the frozen store (`leanr_kernel::resolve_constant_info`) + `constant_info_eq`. Result: fully **lock-free, `unsafe`-free, TSan-clean**. See the dated "Amendment (2026-07-10, execution)" block in the design spec §"Key enabling observation".
 
