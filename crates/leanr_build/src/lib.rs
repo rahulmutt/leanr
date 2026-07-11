@@ -9,5 +9,6 @@ pub mod graph;
 pub mod manifest;
 pub mod modules;
 pub mod scanner;
+mod subprocess;
 
 pub use error::BuildError;

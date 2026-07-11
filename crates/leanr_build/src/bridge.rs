@@ -10,14 +10,12 @@
 //! so we hand it a fresh temp path and rename into the cache.
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
 use std::time::Duration;
-
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
 
 use crate::config::{parse_lakefile_toml, ParsedConfig};
 use crate::error::BuildError;
+use crate::subprocess::{self, RunError};
 
 pub struct LakeInvoker {
     /// The lake executable (PATH-resolved name or explicit path).
@@ -39,28 +37,6 @@ impl Default for LakeInvoker {
     }
 }
 
-/// Kill the child and its whole process-group subtree, then reap it.
-/// Plain `Child::kill` only signals the immediate process; if it has
-/// spawned children of its own, they keep running and keep any inherited
-/// pipe (e.g. stderr) open, which would otherwise hang a reader thread
-/// waiting on that pipe to reach EOF.
-fn kill_child_tree(child: &mut Child) {
-    #[cfg(unix)]
-    {
-        // SAFETY: signaling a process group by pid is a plain libc call;
-        // negating the pid targets the group we created via
-        // `process_group(0)` above rather than a single process.
-        unsafe {
-            libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = child.kill();
-    }
-    let _ = child.wait();
-}
-
 /// Run `lake [+tc] translate-config toml <out>` with cwd `pkg_dir`.
 ///
 /// `lakefile` is the package's config file path (e.g. `<pkg_dir>/lakefile.lean`),
@@ -78,98 +54,52 @@ pub fn translate_lakefile(
     }
     cmd.arg("translate-config").arg("toml").arg(out);
     cmd.current_dir(pkg_dir);
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    // Put the child in its own process group so a timeout kill takes down
-    // its whole subtree (lake may itself spawn `lean`/etc.), not just the
-    // immediate process. A lone `child.kill()` would leave grandchildren
-    // running with the stderr pipe's write end still open, which hangs the
-    // reader-thread join below indefinitely instead of returning promptly.
-    #[cfg(unix)]
-    cmd.process_group(0);
     let display = format!("{} translate-config toml", lake.program.display());
     let sub = |reason: String, stderr: String| BuildError::Subprocess {
         cmd: display.clone(),
         reason,
         stderr,
     };
-    let mut child = cmd.spawn().map_err(|e| {
-        sub(
+    match subprocess::run_with_timeout(&mut cmd, lake.timeout) {
+        Ok(finished) => {
+            if finished.status.success() {
+                Ok(())
+            } else {
+                Err(sub(
+                    format!(
+                        "failed for {} (exit status: {}); fix the lakefile or run \
+                         `lake translate-config toml` there to reproduce",
+                        lakefile.display(),
+                        finished.status
+                    ),
+                    String::from_utf8_lossy(&finished.stderr).into_owned(),
+                ))
+            }
+        }
+        Err(RunError::Spawn(e)) => Err(sub(
             format!(
                 "failed to start for {} ({e}); check that `lake` is installed and on PATH",
                 lakefile.display()
             ),
             String::new(),
-        )
-    })?;
-    // Take stderr immediately and drain it on a dedicated thread. If we only
-    // read it after try_wait observes exit, a child that writes >64KB to
-    // stderr blocks on the pipe write and never exits — burning the whole
-    // timeout and then reporting "timed out" with an empty stderr, losing
-    // the real diagnostic. stdout stays `Stdio::null()`, so it needs no
-    // equivalent drain.
-    let stderr_pipe = child.stderr.take();
-    let stderr_thread = stderr_pipe.map(|mut s| {
-        std::thread::spawn(move || {
-            use std::io::Read;
-            let mut buf = Vec::new();
-            let _ = s.read_to_end(&mut buf);
-            buf
-        })
-    });
-    let join_stderr = |thread: Option<std::thread::JoinHandle<Vec<u8>>>| -> String {
-        thread
-            .and_then(|t| t.join().ok())
-            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-            .unwrap_or_default()
-    };
-    let deadline = std::time::Instant::now() + lake.timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let stderr = join_stderr(stderr_thread);
-                if status.success() {
-                    return Ok(());
-                }
-                return Err(sub(
-                    format!(
-                        "failed for {} (exit status: {status}); fix the lakefile or run \
-                         `lake translate-config toml` there to reproduce",
-                        lakefile.display()
-                    ),
-                    stderr,
-                ));
-            }
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    kill_child_tree(&mut child);
-                    let stderr = join_stderr(stderr_thread);
-                    return Err(sub(
-                        format!(
-                            "timed out after {}s translating {}; re-run, and if the machine is \
-                             slow this timeout may need raising",
-                            lake.timeout.as_secs(),
-                            lakefile.display()
-                        ),
-                        stderr,
-                    ));
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => {
-                kill_child_tree(&mut child);
-                let stderr = join_stderr(stderr_thread);
-                return Err(sub(
-                    format!(
-                        "wait failed for {}: {e}; this is unusual — re-run, and report a leanr \
-                         bug if it persists",
-                        lakefile.display()
-                    ),
-                    stderr,
-                ));
-            }
-        }
+        )),
+        Err(RunError::TimedOut(stderr)) => Err(sub(
+            format!(
+                "timed out after {}s translating {}; re-run, and if the machine is \
+                 slow this timeout may need raising",
+                lake.timeout.as_secs(),
+                lakefile.display()
+            ),
+            String::from_utf8_lossy(&stderr).into_owned(),
+        )),
+        Err(RunError::Wait(e, stderr)) => Err(sub(
+            format!(
+                "wait failed for {}: {e}; this is unusual — re-run, and report a leanr \
+                 bug if it persists",
+                lakefile.display()
+            ),
+            String::from_utf8_lossy(&stderr).into_owned(),
+        )),
     }
 }
 

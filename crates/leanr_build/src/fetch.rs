@@ -5,9 +5,16 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use crate::error::BuildError;
 use crate::manifest::{ManifestPackage, PackageSource};
+use crate::subprocess::{self, RunError};
+
+/// Clones of real dependencies happen over the network and can be slow;
+/// the containment constraint (docs/THREAT_MODEL.md, M2a) is "no hang",
+/// not "fail fast", so this is deliberately generous.
+const GIT_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Reject URLs that could be misparsed as git options or drive exotic
 /// transports. Allowed: https/http/ssh/git/file schemes, scp-like
@@ -31,24 +38,91 @@ pub fn validate_git_url(url: &str) -> Result<(), String> {
     Ok(()) // scp-like or local path
 }
 
+/// Reject package names that could escape `packages_dir` via `Path::join`
+/// (a leading `/` replaces the base entirely; a bare `..` walks back up)
+/// or be misread as a command-line option by tools invoked with `cwd =
+/// packages_dir/<name>`.
+pub(crate) fn validate_package_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("empty package name".into());
+    }
+    if name == "." || name == ".." {
+        return Err(format!(
+            "package name `{name}` is not a valid directory entry"
+        ));
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err(format!("package name contains a path separator: `{name}`"));
+    }
+    if name.contains('\0') {
+        return Err(format!("package name contains a NUL byte: `{name}`"));
+    }
+    if name.starts_with('-') {
+        return Err(format!("package name starts with `-`: `{name}`"));
+    }
+    Ok(())
+}
+
+/// Reject revs that could be misread as a git option or fall outside the
+/// character class lake-manifest.json actually pins (40-hex SHAs); the
+/// wider class here also allows tags/branches without opening up
+/// shell-style metacharacters.
+pub(crate) fn validate_rev(rev: &str) -> Result<(), String> {
+    if rev.is_empty() {
+        return Err("empty git rev".into());
+    }
+    if rev.starts_with('-') {
+        return Err(format!("git rev starts with `-`: `{rev}`"));
+    }
+    if !rev
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'))
+    {
+        return Err(format!(
+            "git rev contains characters outside [0-9A-Za-z._/-]: `{rev}`"
+        ));
+    }
+    Ok(())
+}
+
 fn git(args: &[&str], cwd: &Path) -> Result<String, BuildError> {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .map_err(|e| BuildError::Subprocess {
-            cmd: format!("git {}", args.join(" ")),
+    let mut cmd = Command::new("git");
+    cmd.args(args).current_dir(cwd);
+    let display = format!("git {}", args.join(" "));
+    match subprocess::run_with_timeout(&mut cmd, GIT_TIMEOUT) {
+        Ok(finished) => {
+            if finished.status.success() {
+                Ok(String::from_utf8_lossy(&finished.stdout).trim().to_string())
+            } else {
+                Err(BuildError::Subprocess {
+                    cmd: display,
+                    reason: format!("failed ({})", finished.status),
+                    stderr: String::from_utf8_lossy(&finished.stderr).into_owned(),
+                })
+            }
+        }
+        Err(RunError::Spawn(e)) => Err(BuildError::Subprocess {
+            cmd: display,
             reason: format!("failed to start: {e}"),
             stderr: String::new(),
-        })?;
-    if !out.status.success() {
-        return Err(BuildError::Subprocess {
-            cmd: format!("git {}", args.join(" ")),
-            reason: format!("failed ({})", out.status),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        });
+        }),
+        Err(RunError::TimedOut(stderr)) => Err(BuildError::Subprocess {
+            cmd: display,
+            reason: format!(
+                "timed out after {}s; re-run, and if the network or machine is slow this \
+                 timeout may need raising",
+                GIT_TIMEOUT.as_secs()
+            ),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        }),
+        Err(RunError::Wait(e, stderr)) => Err(BuildError::Subprocess {
+            cmd: display,
+            reason: format!(
+                "wait failed: {e}; this is unusual — re-run, and report a leanr bug if it persists"
+            ),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        }),
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 fn ensure_git(name: &str, url: &str, rev: &str, dest: &Path) -> Result<(), BuildError> {
@@ -56,7 +130,14 @@ fn ensure_git(name: &str, url: &str, rev: &str, dest: &Path) -> Result<(), Build
         name: name.to_string(),
         msg,
     };
+    let manifest_action = |msg: String| {
+        ferr(format!(
+            "{msg} (from lake-manifest.json); fix the entry or regenerate with `lake update`"
+        ))
+    };
+    validate_package_name(name).map_err(manifest_action)?;
     validate_git_url(url).map_err(ferr)?;
+    validate_rev(rev).map_err(manifest_action)?;
     if !dest.is_dir() {
         let parent = dest.parent().unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent)
@@ -72,11 +153,23 @@ fn ensure_git(name: &str, url: &str, rev: &str, dest: &Path) -> Result<(), Build
         )
         .map_err(|e| ferr(format!("clone failed: {e}")))?;
     }
-    let head = git(&["rev-parse", "HEAD"], dest)?;
+    let head = git(&["rev-parse", "HEAD"], dest).map_err(|e| {
+        ferr(format!(
+            "could not read the current commit in {}: {e}; remove the directory and re-run",
+            dest.display()
+        ))
+    })?;
     if head == rev {
         return Ok(()); // already pinned; user files (even dirty) untouched
     }
-    let dirty = !git(&["status", "--porcelain"], dest)?.is_empty();
+    let dirty = !git(&["status", "--porcelain"], dest)
+        .map_err(|e| {
+            ferr(format!(
+                "could not check the working tree status in {}: {e}; remove the directory and re-run",
+                dest.display()
+            ))
+        })?
+        .is_empty();
     if dirty {
         return Err(ferr(format!(
             "{} has local modifications but is at {head}, not the manifest rev {rev}; \
@@ -105,6 +198,7 @@ fn ensure_git(name: &str, url: &str, rev: &str, dest: &Path) -> Result<(), Build
             "checkout",
             "--detach",
             rev,
+            "--",
         ],
         dest,
     )
@@ -288,5 +382,86 @@ mod tests {
         let pkg = git_pkg("dep", orig.path().to_str().unwrap().into(), bad);
         let err = materialize(&[pkg], ws.path(), &ws.path().join("pkgs")).unwrap_err();
         assert!(err.to_string().contains("dep"));
+    }
+
+    // -- Finding 1: path traversal via package name --------------------
+
+    #[test]
+    fn validate_package_name_rejects_traversal_and_injection() {
+        assert!(validate_package_name("dep").is_ok());
+        assert!(validate_package_name("dep-1.2").is_ok());
+        assert!(validate_package_name("../evil").is_err());
+        assert!(validate_package_name("/abs").is_err());
+        assert!(validate_package_name("a/b").is_err());
+        assert!(validate_package_name("-x").is_err());
+        assert!(validate_package_name("").is_err());
+    }
+
+    #[test]
+    fn malicious_package_name_is_rejected_before_touching_the_filesystem() {
+        let (orig, r1, _r2) = origin();
+        let ws = tempfile::TempDir::new().unwrap();
+        let pkgs_dir = ws.path().join(".lake/packages");
+        let pkg = git_pkg("../evil", orig.path().to_str().unwrap().into(), r1);
+        let err = materialize(&[pkg], ws.path(), &pkgs_dir).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("evil"), "got: {msg}");
+        // Nothing escaped packages_dir, and packages_dir itself was never
+        // created — validation happens before any filesystem/git action.
+        assert!(!ws.path().join("evil").exists());
+        assert!(!pkgs_dir.exists());
+    }
+
+    // -- Finding 3: rev unguarded ---------------------------------------
+
+    #[test]
+    fn validate_rev_rejects_option_injection_and_shell_metacharacters() {
+        assert!(validate_rev("0123456789abcdef0123456789abcdef01234567").is_ok());
+        assert!(validate_rev("main").is_ok());
+        assert!(validate_rev("feature/foo.bar").is_ok());
+        assert!(validate_rev("-x").is_err());
+        assert!(validate_rev("$(rm -rf /)").is_err());
+        assert!(validate_rev("; rm -rf /").is_err());
+        assert!(validate_rev("").is_err());
+    }
+
+    #[test]
+    fn malicious_rev_is_rejected_before_invoking_git() {
+        let (orig, _r1, _r2) = origin();
+        let ws = tempfile::TempDir::new().unwrap();
+        let pkgs_dir = ws.path().join(".lake/packages");
+        let pkg = git_pkg("dep", orig.path().to_str().unwrap().into(), "-x".into());
+        let err = materialize(&[pkg], ws.path(), &pkgs_dir).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("dep"), "got: {msg}");
+        // Rejected before the clone that would otherwise create this dir.
+        assert!(!pkgs_dir.join("dep").exists());
+
+        let pkg2 = git_pkg(
+            "dep2",
+            orig.path().to_str().unwrap().into(),
+            "$(rm -rf /)".into(),
+        );
+        let err2 = materialize(&[pkg2], ws.path(), &pkgs_dir).unwrap_err();
+        assert!(err2.to_string().contains("dep2"));
+        assert!(!pkgs_dir.join("dep2").exists());
+    }
+
+    // -- Finding 4: two error paths bypass package attribution ----------
+
+    #[test]
+    fn stray_non_git_directory_reports_the_package_name() {
+        let ws = tempfile::TempDir::new().unwrap();
+        let pkgs_dir = ws.path().join(".lake/packages");
+        std::fs::create_dir_all(pkgs_dir.join("dep")).unwrap();
+        std::fs::write(pkgs_dir.join("dep/not-a-repo.txt"), "oops").unwrap();
+        let pkg = git_pkg(
+            "dep",
+            "https://example.invalid/x/y".into(),
+            "0123456789abcdef0123456789abcdef01234567".into(),
+        );
+        let err = materialize(&[pkg], ws.path(), &pkgs_dir).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("dep"), "got: {msg}");
     }
 }
