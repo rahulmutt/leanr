@@ -177,6 +177,10 @@ fn resolves_a_fresh_workspace_end_to_end() {
     assert!(ws.deps[0].rev.is_some());
     assert!(app.join(".lake/packages/dep/Dep.lean").is_file()); // materialized
 
+    // Finding 2: the effective-targets fallback (defaultTargets, since
+    // opts.targets is empty here) is single-sourced onto the workspace.
+    assert_eq!(ws.targets, vec!["App".to_string()]);
+
     let names: Vec<Vec<String>> = ws
         .waves
         .iter()
@@ -210,7 +214,10 @@ fn explicit_target_and_unknown_target() {
     let (tmp, app) = setup();
     let mut o = opts(tmp.path());
     o.targets = vec!["App".into()];
-    assert!(resolve(&app, &o).is_ok());
+    let ws = resolve(&app, &o).unwrap();
+    // Finding 2: an explicit target list passes through as ws.targets
+    // unchanged (no defaultTargets fallback).
+    assert_eq!(ws.targets, vec!["App".to_string()]);
     o.targets = vec!["Nope".into()];
     match resolve(&app, &o) {
         Err(BuildError::UnknownTarget(t)) => assert_eq!(t, "Nope"),

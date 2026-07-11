@@ -50,6 +50,11 @@ pub struct Workspace {
     pub graph: ModuleGraph,
     pub waves: Vec<Vec<ModuleId>>,
     pub warnings: Vec<String>,
+    /// The effective target list `resolve()` actually seeded the module
+    /// graph from: `ResolveOptions::targets` if non-empty, else the root
+    /// package's `defaultTargets`. Single-sourced here so callers (the
+    /// CLI's JSON plan) never have to recompute the same fallback.
+    pub targets: Vec<String>,
 }
 
 /// Walk up from `start` to the nearest directory containing a lakefile.
@@ -203,5 +208,6 @@ pub fn resolve(root_dir: &Path, opts: &ResolveOptions) -> Result<Workspace, Buil
         graph: module_graph,
         waves,
         warnings,
+        targets: target_names,
     })
 }

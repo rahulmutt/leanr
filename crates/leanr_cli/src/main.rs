@@ -476,13 +476,8 @@ fn build(
         for w in &ws.warnings {
             eprintln!("warning: {w}");
         }
-        let effective_targets: Vec<String> = if targets.is_empty() {
-            ws.root.config.default_targets.clone()
-        } else {
-            targets
-        };
         if json {
-            print_json_plan(&ws, &effective_targets)?;
+            print_json_plan(&ws)?;
         } else {
             print_text_plan(&ws);
         }
@@ -518,7 +513,7 @@ fn lean_print_libdir() -> Result<PathBuf, String> {
     ))
 }
 
-fn print_json_plan(ws: &leanr_build::Workspace, targets: &[String]) -> Result<(), String> {
+fn print_json_plan(ws: &leanr_build::Workspace) -> Result<(), String> {
     let mut packages = Vec::with_capacity(ws.deps.len());
     for d in &ws.deps {
         let dir = rel_display(&d.dir, &ws.root_dir).map_err(|abs| {
@@ -558,7 +553,7 @@ fn print_json_plan(ws: &leanr_build::Workspace, targets: &[String]) -> Result<()
     }
     let plan = JsonPlan {
         root: &ws.root.name,
-        targets,
+        targets: &ws.targets,
         packages,
         modules,
     };
