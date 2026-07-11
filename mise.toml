@@ -118,6 +118,11 @@ description = "M2a differential oracles vs pinned Mathlib: bridge golden, olean 
 depends = ["elan:bootstrap"]
 run = "sh -c 'LEANR_MATHLIB_DIR=\"$PWD/.mathlib\" LEANR_OLEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo test --release -p leanr_build --test mathlib_oracle -- --ignored --nocapture'"
 
+[tasks."build:acceptance"]
+description = "M2a acceptance: fresh clone of pinned Mathlib resolves byte-identically to the materialized checkout (network; local only)"
+depends = ["elan:bootstrap"]
+run = "scripts/build-fresh-acceptance.sh"
+
 [tasks."bench:mathlib"]
 description = "Benchmark leanr vs lean4checker over pinned Mathlib on this pod (needs mathlib:fetch)"
 depends = ["elan:bootstrap"]

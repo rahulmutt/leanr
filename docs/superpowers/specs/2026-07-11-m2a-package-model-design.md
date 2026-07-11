@@ -261,6 +261,33 @@ New mise tasks: `build:dryrun-mathlib` (differential tier); fixture
 regeneration folded into `fixtures:regen`. CI runs the unit tier
 only, matching the existing split.
 
+## Acceptance (recorded on completion)
+
+Run: 2026-07-11, pod: this workspace's devpod (Linux x86_64, warm
+`.mathlib` checkout + Cargo registry cache; network to GitHub
+available and exercised for real by both runs below).
+
+- `mise run build:differential`: 4/4 oracles green over the pinned
+  Mathlib closure (8,564 modules import-diffed against their
+  `.oleans`, 0 mismatches; bridge golden byte-identical; planned
+  module set matches lake's on-disk build exactly). Test binary time
+  39.93s.
+- `mise run build:acceptance`: fresh clone resolved byte-identically
+  to the materialized checkout; 8 packages at manifest revs; 8,564
+  modules planned. Fresh-clone `leanr build --dry-run --json` output
+  (1,524,027 bytes) diffed byte-for-byte against the pre-materialized
+  `.mathlib` checkout's output — identical. Phase timings: clone +
+  checkout of the pinned rev 1.7s; resolving the fresh clone
+  (concurrent `git clone` of all 8 dependencies — aesop, batteries,
+  Cli, importGraph, LeanSearchClient, plausible, proofwidgets, Qq —
+  from GitHub, plus header-scan and DAG assembly over the closure)
+  7.4s; resolving the pre-materialized checkout (dependencies already
+  present, no clones) 0.4s. End-to-end task wall time (incl. release
+  build of `leanr_cli`) 21.5s.
+
+Both `cargo test --workspace` and `mise run lint` remained green
+after these runs.
+
 ## Constraints (inherited)
 
 - `leanr_kernel` untouched; `leanr_build` stays off the kernel's
