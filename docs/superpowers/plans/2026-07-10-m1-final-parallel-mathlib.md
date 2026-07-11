@@ -1473,3 +1473,49 @@ git commit -m "feat: Mathlib pin + parallel sweep + lean4checker benchmark (M1-f
 **Placeholder scan:** No "TBD"/"handle later"; the one irreducible unknown (arena mutability boundary) is called out with the reading list and decision criteria rather than left blank.
 
 **Type consistency:** `CheckedConstants::{new,get,get_decoded,admit,contains,iter_decoded,len}`, `ConstSource::{Plain,Gated}`, `EnvView.consts: ConstSource`, `check_declaration(view: EnvView, scratch: &mut Store, d) -> Admitted`, `Admitted{survivors,quot_init}`, `promote_into`, `build_graph -> DepGraph`, `Task{id,kind,admits,deps}`, `check_parallel(Arc<Store>, Arc<CheckedConstants>, DepGraph, usize, Fn) -> Result<CheckStats, CheckFailure>` — names used consistently across Tasks 2–6. `KernelError::DependencyCycle` introduced in Task 5, used in Task 7's threat doc. ✓
+
+---
+
+## RESUME NOTES — session handoff (2026-07-11)
+
+Branch `m1-final-parallel-mathlib` (local only, ahead of `origin/main`). Executed via subagent-driven-development. The `.superpowers/sdd/progress.md` ledger has blow-by-blow detail but is **gitignored** — this section is the durable handoff.
+
+### Status: Tasks 1–7 DONE + reviewed clean. Task 8 (acceptance) IN PROGRESS.
+
+**Key design change (user-approved) vs. this plan's Task 5:** Step 4a's promotion-mutex + interior-mutable store write was SUPERSEDED. Analysis found it had a real concurrent-read-during-append data race and was unnecessary. Replaced with **read-only "resolve-or-reject"**: the frozen store is never written during checking; inductive/quot survivors are compared by looking their ids up read-only in the frozen store (`leanr_kernel::resolve_constant_info`) + `constant_info_eq`. Result: fully **lock-free, `unsafe`-free, TSan-clean**. See the dated "Amendment (2026-07-10, execution)" block in the design spec §"Key enabling observation".
+
+**Correctness is PROVEN** (stdlib differential gate green earlier): `leanr check --all` `--sequential` == `--jobs 1` == `--jobs 8`, byte-identical: `checked 2433 modules, 203134 declarations (skipped 3611 unsafe/partial)`.
+
+### Commits (branch tip = latest listed):
+- `6e59823` fix(kernel): memoize visited ExprIds in used_constants (O(DAG))  ← latest
+- `11c93f2` fix(bench): derive --jobs from cgroup cpu.max, not nproc
+- `16af7f2` fix(check): dedup build_graph edges globally by (owner,dep)
+- `60a1763` fix(check): linear-time build_graph edge dedup + phase timing
+- `2053415` fix(bench): measure leanchecker via mem-watchdog (no /usr/bin/time)
+- `475090a` chore: Mathlib pin + fetch/check/bench scaffolding
+- `614ff2e` feat!: parallel default + docs (Task 7)
+- `8d80eec` fix(check): count each quotient constant in checked (Task 6 gate finding)
+- `d2fd0cf` feat(cli): parallel check --jobs + differential gate (Task 6)
+- ...(Tasks 1–5 below that; see `git log`)
+
+### THREE bugs the Mathlib acceptance uncovered (all fixed, RED-verified, NONE soundness):
+1. **Quot count** (`8d80eec`): stdlib gate caught parallel undercounting by 3. Scheduler counted `checked=done` (task count); replay counts per-add_decl and calls add_decl once per quotient constant (all 4). Fix: Quot task contributes `names.len()`.
+2. **build_graph O(deps²)** (`60a1763`+`16af7f2`): first Mathlib sweep hung ~10h single-threaded. Pass-2 edge dedup used `Vec::contains`. Fix: global `HashSet<(owner,dep)>`. (v1 `60a1763` had a per-name-clear bug that duplicated block/quot deps; v2 `16af7f2` fixed it.)
+3. **used_constants exponential** (`6e59823`): second sweep stalled in build_graph pass 2. `collect_expr_consts` walked the hash-consed DAG as a tree (no ExprId memo) → exponential on Mathlib's shared proof terms. Fix: `HashSet<ExprId>` visited-set. Output byte-identical.
+
+### TO CLOSE TASK 8 — do these, in order:
+1. **Rebuild release:** `cargo build --release -p leanr_cli`.
+2. **Re-run stdlib differential gate** (REQUIRED — 2 output-identical kernel/graph changes landed since the last gate; verify no verdict perturbation): `mise run check:stdlib:differential` (~13 min). Expect three byte-identical `checked 2433 modules, 203134 declarations (skipped 3611 unsafe/partial)` lines, exit 0.
+3. **Re-run Mathlib sweep** with BOTH perf fixes (never yet completed past decode): `LEAN_PATH="$(cd .mathlib && lake env printenv LEAN_PATH)" scripts/mem-watchdog.sh 40 sh -c 'cargo run --release -p leanr_cli -- check --all --jobs 8'`. Confirm exit 0, a `checked N modules, M declarations (skipped K …)` line, peak RSS ≤ 32 GiB. **Watch the `build_graph:` phase-timing lines on stderr** — pass2 must now complete in seconds. **OPEN RISK: we never got a clean run past decode+build_graph, so a THIRD single-threaded bottleneck (e.g. the CLI fold, or something in the parallel-check phase) may still surface. If it stalls again: check `pgrep -x leanr` thread count (1=pre-check single-threaded phase, 8=parallel check), RSS trend (flat+1 core = stuck in a call), and the last `build_graph:` timing line.**
+4. **Benchmark:** `mise run bench:mathlib` (leanr vs bundled `leanchecker`, both under the 8-CPU cgroup budget via the fixed script). leanr must be green + faster than leanchecker + ≤ 32 GiB.
+5. **Canary:** `LEAN_PATH=... cargo run --release -p leanr_cli -- check <one Mathlib module> --jobs 8` — exit 0.
+6. **Record figures** in the design spec's "## Acceptance" section (module/decl counts, leanr vs leanchecker wall + peak RSS, jobs=8, 8-CPU pod) and commit `feat: Mathlib pin + parallel sweep + lean4checker benchmark (M1-final acceptance)`.
+7. **Final whole-branch review** (superpowers:requesting-code-review, most capable model, MERGE_BASE `git merge-base main HEAD`..HEAD) — then finishing-a-development-branch.
+
+### ENVIRONMENT specifics (this pod; a fresh pod may differ — re-probe):
+- **CPU: cgroup v2 `cpu.max = 800000 100000` = 8 CPUs.** `nproc` misreports 24. USE `--jobs 8` (bench script auto-derives from cpu.max). Oversubscribing throttles + skews the benchmark.
+- Mathlib already fetched at `./.mathlib` (gitignored), pin `360da6fa66c1273b76b6b2d8c5666fd5ac2e3b56` (Mathlib toolchain == ours `leanprover/lean4:v4.32.0-rc1`, verified). `lake exe cache get` done (11007 oleans; full closure = Mathlib + ~15 deps + stdlib). If starting fresh: `mise run mathlib:fetch`.
+- Module set is via `lake env printenv LEAN_PATH` (run inside `.mathlib`), NOT a single `--path` (Mathlib deps build to separate dirs; oleans at `<pkg>/.lake/build/lib/lean`).
+- **`/usr/bin/time` absent, no root** — peak RSS comes from `scripts/mem-watchdog.sh` (prints `peak RSS N GiB (kB)` on exit); bench script already adapted.
+- **lean4checker is deprecated/merged into Lean core as bundled `leanchecker`** (`~/.elan/bin/leanchecker`); no separate repo/tag. Bench targets it, run from inside `.mathlib`.
+- RAM 125 GB (watchdog cap 40 GiB used for headroom; acceptance bar is ≤ 32 GiB). Decode is sequential single-threaded (~5-10 min, the Amdahl floor per spec §out-of-scope).

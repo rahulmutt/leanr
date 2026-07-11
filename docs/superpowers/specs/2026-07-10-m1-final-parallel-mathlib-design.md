@@ -315,6 +315,18 @@ Mathlib's edge count) + bounded per-worker scratch.
 
 ## Acceptance (controller-run, under the 32 GiB watchdog)
 
+> **Status (2026-07-11): IN PROGRESS — figures not yet recorded.** Tasks
+> 1–7 done + reviewed; correctness proven by the stdlib differential gate
+> (`checked 2433 modules, 203134 declarations (skipped 3611
+> unsafe/partial)`, `--sequential`==`--jobs 1`==`--jobs 8`). The Mathlib
+> sweep uncovered and fixed three perf bugs (quotient count, `build_graph`
+> O(deps²), `used_constants` exponential-DAG-walk — all RED-verified, none
+> soundness). The full Mathlib sweep + `leanchecker` benchmark still need a
+> clean end-to-end run and their figures recorded here. **Resume checklist,
+> environment quirks (8-CPU cgroup cap; Mathlib already fetched at
+> `.mathlib`; bundled `leanchecker`), and open risks are in the plan's
+> "## RESUME NOTES" section** (`docs/superpowers/plans/2026-07-10-m1-final-parallel-mathlib.md`).
+
 1. **Canary.** `leanr check Init.Data.Char.Ordinal --jobs N` — exit 0,
    bounded.
 2. **Full stdlib sweep** at `--jobs N` — exit 0, matches recorded
