@@ -46,6 +46,24 @@ enum Command {
         #[arg(long)]
         sequential: bool,
     },
+    /// Resolve the workspace and plan a build (M2a: --dry-run only).
+    Build {
+        /// lean_lib targets (default: the root package's defaultTargets).
+        targets: Vec<String>,
+        /// Resolve, fetch dependencies, and print the module build plan
+        /// without compiling anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Machine-readable JSON plan on stdout.
+        #[arg(long, requires = "dry_run")]
+        json: bool,
+        /// Workspace directory (default: walk up from the current directory).
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Toolchain olean directory (default: `lean --print-libdir`).
+        #[arg(long)]
+        toolchain_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -72,6 +90,13 @@ fn main() -> ExitCode {
             jobs,
             sequential,
         } => check(modules, all, path, jobs, sequential),
+        Command::Build {
+            targets,
+            dry_run,
+            json,
+            dir,
+            toolchain_dir,
+        } => build(targets, dry_run, json, dir, toolchain_dir),
     }
 }
 
@@ -365,6 +390,170 @@ fn check(
                 f.error
             );
             ExitCode::FAILURE
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct JsonPackage<'a> {
+    name: &'a str,
+    rev: Option<&'a str>,
+    dir: String,
+}
+
+#[derive(serde::Serialize)]
+struct JsonModule {
+    name: String,
+    package: String,
+    file: String,
+    wave: usize,
+}
+
+#[derive(serde::Serialize)]
+struct JsonPlan<'a> {
+    root: &'a str,
+    targets: &'a [String],
+    packages: Vec<JsonPackage<'a>>,
+    modules: Vec<JsonModule>,
+}
+
+/// Workspace-relative path with forward slashes (JSON byte-identity
+/// across checkouts; see the plan's Task 9 interface note).
+fn rel_display(path: &std::path::Path, root: &std::path::Path) -> String {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn build(
+    targets: Vec<String>,
+    dry_run: bool,
+    json: bool,
+    dir: Option<PathBuf>,
+    toolchain_dir: Option<PathBuf>,
+) -> ExitCode {
+    if !dry_run {
+        eprintln!(
+            "error: `leanr build` without --dry-run is not implemented yet (coming in M2b); \
+             run `leanr build --dry-run`"
+        );
+        return ExitCode::FAILURE;
+    }
+    let run = || -> Result<(), String> {
+        let start = match &dir {
+            Some(d) => d.clone(),
+            None => std::env::current_dir().map_err(|e| e.to_string())?,
+        };
+        let root_dir = leanr_build::find_workspace_root(&start).map_err(|e| e.to_string())?;
+        let toolchain_olean_dir = match toolchain_dir {
+            Some(d) => d,
+            None => lean_print_libdir()?,
+        };
+        // Pin dependency bridging to the root workspace's toolchain.
+        let toolchain = std::fs::read_to_string(root_dir.join("lean-toolchain"))
+            .ok()
+            .map(|s| s.trim().to_string());
+        let opts = leanr_build::ResolveOptions {
+            targets: targets.clone(),
+            lake: leanr_build::bridge::LakeInvoker {
+                toolchain,
+                ..leanr_build::bridge::LakeInvoker::default()
+            },
+            toolchain_olean_dir,
+        };
+        let ws = leanr_build::resolve(&root_dir, &opts).map_err(|e| e.to_string())?;
+        for w in &ws.warnings {
+            eprintln!("warning: {w}");
+        }
+        let effective_targets: Vec<String> = if targets.is_empty() {
+            ws.root.config.default_targets.clone()
+        } else {
+            targets
+        };
+        if json {
+            print_json_plan(&ws, &effective_targets);
+        } else {
+            print_text_plan(&ws);
+        }
+        Ok(())
+    };
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(msg) => {
+            eprintln!("error: {msg}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn lean_print_libdir() -> Result<PathBuf, String> {
+    let out = std::process::Command::new("lean")
+        .arg("--print-libdir")
+        .output()
+        .map_err(|e| {
+            format!(
+                "cannot run `lean --print-libdir` ({e}); install the pinned toolchain \
+                 (`mise run elan:bootstrap`) or pass --toolchain-dir"
+            )
+        })?;
+    if !out.status.success() {
+        return Err(format!(
+            "`lean --print-libdir` failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    Ok(PathBuf::from(
+        String::from_utf8_lossy(&out.stdout).trim().to_string(),
+    ))
+}
+
+fn print_json_plan(ws: &leanr_build::Workspace, targets: &[String]) {
+    let packages = ws
+        .deps
+        .iter()
+        .map(|d| JsonPackage {
+            name: &d.name,
+            rev: d.rev.as_deref(),
+            dir: rel_display(&d.dir, &ws.root_dir),
+        })
+        .collect();
+    let mut modules = Vec::new();
+    for (wave, ids) in ws.waves.iter().enumerate() {
+        for id in ids {
+            let m = &ws.graph.modules[id.0 as usize];
+            modules.push(JsonModule {
+                name: m.name.to_string(),
+                package: m.package.clone(),
+                file: rel_display(&m.file, &ws.root_dir),
+                wave,
+            });
+        }
+    }
+    let plan = JsonPlan {
+        root: &ws.root.name,
+        targets,
+        packages,
+        modules,
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&plan).expect("plan serializes")
+    );
+}
+
+fn print_text_plan(ws: &leanr_build::Workspace) {
+    println!("workspace: {} ({})", ws.root.name, ws.root_dir.display());
+    for d in &ws.deps {
+        println!("  dep: {} @ {}", d.name, d.rev.as_deref().unwrap_or("path"));
+    }
+    let total: usize = ws.waves.iter().map(|w| w.len()).sum();
+    println!("plan: {total} modules in {} waves", ws.waves.len());
+    for (i, w) in ws.waves.iter().enumerate() {
+        println!("  wave {i} ({} modules):", w.len());
+        for id in w {
+            println!("    {}", ws.graph.modules[id.0 as usize].name);
         }
     }
 }
