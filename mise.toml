@@ -84,6 +84,8 @@ run = [
   "sh -c 'lean --run tests/fixtures/dump_decls.lean tests/fixtures/Sample.olean > tests/fixtures/Sample.decls.txt'",
   "sh -c 'lean --run tests/fixtures/dump_decls.lean tests/fixtures/SampleRich.olean > tests/fixtures/SampleRich.decls.txt'",
   "sh -c 'lean --githash > tests/fixtures/oracle-githash.txt'",
+  "sh -c 'cd .mathlib && rm -f /tmp/leanr-mathlib-golden.toml && lake translate-config toml /tmp/leanr-mathlib-golden.toml && cp /tmp/leanr-mathlib-golden.toml ../crates/leanr_build/tests/fixtures/mathlib-lakefile-golden.toml'",
+  "sh -c 'for p in aesop batteries Cli importGraph LeanSearchClient plausible Qq; do cp .mathlib/.lake/packages/$p/lakefile.toml crates/leanr_build/tests/fixtures/lakefiles/$p.toml; done'",
 ]
 
 [tasks."fixtures:mutations"]
@@ -110,6 +112,11 @@ run = "scripts/mathlib-fetch.sh"
 description = "Kernel-check all of pinned Mathlib in parallel (needs mathlib:fetch first). Verified empirically: a package's oleans land at <pkg>/.lake/build/lib/lean (not .../lib), and each of Mathlib's ~15 dependencies (Batteries, Aesop, Qq, ...) builds separately under .mathlib/.lake/packages/<dep>/.lake/build/lib/lean — so this uses `lake env printenv LEAN_PATH` (run from inside .mathlib) to get Lake's own resolved closure instead of a single hardcoded --path."
 depends = ["elan:bootstrap"]
 run = "sh -c 'LEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo run --release -p leanr_cli -- check --all'"
+
+[tasks."build:differential"]
+description = "M2a differential oracles vs pinned Mathlib: bridge golden, olean import diff, module set (needs mathlib:fetch)"
+depends = ["elan:bootstrap"]
+run = "sh -c 'LEANR_MATHLIB_DIR=\"$PWD/.mathlib\" LEANR_OLEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo test --release -p leanr_build --test mathlib_oracle -- --ignored --nocapture'"
 
 [tasks."bench:mathlib"]
 description = "Benchmark leanr vs lean4checker over pinned Mathlib on this pod (needs mathlib:fetch)"
