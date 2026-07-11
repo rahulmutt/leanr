@@ -69,7 +69,12 @@ pub fn parse_manifest(text: &str, path: &Path) -> Result<Manifest, BuildError> {
         path: path.to_path_buf(),
         msg,
     };
-    let raw: RawManifest = serde_json::from_str(text).map_err(|e| err(e.to_string()))?;
+    let raw: RawManifest = serde_json::from_str(text).map_err(|e| {
+        err(format!(
+            "{}; the file is not valid JSON — regenerate it with `lake update`",
+            e
+        ))
+    })?;
     let major = raw.version.split('.').next().unwrap_or("");
     if major != "1" {
         return Err(err(format!(
@@ -84,18 +89,18 @@ pub fn parse_manifest(text: &str, path: &Path) -> Result<Manifest, BuildError> {
             "git" => PackageSource::Git {
                 url: p
                     .url
-                    .ok_or_else(|| err(format!("package `{}`: missing url", p.name)))?,
+                    .ok_or_else(|| err(format!("package `{}`: missing url; regenerate the manifest with `lake update`", p.name)))?,
                 rev: p
                     .rev
-                    .ok_or_else(|| err(format!("package `{}`: missing rev", p.name)))?,
+                    .ok_or_else(|| err(format!("package `{}`: missing rev; regenerate the manifest with `lake update`", p.name)))?,
                 sub_dir: p.sub_dir,
             },
             "path" => PackageSource::Path {
                 dir: p
                     .dir
-                    .ok_or_else(|| err(format!("package `{}`: missing dir", p.name)))?,
+                    .ok_or_else(|| err(format!("package `{}`: missing dir; regenerate the manifest with `lake update`", p.name)))?,
             },
-            other => return Err(err(format!("package `{}`: unknown type `{other}`", p.name))),
+            other => return Err(err(format!("package `{}`: unknown type `{other}`; a newer lake wrote this file — regenerate with a matching `lake update` or update leanr", p.name))),
         };
         packages.push(ManifestPackage {
             source,
