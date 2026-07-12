@@ -272,6 +272,135 @@ pub struct VerifyReport {
     pub dangling: Vec<String>,
 }
 
+/// Report from `Cache::deep_verify` (M2c spec §Fingerprint completeness):
+/// how many modules were re-run through `lean` and byte-diffed against
+/// their cached artifacts, and which `module:artifact` pairs diverged.
+#[derive(Debug)]
+pub struct DeepReport {
+    pub checked: usize,
+    pub mismatches: Vec<String>,
+}
+
+impl Cache {
+    /// Oracle rebuild-and-diff: re-run `lean` for every module whose
+    /// fingerprint has a cached manifest (modules with no cache entry are
+    /// skipped — nothing to compare against), into a per-module scratch
+    /// dir under `.leanr/verify` so the run never touches the project's
+    /// real materialized artifacts, then byte-diff each produced artifact
+    /// against the cached blob's actual current on-disk bytes. A mismatch
+    /// here means either two distinct inputs fingerprinted the same (a
+    /// fingerprint-completeness failure — the reason this oracle exists)
+    /// or the cached blob itself was corrupted/tampered after insert.
+    /// Requires the project to already be built/materialized (the
+    /// rebuilt module's imports resolve via `LEAN_PATH` against the
+    /// project's `.leanr/build/<pkg>/lib`) and its `--setup` files to
+    /// already exist (written by a prior `build`).
+    pub fn deep_verify(
+        &self,
+        ws: &crate::Workspace,
+        env: &crate::fingerprint::FingerprintEnv,
+        lean: &crate::compile::LeanInvoker,
+        jobs: usize,
+    ) -> Result<DeepReport, crate::BuildError> {
+        let layout = crate::setup::Layout::new(&ws.root_dir);
+        let lean_path = crate::setup::lean_path_env(ws, &layout);
+        let fps = crate::fingerprint::fingerprint_all(ws, env)?;
+        let scratch = ws.root_dir.join(".leanr").join("verify");
+        std::fs::create_dir_all(&scratch).ok();
+        let deps: Vec<Vec<usize>> = (0..ws.graph.modules.len()).map(|_| Vec::new()).collect();
+        let mismatches: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let job = |i: usize| -> Result<(), String> {
+            let m = &ws.graph.modules[i];
+            let expected = match self.lookup(&fps[i]) {
+                Ok(Some(man)) => man,
+                Ok(None) => return Ok(()), // nothing cached for this fp — skip
+                Err(e) => return Err(format!("lookup: {e}")),
+            };
+            let mod_scratch = scratch.join(i.to_string());
+            std::fs::create_dir_all(&mod_scratch).map_err(|e| e.to_string())?;
+            let out = mod_scratch.join(format!(
+                "{}.olean",
+                m.name.components().last().cloned().unwrap_or_default()
+            ));
+            let ile = out.with_extension("ilean");
+            let mut cmd = std::process::Command::new(&lean.program);
+            if let Some(tc) = &lean.toolchain {
+                cmd.arg(format!("+{tc}"));
+            }
+            cmd.arg(&m.file)
+                .arg("-o")
+                .arg(&out)
+                .arg("-i")
+                .arg(&ile)
+                .arg("--setup")
+                .arg(layout.setup_path(&m.package, &m.name))
+                .arg("--json")
+                .env("LEAN_PATH", &lean_path)
+                .current_dir(&ws.root_dir);
+            match crate::subprocess::run_drained(&mut cmd) {
+                Ok(f) if f.status.success() => {}
+                Ok(f) => return Err(format!("rebuild failed: {}", f.status)),
+                // `subprocess::RunError` carries no `Debug`/`Display` impl
+                // (see subprocess.rs) — match its variants explicitly,
+                // the same way compile.rs's build job does.
+                Err(crate::subprocess::RunError::Spawn(e)) => {
+                    return Err(format!(
+                        "failed to start `{}` ({e}); install the pinned toolchain \
+                         (`mise run elan:bootstrap`) or pass --lean",
+                        lean.program.display()
+                    ))
+                }
+                Err(crate::subprocess::RunError::TimedOut(_)) => {
+                    unreachable!("run_drained has no timeout")
+                }
+                Err(crate::subprocess::RunError::Wait(e, _)) => {
+                    return Err(format!("wait failed: {e}"))
+                }
+            }
+            // Diff each produced artifact's bytes against the cached
+            // blob's ACTUAL CURRENT on-disk bytes — not against
+            // `entry.blob`, which is only the hex label recorded at
+            // insert time and is blind to any later corruption of the
+            // blob file itself. Reading the live blob file here is what
+            // makes this a byte-diff oracle: it catches both (a)
+            // fingerprint incompleteness (a rebuild's bytes never
+            // matched what was cached under this key) and (b) a
+            // tampered/corrupted cached blob (rebuild's bytes are
+            // correct, but the cache's stored bytes no longer are).
+            for entry in &expected.artifacts {
+                let produced = mod_scratch.join(&entry.name);
+                let ok = match (
+                    std::fs::read(&produced),
+                    std::fs::read(self.blob_path(&entry.blob)),
+                ) {
+                    (Ok(p), Ok(c)) => p == c,
+                    _ => false,
+                };
+                if !ok {
+                    mismatches
+                        .lock()
+                        .unwrap()
+                        .push(format!("{}:{}", m.name, entry.name));
+                }
+            }
+            Ok(())
+        };
+        crate::pool::run(&deps, jobs.max(1), &job, &|_, _, _| {}).map_err(|f| {
+            crate::BuildError::ModuleBuild {
+                module: ws.graph.modules[f.item].name.to_string(),
+                file: ws.graph.modules[f.item].file.clone(),
+                details: f.message,
+            }
+        })?;
+        let _ = std::fs::remove_dir_all(&scratch);
+        let mismatches = mismatches.into_inner().unwrap();
+        Ok(DeepReport {
+            checked: ws.graph.modules.len(),
+            mismatches,
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct GcReport {
     pub removed: usize,

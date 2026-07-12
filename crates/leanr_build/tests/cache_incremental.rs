@@ -251,6 +251,79 @@ fn toggling_a_lean_option_rebuilds_that_libs_modules() {
 }
 
 #[test]
+fn deep_verify_is_clean_after_build_and_flags_a_tampered_blob() {
+    let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path().join("ws");
+    std::fs::create_dir_all(&dir).unwrap();
+    let ws = fixture(&dir);
+    let xdg = tmp.path().join("xdg-cache");
+    let cache = Cache::new(&xdg);
+    let env = fp_env();
+    let invoker = LeanInvoker {
+        program: counting_lean(),
+        toolchain: None,
+    };
+
+    // 1. Build the fixture into a project + cache (counting-lean writes
+    //    source-derived bytes, so the rebuild below reproduces exactly
+    //    the bytes that were cached).
+    let log1 = tmp.path().join("cold.log");
+    std::env::set_var("COUNTING_LEAN_LOG", &log1);
+    let opts = BuildOptions {
+        jobs: 2,
+        lean: LeanInvoker {
+            program: counting_lean(),
+            toolchain: None,
+        },
+        cache: Some(Cache::new(&xdg)),
+        force: false,
+        fp_env: FingerprintEnv {
+            leanr_version: env.leanr_version.clone(),
+            toolchain_id: env.toolchain_id.clone(),
+            platform: env.platform.clone(),
+        },
+    };
+    leanr_build::compile::build_workspace(&ws, &opts, &|_| {}).unwrap();
+    std::env::remove_var("COUNTING_LEAN_LOG");
+
+    // 2. deep_verify against the SAME counting-lean invoker → clean.
+    let log2 = tmp.path().join("verify-clean.log");
+    std::env::set_var("COUNTING_LEAN_LOG", &log2);
+    let report = cache.deep_verify(&ws, &env, &invoker, 2).unwrap();
+    std::env::remove_var("COUNTING_LEAN_LOG");
+    assert_eq!(report.checked, ws.graph.modules.len());
+    assert!(
+        report.mismatches.is_empty(),
+        "expected a clean deep_verify, got mismatches: {:?}",
+        report.mismatches
+    );
+
+    // 3. Tamper one cached blob (Root.A's olean) — make it writable, then
+    //    rewrite its bytes.
+    let fps = leanr_build::fingerprint::fingerprint_all(&ws, &env).unwrap();
+    let a_id = ws
+        .graph
+        .id_of(&ModuleName::parse("Root.A").unwrap())
+        .unwrap();
+    let manifest = cache.lookup(&fps[a_id.0 as usize]).unwrap().unwrap();
+    let blob_path = cache.blob_path(&manifest.artifacts[0].blob);
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&blob_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::write(&blob_path, b"TAMPERED").unwrap();
+
+    let log3 = tmp.path().join("verify-tampered.log");
+    std::env::set_var("COUNTING_LEAN_LOG", &log3);
+    let report2 = cache.deep_verify(&ws, &env, &invoker, 2).unwrap();
+    std::env::remove_var("COUNTING_LEAN_LOG");
+    assert!(
+        report2.mismatches.iter().any(|m| m.starts_with("Root.A:")),
+        "expected Root.A to be flagged, got: {:?}",
+        report2.mismatches
+    );
+}
+
+#[test]
 fn changing_the_env_rebuilds_everything() {
     let tmp = tempfile::TempDir::new().unwrap();
     let dir = tmp.path().join("ws");
