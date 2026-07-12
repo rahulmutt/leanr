@@ -521,17 +521,34 @@ fn lean_print_libdir() -> Result<PathBuf, String> {
     ))
 }
 
+/// The source directory a module's `file` is relative to in the JSON
+/// plan. Root modules → the workspace root; dep modules → the dep's
+/// resolved source dir (spec 2026-07-12 §Layout: module files live
+/// outside the project root now, so the plan carries package-relative
+/// paths plus a per-package source-dir field).
+fn package_dir<'a>(ws: &'a leanr_build::Workspace, package: &str) -> &'a std::path::Path {
+    ws.deps
+        .iter()
+        .find(|d| d.name == package)
+        .map(|d| d.dir.as_path())
+        .unwrap_or(&ws.root_dir)
+}
+
 fn print_json_plan(ws: &leanr_build::Workspace) -> Result<(), String> {
     let mut packages = Vec::with_capacity(ws.deps.len());
     for d in &ws.deps {
-        let dir = rel_display(&d.dir, &ws.root_dir).map_err(|abs| {
-            format!(
-                "dependency `{}` resolves to an absolute path {} outside the workspace; \
-                 use a workspace-relative `dir` in lake-manifest.json",
-                d.name,
-                abs.display()
-            )
-        })?;
+        let dir = match d.rev {
+            // Git deps live in the per-user source cache; absolute by design.
+            Some(_) => d.dir.display().to_string(),
+            None => rel_display(&d.dir, &ws.root_dir).map_err(|abs| {
+                format!(
+                    "dependency `{}` resolves to an absolute path {} outside the workspace; \
+                     use a workspace-relative `dir` in lake-manifest.json",
+                    d.name,
+                    abs.display()
+                )
+            })?,
+        };
         packages.push(JsonPackage {
             name: &d.name,
             rev: d.rev.as_deref(),
@@ -542,10 +559,10 @@ fn print_json_plan(ws: &leanr_build::Workspace) -> Result<(), String> {
     for (wave, ids) in ws.waves.iter().enumerate() {
         for id in ids {
             let m = &ws.graph.modules[id.0 as usize];
-            let file = rel_display(&m.file, &ws.root_dir).map_err(|abs| {
+            let file = rel_display(&m.file, package_dir(ws, &m.package)).map_err(|abs| {
                 format!(
-                    "module `{}` (package `{}`) resolves to an absolute path {} outside the \
-                     workspace; use a workspace-relative `dir` in lake-manifest.json",
+                    "module `{}` (package `{}`) resolves to {} outside its package directory; \
+                     this is a leanr bug — please report it",
                     m.name,
                     m.package,
                     abs.display()

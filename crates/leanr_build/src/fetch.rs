@@ -1,7 +1,8 @@
-//! Dependency materialization (spec §Architecture, component 4): ensure
-//! `.lake/packages/<name>` is a git checkout at exactly the manifest rev.
-//! Shells out to the `git` CLI (as lake itself does) with explicit
-//! argument vectors and validated URLs; never overwrites local changes.
+//! Dependency materialization (M2b spec §Layout): ensure the shared
+//! per-user source cache holds `<src_cache>/<name>/<rev>/`, an immutable
+//! git checkout at exactly that rev. Shells out to the `git` CLI (as lake
+//! itself does) with explicit argument vectors and validated URLs; a
+//! cache entry that fails rev verification is an error, never repaired.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -125,7 +126,54 @@ fn git(args: &[&str], cwd: &Path) -> Result<String, BuildError> {
     }
 }
 
-fn ensure_git(name: &str, url: &str, rev: &str, dest: &Path) -> Result<(), BuildError> {
+/// Advisory exclusive lock guarding creation of one `<name>/<rev>`
+/// checkout; released when the returned file drops. Unix `flock`; the
+/// `cfg(not(unix))` fallback creates the lock file without holding a
+/// lock (same cfg split as subprocess.rs's process-group kill —
+/// documented, and the double-check after acquisition still catches
+/// most races there).
+fn lock_exclusive(path: &Path) -> Result<std::fs::File, std::io::Error> {
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: flock on a fd we own; blocks until the lock is granted.
+        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(f)
+}
+
+/// A shared cache entry's directory name promises its rev; verify HEAD
+/// actually matches (spec §Error handling & trust: a tampered checkout
+/// fails verification and errors rather than being trusted).
+fn verify_checkout(name: &str, rev: &str, dest: &Path) -> Result<(), BuildError> {
+    let ferr = |msg: String| BuildError::Fetch {
+        name: name.to_string(),
+        msg,
+    };
+    let head = git(&["rev-parse", "HEAD"], dest).map_err(|e| {
+        ferr(format!(
+            "could not read the current commit in {}: {e}; remove the directory and re-run",
+            dest.display()
+        ))
+    })?;
+    if head != rev {
+        return Err(ferr(format!(
+            "shared source cache entry {} is at {head}, not the {rev} its path promises; \
+             cache entries are immutable — remove the directory and re-run",
+            dest.display()
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_git(name: &str, url: &str, rev: &str, pkg_cache: &Path) -> Result<(), BuildError> {
     let ferr = |msg: String| BuildError::Fetch {
         name: name.to_string(),
         msg,
@@ -136,61 +184,35 @@ fn ensure_git(name: &str, url: &str, rev: &str, dest: &Path) -> Result<(), Build
         ))
     };
     validate_package_name(name).map_err(manifest_action)?;
-    validate_git_url(url).map_err(ferr)?;
+    validate_git_url(url).map_err(&ferr)?;
     validate_rev(rev).map_err(manifest_action)?;
-    if !dest.is_dir() {
-        let parent = dest.parent().unwrap_or(Path::new("."));
-        std::fs::create_dir_all(parent)
-            .map_err(|e| ferr(format!("cannot create {}: {e}", parent.display())))?;
-        git(
-            &[
-                "clone",
-                "--",
-                url,
-                dest.to_str().ok_or_else(|| ferr("non-UTF-8 dest".into()))?,
-            ],
-            parent,
-        )
-        .map_err(|e| ferr(format!("clone failed: {e}")))?;
+    let dest = pkg_cache.join(rev);
+    if dest.is_dir() {
+        return verify_checkout(name, rev, &dest);
     }
-    let head = git(&["rev-parse", "HEAD"], dest).map_err(|e| {
-        ferr(format!(
-            "could not read the current commit in {}: {e}; remove the directory and re-run",
-            dest.display()
-        ))
-    })?;
-    if head == rev {
-        return Ok(()); // already pinned; user files (even dirty) untouched
+    std::fs::create_dir_all(pkg_cache)
+        .map_err(|e| ferr(format!("cannot create {}: {e}", pkg_cache.display())))?;
+    let _lock = lock_exclusive(&pkg_cache.join(format!("{rev}.lock")))
+        .map_err(|e| ferr(format!("cannot lock {}: {e}", pkg_cache.display())))?;
+    if dest.is_dir() {
+        // Another process created it while we waited on the lock.
+        return verify_checkout(name, rev, &dest);
     }
-    let dirty = !git(&["status", "--porcelain"], dest)
-        .map_err(|e| {
-            ferr(format!(
-                "could not check the working tree status in {}: {e}; remove the directory and re-run",
-                dest.display()
-            ))
-        })?
-        .is_empty();
-    if dirty {
-        return Err(ferr(format!(
-            "{} has local modifications but is at {head}, not the manifest rev {rev}; \
-             commit/stash or remove the directory",
-            dest.display()
-        )));
-    }
-    // Fetch only if the rev isn't already present locally.
-    if git(
+    // Clone into a temp sibling, pin the rev, verify, then rename: a
+    // crashed run never leaves a half-clone posing as a valid entry.
+    let tmp = pkg_cache.join(format!("{rev}.tmp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    git(
         &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("{rev}^{{commit}}"),
+            "clone",
+            "--",
+            url,
+            tmp.to_str()
+                .ok_or_else(|| ferr("non-UTF-8 cache path".into()))?,
         ],
-        dest,
+        pkg_cache,
     )
-    .is_err()
-    {
-        git(&["fetch", "origin"], dest).map_err(|e| ferr(format!("fetch failed: {e}")))?;
-    }
+    .map_err(|e| ferr(format!("clone failed: {e}")))?;
     git(
         &[
             "-c",
@@ -200,19 +222,22 @@ fn ensure_git(name: &str, url: &str, rev: &str, dest: &Path) -> Result<(), Build
             rev,
             "--",
         ],
-        dest,
+        &tmp,
     )
     .map_err(|e| ferr(format!("checkout of {rev} failed: {e}")))?;
+    verify_checkout(name, rev, &tmp)?;
+    std::fs::rename(&tmp, &dest)
+        .map_err(|e| ferr(format!("cannot move {} into place: {e}", tmp.display())))?;
     Ok(())
 }
 
-/// Materialize every manifest package (spec: fresh clones work with no
-/// lake invocation). Concurrent across packages; deterministic first
-/// error in package order.
+/// Materialize every manifest package into the shared per-user source
+/// cache (spec: fresh clones work with no lake invocation). Concurrent
+/// across packages; deterministic first error in package order.
 pub fn materialize(
     packages: &[ManifestPackage],
     ws_root: &Path,
-    packages_dir: &Path,
+    src_cache: &Path,
 ) -> Result<(), BuildError> {
     let results: Vec<Result<(), BuildError>> = std::thread::scope(|s| {
         let handles: Vec<_> = packages
@@ -223,7 +248,7 @@ pub fn materialize(
                         url,
                         rev,
                         sub_dir: _,
-                    } => ensure_git(&p.name, url, rev, &packages_dir.join(&p.name)),
+                    } => ensure_git(&p.name, url, rev, &src_cache.join(&p.name)),
                     PackageSource::Path { dir } => {
                         let full: PathBuf = ws_root.join(dir);
                         if full.is_dir() {
@@ -309,54 +334,80 @@ mod tests {
     fn clones_at_the_pinned_rev_not_head() {
         let (orig, r1, _r2) = origin();
         let ws = tempfile::TempDir::new().unwrap();
-        let pkgs_dir = ws.path().join(".lake/packages");
+        let cache = ws.path().join("src-cache");
         let pkg = git_pkg("dep", orig.path().to_str().unwrap().into(), r1.clone());
-        materialize(&[pkg], ws.path(), &pkgs_dir).unwrap();
-        assert_eq!(sh(&pkgs_dir.join("dep"), "git rev-parse HEAD"), r1);
+        materialize(&[pkg], ws.path(), &cache).unwrap();
+        assert_eq!(sh(&cache.join("dep").join(&r1), "git rev-parse HEAD"), r1);
     }
 
     #[test]
-    fn existing_clean_checkout_at_wrong_rev_is_moved_to_the_pin() {
+    fn tampered_cache_entry_is_an_error_never_repaired() {
         let (orig, r1, r2) = origin();
         let ws = tempfile::TempDir::new().unwrap();
-        let pkgs_dir = ws.path().join(".lake/packages");
-        let url: String = orig.path().to_str().unwrap().into();
-        materialize(&[git_pkg("dep", url.clone(), r2)], ws.path(), &pkgs_dir).unwrap();
-        materialize(&[git_pkg("dep", url, r1.clone())], ws.path(), &pkgs_dir).unwrap();
-        assert_eq!(sh(&pkgs_dir.join("dep"), "git rev-parse HEAD"), r1);
-    }
-
-    #[test]
-    fn dirty_checkout_is_an_error_never_overwritten() {
-        let (orig, r1, r2) = origin();
-        let ws = tempfile::TempDir::new().unwrap();
-        let pkgs_dir = ws.path().join(".lake/packages");
-        let url: String = orig.path().to_str().unwrap().into();
-        materialize(&[git_pkg("dep", url.clone(), r1)], ws.path(), &pkgs_dir).unwrap();
-        std::fs::write(pkgs_dir.join("dep/local-work.txt"), "precious").unwrap();
-        let err = materialize(&[git_pkg("dep", url, r2)], ws.path(), &pkgs_dir).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("dep") && msg.contains("local"), "got: {msg}");
-        // The precious file survived.
-        assert!(pkgs_dir.join("dep/local-work.txt").exists());
-    }
-
-    #[test]
-    fn matching_rev_is_a_no_op_even_when_dirty() {
-        let (orig, r1, _r2) = origin();
-        let ws = tempfile::TempDir::new().unwrap();
-        let pkgs_dir = ws.path().join(".lake/packages");
+        let cache = ws.path().join("src-cache");
         let url: String = orig.path().to_str().unwrap().into();
         materialize(
             &[git_pkg("dep", url.clone(), r1.clone())],
             ws.path(),
-            &pkgs_dir,
+            &cache,
         )
         .unwrap();
-        std::fs::write(pkgs_dir.join("dep/scratch.txt"), "wip").unwrap();
-        // Already at the right rev: leave the user's files alone.
-        materialize(&[git_pkg("dep", url, r1)], ws.path(), &pkgs_dir).unwrap();
-        assert!(pkgs_dir.join("dep/scratch.txt").exists());
+        // Tamper: move the r1-keyed entry to r2 behind leanr's back.
+        sh(
+            &cache.join("dep").join(&r1),
+            &format!("git -c advice.detachedHead=false checkout -q --detach {r2}"),
+        );
+        let err = materialize(&[git_pkg("dep", url, r1.clone())], ws.path(), &cache).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("immutable") && msg.contains(&r1), "got: {msg}");
+    }
+
+    #[test]
+    fn concurrent_materialize_of_the_same_rev_races_safely() {
+        let (orig, r1, _r2) = origin();
+        let ws = tempfile::TempDir::new().unwrap();
+        let cache = ws.path().join("src-cache");
+        let url: String = orig.path().to_str().unwrap().into();
+        let results: Vec<Result<(), BuildError>> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let pkg = git_pkg("dep", url.clone(), r1.clone());
+                    let cache = cache.clone();
+                    let root = ws.path().to_path_buf();
+                    s.spawn(move || materialize(&[pkg], &root, &cache))
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for r in results {
+            r.unwrap();
+        }
+        assert_eq!(sh(&cache.join("dep").join(&r1), "git rev-parse HEAD"), r1);
+        let leftovers: Vec<_> = std::fs::read_dir(cache.join("dep"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftover tmp dirs: {leftovers:?}");
+    }
+
+    #[test]
+    fn dirty_entry_at_the_right_rev_is_left_alone() {
+        let (orig, r1, _r2) = origin();
+        let ws = tempfile::TempDir::new().unwrap();
+        let cache = ws.path().join("src-cache");
+        let url: String = orig.path().to_str().unwrap().into();
+        materialize(
+            &[git_pkg("dep", url.clone(), r1.clone())],
+            ws.path(),
+            &cache,
+        )
+        .unwrap();
+        std::fs::write(cache.join("dep").join(&r1).join("scratch.txt"), "wip").unwrap();
+        // Already at the right rev: leave the user's files alone (HEAD is
+        // the only thing verified; `status` is no longer consulted).
+        materialize(&[git_pkg("dep", url, r1.clone())], ws.path(), &cache).unwrap();
+        assert!(cache.join("dep").join(&r1).join("scratch.txt").exists());
     }
 
     #[test]
@@ -370,7 +421,7 @@ mod tests {
             config_file: PathBuf::from("lakefile.toml"),
             inherited: false,
         };
-        let err = materialize(&[pkg], ws.path(), &ws.path().join("pkgs")).unwrap_err();
+        let err = materialize(&[pkg], ws.path(), &ws.path().join("src-cache")).unwrap_err();
         assert!(err.to_string().contains("local"));
     }
 
@@ -380,7 +431,7 @@ mod tests {
         let ws = tempfile::TempDir::new().unwrap();
         let bad = "0123456789abcdef0123456789abcdef01234567".to_string();
         let pkg = git_pkg("dep", orig.path().to_str().unwrap().into(), bad);
-        let err = materialize(&[pkg], ws.path(), &ws.path().join("pkgs")).unwrap_err();
+        let err = materialize(&[pkg], ws.path(), &ws.path().join("src-cache")).unwrap_err();
         assert!(err.to_string().contains("dep"));
     }
 
@@ -401,15 +452,15 @@ mod tests {
     fn malicious_package_name_is_rejected_before_touching_the_filesystem() {
         let (orig, r1, _r2) = origin();
         let ws = tempfile::TempDir::new().unwrap();
-        let pkgs_dir = ws.path().join(".lake/packages");
+        let cache = ws.path().join("src-cache");
         let pkg = git_pkg("../evil", orig.path().to_str().unwrap().into(), r1);
-        let err = materialize(&[pkg], ws.path(), &pkgs_dir).unwrap_err();
+        let err = materialize(&[pkg], ws.path(), &cache).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("evil"), "got: {msg}");
-        // Nothing escaped packages_dir, and packages_dir itself was never
+        // Nothing escaped the cache, and the cache itself was never
         // created — validation happens before any filesystem/git action.
         assert!(!ws.path().join("evil").exists());
-        assert!(!pkgs_dir.exists());
+        assert!(!cache.exists());
     }
 
     // -- Finding 3: rev unguarded ---------------------------------------
@@ -429,22 +480,22 @@ mod tests {
     fn malicious_rev_is_rejected_before_invoking_git() {
         let (orig, _r1, _r2) = origin();
         let ws = tempfile::TempDir::new().unwrap();
-        let pkgs_dir = ws.path().join(".lake/packages");
+        let cache = ws.path().join("src-cache");
         let pkg = git_pkg("dep", orig.path().to_str().unwrap().into(), "-x".into());
-        let err = materialize(&[pkg], ws.path(), &pkgs_dir).unwrap_err();
+        let err = materialize(&[pkg], ws.path(), &cache).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("dep"), "got: {msg}");
         // Rejected before the clone that would otherwise create this dir.
-        assert!(!pkgs_dir.join("dep").exists());
+        assert!(!cache.join("dep").exists());
 
         let pkg2 = git_pkg(
             "dep2",
             orig.path().to_str().unwrap().into(),
             "$(rm -rf /)".into(),
         );
-        let err2 = materialize(&[pkg2], ws.path(), &pkgs_dir).unwrap_err();
+        let err2 = materialize(&[pkg2], ws.path(), &cache).unwrap_err();
         assert!(err2.to_string().contains("dep2"));
-        assert!(!pkgs_dir.join("dep2").exists());
+        assert!(!cache.join("dep2").exists());
     }
 
     // -- Finding 4: two error paths bypass package attribution ----------
@@ -452,15 +503,12 @@ mod tests {
     #[test]
     fn stray_non_git_directory_reports_the_package_name() {
         let ws = tempfile::TempDir::new().unwrap();
-        let pkgs_dir = ws.path().join(".lake/packages");
-        std::fs::create_dir_all(pkgs_dir.join("dep")).unwrap();
-        std::fs::write(pkgs_dir.join("dep/not-a-repo.txt"), "oops").unwrap();
-        let pkg = git_pkg(
-            "dep",
-            "https://example.invalid/x/y".into(),
-            "0123456789abcdef0123456789abcdef01234567".into(),
-        );
-        let err = materialize(&[pkg], ws.path(), &pkgs_dir).unwrap_err();
+        let cache = ws.path().join("src-cache");
+        let rev = "0123456789abcdef0123456789abcdef01234567";
+        std::fs::create_dir_all(cache.join("dep").join(rev)).unwrap();
+        std::fs::write(cache.join("dep").join(rev).join("not-a-repo.txt"), "oops").unwrap();
+        let pkg = git_pkg("dep", "https://example.invalid/x/y".into(), rev.into());
+        let err = materialize(&[pkg], ws.path(), &cache).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("dep"), "got: {msg}");
     }

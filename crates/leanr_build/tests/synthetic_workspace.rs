@@ -150,9 +150,9 @@ fn legitimate_sub_dir_resolves_end_to_end() {
     assert_eq!(ws.deps.len(), 1);
     assert_eq!(ws.deps[0].name, "dep");
     assert!(ws.deps[0].dir.ends_with("sub"));
-    // Materialized the whole repo, then resolved the config from the
-    // subDir within it.
-    assert!(app.join(".lake/packages/dep/sub/Dep.lean").is_file());
+    // Materialized the whole repo into the shared source cache, then
+    // resolved the config from the subDir within it.
+    assert!(ws.deps[0].dir.join("Dep.lean").is_file());
     assert!(ws.warnings.is_empty());
 
     let names: Vec<Vec<String>> = ws
@@ -176,7 +176,9 @@ fn resolves_a_fresh_workspace_end_to_end() {
     assert_eq!(ws.deps.len(), 1);
     assert_eq!(ws.deps[0].name, "dep");
     assert!(ws.deps[0].rev.is_some());
-    assert!(app.join(".lake/packages/dep/Dep.lean").is_file()); // materialized
+    // Materialized into the shared per-user source cache, not the workspace.
+    assert!(ws.deps[0].dir.join("Dep.lean").is_file());
+    assert!(ws.deps[0].dir.starts_with(tmp.path().join("xdg-cache")));
 
     // Finding 2: the effective-targets fallback (defaultTargets, since
     // opts.targets is empty here) is single-sourced onto the workspace.

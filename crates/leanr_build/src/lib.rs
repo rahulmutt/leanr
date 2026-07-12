@@ -117,16 +117,16 @@ pub fn resolve(root_dir: &Path, opts: &ResolveOptions) -> Result<Workspace, Buil
         }
     }
 
-    // 4. Materialize.
-    let packages_dir = root_dir.join(&manifest.packages_dir);
-    fetch::materialize(&manifest.packages, root_dir, &packages_dir)?;
+    // 4. Materialize into the shared per-user source cache.
+    let src_cache = opts.cache_root.join("src");
+    fetch::materialize(&manifest.packages, root_dir, &src_cache)?;
 
     // 5. Dependency configs.
     let mut deps = Vec::new();
     for entry in &manifest.packages {
         let (dir, rev) = match &entry.source {
             manifest::PackageSource::Git { rev, sub_dir, .. } => {
-                let base = packages_dir.join(&entry.name);
+                let base = src_cache.join(&entry.name).join(rev);
                 let dir = match sub_dir {
                     Some(sd) => base.join(sd),
                     None => base,

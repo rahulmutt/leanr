@@ -181,5 +181,5 @@ fn json_output_carries_path_dependency_package_and_module() {
         .find(|m| m["name"] == "Dep")
         .expect("Dep module present");
     assert_eq!(dep_module["package"], "dep");
-    assert_eq!(dep_module["file"], "../dep/Dep.lean");
+    assert_eq!(dep_module["file"], "Dep.lean");
 }
