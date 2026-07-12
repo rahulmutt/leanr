@@ -71,6 +71,12 @@ enum Command {
         /// for tests and debugging).
         #[arg(long)]
         lean: Option<PathBuf>,
+        /// Ignore the artifact cache: always run `lean`, never read or write it.
+        #[arg(long)]
+        no_cache: bool,
+        /// Rebuild every module with `lean`, then refresh the cache.
+        #[arg(long, conflicts_with = "no_cache")]
+        force: bool,
     },
 }
 
@@ -106,7 +112,19 @@ fn main() -> ExitCode {
             toolchain_dir,
             jobs,
             lean,
-        } => build(targets, dry_run, json, dir, toolchain_dir, jobs, lean),
+            no_cache,
+            force,
+        } => build(
+            targets,
+            dry_run,
+            json,
+            dir,
+            toolchain_dir,
+            jobs,
+            lean,
+            no_cache,
+            force,
+        ),
     }
 }
 
@@ -446,6 +464,7 @@ fn rel_display(path: &std::path::Path, root: &std::path::Path) -> Result<String,
         .join("/"))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build(
     targets: Vec<String>,
     dry_run: bool,
@@ -454,6 +473,8 @@ fn build(
     toolchain_dir: Option<PathBuf>,
     jobs: Option<usize>,
     lean: Option<PathBuf>,
+    no_cache: bool,
+    force: bool,
 ) -> ExitCode {
     let run = || -> Result<(), String> {
         let start = match &dir {
@@ -503,24 +524,42 @@ fn build(
                 .map(|n| n.get())
                 .unwrap_or(1)
         });
+        let fp_env = leanr_build::fingerprint::FingerprintEnv {
+            leanr_version: env!("CARGO_PKG_VERSION").to_string(),
+            toolchain_id: toolchain_for_lean.clone().unwrap_or_default(),
+            platform: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+        };
+        let cache = if no_cache {
+            None
+        } else {
+            Some(leanr_build::cache::Cache::new(&opts.cache_root))
+        };
         let build_opts = leanr_build::compile::BuildOptions {
             jobs,
             lean: leanr_build::compile::LeanInvoker {
                 program: lean.unwrap_or_else(|| PathBuf::from("lean")),
                 toolchain: toolchain_for_lean,
             },
+            cache,
+            force,
+            fp_env,
         };
         let build_start = std::time::Instant::now();
         let report = leanr_build::compile::build_workspace(&ws, &build_opts, &|e| {
             if !e.diagnostics.is_empty() {
                 eprint!("{}", e.diagnostics);
             }
-            println!("[{}/{}] {} ({:.1}s)", e.done, e.total, e.module, e.secs);
+            let tag = if e.cached { " (cached)" } else { "" };
+            println!(
+                "[{}/{}] {}{} ({:.1}s)",
+                e.done, e.total, e.module, tag, e.secs
+            );
         })
         .map_err(|e| e.to_string())?;
         println!(
-            "built {} modules in {:.1}s ({} jobs)",
+            "built {} modules ({} cached) in {:.1}s ({} jobs)",
             report.built,
+            report.cached,
             build_start.elapsed().as_secs_f64(),
             jobs
         );
