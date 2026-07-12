@@ -13,6 +13,7 @@ pub mod cache_dir;
 pub mod compile;
 pub mod config;
 mod error;
+mod fslock;
 pub mod fetch;
 pub mod graph;
 pub mod manifest;

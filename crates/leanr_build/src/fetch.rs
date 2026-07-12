@@ -148,29 +148,6 @@ fn git(args: &[&str], cwd: &Path) -> Result<String, BuildError> {
     }
 }
 
-/// Advisory exclusive lock guarding creation of one `<name>/<rev>`
-/// checkout; released when the returned file drops. Unix `flock`; the
-/// `cfg(not(unix))` fallback creates the lock file without holding a
-/// lock (same cfg split as subprocess.rs's process-group kill —
-/// documented, and the double-check after acquisition still catches
-/// most races there).
-fn lock_exclusive(path: &Path) -> Result<std::fs::File, std::io::Error> {
-    let f = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        // SAFETY: flock on a fd we own; blocks until the lock is granted.
-        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-    }
-    Ok(f)
-}
-
 /// A shared cache entry's directory name promises its rev; verify HEAD
 /// actually matches (spec §Error handling & trust: a tampered checkout
 /// fails verification and errors rather than being trusted).
@@ -216,7 +193,7 @@ fn ensure_git(name: &str, url: &str, rev: &str, pkg_cache: &Path) -> Result<(), 
     let lock_parent = lock_path.parent().unwrap();
     std::fs::create_dir_all(lock_parent)
         .map_err(|e| ferr(format!("cannot create {}: {e}", lock_parent.display())))?;
-    let _lock = lock_exclusive(&lock_path)
+    let _lock = crate::fslock::lock_exclusive(&lock_path)
         .map_err(|e| ferr(format!("cannot lock {}: {e}", lock_path.display())))?;
     if dest.is_dir() {
         // Another process created it while we waited on the lock.
