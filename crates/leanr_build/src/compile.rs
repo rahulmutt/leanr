@@ -211,7 +211,7 @@ pub fn build_workspace(
             diagnostics: &diags,
         });
     };
-    pool::run(&deps, opts.jobs, &job, &on_done).map_err(|f| {
+    let built = pool::run(&deps, opts.jobs, &job, &on_done).map_err(|f| {
         let m = &ws.graph.modules[f.item];
         BuildError::ModuleBuild {
             module: m.name.to_string(),
@@ -219,9 +219,7 @@ pub fn build_workspace(
             details: f.message,
         }
     })?;
-    Ok(BuildReport {
-        built: ws.graph.modules.len(),
-    })
+    Ok(BuildReport { built })
 }
 
 #[cfg(test)]

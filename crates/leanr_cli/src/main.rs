@@ -46,7 +46,8 @@ enum Command {
         #[arg(long)]
         sequential: bool,
     },
-    /// Resolve the workspace and plan a build (M2a: --dry-run only).
+    /// Resolve the workspace and build every planned module (`--dry-run`
+    /// prints the plan without building).
     Build {
         /// lean_lib targets (default: the root package's defaultTargets).
         targets: Vec<String>,
@@ -505,11 +506,11 @@ fn build(
         let build_opts = leanr_build::compile::BuildOptions {
             jobs,
             lean: leanr_build::compile::LeanInvoker {
-                program: lean.clone().unwrap_or_else(|| PathBuf::from("lean")),
+                program: lean.unwrap_or_else(|| PathBuf::from("lean")),
                 toolchain: toolchain_for_lean,
             },
         };
-        let start = std::time::Instant::now();
+        let build_start = std::time::Instant::now();
         let report = leanr_build::compile::build_workspace(&ws, &build_opts, &|e| {
             if !e.diagnostics.is_empty() {
                 eprint!("{}", e.diagnostics);
@@ -520,7 +521,7 @@ fn build(
         println!(
             "built {} modules in {:.1}s ({} jobs)",
             report.built,
-            start.elapsed().as_secs_f64(),
+            build_start.elapsed().as_secs_f64(),
             jobs
         );
         Ok(())

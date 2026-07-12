@@ -33,12 +33,19 @@ struct State {
 /// waits on), at most `jobs` at a time. Fail-fast: the first failure
 /// abandons everything not yet started; in-flight jobs finish.
 /// `on_done(item, done_count, total)` fires after each success.
+///
+/// On success, the `Ok` payload is the number of items that actually
+/// completed (`done`) — normally equal to `deps.len()`, but the
+/// in-flight guard above lets this return cleanly short of `total` if
+/// nothing is ready and nothing is running (a stall that `resolve()`'s
+/// cycle rejection is meant to make unreachable). Callers must not
+/// assume `Ok` implies every item ran; check the returned count.
 pub fn run(
     deps: &[Vec<usize>],
     jobs: usize,
     job: &(dyn Fn(usize) -> Result<(), String> + Sync),
     on_done: &(dyn Fn(usize, usize, usize) + Sync),
-) -> Result<(), PoolFailure> {
+) -> Result<usize, PoolFailure> {
     let total = deps.len();
     let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); total];
     let mut remaining = vec![0usize; total];
@@ -112,7 +119,7 @@ pub fn run(
     let mut st = state.lock().unwrap();
     match st.failure.take() {
         Some(f) => Err(f),
-        None => Ok(()),
+        None => Ok(st.done),
     }
 }
 
@@ -139,7 +146,7 @@ mod tests {
 
     #[test]
     fn empty_graph_completes() {
-        assert!(run(&[], 4, &|_| Ok(()), &|_, _, _| {}).is_ok());
+        assert_eq!(run(&[], 4, &|_| Ok(()), &|_, _, _| {}).unwrap(), 0);
     }
 
     #[test]
@@ -195,7 +202,7 @@ mod tests {
         let deps: Vec<Vec<usize>> = (0..16).map(|_| vec![]).collect();
         let current = AtomicUsize::new(0);
         let high = AtomicUsize::new(0);
-        run(
+        let done = run(
             &deps,
             2,
             &|_| {
@@ -209,13 +216,14 @@ mod tests {
         )
         .unwrap();
         assert!(high.load(Ordering::SeqCst) <= 2);
+        assert_eq!(done, 16);
     }
 
     #[test]
     fn on_done_counts_monotonically_to_total() {
         let deps: Vec<Vec<usize>> = (0..5).map(|_| vec![]).collect();
         let seen = Mutex::new(Vec::new());
-        run(&deps, 3, &|_| Ok(()), &|_, done, total| {
+        let done = run(&deps, 3, &|_| Ok(()), &|_, done, total| {
             assert_eq!(total, 5);
             seen.lock().unwrap().push(done);
         })
@@ -223,5 +231,15 @@ mod tests {
         let mut s = seen.into_inner().unwrap();
         s.sort_unstable();
         assert_eq!(s, vec![1, 2, 3, 4, 5]);
+        assert_eq!(done, 5);
+    }
+
+    #[test]
+    fn run_returns_completed_count() {
+        // A small fully-completing diamond: the Ok payload must equal
+        // the total item count, not just "no error occurred".
+        let deps = vec![vec![], vec![0], vec![0], vec![1, 2]];
+        let done = run(&deps, 4, &|_| Ok(()), &|_, _, _| {}).unwrap();
+        assert_eq!(done, deps.len());
     }
 }
