@@ -63,6 +63,13 @@ enum Command {
         /// Toolchain olean directory (default: `lean --print-libdir`).
         #[arg(long)]
         toolchain_dir: Option<PathBuf>,
+        /// Worker processes (default: available parallelism).
+        #[arg(long)]
+        jobs: Option<usize>,
+        /// lean executable to drive (default: `lean` on PATH; primarily
+        /// for tests and debugging).
+        #[arg(long)]
+        lean: Option<PathBuf>,
     },
 }
 
@@ -96,7 +103,9 @@ fn main() -> ExitCode {
             json,
             dir,
             toolchain_dir,
-        } => build(targets, dry_run, json, dir, toolchain_dir),
+            jobs,
+            lean,
+        } => build(targets, dry_run, json, dir, toolchain_dir, jobs, lean),
     }
 }
 
@@ -442,14 +451,9 @@ fn build(
     json: bool,
     dir: Option<PathBuf>,
     toolchain_dir: Option<PathBuf>,
+    jobs: Option<usize>,
+    lean: Option<PathBuf>,
 ) -> ExitCode {
-    if !dry_run {
-        eprintln!(
-            "error: `leanr build` without --dry-run is not implemented yet (coming in M2b); \
-             run `leanr build --dry-run`"
-        );
-        return ExitCode::FAILURE;
-    }
     let run = || -> Result<(), String> {
         let start = match &dir {
             Some(d) => d.clone(),
@@ -471,6 +475,7 @@ fn build(
         let toolchain = std::fs::read_to_string(root_dir.join("lean-toolchain"))
             .ok()
             .map(|s| s.trim().to_string());
+        let toolchain_for_lean = toolchain.clone();
         let opts = leanr_build::ResolveOptions {
             targets: targets.clone(),
             lake: leanr_build::bridge::LakeInvoker {
@@ -484,11 +489,40 @@ fn build(
         for w in &ws.warnings {
             eprintln!("warning: {w}");
         }
-        if json {
-            print_json_plan(&ws)?;
-        } else {
-            print_text_plan(&ws);
+        if dry_run {
+            if json {
+                print_json_plan(&ws)?;
+            } else {
+                print_text_plan(&ws);
+            }
+            return Ok(());
         }
+        let jobs = jobs.unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        });
+        let build_opts = leanr_build::compile::BuildOptions {
+            jobs,
+            lean: leanr_build::compile::LeanInvoker {
+                program: lean.clone().unwrap_or_else(|| PathBuf::from("lean")),
+                toolchain: toolchain_for_lean,
+            },
+        };
+        let start = std::time::Instant::now();
+        let report = leanr_build::compile::build_workspace(&ws, &build_opts, &|e| {
+            if !e.diagnostics.is_empty() {
+                eprint!("{}", e.diagnostics);
+            }
+            println!("[{}/{}] {} ({:.1}s)", e.done, e.total, e.module, e.secs);
+        })
+        .map_err(|e| e.to_string())?;
+        println!(
+            "built {} modules in {:.1}s ({} jobs)",
+            report.built,
+            start.elapsed().as_secs_f64(),
+            jobs
+        );
         Ok(())
     };
     match run() {

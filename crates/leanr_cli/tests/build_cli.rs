@@ -74,17 +74,56 @@ fn json_output_is_workspace_relative_and_wave_ordered() {
     assert_eq!(mods[1]["wave"], 1);
 }
 
+fn fake_lean_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../leanr_build/tests/fixtures/fake-lean.sh")
+        .canonicalize()
+        .unwrap()
+}
+
 #[test]
-fn build_without_dry_run_is_a_clear_not_yet_error() {
+fn bare_build_compiles_the_plan_with_progress_and_summary() {
     let tmp = setup();
     Command::cargo_bin("leanr")
         .unwrap()
         .current_dir(tmp.path())
         .env("XDG_CACHE_HOME", tmp.path().join("xdg-cache"))
         .args(["build"])
+        .args([
+            "--toolchain-dir",
+            tmp.path().join("fake-toolchain").to_str().unwrap(),
+        ])
+        .args(["--lean", fake_lean_path().to_str().unwrap()])
+        .args(["--jobs", "2"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[1/2] App.Sub"))
+        .stdout(predicate::str::contains("[2/2] App"))
+        .stdout(predicate::str::contains("built 2 modules"));
+    assert!(tmp
+        .path()
+        .join(".leanr/build/app/lib/App/Sub.olean")
+        .is_file());
+}
+
+#[test]
+fn failed_module_build_is_reported_with_its_diagnostics() {
+    let tmp = setup();
+    Command::cargo_bin("leanr")
+        .unwrap()
+        .current_dir(tmp.path())
+        .env("XDG_CACHE_HOME", tmp.path().join("xdg-cache"))
+        .env("FAKE_LEAN_FAIL_ON", "Sub.lean")
+        .args(["build"])
+        .args([
+            "--toolchain-dir",
+            tmp.path().join("fake-toolchain").to_str().unwrap(),
+        ])
+        .args(["--lean", fake_lean_path().to_str().unwrap()])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("M2b"));
+        .stderr(predicate::str::contains("App.Sub"))
+        .stderr(predicate::str::contains("unknown identifier"));
 }
 
 #[test]
