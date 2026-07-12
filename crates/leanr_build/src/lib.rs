@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 pub mod bridge;
 pub mod cache_dir;
+pub mod compile;
 pub mod config;
 mod error;
 pub mod fetch;

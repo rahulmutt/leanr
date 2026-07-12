@@ -33,4 +33,12 @@ pub enum BuildError {
     UnknownTarget(String),
     #[error("{path}: {err}")]
     Io { path: PathBuf, err: String },
+    #[error("package `{package}` requires {feature}, which `leanr build` does not support yet (M2b builds lean_lib artifacts only)")]
+    Unsupported { package: String, feature: String },
+    #[error("building `{module}` ({file}) failed:\n{details}")]
+    ModuleBuild {
+        module: String,
+        file: PathBuf,
+        details: String,
+    },
 }
