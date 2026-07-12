@@ -11,19 +11,24 @@ pub(crate) struct TestWs {
 }
 
 pub(crate) fn synthetic() -> TestWs {
+    synthetic_with(
+        "name = \"app\"\ndefaultTargets = [\"App\"]\nleanOptions = {autoImplicit = false}\n\n\
+         [[lean_lib]]\nname = \"App\"\nleanOptions = {\"pp.unicode.fun\" = true}\n",
+        &[("App.lean", "import App.Sub\n"), ("App/Sub.lean", "")],
+    )
+}
+
+pub(crate) fn synthetic_with(lakefile: &str, files: &[(&str, &str)]) -> TestWs {
     let tmp = tempfile::TempDir::new().unwrap();
     let write = |rel: &str, text: &str| {
         let p = tmp.path().join(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, text).unwrap();
     };
-    write(
-        "lakefile.toml",
-        "name = \"app\"\ndefaultTargets = [\"App\"]\nleanOptions = {autoImplicit = false}\n\n\
-         [[lean_lib]]\nname = \"App\"\nleanOptions = {\"pp.unicode.fun\" = true}\n",
-    );
-    write("App.lean", "import App.Sub\n");
-    write("App/Sub.lean", "");
+    write("lakefile.toml", lakefile);
+    for (rel, text) in files {
+        write(rel, text);
+    }
     write(
         "lake-manifest.json",
         r#"{"version": "1.2.0", "packages": []}"#,

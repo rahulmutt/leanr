@@ -253,4 +253,73 @@ mod tests {
         let parts: Vec<PathBuf> = std::env::split_paths(&lp).collect();
         assert!(parts.contains(&layout.lib_dir("app")));
     }
+
+    #[test]
+    fn lib_options_win_over_package_options_for_shared_keys() {
+        let t = testws::synthetic_with(
+            "name = \"app\"\ndefaultTargets = [\"App\"]\nleanOptions = {autoImplicit = false}\n\n\
+             [[lean_lib]]\nname = \"App\"\nleanOptions = {autoImplicit = true}\n",
+            &[("App.lean", "import App.Sub\n"), ("App/Sub.lean", "")],
+        );
+        let layout = Layout::new(&t.ws.root_dir);
+        let app_id =
+            t.ws.graph
+                .id_of(&crate::modules::ModuleName::parse("App").unwrap())
+                .unwrap();
+        let s = module_setup(&t.ws, &layout, app_id);
+        let got = serde_json::to_value(&s).unwrap();
+        assert_eq!(got["options"]["autoImplicit"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn module_system_dependency_contributes_full_art_family_to_import_arts() {
+        let t = testws::synthetic_with(
+            "name = \"app\"\ndefaultTargets = [\"App\"]\nleanOptions = {autoImplicit = false}\n\n\
+             [[lean_lib]]\nname = \"App\"\nleanOptions = {\"pp.unicode.fun\" = true}\n",
+            &[
+                ("App.lean", "import App.Sub\n"),
+                ("App/Sub.lean", "module\n\ndef x := 1\n"),
+            ],
+        );
+        let layout = Layout::new(&t.ws.root_dir);
+        let sub_id =
+            t.ws.graph
+                .id_of(&crate::modules::ModuleName::parse("App.Sub").unwrap())
+                .unwrap();
+        let sub = &t.ws.graph.modules[sub_id.0 as usize];
+        assert!(
+            sub.is_module,
+            "expected header scanner to mark App/Sub.lean (starts with `module`) as is_module"
+        );
+
+        let app_id =
+            t.ws.graph
+                .id_of(&crate::modules::ModuleName::parse("App").unwrap())
+                .unwrap();
+        let s = module_setup(&t.ws, &layout, app_id);
+        let sub_name = crate::modules::ModuleName::parse("App.Sub").unwrap();
+        let expected: Vec<String> = ["olean", "ir", "olean.server", "olean.private"]
+            .iter()
+            .map(|ext| {
+                layout
+                    .module_path(layout.lib_dir("app"), &sub_name, ext)
+                    .display()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(s.import_arts.get("App.Sub"), Some(&expected));
+    }
+
+    #[test]
+    fn leaf_module_has_empty_import_arts() {
+        let t = testws::synthetic();
+        let layout = Layout::new(&t.ws.root_dir);
+        let sub_id =
+            t.ws.graph
+                .id_of(&crate::modules::ModuleName::parse("App.Sub").unwrap())
+                .unwrap();
+        let s = module_setup(&t.ws, &layout, sub_id);
+        let got = serde_json::to_value(&s).unwrap();
+        assert_eq!(got["importArts"], serde_json::json!({}));
+    }
 }
