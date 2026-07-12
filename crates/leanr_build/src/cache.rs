@@ -252,7 +252,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::cloned_ref_to_slice_refs)]
     fn materialize_overwrites_a_pre_existing_dest() {
         let (t, c) = cache();
         let a = t.path().join("A.olean");
@@ -263,7 +262,7 @@ mod tests {
         let mut perms = std::fs::metadata(&dest).unwrap().permissions();
         perms.set_readonly(true);
         std::fs::set_permissions(&dest, perms).unwrap();
-        c.materialize(&m, &[dest.clone()]).unwrap();
+        c.materialize(&m, std::slice::from_ref(&dest)).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"fresh");
     }
 }
