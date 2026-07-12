@@ -1,0 +1,105 @@
+name = "mathlib"
+testDriver = "MathlibTest"
+lintDriver = "batteries/runLinter"
+lintDriverArgs = ["Mathlib"]
+defaultTargets = ["Mathlib"]
+
+[[require]]
+name = "batteries"
+scope = "leanprover-community"
+rev = "main"
+
+[[require]]
+name = "Qq"
+scope = "leanprover-community"
+rev = "master"
+
+[[require]]
+name = "aesop"
+scope = "leanprover-community"
+rev = "master"
+
+[[require]]
+name = "proofwidgets"
+scope = "leanprover-community"
+rev = "main"
+options = {errorOnBuild = "ProofWidgets failed to reuse pre-built JS code. Please report this issue on the Lean Zulip."}
+
+[[require]]
+name = "importGraph"
+scope = "leanprover-community"
+rev = "main"
+
+[[require]]
+name = "LeanSearchClient"
+scope = "leanprover-community"
+rev = "main"
+
+[[require]]
+name = "plausible"
+scope = "leanprover-community"
+rev = "main"
+
+[[lean_lib]]
+name = "Mathlib"
+leanOptions = {pp.unicode.fun = true, autoImplicit = false, maxSynthPendingDepth = 3, weak.linter.mathlibStandardSet = true, weak.linter.style.header = true, weak.linter.checkInitImports = true, weak.linter.allScriptsDocumented = true, weak.linter.pythonStyle = true, weak.linter.style.longFile = 1500}
+
+[[lean_lib]]
+name = "Cache"
+globs = ["Cache.+"]
+
+[[lean_lib]]
+name = "MathlibTest"
+globs = ["MathlibTest.+"]
+
+[[lean_lib]]
+name = "Archive"
+leanOptions = {pp.unicode.fun = true, autoImplicit = false, maxSynthPendingDepth = 3, weak.linter.mathlibStandardSet = true, weak.linter.style.header = true, weak.linter.checkInitImports = true, weak.linter.allScriptsDocumented = true, weak.linter.pythonStyle = true, weak.linter.style.longFile = 1500}
+
+[[lean_lib]]
+name = "Counterexamples"
+leanOptions = {pp.unicode.fun = true, autoImplicit = false, maxSynthPendingDepth = 3, weak.linter.mathlibStandardSet = true, weak.linter.style.header = true, weak.linter.checkInitImports = true, weak.linter.allScriptsDocumented = true, weak.linter.pythonStyle = true, weak.linter.style.longFile = 1500}
+
+[[lean_lib]]
+name = "docs"
+
+[[lean_exe]]
+name = "autolabel"
+srcDir = "scripts"
+
+[[lean_exe]]
+name = "cache"
+root = "Cache.Main"
+
+[[lean_exe]]
+name = "«cache-test»"
+root = "Cache.Test"
+
+[[lean_exe]]
+name = "«check-yaml»"
+srcDir = "scripts"
+supportInterpreter = true
+
+[[lean_exe]]
+name = "mk_all"
+srcDir = "scripts"
+supportInterpreter = true
+weakLinkArgs = ["-lLake"]
+
+[[lean_exe]]
+name = "«lint-style»"
+srcDir = "scripts"
+supportInterpreter = true
+weakLinkArgs = ["-lLake"]
+
+[[lean_exe]]
+name = "check_title_labels"
+srcDir = "scripts"
+
+[[lean_exe]]
+name = "«nightly-testing-checklist»"
+srcDir = "scripts"
+
+[[lean_exe]]
+name = "mathlib_test_executable"
+root = "MathlibTest.MathlibTestExecutable"

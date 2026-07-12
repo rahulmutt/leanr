@@ -70,6 +70,10 @@ implementation or a thin frontend. Full design:
   (`mise run check:stdlib:differential`, kept as a permanent regression
   gate). Spec:
   `docs/superpowers/specs/2026-07-10-m1-final-parallel-mathlib-design.md`.
+- `crates/leanr_build` — Lake-compatible package model + module graph
+  (M2a): lakefile.toml schema, translate-config bridge, manifest-driven
+  git materialization, import DAG. `leanr build --dry-run`. No kernel
+  dependency.
 - `crates/leanr_cli` — the `leanr` binary. Thin: argument parsing and
   printing only, so CLI and (future) LSP can never diverge in behavior.
 

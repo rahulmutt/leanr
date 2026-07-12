@@ -11,6 +11,8 @@ allow = [
   # sanctioned kernel TCB recursion dep).
   "Apache-2.0 WITH LLVM-exception",
   "MIT",
+  # BSD-2-Clause is pulled in by `arrayref`, a dependency of `blake3`.
+  "BSD-2-Clause",
   "BSD-3-Clause",
   "ISC",
   "Unicode-3.0",
