@@ -79,6 +79,13 @@ fn run_leanr_build(root: &Path) -> (Workspace, Layout) {
                 program: "lean".into(),
                 toolchain,
             },
+            cache: None,
+            force: false,
+            fp_env: leanr_build::fingerprint::FingerprintEnv {
+                leanr_version: "test".into(),
+                toolchain_id: "test-tc".into(),
+                platform: "test-plat".into(),
+            },
         },
         &|_| {},
     )

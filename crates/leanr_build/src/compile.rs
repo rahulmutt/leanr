@@ -36,6 +36,11 @@ impl Default for LeanInvoker {
 pub struct BuildOptions {
     pub jobs: usize,
     pub lean: LeanInvoker,
+    /// `None` = `--no-cache` (M2b's pure unconditional path). `Some` =
+    /// cache-aware; with `force`, always run `lean` then refresh the cache.
+    pub cache: Option<crate::cache::Cache>,
+    pub force: bool,
+    pub fp_env: crate::fingerprint::FingerprintEnv,
 }
 
 pub struct BuiltEvent<'a> {
@@ -46,11 +51,14 @@ pub struct BuiltEvent<'a> {
     /// Rendered diagnostics (warnings) from a successful build; empty
     /// when lean was silent.
     pub diagnostics: &'a str,
+    /// True when this module's artifacts came from the cache (no lean run).
+    pub cached: bool,
 }
 
 #[derive(Debug)]
 pub struct BuildReport {
     pub built: usize,
+    pub cached: usize,
 }
 
 #[derive(serde::Deserialize)]
@@ -143,8 +151,37 @@ pub fn build_workspace(
     // Per-module (secs, rendered-diagnostics), filled by the job and
     // read by on_done (which the pool calls with counts).
     let results: Mutex<Vec<Option<(f64, String)>>> = Mutex::new(vec![None; ws.graph.modules.len()]);
+    // Fingerprints computed once up front, only when caching is on
+    // (--no-cache skips the fingerprint walk entirely).
+    let fps = match &opts.cache {
+        Some(_) => Some(crate::fingerprint::fingerprint_all(ws, &opts.fp_env)?),
+        None => None,
+    };
+    #[derive(Clone, Copy, PartialEq)]
+    enum Outcome {
+        Built,
+        Cached,
+    }
+    let outcomes: Mutex<Vec<Outcome>> = Mutex::new(vec![Outcome::Built; ws.graph.modules.len()]);
     let job = |i: usize| -> Result<(), String> {
         let m = &ws.graph.modules[i];
+        let dests = layout.artifact_paths(&m.package, m);
+        if let (Some(cache), Some(fps)) = (opts.cache.as_ref(), fps.as_ref()) {
+            if !opts.force {
+                match cache.lookup(&fps[i]) {
+                    Ok(Some(manifest)) => {
+                        if let Err(e) = cache.materialize(&manifest, &dests) {
+                            return Err(format!("cache materialize failed: {e}"));
+                        }
+                        outcomes.lock().unwrap()[i] = Outcome::Cached;
+                        results.lock().unwrap()[i] = Some((0.0, String::new()));
+                        return Ok(());
+                    }
+                    Ok(None) => {} // miss — fall through to lean
+                    Err(e) => return Err(format!("cache lookup failed: {e}")),
+                }
+            }
+        }
         let start = Instant::now();
         let mut cmd = Command::new(&opts.lean.program);
         if let Some(tc) = &opts.lean.toolchain {
@@ -169,6 +206,11 @@ pub fn build_workspace(
             Ok(f) if f.status.success() => {
                 let diags = render_diagnostics(&String::from_utf8_lossy(&f.stdout));
                 results.lock().unwrap()[i] = Some((start.elapsed().as_secs_f64(), diags));
+                if let (Some(cache), Some(fps)) = (opts.cache.as_ref(), fps.as_ref()) {
+                    if let Err(e) = cache.insert(&fps[i], &dests) {
+                        return Err(format!("cache insert failed: {e}"));
+                    }
+                }
                 Ok(())
             }
             Ok(f) => {
@@ -202,6 +244,7 @@ pub fn build_workspace(
         let (secs, diags) = results.lock().unwrap()[i]
             .take()
             .unwrap_or((0.0, String::new()));
+        let cached = outcomes.lock().unwrap()[i] == Outcome::Cached;
         let name = m.name.to_string();
         on_built(BuiltEvent {
             module: &name,
@@ -209,9 +252,10 @@ pub fn build_workspace(
             total,
             secs,
             diagnostics: &diags,
+            cached,
         });
     };
-    let built = pool::run(&deps, opts.jobs, &job, &on_done).map_err(|f| {
+    pool::run(&deps, opts.jobs, &job, &on_done).map_err(|f| {
         let m = &ws.graph.modules[f.item];
         BuildError::ModuleBuild {
             module: m.name.to_string(),
@@ -219,7 +263,13 @@ pub fn build_workspace(
             details: f.message,
         }
     })?;
-    Ok(BuildReport { built })
+    // A fail-fast abort returns Err above, so every module counted here
+    // actually completed (built or cached) — no partial tally can surface.
+    let outs = outcomes.into_inner().unwrap();
+    Ok(BuildReport {
+        built: outs.iter().filter(|o| **o == Outcome::Built).count(),
+        cached: outs.iter().filter(|o| **o == Outcome::Cached).count(),
+    })
 }
 
 #[cfg(test)]
@@ -240,11 +290,87 @@ mod tests {
     // test-only fix, not a change to build_workspace's semantics.
     static ENV_GUARD: Mutex<()> = Mutex::new(());
 
+    use crate::cache::Cache;
+    use crate::fingerprint::FingerprintEnv;
+
     fn fake_lean() -> LeanInvoker {
         LeanInvoker {
             program: Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-lean.sh"),
             toolchain: None,
         }
+    }
+
+    fn fp_env() -> FingerprintEnv {
+        FingerprintEnv {
+            leanr_version: "test".into(),
+            toolchain_id: "test-tc".into(),
+            platform: "test-plat".into(),
+        }
+    }
+
+    fn opts(jobs: usize, cache: Option<Cache>, force: bool) -> BuildOptions {
+        BuildOptions {
+            jobs,
+            lean: fake_lean(),
+            cache,
+            force,
+            fp_env: fp_env(),
+        }
+    }
+
+    #[test]
+    fn cold_build_populates_then_warm_build_is_all_cached() {
+        let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let t = testws::synthetic();
+        let xdg = tempfile::TempDir::new().unwrap();
+        let cold = build_workspace(
+            &t.ws,
+            &opts(1, Some(Cache::new(xdg.path())), false),
+            &|_| {},
+        )
+        .unwrap();
+        assert_eq!((cold.built, cold.cached), (2, 0));
+        // Second build over the same cache: zero lean runs.
+        let warm = build_workspace(
+            &t.ws,
+            &opts(1, Some(Cache::new(xdg.path())), false),
+            &|_| {},
+        )
+        .unwrap();
+        assert_eq!((warm.built, warm.cached), (0, 2));
+    }
+
+    #[test]
+    fn force_reruns_lean_even_on_a_full_cache() {
+        let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let t = testws::synthetic();
+        let xdg = tempfile::TempDir::new().unwrap();
+        build_workspace(
+            &t.ws,
+            &opts(1, Some(Cache::new(xdg.path())), false),
+            &|_| {},
+        )
+        .unwrap();
+        let forced =
+            build_workspace(&t.ws, &opts(1, Some(Cache::new(xdg.path())), true), &|_| {}).unwrap();
+        assert_eq!((forced.built, forced.cached), (2, 0));
+    }
+
+    #[test]
+    fn no_cache_neither_reads_nor_writes() {
+        let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let t = testws::synthetic();
+        let xdg = tempfile::TempDir::new().unwrap();
+        let r = build_workspace(&t.ws, &opts(1, None, false), &|_| {}).unwrap();
+        assert_eq!((r.built, r.cached), (2, 0));
+        // Cache dir stays empty.
+        assert!(!Cache::new(xdg.path())
+            .blob_path("00")
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .exists());
     }
 
     #[test]
@@ -254,14 +380,9 @@ mod tests {
         let events: Mutex<Vec<String>> = Mutex::new(Vec::new());
         // Event ordering is only structural with jobs=1: the pool's on_done fires before
         // the worker loop observes the next ready module.
-        let report = build_workspace(
-            &t.ws,
-            &BuildOptions {
-                jobs: 1,
-                lean: fake_lean(),
-            },
-            &|e: BuiltEvent<'_>| events.lock().unwrap().push(e.module.to_string()),
-        )
+        let report = build_workspace(&t.ws, &opts(1, None, false), &|e: BuiltEvent<'_>| {
+            events.lock().unwrap().push(e.module.to_string())
+        })
         .unwrap();
         assert_eq!(report.built, 2);
         let layout = Layout::new(&t.ws.root_dir);
@@ -279,15 +400,7 @@ mod tests {
     fn parallel_build_produces_every_artifact() {
         let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         let t = testws::synthetic();
-        let report = build_workspace(
-            &t.ws,
-            &BuildOptions {
-                jobs: 2,
-                lean: fake_lean(),
-            },
-            &|_| {},
-        )
-        .unwrap();
+        let report = build_workspace(&t.ws, &opts(2, None, false), &|_| {}).unwrap();
         assert_eq!(report.built, 2);
         let layout = Layout::new(&t.ws.root_dir);
         for m in &t.ws.graph.modules {
@@ -302,15 +415,7 @@ mod tests {
         let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         let t = testws::synthetic();
         std::env::set_var("FAKE_LEAN_FAIL_ON", "Sub.lean");
-        let err = build_workspace(
-            &t.ws,
-            &BuildOptions {
-                jobs: 1,
-                lean: fake_lean(),
-            },
-            &|_| {},
-        )
-        .unwrap_err();
+        let err = build_workspace(&t.ws, &opts(1, None, false), &|_| {}).unwrap_err();
         std::env::remove_var("FAKE_LEAN_FAIL_ON");
         let msg = err.to_string();
         assert!(msg.contains("App.Sub"), "names the module: {msg}");
@@ -335,15 +440,7 @@ mod tests {
     fn precompile_modules_is_a_clear_unsupported_error() {
         let mut t = testws::synthetic();
         t.ws.root.config.precompile_modules = Some(true);
-        let err = build_workspace(
-            &t.ws,
-            &BuildOptions {
-                jobs: 1,
-                lean: fake_lean(),
-            },
-            &|_| {},
-        )
-        .unwrap_err();
+        let err = build_workspace(&t.ws, &opts(1, None, false), &|_| {}).unwrap_err();
         assert!(err.to_string().contains("precompileModules"));
     }
 
