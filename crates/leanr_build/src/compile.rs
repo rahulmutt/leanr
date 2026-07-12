@@ -251,13 +251,15 @@ mod tests {
 
     #[test]
     fn builds_every_module_in_dependency_order() {
-        let _guard = ENV_GUARD.lock().unwrap();
+        let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         let t = testws::synthetic();
         let events: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        // Event ordering is only structural with jobs=1: the pool's on_done fires before
+        // the worker loop observes the next ready module.
         let report = build_workspace(
             &t.ws,
             &BuildOptions {
-                jobs: 2,
+                jobs: 1,
                 lean: fake_lean(),
             },
             &|e: BuiltEvent<'_>| events.lock().unwrap().push(e.module.to_string()),
@@ -276,8 +278,30 @@ mod tests {
     }
 
     #[test]
+    fn parallel_build_produces_every_artifact() {
+        let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let t = testws::synthetic();
+        let report = build_workspace(
+            &t.ws,
+            &BuildOptions {
+                jobs: 2,
+                lean: fake_lean(),
+            },
+            &|_| {},
+        )
+        .unwrap();
+        assert_eq!(report.built, 2);
+        let layout = Layout::new(&t.ws.root_dir);
+        for m in &t.ws.graph.modules {
+            for p in layout.artifact_paths(&m.package, m) {
+                assert!(p.is_file(), "missing artifact {}", p.display());
+            }
+        }
+    }
+
+    #[test]
     fn failing_module_reports_diagnostics_and_deletes_partial_outputs() {
-        let _guard = ENV_GUARD.lock().unwrap();
+        let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         let t = testws::synthetic();
         std::env::set_var("FAKE_LEAN_FAIL_ON", "Sub.lean");
         let err = build_workspace(
