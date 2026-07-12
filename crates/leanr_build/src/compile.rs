@@ -166,11 +166,20 @@ pub fn build_workspace(
     let job = |i: usize| -> Result<(), String> {
         let m = &ws.graph.modules[i];
         let dests = layout.artifact_paths(&m.package, m);
+        // Shared by every failure arm below (cache-materialize failure,
+        // lean non-zero exit, spawn failure, wait failure): a failed job
+        // never leaves partial artifacts a later run could trust.
+        let cleanup = || {
+            for p in &dests {
+                let _ = std::fs::remove_file(p);
+            }
+        };
         if let (Some(cache), Some(fps)) = (opts.cache.as_ref(), fps.as_ref()) {
             if !opts.force {
                 match cache.lookup(&fps[i]) {
                     Ok(Some(manifest)) => {
                         if let Err(e) = cache.materialize(&manifest, &dests) {
+                            cleanup();
                             return Err(format!("cache materialize failed: {e}"));
                         }
                         outcomes.lock().unwrap()[i] = Outcome::Cached;
@@ -197,11 +206,6 @@ pub fn build_workspace(
             .arg("--json")
             .env("LEAN_PATH", &lean_path)
             .current_dir(&ws.root_dir);
-        let cleanup = || {
-            for p in layout.artifact_paths(&m.package, m) {
-                let _ = std::fs::remove_file(p);
-            }
-        };
         match subprocess::run_drained(&mut cmd) {
             Ok(f) if f.status.success() => {
                 let diags = render_diagnostics(&String::from_utf8_lossy(&f.stdout));
