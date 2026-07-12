@@ -114,9 +114,12 @@ depends = ["elan:bootstrap"]
 run = "sh -c 'LEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo run --release -p leanr_cli -- check --all'"
 
 [tasks."build:differential"]
-description = "M2a differential oracles vs pinned Mathlib: bridge golden, olean import diff, module set (needs mathlib:fetch)"
+description = "M2 differential oracles vs pinned lake: M2a bridge/import/module-set + M2b probe-project artifact byte-diff (needs mathlib:fetch + elan)"
 depends = ["elan:bootstrap"]
-run = "sh -c 'LEANR_MATHLIB_DIR=\"$PWD/.mathlib\" LEANR_OLEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo test --release -p leanr_build --test mathlib_oracle -- --ignored --nocapture'"
+run = [
+  "sh -c 'LEANR_MATHLIB_DIR=\"$PWD/.mathlib\" LEANR_OLEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo test --release -p leanr_build --test mathlib_oracle -- --ignored --nocapture'",
+  "cargo test --release -p leanr_build --test lake_build_oracle -- --ignored --nocapture",
+]
 
 [tasks."build:acceptance"]
 description = "M2a acceptance: fresh clone of pinned Mathlib resolves byte-identically to the materialized checkout (network; local only)"
