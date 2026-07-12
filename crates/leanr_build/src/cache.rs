@@ -114,6 +114,32 @@ impl Cache {
         }
         Ok(Some(manifest))
     }
+
+    pub fn materialize(&self, manifest: &Manifest, dests: &[PathBuf]) -> std::io::Result<()> {
+        assert_eq!(
+            manifest.artifacts.len(),
+            dests.len(),
+            "manifest/dest arity mismatch — caller must pass layout.artifact_paths order"
+        );
+        for (entry, dest) in manifest.artifacts.iter().zip(dests) {
+            let blob = self.blob_path(&entry.blob);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            // Overwrite: a prior materialization left a read-only hardlink.
+            if dest.exists() {
+                std::fs::remove_file(dest)?;
+            }
+            match std::fs::hard_link(&blob, dest) {
+                Ok(()) => {}
+                // Cross-device (EXDEV) or other link failure: copy instead.
+                Err(_) => {
+                    std::fs::copy(&blob, dest)?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -207,5 +233,37 @@ mod tests {
         let json = r#"{"artifacts":[{"name":"A.olean","blob":"中"}]}"#;
         write(&p, json.as_bytes());
         assert!(c.lookup("beef").unwrap().is_none());
+    }
+
+    #[test]
+    fn materialize_recreates_every_artifact() {
+        let (t, c) = cache();
+        let a = t.path().join("A.olean");
+        let b = t.path().join("A.ilean");
+        write(&a, b"olean-bytes");
+        write(&b, b"ilean-bytes");
+        let m = c.insert("d00d", &[a.clone(), b.clone()]).unwrap();
+        let out = t.path().join("proj");
+        let da = out.join("A.olean");
+        let db = out.join("A.ilean");
+        c.materialize(&m, &[da.clone(), db.clone()]).unwrap();
+        assert_eq!(std::fs::read(&da).unwrap(), b"olean-bytes");
+        assert_eq!(std::fs::read(&db).unwrap(), b"ilean-bytes");
+    }
+
+    #[test]
+    #[allow(clippy::cloned_ref_to_slice_refs)]
+    fn materialize_overwrites_a_pre_existing_dest() {
+        let (t, c) = cache();
+        let a = t.path().join("A.olean");
+        write(&a, b"fresh");
+        let m = c.insert("f00d", &[a]).unwrap();
+        let dest = t.path().join("out/A.olean");
+        write(&dest, b"stale-and-readonly");
+        let mut perms = std::fs::metadata(&dest).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&dest, perms).unwrap();
+        c.materialize(&m, &[dest.clone()]).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"fresh");
     }
 }
