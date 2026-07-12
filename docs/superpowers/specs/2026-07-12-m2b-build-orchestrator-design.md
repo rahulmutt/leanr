@@ -251,6 +251,85 @@ New/changed mise tasks: the probe oracle joins `build:differential`;
 (fresh clone → build → diff), replacing its M2a dry-run meaning. CI
 runs the unit tier only, matching the existing split.
 
+## Acceptance (recorded on completion)
+
+Run: 2026-07-12, pod: this dev container (8 cores). `mise run
+build:acceptance`:
+
+- fresh clone at `360da6fa66c1273b76b6b2d8c5666fd5ac2e3b56` (line 3 of
+  `mathlib-pin`), XDG cache isolated;
+- `leanr build` of 8,564 modules, --jobs 8 (default nproc), build wall
+  time 6,890s (whole script 6,993s);
+- 42,820 artifacts byte-diffed against lake's — 22 mismatches (across
+  12 modules), all `.ilean`/`.olean.private` — see §Documented
+  divergence below; zero `.olean`/`.ir`/`.olean.server` mismatches;
+- `cargo test --workspace`, `mise run lint`, and `mise run
+  build:differential` all green at this commit.
+
+### Documented divergence
+
+12 modules produced 22 mismatching artifacts against the lake oracle,
+confined entirely to `.ilean` (12 files) and `.olean.private` (10
+files) — never `.olean`, `.ir`, or `.olean.server`:
+
+`Tactic.NormNum.Ineq`, `Data.WSeq.Basic`,
+`Algebra.Homology.BifunctorHomotopy`, `Algebra.MvPolynomial.Rename`,
+`Analysis.Calculus.ContDiff.FaaDiBruno`,
+`Analysis.Calculus.IteratedDeriv.FaaDiBruno`,
+`Analysis.Normed.Module.Alternating.Basic`,
+`CategoryTheory.GuitartExact.VerticalComposition`,
+`Computability.PartrecCode`, `Data.WSeq.Relation`,
+`Geometry.Manifold.Instances.Icc`,
+`RingTheory.MvPolynomial.MonomialOrder` — all 12 are Lean 4
+`module`-system files.
+
+**Verdict: BENIGN**, per the full investigation in
+`docs/superpowers/specs/2026-07-12-m2b-acceptance-divergence-investigation.md`.
+Rationale in one paragraph: deleting and rebuilding two of the affected
+modules with lake alone (identical source, identical toolchain,
+identical checkout) reproduces the same divergence classes against
+their own prior (pre-experiment) artifacts — the two lake rebuilds
+agree byte-for-byte with *each other* but not with the pre-existing
+oracle, ruling out both a leanr invocation difference (lake was never
+involved) and pure per-process randomness (two independent rebuilds
+wouldn't agree with each other by chance). The `.ilean` diffs are
+confined to the `references` (find-usages) index — the `decls` table
+is identical in every case — and the `.olean.private` diffs are 81
+bytes in two fixed-offset clusters of an otherwise identical
+1,013,544-byte file. This is cross-session, thread-scheduling-dependent
+output of Lean's parallel per-declaration elaboration; byte-identity
+against a session-dependent oracle is unattainable for these two
+artifact kinds by any tool, including lake itself, so leanr is not at
+fault.
+
+Resulting acceptance criterion: byte-identity is required for
+`.olean`/`.ir`/`.olean.server` — 100% achieved (0 of the 22 mismatches
+are among these kinds; every `.olean`/`.ir`/`.olean.server` artifact in
+the 42,820-artifact tree matched the oracle exactly). `.ilean` and
+`.olean.private` are reported but non-blocking:
+`scripts/build-fresh-acceptance.sh` (amended at this commit) still
+byte-diffs every artifact, but classifies mismatches by extension — any
+kind other than `.ilean`/`.olean.private` found mismatching still fails
+the run (exit 1); mismatches confined to `.ilean`/`.olean.private`
+print a `PASS — <N> deterministic artifacts ...; <n>
+known-nondeterministic divergences` line and exit 0, per lake's own
+reproduced nondeterminism for those two kinds.
+
+Note on the recorded run above: gates in this section (`cargo test
+--workspace`, `mise run lint`, `mise run build:differential`, `mise run
+ci`) are re-run at this commit, after the script amendment. The
+acceptance run itself — the hours-long `leanr build` of the full
+closure plus byte-diff — was executed once, with the pre-amendment
+script (the one that treated any mismatch as failure), which is why
+its recorded exit status was FAIL. The numbers above (42,820 artifacts,
+22 mismatches, the 12-module list) are that run's actual output. The
+amended script, applied to that same set of results, classifies them
+as PASS-with-known-divergences (0 deterministic-kind mismatches, 22
+known-nondeterministic-kind mismatches) — verified by re-running the
+amended script's classification logic against reconstructed scratch
+trees mirroring matching / deterministic-mismatch / ilean-only-mismatch
+cases (see the amendment commit).
+
 ## Constraints (inherited)
 
 - `leanr_kernel` untouched; `leanr_build` stays off the kernel's
