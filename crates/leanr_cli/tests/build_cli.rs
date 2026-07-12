@@ -269,3 +269,54 @@ fn json_output_carries_path_dependency_package_and_module() {
     assert_eq!(dep_module["package"], "dep");
     assert_eq!(dep_module["file"], "Dep.lean");
 }
+
+#[test]
+fn cache_verify_reports_clean_after_a_build() {
+    let tmp = setup();
+    Command::cargo_bin("leanr")
+        .unwrap()
+        .current_dir(tmp.path())
+        .env("XDG_CACHE_HOME", tmp.path().join("xdg-cache"))
+        .args(["build"])
+        .args([
+            "--toolchain-dir",
+            tmp.path().join("fake-toolchain").to_str().unwrap(),
+        ])
+        .args(["--lean", fake_lean_path().to_str().unwrap()])
+        .assert()
+        .success();
+    Command::cargo_bin("leanr")
+        .unwrap()
+        .current_dir(tmp.path())
+        .env("XDG_CACHE_HOME", tmp.path().join("xdg-cache"))
+        .args(["cache", "verify"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cache verify: OK"));
+}
+
+#[test]
+fn cache_gc_reports_eviction_under_a_small_cap() {
+    let tmp = setup();
+    Command::cargo_bin("leanr")
+        .unwrap()
+        .current_dir(tmp.path())
+        .env("XDG_CACHE_HOME", tmp.path().join("xdg-cache"))
+        .args(["build"])
+        .args([
+            "--toolchain-dir",
+            tmp.path().join("fake-toolchain").to_str().unwrap(),
+        ])
+        .args(["--lean", fake_lean_path().to_str().unwrap()])
+        .assert()
+        .success();
+    Command::cargo_bin("leanr")
+        .unwrap()
+        .current_dir(tmp.path())
+        .env("XDG_CACHE_HOME", tmp.path().join("xdg-cache"))
+        .args(["cache", "gc", "--max-size", "0"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("gc: removed"))
+        .stdout(predicate::str::contains("removed 0 blobs").not());
+}
