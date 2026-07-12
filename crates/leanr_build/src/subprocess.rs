@@ -112,3 +112,25 @@ pub(crate) fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<F
         }
     }
 }
+
+/// Spawn with drained pipes, NO timeout and NO process-group detach:
+/// a compile job legitimately runs for minutes (a Mathlib module's
+/// elaboration), and build workers must stay in leanr's own process
+/// group so a terminal Ctrl-C kills them together — the opposite of
+/// the bridge's translate-config (timed out + group-killed).
+pub(crate) fn run_drained(cmd: &mut Command) -> Result<Finished, RunError> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(RunError::Spawn)?;
+    let stdout_thread = drain(child.stdout.take());
+    let stderr_thread = drain(child.stderr.take());
+    match child.wait() {
+        Ok(status) => Ok(Finished {
+            status,
+            stdout: join(stdout_thread),
+            stderr: join(stderr_thread),
+        }),
+        Err(e) => Err(RunError::Wait(e, join(stderr_thread))),
+    }
+}

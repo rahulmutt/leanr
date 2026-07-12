@@ -9,14 +9,20 @@
 use std::path::{Path, PathBuf};
 
 pub mod bridge;
+pub mod cache_dir;
+pub mod compile;
 pub mod config;
 mod error;
 pub mod fetch;
 pub mod graph;
 pub mod manifest;
 pub mod modules;
+pub mod pool;
 pub mod scanner;
+pub mod setup;
 mod subprocess;
+#[cfg(test)]
+pub(crate) mod testws;
 
 pub use error::BuildError;
 
@@ -30,6 +36,10 @@ pub struct ResolveOptions {
     /// Toolchain olean root (`lean --print-libdir`) for classifying
     /// imports that resolve to no workspace module.
     pub toolchain_olean_dir: PathBuf,
+    /// Per-user leanr cache root (spec 2026-07-12 §Layout): shared git
+    /// source checkouts under `src/`, the bridge cache under
+    /// `config-cache/`. The CLI resolves it from XDG_CACHE_HOME/HOME.
+    pub cache_root: PathBuf,
 }
 
 #[derive(Debug)]
@@ -82,7 +92,7 @@ fn config_file_of(dir: &Path) -> Result<PathBuf, BuildError> {
 
 /// The 7-step pipeline from the spec (§Data flow).
 pub fn resolve(root_dir: &Path, opts: &ResolveOptions) -> Result<Workspace, BuildError> {
-    let cache_dir = root_dir.join(".leanr/config-cache");
+    let cache_dir = opts.cache_root.join("config-cache");
     let mut warnings = Vec::new();
 
     // 2. Root config (native or bridge).
@@ -112,16 +122,16 @@ pub fn resolve(root_dir: &Path, opts: &ResolveOptions) -> Result<Workspace, Buil
         }
     }
 
-    // 4. Materialize.
-    let packages_dir = root_dir.join(&manifest.packages_dir);
-    fetch::materialize(&manifest.packages, root_dir, &packages_dir)?;
+    // 4. Materialize into the shared per-user source cache.
+    let src_cache = opts.cache_root.join("src");
+    fetch::materialize(&manifest.packages, root_dir, &src_cache)?;
 
     // 5. Dependency configs.
     let mut deps = Vec::new();
     for entry in &manifest.packages {
         let (dir, rev) = match &entry.source {
             manifest::PackageSource::Git { rev, sub_dir, .. } => {
-                let base = packages_dir.join(&entry.name);
+                let base = src_cache.join(&entry.name).join(rev);
                 let dir = match sub_dir {
                     Some(sd) => base.join(sd),
                     None => base,
@@ -160,6 +170,7 @@ pub fn resolve(root_dir: &Path, opts: &ResolveOptions) -> Result<Workspace, Buil
             for root in lib.effective_roots() {
                 units.push(LibUnit {
                     package: pkg.name.clone(),
+                    lib: lib.name.clone(),
                     src_dir: pkg.dir.join(&src),
                     root,
                 });

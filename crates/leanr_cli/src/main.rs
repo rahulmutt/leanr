@@ -46,7 +46,8 @@ enum Command {
         #[arg(long)]
         sequential: bool,
     },
-    /// Resolve the workspace and plan a build (M2a: --dry-run only).
+    /// Resolve the workspace and build every planned module (`--dry-run`
+    /// prints the plan without building).
     Build {
         /// lean_lib targets (default: the root package's defaultTargets).
         targets: Vec<String>,
@@ -63,6 +64,13 @@ enum Command {
         /// Toolchain olean directory (default: `lean --print-libdir`).
         #[arg(long)]
         toolchain_dir: Option<PathBuf>,
+        /// Worker processes (default: available parallelism).
+        #[arg(long)]
+        jobs: Option<usize>,
+        /// lean executable to drive (default: `lean` on PATH; primarily
+        /// for tests and debugging).
+        #[arg(long)]
+        lean: Option<PathBuf>,
     },
 }
 
@@ -96,7 +104,9 @@ fn main() -> ExitCode {
             json,
             dir,
             toolchain_dir,
-        } => build(targets, dry_run, json, dir, toolchain_dir),
+            jobs,
+            lean,
+        } => build(targets, dry_run, json, dir, toolchain_dir, jobs, lean),
     }
 }
 
@@ -442,14 +452,9 @@ fn build(
     json: bool,
     dir: Option<PathBuf>,
     toolchain_dir: Option<PathBuf>,
+    jobs: Option<usize>,
+    lean: Option<PathBuf>,
 ) -> ExitCode {
-    if !dry_run {
-        eprintln!(
-            "error: `leanr build` without --dry-run is not implemented yet (coming in M2b); \
-             run `leanr build --dry-run`"
-        );
-        return ExitCode::FAILURE;
-    }
     let run = || -> Result<(), String> {
         let start = match &dir {
             Some(d) => d.clone(),
@@ -460,10 +465,18 @@ fn build(
             Some(d) => d,
             None => lean_print_libdir()?,
         };
+        let cache_root = leanr_build::cache_dir::cache_root(
+            std::env::var_os("XDG_CACHE_HOME").as_deref(),
+            std::env::var_os("HOME").as_deref(),
+        )
+        .ok_or_else(|| {
+            "cannot determine the leanr cache directory: set XDG_CACHE_HOME or HOME".to_string()
+        })?;
         // Pin dependency bridging to the root workspace's toolchain.
         let toolchain = std::fs::read_to_string(root_dir.join("lean-toolchain"))
             .ok()
             .map(|s| s.trim().to_string());
+        let toolchain_for_lean = toolchain.clone();
         let opts = leanr_build::ResolveOptions {
             targets: targets.clone(),
             lake: leanr_build::bridge::LakeInvoker {
@@ -471,16 +484,46 @@ fn build(
                 ..leanr_build::bridge::LakeInvoker::default()
             },
             toolchain_olean_dir,
+            cache_root,
         };
         let ws = leanr_build::resolve(&root_dir, &opts).map_err(|e| e.to_string())?;
         for w in &ws.warnings {
             eprintln!("warning: {w}");
         }
-        if json {
-            print_json_plan(&ws)?;
-        } else {
-            print_text_plan(&ws);
+        if dry_run {
+            if json {
+                print_json_plan(&ws)?;
+            } else {
+                print_text_plan(&ws);
+            }
+            return Ok(());
         }
+        let jobs = jobs.unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        });
+        let build_opts = leanr_build::compile::BuildOptions {
+            jobs,
+            lean: leanr_build::compile::LeanInvoker {
+                program: lean.unwrap_or_else(|| PathBuf::from("lean")),
+                toolchain: toolchain_for_lean,
+            },
+        };
+        let build_start = std::time::Instant::now();
+        let report = leanr_build::compile::build_workspace(&ws, &build_opts, &|e| {
+            if !e.diagnostics.is_empty() {
+                eprint!("{}", e.diagnostics);
+            }
+            println!("[{}/{}] {} ({:.1}s)", e.done, e.total, e.module, e.secs);
+        })
+        .map_err(|e| e.to_string())?;
+        println!(
+            "built {} modules in {:.1}s ({} jobs)",
+            report.built,
+            build_start.elapsed().as_secs_f64(),
+            jobs
+        );
         Ok(())
     };
     match run() {
@@ -513,17 +556,34 @@ fn lean_print_libdir() -> Result<PathBuf, String> {
     ))
 }
 
+/// The source directory a module's `file` is relative to in the JSON
+/// plan. Root modules → the workspace root; dep modules → the dep's
+/// resolved source dir (spec 2026-07-12 §Layout: module files live
+/// outside the project root now, so the plan carries package-relative
+/// paths plus a per-package source-dir field).
+fn package_dir<'a>(ws: &'a leanr_build::Workspace, package: &str) -> &'a std::path::Path {
+    ws.deps
+        .iter()
+        .find(|d| d.name == package)
+        .map(|d| d.dir.as_path())
+        .unwrap_or(&ws.root_dir)
+}
+
 fn print_json_plan(ws: &leanr_build::Workspace) -> Result<(), String> {
     let mut packages = Vec::with_capacity(ws.deps.len());
     for d in &ws.deps {
-        let dir = rel_display(&d.dir, &ws.root_dir).map_err(|abs| {
-            format!(
-                "dependency `{}` resolves to an absolute path {} outside the workspace; \
-                 use a workspace-relative `dir` in lake-manifest.json",
-                d.name,
-                abs.display()
-            )
-        })?;
+        let dir = match d.rev {
+            // Git deps live in the per-user source cache; absolute by design.
+            Some(_) => d.dir.display().to_string(),
+            None => rel_display(&d.dir, &ws.root_dir).map_err(|abs| {
+                format!(
+                    "dependency `{}` resolves to an absolute path {} outside the workspace; \
+                     use a workspace-relative `dir` in lake-manifest.json",
+                    d.name,
+                    abs.display()
+                )
+            })?,
+        };
         packages.push(JsonPackage {
             name: &d.name,
             rev: d.rev.as_deref(),
@@ -534,10 +594,10 @@ fn print_json_plan(ws: &leanr_build::Workspace) -> Result<(), String> {
     for (wave, ids) in ws.waves.iter().enumerate() {
         for id in ids {
             let m = &ws.graph.modules[id.0 as usize];
-            let file = rel_display(&m.file, &ws.root_dir).map_err(|abs| {
+            let file = rel_display(&m.file, package_dir(ws, &m.package)).map_err(|abs| {
                 format!(
-                    "module `{}` (package `{}`) resolves to an absolute path {} outside the \
-                     workspace; use a workspace-relative `dir` in lake-manifest.json",
+                    "module `{}` (package `{}`) resolves to {} outside its package directory; \
+                     this is a leanr bug — please report it",
                     m.name,
                     m.package,
                     abs.display()

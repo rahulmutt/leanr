@@ -46,6 +46,7 @@ fn resolve_mathlib() -> leanr_build::Workspace {
         .parent()
         .expect("Init.olean has a parent")
         .to_path_buf();
+    let tmp = tempfile::TempDir::new().unwrap();
     let opts = ResolveOptions {
         targets: Vec::new(), // defaultTargets = ["Mathlib"]
         lake: LakeInvoker {
@@ -53,6 +54,7 @@ fn resolve_mathlib() -> leanr_build::Workspace {
             ..LakeInvoker::default()
         },
         toolchain_olean_dir,
+        cache_root: tmp.path().join("xdg-cache"),
     };
     resolve(&root, &opts).expect("mathlib resolves")
 }

@@ -12,6 +12,7 @@ use crate::scanner::{scan_header, Header};
 
 pub struct LibUnit {
     pub package: String,
+    pub lib: String,
     pub src_dir: PathBuf,
     pub root: ModuleName,
 }
@@ -28,7 +29,7 @@ impl ModuleResolver {
     /// Longest-root-prefix match over all libs; `Some` only if the mapped
     /// file exists on disk (a matching prefix with a missing file falls
     /// through to the next-longest candidate, then to the toolchain).
-    pub fn resolve(&self, m: &ModuleName) -> Option<(String, PathBuf)> {
+    pub fn resolve(&self, m: &ModuleName) -> Option<(String, String, PathBuf)> {
         let mut candidates: Vec<&LibUnit> = self
             .units
             .iter()
@@ -38,7 +39,7 @@ impl ModuleResolver {
         for u in candidates {
             let file = u.src_dir.join(m.rel_lean_path());
             if file.is_file() {
-                return Some((u.package.clone(), file));
+                return Some((u.package.clone(), u.lib.clone(), file));
             }
         }
         None
@@ -70,6 +71,7 @@ pub struct ModuleId(pub u32);
 pub struct ModuleInfo {
     pub name: ModuleName,
     pub package: String,
+    pub lib: String,
     pub file: PathBuf,
     /// Raw scanned imports, including toolchain-external ones.
     pub imports: Vec<ModuleName>,
@@ -136,9 +138,10 @@ pub fn build_graph(
     resolver: &ModuleResolver,
     toolchain: &dyn ToolchainIndex,
 ) -> Result<ModuleGraph, BuildError> {
-    // name -> (package, file, header); imports kept as names until all
+    type ScanResult = (ModuleName, String, String, PathBuf, Header);
+    // name -> (package, lib, file, header); imports kept as names until all
     // nodes exist, then edges are wired up.
-    let mut scanned: HashMap<ModuleName, (String, PathBuf, Header)> = HashMap::new();
+    let mut scanned: HashMap<ModuleName, (String, String, PathBuf, Header)> = HashMap::new();
     let mut external: HashSet<ModuleName> = HashSet::new();
     // Frontier entries carry their importer for error messages.
     let mut frontier: Vec<(ModuleName, String)> = seeds
@@ -150,13 +153,13 @@ pub fn build_graph(
         frontier.sort();
         frontier.dedup();
         // Resolve + classify this frontier.
-        let mut to_scan: Vec<(ModuleName, String, PathBuf)> = Vec::new();
+        let mut to_scan: Vec<(ModuleName, String, String, PathBuf)> = Vec::new();
         for (m, importer) in frontier.drain(..) {
             if scanned.contains_key(&m) || external.contains(&m) {
                 continue;
             }
             match resolver.resolve(&m) {
-                Some((pkg, file)) => to_scan.push((m, pkg, file)),
+                Some((pkg, lib, file)) => to_scan.push((m, pkg, lib, file)),
                 None if toolchain.contains(&m) => {
                     external.insert(m);
                 }
@@ -176,38 +179,42 @@ pub fn build_graph(
             .map(|n| n.get())
             .unwrap_or(1);
         let chunk_size = scan_chunk_size(to_scan.len(), parallelism);
-        let results: Vec<Result<(ModuleName, String, PathBuf, Header), BuildError>> =
-            std::thread::scope(|s| {
-                let handles: Vec<_> = to_scan
-                    .chunks(chunk_size)
-                    .map(|chunk| {
-                        s.spawn(move || {
-                            chunk
-                                .iter()
-                                .map(|(m, pkg, file)| {
-                                    let bytes =
-                                        std::fs::read(file).map_err(|e| BuildError::Io {
-                                            path: file.clone(),
-                                            err: e.to_string(),
-                                        })?;
-                                    Ok((m.clone(), pkg.clone(), file.clone(), scan_header(&bytes)))
-                                })
-                                .collect::<Vec<Result<(ModuleName, String, PathBuf, Header), BuildError>>>()
-                        })
+        let results: Vec<Result<ScanResult, BuildError>> = std::thread::scope(|s| {
+            let handles: Vec<_> = to_scan
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    s.spawn(move || {
+                        chunk
+                            .iter()
+                            .map(|(m, pkg, lib, file)| {
+                                let bytes = std::fs::read(file).map_err(|e| BuildError::Io {
+                                    path: file.clone(),
+                                    err: e.to_string(),
+                                })?;
+                                Ok((
+                                    m.clone(),
+                                    pkg.clone(),
+                                    lib.clone(),
+                                    file.clone(),
+                                    scan_header(&bytes),
+                                ))
+                            })
+                            .collect::<Vec<Result<ScanResult, BuildError>>>()
                     })
-                    .collect();
-                handles
-                    .into_iter()
-                    .flat_map(|h| h.join().expect("scan thread"))
-                    .collect()
-            });
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().expect("scan thread"))
+                .collect()
+        });
         for r in results {
-            let (m, pkg, file, mut header) = r?;
+            let (m, pkg, lib, file, mut header) = r?;
             add_implicit_init(&mut header);
             for imp in &header.imports {
                 frontier.push((imp.clone(), m.to_string()));
             }
-            scanned.insert(m, (pkg, file, header));
+            scanned.insert(m, (pkg, lib, file, header));
         }
     }
 
@@ -221,7 +228,7 @@ pub fn build_graph(
         .collect();
     let mut modules = Vec::with_capacity(names.len());
     for name in names {
-        let (package, file, header) = scanned.remove(&name).expect("scanned");
+        let (package, lib, file, header) = scanned.remove(&name).expect("scanned");
         let mut deps: Vec<ModuleId> = header
             .imports
             .iter()
@@ -232,6 +239,7 @@ pub fn build_graph(
         modules.push(ModuleInfo {
             name,
             package,
+            lib,
             file,
             imports: header.imports,
             deps,
@@ -345,11 +353,13 @@ mod tests {
         let resolver = ModuleResolver::new(vec![
             LibUnit {
                 package: "app".into(),
+                lib: "App".into(),
                 src_dir: tmp.path().join("app"),
                 root: mn("App"),
             },
             LibUnit {
                 package: "dep".into(),
+                lib: "Dep".into(),
                 src_dir: tmp.path().join("dep"),
                 root: mn("Dep"),
             },
@@ -384,6 +394,7 @@ mod tests {
         write(tmp.path(), "app/App/Prelude.lean", "prelude\n");
         let r = ModuleResolver::new(vec![LibUnit {
             package: "app".into(),
+            lib: "App".into(),
             src_dir: tmp.path().join("app"),
             root: mn("App"),
         }]);
@@ -412,8 +423,9 @@ mod tests {
     #[test]
     fn resolver_longest_prefix_and_existence() {
         let (tmp, r) = two_package_workspace();
-        let (pkg, file) = r.resolve(&mn("App.A")).unwrap();
+        let (pkg, lib, file) = r.resolve(&mn("App.A")).unwrap();
         assert_eq!(pkg, "app");
+        assert_eq!(lib, "App");
         assert_eq!(file, tmp.path().join("app/App/A.lean"));
         assert!(r.resolve(&mn("App.Missing")).is_none()); // root matches, file absent
         assert!(r.resolve(&mn("Other")).is_none());
@@ -443,6 +455,7 @@ mod tests {
         write(tmp.path(), "app/App.lean", "import Ghost\n");
         let r = ModuleResolver::new(vec![LibUnit {
             package: "app".into(),
+            lib: "App".into(),
             src_dir: tmp.path().join("app"),
             root: mn("App"),
         }]);
@@ -480,6 +493,7 @@ mod tests {
         write(tmp.path(), "app/App/B.lean", "import App\n");
         let r = ModuleResolver::new(vec![LibUnit {
             package: "app".into(),
+            lib: "App".into(),
             src_dir: tmp.path().join("app"),
             root: mn("App"),
         }]);
@@ -535,6 +549,7 @@ mod tests {
         );
         let r = ModuleResolver::new(vec![LibUnit {
             package: "app".into(),
+            lib: "App".into(),
             src_dir: tmp.path().join("app"),
             root: mn("App"),
         }]);
@@ -564,11 +579,43 @@ mod tests {
         write(tmp.path(), "app/App/B.lean", "");
         let r = ModuleResolver::new(vec![LibUnit {
             package: "app".into(),
+            lib: "App".into(),
             src_dir: tmp.path().join("app"),
             root: mn("App"),
         }]);
         let g = build_graph(&[mn("App")], &r, &fake_toolchain()).unwrap();
         let app = &g.modules[g.id_of(&mn("App")).unwrap().0 as usize];
         assert_eq!(app.deps.len(), 1);
+    }
+
+    #[test]
+    fn modules_carry_their_owning_lib() {
+        // Reuse the existing synthetic-tree helper pattern in this module:
+        // one package "app", lib "App", module App imports App.Sub.
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("App.lean"), "import App.Sub\n").unwrap();
+        std::fs::create_dir_all(tmp.path().join("App")).unwrap();
+        std::fs::write(tmp.path().join("App/Sub.lean"), "prelude\n").unwrap();
+        let resolver = ModuleResolver::new(vec![LibUnit {
+            package: "app".into(),
+            lib: "App".into(),
+            src_dir: tmp.path().to_path_buf(),
+            root: ModuleName::parse("App").unwrap(),
+        }]);
+        struct NoToolchain;
+        impl ToolchainIndex for NoToolchain {
+            fn contains(&self, _m: &ModuleName) -> bool {
+                true // classify Init etc. as toolchain
+            }
+        }
+        let g = build_graph(
+            &[ModuleName::parse("App").unwrap()],
+            &resolver,
+            &NoToolchain,
+        )
+        .unwrap();
+        for m in &g.modules {
+            assert_eq!(m.lib, "App", "module {} lost its lib attribution", m.name);
+        }
     }
 }
