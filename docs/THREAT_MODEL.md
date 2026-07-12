@@ -130,6 +130,35 @@ posture:
   bytes (property-tested): never panics, never recurses, allocation
   bounded by input size — same discipline as the `.olean` decoder.
 
+## M2b — build orchestrator
+
+**Surface.** `leanr build` runs the official `lean` on package sources:
+elaboration executes metaprograms, so building a package is arbitrary
+code execution by design — the same posture as the M2a bridge and as
+lake itself. Stated, not mitigated.
+
+**Shared source cache.** Dependency checkouts move to a per-user cache
+(`$XDG_CACHE_HOME/leanr/src/<name>/<rev>/`) shared across projects — a
+new cross-project surface. Entries are keyed by `<name>/<rev>` and HEAD
+is re-verified (`git rev-parse`) on every use: a tampered checkout
+fails verification and errors rather than being trusted; a checkout is
+never repaired or overwritten in place. Creation is guarded by an
+advisory `flock` (unix; the non-unix fallback is best-effort, matching
+the subprocess process-group cfg split). The bridge cache is
+content-keyed (blake3 of the lakefile), so cross-project sharing cannot
+serve stale or foreign config. Residual, accepted: running the bridge
+(`lake translate-config`) inside a shared checkout lets lake drop its
+own `.lake` cache dir there — a benign side effect; the content-keyed
+bridge cache makes repeats no-ops.
+
+**Subprocess hygiene.** As established (M2a): explicit argv vectors, no
+shell, drained pipes. Build workers get no timeout (a Mathlib module
+legitimately elaborates for minutes) and are NOT detached into their
+own process group — a terminal Ctrl-C kills leanr and its workers
+together. lean's outputs are never parsed by leanr in M2b (decoding
+stays in `leanr_olean`, used only by test oracles); setup files are
+leanr-written, never read back.
+
 ## Out of scope (for now)
 
 - Sandboxing `lakefile.lean`/tactic execution (revisit at M4).
