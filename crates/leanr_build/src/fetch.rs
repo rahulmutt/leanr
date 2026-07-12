@@ -64,16 +64,38 @@ pub(crate) fn validate_package_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Reject revs that could be misread as a git option or fall outside the
-/// character class lake-manifest.json actually pins (40-hex SHAs); the
-/// wider class here also allows tags/branches without opening up
-/// shell-style metacharacters.
+/// Reject revs that could escape `<name>/<rev>/` via `Path::join`
+/// (a leading `/` replaces the base entirely; path components `.` or `..`
+/// walk back up) or be misread as a git option. Also rejects the character
+/// class outside lake-manifest.json's 40-hex SHAs; the wider class here
+/// allows tags/branches without opening up shell-style metacharacters.
 pub(crate) fn validate_rev(rev: &str) -> Result<(), String> {
     if rev.is_empty() {
         return Err("empty git rev".into());
     }
     if rev.starts_with('-') {
         return Err(format!("git rev starts with `-`: `{rev}`"));
+    }
+    if rev.starts_with('/') {
+        return Err(format!(
+            "git rev starts with `/` (absolute path not allowed): `{rev}`"
+        ));
+    }
+    if rev == "." || rev == ".." {
+        return Err(format!("git rev `{rev}` is not a valid directory entry"));
+    }
+    // Check each path component for . or .. or empty strings (from //)
+    for component in rev.split('/') {
+        if component.is_empty() {
+            return Err(format!(
+                "git rev contains empty path component (from `//` or leading/trailing `/`): `{rev}`"
+            ));
+        }
+        if component == "." || component == ".." {
+            return Err(format!(
+                "git rev contains `.` or `..` path component: `{rev}`"
+            ));
+        }
     }
     if !rev
         .chars()
@@ -535,5 +557,78 @@ mod tests {
         // should succeed, allowing checkout to proceed and then fail on verification.
         assert!(msg.contains("feat/x"), "got: {msg}");
         assert!(!msg.contains("cannot lock"), "got: {msg}");
+    }
+
+    // -- Finding 2: path traversal via rev --------------------------------
+
+    #[test]
+    fn validate_rev_rejects_traversal_and_absolute_paths() {
+        // Legitimate revs that should pass
+        assert!(validate_rev("0123456789abcdef0123456789abcdef01234567").is_ok());
+        assert!(validate_rev("main").is_ok());
+        assert!(validate_rev("feature/foo.bar").is_ok());
+
+        // Traversal via .. components
+        assert!(validate_rev("../../../../tmp/x").is_err());
+        assert!(validate_rev("a/../b").is_err());
+        assert!(validate_rev("a/..").is_err());
+        assert!(validate_rev("../a").is_err());
+
+        // Absolute paths
+        assert!(validate_rev("/abs/path").is_err());
+        assert!(validate_rev("/etc/evil").is_err());
+
+        // Bare . or ..
+        assert!(validate_rev("..").is_err());
+        assert!(validate_rev(".").is_err());
+
+        // Empty components from //
+        assert!(validate_rev("a//b").is_err());
+        assert!(validate_rev("//root").is_err());
+    }
+
+    #[test]
+    fn malicious_traversal_rev_is_rejected_before_touching_the_filesystem() {
+        let (orig, _r1, _r2) = origin();
+        let ws = tempfile::TempDir::new().unwrap();
+        let cache = ws.path().join("src-cache");
+
+        // Test traversal via ..
+        let pkg = git_pkg(
+            "dep",
+            orig.path().to_str().unwrap().into(),
+            "../../../../tmp/x".into(),
+        );
+        let err = materialize(&[pkg], ws.path(), &cache).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("dep"), "got: {msg}");
+        // No filesystem artifacts created before validation rejects
+        assert!(!cache.join("dep").exists());
+
+        // Test absolute path
+        let pkg2 = git_pkg(
+            "dep2",
+            orig.path().to_str().unwrap().into(),
+            "/abs/path".into(),
+        );
+        let err2 = materialize(&[pkg2], ws.path(), &cache).unwrap_err();
+        assert!(err2.to_string().contains("dep2"));
+        assert!(!cache.join("dep2").exists());
+
+        // Test .. component
+        let pkg3 = git_pkg(
+            "dep3",
+            orig.path().to_str().unwrap().into(),
+            "a/../b".into(),
+        );
+        let err3 = materialize(&[pkg3], ws.path(), &cache).unwrap_err();
+        assert!(err3.to_string().contains("dep3"));
+        assert!(!cache.join("dep3").exists());
+
+        // Test empty component from //
+        let pkg4 = git_pkg("dep4", orig.path().to_str().unwrap().into(), "a//b".into());
+        let err4 = materialize(&[pkg4], ws.path(), &cache).unwrap_err();
+        assert!(err4.to_string().contains("dep4"));
+        assert!(!cache.join("dep4").exists());
     }
 }
