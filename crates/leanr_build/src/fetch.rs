@@ -190,10 +190,12 @@ fn ensure_git(name: &str, url: &str, rev: &str, pkg_cache: &Path) -> Result<(), 
     if dest.is_dir() {
         return verify_checkout(name, rev, &dest);
     }
-    std::fs::create_dir_all(pkg_cache)
-        .map_err(|e| ferr(format!("cannot create {}: {e}", pkg_cache.display())))?;
-    let _lock = lock_exclusive(&pkg_cache.join(format!("{rev}.lock")))
-        .map_err(|e| ferr(format!("cannot lock {}: {e}", pkg_cache.display())))?;
+    let lock_path = pkg_cache.join(format!("{rev}.lock"));
+    let lock_parent = lock_path.parent().unwrap();
+    std::fs::create_dir_all(lock_parent)
+        .map_err(|e| ferr(format!("cannot create {}: {e}", lock_parent.display())))?;
+    let _lock = lock_exclusive(&lock_path)
+        .map_err(|e| ferr(format!("cannot lock {}: {e}", lock_path.display())))?;
     if dest.is_dir() {
         // Another process created it while we waited on the lock.
         return verify_checkout(name, rev, &dest);
@@ -511,5 +513,27 @@ mod tests {
         let err = materialize(&[pkg], ws.path(), &cache).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("dep"), "got: {msg}");
+    }
+
+    #[test]
+    fn nested_rev_with_slash_reports_verification_error() {
+        let (orig, r1, _r2) = origin();
+        let origin_dir = orig.path();
+        let ws = tempfile::TempDir::new().unwrap();
+        let cache = ws.path().join("src-cache");
+
+        // Create a branch feat/x pointing at first commit
+        sh(origin_dir, &format!("git branch feat/x {r1}"));
+
+        let url: String = origin_dir.to_str().unwrap().into();
+        let err =
+            materialize(&[git_pkg("dep", url, "feat/x".into())], ws.path(), &cache).unwrap_err();
+
+        let msg = err.to_string();
+        // Should get the verification error (branch revs can't satisfy HEAD==rev check),
+        // not the lock file creation error. The lock-path parent directory creation
+        // should succeed, allowing checkout to proceed and then fail on verification.
+        assert!(msg.contains("feat/x"), "got: {msg}");
+        assert!(!msg.contains("cannot lock"), "got: {msg}");
     }
 }
