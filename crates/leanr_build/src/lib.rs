@@ -165,6 +165,7 @@ pub fn resolve(root_dir: &Path, opts: &ResolveOptions) -> Result<Workspace, Buil
             for root in lib.effective_roots() {
                 units.push(LibUnit {
                     package: pkg.name.clone(),
+                    lib: lib.name.clone(),
                     src_dir: pkg.dir.join(&src),
                     root,
                 });
