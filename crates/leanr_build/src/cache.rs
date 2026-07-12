@@ -24,7 +24,7 @@ pub struct Manifest {
 }
 
 fn shard(hex: &str) -> &str {
-    &hex[..2]
+    hex.get(..2).unwrap_or(hex)
 }
 
 /// Write `bytes` to `path` atomically (temp sibling + rename), flock-
@@ -102,12 +102,13 @@ impl Cache {
             Err(_) => return Ok(None),
         };
         // Guard against a well-formed-JSON-but-malformed `blob` field (e.g. a
-        // hex string shorter than 2 chars), which would otherwise panic
-        // inside `shard()` when `blob_path` is called below.
+        // hex string that's too short, or whose byte offset 2 isn't a char
+        // boundary). `shard()` is total, so a malformed blob simply maps to
+        // a path that won't exist, and `exists()` catches it here.
         if manifest
             .artifacts
             .iter()
-            .any(|a| a.blob.len() < 2 || !self.blob_path(&a.blob).exists())
+            .any(|a| !self.blob_path(&a.blob).exists())
         {
             return Ok(None);
         }
@@ -193,5 +194,18 @@ mod tests {
         let p = c.manifest_path("shortblob");
         write(&p, br#"{"artifacts":[{"name":"A","blob":"x"}]}"#);
         assert!(c.lookup("shortblob").unwrap().is_none());
+    }
+
+    #[test]
+    fn lookup_with_multibyte_blob_hex_is_a_miss_not_a_panic() {
+        let (_t, c) = cache();
+        let p = c.manifest_path("beef");
+        // Valid JSON, but blob is a 3-byte single char straddling byte offset 2.
+        // Byte-string literals can't hold non-ASCII directly, so use a \u
+        // JSON escape in a normal `str` literal (serde_json decodes it to
+        // the 3-byte UTF-8 char '中') and convert to bytes for `write`.
+        let json = r#"{"artifacts":[{"name":"A.olean","blob":"中"}]}"#;
+        write(&p, json.as_bytes());
+        assert!(c.lookup("beef").unwrap().is_none());
     }
 }
