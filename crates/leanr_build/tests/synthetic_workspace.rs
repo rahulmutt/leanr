@@ -91,6 +91,7 @@ fn opts(tmp: &Path) -> ResolveOptions {
             ..LakeInvoker::default()
         },
         toolchain_olean_dir: fake_toolchain(tmp),
+        cache_root: tmp.join("xdg-cache"),
     }
 }
 

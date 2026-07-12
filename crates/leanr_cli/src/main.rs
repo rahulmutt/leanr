@@ -460,6 +460,13 @@ fn build(
             Some(d) => d,
             None => lean_print_libdir()?,
         };
+        let cache_root = leanr_build::cache_dir::cache_root(
+            std::env::var_os("XDG_CACHE_HOME").as_deref(),
+            std::env::var_os("HOME").as_deref(),
+        )
+        .ok_or_else(|| {
+            "cannot determine the leanr cache directory: set XDG_CACHE_HOME or HOME".to_string()
+        })?;
         // Pin dependency bridging to the root workspace's toolchain.
         let toolchain = std::fs::read_to_string(root_dir.join("lean-toolchain"))
             .ok()
@@ -471,6 +478,7 @@ fn build(
                 ..leanr_build::bridge::LakeInvoker::default()
             },
             toolchain_olean_dir,
+            cache_root,
         };
         let ws = leanr_build::resolve(&root_dir, &opts).map_err(|e| e.to_string())?;
         for w in &ws.warnings {

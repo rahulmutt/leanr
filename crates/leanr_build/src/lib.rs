@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 
 pub mod bridge;
+pub mod cache_dir;
 pub mod config;
 mod error;
 pub mod fetch;
@@ -30,6 +31,10 @@ pub struct ResolveOptions {
     /// Toolchain olean root (`lean --print-libdir`) for classifying
     /// imports that resolve to no workspace module.
     pub toolchain_olean_dir: PathBuf,
+    /// Per-user leanr cache root (spec 2026-07-12 §Layout): shared git
+    /// source checkouts under `src/`, the bridge cache under
+    /// `config-cache/`. The CLI resolves it from XDG_CACHE_HOME/HOME.
+    pub cache_root: PathBuf,
 }
 
 #[derive(Debug)]
@@ -82,7 +87,7 @@ fn config_file_of(dir: &Path) -> Result<PathBuf, BuildError> {
 
 /// The 7-step pipeline from the spec (§Data flow).
 pub fn resolve(root_dir: &Path, opts: &ResolveOptions) -> Result<Workspace, BuildError> {
-    let cache_dir = root_dir.join(".leanr/config-cache");
+    let cache_dir = opts.cache_root.join("config-cache");
     let mut warnings = Vec::new();
 
     // 2. Root config (native or bridge).

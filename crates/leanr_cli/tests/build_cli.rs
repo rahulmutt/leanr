@@ -33,6 +33,7 @@ fn setup() -> tempfile::TempDir {
 fn leanr(tmp: &tempfile::TempDir) -> Command {
     let mut c = Command::cargo_bin("leanr").unwrap();
     c.current_dir(tmp.path())
+        .env("XDG_CACHE_HOME", tmp.path().join("xdg-cache"))
         .args(["build", "--dry-run"])
         .args([
             "--toolchain-dir",
@@ -79,6 +80,7 @@ fn build_without_dry_run_is_a_clear_not_yet_error() {
     Command::cargo_bin("leanr")
         .unwrap()
         .current_dir(tmp.path())
+        .env("XDG_CACHE_HOME", tmp.path().join("xdg-cache"))
         .args(["build"])
         .assert()
         .failure()
@@ -101,6 +103,7 @@ fn json_without_dry_run_is_a_clap_error() {
     Command::cargo_bin("leanr")
         .unwrap()
         .current_dir(tmp.path())
+        .env("XDG_CACHE_HOME", tmp.path().join("xdg-cache"))
         .args(["build", "--json"])
         .assert()
         .failure()
@@ -150,6 +153,7 @@ fn json_output_carries_path_dependency_package_and_module() {
     let out = Command::cargo_bin("leanr")
         .unwrap()
         .current_dir(&app)
+        .env("XDG_CACHE_HOME", tmp.path().join("xdg-cache"))
         .args(["build", "--dry-run", "--json"])
         .args([
             "--toolchain-dir",
