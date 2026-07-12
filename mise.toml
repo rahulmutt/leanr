@@ -122,7 +122,7 @@ run = [
 ]
 
 [tasks."build:acceptance"]
-description = "M2a acceptance: fresh clone of pinned Mathlib resolves byte-identically to the materialized checkout (network; local only)"
+description = "M2b acceptance: fresh clone of pinned Mathlib, full `leanr build`, every artifact byte-diffed vs lake's (hours; network; local only)"
 depends = ["elan:bootstrap"]
 run = "scripts/build-fresh-acceptance.sh"
 
