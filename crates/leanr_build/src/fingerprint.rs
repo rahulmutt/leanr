@@ -139,7 +139,10 @@ pub fn fingerprint_all(
             fps[i] = Some(fp);
         }
     }
-    Ok(fps.into_iter().map(|f| f.expect("every module in some wave")).collect())
+    Ok(fps
+        .into_iter()
+        .map(|f| f.expect("every module in some wave"))
+        .collect())
 }
 
 #[cfg(test)]
@@ -168,14 +171,32 @@ mod tests {
         let base = hash_module(&env(), b"p", b"src", b"{}", &["A\u{0}ff".into()]);
         let mut e2 = env();
         e2.leanr_version = "0.2.0".into();
-        assert_ne!(base, hash_module(&e2, b"p", b"src", b"{}", &["A\u{0}ff".into()]));
+        assert_ne!(
+            base,
+            hash_module(&e2, b"p", b"src", b"{}", &["A\u{0}ff".into()])
+        );
         let mut e3 = env();
         e3.toolchain_id = "other".into();
-        assert_ne!(base, hash_module(&e3, b"p", b"src", b"{}", &["A\u{0}ff".into()]));
-        assert_ne!(base, hash_module(&env(), b"q", b"src", b"{}", &["A\u{0}ff".into()]));
-        assert_ne!(base, hash_module(&env(), b"p", b"src2", b"{}", &["A\u{0}ff".into()]));
-        assert_ne!(base, hash_module(&env(), b"p", b"src", b"{\"x\":1}", &["A\u{0}ff".into()]));
-        assert_ne!(base, hash_module(&env(), b"p", b"src", b"{}", &["A\u{0}00".into()]));
+        assert_ne!(
+            base,
+            hash_module(&e3, b"p", b"src", b"{}", &["A\u{0}ff".into()])
+        );
+        assert_ne!(
+            base,
+            hash_module(&env(), b"q", b"src", b"{}", &["A\u{0}ff".into()])
+        );
+        assert_ne!(
+            base,
+            hash_module(&env(), b"p", b"src2", b"{}", &["A\u{0}ff".into()])
+        );
+        assert_ne!(
+            base,
+            hash_module(&env(), b"p", b"src", b"{\"x\":1}", &["A\u{0}ff".into()])
+        );
+        assert_ne!(
+            base,
+            hash_module(&env(), b"p", b"src", b"{}", &["A\u{0}00".into()])
+        );
     }
 
     #[test]
@@ -204,13 +225,27 @@ mod tests {
         // (Merkle recursion), not just App.Sub's.
         let t1 = testws::synthetic();
         let before = fingerprint_all(&t1.ws, &env()).unwrap();
-        let app = t1.ws.graph.id_of(&crate::modules::ModuleName::parse("App").unwrap()).unwrap();
-        let sub = t1.ws.graph.id_of(&crate::modules::ModuleName::parse("App.Sub").unwrap()).unwrap();
+        let app = t1
+            .ws
+            .graph
+            .id_of(&crate::modules::ModuleName::parse("App").unwrap())
+            .unwrap();
+        let sub = t1
+            .ws
+            .graph
+            .id_of(&crate::modules::ModuleName::parse("App.Sub").unwrap())
+            .unwrap();
         // Rewrite App.Sub.lean in the synthetic workspace, re-resolve.
         std::fs::write(&t1.ws.graph.modules[sub.0 as usize].file, "-- edited\n").unwrap();
         let after = fingerprint_all(&t1.ws, &env()).unwrap();
-        assert_ne!(before[sub.0 as usize], after[sub.0 as usize], "leaf fp changes");
-        assert_ne!(before[app.0 as usize], after[app.0 as usize], "dependent fp changes (Merkle)");
+        assert_ne!(
+            before[sub.0 as usize], after[sub.0 as usize],
+            "leaf fp changes"
+        );
+        assert_ne!(
+            before[app.0 as usize], after[app.0 as usize],
+            "dependent fp changes (Merkle)"
+        );
     }
 
     #[test]
@@ -218,8 +253,7 @@ mod tests {
         let t = testws::synthetic();
         let base = fingerprint_all(&t.ws, &env()).unwrap();
         let mut t2 = testws::synthetic();
-        t2.ws.root.config.input_file =
-            Some(vec![toml::Value::String("widget.js".into())]);
+        t2.ws.root.config.input_file = Some(vec![toml::Value::String("widget.js".into())]);
         let changed = fingerprint_all(&t2.ws, &env()).unwrap();
         // Root package's modules must re-fingerprint when its declared
         // custom inputs change.
