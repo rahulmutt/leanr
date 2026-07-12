@@ -108,6 +108,11 @@ Deleted the same artifact set again and re-ran `lake build
 compared **byte-identical** between rebuild #1 and rebuild #2 (`.ilean`,
 `.ilean.hash`, `.ir`, `.olean`, `.olean.private`, `.olean.server`, and even
 `.trace`, for both modules — 22/22 files identical, verified via `cmp -s`).
+This comparison ran in-session against a scratch working directory (outside
+the repository) using `cmp -s` only, not `sha256sum`; unlike §3 (where a
+pre-existing saved-oracle copy made a hash manifest natural), no per-file
+sha256 hashes for rebuild #2 were separately archived, so no hash/size table
+is included here.
 
 So: two independent lake rebuilds performed back-to-back in this environment
 agree with each other exactly, but **neither** agrees with the pre-existing

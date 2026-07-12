@@ -264,7 +264,10 @@ build:acceptance`:
   12 modules), all `.ilean`/`.olean.private` — see §Documented
   divergence below; zero `.olean`/`.ir`/`.olean.server` mismatches;
 - `cargo test --workspace`, `mise run lint`, and `mise run
-  build:differential` all green at this commit.
+  build:differential` all green at the recording commit
+  (`46bfad8b44ae4ccae9a0ffc5016323c7a3218e18`) and re-verified at the
+  commit recording this fix (`mathlib_oracle`: 4 passed; 0 failed;
+  `lake_build_oracle`: 5 passed; 0 failed).
 
 ### Documented divergence
 

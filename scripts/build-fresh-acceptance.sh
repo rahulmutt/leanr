@@ -36,9 +36,15 @@ echo "acceptance: byte-diffing artifacts against .mathlib ..." >&2
 # for these two artifact kinds — verdict BENIGN, lake's own cross-session
 # byte-nondeterminism (thread-scheduling-dependent reference-tracking
 # metadata), not a leanr defect. .olean/.ir/.olean.server are never affected.
+# The investigation only established benign cause for CONTENT variance in
+# artifacts present on both sides — an artifact leanr produced that the
+# oracle lacks entirely is not covered by that verdict and is never excused.
 # So: every artifact is still diffed, but mismatches are split into a
 # deterministic-kind list (must be empty) and a known-nondeterministic-kind
-# list (*.ilean / *.olean.private — reported, non-blocking).
+# list (reported, non-blocking). Only a content diff on an artifact present
+# on both sides, of kind *.ilean / *.olean.private, lands in the
+# known-nondeterministic list; a missing-on-oracle-side artifact always
+# lands in the deterministic (hard-fail) list, regardless of extension.
 mismatches="$tmp/mismatches.txt"; : > "$mismatches"
 deterministic_mismatches="$tmp/deterministic_mismatches.txt"; : > "$deterministic_mismatches"
 nondeterministic_mismatches="$tmp/nondeterministic_mismatches.txt"; : > "$nondeterministic_mismatches"
@@ -53,7 +59,14 @@ for pkg_dir in "$tmp/mathlib/.leanr/build"/*/; do
     [ -d "$pkg_dir/lib" ] || continue
     (cd "$pkg_dir/lib" && find . -type f | sort) | while IFS= read -r f; do
         echo $(($(cat "$total_file") + 1)) > "$total_file"
-        if ! cmp -s "$pkg_dir/lib/$f" "$oracle/$f"; then
+        if [ ! -e "$oracle/$f" ]; then
+            # Present on the leanr side, entirely absent on the oracle side:
+            # never excusable, regardless of extension — the divergence
+            # investigation only covers content variance in artifacts
+            # present on both sides.
+            echo "$pkg/$f (missing on oracle side)" >> "$mismatches"
+            echo "$pkg/$f (missing on oracle side)" >> "$deterministic_mismatches"
+        elif ! cmp -s "$pkg_dir/lib/$f" "$oracle/$f"; then
             echo "$pkg/$f" >> "$mismatches"
             case "$f" in
                 *.ilean|*.olean.private) echo "$pkg/$f" >> "$nondeterministic_mismatches" ;;
@@ -70,8 +83,8 @@ if [ -s "$deterministic_mismatches" ]; then
 fi
 if [ -s "$nondeterministic_mismatches" ]; then
     n=$(wc -l < "$nondeterministic_mismatches")
-    deterministic_count=$((count - n))
-    echo "acceptance: PASS — $deterministic_count deterministic artifacts byte-identical to lake's; $n known-nondeterministic divergences (.ilean/.olean.private — see M2b spec §Acceptance)" >&2
+    byte_identical_count=$((count - n))
+    echo "acceptance: PASS — $byte_identical_count artifacts byte-identical to lake's; $n known-nondeterministic divergences (.ilean/.olean.private, both sides present — see M2b spec §Acceptance)" >&2
     cat "$nondeterministic_mismatches" >&2
     exit 0
 fi
