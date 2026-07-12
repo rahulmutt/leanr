@@ -123,9 +123,14 @@ fp(m) = blake3(
   leanr_version_id,         # STABLE leanr release/commit id (not a per-build nonce) — upgrade ⇒ full rebuild
   toolchain_id,             # lean-toolchain pin
   platform_triple,          # target triple
+  owner_provenance(m),          # git dep: the package's PINNED REV (captures the whole
+                                #   immutable rev-keyed checkout — incl. committed non-.lean
+                                #   compile inputs like ProofWidgets' JS — by reference,
+                                #   sound because fetch.rs verifies rev == checkout bytes).
+                                # root / path dep (no rev): hash of any declared
+                                #   input_file/input_dir file contents, path-sorted.
   source_bytes(m),
   canonical(setup_inputs(m)),   # options (k/v sorted), isModule, plugins, dynlibs
-  extra_input_contents(m),      # content of input_file/input_dir/needs, path-sorted
   sorted[ (import_name, fp(import)) for import in direct_imports(m) ],
 )
 ```
@@ -149,10 +154,17 @@ existing blake3 content-keying (the bridge/config cache).
   artifacts' *identity/content* enters the key via the recursive
   import fps instead — so relocating the store or building on another
   machine does not change any fingerprint.
-- `extra_input_contents(m)` is included deliberately. ProofWidgets'
-  `input_file`/`input_dir` are inputs `lean` reads; omitting them
-  would be an under-inclusive fingerprint — the exact release-blocking
-  class of bug the milestone guards against.
+- `owner_provenance(m)` closes the non-`.lean` compile-input hole
+  (ProofWidgets commits built JS to git; if a module reads it at
+  compile time, hashing only the `.lean` source would miss it — an
+  under-inclusive, release-blocking fingerprint). For **git deps** the
+  package's pinned rev captures the whole immutable checkout by
+  reference — sound because `fetch.rs` already verifies rev-parse ==
+  checkout (a tampered checkout is a hard error, never trusted). For
+  the **root and path deps** (mutable, no rev) we hash the contents of
+  any declared `input_file`/`input_dir` files instead. This supersedes
+  an earlier `extra_input_contents` sketch that lacked clean per-module
+  attribution and never folded the rev in.
 - Completeness is asserted, not assumed: the §Staleness-correctness
   harness perturbs each input axis and fails on under-invalidation,
   and `verify --deep` re-derives artifacts against the oracle.
@@ -255,7 +267,9 @@ synthetic multi-module fixture project (fast, hermetic):
    - edit a leaf module's source;
    - toggle one `leanOption` on the owning lib;
    - change `toolchain_id` / `leanr_version_id`;
-   - change a ProofWidgets-style `input_file`.
+   - change a git dep's pinned rev (must invalidate every module of
+     that dep and their downstream cone), and change a path-dep's
+     declared `input_file` contents.
 3. Assert **exactly** the downstream cone rebuilds — **no
    under-invalidation** (a changed input that fails to invalidate a
    dependent is a release-blocking failure) and **no
