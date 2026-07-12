@@ -17,7 +17,10 @@ pub mod graph;
 pub mod manifest;
 pub mod modules;
 pub mod scanner;
+pub mod setup;
 mod subprocess;
+#[cfg(test)]
+pub(crate) mod testws;
 
 pub use error::BuildError;
 
