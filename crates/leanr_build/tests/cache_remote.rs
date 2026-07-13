@@ -705,6 +705,96 @@ fn get_all_prefetches_misses_and_counts_outcomes() {
     );
 }
 
+// --- final-review I1 + M1: hostile/corrupt-arity remote manifests must
+// degrade to a normal rebuild, never panic, and never poison the local
+// cache permanently (THREAT_MODEL §Remote cache ingestion). ---
+
+#[test]
+fn wrong_arity_remote_manifest_degrades_to_rebuild_and_self_heals() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path().join("ws");
+    std::fs::create_dir_all(&dir).unwrap();
+    let ws = fixture(&dir);
+    let served = tmp.path().join("served");
+    // Hostile remote: every module's REAL fingerprint gets a manifest
+    // naming only ONE artifact, though the real family is two
+    // (olean+ilean). `RemoteCache::fetch` validates blob keys + hashes,
+    // never arity, so this manifest survives fetch and is written into
+    // the local CAS by `insert_manifest`.
+    let fps = fingerprint_all(&ws, &fp_env()).unwrap();
+    for fp in &fps {
+        publish(&served, fp, &[("X.olean", b"wrong-arity-bytes")]);
+    }
+    let srv = httpd::spawn(served);
+    let xdg = tmp.path().join("xdg");
+
+    let (rc1, warnings1) = remote_with_warnings(&format!("http://{}", srv.addr));
+    let log1 = tmp.path().join("b1.log");
+    let r1 = build_with(&ws, &xdg, &log1, Some(rc1), false);
+    // Must SUCCEED (no panic in a pool worker) and rebuild every module
+    // via lean rather than materializing the poisoned manifest.
+    assert_eq!((r1.built, r1.cached, r1.downloaded), (3, 0, 0));
+    assert_eq!(
+        lean_runs(&log1),
+        3,
+        "every poisoned module rebuilt via lean"
+    );
+    assert!(
+        warnings1.lock().unwrap().is_empty(),
+        "arity mismatch is a quiet degrade, not a warned event"
+    );
+
+    // A successful lean run's `insert` overwrites the poisoned manifest
+    // (self-healing, same philosophy as `lookup`'s self-healing misses).
+    // Second build against the SAME still-poisoned remote must be a
+    // clean LOCAL hit — the remote is never re-consulted for these fps.
+    let (rc2, _) = remote_with_warnings(&format!("http://{}", srv.addr));
+    let log2 = tmp.path().join("b2.log");
+    let r2 = build_with(&ws, &xdg, &log2, Some(rc2), false);
+    assert_eq!((r2.built, r2.cached, r2.downloaded), (0, 3, 0));
+    assert_eq!(lean_runs(&log2), 0, "healed cache — zero lean invocations");
+}
+
+#[test]
+fn swapped_artifact_order_remote_manifest_degrades_to_rebuild() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path().join("ws");
+    std::fs::create_dir_all(&dir).unwrap();
+    let ws = fixture(&dir);
+    let served = tmp.path().join("served");
+    let layout = leanr_build::setup::Layout::new(&ws.root_dir);
+    // Hostile remote: correct COUNT (2), but the wrong ORDER — swap the
+    // olean/ilean entries relative to what `layout.artifact_paths`
+    // (and thus `dests`) expects. A positional `materialize` would
+    // write ilean bytes to the .olean path and vice versa.
+    let fps = fingerprint_all(&ws, &fp_env()).unwrap();
+    for (fp, m) in fps.iter().zip(&ws.graph.modules) {
+        let dests = layout.artifact_paths(&m.package, m);
+        let olean_name = dests[0].file_name().unwrap().to_str().unwrap();
+        let ilean_name = dests[1].file_name().unwrap().to_str().unwrap();
+        publish(
+            &served,
+            fp,
+            &[
+                (ilean_name, b"swapped-ilean-payload"),
+                (olean_name, b"swapped-olean-payload"),
+            ],
+        );
+    }
+    let srv = httpd::spawn(served);
+    let (rc, warnings) = remote_with_warnings(&format!("http://{}", srv.addr));
+    let log = tmp.path().join("b.log");
+    let xdg = tmp.path().join("xdg");
+    let r = build_with(&ws, &xdg, &log, Some(rc), false);
+    assert_eq!((r.built, r.cached, r.downloaded), (3, 0, 0));
+    assert_eq!(
+        lean_runs(&log),
+        3,
+        "every swapped-order module rebuilt via lean"
+    );
+    assert!(warnings.lock().unwrap().is_empty());
+}
+
 #[test]
 fn get_all_counts_degraded_as_failed() {
     let tmp = tempfile::TempDir::new().unwrap();

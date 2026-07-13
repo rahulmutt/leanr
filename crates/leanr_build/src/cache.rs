@@ -28,14 +28,28 @@ pub(crate) fn shard(hex: &str) -> &str {
 }
 
 /// Write `bytes` to `path` atomically (temp sibling + rename), flock-
-/// guarded on `path.lock`, leaving the file read-only. A concurrent
+/// guarded on `path.lock`, leaving the file read-only.
+///
+/// `overwrite = false` (blob storage): the path IS the content's blake3
+/// hash, so an existing file at this path is, by construction, already
+/// byte-identical — skipping is a safe, cheap no-op, and a concurrent
 /// writer of identical content races safely (rename is atomic).
-fn write_atomic_readonly(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+///
+/// `overwrite = true` (manifest storage, `Cache::insert`): the path is
+/// keyed by fingerprint, not content, so an existing file is NOT
+/// guaranteed to hold what we're about to write — e.g. a prior
+/// `insert_manifest` may have ingested a wire-sourced manifest with the
+/// wrong arity/order (final-review I1, THREAT_MODEL §Remote cache
+/// ingestion). A verified-correct `insert` from a real `lean` run must
+/// always win and replace whatever (possibly poisoned) manifest is
+/// already there — this is what makes compile.rs's degrade-to-miss
+/// self-healing across builds rather than re-poisoning forever.
+fn write_atomic_readonly(path: &Path, bytes: &[u8], overwrite: bool) -> std::io::Result<()> {
     let parent = path.parent().expect("cache path has a parent");
     std::fs::create_dir_all(parent)?;
     let lock = path.with_extension("lock");
     let _g = crate::fslock::lock_exclusive(&lock)?;
-    if path.exists() {
+    if path.exists() && !overwrite {
         return Ok(()); // content-addressed: already present, identical bytes.
     }
     let tmp = path.with_extension("tmp");
@@ -61,7 +75,7 @@ impl Cache {
     pub fn store_blob(&self, bytes: &[u8]) -> std::io::Result<String> {
         let hex = blake3::hash(bytes).to_hex().to_string();
         let path = self.blob_path(&hex);
-        write_atomic_readonly(&path, bytes)?;
+        write_atomic_readonly(&path, bytes, false)?;
         Ok(hex)
     }
 
@@ -85,7 +99,11 @@ impl Cache {
         }
         let manifest = Manifest { artifacts: entries };
         let json = serde_json::to_vec(&manifest).expect("manifest serializes");
-        write_atomic_readonly(&self.manifest_path(fp), &json)?;
+        // `overwrite = true`: a verified-correct manifest from a real
+        // `lean` run always wins, including over a poisoned manifest a
+        // prior `insert_manifest` ingested from an untrusted remote (see
+        // `write_atomic_readonly`'s doc comment).
+        write_atomic_readonly(&self.manifest_path(fp), &json, true)?;
         Ok(manifest)
     }
 
@@ -95,7 +113,7 @@ impl Cache {
     /// blobs-first ordering keeps a crash self-healing via `lookup`).
     pub fn insert_manifest(&self, fp: &str, manifest: &Manifest) -> std::io::Result<()> {
         let json = serde_json::to_vec(manifest).expect("manifest serializes");
-        write_atomic_readonly(&self.manifest_path(fp), &json)
+        write_atomic_readonly(&self.manifest_path(fp), &json, false)
     }
 
     pub fn lookup(&self, fp: &str) -> std::io::Result<Option<Manifest>> {
@@ -125,11 +143,25 @@ impl Cache {
     }
 
     pub fn materialize(&self, manifest: &Manifest, dests: &[PathBuf]) -> std::io::Result<()> {
-        assert_eq!(
-            manifest.artifacts.len(),
-            dests.len(),
-            "manifest/dest arity mismatch — caller must pass layout.artifact_paths order"
-        );
+        // Defense in depth (final-review I1): a manifest can originate
+        // from untrusted wire bytes (remote fetch → local CAS, or a
+        // tampered local file) and claim the wrong arity for its module.
+        // That must never panic — a panic here runs inside a pool worker
+        // and crashes `leanr build` (THREAT_MODEL §Remote cache
+        // ingestion). Callers are expected to validate arity/order
+        // themselves and treat a mismatch as a cache miss (see
+        // compile.rs's job body); this is the last-resort guard.
+        if manifest.artifacts.len() != dests.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "manifest/dest arity mismatch: manifest has {} artifact(s), \
+                     caller passed {} dest(s)",
+                    manifest.artifacts.len(),
+                    dests.len()
+                ),
+            ));
+        }
         for (entry, dest) in manifest.artifacts.iter().zip(dests) {
             let blob = self.blob_path(&entry.blob);
             if let Some(parent) = dest.parent() {
@@ -528,6 +560,26 @@ mod tests {
         c.materialize(&m, &[da.clone(), db.clone()]).unwrap();
         assert_eq!(std::fs::read(&da).unwrap(), b"olean-bytes");
         assert_eq!(std::fs::read(&db).unwrap(), b"ilean-bytes");
+    }
+
+    #[test]
+    fn materialize_with_mismatched_dest_count_errors_not_panics() {
+        // Defense in depth (final-review I1): a wire-sourced manifest can
+        // claim the wrong arity for its module. materialize must return an
+        // io::Error, never assert!/panic — a panic here runs inside a pool
+        // worker and crashes `leanr build` (THREAT_MODEL §Remote cache
+        // ingestion). Layer 1 (compile.rs) catches this before calling
+        // materialize in the real build path; this pins materialize's own
+        // behavior as a second, independent guard.
+        let (t, c) = cache();
+        let a = t.path().join("A.olean");
+        write(&a, b"olean-bytes");
+        let m = c.insert("badarity", &[a]).unwrap();
+        let out = t.path().join("proj");
+        let da = out.join("A.olean");
+        let db = out.join("A.ilean");
+        let err = c.materialize(&m, &[da, db]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]

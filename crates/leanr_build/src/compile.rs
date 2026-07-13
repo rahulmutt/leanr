@@ -203,6 +203,28 @@ pub fn build_workspace(
                         }
                     }
                 }
+                // Untrusted-manifest discipline (final-review I1/M1,
+                // THREAT_MODEL §Remote cache ingestion): a manifest may
+                // originate from wire bytes (remote fetch → local CAS) or
+                // local corruption, and `RemoteCache::fetch` validates
+                // only blob keys + hashes, never arity or ordering. A
+                // manifest whose artifact count or per-slot name doesn't
+                // match this module's real `dests` layout must never
+                // reach `materialize` — degrade to a miss instead of
+                // panicking or writing artifacts to the wrong paths. The
+                // fall-through `lean` run's `insert` then overwrites the
+                // poisoned manifest, self-healing the local cache exactly
+                // like `lookup`'s self-healing misses.
+                if let Some((manifest, _)) = &hit {
+                    let arity_ok = manifest.artifacts.len() == dests.len();
+                    let order_ok = arity_ok
+                        && manifest.artifacts.iter().zip(&dests).all(|(a, d)| {
+                            d.file_name().and_then(|n| n.to_str()) == Some(a.name.as_str())
+                        });
+                    if !arity_ok || !order_ok {
+                        hit = None;
+                    }
+                }
                 if let Some((manifest, outcome)) = hit {
                     if let Err(e) = cache.materialize(&manifest, &dests) {
                         cleanup();
