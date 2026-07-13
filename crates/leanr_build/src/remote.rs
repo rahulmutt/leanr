@@ -51,6 +51,211 @@ pub fn decompress_capped(compressed: &[u8], cap: u64) -> Result<Vec<u8>, String>
     Ok(out)
 }
 
+use crate::cache::{Cache, Manifest};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+pub type WarnFn = Box<dyn Fn(&str) + Send + Sync>;
+
+/// Read tier over a dumb-HTTP remote (spec §Wire layout). Failure
+/// posture: transport-level errors trip a per-run circuit breaker (one
+/// warning, then silent misses); verification failures warn per
+/// occurrence and NEVER ingest.
+pub struct RemoteCache {
+    base: String,
+    agent: ureq::Agent,
+    tripped: AtomicBool,
+    warn: WarnFn,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum FetchOutcome {
+    /// Manifest + all blobs are now in the local CAS.
+    Hit { downloaded_blobs: usize },
+    /// Remote does not have this fingerprint (or breaker is tripped).
+    Miss,
+    /// Remote HAS the manifest but something failed to download, parse,
+    /// or verify — a miss to the build, distinct for operators.
+    Degraded,
+}
+
+enum GetError {
+    /// Connection-level: refused/timeout/DNS. Trips the breaker.
+    Transport(String),
+    /// Non-200/404 HTTP status.
+    Status(u16),
+    /// Body exceeded the caller's cap.
+    TooLarge,
+}
+
+impl RemoteCache {
+    pub fn new(base_url: &str, warn: WarnFn) -> RemoteCache {
+        // ureq 3: statuses are NOT errors (we branch on them), connect
+        // timeout only (blob downloads may legitimately run long).
+        let config = ureq::Agent::config_builder()
+            .timeout_connect(Some(std::time::Duration::from_secs(10)))
+            .http_status_as_error(false)
+            .build();
+        RemoteCache {
+            base: base_url.trim_end_matches('/').to_string(),
+            agent: config.new_agent(),
+            tripped: AtomicBool::new(false),
+            warn,
+        }
+    }
+
+    fn trip(&self, why: &str) {
+        if !self.tripped.swap(true, Ordering::SeqCst) {
+            (self.warn)(&format!(
+                "remote cache {}: unreachable ({why}) — disabled for the rest of this run",
+                self.base
+            ));
+        }
+    }
+
+    /// GET `{base}/{key}` with a response-size cap. Ok(None) = 404.
+    fn get_capped(&self, key: &str, cap: u64) -> Result<Option<Vec<u8>>, GetError> {
+        let url = format!("{}/{key}", self.base);
+        let mut resp = match self.agent.get(&url).call() {
+            Ok(r) => r,
+            Err(e) => return Err(GetError::Transport(e.to_string())),
+        };
+        match resp.status().as_u16() {
+            200 => {}
+            404 => return Ok(None),
+            s => return Err(GetError::Status(s)),
+        }
+        let body = resp
+            .body_mut()
+            .with_config()
+            .limit(cap)
+            .read_to_vec()
+            .map_err(|_| GetError::TooLarge)?;
+        Ok(Some(body))
+    }
+
+    /// Download manifest + missing blobs for `fp` into the local CAS.
+    /// Blobs are decompressed (capped) and blake3-verified against their
+    /// content key BEFORE `store_blob`; the manifest is written last.
+    pub fn fetch(&self, cache: &Cache, fp: &str) -> FetchOutcome {
+        if self.tripped.load(Ordering::SeqCst) {
+            return FetchOutcome::Miss;
+        }
+        let mbytes = match self.get_capped(&remote_manifest_key(fp), MAX_MANIFEST_BYTES) {
+            Ok(Some(b)) => b,
+            Ok(None) => return FetchOutcome::Miss,
+            Err(GetError::Transport(e)) => {
+                self.trip(&e);
+                return FetchOutcome::Miss;
+            }
+            Err(GetError::Status(s)) => {
+                (self.warn)(&format!(
+                    "remote cache: HTTP {s} fetching manifest for {fp}"
+                ));
+                return FetchOutcome::Degraded;
+            }
+            Err(GetError::TooLarge) => {
+                (self.warn)(&format!(
+                    "remote cache: manifest for {fp} exceeds {MAX_MANIFEST_BYTES} bytes — rejected"
+                ));
+                return FetchOutcome::Degraded;
+            }
+        };
+        // Untrusted-bytes discipline: malformed wire manifest is a warned
+        // degrade, never a panic; hostile `blob` strings never reach a
+        // filesystem path (is_blob_key gates them).
+        let manifest: Manifest = match serde_json::from_slice(&mbytes) {
+            Ok(m) => m,
+            Err(_) => {
+                (self.warn)(&format!(
+                    "remote cache: malformed manifest for {fp} — rejected"
+                ));
+                return FetchOutcome::Degraded;
+            }
+        };
+        if manifest
+            .artifacts
+            .iter()
+            .any(|a| !crate::cache::is_blob_key(&a.blob))
+        {
+            (self.warn)(&format!(
+                "remote cache: manifest for {fp} names an invalid blob key — rejected"
+            ));
+            return FetchOutcome::Degraded;
+        }
+        let mut downloaded = 0usize;
+        for entry in &manifest.artifacts {
+            if cache.blob_path(&entry.blob).exists() {
+                continue; // wire-level dedup (spec §Scope decisions)
+            }
+            let compressed =
+                match self.get_capped(&remote_blob_key(&entry.blob), MAX_ARTIFACT_BYTES) {
+                    Ok(Some(b)) => b,
+                    Ok(None) => {
+                        (self.warn)(&format!(
+                            "remote cache: manifest for {fp} references missing blob {} — degraded",
+                            entry.blob
+                        ));
+                        return FetchOutcome::Degraded;
+                    }
+                    Err(GetError::Transport(e)) => {
+                        self.trip(&e);
+                        return FetchOutcome::Degraded;
+                    }
+                    Err(GetError::Status(s)) => {
+                        (self.warn)(&format!(
+                            "remote cache: HTTP {s} fetching blob {}",
+                            entry.blob
+                        ));
+                        return FetchOutcome::Degraded;
+                    }
+                    Err(GetError::TooLarge) => {
+                        (self.warn)(&format!(
+                            "remote cache: blob {} exceeds {MAX_ARTIFACT_BYTES} bytes — rejected",
+                            entry.blob
+                        ));
+                        return FetchOutcome::Degraded;
+                    }
+                };
+            let bytes = match decompress_capped(&compressed, MAX_ARTIFACT_BYTES) {
+                Ok(b) => b,
+                Err(e) => {
+                    (self.warn)(&format!(
+                        "remote cache: blob {} failed decompression ({e}) — rejected",
+                        entry.blob
+                    ));
+                    return FetchOutcome::Degraded;
+                }
+            };
+            // THE ingestion choke point (spec §Threat model touch).
+            if blake3::hash(&bytes).to_hex().to_string() != entry.blob {
+                (self.warn)(&format!(
+                    "remote cache: blob {} failed hash verification — rejected",
+                    entry.blob
+                ));
+                return FetchOutcome::Degraded;
+            }
+            if let Err(e) = cache.store_blob(&bytes) {
+                (self.warn)(&format!(
+                    "remote cache: storing blob {} failed ({e})",
+                    entry.blob
+                ));
+                return FetchOutcome::Degraded;
+            }
+            downloaded += 1;
+        }
+        // Blobs first, manifest last (crash-safe with lookup self-healing).
+        if let Err(e) = cache.insert_manifest(fp, &manifest) {
+            (self.warn)(&format!(
+                "remote cache: storing manifest for {fp} failed ({e})"
+            ));
+            return FetchOutcome::Degraded;
+        }
+        FetchOutcome::Hit {
+            downloaded_blobs: downloaded,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
