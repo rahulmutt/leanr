@@ -95,7 +95,15 @@ implementation or a thin frontend. Full design:
   as does the bridge cache; Lake-layout interop is retired as of the
   M2b spec (`docs/superpowers/specs/2026-07-12-m2b-build-orchestrator-design.md`).
   `leanr build` / `leanr build --dry-run` / `leanr cache verify [--deep]`
-  / `leanr cache gc --max-size`. No kernel dependency.
+  / `leanr cache gc --max-size`. No kernel dependency. M2d adds
+  `remote`, the network tier over the same CAS: `leanr build` reads
+  through a dumb-HTTP remote on local miss (blobs verified against
+  their content keys before insertion — see docs/THREAT_MODEL.md
+  §Remote cache ingestion), `leanr cache push` uploads via presigned
+  S3 PUTs, `leanr cache get` prefetches the closure. The remote
+  mirrors the CAS layout under `v1/` with zstd-compressed blobs;
+  remote availability affects speed, never correctness (`--no-remote`
+  / `LEANR_REMOTE_CACHE`).
 - `crates/leanr_cli` — the `leanr` binary. Thin: argument parsing and
   printing only, so CLI and (future) LSP can never diverge in behavior.
 
