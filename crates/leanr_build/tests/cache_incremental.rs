@@ -106,6 +106,7 @@ fn build_counting_with_env(
             toolchain_id: env.toolchain_id.clone(),
             platform: env.platform.clone(),
         },
+        remote: None,
     };
     let report = leanr_build::compile::build_workspace(ws, &opts, &|_| {}).unwrap();
     std::env::remove_var("COUNTING_LEAN_LOG");
@@ -283,6 +284,7 @@ fn deep_verify_is_clean_after_build_and_flags_a_tampered_blob() {
             toolchain_id: env.toolchain_id.clone(),
             platform: env.platform.clone(),
         },
+        remote: None,
     };
     leanr_build::compile::build_workspace(&ws, &opts, &|_| {}).unwrap();
     std::env::remove_var("COUNTING_LEAN_LOG");

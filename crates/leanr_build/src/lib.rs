@@ -21,6 +21,7 @@ pub mod graph;
 pub mod manifest;
 pub mod modules;
 pub mod pool;
+pub mod remote;
 pub mod scanner;
 pub mod setup;
 mod subprocess;

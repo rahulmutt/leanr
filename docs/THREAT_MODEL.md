@@ -12,7 +12,7 @@
 | Boundary | Who controls the bytes | Control |
 |---|---|---|
 | `.olean` files | Any package author / cache | Parse defensively: no panics on arbitrary bytes (fuzz/property-tested); kernel-check imported content by default (M1+) |
-| Remote cache entries (M2+) | Cache operator / network | Content-addressed hashes; kernel-check unless signed by a trusted key |
+| Remote cache entries (M2d) | Cache operator / network | Decompress-and-blake3-verify against the content key BEFORE local insertion (single ingestion choke point, `remote.rs`); defensive manifest parsing (size-capped, strict hex, malformed = warned miss); decompression caps (bomb defense). Configuring a remote = trusting its operator with the fp→artifact mapping; signed manifests are the recorded future upgrade |
 | `lakefile.lean` execution (M4+) | Package author | Arbitrary code execution **by design** (same as lake); documented, not hidden |
 | Cargo dependencies | Upstream maintainers | `cargo deny` in CI (advisories, sources, licenses); minimal dependency policy |
 | Committed secrets | Contributors | gitleaks in CI over full history |
@@ -180,6 +180,36 @@ the `leanr_olean` parser must never panic on them (see "Resource
 bounds" above); this section documents cache-store integrity as an
 additional, separate invariant layered in front of that parser once
 remote blobs are in scope.
+
+## Remote cache ingestion (M2d)
+
+M2d adds a network tier: `leanr build --remote <url>` / `leanr cache
+get` download manifests and blobs from an HTTP endpoint, and `leanr
+cache push` uploads to an S3-compatible bucket. The wire bytes are
+untrusted (THREAT boundary: cache operator / network path):
+
+- **Single ingestion choke point.** Remote bytes enter the local CAS
+  only through `remote::RemoteCache::fetch`, which zstd-decompresses
+  under a hard cap and blake3-verifies against the content key BEFORE
+  `Cache::store_blob`. A mismatch is warned and rejected; unverified
+  bytes never land in the store, so every M2c integrity invariant
+  (and `leanr cache verify`) covers remote-sourced entries unchanged.
+- **Defensive parsing.** Wire manifests are size-capped (1 MiB),
+  parsed with serde (malformed = warned degrade, never a panic), and
+  every referenced blob key must be 64 lowercase hex chars before it
+  touches a filesystem path. Blob decompression enforces a 4 GiB
+  output ceiling (bomb defense).
+- **Trust boundary, stated.** Content addressing verifies bytes match
+  keys; it cannot verify the fp→artifact *mapping*. A compromised
+  endpoint can serve self-consistent malicious artifacts for a
+  fingerprint. Configuring a remote = trusting its operator — the
+  same posture as sccache/bazel/cargo remote caches and `lake exe
+  cache`. Signed manifests are the recorded future upgrade; the
+  manifest-fetch path is the seam.
+- **Availability ≠ correctness.** Every network failure degrades to a
+  cache miss (`lean` runs); a connect-level failure trips a per-run
+  circuit breaker (one warning, then silence). Push failures are hard
+  errors (CI must notice).
 
 ## Out of scope (for now)
 

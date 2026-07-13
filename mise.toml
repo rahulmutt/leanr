@@ -42,8 +42,12 @@ run = "gitleaks detect --redact"
 description = "M2c staleness-correctness gate: exact-cone rebuild per perturbed input axis (fast; no toolchain)"
 run = "cargo test --package leanr_build --test cache_incremental"
 
+[tasks."cache:remote"]
+description = "M2d remote-cache gate: hermetic HTTP CAS — fetch/push/tamper/offline/build-through-remote (fast; no toolchain)"
+run = "cargo test --package leanr_build --test cache_remote"
+
 [tasks.ci]
-depends = ["lint", "test", "lint:deps", "scan:secrets", "cache:incremental"]
+depends = ["lint", "test", "lint:deps", "scan:secrets", "cache:incremental", "cache:remote"]
 
 [tasks."sweep:stdlib"]
 description = "Decode every .olean shipped with the pinned toolchain (local; CI has no Lean)"
