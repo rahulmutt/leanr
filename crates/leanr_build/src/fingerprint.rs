@@ -1,10 +1,14 @@
-//! Recursive content-Merkle fingerprint (M2c spec §Fingerprint). A
-//! module's key folds in its source, semantic setup inputs, toolchain,
-//! leanr's own version, its owning package's provenance (git rev, or
-//! declared custom inputs for root/path deps), and the *fingerprints* of
-//! its direct imports — so one fixed-size hash captures the whole
-//! transitive input closure. Pure content (no mtimes): reproducible
-//! across machines and worktrees, which is what a shared CAS needs.
+//! Recursive content-Merkle fingerprint (M2c/M2d spec §Fingerprint). A
+//! module's key folds in its own fully-qualified module identity, its
+//! source, semantic setup inputs, toolchain, leanr's own version, its
+//! owning package's provenance (git rev, or declared custom inputs for
+//! root/path deps), and the *fingerprints* of its direct imports — so
+//! one fixed-size hash captures the whole transitive input closure.
+//! Folding in module identity means distinct modules never share a
+//! fingerprint, even when byte-identical (e.g. deprecation stubs) with
+//! matching provenance, setup, and imports. Pure content (no mtimes):
+//! reproducible across machines and worktrees, which is what a shared
+//! CAS needs.
 
 use crate::graph::{ModuleId, ModuleInfo};
 use crate::setup::Layout;
@@ -34,13 +38,15 @@ fn put(h: &mut blake3::Hasher, field: &[u8]) {
 
 pub(crate) fn hash_module(
     env: &FingerprintEnv,
+    name: &str,
     provenance: &[u8],
     source: &[u8],
     setup_inputs: &[u8],
     import_fps: &[String],
 ) -> Fingerprint {
     let mut h = blake3::Hasher::new();
-    put(&mut h, b"leanr-m2c-fingerprint-v1"); // DOMAIN_TAG + FP_SCHEMA_VERSION
+    put(&mut h, b"leanr-m2d-fingerprint-v2"); // DOMAIN_TAG + FP_SCHEMA_VERSION
+    put(&mut h, name.as_bytes());
     put(&mut h, env.leanr_version.as_bytes());
     put(&mut h, env.toolchain_id.as_bytes());
     put(&mut h, env.platform.as_bytes());
@@ -132,6 +138,7 @@ pub fn fingerprint_all(
             import_fps.sort();
             let fp = hash_module(
                 env,
+                &m.name.to_string(),
                 &provenance_of(m),
                 &source,
                 &setup_inputs_bytes(ws, &layout, id),
@@ -160,8 +167,8 @@ mod tests {
 
     #[test]
     fn deterministic_and_64_hex() {
-        let a = hash_module(&env(), b"p", b"src", b"{}", &["A\u{0}ff".into()]);
-        let b = hash_module(&env(), b"p", b"src", b"{}", &["A\u{0}ff".into()]);
+        let a = hash_module(&env(), "M", b"p", b"src", b"{}", &["A\u{0}ff".into()]);
+        let b = hash_module(&env(), "M", b"p", b"src", b"{}", &["A\u{0}ff".into()]);
         assert_eq!(a, b);
         assert_eq!(a.len(), 64);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
@@ -169,42 +176,54 @@ mod tests {
 
     #[test]
     fn every_component_changes_the_hash() {
-        let base = hash_module(&env(), b"p", b"src", b"{}", &["A\u{0}ff".into()]);
+        let base = hash_module(&env(), "M", b"p", b"src", b"{}", &["A\u{0}ff".into()]);
         let mut e2 = env();
         e2.leanr_version = "0.2.0".into();
         assert_ne!(
             base,
-            hash_module(&e2, b"p", b"src", b"{}", &["A\u{0}ff".into()])
+            hash_module(&e2, "M", b"p", b"src", b"{}", &["A\u{0}ff".into()])
         );
         let mut e3 = env();
         e3.toolchain_id = "other".into();
         assert_ne!(
             base,
-            hash_module(&e3, b"p", b"src", b"{}", &["A\u{0}ff".into()])
+            hash_module(&e3, "M", b"p", b"src", b"{}", &["A\u{0}ff".into()])
         );
         assert_ne!(
             base,
-            hash_module(&env(), b"q", b"src", b"{}", &["A\u{0}ff".into()])
+            hash_module(&env(), "N", b"p", b"src", b"{}", &["A\u{0}ff".into()]),
+            "module identity changes the hash"
         );
         assert_ne!(
             base,
-            hash_module(&env(), b"p", b"src2", b"{}", &["A\u{0}ff".into()])
+            hash_module(&env(), "M", b"q", b"src", b"{}", &["A\u{0}ff".into()])
         );
         assert_ne!(
             base,
-            hash_module(&env(), b"p", b"src", b"{\"x\":1}", &["A\u{0}ff".into()])
+            hash_module(&env(), "M", b"p", b"src2", b"{}", &["A\u{0}ff".into()])
         );
         assert_ne!(
             base,
-            hash_module(&env(), b"p", b"src", b"{}", &["A\u{0}00".into()])
+            hash_module(
+                &env(),
+                "M",
+                b"p",
+                b"src",
+                b"{\"x\":1}",
+                &["A\u{0}ff".into()]
+            )
+        );
+        assert_ne!(
+            base,
+            hash_module(&env(), "M", b"p", b"src", b"{}", &["A\u{0}00".into()])
         );
     }
 
     #[test]
     fn length_prefixing_blocks_boundary_collisions() {
         // ("ab","c") must not equal ("a","bc").
-        let x = hash_module(&env(), b"ab", b"c", b"{}", &[]);
-        let y = hash_module(&env(), b"a", b"bc", b"{}", &[]);
+        let x = hash_module(&env(), "M", b"ab", b"c", b"{}", &[]);
+        let y = hash_module(&env(), "M", b"a", b"bc", b"{}", &[]);
         assert_ne!(x, y);
     }
 
@@ -246,6 +265,38 @@ mod tests {
         assert_ne!(
             before[app.0 as usize], after[app.0 as usize],
             "dependent fp changes (Merkle)"
+        );
+    }
+
+    #[test]
+    fn identical_content_modules_get_distinct_fingerprints() {
+        // Two independent modules (no import relation between them),
+        // same root package, byte-identical source, identical (empty)
+        // import-fp lists. Real-world analogue: Mathlib's six
+        // byte-identical Subpresheaf deprecation stubs. Distinct module
+        // identity alone must be enough to give them distinct fps.
+        let t = testws::synthetic_with(
+            "name = \"app\"\ndefaultTargets = [\"LibA\", \"LibB\"]\n\n\
+             [[lean_lib]]\nname = \"LibA\"\n\n[[lean_lib]]\nname = \"LibB\"\n",
+            &[("LibA.lean", "def x := 1\n"), ("LibB.lean", "def x := 1\n")],
+        );
+        let fps = fingerprint_all(&t.ws, &env()).unwrap();
+        let a =
+            t.ws.graph
+                .id_of(&crate::modules::ModuleName::parse("LibA").unwrap())
+                .unwrap();
+        let b =
+            t.ws.graph
+                .id_of(&crate::modules::ModuleName::parse("LibB").unwrap())
+                .unwrap();
+        assert_eq!(
+            std::fs::read(&t.ws.graph.modules[a.0 as usize].file).unwrap(),
+            std::fs::read(&t.ws.graph.modules[b.0 as usize].file).unwrap(),
+            "fixture sanity: sources must be byte-identical"
+        );
+        assert_ne!(
+            fps[a.0 as usize], fps[b.0 as usize],
+            "distinct modules with identical content/provenance/imports must not share a fingerprint"
         );
     }
 
