@@ -10,6 +10,9 @@ serde_json = "1"
 toml = "0.8"
 blake3 = "1"
 thiserror = "2"
+ureq = "3.3.0"
+zstd = "0.13.3"
+rusty-s3 = "0.10.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

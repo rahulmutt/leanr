@@ -17,6 +17,8 @@ allow = [
   "ISC",
   "Unicode-3.0",
   "Zlib",
+  # CDLA-Permissive-2.0 from webpki-roots (ureq→rustls→webpki-roots, M2d remote cache)
+  "CDLA-Permissive-2.0",
 ]
 
 [bans]
