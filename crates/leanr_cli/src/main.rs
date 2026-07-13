@@ -77,6 +77,12 @@ enum Command {
         /// Rebuild every module with `lean`, then refresh the cache.
         #[arg(long, conflicts_with = "no_cache")]
         force: bool,
+        /// Remote cache URL to read through (env: LEANR_REMOTE_CACHE).
+        #[arg(long, conflicts_with_all = ["no_cache", "no_remote"])]
+        remote: Option<String>,
+        /// Ignore any configured remote cache (local CAS only).
+        #[arg(long)]
+        no_remote: bool,
     },
     /// Inspect and maintain the shared artifact cache.
     Cache {
@@ -107,6 +113,38 @@ enum CacheCommand {
     Gc {
         #[arg(long = "max-size")]
         max_size: u64,
+    },
+    /// Prefetch the workspace's whole module closure from a remote cache
+    /// into the local store (no lean, no materialization).
+    Get {
+        /// Remote cache URL (env: LEANR_REMOTE_CACHE).
+        #[arg(long)]
+        remote: Option<String>,
+        /// Workspace dir (default: walk up from cwd).
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Toolchain olean directory (default: `lean --print-libdir`).
+        #[arg(long)]
+        toolchain_dir: Option<PathBuf>,
+        /// Download worker threads (default: available parallelism).
+        #[arg(long)]
+        jobs: Option<usize>,
+    },
+    /// Upload the workspace's locally-cached artifacts to an S3-compatible
+    /// bucket (credentials via AWS_* env vars; CI-side, explicit only).
+    Push {
+        /// Target: s3://bucket[/prefix].
+        #[arg(long)]
+        to: String,
+        /// Workspace dir (default: walk up from cwd).
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Toolchain olean directory (default: `lean --print-libdir`).
+        #[arg(long)]
+        toolchain_dir: Option<PathBuf>,
+        /// Upload worker threads (default: available parallelism).
+        #[arg(long)]
+        jobs: Option<usize>,
     },
 }
 
@@ -144,6 +182,8 @@ fn main() -> ExitCode {
             lean,
             no_cache,
             force,
+            remote,
+            no_remote,
         } => build(
             targets,
             dry_run,
@@ -154,6 +194,8 @@ fn main() -> ExitCode {
             lean,
             no_cache,
             force,
+            remote,
+            no_remote,
         ),
         Command::Cache { command } => cache_cmd(command),
     }
@@ -495,6 +537,39 @@ fn rel_display(path: &std::path::Path, root: &std::path::Path) -> Result<String,
         .join("/"))
 }
 
+/// M2d remote-read config: `--remote` flag > `LEANR_REMOTE_CACHE` env;
+/// `--no-remote` forces local-only without disturbing the environment.
+fn resolve_remote_url(
+    flag: Option<String>,
+    no_remote: bool,
+    env_val: Option<String>,
+) -> Option<String> {
+    if no_remote {
+        return None;
+    }
+    flag.or(env_val)
+}
+
+fn fp_env_for(toolchain: &Option<String>) -> leanr_build::fingerprint::FingerprintEnv {
+    leanr_build::fingerprint::FingerprintEnv {
+        leanr_version: env!("CARGO_PKG_VERSION").to_string(),
+        toolchain_id: toolchain.clone().unwrap_or_default(),
+        platform: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+    }
+}
+
+fn remote_cache_for(url: &str) -> leanr_build::remote::RemoteCache {
+    leanr_build::remote::RemoteCache::new(url, Box::new(|msg| eprintln!("warning: {msg}")))
+}
+
+fn default_jobs(jobs: Option<usize>) -> usize {
+    jobs.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    })
+}
+
 /// Resolve the workspace rooted at (or found by walking up from) `dir`,
 /// deriving its packages, module graph, and build waves. `targets` and
 /// `toolchain_dir` mirror `build`'s own flags of the same name (empty
@@ -554,6 +629,8 @@ fn build(
     lean: Option<PathBuf>,
     no_cache: bool,
     force: bool,
+    remote: Option<String>,
+    no_remote: bool,
 ) -> ExitCode {
     let run = || -> Result<(), String> {
         let (ws, toolchain_for_lean) = resolve_workspace(dir, targets, toolchain_dir)?;
@@ -565,16 +642,8 @@ fn build(
             }
             return Ok(());
         }
-        let jobs = jobs.unwrap_or_else(|| {
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1)
-        });
-        let fp_env = leanr_build::fingerprint::FingerprintEnv {
-            leanr_version: env!("CARGO_PKG_VERSION").to_string(),
-            toolchain_id: toolchain_for_lean.clone().unwrap_or_default(),
-            platform: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
-        };
+        let jobs = default_jobs(jobs);
+        let fp_env = fp_env_for(&toolchain_for_lean);
         let cache = if no_cache {
             None
         } else {
@@ -587,6 +656,13 @@ fn build(
             })?;
             Some(leanr_build::cache::Cache::new(&cache_root))
         };
+        let remote = match &cache {
+            Some(_) => {
+                resolve_remote_url(remote, no_remote, std::env::var("LEANR_REMOTE_CACHE").ok())
+                    .map(|url| remote_cache_for(&url))
+            }
+            None => None, // --no-cache bypasses everything, remote included
+        };
         let build_opts = leanr_build::compile::BuildOptions {
             jobs,
             lean: leanr_build::compile::LeanInvoker {
@@ -596,15 +672,20 @@ fn build(
             cache,
             force,
             fp_env,
-            // Remote read tier wiring is Task 8 (CLI); until then, local-only.
-            remote: None,
+            remote,
         };
         let build_start = std::time::Instant::now();
         let report = leanr_build::compile::build_workspace(&ws, &build_opts, &|e| {
             if !e.diagnostics.is_empty() {
                 eprint!("{}", e.diagnostics);
             }
-            let tag = if e.cached { " (cached)" } else { "" };
+            let tag = if e.cached {
+                " (cached)"
+            } else if e.downloaded {
+                " (downloaded)"
+            } else {
+                ""
+            };
             println!(
                 "[{}/{}] {}{} ({:.1}s)",
                 e.done, e.total, e.module, tag, e.secs
@@ -612,9 +693,10 @@ fn build(
         })
         .map_err(|e| e.to_string())?;
         println!(
-            "built {} modules ({} cached) in {:.1}s ({} jobs)",
+            "built {} modules ({} cached, {} downloaded) in {:.1}s ({} jobs)",
             report.built,
             report.cached,
+            report.downloaded,
             build_start.elapsed().as_secs_f64(),
             jobs
         );
@@ -670,20 +752,12 @@ fn cache_cmd(command: CacheCommand) -> ExitCode {
                 }
                 if deep {
                     let (ws, toolchain) = resolve_workspace(dir, Vec::new(), None)?;
-                    let env = leanr_build::fingerprint::FingerprintEnv {
-                        leanr_version: env!("CARGO_PKG_VERSION").to_string(),
-                        toolchain_id: toolchain.clone().unwrap_or_default(),
-                        platform: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
-                    };
+                    let env = fp_env_for(&toolchain);
                     let invoker = leanr_build::compile::LeanInvoker {
                         program: lean.unwrap_or_else(|| PathBuf::from("lean")),
                         toolchain,
                     };
-                    let jobs = jobs.unwrap_or_else(|| {
-                        std::thread::available_parallelism()
-                            .map(|n| n.get())
-                            .unwrap_or(1)
-                    });
+                    let jobs = default_jobs(jobs);
                     let d = cache
                         .deep_verify(&ws, &env, &invoker, jobs)
                         .map_err(|e| e.to_string())?;
@@ -700,6 +774,55 @@ fn cache_cmd(command: CacheCommand) -> ExitCode {
                         ));
                     }
                 }
+                Ok(())
+            }
+            CacheCommand::Get {
+                remote,
+                dir,
+                toolchain_dir,
+                jobs,
+            } => {
+                let url =
+                    resolve_remote_url(remote, false, std::env::var("LEANR_REMOTE_CACHE").ok())
+                        .ok_or_else(|| {
+                            "no remote configured: pass --remote or set LEANR_REMOTE_CACHE"
+                                .to_string()
+                        })?;
+                let (ws, toolchain) = resolve_workspace(dir, Vec::new(), toolchain_dir)?;
+                let mut fps =
+                    leanr_build::fingerprint::fingerprint_all(&ws, &fp_env_for(&toolchain))
+                        .map_err(|e| e.to_string())?;
+                fps.sort();
+                fps.dedup();
+                let rc = remote_cache_for(&url);
+                let r = leanr_build::remote::get_all(&cache, &rc, &fps, default_jobs(jobs));
+                println!(
+                    "cache get: {} fetched, {} already local, {} not on remote, {} failed",
+                    r.fetched, r.already_local, r.missing, r.failed
+                );
+                if r.failed > 0 {
+                    return Err(format!("{} module(s) failed to fetch", r.failed));
+                }
+                Ok(())
+            }
+            CacheCommand::Push {
+                to,
+                dir,
+                toolchain_dir,
+                jobs,
+            } => {
+                let (ws, toolchain) = resolve_workspace(dir, Vec::new(), toolchain_dir)?;
+                let mut fps =
+                    leanr_build::fingerprint::fingerprint_all(&ws, &fp_env_for(&toolchain))
+                        .map_err(|e| e.to_string())?;
+                fps.sort();
+                fps.dedup();
+                let pusher = leanr_build::remote::Pusher::from_env(&to)?;
+                let r = pusher.push(&cache, &fps, default_jobs(jobs))?;
+                println!(
+                    "cache push: {} manifests pushed ({} already remote), {} blobs, {} bytes uploaded",
+                    r.manifests_pushed, r.manifests_skipped, r.blobs_pushed, r.bytes_uploaded
+                );
                 Ok(())
             }
         }
@@ -814,6 +937,40 @@ fn print_text_plan(ws: &leanr_build::Workspace) {
         for id in w {
             println!("    {}", ws.graph.modules[id.0 as usize].name);
         }
+    }
+}
+
+#[cfg(test)]
+mod remote_url_tests {
+    use super::resolve_remote_url;
+
+    #[test]
+    fn flag_wins_over_env() {
+        assert_eq!(
+            resolve_remote_url(Some("http://flag".into()), false, Some("http://env".into())),
+            Some("http://flag".into())
+        );
+    }
+
+    #[test]
+    fn env_applies_when_no_flag() {
+        assert_eq!(
+            resolve_remote_url(None, false, Some("http://env".into())),
+            Some("http://env".into())
+        );
+    }
+
+    #[test]
+    fn no_remote_forces_local_only_even_with_env() {
+        assert_eq!(
+            resolve_remote_url(None, true, Some("http://env".into())),
+            None
+        );
+    }
+
+    #[test]
+    fn nothing_configured_is_none() {
+        assert_eq!(resolve_remote_url(None, false, None), None);
     }
 }
 

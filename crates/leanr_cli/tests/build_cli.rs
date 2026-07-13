@@ -202,10 +202,14 @@ fn second_build_reports_cached_modules() {
             .assert()
             .success()
     };
-    run().stdout(predicate::str::contains("built 2 modules (0 cached)"));
+    run().stdout(predicate::str::contains(
+        "built 2 modules (0 cached, 0 downloaded)",
+    ));
     run()
         .stdout(predicate::str::contains("(cached)"))
-        .stdout(predicate::str::contains("built 0 modules (2 cached)"));
+        .stdout(predicate::str::contains(
+            "built 0 modules (2 cached, 0 downloaded)",
+        ));
 }
 
 #[test]
@@ -225,11 +229,15 @@ fn no_cache_flag_forces_a_full_build() {
             .assert()
             .success()
     };
-    run().stdout(predicate::str::contains("built 2 modules (0 cached)"));
+    run().stdout(predicate::str::contains(
+        "built 2 modules (0 cached, 0 downloaded)",
+    ));
     // Second build still runs lean for every module — no cache hits at all.
     run()
         .stdout(predicate::str::contains("(cached)").not())
-        .stdout(predicate::str::contains("built 2 modules (0 cached)"));
+        .stdout(predicate::str::contains(
+            "built 2 modules (0 cached, 0 downloaded)",
+        ));
 }
 
 #[test]
