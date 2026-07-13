@@ -23,7 +23,7 @@ pub struct Manifest {
     pub artifacts: Vec<ArtifactEntry>,
 }
 
-fn shard(hex: &str) -> &str {
+pub(crate) fn shard(hex: &str) -> &str {
     hex.get(..2).unwrap_or(hex)
 }
 
@@ -87,6 +87,15 @@ impl Cache {
         let json = serde_json::to_vec(&manifest).expect("manifest serializes");
         write_atomic_readonly(&self.manifest_path(fp), &json)?;
         Ok(manifest)
+    }
+
+    /// Store an externally-constructed manifest (the remote-ingest path:
+    /// `remote::RemoteCache::fetch` downloads blobs, verifies each
+    /// against its content key, `store_blob`s them, THEN calls this —
+    /// blobs-first ordering keeps a crash self-healing via `lookup`).
+    pub fn insert_manifest(&self, fp: &str, manifest: &Manifest) -> std::io::Result<()> {
+        let json = serde_json::to_vec(manifest).expect("manifest serializes");
+        write_atomic_readonly(&self.manifest_path(fp), &json)
     }
 
     pub fn lookup(&self, fp: &str) -> std::io::Result<Option<Manifest>> {
@@ -259,7 +268,7 @@ impl Cache {
 /// True iff `s` is a valid blob key: exactly 64 lowercase hex chars (a
 /// blake3 hex digest). Used by `walk_blobs` to exclude the `.lock` and
 /// `.tmp` siblings that `write_atomic_readonly` leaves in `blobs/<shard>/`.
-fn is_blob_key(s: &str) -> bool {
+pub(crate) fn is_blob_key(s: &str) -> bool {
     s.len() == 64
         && s.bytes()
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
@@ -608,5 +617,35 @@ mod tests {
             r.bad_blobs.is_empty(),
             "the .lock sibling must not be flagged as tampered"
         );
+    }
+
+    #[test]
+    fn insert_manifest_roundtrips_via_lookup() {
+        let (_t, c) = cache();
+        // A manifest whose blob actually exists (lookup self-heals
+        // otherwise), constructed externally — the remote-ingest path.
+        let blob = c.store_blob(b"downloaded-bytes").unwrap();
+        let m = Manifest {
+            artifacts: vec![ArtifactEntry {
+                name: "A.olean".into(),
+                blob,
+            }],
+        };
+        c.insert_manifest("feed", &m).unwrap();
+        assert_eq!(c.lookup("feed").unwrap().unwrap(), m);
+        // Atomic-write hygiene: the manifest file is read-only.
+        assert!(std::fs::metadata(c.manifest_path("feed"))
+            .unwrap()
+            .permissions()
+            .readonly());
+    }
+
+    #[test]
+    fn is_blob_key_accepts_only_64_lowercase_hex() {
+        assert!(is_blob_key(&"a".repeat(64)));
+        assert!(!is_blob_key(&"A".repeat(64)));
+        assert!(!is_blob_key(&"a".repeat(63)));
+        assert!(!is_blob_key("../../../../etc/passwd"));
+        assert!(!is_blob_key(""));
     }
 }
