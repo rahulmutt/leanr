@@ -71,6 +71,42 @@ enum Command {
         /// for tests and debugging).
         #[arg(long)]
         lean: Option<PathBuf>,
+        /// Ignore the artifact cache: always run `lean`, never read or write it.
+        #[arg(long)]
+        no_cache: bool,
+        /// Rebuild every module with `lean`, then refresh the cache.
+        #[arg(long, conflicts_with = "no_cache")]
+        force: bool,
+    },
+    /// Inspect and maintain the shared artifact cache.
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum CacheCommand {
+    /// Check store integrity (blob bytes == content key; no dangling
+    /// manifests). `--deep` also rebuilds and byte-diffs against `lean`.
+    Verify {
+        /// Rebuild each module with `lean` and byte-diff against the cache.
+        #[arg(long)]
+        deep: bool,
+        /// Workspace dir for `--deep` (default: walk up from cwd).
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Worker processes for `--deep` (default: available parallelism).
+        #[arg(long)]
+        jobs: Option<usize>,
+        /// lean executable to drive for `--deep` (default: `lean` on PATH).
+        #[arg(long)]
+        lean: Option<PathBuf>,
+    },
+    /// Evict least-recently-used blobs until the store is at most SIZE bytes.
+    Gc {
+        #[arg(long = "max-size")]
+        max_size: u64,
     },
 }
 
@@ -106,7 +142,20 @@ fn main() -> ExitCode {
             toolchain_dir,
             jobs,
             lean,
-        } => build(targets, dry_run, json, dir, toolchain_dir, jobs, lean),
+            no_cache,
+            force,
+        } => build(
+            targets,
+            dry_run,
+            json,
+            dir,
+            toolchain_dir,
+            jobs,
+            lean,
+            no_cache,
+            force,
+        ),
+        Command::Cache { command } => cache_cmd(command),
     }
 }
 
@@ -446,6 +495,55 @@ fn rel_display(path: &std::path::Path, root: &std::path::Path) -> Result<String,
         .join("/"))
 }
 
+/// Resolve the workspace rooted at (or found by walking up from) `dir`,
+/// deriving its packages, module graph, and build waves. `targets` and
+/// `toolchain_dir` mirror `build`'s own flags of the same name (empty
+/// `targets` := the root package's `defaultTargets`; no `toolchain_dir` :=
+/// `lean --print-libdir`). Also returns the pinned `lean-toolchain` string
+/// (if any), used to bridge `lake` and to drive `lean`. Shared by `build`
+/// and `cache verify --deep` so both resolve through identical wiring.
+fn resolve_workspace(
+    dir: Option<PathBuf>,
+    targets: Vec<String>,
+    toolchain_dir: Option<PathBuf>,
+) -> Result<(leanr_build::Workspace, Option<String>), String> {
+    let start = match &dir {
+        Some(d) => d.clone(),
+        None => std::env::current_dir().map_err(|e| e.to_string())?,
+    };
+    let root_dir = leanr_build::find_workspace_root(&start).map_err(|e| e.to_string())?;
+    let toolchain_olean_dir = match toolchain_dir {
+        Some(d) => d,
+        None => lean_print_libdir()?,
+    };
+    let cache_root = leanr_build::cache_dir::cache_root(
+        std::env::var_os("XDG_CACHE_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    )
+    .ok_or_else(|| {
+        "cannot determine the leanr cache directory: set XDG_CACHE_HOME or HOME".to_string()
+    })?;
+    // Pin dependency bridging to the root workspace's toolchain.
+    let toolchain = std::fs::read_to_string(root_dir.join("lean-toolchain"))
+        .ok()
+        .map(|s| s.trim().to_string());
+    let opts = leanr_build::ResolveOptions {
+        targets,
+        lake: leanr_build::bridge::LakeInvoker {
+            toolchain: toolchain.clone(),
+            ..leanr_build::bridge::LakeInvoker::default()
+        },
+        toolchain_olean_dir,
+        cache_root,
+    };
+    let ws = leanr_build::resolve(&root_dir, &opts).map_err(|e| e.to_string())?;
+    for w in &ws.warnings {
+        eprintln!("warning: {w}");
+    }
+    Ok((ws, toolchain))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build(
     targets: Vec<String>,
     dry_run: bool,
@@ -454,42 +552,11 @@ fn build(
     toolchain_dir: Option<PathBuf>,
     jobs: Option<usize>,
     lean: Option<PathBuf>,
+    no_cache: bool,
+    force: bool,
 ) -> ExitCode {
     let run = || -> Result<(), String> {
-        let start = match &dir {
-            Some(d) => d.clone(),
-            None => std::env::current_dir().map_err(|e| e.to_string())?,
-        };
-        let root_dir = leanr_build::find_workspace_root(&start).map_err(|e| e.to_string())?;
-        let toolchain_olean_dir = match toolchain_dir {
-            Some(d) => d,
-            None => lean_print_libdir()?,
-        };
-        let cache_root = leanr_build::cache_dir::cache_root(
-            std::env::var_os("XDG_CACHE_HOME").as_deref(),
-            std::env::var_os("HOME").as_deref(),
-        )
-        .ok_or_else(|| {
-            "cannot determine the leanr cache directory: set XDG_CACHE_HOME or HOME".to_string()
-        })?;
-        // Pin dependency bridging to the root workspace's toolchain.
-        let toolchain = std::fs::read_to_string(root_dir.join("lean-toolchain"))
-            .ok()
-            .map(|s| s.trim().to_string());
-        let toolchain_for_lean = toolchain.clone();
-        let opts = leanr_build::ResolveOptions {
-            targets: targets.clone(),
-            lake: leanr_build::bridge::LakeInvoker {
-                toolchain,
-                ..leanr_build::bridge::LakeInvoker::default()
-            },
-            toolchain_olean_dir,
-            cache_root,
-        };
-        let ws = leanr_build::resolve(&root_dir, &opts).map_err(|e| e.to_string())?;
-        for w in &ws.warnings {
-            eprintln!("warning: {w}");
-        }
+        let (ws, toolchain_for_lean) = resolve_workspace(dir, targets, toolchain_dir)?;
         if dry_run {
             if json {
                 print_json_plan(&ws)?;
@@ -503,28 +570,137 @@ fn build(
                 .map(|n| n.get())
                 .unwrap_or(1)
         });
+        let fp_env = leanr_build::fingerprint::FingerprintEnv {
+            leanr_version: env!("CARGO_PKG_VERSION").to_string(),
+            toolchain_id: toolchain_for_lean.clone().unwrap_or_default(),
+            platform: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+        };
+        let cache = if no_cache {
+            None
+        } else {
+            let cache_root = leanr_build::cache_dir::cache_root(
+                std::env::var_os("XDG_CACHE_HOME").as_deref(),
+                std::env::var_os("HOME").as_deref(),
+            )
+            .ok_or_else(|| {
+                "cannot determine the leanr cache directory: set XDG_CACHE_HOME or HOME".to_string()
+            })?;
+            Some(leanr_build::cache::Cache::new(&cache_root))
+        };
         let build_opts = leanr_build::compile::BuildOptions {
             jobs,
             lean: leanr_build::compile::LeanInvoker {
                 program: lean.unwrap_or_else(|| PathBuf::from("lean")),
                 toolchain: toolchain_for_lean,
             },
+            cache,
+            force,
+            fp_env,
         };
         let build_start = std::time::Instant::now();
         let report = leanr_build::compile::build_workspace(&ws, &build_opts, &|e| {
             if !e.diagnostics.is_empty() {
                 eprint!("{}", e.diagnostics);
             }
-            println!("[{}/{}] {} ({:.1}s)", e.done, e.total, e.module, e.secs);
+            let tag = if e.cached { " (cached)" } else { "" };
+            println!(
+                "[{}/{}] {}{} ({:.1}s)",
+                e.done, e.total, e.module, tag, e.secs
+            );
         })
         .map_err(|e| e.to_string())?;
         println!(
-            "built {} modules in {:.1}s ({} jobs)",
+            "built {} modules ({} cached) in {:.1}s ({} jobs)",
             report.built,
+            report.cached,
             build_start.elapsed().as_secs_f64(),
             jobs
         );
         Ok(())
+    };
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(msg) => {
+            eprintln!("error: {msg}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `cache verify`'s integrity check (blob bytes == content key; no
+/// dangling manifests) always runs; `--deep` additionally resolves a
+/// workspace (must already be built — see `CacheCommand::Verify`'s help)
+/// and rebuilds-and-diffs every cached module against a fresh `lean` run.
+fn cache_cmd(command: CacheCommand) -> ExitCode {
+    let run = || -> Result<(), String> {
+        let cache_root = leanr_build::cache_dir::cache_root(
+            std::env::var_os("XDG_CACHE_HOME").as_deref(),
+            std::env::var_os("HOME").as_deref(),
+        )
+        .ok_or_else(|| {
+            "cannot determine the leanr cache directory: set XDG_CACHE_HOME or HOME".to_string()
+        })?;
+        let cache = leanr_build::cache::Cache::new(&cache_root);
+        match command {
+            CacheCommand::Gc { max_size } => {
+                let r = cache.gc(max_size).map_err(|e| e.to_string())?;
+                println!(
+                    "gc: removed {} blobs, freed {} bytes, {} bytes kept",
+                    r.removed, r.freed, r.kept
+                );
+                Ok(())
+            }
+            CacheCommand::Verify {
+                deep,
+                dir,
+                jobs,
+                lean,
+            } => {
+                let r = cache.verify().map_err(|e| e.to_string())?;
+                if r.bad_blobs.is_empty() && r.dangling.is_empty() {
+                    println!("cache verify: OK ({} blobs)", r.blobs);
+                } else {
+                    return Err(format!(
+                        "cache integrity FAILED: {} corrupt blob(s), {} dangling manifest(s)",
+                        r.bad_blobs.len(),
+                        r.dangling.len()
+                    ));
+                }
+                if deep {
+                    let (ws, toolchain) = resolve_workspace(dir, Vec::new(), None)?;
+                    let env = leanr_build::fingerprint::FingerprintEnv {
+                        leanr_version: env!("CARGO_PKG_VERSION").to_string(),
+                        toolchain_id: toolchain.clone().unwrap_or_default(),
+                        platform: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+                    };
+                    let invoker = leanr_build::compile::LeanInvoker {
+                        program: lean.unwrap_or_else(|| PathBuf::from("lean")),
+                        toolchain,
+                    };
+                    let jobs = jobs.unwrap_or_else(|| {
+                        std::thread::available_parallelism()
+                            .map(|n| n.get())
+                            .unwrap_or(1)
+                    });
+                    let d = cache
+                        .deep_verify(&ws, &env, &invoker, jobs)
+                        .map_err(|e| e.to_string())?;
+                    if d.mismatches.is_empty() {
+                        println!(
+                            "cache verify --deep: OK ({} modules byte-identical)",
+                            d.checked
+                        );
+                    } else {
+                        return Err(format!(
+                            "cache verify --deep FAILED: {} mismatch(es): {}",
+                            d.mismatches.len(),
+                            d.mismatches.join(", ")
+                        ));
+                    }
+                }
+                Ok(())
+            }
+        }
     };
     match run() {
         Ok(()) => ExitCode::SUCCESS,

@@ -38,8 +38,12 @@ run = "cargo deny check"
 [tasks."scan:secrets"]
 run = "gitleaks detect --redact"
 
+[tasks."cache:incremental"]
+description = "M2c staleness-correctness gate: exact-cone rebuild per perturbed input axis (fast; no toolchain)"
+run = "cargo test --package leanr_build --test cache_incremental"
+
 [tasks.ci]
-depends = ["lint", "test", "lint:deps", "scan:secrets"]
+depends = ["lint", "test", "lint:deps", "scan:secrets", "cache:incremental"]
 
 [tasks."sweep:stdlib"]
 description = "Decode every .olean shipped with the pinned toolchain (local; CI has no Lean)"

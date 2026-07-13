@@ -84,9 +84,104 @@ fi
 if [ -s "$nondeterministic_mismatches" ]; then
     n=$(wc -l < "$nondeterministic_mismatches")
     byte_identical_count=$((count - n))
-    echo "acceptance: PASS — $byte_identical_count artifacts byte-identical to lake's; $n known-nondeterministic divergences (.ilean/.olean.private, both sides present — see M2b spec §Acceptance)" >&2
+    echo "acceptance: byte-diff PASS — $byte_identical_count artifacts byte-identical to lake's; $n known-nondeterministic divergences (.ilean/.olean.private, both sides present — see M2b spec §Acceptance)" >&2
     cat "$nondeterministic_mismatches" >&2
-    exit 0
+else
+    echo "acceptance: byte-diff PASS — $count artifacts byte-identical to lake's" >&2
 fi
-echo "acceptance: PASS — $count artifacts byte-identical to lake's" >&2
 echo "acceptance: record wall time, --jobs (default nproc), and module count in the M2b spec" >&2
+
+# --- M2c: warm cache hit, incremental cone, store integrity (spec
+# §Acceptance items 2-4) --------------------------------------------------
+# Same clone, same $XDG_CACHE_HOME populated by the cold build above; no
+# `leanr clean` between steps (the CAS is what should make the rebuilds
+# cheap/scoped, not a fresh checkout).
+
+echo "acceptance: warm rebuild (same clone + XDG cache; expect a full cache hit, zero lean runs) ..." >&2
+warm_out="$tmp/warm-build.txt"
+(cd "$tmp/mathlib" && "$leanr" build) > "$warm_out"
+if ! grep -q '^built 0 modules (' "$warm_out"; then
+    echo "acceptance: FAIL — warm build ran lean (expected \"built 0 modules (N cached)\"):" >&2
+    tail -5 "$warm_out" >&2
+    exit 1
+fi
+warm_stale=$(grep '^\[' "$warm_out" | grep -vc ' (cached) (' || true)
+if [ "$warm_stale" -ne 0 ]; then
+    echo "acceptance: FAIL — warm build had $warm_stale module(s) without the \"(cached)\" tag:" >&2
+    grep '^\[' "$warm_out" | grep -v ' (cached) (' >&2
+    exit 1
+fi
+echo "acceptance: PASS — $(grep '^built ' "$warm_out")" >&2
+
+echo "acceptance: incremental rebuild — locating an editable leaf module (zero in-workspace dependents) ..." >&2
+# The root ("mathlib") package's build-plan waves are a topological sort
+# (wave = 1 + max(dependency waves)), and `print_json_plan` emits modules
+# in ascending wave order — so the LAST "mathlib"-package entry in the
+# plan sits in that package's maximum wave, which by construction has no
+# in-workspace dependent (a dependent would need a strictly later wave,
+# and none exists). Editing that module's source therefore has a
+# downstream cone of exactly {itself}: the simplest, unambiguous instance
+# of the "edit one leaf, assert only its cone rebuilds" property. Broader
+# multi-module cone propagation (a leaf with real dependents, a toggled
+# leanOption, a bumped toolchain/leanr version, a moved git-dep rev) is
+# already exhaustively covered by the hermetic `cache:incremental` gate
+# (`mise run cache:incremental`, wired into `ci`) — this acceptance run's
+# job is an end-to-end sanity check against the real Mathlib closure, not
+# a restatement of that harness.
+plan_json="$tmp/plan.json"
+(cd "$tmp/mathlib" && "$leanr" build --dry-run --json) > "$plan_json"
+leaf_name=$(awk '
+    /"name":/    { gsub(/^ *"name": "/, ""); gsub(/"[,]?$/, ""); pending_name = $0 }
+    /"package":/ { gsub(/^ *"package": "/, ""); gsub(/"[,]?$/, ""); pending_pkg = $0 }
+    /"file":/    { if (pending_pkg == "mathlib") { leaf_name = pending_name } }
+    END { print leaf_name }
+' "$plan_json")
+leaf_file=$(awk '
+    /"name":/    { gsub(/^ *"name": "/, ""); gsub(/"[,]?$/, ""); pending_name = $0 }
+    /"package":/ { gsub(/^ *"package": "/, ""); gsub(/"[,]?$/, ""); pending_pkg = $0 }
+    /"file":/    {
+        gsub(/^ *"file": "/, ""); gsub(/"[,]?$/, "")
+        if (pending_pkg == "mathlib") { leaf_file = $0 }
+    }
+    END { print leaf_file }
+' "$plan_json")
+if [ -z "$leaf_name" ] || [ -z "$leaf_file" ]; then
+    echo "acceptance: FAIL — could not find a \"mathlib\"-package module in $plan_json" >&2
+    exit 1
+fi
+echo "acceptance: editing leaf module $leaf_name ($leaf_file) ..." >&2
+printf '\n-- acceptance: M2c incremental-cache probe (%s)\n' "$(date +%s)" >> "$tmp/mathlib/$leaf_file"
+
+incr_out="$tmp/incremental-build.txt"
+(cd "$tmp/mathlib" && "$leanr" build) > "$incr_out"
+stale_lines="$tmp/incremental-stale.txt"
+grep '^\[' "$incr_out" | grep -v ' (cached) (' > "$stale_lines" || true
+stale_count=$(wc -l < "$stale_lines")
+if [ "$stale_count" -ne 1 ]; then
+    echo "acceptance: FAIL — incremental rebuild reported $stale_count non-cached module(s), expected exactly 1 ($leaf_name):" >&2
+    cat "$stale_lines" >&2
+    exit 1
+fi
+stale_module=$(sed -E 's/^\[[0-9]+\/[0-9]+\] ([^ ]+) \([0-9.]+s\)$/\1/' "$stale_lines")
+if [ "$stale_module" != "$leaf_name" ]; then
+    echo "acceptance: FAIL — the single non-cached module was \"$stale_module\", not the edited leaf \"$leaf_name\":" >&2
+    cat "$stale_lines" >&2
+    exit 1
+fi
+echo "acceptance: PASS — incremental rebuild recompiled exactly the edited leaf ($leaf_name); every other module stayed cached" >&2
+
+echo "acceptance: cache integrity (blob bytes == content key; no dangling manifests) ..." >&2
+verify_out="$tmp/cache-verify.txt"
+if ! "$leanr" cache verify > "$verify_out" 2>&1; then
+    echo "acceptance: FAIL — leanr cache verify exited non-zero:" >&2
+    cat "$verify_out" >&2
+    exit 1
+fi
+if ! grep -q '^cache verify: OK (' "$verify_out"; then
+    echo "acceptance: FAIL — unexpected \`leanr cache verify\` output:" >&2
+    cat "$verify_out" >&2
+    exit 1
+fi
+echo "acceptance: PASS — $(cat "$verify_out")" >&2
+
+echo "acceptance: PASS — cold byte-diff, warm cache-hit, incremental cone, and store integrity all verified" >&2

@@ -159,6 +159,28 @@ together. lean's outputs are never parsed by leanr in M2b (decoding
 stays in `leanr_olean`, used only by test oracles); setup files are
 leanr-written, never read back.
 
+## M2c — content-addressed cache integrity
+
+**New invariant: blob bytes == content key.** Every artifact
+`leanr build` writes to the XDG cache (`$XDG_CACHE_HOME/leanr/cache/`)
+is stored under the blake3 hash of its own bytes; `leanr cache verify`
+re-hashes every stored blob and asserts its filename equals that hash,
+and asserts every fingerprint-keyed module manifest references only
+live blobs (no dangling references). In M2c every blob is produced
+locally by our own `lean` runs, so the store's contents are already as
+trusted as the build that made them — this check is not yet load-
+bearing for soundness here. It is built now because it is precisely
+the seam that will make **M2d's untrusted remote blobs** safe to
+ingest: a blob fetched from a remote cache is only materialized into a
+project's build output if its bytes hash to the content key it was
+fetched under, so a tampered or corrupted remote blob is rejected by
+construction rather than trusted on receipt. The existing rule stands
+unchanged — `.olean` bytes are untrusted regardless of provenance and
+the `leanr_olean` parser must never panic on them (see "Resource
+bounds" above); this section documents cache-store integrity as an
+additional, separate invariant layered in front of that parser once
+remote blobs are in scope.
+
 ## Out of scope (for now)
 
 - Sandboxing `lakefile.lean`/tactic execution (revisit at M4).
