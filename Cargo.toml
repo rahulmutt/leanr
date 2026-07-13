@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["crates/leanr_kernel", "crates/leanr_check", "crates/leanr_cli", "crates/leanr_query", "crates/leanr_olean", "crates/leanr_build"]
-exclude = ["crates/leanr_olean/fuzz"]
+members = ["crates/leanr_kernel", "crates/leanr_check", "crates/leanr_cli", "crates/leanr_query", "crates/leanr_syntax", "crates/leanr_olean", "crates/leanr_build"]
+exclude = ["crates/leanr_olean/fuzz", "crates/leanr_syntax/fuzz"]
 
 [workspace.package]
 version = "0.1.0"
