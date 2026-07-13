@@ -309,6 +309,7 @@ impl Cache {
         std::fs::create_dir_all(&scratch).ok();
         let deps: Vec<Vec<usize>> = (0..ws.graph.modules.len()).map(|_| Vec::new()).collect();
         let mismatches: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let checked = std::sync::atomic::AtomicUsize::new(0);
         let job = |i: usize| -> Result<(), String> {
             let m = &ws.graph.modules[i];
             let expected = match self.lookup(&fps[i]) {
@@ -316,6 +317,9 @@ impl Cache {
                 Ok(None) => return Ok(()), // nothing cached for this fp — skip
                 Err(e) => return Err(format!("lookup: {e}")),
             };
+            // Count only modules actually diffed below (cached manifest
+            // found) — not the `Ok(None)` skip path above.
+            checked.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let mod_scratch = scratch.join(i.to_string());
             std::fs::create_dir_all(&mod_scratch).map_err(|e| e.to_string())?;
             let out = mod_scratch.join(format!(
@@ -395,7 +399,7 @@ impl Cache {
         let _ = std::fs::remove_dir_all(&scratch);
         let mismatches = mismatches.into_inner().unwrap();
         Ok(DeepReport {
-            checked: ws.graph.modules.len(),
+            checked: checked.load(std::sync::atomic::Ordering::Relaxed),
             mismatches,
         })
     }
@@ -544,6 +548,7 @@ mod tests {
         assert_eq!(r.blobs, 1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn verify_flags_a_tampered_blob() {
         let (t, c) = cache();

@@ -105,7 +105,8 @@ pub fn fingerprint_all(
         let pkg = std::iter::once(&ws.root)
             .chain(ws.deps.iter())
             .find(|p| p.name == m.package);
-        pkg.map(owner_provenance).unwrap_or_default()
+        pkg.map(owner_provenance)
+            .expect("module's package must be root or a declared dep")
     };
     // `waves` is a topological layering: every dep of a wave-k module is
     // in a wave < k, so its fp is already computed.
