@@ -316,7 +316,15 @@ impl Pusher {
             .strip_prefix("s3://")
             .ok_or_else(|| format!("push target must be s3://bucket[/prefix], got `{to}`"))?;
         let (bucket_name, prefix) = match rest.split_once('/') {
-            Some((b, p)) => (b, format!("{}/", p.trim_matches('/'))),
+            Some((b, p)) => {
+                let p = p.trim_matches('/');
+                let prefix = if p.is_empty() {
+                    String::new()
+                } else {
+                    format!("{p}/")
+                };
+                (b, prefix)
+            }
             None => (rest, String::new()),
         };
         if bucket_name.is_empty() {
@@ -403,7 +411,10 @@ impl Pusher {
                     let i = idx.fetch_add(1, Ordering::SeqCst);
                     let Some(fp) = fps.get(i) else { return };
                     if let Err(e) = self.push_one(cache, fp, &report) {
-                        *first_err.lock().unwrap() = Some(e);
+                        let mut g = first_err.lock().unwrap();
+                        if g.is_none() {
+                            *g = Some(e);
+                        }
                         return;
                     }
                 });

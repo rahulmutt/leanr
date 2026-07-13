@@ -594,3 +594,54 @@ fn push_skips_fps_with_no_local_manifest() {
         (0, 0, 0)
     );
 }
+
+#[test]
+fn trailing_slash_only_target_yields_empty_prefix_not_slash() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let served = tmp.path().join("served");
+    std::fs::create_dir_all(&served).unwrap();
+    let srv = httpd::spawn(served.clone());
+    let cache = Cache::new(&tmp.path().join("xdg"));
+    // Local CAS: one module family under FP.
+    let a = tmp.path().join("A.olean");
+    std::fs::write(&a, b"olean-bytes").unwrap();
+    let m = cache.insert(FP, &[a]).unwrap();
+
+    // from_parts("s3://cas/", ...) must behave identically to "s3://cas"
+    // (empty prefix after trim, not "/" prefix).
+    let p = Pusher::from_parts(
+        "s3://cas/",
+        &format!("http://{}", srv.addr),
+        "us-east-1",
+        "test-key",
+        "test-secret",
+    )
+    .unwrap();
+    let r = p.push(&cache, &[FP.to_string()], 1).unwrap();
+    assert_eq!(
+        (r.manifests_pushed, r.manifests_skipped, r.blobs_pushed),
+        (1, 0, 1)
+    );
+
+    // Objects must land at <served>/cas/v1/... not <served>/cas//v1/...
+    let blob_obj = served
+        .join("cas")
+        .join(remote_blob_key(&m.artifacts[0].blob));
+    let man_obj = served.join("cas").join(remote_manifest_key(FP));
+    assert!(
+        blob_obj.is_file(),
+        "blob object exists at correct path (no double slash): {}",
+        blob_obj.display()
+    );
+    assert!(man_obj.is_file(), "manifest object exists at correct path");
+
+    // Verify remote reads work correctly (uses plain-GET base).
+    let cache_b = Cache::new(&tmp.path().join("xdg-b"));
+    let (rc, _) = remote_with_warnings(&format!("http://{}/cas", srv.addr));
+    assert_eq!(
+        rc.fetch(&cache_b, FP),
+        FetchOutcome::Hit {
+            downloaded_blobs: 1
+        }
+    );
+}
