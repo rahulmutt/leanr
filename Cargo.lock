@@ -788,6 +788,7 @@ dependencies = [
  "thiserror",
  "toml",
  "ureq",
+ "url",
  "zstd",
 ]
 

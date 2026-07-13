@@ -473,3 +473,124 @@ fn local_hit_wins_without_touching_the_remote() {
         "remote never consulted"
     );
 }
+
+// --- Task 6: Pusher (S3-presigned upload) ---
+
+use leanr_build::remote::Pusher;
+
+/// Pusher aimed at the test httpd (which ignores sigv4 query params).
+/// Path-style: objects land under `<served>/<bucket>/<key>`.
+fn test_pusher(addr: std::net::SocketAddr) -> Pusher {
+    Pusher::from_parts(
+        "s3://cas/team",
+        &format!("http://{addr}"),
+        "us-east-1",
+        "test-key",
+        "test-secret",
+    )
+    .unwrap()
+}
+
+#[test]
+fn push_uploads_wire_layout_and_is_idempotent() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let served = tmp.path().join("served");
+    std::fs::create_dir_all(&served).unwrap();
+    let srv = httpd::spawn(served.clone());
+    let cache = Cache::new(&tmp.path().join("xdg"));
+    // Local CAS: one module family under FP.
+    let a = tmp.path().join("A.olean");
+    std::fs::write(&a, b"olean-bytes").unwrap();
+    let m = cache.insert(FP, &[a]).unwrap();
+
+    let p = test_pusher(srv.addr);
+    let r1 = p.push(&cache, &[FP.to_string()], 2).unwrap();
+    assert_eq!(
+        (r1.manifests_pushed, r1.manifests_skipped, r1.blobs_pushed),
+        (1, 0, 1)
+    );
+    assert!(r1.bytes_uploaded > 0);
+    // Objects at s3-path-style locations: <bucket>/<prefix>/<wire key>.
+    let blob_obj = served
+        .join("cas/team")
+        .join(remote_blob_key(&m.artifacts[0].blob));
+    let man_obj = served.join("cas/team").join(remote_manifest_key(FP));
+    assert!(
+        blob_obj.is_file(),
+        "blob object exists: {}",
+        blob_obj.display()
+    );
+    assert!(man_obj.is_file(), "manifest object exists");
+    // Blob object is compressed; decompresses to the original bytes.
+    assert_eq!(
+        leanr_build::remote::decompress_capped(&std::fs::read(&blob_obj).unwrap(), 1 << 20)
+            .unwrap(),
+        b"olean-bytes"
+    );
+    // Manifest object is the plain local manifest JSON.
+    let remote_m: Manifest = serde_json::from_slice(&std::fs::read(&man_obj).unwrap()).unwrap();
+    assert_eq!(remote_m, m);
+    // Second push: everything skipped, nothing uploaded.
+    let r2 = p.push(&cache, &[FP.to_string()], 2).unwrap();
+    assert_eq!(
+        (r2.manifests_pushed, r2.manifests_skipped, r2.blobs_pushed),
+        (0, 1, 0)
+    );
+    assert_eq!(r2.bytes_uploaded, 0);
+}
+
+#[test]
+fn push_then_fetch_roundtrips_end_to_end() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let served = tmp.path().join("served");
+    std::fs::create_dir_all(&served).unwrap();
+    let srv = httpd::spawn(served);
+    let cache_a = Cache::new(&tmp.path().join("xdg-a"));
+    let a = tmp.path().join("A.olean");
+    std::fs::write(&a, b"roundtrip-bytes").unwrap();
+    cache_a.insert(FP, &[a]).unwrap();
+    test_pusher(srv.addr)
+        .push(&cache_a, &[FP.to_string()], 1)
+        .unwrap();
+
+    // Reads go through the plain-GET base under the same bucket path.
+    let cache_b = Cache::new(&tmp.path().join("xdg-b"));
+    let (rc, _) = remote_with_warnings(&format!("http://{}/cas/team", srv.addr));
+    assert_eq!(
+        rc.fetch(&cache_b, FP),
+        FetchOutcome::Hit {
+            downloaded_blobs: 1
+        }
+    );
+    let got = cache_b.lookup(FP).unwrap().unwrap();
+    assert_eq!(
+        std::fs::read(cache_b.blob_path(&got.artifacts[0].blob)).unwrap(),
+        b"roundtrip-bytes"
+    );
+}
+
+#[test]
+fn pusher_from_parts_rejects_bad_targets() {
+    assert!(
+        Pusher::from_parts("http://not-s3", "http://e", "r", "k", "s")
+            .unwrap_err()
+            .contains("s3://")
+    );
+    assert!(Pusher::from_parts("s3://", "http://e", "r", "k", "s").is_err());
+}
+
+#[test]
+fn push_skips_fps_with_no_local_manifest() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let served = tmp.path().join("served");
+    std::fs::create_dir_all(&served).unwrap();
+    let srv = httpd::spawn(served);
+    let cache = Cache::new(&tmp.path().join("xdg"));
+    let r = test_pusher(srv.addr)
+        .push(&cache, &[FP.to_string()], 1)
+        .unwrap();
+    assert_eq!(
+        (r.manifests_pushed, r.manifests_skipped, r.blobs_pushed),
+        (0, 0, 0)
+    );
+}

@@ -256,6 +256,200 @@ impl RemoteCache {
     }
 }
 
+/// Explicit upload tier (spec §Scope decisions: push is explicit, CI-
+/// side; developer machines never upload implicitly). Presigned sigv4
+/// PUT/HEAD via rusty-s3 — works against AWS S3, R2, GCS interop, MinIO,
+/// and the test httpd (which ignores the auth query params).
+pub struct Pusher {
+    bucket: rusty_s3::Bucket,
+    creds: rusty_s3::Credentials,
+    /// Object-key prefix inside the bucket ("" or "team/").
+    prefix: String,
+    agent: ureq::Agent,
+}
+
+// Manual impl: `ureq::Agent` (unlike rusty_s3's types) doesn't derive
+// `Debug`, and `Credentials` should never be printed anyway.
+impl std::fmt::Debug for Pusher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pusher")
+            .field("bucket", &self.bucket)
+            .field("prefix", &self.prefix)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
+pub struct PushReport {
+    pub manifests_pushed: usize,
+    pub manifests_skipped: usize,
+    pub blobs_pushed: usize,
+    pub bytes_uploaded: u64,
+}
+
+const SIGN_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+impl Pusher {
+    /// `to` = `s3://bucket[/prefix]`; endpoint/region/credentials from
+    /// the standard AWS env vars (spec §Wire layout & protocol).
+    pub fn from_env(to: &str) -> Result<Pusher, String> {
+        let region = std::env::var("AWS_REGION")
+            .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
+            .unwrap_or_else(|_| "us-east-1".to_string());
+        let endpoint = std::env::var("AWS_ENDPOINT_URL")
+            .unwrap_or_else(|_| format!("https://s3.{region}.amazonaws.com"));
+        let key_id = std::env::var("AWS_ACCESS_KEY_ID")
+            .map_err(|_| "AWS_ACCESS_KEY_ID not set (required for cache push)".to_string())?;
+        let secret = std::env::var("AWS_SECRET_ACCESS_KEY")
+            .map_err(|_| "AWS_SECRET_ACCESS_KEY not set (required for cache push)".to_string())?;
+        Pusher::from_parts(to, &endpoint, &region, &key_id, &secret)
+    }
+
+    pub fn from_parts(
+        to: &str,
+        endpoint: &str,
+        region: &str,
+        key_id: &str,
+        secret: &str,
+    ) -> Result<Pusher, String> {
+        let rest = to
+            .strip_prefix("s3://")
+            .ok_or_else(|| format!("push target must be s3://bucket[/prefix], got `{to}`"))?;
+        let (bucket_name, prefix) = match rest.split_once('/') {
+            Some((b, p)) => (b, format!("{}/", p.trim_matches('/'))),
+            None => (rest, String::new()),
+        };
+        if bucket_name.is_empty() {
+            return Err(format!("push target must name a bucket, got `{to}`"));
+        }
+        let endpoint: url::Url = endpoint
+            .parse()
+            .map_err(|e| format!("bad endpoint `{endpoint}`: {e}"))?;
+        let bucket = rusty_s3::Bucket::new(
+            endpoint,
+            rusty_s3::UrlStyle::Path,
+            bucket_name.to_string(),
+            region.to_string(),
+        )
+        .map_err(|e| format!("bad bucket `{bucket_name}`: {e}"))?;
+        let config = ureq::Agent::config_builder()
+            .timeout_connect(Some(std::time::Duration::from_secs(10)))
+            .http_status_as_error(false)
+            .build();
+        Ok(Pusher {
+            bucket,
+            creds: rusty_s3::Credentials::new(key_id, secret),
+            prefix,
+            agent: config.new_agent(),
+        })
+    }
+
+    fn head(&self, key: &str) -> Result<bool, String> {
+        use rusty_s3::S3Action;
+        let url = self
+            .bucket
+            .head_object(Some(&self.creds), &format!("{}{key}", self.prefix))
+            .sign(SIGN_TTL);
+        let resp = self
+            .agent
+            .head(url.as_str())
+            .call()
+            .map_err(|e| format!("HEAD {key}: {e}"))?;
+        match resp.status().as_u16() {
+            200 => Ok(true),
+            404 => Ok(false),
+            s => Err(format!("HEAD {key}: HTTP {s}")),
+        }
+    }
+
+    fn put(&self, key: &str, bytes: &[u8]) -> Result<(), String> {
+        use rusty_s3::S3Action;
+        let url = self
+            .bucket
+            .put_object(Some(&self.creds), &format!("{}{key}", self.prefix))
+            .sign(SIGN_TTL);
+        let resp = self
+            .agent
+            .put(url.as_str())
+            .send(bytes)
+            .map_err(|e| format!("PUT {key}: {e}"))?;
+        match resp.status().as_u16() {
+            200 | 201 | 204 => Ok(()),
+            s => Err(format!("PUT {key}: HTTP {s}")),
+        }
+    }
+
+    /// Upload every locally-cached (fp → manifest) the remote lacks:
+    /// HEAD manifest → skip if present; else HEAD+PUT missing blobs
+    /// (compressed), then PUT the manifest LAST (spec §Wire layout:
+    /// blobs before manifest). Push failures are HARD errors.
+    pub fn push(&self, cache: &Cache, fps: &[String], jobs: usize) -> Result<PushReport, String> {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Mutex;
+        let idx = AtomicUsize::new(0);
+        let report = Mutex::new(PushReport {
+            manifests_pushed: 0,
+            manifests_skipped: 0,
+            blobs_pushed: 0,
+            bytes_uploaded: 0,
+        });
+        let first_err: Mutex<Option<String>> = Mutex::new(None);
+        std::thread::scope(|s| {
+            for _ in 0..jobs.max(1) {
+                s.spawn(|| loop {
+                    if first_err.lock().unwrap().is_some() {
+                        return;
+                    }
+                    let i = idx.fetch_add(1, Ordering::SeqCst);
+                    let Some(fp) = fps.get(i) else { return };
+                    if let Err(e) = self.push_one(cache, fp, &report) {
+                        *first_err.lock().unwrap() = Some(e);
+                        return;
+                    }
+                });
+            }
+        });
+        if let Some(e) = first_err.into_inner().unwrap() {
+            return Err(e);
+        }
+        Ok(report.into_inner().unwrap())
+    }
+
+    fn push_one(
+        &self,
+        cache: &Cache,
+        fp: &str,
+        report: &std::sync::Mutex<PushReport>,
+    ) -> Result<(), String> {
+        let Some(manifest) = cache.lookup(fp).map_err(|e| format!("lookup {fp}: {e}"))? else {
+            return Ok(()); // not built locally — nothing to publish
+        };
+        if self.head(&remote_manifest_key(fp))? {
+            report.lock().unwrap().manifests_skipped += 1;
+            return Ok(());
+        }
+        for entry in &manifest.artifacts {
+            let key = remote_blob_key(&entry.blob);
+            if self.head(&key)? {
+                continue;
+            }
+            let bytes = std::fs::read(cache.blob_path(&entry.blob))
+                .map_err(|e| format!("read blob {}: {e}", entry.blob))?;
+            let compressed = compress(&bytes);
+            self.put(&key, &compressed)?;
+            let mut r = report.lock().unwrap();
+            r.blobs_pushed += 1;
+            r.bytes_uploaded += compressed.len() as u64;
+        }
+        let json = serde_json::to_vec(&manifest).expect("manifest serializes");
+        self.put(&remote_manifest_key(fp), &json)?;
+        let mut r = report.lock().unwrap();
+        r.manifests_pushed += 1;
+        r.bytes_uploaded += json.len() as u64;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
