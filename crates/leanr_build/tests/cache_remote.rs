@@ -645,3 +645,84 @@ fn trailing_slash_only_target_yields_empty_prefix_not_slash() {
         }
     );
 }
+
+// --- Task 7: get_all — batch prefetch driver ---
+
+use leanr_build::remote::{get_all, GetReport};
+
+#[test]
+fn get_all_prefetches_misses_and_counts_outcomes() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let served = tmp.path().join("served");
+    let fp_remote = FP; // published below
+    let fp_local = "2222222222222222222222222222222222222222222222222222222222222222";
+    let fp_absent = "3333333333333333333333333333333333333333333333333333333333333333";
+    publish(&served, fp_remote, &[("A.olean", b"remote-bytes")]);
+    let srv = httpd::spawn(served);
+    let cache = Cache::new(&tmp.path().join("xdg"));
+    let local_art = tmp.path().join("L.olean");
+    std::fs::write(&local_art, b"local-bytes").unwrap();
+    cache.insert(fp_local, &[local_art]).unwrap();
+    let (rc, _) = remote_with_warnings(&format!("http://{}", srv.addr));
+    let r = get_all(
+        &cache,
+        &rc,
+        &[
+            fp_remote.to_string(),
+            fp_local.to_string(),
+            fp_absent.to_string(),
+        ],
+        4,
+    );
+    assert_eq!(
+        r,
+        GetReport {
+            fetched: 1,
+            already_local: 1,
+            missing: 1,
+            failed: 0
+        }
+    );
+    assert!(
+        cache.lookup(fp_remote).unwrap().is_some(),
+        "prefetched into local CAS"
+    );
+    // Second run: everything already local except the truly absent fp.
+    let r2 = get_all(
+        &cache,
+        &rc,
+        &[fp_remote.to_string(), fp_local.to_string()],
+        4,
+    );
+    assert_eq!(
+        r2,
+        GetReport {
+            fetched: 0,
+            already_local: 2,
+            missing: 0,
+            failed: 0
+        }
+    );
+}
+
+#[test]
+fn get_all_counts_degraded_as_failed() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let served = tmp.path().join("served");
+    let mp = served.join(remote_manifest_key(FP));
+    std::fs::create_dir_all(mp.parent().unwrap()).unwrap();
+    std::fs::write(&mp, b"{ not json").unwrap();
+    let srv = httpd::spawn(served);
+    let cache = Cache::new(&tmp.path().join("xdg"));
+    let (rc, _) = remote_with_warnings(&format!("http://{}", srv.addr));
+    let r = get_all(&cache, &rc, &[FP.to_string()], 1);
+    assert_eq!(
+        r,
+        GetReport {
+            fetched: 0,
+            already_local: 0,
+            missing: 0,
+            failed: 1
+        }
+    );
+}

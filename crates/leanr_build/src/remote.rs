@@ -52,7 +52,7 @@ pub fn decompress_capped(compressed: &[u8], cap: u64) -> Result<Vec<u8>, String>
 }
 
 use crate::cache::{Cache, Manifest};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 pub type WarnFn = Box<dyn Fn(&str) + Send + Sync>;
 
@@ -458,6 +458,59 @@ impl Pusher {
         r.manifests_pushed += 1;
         r.bytes_uploaded += json.len() as u64;
         Ok(())
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub struct GetReport {
+    pub fetched: usize,
+    pub already_local: usize,
+    pub missing: usize,
+    pub failed: usize,
+}
+
+/// Batch prefetch (spec §Commands: `leanr cache get`): fetch every fp
+/// not already a local hit, over `jobs` worker threads. Callers pass
+/// deduped fps. Failures don't abort the batch — they're counted, and
+/// the CLI turns `failed > 0` into a nonzero exit (fetching is get's
+/// whole job).
+pub fn get_all(cache: &Cache, remote: &RemoteCache, fps: &[String], jobs: usize) -> GetReport {
+    let idx = AtomicUsize::new(0);
+    let (fetched, already, missing, failed) = (
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+    );
+    std::thread::scope(|s| {
+        for _ in 0..jobs.max(1) {
+            s.spawn(|| loop {
+                let i = idx.fetch_add(1, Ordering::SeqCst);
+                let Some(fp) = fps.get(i) else { return };
+                match cache.lookup(fp) {
+                    Ok(Some(_)) => {
+                        already.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        failed.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                }
+                match remote.fetch(cache, fp) {
+                    FetchOutcome::Hit { .. } => fetched.fetch_add(1, Ordering::Relaxed),
+                    FetchOutcome::Miss => missing.fetch_add(1, Ordering::Relaxed),
+                    FetchOutcome::Degraded => failed.fetch_add(1, Ordering::Relaxed),
+                };
+            });
+        }
+    });
+    GetReport {
+        fetched: fetched.into_inner(),
+        already_local: already.into_inner(),
+        missing: missing.into_inner(),
+        failed: failed.into_inner(),
     }
 }
 
