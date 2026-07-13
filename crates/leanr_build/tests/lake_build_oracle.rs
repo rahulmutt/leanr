@@ -86,6 +86,7 @@ fn run_leanr_build(root: &Path) -> (Workspace, Layout) {
                 toolchain_id: "test-tc".into(),
                 platform: "test-plat".into(),
             },
+            remote: None,
         },
         &|_| {},
     )

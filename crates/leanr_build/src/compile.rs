@@ -41,6 +41,9 @@ pub struct BuildOptions {
     pub cache: Option<crate::cache::Cache>,
     pub force: bool,
     pub fp_env: crate::fingerprint::FingerprintEnv,
+    /// Remote read tier (M2d): consulted only on a local cache miss,
+    /// only when `cache` is Some and `force` is false. `None` = local-only.
+    pub remote: Option<crate::remote::RemoteCache>,
 }
 
 pub struct BuiltEvent<'a> {
@@ -53,12 +56,16 @@ pub struct BuiltEvent<'a> {
     pub diagnostics: &'a str,
     /// True when this module's artifacts came from the cache (no lean run).
     pub cached: bool,
+    /// True when this module's artifacts were downloaded from the remote
+    /// cache this run (then materialized from the local store).
+    pub downloaded: bool,
 }
 
 #[derive(Debug)]
 pub struct BuildReport {
     pub built: usize,
     pub cached: usize,
+    pub downloaded: usize,
 }
 
 #[derive(serde::Deserialize)]
@@ -161,6 +168,7 @@ pub fn build_workspace(
     enum Outcome {
         Built,
         Cached,
+        Downloaded,
     }
     let outcomes: Mutex<Vec<Outcome>> = Mutex::new(vec![Outcome::Built; ws.graph.modules.len()]);
     let job = |i: usize| -> Result<(), String> {
@@ -176,19 +184,35 @@ pub fn build_workspace(
         };
         if let (Some(cache), Some(fps)) = (opts.cache.as_ref(), fps.as_ref()) {
             if !opts.force {
-                match cache.lookup(&fps[i]) {
-                    Ok(Some(manifest)) => {
-                        if let Err(e) = cache.materialize(&manifest, &dests) {
-                            cleanup();
-                            return Err(format!("cache materialize failed: {e}"));
-                        }
-                        outcomes.lock().unwrap()[i] = Outcome::Cached;
-                        results.lock().unwrap()[i] = Some((0.0, String::new()));
-                        return Ok(());
-                    }
-                    Ok(None) => {} // miss — fall through to lean
+                let mut hit = match cache.lookup(&fps[i]) {
+                    Ok(m) => m.map(|m| (m, Outcome::Cached)),
                     Err(e) => return Err(format!("cache lookup failed: {e}")),
+                };
+                // M2d read-through tier: local miss → remote fetch →
+                // re-lookup. Every fetch failure mode is a miss (remote
+                // availability never affects build success).
+                if hit.is_none() {
+                    if let Some(remote) = &opts.remote {
+                        if let crate::remote::FetchOutcome::Hit { .. } =
+                            remote.fetch(cache, &fps[i])
+                        {
+                            hit = match cache.lookup(&fps[i]) {
+                                Ok(m) => m.map(|m| (m, Outcome::Downloaded)),
+                                Err(e) => return Err(format!("cache lookup failed: {e}")),
+                            };
+                        }
+                    }
                 }
+                if let Some((manifest, outcome)) = hit {
+                    if let Err(e) = cache.materialize(&manifest, &dests) {
+                        cleanup();
+                        return Err(format!("cache materialize failed: {e}"));
+                    }
+                    outcomes.lock().unwrap()[i] = outcome;
+                    results.lock().unwrap()[i] = Some((0.0, String::new()));
+                    return Ok(());
+                }
+                // miss (local and, if consulted, remote) — fall through to lean
             }
         }
         let start = Instant::now();
@@ -248,7 +272,9 @@ pub fn build_workspace(
         let (secs, diags) = results.lock().unwrap()[i]
             .take()
             .unwrap_or((0.0, String::new()));
-        let cached = outcomes.lock().unwrap()[i] == Outcome::Cached;
+        let outcome = outcomes.lock().unwrap()[i];
+        let cached = outcome == Outcome::Cached;
+        let downloaded = outcome == Outcome::Downloaded;
         let name = m.name.to_string();
         on_built(BuiltEvent {
             module: &name,
@@ -257,6 +283,7 @@ pub fn build_workspace(
             secs,
             diagnostics: &diags,
             cached,
+            downloaded,
         });
     };
     pool::run(&deps, opts.jobs, &job, &on_done).map_err(|f| {
@@ -273,6 +300,7 @@ pub fn build_workspace(
     Ok(BuildReport {
         built: outs.iter().filter(|o| **o == Outcome::Built).count(),
         cached: outs.iter().filter(|o| **o == Outcome::Cached).count(),
+        downloaded: outs.iter().filter(|o| **o == Outcome::Downloaded).count(),
     })
 }
 
@@ -319,6 +347,7 @@ mod tests {
             cache,
             force,
             fp_env: fp_env(),
+            remote: None,
         }
     }
 

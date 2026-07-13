@@ -596,6 +596,8 @@ fn build(
             cache,
             force,
             fp_env,
+            // Remote read tier wiring is Task 8 (CLI); until then, local-only.
+            remote: None,
         };
         let build_start = std::time::Instant::now();
         let report = leanr_build::compile::build_workspace(&ws, &build_opts, &|e| {

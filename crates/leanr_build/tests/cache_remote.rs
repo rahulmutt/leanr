@@ -251,3 +251,225 @@ fn unreachable_remote_trips_breaker_and_warns_once() {
     assert_eq!(w.len(), 1, "one warning for the whole run, got {w:?}");
     assert!(w[0].contains("disabled"), "{w:?}");
 }
+
+// --- Task 5: build integration (the remote tier in the job body) ---
+
+use leanr_build::compile::{build_workspace, BuildOptions, BuildReport, LeanInvoker};
+use leanr_build::fingerprint::{fingerprint_all, FingerprintEnv};
+use leanr_build::{resolve, ResolveOptions, Workspace};
+use std::path::PathBuf;
+
+fn counting_lean() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/counting-lean.sh")
+}
+
+fn write(dir: &Path, rel: &str, text: &str) {
+    let p = dir.join(rel);
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(p, text).unwrap();
+}
+
+/// Same three-module fixture as cache_incremental.rs (Root imports
+/// Root.A and Root.B), resolved fresh per test dir.
+fn fixture(dir: &Path) -> Workspace {
+    write(
+        dir,
+        "lakefile.toml",
+        "name = \"app\"\ndefaultTargets = [\"Root\"]\n\n[[lean_lib]]\nname = \"Root\"\n",
+    );
+    write(dir, "Root.lean", "import Root.A\nimport Root.B\n");
+    write(dir, "Root/A.lean", "-- leaf A\ndef a := 1\n");
+    write(dir, "Root/B.lean", "-- leaf B\ndef b := 2\n");
+    write(
+        dir,
+        "lake-manifest.json",
+        r#"{"version": "1.2.0", "packages": []}"#,
+    );
+    let fake_toolchain = dir.join("fake-toolchain");
+    std::fs::create_dir_all(&fake_toolchain).unwrap();
+    std::fs::write(fake_toolchain.join("Init.olean"), "").unwrap();
+    resolve(
+        dir,
+        &ResolveOptions {
+            targets: Vec::new(),
+            lake: leanr_build::bridge::LakeInvoker::default(),
+            toolchain_olean_dir: fake_toolchain,
+            cache_root: dir.join("resolve-cache"),
+        },
+    )
+    .unwrap()
+}
+
+fn fp_env() -> FingerprintEnv {
+    FingerprintEnv {
+        leanr_version: "test".into(),
+        toolchain_id: "test-tc".into(),
+        platform: "test-plat".into(),
+    }
+}
+
+// COUNTING_LEAN_LOG is process-wide (same fix as cache_incremental.rs's
+// ENV_GUARD): serialize builds that set it.
+static ENV_GUARD: Mutex<()> = Mutex::new(());
+
+fn build_with(
+    ws: &Workspace,
+    xdg: &Path,
+    log: &Path,
+    remote: Option<RemoteCache>,
+    force: bool,
+) -> BuildReport {
+    let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("COUNTING_LEAN_LOG", log);
+    let opts = BuildOptions {
+        jobs: 2,
+        lean: LeanInvoker {
+            program: counting_lean(),
+            toolchain: None,
+        },
+        cache: Some(Cache::new(xdg)),
+        force,
+        fp_env: fp_env(),
+        remote,
+    };
+    let report = build_workspace(ws, &opts, &|_| {}).unwrap();
+    std::env::remove_var("COUNTING_LEAN_LOG");
+    report
+}
+
+fn lean_runs(log: &Path) -> usize {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .count()
+}
+
+/// Publish machine A's whole local CAS into a served-root dir in the
+/// wire layout (compressed blobs, plain manifests). Stand-in for `push`
+/// until Task 6; kept afterward as an independent publisher so the
+/// fetch tests don't depend on push being correct.
+fn publish_cas(xdg: &Path, ws: &Workspace, served: &Path) {
+    let cache = Cache::new(xdg);
+    let fps = fingerprint_all(ws, &fp_env()).unwrap();
+    for fp in &fps {
+        let Some(m) = cache.lookup(fp).unwrap() else {
+            continue;
+        };
+        for e in &m.artifacts {
+            let dst = served.join(remote_blob_key(&e.blob));
+            std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+            std::fs::write(
+                dst,
+                compress(&std::fs::read(cache.blob_path(&e.blob)).unwrap()),
+            )
+            .unwrap();
+        }
+        let mp = served.join(remote_manifest_key(fp));
+        std::fs::create_dir_all(mp.parent().unwrap()).unwrap();
+        std::fs::write(mp, serde_json::to_vec(&m).unwrap()).unwrap();
+    }
+}
+
+#[test]
+fn fresh_machine_builds_entirely_from_remote_zero_lean() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    // Machine A: cold build populates CAS A; publish it.
+    let dir_a = tmp.path().join("ws-a");
+    std::fs::create_dir_all(&dir_a).unwrap();
+    let ws_a = fixture(&dir_a);
+    let xdg_a = tmp.path().join("xdg-a");
+    let cold = build_with(&ws_a, &xdg_a, &tmp.path().join("cold.log"), None, false);
+    assert_eq!((cold.built, cold.cached, cold.downloaded), (3, 0, 0));
+    let served = tmp.path().join("served");
+    publish_cas(&xdg_a, &ws_a, &served);
+    let srv = httpd::spawn(served);
+
+    // Machine B: identical sources, EMPTY local CAS, remote configured.
+    let dir_b = tmp.path().join("ws-b");
+    std::fs::create_dir_all(&dir_b).unwrap();
+    let ws_b = fixture(&dir_b);
+    let xdg_b = tmp.path().join("xdg-b");
+    let log_b = tmp.path().join("b.log");
+    let (rc, _) = remote_with_warnings(&format!("http://{}", srv.addr));
+    let b = build_with(&ws_b, &xdg_b, &log_b, Some(rc), false);
+    assert_eq!(lean_runs(&log_b), 0, "zero lean invocations on machine B");
+    assert_eq!((b.built, b.cached, b.downloaded), (0, 0, 3));
+
+    // Artifacts byte-identical across machines (compare every family
+    // member via Layout, not hand-built paths).
+    let layout_a = leanr_build::setup::Layout::new(&ws_a.root_dir);
+    let layout_b = leanr_build::setup::Layout::new(&ws_b.root_dir);
+    for (ma, mb) in ws_a.graph.modules.iter().zip(&ws_b.graph.modules) {
+        let pa = layout_a.artifact_paths(&ma.package, ma);
+        let pb = layout_b.artifact_paths(&mb.package, mb);
+        for (a, b) in pa.iter().zip(&pb) {
+            assert_eq!(
+                std::fs::read(a).unwrap(),
+                std::fs::read(b).unwrap(),
+                "byte-identical: {} vs {}",
+                a.display(),
+                b.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn dead_remote_degrades_to_a_normal_local_build() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path().join("ws");
+    std::fs::create_dir_all(&dir).unwrap();
+    let ws = fixture(&dir);
+    let dead = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap()
+    };
+    let (rc, warnings) = remote_with_warnings(&format!("http://{dead}"));
+    let log = tmp.path().join("dead.log");
+    let r = build_with(&ws, &tmp.path().join("xdg"), &log, Some(rc), false);
+    assert_eq!((r.built, r.downloaded), (3, 0), "build succeeded via lean");
+    assert_eq!(warnings.lock().unwrap().len(), 1, "breaker warned once");
+}
+
+#[test]
+fn force_runs_lean_even_with_a_populated_remote() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path().join("ws");
+    std::fs::create_dir_all(&dir).unwrap();
+    let ws = fixture(&dir);
+    let xdg = tmp.path().join("xdg");
+    build_with(&ws, &xdg, &tmp.path().join("c.log"), None, false);
+    let served = tmp.path().join("served");
+    publish_cas(&xdg, &ws, &served);
+    let srv = httpd::spawn(served);
+    let (rc, _) = remote_with_warnings(&format!("http://{}", srv.addr));
+    let log = tmp.path().join("force.log");
+    let r = build_with(&ws, &tmp.path().join("xdg-fresh"), &log, Some(rc), true);
+    assert_eq!(lean_runs(&log), 3, "--force always runs lean");
+    assert_eq!((r.built, r.downloaded), (3, 0));
+}
+
+#[test]
+fn local_hit_wins_without_touching_the_remote() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path().join("ws");
+    std::fs::create_dir_all(&dir).unwrap();
+    let ws = fixture(&dir);
+    let xdg = tmp.path().join("xdg");
+    build_with(&ws, &xdg, &tmp.path().join("c.log"), None, false);
+    // Remote is a DEAD endpoint — a warm local build must never contact
+    // it (local lookup happens first), so no breaker warning fires.
+    let dead = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap()
+    };
+    let (rc, warnings) = remote_with_warnings(&format!("http://{dead}"));
+    let log = tmp.path().join("warm.log");
+    let r = build_with(&ws, &xdg, &log, Some(rc), false);
+    assert_eq!(lean_runs(&log), 0);
+    assert_eq!((r.built, r.cached, r.downloaded), (0, 3, 0));
+    assert!(
+        warnings.lock().unwrap().is_empty(),
+        "remote never consulted"
+    );
+}
