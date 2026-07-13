@@ -247,3 +247,16 @@ correctness or build success.**
 ## Next step
 
 Invoke the writing-plans skill to produce the M2d implementation plan.
+
+## Acceptance results (recorded 2026-07-13)
+
+`scripts/remote-cache-acceptance.sh` against the pinned Mathlib (8564 modules, 8 jobs, single host simulating machines A/B/C with isolated XDG cache homes):
+
+- Machine A cold build: `built 8564 modules (0 cached, 0 downloaded)` in 7256.4s.
+- `cache push` to the local S3 stand-in: 8564 manifests pushed (0 already remote), 42820 blobs, 1,848,036,065 bytes uploaded (~1.72 GiB compressed), 14s wall.
+- Machine B `build --remote` (empty local CAS): `built 0 modules (0 cached, 8564 downloaded)` in 11.6s (18s wall including resolve) — zero lean invocations, every module tagged `(downloaded)`.
+- Strict A↔B byte-diff: all 42820 artifacts byte-identical (zero tolerance; A↔lake fidelity remains `scripts/build-fresh-acceptance.sh`'s standing gate — same builder's bytes through the wire).
+- Machine B `cache verify`: store integrity clean.
+- Machine C `cache get` (explicit prefetch, empty CAS): 8564 fetched, 0 already local, 0 not on remote, 0 failed; subsequent `build --no-remote`: `built 0 modules (8564 cached, 0 downloaded)` in 2.3s.
+
+Recorded finding: the first acceptance run FAILED its strict byte-diff (25/42820 artifacts across 5 module families) and exposed a latent M2c bug — the fingerprint omitted module identity, so Mathlib's six byte-identical `Subpresheaf` deprecation stubs (plus one Batteries twin pair) shared fingerprints and the CAS served one twin's artifacts for the others. Fixed by folding the fully-qualified module name into the fingerprint (schema bumped to `leanr-m2d-fingerprint-v2`) with a pinned regression test (`identical_content_modules_get_distinct_fingerprints`); the re-run passed with zero mismatches. This is precisely the failure class the strict-byte-identity gate exists to catch.
