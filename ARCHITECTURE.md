@@ -75,13 +75,27 @@ implementation or a thin frontend. Full design:
   git materialization, import DAG) and the build orchestrator (M2b:
   `setup` plans per-module official-`lean` invocations into leanr's own
   layout under `.leanr/build/`; `pool` is a fail-fast dependency-counter
-  scheduler; `compile` drives one `lean` process per module,
-  unconditionally — no up-to-date skipping until M2c). Dependency
-  sources live in the per-user XDG cache
+  scheduler; `compile` drives one `lean` process per module). M2c adds
+  two more modules on the same `pool`/`setup` seam: `fingerprint`, a
+  recursive content-Merkle over each module's source, semantic setup
+  inputs, toolchain/leanr-version, package provenance, and the
+  fingerprints of its direct imports (so one fixed-size hash captures
+  the whole transitive input closure — no mtimes); and `cache`, the XDG
+  content-addressed artifact store (`$XDG_CACHE_HOME/leanr/cache/`,
+  sharded blob tree + fingerprint-keyed manifests, atomic flock-guarded
+  writes, hardlink materialization into the project's `.leanr/build/`
+  layout with a copy fallback across filesystem mounts) plus `verify`
+  (store-integrity check) and `gc` (LRU eviction to a size cap).
+  `leanr build` is cache-aware by default (a fingerprint hit
+  materializes from the store and skips `lean` entirely); `--no-cache`
+  reverts to M2b's unconditional path (neither reads nor writes the
+  cache) and `--force` always runs `lean` then refreshes the cache with
+  the result. Dependency sources live in the per-user XDG cache
   (`$XDG_CACHE_HOME/leanr/src/<name>/<rev>/`, immutable, flock-guarded),
   as does the bridge cache; Lake-layout interop is retired as of the
   M2b spec (`docs/superpowers/specs/2026-07-12-m2b-build-orchestrator-design.md`).
-  `leanr build` / `leanr build --dry-run`. No kernel dependency.
+  `leanr build` / `leanr build --dry-run` / `leanr cache verify [--deep]`
+  / `leanr cache gc --max-size`. No kernel dependency.
 - `crates/leanr_cli` — the `leanr` binary. Thin: argument parsing and
   printing only, so CLI and (future) LSP can never diverge in behavior.
 
