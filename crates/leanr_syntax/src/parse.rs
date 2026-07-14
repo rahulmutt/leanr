@@ -625,6 +625,78 @@ impl<'a> Ps<'a> {
                     _ => Err(self.fail_expecting(&format!("'{c}'"), at)),
                 }
             }
+            Prim::UnknownTacticIdent => {
+                // ORACLE-PORT `Tactic.«unknown» := leading_parser
+                // withPosition (ident >> errorAtSavedPos "unknown
+                // tactic" true)` (Tactic.lean:29). By the time this arm
+                // runs, `self.pos` is already exactly the ident's start
+                // byte offset: the enclosing `Category` dispatch's
+                // leading-token lookahead is the COMMITTING
+                // `peek_significant` (see `category`'s own doc
+                // comment), so any leading trivia is already skipped/
+                // emitted before ANY leading candidate — including this
+                // one — is even tried. That's the same position
+                // `withPosition` would mark here, so capturing
+                // `self.pos` now stands in for the oracle's saved
+                // marker without needing a separate byte-offset stack.
+                let at = self.pos;
+                self.run(&Prim::Ident)?;
+                // `errorAtSavedPos`'s `mkUnexpectedErrorAt` calls
+                // `mkUnexpectedError` with its default `pushMissing :=
+                // true`, which pushes an ADDITIONAL `.missing` syntax
+                // node on top of whatever `ident` already pushed — not
+                // instead of it. `EmitMissing` is this crate's port of
+                // that exact "always-succeeding, pushes a missing leaf"
+                // shape (see its own doc comment).
+                self.run(&Prim::EmitMissing)?;
+                // DIVERGENCES from the oracle's literal `errorAtSavedPos
+                // msg true` (Task 9 review finding 2 — documented here
+                // per the finding's own instruction to record any
+                // divergence at the code site):
+                // 1. Position: real Lean reports at `c.next savedPos`
+                //    (one char PAST the marker — `delta := true` exists
+                //    purely to guarantee the report lands past a
+                //    possibly-zero-width preceding parser). `ident` is
+                //    never zero-width, so reporting at the marker
+                //    itself (`at`, captured above) rather than marker+1
+                //    char is an intentional, harmless simplification.
+                // 2. No position rewind: `mkUnexpectedErrorAt` also
+                //    resets `s.pos` BACK to the saved position before
+                //    erroring (`s.setPos pos |>.mkUnexpectedError msg`)
+                //    — real Lean's recovery machinery can rely on that
+                //    backward jump because an enclosing `<|>`/longest-
+                //    match may still try a DIFFERENT alternative from
+                //    there. This port's `self.pos` must stay
+                //    monotonically forward (every combinator's
+                //    never-hang invariant depends on it — see
+                //    `sep_by_indent`'s own zero-width guard, this same
+                //    review wave's finding 1) and there is no other
+                //    tactic-category alternative left to try anyway
+                //    (`unknown` is already the MAX_PREC catch-all last
+                //    resort), so skipping the rewind changes no
+                //    observable outcome here: the ident's full span
+                //    stays consumed, exactly as any OTHER successful
+                //    tactic-category production would leave it.
+                // 3. Failure vs. diagnostic: the oracle's `errorMsg`
+                //    being set ultimately surfaces as a genuine
+                //    parser-level error message ("error: unknown
+                //    tactic", confirmed against a fresh oracle dump —
+                //    see `builtin/tactic.rs`'s module doc comment)
+                //    because nothing else in the category can then
+                //    succeed. This port instead records the SAME
+                //    message as a `ParseError` VALUE (this crate's
+                //    whole error-handling architecture — `errors:
+                //    Vec<ParseError>`, never a bare "the parse just
+                //    failed") while the production itself still
+                //    succeeds, producing a real (error-annotated) tree
+                //    instead of no tree at all.
+                self.errors.push(ParseError {
+                    code: "E0301",
+                    span: (at as u32, at as u32),
+                    msg: "unknown tactic".to_string(),
+                });
+                Ok(())
+            }
             Prim::CheckPrec(n) => {
                 // ORACLE-PORT `checkPrecFn` (Basic.lean): succeeds iff
                 // `c.prec <= prec` — i.e. the surrounding right-binding
@@ -1031,13 +1103,35 @@ impl<'a> Ps<'a> {
                 // same as any other non-consuming stop.
                 let (_, next_at) = self.peek_significant_readonly();
                 if self.src[before_sep..next_at].contains('\n') {
-                    after_sep = true;
-                    // `pushNone` — see doc comment fix (2) above: the
-                    // implicit separator is a real, empty `null` node,
-                    // not nothing.
-                    self.start(KIND_NULL);
-                    self.finish();
-                    continue 'outer;
+                    // Never-hang guard (review finding): unlike
+                    // `sep_by_impl`'s `sep`, this branch's `pushNone` is
+                    // zero-width BY CONSTRUCTION — it never advances
+                    // `self.pos`. If `item` itself also managed to
+                    // succeed without consuming anything this iteration
+                    // (`!self.consumed_since(&sp)`, `sp` captured at the
+                    // very top of this loop turn, before `item` ran),
+                    // then taking this `continue 'outer` re-enters the
+                    // loop at the exact same position with the exact
+                    // same lookahead state — `item` is deterministic, so
+                    // it would succeed zero-width again, forever. No
+                    // currently-registered item is zero-width-successful,
+                    // so this is unreached today, but the combinator is
+                    // now a public shared primitive (`grammar.rs`) and
+                    // must not rely on that. Refuse the loop instead:
+                    // treat it as a clean stop, same as the `else`
+                    // fallthrough below, and — critically — do NOT start
+                    // the `null` node in that case, so the event stream
+                    // stays balanced (an unmatched `start` with no
+                    // `finish` would corrupt it).
+                    if self.consumed_since(&sp) {
+                        after_sep = true;
+                        // `pushNone` — see doc comment fix (2) above: the
+                        // implicit separator is a real, empty `null`
+                        // node, not nothing.
+                        self.start(KIND_NULL);
+                        self.finish();
+                        continue 'outer;
+                    }
                 }
             }
             break 'outer Ok(());
@@ -1963,6 +2057,64 @@ mod tests {
         // shape (probed against a fresh dump of a multi-line struct
         // instance, task-9 report).
         assert_eq!(parse_cat(&snap, "a\nb"), "(seq (null a (null) b))");
+    }
+
+    #[test]
+    fn sep_by_indent_zero_width_item_terminates() {
+        // Review finding 1: `sep_by_indent`'s implicit-separator branch
+        // (the `pushNone` continue) is zero-width by construction — it
+        // never advances `self.pos`. If `item` itself ALSO succeeds
+        // zero-width, the pre-fix loop re-derives the exact same
+        // decision at the exact same position forever: no currently-
+        // registered item is zero-width-successful, but the combinator
+        // is now a public shared primitive (`grammar.rs`), so this must
+        // hold for ANY item, not just today's callers.
+        //
+        // Toy item: `Prim::EmitEmptyIdent` — an existing, real primitive
+        // (`hygieneInfoFn`'s port) that ALWAYS succeeds without moving
+        // `self.pos` (see its doc comment). It is not used as a
+        // `sep_by_indent` item by any real grammar row; it's used here
+        // purely as a minimal zero-width-success witness.
+        //
+        // Run via `run_toy` (direct `Ps::run`), NOT `parse_cat`/a
+        // registered category production: a category's own leading-
+        // token dispatch does a COMMITTING peek to find the first
+        // significant token before invoking the row's `Prim` at all,
+        // which would already consume the leading newline this test
+        // needs `sep_by_indent` itself to see as "unconsumed" — that
+        // was tried first and it defeated the repro (the newline was
+        // gone by the time `sep_by_indent` ran, so the implicit-
+        // separator branch legitimately never fired). `run_toy` invokes
+        // `self.run(p)` directly at `self.pos == 0`, so no such
+        // pre-consumption happens.
+        //
+        // `src = "\nx"`: the marker is established by peeking past the
+        // leading newline to "x" (read-only, so `self.pos` stays 0).
+        // Every loop iteration then finds: `checkColGe` holds (current
+        // column == marker column, since nothing has moved); `item`
+        // succeeds zero-width; no explicit `,` follows (the failed
+        // match attempt commits-then-restores, netting no change);
+        // the implicit-separator lookahead sees the SAME leftover
+        // leading newline (still unconsumed, since nothing has
+        // advanced `self.pos` past it) and reports "linebreak since
+        // last item" — true every time. Pre-fix, that satisfies the
+        // implicit-separator branch unconditionally and loops forever
+        // (confirmed empirically: temporarily reverting just the
+        // `self.consumed_since(&sp)` guard added by this fix and
+        // re-running this exact test never returned — no output, no
+        // pass/fail, had to be killed by hand — see task-9-report.md's
+        // "Fix wave 1" section for the transcript).
+        //
+        // Post-fix: the guard recognizes "nothing moved this
+        // iteration" and refuses the `continue`, breaking cleanly
+        // instead — one item parsed, no separator node emitted (an
+        // unmatched `start` for that node would corrupt the event
+        // stream), min (0) is satisfied.
+        let mut kinds = KindInterner::new();
+        let prim = Prim::WithPosition(Arc::new(sep_by_indent(Prim::EmitEmptyIdent, ",")));
+        let (tree_sexpr, errors) = run_toy("\nx", &[","], &prim, &mut kinds);
+        assert_eq!(tree_sexpr, "(root (null ))");
+        assert_eq!(errors, 0);
     }
 
     #[test]

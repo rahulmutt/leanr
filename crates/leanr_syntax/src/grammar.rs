@@ -155,6 +155,25 @@ pub enum Prim {
     /// no leading-trivia skip (never needed: always reached right after
     /// a `CheckNoWsBefore`).
     RawChar(char),
+    /// `Tactic.«unknown»`'s ENTIRE body — ORACLE-PORT `withPosition
+    /// (ident >> errorAtSavedPos "unknown tactic" true)`
+    /// (`Lean/Parser/Tactic.lean:29`), folded into one dedicated
+    /// primitive rather than composed from `WithPosition` + `Ident` +
+    /// a generic "push a diagnostic" combinator: `errorAtSavedPos`'s
+    /// report needs the ident's OWN start byte offset, which is
+    /// simplest to capture right at this call rather than threading a
+    /// byte offset out through `WithPosition`'s (line, col)-only
+    /// marker stack (`Ps::pos_stack`) — no other call site needs that
+    /// byte offset today, so a parallel byte-offset marker stack
+    /// purely to generalize this ONE row would be unused machinery.
+    /// ALWAYS succeeds (an unrecognized tactic name is a recorded
+    /// diagnostic, not a hard parse failure — this crate's `errors:
+    /// Vec<ParseError>` models exactly that "parse errors are values"
+    /// property; see the M3a builtin-surface spec's row for this
+    /// production). See the interpreter arm in `parse.rs` for exactly
+    /// which of `errorAtSavedPos`'s oracle semantics this reproduces
+    /// and which it deliberately doesn't (Task 9 review finding 2).
+    UnknownTacticIdent,
 }
 
 // Terse constructors — builtin/*.rs is written in these.
@@ -584,6 +603,9 @@ fn encode_prim(p: &Prim, snap: &GrammarSnapshot, h: &mut blake3::Hasher) {
             let mut buf = [0u8; 4];
             h.update(c.encode_utf8(&mut buf).as_bytes());
         }
+        UnknownTacticIdent => {
+            h.update(&[39]);
+        }
     }
 }
 
@@ -767,7 +789,7 @@ fn first_tok(p: &Prim) -> FirstTok {
             .map(first_tok)
             .unwrap_or(FirstTok::Any),
         Symbol(s) | NonReservedSymbol(s) => FirstTok::Sym(s.clone()),
-        Ident => FirstTok::Ident,
+        Ident | UnknownTacticIdent => FirstTok::Ident,
         NumLit => FirstTok::Num,
         ScientificLit => FirstTok::Scientific,
         StrLit => FirstTok::Str,
@@ -837,10 +859,22 @@ fn walk_symbols(p: &Prim, f: &mut impl FnMut(&str)) {
             f(sep);
             walk_symbols(item, f);
         }
-        WithForbidden(tok, q) => {
-            f(tok);
-            walk_symbols(q, f);
-        }
+        // ORACLE-PORT `withForbidden`/`withoutForbidden` (Basic.lean):
+        // both are `adaptCacheableContext ({ · with forbiddenTk?/
+        // savedPos? := .. }) p` — i.e. `withFn (adaptCacheableContextFn
+        // ..) p = { p with fn := .. }` (Types.lean `withFn`/
+        // `adaptCacheableContext`). `info` (hence `collectTokens`) is
+        // untouched — it's exactly `p.info`, forwarded unmodified. The
+        // forbidden token string is NOT registered as a token by this
+        // combinator (unlike `Symbol`'s `symbolInfo`, which explicitly
+        // extends `collectTokens`); only `q`'s own reachable symbols
+        // count. A prior version of this function harvested `tok` too —
+        // harmless today ("do", the only real caller's forbidden token,
+        // is harvested anyway via its own `sym("do")` elsewhere — see
+        // `Term.do`), but a gratuitous divergence that would inject a
+        // spurious token for any forbidden string that isn't otherwise a
+        // symbol.
+        WithForbidden(_tok, q) => walk_symbols(q, f),
         WithoutForbidden(q) => walk_symbols(q, f),
         SepBy { item, sep, .. } | SepBy1 { item, sep, .. } => {
             f(sep);
@@ -864,6 +898,7 @@ fn walk_symbols(p: &Prim, f: &mut impl FnMut(&str)) {
         | CheckNoWsBefore
         | EmitMissing
         | EmitEmptyIdent
-        | RawChar(_) => {}
+        | RawChar(_)
+        | UnknownTacticIdent => {}
     }
 }

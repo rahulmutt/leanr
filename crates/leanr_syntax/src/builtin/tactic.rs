@@ -19,21 +19,49 @@
 //! own enumeration of "the builtin tactic set" names only `unknown`/
 //! `nestedTactic`/`«match»`/`introMatch` — these two aren't in it.
 //!
-//! **`«unknown»`'s `errorAtSavedPos`, NOT modeled**: the oracle's
-//! `errorAtSavedPos "unknown tactic" true` genuinely injects a
-//! Parser-level message (confirmed: a fresh `lean` run over `by foo`
-//! reports `error: unknown tactic` — NOT just an elaboration diagnostic;
-//! task-9 report has the probe). This port still parses the SAME tree
-//! shape (an `ident` wrapped in `Lean.Parser.Tactic.unknown`,
-//! ALWAYS-succeeding — never pushed to `self.errors`, since that Vec
-//! models genuine parse failures, not this row's semantic-only
-//! diagnostic), but never fires the message itself — there is no
-//! `Prim` for "succeed, but leave a note". No COMMITTED fixture uses an
-//! unrecognized tactic name (that's the whole reason `ByTac.lean`
-//! bottoms every tactic body out in `«match» ... => _`/`introMatch ...
-//! => _` instead — the honest caveat the task brief itself calls out),
-//! so this divergence never surfaces in the golden gate; recorded here
-//! for anyone who later feeds this row a non-clean fixture.
+//! **`«unknown»`'s `errorAtSavedPos`, now modeled (Task 9 review finding
+//! 2 fix)**: the oracle's `errorAtSavedPos "unknown tactic" true`
+//! genuinely injects a Parser-level message (confirmed: a fresh `lean`
+//! run over `by foo` reports `error: unknown tactic` — NOT just an
+//! elaboration diagnostic; task-9 report has the probe). A prior
+//! version of this port parsed the SAME tree shape (an `ident` wrapped
+//! in `Lean.Parser.Tactic.unknown`) but ALWAYS succeeded silently —
+//! never pushing to `self.errors` — which meant `by foo` parsed clean
+//! with zero diagnostics: the tactic category accepted any identifier
+//! as a valid tactic, defeating the one row the M3a builtin-surface
+//! spec assigns to prove "parse errors are values" for tactics (spec
+//! ~L408/L504). The dedicated `Prim::UnknownTacticIdent` (see its own
+//! doc comment and `parse.rs`'s interpreter arm) now pushes a
+//! `ParseError` (code `E0301`, msg "unknown tactic") at the ident's
+//! start, alongside an `EmitMissing` node matching `errorAtSavedPos`'s
+//! `pushMissing` side effect — this production still always SUCCEEDS
+//! (never aborts the whole parse), matching this crate's "parse errors
+//! are values" architecture rather than the oracle's genuine parser-
+//! level failure; see the interpreter arm for the remaining documented
+//! divergences (position-of-report rounding, no backward position
+//! rewind). No COMMITTED golden fixture uses an unrecognized tactic
+//! name (that's the whole reason `ByTac.lean` bottoms every tactic body
+//! out in `«match» ... => _`/`introMatch ... => _` instead — the honest
+//! caveat the task brief itself calls out); coverage for THIS row lives
+//! in a Rust unit test instead (`unknown_tactic_reports_error_and_round_
+//! trips`, this file's test module). NOT because the oracle CLI itself
+//! rejects the source — checked directly (`lean --run
+//! tests/fixtures/syntax/dump_syntax.lean` over a scratch `by foo`
+//! file): it exits 0 and dumps a tree (`dump_syntax.lean` never
+//! inspects the parser's message log, only the `Syntax` value, so a
+//! recovered parse error doesn't stop it), and that dump's
+//! `Lean.Parser.Tactic.unknown` node is exactly `[ident "foo",
+//! <missing>]`, confirming this fix's tree shape byte-for-byte. The
+//! real blocker is `tests/oracle_golden.rs`'s own harness invariant:
+//! ANY fixture with a committed `.stx.jsonl` dump is asserted
+//! `result.errors.is_empty()` (that assertion is what backs "oracle-
+//! compared fixtures must parse clean" for the other 7 fixtures) — a
+//! committed dump for this row would trip that assertion by design,
+//! since this row's whole point is a NON-empty `errors`. Loosening
+//! that harness invariant to allow specific expected-error fixtures is
+//! out of scope for this fix wave (it would weaken the guarantee for
+//! every other committed fixture too); a plain Rust test asserting
+//! node kind + error + round-trip directly is the narrower fix.
 
 use super::term::{match_alts, match_discr, nd, synthetic_hole, term_hole};
 use crate::grammar::*;
@@ -128,14 +156,18 @@ fn tactic_match_alts(b: &mut SnapshotBuilder) -> Prim {
 
 pub fn register(b: &mut SnapshotBuilder) {
     // «unknown» := leading_parser withPosition (ident >>
-    // errorAtSavedPos "unknown tactic" true) — see module doc comment
-    // for the `errorAtSavedPos` divergence (not modeled: this always
-    // succeeds, never pushes to `self.errors`).
+    // errorAtSavedPos "unknown tactic" true) — Task 9 review finding 2
+    // fix: `Prim::UnknownTacticIdent` is the dedicated primitive that
+    // ports this row's whole body, INCLUDING the `errorAtSavedPos`
+    // diagnostic (a prior version stopped at a bare `WithPosition(Ident)`,
+    // silently accepting ANY identifier as a valid tactic with zero
+    // diagnostics — see module doc comment, updated alongside this fix,
+    // for what's now modeled vs. still deliberately divergent).
     b.leading2(
         "tactic",
         "Lean.Parser.Tactic.unknown",
         MAX_PREC,
-        Prim::WithPosition(Arc::new(Prim::Ident)),
+        Prim::WithPosition(Arc::new(Prim::UnknownTacticIdent)),
     );
     // nestedTactic := tacticSeqBracketed — a BARE alias (no
     // `leading_parser` of its own, so NO extra node: confirmed against
@@ -234,5 +266,50 @@ mod tests {
     fn smoke_show_by_tactic_prime() {
         let out = parse_ok("def t4 := fun (h : P) => show P by\n  match h with\n  | hp => _");
         assert!(out.contains("Lean.Parser.Term.byTactic'"), "{out}");
+    }
+
+    /// Task 9 review finding 2 regression: an unrecognized tactic name
+    /// must round-trip through `Lean.Parser.Tactic.unknown` (an `ident`
+    /// PLUS a `.missing` sibling — `errorAtSavedPos`'s `pushMissing`
+    /// side effect, see `Prim::UnknownTacticIdent`'s doc comment) AND
+    /// yield a diagnostic — the whole property this row exists to make
+    /// testable ("parse errors are values" — M3a builtin-surface spec
+    /// ~L408/L504). Not committed as a golden `.stx.jsonl` fixture: the
+    /// oracle CLI itself tolerates this source fine (checked directly,
+    /// see module doc comment), but `tests/oracle_golden.rs`'s harness
+    /// asserts `result.errors.is_empty()` for ANY fixture with a
+    /// committed dump, which this row's very point (a non-empty
+    /// `errors`) would trip — so this coverage lives here instead.
+    #[test]
+    fn unknown_tactic_reports_error_and_round_trips() {
+        let snap = builtin::snapshot();
+        let src = "prelude\n\ndef t1 := fun (h : A) => by foo";
+        let result = parse_module(src, &snap);
+
+        // Round-trip: byte-exact, same invariant every fixture (clean
+        // or not) is held to.
+        assert_eq!(result.tree.text(), src, "round-trip failed");
+
+        // Diagnostic: exactly one error, the stable E0301 (unexpected-
+        // token) family — no new code minted, per the review finding.
+        assert_eq!(
+            result.errors.len(),
+            1,
+            "expected exactly one diagnostic, got {:?}",
+            result.errors
+        );
+        assert_eq!(result.errors[0].code, "E0301");
+        assert_eq!(result.errors[0].msg, "unknown tactic");
+
+        // Tree shape: `Lean.Parser.Tactic.unknown{ ident "foo",
+        // <missing> }` — matches a fresh oracle dump byte-for-byte
+        // (`lean --run tests/fixtures/syntax/dump_syntax.lean` over
+        // `by foo`, probed while implementing this fix): its
+        // `Lean.Parser.Tactic.unknown` node is exactly
+        // `[{"i":"foo",...},{"k":"<missing>"}]`.
+        let out = crate::canon::canon_jsonl(&result.tree);
+        assert!(out.contains(r#""k":"Lean.Parser.Tactic.unknown""#), "{out}");
+        assert!(out.contains(r#""i":"foo""#), "{out}");
+        assert!(out.contains(r#""k":"<missing>""#), "{out}");
     }
 }
