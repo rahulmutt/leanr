@@ -4,18 +4,38 @@
 //! Failure carries no data — the state records the furthest failure
 //! position + expected set for diagnostics (Lean errorMsg merging).
 //!
-//! `Ps` borrows only a `TokenTable` + `KindInterner` here, NOT a
-//! `GrammarSnapshot` (that type is Task 6's — it doesn't exist yet).
-//! `Category`/`TrailingNode` and the position/precedence checks below
-//! are `unimplemented!` until Task 6 lands and rewires this state to
-//! hold `&GrammarSnapshot` in place of the bare table + interner.
+//! `Ps` holds `&GrammarSnapshot` (Task 6): the single explicit,
+//! hash-fingerprintable parser-state value (spec §Architecture — the
+//! M5 query-firewall seam). Categories/Pratt dispatch (`category`),
+//! position/indentation checks, and the precedence gates all read
+//! through it; nothing here is global.
 
 use std::sync::Arc;
 
-use crate::grammar::Prim;
+use crate::grammar::{Category, FirstTok, GrammarSnapshot, Prim};
 use crate::kind::{KindInterner, SyntaxKind, KIND_ATOM, KIND_GROUP, KIND_IDENT, KIND_NULL};
 use crate::lex::{next_token, Token, TokenKind, TokenTable};
 use crate::tree::{build_tree, Event, SyntaxTree};
+
+/// Depth cap on input-driven `Category` recursion (nested parens and
+/// the like — adversarial input can nest these arbitrarily, and
+/// `category` recurses through `Ps::run` for every level). Not an
+/// oracle port — Lean's own `maxRecDepth` (`CoreM.lean`, default 1000)
+/// governs elaborator/tactic recursion on a native stack with its own
+/// (`stacker`-grown) headroom; `leanr_syntax` cannot depend on
+/// `leanr_kernel`'s `RecGuard` (no workspace deps allowed here) or add
+/// `stacker` itself (no new external deps), so this is a minimal,
+/// from-scratch equivalent — a plain counter, no stack-growing trick,
+/// which means the cap must itself be low enough to never overflow the
+/// HOST stack, not just "low enough to be a sane grammar depth".
+/// Empirically bisected on this build (debug/unoptimized, the
+/// `cargo test`-default profile — see `mise run test`): a
+/// `libtest`-spawned test thread's default stack overflows somewhere
+/// between 300 and 320 levels of this crate's actual `category()`
+/// recursion (`adversarial_nesting_terminates_without_overflow`
+/// pins this); 128 leaves better than 2x headroom under that measured
+/// floor.
+const MAX_CATEGORY_DEPTH: u32 = 128;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParseError {
@@ -40,27 +60,27 @@ pub type PResult = Result<(), Fail>;
 pub(crate) struct Ps<'a> {
     src: &'a str,
     pub(crate) pos: usize,
-    table: &'a TokenTable,
-    kinds: &'a KindInterner,
+    snap: &'a GrammarSnapshot,
+    /// Cloned once at construction (`Arc` bump) so every lookup below
+    /// (`lit`/`field_idx`, tree-building) reads through a plain owned
+    /// field rather than re-deriving from `snap` each time.
+    kinds: Arc<KindInterner>,
     events: Vec<Event>,
     pub(crate) errors: Vec<ParseError>,
     furthest_pos: usize,
     furthest_expected: Vec<String>,
     /// Current right-binding power: `Category` sets it on recursion,
-    /// `Node`'s `prec` gate reads it. `Category` is Task 6's; until
-    /// then this stays 0 and the gate below is a no-op (`np < 0` never
-    /// holds for a `u32`).
+    /// `Node`'s `prec` gate reads it.
     prec: u32,
     /// Precedence of the last completed leading/trailing node.
     lhs_prec: u32,
     /// `withPosition` stack: saved (line, col) of a position marker.
-    /// Populated/read starting Task 6's `WithPosition`/`CheckColGt`.
-    #[allow(dead_code)]
     pos_stack: Vec<(u32, u32)>,
-    /// Byte offset of each line start (for column computation). Read
-    /// starting Task 6's column/line position checks.
-    #[allow(dead_code)]
+    /// Byte offset of each line start (for column computation).
     line_starts: Vec<usize>,
+    /// Input-driven `Category` recursion depth — see
+    /// `MAX_CATEGORY_DEPTH`.
+    cat_depth: u32,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -71,19 +91,34 @@ pub(crate) struct Savepoint {
     lhs_prec: u32,
 }
 
+/// A `longest_match` winner: which candidate won, the events/errors it
+/// produced (relative to the shared savepoint), where it left `pos`,
+/// and its resulting `lhs_prec`. A named struct (not a tuple) purely
+/// to keep `longest_match`'s signature under clippy's type-complexity
+/// threshold.
+#[cfg_attr(not(test), allow(dead_code))]
+struct MatchWinner {
+    idx: usize,
+    events: Vec<Event>,
+    errors: Vec<ParseError>,
+    end: usize,
+    lhs_prec: u32,
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 impl<'a> Ps<'a> {
-    pub(crate) fn new(src: &'a str, table: &'a TokenTable, kinds: &'a KindInterner) -> Self {
+    pub(crate) fn new(src: &'a str, snap: &'a GrammarSnapshot) -> Self {
         let mut line_starts = vec![0];
         for (i, b) in src.bytes().enumerate() {
             if b == b'\n' {
                 line_starts.push(i + 1);
             }
         }
+        let kinds = snap.kinds();
         Ps {
             src,
             pos: 0,
-            table,
+            snap,
             kinds,
             events: Vec::new(),
             errors: Vec::new(),
@@ -93,7 +128,16 @@ impl<'a> Ps<'a> {
             lhs_prec: 0,
             pos_stack: Vec::new(),
             line_starts,
+            cat_depth: 0,
         }
+    }
+
+    fn table(&self) -> &TokenTable {
+        &self.snap.tokens
+    }
+
+    fn snap_category(&self, name: &str) -> Option<&'a Category> {
+        self.snap.categories.get(name)
     }
 
     // ---- events ----------------------------------------------------
@@ -126,7 +170,7 @@ impl<'a> Ps<'a> {
     /// (without consuming) plus its start offset.
     pub(crate) fn peek_significant(&mut self) -> (Token, usize) {
         loop {
-            let (t, err) = next_token(self.src, self.pos, self.table);
+            let (t, err) = next_token(self.src, self.pos, self.table());
             let trivia = matches!(
                 t.kind,
                 TokenKind::Whitespace | TokenKind::LineComment | TokenKind::BlockComment
@@ -177,7 +221,7 @@ impl<'a> Ps<'a> {
 
     /// Consume the peeked significant token as leaf `kind`.
     fn bump(&mut self, t: Token, kind: SyntaxKind) {
-        if let (_, Some(e)) = next_token(self.src, self.pos, self.table) {
+        if let (_, Some(e)) = next_token(self.src, self.pos, self.table()) {
             self.errors.push(ParseError {
                 code: e.code,
                 span: (self.pos as u32, (self.pos + t.len as usize) as u32),
@@ -353,21 +397,90 @@ impl<'a> Ps<'a> {
                 self.events.push(Event::Missing);
                 Ok(())
             }
-            // Task 6 fills these:
-            Prim::Category { .. }
-            | Prim::WithPosition(_)
-            | Prim::CheckColGt
-            | Prim::CheckColGe
-            | Prim::CheckColEq
-            | Prim::CheckLineEq
-            | Prim::CheckPrec(_)
-            | Prim::CheckLhsPrec(_)
-            | Prim::CheckWsBefore
-            | Prim::CheckNoWsBefore
-            | Prim::Many1Indent(_)
-            | Prim::SepByIndentSemicolon(_)
-            | Prim::TrailingNode { .. } => {
-                unimplemented!("Task 6: {:?}", std::mem::discriminant(p))
+            Prim::CheckPrec(n) => {
+                // ORACLE-PORT `checkPrecFn` (Basic.lean): succeeds iff
+                // `c.prec <= prec` — i.e. the surrounding right-binding
+                // power must not exceed this checkpoint's threshold.
+                if self.prec <= *n {
+                    Ok(())
+                } else {
+                    let at = self.pos;
+                    Err(self.fail_expecting("<prec>", at))
+                }
+            }
+            Prim::CheckLhsPrec(n) => {
+                // ORACLE-PORT `checkLhsPrecFn`: succeeds iff
+                // `s.lhsPrec >= prec`.
+                if self.lhs_prec >= *n {
+                    Ok(())
+                } else {
+                    let at = self.pos;
+                    Err(self.fail_expecting("<lhs-prec>", at))
+                }
+            }
+            Prim::WithPosition(q) => {
+                // ORACLE-PORT `withPosition` (Basic.lean): save the
+                // CURRENT position (before any trivia this call's body
+                // might skip is consumed) as the position marker for
+                // nested `checkCol*`/`checkLineEq`, restoring the
+                // previous marker (by popping) on the way out —
+                // success or failure alike, since it's a pure scoping
+                // combinator with no bearing on `q`'s own result.
+                let (_, at) = self.peek_significant();
+                let lc = self.line_col(at);
+                self.pos_stack.push(lc);
+                let r = self.run(q);
+                self.pos_stack.pop();
+                r
+            }
+            Prim::CheckColGt => self.check_col(|cur, saved| cur.1 > saved.1),
+            Prim::CheckColGe => self.check_col(|cur, saved| cur.1 >= saved.1),
+            Prim::CheckColEq => self.check_col(|cur, saved| cur.1 == saved.1),
+            Prim::CheckLineEq => self.check_col(|cur, saved| cur.0 == saved.0),
+            Prim::CheckWsBefore => {
+                // Same trivia-consumption-on-failure hazard as
+                // `check_col` (see there): `had_ws_before_current`'s
+                // own peek can advance `self.pos` even when this check
+                // ultimately fails, so a failing branch must restore.
+                let sp = self.save();
+                if self.had_ws_before_current() {
+                    Ok(())
+                } else {
+                    let at = self.pos;
+                    self.restore(&sp);
+                    Err(self.fail_expecting("<whitespace>", at))
+                }
+            }
+            Prim::CheckNoWsBefore => {
+                let sp = self.save();
+                if self.had_ws_before_current() {
+                    let at = self.pos;
+                    self.restore(&sp);
+                    Err(self.fail_expecting("<no whitespace>", at))
+                } else {
+                    Ok(())
+                }
+            }
+            Prim::Many1Indent(q) => {
+                // ORACLE-PORT `Extra.lean` `many1Indent`: `withPosition
+                // $ many1 (checkColGe "irrelevant" >> p)`.
+                let expanded =
+                    Prim::WithPosition(Arc::new(Prim::Many1(Arc::new(Prim::Seq(vec![
+                        Prim::CheckColGe,
+                        (**q).clone(),
+                    ])))));
+                self.run(&expanded)
+            }
+            Prim::SepByIndentSemicolon(q) => self.sep_by_indent(q),
+            Prim::Category { name, rbp } => self.category(name, *rbp),
+            Prim::TrailingNode { .. } => {
+                // Only the category trailing loop may run these (it
+                // owns the lhs wrap: it splices in the already-parsed
+                // left-hand side's `Start`, retroactively, once this
+                // candidate wins the trailing longest-match). A
+                // `TrailingNode` reached any other way is a
+                // grammar-construction bug, not a parse failure.
+                unreachable!("TrailingNode outside a category trailing loop")
             }
         }
     }
@@ -530,17 +643,325 @@ impl<'a> Ps<'a> {
         Ok(())
     }
 
+    /// Sequence of `p` optionally separated by `;`, indentation-scoped
+    /// (Lean tactic/do-block sequencing: `by skip; skip` or one `skip`
+    /// per line, but not `by skip skip` on one line). ORACLE-PORT
+    /// `Term/Basic.lean` `sepByIndentSemicolon` = `sepByIndent p "; "
+    /// (allowTrailingSep := true)`, and `sepByIndent` itself
+    /// (`Extra.lean`): `withPosition $ sepBy (checkColGe >> p) sep
+    /// (psep <|> checkColEq >> checkLinebreakBefore >> pushNone)
+    /// allowTrailingSep`. Each item must be at or past the marker's
+    /// column; between items, EITHER an explicit `;` is consumed, OR —
+    /// with no token at all — the next item starts on a new line at
+    /// EXACTLY the marker's column (no semicolon needed when items are
+    /// already visually separated by indentation; required when two
+    /// share a line).
+    fn sep_by_indent(&mut self, item: &Prim) -> PResult {
+        let (_, at) = self.peek_significant();
+        let lc = self.line_col(at);
+        self.pos_stack.push(lc);
+        self.start(KIND_NULL);
+        let mut after_sep = false;
+        let result: PResult = 'outer: loop {
+            let sp = self.save();
+            if self.check_col(|cur, saved| cur.1 >= saved.1).is_err() {
+                self.restore(&sp);
+                break 'outer Ok(());
+            }
+            match self.run(item) {
+                Ok(()) => {}
+                Err(f) if self.consumed_since(&sp) => break 'outer Err(f),
+                Err(f) => {
+                    self.restore(&sp);
+                    if after_sep {
+                        // allowTrailingSep := true — a trailing `;`
+                        // (or an implicit newline-separator) with
+                        // nothing following is a clean end, not this
+                        // failure.
+                        break 'outer Ok(());
+                    }
+                    break 'outer Err(f);
+                }
+            }
+            let before_sep = self.pos;
+            let sep_sp = self.save();
+            match self.expect_atom(";", false) {
+                Ok(()) => {
+                    after_sep = true;
+                    continue 'outer;
+                }
+                Err(_) => self.restore(&sep_sp),
+            }
+            // Implicit separator: next token at exactly the marker's
+            // column AND a linebreak occurred since the last item.
+            let coleq_sp = self.save();
+            let coleq = self.check_col(|cur, saved| cur.1 == saved.1).is_ok();
+            self.restore(&coleq_sp);
+            if coleq {
+                let (_, next_at) = self.peek_significant();
+                if self.src[before_sep..next_at].contains('\n') {
+                    after_sep = true;
+                    continue 'outer;
+                }
+            }
+            break 'outer Ok(());
+        };
+        // Same "always finish" requirement as `many_impl`/`sep_by_impl`
+        // — a consuming failure mid-loop must still close this `null`
+        // node, or the dangling `Start` corrupts the event stream.
+        self.finish();
+        self.pos_stack.pop();
+        result
+    }
+
+    /// Character (codepoint) offset from `at`'s line start — ORACLE-
+    /// PORT `Lean/Data/Position.lean` `FileMap.toPosition`'s `toColumn`:
+    /// it walks the source one `Char` at a time (`i.next str`), i.e.
+    /// codepoints, not bytes or UTF-16 units — verified in the pin.
+    fn line_col(&self, at: usize) -> (u32, u32) {
+        let line = self
+            .line_starts
+            .partition_point(|&s| s <= at)
+            .saturating_sub(1);
+        let col = self.src[self.line_starts[line]..at].chars().count();
+        (line as u32, col as u32)
+    }
+
+    /// Shared body for `CheckColGt`/`CheckColGe`/`CheckColEq`/
+    /// `CheckLineEq`: compare the upcoming token's (line, col) against
+    /// the innermost `withPosition` marker. ORACLE-PORT `checkColGtFn`
+    /// et al. (Basic.lean): with no marker active (`c.savedPos? =
+    /// none`), the check is unconstrained — always succeeds.
+    fn check_col(&mut self, ok: impl Fn((u32, u32), (u32, u32)) -> bool) -> PResult {
+        // `peek_significant` skips trivia as a side effect (emitting
+        // trivia events, advancing `self.pos`) regardless of whether
+        // the column check that follows passes or fails. On failure
+        // that side effect MUST be undone: a real bug found while
+        // implementing this against the oracle (`checkColGtFn` et al.
+        // read `s.pos` directly, with no trivia-skipping of their own —
+        // they're pure zero-width checks) — without the restore here,
+        // an indentation check that stops a `many1Indent`-style loop
+        // (e.g. the next line dedents below the marker) would still
+        // have consumed the intervening newline/whitespace, making the
+        // enclosing `many_impl` see a "consuming failure" and abort
+        // with an error instead of cleanly ending the loop.
+        let sp = self.save();
+        let (_, at) = self.peek_significant();
+        let cur = self.line_col(at);
+        let Some(&saved) = self.pos_stack.last() else {
+            return Ok(());
+        };
+        if ok(cur, saved) {
+            Ok(())
+        } else {
+            self.restore(&sp);
+            Err(self.fail_expecting("<indentation>", at))
+        }
+    }
+
+    /// ORACLE-PORT `checkTailWs`/`checkTailNoWs` (Basic.lean): whether
+    /// the previously-parsed token has non-empty trailing trivia
+    /// before the next significant token. Our event stream has no
+    /// "trailing trivia" field on tokens (all trivia is its own flat
+    /// event) so this is reconstructed two ways, covering both call
+    /// patterns:
+    /// - a peek not yet performed here advances `self.pos` past any
+    ///   trivia when it scans it (`at > before`);
+    /// - a peek already performed by an earlier combinator (e.g. the
+    ///   `bump` that consumed the previous token) already did that
+    ///   scan, so `self.pos == at` on entry — the trailing event is
+    ///   then the tell.
+    fn had_ws_before_current(&mut self) -> bool {
+        let before = self.pos;
+        let (_, at) = self.peek_significant();
+        at > before
+            || matches!(
+                self.events.last(),
+                Some(Event::Token { kind, .. }) if crate::kind::is_trivia(*kind)
+            )
+    }
+
+    /// Try each of `parsers` from the same savepoint `sp` (already
+    /// captured by the caller so leading trivia/state is identical for
+    /// every candidate); return the farthest-advancing success.
+    /// First-registered wins on a tied end position. ORACLE-PORT
+    /// `longestMatchFn`/`longestMatchStep` (Basic.lean): ties in real
+    /// Lean collapse into a `choice` node; M3a's recorded,
+    /// spec-documented divergence is first-wins instead (§risks,
+    /// revisited in M3b).
+    ///
+    /// Restores to `sp` after every attempt (including the winner) —
+    /// the caller splices the winning slice back in itself, since a
+    /// trailing-loop caller additionally needs to insert a wrapping
+    /// `Start` before doing so (the Pratt wrap), which a generic
+    /// helper can't do on its own.
+    fn longest_match(&mut self, sp: &Savepoint, parsers: &[Prim]) -> Option<MatchWinner> {
+        let mut best: Option<MatchWinner> = None;
+        for (i, p) in parsers.iter().enumerate() {
+            self.restore(sp);
+            if self.run(p).is_ok() {
+                let better = match &best {
+                    Some(w) => self.pos > w.end,
+                    None => true,
+                };
+                if better {
+                    best = Some(MatchWinner {
+                        idx: i,
+                        events: self.events[sp.events..].to_vec(),
+                        errors: self.errors[sp.errors..].to_vec(),
+                        end: self.pos,
+                        lhs_prec: self.lhs_prec,
+                    });
+                }
+            }
+        }
+        self.restore(sp);
+        best
+    }
+
+    /// The Pratt driver: a category's leading parse (longest match over
+    /// the dispatched leading candidates) followed by the trailing
+    /// loop (repeated longest match over trailing candidates whose
+    /// precedence gates admit the current `prec`/`lhs_prec`, each
+    /// winner retroactively wrapping the already-parsed left-hand
+    /// side). ORACLE-PORT `prattParser`/`leadingParser`/`trailingLoop`
+    /// (Basic.lean).
+    fn category(&mut self, name: &str, rbp: u32) -> PResult {
+        let Some(cat) = self.snap_category(name) else {
+            let at = self.pos;
+            return Err(self.fail_expecting(&format!("<category {name}>"), at));
+        };
+        if self.cat_depth >= MAX_CATEGORY_DEPTH {
+            // Untrusted-input totality: `Category` is the ONE place
+            // input (nested parens, deeply chained trailing forms,
+            // …) can drive recursion depth — see `MAX_CATEGORY_DEPTH`.
+            let at = self.pos;
+            return Err(self.fail_expecting("<max recursion depth exceeded>", at));
+        }
+        self.cat_depth += 1;
+        let saved_prec = self.prec;
+        self.prec = rbp;
+        let r = (|| {
+            // ---- leading: longest match over dispatched candidates --
+            let lhs_events = self.events.len();
+            let (t, at) = self.peek_significant();
+            let text = &self.src[at..at + t.len as usize];
+            let idxs = dispatch(cat, text, t.kind, true);
+            let parsers: Vec<Prim> = idxs
+                .iter()
+                .map(|&i| cat.leading_parsers[i].clone())
+                .collect();
+            let sp = self.save();
+            match self.longest_match(&sp, &parsers) {
+                Some(w) => {
+                    self.events.extend(w.events);
+                    self.errors.extend(w.errors);
+                    self.pos = w.end;
+                    self.lhs_prec = w.lhs_prec;
+                }
+                None => {
+                    let at = self.pos;
+                    return Err(self.fail_expecting(&format!("<{name}>"), at));
+                }
+            }
+
+            // ---- trailing loop --------------------------------------
+            loop {
+                let (t, at) = self.peek_significant();
+                if t.kind == TokenKind::Eof {
+                    break;
+                }
+                let text = &self.src[at..at + t.len as usize];
+                let idxs = dispatch(cat, text, t.kind, false);
+                let qualifying: Vec<usize> = idxs
+                    .into_iter()
+                    .filter(|&idx| match &cat.trailing_parsers[idx] {
+                        Prim::TrailingNode { prec, lhs_prec, .. } => {
+                            *prec >= self.prec && self.lhs_prec >= *lhs_prec
+                        }
+                        _ => unreachable!("trailing entries are TrailingNode"),
+                    })
+                    .collect();
+                if qualifying.is_empty() {
+                    break;
+                }
+                let bodies: Vec<Prim> = qualifying
+                    .iter()
+                    .map(|&idx| match &cat.trailing_parsers[idx] {
+                        Prim::TrailingNode { body, .. } => (**body).clone(),
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                let sp = self.save();
+                match self.longest_match(&sp, &bodies) {
+                    Some(w) => {
+                        let idx = qualifying[w.idx];
+                        let Prim::TrailingNode { kind, prec, .. } = &cat.trailing_parsers[idx]
+                        else {
+                            unreachable!()
+                        };
+                        self.events.extend(w.events);
+                        self.errors.extend(w.errors);
+                        self.pos = w.end;
+                        // The Pratt wrap: the lhs subtree (and every
+                        // earlier wrap around it) already sits at
+                        // `lhs_events`; retroactively opening a `Start`
+                        // there makes the new node's first child be
+                        // that ENTIRE existing subtree, with the just-
+                        // parsed body's events (appended above) as the
+                        // rest of its children.
+                        self.events.insert(lhs_events, Event::Start(*kind));
+                        self.events.push(Event::Finish);
+                        self.lhs_prec = *prec;
+                    }
+                    None => break,
+                }
+            }
+            Ok(())
+        })();
+        self.prec = saved_prec;
+        self.cat_depth -= 1;
+        r
+    }
+
     // ---- output -------------------------------------------------------
-    /// Fold the event stream into a lossless tree. `kinds` is normally
-    /// the snapshot's own `Arc<KindInterner>` (Task 6) — the caller
-    /// supplies it so `Ps` itself never needs to own one.
-    pub(crate) fn finish_into_tree(
-        self,
-        kinds: Arc<KindInterner>,
-    ) -> (SyntaxTree, Vec<ParseError>) {
-        let tree = build_tree(self.src, &self.events, kinds);
+    /// Fold the event stream into a lossless tree, using the
+    /// snapshot's own `Arc<KindInterner>` (cloned once at `Ps::new`).
+    pub(crate) fn finish_into_tree(self) -> (SyntaxTree, Vec<ParseError>) {
+        let tree = build_tree(self.src, &self.events, self.kinds.clone());
         (tree, self.errors)
     }
+}
+
+/// Collect the `leading`/`trailing` candidate indices (registration
+/// order) whose `FirstTok` matches the upcoming token — `FirstTok::Any`
+/// entries are unindexed and always tried, alongside whichever
+/// specific-token entries matched (ORACLE-PORT `PrattParsingTables`:
+/// the indexed table lookup plus the always-tried `leadingParsers`/
+/// `trailingParsers` list, collapsed here into one paired vector — see
+/// `Category`'s doc comment).
+fn dispatch(cat: &Category, text: &str, kind: TokenKind, leading: bool) -> Vec<usize> {
+    let table = if leading { &cat.leading } else { &cat.trailing };
+    table
+        .iter()
+        .filter_map(|(f, idx)| {
+            let matches = match f {
+                FirstTok::Any => true,
+                // A token-table symbol lexes as `Atom` (even when
+                // ident-shaped, e.g. `do`/`then` — ORACLE-PORT
+                // `next_token`'s munch-competition rule in lex.rs); a
+                // plain `Ident` token never satisfies a `Sym` entry.
+                FirstTok::Sym(s) => kind == TokenKind::Atom && s == text,
+                FirstTok::Ident => kind == TokenKind::Ident,
+                FirstTok::Num => kind == TokenKind::Num,
+                FirstTok::Scientific => kind == TokenKind::Scientific,
+                FirstTok::Str => kind == TokenKind::Str,
+                FirstTok::Char => kind == TokenKind::Char,
+                FirstTok::NameLit => kind == TokenKind::NameLit,
+            };
+            matches.then_some(*idx)
+        })
+        .collect()
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -555,26 +976,23 @@ fn trivia_kind(k: TokenKind) -> SyntaxKind {
 
 #[cfg(test)]
 impl<'a> Ps<'a> {
-    /// Test-only constructor: takes ownership of the token table
+    /// Test-only constructor: pre-interns the literal-leaf kind names
+    /// `lit`/`field_idx` look up by name, wraps `table`/`kinds` (as
+    /// they stand at this call) into a category-less `GrammarSnapshot`
     /// (leaked for the `'a` borrow `Ps` needs — fine, this only runs in
-    /// tests) and pre-interns the literal-leaf kind names `lit`/
-    /// `field_idx` look up by name, which real code will get for free
-    /// from Task 6's `SnapshotBuilder` (not built yet).
-    pub(crate) fn new_for_test(
-        src: &'a str,
-        table: TokenTable,
-        kinds: &'a mut KindInterner,
-    ) -> Self {
+    /// tests), matching what real code gets for free from
+    /// `SnapshotBuilder`.
+    pub(crate) fn new_for_test(src: &'a str, table: TokenTable, kinds: &mut KindInterner) -> Self {
         for name in ["num", "scientific", "str", "char", "name", "fieldIdx"] {
             kinds.intern(name);
         }
-        let table: &'a TokenTable = Box::leak(Box::new(table));
-        Ps::new(src, table, kinds)
+        let snap = crate::grammar::GrammarSnapshot::for_test(table, kinds.clone());
+        let snap: &'a crate::grammar::GrammarSnapshot = Box::leak(Box::new(snap));
+        Ps::new(src, snap)
     }
 
     pub(crate) fn finish_into_tree_for_test(self) -> (SyntaxTree, Vec<ParseError>) {
-        let kinds = Arc::new(self.kinds.clone());
-        self.finish_into_tree(kinds)
+        self.finish_into_tree()
     }
 
     pub(crate) fn furthest_for_test(&self) -> (usize, Vec<String>) {
@@ -613,36 +1031,66 @@ mod tests {
         (sexpr(&tree), errors.len())
     }
 
-    fn sexpr(tree: &crate::tree::SyntaxTree) -> String {
-        fn go(n: &crate::tree::SyntaxNode, k: &KindInterner, out: &mut String) {
-            out.push('(');
-            out.push_str(k.name(n.kind()));
-            for el in n.children_with_tokens() {
-                match el {
-                    rowan::NodeOrToken::Node(c) => {
-                        out.push(' ');
-                        go(&c, k, out);
+    /// Hoisted so Task 6's `parse_cat` can sexpr a single sub-node
+    /// (the `Category` call's result) rather than the whole tree.
+    fn sexpr_node(n: &crate::tree::SyntaxNode, k: &KindInterner, out: &mut String) {
+        out.push('(');
+        out.push_str(k.name(n.kind()));
+        for el in n.children_with_tokens() {
+            match el {
+                rowan::NodeOrToken::Node(c) => {
+                    out.push(' ');
+                    sexpr_node(&c, k, out);
+                }
+                rowan::NodeOrToken::Token(t) => {
+                    use crate::kind::*;
+                    if is_trivia(t.kind()) {
+                        continue;
                     }
-                    rowan::NodeOrToken::Token(t) => {
-                        use crate::kind::*;
-                        if is_trivia(t.kind()) {
-                            continue;
-                        }
-                        out.push(' ');
-                        if t.kind() == KIND_IDENT {
-                            out.push_str(t.text());
-                        } else {
-                            out.push('\'');
-                            out.push_str(t.text());
-                            out.push('\'');
-                        }
+                    out.push(' ');
+                    if t.kind() == KIND_IDENT {
+                        out.push_str(t.text());
+                    } else {
+                        out.push('\'');
+                        out.push_str(t.text());
+                        out.push('\'');
                     }
                 }
             }
-            out.push(')');
         }
+        out.push(')');
+    }
+
+    fn sexpr(tree: &crate::tree::SyntaxTree) -> String {
         let mut out = String::new();
-        go(&tree.root(), &tree.kinds, &mut out);
+        sexpr_node(&tree.root(), &tree.kinds, &mut out);
+        out
+    }
+
+    /// Task 6: parse `src` by running `Prim::Category { rbp: 0 }` for
+    /// the snapshot's (single, in these tests) category, wrapped in a
+    /// scaffold `null` root so `build_tree`'s single-root contract
+    /// holds; sexpr just the category's own resulting node.
+    fn parse_cat(snap: &GrammarSnapshot, src: &str) -> String {
+        let name = snap
+            .categories
+            .keys()
+            .next()
+            .expect("test snapshot registers exactly one category")
+            .clone();
+        let mut ps = Ps::new(src, snap);
+        ps.start(KIND_NULL);
+        if ps.run(&Prim::Category { name, rbp: 0 }).is_err() {
+            ps.push_furthest_error();
+        }
+        ps.finish();
+        let (tree, _errors) = ps.finish_into_tree();
+        let root = tree.root();
+        let child = root
+            .first_child()
+            .expect("category call produced exactly one child node");
+        let mut out = String::new();
+        sexpr_node(&child, &tree.kinds, &mut out);
         out
     }
 
@@ -772,5 +1220,180 @@ mod tests {
             prec: None,
             body: Arc::new(body),
         }
+    }
+
+    // ---- Task 6: categories, Pratt precedence, position/prec, ---------
+    // ---- GrammarSnapshot fingerprint. ----------------------------------
+
+    /// A miniature Pratt category: atoms `a`; prefix `- e` (prec 75);
+    /// left-assoc `e + e` (prec 65); right-assoc `e ^ e` (prec 75).
+    fn arith_snapshot() -> crate::grammar::GrammarSnapshot {
+        let mut b = SnapshotBuilder::new();
+        b.category("term");
+        b.leading2("term", "lit", MAX_PREC, Prim::Ident);
+        b.leading2("term", "neg", 75, seq([sym("-"), cat("term", 75)]));
+        b.trailing2("term", "add", 65, 65, seq([sym("+"), cat("term", 66)]));
+        b.trailing2("term", "pow", 75, 76, seq([sym("^"), cat("term", 75)]));
+        b.finish()
+    }
+
+    #[test]
+    fn pratt_precedence_and_associativity() {
+        let snap = arith_snapshot();
+        // Idents parse via the "lit" leading node, so leaves print as
+        // (lit x). a + b + c → left assoc (rhs at 66):
+        assert_eq!(
+            parse_cat(&snap, "a + b + c"),
+            "(add (add (lit a) '+' (lit b)) '+' (lit c))"
+        );
+        // a ^ b ^ c → right assoc (rhs at 75):
+        assert_eq!(
+            parse_cat(&snap, "a ^ b ^ c"),
+            "(pow (lit a) '^' (pow (lit b) '^' (lit c)))"
+        );
+        // - a + b → prefix binds tighter:
+        assert_eq!(
+            parse_cat(&snap, "- a + b"),
+            "(add (neg '-' (lit a)) '+' (lit b))"
+        );
+        // a + - b → the rhs of + parses the prefix:
+        assert_eq!(
+            parse_cat(&snap, "a + - b"),
+            "(add (lit a) '+' (neg '-' (lit b)))"
+        );
+    }
+
+    #[test]
+    fn longest_match_picks_the_farthest_leading_parse() {
+        let mut b = SnapshotBuilder::new();
+        b.category("c");
+        b.leading2("c", "short", MAX_PREC, sym("x"));
+        b.leading2("c", "long", MAX_PREC, seq([sym("x"), sym("!")]));
+        let snap = b.finish();
+        assert_eq!(parse_cat(&snap, "x !"), "(long 'x' '!')");
+        assert_eq!(parse_cat(&snap, "x"), "(short 'x')");
+    }
+
+    #[test]
+    fn with_position_col_gt() {
+        let mut b = SnapshotBuilder::new();
+        b.category("c");
+        // "block" = 'do' then many1 idents, each on a column > do's.
+        b.leading2(
+            "c",
+            "block",
+            MAX_PREC,
+            Prim::WithPosition(Arc::new(seq([
+                sym("do"),
+                many1(seq([Prim::CheckColGt, Prim::Ident])),
+            ]))),
+        );
+        let snap = b.finish();
+        assert_eq!(parse_cat(&snap, "do a\n   b"), "(block 'do' (null a b))");
+        // `b` at column 0 is OUTSIDE the block: many1 stops after `a`.
+        assert_eq!(parse_cat(&snap, "do a\nb"), "(block 'do' (null a))");
+    }
+
+    #[test]
+    fn snapshot_fingerprint_is_stable_and_grammar_sensitive() {
+        let s1 = arith_snapshot();
+        let s2 = arith_snapshot();
+        assert_eq!(s1.fingerprint(), s2.fingerprint());
+        let mut b = SnapshotBuilder::new();
+        b.category("term");
+        b.leading2("term", "lit", MAX_PREC, Prim::Ident);
+        let s3 = b.finish();
+        assert_ne!(s1.fingerprint(), s3.fingerprint());
+    }
+
+    #[test]
+    fn category_leading_match_preserves_errors_from_the_winning_candidate() {
+        // Regression test for a real bug found while implementing this
+        // task: `longest_match`'s per-candidate savepoint restore
+        // truncates `self.errors` before EVERY attempt (needed so a
+        // losing candidate's diagnostics don't leak) — but the WINNING
+        // candidate can itself have pushed legitimate errors (e.g. an
+        // embedded lexer error) that must survive that final restore.
+        // An unterminated raw string still lexes to a `Str` token (with
+        // an attached `LexError`) and successfully completes the
+        // `StrLit` leaf parse, so this exercises exactly that path.
+        let mut b = SnapshotBuilder::new();
+        b.category("c");
+        b.leading2("c", "s", MAX_PREC, Prim::StrLit);
+        let snap = b.finish();
+        let src = "r\"unterminated";
+        let mut ps = Ps::new(src, &snap);
+        ps.start(KIND_NULL);
+        let r = ps.run(&Prim::Category {
+            name: "c".to_string(),
+            rbp: 0,
+        });
+        assert!(r.is_ok(), "the leaf parse itself should succeed: {r:?}");
+        assert_eq!(
+            ps.errors.len(),
+            1,
+            "the embedded unterminated-raw-string lex error must survive \
+             the leading longest-match splice, not be discarded"
+        );
+        assert_eq!(ps.errors[0].code, "E0302");
+    }
+
+    #[test]
+    fn sep_by_indent_semicolon_same_column_no_semicolon_needed() {
+        // ORACLE-PORT `Term/Basic.lean` `sepByIndentSemicolon`: items on
+        // their own line at the marker's column don't need `;`;
+        // two on the SAME line do.
+        let mut b = SnapshotBuilder::new();
+        b.category("c");
+        b.leading2(
+            "c",
+            "seq",
+            MAX_PREC,
+            Prim::WithPosition(Arc::new(Prim::SepByIndentSemicolon(Arc::new(Prim::Ident)))),
+        );
+        let snap = b.finish();
+        assert_eq!(parse_cat(&snap, "a\nb\nc"), "(seq (null a b c))");
+        assert_eq!(parse_cat(&snap, "a; b; c"), "(seq (null a ';' b ';' c))");
+        assert_eq!(parse_cat(&snap, "a; b;"), "(seq (null a ';' b ';'))");
+    }
+
+    #[test]
+    fn adversarial_nesting_terminates_without_overflow() {
+        // Untrusted-input totality: `Category` recursion is the ONE
+        // place input can drive parser recursion depth (nested parens
+        // here). Well past `MAX_CATEGORY_DEPTH`, this must return an
+        // error — gracefully, never panicking or overflowing the
+        // stack (if it does, this test crashes the process rather
+        // than failing an assert, which is exactly the property being
+        // checked).
+        let mut b = SnapshotBuilder::new();
+        b.category("e");
+        b.leading2("e", "atom", MAX_PREC, Prim::Ident);
+        b.leading2(
+            "e",
+            "paren",
+            MAX_PREC,
+            seq([sym("("), cat("e", 0), sym(")")]),
+        );
+        let snap = b.finish();
+        let name = snap.categories.keys().next().unwrap().clone();
+
+        let deep = "(".repeat(10_000) + "x" + &")".repeat(10_000);
+        let mut ps = Ps::new(&deep, &snap);
+        let r = ps.run(&Prim::Category {
+            name: name.clone(),
+            rbp: 0,
+        });
+        assert!(r.is_err(), "adversarial depth must fail, not hang/crash");
+
+        // A depth well within the cap still parses correctly, with the
+        // expected nesting.
+        let depth = 10usize;
+        let shallow = "(".repeat(depth) + "x" + &")".repeat(depth);
+        let mut expected = "(atom x)".to_string();
+        for _ in 0..depth {
+            expected = format!("(paren '(' {expected} ')')");
+        }
+        assert_eq!(parse_cat(&snap, &shallow), expected);
     }
 }
