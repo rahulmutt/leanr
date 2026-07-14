@@ -322,6 +322,46 @@ impl<'a> Ps<'a> {
         }
     }
 
+    /// Read-only preview of the next significant token's (kind, start
+    /// offset) — unlike `peek_significant`, this NEVER mutates
+    /// `self.pos`/`self.events`/`self.errors`: it scans forward from a
+    /// local cursor only. ORACLE-PORT `checkColGtFn`/`checkWsBeforeFn`
+    /// et al. (Basic.lean): every one of these check-combinators is a
+    /// true `epsilonInfo` (zero-width, arity-0) parser that reads
+    /// already-current position/trivia info (`s.pos`'s line/col, or the
+    /// PREVIOUS syntax node's already-attached trailing-trivia span) —
+    /// it never itself re-tokenizes forward. That works for the oracle
+    /// because real Lean's tokenizer eagerly attaches trailing trivia
+    /// to whatever token precedes (every consumed token "owns" the
+    /// whitespace/comments up to the next one). THIS port's trivia is
+    /// lazily discovered instead — only emitted when something
+    /// genuinely commits to peeking forward (an upcoming leading/
+    /// trailing dispatch, or a bump) — Task 5/6's deliberate,
+    /// documented architecture. A check-combinator that used the
+    /// COMMITTING `peek_significant` here would itself become a
+    /// (partial) tokenizer pass; if whatever runs immediately after it
+    /// then fails to consume anything further, that already-committed
+    /// trivia-skip is indistinguishable from real progress to an
+    /// enclosing `many`/`many1`'s `consumed_since` check — turning a
+    /// clean, non-consuming stop into a hard, unrecoverable error
+    /// (Task 8 wave 2 review fix: found via `Term.pipeProj`'s `many
+    /// argument` — see `check_col`/`had_ws_before_current`'s callers
+    /// and the regression test in this file's test module).
+    fn peek_significant_readonly(&self) -> (Token, usize) {
+        let mut pos = self.pos;
+        loop {
+            let (t, _err) = next_token(self.src, pos, self.table());
+            let trivia = matches!(
+                t.kind,
+                TokenKind::Whitespace | TokenKind::LineComment | TokenKind::BlockComment
+            );
+            if !trivia {
+                return (t, pos);
+            }
+            pos += t.len as usize;
+        }
+    }
+
     /// Peek the next significant token as a candidate for a single-token
     /// leaf match; returns the token, its start offset, and a savepoint
     /// captured BEFORE this peek scanned any trivia. On a mismatch, the
@@ -585,7 +625,16 @@ impl<'a> Ps<'a> {
                 // previous marker (by popping) on the way out —
                 // success or failure alike, since it's a pure scoping
                 // combinator with no bearing on `q`'s own result.
-                let (_, at) = self.peek_significant();
+                // Task 8 wave 2 review fix: this marker-establishing
+                // lookahead uses the READ-ONLY preview, not the
+                // committing `peek_significant` — establishing WHERE the
+                // marker sits doesn't need to consume anything, and
+                // committing here would leak as phantom "consumption"
+                // to an enclosing `many`/`many1` if `q` itself later
+                // fails without independently consuming further (same
+                // hazard as `check_col`/`had_ws_before_current`, see
+                // `peek_significant_readonly`'s doc comment).
+                let (_, at) = self.peek_significant_readonly();
                 let lc = self.line_col(at);
                 self.pos_stack.push(lc);
                 let r = self.run(q);
@@ -597,24 +646,20 @@ impl<'a> Ps<'a> {
             Prim::CheckColEq => self.check_col(|cur, saved| cur.1 == saved.1),
             Prim::CheckLineEq => self.check_col(|cur, saved| cur.0 == saved.0),
             Prim::CheckWsBefore => {
-                // Same trivia-consumption-on-failure hazard as
-                // `check_col` (see there): `had_ws_before_current`'s
-                // own peek can advance `self.pos` even when this check
-                // ultimately fails, so a failing branch must restore.
-                let sp = self.save();
+                // `had_ws_before_current` is read-only (Task 8 wave 2
+                // review fix — see its doc comment and
+                // `peek_significant_readonly`'s), so neither arm here
+                // needs its own save/restore any more: nothing to undo.
                 if self.had_ws_before_current() {
                     Ok(())
                 } else {
                     let at = self.pos;
-                    self.restore(&sp);
                     Err(self.fail_expecting("<whitespace>", at))
                 }
             }
             Prim::CheckNoWsBefore => {
-                let sp = self.save();
                 if self.had_ws_before_current() {
                     let at = self.pos;
-                    self.restore(&sp);
                     Err(self.fail_expecting("<no whitespace>", at))
                 } else {
                     Ok(())
@@ -890,22 +935,31 @@ impl<'a> Ps<'a> {
     /// `CheckLineEq`: compare the upcoming token's (line, col) against
     /// the innermost `withPosition` marker. ORACLE-PORT `checkColGtFn`
     /// et al. (Basic.lean): with no marker active (`c.savedPos? =
-    /// none`), the check is unconstrained — always succeeds.
+    /// none`), the check is unconstrained — always succeeds; these are
+    /// all true `epsilonInfo` (zero-width) parsers in the oracle, never
+    /// themselves tokenizing.
+    ///
+    /// Task 8 wave 2 review fix: uses the READ-ONLY preview
+    /// (`peek_significant_readonly`), not the committing
+    /// `peek_significant` a prior version of this fn used. The prior
+    /// version's own doc comment reasoned that only the FAILURE path
+    /// needed a restore (`checkColGtFn` reads `s.pos` directly with no
+    /// tokenizing of its own) — true, but incomplete: the SUCCESS path
+    /// left `self.pos` advanced past whatever trivia this fn's own peek
+    /// happened to skip, and if whatever ran immediately afterward then
+    /// failed WITHOUT independently consuming further, an enclosing
+    /// `many`/`many1`'s `consumed_since` check couldn't tell that
+    /// leaked trivia-skip apart from real progress — turning a clean,
+    /// non-consuming stop into a hard, unrecoverable error. Read-only
+    /// preview removes the hazard at the root (nothing to restore,
+    /// since nothing was ever mutated): see
+    /// `peek_significant_readonly`'s doc comment for the full mechanism
+    /// and how this port's lazy-trivia architecture differs from the
+    /// oracle's eager-trailing-trivia-attachment one. Found via
+    /// `Term.pipeProj`'s `many argument` (`term_app.rs`); regression
+    /// test in this file's test module.
     fn check_col(&mut self, ok: impl Fn((u32, u32), (u32, u32)) -> bool) -> PResult {
-        // `peek_significant` skips trivia as a side effect (emitting
-        // trivia events, advancing `self.pos`) regardless of whether
-        // the column check that follows passes or fails. On failure
-        // that side effect MUST be undone: a real bug found while
-        // implementing this against the oracle (`checkColGtFn` et al.
-        // read `s.pos` directly, with no trivia-skipping of their own —
-        // they're pure zero-width checks) — without the restore here,
-        // an indentation check that stops a `many1Indent`-style loop
-        // (e.g. the next line dedents below the marker) would still
-        // have consumed the intervening newline/whitespace, making the
-        // enclosing `many_impl` see a "consuming failure" and abort
-        // with an error instead of cleanly ending the loop.
-        let sp = self.save();
-        let (_, at) = self.peek_significant();
+        let (_, at) = self.peek_significant_readonly();
         let cur = self.line_col(at);
         let Some(&saved) = self.pos_stack.last() else {
             return Ok(());
@@ -913,7 +967,6 @@ impl<'a> Ps<'a> {
         if ok(cur, saved) {
             Ok(())
         } else {
-            self.restore(&sp);
             Err(self.fail_expecting("<indentation>", at))
         }
     }
@@ -924,15 +977,20 @@ impl<'a> Ps<'a> {
     /// "trailing trivia" field on tokens (all trivia is its own flat
     /// event) so this is reconstructed two ways, covering both call
     /// patterns:
-    /// - a peek not yet performed here advances `self.pos` past any
-    ///   trivia when it scans it (`at > before`);
+    /// - nothing has peeked ahead of the previous token yet, so a
+    ///   READ-ONLY preview (`peek_significant_readonly` — Task 8 wave 2
+    ///   review fix, see its doc comment) finds the next significant
+    ///   token strictly past `self.pos` (`at > before`), WITHOUT
+    ///   committing to that trivia-skip itself — whatever runs next
+    ///   (this call's own caller, on success) does the real, committing
+    ///   peek when it actually needs the position;
     /// - a peek already performed by an earlier combinator (e.g. the
-    ///   `bump` that consumed the previous token) already did that
-    ///   scan, so `self.pos == at` on entry — the trailing event is
-    ///   then the tell.
-    fn had_ws_before_current(&mut self) -> bool {
+    ///   `bump` that consumed the previous token, or an earlier REAL
+    ///   `peek_significant`) already did that scan, so `self.pos == at`
+    ///   on entry — the trailing event is then the tell.
+    fn had_ws_before_current(&self) -> bool {
         let before = self.pos;
-        let (_, at) = self.peek_significant();
+        let (_, at) = self.peek_significant_readonly();
         if at > before {
             return true;
         }
@@ -1100,7 +1158,18 @@ impl<'a> Ps<'a> {
 
             // ---- trailing loop --------------------------------------
             loop {
-                let (t, at) = self.peek_significant();
+                // Task 8 wave 2 review fix: this dispatch lookahead uses
+                // the READ-ONLY preview (`peek_significant_readonly`),
+                // not the committing `peek_significant` — it's purely a
+                // "what token comes next, does anything qualify"
+                // decision, not itself a real parse. See
+                // `peek_significant_readonly`'s doc comment for the full
+                // mechanism/oracle citation; regression test
+                // `trailing_many_finding_nothing_after_a_real_item_does_
+                // not_leak_as_phantom_consumption` (this file's test
+                // module) — reproducing the shape `Term.pipeProj`'s
+                // `many argument` (`builtin/term/term_app.rs`) exposed.
+                let (t, at) = self.peek_significant_readonly();
                 if t.kind == TokenKind::Eof {
                     break;
                 }
@@ -1749,6 +1818,63 @@ mod tests {
         // Genuine progress: the same production DOES wrap when its
         // body actually consumes something.
         assert_eq!(parse_cat(&snap, "x !"), "(wrap (lit x) (null '!'))");
+    }
+
+    #[test]
+    fn trailing_many_finding_nothing_after_a_real_item_does_not_leak_as_phantom_consumption() {
+        // Task 8 wave 2 review fix. A trailing production whose body
+        // ends in `many(seq([CheckWsBefore, CheckColGt, cat(..)]))` —
+        // the exact shape `Term.pipeProj`'s `many argument`
+        // (`builtin/term/term_app.rs`) and `Term.app`'s own `many1
+        // argument` both have — must NOT hard-fail just because the
+        // loop's NEXT attempt, after a real match, lands on a token
+        // that dispatches to nothing in this category.
+        //
+        // Before this fix, `CheckWsBefore`/`CheckColGt` (and the
+        // category trailing loop's own dispatch lookahead) used the
+        // COMMITTING `peek_significant`, which permanently skips
+        // whitespace/comments even when nothing ultimately qualifies.
+        // `many_impl`'s `consumed_since` check then couldn't tell that
+        // leaked trivia-skip apart from real progress: a clean,
+        // zero-net-progress stop looked like a hard, consuming failure,
+        // which `longest_match`'s enclosing restore then discarded
+        // WHOLESALE — losing the already-successfully-matched first
+        // item too, not just the failed second attempt.
+        //
+        // `Term.app`'s own tests didn't catch this because its
+        // argument's LAST step is always a full `termParser argPrec`
+        // CATEGORY RECURSION, whose own (separate) trailing loop
+        // happens to eat the following trivia while finding nothing
+        // further qualifies, before `many1` ever takes its next-
+        // iteration savepoint — accidentally masking the bug. This
+        // toy grammar reproduces it directly with a BARE trailing
+        // token match (no nested category recursion) as the item,
+        // matching `pipeProj`'s `fieldIdx <|> rawIdent` alternative.
+        let mut b = SnapshotBuilder::new();
+        b.category("c");
+        b.leading2("c", "lit", MAX_PREC, Prim::Ident);
+        b.trailing2(
+            "c",
+            "wrap",
+            0,
+            0,
+            seq([
+                sym("!"),
+                many(seq([Prim::CheckWsBefore, Prim::CheckColGt, cat("c", 0)])),
+            ]),
+        );
+        let snap = b.finish();
+
+        // "y" is matched as the loop's one item; the following "?"
+        // (across a newline) dispatches to nothing this category
+        // recognizes as either leading or trailing — the loop must
+        // stop cleanly, keeping "y" rather than discarding the whole
+        // `wrap` (which would leave `x` bare and `! y` as an
+        // unresolved leftover, or — pre-fix — a hard parse error).
+        assert_eq!(
+            parse_cat(&snap, "x ! y\n?"),
+            "(wrap (lit x) '!' (null (lit y)))"
+        );
     }
 
     #[test]
