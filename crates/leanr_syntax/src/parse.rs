@@ -151,38 +151,84 @@ impl<'a> Ps<'a> {
     }
 }
 
-/// Depth cap on input-driven `Category` recursion (nested parens and
-/// the like — adversarial input can nest these arbitrarily, and
-/// `category` recurses through `Ps::run` for every level). Not an
-/// oracle port — Lean's own `maxRecDepth` (`CoreM.lean`, default 1000)
-/// governs elaborator/tactic recursion on a native stack with its own
-/// (`stacker`-grown) headroom; `leanr_syntax` cannot depend on
-/// `leanr_kernel`'s `RecGuard` (no workspace deps allowed here) or add
-/// `stacker` itself (no new external deps), so this is a minimal,
-/// from-scratch equivalent — a plain counter, no stack-growing trick,
-/// which means the cap must itself be low enough to never overflow the
-/// HOST stack, not just "low enough to be a sane grammar depth".
+/// **Minimum-stack contract.** `leanr_syntax` parses untrusted input by
+/// native recursion (`Ps::run` → `category` → `Ps::run` …), so it needs
+/// a guaranteed amount of native stack to be able to promise "never
+/// overflow" (Global Constraint: never panic / never fail to terminate,
+/// on any input). This is that promise's precondition, and it is part of
+/// the public API: **every thread that calls `parse_module` must have at
+/// least `MIN_STACK_BYTES` of stack REMAINING at the call.**
 ///
-/// Empirically bisected on this build (debug/unoptimized, the
-/// `cargo test`-default profile — see `mise run test`; `libtest` runs
-/// each test on a spawned thread, whose default stack is considerably
-/// smaller than the main thread's). Task 11b review: a first pass of
-/// this cap (128) was bisected ONLY against a minimal toy grammar
-/// (`adversarial_nesting_terminates_without_overflow`'s `seq([sym("("),
-/// cat(..), sym(")")])`, floor between 300-320 real levels) — one
-/// `category()` level there is ~3 native `Ps::run` stack frames. Real
-/// builtin productions nest through many MORE frames per level of
-/// input-visible depth (`Node`/`WithPosition`/`Many1Indent`-expansion/
-/// dispatch-closure/etc. between one `Category` entry and the next) —
-/// `builtin/do_notation.rs`'s nested-`do`-block shape
-/// (`do{do{do{..}}}`, one `category("doElem", ..)` recursion per visual
-/// nesting level, but ~8-10x the toy grammar's native frames per level)
-/// is the heaviest real shape measured: its floor is between 96 and 98
-/// real levels (`deeply_nested_do_blocks_terminate_fast_and_parse_clean`,
-/// `tests/never_hang.rs` — Task 11b). The cap must hold for the
-/// heaviest reachable shape, not the lightest, so it's calibrated
-/// against THAT floor: 40 leaves better than 2x headroom under it.
-const MAX_CATEGORY_DEPTH: u32 = 40;
+/// - The Linux/macOS *main* thread default (8 MiB) is under this; a
+///   `main()` that parses should spawn a worker
+///   (`std::thread::Builder::new().stack_size(leanr_syntax::MIN_STACK_BYTES)`)
+///   — which is also exactly what real Lean does, see below.
+/// - `libtest` spawns each test on a 2 MiB thread, so tests that parse
+///   deeply nested input must do the same (`tests/never_hang.rs`'s
+///   `in_worker`); `mise run test` additionally exports `RUST_MIN_STACK`.
+///
+/// Sized against the measured worst case rather than a guess (Task 11b
+/// review, Critical 2 — the previous calibration was taken against
+/// `libtest`'s 2 MiB default and so let a *harness* constraint dictate a
+/// language limit). Method: nest the heaviest builtin shapes to depth D
+/// on a thread of exactly S bytes and bisect the largest D that does not
+/// overflow, then divide S by the `cat_depth` actually reached (not by
+/// the visible nesting depth — a single `do { if p then do { … } }` level
+/// costs ~3 `category()` calls). Worst measured cost per `cat_depth`
+/// level, at S = 8 MiB:
+///
+/// | shape (`builtin/`)                | debug   | release |
+/// |-----------------------------------|---------|---------|
+/// | `do { if p then do { … } }`       | 23.0 KiB| 2.9 KiB |
+/// | `do { … }` / `do { for … do { …}}`| 20.6 KiB| 2.7 KiB |
+/// | `fun x => …`                      | 14.8 KiB| 2.7 KiB |
+/// | `⟨…⟩`, `(…)`, `(… : T)`           | 11-13 KiB| 2.7 KiB|
+///
+/// So `MAX_CATEGORY_DEPTH` × 23.0 KiB = 5.6 MiB of the 16 MiB contract
+/// in the *unoptimized* build (the expensive one) — a **2.8x margin**,
+/// and ~21x in release. Re-bisect both numbers if a future grammar adds
+/// a heavier production than nested `do`/`if`.
+pub const MIN_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+/// Depth cap on input-driven `Category` recursion (nested parens and the
+/// like — adversarial input can nest these arbitrarily, and `category`
+/// recurses through `Ps::run` for every level). Together with
+/// `MIN_STACK_BYTES` this is the parser's stack-safety contract: native
+/// recursion only ever happens on a cache MISS (a hit costs no stack —
+/// see `category`), and every miss is gated here, so the native depth of
+/// a parse is bounded by this constant regardless of input.
+///
+/// **Not an oracle port** — and the pinned oracle is explicit about why
+/// we need one anyway. In `v4.32.0-rc1`, `src/lean/Lean/Parser/` contains
+/// NO recursion guard at all (no `maxRecDepth`, no `withIncRecDepth`, no
+/// stack check): Lean's parser recurses until the *thread stack* runs
+/// out, and then the process dies — measured on the pinned toolchain,
+/// parse-only (`tests/fixtures/syntax/dump_syntax.lean`): `def a :=
+/// ((…1…))` parses cleanly at 3,812 nested parens and at 3,952 prints
+/// "Stack overflow detected. Aborting." (SIGABRT). Lean survives that in
+/// practice by giving its worker threads a big, *explicitly sized* stack
+/// (`lean -s/--tstack=<KB>`), which is precisely the `MIN_STACK_BYTES`
+/// contract above. An abort is not an option for us (Global Constraint:
+/// never panic on untrusted input), so we keep a deterministic cap; it is
+/// this port's own device, not Lean's.
+///
+/// Chosen so that it cannot reject Lean that Lean itself accepts:
+/// - Lean's own *language-level* recursion budget is `maxRecDepth`,
+///   `defaultMaxRecDepth = 512` (`Init/Prelude.lean:4804`, enforced by
+///   `Lean/Util/RecDepth.lean` in the ELABORATOR, not the parser). A term
+///   nested past it is rejected by Lean with default options — measured:
+///   512 nested parens ⇒ "maximum recursion depth has been reached".
+/// - The deepest parse tree in ALL of pinned Mathlib (8,191 files, parsed
+///   with Lean's own parser + Mathlib's parser tables) has node depth
+///   **88** (`Mathlib/Tactic/GCongr/Core.lean`; mean per-file max 26).
+///   Node depth upper-bounds the `cat_depth` a file needs, so 256 clears
+///   the deepest real-world Lean command by ~3x.
+///
+/// The cap is deliberately a plain counter — no stack-pointer probing —
+/// so that acceptance is *deterministic*: the same input parses the same
+/// way in debug and release, which a "remaining stack headroom" guard
+/// could not promise.
+pub const MAX_CATEGORY_DEPTH: u32 = 256;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParseError {
@@ -293,6 +339,18 @@ pub(crate) struct Ps<'a> {
     /// `category`'s doc comment (the "Correctness" section) for why a
     /// plain snapshot-and-replay of the GLOBAL tally would be unsound.
     furthest_stack: Vec<Option<(usize, Vec<String>)>>,
+    /// How many times the `MAX_CATEGORY_DEPTH` arm has fired in this
+    /// parse — a monotone counter, never reset. `category` reads it on
+    /// entry and again on exit: if it moved, the depth cap fired
+    /// somewhere inside THAT call's dynamic extent, the call's result is
+    /// therefore a depth-cap artifact rather than a pure function of its
+    /// cache key, and the entry is NOT inserted (Task 11b review,
+    /// Critical 1 — see `category`'s doc comment, "cat_depth and the
+    /// cache"). O(1), no parallel stack needed: category calls nest, so
+    /// a cap hit inside a child is by construction inside every open
+    /// ancestor too, and each open call has its own `cap_hits`-on-entry
+    /// value in its own native frame.
+    cap_hits: u64,
 }
 
 /// Memoization key for `category()`. ORACLE-PORT `ParserCacheKey`
@@ -319,6 +377,13 @@ pub(crate) struct Ps<'a> {
 /// `Vec<Prim>`), not in anything with `Ps`'s own `'a` snapshot
 /// lifetime — cloning a handful of short strings per category call is
 /// cheap next to the exponential blowup this cache removes.
+///
+/// `depth_headroom` has no oracle counterpart (Lean's parser has no
+/// recursion budget at all — see `MAX_CATEGORY_DEPTH`): it is this
+/// port's own device for keeping `cat_depth`, which IS ambient state a
+/// result can depend on, out of the cache's blind spot. Task 11b review,
+/// Critical 1 — see `category`'s doc comment, "`cat_depth` and the
+/// cache".
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct CatCacheKey {
     pos: usize,
@@ -326,6 +391,13 @@ struct CatCacheKey {
     rbp: u32,
     forbidden: Option<String>,
     saved_pos: Option<(u32, u32)>,
+    /// `None` = this result is depth-INDEPENDENT (the `MAX_CATEGORY_DEPTH`
+    /// cap never fired anywhere inside the call that produced it), so it
+    /// is valid to replay at any `cat_depth`. `Some(h)` = the cap DID fire
+    /// inside, so the result is an artifact of having had exactly `h`
+    /// levels of budget left, and may only be replayed at that same
+    /// headroom.
+    depth_headroom: Option<u32>,
 }
 
 /// What a `category()` call replays on a cache hit. ORACLE-PORT
@@ -410,6 +482,7 @@ impl<'a> Ps<'a> {
             cat_depth: 0,
             cat_cache: HashMap::new(),
             furthest_stack: Vec::new(),
+            cap_hits: 0,
         }
     }
 
@@ -1604,31 +1677,88 @@ impl<'a> Ps<'a> {
     /// comment), safe to store and replay against whatever the ambient
     /// tally happens to be at replay time.
     ///
-    /// **Not** part of the key: `cat_depth` (the `MAX_CATEGORY_DEPTH`
-    /// recursion-budget counter) — checked AFTER the cache lookup
-    /// below, and a depth-exceeded failure is never inserted into the
-    /// cache, precisely so a shallower reachability of the same
-    /// `(pos, name, rbp, forbidden, saved_pos)` key later in the same
-    /// parse can never inherit a depth-cap artifact from a deeper one
-    /// (`cat_depth` is a Rust-stack-safety device, not a grammar
-    /// input — two calls with the same key MUST produce the same
-    /// result regardless of which Rust-call-stack depth reached them,
-    /// and a cache HIT costs no additional native stack at all, so the
-    /// depth cap is irrelevant to it either way).
+    /// **`cat_depth` and the cache** (Task 11b review, Critical 1).
+    /// `cat_depth` is ambient state — a Rust-stack-safety budget, not a
+    /// grammar input — and a result can genuinely depend on it: if
+    /// `MAX_CATEGORY_DEPTH` fires anywhere inside a call, that call
+    /// returns a DEGRADED result (a failure, a truncated event slice, or
+    /// a `"<max recursion depth exceeded>"` in its furthest-failure
+    /// summary). Not caching the *direct* cap failure does not make the
+    /// cache depth-blind-safe, because the capped call's ANCESTORS still
+    /// return and still get cached. Under a key that doesn't record the
+    /// depth they were computed at, such an entry can be replayed at a
+    /// SHALLOWER `cat_depth` — where a fresh parse had budget to spare
+    /// and would have succeeded — spuriously rejecting parseable input
+    /// (`a_depth_capped_subparse_never_poisons_a_shallower_reach_of_the_
+    /// same_key`, this file's test module, is exactly that shape: the
+    /// same key reached at two depths one level apart, the deeper reach
+    /// capped, the shallower one poisoned by it).
+    ///
+    /// So the key carries `depth_headroom`, and the invariant is:
+    /// **an entry is only ever replayed in a state where re-running the
+    /// body would compute it again.**
+    ///
+    /// - The call ran WITHOUT the cap firing inside it (`cap_hits`, the
+    ///   monotone counter the cap arm bumps, did not move while the call
+    ///   was open): its result is independent of the depth budget, so it
+    ///   is stored under `depth_headroom: None` and may be replayed at
+    ///   ANY `cat_depth`.
+    /// - The cap DID fire inside: the result is a function of the budget
+    ///   it had, so it is stored under `depth_headroom: Some(h)`, `h` =
+    ///   the headroom this call started with, and is only ever replayed
+    ///   at that same headroom — where it is, by determinism, exactly
+    ///   what a re-parse computes.
+    ///
+    /// Lookup therefore tries the depth-independent key first and the
+    /// current-headroom key second. Note what this buys over simply
+    /// refusing to cache depth-tainted entries (the other candidate fix):
+    /// past the cap, EVERY ancestor of the capped call is tainted, so
+    /// "don't cache tainted" would leave the whole 3-way
+    /// `paren`/`tuple`/`typeAscription` fanout un-memoized above the cap
+    /// and hand back the Θ(3^depth) DoS this task exists to kill (
+    /// measured: `parens_past_the_depth_cap_degrade_cleanly_not_hang` at
+    /// depth 256 does not finish in 30s that way). Keying on the headroom
+    /// keeps them memoized — sibling candidates at one nesting level all
+    /// sit at the same `cat_depth`, hence the same headroom, hence the
+    /// same key — while still never replaying a depth artifact into a
+    /// state that didn't earn it. The cache stays bounded: at most
+    /// (positions × distinct headrooms) entries, i.e. O(n · cap), so the
+    /// never-hang guarantee is polynomial-bounded, not exponential.
+    ///
+    /// One asymmetry is deliberate: a `None` (depth-independent) entry is
+    /// replayed even at a DEEPER `cat_depth` than it was computed at,
+    /// where a fresh parse might have capped. That can only ACCEPT more
+    /// input, never reject valid input, and it cannot threaten the stack
+    /// bound — a hit costs zero native stack, and native recursion only
+    /// ever happens on a miss, which is gated by the cap.
     fn category(&mut self, name: &str, rbp: u32) -> PResult {
         let Some(cat) = self.snap_category(name) else {
             let at = self.pos;
             return Err(self.fail_expecting(&format!("<category {name}>"), at));
         };
 
-        let key = CatCacheKey {
+        // Depth budget left for this call, i.e. the ambient state the cap
+        // exposes to a parse (see "`cat_depth` and the cache" above).
+        let headroom = MAX_CATEGORY_DEPTH.saturating_sub(self.cat_depth);
+        let mut key = CatCacheKey {
             pos: self.pos,
             name: name.to_string(),
             rbp,
             forbidden: self.forbidden().map(str::to_string),
             saved_pos: self.pos_stack.last().copied(),
+            // Depth-INDEPENDENT entries first: valid at any `cat_depth`,
+            // and the overwhelmingly common case (nothing in a normal
+            // parse ever comes near the cap).
+            depth_headroom: None,
         };
-        if let Some(entry) = self.cat_cache.get(&key).cloned() {
+        let mut hit = self.cat_cache.get(&key).cloned();
+        if hit.is_none() {
+            // …then an entry the cap DID shape, which only this same
+            // headroom may replay.
+            key.depth_headroom = Some(headroom);
+            hit = self.cat_cache.get(&key).cloned();
+        }
+        if let Some(entry) = hit {
             self.apply_furthest_summary(&entry.furthest);
             return match entry.outcome {
                 CatOutcome::Ok {
@@ -1652,11 +1782,18 @@ impl<'a> Ps<'a> {
             // input (nested parens, deeply chained trailing forms,
             // …) can drive recursion depth — see `MAX_CATEGORY_DEPTH`.
             // Deliberately checked AFTER the cache lookup (a hit costs
-            // no native stack) and deliberately NOT cached on failure
-            // here (see this fn's doc comment).
+            // no native stack). Bumping `cap_hits` marks every
+            // currently-open call as depth-dependent: this failure is an
+            // artifact of the ambient depth budget, so neither it nor
+            // any ancestor result computed from it may be cached as
+            // depth-INDEPENDENT (see this fn's doc comment, "`cat_depth`
+            // and the cache"). The direct failure itself is not cached
+            // at all — it is already O(1).
+            self.cap_hits += 1;
             let at = self.pos;
             return Err(self.fail_expecting("<max recursion depth exceeded>", at));
         }
+        let cap_hits_on_entry = self.cap_hits;
         self.cat_depth += 1;
         self.furthest_stack.push(None);
         let saved_prec = self.prec;
@@ -1850,10 +1987,19 @@ impl<'a> Ps<'a> {
             .furthest_stack
             .pop()
             .expect("pushed exactly once above, popped exactly once here");
+        // Task 11b review (Critical 1): if `cap_hits` moved while this
+        // call was open, the depth cap fired inside its dynamic extent,
+        // so `r` (and/or the event slice, and/or the furthest summary)
+        // reflects the depth budget it happened to have — not just the
+        // key. Record that budget in the key, so this entry can only ever
+        // be replayed at the same headroom (where re-running the body
+        // recomputes it exactly); otherwise the entry is depth-blind and
+        // replayable anywhere. See this fn's doc comment.
+        key.depth_headroom = (self.cap_hits != cap_hits_on_entry).then_some(headroom);
         // Task 11b: cache both outcomes (see this fn's doc comment for
-        // why a failure — other than the uncached depth-cap case above
-        // — is just as safe to memoize as a success: it has no
-        // events/errors of its own, only the furthest-failure summary).
+        // why a failure is just as safe to memoize as a success: it has
+        // no events/errors of its own, only the furthest-failure
+        // summary).
         let outcome = match &r {
             Ok(()) => CatOutcome::Ok {
                 events: self.events[entry_sp.events..].to_vec(),
@@ -2046,6 +2192,38 @@ mod tests {
         ps.finish();
         let (tree, errors) = ps.finish_into_tree_for_test();
         (sexpr(&tree), errors.len())
+    }
+
+    /// Run a deep/adversarial parse the way this crate's stack contract
+    /// says every caller must (`MIN_STACK_BYTES` — `libtest`'s own test
+    /// threads get 2 MiB, far under it), AND bound it in wall-clock time
+    /// (`libtest` has no per-test timeout, so an `elapsed < BUDGET`
+    /// assertion placed AFTER the call cannot turn a hang into a failure
+    /// — it never runs). Task 11b review, Critical 2 + Important 3; the
+    /// integration-test twin is `tests/never_hang.rs`'s `in_worker`.
+    fn in_worker<T: Send + 'static>(label: &str, f: impl FnOnce() -> T + Send + 'static) -> T {
+        const BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let h = std::thread::Builder::new()
+            .stack_size(MIN_STACK_BYTES)
+            .spawn(move || {
+                let _ = tx.send(f());
+            })
+            .expect("spawn worker");
+        match rx.recv_timeout(BUDGET) {
+            Ok(v) => {
+                h.join().expect("worker thread panicked");
+                v
+            }
+            // The closure panicked (assert failed / parser panicked):
+            // the sender was dropped without ever sending.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                std::panic::resume_unwind(h.join().expect_err("disconnected without a panic"))
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("{label}: still running after {BUDGET:?} — the parser hung")
+            }
+        }
     }
 
     /// Hoisted so Task 6's `parse_cat` can sexpr a single sub-node
@@ -2615,36 +2793,113 @@ mod tests {
         // error — gracefully, never panicking or overflowing the
         // stack (if it does, this test crashes the process rather
         // than failing an assert, which is exactly the property being
-        // checked).
-        let mut b = SnapshotBuilder::new();
-        b.category("e", LeadingIdentBehavior::Default);
-        b.leading2("e", "atom", MAX_PREC, Prim::Ident);
-        b.leading2(
-            "e",
-            "paren",
-            MAX_PREC,
-            seq([sym("("), cat("e", 0), sym(")")]),
-        );
-        let snap = b.finish();
-        let name = snap.categories.keys().next().unwrap().clone();
+        // checked — hence `in_worker`, which runs it on the stack the
+        // crate's contract actually promises).
+        in_worker("adversarial nesting", || {
+            let mut b = SnapshotBuilder::new();
+            b.category("e", LeadingIdentBehavior::Default);
+            b.leading2("e", "atom", MAX_PREC, Prim::Ident);
+            b.leading2(
+                "e",
+                "paren",
+                MAX_PREC,
+                seq([sym("("), cat("e", 0), sym(")")]),
+            );
+            let snap = b.finish();
+            let name = snap.categories.keys().next().unwrap().clone();
 
-        let deep = "(".repeat(10_000) + "x" + &")".repeat(10_000);
-        let mut ps = Ps::new(&deep, &snap);
-        let r = ps.run(&Prim::Category {
-            name: name.clone(),
-            rbp: 0,
+            let deep = "(".repeat(10_000) + "x" + &")".repeat(10_000);
+            let mut ps = Ps::new(&deep, &snap);
+            let r = ps.run(&Prim::Category {
+                name: name.clone(),
+                rbp: 0,
+            });
+            assert!(r.is_err(), "adversarial depth must fail, not hang/crash");
+
+            // A depth well within the cap still parses correctly, with
+            // the expected nesting.
+            let depth = 10usize;
+            let shallow = "(".repeat(depth) + "x" + &")".repeat(depth);
+            let mut expected = "(atom x)".to_string();
+            for _ in 0..depth {
+                expected = format!("(paren '(' {expected} ')')");
+            }
+            assert_eq!(parse_cat(&snap, &shallow), expected);
         });
-        assert!(r.is_err(), "adversarial depth must fail, not hang/crash");
+    }
 
-        // A depth well within the cap still parses correctly, with the
-        // expected nesting.
-        let depth = 10usize;
-        let shallow = "(".repeat(depth) + "x" + &")".repeat(depth);
-        let mut expected = "(atom x)".to_string();
-        for _ in 0..depth {
-            expected = format!("(paren '(' {expected} ')')");
-        }
-        assert_eq!(parse_cat(&snap, &shallow), expected);
+    /// Task 11b review, CRITICAL 1: a `category()` result computed under
+    /// a subtree that hit `MAX_CATEGORY_DEPTH` must never be cached —
+    /// otherwise a later, SHALLOWER reach of the same cache key replays
+    /// a depth-cap artifact and rejects input a fresh parse accepts.
+    ///
+    /// The shape below reaches the identical key `(pos of "(y)", "e", 0)`
+    /// at two different `cat_depth`s, one level apart:
+    ///
+    /// - `unary` (`"-" e`) tried FIRST, twice: `- ‖ - ‖ (y)` — reaches it
+    ///   at depth d+2, leaving only enough budget for the `paren` inside
+    ///   to fire the cap. So the call at that key FAILS.
+    /// - `double` (`"-" "-" e`) tried second: `- - ‖ (y)` — reaches the
+    ///   SAME key at depth d+1, where `paren` still has budget and `(y)`
+    ///   parses fine.
+    ///
+    /// With `k = MAX_CATEGORY_DEPTH - 3` leading parens to burn the
+    /// budget down to exactly that boundary, the pre-fix cache poisons
+    /// `double`'s reach with `unary`'s depth-capped `Err` and the whole
+    /// (perfectly parseable) input is rejected. Post-fix the tainted
+    /// entry is never inserted, `double` re-parses at its own shallower
+    /// depth, and the parse succeeds.
+    #[test]
+    fn a_depth_capped_subparse_never_poisons_a_shallower_reach_of_the_same_key() {
+        in_worker("depth-cap taint", || {
+            let mut b = SnapshotBuilder::new();
+            b.category("e", LeadingIdentBehavior::Default);
+            b.leading2("e", "atom", MAX_PREC, Prim::Ident);
+            b.leading2(
+                "e",
+                "paren",
+                MAX_PREC,
+                seq([sym("("), cat("e", 0), sym(")")]),
+            );
+            // Registration order matters: `longest_match` attempts
+            // candidates in order, so the DEEP path (`unary`, which
+            // recurses once more before reaching the shared key) runs
+            // first and is the one that would populate the cache with a
+            // depth-capped result.
+            b.leading2("e", "unary", MAX_PREC, seq([sym("-"), cat("e", 0)]));
+            b.leading2(
+                "e",
+                "double",
+                MAX_PREC,
+                seq([sym("-"), sym("-"), cat("e", 0)]),
+            );
+            let snap = b.finish();
+
+            let k = MAX_CATEGORY_DEPTH as usize - 3;
+            let src = "(".repeat(k) + "- - (y)" + &")".repeat(k);
+
+            // (1) The whole (perfectly parseable) input must parse at
+            //     all. Pre-fix this is an `Err`: `double`'s reach of the
+            //     shared key hits `unary`'s cached, depth-capped failure.
+            let mut ps = Ps::new(&src, &snap);
+            let r = ps.run(&Prim::Category {
+                name: "e".to_string(),
+                rbp: 0,
+            });
+            assert!(
+                r.is_ok(),
+                "valid input REJECTED: a depth-capped sibling attempt \
+                 poisoned the cache entry for a shallower reach of the \
+                 same (pos, category, rbp) key"
+            );
+
+            // (2) …and with exactly the shape a fresh parse produces.
+            let mut expected = format!("(double '-' '-' {})", "(paren '(' (atom y) ')')");
+            for _ in 0..k {
+                expected = format!("(paren '(' {expected} ')')");
+            }
+            assert_eq!(parse_cat(&snap, &src), expected);
+        });
     }
 
     /// Task 11b regression: the general shape that exploded
@@ -2657,41 +2912,39 @@ mod tests {
     /// 6 candidates nested to depth 20 is 6^20 ≈ 3.7e15 unmemoized
     /// attempts, i.e. this test would never finish without the cache;
     /// with it, every sibling past the first at a given nesting level
-    /// is an O(1) hit, so the whole parse is Θ(N·depth). A generous
-    /// wall-clock budget (not a tight perf pin — just enough to turn a
-    /// regression into a fast, loud test failure instead of a hang)
-    /// plus an exact expected-shape assertion (not just "didn't hang").
+    /// is an O(1) hit, so the whole parse is Θ(N·depth). The un-memoized
+    /// cost is *infinite* for practical purposes, so the bound can't be
+    /// asserted after the fact (`elapsed < BUDGET` past a call that never
+    /// returns never runs — Task 11b review, Important 3): `in_worker`
+    /// runs the parse on its own thread and gives up on it, failing the
+    /// test, if it is still going after the budget. Plus an exact
+    /// expected-shape assertion (not just "didn't hang").
     #[test]
     fn pathological_alternation_fanout_is_bounded_by_the_category_cache() {
         const N: usize = 6;
-        let mut b = SnapshotBuilder::new();
-        b.category("e", LeadingIdentBehavior::Default);
-        b.leading2("e", "atom", MAX_PREC, Prim::Ident);
-        for i in 0..N {
-            b.leading2(
-                "e",
-                &format!("paren{i}"),
-                MAX_PREC,
-                seq([sym("("), cat("e", 0), sym(")")]),
-            );
-        }
-        let snap = b.finish();
-
-        let depth = 20usize;
-        let src = "(".repeat(depth) + "x" + &")".repeat(depth);
-        let start = std::time::Instant::now();
-        let got = parse_cat(&snap, &src);
-        let elapsed = start.elapsed();
-        assert!(
-            elapsed.as_secs() < 5,
-            "category-call caching regressed: {N}-way fanout at depth {depth} took {elapsed:?}"
-        );
+        const DEPTH: usize = 20;
+        let got = in_worker("6-way fanout at depth 20", || {
+            let mut b = SnapshotBuilder::new();
+            b.category("e", LeadingIdentBehavior::Default);
+            b.leading2("e", "atom", MAX_PREC, Prim::Ident);
+            for i in 0..N {
+                b.leading2(
+                    "e",
+                    &format!("paren{i}"),
+                    MAX_PREC,
+                    seq([sym("("), cat("e", 0), sym(")")]),
+                );
+            }
+            let snap = b.finish();
+            let src = "(".repeat(DEPTH) + "x" + &")".repeat(DEPTH);
+            parse_cat(&snap, &src)
+        });
         // All N candidates are structurally identical (differ only in
         // kind name), so every level is a genuine tie: `longest_match`
         // picks the FIRST-registered winner ("paren0") deterministically,
         // making the resulting shape fully predictable.
         let mut expected = "(atom x)".to_string();
-        for _ in 0..depth {
+        for _ in 0..DEPTH {
             expected = format!("(paren0 '(' {expected} ')')");
         }
         assert_eq!(got, expected);
