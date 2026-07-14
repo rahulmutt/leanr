@@ -17,10 +17,17 @@
 #   - Declared names are sometimes qualified (`Term.quot`,
 #     `Tactic.quotSeq`) — an identifier class without `.` truncates them.
 #   - The toolchain's own doc comments and `--`-commented-out code show
-#     *example* `@[builtin_..._parser] def ...` lines as prose (found in
-#     Lean/Parser/Term.lean, Lean/Attributes.lean, Lean/Elab/StructInst.lean,
-#     Lean/Meta/RecursorInfo.lean, Lean/Compiler/ExternAttr.lean) — plain
-#     grep counts these as hits, but they are not compiled declarations.
+#     *example* `@[builtin_..._parser] def ...` lines as prose — six
+#     confirmed sites, none a live declaration: Lean/Parser/Term.lean:250
+#     (a rejected `depArrow` design), Lean/Parser/Do.lean:118
+#     (`doReassignElse`, disabled via `--`), Lean/Attributes.lean:80-84
+#     (a module-doc code block), Lean/Meta/RecursorInfo.lean:221
+#     (a commented-out `recursor`), Lean/Elab/StructInst.lean:36-64 (a
+#     module-doc code block whose `structInstFieldWhere` example has no
+#     live declaration anywhere in the toolchain), and
+#     Lean/Compiler/ExternAttr.lean:44 (`extern`, disabled via `--`).
+#     Plain grep counts all of these as hits, but they are not compiled
+#     declarations.
 #   - The attribute is not confined to `Lean/Parser/`: three genuine
 #     builtin parsers live under `Lean/Elab/` and `Lean/Meta/`
 #     (`Term.elabToSyntax`, `grindPattern`, `initGrindNorm`).
