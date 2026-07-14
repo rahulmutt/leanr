@@ -421,8 +421,15 @@ fn ident_part_len(rest: &str, base: usize) -> Result<usize, LexFail> {
 /// hex, `0b`/`0B` bin, `0o`/`0O` octal, else decimal; decimal may
 /// continue `.digits` and/or `[eE][+-]?digits` → `Scientific`. Digit
 /// runs may contain `_` separators (`takeDigitsFn`), e.g. `1_000_000`.
-/// A `.` NOT followed by a digit is not consumed (so `1.foo` / `1..2`
-/// leave the `.` for the next token).
+///
+/// A single `.` commits to `Scientific` and is consumed EVEN WITH NO
+/// DIGIT following (`decimalNumberFn`/`parseOptDot`, Basic.lean:840-863,
+/// pinned v4.32.0-rc1): `1.`, `1.e2`, and `1.+2.0` (the last: `1.`
+/// then `+` then `2.0`) all lex a bare trailing dot into the numeral —
+/// verified against the pinned toolchain (`#eval (1. : Float)`, `#eval
+/// (1.e2 : Float)`, `#eval (1.+2.0 : Float)` all elaborate). `..` is
+/// excluded (range operator: `curr = '.' && next = '.'` at
+/// Basic.lean:840) and leaves the dot untouched for the next token.
 ///
 /// Divergence (documented, not fixed here): the oracle *errors* on a
 /// malformed numeral it has committed to — `0x` with no hex digits
@@ -466,9 +473,38 @@ fn number_len(rest: &str) -> (usize, TokenKind) {
 
     let mut i = digits(b, 0, |c| c.is_ascii_digit());
     let mut scientific = false;
-    if i + 1 < b.len() && b[i] == b'.' && b[i + 1].is_ascii_digit() {
-        scientific = true;
-        i = digits(b, i + 1, |c| c.is_ascii_digit());
+    // ORACLE-PORT `parseOptDot` (Basic.lean:852-863): a `.` here (already
+    // known not to start `..`, see the `.. ` exclusion below) always
+    // commits to Scientific and is consumed, digit or no digit after it.
+    if i < b.len() && b[i] == b'.' && b.get(i + 1) != Some(&b'.') {
+        let after_dot = i + 1;
+        if after_dot < b.len() && b[after_dot].is_ascii_digit() {
+            scientific = true;
+            i = digits(b, after_dot, |c| c.is_ascii_digit());
+        } else {
+            // Bare dot (oracle's `hasBareDot = true` branch). ORACLE-PORT
+            // `parseOptExp` (Basic.lean:865-882): it peeks the next char —
+            // `e`/`E` continues into the exponent block below regardless
+            // (checked there first); anything else idFirst/`«` (and NOT
+            // `e`/`E`) is the oracle's "unexpected identifier after
+            // decimal point" error, which *rewinds the whole numeral back
+            // to its start* (`(s.setPos startPos).mkUnexpectedError`).
+            // We can't rewind (totality: every call must consume ≥1
+            // byte and never backtrack), so we replicate the same end
+            // state without an actual backtrack: simply don't commit to
+            // the dot when that's the path ahead. This is the
+            // already-documented `1.foo` divergence (Num "1", ".",
+            // Ident "foo" — no diagnostic emitted either way), unchanged
+            // by this fix.
+            let blocks_dot = matches!(
+                rest[after_dot..].chars().next(),
+                Some(c2) if c2 != 'e' && c2 != 'E' && (is_id_first(c2) || c2 == '«')
+            );
+            if !blocks_dot {
+                scientific = true;
+                i = after_dot;
+            }
+        }
     }
     if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
         let mut j = i + 1;
@@ -835,6 +871,63 @@ mod tests {
                 (TokenKind::Num, "1"),
                 (TokenKind::Atom, "."),
                 (TokenKind::Ident, "foo")
+            ]
+        );
+    }
+
+    #[test]
+    fn bare_trailing_dot_is_scientific() {
+        // ORACLE-PORT `parseOptDot` (Basic.lean:852-863): a `.` commits to
+        // Scientific and is consumed even with no digit following it.
+        // Verified against the pinned v4.32.0-rc1 toolchain: `#eval (1. :
+        // Float)`, `#eval (1.e2 : Float)` (== 100.0), and
+        // `#eval (1.+2.0 : Float)` (== 3.0) all elaborate.
+        let mut t = kw_table();
+        for k in ["+", ".."] {
+            t.insert(k);
+        }
+
+        // `1.` at EOF: a single Scientific token, dot included.
+        assert_eq!(lex_all("1.", &t), vec![(TokenKind::Scientific, "1.")]);
+
+        // `1.e2`: the bare dot is immediately followed by the exponent
+        // marker — still a single Scientific token.
+        assert_eq!(lex_all("1.e2", &t), vec![(TokenKind::Scientific, "1.e2")]);
+
+        // `1.+2.0`: the bare dot ends the first numeral (nothing after it
+        // continues the literal); `+` and the second numeral are separate
+        // tokens, matching `1. + 2.0 = 3.0`.
+        assert_eq!(
+            lex_all("1.+2.0", &t),
+            vec![
+                (TokenKind::Scientific, "1."),
+                (TokenKind::Atom, "+"),
+                (TokenKind::Scientific, "2.0"),
+            ]
+        );
+
+        // `1..2`: `..` is excluded (range operator) — the oracle's
+        // `curr = '.' && next = '.'` check at Basic.lean:840. The dot is
+        // NOT consumed by the numeral.
+        assert_eq!(
+            lex_all("1..2", &t),
+            vec![
+                (TokenKind::Num, "1"),
+                (TokenKind::Atom, ".."),
+                (TokenKind::Num, "2"),
+            ]
+        );
+
+        // `1.foo`: documented divergence, unchanged by this fix — the
+        // oracle errors ("unexpected identifier after decimal point") and
+        // backtracks the whole numeral; we can't backtrack, so we simply
+        // don't commit to the dot (no diagnostic emitted either way).
+        assert_eq!(
+            lex_all("1.foo", &t),
+            vec![
+                (TokenKind::Num, "1"),
+                (TokenKind::Atom, "."),
+                (TokenKind::Ident, "foo"),
             ]
         );
     }
