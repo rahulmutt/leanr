@@ -22,6 +22,16 @@ use crate::grammar::*;
 use crate::kind::{SyntaxKind, KIND_NULL};
 use std::sync::Arc;
 
+// This wave (M3a Task 8, second pass): the remaining `port`-status term
+// rows the brief's "must-have set" left for a follow-up — pragma terms
+// and the app/proj "extras" are large, self-contained groups, split
+// into their own submodules per the plan's module-size discipline
+// (term.rs was already ~960 lines). `cdot` and the `let`-family
+// siblings stay here, colocated with the `paren`/`let`/`have` code they
+// share helpers with.
+mod term_app;
+mod term_pragma;
+
 // ================================================================
 // Shared helpers (not their own surface-table rows; oracle-named
 // sub-parsers used by several of the productions below).
@@ -252,6 +262,27 @@ fn register_holes_and_sorts(b: &mut SnapshotBuilder) {
         seq([sym("Type"), level_arg()]),
     );
     b.leading2("term", "Lean.Parser.Term.prop", MAX_PREC, sym("Prop"));
+}
+
+/// `cdot := leading_parser unicodeSymbol "·" "." >> hygieneInfo` (bare,
+/// MAX_PREC; Task 8 wave 1 deferred this — "zero fixture value" — but it
+/// costs nothing now that `hygiene_info` exists). ORACLE-PORT confirmed
+/// against a fresh dump of `(· )`/`(. )`: `Term.paren`'s inner term is a
+/// bare `Lean.Parser.Term.cdot{ "·"|".", hygieneInfo{} }`, two children,
+/// no further wrap. Shares its leading `Sym(".")` slot with `dotIdent`
+/// (`term_pragma`... no — `term_app`'s `dotIdent`, `Term.lean:924`) —
+/// resolved by ordinary longest-match, same mechanism as `level`'s
+/// `max`/`imax` vs plain `ident`: `.foo` (no ws, ident follows) wins for
+/// `dotIdent` (longer match), bare `.` (nothing ident-shaped follows
+/// with no ws) wins for `cdot`.
+fn register_cdot(b: &mut SnapshotBuilder) {
+    let hi = hygiene_info(b);
+    b.leading2(
+        "term",
+        "Lean.Parser.Term.cdot",
+        MAX_PREC,
+        seq([or_else([sym("·"), sym(".")]), hi]),
+    );
 }
 
 fn register_paren_family(b: &mut SnapshotBuilder) {
@@ -739,6 +770,144 @@ fn register_let_have_show_suffices(b: &mut SnapshotBuilder) {
     );
 }
 
+/// `let`'s siblings (Task 8 wave 2 — deferred by wave 1 as "cheap to
+/// add later" once `let_like`/`let_decl`/`let_config` existed): oracle
+/// shapes cross-checked against a fresh dump of `let_fun x := 1; x` /
+/// `let_delayed x := 1; x` / `let_tmp x := 1; x` / `haveI x := 1; x` /
+/// `letI x := 1; x` (each shows the expected `letDecl{letIdDecl{letId,
+/// null, null, ":=", num}}` body, `haveI`/`letI` additionally showing a
+/// `letConfig{null}` sibling — see task-8-wave2 report for the probe
+/// transcript).
+fn register_let_family_siblings(b: &mut SnapshotBuilder) {
+    // «let_fun» := leading_parser:leadPrec withPosition ((symbol
+    // "let_fun " <|> "let_λ ") >> letDecl) >> optSemicolon termParser —
+    // NO `letConfig` (unlike `let`/`have`/`haveI`/`letI`).
+    let decl = let_decl(b);
+    b.leading2(
+        "term",
+        "Lean.Parser.Term.let_fun",
+        LEAD_PREC,
+        seq([
+            Prim::WithPosition(Arc::new(seq([
+                or_else([sym("let_fun"), sym("let_λ")]),
+                decl,
+            ]))),
+            sym(";"),
+            cat("term", 0),
+        ]),
+    );
+    // «let_delayed» := leading_parser:leadPrec withPosition
+    // ("let_delayed " >> letDecl) >> optSemicolon termParser.
+    let decl = let_decl(b);
+    b.leading2(
+        "term",
+        "Lean.Parser.Term.let_delayed",
+        LEAD_PREC,
+        seq([
+            Prim::WithPosition(Arc::new(seq([sym("let_delayed"), decl]))),
+            sym(";"),
+            cat("term", 0),
+        ]),
+    );
+    // «let_tmp» := leading_parser:leadPrec withPosition ("let_tmp " >>
+    // letDecl) >> optSemicolon termParser.
+    let decl = let_decl(b);
+    b.leading2(
+        "term",
+        "Lean.Parser.Term.let_tmp",
+        LEAD_PREC,
+        seq([
+            Prim::WithPosition(Arc::new(seq([sym("let_tmp"), decl]))),
+            sym(";"),
+            cat("term", 0),
+        ]),
+    );
+    // «haveI» := leading_parser (BARE — no `:leadPrec` annotation, so
+    // MAX_PREC per this file's established bare-`leading_parser`
+    // convention) withPosition ("haveI " >> letConfig >> letDecl) >>
+    // optSemicolon termParser.
+    let cfg = let_config(b);
+    let decl = let_decl(b);
+    b.leading2(
+        "term",
+        "Lean.Parser.Term.haveI",
+        MAX_PREC,
+        seq([
+            Prim::WithPosition(Arc::new(seq([sym("haveI"), cfg, decl]))),
+            sym(";"),
+            cat("term", 0),
+        ]),
+    );
+    // «letI» := leading_parser (bare, MAX_PREC) withPosition ("letI " >>
+    // letConfig >> letDecl) >> optSemicolon termParser.
+    let cfg = let_config(b);
+    let decl = let_decl(b);
+    b.leading2(
+        "term",
+        "Lean.Parser.Term.letI",
+        MAX_PREC,
+        seq([
+            Prim::WithPosition(Arc::new(seq([sym("letI"), cfg, decl]))),
+            sym(";"),
+            cat("term", 0),
+        ]),
+    );
+    register_letrec(b);
+}
+
+/// `letRecDecl := leading_parser optional Command.docComment >>
+/// optional «attributes» >> letDecl >> Termination.suffix` —
+/// `docComment`/`attributes` aren't transcribed (no fixture uses either
+/// on a `let rec`); real, always-empty optional slots (same idiom as
+/// `explicitBinder`'s `binderTactic`/`binderDefault`). `Termination.
+/// suffix` reuses the SAME kind name `command.rs`'s micro
+/// `optDeclSig`/`declValSimple` placeholder already interns (harmless —
+/// `KindInterner::intern` is idempotent) with the identical two-empty-
+/// optional shape (`terminationBy?`/`decreasingBy` aren't transcribed
+/// either — no fixture uses `let rec ... termination_by ...`).
+fn let_rec_decl(b: &mut SnapshotBuilder) -> Prim {
+    let decl = let_decl(b);
+    let suffix_k = b.kind("Lean.Parser.Termination.suffix");
+    let suffix = nd(suffix_k, seq([opt(never()), opt(never())]));
+    let k = b.kind("Lean.Parser.Term.letRecDecl");
+    nd(k, seq([opt(never()), opt(never()), decl, suffix]))
+}
+/// `letRecDecls := leading_parser sepBy1 letRecDecl ", "`.
+fn let_rec_decls(b: &mut SnapshotBuilder) -> Prim {
+    let decl = let_rec_decl(b);
+    let k = b.kind("Lean.Parser.Term.letRecDecls");
+    nd(k, sep_by1(decl, ","))
+}
+/// `«letrec» := leading_parser:leadPrec withPosition (group ("let " >>
+/// nonReservedSymbol "rec ") >> letRecDecls) >> optSemicolon termParser`
+/// — `nonReservedSymbol "rec"` reuses the SAME dispatch fix `level`'s
+/// `max`/`imax` needed (Task 8 wave 1, `parse.rs::dispatch`'s
+/// `FirstTok::Sym` arm matching an `Ident`-kind token too); no further
+/// interpreter change needed here, confirmed by a fresh dump of `let rec
+/// x := 1; x` parsing as `Lean.Parser.Term.letrec` (not falling back to
+/// plain `Term.let` — the oracle's own longest-match: `let` alone
+/// matches `Term.let`, `let` immediately followed by `rec` matches the
+/// longer `letrec`, exactly like `Sort max` vs `Sort (max u v)`).
+fn register_letrec(b: &mut SnapshotBuilder) {
+    let decls = let_rec_decls(b);
+    b.leading2(
+        "term",
+        "Lean.Parser.Term.letrec",
+        LEAD_PREC,
+        seq([
+            Prim::WithPosition(Arc::new(seq([
+                Prim::Group(Arc::new(seq([
+                    sym("let"),
+                    Prim::NonReservedSymbol("rec".into()),
+                ]))),
+                decls,
+            ]))),
+            sym(";"),
+            cat("term", 0),
+        ]),
+    );
+}
+
 // ================================================================
 // depArrow / forall's sibling, arrow, app/proj/completion/explicitUniv.
 // ================================================================
@@ -809,30 +978,16 @@ fn register_arrow_app_proj(b: &mut SnapshotBuilder) {
     // counterpart and is a semantic-only guard (never mis-shapes the
     // tree either way — worst case this fires where the oracle
     // wouldn't, which no fixture exercises) — skipped.
-    // `explicitUnivSuffix := checkNoWsBefore >> ".{" >> sepBy1
-    // levelParser ", " >> "}"`.
     b.trailing2(
         "term",
         "Lean.Parser.Term.explicitUniv",
         MAX_PREC,
         MAX_PREC,
-        seq([
-            Prim::CheckNoWsBefore,
-            sym(".{"),
-            sep_by1(cat("level", 0), ","),
-            sym("}"),
-        ]),
+        explicit_univ_suffix(),
     );
     // app := trailing_parser:leadPrec:maxPrec many1 argument. `argument
     // := checkWsBefore .. >> checkColGt .. >> (namedArgument <|>
     // ellipsis <|> termParser argPrec)`.
-    let argument = || {
-        seq([
-            Prim::CheckWsBefore,
-            Prim::CheckColGt,
-            or_else([named_argument(), ellipsis_arg(), cat("term", ARG_PREC)]),
-        ])
-    };
     b.trailing2(
         "term",
         "Lean.Parser.Term.app",
@@ -858,18 +1013,47 @@ fn ellipsis_arg() -> Prim {
         Prim::NotFollowedBy(Arc::new(seq([Prim::CheckNoWsBefore, sym(".")]))),
     ])
 }
+/// `argument := checkWsBefore .. >> checkColGt .. >> (namedArgument <|>
+/// ellipsis <|> termParser argPrec)` (Term.lean:900-904) — hoisted from
+/// a `register_arrow_app_proj`-local closure (Task 8 wave 1) to a
+/// module fn so `term_app`'s `pipeProj` (`many argument`, Term.lean:958)
+/// can share it verbatim instead of drifting a second copy.
+pub(super) fn argument() -> Prim {
+    seq([
+        Prim::CheckWsBefore,
+        Prim::CheckColGt,
+        or_else([named_argument(), ellipsis_arg(), cat("term", ARG_PREC)]),
+    ])
+}
+/// `explicitUnivSuffix := checkNoWsBefore >> ".{" >> sepBy1 levelParser
+/// ", " >> "}"` (Term.lean:944-945) — hoisted to a module fn (Task 8
+/// wave 2) so `term_app`'s `pipeProj` (`optional explicitUnivSuffix`,
+/// Term.lean:958) can reuse the exact same shape `explicitUniv` already
+/// uses, rather than a second hand-copied definition.
+pub(super) fn explicit_univ_suffix() -> Prim {
+    seq([
+        Prim::CheckNoWsBefore,
+        sym(".{"),
+        sep_by1(cat("level", 0), ","),
+        sym("}"),
+    ])
+}
 
 pub fn register(b: &mut SnapshotBuilder) {
     register_literals(b);
     register_holes_and_sorts(b);
+    register_cdot(b);
     register_paren_family(b);
     register_forall(b);
     register_fun(b);
     register_match(b);
     register_struct_inst(b);
     register_let_have_show_suffices(b);
+    register_let_family_siblings(b);
     register_dep_arrow(b);
     register_arrow_app_proj(b);
+    term_app::register(b);
+    term_pragma::register(b);
 }
 
 #[cfg(test)]
