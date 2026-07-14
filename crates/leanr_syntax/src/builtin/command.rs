@@ -1,24 +1,55 @@
-//! The micro command set + module header (Task 7's vertical slice).
-//! ORACLE-PORT `Lean/Parser/Module/Syntax.lean` (header) and
-//! `Lean/Parser/Command.lean` (`declaration`/`definition`/…) — every
-//! shape below was cross-checked against a FRESH oracle dump of
-//! `tests/fixtures/syntax/Micro.lean` (`mise run fixtures:regen`),
-//! not just read off the source: the pinned v4.32.0-rc1 toolchain has
-//! the module-system rewrite (`module`/`public import`/`meta import`),
-//! which the task brief's inline sketch (citing an older `Module.lean`
-//! shape) didn't anticipate — this file mirrors the ACTUAL pin.
-//! Task 10 replaces the micro command set with the real `declaration`
-//! dispatcher (`abbrev`/`theorem`/`instance`/…); every "not implemented
-//! yet" slot below is a real, oracle-confirmed empty `null` node in the
-//! meantime (never a guess), so Task 10 can extend rather than redo it.
+//! The `command` category (M3a Task 10 — surface table's largest
+//! category, 52 `port`-status rows + the module header). ORACLE-PORT
+//! `Lean/Parser/Command.lean` (authority over the task brief's inline
+//! sketch — see the module-doc comments of the split-out files below
+//! for the per-area citations) + `Lean/Parser/Module/Syntax.lean`
+//! (header, unchanged since Task 7).
+//!
+//! Split by grammar area (module-size discipline — this category alone
+//! is 52 rows, the plan's largest porting surface):
+//! - `command.rs` (this file): module header (Task 7, untouched),
+//!   `docComment`/`declModifiers` (shared by every other file here),
+//!   and the top-level `register` dispatcher.
+//! - `command_decl.rs`: the `declaration` dispatcher and its whole
+//!   `definition`/`theorem`/`instance`/…/`structure` family.
+//! - `command_open.rs`: `namespace`/`section`/`end`/`open` (all 5
+//!   sub-forms)/`«in»`/`mutual`/`variable`/`universe`/`set_option`/
+//!   `attribute`/`export`/`import`/`include`/`omit`.
+//! - `command_misc.rs`: `moduleDoc` + every `#`-prefixed
+//!   introspection command + the small bootstrapping/registration
+//!   commands (`init_quot`, `grindPattern`, …).
+//!
+//! Kind names are byte-for-byte from the surface table's "kind name"
+//! column with escaping guillemets STRIPPED — confirmed against every
+//! fresh oracle dump this task ran (e.g. source declares `def
+//! «private»`, but a live dump's node kind is the bare
+//! `"Lean.Parser.Command.private"`, matching every prior task's own
+//! established convention (`term.rs`'s `Lean.Parser.Term.sorry`, not
+//! `«sorry»`)).
+
+mod command_decl;
+mod command_misc;
+mod command_open;
+
+// Re-exported (Task 10) so `term.rs`'s `Term.«open»`/`Term.«set_option»`
+// and `tactic.rs`'s `Tactic.«open»`/`Tactic.«set_option»` (the 4
+// `... in <term|tactic>` wrapper rows — a DIFFERENT production per
+// category, but sharing the identical `Command.openDecl`/
+// `Command.optionValue` sub-grammar the command-category `«open»`/
+// `«set_option»` also use) can reuse the exact same shapes without a
+// second, drifting copy — same "hoist, re-export" idiom `term.rs`
+// already established for `term_pragma::{match_expr_alts,
+// match_expr_pat}`. `command_open` itself stays a private submodule;
+// only these two names are threaded through.
+pub(super) use command_open::{open_decl, option_value};
 
 use crate::grammar::*;
 use crate::kind::SyntaxKind;
 use std::sync::Arc;
 
 /// `Prim::Node` with no prec gate — the sub-node shape every compound
-/// production uses.
-fn node_named(kind: SyntaxKind, body: Prim) -> Prim {
+/// production uses (shared by every file in this module).
+pub(super) fn nd(kind: SyntaxKind, body: Prim) -> Prim {
     Prim::Node {
         kind,
         prec: None,
@@ -26,18 +57,100 @@ fn node_named(kind: SyntaxKind, body: Prim) -> Prim {
     }
 }
 
-/// Placeholder for a grammar slot this micro set doesn't implement yet
-/// (termination hints, universe binders, deriving clauses, doc
-/// comments, attributes, …). Every M3a fixture that reaches one of
-/// these slots leaves it absent, and an always-empty `optional`
-/// reproduces the oracle's empty `null` node exactly: `Prim::Optional`
-/// always wraps in a `null` node (parse.rs), and an empty `Seq` pushes
-/// no events, so the `null` ends up with zero children either way —
-/// bit-for-bit what a real oracle dump shows for these slots (Task 7's
-/// Micro.lean dump: `declModifiers`'s 7 children, `optDeclSig`'s 2,
-/// `Termination.suffix`'s 2, are all empty `null`s exactly like this).
-fn empty_opt() -> Prim {
-    Prim::Optional(Arc::new(Prim::Seq(vec![])))
+/// `identWithPartialTrailingDot` (`Extra.lean`): `ident >> optional
+/// (checkNoWsBefore >> "." >> checkNoWsBefore >> ident)` — a plain
+/// `Parser` sequence (no `leading_parser` of its own), so it contributes
+/// a bare ident leaf plus a null, never a node. Shared by the module
+/// header's own `import` (Task 7), `«end»`'s optional trailing label,
+/// and `«set_option»`'s option name.
+pub(super) fn ident_with_partial_trailing_dot() -> Prim {
+    seq([
+        Prim::Ident,
+        opt(seq([
+            Prim::CheckNoWsBefore,
+            sym("."),
+            Prim::CheckNoWsBefore,
+            Prim::Ident,
+        ])),
+    ])
+}
+
+/// `Termination.suffix := optional (ppDedent ppLine >> (terminationBy?
+/// <|> terminationBy <|> partialFixpoint <|> coinductiveFixpoint <|>
+/// inductiveFixpoint)) >> optional decreasingBy` (`Term.lean:707-708` —
+/// despite the name, lives in the `Termination` namespace, needed
+/// wherever a declaration body can end, hence `let rec`'s own use in
+/// `term.rs`). None of the 5 `terminationBy`-family alternatives or
+/// `decreasingBy` are transcribed (no fixture uses `termination_by`/
+/// `decreasing_by`) — both slots are real, always-empty optionals,
+/// confirmed byte-for-byte against every fixture's own
+/// `Lean.Parser.Termination.suffix{null{} null{}}` (task-10 report).
+/// Shared by `command_decl.rs`'s `declValSimple` AND `term.rs`'s
+/// `letRecDecl` (a single definition so both call sites can't drift —
+/// this was Task 8/9's own precedent for `term_hole`/`synthetic_hole`).
+pub(super) fn termination_suffix(b: &mut SnapshotBuilder) -> Prim {
+    let k = b.kind("Lean.Parser.Termination.suffix");
+    nd(k, seq([opt(never()), opt(never())]))
+}
+
+/// `Command.docComment := leading_parser ppDedent $ "/--" >> ppSpace >>
+/// ifVerso versoCommentBody commentBody >> ppLine` (`Term.lean:91-92`,
+/// despite the name living in the `Command` namespace) — `doc.verso`
+/// defaults false, so every fixture takes the `commentBody` branch;
+/// `ppDedent`/`ppSpace`/`ppLine` are pretty-print-only no-ops. See
+/// `Prim::DocCommentBody`'s own doc comment for the fresh-dump citation
+/// pinning the exact 2-child shape (`"/--"` atom, then the raw body
+/// atom running through the closing `-/`).
+pub(super) fn doc_comment(b: &mut SnapshotBuilder) -> Prim {
+    let k = b.kind("Lean.Parser.Command.docComment");
+    nd(k, seq([sym("/--"), Prim::DocCommentBody]))
+}
+
+/// `declModifiers (inline : Bool) := optional docComment >> optional
+/// (Term.«attributes» >> ..) >> optional visibility >> optional
+/// «protected» >> optional («meta» <|> «noncomputable») >> optional
+/// «unsafe» >> optional («partial» <|> «nonrec»)` (Command.lean:114-121).
+/// The `inline` parameter only toggles a `ppDedent ppLine` PRETTY-PRINT
+/// hint after the attributes slot (whether `@[attr]` prints on its own
+/// line) — no tree-shape difference between `declModifiers false`
+/// (top-level declarations) and `nestedDeclModifiers`/`declModifiers
+/// true` (ctors, structure binders, `computedField`) — confirmed
+/// against fresh dumps of both call shapes (`Decls.lean`'s top-level
+/// modifiers vs. `Types.lean`'s `structSimpleBinder`/`ctor` modifiers,
+/// task-10 report): both are the identical 7-child
+/// `Lean.Parser.Command.declModifiers` node. One shared fn, no `inline`
+/// parameter, is therefore faithful, not a shortcut.
+pub(super) fn decl_modifiers(b: &mut SnapshotBuilder) -> Prim {
+    let doc = doc_comment(b);
+    let attrs = super::attr::attributes(b);
+    let private_k = b.kind("Lean.Parser.Command.private");
+    let public_k = b.kind("Lean.Parser.Command.public");
+    let visibility = or_else([nd(private_k, sym("private")), nd(public_k, sym("public"))]);
+    let protected_k = b.kind("Lean.Parser.Command.protected");
+    let meta_k = b.kind("Lean.Parser.Command.meta");
+    let noncomputable_k = b.kind("Lean.Parser.Command.noncomputable");
+    let unsafe_k = b.kind("Lean.Parser.Command.unsafe");
+    let partial_k = b.kind("Lean.Parser.Command.partial");
+    let nonrec_k = b.kind("Lean.Parser.Command.nonrec");
+    let k = b.kind("Lean.Parser.Command.declModifiers");
+    nd(
+        k,
+        seq([
+            opt(doc),
+            opt(attrs),
+            opt(visibility),
+            opt(nd(protected_k, sym("protected"))),
+            opt(or_else([
+                nd(meta_k, sym("meta")),
+                nd(noncomputable_k, sym("noncomputable")),
+            ])),
+            opt(nd(unsafe_k, sym("unsafe"))),
+            opt(or_else([
+                nd(partial_k, sym("partial")),
+                nd(nonrec_k, sym("nonrec")),
+            ])),
+        ]),
+    )
 }
 
 pub fn register(b: &mut SnapshotBuilder) {
@@ -58,12 +171,12 @@ pub fn register(b: &mut SnapshotBuilder) {
     let meta_kind = b.kind("Lean.Parser.Module.meta");
     let all_kind = b.kind("Lean.Parser.Module.all");
     let import_kind = b.kind("Lean.Parser.Module.import");
-    b.set_header(node_named(
+    b.set_header(nd(
         header_kind,
         seq([
-            opt(node_named(module_tk_kind, sym("module"))),
-            opt(node_named(prelude_kind, sym("prelude"))),
-            many(node_named(
+            opt(nd(module_tk_kind, sym("module"))),
+            opt(nd(prelude_kind, sym("prelude"))),
+            many(nd(
                 import_kind,
                 seq([
                     // ORACLE-PORT: the oracle wraps
@@ -71,71 +184,141 @@ pub fn register(b: &mut SnapshotBuilder) {
                     // `atomic` (so a partial match backtracks cleanly);
                     // doesn't affect the success-path shape below.
                     atomic(seq([
-                        opt(node_named(public_kind, sym("public"))),
-                        opt(node_named(meta_kind, sym("meta"))),
+                        opt(nd(public_kind, sym("public"))),
+                        opt(nd(meta_kind, sym("meta"))),
                         sym("import"),
                     ])),
-                    opt(node_named(all_kind, sym("all"))),
+                    opt(nd(all_kind, sym("all"))),
                     // ORACLE-PORT `identWithPartialTrailingDot`
-                    // (Extra.lean): `ident >> optional (checkNoWsBefore
-                    // >> "." >> checkNoWsBefore >> ident)` — a plain
-                    // `Parser` sequence (no `leading_parser`), so it
-                    // contributes a bare ident leaf plus a null, not a
-                    // node of its own.
-                    Prim::Ident,
-                    opt(seq([
-                        Prim::CheckNoWsBefore,
-                        sym("."),
-                        Prim::CheckNoWsBefore,
-                        Prim::Ident,
-                    ])),
+                    // (Extra.lean): a plain `Parser` sequence (no
+                    // `leading_parser`), so it contributes a bare ident
+                    // leaf plus a null, not a node of its own.
+                    ident_with_partial_trailing_dot(),
                 ]),
             )),
         ]),
     ));
 
-    // --- micro command set -------------------------------------------
-    // Just enough for the vertical slice: `def x := <term>`.
-    let modifiers = b.kind("Lean.Parser.Command.declModifiers");
-    let def_k = b.kind("Lean.Parser.Command.definition");
-    let decl_id = b.kind("Lean.Parser.Command.declId");
-    let decl_sig = b.kind("Lean.Parser.Command.optDeclSig");
-    let decl_val = b.kind("Lean.Parser.Command.declValSimple");
-    let termination_suffix = b.kind("Lean.Parser.Termination.suffix");
-    b.leading2(
-        "command",
-        "Lean.Parser.Command.declaration",
-        MAX_PREC,
-        seq([
-            // `declModifiers false` (Command.lean): 7 optional slots —
-            // doc comment, attributes, visibility, protected,
-            // meta|noncomputable, unsafe, partial|nonrec — none
-            // implemented yet.
-            node_named(
-                modifiers,
-                seq((0..7).map(|_| empty_opt()).collect::<Vec<_>>()),
-            ),
-            node_named(
-                def_k,
-                seq([
-                    sym("def"),
-                    node_named(decl_id, seq([Prim::Ident, empty_opt()])),
-                    node_named(decl_sig, seq([empty_opt(), empty_opt()])),
-                    node_named(
-                        decl_val,
-                        seq([
-                            sym(":="),
-                            cat("term", 0),
-                            node_named(termination_suffix, seq([empty_opt(), empty_opt()])),
-                            empty_opt(),
-                        ]),
-                    ),
-                    empty_opt(), // optDefDeriving
-                ]),
-            ),
-        ]),
-    );
-    // The term category's own literal/atom registrations (idents,
-    // numerals, …) now live in `term.rs` (M3a Task 8) — this file keeps
-    // only the command-category micro set.
+    command_decl::register(b);
+    command_open::register(b);
+    command_misc::register(b);
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::builtin;
+    use crate::parse_module;
+
+    /// `recover_command`/`starts_command` regression (task-10 brief:
+    /// "if your work makes `starts_command` correct/meaningful, verify
+    /// it"). Before this task, `declaration` (`FirstTok::Any`, an
+    /// all-optional `declModifiers` lead) was the ONLY leading command,
+    /// so `starts_command` (which only matches `FirstTok::Sym` entries)
+    /// was permanently inert — a bad command swept clean to EOF. Now
+    /// that keyword-keyed commands (`namespace`, `#check`, …) are
+    /// registered, an unrecognized token run must resync at the very
+    /// next one instead of consuming the rest of the file.
+    #[test]
+    fn recover_command_resyncs_at_the_next_keyword_command_not_eof() {
+        let snap = builtin::snapshot();
+        // `%%%` isn't a command-category leading token at all (nor a
+        // valid term/binder/etc. — a "just garbage" run), followed by a
+        // real, keyword-led command (`namespace`) that recovery should
+        // resync on rather than swallow.
+        let src = "prelude\n\n%%%\nnamespace Foo\nend Foo\n";
+        let result = parse_module(src, &snap);
+
+        // Total: never panics/hangs, always round-trips byte-exact,
+        // errors included.
+        assert_eq!(result.tree.text(), src, "round-trip failed");
+        assert_eq!(
+            result.errors.len(),
+            1,
+            "expected exactly one recovery diagnostic, got {:?}",
+            result.errors
+        );
+        assert_eq!(result.errors[0].code, "E0301");
+
+        let out = crate::canon::canon_jsonl(&result.tree);
+        // The recovered `namespace Foo`/`end Foo` commands must show up
+        // as REAL, correctly-kinded nodes — not swallowed into the
+        // error-recovery sweep (which the pre-Task-10 `FirstTok::Any`-
+        // only dispatch table would have done, sweeping straight to
+        // EOF instead of stopping at `namespace`).
+        assert!(
+            out.contains(r#""k":"Lean.Parser.Command.namespace""#),
+            "{out}"
+        );
+        assert!(out.contains(r#""k":"Lean.Parser.Command.end""#), "{out}");
+        assert!(out.contains(r#""k":"<error>""#), "{out}");
+    }
+
+    /// The standalone `«deriving»` command (`Lean.Parser.Command.
+    /// deriving`) + a NON-empty `optDeriving`/`derivingClass` slot — no
+    /// committed fixture exercises either (`Types.lean`'s `optDeriving`
+    /// is always the empty-`null` case); coverage lives here instead.
+    /// Shape confirmed against a fresh oracle dump of `structure Foo
+    /// where x : Nat` followed by `deriving instance Repr for Foo`
+    /// (task-10 report).
+    #[test]
+    fn deriving_command_and_a_populated_deriving_clause_parse_clean() {
+        let snap = builtin::snapshot();
+        let src = "prelude\n\nstructure Foo where\n  x : Nat\n  deriving Repr\n\nderiving instance Repr for Foo\n";
+        let result = parse_module(src, &snap);
+        assert!(
+            result.errors.is_empty(),
+            "expected clean parse, got {:?}",
+            result.errors
+        );
+        assert_eq!(result.tree.text(), src, "round-trip failed");
+
+        let out = crate::canon::canon_jsonl(&result.tree);
+        assert!(
+            out.contains(r#""k":"Lean.Parser.Command.derivingClass""#),
+            "{out}"
+        );
+        assert!(
+            out.contains(r#""k":"Lean.Parser.Command.deriving""#),
+            "{out}"
+        );
+    }
+
+    /// `initialize`/`builtin_initialize` + `attribute [-simp] ..`'s
+    /// `eraseAttr` + `instance (priority := ..)`'s `namedPrio` — none
+    /// exercised by a committed fixture. Also the two self-wrap bugs a
+    /// fresh oracle dump caught this task (`eraseAttr`/
+    /// `initializeKeyword` ARE `leading_parser`, a prior version of
+    /// this file's own code missed both wraps — task-10 report has the
+    /// probe transcripts).
+    #[test]
+    fn initialize_builtin_initialize_erase_attr_and_named_prio_parse_clean() {
+        let snap = builtin::snapshot();
+        let src = "prelude\n\ninitialize foo : Nat ← pure z\n\nbuiltin_initialize\n  pure z\n\nattribute [-simp] bar\n\ninstance (priority := 200) : Inhabited Nat where\n  default := z\n";
+        let result = parse_module(src, &snap);
+        assert!(
+            result.errors.is_empty(),
+            "expected clean parse, got {:?}",
+            result.errors
+        );
+        assert_eq!(result.tree.text(), src, "round-trip failed");
+
+        let out = crate::canon::canon_jsonl(&result.tree);
+        assert!(
+            out.contains(r#""k":"Lean.Parser.Command.initialize""#),
+            "{out}"
+        );
+        assert!(
+            out.contains(r#""k":"Lean.Parser.Command.initializeKeyword""#),
+            "{out}"
+        );
+        assert!(out.contains(r#""a":"builtin_initialize""#), "{out}");
+        assert!(
+            out.contains(r#""k":"Lean.Parser.Command.eraseAttr""#),
+            "{out}"
+        );
+        assert!(
+            out.contains(r#""k":"Lean.Parser.Command.namedPrio""#),
+            "{out}"
+        );
+    }
 }

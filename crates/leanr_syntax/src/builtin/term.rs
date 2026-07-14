@@ -117,9 +117,17 @@ fn binder_type(require_type: bool) -> Prim {
 /// and `fun x : A => e` (both exercise a present `optType`), which show
 /// exactly this shape — no fixture previously exercised a present
 /// `optType`, which is why this was missed before.
-pub(super) fn opt_type(b: &mut SnapshotBuilder) -> Prim {
+/// `typeSpec` itself, unwrapped in `optional` — hoisted (Task 10) so
+/// `Term/Basic.lean`'s `optTypeForStructInst := optional (atomic
+/// (typeSpec >> notFollowedBy "}" "}"))` (`struct_inst_field`, below) can
+/// reuse the exact same node shape `opt_type` wraps, rather than a
+/// second hand-copied `":" >> term` definition.
+pub(super) fn type_spec(b: &mut SnapshotBuilder) -> Prim {
     let k = b.kind("Lean.Parser.Term.typeSpec");
-    opt(nd(k, seq([sym(":"), cat("term", 0)])))
+    nd(k, seq([sym(":"), cat("term", 0)]))
+}
+pub(super) fn opt_type(b: &mut SnapshotBuilder) -> Prim {
+    opt(type_spec(b))
 }
 
 fn explicit_binder(b: &mut SnapshotBuilder, require_type: bool) -> Prim {
@@ -170,7 +178,7 @@ fn strict_implicit_binder(b: &mut SnapshotBuilder, require_type: bool) -> Prim {
         ]),
     )
 }
-fn inst_binder(b: &mut SnapshotBuilder) -> Prim {
+pub(super) fn inst_binder(b: &mut SnapshotBuilder) -> Prim {
     let k = b.kind("Lean.Parser.Term.instBinder");
     // `optIdent := optional (atomic (ident >> " : "))`.
     let opt_ident = opt(atomic(seq([Prim::Ident, sym(":")])));
@@ -181,7 +189,7 @@ fn inst_binder(b: &mut SnapshotBuilder) -> Prim {
 /// order — `<|>` is plain PEG orelse here, not a Pratt longest-match,
 /// so order matters, though in practice each alternative's own leading
 /// bracket makes them mutually exclusive anyway).
-fn bracketed_binder(b: &mut SnapshotBuilder, require_type: bool) -> Prim {
+pub(super) fn bracketed_binder(b: &mut SnapshotBuilder, require_type: bool) -> Prim {
     let e = explicit_binder(b, require_type);
     let si = strict_implicit_binder(b, require_type);
     let i = implicit_binder(b, require_type);
@@ -595,33 +603,58 @@ fn struct_inst_field_eqns(b: &mut SnapshotBuilder) {
         seq([opt(sym("private")), alts]),
     );
 }
+/// `structInstFieldBinder := binderIdent <|> bracketedBinder`
+/// (`Term/Basic.lean:286-288`; `withAntiquot` wraps ONLY the
+/// antiquotation alternative, so the real path is a bare `or_else`, no
+/// extra node — same shape as `openDecl`/`funBinder`'s own antiquot
+/// wrapper).
+fn struct_inst_field_binder(b: &mut SnapshotBuilder) -> Prim {
+    let bi = binder_ident(b);
+    let bb = bracketed_binder(b, false);
+    or_else([bi, bb])
+}
+/// `optTypeForStructInst := optional (atomic (typeSpec >> notFollowedBy
+/// "}" "}"))` (`Term/Basic.lean:290`) — the `notFollowedBy` guard stops
+/// a trailing `: T` from being swallowed here when it's actually the
+/// STRUCT INSTANCE's own closing `: T }` (`Term.structInst`'s last
+/// optional slot), not a per-field type override.
+fn opt_type_for_struct_inst(b: &mut SnapshotBuilder) -> Prim {
+    let ts = type_spec(b);
+    opt(atomic(seq([ts, Prim::NotFollowedBy(Arc::new(sym("}")))])))
+}
 /// `structInstField := ppGroup <| leading_parser structInstLVal >>
-/// optional (many (checkColGt >> structInstFieldBinder) >>
-/// optTypeForStructInst >> structInstFieldDeclParser)`.
-/// `structInstFieldBinder`/`optTypeForStructInst` (`{ f (x) := e }`
-/// abbreviation-with-binders / `{ f := e : T }` inline type override)
-/// aren't transcribed — no fixture uses either; left as real, always-
-/// empty slots inside the SAME optional as the (fixture-exercised)
-/// field-decl parse, matching how the oracle's own `optional(a >> b >>
-/// c)` fails/succeeds as ONE unit (if `structInstFieldDeclParser`
-/// itself succeeds — the part we DO port — the whole `optional` must
-/// succeed too, so those slots can't be dropped from the `Seq`).
+/// optional (many (checkColGt >> ppSpace >> structInstFieldBinder) >>
+/// optTypeForStructInst >> ppDedent structInstFieldDeclParser)`
+/// (`Term/Basic.lean:293-294`) — Task 10: `structInstFieldBinder`/
+/// `optTypeForStructInst` are now real (a prior version left both
+/// always-empty, "no fixture uses either"; `Types.lean`'s `instance ...
+/// where mark u := u` now does — the field-decl-with-binder
+/// abbreviation form). Confirmed against a fresh oracle dump (task-10
+/// report): `mark u := u`'s field is `structInstField{structInstLVal{
+/// mark} null{ null{u} null{} structInstFieldDef{":=", null{}, u} }}` —
+/// exactly `many(binder)`'s null wrapping ONE bare-ident binder, then
+/// `optTypeForStructInst`'s empty null, then the field-decl recursion.
 fn struct_inst_field(b: &mut SnapshotBuilder) -> Prim {
     let lval = struct_inst_lval(b);
+    let binder = struct_inst_field_binder(b);
+    let opt_ty = opt_type_for_struct_inst(b);
     let k = b.kind("Lean.Parser.Term.structInstField");
     nd(
         k,
         seq([
             lval,
-            opt(seq([
-                many(never()),
-                opt(never()),
-                cat("structInstFieldDecl", 0),
-            ])),
+            opt(seq([many(binder), opt_ty, cat("structInstFieldDecl", 0)])),
         ]),
     )
 }
-fn struct_inst_fields(b: &mut SnapshotBuilder) -> Prim {
+/// `Term.structInstFields (p : Parser) := node structInstFields p` —
+/// parameterized by BOTH the item's own separator (Task 9: `Term.
+/// structInst`'s literal `{ a := x, b := y }` uses `sepByIndent
+/// structInstField ", " ..`) AND, since Task 10, the CALLER's separator
+/// (`Command.whereStructInst`'s `where a := x; b := y` uses `sepByIndent
+/// structInstField "; " ..` instead) — the same underlying `node`
+/// wrapper, only the separator differs per call site.
+pub(super) fn struct_inst_fields(b: &mut SnapshotBuilder, sep: &str) -> Prim {
     let field = struct_inst_field(b);
     let k = b.kind("Lean.Parser.Term.structInstFields");
     // FIXED (M3a Task 9, was a KNOWN DIVERGENCE per the task-8 report's
@@ -640,7 +673,7 @@ fn struct_inst_fields(b: &mut SnapshotBuilder) -> Prim {
     // interleave `structInstField, null{}, structInstField` — exactly
     // what `sep_by_indent` now produces (see its regression test in
     // parse.rs). Covered by `StructMultiLine.lean` (this task's fixture).
-    nd(k, sep_by_indent(field, ","))
+    nd(k, sep_by_indent(field, sep))
 }
 fn opt_ellipsis(b: &mut SnapshotBuilder) -> Prim {
     // optEllipsis := leading_parser optional " ..".
@@ -655,7 +688,7 @@ fn register_struct_inst(b: &mut SnapshotBuilder) {
     // termParser ", " >> " with ")) >> structInstFields (..) >>
     // optEllipsis >> optional (" : " >> termParser) >> " }".
     let with_terms = opt(atomic(seq([sep_by1(cat("term", 0), ","), sym("with")])));
-    let fields = struct_inst_fields(b);
+    let fields = struct_inst_fields(b, ",");
     let ellipsis = opt_ellipsis(b);
     b.leading2(
         "term",
@@ -944,18 +977,55 @@ fn register_let_family_siblings(b: &mut SnapshotBuilder) {
 /// `KindInterner::intern` is idempotent) with the identical two-empty-
 /// optional shape (`terminationBy?`/`decreasingBy` aren't transcribed
 /// either — no fixture uses `let rec ... termination_by ...`).
-fn let_rec_decl(b: &mut SnapshotBuilder) -> Prim {
+pub(super) fn let_rec_decl(b: &mut SnapshotBuilder) -> Prim {
     let decl = let_decl(b);
-    let suffix_k = b.kind("Lean.Parser.Termination.suffix");
-    let suffix = nd(suffix_k, seq([opt(never()), opt(never())]));
+    let suffix = super::command::termination_suffix(b);
     let k = b.kind("Lean.Parser.Term.letRecDecl");
-    nd(k, seq([opt(never()), opt(never()), decl, suffix]))
+    // Task 10: `optional Command.docComment >> optional «attributes»`
+    // are now real (`command::doc_comment`/`attr::attributes` didn't
+    // exist yet when this was first ported — see those fns' own doc
+    // comments) — no fixture needs either on a `let rec`/`where`
+    // binding, but wiring the real productions costs nothing once they
+    // exist, and is more faithful than an unconditionally-empty slot.
+    let doc = super::command::doc_comment(b);
+    let attrs = super::attr::attributes(b);
+    nd(k, seq([opt(doc), opt(attrs), decl, suffix]))
 }
 /// `letRecDecls := leading_parser sepBy1 letRecDecl ", "`.
 pub(super) fn let_rec_decls(b: &mut SnapshotBuilder) -> Prim {
     let decl = let_rec_decl(b);
     let k = b.kind("Lean.Parser.Term.letRecDecls");
     nd(k, sep_by1(decl, ","))
+}
+
+/// `whereDecls := ppDedent ppLine >> "where" >> sepByIndent (ppGroup
+/// letRecDecl) "; " (allowTrailingSep := true) >> optional whereFinally`
+/// (`Term.lean:740-741`) — M3a Task 10 (`command_decl.rs`'s
+/// `declValSimple`/`declValEqns` and this file's own `let_rec_decl`'s
+/// `whereFinally` slot? no — `letRecDecl` has no `whereDecls` of its
+/// own; this is `declValSimple`'s trailing `optional Term.whereDecls`
+/// and `matchAltsWhereDecls`' own `optional whereDecls`, below).
+/// `ppGroup` is pretty-print-only (confirmed no extra node, same as
+/// `Term.attrInstance`'s own `ppGroup`). `whereFinally` (the `finally |
+/// name => tacticSeq` subsection) isn't transcribed — no fixture uses
+/// it; a real, always-empty optional slot.
+pub(super) fn where_decls(b: &mut SnapshotBuilder) -> Prim {
+    let decl = let_rec_decl(b);
+    let k = b.kind("Lean.Parser.Term.whereDecls");
+    nd(
+        k,
+        seq([sym("where"), sep_by_indent(decl, ";"), opt(never())]),
+    )
+}
+/// `matchAltsWhereDecls := matchAlts >> Termination.suffix >> optional
+/// whereDecls` (`Term.lean:744-745`) — `declValEqns`'s whole body
+/// (`command_decl.rs`).
+pub(super) fn match_alts_where_decls(b: &mut SnapshotBuilder) -> Prim {
+    let alts = match_alts(b, cat("term", 0));
+    let suffix = super::command::termination_suffix(b);
+    let wd = where_decls(b);
+    let k = b.kind("Lean.Parser.Term.matchAltsWhereDecls");
+    nd(k, seq([alts, suffix, opt(wd)]))
 }
 /// `«letrec» := leading_parser:leadPrec withPosition (group ("let " >>
 /// nonReservedSymbol "rec ") >> letRecDecls) >> optSemicolon termParser`
@@ -990,6 +1060,44 @@ fn register_letrec(b: &mut SnapshotBuilder) {
 // ================================================================
 // depArrow / forall's sibling, arrow, app/proj/completion/explicitUniv.
 // ================================================================
+
+/// `Term.«open» := leading_parser:leadPrec "open" >> Command.openDecl >>
+/// withOpenDecl (" in " >> termParser)` (`Command.lean:1018-1019`) —
+/// term-scoped `open Foo in <term>`. One of the M3a Task 9-review's 4
+/// "wrapper rows owned by nobody in writing" (task-10 brief) — DISTINCT
+/// kind from the command-category `«open»` (`command_open.rs`) despite
+/// sharing a name and the same `Command.openDecl` sub-grammar (re-
+/// exported from `command.rs` for exactly this reuse). `withOpenDecl`
+/// threads scope-resolution state through elaboration only — zero tree
+/// contribution (same as the command-category `«open»`'s own
+/// `withPosition`, which also isn't a real tree node).
+fn register_open_in_term(b: &mut SnapshotBuilder) {
+    let decl = super::command::open_decl(b);
+    b.leading2(
+        "term",
+        "Lean.Parser.Term.open",
+        LEAD_PREC,
+        seq([sym("open"), decl, sym("in"), cat("term", 0)]),
+    );
+}
+/// `Term.«set_option» := leading_parser:leadPrec "set_option " >>
+/// identWithPartialTrailingDot >> ppSpace >> Command.optionValue >> "
+/// in " >> termParser` (`Command.lean:1025-1026`) — term-scoped
+/// `set_option opt val in <term>`; the other Task 9-review wrapper row.
+fn register_set_option_in_term(b: &mut SnapshotBuilder) {
+    b.leading2(
+        "term",
+        "Lean.Parser.Term.set_option",
+        LEAD_PREC,
+        seq([
+            sym("set_option"),
+            super::command::ident_with_partial_trailing_dot(),
+            super::command::option_value(),
+            sym("in"),
+            cat("term", 0),
+        ]),
+    );
+}
 
 fn register_dep_arrow(b: &mut SnapshotBuilder) {
     // depArrow := leading_parser:25 depArrowPrefix >> termParser.
@@ -1138,6 +1246,8 @@ pub fn register(b: &mut SnapshotBuilder) {
     register_dep_arrow(b);
     register_arrow_app_proj(b);
     register_by_tactic(b);
+    register_open_in_term(b);
+    register_set_option_in_term(b);
     term_app::register(b);
     term_pragma::register(b);
 }

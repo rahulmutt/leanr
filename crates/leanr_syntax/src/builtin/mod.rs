@@ -3,6 +3,7 @@
 //! set, per docs/superpowers/specs/2026-07-13-m3a-builtin-surface.md.
 //! Kind names MUST match Lean's byte-for-byte (oracle equality).
 
+pub mod attr;
 pub mod command;
 pub mod do_notation;
 pub mod level;
@@ -35,10 +36,18 @@ pub fn snapshot() -> GrammarSnapshot {
     // 2 rows: `structInstFieldDef`/`structInstFieldEqns`) — registered
     // here alongside the others, populated by `term::register`.
     b.category("structInstFieldDecl");
+    // `attr`/`prio` categories (surface table's own `attr` category, 12
+    // rows, + the `prio` misc singleton) — M3a Task 10: declModifiers'
+    // `@[attr1, attr2]` slot and the `attribute` command both recurse
+    // into `attr`; `Attr.simple`/`«instance»`/`default_instance`'s own
+    // optional priority argument recurses into `prio`.
+    b.category("attr");
+    b.category("prio");
     command::register(&mut b);
     level::register(&mut b);
     tactic::register(&mut b);
     term::register(&mut b);
     do_notation::register(&mut b);
+    attr::register(&mut b);
     b.finish()
 }

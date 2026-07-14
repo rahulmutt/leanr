@@ -697,6 +697,7 @@ impl<'a> Ps<'a> {
                 });
                 Ok(())
             }
+            Prim::DocCommentBody => self.doc_comment_body(),
             Prim::CheckPrec(n) => {
                 // ORACLE-PORT `checkPrecFn` (Basic.lean): succeeds iff
                 // `c.prec <= prec` — i.e. the surrounding right-binding
@@ -854,6 +855,48 @@ impl<'a> Ps<'a> {
         } else {
             self.restore(&sp);
             Err(self.fail_expecting(kind_name, at))
+        }
+    }
+
+    /// `Prim::DocCommentBody` — ORACLE-PORT `commentBody`'s `rawFn
+    /// (finishCommentBlock (pushMissingOnError := true) 1)` (see the
+    /// `Prim` variant's own doc comment for the full citation + a fresh
+    /// oracle dump's exact span numbers). `peek_significant` performs the
+    /// SAME leading-trivia skip every other leaf token gets (the oracle's
+    /// own `>>` sequencing between `"/--"` and `commentBody` does this
+    /// implicitly); the doc-comment text itself is then a raw,
+    /// non-tokenizing scan (never calls `next_token` again — the body can
+    /// contain arbitrary text, including sequences that wouldn't
+    /// otherwise lex as valid Lean tokens) up through the matching,
+    /// nesting-aware `-/`. A bare `emit_token` (no `start`/`finish`
+    /// wrap) — `commentBody` is a plain `Parser`, not a `leading_parser`,
+    /// so it contributes ONE leaf, never a node of its own (same
+    /// "unwrapped leaf" shape as `Ident`/`Prim::FieldIdx`'s inner digits).
+    fn doc_comment_body(&mut self) -> PResult {
+        let (_, at) = self.peek_significant();
+        match crate::lex::doc_comment_body_end(&self.src[at..]) {
+            Some(len) => {
+                self.emit_token(KIND_ATOM, len as u32);
+                Ok(())
+            }
+            None => {
+                // Unterminated doc comment: never hang/panic — consume
+                // to EOF (matching `finishCommentBlock`'s own degraded
+                // "ran off the end" fallback) and record a diagnostic
+                // instead of failing the whole parse, this crate's
+                // established "parse errors are values" architecture
+                // (same E0303 code `block_comment_end`'s own unterminated
+                // case already uses for the analogous plain-comment
+                // case).
+                let len = self.src.len() - at;
+                self.errors.push(ParseError {
+                    code: "E0303",
+                    span: (at as u32, self.src.len() as u32),
+                    msg: "unterminated comment".to_string(),
+                });
+                self.emit_token(KIND_ATOM, len as u32);
+                Ok(())
+            }
         }
     }
 

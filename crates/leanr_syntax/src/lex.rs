@@ -337,12 +337,19 @@ pub fn next_token(src: &str, pos: usize, table: &TokenTable) -> (Token, Option<L
     tok(TokenKind::ErrorTok, c.len_utf8())
 }
 
-/// Byte offset just past the matching `-/`, honoring nesting.
-fn block_comment_end(rest: &str) -> Option<usize> {
-    debug_assert!(rest.starts_with("/-"));
+/// Byte offset just past the matching `-/`, honoring nesting. Shared by
+/// `block_comment_end` (nested `/- .. -/` trivia, starting depth 1 right
+/// after its own opening `/-`) and `doc_comment_body_end` (M3a Task 10 —
+/// `Prim::DocCommentBody`'s raw scan, starting depth 1 at the FIRST byte
+/// of the comment body, since the opening `/--`/`/-!` was already
+/// consumed as its own `Symbol` token by the caller — ORACLE-PORT
+/// `finishCommentBlock`, which both `commentBody`'s `rawFn` and the
+/// ordinary block-comment tokenizer path ultimately share in the real
+/// toolchain).
+fn comment_scan_end(rest: &str, start: usize) -> Option<usize> {
     let bytes = rest.as_bytes();
     let mut depth = 1usize;
-    let mut i = 2;
+    let mut i = start;
     while i < bytes.len() {
         if bytes[i..].starts_with(b"/-") {
             depth += 1;
@@ -362,6 +369,23 @@ fn block_comment_end(rest: &str) -> Option<usize> {
         }
     }
     None
+}
+
+fn block_comment_end(rest: &str) -> Option<usize> {
+    debug_assert!(rest.starts_with("/-"));
+    comment_scan_end(rest, 2)
+}
+
+/// Byte offset just past the matching `-/` for a doc-comment BODY scan —
+/// `rest` starts right after `docComment`'s `"/--"` atom (and its own
+/// ordinary leading-trivia skip), so unlike `block_comment_end` there is
+/// no `/-` prefix to skip first (`start = 0`); nesting depth still
+/// starts at 1 (we're already one level deep, inside the doc comment
+/// itself). `None` on an unterminated comment — the caller (`Prim::
+/// DocCommentBody`'s interpreter arm) must still degrade to a
+/// consume-to-EOF diagnostic rather than hang or panic.
+pub(crate) fn doc_comment_body_end(rest: &str) -> Option<usize> {
+    comment_scan_end(rest, 0)
 }
 
 type LexFail = (usize, LexError);

@@ -25,7 +25,7 @@ use std::sync::Arc;
 // ================================================================
 
 /// `leftArrow := unicodeSymbol "← " "<- "` (Do.lean:23).
-fn left_arrow() -> Prim {
+pub(super) fn left_arrow() -> Prim {
     or_else([sym("←"), sym("<-")])
 }
 

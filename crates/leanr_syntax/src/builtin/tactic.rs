@@ -11,13 +11,18 @@
 //! `«match»`/`introMatch`/`nestedTactic`, not tactic breadth (spec's own
 //! scope line).
 //!
-//! **Deferred, with reason**: `Tactic.«open»`/`Tactic.«set_option»`
+//! **`Tactic.«open»`/`Tactic.«set_option»`, now real (M3a Task 10)**:
 //! (`Command.lean:1032,1037` — `open Foo in <tactic>`/`set_option .. in
-//! <tactic>`) need the SAME `... in <command|term|tactic>` wrapper
-//! machinery `term.rs`'s own `Term.«open»`/`Term.«set_option»` rows
-//! defer for (Task 10's real command dispatcher); the task-9 brief's
-//! own enumeration of "the builtin tactic set" names only `unknown`/
-//! `nestedTactic`/`«match»`/`introMatch` — these two aren't in it.
+//! <tactic>`) share the same `Command.openDecl`/`Command.optionValue`
+//! sub-grammar the command-category `«open»`/`«set_option»` use
+//! (re-exported from `command.rs`) — 2 of the 4 "wrapper rows owned by
+//! nobody in writing" Task 9's review flagged (the other 2,
+//! `Term.«open»`/`Term.«set_option»`, register into the `term`
+//! category, `term.rs`). Previously deferred pending Task 10's command
+//! dispatcher (see this file's original module doc comment); the
+//! task-9 brief's own enumeration of "the builtin tactic set" as just
+//! `unknown`/`nestedTactic`/`«match»`/`introMatch` predates this task's
+//! discovery that these two belong here too.
 //!
 //! **`«unknown»`'s `errorAtSavedPos`, now modeled (Task 9 review finding
 //! 2 fix)**: the oracle's `errorAtSavedPos "unknown tactic" true`
@@ -212,6 +217,33 @@ pub fn register(b: &mut SnapshotBuilder) {
         "Lean.Parser.Tactic.introMatch",
         MAX_PREC,
         seq([Prim::NonReservedSymbol("intro".into()), alts]),
+    );
+
+    // Tactic.«open»/Tactic.«set_option» (M3a Task 10 — the two of the
+    // Task 9-review's 4 "wrapper rows owned by nobody in writing" that
+    // land in the `tactic` category; `Command.lean:1032-1038`, DISTINCT
+    // kinds from both the command-category and term-category `«open»`/
+    // `«set_option»` despite sharing names and the same `Command.
+    // openDecl`/`Command.optionValue` sub-grammar (re-exported from
+    // `command.rs`, same reuse `term.rs`'s own copies use). Previously
+    // deferred (see this file's own module doc comment, written before
+    // Task 10's command dispatcher existed) — now real.
+    let decl = super::command::open_decl(b);
+    let seq_p = tactic_seq(b);
+    b.leading2(
+        "tactic",
+        "Lean.Parser.Tactic.open",
+        LEAD_PREC,
+        seq([sym("open"), decl, sym("in"), seq_p]),
+    );
+    let value = super::command::option_value();
+    let ident_dot = super::command::ident_with_partial_trailing_dot();
+    let seq_p = tactic_seq(b);
+    b.leading2(
+        "tactic",
+        "Lean.Parser.Tactic.set_option",
+        LEAD_PREC,
+        seq([sym("set_option"), ident_dot, value, sym("in"), seq_p]),
     );
 }
 

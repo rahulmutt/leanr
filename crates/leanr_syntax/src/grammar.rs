@@ -174,6 +174,30 @@ pub enum Prim {
     /// which of `errorAtSavedPos`'s oracle semantics this reproduces
     /// and which it deliberately doesn't (Task 9 review finding 2).
     UnknownTacticIdent,
+    /// `Lean.Parser.Command.docComment`'s body. ORACLE-PORT: `commentBody`
+    /// is defined as a raw-scanning `Parser` value, `rawFn (finishCommentBlock
+    /// (pushMissingOnError := true) (depth := one)) (trailingWs := true)`
+    /// (Term.lean:69-70) — a raw, nesting-aware scan from the current
+    /// position (AFTER the ordinary leading-trivia skip every `andthen`
+    /// sequencing step performs — same mechanism as any other leaf token,
+    /// see the interpreter arm) through the matching `-/`, INCLUSIVE,
+    /// emitted as one `KIND_ATOM` leaf (never a further node-wrap of its
+    /// own — same "leaf, not `leading_parser`" shape as `Ident`/`NumLit`).
+    ///
+    /// Task 10 (M3a): `docComment` itself is `leading_parser ppDedent $
+    /// "/--" (then ppSpace, then ifVerso versoCommentBody commentBody,
+    /// then ppLine)` — `doc.verso` defaults false, so every fixture takes
+    /// the `commentBody`, never `versoCommentBody`, branch; `"/--"` is an
+    /// ordinary `Prim::Symbol`, this primitive is only ever the SECOND
+    /// child. Confirmed byte-for-byte against a fresh oracle dump of
+    /// `/-- A doc comment. -/` (task-10 report): the `docComment` node's
+    /// two children are `{"a":"/--","s":[9,12]}` then
+    /// `{"a":"A doc comment. -/","s":[13,30]}` — note the span GAP
+    /// (12→13): the space right after `/--` is the second atom's ordinary
+    /// leading-trivia skip (an emitted `Whitespace` trivia event), NOT
+    /// part of the comment-body atom's own span; the atom's text then
+    /// runs through and includes the closing `-/`.
+    DocCommentBody,
 }
 
 // Terse constructors — builtin/*.rs is written in these.
@@ -606,6 +630,9 @@ fn encode_prim(p: &Prim, snap: &GrammarSnapshot, h: &mut blake3::Hasher) {
         UnknownTacticIdent => {
             h.update(&[39]);
         }
+        DocCommentBody => {
+            h.update(&[40]);
+        }
     }
 }
 
@@ -899,6 +926,7 @@ fn walk_symbols(p: &Prim, f: &mut impl FnMut(&str)) {
         | EmitMissing
         | EmitEmptyIdent
         | RawChar(_)
-        | UnknownTacticIdent => {}
+        | UnknownTacticIdent
+        | DocCommentBody => {}
     }
 }
