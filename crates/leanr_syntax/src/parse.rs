@@ -843,8 +843,19 @@ impl<'a> Ps<'a> {
         self.prec = rbp;
         let r = (|| {
             // ---- leading: longest match over dispatched candidates --
-            let lhs_events = self.events.len();
+            // `lhs_events` is captured AFTER `peek_significant` so any
+            // leading trivia it scans (emitted directly into
+            // `self.events`) sits BEFORE this index — consistent with
+            // the no-wrap (bare) case, where that trivia is a sibling
+            // of the leading node rather than swallowed into it. A
+            // later trailing wrap retroactively opens `Event::Start` at
+            // `lhs_events`; capturing it here keeps the leading trivia
+            // OUTSIDE that wrap too, matching the bare case instead of
+            // diverging from it (e.g. `( a + b)`'s leading space before
+            // `a` must sit outside `add`, exactly as it sits outside
+            // the bare atom in `( a )`).
             let (t, at) = self.peek_significant();
+            let lhs_events = self.events.len();
             let text = &self.src[at..at + t.len as usize];
             let idxs = dispatch(cat, text, t.kind, true);
             let parsers: Vec<Prim> = idxs
@@ -894,6 +905,21 @@ impl<'a> Ps<'a> {
                     .collect();
                 let sp = self.save();
                 match self.longest_match(&sp, &bodies) {
+                    // ORACLE-PORT `trailingLoop` (Basic.lean:1943-1946):
+                    // "Discard non-consuming parse errors and break the
+                    // trailing loop instead, restoring `left`. This is
+                    // necessary for fallback parsers like `app` that
+                    // pretend to be always applicable." A winning
+                    // candidate that consumed no input (`w.end ==
+                    // sp.pos`) must NOT wrap `left` — wrapping would
+                    // requalify next iteration and loop forever (and
+                    // grow the event stream unboundedly) whenever a
+                    // trailing production's body can succeed
+                    // zero-width. `self.longest_match` already restored
+                    // to `sp` internally, so there is nothing of the
+                    // winner's to undo here — just stop, leaving the
+                    // existing lhs as the final result.
+                    Some(w) if w.end == sp.pos => break,
                     Some(w) => {
                         let idx = qualifying[w.idx];
                         let Prim::TrailingNode { kind, prec, .. } = &cat.trailing_parsers[idx]
@@ -1091,6 +1117,62 @@ mod tests {
             .expect("category call produced exactly one child node");
         let mut out = String::new();
         sexpr_node(&child, &tree.kinds, &mut out);
+        out
+    }
+
+    /// Trivia-VISIBLE variant of `sexpr_node`/`parse_cat` — Finding 2's
+    /// regression test needs to see exactly where whitespace events
+    /// land (inside vs. outside a trailing wrap), which the trivia-
+    /// stripping `sexpr_node` above can't distinguish. Every trivia
+    /// token (kind-agnostic — whitespace/line/block comment all render
+    /// the same) prints as the literal marker `<ws>` in tree position.
+    fn sexpr_node_with_trivia(n: &crate::tree::SyntaxNode, k: &KindInterner, out: &mut String) {
+        out.push('(');
+        out.push_str(k.name(n.kind()));
+        for el in n.children_with_tokens() {
+            match el {
+                rowan::NodeOrToken::Node(c) => {
+                    out.push(' ');
+                    sexpr_node_with_trivia(&c, k, out);
+                }
+                rowan::NodeOrToken::Token(t) => {
+                    use crate::kind::*;
+                    out.push(' ');
+                    if is_trivia(t.kind()) {
+                        out.push_str("<ws>");
+                    } else if t.kind() == KIND_IDENT {
+                        out.push_str(t.text());
+                    } else {
+                        out.push('\'');
+                        out.push_str(t.text());
+                        out.push('\'');
+                    }
+                }
+            }
+        }
+        out.push(')');
+    }
+
+    fn parse_cat_with_trivia(snap: &GrammarSnapshot, src: &str) -> String {
+        let name = snap
+            .categories
+            .keys()
+            .next()
+            .expect("test snapshot registers exactly one category")
+            .clone();
+        let mut ps = Ps::new(src, snap);
+        ps.start(KIND_NULL);
+        if ps.run(&Prim::Category { name, rbp: 0 }).is_err() {
+            ps.push_furthest_error();
+        }
+        ps.finish();
+        let (tree, _errors) = ps.finish_into_tree();
+        let root = tree.root();
+        let child = root
+            .first_child()
+            .expect("category call produced exactly one child node");
+        let mut out = String::new();
+        sexpr_node_with_trivia(&child, &tree.kinds, &mut out);
         out
     }
 
@@ -1395,5 +1477,115 @@ mod tests {
             expected = format!("(paren '(' {expected} ')')");
         }
         assert_eq!(parse_cat(&snap, &shallow), expected);
+    }
+
+    // ---- Task 6 review fixes ------------------------------------------
+
+    #[test]
+    fn trailing_loop_breaks_on_zero_progress_instead_of_looping_forever() {
+        // ORACLE-PORT `trailingLoop` (Basic.lean:1943-1946): "Discard
+        // non-consuming parse errors and break the trailing loop
+        // instead, restoring `left`. This is necessary for fallback
+        // parsers like `app` that pretend to be always applicable."
+        // A toy trailing production whose body is `opt(sym("!"))` can
+        // WIN the trailing longest-match with zero tokens consumed
+        // (the `!` just isn't there — `Optional` always succeeds).
+        // Without the zero-progress guard this wraps `left`, loops
+        // back to the top of the trailing loop, qualifies again
+        // (nothing changed), and wraps forever — infinite loop, plus
+        // unbounded event-stream growth. This test would hang forever
+        // pre-fix; post-fix it terminates and leaves the zero-width
+        // candidate unapplied, with `y` unconsumed.
+        let mut b = SnapshotBuilder::new();
+        b.category("c");
+        b.leading2("c", "lit", MAX_PREC, Prim::Ident);
+        b.trailing2("c", "wrap", 0, 0, opt(sym("!")));
+        let snap = b.finish();
+
+        // Zero-progress winner: discarded, `x` stands as-is.
+        assert_eq!(parse_cat(&snap, "x y"), "(lit x)");
+        // Genuine progress: the same production DOES wrap when its
+        // body actually consumes something.
+        assert_eq!(parse_cat(&snap, "x !"), "(wrap (lit x) (null '!'))");
+    }
+
+    #[test]
+    fn leading_trivia_stays_outside_a_trailing_wrap_like_it_does_in_the_bare_case() {
+        // Review finding 2: `lhs_events` (the retroactive `Start`
+        // insertion point for a Pratt trailing wrap) used to be
+        // captured BEFORE the leading `peek_significant()`, so the
+        // first token's leading trivia (emitted BY that peek) landed
+        // after the capture point — a later trailing wrap's `Start`
+        // insert at `lhs_events` would then pull that trivia INSIDE
+        // the wrap, even though the bare (no-wrap) case leaves the
+        // very same trivia OUTSIDE the leading node as a sibling.
+        // Fixed by capturing `lhs_events` AFTER the leading peek, so
+        // leading trivia always sits outside any later wrap — same as
+        // the bare case.
+        let mut b = SnapshotBuilder::new();
+        b.category("c");
+        b.leading2(
+            "c",
+            "paren",
+            MAX_PREC,
+            seq([sym("("), cat("c", 0), sym(")")]),
+        );
+        b.leading2("c", "lit", MAX_PREC, Prim::Ident);
+        b.trailing2("c", "add", 65, 65, seq([sym("+"), cat("c", 66)]));
+        let snap = b.finish();
+
+        // Bare case (no trailing wrap): the space after '(' sits
+        // outside `(lit a)`, as a sibling.
+        assert_eq!(
+            parse_cat_with_trivia(&snap, "( a )"),
+            "(paren '(' <ws> (lit a) <ws> ')')"
+        );
+        // Trailing-wrap case: the SAME leading space must land in the
+        // SAME place — outside `(add ...)`, not swallowed as its
+        // first (misattributed) child.
+        assert_eq!(
+            parse_cat_with_trivia(&snap, "( a + b)"),
+            "(paren '(' <ws> (add (lit a) <ws> '+' <ws> (lit b)) ')')"
+        );
+    }
+
+    #[test]
+    fn non_reserved_symbol_does_not_reserve_its_token_snapshot_wide() {
+        // Review finding 3: `nonReservedSymbolInfo` (Basic.lean:
+        // 1143-1149) leaves `collectTokens` at `ParserInfo`'s default
+        // no-op (Types.lean:499-500) — unlike `symbolInfo`
+        // (Basic.lean:1105-1108), which explicitly registers its
+        // token. So a `NonReservedSymbol`'s text must keep lexing as
+        // plain `Ident` everywhere EXCEPT where the combinator itself
+        // is positioned to match it contextually (mirrors real Lean
+        // patterns like `atomic ("(" >> nonReservedSymbol "priority")
+        // >> ...>`, Command.lean:65, where the enclosing symbol
+        // anchors dispatch and the contextual keyword never touches
+        // the token table).
+        let mut b = SnapshotBuilder::new();
+        b.category("c");
+        b.leading2(
+            "c",
+            "kw",
+            MAX_PREC,
+            seq([
+                sym("("),
+                Prim::NonReservedSymbol("dependent".to_string()),
+                sym(")"),
+            ]),
+        );
+        b.leading2("c", "lit", MAX_PREC, Prim::Ident);
+        let snap = b.finish();
+
+        // Contextually, inside the parens, "dependent" matches the
+        // `NonReservedSymbol` combinator.
+        assert_eq!(
+            parse_cat(&snap, "( dependent )"),
+            "(kw '(' 'dependent' ')')"
+        );
+        // In an unrelated position (bare, no parens), the very same
+        // text still lexes and parses as a plain identifier — proving
+        // it was never reserved snapshot-wide.
+        assert_eq!(parse_cat(&snap, "dependent"), "(lit dependent)");
     }
 }

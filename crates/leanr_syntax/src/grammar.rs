@@ -599,16 +599,30 @@ fn is_transparent_for_first(p: &Prim) -> bool {
     )
 }
 
-/// Recursive visitor over every `Symbol`/`NonReservedSymbol` literal
-/// and `SepBy`/`SepBy1` separator string reachable from `p` — these
-/// are exactly the atoms Lean's `syntax` elaboration registers as
-/// tokens (`collectTokens`), so `SnapshotBuilder` harvests the same
-/// set into its `TokenTable` when a leading/trailing parser is
-/// registered.
+/// Recursive visitor over every `Symbol` literal and `SepBy`/`SepBy1`
+/// separator string reachable from `p` — these are exactly the atoms
+/// Lean's `syntax` elaboration registers as tokens (`collectTokens`),
+/// so `SnapshotBuilder` harvests the same set into its `TokenTable`
+/// when a leading/trailing parser is registered.
+///
+/// `NonReservedSymbol` is deliberately NOT harvested here — ORACLE-PORT
+/// `nonReservedSymbolInfo` (Basic.lean:1143-1149) leaves `collectTokens`
+/// at `ParserInfo`'s default (`id`, i.e. a no-op; Types.lean:499-500),
+/// unlike `symbolInfo` (Basic.lean:1105-1108), which explicitly sets
+/// `collectTokens := fun tks => sym :: tks`. The doc comment directly
+/// above `nonReservedSymbolFnAux` spells out why: "registering it as a
+/// token in a Term Syntax would not break the universe Parser" — e.g.
+/// `max`/`imax` must still lex as plain `Ident` outside a `level`
+/// category. Registering it here (as a prior version of this function
+/// did) would make its text lex as `Atom` snapshot-wide, defeating
+/// every contextual keyword. The `NonReservedSymbol` interpreter arm
+/// (`expect_atom(s, true)` in parse.rs) matches its text against
+/// `Ident` tokens directly, so it needs no table entry to work.
 fn walk_symbols(p: &Prim, f: &mut impl FnMut(&str)) {
     use Prim::*;
     match p {
-        Symbol(s) | NonReservedSymbol(s) => f(s),
+        Symbol(s) => f(s),
+        NonReservedSymbol(_) => {}
         Seq(ps) | OrElse(ps) => {
             for q in ps {
                 walk_symbols(q, f);
