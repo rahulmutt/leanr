@@ -79,16 +79,19 @@ pub fn register(b: &mut SnapshotBuilder) {
     b.leading_raw("level", Prim::NumLit);
     // ident := checkPrec maxPrec >> Parser.ident — likewise no node wrap.
     b.leading_raw("level", Prim::Ident);
-    // addLit: trailing_parser:65 " + " >> numLit — a single `:65`
-    // annotation sets BOTH prec and lhsPrec to 65 (ORACLE-PORT
-    // `trailingNode`: `checkPrec prec >> checkLhsPrec lhsPrec >> ...`;
-    // ports elsewhere in this task, e.g. `Term.subst`'s bare `:75`,
-    // follow the same single-number-sets-both convention).
+    // addLit: trailing_parser:65 " + " >> numLit — the single `:65`
+    // annotation supplies ONLY `prec`; `lhsPrec` is omitted and defaults
+    // to `0`, NOT to 65 — ORACLE-PORT `BuiltinNotation.lean:194-197`
+    // (`elabTParserMacroAux`: `lhsPrec?.getD <| quote 0`). So 65/0, not
+    // 65/65 (a mistake this port previously made here and at several
+    // `term` sites — see `term.rs`'s `completion`/`proj`/`explicitUniv`
+    // and `term_app.rs`'s `namedPattern`/`pipeProj`/`pipeCompletion`/
+    // `subst`, all fixed for the same reason).
     b.trailing2(
         "level",
         "Lean.Parser.Level.addLit",
         65,
-        65,
+        0,
         seq([sym("+"), Prim::NumLit]),
     );
 }

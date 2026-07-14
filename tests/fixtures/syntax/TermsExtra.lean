@@ -24,6 +24,16 @@ def namedPatternTerm := match x with
 def pipeProjTerm := x |>.foo
 def pipeCompletionTerm := x |>.
 
+-- Chained forms (review finding 1): `pipeProj`/`subst` are singly-
+-- annotated `trailing_parser`s (only `prec` given) whose OMITTED
+-- `lhsPrec` defaults to 0 (ORACLE-PORT `BuiltinNotation.lean:194-197`),
+-- not to their own `prec` — so a further `proj`/`subst` (both requiring
+-- `lhs_prec >= 0`, always true) must still apply on top of a `pipeProj`
+-- result. Previously mis-registered with `lhsPrec` equal to `pipeProj`'s
+-- own `prec` (MIN_PREC), which wrongly gated these out.
+def pipeProjThenProjTerm := x |>.foo.1
+def pipeProjThenSubstTerm := x |>.foo ▸ y
+
 -- subst.
 def substTerm := h ▸ x
 

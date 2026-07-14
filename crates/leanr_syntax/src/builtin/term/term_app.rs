@@ -36,7 +36,11 @@ fn register_dot_ident(b: &mut SnapshotBuilder) {
 /// `namedPattern : TrailingParser := trailing_parser checkStackTop
 /// isIdent .. >> checkNoWsBefore "no space before '@'" >> "@" >>
 /// optional (atomic (ident >> ":")) >> termParser maxPrec` (bare
-/// `trailing_parser`, so MAX_PREC/MAX_PREC like `proj`/`completion`).
+/// `trailing_parser`, both annotations omitted — ORACLE-PORT
+/// `BuiltinNotation.lean:194-197` (`elabTParserMacroAux`): omitted
+/// `prec` defaults to `maxPrec`, omitted `lhsPrec` defaults to `0` (NOT
+/// to `prec`) — so MAX_PREC/0, like `proj`/`completion`/`explicitUniv`
+/// (`term.rs`).
 /// `checkStackTop` (verifying the already-parsed lhs is a plain ident)
 /// has no `Prim` counterpart — same documented skip `explicitUniv`
 /// already uses (Task 8 wave 1) for its own `checkStackTop`. Confirmed
@@ -49,7 +53,7 @@ fn register_named_pattern(b: &mut SnapshotBuilder) {
         "term",
         "Lean.Parser.Term.namedPattern",
         MAX_PREC,
-        MAX_PREC,
+        0,
         seq([
             Prim::CheckNoWsBefore,
             sym("@"),
@@ -61,20 +65,22 @@ fn register_named_pattern(b: &mut SnapshotBuilder) {
 
 /// `pipeProj := trailing_parser:minPrec " |>." >> checkNoWsBefore >>
 /// (fieldIdx <|> rawIdent) >> optional explicitUnivSuffix >> many
-/// argument` — `:minPrec` sets BOTH prec and lhsPrec to `minPrec` (the
-/// same single-number convention `level.rs`'s `addLit:65` and `subst`
-/// below use). Shares `explicit_univ_suffix`/`argument` verbatim with
-/// `explicitUniv`/`app` (`term.rs`, hoisted this wave for exactly this
-/// reuse). Confirmed against a fresh dump of `x |>.foo`: atom `"|>."`
-/// (NOT three separate tokens), then ident "foo", then two empty
-/// `null`s (the unexercised `optional explicitUnivSuffix`/`many
+/// argument` — `:minPrec` supplies ONLY the `prec` annotation; the
+/// second (`lhsPrec`) slot is omitted and defaults to `0`, NOT to
+/// `minPrec` — ORACLE-PORT `BuiltinNotation.lean:194-197`
+/// (`elabTParserMacroAux`: `lhsPrec?.getD <| quote 0`). So MIN_PREC/0,
+/// not MIN_PREC/MIN_PREC. Shares `explicit_univ_suffix`/`argument`
+/// verbatim with `explicitUniv`/`app` (`term.rs`, hoisted this wave for
+/// exactly this reuse). Confirmed against a fresh dump of `x |>.foo`:
+/// atom `"|>."` (NOT three separate tokens), then ident "foo", then two
+/// empty `null`s (the unexercised `optional explicitUnivSuffix`/`many
 /// argument` slots).
 fn register_pipe_proj(b: &mut SnapshotBuilder) {
     b.trailing2(
         "term",
         "Lean.Parser.Term.pipeProj",
         MIN_PREC,
-        MIN_PREC,
+        0,
         seq([
             sym("|>."),
             Prim::CheckNoWsBefore,
@@ -87,27 +93,31 @@ fn register_pipe_proj(b: &mut SnapshotBuilder) {
     // same token as `pipeProj`'s prefix — ordinary longest-match tells
     // them apart, same mechanism as `cdot`/`dotIdent`'s shared "." lead:
     // `x |>.foo` lets `pipeProj` consume further and win; `x |>.` alone
-    // leaves `pipeCompletion` the longest match). Confirmed against a
-    // fresh dump of `x |>.`.
+    // leaves `pipeCompletion` the longest match). Only `prec` is
+    // supplied (`:minPrec`); `lhsPrec` is omitted and defaults to `0`
+    // (same oracle citation as `pipeProj` above) — MIN_PREC/0, not
+    // MIN_PREC/MIN_PREC. Confirmed against a fresh dump of `x |>.`.
     b.trailing2(
         "term",
         "Lean.Parser.Term.pipeCompletion",
         MIN_PREC,
-        MIN_PREC,
+        0,
         sym("|>."),
     );
 }
 
 /// `subst := trailing_parser:75 " ▸ " >> sepBy1 (termParser 75) " ▸ "`
-/// — `:75` sets both prec/lhsPrec to 75 (same convention as `addLit`).
-/// Confirmed against a fresh dump of `h ▸ x`: `Lean.Parser.Term.subst{
-/// "▸", null(sepBy1 [ident x]) }`.
+/// — `:75` supplies ONLY `prec`; `lhsPrec` is omitted and defaults to
+/// `0`, NOT to 75 — ORACLE-PORT `BuiltinNotation.lean:194-197`
+/// (`elabTParserMacroAux`: `lhsPrec?.getD <| quote 0`). So 75/0, not
+/// 75/75. Confirmed against a fresh dump of `h ▸ x`:
+/// `Lean.Parser.Term.subst{ "▸", null(sepBy1 [ident x]) }`.
 fn register_subst(b: &mut SnapshotBuilder) {
     b.trailing2(
         "term",
         "Lean.Parser.Term.subst",
         75,
-        75,
+        0,
         seq([sym("▸"), sep_by1(cat("term", 75), "▸")]),
     );
 }

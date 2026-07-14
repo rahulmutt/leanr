@@ -67,10 +67,20 @@ fn ident_with_partial_trailing_dot() -> Prim {
     ])
 }
 
-/// `optExprPrecedence := optional (atomic (":" >> termParser maxPrec))`
-/// — used by `«leading_parser»`/`«trailing_parser»` below.
+/// `optExprPrecedence := optional (atomic ":" >> termParser maxPrec)`
+/// (`Term.lean:388`) — `atomic` scopes over the `":"` token ALONE (the
+/// oracle's `>>` binds tighter than the outer `optional`'s argument, so
+/// it parses as `optional ((atomic ":") >> termParser maxPrec)`, NOT
+/// `optional (atomic (":" >> termParser maxPrec))`). This matters:
+/// scoping `atomic` over both would let backtracking swallow a partial
+/// `":" >> termParser maxPrec` failure silently past the `":"` itself;
+/// scoping it over `":"` alone means only the bare colon token is tried
+/// atomically, and once a `":"` is committed the following
+/// `termParser maxPrec` is required (a real parse failure there is NOT
+/// backtracked over). Used by `«leading_parser»`/`«trailing_parser»`
+/// below.
 fn opt_expr_precedence() -> Prim {
-    opt(atomic(seq([sym(":"), cat("term", MAX_PREC)])))
+    opt(seq([atomic(sym(":")), cat("term", MAX_PREC)]))
 }
 
 /// `matchExprPat := leading_parser optional (atomic (ident >> "@")) >>

@@ -948,23 +948,27 @@ fn register_arrow_app_proj(b: &mut SnapshotBuilder) {
         seq([or_else([sym("→"), sym("->")]), cat("term", 25)]),
     );
     // completion := trailing_parser checkNoWsBefore >> "." (editor-
-    // completion marker; MAX_PREC/MAX_PREC like `proj`, since bare
-    // `trailing_parser` with no annotation defaults both to MAX_PREC —
-    // matches `proj`'s own bare `trailing_parser`, immediately below).
+    // completion marker; bare `trailing_parser` with BOTH annotations
+    // omitted — ORACLE-PORT `BuiltinNotation.lean:194-197`
+    // (`elabTParserMacroAux`): an omitted `prec` defaults to
+    // `Parser.maxPrec`, but an omitted `lhsPrec` defaults to `0`, NOT to
+    // `prec` — so this is MAX_PREC/0, not MAX_PREC/MAX_PREC. Same for
+    // `proj`/`explicitUniv` immediately below.
     b.trailing2(
         "term",
         "Lean.Parser.Term.completion",
         MAX_PREC,
-        MAX_PREC,
+        0,
         seq([Prim::CheckNoWsBefore, sym(".")]),
     );
     // proj := trailing_parser checkNoWsBefore >> "." >> checkNoWsBefore
-    // >> (fieldIdx <|> rawIdent).
+    // >> (fieldIdx <|> rawIdent). Bare `trailing_parser`: MAX_PREC/0 (see
+    // `completion`'s comment above for the oracle citation).
     b.trailing2(
         "term",
         "Lean.Parser.Term.proj",
         MAX_PREC,
-        MAX_PREC,
+        0,
         seq([
             Prim::CheckNoWsBefore,
             sym("."),
@@ -973,16 +977,18 @@ fn register_arrow_app_proj(b: &mut SnapshotBuilder) {
         ]),
     );
     // explicitUniv := trailing_parser checkStackTop .. >>
-    // explicitUnivSuffix. `checkStackTop` (verifying the already-parsed
-    // lhs LOOKS like an identifier/dotIdent/proj) has no `Prim`
-    // counterpart and is a semantic-only guard (never mis-shapes the
-    // tree either way — worst case this fires where the oracle
-    // wouldn't, which no fixture exercises) — skipped.
+    // explicitUnivSuffix. Bare `trailing_parser`: MAX_PREC/0 (see
+    // `completion`'s comment above for the oracle citation).
+    // `checkStackTop` (verifying the already-parsed lhs LOOKS like an
+    // identifier/dotIdent/proj) has no `Prim` counterpart and is a
+    // semantic-only guard (never mis-shapes the tree either way — worst
+    // case this fires where the oracle wouldn't, which no fixture
+    // exercises) — skipped.
     b.trailing2(
         "term",
         "Lean.Parser.Term.explicitUniv",
         MAX_PREC,
-        MAX_PREC,
+        0,
         explicit_univ_suffix(),
     );
     // app := trailing_parser:leadPrec:maxPrec many1 argument. `argument

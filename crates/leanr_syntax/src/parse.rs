@@ -861,7 +861,16 @@ impl<'a> Ps<'a> {
     /// already visually separated by indentation; required when two
     /// share a line).
     fn sep_by_indent(&mut self, item: &Prim) -> PResult {
-        let (_, at) = self.peek_significant();
+        // Marker-establishing lookahead — same role as `WithPosition`'s
+        // own marker peek (Task 8 wave 2 review fix, see its doc
+        // comment): finding WHERE the marker sits doesn't need to
+        // consume anything, so this must be the READ-ONLY preview, not
+        // the committing `peek_significant` — otherwise a leaked
+        // trivia-skip here would be indistinguishable from real
+        // `consumed_since` progress to an enclosing `many`/`many1` if
+        // this call's own body later fails without independently
+        // consuming further.
+        let (_, at) = self.peek_significant_readonly();
         let lc = self.line_col(at);
         self.pos_stack.push(lc);
         self.start(KIND_NULL);
@@ -902,7 +911,24 @@ impl<'a> Ps<'a> {
             let coleq = self.check_col(|cur, saved| cur.1 == saved.1).is_ok();
             self.restore(&coleq_sp);
             if coleq {
-                let (_, next_at) = self.peek_significant();
+                // Pure implicit-separator lookahead — only decides
+                // whether to loop again, never itself consumes. Must be
+                // the READ-ONLY preview (Task 8 wave 2 review fix
+                // pattern, see `peek_significant_readonly`'s doc
+                // comment): the committing `peek_significant` would
+                // leak this trivia-skip as phantom consumption if the
+                // `contains('\n')` check below then fails and control
+                // falls through to `break 'outer Ok(())` with nothing
+                // further consumed. Losslessness is preserved either
+                // way: on the `continue 'outer` path the next
+                // iteration's `self.run(item)` re-peeks (committing)
+                // the SAME trivia span while dispatching the next
+                // item's leading token, emitting it exactly once; on
+                // the `break` path nothing between `before_sep` and
+                // `next_at` has been committed yet, so whatever runs
+                // after `sep_by_indent` returns is responsible for it,
+                // same as any other non-consuming stop.
+                let (_, next_at) = self.peek_significant_readonly();
                 if self.src[before_sep..next_at].contains('\n') {
                     after_sep = true;
                     continue 'outer;
@@ -1169,6 +1195,30 @@ impl<'a> Ps<'a> {
                 // not_leak_as_phantom_consumption` (this file's test
                 // module) — reproducing the shape `Term.pipeProj`'s
                 // `many argument` (`builtin/term/term_app.rs`) exposed.
+                //
+                // Intended side effect on node placement (NOT a
+                // regression): before this fix, this same lookahead
+                // committed the whitespace between a function and its
+                // first argument BEFORE `sp` below was captured, so that
+                // trivia ended up as a preceding sibling of the winning
+                // body's own generated events — still inside the
+                // eventual `Term.app` wrap (inserted retroactively at
+                // `lhs_events`, above), but OUTSIDE `many1(argument())`'s
+                // own null-node wrap (`many_impl`'s `self.start(KIND_NULL)`,
+                // which hadn't run yet). Now that this peek is read-only,
+                // `sp` is captured BEFORE the whitespace, so the winning
+                // body (`Term.app`'s `many1(argument())`) opens its null
+                // node first and the whitespace is only actually
+                // committed later — when the first argument's own
+                // leading dispatch peeks forward — landing it INSIDE
+                // that null node as its first child instead. Round-trip
+                // and canon (trivia-free) output are both blind to this
+                // shift; it is unrelated to (and does not conflict with)
+                // `leading_trivia_stays_outside_a_trailing_wrap_...`
+                // (this file's test module), which is about the LHS's
+                // OWN leading trivia staying outside a later trailing
+                // wrap, not about a trailing production's internal
+                // argument trivia.
                 let (t, at) = self.peek_significant_readonly();
                 if t.kind == TokenKind::Eof {
                     break;
@@ -1748,6 +1798,27 @@ mod tests {
         assert_eq!(parse_cat(&snap, "a\nb\nc"), "(seq (null a b c))");
         assert_eq!(parse_cat(&snap, "a; b; c"), "(seq (null a ';' b ';' c))");
         assert_eq!(parse_cat(&snap, "a; b;"), "(seq (null a ';' b ';'))");
+
+        // Review finding 2: `sep_by_indent`'s own marker-establishing
+        // peek (at this fn's own start) and its pure implicit-separator
+        // lookahead (the `if coleq { .. }` branch, deciding whether to
+        // treat a same-column next line as an implicit separator) used
+        // to call the COMMITTING `peek_significant` — the same hazard
+        // class already fixed elsewhere this wave (`check_col`/
+        // `had_ws_before_current`/`WithPosition`'s marker peek/the
+        // trailing loop's dispatch peek): latent today (nothing
+        // registers `SepByIndentSemicolon` in the real grammar yet), but
+        // squarely in Task 9's (`tacticSeq1Indented`) path. Switched
+        // both to `peek_significant_readonly`. Losslessness check with
+        // `parse_cat_with_trivia`: the trivia BETWEEN two implicitly-
+        // separated items (here, a comment plus surrounding whitespace)
+        // must land in the tree EXACTLY ONCE — committed by the second
+        // item's own leading token match, not by either of the
+        // now-read-only lookaheads — never dropped, never duplicated.
+        assert_eq!(
+            parse_cat_with_trivia(&snap, "a -- hi\nb"),
+            "(seq (null a <ws> <ws> b))"
+        );
     }
 
     #[test]
