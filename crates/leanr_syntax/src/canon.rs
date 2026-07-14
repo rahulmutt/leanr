@@ -75,10 +75,10 @@ fn push_span(s: u32, e: u32, out: &mut String) {
     out.push_str("]}");
 }
 
-/// JSON string escaping per RFC 8259 minimal form: `"` `\` escaped,
-/// control chars as \b \f \n \r \t or \u00XX. ORACLE-PORT: must match
-/// Lean's `Json.compress` escaping — verified by the first golden
-/// fixture diff in Task 7 (any mismatch shows up as a whole-line diff).
+/// JSON string escaping matching Lean's `Json.compress` (escapeAux).
+/// Only short forms for `"`, `\`, `\n`, `\r`; all other control chars < 0x20
+/// rendered as `\uXXXX`. Reference: Lean stdlib Lean/Data/Json/Printer.lean
+/// lines 36–62 (escapeAux).
 fn json_str(s: &str, out: &mut String) {
     out.push('"');
     for c in s.chars() {
@@ -87,9 +87,6 @@ fn json_str(s: &str, out: &mut String) {
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{8}' => out.push_str("\\b"),
-            '\u{c}' => out.push_str("\\f"),
             c if (c as u32) < 0x20 => {
                 out.push_str(&format!("\\u{:04x}", c as u32));
             }
@@ -145,5 +142,22 @@ mod tests {
         let mut out = String::new();
         json_str("a\"b\\c\nd\u{1}", &mut out);
         assert_eq!(out, "\"a\\\"b\\\\c\\nd\\u0001\"");
+    }
+
+    #[test]
+    fn json_escaping_matches_lean_printer_control_chars() {
+        // Verify parity with Lean's escapeAux: only ", \, \n, \r get short forms;
+        // tab (0x09), backspace (0x08), form-feed (0x0c), and other < 0x20
+        // all use \uXXXX format (matching Lean/Data/Json/Printer.lean lines 36–62).
+        let mut out = String::new();
+        // String with: tab, backspace, form-feed, newline, carriage-return,
+        // quote, backslash, and control byte 0x01.
+        json_str("a\tb\u{8}c\u{c}d\ne\rf\"g\\h\u{1}i", &mut out);
+        // Expected: tab→	, backspace→, form-feed→,
+        // newline→\n, carriage-return→\r, quote→\", backslash→\\, 0x01→
+        assert_eq!(
+            out,
+            "\"a\\u0009b\\u0008c\\u000cd\\ne\\rf\\\"g\\\\h\\u0001i\""
+        );
     }
 }
