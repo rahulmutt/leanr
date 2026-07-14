@@ -10,6 +10,7 @@
 //! position/indentation checks, and the precedence gates all read
 //! through it; nothing here is global.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::grammar::{Category, FirstTok, GrammarSnapshot, LeadingIdentBehavior, Prim};
@@ -161,14 +162,27 @@ impl<'a> Ps<'a> {
 /// from-scratch equivalent — a plain counter, no stack-growing trick,
 /// which means the cap must itself be low enough to never overflow the
 /// HOST stack, not just "low enough to be a sane grammar depth".
+///
 /// Empirically bisected on this build (debug/unoptimized, the
-/// `cargo test`-default profile — see `mise run test`): a
-/// `libtest`-spawned test thread's default stack overflows somewhere
-/// between 300 and 320 levels of this crate's actual `category()`
-/// recursion (`adversarial_nesting_terminates_without_overflow`
-/// pins this); 128 leaves better than 2x headroom under that measured
-/// floor.
-const MAX_CATEGORY_DEPTH: u32 = 128;
+/// `cargo test`-default profile — see `mise run test`; `libtest` runs
+/// each test on a spawned thread, whose default stack is considerably
+/// smaller than the main thread's). Task 11b review: a first pass of
+/// this cap (128) was bisected ONLY against a minimal toy grammar
+/// (`adversarial_nesting_terminates_without_overflow`'s `seq([sym("("),
+/// cat(..), sym(")")])`, floor between 300-320 real levels) — one
+/// `category()` level there is ~3 native `Ps::run` stack frames. Real
+/// builtin productions nest through many MORE frames per level of
+/// input-visible depth (`Node`/`WithPosition`/`Many1Indent`-expansion/
+/// dispatch-closure/etc. between one `Category` entry and the next) —
+/// `builtin/do_notation.rs`'s nested-`do`-block shape
+/// (`do{do{do{..}}}`, one `category("doElem", ..)` recursion per visual
+/// nesting level, but ~8-10x the toy grammar's native frames per level)
+/// is the heaviest real shape measured: its floor is between 96 and 98
+/// real levels (`deeply_nested_do_blocks_terminate_fast_and_parse_clean`,
+/// `tests/never_hang.rs` — Task 11b). The cap must hold for the
+/// heaviest reachable shape, not the lightest, so it's calibrated
+/// against THAT floor: 40 leaves better than 2x headroom under it.
+const MAX_CATEGORY_DEPTH: u32 = 40;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParseError {
@@ -261,6 +275,90 @@ pub(crate) struct Ps<'a> {
     /// Input-driven `Category` recursion depth — see
     /// `MAX_CATEGORY_DEPTH`.
     cat_depth: u32,
+    /// `category()` memoization table (Task 11b — untrusted-input
+    /// never-hang hardening). ORACLE-PORT `ParserCache`/
+    /// `ParserCacheKey`/`withCacheFn` (`Lean/Parser/Types.lean`) and
+    /// `categoryParser` (`Basic.lean:1736`), which wraps EVERY
+    /// category-parse in exactly this cache. See `category`'s doc
+    /// comment for the full citation, the key/entry shapes
+    /// (`CatCacheKey`/`CatCacheEntry`), and the correctness argument.
+    cat_cache: HashMap<CatCacheKey, CatCacheEntry>,
+    /// Per-open-`category()`-call furthest-failure tally, pushed on
+    /// entry and popped on exit (stack discipline mirrors `pos_stack`/
+    /// `forbidden_stack`) — lets a cache HIT replay its exact effect on
+    /// the global furthest-failure tracker (`furthest_pos`/
+    /// `furthest_expected`) and on every still-open ancestor's own
+    /// eventual cache entry, without re-running any parser code. `None`
+    /// = nothing recorded yet in this call's dynamic extent. See
+    /// `category`'s doc comment (the "Correctness" section) for why a
+    /// plain snapshot-and-replay of the GLOBAL tally would be unsound.
+    furthest_stack: Vec<Option<(usize, Vec<String>)>>,
+}
+
+/// Memoization key for `category()`. ORACLE-PORT `ParserCacheKey`
+/// (`Lean/Parser/Types.lean:247`): `CacheableParserContext`'s `prec`,
+/// `savedPos?`, `forbiddenTk?` fields plus `parserName`/`pos`.
+/// `CacheableParserContext` also has `quotDepth`/`suppressInsideQuot`
+/// — bootstrapping/quotation-only fields (`adaptCacheableContext`
+/// calls in `Basic.lean` around macro antiquotation support) that this
+/// crate never sets or reads (M3a has no quotation/antiquotation
+/// machinery — `ORACLE-PORT` divergence, not an oversight: they're
+/// always constant here, so omitting them from the key partitions the
+/// cache identically to including two always-equal fields would).
+/// `name` is `parserName`; `rbp` is `prec` (`categoryParser` sets
+/// `c.prec := prec` via `adaptCacheableContextFn` immediately before
+/// consulting the cache — Basic.lean:1736-1737 — so this fn's own
+/// `rbp` argument IS that `prec` field, no separate tracking needed);
+/// `forbidden`/`saved_pos` are `forbiddenTk?`/`savedPos?`, read off
+/// `Ps::forbidden()`/`pos_stack.last()` — this port's un-opaque
+/// equivalents of `withForbidden`/`withPosition`'s
+/// `adaptCacheableContext` writes (see those `Prim` arms' own doc
+/// comments). Owned `String`s (not borrowed `&str`) because the
+/// `Prim::Category { name, .. }` a given call reads from may itself
+/// live in a short-lived clone (`longest_match`'s per-candidate
+/// `Vec<Prim>`), not in anything with `Ps`'s own `'a` snapshot
+/// lifetime — cloning a handful of short strings per category call is
+/// cheap next to the exponential blowup this cache removes.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct CatCacheKey {
+    pos: usize,
+    name: String,
+    rbp: u32,
+    forbidden: Option<String>,
+    saved_pos: Option<(u32, u32)>,
+}
+
+/// What a `category()` call replays on a cache hit. ORACLE-PORT
+/// `ParserCacheEntry` (`stx`, `lhsPrec`, `newPos`, `errorMsg`,
+/// `Types.lean:256`) — our `stx` is an event/error SLICE, not a single
+/// `Syntax` value (this crate's flat-event-stream tree model has no
+/// single node to stash — see `tree.rs`'s `Event`). We additionally
+/// have a genuine FAILURE case (`CatOutcome::Err`) real Lean's one
+/// entry shape doesn't need: Lean's parsers always "succeed" at the
+/// stack-effect level (a failed alternative still pushes `missing`
+/// plus sets `errorMsg`), so one shape covers both; this port's
+/// `Result`-based backtracking has two genuinely different shapes — a
+/// failed `category()` call restores to its own entry savepoint (see
+/// the `None` arm below) and so has no events/errors of its own to
+/// replay, only a furthest-failure effect.
+#[derive(Clone)]
+struct CatCacheEntry {
+    outcome: CatOutcome,
+    /// This port's own addition — see `Ps::furthest_stack`'s doc
+    /// comment. No oracle counterpart: Lean has no cross-attempt
+    /// "furthest failure" tally to keep sound under caching.
+    furthest: Option<(usize, Vec<String>)>,
+}
+
+#[derive(Clone)]
+enum CatOutcome {
+    Ok {
+        events: Vec<Event>,
+        errors: Vec<ParseError>,
+        end: usize,
+        lhs_prec: u32,
+    },
+    Err,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -310,6 +408,8 @@ impl<'a> Ps<'a> {
             forbidden_stack: Vec::new(),
             line_starts,
             cat_depth: 0,
+            cat_cache: HashMap::new(),
+            furthest_stack: Vec::new(),
         }
     }
 
@@ -470,7 +570,93 @@ impl<'a> Ps<'a> {
                 self.furthest_expected.push(w);
             }
         }
+        // Task 11b: also fold this point into every currently-open
+        // `category()` call's own LOCAL tally (independent of the
+        // ambient `furthest_pos` above) — see `Ps::furthest_stack`'s
+        // doc comment for why a plain snapshot-and-replay of the
+        // global tally would be unsound once category calls cache.
+        for local in &mut self.furthest_stack {
+            Self::merge_furthest_point(local, at, what);
+        }
         Fail
+    }
+
+    /// Fold one furthest-failure point into a LOCAL (call-scoped) tally
+    /// — the same max-then-union rule `fail_expecting` applies to the
+    /// global tally, applied instead to a tally that starts from
+    /// nothing (`None`) rather than from whatever the ambient global
+    /// tally happened to hold. This independence from the ambient
+    /// starting value is exactly what makes the recorded summary safe
+    /// to replay later against a DIFFERENT ambient value (see
+    /// `category`'s "Correctness" doc section).
+    fn merge_furthest_point(local: &mut Option<(usize, Vec<String>)>, at: usize, what: &str) {
+        match local {
+            None => *local = Some((at, vec![what.to_string()])),
+            Some((pos, expected)) => {
+                if at > *pos {
+                    *pos = at;
+                    *expected = vec![what.to_string()];
+                } else if at == *pos {
+                    let w = what.to_string();
+                    if !expected.contains(&w) {
+                        expected.push(w);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Fold an already-computed summary (e.g. a cached child
+    /// `category()` call's own tally) into a local tally — same rule
+    /// as `merge_furthest_point`, generalized from one point to a
+    /// (position, expected-set) pair.
+    fn merge_furthest_summary(
+        local: &mut Option<(usize, Vec<String>)>,
+        other: &Option<(usize, Vec<String>)>,
+    ) {
+        let Some((at, expected)) = other else {
+            return;
+        };
+        match local {
+            None => *local = Some((*at, expected.clone())),
+            Some((pos, exp)) => {
+                if *at > *pos {
+                    *pos = *at;
+                    *exp = expected.clone();
+                } else if *at == *pos {
+                    for w in expected {
+                        if !exp.contains(w) {
+                            exp.push(w.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Replay a cached `category()` call's furthest-failure effect on
+    /// both the real global tally (`furthest_pos`/`furthest_expected`)
+    /// and every currently-open ancestor `category()` call's own local
+    /// tally, reproducing exactly what a fresh (uncached) re-run of
+    /// that call's body would have done to both — see `category`'s
+    /// "Correctness" doc section.
+    fn apply_furthest_summary(&mut self, summary: &Option<(usize, Vec<String>)>) {
+        let Some((at, expected)) = summary else {
+            return;
+        };
+        if *at > self.furthest_pos {
+            self.furthest_pos = *at;
+            self.furthest_expected = expected.clone();
+        } else if *at == self.furthest_pos {
+            for w in expected {
+                if !self.furthest_expected.contains(w) {
+                    self.furthest_expected.push(w.clone());
+                }
+            }
+        }
+        for local in &mut self.furthest_stack {
+            Self::merge_furthest_summary(local, summary);
+        }
     }
 
     /// Render the running furthest-failure tally as a stable-coded
@@ -1362,44 +1548,147 @@ impl<'a> Ps<'a> {
     /// winner retroactively wrapping the already-parsed left-hand
     /// side). ORACLE-PORT `prattParser`/`leadingParser`/`trailingLoop`
     /// (Basic.lean).
+    ///
+    /// **Memoized** (Task 11b — untrusted-input never-hang hardening).
+    /// ORACLE-PORT `categoryParser`/`withCacheFn` (`Basic.lean:1736`,
+    /// `Lean/Parser/Types.lean:550`): real Lean wraps EVERY
+    /// `categoryParser catName prec` call — this exact function — in a
+    /// cache keyed by `(catName, pos, prec, savedPos?, forbiddenTk?)`
+    /// (see `CatCacheKey`'s doc comment for the full field-by-field
+    /// citation). Without it, `builtin/term.rs`'s
+    /// `register_paren_family` — `paren`/`tuple`/`typeAscription`, THREE
+    /// leading candidates that all share the `"(" >> hygieneInfo`
+    /// prefix and then each independently recurse into `cat("term", 0)`
+    /// at the identical inner position — repeats that recursion at
+    /// EVERY nesting level: `(((((1)))))` at depth D does Θ(3^D) work
+    /// (measured: depth 10 ~376ms, depth 15 >30s). Every sibling
+    /// candidate at a given level is tried from the SAME outer
+    /// savepoint (`longest_match`'s `self.restore(sp)` before each
+    /// attempt), so it sees the identical `pos`/`rbp`/`forbidden`/
+    /// `saved_pos` — the 2nd and 3rd sibling's `cat("term", 0)` become
+    /// O(1) cache hits, collapsing the nesting to Θ(D) category calls.
+    ///
+    /// **Correctness** (a cache hit must reproduce EXACTLY what a
+    /// re-parse would produce): a `category()` call has exactly three
+    /// externally observable effects. (a) On success: the event/error
+    /// slice appended between entry and exit, plus the final `pos`/
+    /// `lhs_prec`. (b) On failure: nothing — the only failure path
+    /// (the leading-dispatch `None` arm below) always `restore`s back
+    /// to `entry_sp` first, so no event/error survives a failed call
+    /// (`Savepoint::restore` doesn't touch `furthest_pos`/
+    /// `furthest_expected` — see its own doc comment — which is
+    /// exactly the field those globals are excluded from `Savepoint`
+    /// for). (c) In BOTH cases, an update to the furthest-failure
+    /// tally. (a)/(b) are stored verbatim as `CatOutcome` and replayed
+    /// by *extending* `self.events`/`self.errors` with that exact
+    /// slice: `Event::Token` carries an ABSOLUTE byte offset into the
+    /// shared source (`tree.rs`), not an offset relative to the splice
+    /// point, so appending a stored slice at a later point in the
+    /// event stream reproduces bit-for-bit what a fresh run would have
+    /// appended — no re-indexing, no risk of double-emitting or
+    /// dropping trivia (the losslessness/event-balance invariant is
+    /// preserved because the slice IS a contiguous, previously-real
+    /// run of balanced `Start`/`Finish`/`Token`/`Missing` events, not a
+    /// re-derived approximation). (c) is why `furthest_stack`/
+    /// `apply_furthest_summary` exist: the tempting shortcut — snapshot
+    /// the GLOBAL `furthest_pos`/`furthest_expected` at exit, replay
+    /// that on a hit — is unsound, because those globals are a running
+    /// max over the WHOLE parse and their value at one call's exit
+    /// depends on the ambient tally on entry, which differs between
+    /// the first (real) run and any later hit at the same key.
+    /// `furthest_stack` instead tracks, per open call, a tally that
+    /// starts from NOTHING (not from the ambient global) — a pure
+    /// function of what happened during this call's own execution
+    /// (including any nested cache hits, which fold their own stored
+    /// tally back in via `apply_furthest_summary` — see that fn's doc
+    /// comment), safe to store and replay against whatever the ambient
+    /// tally happens to be at replay time.
+    ///
+    /// **Not** part of the key: `cat_depth` (the `MAX_CATEGORY_DEPTH`
+    /// recursion-budget counter) — checked AFTER the cache lookup
+    /// below, and a depth-exceeded failure is never inserted into the
+    /// cache, precisely so a shallower reachability of the same
+    /// `(pos, name, rbp, forbidden, saved_pos)` key later in the same
+    /// parse can never inherit a depth-cap artifact from a deeper one
+    /// (`cat_depth` is a Rust-stack-safety device, not a grammar
+    /// input — two calls with the same key MUST produce the same
+    /// result regardless of which Rust-call-stack depth reached them,
+    /// and a cache HIT costs no additional native stack at all, so the
+    /// depth cap is irrelevant to it either way).
     fn category(&mut self, name: &str, rbp: u32) -> PResult {
         let Some(cat) = self.snap_category(name) else {
             let at = self.pos;
             return Err(self.fail_expecting(&format!("<category {name}>"), at));
         };
+
+        let key = CatCacheKey {
+            pos: self.pos,
+            name: name.to_string(),
+            rbp,
+            forbidden: self.forbidden().map(str::to_string),
+            saved_pos: self.pos_stack.last().copied(),
+        };
+        if let Some(entry) = self.cat_cache.get(&key).cloned() {
+            self.apply_furthest_summary(&entry.furthest);
+            return match entry.outcome {
+                CatOutcome::Ok {
+                    events,
+                    errors,
+                    end,
+                    lhs_prec,
+                } => {
+                    self.events.extend(events);
+                    self.errors.extend(errors);
+                    self.pos = end;
+                    self.lhs_prec = lhs_prec;
+                    Ok(())
+                }
+                CatOutcome::Err => Err(Fail),
+            };
+        }
+
         if self.cat_depth >= MAX_CATEGORY_DEPTH {
             // Untrusted-input totality: `Category` is the ONE place
             // input (nested parens, deeply chained trailing forms,
             // …) can drive recursion depth — see `MAX_CATEGORY_DEPTH`.
+            // Deliberately checked AFTER the cache lookup (a hit costs
+            // no native stack) and deliberately NOT cached on failure
+            // here (see this fn's doc comment).
             let at = self.pos;
             return Err(self.fail_expecting("<max recursion depth exceeded>", at));
         }
         self.cat_depth += 1;
+        self.furthest_stack.push(None);
         let saved_prec = self.prec;
         self.prec = rbp;
+        // Captured BEFORE the lookahead `peek_significant` below —
+        // Task 8 review fix: on TOTAL leading-dispatch failure (no
+        // candidate matches at all — e.g. `cat("term", ..)` tried
+        // as one `OrElse` alternative among several, with the next
+        // token separated from the previous one by whitespace), the
+        // category must look like a completely NON-consuming
+        // failure to its caller, exactly like a plain `Prim::Ident`/
+        // `expect_atom` mismatch already does (`peek_for_match`'s
+        // own pre-peek savepoint). Without this, `peek_significant`
+        // permanently emits the intervening whitespace as a trivia
+        // event and advances `self.pos` as a side effect REGARDLESS
+        // of whether dispatch then finds anything — so a failed
+        // `category()` call used to leak that phantom "consumption"
+        // to its caller, which made an enclosing `OrElse`/`many1`
+        // wrongly treat a clean "nothing matched here" as a
+        // consuming error instead of backtracking/stopping. Found
+        // via `Term.fun`'s `many1(funBinder)`: the funBinder
+        // fallback `cat("term", maxPrec)` tried (and failed) against
+        // the `=>` token, permanently consuming the space before it
+        // — `many1` then aborted with a hard error instead of
+        // cleanly stopping after the one binder it already had.
+        // Task 11b: also doubles as the cache-slice base index — this
+        // MUST be the very first savepoint taken in the call (nothing
+        // between `self.prec = rbp` above and here touches
+        // `pos`/`events`/`errors`), since `key.pos` was read before
+        // either.
+        let entry_sp = self.save();
         let r = (|| {
-            // Captured BEFORE the lookahead `peek_significant` below —
-            // Task 8 review fix: on TOTAL leading-dispatch failure (no
-            // candidate matches at all — e.g. `cat("term", ..)` tried
-            // as one `OrElse` alternative among several, with the next
-            // token separated from the previous one by whitespace), the
-            // category must look like a completely NON-consuming
-            // failure to its caller, exactly like a plain `Prim::Ident`/
-            // `expect_atom` mismatch already does (`peek_for_match`'s
-            // own pre-peek savepoint). Without this, `peek_significant`
-            // permanently emits the intervening whitespace as a trivia
-            // event and advances `self.pos` as a side effect REGARDLESS
-            // of whether dispatch then finds anything — so a failed
-            // `category()` call used to leak that phantom "consumption"
-            // to its caller, which made an enclosing `OrElse`/`many1`
-            // wrongly treat a clean "nothing matched here" as a
-            // consuming error instead of backtracking/stopping. Found
-            // via `Term.fun`'s `many1(funBinder)`: the funBinder
-            // fallback `cat("term", maxPrec)` tried (and failed) against
-            // the `=>` token, permanently consuming the space before it
-            // — `many1` then aborted with a hard error instead of
-            // cleanly stopping after the one binder it already had.
-            let entry_sp = self.save();
             // ---- leading: longest match over dispatched candidates --
             // `lhs_events` is captured AFTER `peek_significant` so any
             // leading trivia it scans (emitted directly into
@@ -1557,6 +1846,30 @@ impl<'a> Ps<'a> {
         })();
         self.prec = saved_prec;
         self.cat_depth -= 1;
+        let local_furthest = self
+            .furthest_stack
+            .pop()
+            .expect("pushed exactly once above, popped exactly once here");
+        // Task 11b: cache both outcomes (see this fn's doc comment for
+        // why a failure — other than the uncached depth-cap case above
+        // — is just as safe to memoize as a success: it has no
+        // events/errors of its own, only the furthest-failure summary).
+        let outcome = match &r {
+            Ok(()) => CatOutcome::Ok {
+                events: self.events[entry_sp.events..].to_vec(),
+                errors: self.errors[entry_sp.errors..].to_vec(),
+                end: self.pos,
+                lhs_prec: self.lhs_prec,
+            },
+            Err(Fail) => CatOutcome::Err,
+        };
+        self.cat_cache.insert(
+            key,
+            CatCacheEntry {
+                outcome,
+                furthest: local_furthest,
+            },
+        );
         r
     }
 
@@ -2332,6 +2645,56 @@ mod tests {
             expected = format!("(paren '(' {expected} ')')");
         }
         assert_eq!(parse_cat(&snap, &shallow), expected);
+    }
+
+    /// Task 11b regression: the general shape that exploded
+    /// exponentially before `category()` memoization — N leading
+    /// candidates sharing the identical `"("` first-token slot, each
+    /// independently recursing into the SAME category at the SAME
+    /// inner position (`category`'s own doc comment; the real builtin
+    /// grammar's `register_paren_family` — `paren`/`tuple`/
+    /// `typeAscription` — is a 3-candidate instance of exactly this).
+    /// 6 candidates nested to depth 20 is 6^20 ≈ 3.7e15 unmemoized
+    /// attempts, i.e. this test would never finish without the cache;
+    /// with it, every sibling past the first at a given nesting level
+    /// is an O(1) hit, so the whole parse is Θ(N·depth). A generous
+    /// wall-clock budget (not a tight perf pin — just enough to turn a
+    /// regression into a fast, loud test failure instead of a hang)
+    /// plus an exact expected-shape assertion (not just "didn't hang").
+    #[test]
+    fn pathological_alternation_fanout_is_bounded_by_the_category_cache() {
+        const N: usize = 6;
+        let mut b = SnapshotBuilder::new();
+        b.category("e", LeadingIdentBehavior::Default);
+        b.leading2("e", "atom", MAX_PREC, Prim::Ident);
+        for i in 0..N {
+            b.leading2(
+                "e",
+                &format!("paren{i}"),
+                MAX_PREC,
+                seq([sym("("), cat("e", 0), sym(")")]),
+            );
+        }
+        let snap = b.finish();
+
+        let depth = 20usize;
+        let src = "(".repeat(depth) + "x" + &")".repeat(depth);
+        let start = std::time::Instant::now();
+        let got = parse_cat(&snap, &src);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_secs() < 5,
+            "category-call caching regressed: {N}-way fanout at depth {depth} took {elapsed:?}"
+        );
+        // All N candidates are structurally identical (differ only in
+        // kind name), so every level is a genuine tie: `longest_match`
+        // picks the FIRST-registered winner ("paren0") deterministically,
+        // making the resulting shape fully predictable.
+        let mut expected = "(atom x)".to_string();
+        for _ in 0..depth {
+            expected = format!("(paren0 '(' {expected} ')')");
+        }
+        assert_eq!(got, expected);
     }
 
     // ---- Task 6 review fixes ------------------------------------------
