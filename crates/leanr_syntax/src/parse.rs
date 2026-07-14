@@ -178,6 +178,32 @@ pub struct ParseError {
     pub msg: String,
 }
 
+/// Render one `ParseError` as a `"line:col: error[Exxxx]: message"` line
+/// (Task 13's CLI diagnostic renderer — task-11-brief.md Step 4). Lines
+/// are 1-based; columns are 1-based CODEPOINT offsets (matching
+/// `Ps::line_col`'s own convention, ORACLE-PORT `FileMap.toPosition`'s
+/// `toColumn` — counts `Char`s, not bytes or UTF-16 units).
+///
+/// File-agnostic by design (no path parameter): the caller (the CLI)
+/// prefixes whatever `path:` it likes; this crate has no notion of
+/// "the current file" of its own (`parse_module` takes bare `&str`).
+pub fn render_error(src: &str, e: &ParseError) -> String {
+    let mut line = 1;
+    let mut col = 1;
+    for (i, c) in src.char_indices() {
+        if i >= e.span.0 as usize {
+            break;
+        }
+        if c == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    format!("{line}:{col}: error[{}]: {}", e.code, e.msg)
+}
+
 /// Parse failure marker; all context lives in `Ps` (furthest/expected).
 #[derive(Debug)]
 pub struct Fail;
@@ -1583,7 +1609,19 @@ fn dispatch(cat: &Category, text: &str, kind: TokenKind, leading: bool) -> Vec<u
     // generic `Ident`-keyed candidates entirely — precomputed once so
     // the single ordered pass below (which must preserve registration
     // order for `longest_match`'s tie-break) can just filter.
-    let suppress_plain_ident = kind == TokenKind::Ident
+    //
+    // `leading &&`: ORACLE-PORT `trailingLoop` (Basic.lean:1932) hard-
+    // codes `LeadingIdentBehavior.default` for its OWN ident dispatch —
+    // only `leadingParserAux` (:1910) is passed the category's actual
+    // `behavior`. A category's `ident_behavior` therefore must never
+    // suppress anything on the TRAILING side, regardless of its own
+    // value (`Symbol`/`Both`/`Default` alike) — trailing dispatch always
+    // behaves as `Default` (M3a Task 11 item (b)). Inert today (no
+    // trailing row in `attr`/`prio`/`tactic` — the only non-`Default`
+    // categories — actually collides with a same-text `Ident`-keyed
+    // trailing entry), but a real divergence from the oracle otherwise.
+    let suppress_plain_ident = leading
+        && kind == TokenKind::Ident
         && cat.ident_behavior == LeadingIdentBehavior::Symbol
         && table
             .iter()
@@ -2461,5 +2499,43 @@ mod tests {
         // text still lexes and parses as a plain identifier — proving
         // it was never reserved snapshot-wide.
         assert_eq!(parse_cat(&snap, "dependent"), "(lit dependent)");
+    }
+
+    /// `render_error` (task-11-brief.md Step 4): 1-based line/col,
+    /// stable-coded `error[Exxxx]: msg` rendering. An error at the
+    /// start of line 3 must render `3:1: …`.
+    #[test]
+    fn render_error_reports_one_based_line_and_column() {
+        let src = "def a := 1\ndef b := 2\n???\n";
+        let at = src.find("???").unwrap() as u32;
+        let e = ParseError {
+            code: "E0301",
+            span: (at, at),
+            msg: "unexpected input; expected one of: <command>".to_string(),
+        };
+        assert_eq!(
+            render_error(src, &e),
+            "3:1: error[E0301]: unexpected input; expected one of: <command>"
+        );
+    }
+
+    /// Task 11 Step 3's targeted regression: an unterminated string
+    /// literal must surface exactly ONE `E0302`, never duplicated by a
+    /// `longest_match`/speculative re-lex of the same offset.
+    /// `longest_match` (this file) already isolates each candidate's
+    /// errors behind its own `restore(sp)` and only splices the WINNING
+    /// candidate's own error suffix back into `Ps::errors` — verified
+    /// empirically (task-11 report) across `longest_match`-heavy shapes
+    /// (tuples, lists, struct instances, `match`, binary operators) with
+    /// no duplicate surfacing in any of them; this test pins the
+    /// brief's own literal repro so a future regression here is caught.
+    #[test]
+    fn unterminated_string_reports_e0302_exactly_once() {
+        let snap = crate::builtin::snapshot();
+        let src = "def x := \"open";
+        let r = parse_module(src, &snap);
+        assert_eq!(r.tree.text(), src, "round-trip failed");
+        let e0302: Vec<_> = r.errors.iter().filter(|e| e.code == "E0302").collect();
+        assert_eq!(e0302.len(), 1, "{:?}", r.errors);
     }
 }

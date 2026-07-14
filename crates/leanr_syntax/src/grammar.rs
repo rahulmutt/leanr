@@ -345,9 +345,40 @@ pub enum FirstTok {
 /// literal key (e.g. a `nonReservedSymbol`-keyed row like
 /// `Attr.extern`'s `"extern"`).
 ///
-/// - `Default` — always dispatch only the generic `Ident`-keyed
+/// - `Default` — ORACLE semantics (`indexed`'s `.default` arm,
+///   Basic.lean:1707): always dispatch only the generic `Ident`-keyed
 ///   candidates; a literal-text key match is never consulted (`find
-///   identKind` unconditionally).
+///   identKind` unconditionally) — the oracle's `TokenMap` never even
+///   looks the ident's own text up as a key in this mode.
+///
+///   THIS PORT'S `dispatch` (parse.rs) does not implement that literally:
+///   its `FirstTok::Sym(s)` arm matches an `Ident`-kind token whenever
+///   `s == text`, unconditionally — i.e. regardless of `ident_behavior`,
+///   including under `Default`. That is a real divergence from the
+///   oracle's own stated `.default` semantics, and it is DELIBERATE, not
+///   an oversight (M3a Task 11 item (c) — a prior version of this doc
+///   bullet contradicted the code by describing only the oracle
+///   semantics without saying so): it is safe on the ported surface only
+///   because the ONE call site that can actually reach a `Sym`-keyed
+///   entry via an `Ident`-kind token under `Default` behavior is
+///   `Prim::NonReservedSymbol` (`level`'s `max`/`imax`,
+///   `Level.lean:27,29`, both `includeIdent := true`). The oracle
+///   achieves the identical outcome by literally dual-registering such a
+///   production under BOTH the literal-text key AND the generic
+///   `identKind` key (`nonReservedSymbolInfo`'s `.tokens [sym, "ident"]`,
+///   Basic.lean:1144-1149) — `.default`'s `find identKind` picks it up
+///   via the SECOND registration, never needing to consult the first.
+///   This port instead does no dual build-time registration for
+///   `NonReservedSymbol` at all (`first_tokens`'s own doc comment,
+///   `walk_symbols`'s doc comment) and reproduces the same reachability
+///   at DISPATCH time via that always-on `Sym`-vs-`Ident`-text-match arm.
+///   For every OTHER `Default`-behavior category's real `Prim::Symbol`
+///   rows, the arm is a dead branch: any text actually harvested into
+///   the token table (`walk_symbols`) always lexes as `Atom`, never
+///   `Ident` (maximal-munch prefers the exact keyword), so `kind ==
+///   Ident && s == text` can never hold for them — see `dispatch`'s own
+///   doc comment at the `FirstTok::Sym` match arm for the lexing
+///   argument in full.
 /// - `Symbol` — if a literal-text key match exists, run ONLY those
 ///   candidates (the generic `Ident`-keyed ones are not even tried);
 ///   otherwise fall back to the generic `Ident`-keyed candidates.
@@ -730,7 +761,8 @@ impl SnapshotBuilder {
 
     /// Register a leading parser: interns `kind_name`, wraps `body` in
     /// `Prim::Node`, harvests its `Symbol`s into the token table, and
-    /// indexes the whole thing by its FIRST token for dispatch.
+    /// indexes the whole thing by every first token it can start with
+    /// (Task 11 item (a) — see `index_entries`/`first_tokens`).
     pub fn leading2(&mut self, cat: &str, kind_name: &str, prec: u32, body: Prim) {
         let kind = self.kinds.intern(kind_name);
         let p = Prim::Node {
@@ -739,14 +771,16 @@ impl SnapshotBuilder {
             body: Arc::new(body),
         };
         self.harvest_tokens(&p);
-        let f = first_tok(&p);
+        let fs = index_entries(&p);
         let c = self
             .categories
             .get_mut(cat)
             .expect("category registered before leading2");
         let idx = c.leading_parsers.len();
         c.leading_parsers.push(p);
-        c.leading.push((f, idx));
+        for f in fs {
+            c.leading.push((f, idx));
+        }
     }
 
     /// Register a trailing parser (a category's Pratt-loop
@@ -762,14 +796,16 @@ impl SnapshotBuilder {
             body: Arc::new(body),
         };
         self.harvest_tokens(&p);
-        let f = first_tok(&p);
+        let fs = index_entries(&p);
         let c = self
             .categories
             .get_mut(cat)
             .expect("category registered before trailing2");
         let idx = c.trailing_parsers.len();
         c.trailing_parsers.push(p);
-        c.trailing.push((f, idx));
+        for f in fs {
+            c.trailing.push((f, idx));
+        }
     }
 
     /// Register a leading parser candidate with NO extra `Node` wrap —
@@ -782,14 +818,16 @@ impl SnapshotBuilder {
     /// with no further wrapper.
     pub fn leading_raw(&mut self, cat: &str, body: Prim) {
         self.harvest_tokens(&body);
-        let f = first_tok(&body);
+        let fs = index_entries(&body);
         let c = self
             .categories
             .get_mut(cat)
             .expect("category registered before leading_raw");
         let idx = c.leading_parsers.len();
         c.leading_parsers.push(body);
-        c.leading.push((f, idx));
+        for f in fs {
+            c.leading.push((f, idx));
+        }
     }
 
     fn harvest_tokens(&mut self, p: &Prim) {
@@ -843,55 +881,299 @@ pub fn trailing(
     b.trailing2(cat, kind_name, prec, lhs, body);
 }
 
-/// FIRST-token of a Prim for dispatch indexing; `Any` when unknowable.
-/// Looks through the "transparent" wrappers (`Node`/`TrailingNode`/
-/// `Atomic`/`Group`/`WithPosition`) to their body, and through a `Seq`
-/// to its first non-`is_transparent_for_first` element (position/prec
-/// checks and lookaheads have no first token of their own — Lean's
-/// `firstTokens` computation skips them the same way).
-fn first_tok(p: &Prim) -> FirstTok {
-    use Prim::*;
-    match p {
-        Node { body, .. }
-        | TrailingNode { body, .. }
-        | Atomic(body)
-        | Group(body)
-        | WithPosition(body)
-        | WithoutForbidden(body) => first_tok(body),
-        WithForbidden(_, body) => first_tok(body),
-        Seq(ps) => ps
-            .iter()
-            .find(|q| !is_transparent_for_first(q))
-            .map(first_tok)
-            .unwrap_or(FirstTok::Any),
-        Symbol(s) | NonReservedSymbol(s) => FirstTok::Sym(s.clone()),
-        Ident | UnknownTacticIdent => FirstTok::Ident,
-        NumLit => FirstTok::Num,
-        ScientificLit => FirstTok::Scientific,
-        StrLit => FirstTok::Str,
-        CharLit => FirstTok::Char,
-        NameLit => FirstTok::NameLit,
-        _ => FirstTok::Any,
+/// ORACLE-PORT `Lean.Parser.FirstTokens` (`Types.lean:459-495`): the
+/// static "what can this production start with" lattice the oracle
+/// computes per-`Parser` (as `ParserInfo.firstTokens`) and consults in
+/// `addLeadingParser`/`addTrailingParserAux` (`Extension.lean:106-132`)
+/// to decide how — or whether — to index a registered production.
+/// Task 11 item (a): our port previously only ever produced a single
+/// `FirstTok` (effectively always collapsing to `Unknown`'s `Any`
+/// bucket the moment an `Optional`/`Many`/etc. showed up), so any
+/// production whose body opened with an optional prefix (`declaration`,
+/// `section`, …) went completely unindexed — `recover_command` (and
+/// every other Pratt dispatch) then had to try it unconditionally,
+/// which for the "sweep to the next command keyword" recovery heuristic
+/// meant those keywords were never recognized as command starts at all.
+/// This enum is the oracle's lattice ported directly, so `Category`'s
+/// index can hold every token a production can *actually* lead with,
+/// exactly as the oracle's `TokenMap` does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Ft {
+    /// `FirstTokens.epsilon` — matches without consuming anything (a
+    /// true `epsilonInfo` combinator: `checkPrec`/`checkLhsPrec`/
+    /// `checkColGe`/`checkWsBefore`/`checkNoWsBefore`, and this crate's
+    /// own always-succeeding zero-width leaves `EmitMissing`/
+    /// `EmitEmptyIdent`). Acts as `seq`'s left identity and `merge`'s
+    /// "make the other side optional" case.
+    Epsilon,
+    /// `FirstTokens.unknown` — cannot be statically bounded (the
+    /// oracle's *default* `ParserInfo.firstTokens`, `Types.lean:502`;
+    /// every combinator that doesn't explicitly override it lands
+    /// here). Dominates `seq` (poisons the rest of the sequence, mirrors
+    /// `| tks, _ => tks` catching `Unknown` on the left) and `merge`
+    /// (any pairing not otherwise matched falls to `_,_ => unknown`).
+    Unknown,
+    /// `FirstTokens.tokens tks` — definitely starts with one of these.
+    Tokens(Vec<FirstTok>),
+    /// `FirstTokens.optTokens tks` — MAY start with one of these (the
+    /// rest of the production can also just be absent). Still indexed
+    /// under every token in `tks` exactly like `Tokens` — the oracle's
+    /// `addLeadingParser`/`addTrailingParserAux` (`Extension.lean:
+    /// 117-122`, `:129-131`) route BOTH the `tokens` and `optTokens`
+    /// arms through the identical `addTokens tks` call; only `Category`'s
+    /// OWN combinators (`seq`/`merge`) ever distinguish the two.
+    OptTokens(Vec<FirstTok>),
+}
+
+impl Ft {
+    /// ORACLE-PORT `FirstTokens.toOptional` (`Types.lean:475-477`).
+    fn into_optional(self) -> Ft {
+        match self {
+            Ft::Tokens(tks) => Ft::OptTokens(tks),
+            other => other,
+        }
+    }
+
+    /// ORACLE-PORT `FirstTokens.seq` (`Types.lean:468-473`) — the
+    /// `andthen`/`>>` (sequencing) combinator's `firstTokens` (`p.seq
+    /// q`, `andthenInfo`, `Basic.lean:97`). Order matters: patterns are
+    /// tried top-to-bottom exactly as in the oracle, so e.g. `(Unknown,
+    /// Unknown)` falls through every specific arm to the final
+    /// catch-all (`tks, _ => tks`) rather than accidentally matching an
+    /// earlier one.
+    fn seq(self, other: Ft) -> Ft {
+        match (self, other) {
+            (Ft::Epsilon, tks) => tks,
+            (Ft::OptTokens(mut s1), Ft::OptTokens(s2)) => {
+                s1.extend(s2);
+                Ft::OptTokens(ft_dedup(s1))
+            }
+            (Ft::OptTokens(mut s1), Ft::Tokens(s2)) => {
+                s1.extend(s2);
+                Ft::Tokens(ft_dedup(s1))
+            }
+            (Ft::OptTokens(_), Ft::Unknown) => Ft::Unknown,
+            (tks, _) => tks,
+        }
+    }
+
+    /// ORACLE-PORT `FirstTokens.merge` (`Types.lean:479-487`) — the
+    /// `orelse`/`<|>` (choice) combinator's `firstTokens` (`p.merge q`,
+    /// `orelseInfo`, `Basic.lean:272`).
+    fn merge(self, other: Ft) -> Ft {
+        match (self, other) {
+            (Ft::Epsilon, tks) => tks.into_optional(),
+            (tks, Ft::Epsilon) => tks.into_optional(),
+            (Ft::Tokens(mut s1), Ft::Tokens(s2)) => {
+                s1.extend(s2);
+                Ft::Tokens(ft_dedup(s1))
+            }
+            (Ft::OptTokens(mut s1), Ft::OptTokens(s2)) => {
+                s1.extend(s2);
+                Ft::OptTokens(ft_dedup(s1))
+            }
+            (Ft::Tokens(mut s1), Ft::OptTokens(s2)) => {
+                s1.extend(s2);
+                Ft::OptTokens(ft_dedup(s1))
+            }
+            (Ft::OptTokens(mut s1), Ft::Tokens(s2)) => {
+                s1.extend(s2);
+                Ft::OptTokens(ft_dedup(s1))
+            }
+            _ => Ft::Unknown,
+        }
     }
 }
 
-/// Prims with no first token of their own — skipped when scanning a
-/// `Seq` for its FIRST real token (position/precedence checks and
-/// lookaheads never consume, so they can't anchor dispatch).
-fn is_transparent_for_first(p: &Prim) -> bool {
-    matches!(
-        p,
-        Prim::CheckPrec(_)
-            | Prim::CheckLhsPrec(_)
-            | Prim::CheckColGt
-            | Prim::CheckColGe
-            | Prim::CheckColEq
-            | Prim::CheckLineEq
-            | Prim::CheckWsBefore
-            | Prim::CheckNoWsBefore
-            | Prim::Lookahead(_)
-            | Prim::NotFollowedBy(_)
-    )
+/// Order-preserving de-dup (`FirstTok` has no `Ord`, so this is a plain
+/// `O(n^2)` scan — every list here is a handful of keyword tokens, not
+/// user-scale data).
+fn ft_dedup(v: Vec<FirstTok>) -> Vec<FirstTok> {
+    let mut out: Vec<FirstTok> = Vec::with_capacity(v.len());
+    for f in v {
+        if !out.contains(&f) {
+            out.push(f);
+        }
+    }
+    out
+}
+
+/// `Prim` → `Ft`: the oracle-ported computation `SnapshotBuilder` runs
+/// once per registered production (see `index_entries`, its only
+/// caller). Each arm cites the oracle combinator whose `ParserInfo`
+/// construction it reproduces; combinators with no explicit
+/// `firstTokens` override in the oracle default to `Ft::Unknown`
+/// (`ParserInfo`'s own default, `Types.lean:502`) — spelled out
+/// per-arm below rather than left to a wildcard, so a future `Prim`
+/// variant added without a matching arm here is a compile error, not a
+/// silent misindex (same discipline `encode_prim` already uses).
+fn first_tokens(p: &Prim) -> Ft {
+    use Prim::*;
+    match p {
+        // `node`/`trailingNode`/`group` (`nodeInfo`) and `atomic`/
+        // `lookahead` (`withFn`, which only replaces `fn`, leaving
+        // `info` — hence `firstTokens` — untouched) all forward the
+        // wrapped parser's own `firstTokens` unchanged.
+        Node { body, .. }
+        | TrailingNode { body, .. }
+        | Group(body)
+        | Atomic(body)
+        | Lookahead(body) => first_tokens(body),
+        // `withPosition`/`withoutPosition` (`withFn`) and `withForbidden`/
+        // `withoutForbidden` (`adaptCacheableContext`, which is also a
+        // pure `withFn`-shaped context tweak — `info` untouched, see
+        // `walk_symbols`'s own doc comment on the same pair) all forward
+        // unchanged too.
+        WithPosition(body) | WithoutForbidden(body) => first_tokens(body),
+        WithForbidden(_, body) => first_tokens(body),
+        Seq(ps) => {
+            let mut it = ps.iter();
+            match it.next() {
+                None => Ft::Epsilon,
+                Some(first) => it.fold(first_tokens(first), |acc, q| acc.seq(first_tokens(q))),
+            }
+        }
+        OrElse(ps) => {
+            let mut it = ps.iter();
+            match it.next() {
+                // `never()`'s empty `OrElse` — only ever appears wrapped
+                // in `Optional` (see its own doc comment), whose
+                // `into_optional` leaves `Unknown` as `Unknown` regardless,
+                // so this is never actually observed as a top-level
+                // registration's own `Ft`.
+                None => Ft::Unknown,
+                Some(first) => it.fold(first_tokens(first), |acc, q| acc.merge(first_tokens(q))),
+            }
+        }
+        // `symbolInfo`/`nonReservedSymbolInfo` (`Basic.lean:1105-1108,
+        // 1143-1149`): `FirstTokens.tokens [sym]`. (`nonReservedSymbolInfo`
+        // additionally unions in a generic `"ident"` key when
+        // `includeIdent`, which this port instead reproduces at DISPATCH
+        // time — `parse.rs`'s `dispatch` matches a `FirstTok::Sym` entry
+        // against an `Ident`-kind token with equal text too — see
+        // `LeadingIdentBehavior::Default`'s doc comment for why that's
+        // the right seam, not this one.)
+        Symbol(s) | NonReservedSymbol(s) => Ft::Tokens(vec![FirstTok::Sym(s.clone())]),
+        // `mkAtomicInfo`/`identNoAntiquot` etc. (`Basic.lean:1243-1300`):
+        // `FirstTokens.tokens ["ident"/"num"/...]` — one synthetic key
+        // per literal kind, same as this port's dedicated `FirstTok`
+        // variants. `UnknownTacticIdent` folds `withPosition (ident >>
+        // errorAtSavedPos ..)` into one primitive (see its own doc
+        // comment); `errorAtSavedPos`'s bare `{ fn := .. }` info is
+        // `Unknown`, but `ident`'s mandatory `Tokens(["ident"])` seq'd
+        // with it still dominates (`seq`'s final catch-all), so the
+        // whole production is `Tokens([Ident])` — computed directly here
+        // rather than via a literal `ident >> errorAtSavedPos` expansion,
+        // since this primitive never actually decomposes that way at
+        // runtime either (see the `parse.rs` interpreter arm).
+        Ident | UnknownTacticIdent => Ft::Tokens(vec![FirstTok::Ident]),
+        NumLit => Ft::Tokens(vec![FirstTok::Num]),
+        ScientificLit => Ft::Tokens(vec![FirstTok::Scientific]),
+        StrLit => Ft::Tokens(vec![FirstTok::Str]),
+        CharLit => Ft::Tokens(vec![FirstTok::Char]),
+        NameLit => Ft::Tokens(vec![FirstTok::NameLit]),
+        // `fieldIdxFn`/raw-digit leaves have no oracle `ParserInfo`
+        // override of their own kind in this port's shape (never
+        // registered as a leading/trailing candidate in its own right —
+        // always reached deep inside an already-dispatched `Term.proj`)
+        // — conservatively `Unknown`.
+        FieldIdx => Ft::Unknown,
+        // Category recursion (`Term.parser`/`categoryParser`): the
+        // oracle's own category-invoking combinator sets no
+        // `firstTokens` override, so it's `Unknown` by the same default
+        // every un-overridden combinator gets.
+        Category { .. } => Ft::Unknown,
+        // `optionalInfo` (`Basic.lean:373`): `p.firstTokens.toOptional`.
+        Optional(q) => first_tokens(q).into_optional(),
+        // `manyNoAntiquot`'s `noFirstTokenInfo` (`Basic.lean:428-431`):
+        // sets `collectTokens`/`collectKinds` but leaves `firstTokens` at
+        // `ParserInfo`'s own default — deliberately `Unknown`, NOT
+        // `toOptional` (unlike `optional`) — `many(p)` can match zero
+        // times, and the oracle gives up bounding it entirely rather
+        // than keeping `p`'s own tokens as an `optTokens` candidate.
+        Many(_) => Ft::Unknown,
+        // `many1NoAntiquot := withFn many1Fn` (`Basic.lean:438`): `info`
+        // (hence `firstTokens`) is forwarded from `p` unchanged — `many1`
+        // requires ≥1 occurrence, so `p`'s own first token is mandatory.
+        Many1(q) => first_tokens(q),
+        // `sepByInfo` (`Basic.lean:476-479`): no `firstTokens` field set
+        // ⇒ default `Unknown` (can match zero items, same reasoning as
+        // `many`).
+        SepBy { .. } => Ft::Unknown,
+        // `sepBy1Info` (`Basic.lean:481-485`): `firstTokens := p.firstTokens`
+        // (mandatory ≥1 item; `sep` never contributes since it can only
+        // ever follow an already-parsed item).
+        SepBy1 { item, .. } => first_tokens(item),
+        // `notFollowedByFn`'s wrapper (`Basic.lean:408-409`) is built via
+        // bare `where fn := ..` — no `info :=` at all, so `firstTokens`
+        // is `ParserInfo`'s own default: `Unknown` (testing an upcoming
+        // parser's ABSENCE cannot itself be indexed by that parser's
+        // tokens — the whole point is it succeeds on anything else).
+        NotFollowedBy(_) => Ft::Unknown,
+        // `checkPrecFn`/`checkLhsPrecFn`/`checkColGeFn` all construct
+        // `info := epsilonInfo` explicitly (`Basic.lean:164-165,175-176,
+        // 1499-1500`).
+        CheckPrec(_) | CheckLhsPrec(_) | CheckColGe => Ft::Epsilon,
+        // `checkColGtFn`/`checkColEqFn`/`checkLineEqFn` (`Basic.lean:
+        // 1466-1481, 1503-1525, 1527-1543`) build their `Parser` via bare
+        // `where fn := ..`/`{ fn := .. }` with NO `info` override —
+        // `ParserInfo`'s own default, `Unknown` (NOT `epsilonInfo`,
+        // despite all four being "zero-width position checks" in
+        // spirit — confirmed by reading the pin directly, since this is
+        // exactly the kind of easy-to-assume-uniform detail that would
+        // otherwise silently mis-port: an `Unknown` heading a `Seq`
+        // poisons the WHOLE production to unindexed, unlike `Epsilon`,
+        // which defers to what follows).
+        CheckColGt | CheckColEq | CheckLineEq => Ft::Unknown,
+        // `checkWsBefore`/`checkNoWsBefore` (`Basic.lean:1184-1186,
+        // 1221-1223`) both construct `info := epsilonInfo` explicitly.
+        CheckWsBefore | CheckNoWsBefore => Ft::Epsilon,
+        // `many1Indent p = withPosition $ many1 (checkColGe .. >> p)`
+        // (`Extra.lean:190-191`): `withPosition`/`many1` both forward
+        // unchanged, `checkColGe` is `Epsilon` ⇒ `seq` defers to `p`.
+        Many1Indent(q) => first_tokens(q),
+        // `sepByIndent`/`sepBy1Indent` (`Extra.lean:202-208`): both
+        // `withPosition $ sepBy(1) (checkColGe .. >> item) sep ..` —
+        // `min == 0` mirrors bare `sepBy` (`Unknown`, can be empty);
+        // `min >= 1` mirrors `sepBy1` (`checkColGe` is `Epsilon`, defers
+        // to `item`, mandatory).
+        SepByIndent { item, min: 0, .. } => {
+            let _ = item;
+            Ft::Unknown
+        }
+        SepByIndent { item, .. } => first_tokens(item),
+        // `hygieneInfoNoAntiquot`'s `nodeInfo hygieneInfoKind epsilonInfo`
+        // (`Basic.lean:1348`): forwards `epsilonInfo` unchanged.
+        // `EmitMissing` is this port's analogous always-succeeding,
+        // zero-width leaf (no direct oracle `Parser` value of its own —
+        // see its doc comment) — same `Epsilon` shape.
+        EmitMissing | EmitEmptyIdent => Ft::Epsilon,
+        // `rawCh` bypasses the lexer/token table entirely and (per its
+        // own doc comment) is never reached at the head of a registered
+        // production — conservatively `Unknown`.
+        RawChar(_) => Ft::Unknown,
+        // `commentBody`'s raw scan leaf is likewise never its own
+        // registered production's head (always the second child after a
+        // literal `"/--"` `Symbol`, which already dominates the
+        // production's `Ft` via `seq`'s catch-all) — `Unknown` is a safe,
+        // never-exercised default.
+        DocCommentBody => Ft::Unknown,
+    }
+}
+
+/// The `(FirstTok, idx)` index entries a freshly-registered production
+/// should occupy, computed from its `Ft` (Task 11 item (a)). `Tokens`/
+/// `OptTokens` both index under every token they carry — see `Ft`'s own
+/// doc comment for why the oracle treats the two identically here;
+/// anything else (`Epsilon`/`Unknown`, or a degenerate empty token list)
+/// can't be bounded, so it's indexed as `FirstTok::Any` — tried on every
+/// dispatch, exactly like the oracle's unconditional `leadingParsers`/
+/// `trailingParsers` fallback list.
+fn index_entries(p: &Prim) -> Vec<FirstTok> {
+    match first_tokens(p) {
+        Ft::Tokens(tks) | Ft::OptTokens(tks) if !tks.is_empty() => ft_dedup(tks),
+        _ => vec![FirstTok::Any],
+    }
 }
 
 /// Recursive visitor over every `Symbol` literal and `SepBy`/`SepBy1`
@@ -977,5 +1259,88 @@ fn walk_symbols(p: &Prim, f: &mut impl FnMut(&str)) {
         | RawChar(_)
         | UnknownTacticIdent
         | DocCommentBody => {}
+    }
+}
+
+#[cfg(test)]
+mod ft_index_tests {
+    use super::*;
+
+    /// Task 11 item (a): `declaration` (`declModifiers`-optional lead)
+    /// and `section` (`sectionHeader`-optional lead) must be indexed by
+    /// their real mandatory keyword(s), not solely `FirstTok::Any` —
+    /// this is the exact defect the brief calls out by name
+    /// ("INCLUDING `declaration` and `section`"). Checked directly
+    /// against the crate's own real builtin grammar (not a toy
+    /// snapshot), reading `Category::leading`'s `pub(crate)` fields —
+    /// the observable-behavior counterpart (`recover_command` actually
+    /// resyncing on these keywords) is covered end-to-end by
+    /// `oracle_golden.rs`'s
+    /// `recover_command_resyncs_at_every_common_command_keyword`.
+    #[test]
+    fn declaration_and_section_are_indexed_by_their_mandatory_keyword_not_only_any() {
+        let snap = crate::builtin::snapshot();
+        let kinds = snap.kinds();
+        let cmd = snap.categories.get("command").expect("command category");
+
+        let leading_kind_names_for = |tok: &str| -> Vec<String> {
+            cmd.leading
+                .iter()
+                .filter(|(f, _)| matches!(f, FirstTok::Sym(s) if s == tok))
+                .map(|(_, idx)| match &cmd.leading_parsers[*idx] {
+                    Prim::Node { kind, .. } => kinds.name(*kind).to_string(),
+                    _ => "<unwrapped>".to_string(),
+                })
+                .collect()
+        };
+
+        let def_names = leading_kind_names_for("def");
+        assert!(
+            def_names.contains(&"Lean.Parser.Command.declaration".to_string()),
+            "expected `declaration` indexed under Sym(\"def\"), got {def_names:?}"
+        );
+        let theorem_names = leading_kind_names_for("theorem");
+        assert!(
+            theorem_names.contains(&"Lean.Parser.Command.declaration".to_string()),
+            "expected `declaration` indexed under Sym(\"theorem\"), got {theorem_names:?}"
+        );
+        let structure_names = leading_kind_names_for("structure");
+        assert!(
+            structure_names.contains(&"Lean.Parser.Command.declaration".to_string()),
+            "expected `declaration` indexed under Sym(\"structure\"), got {structure_names:?}"
+        );
+        let section_names = leading_kind_names_for("section");
+        assert!(
+            section_names.contains(&"Lean.Parser.Command.section".to_string()),
+            "expected `section` indexed under Sym(\"section\"), got {section_names:?}"
+        );
+        // `declaration`'s `declModifiers` optional prefix must ALSO
+        // surface it under every modifier keyword (`private`, `@[`,
+        // `/--`, …) — the whole point of the `OptTokens`/`seq` fix.
+        for tok in ["private", "public", "@[", "/--", "protected", "unsafe"] {
+            let names = leading_kind_names_for(tok);
+            assert!(
+                names.contains(&"Lean.Parser.Command.declaration".to_string()),
+                "expected `declaration` indexed under Sym({tok:?}), got {names:?}"
+            );
+        }
+        // Negative control: `declaration` must NOT be registered under
+        // `FirstTok::Any` any more (the pre-fix state) — every entry
+        // pointing at its `leading_parsers` index must be a real
+        // `FirstTok::Sym`.
+        let declaration_idx = cmd
+            .leading_parsers
+            .iter()
+            .position(|p| matches!(p, Prim::Node { kind, .. } if kinds.name(*kind) == "Lean.Parser.Command.declaration"))
+            .expect("declaration registered");
+        let any_count_for_declaration = cmd
+            .leading
+            .iter()
+            .filter(|(f, idx)| *idx == declaration_idx && matches!(f, FirstTok::Any))
+            .count();
+        assert_eq!(
+            any_count_for_declaration, 0,
+            "`declaration` must no longer be indexed under FirstTok::Any"
+        );
     }
 }
