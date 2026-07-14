@@ -21,4 +21,5 @@ pub mod lex;
 pub mod parse;
 pub mod tree;
 
+pub use parse::{parse_module, ParseResult};
 pub use tree::SyntaxTree;

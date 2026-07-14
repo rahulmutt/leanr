@@ -200,11 +200,24 @@ pub struct GrammarSnapshot {
     pub(crate) tokens: crate::lex::TokenTable,
     pub(crate) categories: std::collections::HashMap<String, Category>,
     kinds: std::sync::Arc<crate::kind::KindInterner>,
+    /// The module-header grammar (spec §Oracle harness / Task 7's
+    /// vertical slice): `builtin::snapshot()` always sets this via
+    /// `SnapshotBuilder::set_header`, so `parse_module` can `.expect()`
+    /// it. `Option` (rather than a bare `Prim`) because a category-less
+    /// test snapshot (`GrammarSnapshot::for_test`) has none — PF2
+    /// resolution, task-7-brief.
+    header: Option<Prim>,
 }
 
 impl GrammarSnapshot {
     pub fn kinds(&self) -> std::sync::Arc<crate::kind::KindInterner> {
         self.kinds.clone()
+    }
+
+    /// The module-header `Prim`, if this snapshot's builder set one
+    /// (every real, `builtin::snapshot()`-built snapshot does).
+    pub fn header_prim(&self) -> Option<Prim> {
+        self.header.clone()
     }
 
     /// Stable hash of the whole grammar (spec: the query-ready
@@ -249,6 +262,7 @@ impl GrammarSnapshot {
             tokens,
             categories: Default::default(),
             kinds: std::sync::Arc::new(kinds),
+            header: None,
         }
     }
 }
@@ -437,6 +451,7 @@ pub struct SnapshotBuilder {
     kinds: crate::kind::KindInterner,
     tokens: crate::lex::TokenTable,
     categories: std::collections::HashMap<String, Category>,
+    header: Option<Prim>,
 }
 
 impl SnapshotBuilder {
@@ -451,6 +466,7 @@ impl SnapshotBuilder {
             kinds,
             tokens: Default::default(),
             categories: Default::default(),
+            header: None,
         }
     }
 
@@ -510,9 +526,39 @@ impl SnapshotBuilder {
         c.trailing.push((f, idx));
     }
 
+    /// Register a leading parser candidate with NO extra `Node` wrap —
+    /// for productions whose oracle shape is a bare leaf (`Prim::Ident`,
+    /// a `Syntax.ident`) or that already self-wrap (`Prim::NumLit`
+    /// wraps itself in a "num" node via `Ps::lit`). `leading2` always
+    /// adds an outer `Node { kind_name, .. }`, which would double-wrap
+    /// either case — confirmed against a real oracle dump (Task 7):
+    /// `x` is a bare `{"i":"x",...}`, `42` is `{"c":[...],"k":"num"}`
+    /// with no further wrapper.
+    pub fn leading_raw(&mut self, cat: &str, body: Prim) {
+        self.harvest_tokens(&body);
+        let f = first_tok(&body);
+        let c = self
+            .categories
+            .get_mut(cat)
+            .expect("category registered before leading_raw");
+        let idx = c.leading_parsers.len();
+        c.leading_parsers.push(body);
+        c.leading.push((f, idx));
+    }
+
     fn harvest_tokens(&mut self, p: &Prim) {
         let tokens = &mut self.tokens;
         walk_symbols(p, &mut |s| tokens.insert(s));
+    }
+
+    /// Set the module-header grammar (Task 7's vertical slice —
+    /// `parse_module` reads this back via `GrammarSnapshot::header_prim`).
+    /// Harvests `p`'s symbols into the token table exactly like
+    /// `leading2`/`trailing2`, so header keywords (`prelude`, `import`,
+    /// …) lex as `Atom`, not `Ident`.
+    pub fn set_header(&mut self, p: Prim) {
+        self.harvest_tokens(&p);
+        self.header = Some(p);
     }
 
     pub fn finish(self) -> GrammarSnapshot {
@@ -520,6 +566,7 @@ impl SnapshotBuilder {
             tokens: self.tokens,
             categories: self.categories,
             kinds: std::sync::Arc::new(self.kinds),
+            header: self.header,
         }
     }
 }

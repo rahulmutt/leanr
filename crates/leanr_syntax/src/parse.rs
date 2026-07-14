@@ -13,9 +13,142 @@
 use std::sync::Arc;
 
 use crate::grammar::{Category, FirstTok, GrammarSnapshot, Prim};
-use crate::kind::{KindInterner, SyntaxKind, KIND_ATOM, KIND_GROUP, KIND_IDENT, KIND_NULL};
+use crate::kind::{
+    KindInterner, SyntaxKind, KIND_ATOM, KIND_ERROR, KIND_ERROR_TOKEN, KIND_GROUP, KIND_IDENT,
+    KIND_NULL,
+};
 use crate::lex::{next_token, Token, TokenKind, TokenTable};
 use crate::tree::{build_tree, Event, SyntaxTree};
+
+/// The result of parsing one module (spec §Oracle harness / Task 7's
+/// vertical slice — the caller `leanr_syntax::parse_module` re-exports
+/// from `lib.rs`): a lossless tree, always (untrusted-input totality —
+/// a bad parse still yields a tree with `KIND_ERROR` nodes) plus
+/// whatever diagnostics were recorded along the way.
+#[derive(Debug)]
+pub struct ParseResult {
+    pub tree: SyntaxTree,
+    pub errors: Vec<ParseError>,
+}
+
+/// Parse one module: header, then commands to EOF. Never panics; a
+/// command that fails to parse becomes a `KIND_ERROR` node and parsing
+/// resumes at the next plausible command start (`recover_command`;
+/// Task 11 hardens the recovery heuristic further). ORACLE-PORT
+/// `Lean/Parser/Module.lean` `parseHeader`/`parseCommand`/`mkEOI`: the
+/// trailing `Lean.Parser.Command.eoi` node (a single empty atom at EOF)
+/// mirrors what a real oracle dump of this loop always emits last —
+/// confirmed against a fresh `dump_syntax.lean` run over
+/// `tests/fixtures/syntax/Micro.lean` (Task 7), not assumed from source.
+pub fn parse_module(src: &str, snap: &GrammarSnapshot) -> ParseResult {
+    let kinds = snap.kinds();
+    let mut ps = Ps::new(src, snap);
+    let module = kinds
+        .lookup("module")
+        .expect("interned by builtin::snapshot");
+    ps.start(module);
+
+    // Header (always present; all-optional parts ⇒ cannot fail).
+    let header = snap
+        .header_prim()
+        .expect("builtin::snapshot() always sets a header (PF2)");
+    let _ = ps.run(&header);
+
+    // Command loop.
+    loop {
+        let (t, _at) = ps.peek_significant();
+        if t.kind == TokenKind::Eof {
+            break;
+        }
+        let sp = ps.save();
+        match ps.run(&Prim::Category {
+            name: "command".into(),
+            rbp: 0,
+        }) {
+            Ok(()) => {}
+            Err(_) => {
+                ps.restore(&sp);
+                ps.recover_command();
+            }
+        }
+    }
+    // Trailing eoi node: a single empty atom at EOF, mirroring
+    // `mkEOI`'s `mkNode ``Command.eoi #[atom]`` where `atom` is a
+    // zero-width `Syntax.atom` at the final position. By the time the
+    // loop above breaks, `peek_significant` has already drained any
+    // trailing trivia up to true EOF as a side effect of its own
+    // `Eof`-detecting peek, so `ps.pos` here IS that position already
+    // — no extra peek needed.
+    let eoi = kinds
+        .lookup("Lean.Parser.Command.eoi")
+        .expect("interned by builtin::snapshot");
+    ps.start(eoi);
+    ps.emit_token(KIND_ATOM, 0);
+    ps.finish();
+
+    ps.finish(); // module
+    let (tree, errors) = ps.finish_into_tree();
+    ParseResult { tree, errors }
+}
+
+impl<'a> Ps<'a> {
+    /// Minimal recovery: emit an ERROR node, skip tokens until the next
+    /// token that could START a command (per the command category's
+    /// dispatch index) or EOF; always consume ≥ 1 token. Also surfaces
+    /// the furthest-failure diagnostic (E0301).
+    ///
+    /// PF3 resolution (task-7-brief): every non-Ident, non-`ErrorTok`
+    /// token skipped here becomes `KIND_ATOM`; `TokenKind::ErrorTok`
+    /// maps to `KIND_ERROR_TOKEN` specifically — that kind (Task 1) is
+    /// otherwise unreachable, and canon.rs already special-cases it as
+    /// never-oracle-compared.
+    pub(crate) fn recover_command(&mut self) {
+        let (pos, expected) = (self.furthest_pos, self.furthest_expected.clone());
+        self.errors.push(ParseError {
+            code: "E0301",
+            span: (pos as u32, pos as u32),
+            msg: format!("unexpected input; expected one of: {}", expected.join(", ")),
+        });
+        self.start(KIND_ERROR);
+        let mut first = true;
+        loop {
+            let (t, at) = self.peek_significant();
+            if t.kind == TokenKind::Eof {
+                break;
+            }
+            let text = &self.src[at..at + t.len as usize];
+            if !first && self.starts_command(text, t.kind) {
+                break;
+            }
+            first = false;
+            let kind = match t.kind {
+                TokenKind::Ident => KIND_IDENT,
+                TokenKind::ErrorTok => KIND_ERROR_TOKEN,
+                _ => KIND_ATOM,
+            };
+            self.bump(t, kind);
+        }
+        self.finish();
+    }
+
+    /// Conservative "could this token start a command" test: does the
+    /// "command" category's leading dispatch have a `FirstTok::Sym`
+    /// entry matching this exact text? (No `Any`-indexed fallback here
+    /// — recovery only needs to be conservative, not complete; a false
+    /// negative just means one more token gets swept into the error
+    /// node, which is still a lossless, terminating recovery.)
+    fn starts_command(&self, text: &str, kind: TokenKind) -> bool {
+        if kind != TokenKind::Atom {
+            return false;
+        }
+        let Some(cat) = self.snap_category("command") else {
+            return false;
+        };
+        cat.leading
+            .iter()
+            .any(|(f, _)| matches!(f, FirstTok::Sym(s) if s == text))
+    }
+}
 
 /// Depth cap on input-driven `Category` recursion (nested parens and
 /// the like — adversarial input can nest these arbitrarily, and

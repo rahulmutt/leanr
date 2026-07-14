@@ -94,6 +94,9 @@ run = [
   "sh -c 'lean --githash > tests/fixtures/oracle-githash.txt'",
   "sh -c 'cd .mathlib && rm -f /tmp/leanr-mathlib-golden.toml && lake translate-config toml /tmp/leanr-mathlib-golden.toml && cp /tmp/leanr-mathlib-golden.toml ../crates/leanr_build/tests/fixtures/mathlib-lakefile-golden.toml'",
   "sh -c 'for p in aesop batteries Cli importGraph LeanSearchClient plausible Qq; do cp .mathlib/.lake/packages/$p/lakefile.toml crates/leanr_build/tests/fixtures/lakefiles/$p.toml; done'",
+  # M3a parser fixtures: official parse trees in canonical JSON
+  # (tests/fixtures/syntax/; dump_syntax.lean is the dumper itself).
+  "sh -c 'for f in tests/fixtures/syntax/*.lean; do [ \"$(basename $f)\" = dump_syntax.lean ] && continue; lean --run tests/fixtures/syntax/dump_syntax.lean \"$f\" > \"${f%.lean}.stx.jsonl\"; done'",
 ]
 
 [tasks."fixtures:mutations"]
