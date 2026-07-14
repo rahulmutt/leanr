@@ -530,6 +530,32 @@ impl<'a> Ps<'a> {
                 self.events.push(Event::Missing);
                 Ok(())
             }
+            Prim::EmitEmptyIdent => {
+                // ORACLE-PORT `hygieneInfoFn`: always succeeds, emitting
+                // a zero-width `ident` at the CURRENT position — no
+                // `peek_significant` call, so no trivia is skipped
+                // first (see the `Prim::EmitEmptyIdent` doc comment).
+                self.events.push(Event::Token {
+                    kind: KIND_IDENT,
+                    offset: self.pos as u32,
+                    len: 0,
+                });
+                Ok(())
+            }
+            Prim::RawChar(c) => {
+                // ORACLE-PORT `rawCh`: reads exactly one raw source
+                // character WITHOUT going through `next_token` (see the
+                // `Prim::RawChar` doc comment) — never skips trivia,
+                // never consults the token table.
+                let at = self.pos;
+                match self.src[at..].chars().next() {
+                    Some(got) if got == *c => {
+                        self.emit_token(KIND_ATOM, got.len_utf8() as u32);
+                        Ok(())
+                    }
+                    _ => Err(self.fail_expecting(&format!("'{c}'"), at)),
+                }
+            }
             Prim::CheckPrec(n) => {
                 // ORACLE-PORT `checkPrecFn` (Basic.lean): succeeds iff
                 // `c.prec <= prec` — i.e. the surrounding right-binding
@@ -907,11 +933,35 @@ impl<'a> Ps<'a> {
     fn had_ws_before_current(&mut self) -> bool {
         let before = self.pos;
         let (_, at) = self.peek_significant();
-        at > before
-            || matches!(
-                self.events.last(),
-                Some(Event::Token { kind, .. }) if crate::kind::is_trivia(*kind)
-            )
+        if at > before {
+            return true;
+        }
+        // Nothing left for THIS call to skip — the previous combinator
+        // already scanned past any trivia (e.g. the `bump` that
+        // consumed the token before us, or an earlier
+        // `peek_significant`). Whether that happened depends on
+        // finding the most recent REAL token event, skipping over
+        // zero-width structural noise (`Start`/`Finish`/`Missing`) —
+        // Task 8 review fix: the previous version checked ONLY
+        // `self.events.last()`, which broke the instant ANY wrapper
+        // (`Optional`/`Many`/`Node`'s own `Start(..)`) sat between the
+        // trivia token and this check — e.g. `Term.app`'s `many1
+        // (checkWsBefore >> ..)`: `many_impl` pushes `Start(null)`
+        // BEFORE running its body's first `CheckWsBefore`, so
+        // `events.last()` was always that `Start`, never the
+        // whitespace token right before it — `had_ws_before_current`
+        // silently returned `false` for EVERY argument, breaking
+        // application entirely. Skipping structural events to find the
+        // last real token fixes this without changing behavior for the
+        // (already-correct) no-wrapper case.
+        self.events
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                Event::Token { kind, .. } => Some(crate::kind::is_trivia(*kind)),
+                Event::Start(_) | Event::Finish | Event::Missing => None,
+            })
+            .unwrap_or(false)
     }
 
     /// Try each of `parsers` from the same savepoint `sp` (already
@@ -975,6 +1025,28 @@ impl<'a> Ps<'a> {
         let saved_prec = self.prec;
         self.prec = rbp;
         let r = (|| {
+            // Captured BEFORE the lookahead `peek_significant` below —
+            // Task 8 review fix: on TOTAL leading-dispatch failure (no
+            // candidate matches at all — e.g. `cat("term", ..)` tried
+            // as one `OrElse` alternative among several, with the next
+            // token separated from the previous one by whitespace), the
+            // category must look like a completely NON-consuming
+            // failure to its caller, exactly like a plain `Prim::Ident`/
+            // `expect_atom` mismatch already does (`peek_for_match`'s
+            // own pre-peek savepoint). Without this, `peek_significant`
+            // permanently emits the intervening whitespace as a trivia
+            // event and advances `self.pos` as a side effect REGARDLESS
+            // of whether dispatch then finds anything — so a failed
+            // `category()` call used to leak that phantom "consumption"
+            // to its caller, which made an enclosing `OrElse`/`many1`
+            // wrongly treat a clean "nothing matched here" as a
+            // consuming error instead of backtracking/stopping. Found
+            // via `Term.fun`'s `many1(funBinder)`: the funBinder
+            // fallback `cat("term", maxPrec)` tried (and failed) against
+            // the `=>` token, permanently consuming the space before it
+            // — `many1` then aborted with a hard error instead of
+            // cleanly stopping after the one binder it already had.
+            let entry_sp = self.save();
             // ---- leading: longest match over dispatched candidates --
             // `lhs_events` is captured AFTER `peek_significant` so any
             // leading trivia it scans (emitted directly into
@@ -995,7 +1067,22 @@ impl<'a> Ps<'a> {
                 .iter()
                 .map(|&i| cat.leading_parsers[i].clone())
                 .collect();
-            let sp = self.save();
+            // ORACLE-PORT `runLongestMatchParser` (Basic.lean:1403):
+            // "we initialize [lhsPrec] to maxPrec in the leading case"
+            // — a leading candidate that is a real `leadingNode`
+            // (`Prim::Node` with `Some(prec)`) overrides this on success
+            // (`self.lhs_prec = prec.unwrap_or(0)`, the `Prim::Node` run
+            // arm above); one that's a bare token/leaf parser
+            // (`leading_raw`'s `Prim::Ident`/`NumLit`/etc — no `Node`
+            // wrap at all) never touches `lhs_prec`, so without this
+            // pre-seed it would leak whatever `lhs_prec` happened to
+            // hold from unrelated earlier parsing. `Term.app`'s
+            // trailing gate (`lhs_prec >= MAX_PREC`, Task 8) is the
+            // first production that actually exercises this: a bare
+            // ident head (`f` in `f a b c`) must count as "MAX_PREC
+            // strength" for application to fire at all.
+            let mut sp = self.save();
+            sp.lhs_prec = crate::grammar::MAX_PREC;
             match self.longest_match(&sp, &parsers) {
                 Some(w) => {
                     self.events.extend(w.events);
@@ -1005,7 +1092,9 @@ impl<'a> Ps<'a> {
                 }
                 None => {
                     let at = self.pos;
-                    return Err(self.fail_expecting(&format!("<{name}>"), at));
+                    let f = self.fail_expecting(&format!("<{name}>"), at);
+                    self.restore(&entry_sp);
+                    return Err(f);
                 }
             }
 
@@ -1108,9 +1197,29 @@ fn dispatch(cat: &Category, text: &str, kind: TokenKind, leading: bool) -> Vec<u
                 FirstTok::Any => true,
                 // A token-table symbol lexes as `Atom` (even when
                 // ident-shaped, e.g. `do`/`then` — ORACLE-PORT
-                // `next_token`'s munch-competition rule in lex.rs); a
-                // plain `Ident` token never satisfies a `Sym` entry.
-                FirstTok::Sym(s) => kind == TokenKind::Atom && s == text,
+                // `next_token`'s munch-competition rule in lex.rs), so
+                // the `Atom` arm covers every real `Prim::Symbol`. The
+                // `Ident`-with-matching-text arm is what makes
+                // `Prim::NonReservedSymbol` (`level`'s `max`/`imax`)
+                // dispatchable at all: ORACLE-PORT `nonReservedSymbolInfo`
+                // (Basic.lean) — `nonReservedSymbol sym (includeIdent :=
+                // true)` sets `firstTokens := .tokens [sym, "ident"]`,
+                // a DUAL registration, precisely because `sym`'s text is
+                // deliberately never harvested into the token table
+                // (grammar.rs's `walk_symbols` doc comment) and so can
+                // only ever lex as a plain `Ident`, never an `Atom`. A
+                // real `Symbol`'s text, by contrast, always lexes as
+                // `Atom` once harvested (never `Ident`), so this second
+                // arm is a dead branch for it — extending the match
+                // costs real `Symbol` dispatch nothing and is exactly
+                // what makes a `NonReservedSymbol`-led production
+                // reachable at all. `first_tok` maps both `Symbol` and
+                // `NonReservedSymbol` to the same `FirstTok::Sym`
+                // (grammar.rs), so this one arm covers both.
+                FirstTok::Sym(s) => {
+                    (kind == TokenKind::Atom && s == text)
+                        || (kind == TokenKind::Ident && s == text)
+                }
                 FirstTok::Ident => kind == TokenKind::Ident,
                 FirstTok::Num => kind == TokenKind::Num,
                 FirstTok::Scientific => kind == TokenKind::Scientific,

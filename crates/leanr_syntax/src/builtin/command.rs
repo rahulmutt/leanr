@@ -135,14 +135,7 @@ pub fn register(b: &mut SnapshotBuilder) {
             ),
         ]),
     );
-
-    // term category micro set: bare idents and numerals. Registered
-    // via `leading_raw`, NOT `leading2`: a bare ident is a
-    // `Syntax.ident` LEAF (no wrapping node at all — `x`'s dump is a
-    // bare `{"i":"x",...}`), and `Prim::NumLit` already wraps itself in
-    // a "num" node (`Ps::lit`, `42`'s dump is
-    // `{"c":[{"a":"42",...}],"k":"num"}` with no outer wrapper) —
-    // `leading2` would add a spurious extra wrapper around either.
-    b.leading_raw("term", Prim::Ident);
-    b.leading_raw("term", Prim::NumLit);
+    // The term category's own literal/atom registrations (idents,
+    // numerals, …) now live in `term.rs` (M3a Task 8) — this file keeps
+    // only the command-category micro set.
 }

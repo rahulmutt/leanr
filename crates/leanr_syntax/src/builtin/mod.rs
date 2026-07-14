@@ -4,8 +4,9 @@
 //! Kind names MUST match Lean's byte-for-byte (oracle equality).
 
 pub mod command;
-// Tasks 8–10 add: pub mod level; pub mod term; pub mod do_notation;
-// pub mod tactic;
+pub mod level;
+pub mod term;
+// Tasks 9–10 add: pub mod do_notation; pub mod tactic;
 
 use crate::grammar::{GrammarSnapshot, SnapshotBuilder};
 
@@ -24,7 +25,14 @@ pub fn snapshot() -> GrammarSnapshot {
     b.category("term");
     b.category("level");
     b.category("tactic");
+    // `Term.structInst`'s field-decl slot recurses into its own tiny
+    // category (surface table's "struct-instance-field-decl category",
+    // 2 rows: `structInstFieldDef`/`structInstFieldEqns`) — registered
+    // here alongside the others, populated by `term::register`.
+    b.category("structInstFieldDecl");
     command::register(&mut b);
-    // Tasks 8–10: level::register(&mut b); term::register(&mut b); …
+    level::register(&mut b);
+    term::register(&mut b);
+    // Task 9–10: do_notation::register(&mut b); tactic::register(&mut b);
     b.finish()
 }

@@ -91,6 +91,35 @@ pub enum Prim {
     /// Zero-width success producing a `Syntax.missing` leaf (used by
     /// error recovery and a few builtin productions).
     EmitMissing,
+    /// Zero-width success producing an EMPTY `Syntax.ident` leaf at the
+    /// CURRENT position (no trivia skip first) — ORACLE-PORT
+    /// `hygieneInfoFn` (Basic.lean): ``hygieneInfo`` always succeeds,
+    /// fabricating an anonymous, empty-text `ident` positioned
+    /// immediately after whatever token was just consumed (BEFORE its
+    /// trailing whitespace — the oracle "steals" that trailing trivia
+    /// for itself, but since our span only ever reports `(pos, pos)`
+    /// for this zero-width leaf, not consuming any trivia here
+    /// reproduces the observable position exactly; confirmed against a
+    /// fresh oracle dump of `(  x)`, whose `hygieneInfo` ident sits at
+    /// the byte offset immediately after `(`, not after the two
+    /// following spaces). Used by `hygienicLParen` (paren/tuple/
+    /// typeAscription/anonymousCtor's common `"(" >> hygieneInfo`
+    /// prefix) and `letId`'s anaphoric-`let` fallback.
+    EmitEmptyIdent,
+    /// Raw single-character match that bypasses the LEXER entirely (no
+    /// `next_token` call) — ORACLE-PORT `rawCh` (Basic.lean), used by
+    /// `doubleQuotedName` (`` "`" >> checkNoWsBefore >> rawCh '`' >>
+    /// ident ``): tokenizing normally at this position would let
+    /// `next_token`'s unconditional `` ` ``-dispatch swallow the SECOND
+    /// backtick plus the following ident into one `NameLit` token
+    /// (indistinguishable from `` `foo ``'s own shape) — the whole
+    /// reason the oracle comment says "we cannot use ``` "``" ``` as a
+    /// new token either". Reading exactly one raw `char` straight from
+    /// the source (like `FieldIdx`'s raw digit scan) sidesteps that
+    /// ambiguity. Emits `KIND_ATOM` of the matched char's UTF-8 length;
+    /// no leading-trivia skip (never needed: always reached right after
+    /// a `CheckNoWsBefore`).
+    RawChar(char),
 }
 
 // Terse constructors — builtin/*.rs is written in these.
@@ -125,6 +154,39 @@ pub fn sep_by1(item: Prim, sep: &str) -> Prim {
         sep: sep.to_string(),
         allow_trailing: false,
     }
+}
+/// `sepBy1 .. (allowTrailingSep := true)` — the variant `Term.tuple`'s
+/// inner list and `Term.matchAlt`'s comma-separated pattern groups use
+/// (source: `sepBy1 termParser ", " (allowTrailingSep := true)`).
+pub fn sep_by1_trailing(item: Prim, sep: &str) -> Prim {
+    Prim::SepBy1 {
+        item: Arc::new(item),
+        sep: sep.to_string(),
+        allow_trailing: true,
+    }
+}
+/// `sepBy .. (allowTrailingSep := true)` — `Term.anonymousCtor`'s `⟨…⟩`
+/// list (0 or more, source: `sepBy termParser ", " (allowTrailingSep :=
+/// true)`).
+pub fn sep_by_trailing(item: Prim, sep: &str) -> Prim {
+    Prim::SepBy {
+        item: Arc::new(item),
+        sep: sep.to_string(),
+        allow_trailing: true,
+    }
+}
+/// Zero-width, ALWAYS-FAILING (never consumes) placeholder for a real
+/// sub-grammar this port doesn't transcribe (documented "not ported"
+/// slots — same idiom as `builtin/command.rs`'s `empty_opt()`, one
+/// level lower: wrapping this in `opt(..)` reproduces an
+/// always-empty-`null` oracle slot exactly, since a zero-`OrElse`
+/// fails immediately without consuming, same as `Optional`'s clean
+/// "nothing here" path).
+pub fn never() -> Prim {
+    Prim::OrElse(vec![])
+}
+pub fn raw_char(c: char) -> Prim {
+    Prim::RawChar(c)
 }
 pub fn or_else(ps: impl IntoIterator<Item = Prim>) -> Prim {
     Prim::OrElse(ps.into_iter().collect())
@@ -436,6 +498,14 @@ fn encode_prim(p: &Prim, snap: &GrammarSnapshot, h: &mut blake3::Hasher) {
         EmitMissing => {
             h.update(&[34]);
         }
+        EmitEmptyIdent => {
+            h.update(&[35]);
+        }
+        RawChar(c) => {
+            h.update(&[36]);
+            let mut buf = [0u8; 4];
+            h.update(c.encode_utf8(&mut buf).as_bytes());
+        }
     }
 }
 
@@ -707,6 +777,8 @@ fn walk_symbols(p: &Prim, f: &mut impl FnMut(&str)) {
         | CheckLhsPrec(_)
         | CheckWsBefore
         | CheckNoWsBefore
-        | EmitMissing => {}
+        | EmitMissing
+        | EmitEmptyIdent
+        | RawChar(_) => {}
     }
 }
