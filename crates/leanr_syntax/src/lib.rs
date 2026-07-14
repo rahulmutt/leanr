@@ -9,12 +9,12 @@
 //! on any byte sequence (docs/THREAT_MODEL.md).
 //!
 //! **Stack contract**: the parser recurses natively through nested input,
-//! so that "no panic" promise has one precondition — call `parse_module`
-//! only on a thread with at least [`MIN_STACK_BYTES`] of stack left. The
-//! main thread's 8 MiB default is below that; spawn a worker
-//! (`std::thread::Builder::new().stack_size(leanr_syntax::MIN_STACK_BYTES)`),
-//! exactly as Lean itself sizes its parser threads (`lean --tstack`). See
-//! [`MIN_STACK_BYTES`] and [`MAX_CATEGORY_DEPTH`].
+//! so that "no panic" promise needs a known amount of native stack
+//! ([`MIN_STACK_BYTES`], the budget [`MAX_CATEGORY_DEPTH`] is calibrated
+//! against). Callers do not have to arrange it: [`parse_module`] runs the
+//! parse on a worker thread it sizes itself — exactly as Lean sizes its
+//! own parser threads (`lean --tstack`) — so the guarantee holds on any
+//! thread, including a 2 MiB `libtest` or `tokio` one.
 //!
 //! Task 1 (this commit) lands the crate scaffold: syntax kinds, rowan
 //! trees, event-based tree building, and canonical JSON output. `lex`,

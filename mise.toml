@@ -21,14 +21,13 @@ run = "sh -c '\"$(mise which elan-init)\" -y --no-modify-path --default-toolchai
 run = "cargo build --workspace"
 
 [tasks.test]
-# RUST_MIN_STACK = leanr_syntax::MIN_STACK_BYTES (16 MiB): the parser recurses
-# natively through nested input and documents a minimum-stack contract for its
-# callers (crates/leanr_syntax/src/parse.rs), but `libtest` runs every test on a
-# spawned thread whose default stack is 2 MiB — far under it. Deep-nesting tests
-# size their own worker threads (`in_worker`), so a bare `cargo test` is correct
-# too; this makes the contract hold for every OTHER test as well (e.g. M3a Task
-# 12's property/fuzz tests, which feed the parser arbitrary generated input).
-env = { RUST_MIN_STACK = "16777216" }
+# No RUST_MIN_STACK here, deliberately (Task 11b review wave 2, Critical 2).
+# It used to export 16 MiB because `leanr_syntax`'s minimum-stack contract was a
+# precondition on callers and `libtest` runs every test on a 2 MiB thread. That
+# is fixed at the source: `parse_module` now spawns its own correctly-sized
+# worker, so the contract holds on any thread — including a bare `cargo test`,
+# and including Task 12's property/fuzz tests. Setting it here again would only
+# hide a regression of that fix.
 run = "cargo test --workspace"
 
 [tasks.fmt]

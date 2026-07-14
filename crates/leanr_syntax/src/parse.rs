@@ -41,7 +41,55 @@ pub struct ParseResult {
 /// mirrors what a real oracle dump of this loop always emits last —
 /// confirmed against a fresh `dump_syntax.lean` run over
 /// `tests/fixtures/syntax/Micro.lean` (Task 7), not assumed from source.
+///
+/// **Runs the parse on its own, correctly sized worker thread.** The
+/// parser recurses natively through nested input, so "never panic on
+/// untrusted input" needs a known amount of native stack —
+/// `MIN_STACK_BYTES`, against which `MAX_CATEGORY_DEPTH` is calibrated
+/// (see both constants). That used to be an unchecked *precondition* on
+/// this function's caller, which is the worst possible shape for a safety
+/// contract: nothing verified it, the default environment violates it
+/// (main thread 8 MiB, a `tokio` worker or a `libtest` thread 2 MiB), and
+/// the failure mode is a SIGSEGV — strictly worse than the panic the
+/// untrusted-input rule forbids (Task 11b review wave 2, Critical 2). So
+/// the contract is now internal and unconditional: `parse_module` spawns a
+/// `std::thread::Builder::new().stack_size(MIN_STACK_BYTES)` scoped worker
+/// (`spawn_scoped`, std-only, stable since 1.63 — it borrows `src`/`snap`
+/// without a `'static` bound, so this signature is unchanged) and joins
+/// it. Callers need no stack discipline of their own. This is also, in
+/// miniature, what real Lean does: it sizes its parser threads explicitly
+/// (`lean -s/--tstack=<KB>`).
+///
+/// Cost: one thread spawn+join per module parse, measured at ~30-60 µs —
+/// three orders of magnitude under a real module parse (the smallest
+/// oracle fixture is ~0.5 ms; `Micro.lean` ~1 ms), so it is not a
+/// meaningful tax on the only granularity this API offers.
+///
+/// A panic inside the worker is re-raised on the caller's thread
+/// (`resume_unwind`) rather than swallowed: the never-panic property is
+/// about *input*, not about masking genuine bugs.
 pub fn parse_module(src: &str, snap: &GrammarSnapshot) -> ParseResult {
+    std::thread::scope(|scope| {
+        let worker = std::thread::Builder::new()
+            .stack_size(MIN_STACK_BYTES)
+            .spawn_scoped(scope, || parse_module_here(src, snap))
+            // Not an untrusted-input failure path: the OS refusing a
+            // thread is a resource condition, unrelated to the bytes being
+            // parsed. A clean panic here is the right (and only honest)
+            // outcome — the alternative, parsing inline on a stack of
+            // unknown size, is the segfault this whole change removes.
+            .expect("spawn the parse worker thread");
+        match worker.join() {
+            Ok(r) => r,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    })
+}
+
+/// `parse_module`'s body, on whatever stack the caller is standing on.
+/// Private on purpose: the public entry point is `parse_module`, which
+/// guarantees that stack is `MIN_STACK_BYTES` (see there).
+fn parse_module_here(src: &str, snap: &GrammarSnapshot) -> ParseResult {
     let kinds = snap.kinds();
     let mut ps = Ps::new(src, snap);
     let module = kinds
@@ -105,11 +153,11 @@ impl<'a> Ps<'a> {
     /// never-oracle-compared.
     pub(crate) fn recover_command(&mut self) {
         let (pos, expected) = (self.furthest_pos, self.furthest_expected.clone());
-        self.errors.push(ParseError {
+        self.errors.push(PError::Err(ParseError {
             code: "E0301",
             span: (pos as u32, pos as u32),
             msg: format!("unexpected input; expected one of: {}", expected.join(", ")),
-        });
+        }));
         self.start(KIND_ERROR);
         let mut first = true;
         loop {
@@ -155,17 +203,21 @@ impl<'a> Ps<'a> {
 /// native recursion (`Ps::run` → `category` → `Ps::run` …), so it needs
 /// a guaranteed amount of native stack to be able to promise "never
 /// overflow" (Global Constraint: never panic / never fail to terminate,
-/// on any input). This is that promise's precondition, and it is part of
-/// the public API: **every thread that calls `parse_module` must have at
-/// least `MIN_STACK_BYTES` of stack REMAINING at the call.**
+/// on any input). This constant is that amount, and
+/// `MAX_CATEGORY_DEPTH` is calibrated against it.
 ///
-/// - The Linux/macOS *main* thread default (8 MiB) is under this; a
-///   `main()` that parses should spawn a worker
-///   (`std::thread::Builder::new().stack_size(leanr_syntax::MIN_STACK_BYTES)`)
-///   — which is also exactly what real Lean does, see below.
-/// - `libtest` spawns each test on a 2 MiB thread, so tests that parse
-///   deeply nested input must do the same (`tests/never_hang.rs`'s
-///   `in_worker`); `mise run test` additionally exports `RUST_MIN_STACK`.
+/// **It is not a precondition on callers.** `parse_module` runs the parse
+/// on a worker thread it sizes itself (`stack_size(MIN_STACK_BYTES)` — see
+/// there), so the guarantee is unconditional and internal. It was briefly
+/// a documented caller obligation instead, which was a mistake: nothing
+/// checked it, every default environment violates it (main thread 8 MiB;
+/// a `tokio` worker or a `libtest` thread 2 MiB), and the failure mode was
+/// a SIGSEGV — strictly worse than the panic the untrusted-input rule
+/// forbids (Task 11b review wave 2, Critical 2). The constant stays public
+/// because it is the number `MAX_CATEGORY_DEPTH` is derived from, and
+/// because anything that calls *below* `parse_module` — this crate's own
+/// deep-nesting unit tests drive `Ps::category` directly — still has to
+/// supply it for itself.
 ///
 /// Sized against the measured worst case rather than a guess (Task 11b
 /// review, Critical 2 — the previous calibration was taken against
@@ -269,6 +321,121 @@ pub fn render_error(src: &str, e: &ParseError) -> String {
 pub struct Fail;
 pub type PResult = Result<(), Fail>;
 
+/// A parse-time event: either a real tree `Event`, or a REFERENCE to a
+/// whole `category()` subtree that has already been computed and lives in
+/// `Ps::subtrees`.
+///
+/// This indirection is what makes the `category()` memo table (Task 11b)
+/// cost O(total events) instead of O(`MAX_CATEGORY_DEPTH` × total events)
+/// — see `Ps::subtrees` for the measurement and the argument. It is also
+/// the shape the ORACLE has: Lean's `ParserCacheEntry.stx` is a `Syntax`
+/// *node* (`Lean/Parser/Types.lean:256`) — a persistent, structurally
+/// shared tree, so an outer cached node holds a POINTER to the inner
+/// cached node rather than a copy of it. Storing flat event copies was
+/// this port's divergence, and O(depth × n) retention was its price.
+///
+/// Never escapes the parser: `finish_into_tree` flattens the whole thing
+/// back into a plain `Vec<Event>` (`flatten_events`), so `tree.rs` and the
+/// public `Event` type are untouched by any of this.
+#[derive(Clone, Debug)]
+enum PEvent {
+    Ev(Event),
+    Sub(usize),
+}
+
+/// The error-stream twin of `PEvent` — same indirection, same reason: a
+/// cached `category()` subtree's errors would otherwise be copied once per
+/// enclosing cached call. (`Prim::Tactic`'s "unknown tactic" E0301 is a
+/// diagnostic a *successful* category parse can emit, once per unknown
+/// tactic, so this axis is adversarially reachable too — not just the
+/// event axis.)
+#[derive(Clone, Debug)]
+enum PError {
+    Err(ParseError),
+    Sub(usize),
+}
+
+/// One memoized `category()` call's OWN output — the events and errors it
+/// appended itself, with each nested `category()` call left as a `Sub`
+/// reference rather than inlined. Owned by `Ps::subtrees`; referenced by
+/// `CatOutcome::Ok`.
+struct Subtree {
+    events: Vec<PEvent>,
+    errors: Vec<PError>,
+    /// Is the LAST real `Event::Token` anywhere in this subtree trivia?
+    /// `None` = the subtree contains no token at all (it is entirely
+    /// structural — `Start`/`Finish`/`Missing`).
+    ///
+    /// Precomputed because `had_ws_before_current` (`Prim::CheckWsBefore`,
+    /// the whitespace gate `Term.app`'s argument list depends on) answers
+    /// exactly this question by scanning `Ps::events` backwards — and once
+    /// a completed category call collapses to a single `PEvent::Sub`, the
+    /// token it needs to see is no longer in `Ps::events` at all. Folding
+    /// the answer in at construction keeps that scan O(1) per subtree
+    /// instead of forcing it to re-descend.
+    last_tok_trivia: Option<bool>,
+}
+
+/// Flatten a `PEvent` stream (expanding every `Sub` reference against
+/// `subs`) into the plain `Event` stream `tree.rs` consumes.
+///
+/// Iterative, with an explicit worklist rather than native recursion: the
+/// nesting is input-driven (bounded by `MAX_CATEGORY_DEPTH`, but the
+/// untrusted-input rule says "never overflow", and a heap worklist makes
+/// that unconditional rather than a second thing to calibrate).
+/// Termination is structural: a `Sub(id)` can only ever be pushed by a
+/// call that RETURNED before its parent captured it, so `id` is strictly
+/// less than the id of any subtree referencing it — the reference graph is
+/// a DAG ordered by construction, and cannot cycle.
+fn flatten_events(root: &[PEvent], subs: &[Subtree]) -> Vec<Event> {
+    let mut out = Vec::with_capacity(root.len());
+    let mut stack: Vec<(&[PEvent], usize)> = vec![(root, 0)];
+    while let Some(&(slice, i)) = stack.last() {
+        if i >= slice.len() {
+            stack.pop();
+            continue;
+        }
+        stack.last_mut().expect("just peeked").1 += 1;
+        match &slice[i] {
+            PEvent::Ev(e) => out.push(e.clone()),
+            PEvent::Sub(id) => stack.push((&subs[*id].events, 0)),
+        }
+    }
+    out
+}
+
+/// `flatten_events`'s twin for the error stream. Order is preserved
+/// exactly: a child's errors sit, contiguously, at the point in its
+/// parent's error list where the child ran — which is precisely where its
+/// `Sub` marker was pushed.
+fn flatten_errors(root: &[PError], subs: &[Subtree]) -> Vec<ParseError> {
+    let mut out = Vec::with_capacity(root.len());
+    let mut stack: Vec<(&[PError], usize)> = vec![(root, 0)];
+    while let Some(&(slice, i)) = stack.last() {
+        if i >= slice.len() {
+            stack.pop();
+            continue;
+        }
+        stack.last_mut().expect("just peeked").1 += 1;
+        match &slice[i] {
+            PError::Err(e) => out.push(e.clone()),
+            PError::Sub(id) => stack.push((&subs[*id].errors, 0)),
+        }
+    }
+    out
+}
+
+/// The `last_tok_trivia` summary for a freshly built subtree (see that
+/// field): the last real token in `events`, consulting an already-built
+/// nested subtree's own summary rather than re-descending into it.
+fn last_tok_trivia(events: &[PEvent], subs: &[Subtree]) -> Option<bool> {
+    events.iter().rev().find_map(|e| match e {
+        PEvent::Ev(Event::Token { kind, .. }) => Some(crate::kind::is_trivia(*kind)),
+        PEvent::Ev(Event::Start(_) | Event::Finish | Event::Missing) => None,
+        PEvent::Sub(id) => subs[*id].last_tok_trivia,
+    })
+}
+
 // This whole apparatus is exercised today only by the toy-grammar tests
 // below — Task 5 has no *production* caller yet (that's `parse_module`,
 // Task 7, over a real `GrammarSnapshot`, Task 6). `cfg(test)` strips
@@ -284,8 +451,46 @@ pub(crate) struct Ps<'a> {
     /// (`lit`/`field_idx`, tree-building) reads through a plain owned
     /// field rather than re-deriving from `snap` each time.
     kinds: Arc<KindInterner>,
-    events: Vec<Event>,
-    pub(crate) errors: Vec<ParseError>,
+    events: Vec<PEvent>,
+    errors: Vec<PError>,
+    /// Append-only arena of memoized `category()` subtrees — the backing
+    /// store `PEvent::Sub`/`PError::Sub` point into, and (via
+    /// `CatOutcome::Ok`) what a cache hit replays.
+    ///
+    /// **Why the indirection exists** (Task 11b review wave 2,
+    /// Important 1). The cache used to store, per entry, a flat COPY of
+    /// the whole event slice the call produced. Since a category call's
+    /// slice contains its children's slices, a token was retained once per
+    /// enclosing cached call — O(`MAX_CATEGORY_DEPTH` × n), and the wave-1
+    /// cap raise (40 → 256) multiplied it by 6.4x. Measured, before this
+    /// change: 98 KiB of source nested just under the cap
+    /// (`(`×252 around a large term) retained **325 MiB**; the cache held
+    /// 10.5M events against 42K live ones, a 248x blowup that tracks the
+    /// nesting depth exactly. Linear in file size, so a few-MiB adversarial
+    /// file exhausts memory — the same resource-exhaustion DoS this task
+    /// exists to close, in the memory axis instead of the time axis.
+    ///
+    /// A subtree now stores only its OWN events/errors, with each nested
+    /// category call left as a `Sub` id, so each event is retained exactly
+    /// once no matter how deeply it is nested: O(n), not O(cap × n). Same
+    /// input, after: 1.9 MiB.
+    ///
+    /// **Why not eviction or a size threshold** (the other two candidates).
+    /// Both re-open the Θ(3^depth) DoS. A size threshold ("don't cache
+    /// slices bigger than T") declines to cache *precisely* the deeply
+    /// nested subtrees — the ones whose siblings must hit — so the
+    /// `paren`/`tuple`/`typeAscription` fanout re-parses them and the blowup
+    /// returns. Eviction is worse than it looks: the memo table's
+    /// polynomial bound needs an entry computed inside a call to survive
+    /// until that call returns, and "survive until the IMMEDIATE parent
+    /// returns" is NOT enough — a key reached from two different children of
+    /// the same parent would be recomputed under each, which is exactly the
+    /// branching that gives 3^depth back. Nothing short of "never evict
+    /// within one `parse_module`" preserves the bound, so the fix has to be
+    /// in the REPRESENTATION, not the retention policy. Which is also where
+    /// the oracle put it: `ParserCacheEntry.stx` is a shared `Syntax` node,
+    /// not a copy (see `PEvent`).
+    subtrees: Vec<Subtree>,
     furthest_pos: usize,
     furthest_expected: Vec<String>,
     /// Current right-binding power: `Category` sets it on recursion,
@@ -339,17 +544,21 @@ pub(crate) struct Ps<'a> {
     /// `category`'s doc comment (the "Correctness" section) for why a
     /// plain snapshot-and-replay of the GLOBAL tally would be unsound.
     furthest_stack: Vec<Option<(usize, Vec<String>)>>,
-    /// How many times the `MAX_CATEGORY_DEPTH` arm has fired in this
-    /// parse — a monotone counter, never reset. `category` reads it on
-    /// entry and again on exit: if it moved, the depth cap fired
-    /// somewhere inside THAT call's dynamic extent, the call's result is
-    /// therefore a depth-cap artifact rather than a pure function of its
-    /// cache key, and the entry is NOT inserted (Task 11b review,
-    /// Critical 1 — see `category`'s doc comment, "cat_depth and the
-    /// cache"). O(1), no parallel stack needed: category calls nest, so
-    /// a cap hit inside a child is by construction inside every open
-    /// ancestor too, and each open call has its own `cap_hits`-on-entry
-    /// value in its own native frame.
+    /// How many times this parse has produced a depth-cap artifact — a
+    /// monotone counter, never reset, bumped both by the
+    /// `MAX_CATEGORY_DEPTH` arm itself AND by a cache hit that REPLAYS a
+    /// depth-tainted (`depth_headroom: Some(_)`) entry, since inheriting
+    /// an artifact taints a call exactly as much as producing one does
+    /// (Task 11b review wave 2, Critical 1). `category` reads it on entry
+    /// and again on exit: if it moved, the depth cap shaped something
+    /// inside THAT call's dynamic extent, so the call's result is a
+    /// function of the depth budget it had and not of its cache key
+    /// alone, and it is filed under `depth_headroom: Some(headroom)`
+    /// rather than the depth-independent `None` bucket (see `category`'s
+    /// doc comment, "`cat_depth` and the cache"). O(1), no parallel stack
+    /// needed: category calls nest, so a bump inside a child is by
+    /// construction inside every open ancestor too, and each open call
+    /// holds its own `cap_hits`-on-entry value in its own native frame.
     cap_hits: u64,
 }
 
@@ -402,17 +611,17 @@ struct CatCacheKey {
 
 /// What a `category()` call replays on a cache hit. ORACLE-PORT
 /// `ParserCacheEntry` (`stx`, `lhsPrec`, `newPos`, `errorMsg`,
-/// `Types.lean:256`) — our `stx` is an event/error SLICE, not a single
-/// `Syntax` value (this crate's flat-event-stream tree model has no
-/// single node to stash — see `tree.rs`'s `Event`). We additionally
+/// `Types.lean:256`): `sub` is our `stx` — an id into `Ps::subtrees`,
+/// which (like Lean's `Syntax`) is a structurally SHARED node, not a copy
+/// (wave 2, Important 1 — see `PEvent`/`Ps::subtrees`). We additionally
 /// have a genuine FAILURE case (`CatOutcome::Err`) real Lean's one
 /// entry shape doesn't need: Lean's parsers always "succeed" at the
 /// stack-effect level (a failed alternative still pushes `missing`
 /// plus sets `errorMsg`), so one shape covers both; this port's
 /// `Result`-based backtracking has two genuinely different shapes — a
-/// failed `category()` call restores to its own entry savepoint (see
-/// the `None` arm below) and so has no events/errors of its own to
-/// replay, only a furthest-failure effect.
+/// failed `category()` call restores to its own entry savepoint and so
+/// has no events/errors of its own to replay, only a furthest-failure
+/// effect.
 #[derive(Clone)]
 struct CatCacheEntry {
     outcome: CatOutcome,
@@ -425,8 +634,9 @@ struct CatCacheEntry {
 #[derive(Clone)]
 enum CatOutcome {
     Ok {
-        events: Vec<Event>,
-        errors: Vec<ParseError>,
+        /// Index into `Ps::subtrees` — replaying this entry is a single
+        /// `PEvent::Sub(sub)` push, O(1), no matter how big the subtree.
+        sub: usize,
         end: usize,
         lhs_prec: u32,
     },
@@ -449,8 +659,8 @@ pub(crate) struct Savepoint {
 #[cfg_attr(not(test), allow(dead_code))]
 struct MatchWinner {
     idx: usize,
-    events: Vec<Event>,
-    errors: Vec<ParseError>,
+    events: Vec<PEvent>,
+    errors: Vec<PError>,
     end: usize,
     lhs_prec: u32,
 }
@@ -481,6 +691,7 @@ impl<'a> Ps<'a> {
             line_starts,
             cat_depth: 0,
             cat_cache: HashMap::new(),
+            subtrees: Vec::new(),
             furthest_stack: Vec::new(),
             cap_hits: 0,
         }
@@ -503,10 +714,10 @@ impl<'a> Ps<'a> {
 
     // ---- events ----------------------------------------------------
     pub(crate) fn start(&mut self, kind: SyntaxKind) {
-        self.events.push(Event::Start(kind));
+        self.events.push(PEvent::Ev(Event::Start(kind)));
     }
     pub(crate) fn finish(&mut self) {
-        self.events.push(Event::Finish);
+        self.events.push(PEvent::Ev(Event::Finish));
     }
     pub(crate) fn save(&self) -> Savepoint {
         Savepoint {
@@ -540,11 +751,11 @@ impl<'a> Ps<'a> {
                 return (t, self.pos);
             }
             if let Some(e) = err {
-                self.errors.push(ParseError {
+                self.errors.push(PError::Err(ParseError {
                     code: e.code,
                     span: (self.pos as u32, (self.pos + t.len as usize) as u32),
                     msg: e.msg,
-                });
+                }));
             }
             self.emit_token(trivia_kind(t.kind), t.len);
         }
@@ -612,22 +823,22 @@ impl<'a> Ps<'a> {
     }
 
     fn emit_token(&mut self, kind: SyntaxKind, len: u32) {
-        self.events.push(Event::Token {
+        self.events.push(PEvent::Ev(Event::Token {
             kind,
             offset: self.pos as u32,
             len,
-        });
+        }));
         self.pos += len as usize;
     }
 
     /// Consume the peeked significant token as leaf `kind`.
     fn bump(&mut self, t: Token, kind: SyntaxKind) {
         if let (_, Some(e)) = next_token(self.src, self.pos, self.table()) {
-            self.errors.push(ParseError {
+            self.errors.push(PError::Err(ParseError {
                 code: e.code,
                 span: (self.pos as u32, (self.pos + t.len as usize) as u32),
                 msg: e.msg,
-            });
+            }));
         }
         self.emit_token(kind, t.len);
     }
@@ -750,11 +961,11 @@ impl<'a> Ps<'a> {
                 self.furthest_expected.join(", ")
             )
         };
-        self.errors.push(ParseError {
+        self.errors.push(PError::Err(ParseError {
             code: "E0301",
             span: (self.furthest_pos as u32, self.furthest_pos as u32),
             msg,
-        });
+        }));
     }
 
     // ---- the interpreter --------------------------------------------
@@ -881,7 +1092,7 @@ impl<'a> Ps<'a> {
                 r
             }
             Prim::EmitMissing => {
-                self.events.push(Event::Missing);
+                self.events.push(PEvent::Ev(Event::Missing));
                 Ok(())
             }
             Prim::EmitEmptyIdent => {
@@ -889,11 +1100,11 @@ impl<'a> Ps<'a> {
                 // a zero-width `ident` at the CURRENT position — no
                 // `peek_significant` call, so no trivia is skipped
                 // first (see the `Prim::EmitEmptyIdent` doc comment).
-                self.events.push(Event::Token {
+                self.events.push(PEvent::Ev(Event::Token {
                     kind: KIND_IDENT,
                     offset: self.pos as u32,
                     len: 0,
-                });
+                }));
                 Ok(())
             }
             Prim::RawChar(c) => {
@@ -975,11 +1186,11 @@ impl<'a> Ps<'a> {
                 //    failed") while the production itself still
                 //    succeeds, producing a real (error-annotated) tree
                 //    instead of no tree at all.
-                self.errors.push(ParseError {
+                self.errors.push(PError::Err(ParseError {
                     code: "E0301",
                     span: (at as u32, at as u32),
                     msg: "unknown tactic".to_string(),
-                });
+                }));
                 Ok(())
             }
             Prim::DocCommentBody => self.doc_comment_body(),
@@ -1174,11 +1385,11 @@ impl<'a> Ps<'a> {
                 // case already uses for the analogous plain-comment
                 // case).
                 let len = self.src.len() - at;
-                self.errors.push(ParseError {
+                self.errors.push(PError::Err(ParseError {
                     code: "E0303",
                     span: (at as u32, self.src.len() as u32),
                     msg: "unterminated comment".to_string(),
-                });
+                }));
                 self.emit_token(KIND_ATOM, len as u32);
                 Ok(())
             }
@@ -1566,14 +1777,11 @@ impl<'a> Ps<'a> {
         // application entirely. Skipping structural events to find the
         // last real token fixes this without changing behavior for the
         // (already-correct) no-wrapper case.
-        self.events
-            .iter()
-            .rev()
-            .find_map(|e| match e {
-                Event::Token { kind, .. } => Some(crate::kind::is_trivia(*kind)),
-                Event::Start(_) | Event::Finish | Event::Missing => None,
-            })
-            .unwrap_or(false)
+        // A completed `category()` call collapses to ONE `PEvent::Sub`
+        // (wave 2, Important 1), so the token this scan is looking for may
+        // be inside a subtree rather than in `self.events`; the subtree's
+        // precomputed `last_tok_trivia` answers for it without descending.
+        last_tok_trivia(&self.events, &self.subtrees).unwrap_or(false)
     }
 
     /// Try each of `parsers` from the same savepoint `sp` (already
@@ -1709,6 +1917,14 @@ impl<'a> Ps<'a> {
     ///   at that same headroom — where it is, by determinism, exactly
     ///   what a re-parse computes.
     ///
+    /// "The cap fired inside" means *in this call's dynamic extent*, and
+    /// that includes INHERITING a capped result through a cache hit — a
+    /// `Some(_)`-keyed hit bumps `cap_hits` too (see the hit path below,
+    /// Task 11b review wave 2). Only counting fresh cap fires would leave
+    /// a call that merely replayed a capped sub-result looking
+    /// depth-independent, and store it under `None` — reopening exactly
+    /// the failure mode above one level up.
+    ///
     /// Lookup therefore tries the depth-independent key first and the
     /// current-headroom key second. Note what this buys over simply
     /// refusing to cache depth-tainted entries (the other candidate fix):
@@ -1720,10 +1936,25 @@ impl<'a> Ps<'a> {
     /// depth 256 does not finish in 30s that way). Keying on the headroom
     /// keeps them memoized — sibling candidates at one nesting level all
     /// sit at the same `cat_depth`, hence the same headroom, hence the
-    /// same key — while still never replaying a depth artifact into a
-    /// state that didn't earn it. The cache stays bounded: at most
-    /// (positions × distinct headrooms) entries, i.e. O(n · cap), so the
-    /// never-hang guarantee is polynomial-bounded, not exponential.
+    /// same key.
+    ///
+    /// To be precise about WHY that works, since it is easy to misread
+    /// (Task 11b review wave 2, Important 2): `headroom =
+    /// MAX_CATEGORY_DEPTH - cat_depth` is a *bijection* with `cat_depth`,
+    /// so keying on it partitions the cache **identically** to keying on
+    /// the absolute depth — it buys no extra sharing on its own, and
+    /// nothing here would change if the field held `cat_depth` instead.
+    /// The mechanism that actually collapses the fanout is the **`None`
+    /// bucket**: the overwhelming majority of calls never touch the cap,
+    /// go in depth-INDEPENDENT, and are therefore shared across every
+    /// `cat_depth` at which their key is reached. `Some(h)` is only the
+    /// quarantine for the rare depth-tainted entry, and there the
+    /// same-depth-only sharing is exactly what keeps the *above-the-cap*
+    /// fanout (where every entry is tainted) from re-exponentiating —
+    /// siblings at one nesting level share a `cat_depth`, so they still
+    /// hit each other. The cache stays bounded: at most (positions ×
+    /// distinct headrooms) entries, i.e. O(n · cap), so the never-hang
+    /// guarantee is polynomial-bounded, not exponential.
     ///
     /// One asymmetry is deliberate: a `None` (depth-independent) entry is
     /// replayed even at a DEEPER `cat_depth` than it was computed at,
@@ -1752,23 +1983,50 @@ impl<'a> Ps<'a> {
             depth_headroom: None,
         };
         let mut hit = self.cat_cache.get(&key).cloned();
+        // Did the entry we matched come from the depth-DEPENDENT bucket?
+        // (`key.depth_headroom` is `None` for the first probe, `Some(_)`
+        // for the second, so this is just "did the second probe win".)
+        let mut hit_is_depth_dependent = false;
         if hit.is_none() {
             // …then an entry the cap DID shape, which only this same
             // headroom may replay.
             key.depth_headroom = Some(headroom);
             hit = self.cat_cache.get(&key).cloned();
+            hit_is_depth_dependent = hit.is_some();
         }
         if let Some(entry) = hit {
+            if hit_is_depth_dependent {
+                // Task 11b review wave 2 (Critical 1, reopened): a
+                // `Some(_)`-keyed entry IS, by definition, a depth-cap
+                // artifact — the cap fired inside the call that produced
+                // it. INHERITING it makes this call's result just as much
+                // an artifact of the ambient depth budget as computing it
+                // afresh would have, so every currently-open ancestor must
+                // be tainted exactly as a fresh cap fire would taint them
+                // (`cap_hits` is the monotone counter each open call
+                // diffs on exit — see the cap arm below and this fn's doc
+                // comment). Without this bump an ancestor that merely
+                // REPLAYS a capped sub-result gets stored under
+                // `depth_headroom: None`, i.e. advertised as valid at any
+                // `cat_depth`, and replaying THAT at a shallower depth —
+                // where a fresh parse had budget and would have succeeded
+                // — rejects valid input (regression test:
+                // `a_cache_hit_on_a_depth_capped_entry_taints_its_
+                // ancestors_too`). A `None` hit needs no bump: a
+                // depth-independent result cannot make its parent
+                // depth-dependent.
+                self.cap_hits += 1;
+            }
             self.apply_furthest_summary(&entry.furthest);
             return match entry.outcome {
-                CatOutcome::Ok {
-                    events,
-                    errors,
-                    end,
-                    lhs_prec,
-                } => {
-                    self.events.extend(events);
-                    self.errors.extend(errors);
+                CatOutcome::Ok { sub, end, lhs_prec } => {
+                    // O(1), whatever the subtree's size: one shared
+                    // reference, not a copy of its events (wave 2,
+                    // Important 1 — see `PEvent`). This is also what makes
+                    // the ENCLOSING call's own eventual entry small: it
+                    // captures this `Sub` marker, not the subtree behind it.
+                    self.events.push(PEvent::Sub(sub));
+                    self.errors.push(PError::Sub(sub));
                     self.pos = end;
                     self.lhs_prec = lhs_prec;
                     Ok(())
@@ -1972,8 +2230,15 @@ impl<'a> Ps<'a> {
                         // that ENTIRE existing subtree, with the just-
                         // parsed body's events (appended above) as the
                         // rest of its children.
-                        self.events.insert(lhs_events, Event::Start(*kind));
-                        self.events.push(Event::Finish);
+                        // (The lhs may by now be a single `PEvent::Sub`
+                        // marker standing for a whole memoized subtree —
+                        // wave 2, Important 1. That changes nothing here:
+                        // `lhs_events` is still the index of the lhs's first
+                        // top-level event, and wrapping is still one `Start`
+                        // inserted in front of it.)
+                        self.events
+                            .insert(lhs_events, PEvent::Ev(Event::Start(*kind)));
+                        self.events.push(PEvent::Ev(Event::Finish));
                         self.lhs_prec = *prec;
                     }
                     None => break,
@@ -2001,12 +2266,37 @@ impl<'a> Ps<'a> {
         // no events/errors of its own, only the furthest-failure
         // summary).
         let outcome = match &r {
-            Ok(()) => CatOutcome::Ok {
-                events: self.events[entry_sp.events..].to_vec(),
-                errors: self.errors[entry_sp.errors..].to_vec(),
-                end: self.pos,
-                lhs_prec: self.lhs_prec,
-            },
+            Ok(()) => {
+                // Move this call's own output OUT of the live streams and
+                // into the subtree arena, leaving a single `Sub` marker
+                // behind (wave 2, Important 1 — see `PEvent`). Nested
+                // category calls already collapsed to `Sub` markers the same
+                // way before returning here, so what we move is only THIS
+                // call's own events/errors: each event is retained exactly
+                // once across the whole parse, not once per enclosing call.
+                //
+                // Observationally this is a no-op for every other part of
+                // the parser: `flatten_events` expands the markers back into
+                // the identical event stream at tree-build time, and
+                // `self.events.len()` (`save`/`lhs_events`) only ever indexes
+                // TOP-LEVEL boundaries, never into a subtree.
+                let sub = self.subtrees.len();
+                let events = self.events.split_off(entry_sp.events);
+                let errors = self.errors.split_off(entry_sp.errors);
+                let last_tok_trivia = last_tok_trivia(&events, &self.subtrees);
+                self.subtrees.push(Subtree {
+                    events,
+                    errors,
+                    last_tok_trivia,
+                });
+                self.events.push(PEvent::Sub(sub));
+                self.errors.push(PError::Sub(sub));
+                CatOutcome::Ok {
+                    sub,
+                    end: self.pos,
+                    lhs_prec: self.lhs_prec,
+                }
+            }
             Err(Fail) => CatOutcome::Err,
         };
         self.cat_cache.insert(
@@ -2022,9 +2312,18 @@ impl<'a> Ps<'a> {
     // ---- output -------------------------------------------------------
     /// Fold the event stream into a lossless tree, using the
     /// snapshot's own `Arc<KindInterner>` (cloned once at `Ps::new`).
+    /// The diagnostics recorded so far, in push order. Materializes the
+    /// `PError` stream (expanding memoized subtrees — see `PEvent`); the
+    /// live `self.errors` is not a flat list any more.
+    pub(crate) fn errors(&self) -> Vec<ParseError> {
+        flatten_errors(&self.errors, &self.subtrees)
+    }
+
     pub(crate) fn finish_into_tree(self) -> (SyntaxTree, Vec<ParseError>) {
-        let tree = build_tree(self.src, &self.events, self.kinds.clone());
-        (tree, self.errors)
+        let events = flatten_events(&self.events, &self.subtrees);
+        let errors = flatten_errors(&self.errors, &self.subtrees);
+        let tree = build_tree(self.src, &events, self.kinds.clone());
+        (tree, errors)
     }
 }
 
@@ -2194,13 +2493,19 @@ mod tests {
         (sexpr(&tree), errors.len())
     }
 
-    /// Run a deep/adversarial parse the way this crate's stack contract
-    /// says every caller must (`MIN_STACK_BYTES` — `libtest`'s own test
-    /// threads get 2 MiB, far under it), AND bound it in wall-clock time
-    /// (`libtest` has no per-test timeout, so an `elapsed < BUDGET`
-    /// assertion placed AFTER the call cannot turn a hang into a failure
-    /// — it never runs). Task 11b review, Critical 2 + Important 3; the
-    /// integration-test twin is `tests/never_hang.rs`'s `in_worker`.
+    /// Run a deep/adversarial parse on a thread with `MIN_STACK_BYTES`,
+    /// AND bound it in wall-clock time (`libtest` has no per-test timeout,
+    /// so an `elapsed < BUDGET` assertion placed AFTER the call cannot
+    /// turn a hang into a failure — it never runs). Task 11b review,
+    /// Critical 2 + Important 3.
+    ///
+    /// The `stack_size` here is load-bearing and, unlike
+    /// `tests/never_hang.rs`'s `in_worker` (which dropped it in wave 2),
+    /// must stay: these unit tests drive `Ps::run`/`Ps::category` and
+    /// `parse_cat` DIRECTLY, below `parse_module` — so they bypass the
+    /// worker `parse_module` sizes for itself and have to supply the
+    /// contracted stack themselves. `libtest`'s own test threads get
+    /// 2 MiB, an eighth of it.
     fn in_worker<T: Send + 'static>(label: &str, f: impl FnOnce() -> T + Send + 'static) -> T {
         const BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -2580,13 +2885,14 @@ mod tests {
             rbp: 0,
         });
         assert!(r.is_ok(), "the leaf parse itself should succeed: {r:?}");
+        let errors = ps.errors();
         assert_eq!(
-            ps.errors.len(),
+            errors.len(),
             1,
             "the embedded unterminated-raw-string lex error must survive \
              the leading longest-match splice, not be discarded"
         );
-        assert_eq!(ps.errors[0].code, "E0302");
+        assert_eq!(errors[0].code, "E0302");
     }
 
     #[test]
@@ -2898,6 +3204,101 @@ mod tests {
             for _ in 0..k {
                 expected = format!("(paren '(' {expected} ')')");
             }
+            assert_eq!(parse_cat(&snap, &src), expected);
+        });
+    }
+
+    /// Task 11b review WAVE 2, CRITICAL 1 (reopened): the depth taint must
+    /// also propagate through a cache **HIT**. Keying tainted entries by
+    /// headroom is not enough on its own — the taint counter (`cap_hits`)
+    /// used to be bumped only where the cap arm *fires*, which is only
+    /// reachable on a MISS. A call that merely *inherits* a capped
+    /// sub-result by replaying a `depth_headroom: Some(_)` entry therefore
+    /// exited with `cap_hits` unmoved and got filed under `None` — i.e.
+    /// advertised as valid at ANY `cat_depth` while carrying a depth-cap
+    /// artifact inside it. Replaying THAT at a shallower depth is the
+    /// original Critical 1 all over again, one level up.
+    ///
+    /// The shape below (the reviewer's traced path, as a toy grammar) is
+    /// deliberately NOT the one
+    /// `a_depth_capped_subparse_never_poisons_a_shallower_reach_of_the_same_key`
+    /// exercises: there, the poisoned key is reached by a *fresh* deeper
+    /// parse. Here it is reached by a *hit*, and that test passes even with
+    /// the hit-path bump removed.
+    ///
+    /// - `lo`/`hi` are two leading candidates on the same first token `#`,
+    ///   differing only in the `rbp` they hand to their inner category call
+    ///   (`0` vs `MAX_PREC` — exactly `builtin/term.rs`'s commonplace
+    ///   `cat("term", 0)`-vs-`cat("term", MAX_PREC)` split). Both therefore
+    ///   run at the SAME position and the SAME `cat_depth`, under DIFFERENT
+    ///   keys, and both reach the identical inner key `K` = the paren
+    ///   chain's second level.
+    /// - `lo` is registered first, so it runs first and computes `K` fresh.
+    ///   The paren chain is sized so that at `lo`'s depth the cap fires
+    ///   inside it ⇒ `K` is stored `Some(h)`, `E₀` (`lo`'s inner call) is
+    ///   correctly tainted, and `lo` fails.
+    /// - `hi` then runs at the same position/depth, reaches `K` ⇒ **cache
+    ///   HIT on a `Some(h)` entry**. Pre-fix: no taint ⇒ `E₁` (`hi`'s inner
+    ///   call) is filed under `None` while carrying `K`'s capped failure.
+    /// - `unary`/`double` put the whole `#…` construct at two `cat_depth`s
+    ///   one level apart (`unary` twice = deep, `double` once = shallow).
+    ///   `lo` can never succeed (it demands a trailing `@` the input does
+    ///   not have), so at the shallow depth the parse hinges entirely on
+    ///   `hi` — which pre-fix takes the poisoned `None` hit and rejects
+    ///   input that a fresh parse at that depth parses cleanly.
+    #[test]
+    fn a_cache_hit_on_a_depth_capped_entry_taints_its_ancestors_too() {
+        in_worker("depth-cap taint through a cache hit", || {
+            let mut b = SnapshotBuilder::new();
+            b.category("e", LeadingIdentBehavior::Default);
+            b.leading2("e", "atom", MAX_PREC, Prim::Ident);
+            b.leading2(
+                "e",
+                "paren",
+                MAX_PREC,
+                seq([sym("("), cat("e", 0), sym(")")]),
+            );
+            b.leading2("e", "unary", MAX_PREC, seq([sym("-"), cat("e", 0)]));
+            b.leading2(
+                "e",
+                "double",
+                MAX_PREC,
+                seq([sym("-"), sym("-"), cat("e", 0)]),
+            );
+            // Registration order matters: `lo` must run (and populate the
+            // cache) before `hi` reaches the same inner key.
+            b.leading2("e", "lo", MAX_PREC, seq([sym("#"), cat("e", 0), sym("@")]));
+            b.leading2("e", "hi", MAX_PREC, seq([sym("#"), cat("e", MAX_PREC)]));
+            let snap = b.finish();
+
+            // Depth budget: `#`'s inner call sits at `cat_depth` 3 down the
+            // `unary`+`unary` path and at 2 down the `double` path. One
+            // paren level costs exactly one `cat_depth`, and the innermost
+            // `y` needs one more, so `m` parens make the deep path's
+            // innermost call land at `3 + m` and the shallow path's at
+            // `2 + m`. `m = MAX_CATEGORY_DEPTH - 3` therefore trips the cap
+            // on the deep path (`3 + m == MAX_CATEGORY_DEPTH`) and clears
+            // it by exactly one level on the shallow path.
+            let m = MAX_CATEGORY_DEPTH as usize - 3;
+            let src = "- - #".to_string() + &"(".repeat(m) + "y" + &")".repeat(m);
+
+            let mut ps = Ps::new(&src, &snap);
+            let r = ps.run(&Prim::Category {
+                name: "e".to_string(),
+                rbp: 0,
+            });
+            assert!(
+                r.is_ok(),
+                "valid input REJECTED: a cache HIT on a depth-capped entry \
+                 failed to taint its ancestor, so the ancestor was filed as \
+                 depth-independent and poisoned a shallower reach of its key"
+            );
+
+            let mut inner = "(atom y)".to_string();
+            for _ in 0..m {
+                inner = format!("(paren '(' {inner} ')')");
+            }
+            let expected = format!("(double '-' '-' (hi '#' {inner}))");
             assert_eq!(parse_cat(&snap, &src), expected);
         });
     }

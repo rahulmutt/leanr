@@ -9,27 +9,30 @@
 //! into Θ(3^depth) work: `def a := ((((( 1 )))))` measured 1.0ms at
 //! depth 5, 376ms at depth 10, and >30s (killed) at depth 15.
 //!
-//! Every parse below runs inside `in_worker`, which is what actually
-//! makes these tests able to FAIL rather than hang or crash (Task 11b
-//! review, Important 3 + Critical 2):
+//! Every parse below runs inside `in_worker`, which is what makes these
+//! tests able to FAIL rather than hang (Task 11b review, Important 3): it
+//! runs the parse on a worker thread and waits with a `recv_timeout`, so a
+//! re-exponentialized cache — or any other non-termination — turns into a
+//! loud, bounded test failure instead of a CI-eating hang. An
+//! `Instant::elapsed()` assertion placed AFTER `parse_module` returns
+//! cannot do that: it never runs.
 //!
-//! - it runs the parse on a worker thread and waits with a `recv_timeout`,
-//!   so a re-exponentialized cache — or any other non-termination — turns
-//!   into a loud, bounded test failure instead of a CI-eating hang (an
-//!   `Instant::elapsed()` assertion AFTER `parse_module` returns cannot do
-//!   that: it never runs);
-//! - it gives that thread `MIN_STACK_BYTES`, the crate's documented
-//!   minimum-stack contract, instead of `libtest`'s 2 MiB default — so the
-//!   depth cap is exercised against the stack the library actually asks
-//!   embedders for, and a *harness* default cannot dictate the parser's
-//!   acceptance limit.
+//! `in_worker` deliberately does NOT size that thread. It used to, because
+//! the crate's minimum-stack contract used to be the caller's problem and
+//! `libtest` hands every test a 2 MiB thread — far under it. Since Task 11b
+//! review wave 2 (Critical 2) `parse_module` spawns its own
+//! `MIN_STACK_BYTES` worker, so these tests exercise the same stack a real
+//! embedder gets *precisely by not arranging anything*: if the contract
+//! ever stopped holding internally, the deep tests below would crash here,
+//! which is the point. (The unit tests in `parse.rs` still size their own
+//! threads — they drive `Ps::category` directly, below `parse_module`.)
 //!
 //! Per the acceptance bar, the tests assert the resulting tree/diagnostics,
 //! not just "didn't hang".
 
 use leanr_syntax::kind::KindInterner;
 use leanr_syntax::tree::SyntaxNode;
-use leanr_syntax::{builtin, parse_module, MAX_CATEGORY_DEPTH, MIN_STACK_BYTES};
+use leanr_syntax::{builtin, parse_module, MAX_CATEGORY_DEPTH};
 use std::sync::mpsc::{channel, RecvTimeoutError};
 use std::time::Duration;
 
@@ -38,14 +41,12 @@ use std::time::Duration;
 /// exponential, not pin exact numbers — depth 15 alone used to take >30s.
 const BUDGET: Duration = Duration::from_secs(30);
 
-/// Run `f` on a thread with the crate's documented minimum stack, and
-/// fail the test if it has not finished within `BUDGET`. Unlike an
-/// after-the-fact `elapsed < BUDGET` assertion, this bounds a HANG: the
-/// timeout fires while the parse is still running.
+/// Run `f` on a worker thread and fail the test if it has not finished
+/// within `BUDGET`. Unlike an after-the-fact `elapsed < BUDGET` assertion,
+/// this bounds a HANG: the timeout fires while the parse is still running.
 fn in_worker(label: &str, f: impl FnOnce() + Send + 'static) {
     let (tx, rx) = channel();
     let h = std::thread::Builder::new()
-        .stack_size(MIN_STACK_BYTES)
         .spawn(move || {
             f();
             let _ = tx.send(());
@@ -58,6 +59,13 @@ fn in_worker(label: &str, f: impl FnOnce() + Send + 'static) {
         Err(RecvTimeoutError::Disconnected) => {
             std::panic::resume_unwind(h.join().expect_err("disconnected without a panic"))
         }
+        // Deliberately does NOT join `h`: the whole point is that the
+        // worker is still running and we cannot get it back. Rust has no
+        // thread cancellation, so the runaway worker is simply left to be
+        // reaped when the test process exits (moments later, on this
+        // panic). It burns one core until then — acceptable for a failing
+        // test, and the only alternative would be to hang forever waiting
+        // for exactly the thing we just proved is not going to finish.
         Err(RecvTimeoutError::Timeout) => panic!(
             "{label}: still running after {BUDGET:?} — the parser hung \
              (category-call memoization regressed back to exponential \
@@ -204,15 +212,22 @@ fn deeply_nested_do_blocks_terminate_fast_and_parse_clean() {
     }
 }
 
-/// The stack-safety contract itself (Task 11b review, Critical 2): on a
-/// thread with exactly `MIN_STACK_BYTES` — no more — the HEAVIEST shape in
-/// the builtin grammar, driven all the way past `MAX_CATEGORY_DEPTH`, must
-/// not overflow the stack. `do { if p then do { … } }` costs ~3
-/// `category()` calls (and ~23 KiB of unoptimized native stack) per visible
-/// level, ~3x a nested paren — it is the shape the cap is calibrated
-/// against, so this is the test that would crash (SIGSEGV, not a failed
-/// assert) if the cap were raised, the frame cost grew, or the contract
-/// shrank. `in_worker` supplies exactly the contracted stack.
+/// The stack-safety contract itself (Task 11b review, Critical 2): the
+/// HEAVIEST shape in the builtin grammar, driven all the way past
+/// `MAX_CATEGORY_DEPTH`, must not overflow the stack `parse_module` gives
+/// itself. `do { if p then do { … } }` costs ~3 `category()` calls (and
+/// ~23 KiB of unoptimized native stack) per visible level, ~3x a nested
+/// paren — it is the shape the cap is calibrated against, so this is the
+/// test that would crash (SIGSEGV, not a failed assert) if the cap were
+/// raised, the frame cost grew, or `MIN_STACK_BYTES` shrank.
+///
+/// Note what is deliberately absent: this test arranges NO stack of its
+/// own. It runs on a stock `libtest`/`in_worker` thread (2 MiB — an eighth
+/// of the contract) and still must not overflow, because `parse_module`
+/// spawns its own `MIN_STACK_BYTES` worker (wave 2, Critical 2). That is
+/// precisely the property under test: the guarantee is internal, not a
+/// precondition anyone can forget. Before wave 2 this test only passed
+/// because the harness hand-fed it the right stack.
 #[test]
 fn the_heaviest_shape_at_the_depth_cap_fits_in_the_documented_minimum_stack() {
     // 3 category levels per visible level ⇒ this drives `cat_depth` well
