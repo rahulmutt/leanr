@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use crate::grammar::{Category, FirstTok, GrammarSnapshot, Prim};
+use crate::grammar::{Category, FirstTok, GrammarSnapshot, LeadingIdentBehavior, Prim};
 use crate::kind::{
     KindInterner, SyntaxKind, KIND_ATOM, KIND_ERROR, KIND_ERROR_TOKEN, KIND_GROUP, KIND_IDENT,
     KIND_NULL,
@@ -1550,8 +1550,44 @@ impl<'a> Ps<'a> {
 /// the indexed table lookup plus the always-tried `leadingParsers`/
 /// `trailingParsers` list, collapsed here into one paired vector — see
 /// `Category`'s doc comment).
+///
+/// ORACLE-PORT `Basic.lean`'s `indexed` — the `LeadingIdentBehavior`
+/// dispatch (M3a Task 10 review Finding 1). When the upcoming token
+/// lexes as `Ident`, `indexed` first asks whether ANY parser is
+/// registered under the literal key equal to the ident's own text (a
+/// `nonReservedSymbol`-keyed row, e.g. `Attr.extern`'s `"extern"` —
+/// `first_tok` maps both `Prim::Symbol` and `Prim::NonReservedSymbol`
+/// to the same `FirstTok::Sym`, so that's the `FirstTok::Sym(s) if s ==
+/// text` case below); what happens next depends on the category's
+/// `LeadingIdentBehavior`:
+///   - `Symbol` — if such a literal-key match exists, run ONLY those
+///     candidates; the generic `Ident`-keyed candidates (e.g.
+///     `Attr.simple`'s bare `ident`) are not even tried. This is the
+///     substantive fix: previously every `FirstTok::Ident` entry was
+///     included unconditionally alongside any `FirstTok::Sym` text
+///     match, so e.g. `Attr.simple` could out-consume (or, on a strict
+///     tie, lose a registration-order race against) `Attr.extern` for
+///     input like `@[extern foo]` — a divergence from the oracle, which
+///     never even considers `Attr.simple` there (`attr`'s category
+///     behavior is `.symbol`, `Attr.lean:20`), so it always rejects.
+///   - `Default`/`Both` — union the literal-key match (if any) with the
+///     generic `Ident`-keyed candidates, exactly as before (this is
+///     also what makes `Prim::NonReservedSymbol` with an implied
+///     `includeIdent := true`, e.g. `level`'s `max`/`imax`
+///     `Level.lean:27,29`, reachable at all: its ONLY registration is
+///     the literal-key `FirstTok::Sym`, unioned in here since `level`'s
+///     behavior is `.default`).
 fn dispatch(cat: &Category, text: &str, kind: TokenKind, leading: bool) -> Vec<usize> {
     let table = if leading { &cat.leading } else { &cat.trailing };
+    // Under `Symbol` behavior, a literal-key ident match suppresses the
+    // generic `Ident`-keyed candidates entirely — precomputed once so
+    // the single ordered pass below (which must preserve registration
+    // order for `longest_match`'s tie-break) can just filter.
+    let suppress_plain_ident = kind == TokenKind::Ident
+        && cat.ident_behavior == LeadingIdentBehavior::Symbol
+        && table
+            .iter()
+            .any(|(f, _)| matches!(f, FirstTok::Sym(s) if s == text));
     table
         .iter()
         .filter_map(|(f, idx)| {
@@ -1582,7 +1618,7 @@ fn dispatch(cat: &Category, text: &str, kind: TokenKind, leading: bool) -> Vec<u
                     (kind == TokenKind::Atom && s == text)
                         || (kind == TokenKind::Ident && s == text)
                 }
-                FirstTok::Ident => kind == TokenKind::Ident,
+                FirstTok::Ident => kind == TokenKind::Ident && !suppress_plain_ident,
                 FirstTok::Num => kind == TokenKind::Num,
                 FirstTok::Scientific => kind == TokenKind::Scientific,
                 FirstTok::Str => kind == TokenKind::Str,
@@ -1915,7 +1951,7 @@ mod tests {
     /// left-assoc `e + e` (prec 65); right-assoc `e ^ e` (prec 75).
     fn arith_snapshot() -> crate::grammar::GrammarSnapshot {
         let mut b = SnapshotBuilder::new();
-        b.category("term");
+        b.category("term", LeadingIdentBehavior::Default);
         b.leading2("term", "lit", MAX_PREC, Prim::Ident);
         b.leading2("term", "neg", 75, seq([sym("-"), cat("term", 75)]));
         b.trailing2("term", "add", 65, 65, seq([sym("+"), cat("term", 66)]));
@@ -1952,7 +1988,7 @@ mod tests {
     #[test]
     fn longest_match_picks_the_farthest_leading_parse() {
         let mut b = SnapshotBuilder::new();
-        b.category("c");
+        b.category("c", LeadingIdentBehavior::Default);
         b.leading2("c", "short", MAX_PREC, sym("x"));
         b.leading2("c", "long", MAX_PREC, seq([sym("x"), sym("!")]));
         let snap = b.finish();
@@ -1963,7 +1999,7 @@ mod tests {
     #[test]
     fn with_position_col_gt() {
         let mut b = SnapshotBuilder::new();
-        b.category("c");
+        b.category("c", LeadingIdentBehavior::Default);
         // "block" = 'do' then many1 idents, each on a column > do's.
         b.leading2(
             "c",
@@ -1986,7 +2022,7 @@ mod tests {
         let s2 = arith_snapshot();
         assert_eq!(s1.fingerprint(), s2.fingerprint());
         let mut b = SnapshotBuilder::new();
-        b.category("term");
+        b.category("term", LeadingIdentBehavior::Default);
         b.leading2("term", "lit", MAX_PREC, Prim::Ident);
         let s3 = b.finish();
         assert_ne!(s1.fingerprint(), s3.fingerprint());
@@ -2004,7 +2040,7 @@ mod tests {
         // an attached `LexError`) and successfully completes the
         // `StrLit` leaf parse, so this exercises exactly that path.
         let mut b = SnapshotBuilder::new();
-        b.category("c");
+        b.category("c", LeadingIdentBehavior::Default);
         b.leading2("c", "s", MAX_PREC, Prim::StrLit);
         let snap = b.finish();
         let src = "r\"unterminated";
@@ -2034,7 +2070,7 @@ mod tests {
         // NOT nothing, as a prior version of both the impl and this test
         // wrongly had it (see `sep_by_indent`'s doc comment fix (2)).
         let mut b = SnapshotBuilder::new();
-        b.category("c");
+        b.category("c", LeadingIdentBehavior::Default);
         b.leading2(
             "c",
             "seq",
@@ -2084,7 +2120,7 @@ mod tests {
         // `min: 1`). Also exercises the generalized `sep` parameter
         // (`,`, not `;` — `Term.structInstFields`'s real separator).
         let mut b = SnapshotBuilder::new();
-        b.category("c");
+        b.category("c", LeadingIdentBehavior::Default);
         b.leading2(
             "c",
             "seq",
@@ -2170,7 +2206,7 @@ mod tests {
         // guard + `pushNone`, `Term/Basic.lean:86-92`; this fn must not
         // pre-empt that by silently accepting zero items itself).
         let mut b = SnapshotBuilder::new();
-        b.category("c");
+        b.category("c", LeadingIdentBehavior::Default);
         b.leading2(
             "c",
             "seq",
@@ -2230,7 +2266,7 @@ mod tests {
         // than failing an assert, which is exactly the property being
         // checked).
         let mut b = SnapshotBuilder::new();
-        b.category("e");
+        b.category("e", LeadingIdentBehavior::Default);
         b.leading2("e", "atom", MAX_PREC, Prim::Ident);
         b.leading2(
             "e",
@@ -2278,7 +2314,7 @@ mod tests {
         // pre-fix; post-fix it terminates and leaves the zero-width
         // candidate unapplied, with `y` unconsumed.
         let mut b = SnapshotBuilder::new();
-        b.category("c");
+        b.category("c", LeadingIdentBehavior::Default);
         b.leading2("c", "lit", MAX_PREC, Prim::Ident);
         b.trailing2("c", "wrap", 0, 0, opt(sym("!")));
         let snap = b.finish();
@@ -2321,7 +2357,7 @@ mod tests {
         // token match (no nested category recursion) as the item,
         // matching `pipeProj`'s `fieldIdx <|> rawIdent` alternative.
         let mut b = SnapshotBuilder::new();
-        b.category("c");
+        b.category("c", LeadingIdentBehavior::Default);
         b.leading2("c", "lit", MAX_PREC, Prim::Ident);
         b.trailing2(
             "c",
@@ -2361,7 +2397,7 @@ mod tests {
         // leading trivia always sits outside any later wrap — same as
         // the bare case.
         let mut b = SnapshotBuilder::new();
-        b.category("c");
+        b.category("c", LeadingIdentBehavior::Default);
         b.leading2(
             "c",
             "paren",
@@ -2401,7 +2437,7 @@ mod tests {
         // anchors dispatch and the contextual keyword never touches
         // the token table).
         let mut b = SnapshotBuilder::new();
-        b.category("c");
+        b.category("c", LeadingIdentBehavior::Default);
         b.leading2(
             "c",
             "kw",

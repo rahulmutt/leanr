@@ -344,4 +344,58 @@ mod tests {
         assert!(out.contains(r#""i":"foo""#), "{out}");
         assert!(out.contains(r#""k":"<missing>""#), "{out}");
     }
+
+    /// M3a Task 10 review Finding 3 — investigated, NOT reproducible as
+    /// stated. The finding claimed `by match z with | a => a` parses to
+    /// a "spurious trailing `Tactic.unknown` + E0301 ... on VALID
+    /// input" (a false error the golden gate's zero-error assertion
+    /// would trip). Directly checked against the pinned oracle CLI
+    /// (`lean --run tests/fixtures/syntax/dump_syntax.lean` — NOT just
+    /// this crate's own tests) over exactly this shape
+    /// (`def f (z : Nat) : Nat := by match z with\n  | a => a\n`): the
+    /// real compiler ALSO reports a single parser-level "unknown
+    /// tactic" diagnostic (`lean`'s own CLI: "error: unknown tactic")
+    /// and the dump's tree is BYTE-IDENTICAL to this crate's own
+    /// output — one `Lean.Parser.Tactic.unknown{ident "a", <missing>}`
+    /// node, nested exactly once inside the match alt's RHS (`matchRhs
+    /// := Term.hole <|> Term.syntheticHole <|> tacticSeq`,
+    /// `Tactic.lean:34` — a bare `a` matches neither `hole` nor
+    /// `syntheticHole`, so it falls through to `tacticSeq`, same as
+    /// this port). This is expected: `a` is not a registered builtin
+    /// tactic in EITHER engine (this crate's tactic set deliberately
+    /// excludes `Init`-declared tactics like `exact`, per this file's
+    /// own module doc comment and the M3a/M3b scope line) — NOT a
+    /// false error, and not something a "zero errors" fixture could
+    /// ever cover (the oracle itself doesn't parse it clean). No
+    /// registration-order/dispatch-tie mechanism (`longest_match`,
+    /// `sep_by_indent`'s loop) was found to leak errors from a
+    /// discarded/losing candidate either: `Ps::restore` truncates both
+    /// `events` AND `errors` back to the shared savepoint at the START
+    /// of every `longest_match` iteration (parse.rs), so a losing
+    /// candidate's side effects never survive to contaminate the
+    /// winner or a sibling attempt.
+    ///
+    /// The regression coverage the finding actually asked for — "match
+    /// as the WHOLE tactic block", zero errors — already exists:
+    /// `ByTac.lean`'s committed `t1` (`by\n  match h with\n  | hp =>
+    /// _`) is exactly that shape (a single tactic-mode `match`, no
+    /// other tactics before or after it in the same `tacticSeq`,
+    /// bottoming out in `Term.hole` per the established convention),
+    /// oracle-verified byte-exact by the golden gate. This test locks
+    /// in the SAME zero-error property directly (not via a fixture,
+    /// since the true "valid" input already has fixture coverage) for
+    /// extra assurance the tacticSeq loop cleanly terminates right
+    /// after a `match` tactic with no trailing phantom tactic attempt.
+    #[test]
+    fn match_as_the_whole_tactic_block_is_zero_error_when_it_bottoms_out_validly() {
+        let snap = builtin::snapshot();
+        let src = "prelude\n\ndef t1 := fun (h : A) => by\n  match h with\n  | hp => _\n";
+        let result = parse_module(src, &snap);
+        assert_eq!(result.tree.text(), src, "round-trip failed");
+        assert!(
+            result.errors.is_empty(),
+            "a valid match-as-whole-tactic-block must be zero-error, got {:?}",
+            result.errors
+        );
+    }
 }

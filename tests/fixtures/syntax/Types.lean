@@ -16,3 +16,7 @@ class Marker (α : Sort 1) where
 
 instance : Marker Unit' where
   mark u := u
+
+structure Recorded (α : Sort 1) where
+  x : α
+  deriving Repr

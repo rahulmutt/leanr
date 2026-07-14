@@ -10,7 +10,7 @@ pub mod level;
 pub mod tactic;
 pub mod term;
 
-use crate::grammar::{GrammarSnapshot, SnapshotBuilder};
+use crate::grammar::{GrammarSnapshot, LeadingIdentBehavior, SnapshotBuilder};
 
 pub fn snapshot() -> GrammarSnapshot {
     let mut b = SnapshotBuilder::new();
@@ -23,26 +23,41 @@ pub fn snapshot() -> GrammarSnapshot {
     // definitions...").
     b.kind("module");
     b.kind("Lean.Parser.Command.eoi");
-    b.category("command");
-    b.category("term");
-    b.category("level");
-    b.category("tactic");
+    // Each category's `LeadingIdentBehavior` (M3a Task 10 review Finding
+    // 1) is read off its own `registerBuiltinParserAttribute` call site
+    // in the pin — the `behavior` parameter defaults to `.default` when
+    // omitted:
+    //   - `command`  — `Extension.lean:595` (omitted → `.default`)
+    //   - `term`     — `Extension.lean:590` (omitted → `.default`)
+    //   - `level`    — `Level.lean:17` (omitted → `.default`)
+    //   - `tactic`   — `Term/Basic.lean:33` (`.both`, explicit)
+    //   - `doElem`   — `Do.lean:16` (omitted → `.default`)
+    //   - `structInstFieldDecl` — `Term/Basic.lean:272` (omitted →
+    //     `.default`)
+    //   - `attr`     — `Attr.lean:20` (`.symbol`, explicit)
+    //   - `prio`     — `Attr.lean:16` (`.both`, explicit)
+    b.category("command", LeadingIdentBehavior::Default);
+    b.category("term", LeadingIdentBehavior::Default);
+    b.category("level", LeadingIdentBehavior::Default);
+    b.category("tactic", LeadingIdentBehavior::Both);
     // `doElem` category (surface table: 27 rows, `Lean/Parser/Do.lean`)
     // — `do`-block statements (`let`/`for`/`if`/`match`/`return`/…),
     // populated by `do_notation::register` (M3a Task 9).
-    b.category("doElem");
+    b.category("doElem", LeadingIdentBehavior::Default);
     // `Term.structInst`'s field-decl slot recurses into its own tiny
     // category (surface table's "struct-instance-field-decl category",
     // 2 rows: `structInstFieldDef`/`structInstFieldEqns`) — registered
     // here alongside the others, populated by `term::register`.
-    b.category("structInstFieldDecl");
+    b.category("structInstFieldDecl", LeadingIdentBehavior::Default);
     // `attr`/`prio` categories (surface table's own `attr` category, 12
     // rows, + the `prio` misc singleton) — M3a Task 10: declModifiers'
     // `@[attr1, attr2]` slot and the `attribute` command both recurse
     // into `attr`; `Attr.simple`/`«instance»`/`default_instance`'s own
-    // optional priority argument recurses into `prio`.
-    b.category("attr");
-    b.category("prio");
+    // optional priority argument recurses into `prio`. `attr` = `.symbol`
+    // is THE substantive fix of Task 10 review Finding 1 (see
+    // `parse.rs::dispatch` and `LeadingIdentBehavior`'s own doc comment).
+    b.category("attr", LeadingIdentBehavior::Symbol);
+    b.category("prio", LeadingIdentBehavior::Both);
     command::register(&mut b);
     level::register(&mut b);
     tactic::register(&mut b);

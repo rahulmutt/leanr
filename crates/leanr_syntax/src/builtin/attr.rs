@@ -58,31 +58,30 @@ fn extern_entry(b: &mut SnapshotBuilder) -> Prim {
 }
 
 fn register_attr_category(b: &mut SnapshotBuilder) {
-    // ORDERING NOTE (M3a Task 10 review finding): every
-    // `nonReservedSymbol`-keyed row (`recursor`/`default_instance`/
-    // `specialize`/`extern`) is registered BEFORE `simple` —
-    // DELIBERATELY, not source order (the oracle declares `simple`
-    // first). Each is `nonReservedSymbol`-keyed, so its leading token
-    // is `Ident`-kind text, dispatched ALONGSIDE `simple`'s own generic
-    // `Ident`-kind candidate (`dispatch`'s dual `FirstTok::Sym` arm,
-    // parse.rs). Whenever the row's OWN tail can consume the exact same
-    // span `simple`'s `optional (priorityParser <|> ident)` tail would
-    // (a bare numeral via the shared `prio` category recursion, e.g.
-    // `@[recursor 0]`/`@[default_instance 50]`; or simply NOTHING,
-    // since `specialize`/`extern`'s own tails are `many`-based and admit
-    // zero items too, e.g. bare `@[specialize]`/`@[extern]`) — this is
-    // an EXACT tie in total consumed length. This engine's
-    // `longest_match` (parse.rs) keeps the FIRST candidate on a tie
-    // (`self.pos > w.end`, strict), so registration order is genuinely
-    // load-bearing here: fresh dumps of `@[recursor 0]`/`@[default_
-    // instance 50]`/bare `@[specialize]` all confirmed the specific row
-    // must win, not `simple` (task-10 report — this fixes real bugs an
-    // early version of this file had, since `simple` was registered
-    // first throughout). `class`/`instance`/`«macro»`/`«export»`/
-    // `tactic_alt`/`tactic_tag`/`tactic_name` are all REAL `Symbol`s
-    // (not `nonReservedSymbol`), so they always lex as `Atom`, never
-    // `Ident` — no collision with `simple`'s `Ident`-keyed dispatch,
-    // hence no ordering sensitivity for them.
+    // DISPATCH NOTE (M3a Task 10 review Finding 1 — corrected; the
+    // previous version of this comment claimed a registration-order
+    // tie-break that real Lean does not have). `attr`'s category
+    // behavior is `LeadingIdentBehavior::Symbol` (`Attr.lean:20`:
+    // `registerBuiltinParserAttribute \`builtin_attr_parser
+    // ``Category.attr .symbol`). ORACLE-PORT `Basic.lean`'s `indexed`:
+    // under `.symbol`, when the leading token is an ident whose text
+    // equals a registered literal key (`recursor`/`default_instance`/
+    // `specialize`/`extern`, each `nonReservedSymbol`-keyed), ONLY that
+    // key's parser runs — `simple`'s generic `ident`-keyed candidate is
+    // never even tried, full stop, no tie to break. `parse.rs::dispatch`
+    // now implements this directly (`suppress_plain_ident`), so e.g.
+    // `@[extern foo]` is REJECTED (`externEntry` needs a `strLit`,
+    // `simple` is never a candidate to fall back to) and `@[recursor 0]`/
+    // `@[default_instance 50]`/bare `@[specialize]` all resolve to their
+    // own row without any longest-match contest against `simple`.
+    // Registration order below is therefore no longer semantically
+    // load-bearing for this tie — kept as-is (rather than reverting to
+    // the oracle's own source order, which declares `simple` first) only
+    // to avoid gratuitous dump churn (`AttrWide.lean`'s committed dump
+    // already reflects this order). `class`/`instance`/`«macro»`/
+    // `«export»`/`tactic_alt`/`tactic_tag`/`tactic_name` are all REAL
+    // `Symbol`s (not `nonReservedSymbol`), so they always lex as `Atom`,
+    // never `Ident` — never in the running for this dispatch at all.
     //
     // recursor := leading_parser nonReservedSymbol "recursor " >> numLit.
     b.leading2(
@@ -236,4 +235,112 @@ pub(super) fn attributes(b: &mut SnapshotBuilder) -> Prim {
 pub fn register(b: &mut SnapshotBuilder) {
     register_prio_category(b);
     register_attr_category(b);
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::builtin;
+    use crate::parse_module;
+
+    /// M3a Task 10 review Finding 1 — `attr`'s category behavior is
+    /// `LeadingIdentBehavior::Symbol` (`Attr.lean:20`), so a literal-key
+    /// ident match (`recursor`/`default_instance`/`specialize`/`extern`)
+    /// must suppress `Attr.simple`'s generic `ident` candidate entirely,
+    /// not merely out-consume or out-order it. These four MUST be
+    /// rejected: `externEntry` needs a `strLit` (`@[extern foo]` has a
+    /// bare ident instead), `recursor` needs a mandatory `numLit`
+    /// (`@[recursor]` has none), and `default_instance`'s optional tail
+    /// is `priorityParser` (a numeral), not an arbitrary `ident`
+    /// (`@[default_instance foo]`).
+    fn expect_rejected(attr_src: &str) {
+        let snap = builtin::snapshot();
+        let src = format!("prelude\n\n{attr_src} def x := y\n");
+        let result = parse_module(&src, &snap);
+        assert!(
+            !result.errors.is_empty(),
+            "expected {attr_src:?} to be REJECTED (oracle divergence \
+             otherwise), but it parsed clean"
+        );
+    }
+
+    fn expect_accepted(attr_src: &str) {
+        let snap = builtin::snapshot();
+        let src = format!("prelude\n\n{attr_src} def x := y\n");
+        let result = parse_module(&src, &snap);
+        assert!(
+            result.errors.is_empty(),
+            "expected {attr_src:?} to parse clean, got {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn extern_foo_is_rejected_not_misparsed_as_simple() {
+        expect_rejected("@[extern foo]");
+    }
+
+    #[test]
+    fn bare_recursor_is_rejected_not_misparsed_as_simple() {
+        expect_rejected("@[recursor]");
+    }
+
+    #[test]
+    fn default_instance_foo_is_rejected_not_misparsed_as_simple() {
+        expect_rejected("@[default_instance foo]");
+    }
+
+    #[test]
+    fn recursor_with_numeral_still_parses_as_recursor() {
+        let snap = builtin::snapshot();
+        let src = "prelude\n\n@[recursor 0] def x := y\n";
+        let result = parse_module(src, &snap);
+        assert!(
+            result.errors.is_empty(),
+            "expected clean parse, got {:?}",
+            result.errors
+        );
+        let out = crate::canon::canon_jsonl(&result.tree);
+        assert!(out.contains(r#""k":"Lean.Parser.Attr.recursor""#), "{out}");
+    }
+
+    #[test]
+    fn specialize_with_ident_still_parses_as_specialize() {
+        let snap = builtin::snapshot();
+        let src = "prelude\n\n@[specialize foo] def x := y\n";
+        let result = parse_module(src, &snap);
+        assert!(
+            result.errors.is_empty(),
+            "expected clean parse, got {:?}",
+            result.errors
+        );
+        let out = crate::canon::canon_jsonl(&result.tree);
+        assert!(
+            out.contains(r#""k":"Lean.Parser.Attr.specialize""#),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn extern_with_strlit_still_parses_as_extern() {
+        let snap = builtin::snapshot();
+        let src = "prelude\n\n@[extern \"f\"] def x := y\n";
+        let result = parse_module(src, &snap);
+        assert!(
+            result.errors.is_empty(),
+            "expected clean parse, got {:?}",
+            result.errors
+        );
+        let out = crate::canon::canon_jsonl(&result.tree);
+        assert!(out.contains(r#""k":"Lean.Parser.Attr.extern""#), "{out}");
+    }
+
+    #[test]
+    fn plain_simp_still_parses_as_simple() {
+        expect_accepted("@[simp]");
+        let snap = builtin::snapshot();
+        let src = "prelude\n\n@[simp] def x := y\n";
+        let result = parse_module(src, &snap);
+        let out = crate::canon::canon_jsonl(&result.tree);
+        assert!(out.contains(r#""k":"Lean.Parser.Attr.simple""#), "{out}");
+    }
 }

@@ -259,11 +259,9 @@ pub fn sep_by_trailing(item: Prim, sep: &str) -> Prim {
 }
 /// Zero-width, ALWAYS-FAILING (never consumes) placeholder for a real
 /// sub-grammar this port doesn't transcribe (documented "not ported"
-/// slots — same idiom as `builtin/command.rs`'s `empty_opt()`, one
-/// level lower: wrapping this in `opt(..)` reproduces an
-/// always-empty-`null` oracle slot exactly, since a zero-`OrElse`
-/// fails immediately without consuming, same as `Optional`'s clean
-/// "nothing here" path).
+/// slots): wrapping this in `opt(..)` reproduces an always-empty-
+/// `null` oracle slot exactly, since a zero-`OrElse` fails immediately
+/// without consuming, same as `Optional`'s clean "nothing here" path.
 pub fn never() -> Prim {
     Prim::OrElse(vec![])
 }
@@ -341,6 +339,38 @@ pub enum FirstTok {
     Any,
 }
 
+/// ORACLE-PORT `Lean.Parser.LeadingIdentBehavior` (`Basic.lean`,
+/// `indexed`): how a category's leading-token dispatch treats an
+/// actual identifier token whose text happens to match a registered
+/// literal key (e.g. a `nonReservedSymbol`-keyed row like
+/// `Attr.extern`'s `"extern"`).
+///
+/// - `Default` — always dispatch only the generic `Ident`-keyed
+///   candidates; a literal-text key match is never consulted (`find
+///   identKind` unconditionally).
+/// - `Symbol` — if a literal-text key match exists, run ONLY those
+///   candidates (the generic `Ident`-keyed ones are not even tried);
+///   otherwise fall back to the generic `Ident`-keyed candidates.
+/// - `Both` — union the literal-text key match (if any) with the
+///   generic `Ident`-keyed candidates.
+///
+/// Each builtin category's value is read off its own
+/// `registerBuiltinParserAttribute`/`registerBuiltinParserAttribute`
+/// call site in the pin (the `behavior` parameter defaults to
+/// `.default` when omitted): `attr` = `.symbol` (`Attr.lean:20`);
+/// `tactic` = `.both` (`Term/Basic.lean:33`); `prio` = `.both`
+/// (`Attr.lean:16`); `level`/`term`/`command`/`doElem`/
+/// `structInstFieldDecl` all omit the parameter, hence `.default`
+/// (`Level.lean:17`, `Extension.lean:590,595`, `Do.lean:16`,
+/// `Term/Basic.lean:272`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum LeadingIdentBehavior {
+    #[default]
+    Default,
+    Symbol,
+    Both,
+}
+
 /// A syntax category's Pratt-parsing table: leading productions (the
 /// atoms/prefixes that can START an expression) and trailing ones
 /// (the infix/postfix continuations the trailing loop chains on).
@@ -359,6 +389,9 @@ pub struct Category {
     pub leading_parsers: Vec<Prim>,
     pub trailing: Vec<(FirstTok, usize)>,
     pub trailing_parsers: Vec<Prim>,
+    /// ORACLE-PORT `ParserCategory.behavior` — see
+    /// `LeadingIdentBehavior`'s own doc comment.
+    pub ident_behavior: LeadingIdentBehavior,
 }
 
 /// The whole parser state as one explicit, hash-fingerprintable value
@@ -402,7 +435,12 @@ impl GrammarSnapshot {
     /// same iff the grammars they describe are the same.
     pub fn fingerprint(&self) -> blake3::Hash {
         let mut h = blake3::Hasher::new();
-        h.update(b"leanr-m3a-grammar-v1\0");
+        // v2: bumped from v1 when `Category::ident_behavior`
+        // (`LeadingIdentBehavior`) was added to the hashed shape below —
+        // a grammar that only differs in a category's ident-dispatch
+        // behavior must fingerprint differently (M3a Task 10 review
+        // Finding 1).
+        h.update(b"leanr-m3a-grammar-v2\0");
         for t in self.tokens.iter() {
             h.update(t.as_bytes());
             h.update(b"\0");
@@ -413,6 +451,12 @@ impl GrammarSnapshot {
             h.update(name.as_bytes());
             h.update(b"\x01");
             let c = &self.categories[name];
+            let behavior_byte: u8 = match c.ident_behavior {
+                LeadingIdentBehavior::Default => 0,
+                LeadingIdentBehavior::Symbol => 1,
+                LeadingIdentBehavior::Both => 2,
+            };
+            h.update(&[behavior_byte]);
             for p in c.leading_parsers.iter().chain(&c.trailing_parsers) {
                 encode_prim(p, self, &mut h);
             }
@@ -675,8 +719,13 @@ impl SnapshotBuilder {
         self.tokens.insert(tok);
     }
 
-    pub fn category(&mut self, name: &str) {
-        self.categories.entry(name.to_string()).or_default();
+    pub fn category(&mut self, name: &str, behavior: LeadingIdentBehavior) {
+        self.categories
+            .entry(name.to_string())
+            .or_insert_with(|| Category {
+                ident_behavior: behavior,
+                ..Default::default()
+            });
     }
 
     /// Register a leading parser: interns `kind_name`, wraps `body` in

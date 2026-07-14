@@ -142,7 +142,7 @@ fn explicit_binder(b: &mut SnapshotBuilder, require_type: bool) -> Prim {
             // `optional (binderTactic <|> binderDefault)` — neither
             // sub-parser is transcribed (no fixture uses `(x : A := v)`
             // or `(x : A := by tac)`); left as a real, always-empty
-            // optional slot (Task 7's `empty_opt()` idiom one level up).
+            // optional slot (`never()`'s own doc comment, grammar.rs).
             opt(never()),
             sym(")"),
         ]),
