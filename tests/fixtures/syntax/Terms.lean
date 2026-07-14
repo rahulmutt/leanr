@@ -33,3 +33,5 @@ def inaccessibleTerm := fun p => match p with
   | .(a) => a
 def unsafeTerm := unsafe a
 def explicitUnivT := f.{u, v}
+def letTyped := let x : A := a; x
+def funTyped := fun x : A => x

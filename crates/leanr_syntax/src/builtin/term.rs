@@ -92,24 +92,18 @@ fn binder_type(require_type: bool) -> Prim {
         opt(inner)
     }
 }
-fn opt_type() -> Prim {
-    // `typeSpec := leading_parser " : " >> termParser`; `optType :=
-    // optional typeSpec` — `typeSpec` is itself `leading_parser`, so it
-    // node-wraps... EXCEPT a fresh dump of a bare `def x := e`'s
-    // `optDeclSig`/`declSig` shows `optType`'s slot as a plain
-    // `null{":" , term}` with NO extra `Lean.Parser.Term.typeSpec`
-    // wrapper (Task 7's Micro dump). That's because every `optType`
-    // call site in this file threads through `optional(..)`, and
-    // `typeSpec`'s own `leading_parser` wrap would need a SEPARATE
-    // outer node — but real usage (`forall`, `sort`/`type`'s level
-    // slot excepted) always goes through the un-wrapped `binderType
-    // false` shape instead, which is textually identical
-    // (`" : " >> termParser`) without the wrapper. Confirmed against
-    // `∀ (x : A), B`'s dump (`Lean.Parser.Term.forall`'s `optType`
-    // slot is a bare `null{":",A}`, no `typeSpec` node) — so `optType`
-    // here is implemented as `binderType false` (no separate `typeSpec`
-    // node), matching what's actually observed.
-    binder_type(false)
+/// `typeSpec := leading_parser " : " >> termParser`; `optType := optional
+/// typeSpec` (Basic.lean:262,265). `typeSpec` IS its own `leading_parser`,
+/// so a PRESENT `optType` wraps in a `Lean.Parser.Term.typeSpec` node
+/// (inside `optional`'s own `null` wrapper): `null{ typeSpec{":", term} }`.
+/// An ABSENT `optType` is the ordinary empty `null{}` `Prim::Optional`
+/// produces. Confirmed by regenerated fixture dumps of `let x : T := v`
+/// and `fun x : A => e` (both exercise a present `optType`), which show
+/// exactly this shape — no fixture previously exercised a present
+/// `optType`, which is why this was missed before.
+fn opt_type(b: &mut SnapshotBuilder) -> Prim {
+    let k = b.kind("Lean.Parser.Term.typeSpec");
+    opt(nd(k, seq([sym(":"), cat("term", 0)])))
 }
 
 fn explicit_binder(b: &mut SnapshotBuilder, require_type: bool) -> Prim {
@@ -338,7 +332,7 @@ fn register_forall(b: &mut SnapshotBuilder) {
     // termParser.
     let bi = binder_ident(b);
     let bb = bracketed_binder(b, false);
-    let ot = opt_type();
+    let ot = opt_type(b);
     b.leading2(
         "term",
         "Lean.Parser.Term.forall",
@@ -387,7 +381,7 @@ fn basic_fun(b: &mut SnapshotBuilder) -> Prim {
     // basicFun := leading_parser (many1 (funBinder) >> optType >>
     // unicodeSymbol " ↦" " =>") >> termParser.
     let fb = fun_binder(b);
-    let ot = opt_type();
+    let ot = opt_type(b);
     let k = b.kind("Lean.Parser.Term.basicFun");
     nd(
         k,
@@ -409,7 +403,10 @@ fn match_discr(b: &mut SnapshotBuilder) -> Prim {
     nd(k, seq([opt(atomic(seq([bi, sym(":")]))), cat("term", 0)]))
 }
 /// `matchAlt (rhsParser) := leading_parser "| " >> sepBy1 (sepBy1
-/// termParser ", ") " | " >> darrow >> checkColGe(..) >> rhsParser`.
+/// termParser ", ") " | " >> darrow >> checkColGe(..) >> rhsParser`
+/// (Term.lean:265-269). The INNER `sepBy1 termParser ", "` has NO
+/// `allowTrailingSep` — plain `sep_by1`, not `sep_by1_trailing` (a prior
+/// version of this port wrongly used the trailing variant here).
 /// `rhs` lets `structInstFieldEqns` reuse this for its own rhs shape
 /// (still `termParser` in every call site this task ports).
 fn match_alt(b: &mut SnapshotBuilder) -> Prim {
@@ -418,7 +415,7 @@ fn match_alt(b: &mut SnapshotBuilder) -> Prim {
         k,
         seq([
             sym("|"),
-            sep_by1(sep_by1_trailing(cat("term", 0), ","), "|"),
+            sep_by1(sep_by1(cat("term", 0), ","), "|"),
             sym("=>"),
             Prim::CheckColGe,
             cat("term", 0),
@@ -552,11 +549,19 @@ fn struct_inst_field(b: &mut SnapshotBuilder) -> Prim {
 fn struct_inst_fields(b: &mut SnapshotBuilder) -> Prim {
     let field = struct_inst_field(b);
     let k = b.kind("Lean.Parser.Term.structInstFields");
-    // `sepByIndent structInstField ", " (allowTrailingSep := true)` —
-    // approximated as a plain (non-indentation-aware) `SepBy`: every
-    // fixture's struct instance is single-line, where `sepByIndent`'s
-    // column/newline-implicit-separator behavior is unobservable from
-    // plain comma-`sepBy` (documented simplification, task-8 report).
+    // KNOWN DIVERGENCE (M3a): oracle is `sepByIndent structInstField ", "
+    // (allowTrailingSep := true)` — column/newline-sensitive (a same-
+    // column-newline is an implicit separator alternative to a literal
+    // `,`, per `checkColGe` gating each item). Approximated here as a
+    // plain, non-indentation-aware `SepBy`. This is a REAL divergence on
+    // MULTI-LINE struct instance literals (a newline-separated, no-comma
+    // field list will not parse the way the oracle does); every
+    // committed fixture's struct instance is single-line, where the two
+    // are unobservable from each other, so the gap doesn't show up in
+    // the golden gate. Needs the `sepByIndent` machinery (see
+    // `SepByIndentSemicolon` in `grammar.rs`, generalized to a comma
+    // separator) to close for real — tracked, not fixed, in this task.
+    // Also recorded in the task-8 report's Fix wave 1 section.
     nd(k, sep_by_trailing(field, ","))
 }
 fn opt_ellipsis(b: &mut SnapshotBuilder) -> Prim {
@@ -635,7 +640,7 @@ fn let_id_binder(b: &mut SnapshotBuilder) -> Prim {
 fn let_id_lhs(b: &mut SnapshotBuilder) -> Prim {
     let id = let_id(b);
     let binder = let_id_binder(b);
-    let ot = opt_type();
+    let ot = opt_type(b);
     seq([id, many(binder), ot])
 }
 /// `letIdDecl := leading_parser atomic (letIdLhs >> " := ") >>

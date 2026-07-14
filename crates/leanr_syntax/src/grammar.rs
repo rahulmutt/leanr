@@ -156,8 +156,12 @@ pub fn sep_by1(item: Prim, sep: &str) -> Prim {
     }
 }
 /// `sepBy1 .. (allowTrailingSep := true)` — the variant `Term.tuple`'s
-/// inner list and `Term.matchAlt`'s comma-separated pattern groups use
-/// (source: `sepBy1 termParser ", " (allowTrailingSep := true)`).
+/// inner list uses (source: `tuple := hygienicLParen >> optional (.. >>
+/// termParser >> ", " >> sepBy1 termParser ", " (allowTrailingSep :=
+/// true)) >> ")"`, Term.lean:186-187). NOT `Term.matchAlt`'s
+/// comma-separated pattern groups — those are a PLAIN `sepBy1` with no
+/// `allowTrailingSep` (Term.lean:266-267); see `match_alt` in
+/// `builtin/term.rs`.
 pub fn sep_by1_trailing(item: Prim, sep: &str) -> Prim {
     Prim::SepBy1 {
         item: Arc::new(item),
