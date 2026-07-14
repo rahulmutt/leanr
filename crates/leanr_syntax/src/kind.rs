@@ -41,8 +41,10 @@ pub fn is_leaf(k: SyntaxKind) -> bool {
 /// Append-only name↔u16 interner. Built once per `GrammarSnapshot`
 /// (snapshot construction pre-interns every kind its grammar can emit),
 /// shared `Arc` with every tree parsed under it — parsing itself never
-/// mutates the interner.
-#[derive(Debug)]
+/// mutates the interner. `Clone` is cheap (an `Arc<str>` per name) and
+/// is used by `parse`'s test harness, which builds trees straight from
+/// a test-owned interner rather than a `GrammarSnapshot`'s `Arc`.
+#[derive(Clone, Debug)]
 pub struct KindInterner {
     names: Vec<Arc<str>>,
     map: HashMap<Arc<str>, u16>,
