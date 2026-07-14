@@ -31,13 +31,19 @@ use std::sync::Arc;
 // share helpers with.
 mod term_app;
 mod term_pragma;
+// Re-exported (Task 9) so `do_notation.rs` (a SIBLING of `term`, not a
+// descendant) can reuse `matchExprPat`/`matchExprAlt(s)` for
+// `doLetExpr`/`doLetMetaExpr`/`doMatchExpr` without a second, drifting
+// copy — `term_pragma` itself stays a private submodule (unchanged),
+// only these three names are threaded through.
+pub(super) use term_pragma::{match_expr_alts, match_expr_pat};
 
 // ================================================================
 // Shared helpers (not their own surface-table rows; oracle-named
 // sub-parsers used by several of the productions below).
 // ================================================================
 
-fn nd(kind: SyntaxKind, body: Prim) -> Prim {
+pub(super) fn nd(kind: SyntaxKind, body: Prim) -> Prim {
     Prim::Node {
         kind,
         prec: None,
@@ -48,7 +54,7 @@ fn nd(kind: SyntaxKind, body: Prim) -> Prim {
 /// `hygieneInfo` (Extra.lean): always succeeds, wraps a zero-width
 /// empty `ident` in its own (unqualified — NOT `Lean.Parser.Term.*`;
 /// confirmed against a fresh dump) `hygieneInfo` node.
-fn hygiene_info(b: &mut SnapshotBuilder) -> Prim {
+pub(super) fn hygiene_info(b: &mut SnapshotBuilder) -> Prim {
     let k = b.kind("hygieneInfo");
     nd(k, Prim::EmitEmptyIdent)
 }
@@ -73,11 +79,11 @@ fn hygienic_lparen(b: &mut SnapshotBuilder) -> Prim {
 /// same as term-position `_`). `term_hole()` below is the SAME body
 /// `Term.hole`'s own `leading2` registration uses (kept as one fn so
 /// both call sites can't drift).
-fn term_hole(b: &mut SnapshotBuilder) -> Prim {
+pub(super) fn term_hole(b: &mut SnapshotBuilder) -> Prim {
     let k = b.kind("Lean.Parser.Term.hole");
     nd(k, sym("_"))
 }
-fn binder_ident(b: &mut SnapshotBuilder) -> Prim {
+pub(super) fn binder_ident(b: &mut SnapshotBuilder) -> Prim {
     let hole = term_hole(b);
     or_else([Prim::Ident, hole])
 }
@@ -111,7 +117,7 @@ fn binder_type(require_type: bool) -> Prim {
 /// and `fun x : A => e` (both exercise a present `optType`), which show
 /// exactly this shape — no fixture previously exercised a present
 /// `optType`, which is why this was missed before.
-fn opt_type(b: &mut SnapshotBuilder) -> Prim {
+pub(super) fn opt_type(b: &mut SnapshotBuilder) -> Prim {
     let k = b.kind("Lean.Parser.Term.typeSpec");
     opt(nd(k, seq([sym(":"), cat("term", 0)])))
 }
@@ -226,10 +232,25 @@ fn register_literals(b: &mut SnapshotBuilder) {
     );
 }
 
+/// `syntheticHole := leading_parser "?" >> (ident <|> "_")` — the SAME
+/// body `syntheticHole`'s own `leading2` registration below uses,
+/// FULLY NODE-WRAPPED (like `term_hole`'s own doc comment: "kept as one
+/// fn so both call sites can't drift") — hoisted (Task 9) so
+/// `tactic.rs`'s `matchRhs` (`Term.hole <|> Term.syntheticHole <|>
+/// tacticSeq`) can embed the already-wrapped node directly, the same
+/// way `binder_ident` embeds `term_hole(b)`.
+pub(super) fn synthetic_hole(b: &mut SnapshotBuilder) -> Prim {
+    let k = b.kind("Lean.Parser.Term.syntheticHole");
+    nd(k, seq([sym("?"), or_else([Prim::Ident, sym("_")])]))
+}
+
 fn register_holes_and_sorts(b: &mut SnapshotBuilder) {
     // hole := leading_parser "_".
     b.leading2("term", "Lean.Parser.Term.hole", MAX_PREC, sym("_"));
-    // syntheticHole := leading_parser "?" >> (ident <|> "_").
+    // syntheticHole := leading_parser "?" >> (ident <|> "_") — BARE body
+    // here (not `synthetic_hole(b)`, which is already node-wrapped —
+    // `leading2` would double-wrap it, same reasoning as `term_hole`
+    // vs. this file's plain `hole` registration just above).
     b.leading2(
         "term",
         "Lean.Parser.Term.syntheticHole",
@@ -287,17 +308,28 @@ fn register_cdot(b: &mut SnapshotBuilder) {
 
 fn register_paren_family(b: &mut SnapshotBuilder) {
     // paren := hygienicLParen >> withoutPosition (withoutForbidden
-    // (ppDedentIfGrouped termParser)) >> ")" — the pp/position/
-    // forbidden combinators are all parsing no-ops.
+    // (ppDedentIfGrouped termParser)) >> ")" — `withoutPosition`/
+    // `ppDedentIfGrouped` are parsing no-ops (position-marker/pretty-
+    // print only), but `withoutForbidden` is REAL as of Task 9 (see
+    // `Prim::WithForbidden`'s doc comment): once `do_notation.rs`
+    // registers `withForbidden "do" ..` scopes (`doFor`'s iterable,
+    // `doUnless`'s condition, …), a parenthesized sub-term must clear
+    // that scope — "there is no parsing ambiguity inside these nested
+    // constructs" (Basic.lean's own doc comment) — so `(foo do bar)`
+    // used AS a `for`-loop iterable, e.g., can still contain its own
+    // nested `do`.
     let lp = hygienic_lparen(b);
     b.leading2(
         "term",
         "Lean.Parser.Term.paren",
         MAX_PREC,
-        seq([lp, cat("term", 0), sym(")")]),
+        seq([lp, without_forbidden(cat("term", 0)), sym(")")]),
     );
-    // tuple := hygienicLParen >> optional (termParser >> ", " >>
-    // sepBy1 termParser ", " (allowTrailingSep := true)) >> ")".
+    // tuple := hygienicLParen >> optional (withoutPosition
+    // (withoutForbidden (termParser >> ", " >> sepBy1 termParser ", "
+    // (allowTrailingSep := true)))) >> ")" — `withoutForbidden` scopes
+    // the WHOLE inner sequence (both the first term and the trailing
+    // list), same reasoning as `paren` above.
     let lp = hygienic_lparen(b);
     b.leading2(
         "term",
@@ -305,30 +337,39 @@ fn register_paren_family(b: &mut SnapshotBuilder) {
         MAX_PREC,
         seq([
             lp,
-            opt(seq([
+            opt(without_forbidden(seq([
                 cat("term", 0),
                 sym(","),
                 sep_by1_trailing(cat("term", 0), ","),
-            ])),
+            ]))),
             sym(")"),
         ]),
     );
-    // typeAscription := hygienicLParen >> (termParser >> " :" >>
-    // optional (ppSpace >> termParser)) >> ")".
+    // typeAscription := hygienicLParen >> (withoutPosition
+    // (withoutForbidden (termParser >> " :" >> optional (ppSpace >>
+    // termParser)))) >> ")".
     let lp = hygienic_lparen(b);
     b.leading2(
         "term",
         "Lean.Parser.Term.typeAscription",
         MAX_PREC,
-        seq([lp, cat("term", 0), sym(":"), opt(cat("term", 0)), sym(")")]),
+        seq([
+            lp,
+            without_forbidden(seq([cat("term", 0), sym(":"), opt(cat("term", 0))])),
+            sym(")"),
+        ]),
     );
-    // anonymousCtor := "⟨" >> sepBy termParser ", " (allowTrailingSep :=
-    // true) >> "⟩".
+    // anonymousCtor := "⟨" >> withoutPosition (withoutForbidden (sepBy
+    // termParser ", " (allowTrailingSep := true))) >> "⟩".
     b.leading2(
         "term",
         "Lean.Parser.Term.anonymousCtor",
         MAX_PREC,
-        seq([sym("⟨"), sep_by_trailing(cat("term", 0), ","), sym("⟩")]),
+        seq([
+            sym("⟨"),
+            without_forbidden(sep_by_trailing(cat("term", 0), ",")),
+            sym("⟩"),
+        ]),
     );
     // inaccessible := ".(" >> termParser >> ")".
     b.leading2(
@@ -428,7 +469,7 @@ fn basic_fun(b: &mut SnapshotBuilder) -> Prim {
 /// `matchDiscr := leading_parser optional (atomic (binderIdent >> " :
 /// ")) >> termParser` — not attributed, but IS `leading_parser` (own
 /// node, confirmed by dump).
-fn match_discr(b: &mut SnapshotBuilder) -> Prim {
+pub(super) fn match_discr(b: &mut SnapshotBuilder) -> Prim {
     let bi = binder_ident(b);
     let k = b.kind("Lean.Parser.Term.matchDiscr");
     nd(k, seq([opt(atomic(seq([bi, sym(":")]))), cat("term", 0)]))
@@ -438,9 +479,12 @@ fn match_discr(b: &mut SnapshotBuilder) -> Prim {
 /// (Term.lean:265-269). The INNER `sepBy1 termParser ", "` has NO
 /// `allowTrailingSep` — plain `sep_by1`, not `sep_by1_trailing` (a prior
 /// version of this port wrongly used the trailing variant here).
-/// `rhs` lets `structInstFieldEqns` reuse this for its own rhs shape
-/// (still `termParser` in every call site this task ports).
-fn match_alt(b: &mut SnapshotBuilder) -> Prim {
+/// `rhs` is a REAL parameter (Task 9 — was hardcoded to `termParser`
+/// until `do_notation.rs`/`tactic.rs` needed their own `rhsParser`s:
+/// `doMatch`'s `doSeq`, `Tactic.«match»`'s `matchRhs` = `hole <|>
+/// syntheticHole <|> tacticSeq`); `structInstFieldEqns`'s own call
+/// passes `cat("term", 0)`, same as `register_fun`/`register_match`.
+pub(super) fn match_alt(b: &mut SnapshotBuilder, rhs: Prim) -> Prim {
     let k = b.kind("Lean.Parser.Term.matchAlt");
     nd(
         k,
@@ -449,7 +493,7 @@ fn match_alt(b: &mut SnapshotBuilder) -> Prim {
             sep_by1(sep_by1(cat("term", 0), ","), "|"),
             sym("=>"),
             Prim::CheckColGe,
-            cat("term", 0),
+            rhs,
         ]),
     )
 }
@@ -457,8 +501,8 @@ fn match_alt(b: &mut SnapshotBuilder) -> Prim {
 /// (ppLine >> matchAlt rhsParser)` — the outer `withPosition` is
 /// redundant with `Many1Indent`'s own internal one (same position, no
 /// input consumed between them); skipped, see task-8 report.
-fn match_alts(b: &mut SnapshotBuilder) -> Prim {
-    let alt = match_alt(b);
+pub(super) fn match_alts(b: &mut SnapshotBuilder, rhs: Prim) -> Prim {
+    let alt = match_alt(b, rhs);
     let k = b.kind("Lean.Parser.Term.matchAlts");
     nd(k, Prim::Many1Indent(Arc::new(alt)))
 }
@@ -467,7 +511,7 @@ fn register_fun(b: &mut SnapshotBuilder) {
     // «fun» := leading_parser:maxPrec unicodeSymbol "λ" "fun" >>
     // (basicFun <|> matchAlts).
     let bf = basic_fun(b);
-    let ma = match_alts(b);
+    let ma = match_alts(b, cat("term", 0));
     b.leading2(
         "term",
         "Lean.Parser.Term.fun",
@@ -485,7 +529,7 @@ fn register_match(b: &mut SnapshotBuilder) {
     // (same idiom as `explicitBinder`'s `binderTactic`/`binderDefault`
     // slot above).
     let discr = match_discr(b);
-    let alts = match_alts(b);
+    let alts = match_alts(b, cat("term", 0));
     b.leading2(
         "term",
         "Lean.Parser.Term.match",
@@ -543,7 +587,7 @@ fn struct_inst_field_def(b: &mut SnapshotBuilder) {
 /// `structInstFieldEqns := leading_parser optional "private" >>
 /// matchAlts`.
 fn struct_inst_field_eqns(b: &mut SnapshotBuilder) {
-    let alts = match_alts(b);
+    let alts = match_alts(b, cat("term", 0));
     b.leading2(
         "structInstFieldDecl",
         "Lean.Parser.Term.structInstFieldEqns",
@@ -580,20 +624,23 @@ fn struct_inst_field(b: &mut SnapshotBuilder) -> Prim {
 fn struct_inst_fields(b: &mut SnapshotBuilder) -> Prim {
     let field = struct_inst_field(b);
     let k = b.kind("Lean.Parser.Term.structInstFields");
-    // KNOWN DIVERGENCE (M3a): oracle is `sepByIndent structInstField ", "
+    // FIXED (M3a Task 9, was a KNOWN DIVERGENCE per the task-8 report's
+    // Fix wave 1 section): oracle is `sepByIndent structInstField ", "
     // (allowTrailingSep := true)` — column/newline-sensitive (a same-
     // column-newline is an implicit separator alternative to a literal
-    // `,`, per `checkColGe` gating each item). Approximated here as a
-    // plain, non-indentation-aware `SepBy`. This is a REAL divergence on
-    // MULTI-LINE struct instance literals (a newline-separated, no-comma
-    // field list will not parse the way the oracle does); every
-    // committed fixture's struct instance is single-line, where the two
-    // are unobservable from each other, so the gap doesn't show up in
-    // the golden gate. Needs the `sepByIndent` machinery (see
-    // `SepByIndentSemicolon` in `grammar.rs`, generalized to a comma
-    // separator) to close for real — tracked, not fixed, in this task.
-    // Also recorded in the task-8 report's Fix wave 1 section.
-    nd(k, sep_by_trailing(field, ","))
+    // `,`, per `checkColGe` gating each item, with the accepted implicit
+    // separator itself contributing a real empty `null` node —
+    // `pushNone`). Task 9's do-notation/tactic work made the general
+    // `sep_by_indent` primitive available (generalized from the
+    // semicolon-only `SepByIndentSemicolon` placeholder to a
+    // `sep`-parameterized `Prim::SepByIndent`, see grammar.rs), so the
+    // plain non-indentation-aware `SepBy` approximation is replaced here.
+    // Confirmed against a fresh oracle dump of a MULTI-LINE, no-comma
+    // struct instance (`{ a := x\n  b := y }`, task-9 report): children
+    // interleave `structInstField, null{}, structInstField` — exactly
+    // what `sep_by_indent` now produces (see its regression test in
+    // parse.rs). Covered by `StructMultiLine.lean` (this task's fixture).
+    nd(k, sep_by_indent(field, ","))
 }
 fn opt_ellipsis(b: &mut SnapshotBuilder) -> Prim {
     // optEllipsis := leading_parser optional " ..".
@@ -640,7 +687,7 @@ fn register_struct_inst(b: &mut SnapshotBuilder) {
 /// `letConfig := leading_parser many letConfigItem` — `letConfigItem`
 /// (`+nondep`/`-nondep`/`(eq := h)`/…) isn't transcribed (no fixture
 /// uses any `let` option); always-empty `many(never())`.
-fn let_config(b: &mut SnapshotBuilder) -> Prim {
+pub(super) fn let_config(b: &mut SnapshotBuilder) -> Prim {
     let k = b.kind("Lean.Parser.Term.letConfig");
     nd(k, many(never()))
 }
@@ -689,7 +736,7 @@ fn let_id_decl(b: &mut SnapshotBuilder) -> Prim {
 /// >> (letPatDecl true <|> letIdDecl <|> letPatDecl <|> letEqnsDecl)` —
 /// only the `letIdDecl` alternative is ported (no fixture uses
 /// pattern-`let`/`let f | pat => ..` equational form).
-fn let_decl(b: &mut SnapshotBuilder) -> Prim {
+pub(super) fn let_decl(b: &mut SnapshotBuilder) -> Prim {
     let id_decl = let_id_decl(b);
     let k = b.kind("Lean.Parser.Term.letDecl");
     nd(
@@ -727,14 +774,46 @@ fn from_term(b: &mut SnapshotBuilder) -> Prim {
     nd(k, seq([sym("from"), cat("term", 0)]))
 }
 
+/// `byTactic' := leading_parser "by " >> Tactic.tacticSeqIndentGt` —
+/// NOT itself `@[builtin_term_parser]`-attributed (so not its own
+/// surface-table row — same "named but unattributed" treatment as
+/// `matchDiscr`/`hygienicLParen`), but IS `leading_parser`, so it
+/// node-wraps in its own `Lean.Parser.Term.byTactic'` kind. `showRhs :=
+/// fromTerm <|> byTactic'`'s second alternative (Task 9 — was deferred
+/// pending `tacticSeq`, now that `tactic.rs` exists).
+fn by_tactic_prime(b: &mut SnapshotBuilder) -> Prim {
+    let seq_gt = super::tactic::tactic_seq_indent_gt(b);
+    let k = b.kind("Lean.Parser.Term.byTactic'");
+    nd(k, seq([sym("by"), seq_gt]))
+}
+/// `showRhs := fromTerm <|> byTactic'` — shared by `«show»` and
+/// `sufficesDecl` (both call sites this port needs).
+fn show_rhs(b: &mut SnapshotBuilder) -> Prim {
+    let from = from_term(b);
+    let by_tac = by_tactic_prime(b);
+    or_else([from, by_tac])
+}
+
+/// `byTactic := leading_parser:leadPrec ppAllowUngrouped >> "by " >>
+/// Tactic.tacticSeqIndentGt` (Term.lean:107-108) — fixture-critical:
+/// `by` blocks.
+fn register_by_tactic(b: &mut SnapshotBuilder) {
+    let seq_gt = super::tactic::tactic_seq_indent_gt(b);
+    b.leading2(
+        "term",
+        "Lean.Parser.Term.byTactic",
+        LEAD_PREC,
+        seq([sym("by"), seq_gt]),
+    );
+}
+
 fn register_let_have_show_suffices(b: &mut SnapshotBuilder) {
     let_like(b, "Lean.Parser.Term.let", "let", LEAD_PREC);
     let_like(b, "Lean.Parser.Term.have", "have", LEAD_PREC);
 
     // «show» := leading_parser:leadPrec "show " >> termParser >>
-    // showRhs. `showRhs := fromTerm <|> byTactic'` — only `fromTerm` is
-    // ported (byTactic' needs Task 9's `tacticSeq`; deferred with it).
-    let rhs = from_term(b);
+    // showRhs.
+    let rhs = show_rhs(b);
     b.leading2(
         "term",
         "Lean.Parser.Term.show",
@@ -748,7 +827,7 @@ fn register_let_have_show_suffices(b: &mut SnapshotBuilder) {
     // hygieneInfo) >> termParser >> showRhs`.
     let bi = binder_ident(b);
     let hi = hygiene_info(b);
-    let rhs = from_term(b);
+    let rhs = show_rhs(b);
     let decl_k = b.kind("Lean.Parser.Term.sufficesDecl");
     let decl = nd(
         decl_k,
@@ -873,7 +952,7 @@ fn let_rec_decl(b: &mut SnapshotBuilder) -> Prim {
     nd(k, seq([opt(never()), opt(never()), decl, suffix]))
 }
 /// `letRecDecls := leading_parser sepBy1 letRecDecl ", "`.
-fn let_rec_decls(b: &mut SnapshotBuilder) -> Prim {
+pub(super) fn let_rec_decls(b: &mut SnapshotBuilder) -> Prim {
     let decl = let_rec_decl(b);
     let k = b.kind("Lean.Parser.Term.letRecDecls");
     nd(k, sep_by1(decl, ","))
@@ -1058,6 +1137,7 @@ pub fn register(b: &mut SnapshotBuilder) {
     register_let_family_siblings(b);
     register_dep_arrow(b);
     register_arrow_app_proj(b);
+    register_by_tactic(b);
     term_app::register(b);
     term_pragma::register(b);
 }

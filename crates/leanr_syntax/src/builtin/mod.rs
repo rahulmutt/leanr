@@ -4,9 +4,10 @@
 //! Kind names MUST match Lean's byte-for-byte (oracle equality).
 
 pub mod command;
+pub mod do_notation;
 pub mod level;
+pub mod tactic;
 pub mod term;
-// Tasks 9–10 add: pub mod do_notation; pub mod tactic;
 
 use crate::grammar::{GrammarSnapshot, SnapshotBuilder};
 
@@ -25,6 +26,10 @@ pub fn snapshot() -> GrammarSnapshot {
     b.category("term");
     b.category("level");
     b.category("tactic");
+    // `doElem` category (surface table: 27 rows, `Lean/Parser/Do.lean`)
+    // — `do`-block statements (`let`/`for`/`if`/`match`/`return`/…),
+    // populated by `do_notation::register` (M3a Task 9).
+    b.category("doElem");
     // `Term.structInst`'s field-decl slot recurses into its own tiny
     // category (surface table's "struct-instance-field-decl category",
     // 2 rows: `structInstFieldDef`/`structInstFieldEqns`) — registered
@@ -32,7 +37,8 @@ pub fn snapshot() -> GrammarSnapshot {
     b.category("structInstFieldDecl");
     command::register(&mut b);
     level::register(&mut b);
+    tactic::register(&mut b);
     term::register(&mut b);
-    // Task 9–10: do_notation::register(&mut b); tactic::register(&mut b);
+    do_notation::register(&mut b);
     b.finish()
 }

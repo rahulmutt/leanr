@@ -209,6 +209,27 @@ pub(crate) struct Ps<'a> {
     lhs_prec: u32,
     /// `withPosition` stack: saved (line, col) of a position marker.
     pos_stack: Vec<(u32, u32)>,
+    /// ORACLE-PORT `Basic.lean`'s `forbiddenTk?` parser-context field —
+    /// `withForbidden`/`withoutForbidden`'s scope stack (Task 9: the
+    /// FIRST real user — `doForDecl`'s iterable, `doIfCond`'s
+    /// condition, `doUnless`/`termUnless`'s condition, `doFor`/
+    /// `termFor`'s per-declaration iterable all wrap `termParser` in
+    /// `withForbidden "do" ..` to stop the term Pratt-loop from
+    /// swallowing the construct's OWN trailing `"do "` keyword as an
+    /// application argument — Term.do's own precedence, `argPrec`,
+    /// is exactly `ARG_PREC`, so without this it WOULD qualify as an
+    /// `argument()`-strength trailing argument and get eaten, per
+    /// `mkTokenAndFixPos` (Basic.lean): "if a token *anywhere* in `p`
+    /// resolves to the forbidden text, parsing stops there — Task 9
+    /// verified this is not just theoretical: an early version of
+    /// `doFor`'s port without this hard-failed on `for x in xs do ..`
+    /// (see task-9 report for the probe/regression test). A `Vec`
+    /// stack (not one `Option`) mirrors `pos_stack`'s own
+    /// save/restore-on-exit discipline for correctly-nested scopes
+    /// (`withForbidden` inside `withForbidden`, or `withoutForbidden`
+    /// nested inside one — e.g. a parenthesized term used as a `for`
+    /// loop's iterable).
+    forbidden_stack: Vec<Option<String>>,
     /// Byte offset of each line start (for column computation).
     line_starts: Vec<usize>,
     /// Input-driven `Category` recursion depth — see
@@ -260,9 +281,17 @@ impl<'a> Ps<'a> {
             prec: 0,
             lhs_prec: 0,
             pos_stack: Vec::new(),
+            forbidden_stack: Vec::new(),
             line_starts,
             cat_depth: 0,
         }
+    }
+
+    /// Current forbidden-token scope, if any — ORACLE-PORT
+    /// `ParserContext.forbiddenTk?` (the top of `forbidden_stack`, or
+    /// none outside any `withForbidden` scope).
+    fn forbidden(&self) -> Option<&str> {
+        self.forbidden_stack.last().and_then(|o| o.as_deref())
     }
 
     fn table(&self) -> &TokenTable {
@@ -675,7 +704,29 @@ impl<'a> Ps<'a> {
                     ])))));
                 self.run(&expanded)
             }
-            Prim::SepByIndentSemicolon(q) => self.sep_by_indent(q),
+            Prim::SepByIndent { item, sep, min } => self.sep_by_indent(item, sep, *min),
+            Prim::WithForbidden(tok, q) => {
+                // ORACLE-PORT `withForbidden`/`adaptCacheableContext`
+                // (Basic.lean): scopes `forbiddenTk?` for the duration of
+                // `q` only — restored (success or failure alike) once
+                // `q` returns, same discipline as `WithPosition`'s
+                // marker stack.
+                self.forbidden_stack.push(Some(tok.clone()));
+                let r = self.run(q);
+                self.forbidden_stack.pop();
+                r
+            }
+            Prim::WithoutForbidden(q) => {
+                // ORACLE-PORT `withoutForbidden`: locally clears the
+                // scope (e.g. a parenthesized sub-term has no parsing
+                // ambiguity to guard against) rather than removing the
+                // stack frame outright — an ENCLOSING `withForbidden`
+                // must still apply once `q` returns.
+                self.forbidden_stack.push(None);
+                let r = self.run(q);
+                self.forbidden_stack.pop();
+                r
+            }
             Prim::Category { name, rbp } => self.category(name, *rbp),
             Prim::TrailingNode { .. } => {
                 // Only the category trailing loop may run these (it
@@ -697,6 +748,17 @@ impl<'a> Ps<'a> {
             TokenKind::Ident if allow_ident => text == s,
             _ => false,
         };
+        // ORACLE-PORT `mkTokenAndFixPos` (Basic.lean): "if
+        // `c.forbiddenTk? == some tk`, [fail] 'forbidden token'" —
+        // checked at the SAME granularity real Lean does it (per
+        // literal-token match attempt), so a token that would otherwise
+        // match is instead treated as a clean failure while a
+        // `withForbidden` scope for that exact text is active. See
+        // `Prim::WithForbidden`'s doc comment for why this matters
+        // (`doFor`/`doUnless`/etc.'s iterable/condition must NOT let
+        // `Term.app`'s argument loop swallow the construct's own
+        // trailing `"do "` keyword).
+        let ok = ok && self.forbidden() != Some(s);
         if ok {
             self.bump(t, KIND_ATOM);
             Ok(())
@@ -847,20 +909,53 @@ impl<'a> Ps<'a> {
         Ok(())
     }
 
-    /// Sequence of `p` optionally separated by `;`, indentation-scoped
+    /// Sequence of `p` optionally separated by `sep`, indentation-scoped
     /// (Lean tactic/do-block sequencing: `by skip; skip` or one `skip`
-    /// per line, but not `by skip skip` on one line). ORACLE-PORT
-    /// `Term/Basic.lean` `sepByIndentSemicolon` = `sepByIndent p "; "
-    /// (allowTrailingSep := true)`, and `sepByIndent` itself
-    /// (`Extra.lean`): `withPosition $ sepBy (checkColGe >> p) sep
-    /// (psep <|> checkColEq >> checkLinebreakBefore >> pushNone)
-    /// allowTrailingSep`. Each item must be at or past the marker's
-    /// column; between items, EITHER an explicit `;` is consumed, OR —
-    /// with no token at all — the next item starts on a new line at
-    /// EXACTLY the marker's column (no semicolon needed when items are
-    /// already visually separated by indentation; required when two
-    /// share a line).
-    fn sep_by_indent(&mut self, item: &Prim) -> PResult {
+    /// per line, but not `by skip skip` on one line; `structInstFields`'s
+    /// `,`-separated field list is the same shape). ORACLE-PORT
+    /// `Extra.lean` `sepByIndent`/`sepBy1Indent`: `withPosition $
+    /// sepBy(1) (checkColGe >> p) sep (psep <|> checkColEq >>
+    /// checkLinebreakBefore >> pushNone) (allowTrailingSep := true)`.
+    /// Each item must be at or past the marker's column; between items,
+    /// EITHER an explicit `sep` is consumed, OR — with no token at all —
+    /// the next item starts on a new line at EXACTLY the marker's column
+    /// (no separator needed when items are already visually separated by
+    /// indentation; required when two share a line). `min` is 0
+    /// (`sepByIndent`) or 1 (`sepBy1Indent`) — see `Prim::SepByIndent`'s
+    /// doc comment.
+    ///
+    /// Task 9 fixes two divergences a fresh oracle probe found once a
+    /// real caller (this task's `tacticSeq1Indented`/`tacticSeqBracketed`
+    /// port) finally exercised this Task-6-authored, never-registered
+    /// fn:
+    /// 1. **Zero-item handling.** The oracle's `checkColGe >> p` failing
+    ///    on the very FIRST attempt (whether from `checkColGe` itself or
+    ///    from `p`) is just an ordinary non-consuming item failure to
+    ///    `sepBy`/`sepBy1` — `sepBy` (min 0) accepts it as "zero items";
+    ///    `sepBy1` (min 1) does not. The prior version special-cased a
+    ///    `checkColGe` failure as an unconditional clean stop (right for
+    ///    `sepBy`, wrong for `sepBy1` — e.g. `tacticSeq1Indented` must
+    ///    hard-fail, not silently succeed empty, when `by` is followed by
+    ///    nothing at all indented; the wrapping `tacticSeqIndentGt`
+    ///    supplies its OWN explicit empty-fallback via a `checkColGt`
+    ///    guard + `pushNone`, per `Term/Basic.lean:86-92` — this fn must
+    ///    not pre-empt that).
+    /// 2. **Implicit separator's tree contribution.** `psep <|>
+    ///    (checkColEq .. checkLinebreakBefore .. pushNone)` (`..` standing
+    ///    in for the oracle's `>>` here, so no wrapped doc line starts
+    ///    with it — rustdoc/clippy treat a leading `>` as a markdown
+    ///    blockquote marker) — the ACCEPTED implicit (same-column-
+    ///    newline) branch still runs `pushNone` (`Basic.lean`:
+    ///    pushes a real, empty `mkNullNode`) as its OWN sibling
+    ///    contribution, exactly where an explicit separator atom would
+    ///    sit. Confirmed against a fresh dump of a multi-line struct
+    ///    instance (`{ a := x\n  b := y }`, no commas): `structInstFields`'
+    ///    children interleave `structInstField, null{}, structInstField`
+    ///    — that middle empty `null{}` IS the implicit separator's node,
+    ///    not nothing. The prior version emitted no node at all here
+    ///    (regression test below, previously asserting the WRONG
+    ///    no-separator-node shape, is corrected as part of this fix).
+    fn sep_by_indent(&mut self, item: &Prim, sep: &str, min: usize) -> PResult {
         // Marker-establishing lookahead — same role as `WithPosition`'s
         // own marker peek (Task 8 wave 2 review fix, see its doc
         // comment): finding WHERE the marker sits doesn't need to
@@ -875,22 +970,28 @@ impl<'a> Ps<'a> {
         self.pos_stack.push(lc);
         self.start(KIND_NULL);
         let mut after_sep = false;
+        let mut n = 0usize;
         let result: PResult = 'outer: loop {
             let sp = self.save();
-            if self.check_col(|cur, saved| cur.1 >= saved.1).is_err() {
-                self.restore(&sp);
-                break 'outer Ok(());
-            }
-            match self.run(item) {
-                Ok(()) => {}
+            // `checkColGe >> p`, folded: a `checkColGe` failure is, from
+            // `sepBy`'s perspective, indistinguishable from `p` itself
+            // failing without consuming (`checkColGe` is zero-width) —
+            // both funnel into the SAME mandatory-first-vs-clean-stop
+            // decision below.
+            let item_result: PResult = match self.check_col(|cur, saved| cur.1 >= saved.1) {
+                Ok(()) => self.run(item),
+                Err(f) => Err(f),
+            };
+            match item_result {
+                Ok(()) => n += 1,
                 Err(f) if self.consumed_since(&sp) => break 'outer Err(f),
                 Err(f) => {
                     self.restore(&sp);
-                    if after_sep {
-                        // allowTrailingSep := true — a trailing `;`
-                        // (or an implicit newline-separator) with
-                        // nothing following is a clean end, not this
-                        // failure.
+                    // allowTrailingSep := true — a trailing separator
+                    // (explicit or implicit) with nothing following is a
+                    // clean end. Otherwise, whether zero items is
+                    // acceptable depends on `min` (see doc comment).
+                    if after_sep || n >= min {
                         break 'outer Ok(());
                     }
                     break 'outer Err(f);
@@ -898,7 +999,7 @@ impl<'a> Ps<'a> {
             }
             let before_sep = self.pos;
             let sep_sp = self.save();
-            match self.expect_atom(";", false) {
+            match self.expect_atom(sep, false) {
                 Ok(()) => {
                     after_sep = true;
                     continue 'outer;
@@ -931,6 +1032,11 @@ impl<'a> Ps<'a> {
                 let (_, next_at) = self.peek_significant_readonly();
                 if self.src[before_sep..next_at].contains('\n') {
                     after_sep = true;
+                    // `pushNone` — see doc comment fix (2) above: the
+                    // implicit separator is a real, empty `null` node,
+                    // not nothing.
+                    self.start(KIND_NULL);
+                    self.finish();
                     continue 'outer;
                 }
             }
@@ -1783,42 +1889,140 @@ mod tests {
 
     #[test]
     fn sep_by_indent_semicolon_same_column_no_semicolon_needed() {
-        // ORACLE-PORT `Term/Basic.lean` `sepByIndentSemicolon`: items on
-        // their own line at the marker's column don't need `;`;
-        // two on the SAME line do.
+        // ORACLE-PORT `Term/Basic.lean` `sepBy1IndentSemicolon` (min 1,
+        // matching `tacticSeq1Indented`'s real use): items on their own
+        // line at the marker's column don't need `;`; two on the SAME
+        // line do. Task 9 fix: the implicit (same-column-newline)
+        // separator is itself a real, empty `null` node (`pushNone`) —
+        // NOT nothing, as a prior version of both the impl and this test
+        // wrongly had it (see `sep_by_indent`'s doc comment fix (2)).
         let mut b = SnapshotBuilder::new();
         b.category("c");
         b.leading2(
             "c",
             "seq",
             MAX_PREC,
-            Prim::WithPosition(Arc::new(Prim::SepByIndentSemicolon(Arc::new(Prim::Ident)))),
+            Prim::WithPosition(Arc::new(sep_by1_indent(Prim::Ident, ";"))),
         );
         let snap = b.finish();
-        assert_eq!(parse_cat(&snap, "a\nb\nc"), "(seq (null a b c))");
+        assert_eq!(
+            parse_cat(&snap, "a\nb\nc"),
+            "(seq (null a (null) b (null) c))"
+        );
         assert_eq!(parse_cat(&snap, "a; b; c"), "(seq (null a ';' b ';' c))");
         assert_eq!(parse_cat(&snap, "a; b;"), "(seq (null a ';' b ';'))");
 
-        // Review finding 2: `sep_by_indent`'s own marker-establishing
-        // peek (at this fn's own start) and its pure implicit-separator
-        // lookahead (the `if coleq { .. }` branch, deciding whether to
-        // treat a same-column next line as an implicit separator) used
-        // to call the COMMITTING `peek_significant` — the same hazard
-        // class already fixed elsewhere this wave (`check_col`/
+        // Review finding 2 (Task 8 wave 2): `sep_by_indent`'s own
+        // marker-establishing peek and its pure implicit-separator
+        // lookahead (the `if coleq { .. }` branch) must be the READ-ONLY
+        // preview, not the committing `peek_significant` — the same
+        // hazard class fixed elsewhere that wave (`check_col`/
         // `had_ws_before_current`/`WithPosition`'s marker peek/the
-        // trailing loop's dispatch peek): latent today (nothing
-        // registers `SepByIndentSemicolon` in the real grammar yet), but
-        // squarely in Task 9's (`tacticSeq1Indented`) path. Switched
-        // both to `peek_significant_readonly`. Losslessness check with
+        // trailing loop's dispatch peek). Losslessness check with
         // `parse_cat_with_trivia`: the trivia BETWEEN two implicitly-
         // separated items (here, a comment plus surrounding whitespace)
         // must land in the tree EXACTLY ONCE — committed by the second
         // item's own leading token match, not by either of the
-        // now-read-only lookaheads — never dropped, never duplicated.
+        // read-only lookaheads — never dropped, never duplicated.
+        // The empty separator node is pushed (zero-width, no peek of its
+        // own) BEFORE the trivia between it and `b` — `b`'s own leading
+        // dispatch is what commits that trivia-skip, same lazy-trivia
+        // architecture as every other zero-width marker in this port
+        // (e.g. `EmitEmptyIdent`'s doc comment).
         assert_eq!(
             parse_cat_with_trivia(&snap, "a -- hi\nb"),
-            "(seq (null a <ws> <ws> b))"
+            "(seq (null a (null) <ws> <ws> b))"
         );
+    }
+
+    #[test]
+    fn sep_by_indent_min_zero_accepts_empty_and_general_separator() {
+        // Task 9 fix (1): `sepByIndent` (min 0 — `tacticSeqBracketed`'s
+        // `{ }`, `Term.structInstFields`) must accept ZERO items when the
+        // very first attempt fails without consuming — a prior version
+        // of `sep_by_indent` unconditionally treated ANY `checkColGe`
+        // failure as a clean stop regardless of `min`, which happened to
+        // give the right answer here but for the wrong reason (see the
+        // OTHER new test below for where that reasoning breaks for
+        // `min: 1`). Also exercises the generalized `sep` parameter
+        // (`,`, not `;` — `Term.structInstFields`'s real separator).
+        let mut b = SnapshotBuilder::new();
+        b.category("c");
+        b.leading2(
+            "c",
+            "seq",
+            MAX_PREC,
+            Prim::WithPosition(Arc::new(sep_by_indent(Prim::Ident, ","))),
+        );
+        let snap = b.finish();
+        assert_eq!(parse_cat(&snap, ""), "(seq (null))");
+        assert_eq!(parse_cat(&snap, "a, b, c"), "(seq (null a ',' b ',' c))");
+        // Multi-line, no comma — the `structInstFields` divergence this
+        // task closes (see `builtin/term.rs::struct_inst_fields`):
+        // matches the oracle's `structInstField, null{}, structInstField`
+        // shape (probed against a fresh dump of a multi-line struct
+        // instance, task-9 report).
+        assert_eq!(parse_cat(&snap, "a\nb"), "(seq (null a (null) b))");
+    }
+
+    #[test]
+    fn sep_by1_indent_min_one_hard_fails_on_zero_items() {
+        // Task 9 fix (1), the `min: 1` side: `sepBy1IndentSemicolon`
+        // (`tacticSeq1Indented`'s real body) must FAIL — not silently
+        // succeed empty — when no item is found at all (its wrapping
+        // `tacticSeqIndentGt` supplies the oracle's OWN explicit
+        // empty-tactic-sequence fallback via a separate `checkColGt`
+        // guard + `pushNone`, `Term/Basic.lean:86-92`; this fn must not
+        // pre-empt that by silently accepting zero items itself).
+        let mut b = SnapshotBuilder::new();
+        b.category("c");
+        b.leading2(
+            "c",
+            "seq",
+            MAX_PREC,
+            Prim::WithPosition(Arc::new(sep_by1_indent(Prim::Ident, ";"))),
+        );
+        let snap = b.finish();
+        let mut ps = Ps::new("", &snap);
+        let r = ps.run(&Prim::Category {
+            name: "c".to_string(),
+            rbp: 0,
+        });
+        assert!(r.is_err(), "sepBy1Indent must hard-fail on zero items");
+    }
+
+    #[test]
+    fn with_forbidden_blocks_the_exact_token_only_within_its_scope() {
+        // ORACLE-PORT `mkTokenAndFixPos`/`withForbidden` (Basic.lean):
+        // Task 9's `doFor`/`doUnless`/etc. wrap their iterable/condition
+        // in `withForbidden "do" termParser` so the term Pratt-loop can't
+        // eat the construct's OWN trailing `"do "` keyword as an
+        // application argument (`Term.do`'s prec, `argPrec`, is exactly
+        // `ARG_PREC` — high enough to otherwise qualify). Regression for
+        // an early version of this port that lacked `WithForbidden`
+        // entirely (see task-9 report).
+        let mut k = KindInterner::new();
+
+        // (1) A bare forbidden match fails cleanly (no consumption).
+        let p = with_forbidden("do", sym("do"));
+        let (_, errs) = run_toy("do", &["do"], &wrap_root(&mut k, p), &mut k);
+        assert_eq!(errs, 1, "forbidden token must fail to match");
+
+        // (2) `withoutForbidden` nested inside re-enables it.
+        let p = with_forbidden("do", without_forbidden(sym("do")));
+        let (s, errs) = run_toy("do", &["do"], &wrap_root(&mut k, p), &mut k);
+        assert_eq!(errs, 0);
+        assert_eq!(s, "(root (r 'do'))");
+
+        // (3) The scope is exactly as wide as its own body — once
+        // `WithForbidden`'s `q` returns, a LATER match of the same token
+        // outside the scope succeeds normally (mirrors `doFor`'s own
+        // trailing `"do "` keyword, reached only after the iterable's
+        // `withForbidden`-scoped term parse has already returned).
+        let p = seq([with_forbidden("do", Prim::Ident), sym("do")]);
+        let (s, errs) = run_toy("x do", &["do"], &wrap_root(&mut k, p), &mut k);
+        assert_eq!(errs, 0);
+        assert_eq!(s, "(root (r x 'do'))");
     }
 
     #[test]

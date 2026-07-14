@@ -89,7 +89,7 @@ fn opt_expr_precedence() -> Prim {
 /// dump of `match_expr` / `let_expr` (task-8-wave2 report probes):
 /// `Lean.Parser.Term.matchExprPat{ null(optional empty), ident "Foo",
 /// null(many [a, b]) }`.
-fn match_expr_pat(b: &mut SnapshotBuilder) -> Prim {
+pub(in crate::builtin) fn match_expr_pat(b: &mut SnapshotBuilder) -> Prim {
     let bi = binder_ident(b);
     let k = b.kind("Lean.Parser.Term.matchExprPat");
     nd(
@@ -102,21 +102,23 @@ fn match_expr_pat(b: &mut SnapshotBuilder) -> Prim {
     )
 }
 /// `matchExprAlt (rhsParser) := leading_parser "| " >> ppIndent
-/// (matchExprPat >> " => " >> rhsParser)` — `rhsParser` is always
-/// `termParser` at this port's only call site (`matchExprAlts`'s use
-/// inside `matchExpr`; the real declaration's `matchExprAltExpr` generic
-/// instantiation is a quotation-only convenience, M3b).
-fn match_expr_alt(b: &mut SnapshotBuilder) -> Prim {
+/// (matchExprPat >> " => " >> rhsParser)` — `rhs` is a REAL parameter
+/// (Task 9 — was hardcoded to `termParser` until `do_notation.rs`'s
+/// `doMatchExpr` needed its own `rhsParser := doSeq`; the real
+/// declaration's `matchExprAltExpr` generic instantiation is a
+/// quotation-only convenience, M3b, not another call site this port
+/// needs).
+pub(super) fn match_expr_alt(b: &mut SnapshotBuilder, rhs: Prim) -> Prim {
     let pat = match_expr_pat(b);
     let k = b.kind("Lean.Parser.Term.matchExprAlt");
-    nd(k, seq([sym("|"), pat, sym("=>"), cat("term", 0)]))
+    nd(k, seq([sym("|"), pat, sym("=>"), rhs]))
 }
 /// `matchExprElseAlt (rhsParser) := leading_parser "| " >> ppIndent
 /// (hole >> " => " >> rhsParser)`.
-fn match_expr_else_alt(b: &mut SnapshotBuilder) -> Prim {
+pub(super) fn match_expr_else_alt(b: &mut SnapshotBuilder, rhs: Prim) -> Prim {
     let hole = term_hole(b);
     let k = b.kind("Lean.Parser.Term.matchExprElseAlt");
-    nd(k, seq([sym("|"), hole, sym("=>"), cat("term", 0)]))
+    nd(k, seq([sym("|"), hole, sym("=>"), rhs]))
 }
 /// `matchExprAlts (rhsParser) := leading_parser withPosition $ many
 /// (ppLine >> checkColGe "irrelevant" >> notFollowedBy (symbol "| " >>
@@ -124,10 +126,12 @@ fn match_expr_else_alt(b: &mut SnapshotBuilder) -> Prim {
 /// checkColGe .. >> matchExprElseAlt rhsParser)`. Confirmed against a
 /// fresh dump of `match_expr e with | Foo a b => a | _ => e`:
 /// `Lean.Parser.Term.matchExprAlts{ null([matchExprAlt]),
-/// matchExprElseAlt }`.
-fn match_expr_alts(b: &mut SnapshotBuilder) -> Prim {
-    let alt = match_expr_alt(b);
-    let else_alt = match_expr_else_alt(b);
+/// matchExprElseAlt }`. `rhs` is cloned once per alt-kind (`matchExprAlt`
+/// / `matchExprElseAlt`), matching each's own independent `rhsParser`
+/// instantiation in the oracle.
+pub(in crate::builtin) fn match_expr_alts(b: &mut SnapshotBuilder, rhs: Prim) -> Prim {
+    let alt = match_expr_alt(b, rhs.clone());
+    let else_alt = match_expr_else_alt(b, rhs);
     let k = b.kind("Lean.Parser.Term.matchExprAlts");
     nd(
         k,
@@ -146,7 +150,7 @@ fn match_expr_alts(b: &mut SnapshotBuilder) -> Prim {
 fn register_match_expr_let_expr(b: &mut SnapshotBuilder) {
     // matchExpr := leading_parser:leadPrec "match_expr " >> termParser
     // >> " with" >> ppDedent (matchExprAlts termParser).
-    let alts = match_expr_alts(b);
+    let alts = match_expr_alts(b, cat("term", 0));
     b.leading2(
         "term",
         "Lean.Parser.Term.matchExpr",

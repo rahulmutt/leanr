@@ -84,10 +84,45 @@ pub enum Prim {
     CheckLhsPrec(u32),
     CheckWsBefore,
     CheckNoWsBefore,
-    /// `many1Indent` / `sepByIndent` (do-blocks, tactic seqs) —
+    /// `many1Indent` (do-blocks, tactic seqs) —
     /// Task 6 gives these their withPosition+colGe expansion.
     Many1Indent(Arc<Prim>),
-    SepByIndentSemicolon(Arc<Prim>),
+    /// `sepByIndent`/`sepBy1Indent` (Extra.lean): `withPosition $ sepBy
+    /// (checkColGe .. p) sep (psep <|> checkColEq .. checkLinebreakBefore
+    /// .. pushNone) allowTrailingSep` (`..` standing in for the oracle's
+    /// `>>` sequencing operator here, so a wrapped doc line never starts
+    /// with it — rustdoc/clippy treat a LEADING `>` as a markdown
+    /// blockquote marker). Task 9 generalizes this from a hardcoded-`";"`
+    /// `SepByIndentSemicolon(Arc<Prim>)` (Task 6's original, never-
+    /// registered placeholder — see `sep_by_indent`'s doc comment in
+    /// parse.rs for the semantics it needed fixing once a real caller
+    /// showed up) to a `sep`-parameterized primitive: every call site
+    /// this port needs (`sepByIndentSemicolon`/`sepBy1IndentSemicolon`,
+    /// hardcoding `sep = "; "`, AND `Term.structInstFields`'s own
+    /// `sepByIndent .. ", " (allowTrailingSep := true)`, `sep = ", "`)
+    /// shares the same underlying combinator in the oracle, differing
+    /// only in `sep` and in `sepBy` vs. `sepBy1` (captured here as
+    /// `min: 0` vs. `min: 1`) — `allowTrailingSep` is always `true` at
+    /// every call site this port needs, so it isn't a separate field.
+    SepByIndent {
+        item: Arc<Prim>,
+        sep: String,
+        min: usize,
+    },
+    /// `withForbidden tk p` (Basic.lean) — Task 9: `doForDecl`'s
+    /// iterable, `doIfCond`'s condition, `doUnless`/`termUnless`'s
+    /// condition all wrap `termParser` in `withForbidden "do" ..` so the
+    /// term Pratt-loop's application argument-loop can't swallow the
+    /// construct's own trailing `"do "` keyword (`Term.do`'s own
+    /// registered prec, `argPrec`, is exactly `ARG_PREC` — high enough
+    /// to otherwise qualify as an `argument()`-strength trailing
+    /// argument). See `parse.rs`'s `expect_atom` for the enforcement
+    /// point (ORACLE-PORT `mkTokenAndFixPos`).
+    WithForbidden(String, Arc<Prim>),
+    /// `withoutForbidden p` — locally clears an enclosing
+    /// `WithForbidden` scope (bracketing constructs like `(..)` have no
+    /// parsing ambiguity to guard against internally).
+    WithoutForbidden(Arc<Prim>),
     /// Zero-width success producing a `Syntax.missing` leaf (used by
     /// error recovery and a few builtin productions).
     EmitMissing,
@@ -188,6 +223,33 @@ pub fn sep_by_trailing(item: Prim, sep: &str) -> Prim {
 /// "nothing here" path).
 pub fn never() -> Prim {
     Prim::OrElse(vec![])
+}
+/// `sepByIndent p sep (allowTrailingSep := true)` (Extra.lean) — 0-or-
+/// more, indentation-scoped (see `Prim::SepByIndent`'s doc comment).
+/// `Term.structInstFields`'s own call site (`sep = ", "`).
+pub fn sep_by_indent(item: Prim, sep: &str) -> Prim {
+    Prim::SepByIndent {
+        item: Arc::new(item),
+        sep: sep.to_string(),
+        min: 0,
+    }
+}
+/// `sepBy1Indent p sep (allowTrailingSep := true)` — 1-or-more variant;
+/// `Term/Basic.lean`'s `tacticSeq1Indented` (`sep = ";"`) is the only
+/// call site this port needs.
+pub fn sep_by1_indent(item: Prim, sep: &str) -> Prim {
+    Prim::SepByIndent {
+        item: Arc::new(item),
+        sep: sep.to_string(),
+        min: 1,
+    }
+}
+/// `withForbidden tk p` — see `Prim::WithForbidden`'s doc comment.
+pub fn with_forbidden(tok: &str, p: Prim) -> Prim {
+    Prim::WithForbidden(tok.to_string(), Arc::new(p))
+}
+pub fn without_forbidden(p: Prim) -> Prim {
+    Prim::WithoutForbidden(Arc::new(p))
 }
 pub fn raw_char(c: char) -> Prim {
     Prim::RawChar(c)
@@ -495,8 +557,20 @@ fn encode_prim(p: &Prim, snap: &GrammarSnapshot, h: &mut blake3::Hasher) {
             h.update(&[32]);
             encode_prim(q, snap, h);
         }
-        SepByIndentSemicolon(q) => {
-            h.update(&[33]);
+        SepByIndent { item, sep, min } => {
+            h.update(&[33, *min as u8]);
+            h.update(sep.as_bytes());
+            h.update(b"\0");
+            encode_prim(item, snap, h);
+        }
+        WithForbidden(tok, q) => {
+            h.update(&[37]);
+            h.update(tok.as_bytes());
+            h.update(b"\0");
+            encode_prim(q, snap, h);
+        }
+        WithoutForbidden(q) => {
+            h.update(&[38]);
             encode_prim(q, snap, h);
         }
         EmitMissing => {
@@ -684,7 +758,9 @@ fn first_tok(p: &Prim) -> FirstTok {
         | TrailingNode { body, .. }
         | Atomic(body)
         | Group(body)
-        | WithPosition(body) => first_tok(body),
+        | WithPosition(body)
+        | WithoutForbidden(body) => first_tok(body),
+        WithForbidden(_, body) => first_tok(body),
         Seq(ps) => ps
             .iter()
             .find(|q| !is_transparent_for_first(q))
@@ -752,15 +828,20 @@ fn walk_symbols(p: &Prim, f: &mut impl FnMut(&str)) {
         Node { body, .. } | TrailingNode { body, .. } => walk_symbols(body, f),
         Optional(q) | Many(q) | Many1(q) | Atomic(q) | Lookahead(q) | NotFollowedBy(q)
         | Group(q) | WithPosition(q) | Many1Indent(q) => walk_symbols(q, f),
-        SepByIndentSemicolon(q) => {
-            // ORACLE-PORT `Term/Basic.lean` `sepByIndentSemicolon` hard-
-            // codes its separator to `"; "`; parse.rs's `sep_by_indent`
-            // matches the bare `;` character (no pretty-print-only
-            // trailing space to replicate), so that's what needs
-            // registering as a real token.
-            f(";");
+        SepByIndent { item, sep, .. } => {
+            // The oracle's `sep` args (`"; "`/`", "`) carry a pretty-
+            // print-only trailing space; `sep_by_indent` matches the
+            // bare atom (no space to replicate), so THAT's what needs
+            // registering as a real token — same trim `SepBy`/`SepBy1`
+            // already apply to their own `sep` string just below.
+            f(sep);
+            walk_symbols(item, f);
+        }
+        WithForbidden(tok, q) => {
+            f(tok);
             walk_symbols(q, f);
         }
+        WithoutForbidden(q) => walk_symbols(q, f),
         SepBy { item, sep, .. } | SepBy1 { item, sep, .. } => {
             f(sep);
             walk_symbols(item, f);
