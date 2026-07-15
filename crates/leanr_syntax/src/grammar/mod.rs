@@ -16,7 +16,7 @@ use crate::kind::SyntaxKind;
 
 pub mod notation;
 pub mod overlay;
-pub use notation::{mangle_kind, NotationAtom};
+pub use notation::{derive, mangle_kind, NotationAtom, NotationSpec};
 pub use overlay::{CategoryDelta, Overlay};
 
 #[derive(Clone, Debug)]
