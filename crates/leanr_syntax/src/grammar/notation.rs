@@ -251,6 +251,78 @@ mod tests {
         );
     }
 
+    /// Oracle dump (Task 3 fix — mangler multi-atom + interior-ws
+    /// coverage, module doc addendum): a notation with TWO cased
+    /// keyword atoms and interior placeholders. Surface source dumped
+    /// (via the module doc's `Lean.Elab.IO.processCommands`-driven
+    /// scratch technique, pinned `lean` v4.32.0-rc1):
+    /// ```text
+    /// notation "if " c " then " t:100 => (c, t)
+    /// example := if True then 1
+    /// ```
+    /// The `example`'s value's generated kind, observed byte-exact in
+    /// the dump: `"termIf_Then_"` — no guillemets (already a valid
+    /// plain identifier) AND both keyword atoms independently
+    /// capitalized (`if ` → `If`, ` then ` → `Then`), confirming the
+    /// per-atom capitalization branch fires more than once per call and
+    /// that guillemet-omission still holds with >1 symbol atom (Probe 3
+    /// in the module doc only exercised a single symbol atom).
+    #[test]
+    fn mangle_capitalizes_each_of_multiple_keyword_atoms() {
+        assert_eq!(
+            mangle_kind(
+                "term",
+                &[
+                    Symbol("if ".into()),
+                    Placeholder,
+                    Symbol(" then ".into()),
+                    Placeholder
+                ]
+            ),
+            "termIf_Then_"
+        );
+    }
+
+    /// Interior-whitespace-to-`_` coverage (Task 3 fix). NOT
+    /// oracle-derived, unlike the test above — and deliberately so.
+    ///
+    /// Investigation finding: real Lean can never produce a `Symbol`
+    /// atom whose TRIMMED contents still contain whitespace, because
+    /// `Lean.Elab.Syntax`'s `isValidAtom` (pin v4.32.0-rc1,
+    /// `Lean/Elab/Syntax.lean:250-259`) trims the same way this
+    /// mangler does and then rejects the atom outright if any
+    /// whitespace remains (`!(s.any Char.isWhitespace)`), throwing
+    /// `"invalid atom"` and aborting the whole `notation`/`syntax`
+    /// command — confirmed empirically: `notation "a b" x:100 => Not x`
+    /// fails elaboration with exactly that error (scratch dump, same
+    /// technique as above), so the command never registers and no
+    /// generated kind ever exists to observe. `notation` delegates atom
+    /// validation to this exact same code path (`Lean/Elab/Notation.lean`
+    /// `public import`s `Lean.Elab.Syntax`; `expandNotationItemIntoSyntaxItem`
+    /// converts each notation string atom into a `syntax`-command item,
+    /// then `elabSyntax`'s `Term.toParserDescr` runs the identical
+    /// `isValidAtom` gate), so this isn't a `notation`-specific quirk.
+    ///
+    /// `mkNameFromParserSyntax` (`Lean/Elab/Syntax.lean:334-357`, the
+    /// function `mangle_symbol_atom` ports) DOES run its
+    /// whitespace-to-`_` substitution — but it runs *before*
+    /// `toParserDescr`'s validation, on the same syntax tree, and if
+    /// that later validation throws, the name it computed is simply
+    /// discarded along with the rest of the failed command. So the
+    /// branch is real in the ported source, byte-confirmed to exist in
+    /// `Lean/Elab/Syntax.lean`'s own text, but PROVABLY UNREACHABLE via
+    /// any notation/syntax declaration Lean will actually accept — no
+    /// oracle dump can ever exercise it, because no such dump can exist.
+    ///
+    /// Kept as a pure-function robustness test only (same rationale as
+    /// `mangle_never_panics_on_degenerate_input` below), locking the
+    /// mangler's own defined behavior for this synthetic input rather
+    /// than an oracle-observed one.
+    #[test]
+    fn mangle_replaces_interior_whitespace_with_underscore() {
+        assert_eq!(mangle_kind("term", &[Symbol("a b".into())]), "termA_b");
+    }
+
     #[test]
     fn mangle_never_panics_on_degenerate_input() {
         assert_eq!(mangle_kind("", &[]), "«»");
