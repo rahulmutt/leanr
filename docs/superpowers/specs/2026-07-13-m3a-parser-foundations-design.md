@@ -271,3 +271,75 @@ but never runs them).
 ## Next step
 
 Invoke the writing-plans skill to produce the M3a implementation plan.
+
+## Acceptance results (recorded 2026-07-15)
+
+`scripts/parse-acceptance.sh` against the pinned toolchain (`lean`
+4.32.0-rc1):
+
+- Fixture corpus: 15 `.lean` files under `tests/fixtures/syntax/`, 12
+  oracle-compared (`AttrWide`, `ByTac`, `Cmds`, `CmdsWide`, `Decls`,
+  `MatchDo`, `Micro`, `StructMultiLine`, `TermsExtra`, `Terms`,
+  `Types`, `Unicode`); `dump_syntax.lean` is the oracle script itself
+  (skipped); `Errors0.lean`/`Errors1.lean` are round-trip-only (no
+  dump). Fresh `lean --run dump_syntax.lean` output diffed
+  byte-for-byte against every committed `.stx.jsonl`: zero diffs on
+  all 12.
+- Error fixtures: total losslessness confirmed
+  (`r.tree.text() == src` on both `Errors0.lean` and `Errors1.lean`);
+  resync demonstrated on `Errors0.lean` — 2 `declaration` commands
+  (`good1`, `good2`) parse normally on either side of the 1
+  garbage-text `<error>` node.
+- Property gates green: `cargo test --release -p leanr_syntax` — 97
+  lib unit tests, 4 `lossless.rs` proptest properties
+  (`lexer_is_total_and_lossless`, `parse_round_trips_arbitrary_input`,
+  `parse_round_trips_lean_shaped_soup`, `reparse_is_stable`; 256 cases
+  each, proptest default), 5 `never_hang.rs` depth/stack tests, 4
+  `oracle_golden.rs` integration tests — 110/110 passed, 0 failed.
+  Fuzz soak (`mise run fuzz:syntax`, `parse_module`, 60s,
+  `ASAN_OPTIONS=detect_leaks=0`): 3464 runs, cov 2147 / ft 11884, ran
+  to completion (`DONE`) with zero crashes/timeouts/OOMs.
+- `leanr parse --dump` (release build) byte-identical to the oracle
+  dump on all 12 oracle-compared fixtures (`diff -u` clean on every
+  one).
+- Grammar snapshot fingerprint: `snapshot_fingerprint_is_stable_and_grammar_sensitive`
+  passed (deterministic blake3 fingerprint, changes under a grammar
+  edit — regression-tested since Task 6/10's `LeadingIdentBehavior`
+  field bump to `leanr-m3a-grammar-v2`).
+- `mise run ci` (lint, test, lint:deps, scan:secrets,
+  cache:incremental, cache:remote): green — `cargo fmt --all --check`
+  clean, `cargo clippy --workspace --all-targets -- -D warnings`
+  clean, `cargo deny check` "advisories ok, bans ok, licenses ok,
+  sources ok" (one pre-existing `getrandom` duplicate-version
+  warning, `bans=warn`, not new to this task), `gitleaks detect`
+  "no leaks found", full workspace test suite green.
+- Divergences discovered and fixed along the way (real list, from the
+  milestone's own tasks, not invented): tab/CR are lexed as
+  single-byte `ErrorTok` under new codes E0307/E0308 rather than
+  treated as whitespace, matching Lean's trivia set of exactly
+  `{' ', '\n'}` (Task 2); `1.foo`/`1e`/`0x` intentionally clean-split
+  with no diagnostic where Lean hard-errors via backtracking (Task 3,
+  documented as valid-input-safe); `leading_parser` default `lhsPrec`
+  is 0 (not the surrounding precedence) for 8 registrations
+  (`completion`/`proj`/`explicitUniv`/`namedPattern`/`pipeProj`/
+  `pipeCompletion`/`subst`/level `addLit`) — the brief's draft had
+  this wrong and valid Lean like `x |>.f.1` hard-errored until fixed
+  (Task 8); `structInstFields` initially approximated the oracle's
+  `sepByIndent` with a plain `SepBy` (multi-line struct instances
+  diverged), closed by porting real indent-sensitive `sep_by_indent`
+  machinery (Task 8→9); a new `LeadingIdentBehavior` (Default/Symbol/
+  Both) field was added to `Category` because the oracle has no
+  dispatch tie to break the way the brief assumed — `attr` is
+  `.symbol`-keyed, so pre-fix `@[extern foo]`/`@[recursor]`/
+  `@[default_instance foo]` were silently accepted as `Attr.simple`
+  though Lean rejects them (Task 10, fingerprint bumped v1→v2); lex
+  diagnostics are *dropped* (not duplicated) when their token loses a
+  `longest_match` race — e.g. `def x := ["a, "b]` reports only E0301,
+  the unterminated-string E0302 from the losing branch is not
+  surfaced — tracked as a diagnostic-completeness gap, not a
+  losslessness or acceptance-blocking one (Task 11, evidence-based
+  decline of a proposed BTreeSet dedup whose premise was inverted).
+
+No stale dumps were found on this run — all 12 committed
+`.stx.jsonl` fixtures matched a freshly regenerated dump from the
+pinned toolchain byte-for-byte on the first attempt.

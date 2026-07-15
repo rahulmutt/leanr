@@ -152,6 +152,11 @@ description = "M2b acceptance: fresh clone of pinned Mathlib, full `leanr build`
 depends = ["elan:bootstrap"]
 run = "scripts/build-fresh-acceptance.sh"
 
+[tasks."parse:acceptance"]
+description = "M3a acceptance: fresh oracle dumps vs committed, golden+property gates, CLI dump diff, fuzz smoke (local; needs toolchain + nightly)"
+depends = ["elan:bootstrap"]
+run = "scripts/parse-acceptance.sh"
+
 [tasks."bench:mathlib"]
 description = "Benchmark leanr vs lean4checker over pinned Mathlib on this pod (needs mathlib:fetch)"
 depends = ["elan:bootstrap"]
