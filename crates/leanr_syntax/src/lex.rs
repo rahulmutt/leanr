@@ -126,6 +126,28 @@ impl TokenTable {
         }
         best
     }
+
+    /// Maximal-munch against this table UNIONED with `extra` (the same-file
+    /// overlay; empty at M3a). Kept separate so the base table stays
+    /// immutable and Arc-shared — extending the grammar never clones it
+    /// (spec §Architecture: O(1) overlay). Mirrors `munch`'s scan/tie-break
+    /// exactly (same char-boundary walk, same "last — i.e. longest — match
+    /// wins" rule) and reduces to it when `extra` is empty, just consulting
+    /// both tables' entries and the larger of the two `max_len` caps.
+    pub fn munch_with<'a>(&self, rest: &'a str, extra: &TokenTable) -> Option<&'a str> {
+        let cap = self.max_len.max(extra.max_len);
+        let mut best = None;
+        for (i, c) in rest.char_indices() {
+            let end = i + c.len_utf8();
+            if end > cap {
+                break;
+            }
+            if self.toks.contains(&rest[..end]) || extra.toks.contains(&rest[..end]) {
+                best = Some(&rest[..end]);
+            }
+        }
+        best
+    }
 }
 
 fn tok(kind: TokenKind, len: usize) -> (Token, Option<LexError>) {
@@ -170,7 +192,16 @@ fn is_lean_whitespace(c: char) -> bool {
 
 /// Lex one token at `pos`. Trivia (whitespace/comments) are returned as
 /// ordinary tokens; the parser loops. Returns Eof (len 0) at end.
-pub fn next_token(src: &str, pos: usize, table: &TokenTable) -> (Token, Option<LexError>) {
+/// `overlay_tokens` is the same-file grammar-growth token set (empty —
+/// `&TokenTable::default()` — until M3b1 Task 5+ wires overlay
+/// registration through the parser); the symbol munch is against
+/// `table ∪ overlay_tokens`, never a clone of `table`.
+pub fn next_token(
+    src: &str,
+    pos: usize,
+    table: &TokenTable,
+    overlay_tokens: &TokenTable,
+) -> (Token, Option<LexError>) {
     let rest = &src[pos..];
     let mut chars = rest.chars();
     let Some(c) = chars.next() else {
@@ -246,7 +277,10 @@ pub fn next_token(src: &str, pos: usize, table: &TokenTable) -> (Token, Option<L
     // over any token-table match — there is no munch competition for
     // them, only for the final ident-vs-symbol case (`isToken`/
     // `mkIdResult`, ported below as the `munched`-vs-`len` compare).
-    let munched = table.munch(rest).map(str::len).unwrap_or(0);
+    let munched = table
+        .munch_with(rest, overlay_tokens)
+        .map(str::len)
+        .unwrap_or(0);
 
     if c == '"' {
         return match string_lit_len(rest) {
@@ -713,7 +747,7 @@ mod tests {
         let mut out = Vec::new();
         let mut pos = 0;
         loop {
-            let (tok, _err) = next_token(src, pos, table);
+            let (tok, _err) = next_token(src, pos, table, &TokenTable::default());
             if tok.kind == TokenKind::Eof {
                 break;
             }
@@ -774,7 +808,7 @@ mod tests {
     #[test]
     fn unterminated_block_comment_is_an_error_not_a_hang() {
         let t = TokenTable::default();
-        let (tok, err) = next_token("/- never closed", 0, &t);
+        let (tok, err) = next_token("/- never closed", 0, &t, &TokenTable::default());
         assert_eq!(tok.kind, TokenKind::BlockComment);
         assert_eq!(tok.len as usize, "/- never closed".len());
         assert_eq!(err.unwrap().code, "E0303");
@@ -796,7 +830,7 @@ mod tests {
     #[test]
     fn tabs_are_rejected_not_treated_as_whitespace() {
         let t = TokenTable::default();
-        let (tok, err) = next_token("\tx", 0, &t);
+        let (tok, err) = next_token("\tx", 0, &t, &TokenTable::default());
         assert_eq!(tok.kind, TokenKind::ErrorTok);
         assert_eq!(tok.len, 1);
         assert_eq!(err.unwrap().code, "E0307");
@@ -807,7 +841,7 @@ mod tests {
         let t = TokenTable::default();
         // Even as part of a CRLF pair: Lean's whitespace() checks '\r'
         // unconditionally, with no lookahead for a following '\n'.
-        let (tok, err) = next_token("\r\nx", 0, &t);
+        let (tok, err) = next_token("\r\nx", 0, &t, &TokenTable::default());
         assert_eq!(tok.kind, TokenKind::ErrorTok);
         assert_eq!(tok.len, 1);
         assert_eq!(err.unwrap().code, "E0308");
@@ -816,7 +850,7 @@ mod tests {
     #[test]
     fn whitespace_run_stops_before_a_tab() {
         let t = TokenTable::default();
-        let (tok, err) = next_token(" \tx", 0, &t);
+        let (tok, err) = next_token(" \tx", 0, &t, &TokenTable::default());
         assert_eq!(tok.kind, TokenKind::Whitespace);
         assert_eq!(tok.len, 1);
         assert!(err.is_none());
@@ -829,7 +863,7 @@ mod tests {
         // chars `Char.isWhitespace` recognizes in the oracle, so it must
         // NOT be treated as trivia here.
         let t = TokenTable::default();
-        let (tok, _err) = next_token("\u{00A0}x", 0, &t);
+        let (tok, _err) = next_token("\u{00A0}x", 0, &t, &TokenTable::default());
         assert_ne!(tok.kind, TokenKind::Whitespace);
     }
 
@@ -873,7 +907,7 @@ mod tests {
             (TokenKind::Ident, "«weird id».x")
         );
         assert_eq!(lex_all("α₁'", &t)[0], (TokenKind::Ident, "α₁'"));
-        let (tok, err) = next_token("«never closed", 0, &t);
+        let (tok, err) = next_token("«never closed", 0, &t, &TokenTable::default());
         assert_eq!(tok.kind, TokenKind::ErrorTok);
         assert_eq!(err.unwrap().code, "E0306");
     }
@@ -976,7 +1010,7 @@ mod tests {
         assert_eq!(lex_all("'\\n'", &t)[0], (TokenKind::Char, "'\\n'"));
         assert_eq!(lex_all("'a'", &t)[0], (TokenKind::Char, "'a'"));
         assert_eq!(lex_all("`foo.bar", &t)[0], (TokenKind::NameLit, "`foo.bar"));
-        let (tok, err) = next_token("\"never closed", 0, &t);
+        let (tok, err) = next_token("\"never closed", 0, &t, &TokenTable::default());
         assert_eq!(tok.kind, TokenKind::Str);
         assert_eq!(err.unwrap().code, "E0302");
     }
@@ -1006,7 +1040,7 @@ mod tests {
     #[test]
     fn unterminated_raw_string_is_an_error_not_a_silent_ident_split() {
         let t = kw_table();
-        let (tok, err) = next_token("r\"never closed", 0, &t);
+        let (tok, err) = next_token("r\"never closed", 0, &t, &TokenTable::default());
         assert_eq!(tok.kind, TokenKind::Str);
         assert_eq!(tok.len as usize, "r\"never closed".len());
         assert_eq!(err.unwrap().code, "E0302");
@@ -1021,13 +1055,27 @@ mod tests {
     }
 
     #[test]
+    fn munch_with_unions_base_and_overlay() {
+        let mut base = TokenTable::default();
+        base.insert("+");
+        let mut overlay = TokenTable::default();
+        overlay.insert("⊕");
+        // base-only token still munches
+        assert_eq!(base.munch_with("+ x", &overlay), Some("+"));
+        // overlay-only token munches without being in base
+        assert_eq!(base.munch_with("⊕ x", &overlay), Some("⊕"));
+        // neither: no token
+        assert_eq!(base.munch_with("x", &overlay), None);
+    }
+
+    #[test]
     fn doubled_quote_is_not_an_ambiguous_char_literal() {
         // ORACLE-PORT `tokenFnAux`'s `curr == '\'' && next != '\''`
         // guard: `''` never opens a char literal (that would require
         // the ambiguous bare `'''`), so with no matching table entry it
         // falls through to a single-byte ErrorTok, not a Char token.
         let t = kw_table();
-        let (tok, _err) = next_token("''", 0, &t);
+        let (tok, _err) = next_token("''", 0, &t, &TokenTable::default());
         assert_ne!(tok.kind, TokenKind::Char);
         assert_eq!(tok.len, 1);
     }

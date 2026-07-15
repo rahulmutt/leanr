@@ -14,6 +14,9 @@ use std::sync::Arc;
 
 use crate::kind::SyntaxKind;
 
+pub mod overlay;
+pub use overlay::{CategoryDelta, Overlay};
+
 #[derive(Clone, Debug)]
 pub enum Prim {
     /// Sequence; children parse in order into the current node.
@@ -447,6 +450,13 @@ pub struct GrammarSnapshot {
 impl GrammarSnapshot {
     pub fn kinds(&self) -> std::sync::Arc<crate::kind::KindInterner> {
         self.kinds.clone()
+    }
+
+    /// Number of interned kinds = first free dynamic slot for the
+    /// overlay (M3b1: `Overlay::new` numbers its own kinds starting
+    /// here, so overlay kind ids never collide with the base's).
+    pub fn kind_count(&self) -> u16 {
+        self.kinds.len_u16()
     }
 
     /// The module-header `Prim`, if this snapshot's builder set one

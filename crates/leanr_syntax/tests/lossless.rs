@@ -14,7 +14,7 @@ proptest! {
         let mut pos = 0;
         let mut rebuilt = String::new();
         loop {
-            let (tok, _err) = next_token(&src, pos, &table);
+            let (tok, _err) = next_token(&src, pos, &table, &TokenTable::default());
             if tok.kind == TokenKind::Eof { break; }
             prop_assert!(tok.len > 0, "no progress at {pos}");
             rebuilt.push_str(&src[pos..pos + tok.len as usize]);

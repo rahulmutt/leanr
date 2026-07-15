@@ -768,7 +768,7 @@ impl<'a> Ps<'a> {
     /// (without consuming) plus its start offset.
     pub(crate) fn peek_significant(&mut self) -> (Token, usize) {
         loop {
-            let (t, err) = next_token(self.src, self.pos, self.table());
+            let (t, err) = next_token(self.src, self.pos, self.table(), &TokenTable::default());
             let trivia = matches!(
                 t.kind,
                 TokenKind::Whitespace | TokenKind::LineComment | TokenKind::BlockComment
@@ -815,7 +815,7 @@ impl<'a> Ps<'a> {
     fn peek_significant_readonly(&self) -> (Token, usize) {
         let mut pos = self.pos;
         loop {
-            let (t, _err) = next_token(self.src, pos, self.table());
+            let (t, _err) = next_token(self.src, pos, self.table(), &TokenTable::default());
             let trivia = matches!(
                 t.kind,
                 TokenKind::Whitespace | TokenKind::LineComment | TokenKind::BlockComment
@@ -859,7 +859,7 @@ impl<'a> Ps<'a> {
 
     /// Consume the peeked significant token as leaf `kind`.
     fn bump(&mut self, t: Token, kind: SyntaxKind) {
-        if let (_, Some(e)) = next_token(self.src, self.pos, self.table()) {
+        if let (_, Some(e)) = next_token(self.src, self.pos, self.table(), &TokenTable::default()) {
             self.errors.push(PError::Err(ParseError {
                 code: e.code,
                 span: (self.pos as u32, (self.pos + t.len as usize) as u32),
