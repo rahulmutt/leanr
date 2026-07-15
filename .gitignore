@@ -25,6 +25,11 @@ crates/leanr_olean/fuzz/artifacts/
 crates/leanr_olean/fuzz/target/
 crates/leanr_olean/fuzz/Cargo.lock
 
+# cargo-fuzz (crates/leanr_syntax/fuzz is excluded from the workspace)
+crates/leanr_syntax/fuzz/artifacts/
+crates/leanr_syntax/fuzz/target/
+crates/leanr_syntax/fuzz/Cargo.lock
+
 # Mathlib checkout + prebuilt .oleans (M1-final Mathlib-scale acceptance
 # sweep). Cloned by `scripts/mathlib-fetch.sh`; local, network-fetched, not
 # committed. (No separate `.lean4checker/` clone: `scripts/bench-mathlib.sh`
