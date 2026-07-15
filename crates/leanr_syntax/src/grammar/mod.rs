@@ -14,7 +14,9 @@ use std::sync::Arc;
 
 use crate::kind::SyntaxKind;
 
+pub mod notation;
 pub mod overlay;
+pub use notation::{mangle_kind, NotationAtom};
 pub use overlay::{CategoryDelta, Overlay};
 
 #[derive(Clone, Debug)]
