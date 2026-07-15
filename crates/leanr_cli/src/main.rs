@@ -89,6 +89,16 @@ enum Command {
         #[command(subcommand)]
         command: CacheCommand,
     },
+    /// Parse a Lean source file with the builtin grammar (M3a: no
+    /// imported notation yet) and report syntax errors.
+    Parse {
+        /// The .lean file to parse.
+        file: PathBuf,
+        /// Print the canonical parse tree as JSON lines (the oracle-
+        /// comparable form; see leanr_syntax::canon).
+        #[arg(long)]
+        dump: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -198,6 +208,7 @@ fn main() -> ExitCode {
             no_remote,
         ),
         Command::Cache { command } => cache_cmd(command),
+        Command::Parse { file, dump } => parse_cmd(&file, dump),
     }
 }
 
@@ -250,6 +261,40 @@ fn olean_decls(path: &std::path::Path) -> ExitCode {
             eprintln!("error: {}: {err}", path.display());
             ExitCode::FAILURE
         }
+    }
+}
+
+fn parse_cmd(file: &Path, dump: bool) -> ExitCode {
+    let bytes = match std::fs::read(file) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: cannot read {}: {e}", file.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let src = match String::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            eprintln!("{}: error[E0305]: file is not valid UTF-8", file.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let snap = leanr_syntax::builtin::snapshot();
+    let result = leanr_syntax::parse_module(&src, &snap);
+    if dump {
+        print!("{}", leanr_syntax::canon::canon_jsonl(&result.tree));
+    }
+    for e in &result.errors {
+        eprintln!(
+            "{}:{}",
+            file.display(),
+            leanr_syntax::parse::render_error(&src, e)
+        );
+    }
+    if result.errors.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 

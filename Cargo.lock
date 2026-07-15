@@ -821,6 +821,7 @@ dependencies = [
  "leanr_check",
  "leanr_kernel",
  "leanr_olean",
+ "leanr_syntax",
  "predicates",
  "serde",
  "serde_json",

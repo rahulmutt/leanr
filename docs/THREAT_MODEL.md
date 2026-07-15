@@ -12,6 +12,7 @@
 | Boundary | Who controls the bytes | Control |
 |---|---|---|
 | `.olean` files | Any package author / cache | Parse defensively: no panics on arbitrary bytes (fuzz/property-tested); kernel-check imported content by default (M1+) |
+| **Lean source text** (`leanr parse`, later `fmt`/LSP) | Any file author | Arbitrary user bytes. Lower stakes than `.olean` (no decoded-value invariants to corrupt) but the same bar: no panic, no non-termination, on any input — enforced by proptest totality gates and the `fuzz:syntax` target. Malformed input degrades to error tokens/nodes with stable-coded diagnostics (`E03xx`); losslessness is total, so hostile input cannot desynchronize spans. |
 | Remote cache entries (M2d) | Cache operator / network | Decompress-and-blake3-verify against the content key BEFORE local insertion (single ingestion choke point, `remote.rs`); defensive manifest parsing (size-capped, strict hex, malformed = warned miss); decompression caps (bomb defense). Configuring a remote = trusting its operator with the fp→artifact mapping; signed manifests are the recorded future upgrade |
 | `lakefile.lean` execution (M4+) | Package author | Arbitrary code execution **by design** (same as lake); documented, not hidden |
 | Cargo dependencies | Upstream maintainers | `cargo deny` in CI (advisories, sources, licenses); minimal dependency policy |
