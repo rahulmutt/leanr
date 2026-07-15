@@ -60,12 +60,10 @@ mod tests {
         let base = crate::builtin::snapshot();
         let ov = Overlay::new(&base);
         assert!(ov.is_empty());
-        assert!(
-            ov.tokens()
-                .munch_with("anything", &TokenTable::default())
-                .is_none()
-                || true
-        ); // overlay token set starts empty
+        assert!(ov
+            .tokens()
+            .munch_with("anything", &TokenTable::default())
+            .is_none()); // overlay token set starts empty
         assert!(base.kind_count() >= crate::kind::FIRST_DYNAMIC_KIND);
     }
 }
