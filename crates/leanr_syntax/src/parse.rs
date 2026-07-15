@@ -13,7 +13,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::grammar::{Category, FirstTok, GrammarSnapshot, LeadingIdentBehavior, Prim};
+use crate::grammar::{
+    Category, CategoryDelta, FirstTok, GrammarSnapshot, LeadingIdentBehavior, Overlay, Prim,
+};
 use crate::kind::{
     KindInterner, SyntaxKind, KIND_ATOM, KIND_ERROR, KIND_ERROR_TOKEN, KIND_GROUP, KIND_IDENT,
     KIND_NULL,
@@ -90,8 +92,39 @@ pub fn parse_module(src: &str, snap: &GrammarSnapshot) -> ParseResult {
 /// Private on purpose: the public entry point is `parse_module`, which
 /// guarantees that stack is `MIN_STACK_BYTES` (see there).
 fn parse_module_here(src: &str, snap: &GrammarSnapshot) -> ParseResult {
-    let kinds = snap.kinds();
+    run_module(Ps::new(src, snap), snap)
+}
+
+/// Test-only entry point (M3b1 Task 6 brief interfaces: "a `pub(crate)`
+/// variant of `parse_module` that accepts a pre-seeded overlay"):
+/// installs `ov` on a fresh `Ps` before running the header + command
+/// loop, so a test can exercise "a manually-installed overlay actually
+/// changes parsing" directly — without Task 7's per-command growth loop
+/// (parsing a `notation` command and folding its `NotationSpec` into the
+/// overlay automatically), which is out of scope for this task.
+///
+/// Runs on the CALLER's stack, unlike `parse_module` (no
+/// `MIN_STACK_BYTES` worker) — fine for the small fixtures this is used
+/// with; every production parse still goes through `parse_module`.
+#[cfg(test)]
+pub(crate) fn parse_module_with_overlay(
+    src: &str,
+    snap: &GrammarSnapshot,
+    ov: Overlay,
+) -> ParseResult {
     let mut ps = Ps::new(src, snap);
+    ps.install_overlay(ov);
+    run_module(ps, snap)
+}
+
+/// Shared by `parse_module_here` and (test-only)
+/// `parse_module_with_overlay`: header, then commands to EOF, then the
+/// trailing `eoi` node — see `parse_module`'s own doc comment for the
+/// full citation of what this reproduces. Takes an already-constructed
+/// `Ps` so the only difference between the two callers is whether
+/// `install_overlay` ran first.
+fn run_module(mut ps: Ps<'_>, snap: &GrammarSnapshot) -> ParseResult {
+    let kinds = snap.kinds();
     let module = kinds
         .lookup("module")
         .expect("interned by builtin::snapshot");
@@ -477,6 +510,18 @@ pub(crate) struct Ps<'a> {
     /// (`lit`/`field_idx`, tree-building) reads through a plain owned
     /// field rather than re-deriving from `snap` each time.
     kinds: Arc<KindInterner>,
+    /// Same-file grammar growth (M3b1 Task 6): consulted AFTER the base
+    /// snapshot at the three grammar read points (munch — `overlay.tokens()`
+    /// in `peek_significant`/`peek_significant_readonly`/`bump`; dispatch —
+    /// `category`'s leading/trailing candidate gathering; kind naming —
+    /// `merged_kinds`, used by `finish_into_tree`). Starts empty
+    /// (`Overlay::new(snap)`, `Ps::new`), so a `Ps` nobody calls
+    /// `install_overlay` on behaves byte-identically to M3a at every one
+    /// of those three points (empty token table ⇒ `munch_with` ≡ `munch`;
+    /// `category_delta` always `None` ⇒ no candidates appended;
+    /// `merged_kinds` short-circuits to a plain `Arc::clone` of the base
+    /// interner — see each site's own doc comment).
+    overlay: Overlay,
     events: Vec<PEvent>,
     errors: Vec<PError>,
     /// Append-only arena of memoized `category()` subtrees — the backing
@@ -706,6 +751,7 @@ impl<'a> Ps<'a> {
             pos: 0,
             snap,
             kinds,
+            overlay: Overlay::new(snap),
             events: Vec::new(),
             errors: Vec::new(),
             furthest_pos: 0,
@@ -732,6 +778,50 @@ impl<'a> Ps<'a> {
 
     fn table(&self) -> &TokenTable {
         &self.snap.tokens
+    }
+
+    /// Install a same-file grammar overlay (M3b1 Task 6): from this call
+    /// on, the three grammar read points consult it (see the `overlay`
+    /// field's own doc comment). `pub(crate)` — used by this file's own
+    /// test below, and, from Task 7, the command loop that grows the
+    /// overlay mid-parse as `notation`/mixfix commands are seen.
+    pub(crate) fn install_overlay(&mut self, ov: Overlay) {
+        self.overlay = ov;
+    }
+
+    /// Base kinds + this `Ps`'s overlay's own kinds, folded into ONE
+    /// `KindInterner` — what `finish_into_tree` hands to `build_tree` so
+    /// the final tree can name EVERY kind a `Prim::Node`/`TrailingNode`
+    /// might have emitted. An overlay-numbered kind (`>= snap.kind_count()`
+    /// — Task 5) is never in the base interner on its own, so resolving it
+    /// at build time needs this; the events themselves are unchanged
+    /// (`Prim::Node`'s kind u16 is already overlay-numbered when it's
+    /// emitted — Task 5 — only NAME RESOLUTION at build time is new here).
+    ///
+    /// Correct because `KindInterner::intern` is append-only and
+    /// idempotent (kind.rs): starting from a clone of exactly the base
+    /// interner (`snap.kind_count()` entries — the same count
+    /// `Overlay::new` recorded as `base_kind_count`) and re-interning the
+    /// overlay's kind names in REGISTRATION order hands back exactly the
+    /// ids `Overlay::intern` itself assigned (`base_kind_count + i`), so a
+    /// `Prim::Node`'s overlay-numbered kind resolves to the same name
+    /// either way.
+    ///
+    /// Empty overlay ⇒ `self.kinds.clone()`, a plain `Arc` bump — no new
+    /// interner, no divergence from M3a's `finish_into_tree`, which did
+    /// exactly that. Checked on `kind_names` directly (not
+    /// `Overlay::is_empty`, which also looks at `cats`) since that is the
+    /// exact condition under which the loop below would do nothing.
+    fn merged_kinds(&self) -> Arc<KindInterner> {
+        let names = self.overlay.kind_names();
+        if names.is_empty() {
+            return self.kinds.clone();
+        }
+        let mut merged = (*self.kinds).clone();
+        for name in names {
+            merged.intern(name);
+        }
+        Arc::new(merged)
     }
 
     fn snap_category(&self, name: &str) -> Option<&'a Category> {
@@ -768,7 +858,7 @@ impl<'a> Ps<'a> {
     /// (without consuming) plus its start offset.
     pub(crate) fn peek_significant(&mut self) -> (Token, usize) {
         loop {
-            let (t, err) = next_token(self.src, self.pos, self.table(), &TokenTable::default());
+            let (t, err) = next_token(self.src, self.pos, self.table(), self.overlay.tokens());
             let trivia = matches!(
                 t.kind,
                 TokenKind::Whitespace | TokenKind::LineComment | TokenKind::BlockComment
@@ -815,7 +905,7 @@ impl<'a> Ps<'a> {
     fn peek_significant_readonly(&self) -> (Token, usize) {
         let mut pos = self.pos;
         loop {
-            let (t, _err) = next_token(self.src, pos, self.table(), &TokenTable::default());
+            let (t, _err) = next_token(self.src, pos, self.table(), self.overlay.tokens());
             let trivia = matches!(
                 t.kind,
                 TokenKind::Whitespace | TokenKind::LineComment | TokenKind::BlockComment
@@ -859,7 +949,7 @@ impl<'a> Ps<'a> {
 
     /// Consume the peeked significant token as leaf `kind`.
     fn bump(&mut self, t: Token, kind: SyntaxKind) {
-        if let (_, Some(e)) = next_token(self.src, self.pos, self.table(), &TokenTable::default()) {
+        if let (_, Some(e)) = next_token(self.src, self.pos, self.table(), self.overlay.tokens()) {
             self.errors.push(PError::Err(ParseError {
                 code: e.code,
                 span: (self.pos as u32, (self.pos + t.len as usize) as u32),
@@ -2126,10 +2216,23 @@ impl<'a> Ps<'a> {
             let lhs_events = self.events.len();
             let text = &self.src[at..at + t.len as usize];
             let idxs = dispatch(cat, text, t.kind, true);
-            let parsers: Vec<Prim> = idxs
+            let mut parsers: Vec<Prim> = idxs
                 .iter()
                 .map(|&i| cat.leading_parsers[i].clone())
                 .collect();
+            // M3b1 Task 6: same-file overlay additions are ADDITIONS —
+            // never displace a base production — so they're appended
+            // AFTER the base candidates (registration order), run
+            // through the identical `first_tok_matches` rule
+            // (`dispatch_overlay`) and then the SAME `longest_match`
+            // below: one dispatch/selection path, base and overlay
+            // candidates just feed the same list. Empty overlay ⇒
+            // `category_delta` is `None` ⇒ `parsers` is unchanged from
+            // above, byte-identical to M3a.
+            if let Some(cd) = self.overlay.category_delta(name) {
+                let suppress = suppress_plain_ident_for(cat, text, t.kind, true);
+                parsers.extend(dispatch_overlay(cd, text, t.kind, true, suppress));
+            }
             // ORACLE-PORT `runLongestMatchParser` (Basic.lean:1403):
             // "we initialize [lhsPrec] to maxPrec in the leading case"
             // — a leading candidate that is a real `leadingNode`
@@ -2204,9 +2307,20 @@ impl<'a> Ps<'a> {
                 }
                 let text = &self.src[at..at + t.len as usize];
                 let idxs = dispatch(cat, text, t.kind, false);
-                let qualifying: Vec<usize> = idxs
+                let mut candidates: Vec<Prim> = idxs
+                    .iter()
+                    .map(|&idx| cat.trailing_parsers[idx].clone())
+                    .collect();
+                // M3b1 Task 6: overlay trailing additions, same
+                // append-after-base rule as the leading side above (and
+                // the same no-op-when-empty guarantee).
+                if let Some(cd) = self.overlay.category_delta(name) {
+                    let suppress = suppress_plain_ident_for(cat, text, t.kind, false);
+                    candidates.extend(dispatch_overlay(cd, text, t.kind, false, suppress));
+                }
+                let qualifying: Vec<Prim> = candidates
                     .into_iter()
-                    .filter(|&idx| match &cat.trailing_parsers[idx] {
+                    .filter(|p| match p {
                         Prim::TrailingNode { prec, lhs_prec, .. } => {
                             *prec >= self.prec && self.lhs_prec >= *lhs_prec
                         }
@@ -2218,7 +2332,7 @@ impl<'a> Ps<'a> {
                 }
                 let bodies: Vec<Prim> = qualifying
                     .iter()
-                    .map(|&idx| match &cat.trailing_parsers[idx] {
+                    .map(|p| match p {
                         Prim::TrailingNode { body, .. } => (**body).clone(),
                         _ => unreachable!(),
                     })
@@ -2241,9 +2355,7 @@ impl<'a> Ps<'a> {
                     // existing lhs as the final result.
                     Some(w) if w.end == sp.pos => break,
                     Some(w) => {
-                        let idx = qualifying[w.idx];
-                        let Prim::TrailingNode { kind, prec, .. } = &cat.trailing_parsers[idx]
-                        else {
+                        let Prim::TrailingNode { kind, prec, .. } = &qualifying[w.idx] else {
                             unreachable!()
                         };
                         self.events.extend(w.events);
@@ -2348,13 +2460,92 @@ impl<'a> Ps<'a> {
         flatten_errors(&self.errors, &self.subtrees)
     }
 
-    /// Fold the event stream into a lossless tree, using the
-    /// snapshot's own `Arc<KindInterner>` (cloned once at `Ps::new`).
+    /// Fold the event stream into a lossless tree, using `merged_kinds`
+    /// (M3b1 Task 6: base kinds + this `Ps`'s overlay's own kinds — a
+    /// plain `Arc::clone` of the snapshot's interner when the overlay has
+    /// none, same as M3a's `self.kinds.clone()` here before this task).
     pub(crate) fn finish_into_tree(self) -> (SyntaxTree, Vec<ParseError>) {
+        let kinds = self.merged_kinds();
         let events = flatten_events(&self.events, &self.subtrees);
         let errors = flatten_errors(&self.errors, &self.subtrees);
-        let tree = build_tree(self.src, &events, self.kinds.clone());
+        let tree = build_tree(self.src, &events, kinds);
         (tree, errors)
+    }
+}
+
+/// `LeadingIdentBehavior::Symbol`'s ident-suppression flag — factored
+/// out of `dispatch` (M3b1 Task 6) so `category()` can compute it
+/// exactly ONCE per read point and apply the SAME value to both the
+/// base dispatch (`dispatch`) and the overlay dispatch
+/// (`dispatch_overlay`), rather than two call sites each re-deriving it
+/// (possibly inconsistently). Behavior is unchanged from before the
+/// refactor — see `dispatch`'s own doc comment for the full ORACLE-PORT
+/// `indexed`/`LeadingIdentBehavior` citation this implements.
+///
+/// `leading &&`: ORACLE-PORT `trailingLoop` (Basic.lean:1932) hard-codes
+/// `LeadingIdentBehavior.default` for its OWN ident dispatch — only
+/// `leadingParserAux` (:1910) is passed the category's actual
+/// `behavior`. A category's `ident_behavior` therefore must never
+/// suppress anything on the TRAILING side, regardless of its own value
+/// (`Symbol`/`Both`/`Default` alike) — trailing dispatch always behaves
+/// as `Default` (M3a Task 11 item (b)). Inert today (no trailing row in
+/// `attr`/`prio`/`tactic` — the only non-`Default` categories — actually
+/// collides with a same-text `Ident`-keyed trailing entry), but a real
+/// divergence from the oracle otherwise.
+fn suppress_plain_ident_for(cat: &Category, text: &str, kind: TokenKind, leading: bool) -> bool {
+    let table = if leading { &cat.leading } else { &cat.trailing };
+    leading
+        && kind == TokenKind::Ident
+        && cat.ident_behavior == LeadingIdentBehavior::Symbol
+        && table
+            .iter()
+            .any(|(f, _)| matches!(f, FirstTok::Sym(s) if s == text))
+}
+
+/// Whether first-token index entry `f` matches the upcoming `(text,
+/// kind)` token — the ONE selection rule every candidate list in this
+/// file is dispatched through: the base `Category::leading`/`trailing`
+/// tables (via `dispatch`) AND, since M3b1 Task 6, an `Overlay`'s
+/// `CategoryDelta::leading`/`trailing` (via `dispatch_overlay`). Pulled
+/// out so overlay candidates are filtered by the IDENTICAL logic rather
+/// than a second, driftable copy of it (Task 6 brief: "Do not duplicate
+/// the dispatch logic").
+fn first_tok_matches(
+    f: &FirstTok,
+    text: &str,
+    kind: TokenKind,
+    suppress_plain_ident: bool,
+) -> bool {
+    match f {
+        FirstTok::Any => true,
+        // A token-table symbol lexes as `Atom` (even when ident-shaped,
+        // e.g. `do`/`then` — ORACLE-PORT `next_token`'s munch-competition
+        // rule in lex.rs), so the `Atom` arm covers every real
+        // `Prim::Symbol`. The `Ident`-with-matching-text arm is what
+        // makes `Prim::NonReservedSymbol` (`level`'s `max`/`imax`)
+        // dispatchable at all: ORACLE-PORT `nonReservedSymbolInfo`
+        // (Basic.lean) — `nonReservedSymbol sym (includeIdent := true)`
+        // sets `firstTokens := .tokens [sym, "ident"]`, a DUAL
+        // registration, precisely because `sym`'s text is deliberately
+        // never harvested into the token table (grammar.rs's
+        // `walk_symbols` doc comment) and so can only ever lex as a
+        // plain `Ident`, never an `Atom`. A real `Symbol`'s text, by
+        // contrast, always lexes as `Atom` once harvested (never
+        // `Ident`), so this second arm is a dead branch for it —
+        // extending the match costs real `Symbol` dispatch nothing and
+        // is exactly what makes a `NonReservedSymbol`-led production
+        // reachable at all. `first_tok` maps both `Symbol` and
+        // `NonReservedSymbol` to the same `FirstTok::Sym` (grammar.rs),
+        // so this one arm covers both.
+        FirstTok::Sym(s) => {
+            (kind == TokenKind::Atom && s == text) || (kind == TokenKind::Ident && s == text)
+        }
+        FirstTok::Ident => kind == TokenKind::Ident && !suppress_plain_ident,
+        FirstTok::Num => kind == TokenKind::Num,
+        FirstTok::Scientific => kind == TokenKind::Scientific,
+        FirstTok::Str => kind == TokenKind::Str,
+        FirstTok::Char => kind == TokenKind::Char,
+        FirstTok::NameLit => kind == TokenKind::NameLit,
     }
 }
 
@@ -2392,68 +2583,48 @@ impl<'a> Ps<'a> {
 ///     `Level.lean:27,29`, reachable at all: its ONLY registration is
 ///     the literal-key `FirstTok::Sym`, unioned in here since `level`'s
 ///     behavior is `.default`).
+///
+/// Under `Symbol` behavior, a literal-key ident match suppresses the
+/// generic `Ident`-keyed candidates entirely — precomputed once
+/// (`suppress_plain_ident_for`) so the single ordered dispatch pass
+/// (which must preserve registration order for `longest_match`'s
+/// tie-break) can just filter (`first_tok_matches`).
 fn dispatch(cat: &Category, text: &str, kind: TokenKind, leading: bool) -> Vec<usize> {
     let table = if leading { &cat.leading } else { &cat.trailing };
-    // Under `Symbol` behavior, a literal-key ident match suppresses the
-    // generic `Ident`-keyed candidates entirely — precomputed once so
-    // the single ordered pass below (which must preserve registration
-    // order for `longest_match`'s tie-break) can just filter.
-    //
-    // `leading &&`: ORACLE-PORT `trailingLoop` (Basic.lean:1932) hard-
-    // codes `LeadingIdentBehavior.default` for its OWN ident dispatch —
-    // only `leadingParserAux` (:1910) is passed the category's actual
-    // `behavior`. A category's `ident_behavior` therefore must never
-    // suppress anything on the TRAILING side, regardless of its own
-    // value (`Symbol`/`Both`/`Default` alike) — trailing dispatch always
-    // behaves as `Default` (M3a Task 11 item (b)). Inert today (no
-    // trailing row in `attr`/`prio`/`tactic` — the only non-`Default`
-    // categories — actually collides with a same-text `Ident`-keyed
-    // trailing entry), but a real divergence from the oracle otherwise.
-    let suppress_plain_ident = leading
-        && kind == TokenKind::Ident
-        && cat.ident_behavior == LeadingIdentBehavior::Symbol
-        && table
-            .iter()
-            .any(|(f, _)| matches!(f, FirstTok::Sym(s) if s == text));
+    let suppress_plain_ident = suppress_plain_ident_for(cat, text, kind, leading);
     table
         .iter()
         .filter_map(|(f, idx)| {
-            let matches = match f {
-                FirstTok::Any => true,
-                // A token-table symbol lexes as `Atom` (even when
-                // ident-shaped, e.g. `do`/`then` — ORACLE-PORT
-                // `next_token`'s munch-competition rule in lex.rs), so
-                // the `Atom` arm covers every real `Prim::Symbol`. The
-                // `Ident`-with-matching-text arm is what makes
-                // `Prim::NonReservedSymbol` (`level`'s `max`/`imax`)
-                // dispatchable at all: ORACLE-PORT `nonReservedSymbolInfo`
-                // (Basic.lean) — `nonReservedSymbol sym (includeIdent :=
-                // true)` sets `firstTokens := .tokens [sym, "ident"]`,
-                // a DUAL registration, precisely because `sym`'s text is
-                // deliberately never harvested into the token table
-                // (grammar.rs's `walk_symbols` doc comment) and so can
-                // only ever lex as a plain `Ident`, never an `Atom`. A
-                // real `Symbol`'s text, by contrast, always lexes as
-                // `Atom` once harvested (never `Ident`), so this second
-                // arm is a dead branch for it — extending the match
-                // costs real `Symbol` dispatch nothing and is exactly
-                // what makes a `NonReservedSymbol`-led production
-                // reachable at all. `first_tok` maps both `Symbol` and
-                // `NonReservedSymbol` to the same `FirstTok::Sym`
-                // (grammar.rs), so this one arm covers both.
-                FirstTok::Sym(s) => {
-                    (kind == TokenKind::Atom && s == text)
-                        || (kind == TokenKind::Ident && s == text)
-                }
-                FirstTok::Ident => kind == TokenKind::Ident && !suppress_plain_ident,
-                FirstTok::Num => kind == TokenKind::Num,
-                FirstTok::Scientific => kind == TokenKind::Scientific,
-                FirstTok::Str => kind == TokenKind::Str,
-                FirstTok::Char => kind == TokenKind::Char,
-                FirstTok::NameLit => kind == TokenKind::NameLit,
-            };
-            matches.then_some(*idx)
+            first_tok_matches(f, text, kind, suppress_plain_ident).then_some(*idx)
         })
+        .collect()
+}
+
+/// Overlay twin of `dispatch` (M3b1 Task 6): same `first_tok_matches`
+/// rule, applied to an `Overlay`'s `CategoryDelta` instead of the base
+/// `Category`. A `CategoryDelta` stores `(FirstTok, Prim)` pairs
+/// directly rather than `(FirstTok, usize)` indices into a separate
+/// parser vec (Task 1/5's doc comment on `CategoryDelta`: an overlay's
+/// additions are small, same-file, not a whole snapshot's worth of
+/// productions), so this returns cloned `Prim`s rather than indices.
+/// `suppress_plain_ident` is the caller's (`category`'s) own value,
+/// computed once from the BASE category via `suppress_plain_ident_for`
+/// — `LeadingIdentBehavior` is a base-`Category`-level concept with no
+/// per-overlay override (M3b1 only ever EXTENDS an existing category,
+/// never adds a new one), so the base category's own flag governs both
+/// halves of the merged candidate list.
+fn dispatch_overlay(
+    cd: &CategoryDelta,
+    text: &str,
+    kind: TokenKind,
+    leading: bool,
+    suppress_plain_ident: bool,
+) -> Vec<Prim> {
+    let table = if leading { &cd.leading } else { &cd.trailing };
+    table
+        .iter()
+        .filter(|(f, _)| first_tok_matches(f, text, kind, suppress_plain_ident))
+        .map(|(_, p)| p.clone())
         .collect()
 }
 
@@ -3617,5 +3788,81 @@ mod tests {
         assert_eq!(r.tree.text(), src, "round-trip failed");
         let e0302: Vec<_> = r.errors.iter().filter(|e| e.code == "E0302").collect();
         assert_eq!(e0302.len(), 1, "{:?}", r.errors);
+    }
+
+    /// A `«term_⊕_»` infixl on `⊕`, `term` category, prec 65/lhs_prec 65
+    /// — same shape/fields as `grammar::overlay::tests::
+    /// register_adds_token_kind_and_trailing_entry` (Task 5 Step 1),
+    /// EXCEPT the `body`: that test only ever exercises `Overlay::
+    /// register`'s bookkeeping (never runs a parse), so its body —
+    /// `seq([cat("term", 66), sym("⊕"), cat("term", 66)])` — re-parses a
+    /// SECOND leading term ahead of the `⊕` symbol, which is not how a
+    /// trailing production is shaped (the Pratt loop already has the lhs
+    /// — see every base `trailing2` registration in `builtin/term.rs`,
+    /// e.g. `Term.arrow`: `seq([sym("→"), cat("term", 25)])`, operator
+    /// then rhs, never lhs again). Used unmodified, that body can never
+    /// actually match (its own leading `cat("term", 66)` would need to
+    /// parse starting AT `⊕`, which has no leading production of its
+    /// own) — so THIS helper fixes the body to the real trailing shape
+    /// or `installed_overlay_parses_new_infix` below could never pass.
+    fn sum_spec() -> NotationSpec {
+        NotationSpec {
+            category: "term".into(),
+            kind_name: "«term_⊕_»".into(),
+            leading: false,
+            prec: 65,
+            lhs_prec: Some(65),
+            tokens: vec!["⊕".into()],
+            body: seq([sym("⊕"), cat("term", 66)]),
+        }
+    }
+
+    /// M3b1 Task 6 Step 1: a manually-installed overlay actually changes
+    /// parsing. The base grammar can't parse `a ⊕ b` as one term — `⊕`
+    /// is unknown to it (lexes as `ErrorTok`, no dispatch entry anywhere)
+    /// — so without the overlay this would fail to consume `⊕ b` at all;
+    /// with `sum_spec()` installed, `a ⊕ b` groups as one `«term_⊕_»`
+    /// node, proving all three read points (munch, dispatch, kind
+    /// naming) actually route through `self.overlay`.
+    #[test]
+    fn installed_overlay_parses_new_infix() {
+        let base = crate::builtin::snapshot();
+        let mut ov = Overlay::new(&base);
+        ov.register(sum_spec());
+        let src = "prelude\n#check a ⊕ b\n";
+        let r = parse_module_with_overlay(src, &base, ov);
+        assert_eq!(r.tree.text(), src, "round-trip failed");
+        assert!(
+            r.tree
+                .root()
+                .descendants()
+                .any(|n| r.tree.kinds.name(n.kind()) == "«term_⊕_»"),
+            "no «term_⊕_» node in the tree: {:#?}",
+            r.tree.root()
+        );
+    }
+
+    /// Companion to the above: an EMPTY overlay (the default `Ps::new`
+    /// state) must NOT change parsing — `⊕` stays unrecognized, exactly
+    /// as in M3a. Not a full parse-equivalence check (that's the whole
+    /// crate's existing suite, run as this task's regression gate); this
+    /// just pins the one new behavior (`⊕` specifically) the empty case
+    /// must still reject, so a future accidental "always consult overlay
+    /// candidates" bug (e.g. forgetting the `category_delta(name)` is
+    /// `None` check) would be caught right next to the positive case.
+    #[test]
+    fn empty_overlay_still_rejects_the_new_infix() {
+        let base = crate::builtin::snapshot();
+        let src = "prelude\n#check a ⊕ b\n";
+        let r = parse_module(src, &base);
+        assert!(
+            !r.errors.is_empty(),
+            "expected a parse error for the unknown `⊕` with no overlay installed"
+        );
+        assert!(!r
+            .tree
+            .root()
+            .descendants()
+            .any(|n| r.tree.kinds.name(n.kind()) == "«term_⊕_»"));
     }
 }

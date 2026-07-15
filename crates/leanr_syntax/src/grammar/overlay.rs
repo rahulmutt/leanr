@@ -137,6 +137,20 @@ impl Overlay {
         self.cats.get(name)
     }
 
+    /// This overlay's own kind names, in REGISTRATION order — i.e.
+    /// exactly the order `intern` handed out the ids `base_kind_count..`
+    /// (see `intern`'s own doc comment). `pub(crate)`: the one thing
+    /// `parse.rs`'s `Ps::merged_kinds` (M3b1 Task 6) needs to fold this
+    /// overlay's kinds into a fresh clone of the base `KindInterner` and
+    /// get back the SAME numbering `Overlay::intern` already assigned —
+    /// `KindInterner::intern` is append-only, so re-interning these names
+    /// in this exact order, into an interner that already has
+    /// `base_kind_count` entries, reproduces `base_kind_count + i` for
+    /// the `i`-th name here.
+    pub(crate) fn kind_names(&self) -> &[Arc<str>] {
+        &self.kind_names
+    }
+
     /// Extend `h` with this overlay's contribution to the grammar's
     /// fingerprint (spec: the M5 query-firewall seam) — so registering a
     /// notation changes the effective (base + overlay) fingerprint (Task
