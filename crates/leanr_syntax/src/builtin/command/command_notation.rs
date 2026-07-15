@@ -238,6 +238,7 @@ mod tests {
         for src in [
             "prelude\ninfixl:65 \" ⊕ \" => Sum\n",
             "prelude\ninfixr:65 \" ⇒ \" => Arrow\n",
+            "prelude\ninfix:65 \" ⊙ \" => Foo\n",
             "prelude\nprefix:100 \"~\" => Not\n",
             "prelude\npostfix:100 \"!\" => Fact\n",
             "prelude\nnotation:70 a \" ⊗ \" b => Prod a b\n",
@@ -248,6 +249,53 @@ mod tests {
                 r.errors.is_empty(),
                 "should parse clean: {src:?} errs={:?}",
                 r.errors
+            );
+        }
+    }
+
+    /// Regression guard for the `namedName`/`namedPrio` optional-slot
+    /// ORDER (module doc's oracle dump: `namedName` — `(name := ..)` —
+    /// sits BEFORE `namedPrio` — `(priority := ..)` — in both `mixfix`
+    /// and `notation`'s child sequence). Both slots are `opt(...)`, so a
+    /// swapped-order bug in `register` (line up `nn`/`np` after `np`/
+    /// `nn`) would still round-trip byte-for-byte and parse clean on
+    /// sources that only ever set ONE of the two — only a source setting
+    /// BOTH, with a structural order assertion, would catch a swap. The
+    /// two sources below are the module doc's own oracle-confirmed
+    /// `(name := ..) (priority := ..)` probes (lines 36-38, 79-81 above),
+    /// with the doc's `..`/`Sum3` term placeholders filled in with real
+    /// terms so they're complete, parseable sources.
+    #[test]
+    fn notation_named_args_parse_clean_and_ordered() {
+        let snap = crate::builtin::snapshot();
+        for src in [
+            "prelude\ninfixl:65 (name := fooName) (priority := 10) \" ⊕⊕⊕ \" => Sum3\n",
+            "prelude\nnotation (name := foo) (priority := 10) a \" ⊗ \" b => Prod a b\n",
+        ] {
+            let r = crate::parse_module(src, &snap);
+            assert_eq!(r.tree.text(), src, "round-trip: {src:?}");
+            assert!(
+                r.errors.is_empty(),
+                "should parse clean: {src:?} errs={:?}",
+                r.errors
+            );
+
+            let mut named_name_pos = None;
+            let mut named_prio_pos = None;
+            for (i, node) in r.tree.root().descendants().enumerate() {
+                match r.tree.kinds.name(node.kind()) {
+                    "Lean.Parser.Command.namedName" => named_name_pos = Some(i),
+                    "Lean.Parser.Command.namedPrio" => named_prio_pos = Some(i),
+                    _ => {}
+                }
+            }
+            let named_name_pos =
+                named_name_pos.unwrap_or_else(|| panic!("no namedName node in {src:?}"));
+            let named_prio_pos =
+                named_prio_pos.unwrap_or_else(|| panic!("no namedPrio node in {src:?}"));
+            assert!(
+                named_name_pos < named_prio_pos,
+                "namedName ({named_name_pos}) should precede namedPrio ({named_prio_pos}) in {src:?}"
             );
         }
     }
