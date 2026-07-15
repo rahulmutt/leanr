@@ -173,7 +173,45 @@ fn run_module(mut ps: Ps<'_>, snap: &GrammarSnapshot) -> ParseResult {
                 ps.restore(&sp);
                 ps.recover_command();
             }
-            Ok(()) => {}
+            // M3b1 Task 7: a CLEAN command parse (this arm only — never
+            // the recovery arms below, which restore to `sp` and so have
+            // nothing of this command left to inspect) may itself have
+            // been a `notation`/`mixfix` declaration. Materialize just
+            // this command's subtree from its own event slice
+            // (`ps.events[sp.events..]`, `sp` taken right before `run`
+            // above — a `Category` call's events are always one balanced
+            // subtree) via the same tested `flatten_events`/`build_tree`
+            // infra `finish_into_tree` uses for the whole module, and
+            // hand it to `derive` (Task 4). `derive` returns `None` for
+            // every non-notation command shape (and, per its own doc
+            // comment, for a malformed one too — its child-navigation is
+            // `?`-propagated `Option` throughout), so this is a no-op on
+            // every command that isn't a clean `notation`/`mixfix` —
+            // exactly the "empty overlay never mutated" no-regression
+            // bar the brief sets.
+            //
+            // `ps.merged_kinds()` (base + overlay-so-far), not the bare
+            // base `ps.kinds`: a mixfix/notation command's OWN RHS can
+            // itself use a notation this same loop registered on an
+            // earlier command, so `derive`'s kind-name lookups need
+            // every overlay kind registered before THIS command, not
+            // just the immutable base set.
+            Ok(()) => {
+                let cmd_events = flatten_events(&ps.events[sp.events..], &ps.subtrees);
+                let cmd_kinds = ps.merged_kinds();
+                let subtree = build_tree(ps.src, &cmd_events, cmd_kinds);
+                if let Some(spec) =
+                    crate::grammar::notation::derive(&subtree.root(), &subtree.kinds)
+                {
+                    ps.overlay.register(spec);
+                    // Grammar just changed: any `cat_cache` entry from
+                    // before this command is memoized against the OLD
+                    // grammar (Task 6's cache key has no dependency on
+                    // overlay state) and would replay stale
+                    // leading/trailing candidate sets if hit again.
+                    ps.clear_category_cache();
+                }
+            }
             Err(_) => {
                 ps.restore(&sp);
                 ps.recover_command();
@@ -787,6 +825,28 @@ impl<'a> Ps<'a> {
     /// overlay mid-parse as `notation`/mixfix commands are seen.
     pub(crate) fn install_overlay(&mut self, ov: Overlay) {
         self.overlay = ov;
+    }
+
+    /// Empty `cat_cache` (Task 11b's `category()` memoization table —
+    /// see its own doc comment). Called from the command loop (Task 7)
+    /// right after `self.overlay.register(..)` grows the grammar
+    /// mid-file: `CatCacheKey` has no dependency on overlay state (it
+    /// keys purely on `pos`/`name`/`rbp`/`forbidden`/`saved_pos`/
+    /// `depth_headroom` — see that struct's doc comment), so a stale
+    /// entry computed under the PRE-registration grammar (e.g. "no
+    /// leading production matched at this `pos`" for a category the new
+    /// notation just added a production to) would otherwise replay as a
+    /// cache HIT against the post-registration grammar and silently
+    /// resurrect exactly the bug this task closes. Cheap and correct
+    /// over "invalidate just the affected category": entries are
+    /// bounded by this SAME command's own work (each command starts
+    /// this call from an empty-at-command-start cache in practice, since
+    /// nothing outside `category()` itself populates it and the loop
+    /// clears it after every notation-registering command), and grammar
+    /// growth is bounded by command count, not token count (this call
+    /// site fires at most once per command, never per token).
+    pub(crate) fn clear_category_cache(&mut self) {
+        self.cat_cache.clear();
     }
 
     /// Base kinds + this `Ps`'s overlay's own kinds, folded into ONE
@@ -3864,5 +3924,27 @@ mod tests {
             .root()
             .descendants()
             .any(|n| r.tree.kinds.name(n.kind()) == "«term_⊕_»"));
+    }
+
+    /// M3b1 Task 7 Step 1: the command loop itself grows the overlay —
+    /// no manually pre-seeded `Overlay` (unlike the pair above, which
+    /// exercise `parse_module_with_overlay`). An `infixl:65 " ⊕ " =>
+    /// Sum` command on line 2 must be LIVE for the `#check a ⊕ b` on
+    /// line 3, via plain `parse_module`.
+    #[test]
+    fn same_file_notation_is_live_on_the_next_line() {
+        let snap = crate::builtin::snapshot();
+        let src = "prelude\ninfixl:65 \" ⊕ \" => Sum\n#check a ⊕ b\n";
+        let r = crate::parse_module(src, &snap);
+        assert_eq!(r.tree.text(), src);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        // the #check uses the just-declared notation
+        assert!(
+            r.tree
+                .root()
+                .descendants()
+                .any(|n| r.tree.kinds.name(n.kind()) == "«term_⊕_»"),
+            "notation not live on next line"
+        );
     }
 }
