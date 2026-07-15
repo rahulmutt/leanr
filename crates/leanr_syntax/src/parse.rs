@@ -114,6 +114,32 @@ fn parse_module_here(src: &str, snap: &GrammarSnapshot) -> ParseResult {
             name: "command".into(),
             rbp: 0,
         }) {
+            // Belt-and-suspenders zero-progress guard (M3a final-review
+            // Minor finding (e)). This loop's termination currently
+            // relies on a GRAMMAR property — every `command` leading
+            // production starts with a mandatory keyword / `@[` / `/--`
+            // / modifier, so a *successful* `command` parse can never
+            // be zero-width today — rather than a LOCAL one enforced by
+            // the loop itself. That's unlike every other repeating
+            // combinator in this file (`many`/`many1`/`sep_by_indent`),
+            // which all carry their own explicit `consumed_since` stall
+            // guard instead of trusting their callee to always consume.
+            // A future nullable `command` leading production (grammar
+            // data can change; this loop's code should not have to)
+            // would otherwise spin here forever re-matching the same
+            // zero-width success at the same `pos` — exactly the
+            // never-hang guarantee this crate exists to uphold. So:
+            // treat a zero-width SUCCESS the same as a failure — discard
+            // it and force resync via `recover_command` (always
+            // consumes >= 1 token, or hits EOF). UNREACHABLE on the
+            // current grammar (no `command` leading production is
+            // nullable, so `ps.pos` always advances on `Ok`) — this arm
+            // is dead code today by construction, confirmed by the
+            // golden gate staying byte-exact with it present.
+            Ok(()) if ps.pos == sp.pos => {
+                ps.restore(&sp);
+                ps.recover_command();
+            }
             Ok(()) => {}
             Err(_) => {
                 ps.restore(&sp);
@@ -152,12 +178,12 @@ impl<'a> Ps<'a> {
     /// otherwise unreachable, and canon.rs already special-cases it as
     /// never-oracle-compared.
     pub(crate) fn recover_command(&mut self) {
-        let (pos, expected) = (self.furthest_pos, self.furthest_expected.clone());
-        self.errors.push(PError::Err(ParseError {
-            code: "E0301",
-            span: (pos as u32, pos as u32),
-            msg: format!("unexpected input; expected one of: {}", expected.join(", ")),
-        }));
+        // Same guarded message construction as every other furthest-failure
+        // diagnostic (`push_furthest_error`) — reusing it (rather than
+        // hand-rolling "expected one of: {join}" here again) is what keeps
+        // this from ever emitting a dangling "expected one of: " when the
+        // expected set is empty.
+        self.push_furthest_error();
         self.start(KIND_ERROR);
         let mut first = true;
         loop {
@@ -2310,15 +2336,20 @@ impl<'a> Ps<'a> {
     }
 
     // ---- output -------------------------------------------------------
-    /// Fold the event stream into a lossless tree, using the
-    /// snapshot's own `Arc<KindInterner>` (cloned once at `Ps::new`).
     /// The diagnostics recorded so far, in push order. Materializes the
     /// `PError` stream (expanding memoized subtrees — see `PEvent`); the
     /// live `self.errors` is not a flat list any more.
+    ///
+    /// Cost: O(total events) — it walks and materializes the *entire*
+    /// event stream on every call, so it must never be called from inside
+    /// the per-command loop (that would make `parse_module` quadratic);
+    /// call it once, at the end of a parse.
     pub(crate) fn errors(&self) -> Vec<ParseError> {
         flatten_errors(&self.errors, &self.subtrees)
     }
 
+    /// Fold the event stream into a lossless tree, using the
+    /// snapshot's own `Arc<KindInterner>` (cloned once at `Ps::new`).
     pub(crate) fn finish_into_tree(self) -> (SyntaxTree, Vec<ParseError>) {
         let events = flatten_events(&self.events, &self.subtrees);
         let errors = flatten_errors(&self.errors, &self.subtrees);
@@ -3533,6 +3564,38 @@ mod tests {
         assert_eq!(
             render_error(src, &e),
             "3:1: error[E0301]: unexpected input; expected one of: <command>"
+        );
+    }
+
+    /// M3a final-review Minor finding (c): `recover_command` used to
+    /// hand-roll its E0301 message as `format!("...expected one of:
+    /// {}", expected.join(", "))`, which renders a dangling "expected
+    /// one of: " with nothing after it whenever the furthest-failure
+    /// expected set is empty. It now reuses `push_furthest_error`'s
+    /// already-guarded construction instead. Drive `recover_command` on
+    /// a freshly constructed `Ps`, where `furthest_pos`/
+    /// `furthest_expected` are still at their `Ps::new` defaults (`0`,
+    /// `[]`) because no `fail_expecting` call has run yet — so the
+    /// expected set really is empty when the diagnostic is rendered —
+    /// and assert the message is the guarded fallback, never a dangling
+    /// join.
+    #[test]
+    fn recover_command_never_emits_dangling_expected_one_of() {
+        let mut k = KindInterner::new();
+        let table = TokenTable::default();
+        let mut ps = Ps::new_for_test("stray tokens here", table, &mut k);
+        ps.recover_command();
+        let errors = ps.errors();
+        assert_eq!(errors.len(), 1, "recover_command records exactly one E0301");
+        assert_eq!(errors[0].code, "E0301");
+        assert!(
+            !errors[0].msg.contains("expected one of: "),
+            "dangling \"expected one of: \" with nothing after it: {:?}",
+            errors[0].msg
+        );
+        assert_eq!(
+            errors[0].msg, "unexpected input",
+            "empty expected set must render push_furthest_error's guarded fallback"
         );
     }
 
