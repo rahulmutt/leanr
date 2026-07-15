@@ -25,6 +25,20 @@ crates/leanr_olean/fuzz/artifacts/
 crates/leanr_olean/fuzz/target/
 crates/leanr_olean/fuzz/Cargo.lock
 
+# cargo-fuzz (crates/leanr_syntax/fuzz is excluded from the workspace)
+crates/leanr_syntax/fuzz/artifacts/
+crates/leanr_syntax/fuzz/target/
+crates/leanr_syntax/fuzz/Cargo.lock
+
+# `mise run fuzz:syntax` / `parse:acceptance` mutate this corpus dir with
+# hundreds of untracked discovered inputs per run. This ignores the
+# directory for the purpose of new/untracked files only — git ignore rules
+# never un-track already-committed paths, so the 15 committed seed
+# fixtures under parse_module/ stay tracked and their edits still show up
+# in `git status` normally (verified: `git ls-files` still lists all 15
+# after this rule).
+crates/leanr_syntax/fuzz/corpus/parse_module/
+
 # Mathlib checkout + prebuilt .oleans (M1-final Mathlib-scale acceptance
 # sweep). Cloned by `scripts/mathlib-fetch.sh`; local, network-fetched, not
 # committed. (No separate `.lean4checker/` clone: `scripts/bench-mathlib.sh`

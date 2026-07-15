@@ -104,6 +104,25 @@ implementation or a thin frontend. Full design:
   mirrors the CAS layout under `v1/` with zstd-compressed blobs;
   remote availability affects speed, never correctness (`--no-remote`
   / `LEANR_REMOTE_CACHE`).
+- `crates/leanr_syntax` — lossless Lean source trees + the extensible
+  parser (M3a). Trust boundary: source text is untrusted input
+  (`docs/THREAT_MODEL.md`) — the lexer/parser never panic and always
+  terminate, fuzzed via `mise run fuzz:syntax`, and `text(parse(src))
+  == src` holds for every input including parse errors (error nodes +
+  command-resync recovery). The parser interprets a ParserDescr-shaped
+  combinator tree (`grammar::Prim`) over an explicit, fingerprintable
+  `GrammarSnapshot` (token table + Pratt categories) — the
+  parser-state firewall seam the architecture's incrementality story
+  needs, kept batch-mode until M5. M3a ships the builtin grammar
+  (ports of the pinned toolchain's compiled `@[builtin_*_parser]`
+  set, enumerated in
+  `docs/superpowers/specs/2026-07-13-m3a-builtin-surface.md`);
+  imported/declared grammar (ParserDescr interpretation from
+  `.olean`s) is M3b. Correctness bar: byte round-trip + node-exact
+  equality against official parse trees
+  (`tests/fixtures/syntax/`, dumped by `dump_syntax.lean`, regen via
+  `mise run fixtures:regen`). No workspace-crate dependencies.
+  `leanr parse [--dump]` in the CLI.
 - `crates/leanr_cli` — the `leanr` binary. Thin: argument parsing and
   printing only, so CLI and (future) LSP can never diverge in behavior.
 

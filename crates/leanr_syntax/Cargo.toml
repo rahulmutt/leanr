@@ -1,0 +1,13 @@
+[package]
+name = "leanr_syntax"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rowan = "0.16"
+blake3 = "1"
+
+[dev-dependencies]
+proptest = "1"
