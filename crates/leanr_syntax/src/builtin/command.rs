@@ -29,6 +29,7 @@
 
 mod command_decl;
 mod command_misc;
+mod command_notation;
 mod command_open;
 
 // Re-exported (Task 10) so `term.rs`'s `Term.«open»`/`Term.«set_option»`
@@ -153,6 +154,33 @@ pub(super) fn decl_modifiers(b: &mut SnapshotBuilder) -> Prim {
     )
 }
 
+/// `namedPrio := leading_parser atomic (" (" >> nonReservedSymbol
+/// "priority") >> " := " >> withoutPosition priorityParser >> ")"` —
+/// unattributed but `leading_parser` (self-wraps, same "named helper"
+/// shape as `matchDiscr`); recurses into the `prio` category (`attr.rs`'s
+/// `Priority.numPrio`). Hoisted here (M3b1 Task 2) from `command_decl.rs`
+/// (its original sole consumer, `instance`'s `(priority := ..)` slot) so
+/// `command_notation.rs`'s `notation`/mixfix-family `namedPrio` optional
+/// can share the identical definition instead of a second, drifting copy
+/// — same "hoist, re-export" idiom this file's own module doc already
+/// uses for `command_open`'s `open_decl`/`option_value`. Confirmed
+/// byte-identical shape at both call sites against a fresh oracle dump
+/// of `instance (priority := 200) : ..` (task-10 report) and
+/// `infixl:65 (name := .. ) (priority := 10) " ⊕⊕⊕ " => Sum3` (task-2
+/// report).
+pub(super) fn named_prio(b: &mut SnapshotBuilder) -> Prim {
+    let k = b.kind("Lean.Parser.Command.namedPrio");
+    nd(
+        k,
+        seq([
+            atomic(seq([sym("("), Prim::NonReservedSymbol("priority".into())])),
+            sym(":="),
+            cat("prio", 0),
+            sym(")"),
+        ]),
+    )
+}
+
 pub fn register(b: &mut SnapshotBuilder) {
     // --- module header (ORACLE-PORT `Lean/Parser/Module/Syntax.lean`
     // `header`) ---------------------------------------------------
@@ -202,6 +230,7 @@ pub fn register(b: &mut SnapshotBuilder) {
     command_decl::register(b);
     command_open::register(b);
     command_misc::register(b);
+    command_notation::register(b);
 }
 
 #[cfg(test)]
