@@ -78,7 +78,9 @@ fn mathlib_sweep_ratchet() {
         }
     }
     files.sort();
+    let total = files.len();
     files.truncate(limit);
+    let truncated = files.len() < total;
 
     let rel_of = |file: &Path| -> String {
         file.strip_prefix(&mathlib)
@@ -130,13 +132,15 @@ fn mathlib_sweep_ratchet() {
         .map(String::from)
         .collect();
 
-    // Only pass-list entries that were actually swept this run can regress —
-    // under a bounded LEANR_SWEEP_LIMIT, entries outside the swept prefix
-    // are neither green nor regressed in this run.
+    // Full runs (no LEANR_SWEEP_LIMIT truncation) gate the whole committed
+    // list — a deleted/renamed/typo'd pass-list entry fails loudly, forcing
+    // a conscious passlist:update. Truncated runs only gate entries actually
+    // swept this run; entries outside the swept prefix are neither green nor
+    // regressed.
     let committed_swept = committed.iter().filter(|f| swept.contains(*f)).count();
     let regressions: Vec<_> = committed
         .iter()
-        .filter(|f| swept.contains(*f) && !green.contains(*f))
+        .filter(|f| (!truncated || swept.contains(*f)) && !green.contains(*f))
         .collect();
     let newly_green: Vec<_> = green.iter().filter(|f| !committed.contains(*f)).collect();
     eprintln!(
