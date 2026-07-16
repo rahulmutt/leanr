@@ -164,24 +164,29 @@ hand-built term-bank exprs, isolated from snapshot assembly.
 
 ### `leanr_grammar`: snapshot assembly
 
-Folds an import closure's entries, in Lean's import order, onto the
-M3a builtin snapshot via M3b1's `extend(delta)`:
+Folds an import closure's entries, in Lean's import order, into a flat
+imported-base snapshot built with the existing `SnapshotBuilder`
+(implementation refinement over the drafted `extend(delta)` folding:
+the M3b1 overlay cannot introduce categories and dispatch consults it
+only for base categories, so extending it would touch the dispatch hot
+path; a builder rebuild per import set is one-time per file, cached,
+and reuses the already-tested registration path):
 
-- `token` entries into the delta token table (idempotent
-  re-registration, M3b1 semantics);
+- `token` entries into the builder token table (idempotent);
 - `kind` entries interned;
-- `category` entries create **new categories** — a small
-  `GrammarSnapshot`/overlay extension: deltas can introduce categories
-  (with their leading-ident behavior), not just extend existing ones;
+- `category` entries create **new categories** via the existing
+  `SnapshotBuilder::category` (with their leading-ident behavior);
 - `parser` entries become leading/trailing category entries from the
-  interpreted `Prim` (leading vs. trailing falls out of the descr
-  shape, as in M3b1's derivation).
+  interpreted `Prim` (leading vs. trailing comes from the constant's
+  declared type: `ParserDescr`/`Parser` leading,
+  `TrailingParserDescr`/`TrailingParser` trailing, per
+  `mkParserOfConstant`, `Lean/Parser/Extension.lean`).
 
-The assembled base snapshot is cached per import set. `fingerprint()`
-folds the ordered entry digest into the base hash, so import-derived
-grammar participates in the M5 firewall seam exactly like same-file
-deltas. Same-file M3b1 commands then thread *on top of* this imported
-base, unchanged.
+The assembled base snapshot is cached per import set. Its existing
+`fingerprint()` covers all imported grammar (tokens, categories,
+productions), keeping the M5 firewall seam honest. Same-file M3b1
+commands then thread their overlay *on top of* this imported base,
+unchanged.
 
 ### CLI: import-aware `leanr parse`
 
