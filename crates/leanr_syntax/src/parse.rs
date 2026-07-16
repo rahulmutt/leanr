@@ -3947,4 +3947,54 @@ mod tests {
             "notation not live on next line"
         );
     }
+
+    /// M3b1 Task 9 Step 1: a malformed `infixl` (missing the mandatory
+    /// `=> rhs` tail) must register NOTHING — the overlay stays
+    /// unmutated — and the command loop must resync cleanly so the
+    /// `def good` after it still parses as a real declaration.
+    ///
+    /// `⊕` is fine to reuse here (unlike a real oracle-compared
+    /// fixture — see `NotationBadResync.lean`'s own doc comment on why
+    /// IT needed a novel `⧉` instead): this is a leanr-internal `parse_module`
+    /// unit test, never diffed against a `lean --run dump_syntax.lean`
+    /// dump, so Init's own pre-existing `infixr:30 " ⊕ " => Sum`
+    /// declaration (which this crate's builtin snapshot doesn't even
+    /// model) has no bearing on it.
+    ///
+    /// TDD per the task brief: run BEFORE Task 9's Step 3 guard existed
+    /// — PASSED ALREADY (recorded in task-9-report.md), because Task
+    /// 7's loop already gates `derive`/`register` behind the clean
+    /// `Ok(())` command-loop arm only (never the `Err`/zero-progress
+    /// resync arms, both of which `restore(&sp)` first): the missing
+    /// `=> Sum` tail makes `sym("=>")` fail INSIDE the `mixfix` leading
+    /// production's own `Prim::Seq`, which has no per-slot recovery of
+    /// its own (a consuming failure inside `Seq`/`OrElse`/`Optional`
+    /// always propagates up as a hard `Err`, never a partial `Ok` with
+    /// a `<missing>`/`<error>` node spliced in) — so the WHOLE `mixfix`
+    /// candidate fails, `category("command", 0)` finds no leading
+    /// winner, and the outer command-loop match takes the `Err(_)` arm
+    /// (restore + `recover_command`), never reaching `derive`/
+    /// `register` at all. Kept as a regression test regardless of
+    /// whether it needed the Step 3 guard to pass, per the brief.
+    #[test]
+    fn malformed_notation_registers_nothing_and_resyncs() {
+        let snap = crate::builtin::snapshot();
+        // missing `=> rhs` — malformed
+        let src = "prelude\ninfixl:65 \" ⊕ \"\ndef good := 1\n";
+        let r = crate::parse_module(src, &snap);
+        assert_eq!(r.tree.text(), src); // still lossless
+        assert!(!r.errors.is_empty()); // the bad line errored
+                                       // the good def after it parsed as a real declaration, not swallowed
+        assert!(r
+            .tree
+            .root()
+            .children()
+            .any(|c| r.tree.kinds.name(c.kind()) == "Lean.Parser.Command.declaration"));
+        // ⊕ was NOT registered (no «term_⊕_» kind anywhere)
+        assert!(!r
+            .tree
+            .root()
+            .descendants()
+            .any(|n| r.tree.kinds.name(n.kind()) == "«term_⊕_»"));
+    }
 }

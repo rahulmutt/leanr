@@ -119,7 +119,7 @@
 //! (category-scoped) name only, not a namespace-qualified one —
 //! matching the brief's category-only signature.
 
-use crate::kind::KindInterner;
+use crate::kind::{KindInterner, KIND_ERROR, KIND_MISSING};
 use crate::lex::{is_id_first, is_id_rest};
 use crate::tree::SyntaxNode;
 
@@ -352,7 +352,10 @@ enum Item {
 /// module's oracle-confirmed shape for that kind (malformed/error-node
 /// trees — Task 9's formal remit, but every navigation step below is
 /// already `?`-propagated `Option`, so it falls out for free rather
-/// than needing a dedicated guard).
+/// than needing a dedicated guard), OR (Task 9 Step 3, defense in
+/// depth — see `contains_error_or_missing`'s own doc comment)
+/// `node` contains an `<error>`/`<missing>` node anywhere in its
+/// structural slots.
 pub fn derive(node: &SyntaxNode, kinds: &KindInterner) -> Option<NotationSpec> {
     // M3b1 only ever registers into the `term` category (both
     // `mixfix`'s and `notation`'s own RHS recurse via `cat("term", 0)`
@@ -362,11 +365,87 @@ pub fn derive(node: &SyntaxNode, kinds: &KindInterner) -> Option<NotationSpec> {
     // own (real Lean's `notation` always targets `term` too — see
     // `elabNotation`'s `let cat := mkIdentFrom ref \`term`).
     let category = "term";
-    match kinds.name(node.kind()) {
+    let name = kinds.name(node.kind());
+    if name != "Lean.Parser.Command.mixfix" && name != "Lean.Parser.Command.notation" {
+        return None;
+    }
+    // Task 9 Step 3: refuse to derive a `NotationSpec` from a subtree
+    // that isn't STRUCTURALLY clean, even though it reached this call
+    // via the command loop's own clean `Ok(())` arm (`parse.rs`'s
+    // `run_module`, M3b1 Task 7) — see `contains_error_or_missing`'s
+    // own doc comment for why this is currently unreachable-by-
+    // construction on this crate's grammar, and why the guard is kept
+    // anyway.
+    if contains_error_or_missing(node) {
+        return None;
+    }
+    match name {
         "Lean.Parser.Command.mixfix" => derive_mixfix(node, kinds, category),
         "Lean.Parser.Command.notation" => derive_notation(node, kinds, category),
-        _ => None,
+        _ => unreachable!("checked above"),
     }
+}
+
+/// Task 9 Step 3 (defense in depth, task-9-brief's Step 3): `true` iff
+/// `node` or anything nested inside it — node OR leaf token, any
+/// depth — is an `<error>` node (`KIND_ERROR`, the node
+/// `Ps::recover_command` wraps its swept tokens in) or a `<missing>`
+/// leaf (`KIND_MISSING`, this crate's `Syntax.missing`, emitted only by
+/// `Prim::EmitMissing`/`Event::Missing`).
+///
+/// **Why the whole subtree, not just the four slots the brief names as
+/// examples** (the fixity keyword, the symbol atom, `=>`, the RHS
+/// term): scanning everything is a strict SUPERSET of "scan the
+/// required slots" — it can only reject MORE trees, never fewer — and
+/// it's safe to be that broad here specifically because there is no
+/// slot in `mixfix`/`notation`'s own oracle shape that is allowed to
+/// legitimately contain `<error>`/`<missing>`: every OPTIONAL slot
+/// (`namedName`, `namedPrio`, `notation`'s own top-level `precedence`,
+/// `identPrec`'s inner `precedence`) is `opt(..)`-wrapped, and a
+/// genuinely-absent optional emits a plain, EMPTY `null` node
+/// (`Prim::Optional`'s non-consuming-failure arm, `parse.rs`) — never
+/// `<missing>` — so this scan cannot false-reject a valid fixture whose
+/// optional slots are simply unused (confirmed by the full regression
+/// run below finding zero valid-fixture regressions).
+///
+/// **Why this is provably unreachable today, and why the guard is
+/// still worth keeping** (Task 9 brief's own instruction — "a command
+/// can parse as a clean `Ok` while still containing an error/missing
+/// node in a structural slot"): reading `parse.rs`'s `Ps::run` shows
+/// `<error>` nodes are emitted in exactly ONE place in this whole
+/// crate — `Ps::recover_command`, called only by `run_module`'s own
+/// top-level command loop, never from inside a `Prim::Seq`/`Node`
+/// body — and `<missing>` leaves are emitted in exactly ONE place —
+/// `Prim::EmitMissing`, used only by `Prim::UnknownTacticIdent`
+/// (`Tactic.«unknown»`, unrelated to `notation`/`mixfix`). Neither
+/// `command_notation.rs`'s `mixfix`/`notation` productions, nor
+/// anything a `cat("term", 0)` RHS recursion can reach, ever calls
+/// either. And `Prim::Seq`/`Prim::OrElse`/`Prim::Optional` have NO
+/// "insert `<missing>`, recover, and keep going" mode of their own — a
+/// CONSUMING failure partway through a `Seq` (e.g. `sym("=>")` failing
+/// because the RHS was omitted) propagates as a hard `Err` all the way
+/// out to `run_module`'s loop, which then takes the `Err(_)`
+/// arm — `restore(&sp)` + `recover_command()` — NOT the clean `Ok(())`
+/// arm this function is only ever called from. So today, every subtree
+/// this function receives that reached the `Ok(())` arm is, by
+/// construction, already 100% free of `<error>`/`<missing>` — this
+/// scan is a no-op on every currently-reachable input (confirmed: the
+/// full regression suite below is unchanged after adding it). It stays
+/// anyway as defense-in-depth against a FUTURE change this task's own
+/// brief anticipates: a future per-slot recovery mode (mirroring real
+/// Lean's own `errorAtSavedPos`/partial-node recovery, `Basic.lean`)
+/// that lets some OTHER production reach a clean-looking `Ok(())` with
+/// an `<error>`/`<missing>` spliced into one of ITS slots, which — if
+/// this crate's `notation`/`mixfix` productions ever grew one too —
+/// would otherwise let a half-built parser register silently.
+fn contains_error_or_missing(node: &SyntaxNode) -> bool {
+    if node.kind() == KIND_ERROR {
+        return true;
+    }
+    node.children_with_tokens().any(|el| match el {
+        rowan::NodeOrToken::Node(n) => contains_error_or_missing(&n),
+        rowan::NodeOrToken::Token(t) => t.kind() == KIND_MISSING,
+    })
 }
 
 /// `mixfix`'s oracle shape (command_notation.rs module doc, oracle dump
@@ -1067,5 +1146,232 @@ mod tests {
         let cmd = find_command(&r.tree, "Lean.Parser.Command.notation");
         let spec = derive(&cmd, &r.tree.kinds).expect("derives");
         assert_eq!(spec.kind_name, "«term★»");
+    }
+
+    // ============================================================
+    // `contains_error_or_missing` / the Task 9 Step 3 guard.
+    //
+    // As `contains_error_or_missing`'s own doc comment explains,
+    // this crate's interpreter can never actually PRODUCE a
+    // `<missing>`/`<error>` node inside a subtree that reaches
+    // `run_module`'s clean `Ok(())` arm — so exercising the guard
+    // needs a HAND-BUILT tree (`tree::build_tree`, same technique
+    // `tree.rs`'s own `events_build_a_lossless_tree` test uses), not
+    // a real `crate::parse_module` call. `hand_built_mixfix` below
+    // reproduces `command_notation.rs`'s own oracle-dumped `mixfix`
+    // shape (module doc there: `infixl:65 " ⊕ " => Sum`) exactly,
+    // parameterized over the final (RHS term) slot's own events, so
+    // the SAME builder proves both directions: a valid RHS still
+    // derives `Some` (the guard doesn't over-reject), and a
+    // `<missing>`/`<error>` RHS derives `None` (the guard fires).
+    // ============================================================
+
+    /// Hand-builds `infixl:65"a"=>Sum`-shaped events (the exact child
+    /// sequence `derive_mixfix` navigates — see `command_notation.rs`'s
+    /// module-doc oracle dump), with the final RHS-term slot supplied
+    /// by the caller. Not real lexable source text (offsets are
+    /// synthetic, chosen only to keep every token's byte-slice valid)
+    /// — irrelevant here since `derive` never re-lexes, only reads
+    /// already-built node/token kinds and token text.
+    fn hand_built_mixfix(rhs: Vec<crate::tree::Event>) -> crate::tree::SyntaxTree {
+        use crate::kind::KIND_ATOM;
+        use crate::kind::KIND_NULL;
+        use crate::tree::{build_tree, Event};
+
+        let src = "infixl:65\"a\"=>Sum";
+        let mut it = KindInterner::new();
+        let mixfix_k = it.intern("Lean.Parser.Command.mixfix");
+        let attr_kind_k = it.intern("Lean.Parser.Term.attrKind");
+        let infixl_k = it.intern("Lean.Parser.Command.infixl");
+        let prec_k = it.intern("Lean.Parser.precedence");
+        let num_k = it.intern("num");
+        let str_k = it.intern("str");
+
+        let mut events = vec![
+            Event::Start(mixfix_k),
+            Event::Start(KIND_NULL),
+            Event::Finish, // optional docComment
+            Event::Start(KIND_NULL),
+            Event::Finish, // optional Term.attributes
+            Event::Start(attr_kind_k),
+            Event::Start(KIND_NULL),
+            Event::Finish, // scoped/local absent
+            Event::Finish, // attrKind
+            Event::Start(infixl_k),
+            Event::Token {
+                kind: KIND_ATOM,
+                offset: 0,
+                len: 6,
+            }, // "infixl"
+            Event::Finish, // mixfixKind
+            Event::Start(prec_k),
+            Event::Token {
+                kind: KIND_ATOM,
+                offset: 6,
+                len: 1,
+            }, // ":"
+            Event::Start(num_k),
+            Event::Token {
+                kind: KIND_ATOM,
+                offset: 7,
+                len: 2,
+            }, // "65"
+            Event::Finish, // num
+            Event::Finish, // precedence
+            Event::Start(KIND_NULL),
+            Event::Finish, // optional namedName
+            Event::Start(KIND_NULL),
+            Event::Finish, // optional namedPrio
+            Event::Start(str_k),
+            Event::Token {
+                kind: KIND_ATOM,
+                offset: 9,
+                len: 3,
+            }, // "\"a\""
+            Event::Finish, // str
+            Event::Token {
+                kind: KIND_ATOM,
+                offset: 12,
+                len: 2,
+            }, // "=>"
+        ];
+        events.extend(rhs);
+        events.push(Event::Finish); // mixfix
+
+        build_tree(src, &events, std::sync::Arc::new(it))
+    }
+
+    /// Baseline: `hand_built_mixfix` with a REAL ident RHS derives
+    /// `Some` — proves the guard tests below fail because of the
+    /// injected `<missing>`/`<error>`, not because the synthetic tree
+    /// is shaped wrong some other way.
+    #[test]
+    fn hand_built_mixfix_with_valid_rhs_still_derives_some() {
+        use crate::kind::KIND_IDENT;
+        use crate::tree::Event;
+
+        let tree = hand_built_mixfix(vec![Event::Token {
+            kind: KIND_IDENT,
+            offset: 14,
+            len: 3,
+        }]); // "Sum"
+        assert!(
+            derive(&tree.root(), &tree.kinds).is_some(),
+            "a structurally complete mixfix subtree must still derive"
+        );
+    }
+
+    /// Task 9 Step 3's focused test: a `<missing>` leaf in the RHS
+    /// term slot — a required structural slot (`command_notation.rs`'s
+    /// oracle shape: `.. "=>" term`) — must make `derive` return
+    /// `None`, even though nothing else in the subtree is malformed.
+    #[test]
+    fn derive_returns_none_when_rhs_term_slot_is_missing() {
+        use crate::tree::Event;
+
+        let tree = hand_built_mixfix(vec![Event::Missing]);
+        assert!(
+            derive(&tree.root(), &tree.kinds).is_none(),
+            "a <missing> RHS term must not derive a NotationSpec"
+        );
+    }
+
+    /// Same, but the RHS slot is an `<error>` node (`KIND_ERROR` — the
+    /// kind `Ps::recover_command` wraps swept tokens in) instead of a
+    /// bare `<missing>` leaf — covers the OTHER kind the brief names
+    /// (`KIND_ERROR`/`KIND_MISSING`), not just one of the two.
+    #[test]
+    fn derive_returns_none_when_rhs_term_slot_is_an_error_node() {
+        use crate::kind::{KIND_ATOM, KIND_ERROR};
+        use crate::tree::Event;
+
+        let tree = hand_built_mixfix(vec![
+            Event::Start(KIND_ERROR),
+            Event::Token {
+                kind: KIND_ATOM,
+                offset: 14,
+                len: 3,
+            },
+            Event::Finish,
+        ]);
+        assert!(
+            derive(&tree.root(), &tree.kinds).is_none(),
+            "an <error> RHS term must not derive a NotationSpec"
+        );
+    }
+
+    /// The guard recurses, not just a shallow top-level scan: a
+    /// `<missing>` nested TWO levels deep (inside `precedence`'s own
+    /// `num` child, not a direct child of the outer `mixfix` node)
+    /// must still be caught. RHS term is a real, valid ident here —
+    /// the ONLY malformed slot is the precedence's digit.
+    #[test]
+    fn derive_returns_none_when_a_nested_slot_is_missing() {
+        use crate::kind::{KIND_ATOM, KIND_IDENT, KIND_NULL};
+        use crate::tree::{build_tree, Event};
+
+        let src = "infixl:\"a\"=>Sum";
+        let mut it = KindInterner::new();
+        let mixfix_k = it.intern("Lean.Parser.Command.mixfix");
+        let attr_kind_k = it.intern("Lean.Parser.Term.attrKind");
+        let infixl_k = it.intern("Lean.Parser.Command.infixl");
+        let prec_k = it.intern("Lean.Parser.precedence");
+        let num_k = it.intern("num");
+        let str_k = it.intern("str");
+        let events = vec![
+            Event::Start(mixfix_k),
+            Event::Start(KIND_NULL),
+            Event::Finish,
+            Event::Start(KIND_NULL),
+            Event::Finish,
+            Event::Start(attr_kind_k),
+            Event::Start(KIND_NULL),
+            Event::Finish,
+            Event::Finish,
+            Event::Start(infixl_k),
+            Event::Token {
+                kind: KIND_ATOM,
+                offset: 0,
+                len: 6,
+            },
+            Event::Finish,
+            Event::Start(prec_k),
+            Event::Token {
+                kind: KIND_ATOM,
+                offset: 6,
+                len: 1,
+            },
+            Event::Start(num_k),
+            Event::Missing, // <-- the ONLY malformed slot, 2 levels deep
+            Event::Finish,
+            Event::Finish,
+            Event::Start(KIND_NULL),
+            Event::Finish,
+            Event::Start(KIND_NULL),
+            Event::Finish,
+            Event::Start(str_k),
+            Event::Token {
+                kind: KIND_ATOM,
+                offset: 7,
+                len: 3,
+            },
+            Event::Finish,
+            Event::Token {
+                kind: KIND_ATOM,
+                offset: 10,
+                len: 2,
+            },
+            Event::Token {
+                kind: KIND_IDENT,
+                offset: 12,
+                len: 3,
+            },
+            Event::Finish,
+        ];
+        let tree = build_tree(src, &events, std::sync::Arc::new(it));
+        assert!(
+            derive(&tree.root(), &tree.kinds).is_none(),
+            "a <missing> nested inside `precedence`'s own `num` child must still be caught"
+        );
     }
 }
