@@ -196,7 +196,21 @@ fn run_module(mut ps: Ps<'_>, snap: &GrammarSnapshot) -> ParseResult {
             // earlier command, so `derive`'s kind-name lookups need
             // every overlay kind registered before THIS command, not
             // just the immutable base set.
-            Ok(()) => {
+            //
+            // Review follow-up (Issue 1, perf): the block below builds a
+            // SECOND green subtree for this command (`finish_into_tree`
+            // builds the whole module's tree, including this command,
+            // again at the end) and, once any overlay kind exists,
+            // clones the whole base interner via `merged_kinds` — for
+            // EVERY command, even though `derive` can only ever return
+            // `Some` for the two outer kinds `command_may_grow_grammar`
+            // checks. Gate the build behind that cheap peek (follows the
+            // single `Sub` marker to its subtree's root `Event::Start`
+            // kind — no tree build) so a notation-free file pays none of
+            // this per command, restoring the plain M3a hot path; a
+            // `mixfix`/`notation` command still builds+derives+registers
+            // exactly as before.
+            Ok(()) if ps.command_may_grow_grammar(sp.events) => {
                 let cmd_events = flatten_events(&ps.events[sp.events..], &ps.subtrees);
                 let cmd_kinds = ps.merged_kinds();
                 let subtree = build_tree(ps.src, &cmd_events, cmd_kinds);
@@ -212,6 +226,7 @@ fn run_module(mut ps: Ps<'_>, snap: &GrammarSnapshot) -> ParseResult {
                     ps.clear_category_cache();
                 }
             }
+            Ok(()) => {}
             Err(_) => {
                 ps.restore(&sp);
                 ps.recover_command();
@@ -847,6 +862,59 @@ impl<'a> Ps<'a> {
     /// site fires at most once per command, never per token).
     pub(crate) fn clear_category_cache(&mut self) {
         self.cat_cache.clear();
+    }
+
+    /// M3b1 Task 7 review follow-up (Issue 1, perf): cheap peek — is the
+    /// command whose event slice starts at `from_event`
+    /// (`self.events[from_event..]`, a savepoint taken right before a
+    /// SUCCESSFUL top-level `Category { name: "command", .. }` call — see
+    /// `run_module`'s clean `Ok(())` arm) possibly a `notation`/`mixfix`
+    /// declaration, i.e. worth paying `flatten_events` +
+    /// `build_tree` + `derive` for at all?
+    ///
+    /// A successful `category()` call's own top-level footprint is
+    /// ALWAYS exactly one `PEvent::Sub(idx)` marker — its Ok arm moves
+    /// everything the call produced into `self.subtrees[idx]` and
+    /// leaves only that one marker behind in the caller's event stream
+    /// (see `category`'s Ok arm) — so resolving the outer kind never
+    /// needs to build anything: follow the marker to its subtree, skip
+    /// that subtree's own leading trivia (raw `Event::Token` events
+    /// `category`'s pre-dispatch `peek_significant` emits directly,
+    /// ahead of the winning leading candidate's own events), and read
+    /// the `SyntaxKind` straight off the first `Event::Start` — which
+    /// IS the whole command's outer node, because every `command`
+    /// leading production is `nd(kind, ..)` (`Prim::Node`,
+    /// `builtin/command.rs`'s shared helper), never a bare token/leaf.
+    /// If the first non-trivia event isn't a `Start` (defensive only —
+    /// unreachable on this crate's grammar, since no `command` leading
+    /// production is a bare leaf), this conservatively reports
+    /// "not eligible" rather than guessing.
+    ///
+    /// `derive` (`grammar/notation.rs`) returns `Some` ONLY for
+    /// `Lean.Parser.Command.mixfix`/`Lean.Parser.Command.notation` —
+    /// every other outer kind is an immediate `None` — so this peek's
+    /// two-name check is exactly `derive`'s own outer-kind dispatch,
+    /// evaluated without paying for a green tree first. Both names are
+    /// BASE kinds (`command.rs`'s `mixfix`/`notation` are builtin
+    /// productions, never overlay-registered), so the base `self.kinds`
+    /// — not `merged_kinds()` — is enough here; no `Arc<KindInterner>`
+    /// clone needed just to peek.
+    pub(crate) fn command_may_grow_grammar(&self, from_event: usize) -> bool {
+        let Some(&sub) = self.events[from_event..].iter().find_map(|e| match e {
+            PEvent::Sub(idx) => Some(idx),
+            PEvent::Ev(_) => None,
+        }) else {
+            return false;
+        };
+        let first_non_trivia = self.subtrees[sub].events.iter().find(|e| {
+            !matches!(e, PEvent::Ev(Event::Token { kind, .. }) if crate::kind::is_trivia(*kind))
+        });
+        let Some(PEvent::Ev(Event::Start(kind))) = first_non_trivia else {
+            return false;
+        };
+        let kind = *kind;
+        let name = self.kinds.name(kind);
+        name == "Lean.Parser.Command.mixfix" || name == "Lean.Parser.Command.notation"
     }
 
     /// Base kinds + this `Ps`'s overlay's own kinds, folded into ONE
@@ -3945,6 +4013,56 @@ mod tests {
                 .descendants()
                 .any(|n| r.tree.kinds.name(n.kind()) == "«term_⊕_»"),
             "notation not live on next line"
+        );
+    }
+
+    /// Review follow-up (Issue 1, perf): `command_may_grow_grammar`'s
+    /// own classification, exercised directly against real successful
+    /// `Category { name: "command", .. }` parses — mirrors
+    /// `run_module`'s own loop shape (peek header, then per command:
+    /// save, run the category, classify) without going through the
+    /// full `parse_module` + `derive` pipeline. A `mixfix` AND a
+    /// `notation` command must both classify as build-eligible; a
+    /// `def` and a `#check` (representative of "everything else") must
+    /// both classify as skip — proving the peek neither wrongly skips
+    /// a real notation/mixfix command nor wrongly builds for an
+    /// ordinary one.
+    #[test]
+    fn command_may_grow_grammar_classifies_notation_and_mixfix_true_others_false() {
+        let snap = crate::builtin::snapshot();
+        let module = snap
+            .kinds()
+            .lookup("module")
+            .expect("interned by builtin::snapshot");
+        let src = "prelude\ninfixl:65 \" ⊕ \" => Sum\nnotation:70 a \" ⊗ \" b => Prod a b\ndef bar := 1\n#check bar\n";
+        let mut ps = Ps::new(src, &snap);
+        ps.start(module);
+        let header = snap
+            .header_prim()
+            .expect("builtin::snapshot() always sets a header");
+        ps.run(&header).expect("header never fails");
+
+        let mut classifications = Vec::new();
+        loop {
+            let (t, _at) = ps.peek_significant();
+            if t.kind == crate::lex::TokenKind::Eof {
+                break;
+            }
+            let sp = ps.save();
+            let r = ps.run(&Prim::Category {
+                name: "command".into(),
+                rbp: 0,
+            });
+            assert!(
+                r.is_ok(),
+                "every command in this fixture must parse cleanly: {r:?}"
+            );
+            classifications.push(ps.command_may_grow_grammar(sp.events));
+        }
+        assert_eq!(
+            classifications,
+            vec![true, true, false, false],
+            "expected [infixl=mixfix, notation, def=skip, #check=skip]"
         );
     }
 
