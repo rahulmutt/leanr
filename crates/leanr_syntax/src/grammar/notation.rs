@@ -265,7 +265,13 @@ fn capitalize_first_ascii(s: &str) -> String {
 /// is how `kind.toString` (this crate's oracle-dump comparison point,
 /// same as the committed `dump_syntax.lean`'s `toCanon`) prints a
 /// `Name`.
-fn escape_name_component(s: &str) -> String {
+///
+/// `pub` (same promotion already done for `trim_lean_symbol`): reused
+/// by `leanr_grammar::descr` to build the ESCAPED display form of an
+/// imported parser's kind `Name` component-by-component (M3b2a Task 6
+/// review Finding 1), matching the oracle dump's `«term_⊕⊕_»`-style
+/// guillemet-quoting instead of interning the raw joined name.
+pub fn escape_name_component(s: &str) -> String {
     if needs_no_escape(s) {
         return s.to_string();
     }
@@ -278,7 +284,8 @@ fn escape_name_component(s: &str) -> String {
     format!("«{s}»")
 }
 
-fn needs_no_escape(s: &str) -> bool {
+/// `pub` alongside `escape_name_component` (same reuse rationale).
+pub fn needs_no_escape(s: &str) -> bool {
     let mut chars = s.chars();
     match chars.next() {
         Some(first) => is_id_first(first) && chars.all(is_id_rest),

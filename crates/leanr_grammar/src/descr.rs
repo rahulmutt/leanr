@@ -10,7 +10,7 @@ use std::sync::Arc;
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, NameId, Store};
 use leanr_kernel::ConstantInfo;
-use leanr_syntax::grammar::notation::trim_lean_symbol;
+use leanr_syntax::grammar::notation::{escape_name_component, trim_lean_symbol};
 use leanr_syntax::grammar::Prim;
 use leanr_syntax::grammar::SnapshotBuilder;
 
@@ -375,10 +375,43 @@ impl Cx<'_> {
         }
     }
 
+    /// Evaluate a `Name`-typed literal expr into its ESCAPED display-string
+    /// form — the string a real Lean `kind.toString()` prints, e.g.
+    /// `«term_⊕⊕_»` for the mangled component `term_⊕⊕_`. Both the oracle
+    /// dumps (`ImportMixfix.stx.jsonl`'s `"k"` fields) and M3b1's native
+    /// path (`notation::mangle_kind`, which calls `escape_name_component`)
+    /// use this escaped form, never the raw joined `Name`.
+    ///
+    /// Lean's `Name.toString` escapes each `.`-separated component
+    /// INDEPENDENTLY (`escapePart`/`needsNoEscape`) and joins with `.`,
+    /// not one `escape_name_component` call over the whole joined string
+    /// (same distinction `notation.rs::mangle_private_kind` documents,
+    /// e.g. a scoped kind `NotaDep.term_⊖⊖_` escapes as `NotaDep.«term_⊖⊖_»`
+    /// — `NotaDep` is already a valid identifier so `needs_no_escape`
+    /// leaves it bare, only the mangled-symbol component needs guillemets).
+    ///
+    /// CRITICAL: used ONLY by `intern_kind`. `eval_name` (raw, unescaped)
+    /// remains the only `Name`-evaluator for alias lookup keys
+    /// (`"andthen"`), category names (`"term"`/`"widget"`, matched
+    /// against the category table's plain-identifier keys), and
+    /// `ParserDescr.parser` target resolution (matched against kernel
+    /// `Display`, which is raw) — escaping those would break the lookups.
+    fn eval_name_display(&self, e: ExprId) -> Result<String, SkipReason> {
+        let mut parts: Vec<String> = Vec::new();
+        self.push_name_parts(e, &mut parts)?;
+        Ok(parts
+            .iter()
+            .map(|p| escape_name_component(p))
+            .collect::<Vec<_>>()
+            .join("."))
+    }
+
     /// Kind names intern via the builder (single interner for the whole
-    /// assembled snapshot).
+    /// assembled snapshot), under the ESCAPED display form (see
+    /// `eval_name_display`) — matching the oracle dump's guillemet
+    /// quoting, e.g. `«term_⊕⊕_»`, not the raw mangled name.
     fn intern_kind(&mut self, e: ExprId) -> Result<leanr_syntax::kind::SyntaxKind, SkipReason> {
-        let name = self.eval_name(e)?;
+        let name = self.eval_name_display(e)?;
         Ok(self.builder.kind(&name))
     }
 }
@@ -401,7 +434,16 @@ mod tests {
         (st, md)
     }
 
-    fn interpret_named(suffix: &str) -> Result<Interpreted, crate::SkipReason> {
+    /// Returns the interpreted result AND the finished snapshot, so a
+    /// golden can resolve an interned `SyntaxKind` back to the exact
+    /// string `intern_kind` handed the builder (M3b2a Task 6 review
+    /// Finding 2: pin the escaped kind name, not just its shape).
+    fn interpret_named(
+        suffix: &str,
+    ) -> (
+        Result<Interpreted, crate::SkipReason>,
+        leanr_syntax::grammar::GrammarSnapshot,
+    ) {
         let (st, md) = load_notadep();
         let consts: HashMap<_, _> = md
             .constants
@@ -421,7 +463,8 @@ mod tests {
             })
             .unwrap_or_else(|| panic!("no parser entry ending {suffix}"));
         let mut b = leanr_syntax::builtin::builder();
-        interpret(decl, &consts, &st, &mut b)
+        let r = interpret(decl, &consts, &st, &mut b);
+        (r, b.finish())
     }
 
     #[test]
@@ -430,25 +473,29 @@ mod tests {
         //   trailingNode `«term_⊕⊕_» 65 65 (symbol " ⊕⊕ " >> cat term 66)
         // (rbp 66 = p+1 for left-assoc; kind name is Lean's mangling —
         //  both already pinned by ImportMixfix.stx.jsonl.)
-        let Interpreted::Trailing(p) = infixl().expect("interpreted") else {
+        //
+        // NOTE (Task 3 decode): the parser-entry `decl` name is the
+        // UNMANGLED constant name `term_⊕⊕_`, not the mangled kind
+        // `«term_⊕⊕_»` (which is what `trailingNode`'s kind arg holds).
+        let (r, snap) = interpret_named("term_⊕⊕_");
+        let Interpreted::Trailing(p) = r.expect("interpreted") else {
             panic!("expected trailing")
         };
-        fn infixl() -> Result<Interpreted, crate::SkipReason> {
-            // NOTE (Task 3 decode): the parser-entry `decl` name is the
-            // UNMANGLED constant name `term_⊕⊕_`, not the mangled kind
-            // `«term_⊕⊕_»` (which is what `trailingNode`'s kind arg holds).
-            interpret_named("term_⊕⊕_")
-        }
         let Prim::TrailingNode {
+            kind,
             prec,
             lhs_prec,
             body,
-            ..
         } = p
         else {
             panic!("expected TrailingNode, got {p:?}")
         };
         assert_eq!((prec, lhs_prec), (65, 65));
+        // Review Finding 2: pin the INTERNED kind name to the escaped
+        // display form — exactly the `"k"` field ImportMixfix.stx.jsonl's
+        // ⊕⊕ line carries (`"k":"«term_⊕⊕_»"`), not the raw joined name
+        // `term_⊕⊕_` that a pre-fix `intern_kind` would have used.
+        assert_eq!(snap.kinds().name(kind), "«term_⊕⊕_»");
         let Prim::Seq(items) = &*body else {
             panic!("expected Seq, got {body:?}")
         };
@@ -466,18 +513,21 @@ mod tests {
 
     #[test]
     fn prefix_interprets_as_leading_node() {
-        let r = interpret_named("term⋄⋄_").expect("interpreted");
-        let Interpreted::Leading(Prim::Node { prec, .. }) = r else {
-            panic!("expected leading Node, got {r:?}")
+        // prefix:100 "⋄⋄" ⇒ ImportMixfix.stx.jsonl's `#check ⋄⋄ 1` line
+        // carries `"k":"«term⋄⋄_»"` for the generated kind.
+        let (r, snap) = interpret_named("term⋄⋄_");
+        let Interpreted::Leading(Prim::Node { kind, prec, .. }) = r.expect("interpreted") else {
+            panic!("expected leading Node")
         };
         assert_eq!(prec, Some(100));
+        assert_eq!(snap.kinds().name(kind), "«term⋄⋄_»");
     }
 
     #[test]
     fn category_reference_interprets() {
         // syntax "wrap[" widget "]" : term — body contains cat widget.
-        let r = interpret_named("termWrap[_]").unwrap_or_else(|e| panic!("skip: {e:?}"));
-        let Interpreted::Leading(prim) = r else {
+        let (r, _snap) = interpret_named("termWrap[_]");
+        let Interpreted::Leading(prim) = r.unwrap_or_else(|e| panic!("skip: {e:?}")) else {
             panic!("expected leading")
         };
         let dbg = format!("{prim:?}");
