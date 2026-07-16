@@ -12,9 +12,19 @@ trap 'rm -rf "$tmp"' EXIT
 for f in tests/fixtures/syntax/*.lean; do
   base=$(basename "$f")
   [ "$base" = dump_syntax.lean ] && continue
+  [ "$base" = dump_syntax_elab.lean ] && continue
   committed="${f%.lean}.stx.jsonl"
   [ -f "$committed" ] || { echo "  (no dump — round-trip-only) $base"; continue; }
-  lean --run tests/fixtures/syntax/dump_syntax.lean "$f" > "$tmp/$base.jsonl"
+  # M3b1 same-file notation fixtures (Notation*.lean) grow their own
+  # grammar mid-file — only observable by actually ELABORATING each
+  # command, which the parse-only dump_syntax.lean can't do (see its
+  # own header comment and dump_syntax_elab.lean's module doc). Use the
+  # elaborating dumper for those, same as `fixtures:regen-notation`.
+  case "$base" in
+    Notation*.lean) dumper=tests/fixtures/syntax/dump_syntax_elab.lean ;;
+    *) dumper=tests/fixtures/syntax/dump_syntax.lean ;;
+  esac
+  lean --run "$dumper" "$f" > "$tmp/$base.jsonl"
   diff -u "$committed" "$tmp/$base.jsonl" || { echo "STALE DUMP: $f"; exit 1; }
   echo "  ok $base"
 done
@@ -27,6 +37,7 @@ cargo build --release -p leanr_cli
 for f in tests/fixtures/syntax/*.lean; do
   base=$(basename "$f")
   [ "$base" = dump_syntax.lean ] && continue
+  [ "$base" = dump_syntax_elab.lean ] && continue
   committed="${f%.lean}.stx.jsonl"
   [ -f "$committed" ] || continue
   ./target/release/leanr parse --dump "$f" | diff -u "$committed" - \

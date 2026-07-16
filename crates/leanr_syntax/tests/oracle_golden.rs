@@ -87,6 +87,56 @@ fn error_fixtures_round_trip_and_resync() {
     assert_eq!(errs, 1);
 }
 
+/// M3b1 Task 8's own corpus step ("asserting the surrounding commands
+/// still parse") for `NotationBadResync.lean`: an intentionally
+/// malformed `infixl` (missing the mandatory `=> term` tail) sandwiched
+/// between two good `def`s. No `.stx.jsonl` — excluded from
+/// oracle-equality above (same as `Errors0.lean`/`Errors1.lean`), but
+/// still lossless AND resyncs: both good `def`s parse as real
+/// `declaration` nodes, never swallowed into the error sweep, and the
+/// broken `infixl` registers nothing (Task 7's `Ok(())`-only guard on
+/// `derive`/`register` — there is no clean command parse here to
+/// derive from in the first place, so this is really just confirming
+/// the ALREADY-EXISTING `Err`/recover path handles a notation-shaped
+/// failure the same as any other command failure — Task 9's formal
+/// remit is the defensive `derive`-side guard for a clean-but-partial
+/// parse, a different case).
+#[test]
+fn bad_notation_fixture_round_trips_and_resyncs_around_good_commands() {
+    let snap = builtin::snapshot();
+    let src = std::fs::read_to_string(fixture_dir().join("NotationBadResync.lean")).unwrap();
+    let r = parse_module(&src, &snap);
+    assert_eq!(r.tree.text(), src, "losslessness is TOTAL");
+    assert!(!r.errors.is_empty(), "the malformed infixl must error");
+    let kinds = r.tree.kinds.clone();
+    let decls = r
+        .tree
+        .root()
+        .children()
+        .filter(|c| kinds.name(c.kind()) == "Lean.Parser.Command.declaration")
+        .count();
+    assert_eq!(
+        decls, 2,
+        "both `def before`/`def after` must parse as real declarations"
+    );
+    let errs = r
+        .tree
+        .root()
+        .children()
+        .filter(|c| kinds.name(c.kind()) == "<error>")
+        .count();
+    assert_eq!(errs, 1, "the broken infixl is contained in one <error>");
+    // The notation must not have registered: no `«term_⧉_»`-shaped kind
+    // anywhere in the tree.
+    assert!(
+        !r.tree
+            .root()
+            .descendants()
+            .any(|n| kinds.name(n.kind()).contains('⧉')),
+        "a malformed notation must register nothing"
+    );
+}
+
 #[test]
 fn every_error_has_a_stable_code_and_a_span_inside_the_file() {
     let snap = builtin::snapshot();

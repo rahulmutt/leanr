@@ -141,6 +141,17 @@ pub enum NotationAtom {
 /// any input, including empty `atoms`/`category` or a `Symbol` whose
 /// trimmed contents are empty.
 pub fn mangle_kind(category: &str, atoms: &[NotationAtom]) -> String {
+    escape_name_component(&mangle_kind_unescaped(category, atoms))
+}
+
+/// The un-escaped local (category-scoped) name — `mangle_kind` minus
+/// the final guillemet-wrapping step. Pulled out (M3b1 Task 8) so
+/// `mangle_private_kind` below can apply `escape_name_component` to
+/// just this ONE `Name` component, matching how Lean's own
+/// `Name.toString` escapes a MULTI-component `Name` component-by-
+/// component, not as a single joined string (see `mangle_private_kind`'s
+/// own doc comment for the oracle dump that shows this).
+fn mangle_kind_unescaped(category: &str, atoms: &[NotationAtom]) -> String {
     let mut base = String::from(category);
     for atom in atoms {
         match atom {
@@ -148,7 +159,65 @@ pub fn mangle_kind(category: &str, atoms: &[NotationAtom]) -> String {
             NotationAtom::Symbol(s) => base.push_str(&mangle_symbol_atom(s)),
         }
     }
-    escape_name_component(&base)
+    base
+}
+
+/// The `local notation`/`local infixl`/… kind name — DISTINCT from
+/// `mangle_kind`, discovered by Task 8's oracle gate (`NotationLocal.
+/// lean`), not anticipated by Task 3/4's original derivation.
+///
+/// ORACLE DUMP (Task 8, `dump_syntax_elab.lean` — the elaborating
+/// dumper, since this is a Lean ELABORATOR behavior, `Lean/Elab/
+/// Syntax.lean:432-433`'s `elabSyntax`, invisible to any parse-only
+/// dump): `local notation "★" => Sum` used as `★` generates kind
+/// ```text
+/// "_private.0.«term★»"
+/// ```
+/// not the plain `mangle_kind`-shape `"«term★»"` a non-`local`
+/// `notation` with the same atoms would get.
+///
+/// SOURCE (pin v4.32.0-rc1): `elabSyntax` only applies this when
+/// `attrKind matches \`(attrKind| local)` (`Lean/Elab/Syntax.lean:432` —
+/// `scoped` does NOT trigger it, matching this crate's design spec §7
+/// "`local notation` in scope, `scoped` excluded"): `stxNodeKind :=
+/// mkPrivateName (← getEnv) stxNodeKind`. `mkPrivateName`/
+/// `mkPrivateNameCore` (`Lean/PrivateName.lean:26-30`): `Name.mkNum
+/// (\`_private ++ mainModule) 0 ++ n` — a name is NEVER a single
+/// string, it's Lean's own linked-list `Name` type, and `Name.toString`
+/// (what `kind.toString` — this crate's whole oracle-comparison point —
+/// actually calls) escapes each `.str`/`.num` COMPONENT independently
+/// (`escapePart`/`needsNoEscape`, same rule `escape_name_component`
+/// already ports), then joins with `.` — NOT one `escape_name_component`
+/// call over the whole concatenated string. `_private` and the literal
+/// `0` component are always plain (never need escaping); only the
+/// LAST component (`n`, this notation's own unescaped mangled name)
+/// ever needs guillemets — reproduced here as `escape_name_component`
+/// applied to JUST `mangle_kind_unescaped`'s output, not the joined
+/// `"_private.0.…"` string.
+///
+/// `mainModule` (the file's own dotted module name, e.g. what a real
+/// `lean tests/fixtures/syntax/NotationLocal.lean -o …` compile derives
+/// from the file's path relative to the invoking `lean`'s CWD —
+/// `Lean/Util/Path.lean`'s `moduleNameOfFileName`) is DELIBERATELY
+/// treated as `Name.anonymous` here, for two independent reasons: (1)
+/// `parse_module`'s own public signature (`fn parse_module(src: &str,
+/// snap: &GrammarSnapshot)`) never receives a file path or module name
+/// — there is no input to derive one from; (2) this crate's dumper
+/// (`dump_syntax_elab.lean`) ALSO never passes a `mainModule` to
+/// `processHeader` (defaults `Name.anonymous`), matching every other
+/// fixture in this corpus being hermetic/path-independent (renaming or
+/// relocating a fixture file must not change its committed dump) — so
+/// `Name.anonymous` is the oracle-CONFIRMED, stable ground truth here,
+/// not an approximation of a path-dependent value this crate can't
+/// compute. With `mainModule = anonymous`, `\`_private ++ mainModule`
+/// collapses to plain `\`_private` (`Name.append n .anonymous = n`),
+/// which is exactly the constant `"_private.0."` prefix hardcoded
+/// below.
+fn mangle_private_kind(category: &str, atoms: &[NotationAtom]) -> String {
+    format!(
+        "_private.0.{}",
+        escape_name_component(&mangle_kind_unescaped(category, atoms))
+    )
 }
 
 /// `Char.isWhitespace` (`Init/Data/Char/Basic.lean:97`, pin
@@ -314,6 +383,7 @@ fn derive_mixfix(node: &SyntaxNode, kinds: &KindInterner, category: &str) -> Opt
     let attr_kind_pos = children
         .iter()
         .position(|c| kinds.name(c.kind()) == "Lean.Parser.Term.attrKind")?;
+    let is_local = is_local_attr_kind(&children[attr_kind_pos], kinds);
     let mixfix_kind_node = children.get(attr_kind_pos + 1)?;
     let fixity = kinds.name(mixfix_kind_node.kind());
     let precedence_node = children.get(attr_kind_pos + 2)?;
@@ -361,7 +431,7 @@ fn derive_mixfix(node: &SyntaxNode, kinds: &KindInterner, category: &str) -> Opt
     // above), so unlike a hand-written `notation`, there is no
     // atom-like-defaulting case to consider here: the outer prec is
     // always exactly `p`.
-    build_spec(category, items, p)
+    build_spec(category, items, p, is_local)
 }
 
 /// `notation`'s oracle shape (command_notation.rs module doc, oracle
@@ -380,6 +450,7 @@ fn derive_notation(
     let attr_kind_pos = children
         .iter()
         .position(|c| kinds.name(c.kind()) == "Lean.Parser.Term.attrKind")?;
+    let is_local = is_local_attr_kind(&children[attr_kind_pos], kinds);
     let prec_wrapper = children.get(attr_kind_pos + 1)?;
     let explicit_prec = find_child(prec_wrapper, "Lean.Parser.precedence", kinds)
         .and_then(|pn| read_prec_num(&pn, kinds));
@@ -422,7 +493,24 @@ fn derive_notation(
     let atom_like = matches!(items.first(), Some(Item::Symbol(_)))
         && matches!(items.last(), Some(Item::Symbol(_)));
     let outer_prec = explicit_prec.unwrap_or(if atom_like { MAX_PREC } else { LEAD_PREC });
-    build_spec(category, items, outer_prec)
+    build_spec(category, items, outer_prec, is_local)
+}
+
+/// Whether `attr_kind_node` (a `Lean.Parser.Term.attrKind` node —
+/// `nd(k, opt(scoped_or_local))`, `attr.rs`'s `attr_kind`) carries the
+/// `local` modifier specifically (not `scoped`, not absent) — the
+/// exact condition `Lean/Elab/Syntax.lean:432`'s `elabSyntax` gates
+/// `mkPrivateName` on (`mangle_private_kind`'s own doc comment has the
+/// oracle dump + source citation). `attrKind`'s single child is the
+/// `optional`'s own `null` wrapper: 0 children when the modifier is
+/// absent, 1 child (`Lean.Parser.Term.scoped` or `Lean.Parser.Term.
+/// local`) when present.
+fn is_local_attr_kind(attr_kind_node: &SyntaxNode, kinds: &KindInterner) -> bool {
+    attr_kind_node
+        .children()
+        .next()
+        .and_then(|opt_wrapper| opt_wrapper.children().next())
+        .is_some_and(|inner| kinds.name(inner.kind()) == "Lean.Parser.Term.local")
 }
 
 /// Shared tail end of both `derive_mixfix`/`derive_notation`: turn an
@@ -440,7 +528,7 @@ fn derive_notation(
 /// interior/trailing one) becomes an ordinary `Prim::Category`
 /// recursion at its own `:prec` (defaulting to `0` the same way,
 /// `processParserCategory`'s identical `prec?.getD 0`).
-fn build_spec(category: &str, items: Vec<Item>, prec: u32) -> Option<NotationSpec> {
+fn build_spec(category: &str, items: Vec<Item>, prec: u32, is_local: bool) -> Option<NotationSpec> {
     if items.is_empty() {
         return None;
     }
@@ -451,7 +539,16 @@ fn build_spec(category: &str, items: Vec<Item>, prec: u32) -> Option<NotationSpe
             Item::Placeholder(_) => NotationAtom::Placeholder,
         })
         .collect();
-    let kind_name = mangle_kind(category, &atoms);
+    // M3b1 Task 8 (oracle-forced fix, `NotationLocal.lean`): `local
+    // notation`/`local infixl`/… gets a DIFFERENT generated kind name
+    // than the same declaration without `local` — see
+    // `mangle_private_kind`'s own doc comment for the oracle dump and
+    // source citation.
+    let kind_name = if is_local {
+        mangle_private_kind(category, &atoms)
+    } else {
+        mangle_kind(category, &atoms)
+    };
     let tokens: Vec<String> = items
         .iter()
         .filter_map(|it| match it {
@@ -917,5 +1014,58 @@ mod tests {
         assert!(r.errors.is_empty(), "errs={:?}", r.errors);
         let cmd = find_command(&r.tree, "Lean.Parser.Command.declaration");
         assert!(derive(&cmd, &r.tree.kinds).is_none());
+    }
+
+    /// `mangle_private_kind`'s own doc comment has the oracle dump +
+    /// source citation (Task 8, `NotationLocal.lean`'s gate run first
+    /// surfaced this: `derive` was producing the PLAIN `mangle_kind`
+    /// shape for a `local notation`, mismatching the real toolchain's
+    /// `_private.0.«term★»`).
+    #[test]
+    fn mangle_private_kind_matches_oracle_local_notation_shape() {
+        assert_eq!(
+            mangle_private_kind("term", &[Symbol("★".into())]),
+            "_private.0.«term★»"
+        );
+        // A plain-identifier-shaped local notation still gets the
+        // `_private.0.` prefix, but the LAST component itself needs no
+        // guillemets (mirrors `mangle_omits_guillemets_...` for the
+        // non-local case).
+        assert_eq!(
+            mangle_private_kind("term", &[Symbol("myOp".into()), Placeholder]),
+            "_private.0.termMyOp_"
+        );
+    }
+
+    /// `derive`, end to end, on `local notation "★" => Sum` (Task 8's
+    /// `NotationLocal.lean` fixture, oracle-confirmed against
+    /// `dump_syntax_elab.lean`).
+    #[test]
+    fn derive_local_notation_uses_private_kind_name() {
+        let snap = crate::builtin::snapshot();
+        let r = crate::parse_module("local notation \"★\" => Sum\n", &snap);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        let cmd = find_command(&r.tree, "Lean.Parser.Command.notation");
+        let spec = derive(&cmd, &r.tree.kinds).expect("derives");
+        assert_eq!(spec.kind_name, "_private.0.«term★»");
+    }
+
+    /// `scoped` notation is explicitly excluded from private mangling
+    /// (`Lean/Elab/Syntax.lean:432`'s `attrKind matches \`(attrKind|
+    /// local)` — `scoped` never matches that pattern; module doc's
+    /// design-spec §7 citation). Not independently oracle-dumped for
+    /// THIS test (no scoped fixture in the corpus — `scoped` is out of
+    /// M3b1's scope per spec §7), but `is_local_attr_kind` returning
+    /// `false` for `Lean.Parser.Term.scoped` is a direct, mechanical
+    /// consequence of its own doc comment's condition, worth locking
+    /// against a regression that widens the check to "any modifier".
+    #[test]
+    fn derive_scoped_notation_uses_plain_kind_name_not_private() {
+        let snap = crate::builtin::snapshot();
+        let r = crate::parse_module("scoped notation \"★\" => Sum\n", &snap);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        let cmd = find_command(&r.tree, "Lean.Parser.Command.notation");
+        let spec = derive(&cmd, &r.tree.kinds).expect("derives");
+        assert_eq!(spec.kind_name, "«term★»");
     }
 }
