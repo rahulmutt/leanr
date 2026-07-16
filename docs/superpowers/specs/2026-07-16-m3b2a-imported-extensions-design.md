@@ -51,6 +51,16 @@ the same comparison. The M3b2a bar is a non-trivial pass-list of real
 Mathlib-closure files that use imported notation — the exact set is
 whatever parses green, recorded and ratcheted, not predicted here.
 
+**Acceptance recorded (2026-07-16):** hermetic import corpus green
+byte-for-byte (4 importers vs pinned-toolchain dumps); all gates green
+(workspace tests, lint, deps, 5-step parse-acceptance incl. import
+corpus, fuzz both targets). Initial Mathlib ratchet populated from a
+bounded sweep (`LEANR_SWEEP_LIMIT=200`, agreed cap — the single-threaded
+full sweep was stopped at 4.5h): 200 files swept, 23 oracle-green on
+the committed pass-list, 0 regressions; greens verified to use
+imported (`Init`-declared) notation. Follow-up recorded: parallelize
+the sweep, then re-run the full closure to grow the pass-list.
+
 ## M3b2 decomposition (agreed in brainstorming)
 
 M3b2 as recorded in the M3b1 spec bundles three subsystems: (a)

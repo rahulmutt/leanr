@@ -1,2 +1,25 @@
 # Mathlib-closure files that parse oracle-green (M3b2a ratchet).
 # Regenerate: mise run passlist:update. NEVER hand-edit to hide a regression.
+.lake/packages/LeanSearchClient/LeanSearchClient.lean
+.lake/packages/Qq/Qq.lean
+.lake/packages/aesop/Aesop.lean
+.lake/packages/aesop/Aesop/Builder.lean
+.lake/packages/aesop/Aesop/Builder/Constructors.lean
+.lake/packages/aesop/Aesop/Constants.lean
+.lake/packages/aesop/Aesop/Forward/CompleteMatchQueue.lean
+.lake/packages/aesop/Aesop/Frontend.lean
+.lake/packages/aesop/Aesop/Frontend/Extension/Init.lean
+.lake/packages/aesop/Aesop/Index/DiscrKeyConfig.lean
+.lake/packages/aesop/Aesop/Index/DiscrTreeConfig.lean
+.lake/packages/aesop/Aesop/Main.lean
+.lake/packages/aesop/Aesop/Options.lean
+.lake/packages/aesop/Aesop/RulePattern/Cache.lean
+.lake/packages/aesop/Aesop/RuleSet/Member.lean
+.lake/packages/aesop/Aesop/RuleTac.lean
+.lake/packages/aesop/Aesop/RuleTac/Descr.lean
+.lake/packages/aesop/Aesop/Script/Tactic.lean
+.lake/packages/aesop/Aesop/Search/Queue/Class.lean
+.lake/packages/aesop/Aesop/Tree.lean
+.lake/packages/aesop/Aesop/Tree/Free.lean
+.lake/packages/aesop/Aesop/Tree/State.lean
+.lake/packages/aesop/Aesop/Tree/Traversal.lean
