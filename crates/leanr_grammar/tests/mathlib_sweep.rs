@@ -2,7 +2,7 @@
 //! acceptance; grows into M3b3's 100% gate). Needs `mise run
 //! mathlib:fetch` first. Run via `mise run parse:mathlib`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -80,17 +80,25 @@ fn mathlib_sweep_ratchet() {
     files.sort();
     files.truncate(limit);
 
+    let rel_of = |file: &Path| -> String {
+        file.strip_prefix(&mathlib)
+            .unwrap_or(file)
+            .display()
+            .to_string()
+    };
+
+    // The set of pass-list entries actually exercised this run — under a
+    // bounded LEANR_SWEEP_LIMIT, files outside this set are neither green
+    // nor regressed; they simply weren't swept.
+    let swept: BTreeSet<String> = files.iter().map(|f| rel_of(f)).collect();
+
     // Snapshot cache keyed by the file's import list.
     let mut snap_cache: BTreeMap<Vec<String>, Option<Arc<leanr_syntax::grammar::GrammarSnapshot>>> =
         BTreeMap::new();
 
-    let mut green: Vec<String> = Vec::new();
+    let mut green: BTreeSet<String> = BTreeSet::new();
     for file in &files {
-        let rel = file
-            .strip_prefix(&mathlib)
-            .unwrap_or(file)
-            .display()
-            .to_string();
+        let rel = rel_of(file);
         let Ok(src) = std::fs::read_to_string(file) else {
             continue;
         };
@@ -111,24 +119,32 @@ fn mathlib_sweep_ratchet() {
             continue;
         };
         if leanr_syntax::canon::canon_jsonl(&r.tree) == want {
-            green.push(rel);
+            green.insert(rel);
         }
     }
-    green.sort();
 
-    let committed: Vec<String> = std::fs::read_to_string(passlist_path())
+    let committed: BTreeSet<String> = std::fs::read_to_string(passlist_path())
         .unwrap_or_default()
         .lines()
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .map(String::from)
         .collect();
 
-    let regressions: Vec<_> = committed.iter().filter(|f| !green.contains(f)).collect();
-    let newly_green: Vec<_> = green.iter().filter(|f| !committed.contains(f)).collect();
+    // Only pass-list entries that were actually swept this run can regress —
+    // under a bounded LEANR_SWEEP_LIMIT, entries outside the swept prefix
+    // are neither green nor regressed in this run.
+    let committed_swept = committed.iter().filter(|f| swept.contains(*f)).count();
+    let regressions: Vec<_> = committed
+        .iter()
+        .filter(|f| swept.contains(*f) && !green.contains(*f))
+        .collect();
+    let newly_green: Vec<_> = green.iter().filter(|f| !committed.contains(*f)).collect();
     eprintln!(
-        "sweep: {} files, {} green, {} on pass-list, {} regressions, {} newly green",
+        "sweep: {} files, {} green, {} on pass-list, {}/{} pass-list entries swept, {} regressions, {} newly green",
         files.len(),
         green.len(),
+        committed.len(),
+        committed_swept,
         committed.len(),
         regressions.len(),
         newly_green.len()
