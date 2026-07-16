@@ -240,4 +240,82 @@ mod tests {
         assert!(ov.category_delta("term").unwrap().trailing.len() == 1);
         assert!(!ov.is_empty());
     }
+
+    /// Mirrors `parse.rs::tests::sum_spec()` (Task 6) — same
+    /// operator-first trailing shape (`seq([sym("⊕"), cat("term", 66)])`)
+    /// — kept as a local copy since that helper lives in a different
+    /// module's private `#[cfg(test)]` and this file's tests should not
+    /// depend on `parse.rs`'s test internals.
+    fn sum_spec() -> NotationSpec {
+        NotationSpec {
+            category: "term".into(),
+            kind_name: "«term_⊕_»".into(),
+            leading: false,
+            prec: 65,
+            lhs_prec: Some(65),
+            tokens: vec!["⊕".into()],
+            body: crate::grammar::seq([crate::grammar::sym("⊕"), crate::grammar::cat("term", 66)]),
+        }
+    }
+
+    /// Task 10 Step 1 (M3b1 plan): the M5 firewall seam — same-file
+    /// grammar growth (a registered notation) must change the effective
+    /// (base + overlay) fingerprint, so a query cache keyed on it is
+    /// correctly invalidated.
+    #[test]
+    fn overlay_changes_effective_fingerprint() {
+        let base = crate::builtin::snapshot();
+        let base_fp = base.fingerprint();
+        let mut ov = Overlay::new(&base);
+        ov.register(sum_spec());
+        let mut h = blake3::Hasher::new();
+        h.update(base_fp.as_bytes());
+        ov.fingerprint_into(&mut h);
+        let with_overlay = h.finalize();
+        assert_ne!(
+            with_overlay, base_fp,
+            "grammar growth must change the fingerprint"
+        );
+    }
+
+    /// Task 10 Part B (absorbed from Task 5 review): `fingerprint_into`
+    /// must be deterministic — two independently built overlays that
+    /// register the SAME spec must hash identically. Guards against a
+    /// future regression (e.g. iterating `cats`, a `HashMap`, without
+    /// the `.sort()` this file's `fingerprint_into` already does).
+    #[test]
+    fn fingerprint_into_is_deterministic_across_independent_overlays() {
+        let base = crate::builtin::snapshot();
+        let mut ov1 = Overlay::new(&base);
+        ov1.register(sum_spec());
+        let mut ov2 = Overlay::new(&base);
+        ov2.register(sum_spec());
+
+        let mut h1 = blake3::Hasher::new();
+        ov1.fingerprint_into(&mut h1);
+        let mut h2 = blake3::Hasher::new();
+        ov2.fingerprint_into(&mut h2);
+
+        assert_eq!(
+            h1.finalize(),
+            h2.finalize(),
+            "fingerprint_into must be deterministic for equivalent overlays"
+        );
+    }
+
+    /// Task 10 Part B (absorbed from Task 5 review): `intern` (via
+    /// `register`) is idempotent on a repeated kind name — registering
+    /// the same spec TWICE into one overlay must hand back the SAME
+    /// `SyntaxKind` both times, not a duplicate.
+    #[test]
+    fn register_is_idempotent_for_the_same_kind_name() {
+        let base = crate::builtin::snapshot();
+        let mut ov = Overlay::new(&base);
+        let k1 = ov.register(sum_spec());
+        let k2 = ov.register(sum_spec());
+        assert_eq!(
+            k1, k2,
+            "re-registering the same spec must not mint a new kind"
+        );
+    }
 }
