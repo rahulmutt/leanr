@@ -683,7 +683,7 @@ fn strip_quotes(raw: &str) -> &str {
 /// the capitalization step) for `NotationSpec::tokens`/`Prim::Symbol`,
 /// which need the bare matchable token text, not a mangled kind-name
 /// fragment.
-fn trim_lean_symbol(raw: &str) -> String {
+pub fn trim_lean_symbol(raw: &str) -> String {
     raw.trim_matches(is_lean_whitespace).to_string()
 }
 
