@@ -14,6 +14,11 @@ use std::sync::Arc;
 
 use crate::kind::SyntaxKind;
 
+pub mod notation;
+pub mod overlay;
+pub use notation::{derive, mangle_kind, NotationAtom, NotationSpec};
+pub use overlay::{CategoryDelta, Overlay};
+
 #[derive(Clone, Debug)]
 pub enum Prim {
     /// Sequence; children parse in order into the current node.
@@ -449,6 +454,13 @@ impl GrammarSnapshot {
         self.kinds.clone()
     }
 
+    /// Number of interned kinds = first free dynamic slot for the
+    /// overlay (M3b1: `Overlay::new` numbers its own kinds starting
+    /// here, so overlay kind ids never collide with the base's).
+    pub fn kind_count(&self) -> u16 {
+        self.kinds.len_u16()
+    }
+
     /// The module-header `Prim`, if this snapshot's builder set one
     /// (every real, `builtin::snapshot()`-built snapshot does).
     pub fn header_prim(&self) -> Option<Prim> {
@@ -488,8 +500,9 @@ impl GrammarSnapshot {
                 LeadingIdentBehavior::Both => 2,
             };
             h.update(&[behavior_byte]);
+            let kind_name = |k: SyntaxKind| self.kinds.name(k).to_string();
             for p in c.leading_parsers.iter().chain(&c.trailing_parsers) {
-                encode_prim(p, self, &mut h);
+                encode_prim(p, &kind_name, &mut h);
             }
         }
         h.finalize()
@@ -519,22 +532,33 @@ impl GrammarSnapshot {
 /// grammar's observable shape. Every variant is handled explicitly —
 /// no wildcard arm — so adding a `Prim` variant without extending this
 /// is a compile error, not a silent fingerprint gap.
-fn encode_prim(p: &Prim, snap: &GrammarSnapshot, h: &mut blake3::Hasher) {
+///
+/// `kind_name` resolves a `SyntaxKind` to its stable name — a closure
+/// rather than a bare `&GrammarSnapshot` so this ONE recursive walk is
+/// shared by both `GrammarSnapshot::fingerprint` (resolves via its own
+/// `KindInterner`) and `Overlay::fingerprint_into` (M3b1 Task 5;
+/// resolves via the overlay's own `kind_names`, which a `GrammarSnapshot`
+/// knows nothing about) — no parallel copy of this match in `overlay.rs`.
+pub(crate) fn encode_prim(
+    p: &Prim,
+    kind_name: &dyn Fn(SyntaxKind) -> String,
+    h: &mut blake3::Hasher,
+) {
     use Prim::*;
     match p {
         Seq(ps) => {
             h.update(&[0]);
             for q in ps {
-                encode_prim(q, snap, h);
+                encode_prim(q, kind_name, h);
             }
             h.update(&[0xFF]);
         }
         Node { kind, prec, body } => {
             h.update(&[1]);
-            h.update(snap.kinds.name(*kind).as_bytes());
+            h.update(kind_name(*kind).as_bytes());
             h.update(b"\0");
             h.update(&prec.unwrap_or(u32::MAX).to_le_bytes());
-            encode_prim(body, snap, h);
+            encode_prim(body, kind_name, h);
         }
         TrailingNode {
             kind,
@@ -543,11 +567,11 @@ fn encode_prim(p: &Prim, snap: &GrammarSnapshot, h: &mut blake3::Hasher) {
             body,
         } => {
             h.update(&[2]);
-            h.update(snap.kinds.name(*kind).as_bytes());
+            h.update(kind_name(*kind).as_bytes());
             h.update(b"\0");
             h.update(&prec.to_le_bytes());
             h.update(&lhs_prec.to_le_bytes());
-            encode_prim(body, snap, h);
+            encode_prim(body, kind_name, h);
         }
         Symbol(s) => {
             h.update(&[3]);
@@ -588,15 +612,15 @@ fn encode_prim(p: &Prim, snap: &GrammarSnapshot, h: &mut blake3::Hasher) {
         }
         Optional(q) => {
             h.update(&[13]);
-            encode_prim(q, snap, h);
+            encode_prim(q, kind_name, h);
         }
         Many(q) => {
             h.update(&[14]);
-            encode_prim(q, snap, h);
+            encode_prim(q, kind_name, h);
         }
         Many1(q) => {
             h.update(&[15]);
-            encode_prim(q, snap, h);
+            encode_prim(q, kind_name, h);
         }
         SepBy {
             item,
@@ -606,7 +630,7 @@ fn encode_prim(p: &Prim, snap: &GrammarSnapshot, h: &mut blake3::Hasher) {
             h.update(&[16, *allow_trailing as u8]);
             h.update(sep.as_bytes());
             h.update(b"\0");
-            encode_prim(item, snap, h);
+            encode_prim(item, kind_name, h);
         }
         SepBy1 {
             item,
@@ -616,34 +640,34 @@ fn encode_prim(p: &Prim, snap: &GrammarSnapshot, h: &mut blake3::Hasher) {
             h.update(&[17, *allow_trailing as u8]);
             h.update(sep.as_bytes());
             h.update(b"\0");
-            encode_prim(item, snap, h);
+            encode_prim(item, kind_name, h);
         }
         OrElse(ps) => {
             h.update(&[18]);
             for q in ps {
-                encode_prim(q, snap, h);
+                encode_prim(q, kind_name, h);
             }
             h.update(&[0xFF]);
         }
         Atomic(q) => {
             h.update(&[19]);
-            encode_prim(q, snap, h);
+            encode_prim(q, kind_name, h);
         }
         Lookahead(q) => {
             h.update(&[20]);
-            encode_prim(q, snap, h);
+            encode_prim(q, kind_name, h);
         }
         NotFollowedBy(q) => {
             h.update(&[21]);
-            encode_prim(q, snap, h);
+            encode_prim(q, kind_name, h);
         }
         Group(q) => {
             h.update(&[22]);
-            encode_prim(q, snap, h);
+            encode_prim(q, kind_name, h);
         }
         WithPosition(q) => {
             h.update(&[23]);
-            encode_prim(q, snap, h);
+            encode_prim(q, kind_name, h);
         }
         CheckColGt => {
             h.update(&[24]);
@@ -673,23 +697,23 @@ fn encode_prim(p: &Prim, snap: &GrammarSnapshot, h: &mut blake3::Hasher) {
         }
         Many1Indent(q) => {
             h.update(&[32]);
-            encode_prim(q, snap, h);
+            encode_prim(q, kind_name, h);
         }
         SepByIndent { item, sep, min } => {
             h.update(&[33, *min as u8]);
             h.update(sep.as_bytes());
             h.update(b"\0");
-            encode_prim(item, snap, h);
+            encode_prim(item, kind_name, h);
         }
         WithForbidden(tok, q) => {
             h.update(&[37]);
             h.update(tok.as_bytes());
             h.update(b"\0");
-            encode_prim(q, snap, h);
+            encode_prim(q, kind_name, h);
         }
         WithoutForbidden(q) => {
             h.update(&[38]);
-            encode_prim(q, snap, h);
+            encode_prim(q, kind_name, h);
         }
         EmitMissing => {
             h.update(&[34]);
@@ -1169,7 +1193,7 @@ fn first_tokens(p: &Prim) -> Ft {
 /// can't be bounded, so it's indexed as `FirstTok::Any` — tried on every
 /// dispatch, exactly like the oracle's unconditional `leadingParsers`/
 /// `trailingParsers` fallback list.
-fn index_entries(p: &Prim) -> Vec<FirstTok> {
+pub(crate) fn index_entries(p: &Prim) -> Vec<FirstTok> {
     match first_tokens(p) {
         Ft::Tokens(tks) | Ft::OptTokens(tks) if !tks.is_empty() => ft_dedup(tks),
         _ => vec![FirstTok::Any],

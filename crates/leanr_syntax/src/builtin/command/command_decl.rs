@@ -19,7 +19,7 @@
 //! sites use the same "just run the inner parser" simplification).
 
 use crate::builtin::attr::attr_kind;
-use crate::builtin::command::{decl_modifiers, doc_comment, nd, termination_suffix};
+use crate::builtin::command::{decl_modifiers, doc_comment, named_prio, nd, termination_suffix};
 use crate::builtin::term::{
     binder_ident, bracketed_binder, match_alts_where_decls, opt_type, struct_inst_fields,
     type_spec, where_decls,
@@ -215,23 +215,6 @@ fn opaque(b: &mut SnapshotBuilder) -> Prim {
     let val = decl_val_simple(b);
     let k = b.kind("Lean.Parser.Command.opaque");
     nd(k, seq([sym("opaque"), id, sig, opt(val)]))
-}
-/// `namedPrio := leading_parser atomic (" (" >> nonReservedSymbol
-/// "priority") >> " := " >> withoutPosition priorityParser >> ")"` —
-/// unattributed but `leading_parser` (self-wraps, same "named helper"
-/// shape as `matchDiscr`); recurses into the `prio` category
-/// (`attr.rs`'s `Priority.numPrio`).
-fn named_prio(b: &mut SnapshotBuilder) -> Prim {
-    let k = b.kind("Lean.Parser.Command.namedPrio");
-    nd(
-        k,
-        seq([
-            atomic(seq([sym("("), Prim::NonReservedSymbol("priority".into())])),
-            sym(":="),
-            cat("prio", 0),
-            sym(")"),
-        ]),
-    )
 }
 fn instance_decl(b: &mut SnapshotBuilder) -> Prim {
     let ak = attr_kind(b);

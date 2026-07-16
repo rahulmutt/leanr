@@ -95,6 +95,13 @@ impl KindInterner {
     pub fn name(&self, k: SyntaxKind) -> &str {
         &self.names[k.0 as usize]
     }
+
+    /// Number of interned kinds — the first free dynamic slot an
+    /// `Overlay` (M3b1) can hand out without colliding with the base
+    /// snapshot's own kinds.
+    pub fn len_u16(&self) -> u16 {
+        self.names.len() as u16
+    }
 }
 
 impl Default for KindInterner {

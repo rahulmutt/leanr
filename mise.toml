@@ -111,7 +111,25 @@ run = [
   "sh -c 'for p in aesop batteries Cli importGraph LeanSearchClient plausible Qq; do cp .mathlib/.lake/packages/$p/lakefile.toml crates/leanr_build/tests/fixtures/lakefiles/$p.toml; done'",
   # M3a parser fixtures: official parse trees in canonical JSON
   # (tests/fixtures/syntax/; dump_syntax.lean is the dumper itself).
-  "sh -c 'for f in tests/fixtures/syntax/*.lean; do [ \"$(basename $f)\" = dump_syntax.lean ] && continue; lean --run tests/fixtures/syntax/dump_syntax.lean \"$f\" > \"${f%.lean}.stx.jsonl\"; done'",
+  # `Notation*.lean` (M3b1 same-file notation corpus, Task 8) are
+  # EXCLUDED here — they grow their own grammar mid-file, which
+  # `dump_syntax.lean`'s parse-only (no elaboration) loop cannot
+  # observe; see the `fixtures:regen-notation` task below, which this
+  # task also depends on.
+  "sh -c 'for f in tests/fixtures/syntax/*.lean; do b=$(basename \"$f\"); case \"$b\" in dump_syntax.lean|dump_syntax_elab.lean|Notation*.lean) continue;; esac; lean --run tests/fixtures/syntax/dump_syntax.lean \"$f\" > \"${f%.lean}.stx.jsonl\"; done'",
+]
+depends_post = ["fixtures:regen-notation"]
+
+[tasks."fixtures:regen-notation"]
+description = "Regenerate the M3b1 same-file-notation oracle dumps (dump_syntax_elab.lean — ELABORATES each command so a notation/mixfix declaration's grammar growth is live for later commands, unlike the parse-only dump_syntax.lean; see that file's module doc). Run standalone, or via fixtures:regen (depends_post)."
+depends = ["elan:bootstrap"]
+run = [
+  # `NotationBadResync.lean` is an intentionally malformed fixture
+  # (round-trip-only — oracle_golden.rs treats a missing .stx.jsonl as
+  # "not oracle-compared"), so it's excluded here, same as every other
+  # error fixture (Errors0.lean/Errors1.lean) is excluded from the
+  # M3a loop above.
+  "sh -c 'for f in tests/fixtures/syntax/Notation*.lean; do [ -e \"$f\" ] || continue; [ \"$(basename $f)\" = NotationBadResync.lean ] && continue; lean --run tests/fixtures/syntax/dump_syntax_elab.lean \"$f\" > \"${f%.lean}.stx.jsonl\"; done'",
 ]
 
 [tasks."fixtures:mutations"]
