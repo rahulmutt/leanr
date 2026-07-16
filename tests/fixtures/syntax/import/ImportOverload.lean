@@ -1,3 +1,4 @@
 import NotaDep
-infixl:65 " ⊕⊕ " => HMul.hMul
+prefix:100 "⊕⊕" => Nat.succ
+#check ⊕⊕2
 #check 1 ⊕⊕ 2

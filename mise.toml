@@ -120,17 +120,26 @@ run = [
   # M3b2a Task 2: synthetic import-notation corpus
   # (tests/fixtures/syntax/import/). NotaDep{,Meta}.olean build against
   # the REAL toolchain Init (bare `lean`, no LEAN_PATH). The importer
-  # dumps below set LEAN_PATH=$PWD so `import NotaDep` resolves — done
-  # BEFORE the stub Init.olean is built (deviation from the task brief,
-  # which built Init.olean first): `SearchPath.findWithExt` matches the
-  # FIRST search-path root with either a `pkg/` dir OR a `pkg.olean`
-  # file, so once LEAN_PATH=$PWD is set, a stub `Init.olean` sitting in
-  # this SAME directory shadows the real Init's submodules (e.g.
+  # dumps below set LEAN_PATH=$PWD so `import NotaDep` resolves.
+  #
+  # Invariant (not just "build order"): the committed stub `Init.olean`
+  # must NOT EXIST on disk while any dep build or importer dump below
+  # runs. `SearchPath.findWithExt` matches the FIRST search-path root
+  # with either a `pkg/` dir OR a `pkg.olean` file, so once
+  # LEAN_PATH=$PWD is set, a stub `Init.olean` sitting in this SAME
+  # directory shadows the real Init's submodules (e.g.
   # `Init.Data.List.Impl`) before the builtin sysroot entry is ever
   # tried, breaking every importer dump with "object file ... does not
-  # exist". Building Init.olean last avoids the shadow entirely; the
-  # stub is only ever consumed by leanr-side (Rust) hermetic tests, not
-  # by these `lean --run` dumps.
+  # exist". This is not merely avoided by running Init.olean's build
+  # last on a clean checkout — it's the fixture's OWN prior output
+  # sitting there from the previous regen that shadows it, so a
+  # committed `Init.olean` breaks every regen after the first unless
+  # it's removed first. Hence: `rm -f Init.olean` UNCONDITIONALLY as
+  # the very first step of this sequence, then dep builds, then
+  # dumps, then rebuild the stub `Init.olean` LAST. The stub is only
+  # ever consumed by leanr-side (Rust) hermetic tests, not by these
+  # `lean --run` dumps.
+  "sh -c 'cd tests/fixtures/syntax/import && rm -f Init.olean'",
   "sh -c 'cd tests/fixtures/syntax/import && lean NotaDep.lean -o NotaDep.olean && lean NotaDepMeta.lean -o NotaDepMeta.olean'",
   "sh -c 'cd tests/fixtures/syntax/import && for f in ImportMixfix ImportMunch ImportCat; do LEAN_PATH=$PWD lean --run ../dump_syntax.lean $f.lean > $f.stx.jsonl; done'",
   "sh -c 'cd tests/fixtures/syntax/import && LEAN_PATH=$PWD lean --run ../dump_syntax_elab.lean ImportOverload.lean > ImportOverload.stx.jsonl'",
