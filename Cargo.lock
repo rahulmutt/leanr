@@ -837,6 +837,7 @@ dependencies = [
  "leanr_kernel",
  "leanr_olean",
  "leanr_syntax",
+ "rayon",
 ]
 
 [[package]]

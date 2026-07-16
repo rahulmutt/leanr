@@ -11,3 +11,4 @@ leanr_syntax = { version = "0.1.0", path = "../leanr_syntax" }
 
 [dev-dependencies]
 blake3 = "1"
+rayon = "1"

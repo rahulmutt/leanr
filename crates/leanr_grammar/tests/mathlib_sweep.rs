@@ -10,6 +10,7 @@ use std::sync::Arc;
 use leanr_grammar::assemble;
 use leanr_kernel::bank::Store;
 use leanr_olean::SearchPath;
+use rayon::prelude::*;
 
 fn passlist_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/syntax/mathlib-passlist.txt")
@@ -94,36 +95,57 @@ fn mathlib_sweep_ratchet() {
     // nor regressed; they simply weren't swept.
     let swept: BTreeSet<String> = files.iter().map(|f| rel_of(f)).collect();
 
-    // Snapshot cache keyed by the file's import list.
-    let mut snap_cache: BTreeMap<Vec<String>, Option<Arc<leanr_syntax::grammar::GrammarSnapshot>>> =
-        BTreeMap::new();
-
-    let mut green: BTreeSet<String> = BTreeSet::new();
+    // Phase A: group files by import list, build each import set's
+    // snapshot once, in parallel. Each closure owns its Store; only the
+    // immutable Arc<GrammarSnapshot> crosses threads.
+    let mut by_imports: BTreeMap<Vec<String>, Vec<PathBuf>> = BTreeMap::new();
     for file in &files {
-        let rel = rel_of(file);
         let Ok(src) = std::fs::read_to_string(file) else {
             continue;
         };
-        let imports = leanr_syntax::parse_header_imports(&src);
-        let snap = snap_cache.entry(imports.clone()).or_insert_with(|| {
-            let mut st = Store::persistent();
-            let targets: Vec<_> = imports.iter().map(|m| dotted_to_name(m)).collect();
-            leanr_olean::load_closure(&sp, &targets, &mut st)
-                .ok()
-                .map(|loaded| Arc::new(assemble(&loaded, &st).snapshot))
-        });
-        let Some(snap) = snap else { continue };
-        let r = leanr_syntax::parse_module(&src, snap);
-        if r.tree.text() != src || !r.errors.is_empty() {
-            continue;
-        }
-        let Some(want) = oracle_dump(&mathlib, &lean_path, &githash, file) else {
-            continue;
-        };
-        if leanr_syntax::canon::canon_jsonl(&r.tree) == want {
-            green.insert(rel);
-        }
+        by_imports
+            .entry(leanr_syntax::parse_header_imports(&src))
+            .or_default()
+            .push(file.clone());
     }
+    let snaps: BTreeMap<Vec<String>, Option<Arc<leanr_syntax::grammar::GrammarSnapshot>>> =
+        by_imports
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_par_iter()
+            .map(|imports| {
+                let mut st = Store::persistent();
+                let targets: Vec<_> = imports.iter().map(|m| dotted_to_name(m)).collect();
+                let snap = leanr_olean::load_closure(&sp, &targets, &mut st)
+                    .ok()
+                    .map(|loaded| Arc::new(assemble(&loaded, &st).snapshot));
+                (imports, snap)
+            })
+            .collect();
+
+    // Phase B: sweep all files in parallel. oracle_dump subprocesses
+    // parallelize here too (the real wall-clock win on a cold cache).
+    let green: BTreeSet<String> = by_imports
+        .par_iter()
+        .flat_map(|(imports, group)| {
+            let snap = &snaps[imports];
+            group
+                .par_iter()
+                .filter_map(|file| {
+                    let snap = snap.as_ref()?;
+                    let rel = rel_of(file);
+                    let src = std::fs::read_to_string(file).ok()?;
+                    let r = leanr_syntax::parse_module(&src, snap);
+                    if r.tree.text() != src || !r.errors.is_empty() {
+                        return None;
+                    }
+                    let want = oracle_dump(&mathlib, &lean_path, &githash, file)?;
+                    (leanr_syntax::canon::canon_jsonl(&r.tree) == want).then_some(rel)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
 
     let committed: BTreeSet<String> = std::fs::read_to_string(passlist_path())
         .unwrap_or_default()
