@@ -28,7 +28,10 @@ fn notadep_entries_decode_typed() {
         })
         .collect();
     for expected in ["⊕⊕", "⊗⊗", "⋄⋄", "‼", "⟪", "⟫", "+++", "wob", "wrap["] {
-        assert!(tokens.contains(&expected), "missing token {expected:?} in {tokens:?}");
+        assert!(
+            tokens.contains(&expected),
+            "missing token {expected:?} in {tokens:?}"
+        );
     }
 
     // The custom category arrives as a category entry named `widget`.
@@ -51,15 +54,16 @@ fn notadep_entries_decode_typed() {
         .filter(|e| matches!(e.scope, EntryScope::Scoped(_)))
         .collect();
     assert!(!scoped.is_empty(), "expected a scoped entry for ⊖⊖");
-    let EntryScope::Scoped(ns) = scoped[0].scope else { unreachable!() };
+    let EntryScope::Scoped(ns) = scoped[0].scope else {
+        unreachable!()
+    };
     assert_eq!(name_string(&st, Some(ns)), "NotaDep");
 
     let global_parsers = md
         .parser_entries
         .iter()
         .filter(|e| {
-            matches!(e.scope, EntryScope::Global)
-                && matches!(e.entry, ParserEntry::Parser { .. })
+            matches!(e.scope, EntryScope::Global) && matches!(e.entry, ParserEntry::Parser { .. })
         })
         .count();
     // 6 mixfix/notation + 3 widget syntaxes + wrap[] = 10 (adjust ONLY

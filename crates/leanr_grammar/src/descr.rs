@@ -74,7 +74,9 @@ impl Cx<'_> {
             Some("ParserDescr") => Ok(Interpreted::Leading(self.descr(value)?)),
             Some("TrailingParserDescr") => Ok(Interpreted::Trailing(self.descr(value)?)),
             Some("Parser.Parser") | Some("Parser.TrailingParser") => Err(SkipReason::RawParser),
-            _ => Err(SkipReason::UnsupportedShape("unexpected parser constant type")),
+            _ => Err(SkipReason::UnsupportedShape(
+                "unexpected parser constant type",
+            )),
         }
     }
 
@@ -195,7 +197,9 @@ impl Cx<'_> {
                 let ascii = trim_symbol(&self.eval_string(args[1])?);
                 Ok(Prim::OrElse(vec![Prim::Symbol(uni), Prim::Symbol(ascii)]))
             }
-            _ => Err(SkipReason::UnsupportedShape("unknown ParserDescr constructor")),
+            _ => Err(SkipReason::UnsupportedShape(
+                "unknown ParserDescr constructor",
+            )),
         }
     }
 
@@ -266,11 +270,14 @@ impl Cx<'_> {
     ///     (anonymous-rooted string chain; the elaborator emits these for
     ///     name literals up to 8 components — Init/Prelude.lean)
     ///   - `Name.mkSimple s` (App, 1 arg)              → [s]
+    ///
     /// Anything else → UnsupportedShape("name literal").
     fn push_name_parts(&self, e: ExprId, parts: &mut Vec<String>) -> Result<(), SkipReason> {
         let (head, args) = self.app_spine(e);
         let Some(head) = head else {
-            return Err(SkipReason::UnsupportedShape("name literal head is not a const"));
+            return Err(SkipReason::UnsupportedShape(
+                "name literal head is not a const",
+            ));
         };
         let full = self.name_string(head);
         let name = strip_lean(&full);
@@ -534,4 +541,3 @@ mod tests {
         assert!(dbg.contains("widget"), "no widget category in {dbg}");
     }
 }
-

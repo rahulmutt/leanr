@@ -39,6 +39,12 @@ crates/leanr_syntax/fuzz/Cargo.lock
 # after this rule).
 crates/leanr_syntax/fuzz/corpus/parse_module/
 
+# `mise run fuzz:olean` / `parse:acceptance` mutate this corpus dir the
+# same way (see the parse_module/ rule above): hundreds of untracked
+# discovered inputs per run. The 2 committed seed fixtures under
+# module_data/ (Sample.olean, SampleRich.olean) stay tracked.
+crates/leanr_olean/fuzz/corpus/module_data/
+
 # Mathlib checkout + prebuilt .oleans (M1-final Mathlib-scale acceptance
 # sweep). Cloned by `scripts/mathlib-fetch.sh`; local, network-fetched, not
 # committed. (No separate `.lean4checker/` clone: `scripts/bench-mathlib.sh`

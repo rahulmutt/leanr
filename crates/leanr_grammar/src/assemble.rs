@@ -97,7 +97,10 @@ pub fn assemble(modules: &[(Arc<Name>, ModuleData)], store: &Store) -> Assembled
             }
         }
     }
-    AssembledGrammar { snapshot: b.finish(), skipped }
+    AssembledGrammar {
+        snapshot: b.finish(),
+        skipped,
+    }
 }
 
 fn map_behavior(b: leanr_olean::CatBehavior) -> leanr_syntax::grammar::LeadingIdentBehavior {

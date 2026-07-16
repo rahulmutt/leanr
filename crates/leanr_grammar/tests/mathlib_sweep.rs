@@ -12,8 +12,7 @@ use leanr_kernel::bank::Store;
 use leanr_olean::SearchPath;
 
 fn passlist_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/syntax/mathlib-passlist.txt")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/syntax/mathlib-passlist.txt")
 }
 
 /// Oracle dump with per-file cache under target/leanr-stx-cache/.
@@ -63,7 +62,11 @@ fn mathlib_sweep_ratchet() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(usize::MAX);
 
-    let roots: Vec<PathBuf> = lean_path.split(':').filter(|s| !s.is_empty()).map(Into::into).collect();
+    let roots: Vec<PathBuf> = lean_path
+        .split(':')
+        .filter(|s| !s.is_empty())
+        .map(Into::into)
+        .collect();
     let sp = SearchPath::new(roots);
 
     // Enumerate: Mathlib/**/*.lean + each package's source tree.
@@ -83,15 +86,18 @@ fn mathlib_sweep_ratchet() {
 
     let mut green: Vec<String> = Vec::new();
     for file in &files {
-        let rel = file.strip_prefix(&mathlib).unwrap_or(file).display().to_string();
-        let Ok(src) = std::fs::read_to_string(file) else { continue };
+        let rel = file
+            .strip_prefix(&mathlib)
+            .unwrap_or(file)
+            .display()
+            .to_string();
+        let Ok(src) = std::fs::read_to_string(file) else {
+            continue;
+        };
         let imports = leanr_syntax::parse_header_imports(&src);
         let snap = snap_cache.entry(imports.clone()).or_insert_with(|| {
             let mut st = Store::persistent();
-            let targets: Vec<_> = imports
-                .iter()
-                .map(|m| dotted_to_name(m))
-                .collect();
+            let targets: Vec<_> = imports.iter().map(|m| dotted_to_name(m)).collect();
             leanr_olean::load_closure(&sp, &targets, &mut st)
                 .ok()
                 .map(|loaded| Arc::new(assemble(&loaded, &st).snapshot))
@@ -101,7 +107,9 @@ fn mathlib_sweep_ratchet() {
         if r.tree.text() != src || !r.errors.is_empty() {
             continue;
         }
-        let Some(want) = oracle_dump(&mathlib, &lean_path, &githash, file) else { continue };
+        let Some(want) = oracle_dump(&mathlib, &lean_path, &githash, file) else {
+            continue;
+        };
         if leanr_syntax::canon::canon_jsonl(&r.tree) == want {
             green.push(rel);
         }
@@ -119,7 +127,11 @@ fn mathlib_sweep_ratchet() {
     let newly_green: Vec<_> = green.iter().filter(|f| !committed.contains(f)).collect();
     eprintln!(
         "sweep: {} files, {} green, {} on pass-list, {} regressions, {} newly green",
-        files.len(), green.len(), committed.len(), regressions.len(), newly_green.len()
+        files.len(),
+        green.len(),
+        committed.len(),
+        regressions.len(),
+        newly_green.len()
     );
 
     if std::env::var("LEANR_PASSLIST_UPDATE").as_deref() == Ok("1") {
@@ -134,11 +146,16 @@ fn mathlib_sweep_ratchet() {
         std::fs::write(passlist_path(), out).unwrap();
         return;
     }
-    assert!(regressions.is_empty(), "pass-list regressions: {regressions:#?}");
+    assert!(
+        regressions.is_empty(),
+        "pass-list regressions: {regressions:#?}"
+    );
 }
 
 fn collect_lean_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {
@@ -157,7 +174,10 @@ fn dotted_to_name(dotted: &str) -> Arc<leanr_kernel::Name> {
     use leanr_kernel::Name;
     let mut n = Arc::new(Name::Anonymous);
     for part in dotted.split('.') {
-        n = Arc::new(Name::Str { parent: n, part: part.to_string() });
+        n = Arc::new(Name::Str {
+            parent: n,
+            part: part.to_string(),
+        });
     }
     n
 }

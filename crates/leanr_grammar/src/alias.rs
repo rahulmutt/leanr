@@ -19,13 +19,19 @@ pub(crate) enum AliasPrim {
 fn seq2(a: Prim, b: Prim) -> Prim {
     // Flatten nested andthen chains like the builtin ports do.
     match a {
-        Prim::Seq(mut v) => { v.push(b); Prim::Seq(v) }
+        Prim::Seq(mut v) => {
+            v.push(b);
+            Prim::Seq(v)
+        }
         a => Prim::Seq(vec![a, b]),
     }
 }
 fn or2(a: Prim, b: Prim) -> Prim {
     match a {
-        Prim::OrElse(mut v) => { v.push(b); Prim::OrElse(v) }
+        Prim::OrElse(mut v) => {
+            v.push(b);
+            Prim::OrElse(v)
+        }
         a => Prim::OrElse(vec![a, b]),
     }
 }
@@ -61,8 +67,9 @@ pub(crate) fn lookup(alias: &str) -> Option<AliasPrim> {
         "colEq" => Const(Prim::CheckColEq),
         "lineEq" => Const(Prim::CheckLineEq),
         // pretty-printer hints: parse nothing / transparent
-        "ppSpace" | "ppHardSpace" | "ppLine" | "ppAllowUngrouped"
-        | "ppHardLineUnlessUngrouped" => Epsilon,
+        "ppSpace" | "ppHardSpace" | "ppLine" | "ppAllowUngrouped" | "ppHardLineUnlessUngrouped" => {
+            Epsilon
+        }
         "ppGroup" | "ppRealGroup" | "ppRealFill" | "ppIndent" | "ppDedent"
         | "ppDedentIfGrouped" | "patternIgnore" => Transparent,
         _ => return None,
@@ -82,18 +89,28 @@ mod tests {
         assert!(matches!(lookup("many"), Some(AliasPrim::Unary(_))));
         assert!(matches!(lookup("ppSpace"), Some(AliasPrim::Epsilon)));
         assert!(matches!(lookup("ppIndent"), Some(AliasPrim::Transparent)));
-        assert!(matches!(lookup("num"), Some(AliasPrim::Const(Prim::NumLit))));
-        assert!(matches!(lookup("colGt"), Some(AliasPrim::Const(Prim::CheckColGt))));
+        assert!(matches!(
+            lookup("num"),
+            Some(AliasPrim::Const(Prim::NumLit))
+        ));
+        assert!(matches!(
+            lookup("colGt"),
+            Some(AliasPrim::Const(Prim::CheckColGt))
+        ));
         assert!(lookup("declModifiers").is_none()); // deliberately absent → skip
         assert!(lookup("nonsense").is_none());
     }
 
     #[test]
     fn binary_builders_build() {
-        let Some(AliasPrim::Binary(f)) = lookup("andthen") else { panic!() };
+        let Some(AliasPrim::Binary(f)) = lookup("andthen") else {
+            panic!()
+        };
         let p = f(Prim::Ident, Prim::NumLit);
         assert!(matches!(p, Prim::Seq(ref v) if v.len() == 2));
-        let Some(AliasPrim::Binary(g)) = lookup("orelse") else { panic!() };
+        let Some(AliasPrim::Binary(g)) = lookup("orelse") else {
+            panic!()
+        };
         assert!(matches!(g(Prim::Ident, Prim::NumLit), Prim::OrElse(_)));
     }
 }

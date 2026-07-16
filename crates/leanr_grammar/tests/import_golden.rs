@@ -34,7 +34,11 @@ fn importers_parse_green_against_oracle_dumps() {
         for (i, (g_line, w_line)) in got.lines().zip(want.lines()).enumerate() {
             assert_eq!(g_line, w_line, "{stem} line {i}");
         }
-        assert_eq!(got.lines().count(), want.lines().count(), "{stem} line count");
+        assert_eq!(
+            got.lines().count(),
+            want.lines().count(),
+            "{stem} line count"
+        );
     }
 }
 
@@ -48,8 +52,9 @@ fn scoped_entry_is_skipped_and_recorded() {
     // `Parser { decl: NotaDep.term_⊖⊖_, .. }`). Pin the recorded skip to
     // that exact decl, not just the reason variant.
     assert!(
-        g.skipped.iter().any(|s| s.reason == SkipReason::ScopedInactive
-            && s.decl.ends_with("term_⊖⊖_")),
+        g.skipped
+            .iter()
+            .any(|s| s.reason == SkipReason::ScopedInactive && s.decl.ends_with("term_⊖⊖_")),
         "scoped ⊖⊖ decl should be recorded: {:?}",
         g.skipped
     );
@@ -69,8 +74,9 @@ fn raw_parser_entry_skips_but_tokens_fold() {
     let name = Arc::new(leanr_kernel::Name::Anonymous);
     let g = assemble(&[(name, md)], &st);
     assert!(
-        g.skipped.iter().any(|s| s.reason == SkipReason::RawParser
-            && s.decl.ends_with("rawWidget")),
+        g.skipped
+            .iter()
+            .any(|s| s.reason == SkipReason::RawParser && s.decl.ends_with("rawWidget")),
         "raw Parser skip missing: {:?}",
         g.skipped
     );

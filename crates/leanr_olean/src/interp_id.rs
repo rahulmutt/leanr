@@ -522,10 +522,16 @@ impl<'s> InterpId<'s> {
         };
         let (scope, payload) = match (tag, fields.len()) {
             (0, 1) => (crate::EntryScope::Global, &fields[0]),
-            (1, 2) => (crate::EntryScope::Scoped(self.name_req(&fields[0])?), &fields[1]),
+            (1, 2) => (
+                crate::EntryScope::Scoped(self.name_req(&fields[0])?),
+                &fields[1],
+            ),
             _ => return Err(bad("ScopedEnvExtension.Entry")),
         };
-        Ok(crate::ScopedParserEntry { scope, entry: self.parser_entry(payload)? })
+        Ok(crate::ScopedParserEntry {
+            scope,
+            entry: self.parser_entry(payload)?,
+        })
     }
 
     /// oracle: ParserExtension.OLeanEntry (Extension.lean:57-62), tag order.
@@ -544,7 +550,12 @@ impl<'s> InterpId<'s> {
     /// (global) / `Ctor{tag:1, fields:2}` (scoped) — both as hypothesized,
     /// needing no adjustment.
     fn parser_entry(&mut self, r: &Raw) -> Result<crate::ParserEntry, OleanError> {
-        let RawValue::Ctor { tag, fields, scalars } = &**r else {
+        let RawValue::Ctor {
+            tag,
+            fields,
+            scalars,
+        } = &**r
+        else {
             return Err(bad("ParserExtension.OLeanEntry"));
         };
         match (tag, fields.len()) {

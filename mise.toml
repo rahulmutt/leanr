@@ -192,7 +192,13 @@ run = "sh -c 'LEANR_MATHLIB_DIR=\"$PWD/.mathlib\" LEANR_OLEAN_PATH=\"$(cd .mathl
 [tasks."passlist:update"]
 description = "Rewrite tests/fixtures/syntax/mathlib-passlist.txt from a fresh sweep (review the diff before committing)"
 depends = ["elan:bootstrap"]
-run = "sh -c 'LEANR_PASSLIST_UPDATE=1 LEANR_MATHLIB_DIR=\"$PWD/.mathlib\" LEANR_OLEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo test --release -p leanr_grammar --test mathlib_sweep -- --ignored --nocapture'"
+# LEANR_SWEEP_LIMIT="" neutralizes any smoke-run limit leaked in from the
+# calling shell's environment (e.g. a prior `LEANR_SWEEP_LIMIT=N mise run
+# parse:mathlib` smoke check): mathlib_sweep.rs parses it via
+# `.and_then(|s| s.parse().ok())`, so an empty string fails to parse →
+# None → unwrap_or(usize::MAX), i.e. unlimited. A leaked non-empty limit
+# here would silently truncate the pass-list this task writes.
+run = "sh -c 'LEANR_SWEEP_LIMIT=\"\" LEANR_PASSLIST_UPDATE=1 LEANR_MATHLIB_DIR=\"$PWD/.mathlib\" LEANR_OLEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo test --release -p leanr_grammar --test mathlib_sweep -- --ignored --nocapture'"
 
 [tasks."build:differential"]
 description = "M2 differential oracles vs pinned lake: M2a bridge/import/module-set + M2b probe-project artifact byte-diff (needs mathlib:fetch + elan)"

@@ -59,8 +59,15 @@ pub enum CatBehavior {
 pub enum ParserEntry {
     Token(String),
     Kind(NameId),
-    Category { cat: NameId, decl: NameId, behavior: CatBehavior },
-    Parser { cat: NameId, decl: NameId },
+    Category {
+        cat: NameId,
+        decl: NameId,
+        behavior: CatBehavior,
+    },
+    Parser {
+        cat: NameId,
+        decl: NameId,
+    },
 }
 
 /// Scope wrapper (oracle `ScopedEnvExtension.Entry`): `local` never
