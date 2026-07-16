@@ -515,9 +515,89 @@ impl<'s> InterpId<'s> {
         })
     }
 
+    /// oracle: ScopedEnvExtension.Entry — tag 0 global(v), tag 1 scoped(ns, v).
+    fn scoped_parser_entry(&mut self, r: &Raw) -> Result<crate::ScopedParserEntry, OleanError> {
+        let RawValue::Ctor { tag, fields, .. } = &**r else {
+            return Err(bad("ScopedEnvExtension.Entry"));
+        };
+        let (scope, payload) = match (tag, fields.len()) {
+            (0, 1) => (crate::EntryScope::Global, &fields[0]),
+            (1, 2) => (
+                crate::EntryScope::Scoped(self.name_req(&fields[0])?),
+                &fields[1],
+            ),
+            _ => return Err(bad("ScopedEnvExtension.Entry")),
+        };
+        Ok(crate::ScopedParserEntry {
+            scope,
+            entry: self.parser_entry(payload)?,
+        })
+    }
+
+    /// oracle: ParserExtension.OLeanEntry (Extension.lean:57-62), tag order.
+    ///
+    /// Empirical pin (NotaDep.olean, via a temporary eprintln dumping each
+    /// entry's `(tag, fields.len(), scalars)` before the `match`): the
+    /// `widget` category entry decoded as `Ctor{tag:2, fields:2,
+    /// scalars:[0,0,0,0,0,0,0,0]}` — `behavior` (`LeadingIdentBehavior`)
+    /// arrives as a SCALAR byte (the enum discriminant at `scalars[0]`,
+    /// padded to a word), not a boxed pointer field. This matches the
+    /// brief's first hypothesis and the `DefinitionSafety`/`QuotKind`
+    /// pattern elsewhere in this file, not the boxed-`Scalar`-field
+    /// pattern. Also confirmed: the raw `ModuleData.entries` pair is
+    /// `Ctor{tag:0, fields:2}` (`Name × Array EnvExtensionEntry`) and the
+    /// `ScopedEnvExtension.Entry` wrapper is `Ctor{tag:0, fields:1}`
+    /// (global) / `Ctor{tag:1, fields:2}` (scoped) — both as hypothesized,
+    /// needing no adjustment.
+    fn parser_entry(&mut self, r: &Raw) -> Result<crate::ParserEntry, OleanError> {
+        let RawValue::Ctor {
+            tag,
+            fields,
+            scalars,
+        } = &**r
+        else {
+            return Err(bad("ParserExtension.OLeanEntry"));
+        };
+        match (tag, fields.len()) {
+            (0, 1) => Ok(crate::ParserEntry::Token(string(&fields[0])?)),
+            (1, 1) => Ok(crate::ParserEntry::Kind(self.name_req(&fields[0])?)),
+            (2, 2) => Ok(crate::ParserEntry::Category {
+                cat: self.name_req(&fields[0])?,
+                decl: self.name_req(&fields[1])?,
+                behavior: match scalars.first().copied() {
+                    Some(0) => crate::CatBehavior::Default,
+                    Some(1) => crate::CatBehavior::Symbol,
+                    Some(2) => crate::CatBehavior::Both,
+                    _ => return Err(bad("LeadingIdentBehavior")),
+                },
+            }),
+            (3, 3) => {
+                let _prio = nat(&fields[2])?; // validated, dropped
+                Ok(crate::ParserEntry::Parser {
+                    cat: self.name_req(&fields[0])?,
+                    decl: self.name_req(&fields[1])?,
+                })
+            }
+            _ => Err(bad("ParserExtension.OLeanEntry")),
+        }
+    }
+
     /// ModuleData (Environment.lean:109-129).
     pub(crate) fn module_data(&mut self, root: &Raw) -> Result<crate::ModuleData, OleanError> {
         let (f, s) = ctor(root, 0, 5, "ModuleData")?;
+        // entries : Array (Name × Array EnvExtensionEntry). Only the
+        // parserExtension pair is decoded (M3b2a); others stay opaque.
+        let mut parser_entries = Vec::new();
+        for pair in array(&f[4])? {
+            let (pf, _) = ctor(pair, 0, 2, "ModuleData.entries pair")?;
+            let ext_name = self.name(&pf[0])?;
+            if self.st.to_name(None, ext_name).to_string() != "Lean.Parser.parserExtension" {
+                continue;
+            }
+            for e in array(&pf[1])? {
+                parser_entries.push(self.scoped_parser_entry(e)?);
+            }
+        }
         Ok(crate::ModuleData {
             is_module: boolean(s.first(), "ModuleData.isModule")?,
             imports: array(&f[0])?
@@ -537,6 +617,7 @@ impl<'s> InterpId<'s> {
                 .map(|n| self.name_req(n))
                 .collect::<Result<_, _>>()?,
             num_entries: array(&f[4])?.len(),
+            parser_entries,
         })
     }
 }

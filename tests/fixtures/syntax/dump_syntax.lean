@@ -12,6 +12,22 @@ Json.compress prints object keys RBMap-sorted = alphabetical, matching
 leanr's canon.rs writer.
 
 Usage: lean --run dump_syntax.lean <file.lean>   (pinned toolchain)
+
+M3b2a Task 2 addendum: `Lean.enableInitializersExecution` MUST run
+before `Parser.parseHeader`/`processHeader` (same fact documented in
+`dump_syntax_elab.lean`'s module doc) or `importModules (loadExts :=
+true)` throws internally and `processHeader` silently falls back to an
+EMPTY environment — invisible for every prior M3a/M3b1 fixture (none
+imports a LOCAL module with its own notation/parser extensions; `import
+Lean` itself doesn't need loadExts to round-trip a parse-only dump), but
+fatal for the M3b2a `import/` corpus: `NotaDep`'s custom notation must
+actually be live in `env` for the importer fixtures' term parser to
+recognize e.g. `⊕⊕`, or the parser just stops at the plain numeral and
+silently drops the rest of the line into that command's trailing span
+(confirmed empirically: the header parses and `import NotaDep`
+succeeds syntactically either way — only the LATER environment-driven
+parsing is affected, which is why this was never caught by the M3a
+corpus's own oracle_golden gate).
 -/
 import Lean
 
@@ -33,6 +49,10 @@ partial def toCanon : Syntax → Json
 unsafe def main (args : List String) : IO Unit := do
   let fileName := args.head!
   let input ← IO.FS.readFile fileName
+  -- Must run before parseHeader/processHeader (module doc above) or
+  -- `importModules (loadExts := true)` throws internally and
+  -- `processHeader` silently falls back to an empty environment.
+  Lean.enableInitializersExecution
   Lean.initSearchPath (← Lean.findSysroot)
   let inputCtx := Parser.mkInputContext input fileName
   let (header, parserState, messages) ← Parser.parseHeader inputCtx

@@ -89,8 +89,8 @@ enum Command {
         #[command(subcommand)]
         command: CacheCommand,
     },
-    /// Parse a Lean source file with the builtin grammar (M3a: no
-    /// imported notation yet) and report syntax errors.
+    /// Parse a Lean source file, folding in notation from its imports
+    /// when a search root is available, and report syntax errors.
     Parse {
         /// The .lean file to parse.
         file: PathBuf,
@@ -98,6 +98,16 @@ enum Command {
         /// comparable form; see leanr_syntax::canon).
         #[arg(long)]
         dump: bool,
+        /// Olean search roots for resolving the file's imports (repeatable,
+        /// highest priority first; combined with LEAN_PATH and
+        /// `lean --print-libdir`, like `check`). Without any resolvable
+        /// root the file parses under the builtin grammar only.
+        #[arg(long = "path")]
+        path: Vec<PathBuf>,
+        /// List imported parser entries that were skipped (raw parsers,
+        /// unknown aliases, scoped) to stderr.
+        #[arg(long)]
+        verbose: bool,
     },
 }
 
@@ -208,7 +218,12 @@ fn main() -> ExitCode {
             no_remote,
         ),
         Command::Cache { command } => cache_cmd(command),
-        Command::Parse { file, dump } => parse_cmd(&file, dump),
+        Command::Parse {
+            file,
+            dump,
+            path,
+            verbose,
+        } => parse_cmd(&file, dump, path, verbose),
     }
 }
 
@@ -264,7 +279,7 @@ fn olean_decls(path: &std::path::Path) -> ExitCode {
     }
 }
 
-fn parse_cmd(file: &Path, dump: bool) -> ExitCode {
+fn parse_cmd(file: &Path, dump: bool, path: Vec<PathBuf>, verbose: bool) -> ExitCode {
     let bytes = match std::fs::read(file) {
         Ok(b) => b,
         Err(e) => {
@@ -279,8 +294,44 @@ fn parse_cmd(file: &Path, dump: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let snap = leanr_syntax::builtin::snapshot();
-    let result = leanr_syntax::parse_module(&src, &snap);
+    let imports = leanr_syntax::parse_header_imports(&src);
+    let assembled; // keep alive alongside the `&snapshot` borrow below
+    let snap = if imports.is_empty() {
+        None
+    } else {
+        let roots = discover_roots(path);
+        if roots.is_empty() {
+            None // no roots: builtin-only (documented fallback)
+        } else {
+            let sp = SearchPath::new(roots);
+            let targets: Vec<_> = imports.iter().map(|m| parse_module_name(m)).collect();
+            let mut st = leanr_kernel::bank::Store::persistent();
+            match leanr_olean::load_closure(&sp, &targets, &mut st) {
+                Ok(loaded) => {
+                    assembled = leanr_grammar::assemble(&loaded, &st);
+                    if verbose {
+                        for s in &assembled.skipped {
+                            eprintln!("skipped parser entry {} ({:?})", s.decl, s.reason);
+                        }
+                    }
+                    Some(&assembled.snapshot)
+                }
+                Err(e) => {
+                    eprintln!("error[E0306]: cannot load imports: {e}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    };
+    let builtin;
+    let snap = match snap {
+        Some(s) => s,
+        None => {
+            builtin = leanr_syntax::builtin::snapshot();
+            &builtin
+        }
+    };
+    let result = leanr_syntax::parse_module(&src, snap);
     if dump {
         print!("{}", leanr_syntax::canon::canon_jsonl(&result.tree));
     }

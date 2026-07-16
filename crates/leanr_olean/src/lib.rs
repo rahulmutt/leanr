@@ -212,4 +212,6 @@ mod module_data;
 mod raw;
 
 pub use loader::{load_closure, LoadError, SearchPath};
-pub use module_data::{Import, ModuleData, PartKind};
+pub use module_data::{
+    CatBehavior, EntryScope, Import, ModuleData, ParserEntry, PartKind, ScopedParserEntry,
+};

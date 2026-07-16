@@ -123,6 +123,15 @@ implementation or a thin frontend. Full design:
   (`tests/fixtures/syntax/`, dumped by `dump_syntax.lean`, regen via
   `mise run fixtures:regen`). No workspace-crate dependencies.
   `leanr parse [--dump]` in the CLI.
+- `crates/leanr_grammar` — the bridge from decoded `.olean`
+  parser-extension entries to the parser's grammar (M3b2a). Interprets
+  `ParserDescr` constant values from the term bank into `grammar::Prim`
+  productions (skip-and-record for anything uninterpretable — raw
+  `Parser` functions, unknown aliases) and assembles the per-import-set
+  base `GrammarSnapshot` (builtins + imported tokens/kinds/categories/
+  parsers, in closure order). Depends on `leanr_olean`, `leanr_kernel`,
+  `leanr_syntax`; exists so the untrusted-bytes decoder never
+  interprets and the parser keeps zero workspace deps.
 - `crates/leanr_cli` — the `leanr` binary. Thin: argument parsing and
   printing only, so CLI and (future) LSP can never diverge in behavior.
 

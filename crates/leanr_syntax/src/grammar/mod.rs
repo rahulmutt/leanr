@@ -832,6 +832,45 @@ impl SnapshotBuilder {
         }
     }
 
+    /// Register an already-shaped leading production — unlike
+    /// `leading2`, `prim` arrives pre-wrapped (M3b2a Task 4: an
+    /// interpreted, imported `ParserDescr`'s own `node` constructor
+    /// already produced the `Prim::Node`, so wrapping it again here
+    /// would double-wrap it). Otherwise identical to `leading2`: harvest
+    /// its `Symbol`s into the token table, index it by every first token
+    /// it can start with, and push it onto the category's
+    /// `leading_parsers` list.
+    pub fn leading_prim(&mut self, cat: &str, prim: Prim) {
+        self.harvest_tokens(&prim);
+        let fs = index_entries(&prim);
+        let c = self
+            .categories
+            .get_mut(cat)
+            .expect("category registered before leading_prim");
+        let idx = c.leading_parsers.len();
+        c.leading_parsers.push(prim);
+        for f in fs {
+            c.leading.push((f, idx));
+        }
+    }
+
+    /// Trailing counterpart of [`Self::leading_prim`] — `prim` arrives
+    /// already `Prim::TrailingNode`-wrapped; otherwise identical to
+    /// `trailing2`.
+    pub fn trailing_prim(&mut self, cat: &str, prim: Prim) {
+        self.harvest_tokens(&prim);
+        let fs = index_entries(&prim);
+        let c = self
+            .categories
+            .get_mut(cat)
+            .expect("category registered before trailing_prim");
+        let idx = c.trailing_parsers.len();
+        c.trailing_parsers.push(prim);
+        for f in fs {
+            c.trailing.push((f, idx));
+        }
+    }
+
     /// Register a leading parser candidate with NO extra `Node` wrap —
     /// for productions whose oracle shape is a bare leaf (`Prim::Ident`,
     /// a `Syntax.ident`) or that already self-wrap (`Prim::NumLit`
@@ -1365,6 +1404,50 @@ mod ft_index_tests {
         assert_eq!(
             any_count_for_declaration, 0,
             "`declaration` must no longer be indexed under FirstTok::Any"
+        );
+    }
+}
+
+/// M3b2a Task 4: the three new seams — `builtin::builder()` (a
+/// pre-registered `SnapshotBuilder` `leanr_grammar` can append to before
+/// `finish()`) and `leading_prim`/`trailing_prim` (registering an
+/// already-`Node`/`TrailingNode`-shaped `Prim`, as an interpreted
+/// imported `ParserDescr` arrives).
+#[cfg(test)]
+mod builder_seam_tests {
+    use super::*;
+
+    #[test]
+    fn leading_prim_registers_and_dispatches() {
+        let mut b = crate::builtin::builder();
+        let kind = b.kind("Test.imported");
+        b.token("@@@");
+        b.leading_prim(
+            "term",
+            Prim::Node {
+                kind,
+                prec: Some(LEAD_PREC),
+                body: std::sync::Arc::new(Prim::Seq(vec![
+                    Prim::Symbol("@@@".into()),
+                    Prim::Category {
+                        name: "term".into(),
+                        rbp: MAX_PREC,
+                    },
+                ])),
+            },
+        );
+        let snap = b.finish();
+        let r = crate::parse_module("#check @@@1\n", &snap);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert_eq!(r.tree.text(), "#check @@@1\n");
+        assert!(crate::canon::canon_jsonl(&r.tree).contains("Test.imported"));
+    }
+
+    #[test]
+    fn builder_finish_equals_builtin_snapshot() {
+        assert_eq!(
+            crate::builtin::builder().finish().fingerprint(),
+            crate::builtin::snapshot().fingerprint()
         );
     }
 }

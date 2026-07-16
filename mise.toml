@@ -117,6 +117,33 @@ run = [
   # observe; see the `fixtures:regen-notation` task below, which this
   # task also depends on.
   "sh -c 'for f in tests/fixtures/syntax/*.lean; do b=$(basename \"$f\"); case \"$b\" in dump_syntax.lean|dump_syntax_elab.lean|Notation*.lean) continue;; esac; lean --run tests/fixtures/syntax/dump_syntax.lean \"$f\" > \"${f%.lean}.stx.jsonl\"; done'",
+  # M3b2a Task 2: synthetic import-notation corpus
+  # (tests/fixtures/syntax/import/). NotaDep{,Meta}.olean build against
+  # the REAL toolchain Init (bare `lean`, no LEAN_PATH). The importer
+  # dumps below set LEAN_PATH=$PWD so `import NotaDep` resolves.
+  #
+  # Invariant (not just "build order"): the committed stub `Init.olean`
+  # must NOT EXIST on disk while any dep build or importer dump below
+  # runs. `SearchPath.findWithExt` matches the FIRST search-path root
+  # with either a `pkg/` dir OR a `pkg.olean` file, so once
+  # LEAN_PATH=$PWD is set, a stub `Init.olean` sitting in this SAME
+  # directory shadows the real Init's submodules (e.g.
+  # `Init.Data.List.Impl`) before the builtin sysroot entry is ever
+  # tried, breaking every importer dump with "object file ... does not
+  # exist". This is not merely avoided by running Init.olean's build
+  # last on a clean checkout — it's the fixture's OWN prior output
+  # sitting there from the previous regen that shadows it, so a
+  # committed `Init.olean` breaks every regen after the first unless
+  # it's removed first. Hence: `rm -f Init.olean` UNCONDITIONALLY as
+  # the very first step of this sequence, then dep builds, then
+  # dumps, then rebuild the stub `Init.olean` LAST. The stub is only
+  # ever consumed by leanr-side (Rust) hermetic tests, not by these
+  # `lean --run` dumps.
+  "sh -c 'cd tests/fixtures/syntax/import && rm -f Init.olean'",
+  "sh -c 'cd tests/fixtures/syntax/import && lean NotaDep.lean -o NotaDep.olean && lean NotaDepMeta.lean -o NotaDepMeta.olean'",
+  "sh -c 'cd tests/fixtures/syntax/import && for f in ImportMixfix ImportMunch ImportCat; do LEAN_PATH=$PWD lean --run ../dump_syntax.lean $f.lean > $f.stx.jsonl; done'",
+  "sh -c 'cd tests/fixtures/syntax/import && LEAN_PATH=$PWD lean --run ../dump_syntax_elab.lean ImportOverload.lean > ImportOverload.stx.jsonl'",
+  "sh -c 'cd tests/fixtures/syntax/import && lean Init.lean -o Init.olean'",
 ]
 depends_post = ["fixtures:regen-notation"]
 
@@ -156,6 +183,22 @@ run = "scripts/mathlib-fetch.sh"
 description = "Kernel-check all of pinned Mathlib in parallel (needs mathlib:fetch first). Verified empirically: a package's oleans land at <pkg>/.lake/build/lib/lean (not .../lib), and each of Mathlib's ~15 dependencies (Batteries, Aesop, Qq, ...) builds separately under .mathlib/.lake/packages/<dep>/.lake/build/lib/lean — so this uses `lake env printenv LEAN_PATH` (run from inside .mathlib) to get Lake's own resolved closure instead of a single hardcoded --path."
 depends = ["elan:bootstrap"]
 run = "sh -c 'LEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo run --release -p leanr_cli -- check --all'"
+
+[tasks."parse:mathlib"]
+description = "M3b2a Mathlib parse sweep vs the pass-list ratchet (needs mathlib:fetch). LEANR_SWEEP_LIMIT=N for a smoke run."
+depends = ["elan:bootstrap"]
+run = "sh -c 'LEANR_MATHLIB_DIR=\"$PWD/.mathlib\" LEANR_OLEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo test --release -p leanr_grammar --test mathlib_sweep -- --ignored --nocapture'"
+
+[tasks."passlist:update"]
+description = "Rewrite tests/fixtures/syntax/mathlib-passlist.txt from a fresh sweep (review the diff before committing)"
+depends = ["elan:bootstrap"]
+# LEANR_SWEEP_LIMIT="" neutralizes any smoke-run limit leaked in from the
+# calling shell's environment (e.g. a prior `LEANR_SWEEP_LIMIT=N mise run
+# parse:mathlib` smoke check): mathlib_sweep.rs parses it via
+# `.and_then(|s| s.parse().ok())`, so an empty string fails to parse →
+# None → unwrap_or(usize::MAX), i.e. unlimited. A leaked non-empty limit
+# here would silently truncate the pass-list this task writes.
+run = "sh -c 'LEANR_SWEEP_LIMIT=\"\" LEANR_PASSLIST_UPDATE=1 LEANR_MATHLIB_DIR=\"$PWD/.mathlib\" LEANR_OLEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo test --release -p leanr_grammar --test mathlib_sweep -- --ignored --nocapture'"
 
 [tasks."build:differential"]
 description = "M2 differential oracles vs pinned lake: M2a bridge/import/module-set + M2b probe-project artifact byte-diff (needs mathlib:fetch + elan)"

@@ -1,0 +1,5 @@
+{"c":[{"c":[],"k":"null"},{"c":[],"k":"null"},{"c":[{"c":[{"c":[],"k":"null"},{"c":[],"k":"null"},{"a":"import","s":[0,6]},{"c":[],"k":"null"},{"i":"NotaDep","s":[7,14]},{"c":[],"k":"null"}],"k":"Lean.Parser.Module.import"}],"k":"null"}],"k":"Lean.Parser.Module.header"}
+{"c":[{"c":[],"k":"null"},{"c":[],"k":"null"},{"c":[{"c":[],"k":"null"}],"k":"Lean.Parser.Term.attrKind"},{"c":[{"a":"prefix","s":[15,21]}],"k":"Lean.Parser.Command.prefix"},{"c":[{"a":":","s":[21,22]},{"c":[{"a":"100","s":[22,25]}],"k":"num"}],"k":"Lean.Parser.precedence"},{"c":[],"k":"null"},{"c":[],"k":"null"},{"c":[{"a":"\"⊕⊕\"","s":[26,34]}],"k":"str"},{"a":"=>","s":[35,37]},{"i":"Nat.succ","s":[38,46]}],"k":"Lean.Parser.Command.mixfix"}
+{"c":[{"a":"#check","s":[47,53]},{"c":[{"a":"⊕⊕","s":[54,60]},{"c":[{"a":"2","s":[60,61]}],"k":"num"}],"k":"«term⊕⊕_»"}],"k":"Lean.Parser.Command.check"}
+{"c":[{"a":"#check","s":[62,68]},{"c":[{"c":[{"a":"1","s":[69,70]}],"k":"num"},{"a":"⊕⊕","s":[71,77]},{"c":[{"a":"2","s":[78,79]}],"k":"num"}],"k":"«term_⊕⊕_»"}],"k":"Lean.Parser.Command.check"}
+{"c":[{"a":"","s":[80,80]}],"k":"Lean.Parser.Command.eoi"}

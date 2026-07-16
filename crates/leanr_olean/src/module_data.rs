@@ -43,6 +43,47 @@ pub enum PartKind {
     Private,
 }
 
+/// `LeadingIdentBehavior` (oracle: Parser/Basic.lean:1643-1659); tag order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatBehavior {
+    Default,
+    Symbol,
+    Both,
+}
+
+/// One typed `Lean.Parser.parserExtension` olean entry
+/// (oracle `ParserExtension.OLeanEntry`, Parser/Extension.lean:57-62;
+/// tag order). `prio` is dropped: no leanr consumer reads it (dispatch
+/// is longest-match) — see the M3b2a design spec.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParserEntry {
+    Token(String),
+    Kind(NameId),
+    Category {
+        cat: NameId,
+        decl: NameId,
+        behavior: CatBehavior,
+    },
+    Parser {
+        cat: NameId,
+        decl: NameId,
+    },
+}
+
+/// Scope wrapper (oracle `ScopedEnvExtension.Entry`): `local` never
+/// serializes; `scoped` carries its activation namespace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryScope {
+    Global,
+    Scoped(NameId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedParserEntry {
+    pub scope: EntryScope,
+    pub entry: ParserEntry,
+}
+
 /// The decoded contents of one `.olean` module, decoded directly into
 /// term-bank ids (term-bank phase 3 — the Arc decode path this used to
 /// have a twin of is deleted, along with the differential gate that
@@ -60,6 +101,10 @@ pub struct ModuleData {
     /// Environment-extension entries are validated by phase A but kept
     /// opaque (spec: interpreted by the elaborator in M4).
     pub num_entries: usize,
+    /// Typed decode of the `Lean.Parser.parserExtension` entries pair
+    /// (M3b2a); all other extension entries stay opaque (folded into
+    /// `num_entries` only).
+    pub parser_entries: Vec<ScopedParserEntry>,
 }
 
 impl ModuleData {
@@ -209,6 +254,7 @@ impl ModuleData {
             constants,
             extra_const_names,
             num_entries: base.num_entries,
+            parser_entries: std::mem::take(&mut base.parser_entries),
         })
     }
 }
