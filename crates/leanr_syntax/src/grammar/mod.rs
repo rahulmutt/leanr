@@ -203,6 +203,36 @@ pub enum Prim {
     /// part of the comment-body atom's own span; the atom's text then
     /// runs through and includes the closing `-/`.
     DocCommentBody,
+    /// ORACLE `incQuotDepth p` (`Term.quot`/`Tactic.quot`/`Command.quot`/
+    /// `Term.dynamicQuot` all wrap their body in this): body parses with
+    /// quotation depth +1 (antiquotation alternatives become active —
+    /// engine-level, Task 3).
+    IncQuotDepth(Arc<Prim>),
+    /// ORACLE `decQuotDepth p`: the `$(e)` nested-term escape parses its
+    /// body one level shallower (saturating at 0). Not reached by any
+    /// M3b2b Task 2 fixture (no antiquots yet — Task 3) but plumbed now
+    /// alongside `IncQuotDepth` per the brief's interface contract.
+    DecQuotDepth(Arc<Prim>),
+    /// ORACLE `Term.dynamicQuot := withoutPosition <| leading_parser
+    /// "`(" >> ident >> "| " >> incQuotDepth (parserOfStack 1) >> ")"`'s
+    /// `ident >> "| " >> incQuotDepth (parserOfStack 1)` tail: consume an
+    /// ident naming a category, then `|`, then that category's parser at
+    /// depth+1. Engine-special because the category is named by input
+    /// text (precedent: `UnknownTacticIdent`, `DocCommentBody`).
+    DynamicQuotBody,
+    /// ORACLE `many1Unbox p := withResultOf (many1NoAntiquot p) fun stx
+    /// => if stx.getNumArgs == 1 then stx.getArg 0 else stx` (Basic.lean)
+    /// — `Command.quot`'s command-list body (`Command.lean:50-51`,
+    /// doc comment: "Multiple commands will be put in a `null` node, but
+    /// a single command will not"). Not one of the brief's headline 3
+    /// interface variants — a genuinely NEW empirical pin the Step 1
+    /// dump forced (see `term_quot.rs`'s module doc): `many1(p)` (the
+    /// existing combinator) always wraps in `null` regardless of count,
+    /// which doesn't match the dump's 3-child `Command.quot` node for a
+    /// single `#check`. `first_tokens`/`walk_symbols` treat this exactly
+    /// like `Many1` (mandatory ≥1 occurrence, same token/symbol
+    /// forwarding) — only the tree SHAPE differs, in `run`'s arm.
+    Many1Unbox(Arc<Prim>),
 }
 
 // Terse constructors — builtin/*.rs is written in these.
@@ -230,6 +260,16 @@ pub fn many(p: Prim) -> Prim {
 }
 pub fn many1(p: Prim) -> Prim {
     Prim::Many1(Arc::new(p))
+}
+/// ORACLE `many1Unbox` — see `Prim::Many1Unbox`'s doc comment.
+pub fn many1_unbox(p: Prim) -> Prim {
+    Prim::Many1Unbox(Arc::new(p))
+}
+pub fn inc_quot_depth(p: Prim) -> Prim {
+    Prim::IncQuotDepth(Arc::new(p))
+}
+pub fn dec_quot_depth(p: Prim) -> Prim {
+    Prim::DecQuotDepth(Arc::new(p))
 }
 pub fn sep_by1(item: Prim, sep: &str) -> Prim {
     Prim::SepBy1 {
@@ -732,6 +772,21 @@ pub(crate) fn encode_prim(
         DocCommentBody => {
             h.update(&[40]);
         }
+        IncQuotDepth(q) => {
+            h.update(&[41]);
+            encode_prim(q, kind_name, h);
+        }
+        DecQuotDepth(q) => {
+            h.update(&[42]);
+            encode_prim(q, kind_name, h);
+        }
+        DynamicQuotBody => {
+            h.update(&[43]);
+        }
+        Many1Unbox(q) => {
+            h.update(&[44]);
+            encode_prim(q, kind_name, h);
+        }
     }
 }
 
@@ -1221,6 +1276,26 @@ fn first_tokens(p: &Prim) -> Ft {
         // production's `Ft` via `seq`'s catch-all) — `Unknown` is a safe,
         // never-exercised default.
         DocCommentBody => Ft::Unknown,
+        // `incQuotDepth`/`decQuotDepth` (`Basic.lean`) are both
+        // `adaptCacheableContextFn`-shaped `withFn` wrappers (like
+        // `withPosition`/`withForbidden` above) — `info` (hence
+        // `firstTokens`) forwards from the inner parser unchanged.
+        IncQuotDepth(q) | DecQuotDepth(q) => first_tokens(q),
+        // `dynamicQuot`'s own `ident >> "| " >> ..` head is a mandatory
+        // `ident` — same `Tokens([Ident])` shape as `UnknownTacticIdent`
+        // above, for the same reason (folded into one primitive, but the
+        // ident is still the unconditional first token).
+        DynamicQuotBody => Ft::Tokens(vec![FirstTok::Ident]),
+        // `many1Unbox p := withResultOf (many1NoAntiquot p) ..`
+        // (Basic.lean): `withResultOfInfo` rebuilds a FRESH `ParserInfo`
+        // carrying only `collectTokens`/`collectKinds` from `p` — NOT
+        // `firstTokens`, which is left at `ParserInfo`'s own default,
+        // `Unknown` (see `Prim::Many1Unbox`'s doc comment for the full
+        // citation). Never actually the head of a registered production
+        // in this port anyway (`Command.quot` always precedes it with a
+        // literal `"`("` `Symbol`, which already dominates via `seq`'s
+        // catch-all) — `Unknown` is the oracle-faithful answer either way.
+        Many1Unbox(_) => Ft::Unknown,
     }
 }
 
@@ -1270,7 +1345,8 @@ fn walk_symbols(p: &Prim, f: &mut impl FnMut(&str)) {
         }
         Node { body, .. } | TrailingNode { body, .. } => walk_symbols(body, f),
         Optional(q) | Many(q) | Many1(q) | Atomic(q) | Lookahead(q) | NotFollowedBy(q)
-        | Group(q) | WithPosition(q) | Many1Indent(q) => walk_symbols(q, f),
+        | Group(q) | WithPosition(q) | Many1Indent(q) | IncQuotDepth(q) | DecQuotDepth(q)
+        | Many1Unbox(q) => walk_symbols(q, f),
         SepByIndent { item, sep, .. } => {
             // The oracle's `sep` args (`"; "`/`", "`) carry a pretty-
             // print-only trailing space; `sep_by_indent` matches the
@@ -1321,7 +1397,19 @@ fn walk_symbols(p: &Prim, f: &mut impl FnMut(&str)) {
         | EmitEmptyIdent
         | RawChar(_)
         | UnknownTacticIdent
-        | DocCommentBody => {}
+        | DocCommentBody
+        // `DynamicQuotBody` carries no `Prim::Symbol` of its own to
+        // harvest here (it's an engine-special leaf, like
+        // `UnknownTacticIdent`/`DocCommentBody` above, whose runtime
+        // `expect_atom("|", ..)` call — see `dynamic_quot_body` in
+        // parse.rs — checks the TABLE directly rather than going
+        // through a `Prim::Symbol` node). This is harmless, not a gap:
+        // `"|"` is already registered snapshot-wide by every `matchAlt`-
+        // shaped production (`term_pragma.rs`'s `match_expr_alt`,
+        // `term.rs`'s `match_alt`, `do_notation.rs`'s `doMatch`, …), so
+        // by the time ANY `dynamicQuot` production is reachable the
+        // token is already in the table.
+        | DynamicQuotBody => {}
     }
 }
 

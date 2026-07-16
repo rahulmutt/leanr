@@ -753,18 +753,42 @@ pub(crate) struct Ps<'a> {
     /// construction inside every open ancestor too, and each open call
     /// holds its own `cap_hits`-on-entry value in its own native frame.
     cap_hits: u64,
+    /// Quotation nesting depth — ORACLE-PORT `CacheableParserContext.
+    /// quotDepth` (`incQuotDepth`/`decQuotDepth`, `Basic.lean`). `0`
+    /// outside any quotation; `Term.quot`/`Tactic.quot`/`Command.quot`/
+    /// `Term.dynamicQuot` each bump it by 1 around their body (M3b2b
+    /// Task 2). NOT in `Savepoint`: every increment/decrement pairs
+    /// inside a single `run()` frame (`Prim::IncQuotDepth`/
+    /// `DecQuotDepth`'s arms save-and-restore around their inner `run`
+    /// call, exactly like `forbidden_stack`/`pos_stack`'s own push/pop
+    /// discipline), so backtracking can never leak a stale depth — a
+    /// failed alternative's `restore()` unwinds `events`/`errors`/`pos`,
+    /// but by the time that `restore()` runs, the `IncQuotDepth` arm
+    /// that opened this scope has ALREADY decremented back on its own
+    /// stack frame's way out (Rust's own call-stack unwind undoes it,
+    /// same argument as the other two stacks). Reading nothing here
+    /// used to be exact for M3a/M3b1 (no quotation machinery existed —
+    /// see `CatCacheKey`'s doc comment, since updated); Task 3 is what
+    /// makes something (antiquotation alternatives) actually READ this
+    /// field — here it is only ever set.
+    quot_depth: u32,
 }
 
 /// Memoization key for `category()`. ORACLE-PORT `ParserCacheKey`
 /// (`Lean/Parser/Types.lean:247`): `CacheableParserContext`'s `prec`,
 /// `savedPos?`, `forbiddenTk?` fields plus `parserName`/`pos`.
-/// `CacheableParserContext` also has `quotDepth`/`suppressInsideQuot`
-/// — bootstrapping/quotation-only fields (`adaptCacheableContext`
-/// calls in `Basic.lean` around macro antiquotation support) that this
-/// crate never sets or reads (M3a has no quotation/antiquotation
-/// machinery — `ORACLE-PORT` divergence, not an oversight: they're
-/// always constant here, so omitting them from the key partitions the
-/// cache identically to including two always-equal fields would).
+/// `CacheableParserContext` also has `suppressInsideQuot` — a
+/// bootstrapping-only field (`adaptCacheableContext` calls in
+/// `Basic.lean` around macro antiquotation support) this crate never
+/// sets or reads (`ORACLE-PORT` divergence, not an oversight: always
+/// constant here, so omitting it from the key partitions the cache
+/// identically to including an always-equal field would). `quotDepth`,
+/// its sibling, WAS in that same "never set or read" bucket through
+/// M3a/M3b1 but is real, cache-relevant state as of M3b2b Task 2 (see
+/// `Ps::quot_depth`'s doc comment) — hence `quot_depth` below, keyed in
+/// for the same reason `forbidden`/`saved_pos` are: a term memoized at
+/// depth 0 must never satisfy a depth-1 lookup once Task 3's
+/// antiquotation alternatives make the two observably different.
 /// `name` is `parserName`; `rbp` is `prec` (`categoryParser` sets
 /// `c.prec := prec` via `adaptCacheableContextFn` immediately before
 /// consulting the cache — Basic.lean:1736-1737 — so this fn's own
@@ -800,6 +824,15 @@ struct CatCacheKey {
     /// levels of budget left, and may only be replayed at that same
     /// headroom.
     depth_headroom: Option<u32>,
+    /// `Ps::quot_depth` at call time — ORACLE `CacheableParserContext.
+    /// quotDepth` (M3b2b Task 2; see this struct's own doc comment).
+    /// Antiquotation alternatives (Task 3) read `quot_depth`, so a term
+    /// memoized at depth 0 (outside any quotation) must be a cache MISS
+    /// against a depth-1 lookup (inside one) even at the identical
+    /// `pos`/`rbp`/`forbidden`/`saved_pos` — same reasoning as every
+    /// other field here, just for a piece of ambient state this task
+    /// introduces rather than one M3a already had.
+    quot_depth: u32,
 }
 
 /// What a `category()` call replays on a cache hit. ORACLE-PORT
@@ -888,6 +921,7 @@ impl<'a> Ps<'a> {
             subtrees: Vec::new(),
             furthest_stack: Vec::new(),
             cap_hits: 0,
+            quot_depth: 0,
         }
     }
 
@@ -1507,6 +1541,21 @@ impl<'a> Ps<'a> {
                 Ok(())
             }
             Prim::DocCommentBody => self.doc_comment_body(),
+            Prim::IncQuotDepth(q) => {
+                self.quot_depth += 1;
+                let r = self.run(q);
+                self.quot_depth -= 1;
+                r
+            }
+            Prim::DecQuotDepth(q) => {
+                let saved = self.quot_depth;
+                self.quot_depth = saved.saturating_sub(1);
+                let r = self.run(q);
+                self.quot_depth = saved;
+                r
+            }
+            Prim::DynamicQuotBody => self.dynamic_quot_body(),
+            Prim::Many1Unbox(q) => self.many1_unbox_impl(q),
             Prim::CheckPrec(n) => {
                 // ORACLE-PORT `checkPrecFn` (Basic.lean): succeeds iff
                 // `c.prec <= prec` — i.e. the surrounding right-binding
@@ -1709,6 +1758,23 @@ impl<'a> Ps<'a> {
         }
     }
 
+    /// ORACLE `Term.dynamicQuot`'s `ident >> "| " >> incQuotDepth
+    /// (parserOfStack 1)` tail: the just-parsed ident names the category.
+    fn dynamic_quot_body(&mut self) -> PResult {
+        let (t, at, sp) = self.peek_for_match();
+        if t.kind != TokenKind::Ident {
+            self.restore(&sp);
+            return Err(self.fail_expecting("<quotation category>", at));
+        }
+        let cat_name = self.src[at..at + t.len as usize].to_string();
+        self.bump(t, KIND_IDENT);
+        self.expect_atom("|", false)?;
+        self.quot_depth += 1;
+        let r = self.category(&cat_name, 0);
+        self.quot_depth -= 1;
+        r
+    }
+
     fn field_idx(&mut self) -> PResult {
         // Raw digits immediately after '.': the LEXER would produce a
         // Num (or Scientific for `x.1.2`!) — so FieldIdx lexes directly:
@@ -1783,6 +1849,60 @@ impl<'a> Ps<'a> {
         if n < min {
             let at = self.pos;
             return Err(self.fail_expecting("<many1 item>", at));
+        }
+        Ok(())
+    }
+
+    /// `Prim::Many1Unbox` — ORACLE `many1Unbox p := withResultOf
+    /// (many1NoAntiquot p) fun stx => if stx.getNumArgs == 1 then
+    /// stx.getArg 0 else stx` (see the `Prim` variant's own doc
+    /// comment). Deliberately NOT built on `many_impl`: that helper
+    /// opens its `KIND_NULL` node UNCONDITIONALLY before the loop runs
+    /// (it has to — the node must balance even on a mid-loop consuming
+    /// failure), which is exactly the wrapper `many1Unbox` must NOT emit
+    /// when exactly one item matches. Here the `Start` is deferred: run
+    /// the same `many1`-shaped loop with no enclosing node at all, then
+    /// retroactively splice a `Start(KIND_NULL)`/`Finish` pair around
+    /// the collected events ONLY if 2+ items matched (`n == 1` leaves
+    /// the single item's own events spliced in directly, unwrapped).
+    fn many1_unbox_impl(&mut self, q: &Prim) -> PResult {
+        let events_start = self.events.len();
+        let mut n = 0usize;
+        let result: PResult = loop {
+            let sp = self.save();
+            match self.run(q) {
+                Ok(()) => {
+                    if !self.consumed_since(&sp) {
+                        // Same zero-width guard as `many_impl` (min = 1
+                        // here always, so the first item is exempt).
+                        if n == 0 {
+                            n = 1;
+                            continue;
+                        }
+                        let at = self.pos;
+                        break Err(self.fail_expecting("<many1Unbox: zero-width item>", at));
+                    }
+                    n += 1;
+                }
+                Err(f) if self.consumed_since(&sp) => break Err(f),
+                Err(_) => {
+                    self.restore(&sp);
+                    break Ok(());
+                }
+            }
+        };
+        // Unlike `many_impl`, there is no dangling `Start` to balance on
+        // a consuming failure — none was ever emitted — so a hard error
+        // propagates directly, no wrapping node to close first.
+        result?;
+        if n == 0 {
+            let at = self.pos;
+            return Err(self.fail_expecting("<many1Unbox item>", at));
+        }
+        if n >= 2 {
+            self.events
+                .insert(events_start, PEvent::Ev(Event::Start(KIND_NULL)));
+            self.finish();
         }
         Ok(())
     }
@@ -2294,6 +2414,7 @@ impl<'a> Ps<'a> {
             // and the overwhelmingly common case (nothing in a normal
             // parse ever comes near the cap).
             depth_headroom: None,
+            quot_depth: self.quot_depth,
         };
         let mut hit = self.cat_cache.get(&key).cloned();
         // Did the entry we matched come from the depth-DEPENDENT bucket?

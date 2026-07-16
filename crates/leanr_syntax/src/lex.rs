@@ -917,6 +917,19 @@ mod tests {
     }
 
     #[test]
+    fn backtick_paren_lexes_as_atom_when_in_table() {
+        let mut t = TokenTable::default();
+        t.insert("`(");
+        t.insert("`");
+        // "`(" present and next char not id-first → 2-byte atom, maximal munch.
+        assert_eq!(lex_all("`(", &t)[0], (TokenKind::Atom, "`("));
+        // A name literal still wins when the char after the backtick is id-first.
+        assert_eq!(lex_all("`foo", &t)[0].0, TokenKind::NameLit);
+        // Bare "`" before a non-id char: the 1-byte atom.
+        assert_eq!(lex_all("` x", &t)[0], (TokenKind::Atom, "`"));
+    }
+
+    #[test]
     fn number_literals() {
         let t = kw_table();
         assert_eq!(lex_all("0x1F", &t)[0], (TokenKind::Num, "0x1F"));
