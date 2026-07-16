@@ -12,7 +12,18 @@ pub mod term;
 
 use crate::grammar::{GrammarSnapshot, LeadingIdentBehavior, SnapshotBuilder};
 
-pub fn snapshot() -> GrammarSnapshot {
+/// The pre-registered builtin `SnapshotBuilder` — everything `snapshot()`
+/// does up to (but not including) `finish()`. M3b2a Task 4: exposed so
+/// `leanr_grammar` (imported-extension registration, downstream tasks)
+/// can append entries — e.g. an imported module's interpreted
+/// `notation`/`ParserDescr`-derived `Prim`s via `leading_prim`/
+/// `trailing_prim` — onto the SAME builtin base before calling
+/// `finish()` itself, rather than only being able to grow an
+/// already-`finish`ed `GrammarSnapshot` (which has no builder-shaped
+/// mutation API at all). `snapshot() == builder().finish()` by
+/// construction (see `snapshot`, below) — proven behavior-identical by
+/// `builder_finish_equals_builtin_snapshot`'s fingerprint-equality test.
+pub fn builder() -> SnapshotBuilder {
     let mut b = SnapshotBuilder::new();
     // "module" is OUR OWN synthetic root kind — never oracle-compared
     // (canon.rs's `canon_jsonl` only emits the root's *children*: the
@@ -64,5 +75,13 @@ pub fn snapshot() -> GrammarSnapshot {
     term::register(&mut b);
     do_notation::register(&mut b);
     attr::register(&mut b);
-    b.finish()
+    b
+}
+
+/// The builtin grammar snapshot (spec §Architecture / builtin): every
+/// `@[builtin_*_parser]` this crate ports, pre-registered and finished.
+/// `builder()` carries the whole body except `finish()` itself (M3b2a
+/// Task 4), so this is now just that plus the one final call.
+pub fn snapshot() -> GrammarSnapshot {
+    builder().finish()
 }

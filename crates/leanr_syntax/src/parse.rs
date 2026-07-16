@@ -252,6 +252,75 @@ fn run_module(mut ps: Ps<'_>, snap: &GrammarSnapshot) -> ParseResult {
     ParseResult { tree, errors }
 }
 
+/// Parse ONLY the module header and return the imported module names
+/// (dotted), so a caller (the CLI) can resolve imports before the real
+/// parse. Total: any input yields a (possibly empty) list, never a
+/// panic. The header grammar is fixed (imports cannot themselves depend
+/// on imports — the header cannot grow the grammar it's parsed with),
+/// so the builtin snapshot is always sufficient — official Lean's own
+/// `parseHeader` has the same property.
+///
+/// Lifts exactly `run_module`'s header phase (see there): `ps.start`
+/// the synthetic `module` root, `ps.run` the snapshot's `header_prim`,
+/// `ps.finish` the root, then `ps.finish_into_tree()` — the same
+/// event-flattening/tree-build call `run_module` uses for the whole
+/// module, just closed right after the header instead of after the
+/// command loop + `eoi`. No worker thread (unlike `parse_module`): the
+/// header's own grammar has no unbounded input-driven recursion (no
+/// category can recurse into itself through an import line — imports
+/// are `atomic(..) >> ident`, nothing nests), so `MIN_STACK_BYTES` is
+/// not a concern here.
+///
+/// The one piece of new logic is the walk below: every
+/// `Lean.Parser.Module.import` node's ident token(s), joined with `.`.
+/// Normally the module name lexes as one dotted `Ident` token (Task 4
+/// brief: "Foo.Bar.Baz is ONE ident token"); `ident_with_partial_trailing_dot`
+/// (`builtin/command.rs`) can also split a trailing-dot edge case into
+/// two `Ident` tokens around a `.` atom, so joining every `KIND_IDENT`
+/// child found (in source order) reconstructs the full dotted name
+/// either way.
+pub fn parse_header_imports(src: &str) -> Vec<String> {
+    let snap = crate::builtin::snapshot();
+    let kinds = snap.kinds();
+    let mut ps = Ps::new(src, &snap);
+    let Some(module_kind) = kinds.lookup("module") else {
+        // Unreachable on the real builtin snapshot (`builtin::snapshot`
+        // always interns "module") — defensive only, so this stays
+        // total even if that invariant is ever violated.
+        return Vec::new();
+    };
+    ps.start(module_kind);
+    if let Some(header) = snap.header_prim() {
+        // Best-effort: a malformed header still leaves `ps` in a valid
+        // (if partial/erroring) state — `run`'s own combinators never
+        // panic on untrusted input, and any failure here just means a
+        // smaller (possibly empty) partial tree to walk below.
+        let _ = ps.run(&header);
+    }
+    ps.finish(); // module
+    let (tree, _errors) = ps.finish_into_tree();
+
+    let import_kind_name = "Lean.Parser.Module.import";
+    let mut out = Vec::new();
+    for node in tree.root().descendants() {
+        if tree.kinds.name(node.kind()) != import_kind_name {
+            continue;
+        }
+        let mut parts = Vec::new();
+        for el in node.children_with_tokens() {
+            if let rowan::NodeOrToken::Token(t) = el {
+                if t.kind() == KIND_IDENT {
+                    parts.push(t.text().to_string());
+                }
+            }
+        }
+        if !parts.is_empty() {
+            out.push(parts.join("."));
+        }
+    }
+    out
+}
+
 impl<'a> Ps<'a> {
     /// Minimal recovery: emit an ERROR node, skip tokens until the next
     /// token that could START a command (per the command category's
@@ -4114,5 +4183,27 @@ mod tests {
             .root()
             .descendants()
             .any(|n| r.tree.kinds.name(n.kind()) == "«term_⊕_»"));
+    }
+
+    /// M3b2a Task 4: `parse_header_imports` — a header-only parse, never
+    /// touching the command loop (Step 4's `#check 1` after the imports
+    /// proves this: if it were parsed as a command too and failed, that
+    /// wouldn't show up here either way, but a whole-module parse of
+    /// malformed input further down WOULD panic/hang if this secretly
+    /// delegated to `parse_module`'s command loop instead of stopping at
+    /// the header).
+    #[test]
+    fn header_imports_are_extracted() {
+        assert_eq!(
+            parse_header_imports("import Foo\nimport Foo.Bar.Baz\n#check 1\n"),
+            vec!["Foo".to_string(), "Foo.Bar.Baz".to_string()]
+        );
+        assert_eq!(parse_header_imports("#check 1\n"), Vec::<String>::new());
+        assert_eq!(
+            parse_header_imports("prelude\n#check 1\n"),
+            Vec::<String>::new()
+        );
+        // Malformed header: never panic, best-effort.
+        let _ = parse_header_imports("import \u{0}\u{0}");
     }
 }
