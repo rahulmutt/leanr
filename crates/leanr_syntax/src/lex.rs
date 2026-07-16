@@ -108,6 +108,10 @@ impl TokenTable {
         self.toks.contains(tok)
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.toks.is_empty()
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &str> {
         self.toks.iter().map(|s| s.as_str())
     }

@@ -38,7 +38,7 @@ impl Overlay {
         }
     }
     pub fn is_empty(&self) -> bool {
-        self.cats.is_empty() && self.kind_names.is_empty()
+        self.cats.is_empty() && self.kind_names.is_empty() && self.tokens.is_empty()
     }
     pub fn tokens(&self) -> &TokenTable {
         &self.tokens
@@ -57,6 +57,16 @@ impl Overlay {
     /// pairs directly rather than `(FirstTok, usize)` indices into a
     /// separate parser vec, since an overlay's deltas are small,
     /// same-file additions, not a whole snapshot's worth of productions.
+    ///
+    /// Note: calling `register` twice with the same `kind_name` interns
+    /// idempotently (`intern` returns the SAME `SyntaxKind` both times)
+    /// BUT still appends a second `(FirstTok, Prim)` entry to the
+    /// category delta; this is harmless because `longest_match`'s
+    /// strict-greater tie-break makes the first identical entry win,
+    /// producing the same tree either way. The one diverging case — two
+    /// DISTINCT notations whose atoms mangle to the SAME kind name — is
+    /// Lean's `mkUnusedBaseName` collision-suffixing, out of scope for
+    /// M3b1 (see `intern`'s own doc comment).
     pub fn register(&mut self, spec: NotationSpec) -> SyntaxKind {
         // Intern the generated kind AFTER the base (overlay-local,
         // bounded by command count — never per-token).
@@ -308,7 +318,7 @@ mod tests {
     /// the same spec TWICE into one overlay must hand back the SAME
     /// `SyntaxKind` both times, not a duplicate.
     #[test]
-    fn register_is_idempotent_for_the_same_kind_name() {
+    fn intern_is_idempotent_for_the_same_kind_name() {
         let base = crate::builtin::snapshot();
         let mut ov = Overlay::new(&base);
         let k1 = ov.register(sum_spec());
