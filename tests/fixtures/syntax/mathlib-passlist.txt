@@ -1,0 +1,2 @@
+# Mathlib-closure files that parse oracle-green (M3b2a ratchet).
+# Regenerate: mise run passlist:update. NEVER hand-edit to hide a regression.

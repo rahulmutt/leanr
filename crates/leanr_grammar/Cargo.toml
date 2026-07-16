@@ -8,3 +8,6 @@ license.workspace = true
 leanr_kernel = { version = "0.1.0", path = "../leanr_kernel" }
 leanr_olean = { version = "0.1.0", path = "../leanr_olean" }
 leanr_syntax = { version = "0.1.0", path = "../leanr_syntax" }
+
+[dev-dependencies]
+blake3 = "1"
