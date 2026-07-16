@@ -41,12 +41,21 @@ fn importers_parse_green_against_oracle_dumps() {
 #[test]
 fn scoped_entry_is_skipped_and_recorded() {
     let (st, g) = notadep_grammar();
+    // NotaDep declares exactly one scoped notation: `scoped infixl:65
+    // " ⊖⊖ " => HSub.hSub`, whose decl is `NotaDep.term_⊖⊖_` (confirmed
+    // empirically by decoding NotaDep.olean's scoped parser_entries: the
+    // only `Scoped` entries are `Token("⊖⊖")` and
+    // `Parser { decl: NotaDep.term_⊖⊖_, .. }`). Pin the recorded skip to
+    // that exact decl, not just the reason variant.
     assert!(
-        g.skipped.iter().any(|s| s.reason == SkipReason::ScopedInactive),
-        "scoped ⊖⊖ should be recorded: {:?}",
+        g.skipped.iter().any(|s| s.reason == SkipReason::ScopedInactive
+            && s.decl.ends_with("term_⊖⊖_")),
+        "scoped ⊖⊖ decl should be recorded: {:?}",
         g.skipped
     );
-    // And its parser must NOT be active: ⊖⊖ has no term production.
+    // And it must not have been folded as an active parser: parsing a
+    // term that uses ⊖⊖ infix must fail (no production registered for
+    // it under the assembled snapshot, since scoped activation is M3b3).
     let r = leanr_syntax::parse_module("#check 1 ⊖⊖ 2\n", &g.snapshot);
     assert!(!r.errors.is_empty(), "scoped notation must not parse");
     let _ = st;
@@ -64,6 +73,40 @@ fn raw_parser_entry_skips_but_tokens_fold() {
             && s.decl.ends_with("rawWidget")),
         "raw Parser skip missing: {:?}",
         g.skipped
+    );
+
+    // The skip above proves the *parser* (rawWidget : Parser, a compiled
+    // function — not a ParserDescr — so `descr::interpret` can't walk it)
+    // never becomes an active term production. It says nothing about
+    // whether the token it's built from folded into the assembled table.
+    //
+    // Empirically confirmed (temporary debug dump of NotaDepMeta.olean's
+    // decoded `parser_entries`, removed after use): `leading_parser
+    // "rawwob"` decodes to TWO separate global entries —
+    // `ParserEntry::Token("rawwob")` and `ParserEntry::Parser { cat: term,
+    // decl: rawWidget }` — exactly as the brief predicted ("token entries
+    // are separate `.token` entries"). The `Token` entry is `Global`, so
+    // assemble's fold runs `b.token("rawwob")` unconditionally, independent
+    // of the sibling `Parser` entry's interpret failure.
+    //
+    // A folded token is reserved: it stops lexing as a plain identifier.
+    // So under the assembled snapshot:
+    //   - `#check rawwob`  -- "rawwob" is a reserved token with no term
+    //     production (its only would-be production was the skipped raw
+    //     parser) -- must be a parse ERROR.
+    //   - `#check rawwobz` -- not a token; ordinary identifier -- must
+    //     parse clean, as the control.
+    let hit = leanr_syntax::parse_module("#check rawwob\n", &g.snapshot);
+    assert!(
+        !hit.errors.is_empty(),
+        "rawwob must be reserved (folded token, no production): {:?}",
+        hit.errors
+    );
+    let miss = leanr_syntax::parse_module("#check rawwobz\n", &g.snapshot);
+    assert!(
+        miss.errors.is_empty(),
+        "rawwobz (not a token) must parse as an ordinary ident: {:?}",
+        miss.errors
     );
 }
 
