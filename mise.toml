@@ -117,6 +117,24 @@ run = [
   # observe; see the `fixtures:regen-notation` task below, which this
   # task also depends on.
   "sh -c 'for f in tests/fixtures/syntax/*.lean; do b=$(basename \"$f\"); case \"$b\" in dump_syntax.lean|dump_syntax_elab.lean|Notation*.lean) continue;; esac; lean --run tests/fixtures/syntax/dump_syntax.lean \"$f\" > \"${f%.lean}.stx.jsonl\"; done'",
+  # M3b2a Task 2: synthetic import-notation corpus
+  # (tests/fixtures/syntax/import/). NotaDep{,Meta}.olean build against
+  # the REAL toolchain Init (bare `lean`, no LEAN_PATH). The importer
+  # dumps below set LEAN_PATH=$PWD so `import NotaDep` resolves — done
+  # BEFORE the stub Init.olean is built (deviation from the task brief,
+  # which built Init.olean first): `SearchPath.findWithExt` matches the
+  # FIRST search-path root with either a `pkg/` dir OR a `pkg.olean`
+  # file, so once LEAN_PATH=$PWD is set, a stub `Init.olean` sitting in
+  # this SAME directory shadows the real Init's submodules (e.g.
+  # `Init.Data.List.Impl`) before the builtin sysroot entry is ever
+  # tried, breaking every importer dump with "object file ... does not
+  # exist". Building Init.olean last avoids the shadow entirely; the
+  # stub is only ever consumed by leanr-side (Rust) hermetic tests, not
+  # by these `lean --run` dumps.
+  "sh -c 'cd tests/fixtures/syntax/import && lean NotaDep.lean -o NotaDep.olean && lean NotaDepMeta.lean -o NotaDepMeta.olean'",
+  "sh -c 'cd tests/fixtures/syntax/import && for f in ImportMixfix ImportMunch ImportCat; do LEAN_PATH=$PWD lean --run ../dump_syntax.lean $f.lean > $f.stx.jsonl; done'",
+  "sh -c 'cd tests/fixtures/syntax/import && LEAN_PATH=$PWD lean --run ../dump_syntax_elab.lean ImportOverload.lean > ImportOverload.stx.jsonl'",
+  "sh -c 'cd tests/fixtures/syntax/import && lean Init.lean -o Init.olean'",
 ]
 depends_post = ["fixtures:regen-notation"]
 
