@@ -122,6 +122,19 @@ pub fn builder() -> SnapshotBuilder {
     // `parse.rs::dispatch` and `LeadingIdentBehavior`'s own doc comment).
     b.category("attr", LeadingIdentBehavior::Symbol);
     b.category("prio", LeadingIdentBehavior::Both);
+    // `stx` category (M3b2b Task 6, surface table's `syntax`-item
+    // grammar, `Lean/Parser/Syntax.lean`'s `Syntax.paren`/`.cat`/
+    // `.unary`/`.binary`/`.sepBy`/`.sepBy1`/`.atom`/`.nonReserved` +
+    // the `+`/`*`/`?`/`,*` quantifier-suffix trailing productions,
+    // `command_syntax.rs`) — `Syntax.lean:17`'s own registration,
+    // `registerBuiltinParserAttribute \`builtin_syntax_parser
+    // ``Category.stx .both`, is EXPLICIT `.both` (unlike `command`/
+    // `term`/`level`/`doElem`/`structInstFieldDecl`, all omitted →
+    // `.default`) — pinned here rather than left at the `#[default]`
+    // `Default`, per this task's own brief instruction to read the
+    // behavior off the oracle's category-registration call site
+    // rather than assume.
+    b.category("stx", LeadingIdentBehavior::Both);
     command::register(&mut b);
     level::register(&mut b);
     tactic::register(&mut b);

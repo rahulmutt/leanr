@@ -18,6 +18,11 @@
 //! - `command_misc.rs`: `moduleDoc` + every `#`-prefixed
 //!   introspection command + the small bootstrapping/registration
 //!   commands (`init_quot`, `grindPattern`, …).
+//! - `command_notation.rs` (M3b1 Task 2): `notation`/`infixl`/`infixr`/
+//!   `infix`/`prefix`/`postfix`.
+//! - `command_syntax.rs` (M3b2b Task 6): the `stx` category + `syntax`/
+//!   `declare_syntax_cat`/`syntaxAbbrev`/`macro_rules`/`macro` command
+//!   SHAPES. ORACLE-PORT `Lean/Parser/Syntax.lean`.
 //!
 //! Kind names are byte-for-byte from the surface table's "kind name"
 //! column with escaping guillemets STRIPPED — confirmed against every
@@ -31,6 +36,7 @@ mod command_decl;
 mod command_misc;
 mod command_notation;
 mod command_open;
+mod command_syntax;
 
 // Re-exported (Task 10) so `term.rs`'s `Term.«open»`/`Term.«set_option»`
 // and `tactic.rs`'s `Tactic.«open»`/`Tactic.«set_option»` (the 4
@@ -121,12 +127,59 @@ pub(super) fn doc_comment(b: &mut SnapshotBuilder) -> Prim {
 /// task-10 report): both are the identical 7-child
 /// `Lean.Parser.Command.declModifiers` node. One shared fn, no `inline`
 /// parameter, is therefore faithful, not a shortcut.
+/// `visibility := «private» <|> «public»` — the `declModifiers`/
+/// `syntaxAbbrev`-shared visibility alternative (`Lean.Parser.Command.
+/// private`/`.public`, each a bare, self-wrapping `leading_parser`).
+/// Hoisted (M3b2b Task 6) from `decl_modifiers`'s own inline
+/// construction (its original sole use site) so `command_syntax.rs`'s
+/// `syntaxAbbrev` (`optional visibility`, ORACLE-PORT `Lean/Parser/
+/// Syntax.lean:108-109`) can share the identical definition instead of
+/// a second, drifting copy — same "hoist, re-export" idiom this
+/// module's own `named_prio`/`precedence`/`named_name` already use.
+pub(super) fn visibility(b: &mut SnapshotBuilder) -> Prim {
+    let private_k = b.kind("Lean.Parser.Command.private");
+    let public_k = b.kind("Lean.Parser.Command.public");
+    or_else([nd(private_k, sym("private")), nd(public_k, sym("public"))])
+}
+
+/// `Lean.Parser.precedence := ":" >> NumLit` — shared by `mixfix`
+/// (mandatory slot), `notation`'s own top-level precedence (optional
+/// slot, caller wraps in `opt`), `identPrec`'s inner precedence (also
+/// caller-wrapped `opt`), and (M3b2b Task 6) `command_syntax.rs`'s
+/// `syntax` command's own top-level `optPrecedence` slot. Hoisted here
+/// from `command_notation.rs` (its original sole owner) once a SECOND
+/// module needed the identical production — same "hoist, re-export"
+/// idiom as `named_prio` (below). See `command_notation.rs`'s module
+/// doc for the fresh-dump citation ruling out a `"max"`/`"min"`
+/// keyword fallback.
+pub(super) fn precedence(b: &mut SnapshotBuilder) -> Prim {
+    let k = b.kind("Lean.Parser.precedence");
+    nd(k, seq([sym(":"), Prim::NumLit]))
+}
+
+/// `Lean.Parser.Command.namedName := atomic ("(" >> nonReservedSymbol
+/// "name") >> " := " >> ident >> ")"` — the `notation`/`mixfix`/(M3b2b
+/// Task 6) `syntax`/`macro`-family `optNamedName` production, same
+/// "named helper, self-wraps" shape as `named_prio`. Hoisted here from
+/// `command_notation.rs` (its original sole owner) once a SECOND
+/// module needed the identical production.
+pub(super) fn named_name(b: &mut SnapshotBuilder) -> Prim {
+    let k = b.kind("Lean.Parser.Command.namedName");
+    nd(
+        k,
+        seq([
+            atomic(seq([sym("("), Prim::NonReservedSymbol("name".into())])),
+            sym(":="),
+            Prim::Ident,
+            sym(")"),
+        ]),
+    )
+}
+
 pub(super) fn decl_modifiers(b: &mut SnapshotBuilder) -> Prim {
     let doc = doc_comment(b);
     let attrs = super::attr::attributes(b);
-    let private_k = b.kind("Lean.Parser.Command.private");
-    let public_k = b.kind("Lean.Parser.Command.public");
-    let visibility = or_else([nd(private_k, sym("private")), nd(public_k, sym("public"))]);
+    let visibility = visibility(b);
     let protected_k = b.kind("Lean.Parser.Command.protected");
     let meta_k = b.kind("Lean.Parser.Command.meta");
     let noncomputable_k = b.kind("Lean.Parser.Command.noncomputable");
@@ -231,6 +284,7 @@ pub fn register(b: &mut SnapshotBuilder) {
     command_open::register(b);
     command_misc::register(b);
     command_notation::register(b);
+    command_syntax::register(b);
 }
 
 #[cfg(test)]

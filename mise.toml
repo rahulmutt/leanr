@@ -111,12 +111,19 @@ run = [
   "sh -c 'for p in aesop batteries Cli importGraph LeanSearchClient plausible Qq; do cp .mathlib/.lake/packages/$p/lakefile.toml crates/leanr_build/tests/fixtures/lakefiles/$p.toml; done'",
   # M3a parser fixtures: official parse trees in canonical JSON
   # (tests/fixtures/syntax/; dump_syntax.lean is the dumper itself).
-  # `Notation*.lean` (M3b1 same-file notation corpus, Task 8) are
-  # EXCLUDED here — they grow their own grammar mid-file, which
-  # `dump_syntax.lean`'s parse-only (no elaboration) loop cannot
+  # `Notation*.lean` (M3b1 same-file notation corpus, Task 8) and
+  # `Stx*.lean` (M3b2b Task 6 same-file `syntax`/`macro`/`macro_rules`
+  # corpus) are EXCLUDED here — they grow their own grammar mid-file,
+  # which `dump_syntax.lean`'s parse-only (no elaboration) loop cannot
   # observe; see the `fixtures:regen-notation` task below, which this
-  # task also depends on.
-  "sh -c 'for f in tests/fixtures/syntax/*.lean; do b=$(basename \"$f\"); case \"$b\" in dump_syntax.lean|dump_syntax_elab.lean|Notation*.lean) continue;; esac; lean --run tests/fixtures/syntax/dump_syntax.lean \"$f\" > \"${f%.lean}.stx.jsonl\"; done'",
+  # task also depends on. `Errors0.lean`/`Errors1.lean` are also
+  # excluded (fixing a pre-existing gap: this case pattern previously
+  # didn't list them despite the comment two tasks below claiming they
+  # were excluded from this very loop — they have no committed
+  # `.stx.jsonl` and are intentionally malformed, round-trip-only
+  # fixtures, so a stray dump here was always a no-op/harmless but
+  # never an intentional one).
+  "sh -c 'for f in tests/fixtures/syntax/*.lean; do b=$(basename \"$f\"); case \"$b\" in dump_syntax.lean|dump_syntax_elab.lean|Notation*.lean|Stx*.lean|Errors0.lean|Errors1.lean) continue;; esac; lean --run tests/fixtures/syntax/dump_syntax.lean \"$f\" > \"${f%.lean}.stx.jsonl\"; done'",
   # M3b2a Task 2: synthetic import-notation corpus
   # (tests/fixtures/syntax/import/). NotaDep{,Meta}.olean build against
   # the REAL toolchain Init (bare `lean`, no LEAN_PATH). The importer
@@ -157,6 +164,17 @@ run = [
   # error fixture (Errors0.lean/Errors1.lean) is excluded from the
   # M3a loop above.
   "sh -c 'for f in tests/fixtures/syntax/Notation*.lean; do [ -e \"$f\" ] || continue; [ \"$(basename $f)\" = NotationBadResync.lean ] && continue; lean --run tests/fixtures/syntax/dump_syntax_elab.lean \"$f\" > \"${f%.lean}.stx.jsonl\"; done'",
+  # M3b2b Task 6: `Stx*.lean` (`StxShapes.lean` — `declare_syntax_cat`/
+  # `syntax`/`syntaxAbbrev` grow the grammar mid-file the same way a
+  # `notation`/mixfix command does) gets the identical elab-dump
+  # treatment, duplicated rather than folded into the loop above
+  # (different glob, different — currently empty — exclusion set;
+  # `QuotMacroRules.lean` also needs this same elaborating dumper, but
+  # is deliberately NOT wired in here — it stays untracked/regenerated
+  # by hand until Task 8, and its `Quot*` name would otherwise collide
+  # with the already-plain-loop `QuotBasic.lean`/`QuotAntiquot.lean`/
+  # `QuotSplice.lean` fixtures if this were made glob-generic).
+  "sh -c 'for f in tests/fixtures/syntax/Stx*.lean; do [ -e \"$f\" ] || continue; lean --run tests/fixtures/syntax/dump_syntax_elab.lean \"$f\" > \"${f%.lean}.stx.jsonl\"; done'",
 ]
 
 [tasks."fixtures:mutations"]

@@ -91,7 +91,7 @@
 //! failure handling already satisfies that with zero extra code here).
 
 use crate::builtin::attr::{attr_kind, attributes};
-use crate::builtin::command::{doc_comment, named_prio, nd};
+use crate::builtin::command::{doc_comment, named_name, named_prio, nd, precedence};
 use crate::grammar::*;
 
 /// `optional docComment >> optional Term.«attributes» >> Term.attrKind`
@@ -106,35 +106,6 @@ fn notation_prefix(b: &mut SnapshotBuilder) -> Prim {
     let attrs = attributes(b);
     let ak = attr_kind(b);
     seq([opt(doc), opt(attrs), ak])
-}
-
-/// `Lean.Parser.precedence := ":" >> NumLit` — shared by `mixfix`
-/// (mandatory slot), `notation`'s own top-level precedence (optional
-/// slot, caller wraps in `opt`), and `identPrec`'s inner precedence
-/// (also caller-wrapped `opt`). See this file's module doc for the
-/// fresh-dump citation ruling out a `"max"`/`"min"` keyword fallback.
-fn precedence(b: &mut SnapshotBuilder) -> Prim {
-    let k = b.kind("Lean.Parser.precedence");
-    nd(k, seq([sym(":"), Prim::NumLit]))
-}
-
-/// `Lean.Parser.Command.namedName := atomic ("(" >> nonReservedSymbol
-/// "name") >> " := " >> ident >> ")"` — the `notation`/`mixfix`-family
-/// counterpart to `named_prio` (`command.rs`), same "named helper,
-/// self-wraps" shape (`atomic` around the disambiguating `"(" >>
-/// nonReservedSymbol` prefix only, matching `named_prio`'s own atomic
-/// scope exactly).
-fn named_name(b: &mut SnapshotBuilder) -> Prim {
-    let k = b.kind("Lean.Parser.Command.namedName");
-    nd(
-        k,
-        seq([
-            atomic(seq([sym("("), Prim::NonReservedSymbol("name".into())])),
-            sym(":="),
-            Prim::Ident,
-            sym(")"),
-        ]),
-    )
 }
 
 /// `Lean.Parser.Command.identPrec := ident >> optional precedence` —
