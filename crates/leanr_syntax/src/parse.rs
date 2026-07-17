@@ -5340,4 +5340,96 @@ mod tests {
             .count();
         assert_eq!(n, 2, "both $x occurrences must be antiquots");
     }
+
+    /// M3b2b Task 9 review fix: `category_cache_is_quot_depth_keyed`
+    /// above is a sanity pin, not a poisoning-REGRESSION pin — its two
+    /// `$x`s sit at different byte offsets, so `CatCacheKey.pos` alone
+    /// already distinguishes them; that test would keep passing even if
+    /// `quot_depth` were deleted from the key outright. This test
+    /// instead engineers a genuine COLLISION: the identical
+    /// `(pos, name, rbp, forbidden, saved_pos, depth_headroom)` reached
+    /// at two different `quot_depth`s, using the same technique
+    /// `a_cache_hit_on_a_depth_capped_entry_taints_its_ancestors_too`
+    /// (above) uses for the depth-cap axis — two leading candidates
+    /// sharing one first token, differing only in what surrounds their
+    /// shared inner category call.
+    ///
+    /// - `no_quot` (registered FIRST, so it runs first and populates
+    ///   the cache) is `"#" >> cat("inner", 0)`, i.e. `inner`'s call
+    ///   runs at `quot_depth` 0. `inner` is a deliberately EMPTY
+    ///   category (zero productions): at depth 0, `$` matches no
+    ///   antiquot alternative (`try_category_antiquot`'s own
+    ///   `quot_depth == 0` gate) and dispatches to nothing (empty
+    ///   leading table) — a clean, *cached* `CatOutcome::Err` filed
+    ///   under `quot_depth: 0`.
+    /// - `with_quot` (registered SECOND) is
+    ///   `"#" >> inc_quot_depth(cat("inner", 0))`: the IDENTICAL inner
+    ///   call, at the IDENTICAL byte position (right after the shared
+    ///   `"#"`) — `forbidden`/`saved_pos`/`depth_headroom` all
+    ///   identical too, since neither candidate ever touches any of
+    ///   them — differing from `no_quot`'s reach of that key ONLY in
+    ///   `quot_depth` (1, not 0). At depth 1 the same `$x` legitimately
+    ///   resolves via `try_category_antiquot` into an
+    ///   `inner.pseudo.antiquot` node.
+    ///
+    /// If `quot_depth` left `CatCacheKey`, `with_quot`'s reach of this
+    /// key would be a cache HIT on `no_quot`'s stale `Err` — a term
+    /// memoized at depth 0 wrongly satisfying a depth-1 lookup — and
+    /// the whole `"outer"` category call would spuriously fail (no
+    /// other candidate left to fall back to: `no_quot` itself already
+    /// fails on its own terms at depth 0). With the field in place
+    /// (current, correct behavior), `with_quot` wins outright and the
+    /// antiquot node is produced.
+    #[test]
+    fn a_quot_depth_0_cache_miss_never_poisons_a_quot_depth_1_hit_at_the_same_key() {
+        let mut b = SnapshotBuilder::new();
+        // `"#"` is auto-harvested from the `sym("#")` literals below;
+        // `"$"` is not spelled as a `sym(..)` anywhere in this grammar
+        // (the antiquot mechanism consumes it internally), so it must
+        // be registered explicitly or it lexes as `ErrorTok`, not
+        // `Atom` — see `lex::next_token`'s munch-table fallback.
+        b.token("$");
+        b.category("inner", LeadingIdentBehavior::Default);
+        b.category("outer", LeadingIdentBehavior::Default);
+        // Registration order matters: `no_quot` must run (and populate
+        // the cache) before `with_quot` reaches the same inner key.
+        b.leading2(
+            "outer",
+            "no_quot",
+            MAX_PREC,
+            seq([sym("#"), cat("inner", 0)]),
+        );
+        b.leading2(
+            "outer",
+            "with_quot",
+            MAX_PREC,
+            seq([sym("#"), inc_quot_depth(cat("inner", 0))]),
+        );
+        let snap = b.finish();
+
+        let src = "#$x";
+        let mut ps = Ps::new(src, &snap);
+        ps.start(KIND_NULL);
+        let r = ps.run(&Prim::Category {
+            name: "outer".to_string(),
+            rbp: 0,
+        });
+        assert!(
+            r.is_ok(),
+            "valid input REJECTED: a quot_depth-0 cache MISS on \
+             (pos, name, rbp, forbidden, saved_pos, depth_headroom) \
+             poisoned the quot_depth-1 reach of the identical key"
+        );
+        if r.is_err() {
+            ps.push_furthest_error();
+        }
+        ps.finish();
+        let (tree, errors) = ps.finish_into_tree();
+        assert!(errors.is_empty(), "{:?}", errors);
+        assert!(
+            crate::canon::canon_jsonl(&tree).contains("inner.pseudo.antiquot"),
+            "no antiquot node in {}",
+            crate::canon::canon_jsonl(&tree)
+        );
+    }
 }
