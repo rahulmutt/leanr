@@ -233,6 +233,22 @@ pub enum Prim {
     /// like `Many1` (mandatory ≥1 occurrence, same token/symbol
     /// forwarding) — only the tree SHAPE differs, in `run`'s arm.
     Many1Unbox(Arc<Prim>),
+    /// ORACLE `leading_parser (withAnonymousAntiquot := false) ..`
+    /// (`Term.lean`'s `basicFun`/`letId`/`letIdDecl`/… and friends): the
+    /// wrapped parser's own antiquot alternative(s), if any, may not
+    /// accept a BARE `$x` (no `:name` suffix) — only a typed `$x:name`.
+    /// Threaded through `parse.rs`'s `Ps::anon_antiquot_ok` flag (M3b2b
+    /// Task 3). No builtin production constructs this yet — the pinned
+    /// toolchain's `leading_parser (withAnonymousAntiquot := false)`
+    /// macro sugar sets a PLAIN `Bool` field on the `leadingNode`/
+    /// `nodeWithAntiquot` call it expands to, rather than wrapping an
+    /// arbitrary sub-parser the way this primitive does; that shape
+    /// isn't reachable from any M3b2b Task 1-3 builtin fixture. Plumbed
+    /// now (exhaustive match arms below) per the Task 3 brief's
+    /// interface contract — Task 4's imported-`ParserDescr` mapping is
+    /// the first real producer, wrapping a decoded parser whose OLean
+    /// `ParserDescr.node`/`.parser` entry carries the flag.
+    WithoutAnonymousAntiquot(Arc<Prim>),
 }
 
 // Terse constructors — builtin/*.rs is written in these.
@@ -787,6 +803,10 @@ pub(crate) fn encode_prim(
             h.update(&[44]);
             encode_prim(q, kind_name, h);
         }
+        WithoutAnonymousAntiquot(q) => {
+            h.update(&[45]);
+            encode_prim(q, kind_name, h);
+        }
     }
 }
 
@@ -1296,6 +1316,14 @@ fn first_tokens(p: &Prim) -> Ft {
         // literal `"`("` `Symbol`, which already dominates via `seq`'s
         // catch-all) — `Unknown` is the oracle-faithful answer either way.
         Many1Unbox(_) => Ft::Unknown,
+        // `leading_parser (withAnonymousAntiquot := false) ..` sets a
+        // plain flag on the SAME `leadingNode`/`nodeWithAntiquot` call —
+        // no separate `withFn`/`info` wrap of its own in the oracle —
+        // so this port's stand-in wrapper (see the variant's own doc
+        // comment) forwards the inner parser's `firstTokens` unchanged,
+        // same as every other pure-scoping wrapper above (`WithPosition`,
+        // `WithForbidden`, `IncQuotDepth`/`DecQuotDepth`).
+        WithoutAnonymousAntiquot(q) => first_tokens(q),
     }
 }
 
@@ -1346,7 +1374,7 @@ fn walk_symbols(p: &Prim, f: &mut impl FnMut(&str)) {
         Node { body, .. } | TrailingNode { body, .. } => walk_symbols(body, f),
         Optional(q) | Many(q) | Many1(q) | Atomic(q) | Lookahead(q) | NotFollowedBy(q)
         | Group(q) | WithPosition(q) | Many1Indent(q) | IncQuotDepth(q) | DecQuotDepth(q)
-        | Many1Unbox(q) => walk_symbols(q, f),
+        | Many1Unbox(q) | WithoutAnonymousAntiquot(q) => walk_symbols(q, f),
         SepByIndent { item, sep, .. } => {
             // The oracle's `sep` args (`"; "`/`", "`) carry a pretty-
             // print-only trailing space; `sep_by_indent` matches the

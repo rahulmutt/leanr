@@ -120,7 +120,7 @@ impl Overlay {
     /// to the same name) returns the SAME `SyntaxKind` rather than
     /// interning a duplicate — collision-suffixing (`_1`/`_2`, real
     /// Lean's `mkUnusedBaseName`) is out of scope for M3b1 (task brief).
-    fn intern(&mut self, name: &str) -> SyntaxKind {
+    pub(crate) fn intern(&mut self, name: &str) -> SyntaxKind {
         if let Some(&k) = self.kind_map.get(name) {
             return SyntaxKind(k);
         }

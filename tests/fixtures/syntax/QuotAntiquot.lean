@@ -1,0 +1,8 @@
+def a := `($x)
+def b := `($x.foo)
+def c := `($x:ident)
+def d := `($(f 1))
+def e := `(fun y => $body)
+def f := `(tactic| match x, $h with | hp => _)
+def g := `(`($$x))
+def h := `(f $x $y)

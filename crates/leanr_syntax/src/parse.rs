@@ -772,6 +772,17 @@ pub(crate) struct Ps<'a> {
     /// makes something (antiquotation alternatives) actually READ this
     /// field — here it is only ever set.
     quot_depth: u32,
+    /// ORACLE `Prim::WithoutAnonymousAntiquot`'s scope flag — `true`
+    /// (the default, matching real Lean's `withAnonymousAntiquot :=
+    /// true` default) outside any such scope: a node antiquot (`Prim::Node`
+    /// entry, `try_antiquot`) may accept a bare `$x` with no `:name`
+    /// suffix. `false` inside one: only a typed `$x:name` is accepted.
+    /// NOT in `Savepoint` — same push/pop-inside-one-`run()`-frame
+    /// discipline as `forbidden_stack`/`quot_depth` (see their doc
+    /// comments): the `Prim::WithoutAnonymousAntiquot` run arm
+    /// save-and-restores around its inner `run` call, so backtracking
+    /// can never leak a stale value.
+    anon_antiquot_ok: bool,
 }
 
 /// Memoization key for `category()`. ORACLE-PORT `ParserCacheKey`
@@ -922,6 +933,7 @@ impl<'a> Ps<'a> {
             furthest_stack: Vec::new(),
             cap_hits: 0,
             quot_depth: 0,
+            anon_antiquot_ok: true,
         }
     }
 
@@ -1325,6 +1337,35 @@ impl<'a> Ps<'a> {
                 Ok(())
             }
             Prim::Node { kind, prec, body } => {
+                // ORACLE-PORT `nodeWithAntiquot name kind p anonymous`:
+                // `withAntiquot (mkAntiquot name kind anonymous) (node
+                // kind p)` — this node's OWN antiquot alternative, tried
+                // before the prec gate (a `$`-headed antiquot has no
+                // `prec` of its own to gate: `mkAntiquot` is always
+                // `leadingNode kind maxPrec`). Perf: the ONLY work paid
+                // at `quot_depth == 0` (every corpus/depth-0 parse) is
+                // this one integer compare — `kind_name`'s string
+                // materialization is behind it, never on the hot path.
+                // No M3b2b Task 1-3 fixture reaches this arm with `$`
+                // next (every antiquot fixture line hits it via a
+                // CATEGORY call instead — `category`'s own antiquot
+                // handling, `try_category_antiquot`); wired now per the
+                // brief's interface contract for Task 4 (imported
+                // `nodeWithAntiquot`-shaped productions) and Task 8.
+                if self.quot_depth > 0 {
+                    let kind_name = self.kinds.name(*kind).to_string();
+                    let short = kind_name
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or(&kind_name)
+                        .to_string();
+                    if let Some(r) = self.try_antiquot(&short, &kind_name, self.anon_antiquot_ok) {
+                        if r.is_ok() {
+                            self.lhs_prec = prec.unwrap_or(0);
+                        }
+                        return r;
+                    }
+                }
                 if let Some(np) = prec {
                     if *np < self.prec {
                         let at = self.pos;
@@ -1345,6 +1386,25 @@ impl<'a> Ps<'a> {
             }
             Prim::Symbol(s) => self.expect_atom(s, false),
             Prim::NonReservedSymbol(s) => self.expect_atom(s, true),
+            // antiquot hook: NOT added here (M3b2b Task 3) — a
+            // per-arm `try_antiquot` hook, reached only when THIS bare
+            // leaf is independently selected as a category leading
+            // candidate for token `$`, isn't how the fixture's own
+            // `ident` leaf antiquot (`QuotAntiquot.lean` line c, `$x:ident`
+            // inside a `term`-category quotation) is actually reached —
+            // `category`'s own antiquot handling
+            // (`try_category_antiquot`) resolves that suffix directly
+            // (see its doc comment for the full oracle citation: the
+            // real oracle reaches `ident`'s OWN `mkAntiquot` via a
+            // static per-production first-token table union this crate
+            // can't replicate without moving the base snapshot's
+            // fingerprint). `num`/`scientific`/`str`/`char`/`name` hooks
+            // are the same story, one level further from any COMMITTED
+            // fixture line — add a per-arm hook here ONLY if a future
+            // fixture demands one reached OUTSIDE `category`'s own
+            // dispatch (e.g. a bare `Prim::Ident` invoked directly, not
+            // through `category()` — none of Task 3's fixture lines do
+            // this).
             Prim::Ident => {
                 let (t, at, sp) = self.peek_for_match();
                 if t.kind == TokenKind::Ident {
@@ -1658,6 +1718,13 @@ impl<'a> Ps<'a> {
                 self.forbidden_stack.pop();
                 r
             }
+            Prim::WithoutAnonymousAntiquot(q) => {
+                let saved = self.anon_antiquot_ok;
+                self.anon_antiquot_ok = false;
+                let r = self.run(q);
+                self.anon_antiquot_ok = saved;
+                r
+            }
             Prim::Category { name, rbp } => self.category(name, *rbp),
             Prim::TrailingNode { .. } => {
                 // Only the category trailing loop may run these (it
@@ -1669,6 +1736,368 @@ impl<'a> Ps<'a> {
                 unreachable!("TrailingNode outside a category trailing loop")
             }
         }
+    }
+
+    /// ORACLE-PORT `mkAntiquot` (`Lean/Parser/Extra.lean` — read at the
+    /// pinned toolchain before implementing/modifying this, per the
+    /// M3b2b Task 3 brief) as used by a NAMED node's own antiquot
+    /// alternative (`nodeWithAntiquot`/`Prim::Node`'s `try_antiquot`
+    /// call, and the leaf-arm hooks the corpus/sweep add on demand —
+    /// see those call sites). The category-ENTRY antiquot alternative
+    /// is a separate, sibling mechanism (`try_category_antiquot` below)
+    /// — see ITS doc comment for why the two can't share this one
+    /// (`mkCategoryAntiquotParser`'s `isPseudoKind := true` and its
+    /// `:name` suffix racing the category's OWN leading dispatch on
+    /// failure need different handling than a single named node's own,
+    /// simpler, exact-name-only suffix).
+    ///
+    /// The gate: only at `quot_depth > 0` with `$` next. `antiquot`'s
+    /// entire body (prefix through the optional `:name` suffix) is
+    /// ORACLE-ATOMIC (`mkAntiquot`'s `atomic <| ..`) — ANY failure
+    /// anywhere inside it is a CLEAN, non-consuming failure from this
+    /// fn's caller's point of view, so `None` (not `Some(Err(_))`) is
+    /// this fn's answer whenever `antiquot` doesn't succeed: ORACLE
+    /// `orelseFnCore`'s failure branch (`Basic.lean:226-235`) always
+    /// retries the normal parser `q` when `p` (the antiquot) fails
+    /// without consuming — which `atomic` guarantees unconditionally,
+    /// independent of `isCatAntiquot`/`OrElseOnAntiquotBehavior` (those
+    /// only change what happens when `p` SUCCEEDS, i.e. whether `q` is
+    /// even tried at all — see `try_category_antiquot`'s doc comment
+    /// for the one place that distinction actually matters here).
+    fn try_antiquot(&mut self, name: &str, kind_name: &str, anonymous: bool) -> Option<PResult> {
+        if self.quot_depth == 0 {
+            return None;
+        }
+        let (t, at) = self.peek_significant_readonly();
+        if t.kind != TokenKind::Atom || &self.src[at..at + t.len as usize] != "$" {
+            return None;
+        }
+        let sp = self.save();
+        match self.antiquot(name, kind_name, anonymous) {
+            Ok(()) => Some(Ok(())),
+            Err(e) => {
+                self.restore(&sp);
+                let _ = e;
+                None
+            }
+        }
+    }
+
+    /// node `<kind_name>.antiquot`:
+    ///   "$"  many(noWs "$")  noWs (ident <|> "(" decQuotDepth(term) ")")
+    ///   (":" name | null-if-anonymous)
+    /// Child layout pinned by `QuotAntiquot.stx.jsonl` (lines a/c/d/g):
+    /// four children always — the `$` atom, a null node holding extra
+    /// `$`s (Lean's `many` always emits a null wrapper, even empty), the
+    /// ident or `antiquotNestedExpr` node, and the `antiquotName` node
+    /// or a null (the anonymous-suffix `pushNone` slot).
+    fn antiquot(&mut self, name: &str, kind_name: &str, anonymous: bool) -> PResult {
+        let kind = self.overlay.intern(&format!("{kind_name}.antiquot"));
+        let sp = self.save();
+        self.start(kind);
+        // --- atomic prefix ---
+        let prefix = (|| -> PResult {
+            self.expect_atom("$", false)?;
+            // Extra `$`s (nested-quotation escape). Each must be
+            // whitespace-adjacent to the previous.
+            self.start(KIND_NULL);
+            loop {
+                let sp2 = self.save();
+                let (t, at2) = self.peek_significant_readonly();
+                let is_dollar =
+                    t.kind == TokenKind::Atom && &self.src[at2..at2 + t.len as usize] == "$";
+                if !is_dollar || self.had_ws_before_current() {
+                    self.restore(&sp2);
+                    break;
+                }
+                self.expect_atom("$", false)?;
+            }
+            self.finish();
+            if self.had_ws_before_current() {
+                let at2 = self.pos;
+                return Err(self.fail_expecting("<no space before spliced term>", at2));
+            }
+            Ok(())
+        })();
+        if prefix.is_err() {
+            // Prefix failed → not an antiquot after all; unwind fully
+            // (the caller, `try_antiquot`, also restores — see its own
+            // doc comment — but doing it here too keeps this fn correct
+            // in isolation, e.g. under a future direct caller).
+            self.restore(&sp);
+            return prefix;
+        }
+        // --- body: antiquotExpr, then the optional `:name` suffix ---
+        let r = (|| -> PResult {
+            // ident, or `(` decQuotDepth(term) `)` as antiquotNestedExpr.
+            let (t, at2, sp2) = self.peek_for_match();
+            match t.kind {
+                TokenKind::Ident => self.bump(t, KIND_IDENT),
+                TokenKind::Atom if &self.src[at2..at2 + t.len as usize] == "(" => {
+                    self.restore(&sp2);
+                    let nested = self.overlay.intern("antiquotNestedExpr");
+                    self.start(nested);
+                    let inner = (|| -> PResult {
+                        self.expect_atom("(", false)?;
+                        self.run(&Prim::DecQuotDepth(Arc::new(Prim::Category {
+                            name: "term".into(),
+                            rbp: 0,
+                        })))?;
+                        self.expect_atom(")", false)
+                    })();
+                    self.finish();
+                    inner?;
+                }
+                _ => {
+                    self.restore(&sp2);
+                    return Err(self.fail_expecting("<antiquot ident or (term)>", at2));
+                }
+            }
+            // Optional `:name` suffix (antiquotName node); when
+            // !anonymous the suffix is mandatory. Unlike the CATEGORY
+            // antiquot (`try_category_antiquot`), a named node's own
+            // suffix must equal `name` EXACTLY (`nonReservedSymbol
+            // name` — no category-vs-leaf-kind ambiguity to resolve
+            // here, since this fn is never the category's OWN antiquot
+            // entry point).
+            let sp3 = self.save();
+            let (t, at3) = self.peek_significant_readonly();
+            let is_colon = t.kind == TokenKind::Atom && &self.src[at3..at3 + t.len as usize] == ":";
+            if is_colon && !self.had_ws_before_current() {
+                let named = self.overlay.intern("antiquotName");
+                self.start(named);
+                let inner = (|| -> PResult {
+                    self.expect_atom(":", false)?;
+                    self.expect_atom(name, true) // nonReservedSymbol: ident allowed
+                })();
+                self.finish();
+                if inner.is_err() {
+                    self.restore(&sp3);
+                    if !anonymous {
+                        let at4 = self.pos;
+                        return Err(self.fail_expecting("<:kind>", at4));
+                    }
+                    self.start(KIND_NULL);
+                    self.finish();
+                }
+            } else if anonymous {
+                self.start(KIND_NULL);
+                self.finish();
+            } else {
+                let at4 = self.pos;
+                return Err(self.fail_expecting("<:kind>", at4));
+            }
+            Ok(())
+        })();
+        self.finish(); // the antiquot node always closes (Node-arm idiom)
+        if r.is_ok() {
+            self.lhs_prec = crate::grammar::MAX_PREC; // leadingNode kind maxPrec
+        }
+        r
+    }
+
+    /// The builtin LEAF antiquot kinds (`Basic.lean`'s `ident`/`num`/
+    /// `hexnum`/`scientific`/`str`/`char`/`name` — the `mkAntiquot`
+    /// call embedded in each of `Parser.ident`/`Parser.numLit`/etc.,
+    /// ALWAYS `isPseudoKind := false`, i.e. plain `<name>.antiquot`
+    /// kinds). Used only by `try_category_antiquot`'s suffix-driven
+    /// kind resolution (see its doc comment) — NOT a general "which
+    /// antiquot hooks exist" registry; `ident` is the only one this
+    /// crate's oracle_golden corpus currently pins (`QuotAntiquot.lean`
+    /// line c, `$x:ident`) — `num`/`str` were spot-probed against the
+    /// pinned toolchain during Task 3 development (`` `($x:num)``/
+    /// `` `($x:str)``, both resolve the same way) but have no COMMITTED
+    /// fixture line yet; included anyway since they're one shared,
+    /// static, oracle-cited list, not a per-name hook to wire
+    /// separately (unlike `Prim::Ident`'s own leaf-arm hook at
+    /// `Prim::Node`/leaf call sites, which — per the M3b2b Task 3 brief
+    /// — really is added on demand, one Prim variant at a time).
+    const CATEGORY_LEAF_ANTIQUOT_NAMES: [&'static str; 7] = [
+        "ident",
+        "num",
+        "hexnum",
+        "scientific",
+        "str",
+        "char",
+        "name",
+    ];
+
+    /// ORACLE-PORT `mkCategoryAntiquotParser`/`categoryParserFnImpl`
+    /// (`Lean/Parser/Extension.lean`): `mkAntiquot catName.toString
+    /// catName (isPseudoKind := true)`, raced against the category's own
+    /// leading dispatch via `withAntiquotFn (isCatAntiquot := true) ..`
+    /// (`Basic.lean`'s `leadingParser`).
+    ///
+    /// **Why this can't just call `try_antiquot`/`antiquot`** (the
+    /// empirical pin `QuotAntiquot.stx.jsonl` line c forced — see
+    /// `category`'s call site for the full citation trail): the
+    /// oracle's `nonReservedSymbol name` in `mkCategoryAntiquotParser`
+    /// requires the `:suffix` text to equal the CATEGORY's own bare
+    /// name EXACTLY (`name` here). `$x:ident` inside a `term`-category
+    /// quotation does NOT satisfy that (`"ident" != "term"`), so the
+    /// oracle's category-level attempt fails — atomically, hence
+    /// non-consuming — and `orelseFnCore` retries the category's OWN
+    /// normal leading dispatch, where the registered `ident` leading
+    /// production's OWN (unrelated, non-pseudo-kinded) `mkAntiquot
+    /// "ident" identKind` gets an independent shot and succeeds,
+    /// producing `ident.antiquot`. Reproducing that exactly would need
+    /// this crate's STATIC per-production first-token dispatch table to
+    /// ALSO index every antiquot-wrapped leading candidate under the
+    /// literal token `"$"` — a base-`GrammarSnapshot` change the M3b2b
+    /// plan's global constraints forbid (fingerprints must not move).
+    ///
+    /// This fn instead collapses the two-step oracle race into ONE
+    /// parse whose final KIND is chosen from the parsed suffix text
+    /// after the fact (see `CATEGORY_LEAF_ANTIQUOT_NAMES`): no suffix,
+    /// or suffix == `cat_name` → the category's own pseudo kind
+    /// (`<cat_name>.pseudo.antiquot`); suffix == a known leaf name →
+    /// that leaf's plain kind (`<name>.antiquot`); anything else → the
+    /// whole antiquot fails (`None`, falls through to the category's
+    /// normal dispatch, which then fails on ITS OWN terms — the same
+    /// observable "parse error" outcome as the oracle's own
+    /// unrelated-fallback corner for an unrecognized suffix, spot-probed
+    /// as `` `($x:foo)`` during development, without reproducing its
+    /// exact `doForward`/`<missing>` shape, which no fixture pins).
+    ///
+    /// Always anonymous (`$x` alone, no suffix, always succeeds) — the
+    /// category antiquot has no `WithoutAnonymousAntiquot` scope of its
+    /// own in the oracle (that flag is a per-NODE `leading_parser`
+    /// option, never set on `mkCategoryAntiquotParser`'s call).
+    fn try_category_antiquot(&mut self, cat_name: &str, t: Token, at: usize) -> Option<PResult> {
+        if self.quot_depth == 0 {
+            return None;
+        }
+        if t.kind != TokenKind::Atom || &self.src[at..at + t.len as usize] != "$" {
+            return None;
+        }
+        let sp = self.save();
+        match self.category_antiquot_body(cat_name) {
+            Ok(()) => Some(Ok(())),
+            Err(e) => {
+                self.restore(&sp);
+                let _ = e;
+                None
+            }
+        }
+    }
+
+    /// The parse-then-classify body `try_category_antiquot` wraps — see
+    /// its doc comment. On ANY error the caller restores fully, so
+    /// nothing here needs its own outermost save/restore (only the
+    /// suffix's own local `sp3`, which mirrors `antiquot`'s equivalent
+    /// bookkeeping for readability/defense-in-depth, same as there).
+    fn category_antiquot_body(&mut self, cat_name: &str) -> PResult {
+        let node_start = self.events.len();
+        self.expect_atom("$", false)?;
+        self.start(KIND_NULL);
+        loop {
+            let sp2 = self.save();
+            let (t, at2) = self.peek_significant_readonly();
+            let is_dollar =
+                t.kind == TokenKind::Atom && &self.src[at2..at2 + t.len as usize] == "$";
+            if !is_dollar || self.had_ws_before_current() {
+                self.restore(&sp2);
+                break;
+            }
+            self.expect_atom("$", false)?;
+        }
+        self.finish();
+        if self.had_ws_before_current() {
+            let at2 = self.pos;
+            return Err(self.fail_expecting("<no space before spliced term>", at2));
+        }
+        // antiquotExpr: ident, or `(` decQuotDepth(term) `)`.
+        let (t, at2, sp2) = self.peek_for_match();
+        match t.kind {
+            TokenKind::Ident => self.bump(t, KIND_IDENT),
+            TokenKind::Atom if &self.src[at2..at2 + t.len as usize] == "(" => {
+                self.restore(&sp2);
+                let nested = self.overlay.intern("antiquotNestedExpr");
+                self.start(nested);
+                let inner = (|| -> PResult {
+                    self.expect_atom("(", false)?;
+                    self.run(&Prim::DecQuotDepth(Arc::new(Prim::Category {
+                        name: "term".into(),
+                        rbp: 0,
+                    })))?;
+                    self.expect_atom(")", false)
+                })();
+                self.finish();
+                inner?;
+            }
+            _ => {
+                self.restore(&sp2);
+                return Err(self.fail_expecting("<antiquot ident or (term)>", at2));
+            }
+        }
+        // Optional `:name` suffix — parsed GENERICALLY (any Ident-kind
+        // token; real `nonReservedSymbol` also allows reserved-word
+        // text, but none of `cat_name`/`CATEGORY_LEAF_ANTIQUOT_NAMES`
+        // are reserved words in this crate's token table, so
+        // restricting to `TokenKind::Ident` costs nothing observable).
+        // The KIND is resolved from the captured text afterward — see
+        // this fn's caller's doc comment.
+        let sp3 = self.save();
+        let (t, at3) = self.peek_significant_readonly();
+        let is_colon = t.kind == TokenKind::Atom && &self.src[at3..at3 + t.len as usize] == ":";
+        let suffix_name: Option<String> = if is_colon && !self.had_ws_before_current() {
+            let named = self.overlay.intern("antiquotName");
+            self.start(named);
+            let inner = (|| -> Result<String, Fail> {
+                self.expect_atom(":", false)?;
+                let (t2, at4, sp4) = self.peek_for_match();
+                if t2.kind != TokenKind::Ident {
+                    self.restore(&sp4);
+                    return Err(self.fail_expecting("<:kind>", at4));
+                }
+                let text = self.src[at4..at4 + t2.len as usize].to_string();
+                self.bump(t2, KIND_ATOM);
+                Ok(text)
+            })();
+            self.finish();
+            match inner {
+                Ok(text) => Some(text),
+                Err(f) => {
+                    // A colon genuinely present but not resolving to a
+                    // name is a CONSUMING failure in the oracle (`symbol
+                    // ":"` already bumped) — `checkNoImmediateColon`
+                    // then also fails (a colon IS immediately there), so
+                    // the `anonymous` `pushNone` fallback never applies
+                    // either; the whole antiquot fails (caller restores
+                    // fully).
+                    self.restore(&sp3);
+                    return Err(f);
+                }
+            }
+        } else {
+            None
+        };
+        let kind_name = match &suffix_name {
+            None => format!("{cat_name}.pseudo"),
+            Some(s) if s == cat_name => format!("{cat_name}.pseudo"),
+            Some(s) if Self::CATEGORY_LEAF_ANTIQUOT_NAMES.contains(&s.as_str()) => s.clone(),
+            Some(_) => {
+                let at4 = self.pos;
+                return Err(self.fail_expecting("<antiquot kind>", at4));
+            }
+        };
+        if suffix_name.is_none() {
+            // pushNone: the (always-anonymous) category antiquot's
+            // optional suffix slot, absent.
+            self.start(KIND_NULL);
+            self.finish();
+        }
+        // Retroactive node wrap — same technique `category`'s own
+        // trailing loop uses (`self.events.insert(lhs_events,
+        // Start(kind))`): the final KIND depends on the suffix just
+        // parsed, so it can't be `self.start`-ed up front the way
+        // `antiquot`'s (name known in advance) can.
+        let kind = self.overlay.intern(&format!("{kind_name}.antiquot"));
+        self.events
+            .insert(node_start, PEvent::Ev(Event::Start(kind)));
+        self.events.push(PEvent::Ev(Event::Finish));
+        self.lhs_prec = crate::grammar::MAX_PREC; // leadingNode kind maxPrec
+        Ok(())
     }
 
     fn expect_atom(&mut self, s: &str, allow_ident: bool) -> PResult {
@@ -2533,52 +2962,72 @@ impl<'a> Ps<'a> {
             let (t, at) = self.peek_significant();
             let lhs_events = self.events.len();
             let text = &self.src[at..at + t.len as usize];
-            let idxs = dispatch(cat, text, t.kind, true);
-            let mut parsers: Vec<Prim> = idxs
-                .iter()
-                .map(|&i| cat.leading_parsers[i].clone())
-                .collect();
-            // M3b1 Task 6: same-file overlay additions are ADDITIONS —
-            // never displace a base production — so they're appended
-            // AFTER the base candidates (registration order), run
-            // through the identical `first_tok_matches` rule
-            // (`dispatch_overlay`) and then the SAME `longest_match`
-            // below: one dispatch/selection path, base and overlay
-            // candidates just feed the same list. Empty overlay ⇒
-            // `category_delta` is `None` ⇒ `parsers` is unchanged from
-            // above, byte-identical to M3a.
-            if let Some(cd) = self.overlay.category_delta(name) {
-                let suppress = suppress_plain_ident_for(cat, text, t.kind, true);
-                parsers.extend(dispatch_overlay(cd, text, t.kind, true, suppress));
-            }
-            // ORACLE-PORT `runLongestMatchParser` (Basic.lean:1403):
-            // "we initialize [lhsPrec] to maxPrec in the leading case"
-            // — a leading candidate that is a real `leadingNode`
-            // (`Prim::Node` with `Some(prec)`) overrides this on success
-            // (`self.lhs_prec = prec.unwrap_or(0)`, the `Prim::Node` run
-            // arm above); one that's a bare token/leaf parser
-            // (`leading_raw`'s `Prim::Ident`/`NumLit`/etc — no `Node`
-            // wrap at all) never touches `lhs_prec`, so without this
-            // pre-seed it would leak whatever `lhs_prec` happened to
-            // hold from unrelated earlier parsing. `Term.app`'s
-            // trailing gate (`lhs_prec >= MAX_PREC`, Task 8) is the
-            // first production that actually exercises this: a bare
-            // ident head (`f` in `f a b c`) must count as "MAX_PREC
-            // strength" for application to fire at all.
-            let mut sp = self.save();
-            sp.lhs_prec = crate::grammar::MAX_PREC;
-            match self.longest_match(&sp, &parsers) {
-                Some(w) => {
-                    self.events.extend(w.events);
-                    self.errors.extend(w.errors);
-                    self.pos = w.end;
-                    self.lhs_prec = w.lhs_prec;
+            // M3b2b Task 3: the category's OWN antiquot alternative
+            // (`$x`/`$x:name`/`$(term)`) — tried BEFORE the normal
+            // leading dispatch below, exactly where a real leading
+            // candidate would sit (same `lhs_events` splice point, so a
+            // later trailing production wraps an antiquot lhs exactly
+            // like any other — `QuotAntiquot.lean` line `b`, `$x y`,
+            // pins this: `Term.app` wraps the antiquot). See
+            // `try_category_antiquot`'s doc comment for the oracle
+            // citation and why this races differently than a plain
+            // `OrElse` would.
+            if let Some(ar) = self.try_category_antiquot(name, t, at) {
+                ar?;
+                // Antiquot won outright (`isCatAntiquot`'s `.acceptLhs`)
+                // — `self.lhs_prec` is already `MAX_PREC`
+                // (`try_category_antiquot`/`category_antiquot_body`), so
+                // just fall through to the trailing loop below, same as
+                // a normal `Prim::Node` leading candidate's own success
+                // path would.
+            } else {
+                let idxs = dispatch(cat, text, t.kind, true);
+                let mut parsers: Vec<Prim> = idxs
+                    .iter()
+                    .map(|&i| cat.leading_parsers[i].clone())
+                    .collect();
+                // M3b1 Task 6: same-file overlay additions are ADDITIONS —
+                // never displace a base production — so they're appended
+                // AFTER the base candidates (registration order), run
+                // through the identical `first_tok_matches` rule
+                // (`dispatch_overlay`) and then the SAME `longest_match`
+                // below: one dispatch/selection path, base and overlay
+                // candidates just feed the same list. Empty overlay ⇒
+                // `category_delta` is `None` ⇒ `parsers` is unchanged from
+                // above, byte-identical to M3a.
+                if let Some(cd) = self.overlay.category_delta(name) {
+                    let suppress = suppress_plain_ident_for(cat, text, t.kind, true);
+                    parsers.extend(dispatch_overlay(cd, text, t.kind, true, suppress));
                 }
-                None => {
-                    let at = self.pos;
-                    let f = self.fail_expecting(&format!("<{name}>"), at);
-                    self.restore(&entry_sp);
-                    return Err(f);
+                // ORACLE-PORT `runLongestMatchParser` (Basic.lean:1403):
+                // "we initialize [lhsPrec] to maxPrec in the leading case"
+                // — a leading candidate that is a real `leadingNode`
+                // (`Prim::Node` with `Some(prec)`) overrides this on success
+                // (`self.lhs_prec = prec.unwrap_or(0)`, the `Prim::Node` run
+                // arm above); one that's a bare token/leaf parser
+                // (`leading_raw`'s `Prim::Ident`/`NumLit`/etc — no `Node`
+                // wrap at all) never touches `lhs_prec`, so without this
+                // pre-seed it would leak whatever `lhs_prec` happened to
+                // hold from unrelated earlier parsing. `Term.app`'s
+                // trailing gate (`lhs_prec >= MAX_PREC`, Task 8) is the
+                // first production that actually exercises this: a bare
+                // ident head (`f` in `f a b c`) must count as "MAX_PREC
+                // strength" for application to fire at all.
+                let mut sp = self.save();
+                sp.lhs_prec = crate::grammar::MAX_PREC;
+                match self.longest_match(&sp, &parsers) {
+                    Some(w) => {
+                        self.events.extend(w.events);
+                        self.errors.extend(w.errors);
+                        self.pos = w.end;
+                        self.lhs_prec = w.lhs_prec;
+                    }
+                    None => {
+                        let at = self.pos;
+                        let f = self.fail_expecting(&format!("<{name}>"), at);
+                        self.restore(&entry_sp);
+                        return Err(f);
+                    }
                 }
             }
 
@@ -4326,5 +4775,26 @@ mod tests {
         );
         // Malformed header: never panic, best-effort.
         let _ = parse_header_imports("import \u{0}\u{0}");
+    }
+
+    /// M3b2b Task 3 Step 2: the engine-level antiquotation gate.
+    /// `quot_depth > 0` (inside a `` `(...) `` quotation) offers the
+    /// antiquot alternative; `quot_depth == 0` (ordinary top-level code)
+    /// does not — `$x` there is exactly as unparseable as in M3a/M3b1.
+    #[test]
+    fn antiquot_only_inside_quotation() {
+        let snap = crate::builtin::snapshot();
+        // Inside `(...): `$x` parses as a term.antiquot node.
+        let r = crate::parse_module("def a := `($x)\n", &snap);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(
+            crate::canon::canon_jsonl(&r.tree).contains("term.pseudo.antiquot"),
+            "no antiquot node in {}",
+            crate::canon::canon_jsonl(&r.tree)
+        );
+        // Outside a quotation, `$x` is NOT an antiquot (macroDollarArg
+        // territory / plain failure — exactly what depth 0 means).
+        let r0 = crate::parse_module("def a := $x\n", &snap);
+        assert!(!crate::canon::canon_jsonl(&r0.tree).contains("antiquot"));
     }
 }
