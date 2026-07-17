@@ -124,10 +124,6 @@ pub(super) fn register(b: &mut SnapshotBuilder) {
         "term",
         "Lean.Parser.Tactic.quot",
         MAX_PREC,
-        seq([
-            sym("`(tactic|"),
-            inc_quot_depth(cat("tactic", 0)),
-            sym(")"),
-        ]),
+        seq([sym("`(tactic|"), inc_quot_depth(cat("tactic", 0)), sym(")")]),
     );
 }
