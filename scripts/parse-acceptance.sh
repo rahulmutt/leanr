@@ -24,8 +24,22 @@ for f in tests/fixtures/syntax/*.lean; do
   # command, which the parse-only dump_syntax.lean can't do (see its
   # own header comment and dump_syntax_elab.lean's module doc). Use the
   # elaborating dumper for those, same as `fixtures:regen-notation`.
+  #
+  # M3b2b Task 6/10: `Stx*.lean` (`declare_syntax_cat`/`syntax`
+  # commands consumed later in the same file, e.g. StxShapes.lean/
+  # StxDeclareUse.lean) grow the grammar mid-file the same way, so they
+  # need the same elaborating dumper (mise.toml's
+  # `fixtures:regen-notation` treats them identically). `QuotMacroRules.lean`
+  # is a `Quot*`-named exception that ALSO needs the elaborating dumper
+  # (its `macro`/`macro_rules` commands are consumed by later `#check`s
+  # in the same file) — called out explicitly here, matched before the
+  # general `Quot*` case below, since its name would otherwise fall
+  # into the plain-dumper default alongside QuotBasic/QuotAntiquot/
+  # QuotSplice (see mise.toml's `fixtures:regen-notation` comment).
   case "$base" in
     Notation*.lean) dumper=tests/fixtures/syntax/dump_syntax_elab.lean ;;
+    QuotMacroRules.lean) dumper=tests/fixtures/syntax/dump_syntax_elab.lean ;;
+    Stx*.lean) dumper=tests/fixtures/syntax/dump_syntax_elab.lean ;;
     *) dumper=tests/fixtures/syntax/dump_syntax.lean ;;
   esac
   lean --run "$dumper" "$f" > "$tmp/$base.jsonl"
