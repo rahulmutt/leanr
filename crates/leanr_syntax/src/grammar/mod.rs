@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use crate::kind::SyntaxKind;
 
+pub mod alias;
 pub mod notation;
 pub mod overlay;
 pub use notation::{derive, mangle_kind, NotationAtom, NotationSpec};
