@@ -95,9 +95,9 @@ fn mathlib_sweep_ratchet() {
     // nor regressed; they simply weren't swept.
     let swept: BTreeSet<String> = files.iter().map(|f| rel_of(f)).collect();
 
-    // Phase A: group files by import list, build each import set's
-    // snapshot once, in parallel. Each closure owns its Store; only the
-    // immutable Arc<GrammarSnapshot> crosses threads.
+    // Group files by import list (sorted by `Vec<String>` order via
+    // `BTreeMap`, giving prefix locality: similar import lists land next to
+    // each other below).
     let mut by_imports: BTreeMap<Vec<String>, Vec<PathBuf>> = BTreeMap::new();
     for file in &files {
         let Ok(src) = std::fs::read_to_string(file) else {
@@ -108,42 +108,68 @@ fn mathlib_sweep_ratchet() {
             .or_default()
             .push(file.clone());
     }
-    let snaps: BTreeMap<Vec<String>, Option<Arc<leanr_syntax::grammar::GrammarSnapshot>>> =
-        by_imports
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>()
-            .into_par_iter()
-            .map(|imports| {
-                let mut st = Store::persistent();
-                let targets: Vec<_> = imports.iter().map(|m| dotted_to_name(m)).collect();
-                let snap = leanr_olean::load_closure(&sp, &targets, &mut st)
-                    .ok()
-                    .map(|loaded| Arc::new(assemble(&loaded, &st).snapshot));
-                (imports, snap)
-            })
-            .collect();
 
-    // Phase B: sweep all files in parallel. oracle_dump subprocesses
-    // parallelize here too (the real wall-clock win on a cold cache).
-    let green: BTreeSet<String> = by_imports
+    // Fused snapshot-build + sweep, one import set at a time, in parallel —
+    // no barrier between "build every snapshot" and "sweep every file"
+    // (was: phase A built and held all 7,738 `Arc<GrammarSnapshot>`s before
+    // phase B could sweep a single file). Each set still gets its OWN fresh
+    // `Store::persistent()` (unchanged from before this fix): a chunked,
+    // warm-store-per-worker variant of this (reusing one `Store` across many
+    // sets sequentially, to collapse decode of shared oleans like
+    // Init/Std/Mathlib.Init) was prototyped and passed its own correctness
+    // check (LIMIT=30 cold-vs-warm green-list diff was byte-identical, and
+    // an isolated single-chunk replay of the exact sequence one worker
+    // processed never reproduced any issue) but reliably panicked
+    // (`index out of bounds` in `leanr_syntax`'s `KindInterner::name`,
+    // reproduced twice) once multiple chunks' independent warm `Store`s ran
+    // concurrently at LEANR_SWEEP_LIMIT=200 — a real, reproducible-at-scale
+    // failure mode whose exact mechanism wasn't pinned down within budget
+    // (see task-1-optimize-report.md). Rather than ship that risk, this
+    // keeps the fresh-store-per-set decode cost (no change there) and only
+    // banks the two SAFE wins: no phase barrier, and at most one live
+    // `Arc<GrammarSnapshot>` in flight per in-progress set (dropped the
+    // moment its files are swept) instead of all 7,738 held at once.
+    let import_sets: Vec<Vec<String>> = by_imports.keys().cloned().collect();
+    let total_sets = import_sets.len();
+    let sets_done = std::sync::atomic::AtomicUsize::new(0);
+    let green_count = std::sync::atomic::AtomicUsize::new(0);
+    let green: BTreeSet<String> = import_sets
         .par_iter()
-        .flat_map(|(imports, group)| {
-            let snap = &snaps[imports];
-            group
-                .par_iter()
-                .filter_map(|file| {
-                    let snap = snap.as_ref()?;
-                    let rel = rel_of(file);
-                    let src = std::fs::read_to_string(file).ok()?;
-                    let r = leanr_syntax::parse_module(&src, snap);
-                    if r.tree.text() != src || !r.errors.is_empty() {
-                        return None;
-                    }
-                    let want = oracle_dump(&mathlib, &lean_path, &githash, file)?;
-                    (leanr_syntax::canon::canon_jsonl(&r.tree) == want).then_some(rel)
-                })
-                .collect::<Vec<_>>()
+        .flat_map(|imports| {
+            let mut st = Store::persistent();
+            let targets: Vec<_> = imports.iter().map(|m| dotted_to_name(m)).collect();
+            let snap = leanr_olean::load_closure(&sp, &targets, &mut st)
+                .ok()
+                .map(|loaded| Arc::new(assemble(&loaded, &st).snapshot));
+            let set_green: Vec<String> = match &snap {
+                Some(snap) => {
+                    let group = &by_imports[imports];
+                    group
+                        .par_iter()
+                        .filter_map(|file| {
+                            let rel = rel_of(file);
+                            let src = std::fs::read_to_string(file).ok()?;
+                            let r = leanr_syntax::parse_module(&src, snap);
+                            if r.tree.text() != src || !r.errors.is_empty() {
+                                return None;
+                            }
+                            let want = oracle_dump(&mathlib, &lean_path, &githash, file)?;
+                            (leanr_syntax::canon::canon_jsonl(&r.tree) == want).then_some(rel)
+                        })
+                        .collect()
+                }
+                None => Vec::new(),
+            };
+            // `snap` (and its Arc<GrammarSnapshot>) drops here, right after
+            // this set's files are swept — never accumulated across sets.
+            use std::sync::atomic::Ordering;
+            let done = sets_done.fetch_add(1, Ordering::Relaxed) + 1;
+            let green_so_far =
+                green_count.fetch_add(set_green.len(), Ordering::Relaxed) + set_green.len();
+            if done.is_multiple_of(100) || done == total_sets {
+                eprintln!("[sweep] {done}/{total_sets} sets, {green_so_far} green so far");
+            }
+            set_green
         })
         .collect();
 

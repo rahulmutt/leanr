@@ -204,7 +204,7 @@ depends = ["elan:bootstrap"]
 run = "sh -c 'LEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo run --release -p leanr_cli -- check --all'"
 
 [tasks."parse:mathlib"]
-description = "M3b2a Mathlib parse sweep vs the pass-list ratchet (needs mathlib:fetch). LEANR_SWEEP_LIMIT=N for a smoke run. The sweep runs both phases in parallel via rayon; set RAYON_NUM_THREADS=N to cap worker threads (e.g. under memory pressure from parallel oracle `lean` subprocesses)."
+description = "M3b2a Mathlib parse sweep vs the pass-list ratchet (needs mathlib:fetch). LEANR_SWEEP_LIMIT=N for a smoke run. Snapshot build + sweep are streamed per import set (no barrier, no accumulated snapshots) and run in parallel via rayon; set RAYON_NUM_THREADS=N to cap worker threads (e.g. under memory pressure from parallel oracle `lean` subprocesses)."
 depends = ["elan:bootstrap"]
 run = "sh -c 'LEANR_MATHLIB_DIR=\"$PWD/.mathlib\" LEANR_OLEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo test --release -p leanr_grammar --test mathlib_sweep -- --ignored --nocapture'"
 
