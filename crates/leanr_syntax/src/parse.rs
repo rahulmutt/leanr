@@ -1896,31 +1896,52 @@ impl<'a> Ps<'a> {
         r
     }
 
-    /// The builtin LEAF antiquot kinds (`Basic.lean`'s `ident`/`num`/
-    /// `hexnum`/`scientific`/`str`/`char`/`name` — the `mkAntiquot`
-    /// call embedded in each of `Parser.ident`/`Parser.numLit`/etc.,
-    /// ALWAYS `isPseudoKind := false`, i.e. plain `<name>.antiquot`
-    /// kinds). Used only by `try_category_antiquot`'s suffix-driven
-    /// kind resolution (see its doc comment) — NOT a general "which
-    /// antiquot hooks exist" registry; `ident` is the only one this
-    /// crate's oracle_golden corpus currently pins (`QuotAntiquot.lean`
-    /// line c, `$x:ident`) — `num`/`str` were spot-probed against the
-    /// pinned toolchain during Task 3 development (`` `($x:num)``/
-    /// `` `($x:str)``, both resolve the same way) but have no COMMITTED
-    /// fixture line yet; included anyway since they're one shared,
-    /// static, oracle-cited list, not a per-name hook to wire
-    /// separately (unlike `Prim::Ident`'s own leaf-arm hook at
-    /// `Prim::Node`/leaf call sites, which — per the M3b2b Task 3 brief
-    /// — really is added on demand, one Prim variant at a time).
-    const CATEGORY_LEAF_ANTIQUOT_NAMES: [&'static str; 7] = [
-        "ident",
-        "num",
-        "hexnum",
-        "scientific",
-        "str",
-        "char",
-        "name",
-    ];
+    /// The builtin LEAF antiquot kinds this fn's flat, suffix-driven
+    /// resolution (`kind_name = suffix_name.clone()`, no extra wrapper
+    /// node) can actually reproduce — `Basic.lean`'s `mkAntiquot` call
+    /// embedded in each of `Parser.ident`/`Parser.numLit`/`Parser.
+    /// strLit`/`Parser.charLit`/`Parser.scientificLit`, ALWAYS
+    /// `isPseudoKind := false`, i.e. plain `<name>.antiquot` kinds with
+    /// NO wrapping node around them (the leaf production IS the whole
+    /// leading node in the oracle). Used only by
+    /// `try_category_antiquot`'s suffix-driven kind resolution (see its
+    /// doc comment) — NOT a general "which antiquot hooks exist"
+    /// registry.
+    ///
+    /// Every name here is fixture-pinned in `QuotAntiquot.lean`/
+    /// `.stx.jsonl`: `ident` (line c, `$x:ident` → `ident.antiquot`),
+    /// `num` (line i, `$n:num` → `num.antiquot`), `str` (line j, `$s:str`
+    /// → `str.antiquot`), `char` (line k, `$c:char` → `char.antiquot`),
+    /// `scientific` (line l, `$sc:scientific` → `scientific.antiquot`) —
+    /// each dumps as a direct, unwrapped child of `Term.quot`, matching
+    /// this fn's flat resolution exactly.
+    ///
+    /// skip-and-record (per M3b2b Task 3 review fix, milestone rule
+    /// "only ship what a fixture pins"):
+    /// - `hexnum` — probed as `` `($h:hexnum)``: the oracle does NOT
+    ///   recognize `hexnum` as an antiquot suffix name in term position
+    ///   at all (hex literals are still kind `num`, not their own
+    ///   antiquot-hookable leaf); the whole antiquot fails and the
+    ///   dump degenerates to `Term.doForward`/`<missing>` (the same
+    ///   unrecognized-suffix corner as `:foo`, see this fn's own doc
+    ///   comment) — not something a `CATEGORY_LEAF_ANTIQUOT_NAMES` entry
+    ///   could ever produce correctly. Not committed as a fixture line.
+    /// - `name` — probed as `` `($nm:name)``: the oracle wraps the
+    ///   result in an EXTRA `Lean.Parser.Term.quotedName` node (`{"c":
+    ///   [{"c":[..antiquotName..],"k":"name.antiquot"}],"k":
+    ///   "Lean.Parser.Term.quotedName"}`) around `name.antiquot`,
+    ///   because `name` isn't itself directly registered as a `term`
+    ///   leading production the way `ident`/`num`/`str`/`char`/
+    ///   `scientific` are — only `Term.quotedName := leading_parser
+    ///   nameLit` is, and `nameLit`'s own antiquot fires INSIDE that
+    ///   wrapper. This fn's flat `kind_name = suffix_name.clone()`
+    ///   resolution has no wrapper-node concept and would emit a bare
+    ///   `name.antiquot` with no `Term.quotedName` parent — a real
+    ///   mismatch, not just an untested extrapolation. Not committed as
+    ///   a fixture line; would need a per-name wrapper mechanism (out of
+    ///   scope for this fix) to reproduce.
+    const CATEGORY_LEAF_ANTIQUOT_NAMES: [&'static str; 5] =
+        ["ident", "num", "scientific", "str", "char"];
 
     /// ORACLE-PORT `mkCategoryAntiquotParser`/`categoryParserFnImpl`
     /// (`Lean/Parser/Extension.lean`): `mkAntiquot catName.toString
@@ -2968,7 +2989,11 @@ impl<'a> Ps<'a> {
             // candidate would sit (same `lhs_events` splice point, so a
             // later trailing production wraps an antiquot lhs exactly
             // like any other — `QuotAntiquot.lean` line `b`, `$x y`,
-            // pins this: `Term.app` wraps the antiquot). See
+            // pins this: the dump shows `Lean.Parser.Term.app` wrapping
+            // `term.pseudo.antiquot` as its first child (`$x` as the
+            // Pratt lhs) with `y` as the second/arg child, i.e. the
+            // trailing `app` production splices in at `lhs_events`
+            // exactly as it would over any other lhs). See
             // `try_category_antiquot`'s doc comment for the oracle
             // citation and why this races differently than a plain
             // `OrElse` would.
