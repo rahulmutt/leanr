@@ -252,3 +252,49 @@ fn the_heaviest_shape_at_the_depth_cap_fits_in_the_documented_minimum_stack() {
         });
     }
 }
+
+/// M3b2b Task 9: quotations nest via the same `Category` recursion depth
+/// as parens/anonymousCtor/do above (`` `( `( `( 1 ) ) ) ``), so this is
+/// the quotation-family sibling of
+/// `deeply_nested_parens_terminate_fast_and_parse_clean` — pinning that
+/// Task 2's `quot_depth` plumbing costs no more than an ordinary
+/// `Category` level and does not reintroduce exponential blowup or a
+/// hang as quotations nest.
+#[test]
+fn nested_quotations_terminate() {
+    for depth in [5usize, 20, 100, 1000] {
+        let src = format!("def a := {}1{}\n", "`(".repeat(depth), ")".repeat(depth));
+        in_worker(&format!("nested quots depth {depth}"), move || {
+            let snap = leanr_syntax::builtin::snapshot();
+            let r = leanr_syntax::parse_module(&src, &snap);
+            assert_eq!(r.tree.text(), src, "lossless at depth {depth}");
+        });
+    }
+}
+
+/// M3b2b Task 9: `$` (antiquot) is the OTHER quotation-family recursion
+/// path — Task 3/4's backtracking "try antiquot, else fall through"
+/// alternative and Task 4's splice/scope prefix unwinding. A storm of
+/// `$` tokens (nested antiquot attempts, `$` immediately followed by
+/// whitespace so the antiquot body never resolves, `$[` splice-bracket
+/// storms, and depth 0 as a fast-failure control) exercises exactly the
+/// atomic-prefix restore paths this task's brief calls out as the
+/// suspect for any hang: every early return in `antiquot`/
+/// `antiquot_splice` must restore or finish symmetrically, or one of
+/// these degenerates into unbounded backtracking instead of a clean
+/// (possibly erroring) parse.
+#[test]
+fn dollar_storms_terminate() {
+    for src in [
+        format!("def a := `({}x)\n", "$".repeat(500)),
+        format!("def a := `({} x)\n", "$ ".repeat(500)),
+        format!("def a := `(⟨{}⟩)\n", "$[".repeat(200)),
+        "def a := $x\n".to_string(), // depth 0: plain failure, fast
+    ] {
+        in_worker("dollar storm", move || {
+            let snap = leanr_syntax::builtin::snapshot();
+            let r = leanr_syntax::parse_module(&src, &snap);
+            assert_eq!(r.tree.text(), src, "lossless");
+        });
+    }
+}

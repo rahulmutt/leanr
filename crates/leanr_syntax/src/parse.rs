@@ -5304,4 +5304,40 @@ mod tests {
         assert!(r.errors.is_empty(), "{:?}", r.errors);
         assert!(crate::canon::canon_jsonl(&r.tree).contains("widgetish.pseudo.antiquot"));
     }
+
+    /// M3b2b Task 9 Step 2: the cache-poisoning regression this plan's
+    /// `CatCacheKey.quot_depth` field prevents. The same byte offset
+    /// parses `term` both inside and outside a quotation (`$x` is legal
+    /// only inside); if the cache ignored depth, whichever ran first
+    /// would poison the other. Pin, not RED/GREEN: this already passes
+    /// since Task 2 landed `quot_depth` in the key — it guards against
+    /// regression, not a new behavior.
+    ///
+    /// Brief's sketch checks `.contains("term.antiquot")`; corrected
+    /// here to `"term.pseudo.antiquot"` — the landed, oracle-pinned
+    /// no-suffix category-antiquot kind name (same correction as
+    /// `antiquot_only_inside_quotation` above and Task 7's
+    /// `declare_syntax_cat_creates_a_quotable_category`).
+    ///
+    /// Brief's sketch also joins the two `$x`s with `" + "`; this
+    /// grammar registers no arithmetic-operator trailing parser for
+    /// `term` (only `level.rs`'s unrelated universe-level `addLit`), so
+    /// `def a := `($x + $x)` is a plain parse failure independent of
+    /// antiquot/cache behavior — not what this test means to pin.
+    /// Substituted `$x $x` (`Term.app`, `register_arrow_app_proj`'s
+    /// `many1(argument())`), which the grammar does register: it
+    /// preserves the pinned property (two independent `term` category
+    /// calls at the SAME `quot_depth`, each resolving `$x` to an
+    /// antiquot rather than one poisoning the other's cache entry).
+    #[test]
+    fn category_cache_is_quot_depth_keyed() {
+        let snap = crate::builtin::snapshot();
+        let src = "def a := `($x $x)\n";
+        let r = crate::parse_module(src, &snap);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        let n = crate::canon::canon_jsonl(&r.tree)
+            .matches("term.pseudo.antiquot")
+            .count();
+        assert_eq!(n, 2, "both $x occurrences must be antiquots");
+    }
 }
