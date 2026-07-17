@@ -924,8 +924,19 @@ pub(crate) const GRAMMAR_GROWING_KINDS: &[&str] = &[
     "Lean.Parser.Command.mixfix",
     "Lean.Parser.Command.notation",
     "Lean.Parser.Command.syntaxCat", // pinned by StxShapes dump
-    // Task 8 appends: syntax, syntaxAbbrev, macro, and the imported
-    // elab-family kinds.
+    // M3b2b Task 8: the general `syntax`-command surface
+    // (`grammar::surface::derive_surface`). `syntaxAbbrev` is included
+    // even though it always derives `None` today (it registers a
+    // by-name-referenceable parser fragment, not a category production
+    // — `derive_syntax_abbrev`'s own doc comment) — per this task's
+    // brief, kept minimal but not pruned to "only kinds that currently
+    // derive Some". `macro_rules`/`elab_rules` are shape-only (never
+    // grow the grammar themselves) and deliberately STAY OFF this list.
+    "Lean.Parser.Command.syntax",
+    "Lean.Parser.Command.syntaxAbbrev",
+    "Lean.Parser.Command.macro",
+    "Lean.Parser.Command.elab",
+    "Lean.Parser.Command.binderPredicate",
 ];
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1379,8 +1390,27 @@ impl<'a> Ps<'a> {
                 // handling, `try_category_antiquot`); wired now per the
                 // brief's interface contract for Task 4 (imported
                 // `nodeWithAntiquot`-shaped productions) and Task 8.
+                //
+                // Task 8 fix (`StxDeclareUse.lean`'s own `macro_rules`
+                // gate first surfaced this): `*kind` here is whatever
+                // `Overlay::register`/`SnapshotBuilder::leading2` built
+                // this `Prim::Node` with — for a SAME-FILE `syntax`
+                // production (M3b2b Task 8, `grammar::surface`) that is
+                // an OVERLAY-numbered kind (`>= snap.kind_count()`),
+                // never resolvable via the bare BASE `self.kinds`
+                // (`top_level_is_antiquot`'s own doc comment already
+                // establishes this exact overlay-vs-base split for the
+                // identical "resolve this Prim::Node's kind name" need).
+                // `Overlay::kind_name` returns `None` for a base kind
+                // (`checked_sub` underflows), so trying it FIRST and
+                // falling back to the base interner is correct for
+                // both.
                 if self.quot_depth > 0 {
-                    let kind_name = self.kinds.name(*kind).to_string();
+                    let kind_name = self
+                        .overlay
+                        .kind_name(*kind)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| self.kinds.name(*kind).to_string());
                     let short = kind_name
                         .rsplit('.')
                         .next()
@@ -2372,11 +2402,75 @@ impl<'a> Ps<'a> {
         // parsed, so it can't be `self.start`-ed up front the way
         // `antiquot`'s (name known in advance) can.
         let kind = self.overlay.intern(&format!("{kind_name}.antiquot"));
-        self.events
-            .insert(node_start, PEvent::Ev(Event::Start(kind)));
-        self.events.push(PEvent::Ev(Event::Finish));
+        // M3b2b Task 8 fix (`StxDeclareUse.lean`'s own `$n:num` inside
+        // `grab[...]`'s `widgetish` argument first surfaced this): see
+        // `leaf_antiquot_wrap_kind`'s own doc comment for the oracle
+        // citation (`numLit`'s antiquot alternative is baked INTO the
+        // literal parser itself, so whatever outer `node` a SAME-FILE
+        // `syntax`-declared production wraps a bare alias reference to
+        // it in — e.g. `syntax num : widgetish`'s own `widgetish_` —
+        // wraps the antiquot result too). `None` (no such overlay
+        // production) preserves the original bare `{kind_name}.antiquot`
+        // shape unchanged (every builtin category's intrinsic
+        // `num`/`ident`/… registration, which has no such wrap).
+        if let Some(wrap_kind) = self.leaf_antiquot_wrap_kind(cat_name, &kind_name) {
+            self.events
+                .insert(node_start, PEvent::Ev(Event::Start(wrap_kind)));
+            self.events
+                .insert(node_start + 1, PEvent::Ev(Event::Start(kind)));
+            self.events.push(PEvent::Ev(Event::Finish)); // inner (kind)
+            self.events.push(PEvent::Ev(Event::Finish)); // outer (wrap_kind)
+        } else {
+            self.events
+                .insert(node_start, PEvent::Ev(Event::Start(kind)));
+            self.events.push(PEvent::Ev(Event::Finish));
+        }
         self.lhs_prec = crate::grammar::MAX_PREC; // leadingNode kind maxPrec
         Ok(())
+    }
+
+    /// M3b2b Task 8 fix: whether `cat_name`'s OVERLAY (same-file,
+    /// `grammar::surface`-derived) leading productions include one that
+    /// wraps a BARE reference to the literal leaf `kind_name` names
+    /// (`"num"` → `Prim::NumLit`, etc. — `is_named_literal`) in an outer
+    /// node of its own — and if so, that outer node's `SyntaxKind`.
+    ///
+    /// ORACLE-PORT rationale: `Lean/Parser/Extra.lean`'s `numLit`/
+    /// `strLit`/`charLit`/`scientificLit`/`Lean.Parser.ident` are each
+    /// `withAntiquot (mkAntiquot <name> <kind>) <name>NoAntiquot` — the
+    /// antiquot alternative is baked INTO the literal parser itself, so
+    /// whatever `node`/`leadingNode` wrap a `syntax`-declared production
+    /// puts around a BARE alias reference to one of them (`syntax num :
+    /// widgetish`'s own `ParserDescr.node "widgetish_" prec
+    /// (ParserDescr.const \`num)`, compiling to `leadingNode
+    /// "widgetish_" prec numLit`) transparently wraps the antiquot
+    /// result too (`node n p` wraps whatever `p` — antiquot included —
+    /// produces). This crate's `category_antiquot_body` collapses the
+    /// whole two-step oracle race into one classify-after-parse step
+    /// with NO wrapping node of its own by default — correct for
+    /// `term`/`tactic`'s own INTRINSIC, unwrapped `num`/`ident`/…
+    /// registrations (`SnapshotBuilder::leading_raw`'s own doc comment:
+    /// no extra `Node` wrap for a bare leaf) — so this is the seam that
+    /// corrects it for a SAME-FILE production that DOES add a wrap.
+    /// Base-snapshot categories are deliberately NOT searched here (this
+    /// crate's own literal leaves are always registered via
+    /// `leading_raw`, never wrapped, so no builtin category could ever
+    /// have a match anyway — searching only the overlay is both
+    /// sufficient and keeps this from ever touching the immutable base
+    /// tables, matching the "SAME-FILE overlay additions" scoping
+    /// `category`'s own dispatch-merging code already uses elsewhere).
+    fn leaf_antiquot_wrap_kind(&self, cat_name: &str, kind_name: &str) -> Option<SyntaxKind> {
+        let cd = self.overlay.category_delta(cat_name)?;
+        cd.leading.iter().find_map(|(_, p)| match p {
+            Prim::Node { kind, body, .. } => {
+                let inner = match body.as_ref() {
+                    Prim::Seq(v) if v.len() == 1 => &v[0],
+                    other => other,
+                };
+                is_named_literal(inner, kind_name).then_some(*kind)
+            }
+            _ => None,
+        })
     }
 
     fn expect_atom(&mut self, s: &str, allow_ident: bool) -> PResult {
@@ -3603,6 +3697,23 @@ impl<'a> Ps<'a> {
 }
 
 /// `LeadingIdentBehavior::Symbol`'s ident-suppression flag — factored
+/// `Prim` discriminant check for `Ps::leaf_antiquot_wrap_kind`: does `p`
+/// match the bare literal-leaf primitive `name` (one of `Ps::
+/// CATEGORY_LEAF_ANTIQUOT_NAMES`) names? Every one of these variants is
+/// a plain, no-payload leaf (`Prim::NumLit`/`StrLit`/`CharLit`/
+/// `ScientificLit`/`Ident`), so this is a pure discriminant match, never
+/// a value comparison.
+fn is_named_literal(p: &Prim, name: &str) -> bool {
+    matches!(
+        (p, name),
+        (Prim::Ident, "ident")
+            | (Prim::NumLit, "num")
+            | (Prim::ScientificLit, "scientific")
+            | (Prim::StrLit, "str")
+            | (Prim::CharLit, "char")
+    )
+}
+
 /// out of `dispatch` (M3b1 Task 6) so `category()` can compute it
 /// exactly ONCE per read point and apply the SAME value to both the
 /// base dispatch (`dispatch`) and the overlay dispatch

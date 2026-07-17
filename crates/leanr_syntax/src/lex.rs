@@ -353,7 +353,20 @@ pub fn next_token(
                 if munched > len {
                     return tok(TokenKind::Atom, munched);
                 }
-                if table.contains(&rest[..len]) {
+                // M3b2b Task 8 fix (`QuotMacroRules.lean`'s own `probe`/
+                // `twice` gate first surfaced this): an ident-SHAPED
+                // keyword registered ONLY in the same-file OVERLAY
+                // table (e.g. a `syntax "probe" term : term` production
+                // — `probe` is alphabetic, so it can only ever win this
+                // exact-length branch, never the `munched > len`
+                // strictly-longer one a punctuation symbol like `⊕`
+                // takes) was checked against the BASE `table` only,
+                // never `overlay_tokens` — so it silently kept lexing
+                // as a plain `Ident` and the whole production was
+                // unreachable at parse time even though it registered
+                // correctly. Mirrors `munch_with`'s own "both tables"
+                // rule just above.
+                if table.contains(&rest[..len]) || overlay_tokens.contains(&rest[..len]) {
                     return tok(TokenKind::Atom, len); // ident-shaped keyword
                 }
                 return tok(TokenKind::Ident, len);

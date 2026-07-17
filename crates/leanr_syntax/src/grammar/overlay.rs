@@ -415,4 +415,40 @@ mod tests {
         ov.fingerprint_into(&mut h2);
         assert_ne!(h1.finalize(), h2.finalize());
     }
+
+    /// M3b2b Task 8 preliminary (controller-added, from Task 7's
+    /// review): the SAME category name, differing ONLY in its
+    /// registered `LeadingIdentBehavior`, must still fingerprint
+    /// differently — locks the behavior BYTE into the hash (not just
+    /// "a category exists", which `overlay_categories_register_and_
+    /// fingerprint` above already covers). Mirrors
+    /// `GrammarSnapshot::fingerprint`'s own module-doc "v2" bump, which
+    /// added the identical per-category behavior byte for base
+    /// categories (M3a Task 10 review Finding 1) — this is that same
+    /// guarantee for an OVERLAY-registered (same-file
+    /// `declare_syntax_cat`) category.
+    #[test]
+    fn overlay_categories_differing_only_in_behavior_fingerprint_differently() {
+        let base = crate::builtin::snapshot();
+
+        let mut ov_default = Overlay::new(&base);
+        ov_default.register_category("widgetish", LeadingIdentBehavior::Default);
+        let mut h_default = blake3::Hasher::new();
+        ov_default.fingerprint_into(&mut h_default);
+
+        let mut ov_symbol = Overlay::new(&base);
+        ov_symbol.register_category("widgetish", LeadingIdentBehavior::Symbol);
+        let mut h_symbol = blake3::Hasher::new();
+        ov_symbol.fingerprint_into(&mut h_symbol);
+
+        let mut ov_both = Overlay::new(&base);
+        ov_both.register_category("widgetish", LeadingIdentBehavior::Both);
+        let mut h_both = blake3::Hasher::new();
+        ov_both.fingerprint_into(&mut h_both);
+
+        let (d, s, b) = (h_default.finalize(), h_symbol.finalize(), h_both.finalize());
+        assert_ne!(d, s, "Default vs Symbol must fingerprint differently");
+        assert_ne!(d, b, "Default vs Both must fingerprint differently");
+        assert_ne!(s, b, "Symbol vs Both must fingerprint differently");
+    }
 }

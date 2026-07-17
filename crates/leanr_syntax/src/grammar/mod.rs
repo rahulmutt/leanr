@@ -17,6 +17,7 @@ use crate::kind::SyntaxKind;
 pub mod alias;
 pub mod notation;
 pub mod overlay;
+pub mod surface;
 pub use notation::{derive_delta, mangle_kind, GrammarDelta, NotationAtom, NotationSpec};
 pub use overlay::{CategoryDelta, Overlay};
 
