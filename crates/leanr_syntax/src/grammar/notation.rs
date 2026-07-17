@@ -119,11 +119,11 @@
 //! (category-scoped) name only, not a namespace-qualified one —
 //! matching the brief's category-only signature.
 
-use crate::kind::{KindInterner, KIND_ERROR, KIND_MISSING};
+use crate::kind::{KindInterner, KIND_ERROR, KIND_IDENT, KIND_MISSING};
 use crate::lex::{is_id_first, is_id_rest};
 use crate::tree::SyntaxNode;
 
-use super::{Prim, LEAD_PREC, MAX_PREC};
+use super::{LeadingIdentBehavior, Prim, LEAD_PREC, MAX_PREC};
 
 /// One atom of a notation's surface syntax, in declaration order.
 /// `Symbol` carries the *raw* (untrimmed) source text of a quoted
@@ -354,16 +354,35 @@ enum Item {
     Placeholder(Option<u32>),
 }
 
-/// Entry point (brief's `pub fn derive`). `None` iff `node.kind()` is
-/// not a notation/mixfix outer kind, OR the subtree doesn't match this
-/// module's oracle-confirmed shape for that kind (malformed/error-node
-/// trees — Task 9's formal remit, but every navigation step below is
-/// already `?`-propagated `Option`, so it falls out for free rather
-/// than needing a dedicated guard), OR (Task 9 Step 3, defense in
-/// depth — see `contains_error_or_missing`'s own doc comment)
-/// `node` contains an `<error>`/`<missing>` node anywhere in its
-/// structural slots.
-pub fn derive(node: &SyntaxNode, kinds: &KindInterner) -> Option<NotationSpec> {
+/// M3b2b Task 7: `derive`'s generalized return type — a grammar-growing
+/// command derives EITHER a new PRODUCTION to fold into an existing
+/// category (`notation`/`mixfix`, exactly the old `derive`'s plain
+/// `NotationSpec` result) OR a brand-new, initially-EMPTY CATEGORY
+/// (`declare_syntax_cat` — Task 8 registers productions into it; until
+/// then the category exists only for a category antiquot, `$x`, to
+/// resolve into — see `parse.rs`'s `category()` overlay fallback).
+#[derive(Clone, Debug)]
+pub enum GrammarDelta {
+    Production(NotationSpec),
+    NewCategory {
+        name: String,
+        behavior: LeadingIdentBehavior,
+    },
+}
+
+/// Entry point (brief's `pub fn derive_delta`, M3b2b Task 7 — supersedes
+/// M3b1's plain `derive`, single call site updated in place rather than
+/// kept as a wrapper, see this task's report for the `grep` that found
+/// no other call sites). `None` iff `node.kind()` is not a grammar-
+/// growing outer kind (`notation`/`mixfix`/`declare_syntax_cat`), OR the
+/// subtree doesn't match this module's oracle-confirmed shape for that
+/// kind (malformed/error-node trees — Task 9's formal remit, but every
+/// navigation step below is already `?`-propagated `Option`, so it falls
+/// out for free rather than needing a dedicated guard), OR (Task 9 Step
+/// 3, defense in depth — see `contains_error_or_missing`'s own doc
+/// comment) `node` contains an `<error>`/`<missing>` node anywhere in
+/// its structural slots.
+pub fn derive_delta(node: &SyntaxNode, kinds: &KindInterner) -> Option<GrammarDelta> {
     // M3b1 only ever registers into the `term` category (both
     // `mixfix`'s and `notation`'s own RHS recurse via `cat("term", 0)`
     // — command_notation.rs's `register`) — hardcoded per the task
@@ -373,24 +392,77 @@ pub fn derive(node: &SyntaxNode, kinds: &KindInterner) -> Option<NotationSpec> {
     // `elabNotation`'s `let cat := mkIdentFrom ref \`term`).
     let category = "term";
     let name = kinds.name(node.kind());
-    if name != "Lean.Parser.Command.mixfix" && name != "Lean.Parser.Command.notation" {
+    if name != "Lean.Parser.Command.mixfix"
+        && name != "Lean.Parser.Command.notation"
+        && name != "Lean.Parser.Command.syntaxCat"
+    {
         return None;
     }
-    // Task 9 Step 3: refuse to derive a `NotationSpec` from a subtree
-    // that isn't STRUCTURALLY clean, even though it reached this call
-    // via the command loop's own clean `Ok(())` arm (`parse.rs`'s
-    // `run_module`, M3b1 Task 7) — see `contains_error_or_missing`'s
-    // own doc comment for why this is currently unreachable-by-
-    // construction on this crate's grammar, and why the guard is kept
-    // anyway.
+    // Task 9 Step 3: refuse to derive a delta from a subtree that isn't
+    // STRUCTURALLY clean, even though it reached this call via the
+    // command loop's own clean `Ok(())` arm (`parse.rs`'s `run_module`,
+    // M3b1 Task 7) — see `contains_error_or_missing`'s own doc comment
+    // for why this is currently unreachable-by-construction on this
+    // crate's grammar, and why the guard is kept anyway. Applies
+    // uniformly to `declare_syntax_cat` too — same reasoning, no slot
+    // in ITS oracle shape (module doc, `command_syntax.rs`) is allowed
+    // to legitimately contain one either.
     if contains_error_or_missing(node) {
         return None;
     }
     match name {
-        "Lean.Parser.Command.mixfix" => derive_mixfix(node, kinds, category),
-        "Lean.Parser.Command.notation" => derive_notation(node, kinds, category),
+        "Lean.Parser.Command.mixfix" => {
+            derive_mixfix(node, kinds, category).map(GrammarDelta::Production)
+        }
+        "Lean.Parser.Command.notation" => {
+            derive_notation(node, kinds, category).map(GrammarDelta::Production)
+        }
+        "Lean.Parser.Command.syntaxCat" => derive_syntax_cat(node, kinds),
         _ => unreachable!("checked above"),
     }
+}
+
+/// `declare_syntax_cat`'s oracle shape (`command_syntax.rs`'s module
+/// doc, Task 6's oracle dump): `Lean.Parser.Command.syntaxCat{
+/// null(doc), "declare_syntax_cat"(atom), ident(bare token),
+/// null(catBehavior) }`. Both `sym("declare_syntax_cat")` and
+/// `Prim::Ident` are bare TOKENS (no node wrap — the same token/node
+/// split `derive_notation`'s own doc comment already establishes for
+/// `notation`'s bare `"notation"` keyword and `identPrec`'s bare
+/// leading `ident`), so `node.children()` (nodes only) sees exactly 2
+/// node children: the `null(doc)` wrapper (unused here — doc comments
+/// are out of this task's scope) and the `null(catBehavior)` wrapper.
+fn derive_syntax_cat(node: &SyntaxNode, kinds: &KindInterner) -> Option<GrammarDelta> {
+    let name = first_ident_token_text(node)?;
+    let children: Vec<SyntaxNode> = node.children().collect();
+    let behavior_wrapper = children.get(1)?;
+    let behavior = match behavior_wrapper.children().next() {
+        Some(inner) => match kinds.name(inner.kind()) {
+            "Lean.Parser.Command.catBehaviorBoth" => LeadingIdentBehavior::Both,
+            "Lean.Parser.Command.catBehaviorSymbol" => LeadingIdentBehavior::Symbol,
+            // Malformed/unexpected behavior shape (Task 9's formal
+            // remit; never panic here either way) — bail out with
+            // `None`.
+            _ => return None,
+        },
+        None => LeadingIdentBehavior::Default,
+    };
+    Some(GrammarDelta::NewCategory { name, behavior })
+}
+
+/// First TOKEN child of `node` whose token KIND is `KIND_IDENT` —
+/// unlike `first_token_text` (which returns a node's ONE token,
+/// unconditionally the first), `declare_syntax_cat`'s outer node has
+/// TWO direct token children (the bare `"declare_syntax_cat"` keyword
+/// atom, then the category name ident) since neither is wrapped in its
+/// own node — this picks the ident out by token KIND rather than
+/// position, so it's robust regardless of what (if anything) sits
+/// ahead of it.
+fn first_ident_token_text(node: &SyntaxNode) -> Option<String> {
+    node.children_with_tokens().find_map(|el| {
+        let t = el.into_token()?;
+        (t.kind() == KIND_IDENT).then(|| t.text().to_string())
+    })
 }
 
 /// Task 9 Step 3 (defense in depth, task-9-brief's Step 3): `true` iff
@@ -865,6 +937,23 @@ mod tests {
             .children()
             .find(|c| tree.kinds.name(c.kind()) == outer_kind)
             .unwrap_or_else(|| panic!("no {outer_kind} command node in parsed tree"))
+    }
+
+    /// Test-only shim reproducing the OLD `derive`'s signature/contract
+    /// (plain `Option<NotationSpec>`, `None` for anything that isn't a
+    /// `notation`/`mixfix` production) over the new `derive_delta` —
+    /// every `notation`/`mixfix` test below predates `GrammarDelta`
+    /// (M3b2b Task 7) and asserts directly against `NotationSpec`
+    /// fields; kept local to this test module (not part of the public
+    /// API — see `derive_delta`'s own doc comment for why the real
+    /// `derive` was removed rather than kept as a production wrapper)
+    /// so those assertions don't all need rewriting to match on
+    /// `GrammarDelta::Production` individually.
+    fn derive(node: &SyntaxNode, kinds: &KindInterner) -> Option<NotationSpec> {
+        match derive_delta(node, kinds) {
+            Some(GrammarDelta::Production(spec)) => Some(spec),
+            _ => None,
+        }
     }
 
     #[test]

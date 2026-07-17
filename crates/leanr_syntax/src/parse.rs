@@ -176,24 +176,27 @@ fn run_module(mut ps: Ps<'_>, snap: &GrammarSnapshot) -> ParseResult {
             // M3b1 Task 7: a CLEAN command parse (this arm only — never
             // the recovery arms below, which restore to `sp` and so have
             // nothing of this command left to inspect) may itself have
-            // been a `notation`/`mixfix` declaration. Materialize just
-            // this command's subtree from its own event slice
-            // (`ps.events[sp.events..]`, `sp` taken right before `run`
-            // above — a `Category` call's events are always one balanced
-            // subtree) via the same tested `flatten_events`/`build_tree`
-            // infra `finish_into_tree` uses for the whole module, and
-            // hand it to `derive` (Task 4). `derive` returns `None` for
-            // every non-notation command shape (and, per its own doc
-            // comment, for a malformed one too — its child-navigation is
-            // `?`-propagated `Option` throughout), so this is a no-op on
-            // every command that isn't a clean `notation`/`mixfix` —
+            // been a grammar-growing declaration (M3b1: `notation`/
+            // `mixfix`; M3b2b Task 7 adds `declare_syntax_cat` — see
+            // `GRAMMAR_GROWING_KINDS`). Materialize just this command's
+            // subtree from its own event slice (`ps.events[sp.events..]`,
+            // `sp` taken right before `run` above — a `Category` call's
+            // events are always one balanced subtree) via the same
+            // tested `flatten_events`/`build_tree` infra
+            // `finish_into_tree` uses for the whole module, and hand it
+            // to `derive_delta` (M3b2b Task 7 — supersedes M3b1's plain
+            // `derive`). `derive_delta` returns `None` for every command
+            // shape outside `GRAMMAR_GROWING_KINDS` (and, per its own
+            // doc comment, for a malformed one too — its child-
+            // navigation is `?`-propagated `Option` throughout), so this
+            // is a no-op on every command that isn't one of those —
             // exactly the "empty overlay never mutated" no-regression
             // bar the brief sets.
             //
             // `ps.merged_kinds()` (base + overlay-so-far), not the bare
             // base `ps.kinds`: a mixfix/notation command's OWN RHS can
             // itself use a notation this same loop registered on an
-            // earlier command, so `derive`'s kind-name lookups need
+            // earlier command, so `derive_delta`'s kind-name lookups need
             // every overlay kind registered before THIS command, not
             // just the immutable base set.
             //
@@ -202,22 +205,29 @@ fn run_module(mut ps: Ps<'_>, snap: &GrammarSnapshot) -> ParseResult {
             // builds the whole module's tree, including this command,
             // again at the end) and, once any overlay kind exists,
             // clones the whole base interner via `merged_kinds` — for
-            // EVERY command, even though `derive` can only ever return
-            // `Some` for the two outer kinds `command_may_grow_grammar`
-            // checks. Gate the build behind that cheap peek (follows the
-            // single `Sub` marker to its subtree's root `Event::Start`
-            // kind — no tree build) so a notation-free file pays none of
-            // this per command, restoring the plain M3a hot path; a
-            // `mixfix`/`notation` command still builds+derives+registers
-            // exactly as before.
+            // EVERY command, even though `derive_delta` can only ever
+            // return `Some` for the outer kinds `command_may_grow_grammar`
+            // checks (`GRAMMAR_GROWING_KINDS`). Gate the build behind
+            // that cheap peek (follows the single `Sub` marker to its
+            // subtree's root `Event::Start` kind — no tree build) so a
+            // grammar-static file pays none of this per command,
+            // restoring the plain M3a hot path; a grammar-growing
+            // command still builds+derives+registers exactly as before.
             Ok(()) if ps.command_may_grow_grammar(sp.events) => {
                 let cmd_events = flatten_events(&ps.events[sp.events..], &ps.subtrees);
                 let cmd_kinds = ps.merged_kinds();
                 let subtree = build_tree(ps.src, &cmd_events, cmd_kinds);
-                if let Some(spec) =
-                    crate::grammar::notation::derive(&subtree.root(), &subtree.kinds)
+                if let Some(delta) =
+                    crate::grammar::notation::derive_delta(&subtree.root(), &subtree.kinds)
                 {
-                    ps.overlay.register(spec);
+                    match delta {
+                        crate::grammar::GrammarDelta::Production(spec) => {
+                            ps.overlay.register(spec);
+                        }
+                        crate::grammar::GrammarDelta::NewCategory { name, behavior } => {
+                            ps.overlay.register_category(&name, behavior);
+                        }
+                    }
                     // Grammar just changed: any `cat_cache` entry from
                     // before this command is memoized against the OLD
                     // grammar (Task 6's cache key has no dependency on
@@ -902,6 +912,22 @@ struct MatchWinner {
     lhs_prec: u32,
 }
 
+/// M3b2b Task 7: outer command kinds `derive_delta` (`grammar/
+/// notation.rs`) can turn into a `GrammarDelta` — shared between
+/// `command_may_grow_grammar`'s cheap peek (this list must stay in sync
+/// with `derive_delta`'s own outer-kind dispatch, or the peek silently
+/// starts skipping a kind `derive_delta` would otherwise handle) and
+/// `run_module`'s grow arm. M3b1 only ever had the first two; M3b2b
+/// Task 7 adds `declare_syntax_cat`'s pinned kind name (StxShapes dump,
+/// `command_syntax.rs`).
+pub(crate) const GRAMMAR_GROWING_KINDS: &[&str] = &[
+    "Lean.Parser.Command.mixfix",
+    "Lean.Parser.Command.notation",
+    "Lean.Parser.Command.syntaxCat", // pinned by StxShapes dump
+    // Task 8 appends: syntax, syntaxAbbrev, macro, and the imported
+    // elab-family kinds.
+];
+
 #[cfg_attr(not(test), allow(dead_code))]
 impl<'a> Ps<'a> {
     pub(crate) fn new(src: &'a str, snap: &'a GrammarSnapshot) -> Self {
@@ -983,9 +1009,9 @@ impl<'a> Ps<'a> {
     /// command whose event slice starts at `from_event`
     /// (`self.events[from_event..]`, a savepoint taken right before a
     /// SUCCESSFUL top-level `Category { name: "command", .. }` call — see
-    /// `run_module`'s clean `Ok(())` arm) possibly a `notation`/`mixfix`
-    /// declaration, i.e. worth paying `flatten_events` +
-    /// `build_tree` + `derive` for at all?
+    /// `run_module`'s clean `Ok(())` arm) possibly a grammar-growing
+    /// declaration (`GRAMMAR_GROWING_KINDS`), i.e. worth paying
+    /// `flatten_events` + `build_tree` + `derive_delta` for at all?
     ///
     /// A successful `category()` call's own top-level footprint is
     /// ALWAYS exactly one `PEvent::Sub(idx)` marker — its Ok arm moves
@@ -1005,15 +1031,16 @@ impl<'a> Ps<'a> {
     /// production is a bare leaf), this conservatively reports
     /// "not eligible" rather than guessing.
     ///
-    /// `derive` (`grammar/notation.rs`) returns `Some` ONLY for
-    /// `Lean.Parser.Command.mixfix`/`Lean.Parser.Command.notation` —
-    /// every other outer kind is an immediate `None` — so this peek's
-    /// two-name check is exactly `derive`'s own outer-kind dispatch,
-    /// evaluated without paying for a green tree first. Both names are
-    /// BASE kinds (`command.rs`'s `mixfix`/`notation` are builtin
-    /// productions, never overlay-registered), so the base `self.kinds`
-    /// — not `merged_kinds()` — is enough here; no `Arc<KindInterner>`
-    /// clone needed just to peek.
+    /// `derive_delta` (`grammar/notation.rs`) returns `Some` ONLY for
+    /// the outer kinds in `GRAMMAR_GROWING_KINDS` — every other outer
+    /// kind is an immediate `None` — so this peek's membership check is
+    /// exactly `derive_delta`'s own outer-kind dispatch, evaluated
+    /// without paying for a green tree first. Every name in that slice
+    /// is a BASE kind (`command.rs`'s `mixfix`/`notation`,
+    /// `command_syntax.rs`'s `syntaxCat` — all builtin productions,
+    /// never overlay-registered), so the base `self.kinds` — not
+    /// `merged_kinds()` — is enough here; no `Arc<KindInterner>` clone
+    /// needed just to peek.
     pub(crate) fn command_may_grow_grammar(&self, from_event: usize) -> bool {
         let Some(&sub) = self.events[from_event..].iter().find_map(|e| match e {
             PEvent::Sub(idx) => Some(idx),
@@ -1029,7 +1056,7 @@ impl<'a> Ps<'a> {
         };
         let kind = *kind;
         let name = self.kinds.name(kind);
-        name == "Lean.Parser.Command.mixfix" || name == "Lean.Parser.Command.notation"
+        GRAMMAR_GROWING_KINDS.contains(&name)
     }
 
     /// Base kinds + this `Ps`'s overlay's own kinds, folded into ONE
@@ -3133,9 +3160,32 @@ impl<'a> Ps<'a> {
     /// bound — a hit costs zero native stack, and native recursion only
     /// ever happens on a miss, which is gated by the cap.
     fn category(&mut self, name: &str, rbp: u32) -> PResult {
-        let Some(cat) = self.snap_category(name) else {
-            let at = self.pos;
-            return Err(self.fail_expecting(&format!("<category {name}>"), at));
+        // M3b2b Task 7: `declare_syntax_cat` grows the grammar with a
+        // brand-new, initially-EMPTY category — one that has no entry
+        // in `self.snap` (the immutable base) at all, only a recorded
+        // `LeadingIdentBehavior` in `self.overlay.categories` (Task 8
+        // registers productions into it). `snap_category` returns
+        // `&'a Category` borrowed from the snapshot's own lifetime, so
+        // an overlay-only category — which has no base `Category` to
+        // borrow — needs an OWNED empty one instead; `owned_empty` is
+        // declared here (not inside the `match`) so it outlives every
+        // later use of `cat` in this function body.
+        let owned_empty: Category;
+        let cat: &Category = match self.snap_category(name) {
+            Some(c) => c,
+            None => match self.overlay.category_behavior(name) {
+                Some(behavior) => {
+                    owned_empty = Category {
+                        ident_behavior: behavior,
+                        ..Default::default()
+                    };
+                    &owned_empty
+                }
+                None => {
+                    let at = self.pos;
+                    return Err(self.fail_expecting(&format!("<category {name}>"), at));
+                }
+            },
         };
 
         // Depth budget left for this call, i.e. the ambient state the cap
@@ -5108,5 +5158,39 @@ mod tests {
         // territory / plain failure — exactly what depth 0 means).
         let r0 = crate::parse_module("def a := $x\n", &snap);
         assert!(!crate::canon::canon_jsonl(&r0.tree).contains("antiquot"));
+    }
+
+    /// M3b2b Task 7 Step 1 (RED first): end-to-end through the public
+    /// API — `declare_syntax_cat widgetish` grows the grammar with a
+    /// brand-new, initially-EMPTY category (Task 8 registers
+    /// productions into it), and a category antiquot (`$x`, the one
+    /// thing an EMPTY category can parse inside a quotation — engine-
+    /// side since M3b2b Task 3) resolves into it via `category()`'s
+    /// overlay fallback.
+    ///
+    /// Task 7 brief's own sketch of this test checks
+    /// `.contains("widgetish.antiquot")`; corrected here to
+    /// `"widgetish.pseudo.antiquot"` — the actual, already-oracle-pinned
+    /// kind name `category_antiquot_body` emits for a no-suffix category
+    /// antiquot (`kind_name = format!("{cat_name}.pseudo")`, then
+    /// `format!("{kind_name}.antiquot")` — see that fn's own doc
+    /// comment/`mkCategoryAntiquotParser`'s `isPseudoKind := true`),
+    /// confirmed by the pre-existing `antiquot_only_inside_quotation`
+    /// test above asserting the SAME pattern for `term`
+    /// (`"term.pseudo.antiquot"`, this file's own line ~5153). The bare
+    /// (non-`.pseudo`) `"<name>.antiquot"` shape is reserved for
+    /// `CATEGORY_LEAF_ANTIQUOT_NAMES` (`ident`/`num`/`str`/`char`/
+    /// `scientific`, an explicit `:suffix` match), not this no-suffix
+    /// case — unaffected by this task, which only registers the
+    /// category and wires `category()`'s overlay fallback, never
+    /// touches antiquot kind-name resolution.
+    #[test]
+    fn declare_syntax_cat_creates_a_quotable_category() {
+        let snap = crate::builtin::snapshot();
+        let src = "declare_syntax_cat widgetish\ndef q := `(widgetish| $x)\n";
+        let r = crate::parse_module(src, &snap);
+        assert_eq!(r.tree.text(), src);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(crate::canon::canon_jsonl(&r.tree).contains("widgetish.pseudo.antiquot"));
     }
 }
