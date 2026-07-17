@@ -125,10 +125,17 @@ fn mathlib_sweep_ratchet() {
     // concurrently at LEANR_SWEEP_LIMIT=200 — a real, reproducible-at-scale
     // failure mode whose exact mechanism wasn't pinned down within budget
     // (see task-1-optimize-report.md). Rather than ship that risk, this
-    // keeps the fresh-store-per-set decode cost (no change there) and only
-    // banks the two SAFE wins: no phase barrier, and at most one live
-    // `Arc<GrammarSnapshot>` in flight per in-progress set (dropped the
-    // moment its files are swept) instead of all 7,738 held at once.
+    // keeps the fresh-store-per-set decode cost (no change there) and banks
+    // three SAFE wins: no phase barrier; the decoded `Store` (the biggest
+    // per-worker allocation, multi-GB for deep Mathlib closures) is dropped
+    // immediately after `assemble` rather than held through the file sweep;
+    // and the inner per-file loop is sequential, since the real distribution
+    // is 7,738 import sets over 8,844 files (avg ~1.1 files/set) — nested
+    // parallelism buys nothing there but lets a thread blocked on a nested
+    // join steal another outer set, stacking a second live multi-GB `Store`
+    // on top. Live memory is therefore bounded by thread count ×
+    // max(one `Store` during load, one `Arc<GrammarSnapshot>` during sweep),
+    // instead of all 7,738 snapshots (or worse, stacked stores) held at once.
     let import_sets: Vec<Vec<String>> = by_imports.keys().cloned().collect();
     let total_sets = import_sets.len();
     let sets_done = std::sync::atomic::AtomicUsize::new(0);
@@ -136,16 +143,25 @@ fn mathlib_sweep_ratchet() {
     let green: BTreeSet<String> = import_sets
         .par_iter()
         .flat_map(|imports| {
-            let mut st = Store::persistent();
-            let targets: Vec<_> = imports.iter().map(|m| dotted_to_name(m)).collect();
-            let snap = leanr_olean::load_closure(&sp, &targets, &mut st)
-                .ok()
-                .map(|loaded| Arc::new(assemble(&loaded, &st).snapshot));
+            let snap = {
+                let mut st = Store::persistent();
+                let targets: Vec<_> = imports.iter().map(|m| dotted_to_name(m)).collect();
+                leanr_olean::load_closure(&sp, &targets, &mut st)
+                    .ok()
+                    .map(|loaded| Arc::new(assemble(&loaded, &st).snapshot))
+                // `st` (the decoded olean Store, the biggest allocation) drops here —
+                // only the assembled snapshot is needed to sweep the set's files.
+            };
             let set_green: Vec<String> = match &snap {
                 Some(snap) => {
                     let group = &by_imports[imports];
+                    // Sequential: sets average ~1.1 files, so nested
+                    // parallelism has nothing to gain, and it lets an idle
+                    // thread steal another outer set while still holding
+                    // this set's `Store`/`snap`, stacking a second live
+                    // multi-GB allocation.
                     group
-                        .par_iter()
+                        .iter()
                         .filter_map(|file| {
                             let rel = rel_of(file);
                             let src = std::fs::read_to_string(file).ok()?;
