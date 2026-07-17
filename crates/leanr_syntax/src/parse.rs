@@ -1424,7 +1424,26 @@ impl<'a> Ps<'a> {
             Prim::Optional(q) => {
                 let sp = self.save();
                 self.start(KIND_NULL);
-                match self.run(q) {
+                // ORACLE `optional(p) := optionalNoAntiquot
+                // (withAntiquotSpliceAndSuffix `optional p (symbol
+                // "?"))` (`Extra.lean:42`): the antiquot-splice
+                // alternative REPLACES `p` inside `optionalNoAntiquot`'s
+                // own null-wrap (not a separate wrap around it) — so the
+                // splice attempt sits HERE, inside the SAME `KIND_NULL`
+                // this arm already opens, and its `PResult` feeds the
+                // identical success/consuming-failure/clean-failure
+                // judgment below as an ordinary `self.run(q)` would.
+                // `try_antiquot_splice`'s own `quot_depth == 0` gate
+                // would catch this too; gating here as well matches the
+                // `Prim::Node` entry hook's "hot path pays only the
+                // depth check" idiom (`Ps::quot_depth`'s doc comment).
+                let inner = if self.quot_depth > 0 {
+                    self.try_antiquot_splice("optional", Some("?"), q)
+                        .unwrap_or_else(|| self.run(q))
+                } else {
+                    self.run(q)
+                };
+                match inner {
                     Ok(()) => {
                         self.finish();
                         Ok(())
@@ -1896,6 +1915,214 @@ impl<'a> Ps<'a> {
         r
     }
 
+    /// ORACLE `Syntax.isAntiquots` (`Lean/Syntax.lean:545`): `stx.
+    /// isAntiquot || ..`, and `isAntiquot` itself is `Name.str _
+    /// "antiquot"` — the LAST component of the kind name, literally
+    /// `"antiquot"` (matches `foo.antiquot` AND `foo.pseudo.antiquot`,
+    /// since both end in that one component). `withAntiquotSuffixSplice`
+    /// (`Basic.lean:1865-1882`) checks this on `s.stxStack.back` — the
+    /// single syntax value the just-run element parser produced — to
+    /// decide whether a trailing suffix (`,*`/`*`/`?`) is even attempted.
+    ///
+    /// This port has no `stxStack`; the analogous "single value the
+    /// just-run element produced" is read off the EVENT STREAM instead,
+    /// generalizing `command_may_grow_grammar`'s Sub-aware peek (this
+    /// file, above `merged_kinds`) two ways: (a) a bare `Event::Start`
+    /// is also accepted directly, not just a `PEvent::Sub` marker —
+    /// needed because an item Prim isn't always `Prim::Category` (e.g.
+    /// `sepBy1(matchDiscr, ",")`'s `matchDiscr` is a raw `Prim::Node`,
+    /// which pushes `Start`/`Finish` inline, never through `category()`'s
+    /// own cache-and-collapse-to-`Sub` machinery — Task 3 report,
+    /// divergence 4); (b) the kind name is resolved via
+    /// `Overlay::kind_name`, not `self.kinds.name` — every antiquot kind
+    /// is interned into the OVERLAY space at parse time (`antiquot`/
+    /// `category_antiquot_body`, above), never the base snapshot, unlike
+    /// `command_may_grow_grammar`'s two BASE-kind names.
+    ///
+    /// One level of `Sub`-indirection is enough: whatever a freshly
+    /// produced subtree's OWN first non-trivia event is, it is always
+    /// either that category's antiquot's own `Start` (pushed directly by
+    /// `antiquot`/`category_antiquot_body`, never through a nested `Sub`)
+    /// or an ordinary leading candidate's own `Start`/leaf token — never
+    /// itself another bare `Sub` marker, since a category's entry
+    /// dispatch (antiquot-or-normal) is exactly what OPENS that first
+    /// event, before any further nested `category()` call the winning
+    /// production's OWN body might make (which would be nested INSIDE
+    /// that first `Start`, not sit ahead of it).
+    fn top_level_is_antiquot(&self, from_event: usize) -> bool {
+        let not_trivia = |e: &&PEvent| !matches!(e, PEvent::Ev(Event::Token { kind, .. }) if crate::kind::is_trivia(*kind));
+        let Some(first) = self.events[from_event..].iter().find(not_trivia) else {
+            return false;
+        };
+        let kind = match first {
+            PEvent::Ev(Event::Start(kind)) => *kind,
+            PEvent::Sub(idx) => match self.subtrees[*idx].events.iter().find(not_trivia) {
+                Some(PEvent::Ev(Event::Start(kind))) => *kind,
+                _ => return false,
+            },
+            _ => return false,
+        };
+        self.overlay
+            .kind_name(kind)
+            .is_some_and(|n| n.ends_with(".antiquot"))
+    }
+
+    /// ORACLE `withAntiquotSpliceAndSuffix kind p suffix := withAntiquot
+    /// (mkAntiquotSplice kind (withoutInfo p) suffix)
+    /// (withAntiquotSuffixSplice kind p suffix)` (`Basic.lean:1884-1886`)
+    /// — the repetition-position antiquot alternative `many`/`many1`/
+    /// `sepBy`/`sepBy1`/`optional` all thread their element parser
+    /// through (`Extra.lean:42,52,67`; `Basic.lean:1895-1902`). Gate:
+    /// only at `quot_depth > 0` with `$` next — mirrors `try_antiquot`'s
+    /// own gate exactly (see its doc comment); callers ALSO gate on
+    /// `quot_depth > 0` themselves before even calling this (Node-arm
+    /// idiom, `Ps::quot_depth`'s own doc comment: "hot path pays only
+    /// the depth check"), so the check here is defense-in-depth for any
+    /// future direct caller, same redundancy `try_antiquot`/
+    /// `try_category_antiquot` already have.
+    ///
+    /// Unlike `try_antiquot`/`try_category_antiquot`, a failure here is
+    /// NOT converted to `None` (i.e. NOT treated as "antiquot doesn't
+    /// apply, try the caller's normal path instead"): once `$` is
+    /// confirmed present at a repetition boundary, this crate treats
+    /// failing to complete either splice form as a hard, must-report
+    /// error for the whole repetition — brief-directed simplification
+    /// (see the fn's own call sites in `many_impl`/`sep_by_impl`/
+    /// `Prim::Optional`, and this task's report's "Divergences" section)
+    /// rather than the oracle's own `orelseFnCore`-derived behavior
+    /// (`$` present but BOTH forms fail cleanly ⇒ `withAntiquotSpliceAndSuffix`
+    /// itself fails NON-consuming ⇒ the enclosing `manyNoAntiquot`/
+    /// `sepByNoAntiquot` treats that exactly like an ordinary "no more
+    /// items" stop, silently leaving the unconsumed `$` for whatever
+    /// follows to fail on instead). No fixture line exercises this
+    /// corner (every antiquot this crate's fixtures write genuinely
+    /// succeeds), so the divergence is unobserved but documented.
+    fn try_antiquot_splice(
+        &mut self,
+        kind_name: &str,
+        suffix: Option<&str>,
+        scope_body: &Prim,
+    ) -> Option<PResult> {
+        if self.quot_depth == 0 {
+            return None;
+        }
+        let (t, at) = self.peek_significant_readonly();
+        if t.kind != TokenKind::Atom || &self.src[at..at + t.len as usize] != "$" {
+            return None;
+        }
+        Some(self.antiquot_splice(kind_name, suffix, scope_body))
+    }
+
+    /// The body `try_antiquot_splice` wraps — two alternatives, tried in
+    /// the oracle's own order (`withAntiquot antiquotP p`: try
+    /// `antiquotP`/scope-form first; ANY failure inside it is clean/
+    /// non-consuming — `mkAntiquotSplice`'s own `atomic <| ..` — so it
+    /// always falls through to the elem/suffix-form on failure, exactly
+    /// like `antiquot`'s prefix atomicity, above):
+    ///
+    /// 1. **Scope form** (`mkAntiquotSplice`, `Basic.lean:1857-1863`):
+    ///    node `{kind_name}.antiquot_scope` = atomic(`$` many(noWs `$`)
+    ///    noWs `[` node(null, scope_body) `]` suffix?). `scope_body`
+    ///    runs at the SAME depth (no `IncQuotDepth`/`DecQuotDepth` here,
+    ///    unlike `antiquotNestedExpr`'s `$(term)` — the oracle's own
+    ///    `mkAntiquotSplice` never adjusts `quotDepth` either).
+    /// 2. **Suffix-splice form** (`withAntiquotSuffixSplice`,
+    ///    `Basic.lean:1865-1882`): run `scope_body` NORMALLY (its own
+    ///    antiquot alternative, if any, is what actually consumes `$` —
+    ///    e.g. `category()`'s `try_category_antiquot`, or `Prim::Node`'s
+    ///    own hook); if it succeeded AND the single value it produced is
+    ///    itself antiquot-shaped (`top_level_is_antiquot`, above — ORACLE
+    ///    `isAntiquots`), ALSO try consuming `suffix` and wrap
+    ///    `[element, suffix]` in `{kind_name}.antiquot_suffix_splice`;
+    ///    if `suffix` doesn't apply/isn't given or fails to match, the
+    ///    element's own result stands UNWRAPPED (ORACLE:
+    ///    `withAntiquotSuffixSpliceFn`'s `if s.hasError then s.restore
+    ///    iniSz iniPos` only rewinds the SUFFIX attempt, never the
+    ///    already-succeeded element).
+    fn antiquot_splice(
+        &mut self,
+        kind_name: &str,
+        suffix: Option<&str>,
+        scope_body: &Prim,
+    ) -> PResult {
+        // --- 1: scope form, `$[scope_body]suffix` ---
+        let sp = self.save();
+        let scope_kind = self.overlay.intern(&format!("{kind_name}.antiquot_scope"));
+        let scope_r: PResult = (|| {
+            self.expect_atom("$", false)?;
+            // Extra `$`s (nested-quotation escape) — same idiom as
+            // `antiquot`'s prefix, above.
+            self.start(KIND_NULL);
+            loop {
+                let sp2 = self.save();
+                let (t, at2) = self.peek_significant_readonly();
+                let is_dollar =
+                    t.kind == TokenKind::Atom && &self.src[at2..at2 + t.len as usize] == "$";
+                if !is_dollar || self.had_ws_before_current() {
+                    self.restore(&sp2);
+                    break;
+                }
+                self.expect_atom("$", false)?;
+            }
+            self.finish();
+            if self.had_ws_before_current() {
+                let at2 = self.pos;
+                return Err(self.fail_expecting("<no space before spliced term>", at2));
+            }
+            self.expect_atom("[", false)?;
+            self.start(KIND_NULL);
+            let inner = self.run(scope_body);
+            self.finish();
+            inner?;
+            self.expect_atom("]", false)?;
+            if let Some(suf) = suffix {
+                self.expect_atom(suf, false)?;
+            }
+            Ok(())
+        })();
+        if scope_r.is_ok() {
+            // Retroactive node wrap — same technique
+            // `category_antiquot_body` uses: the whole atomic prefix has
+            // already run by the time we know it succeeded, so the
+            // `Start` couldn't be emitted up front.
+            self.events
+                .insert(sp.events, PEvent::Ev(Event::Start(scope_kind)));
+            self.finish();
+            self.lhs_prec = crate::grammar::MAX_PREC; // leadingNode kind maxPrec
+            return Ok(());
+        }
+        self.restore(&sp);
+
+        // --- 2: suffix-splice form, `scope_body` then optional `suffix` ---
+        let events_before = self.events.len();
+        self.run(scope_body)?;
+        if let Some(suf) = suffix {
+            if self.top_level_is_antiquot(events_before) {
+                let sp3 = self.save();
+                if self.expect_atom(suf, false).is_ok() {
+                    let kind = self
+                        .overlay
+                        .intern(&format!("{kind_name}.antiquot_suffix_splice"));
+                    self.events
+                        .insert(events_before, PEvent::Ev(Event::Start(kind)));
+                    self.finish();
+                    // No `setLhsPrec` here (unlike the scope form, above):
+                    // ORACLE `withAntiquotSuffixSplice` is a plain
+                    // `Parser` `mkNode`-wrapping `p`'s already-succeeded
+                    // result, never going through `leadingNode` itself —
+                    // `self.lhs_prec` already carries whatever `p`'s own
+                    // success set (always `MAX_PREC` here, since we only
+                    // reach this branch when `top_level_is_antiquot` is
+                    // true, i.e. `p` itself won via SOME `leadingNode
+                    // .. maxPrec`-shaped antiquot), untouched by this wrap.
+                } else {
+                    self.restore(&sp3);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The builtin LEAF antiquot kinds this fn's flat, suffix-driven
     /// resolution (`kind_name = suffix_name.clone()`, no extra wrapper
     /// node) can actually reproduce — `Basic.lean`'s `mkAntiquot` call
@@ -2252,6 +2479,29 @@ impl<'a> Ps<'a> {
         let mut n = 0usize;
         let result: PResult = loop {
             let sp = self.save();
+            // ORACLE `many(p) := manyNoAntiquot (withAntiquotSpliceAndSuffix
+            // `many p (symbol "*"))` (`Extra.lean:51-52`, shared by
+            // `many1` — `Extra.lean:66-67` — same `` `many `` kind
+            // prefix and `"*"` suffix regardless of `min`): tried before
+            // the plain item on every iteration, not just the first —
+            // matches the oracle exactly (each `manyAux` call re-invokes
+            // the SAME antiquot-splice-wrapped element). A splice keeps
+            // the loop going (`continue`) rather than ending it: unlike
+            // `sepBy`'s suffix (see `sep_by_impl`), `many`'s items have
+            // no separator to stop looking for, so the very next
+            // iteration's own `$`-fast-check naturally returns `None`
+            // once real content runs out.
+            if self.quot_depth > 0 {
+                if let Some(r) = self.try_antiquot_splice("many", Some("*"), q) {
+                    match r {
+                        Ok(()) => {
+                            n += 1;
+                            continue;
+                        }
+                        Err(f) => break Err(f),
+                    }
+                }
+            }
             match self.run(q) {
                 Ok(()) => {
                     if !self.consumed_since(&sp) {
@@ -2370,6 +2620,30 @@ impl<'a> Ps<'a> {
         // often.
         let result: PResult = 'outer: loop {
             let sp = self.save();
+            // ORACLE `sepByElemParser p sep := withAntiquotSpliceAndSuffix
+            // `sepBy p (symbol (sep.trimAscii.copy ++ "*"))`
+            // (`Basic.lean:1895-1896`, shared by `sepBy`/`sepBy1`): the
+            // suffix reuses THIS position's own separator text (`",*"`
+            // for `sep = ","`), so a successful splice already
+            // represents the WHOLE remainder of the list — unlike
+            // `many_impl`, this position does NOT keep looping
+            // afterward (`break 'outer`, not `continue`): looking for
+            // another `sep` past a suffix that already means "the rest
+            // of the list, spliced" has no sensible reading, and
+            // `QuotSplice.lean` line a's dump (this task's report) pins
+            // that the splice IS the whole `null` node's content.
+            if self.quot_depth > 0 {
+                let suffix = format!("{sep}*");
+                if let Some(r) = self.try_antiquot_splice("sepBy", Some(&suffix), item) {
+                    match r {
+                        Ok(()) => {
+                            n += 1;
+                            break 'outer Ok(());
+                        }
+                        Err(f) => break 'outer Err(f),
+                    }
+                }
+            }
             match self.run(item) {
                 Ok(()) => n += 1,
                 Err(f) if self.consumed_since(&sp) => break 'outer Err(f),

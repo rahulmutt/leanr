@@ -1,0 +1,5 @@
+def a := `(⟨$xs,*⟩)
+def b := `(f $args*)
+def c := `(⟨$[$x],*⟩)
+def d := `(tactic| match x, $hs,* with | hp => _)
+def e := `((y : $[$z]?))
