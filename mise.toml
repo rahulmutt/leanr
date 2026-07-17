@@ -123,7 +123,7 @@ run = [
   # `.stx.jsonl` and are intentionally malformed, round-trip-only
   # fixtures, so a stray dump here was always a no-op/harmless but
   # never an intentional one).
-  "sh -c 'for f in tests/fixtures/syntax/*.lean; do b=$(basename \"$f\"); case \"$b\" in dump_syntax.lean|dump_syntax_elab.lean|Notation*.lean|Stx*.lean|Errors0.lean|Errors1.lean) continue;; esac; lean --run tests/fixtures/syntax/dump_syntax.lean \"$f\" > \"${f%.lean}.stx.jsonl\"; done'",
+  "sh -c 'for f in tests/fixtures/syntax/*.lean; do b=$(basename \"$f\"); case \"$b\" in dump_syntax.lean|dump_syntax_elab.lean|Notation*.lean|Stx*.lean|QuotMacroRules.lean|Errors0.lean|Errors1.lean) continue;; esac; lean --run tests/fixtures/syntax/dump_syntax.lean \"$f\" > \"${f%.lean}.stx.jsonl\"; done'",
   # M3b2a Task 2: synthetic import-notation corpus
   # (tests/fixtures/syntax/import/). NotaDep{,Meta}.olean build against
   # the REAL toolchain Init (bare `lean`, no LEAN_PATH). The importer
@@ -168,13 +168,14 @@ run = [
   # `syntax`/`syntaxAbbrev` grow the grammar mid-file the same way a
   # `notation`/mixfix command does) gets the identical elab-dump
   # treatment, duplicated rather than folded into the loop above
-  # (different glob, different — currently empty — exclusion set;
-  # `QuotMacroRules.lean` also needs this same elaborating dumper, but
-  # is deliberately NOT wired in here — it stays untracked/regenerated
-  # by hand until Task 8, and its `Quot*` name would otherwise collide
-  # with the already-plain-loop `QuotBasic.lean`/`QuotAntiquot.lean`/
-  # `QuotSplice.lean` fixtures if this were made glob-generic).
-  "sh -c 'for f in tests/fixtures/syntax/Stx*.lean; do [ -e \"$f\" ] || continue; lean --run tests/fixtures/syntax/dump_syntax_elab.lean \"$f\" > \"${f%.lean}.stx.jsonl\"; done'",
+  # (different glob, different — currently empty — exclusion set).
+  # `QuotMacroRules.lean` (committed at Task 8) needs this same
+  # elaborating dumper despite its `Quot*` name (its `syntax`/`macro`
+  # commands grow the grammar mid-file); it is excluded from the plain
+  # loop above and explicitly listed here — the other `Quot*` fixtures
+  # (`QuotBasic`/`QuotAntiquot`/`QuotSplice`) are quotation-only, no
+  # grammar growth, and stay on the plain parse-only loop.
+  "sh -c 'for f in tests/fixtures/syntax/Stx*.lean tests/fixtures/syntax/QuotMacroRules.lean; do [ -e \"$f\" ] || continue; lean --run tests/fixtures/syntax/dump_syntax_elab.lean \"$f\" > \"${f%.lean}.stx.jsonl\"; done'",
 ]
 
 [tasks."fixtures:mutations"]
