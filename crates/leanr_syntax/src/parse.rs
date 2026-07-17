@@ -1714,6 +1714,8 @@ impl<'a> Ps<'a> {
                     ])))));
                 self.run(&expanded)
             }
+            // skip-and-record (M3b2b Task 4): sepByIndent positions offer
+            // no antiquot splice yet — no fixture pins them.
             Prim::SepByIndent { item, sep, min } => self.sep_by_indent(item, sep, *min),
             Prim::WithForbidden(tok, q) => {
                 // ORACLE-PORT `withForbidden`/`adaptCacheableContext`
@@ -1802,6 +1804,83 @@ impl<'a> Ps<'a> {
         }
     }
 
+    /// The `"$" many(noWs "$") noWs` prefix shared verbatim by `antiquot`,
+    /// `antiquot_splice`'s scope form, and `category_antiquot_body`:
+    /// consumes the leading `$` (already peeked by the caller's own
+    /// `try_antiquot`/`try_antiquot_splice`/`try_category_antiquot` gate),
+    /// then ORACLE `many(noWs "$")` — any further `$`s (nested-quotation
+    /// escape), each required to be whitespace-adjacent to the one
+    /// before it (Lean's `many` always emits a null wrapper here, even
+    /// when the loop runs zero times) — and finally ORACLE `noWs` itself:
+    /// the token immediately following this prefix must have no
+    /// whitespace before it, or the whole prefix fails (a `PResult::Err`;
+    /// each caller decides how far to unwind — see their own doc
+    /// comments).
+    ///
+    /// Extracted per M3b2b Task 4 review fix Finding 1: confirmed
+    /// byte-identical (module comment wording aside) across all three
+    /// original inline copies before being pulled out here — genuinely
+    /// one piece of logic, not three that happened to converge.
+    fn antiquot_dollar_prefix(&mut self) -> PResult {
+        self.expect_atom("$", false)?;
+        self.start(KIND_NULL);
+        loop {
+            let sp2 = self.save();
+            let (t, at2) = self.peek_significant_readonly();
+            let is_dollar =
+                t.kind == TokenKind::Atom && &self.src[at2..at2 + t.len as usize] == "$";
+            if !is_dollar || self.had_ws_before_current() {
+                self.restore(&sp2);
+                break;
+            }
+            self.expect_atom("$", false)?;
+        }
+        self.finish();
+        if self.had_ws_before_current() {
+            let at2 = self.pos;
+            return Err(self.fail_expecting("<no space before spliced term>", at2));
+        }
+        Ok(())
+    }
+
+    /// `antiquotExpr`: ident, or `(` decQuotDepth(term) `)` wrapped in an
+    /// `antiquotNestedExpr` node — the body shared verbatim by `antiquot`
+    /// and `category_antiquot_body` (`antiquot_splice`'s scope form does
+    /// NOT use this; its bracketed body is an arbitrary `scope_body`
+    /// `Prim`, not this fixed ident/paren shape). The paren form recurses
+    /// into `term` one quotation depth down (`DecQuotDepth`), matching
+    /// `$(x)` unwrapping a still-quoted term one level in.
+    ///
+    /// Extracted per M3b2b Task 4 review fix Finding 1: confirmed
+    /// byte-identical across both original inline copies before being
+    /// pulled out here.
+    fn antiquot_expr(&mut self) -> PResult {
+        let (t, at2, sp2) = self.peek_for_match();
+        match t.kind {
+            TokenKind::Ident => self.bump(t, KIND_IDENT),
+            TokenKind::Atom if &self.src[at2..at2 + t.len as usize] == "(" => {
+                self.restore(&sp2);
+                let nested = self.overlay.intern("antiquotNestedExpr");
+                self.start(nested);
+                let inner = (|| -> PResult {
+                    self.expect_atom("(", false)?;
+                    self.run(&Prim::DecQuotDepth(Arc::new(Prim::Category {
+                        name: "term".into(),
+                        rbp: 0,
+                    })))?;
+                    self.expect_atom(")", false)
+                })();
+                self.finish();
+                inner?;
+            }
+            _ => {
+                self.restore(&sp2);
+                return Err(self.fail_expecting("<antiquot ident or (term)>", at2));
+            }
+        }
+        Ok(())
+    }
+
     /// node `<kind_name>.antiquot`:
     ///   "$"  many(noWs "$")  noWs (ident <|> "(" decQuotDepth(term) ")")
     ///   (":" name | null-if-anonymous)
@@ -1815,29 +1894,8 @@ impl<'a> Ps<'a> {
         let sp = self.save();
         self.start(kind);
         // --- atomic prefix ---
-        let prefix = (|| -> PResult {
-            self.expect_atom("$", false)?;
-            // Extra `$`s (nested-quotation escape). Each must be
-            // whitespace-adjacent to the previous.
-            self.start(KIND_NULL);
-            loop {
-                let sp2 = self.save();
-                let (t, at2) = self.peek_significant_readonly();
-                let is_dollar =
-                    t.kind == TokenKind::Atom && &self.src[at2..at2 + t.len as usize] == "$";
-                if !is_dollar || self.had_ws_before_current() {
-                    self.restore(&sp2);
-                    break;
-                }
-                self.expect_atom("$", false)?;
-            }
-            self.finish();
-            if self.had_ws_before_current() {
-                let at2 = self.pos;
-                return Err(self.fail_expecting("<no space before spliced term>", at2));
-            }
-            Ok(())
-        })();
+        // dollar-prefix: see `antiquot_dollar_prefix`'s doc comment.
+        let prefix = self.antiquot_dollar_prefix();
         if prefix.is_err() {
             // Prefix failed → not an antiquot after all; unwind fully
             // (the caller, `try_antiquot`, also restores — see its own
@@ -1848,30 +1906,8 @@ impl<'a> Ps<'a> {
         }
         // --- body: antiquotExpr, then the optional `:name` suffix ---
         let r = (|| -> PResult {
-            // ident, or `(` decQuotDepth(term) `)` as antiquotNestedExpr.
-            let (t, at2, sp2) = self.peek_for_match();
-            match t.kind {
-                TokenKind::Ident => self.bump(t, KIND_IDENT),
-                TokenKind::Atom if &self.src[at2..at2 + t.len as usize] == "(" => {
-                    self.restore(&sp2);
-                    let nested = self.overlay.intern("antiquotNestedExpr");
-                    self.start(nested);
-                    let inner = (|| -> PResult {
-                        self.expect_atom("(", false)?;
-                        self.run(&Prim::DecQuotDepth(Arc::new(Prim::Category {
-                            name: "term".into(),
-                            rbp: 0,
-                        })))?;
-                        self.expect_atom(")", false)
-                    })();
-                    self.finish();
-                    inner?;
-                }
-                _ => {
-                    self.restore(&sp2);
-                    return Err(self.fail_expecting("<antiquot ident or (term)>", at2));
-                }
-            }
+            // antiquotExpr: see `antiquot_expr`'s doc comment.
+            self.antiquot_expr()?;
             // Optional `:name` suffix (antiquotName node); when
             // !anonymous the suffix is mandatory. Unlike the CATEGORY
             // antiquot (`try_category_antiquot`), a named node's own
@@ -1983,20 +2019,33 @@ impl<'a> Ps<'a> {
     ///
     /// Unlike `try_antiquot`/`try_category_antiquot`, a failure here is
     /// NOT converted to `None` (i.e. NOT treated as "antiquot doesn't
-    /// apply, try the caller's normal path instead"): once `$` is
-    /// confirmed present at a repetition boundary, this crate treats
-    /// failing to complete either splice form as a hard, must-report
-    /// error for the whole repetition — brief-directed simplification
-    /// (see the fn's own call sites in `many_impl`/`sep_by_impl`/
-    /// `Prim::Optional`, and this task's report's "Divergences" section)
-    /// rather than the oracle's own `orelseFnCore`-derived behavior
-    /// (`$` present but BOTH forms fail cleanly ⇒ `withAntiquotSpliceAndSuffix`
-    /// itself fails NON-consuming ⇒ the enclosing `manyNoAntiquot`/
-    /// `sepByNoAntiquot` treats that exactly like an ordinary "no more
-    /// items" stop, silently leaving the unconsumed `$` for whatever
-    /// follows to fail on instead). No fixture line exercises this
-    /// corner (every antiquot this crate's fixtures write genuinely
-    /// succeeds), so the divergence is unobserved but documented.
+    /// apply, try the caller's normal path instead"). What happens to
+    /// that `Err` next is NOT uniform across the three call sites,
+    /// though — correcting a prior version of this comment that implied
+    /// it was:
+    /// - `many_impl`/`sep_by_impl`: once `$` is confirmed present at a
+    ///   repetition boundary, these two treat failing to complete either
+    ///   splice form as an UNCONDITIONAL hard, must-report error for the
+    ///   whole repetition (`break Err(f)`, no consuming check) — brief-
+    ///   directed simplification (see those two fns' own call sites, and
+    ///   this task's report's "Divergences" section) rather than the
+    ///   oracle's own `orelseFnCore`-derived behavior (`$` present but
+    ///   BOTH forms fail cleanly ⇒ `withAntiquotSpliceAndSuffix` itself
+    ///   fails NON-consuming ⇒ the enclosing `manyNoAntiquot`/
+    ///   `sepByNoAntiquot` treats that exactly like an ordinary "no more
+    ///   items" stop, silently leaving the unconsumed `$` for whatever
+    ///   follows to fail on instead).
+    /// - `Prim::Optional`: does NOT add that unconditional override. It
+    ///   feeds the `Some(Err(f))` straight into the SAME consuming/
+    ///   non-consuming judgment that arm already applies to an ordinary
+    ///   `self.run(q)` result — so a non-consuming splice failure there
+    ///   still resolves to a clean, empty optional (no error), and only
+    ///   a CONSUMING splice failure hard-errors, i.e. plain `optional`
+    ///   semantics apply unmodified (see `Prim::Optional`'s own arm).
+    ///
+    /// No fixture line exercises either corner (every antiquot this
+    /// crate's fixtures write genuinely succeeds), so both divergences
+    /// are unobserved but documented.
     fn try_antiquot_splice(
         &mut self,
         kind_name: &str,
@@ -2039,6 +2088,16 @@ impl<'a> Ps<'a> {
     ///    `withAntiquotSuffixSpliceFn`'s `if s.hasError then s.restore
     ///    iniSz iniPos` only rewinds the SUFFIX attempt, never the
     ///    already-succeeded element).
+    ///
+    /// skip-and-record (M3b2b Task 4 review fix): fixtures pin the
+    /// scope form and the suffix form each at least once, but not the
+    /// full cross product — e.g. `many`'s scope form combined with
+    /// `sepBy`'s suffix form, or `optional`'s suffix form on a
+    /// non-antiquot-shaped element — is exercised only parametrically
+    /// (this one fn serves `many`/`sepBy`/`optional` alike; the shared
+    /// code path is what stands in for a dedicated fixture per
+    /// combination), not by a dedicated fixture line for each
+    /// `kind_name`×form pairing.
     fn antiquot_splice(
         &mut self,
         kind_name: &str,
@@ -2049,26 +2108,9 @@ impl<'a> Ps<'a> {
         let sp = self.save();
         let scope_kind = self.overlay.intern(&format!("{kind_name}.antiquot_scope"));
         let scope_r: PResult = (|| {
-            self.expect_atom("$", false)?;
-            // Extra `$`s (nested-quotation escape) — same idiom as
-            // `antiquot`'s prefix, above.
-            self.start(KIND_NULL);
-            loop {
-                let sp2 = self.save();
-                let (t, at2) = self.peek_significant_readonly();
-                let is_dollar =
-                    t.kind == TokenKind::Atom && &self.src[at2..at2 + t.len as usize] == "$";
-                if !is_dollar || self.had_ws_before_current() {
-                    self.restore(&sp2);
-                    break;
-                }
-                self.expect_atom("$", false)?;
-            }
-            self.finish();
-            if self.had_ws_before_current() {
-                let at2 = self.pos;
-                return Err(self.fail_expecting("<no space before spliced term>", at2));
-            }
+            // dollar-prefix: see `antiquot_dollar_prefix`'s doc comment
+            // (same idiom as `antiquot`'s prefix).
+            self.antiquot_dollar_prefix()?;
             self.expect_atom("[", false)?;
             self.start(KIND_NULL);
             let inner = self.run(scope_body);
@@ -2236,48 +2278,10 @@ impl<'a> Ps<'a> {
     /// bookkeeping for readability/defense-in-depth, same as there).
     fn category_antiquot_body(&mut self, cat_name: &str) -> PResult {
         let node_start = self.events.len();
-        self.expect_atom("$", false)?;
-        self.start(KIND_NULL);
-        loop {
-            let sp2 = self.save();
-            let (t, at2) = self.peek_significant_readonly();
-            let is_dollar =
-                t.kind == TokenKind::Atom && &self.src[at2..at2 + t.len as usize] == "$";
-            if !is_dollar || self.had_ws_before_current() {
-                self.restore(&sp2);
-                break;
-            }
-            self.expect_atom("$", false)?;
-        }
-        self.finish();
-        if self.had_ws_before_current() {
-            let at2 = self.pos;
-            return Err(self.fail_expecting("<no space before spliced term>", at2));
-        }
-        // antiquotExpr: ident, or `(` decQuotDepth(term) `)`.
-        let (t, at2, sp2) = self.peek_for_match();
-        match t.kind {
-            TokenKind::Ident => self.bump(t, KIND_IDENT),
-            TokenKind::Atom if &self.src[at2..at2 + t.len as usize] == "(" => {
-                self.restore(&sp2);
-                let nested = self.overlay.intern("antiquotNestedExpr");
-                self.start(nested);
-                let inner = (|| -> PResult {
-                    self.expect_atom("(", false)?;
-                    self.run(&Prim::DecQuotDepth(Arc::new(Prim::Category {
-                        name: "term".into(),
-                        rbp: 0,
-                    })))?;
-                    self.expect_atom(")", false)
-                })();
-                self.finish();
-                inner?;
-            }
-            _ => {
-                self.restore(&sp2);
-                return Err(self.fail_expecting("<antiquot ident or (term)>", at2));
-            }
-        }
+        // dollar-prefix: see `antiquot_dollar_prefix`'s doc comment.
+        self.antiquot_dollar_prefix()?;
+        // antiquotExpr: see `antiquot_expr`'s doc comment.
+        self.antiquot_expr()?;
         // Optional `:name` suffix — parsed GENERICALLY (any Ident-kind
         // token; real `nonReservedSymbol` also allows reserved-word
         // text, but none of `cat_name`/`CATEGORY_LEAF_ANTIQUOT_NAMES`
@@ -2496,6 +2500,15 @@ impl<'a> Ps<'a> {
                     match r {
                         Ok(()) => {
                             n += 1;
+                            // No-infinite-loop invariant, made explicit:
+                            // `try_antiquot_splice` only returns `Some`
+                            // when it just peeked a literal `$` and then
+                            // committed to consuming it (its own doc
+                            // comment's gate), so a successful splice
+                            // here always advances `self.pos` — this
+                            // `continue` can never re-run this same `sp`
+                            // turn without progress.
+                            debug_assert!(self.consumed_since(&sp));
                             continue;
                         }
                         Err(f) => break Err(f),

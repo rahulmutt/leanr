@@ -70,7 +70,21 @@ pub fn builder() -> SnapshotBuilder {
     //   `"▸*"` combined-token registration on demand, when (if) a future
     //   fixture actually exercises a splice suffix at one of those
     //   positions — same "don't force it" discipline this crate already
-    //   applies to `CATEGORY_LEAF_ANTIQUOT_NAMES` (`parse.rs`).
+    //   applies to `CATEGORY_LEAF_ANTIQUOT_NAMES` (`parse.rs`). Failure
+    //   mode while unregistered, named explicitly (M3b2b Task 4 review
+    //   fix): this is NOT a hard error at parse time. `antiquot_splice`'s
+    //   suffix-splice form (`parse.rs`) still runs `scope_body` and
+    //   checks `top_level_is_antiquot` on whatever it produced, then
+    //   attempts `expect_atom(suf, false)` for the combined suffix text
+    //   (e.g. `"|*"`) — with no such token registered, the tokenizer can
+    //   never maximal-munch it as one atom, so that `expect_atom` fails
+    //   and is treated as "suffix doesn't apply" (see `antiquot_splice`'s
+    //   own doc comment, alternative 2): the element's already-parsed
+    //   result stands UNWRAPPED (no `.antiquot_suffix_splice` node), and
+    //   the stray `|`/`*` text is left in the stream for whatever runs
+    //   next to trip over — a silent misparse, not a diagnosed one.
+    //   Tokens are added here only once a fixture actually pins that
+    //   separator's splice suffix.
     b.token("*");
     b.token(",*");
     // Each category's `LeadingIdentBehavior` (M3a Task 10 review Finding
