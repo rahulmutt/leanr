@@ -32,10 +32,14 @@ touching crate boundaries, and the design spec in
     discovery. "What newly parses." Inherently full-corpus: walks all of
     Mathlib and decodes an olean closure per distinct import set (~8,221
     sets). ~35h at `RAYON_NUM_THREADS=5` on 8 effective cores, dominated by
-    closure decode, not the oracle. Never run these outside a dedicated
-    nightly job — `parse:mathlib:nightly` runs the full gate and only then
-    rewrites the pass-list, so a regression fails before the baseline is
-    re-baselined over it.
+    closure decode, not the oracle — ONE such sweep, not two: `parse:mathlib`
+    (gate only) and `passlist:update` (gate then rewrite) both do this same
+    ~35h walk, so `parse:mathlib:nightly` runs `passlist:update` alone rather
+    than `parse:mathlib` followed by `passlist:update` (that would be two
+    full sweeps back to back, ~70h, and cannot fit a daily cron). Within that
+    one sweep, `mathlib_sweep.rs` checks for regressions before it rewrites
+    the pass-list, so a regression fails before the baseline is touched.
+    Never run any of these outside a dedicated nightly job.
   - There is no GitHub Actions workflow for the discovery tier: CI runs
     hosted `ubuntu-latest` (no Lean toolchain, ~14GB disk, 6h job cap) and
     `.mathlib` is a ~25GB local checkout — it cannot run there. Instead,
