@@ -236,6 +236,29 @@ fn run_module(mut ps: Ps<'_>, snap: &GrammarSnapshot) -> ParseResult {
                     ps.clear_category_cache();
                 }
             }
+            // M3b3 Task 1: a clean command whose outer kind is
+            // scope-relevant (`SCOPE_COMMAND_KINDS`) updates `ps.scope`.
+            // Disjoint from the grammar-growing arm above (no kind is in
+            // both lists), so this never double-builds the same
+            // command's subtree; same cheap-peek-then-build-only-if-
+            // eligible shape as that arm, for the same reason (scope
+            // commands are rare — `namespace`/`section`/`end`/`open` —
+            // so the extra tree build is bounded by their count, not
+            // paid per command).
+            Ok(())
+                if ps
+                    .peek_command_kind_name(sp.events)
+                    .is_some_and(|n| SCOPE_COMMAND_KINDS.contains(&n)) =>
+            {
+                let cmd_events = flatten_events(&ps.events[sp.events..], &ps.subtrees);
+                let cmd_kinds = ps.merged_kinds();
+                let subtree = build_tree(ps.src, &cmd_events, cmd_kinds);
+                crate::grammar::scope::scope_command_update(
+                    &mut ps.scope,
+                    &subtree.root(),
+                    &subtree.kinds,
+                );
+            }
             Ok(()) => {}
             Err(_) => {
                 ps.restore(&sp);
@@ -793,6 +816,14 @@ pub(crate) struct Ps<'a> {
     /// save-and-restores around its inner `run` call, so backtracking
     /// can never leak a stale value.
     anon_antiquot_ok: bool,
+    /// Same-file namespace/section/open scope tracking (M3b3 Task 1) —
+    /// updated by the command loop after each successful `Category {
+    /// name: "command", .. }` parse whose outer kind is in
+    /// `SCOPE_COMMAND_KINDS` (`scope::scope_command_update`). Read by
+    /// no one yet this task (ZERO behavior change) — Task 2 consumes
+    /// `current_namespace()` for derived-kind naming, Task 4 consumes
+    /// `open_namespace`/`active_namespaces` for scoped activation.
+    scope: crate::grammar::scope::ScopeStack,
 }
 
 /// Memoization key for `category()`. ORACLE-PORT `ParserCacheKey`
@@ -945,6 +976,16 @@ pub(crate) const GRAMMAR_GROWING_KINDS: &[&str] = &[
     "Lean.Parser.Command.macro",
 ];
 
+/// Commands whose successful parse updates `Ps::scope` (M3b3 Task 1).
+/// Same cheap-peek mechanism as `command_may_grow_grammar`
+/// (`peek_command_kind_name`).
+pub(crate) const SCOPE_COMMAND_KINDS: &[&str] = &[
+    "Lean.Parser.Command.namespace",
+    "Lean.Parser.Command.section",
+    "Lean.Parser.Command.end",
+    "Lean.Parser.Command.open",
+];
+
 #[cfg_attr(not(test), allow(dead_code))]
 impl<'a> Ps<'a> {
     pub(crate) fn new(src: &'a str, snap: &'a GrammarSnapshot) -> Self {
@@ -977,6 +1018,7 @@ impl<'a> Ps<'a> {
             cap_hits: 0,
             quot_depth: 0,
             anon_antiquot_ok: true,
+            scope: crate::grammar::scope::ScopeStack::new(),
         }
     }
 
@@ -1067,24 +1109,37 @@ impl<'a> Ps<'a> {
     /// hook does; such a kind's name is never in `GRAMMAR_GROWING_KINDS`,
     /// so the membership check falls through to `false`.
     pub(crate) fn command_may_grow_grammar(&self, from_event: usize) -> bool {
-        let Some(&sub) = self.events[from_event..].iter().find_map(|e| match e {
+        self.peek_command_kind_name(from_event)
+            .is_some_and(|n| GRAMMAR_GROWING_KINDS.contains(&n))
+    }
+
+    /// M3b3 Task 1: the peek `command_may_grow_grammar` used to do
+    /// inline, generalized into "what IS this command's outer kind
+    /// name" (not just "is it grammar-growing") so the command loop can
+    /// also ask "is it scope-relevant" (`SCOPE_COMMAND_KINDS`) off the
+    /// exact same cheap, no-tree-build peek. Overlay-first kind
+    /// resolution preserved EXACTLY as `command_may_grow_grammar` had it
+    /// (commit 6807f05) — see that fn's own doc comment (now here) for
+    /// the full citation of why overlay-first-with-base-fallback is
+    /// required (a same-file `syntax .. : command` reuse lands an
+    /// overlay-numbered kind here, out of range for the base interner).
+    fn peek_command_kind_name(&self, from_event: usize) -> Option<&str> {
+        let &sub = self.events[from_event..].iter().find_map(|e| match e {
             PEvent::Sub(idx) => Some(idx),
             PEvent::Ev(_) => None,
-        }) else {
-            return false;
-        };
+        })?;
         let first_non_trivia = self.subtrees[sub].events.iter().find(|e| {
             !matches!(e, PEvent::Ev(Event::Token { kind, .. }) if crate::kind::is_trivia(*kind))
         });
         let Some(PEvent::Ev(Event::Start(kind))) = first_non_trivia else {
-            return false;
+            return None;
         };
         let kind = *kind;
-        let name = self
-            .overlay
-            .kind_name(kind)
-            .unwrap_or_else(|| self.kinds.name(kind));
-        GRAMMAR_GROWING_KINDS.contains(&name)
+        Some(
+            self.overlay
+                .kind_name(kind)
+                .unwrap_or_else(|| self.kinds.name(kind)),
+        )
     }
 
     /// Base kinds + this `Ps`'s overlay's own kinds, folded into ONE
@@ -5225,6 +5280,29 @@ mod tests {
                 .any(|n| r.tree.kinds.name(n.kind()).contains("Greetcmd")),
             "declared command not live on the next line"
         );
+    }
+
+    /// M3b3 Task 1: `ScopeStack` unit + `scope_command_update` wiring —
+    /// a `namespace`/`section`/`end`/`end` sequence updates
+    /// `current_namespace` exactly as tree-driven scope tracking
+    /// predicts, per-command, in parse order.
+    #[test]
+    fn scope_updates_follow_parsed_commands() {
+        use crate::grammar::scope::{scope_command_update, ScopeStack};
+        let snap = crate::builtin::snapshot();
+        let mut stack = ScopeStack::new();
+        let src = "namespace Foo.Bar\nsection\nend\nend Foo.Bar\n";
+        let r = crate::parse_module(src, &snap);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        let expected = ["Foo.Bar", "Foo.Bar", "Foo.Bar", ""];
+        // Skip the module's own leading `Lean.Parser.Module.header` node
+        // (`run_module` always emits exactly one, even for a header-less
+        // source like this fixture) — `expected` covers only the 4 real
+        // commands that follow it.
+        for (cmd, want) in r.tree.root().children().skip(1).zip(expected) {
+            scope_command_update(&mut stack, &cmd, &r.tree.kinds);
+            assert_eq!(stack.current_namespace(), want);
+        }
     }
 
     /// M3b1 Task 9 Step 1: a malformed `infixl` (missing the mandatory
