@@ -223,11 +223,44 @@ fn mangle_kind_unescaped(category: &str, atoms: &[NotationAtom]) -> String {
 /// collapses to plain `\`_private` (`Name.append n .anonymous = n`),
 /// which is exactly the constant `"_private.0."` prefix hardcoded
 /// below.
+///
+/// M3b3 Task 3: the prefixing itself is factored out as
+/// `private_kind_name`, which takes an ALREADY-qualified name — see
+/// that function's own doc comment for why the `_private.0.` wrap
+/// applies OUTSIDE the namespace qualification, not inside it.
+/// `#[cfg(test)]`: `build_spec` below now calls `private_kind_name`
+/// directly on the namespace-qualified name (the ordering fix this
+/// task made), so this thin, unqualified-only wrapper has no
+/// production caller left — kept solely as the
+/// `mangle_private_kind_matches_oracle_local_notation_shape` test's
+/// oracle-pinned anchor (still byte-identical to `private_kind_name(
+/// &mangle_kind(..))` at empty namespace, which is what that test
+/// exercises).
+#[cfg(test)]
 fn mangle_private_kind(category: &str, atoms: &[NotationAtom]) -> String {
-    format!(
-        "_private.0.{}",
-        escape_name_component(&mangle_kind_unescaped(category, atoms))
-    )
+    private_kind_name(&mangle_kind(category, atoms))
+}
+
+/// The `mkPrivateName` wrap itself (`Lean/PrivateName.lean:26-30`:
+/// `Name.mkNum (\`_private ++ mainModule) 0 ++ n`, `mainModule =
+/// anonymous` here — `mangle_private_kind`'s own doc comment covers
+/// why), applied to an ALREADY-FULLY-qualified name — critically,
+/// `qualified` here is expected to already have `qualify_kind_name`'s
+/// namespace-prepending done to it, NOT the other way around.
+///
+/// ORDERING, pinned by `Lean/Elab/Syntax.lean:434-436`'s `elabSyntax`
+/// (pin v4.32.0-rc1): `stxNodeKind := (← getCurrNamespace) ++ name`
+/// runs FIRST, unconditionally; `stxNodeKind := mkPrivateName (←
+/// getEnv) stxNodeKind` runs SECOND, only under the `local` gate — so
+/// the namespace sits INSIDE the `_private.0.` wrap (`_private.0.Ns.x`),
+/// never the reverse (`Ns._private.0.x`). Confirmed against the real
+/// oracle (`StxLocal.lean`'s `dump_syntax_elab.lean` dump, M3b3
+/// Task 3): `local syntax "woblocns" : term` inside `namespace
+/// Widgloc` derives `_private.0.Widgloc.termWoblocns`. `build_spec`
+/// below and `grammar::surface`'s `build_from_items` both call this
+/// the same way: qualify first, private-wrap second.
+pub(crate) fn private_kind_name(qualified: &str) -> String {
+    format!("_private.0.{qualified}")
 }
 
 /// `Char.isWhitespace` (`Init/Data/Char/Basic.lean:97`, pin
@@ -707,7 +740,15 @@ fn derive_notation(
 /// `optional`'s own `null` wrapper: 0 children when the modifier is
 /// absent, 1 child (`Lean.Parser.Term.scoped` or `Lean.Parser.Term.
 /// local`) when present.
-fn is_local_attr_kind(attr_kind_node: &SyntaxNode, kinds: &KindInterner) -> bool {
+///
+/// `pub(crate)` (M3b3 Task 3): `grammar::surface`'s general
+/// `syntax`/`macro` derivation needs this exact same attrKind-reading
+/// condition — `Lean/Elab/Syntax.lean:432`'s `elabSyntax` gates
+/// `mkPrivateName` on it identically regardless of whether the
+/// declaration came through the `notation` sugar or the general
+/// surface (one pinned rule, two callers, same discipline as
+/// `mangle_symbol_atom`'s own `pub(super)` promotion above).
+pub(crate) fn is_local_attr_kind(attr_kind_node: &SyntaxNode, kinds: &KindInterner) -> bool {
     attr_kind_node
         .children()
         .next()
@@ -751,15 +792,21 @@ fn build_spec(
     // notation`/`local infixl`/… gets a DIFFERENT generated kind name
     // than the same declaration without `local` — see
     // `mangle_private_kind`'s own doc comment for the oracle dump and
-    // source citation. M3b3 Task 2: the whole result — private-mangled
-    // or plain — is namespace-qualified (`stxNodeKind := currNamespace
-    // ++ name`); `qualify_kind_name`'s own doc comment covers the
-    // empty-namespace identity that keeps every pre-M3b3 fixture
-    // byte-identical.
+    // source citation. M3b3 Task 2: the result is namespace-qualified
+    // (`stxNodeKind := currNamespace ++ name`); `qualify_kind_name`'s
+    // own doc comment covers the empty-namespace identity that keeps
+    // every pre-M3b3 fixture byte-identical. M3b3 Task 3 (oracle-forced
+    // REORDERING, `StxLocal.lean`): qualification happens BEFORE the
+    // `_private.0.` wrap, not after — `private_kind_name`'s own doc
+    // comment has the `Lean/Elab/Syntax.lean:434-436` source citation
+    // pinning this order (`_private.0.Ns.x`, never `Ns._private.0.x`).
+    // This is a REORDERING fix from M3b3 Task 2's original (untested at
+    // the time) `qualify_kind_name(ns, mangle_private_kind(..))`.
+    let qualified = qualify_kind_name(current_ns, &mangle_kind(category, &atoms));
     let kind_name = if is_local {
-        qualify_kind_name(current_ns, &mangle_private_kind(category, &atoms))
+        private_kind_name(&qualified)
     } else {
-        qualify_kind_name(current_ns, &mangle_kind(category, &atoms))
+        qualified
     };
     let tokens: Vec<String> = items
         .iter()

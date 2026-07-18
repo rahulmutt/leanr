@@ -5336,6 +5336,28 @@ mod tests {
         );
     }
 
+    /// M3b3 Task 3 (the recorded M3b2b gap, `derive_syntax_cmd`'s old
+    /// "Known gap" doc paragraph): `local syntax`/`local macro` derive
+    /// the PRIVATE (`_private.0.`-prefixed) kind name, not the plain
+    /// one — oracle-confirmed against `StxLocal.stx.jsonl`.
+    #[test]
+    fn local_syntax_derives_private_kind_name() {
+        let snap = crate::builtin::snapshot();
+        let src = "local syntax \"wobloc\" : term\n\
+                   macro_rules | `(wobloc) => `(45)\n#check wobloc\n";
+        let r = crate::parse_module(src, &snap);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        // Oracle-pinned exact shape (`StxLocal.stx.jsonl`):
+        // `_private.0.termWobloc`.
+        assert!(
+            r.tree
+                .root()
+                .descendants()
+                .any(|n| r.tree.kinds.name(n.kind()) == "_private.0.termWobloc"),
+            "local syntax must derive the private kind name"
+        );
+    }
+
     /// M3b1 Task 9 Step 1: a malformed `infixl` (missing the mandatory
     /// `=> rhs` tail) must register NOTHING — the overlay stays
     /// unmutated — and the command loop must resync cleanly so the

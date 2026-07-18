@@ -41,8 +41,8 @@ use std::sync::Arc;
 use super::alias::{self, AliasPrim};
 use super::notation::{
     escape_name_component, find_child, first_ident_token_text, first_token_text,
-    mangle_symbol_atom, qualify_kind_name, read_prec_num, strip_quotes, trim_lean_symbol,
-    GrammarDelta, NotationSpec,
+    is_local_attr_kind, mangle_symbol_atom, private_kind_name, qualify_kind_name, read_prec_num,
+    strip_quotes, trim_lean_symbol, GrammarDelta, NotationSpec,
 };
 use super::{walk_symbols, Prim, LEAD_PREC, MAX_PREC};
 use crate::kind::{KindInterner, KIND_IDENT};
@@ -113,15 +113,15 @@ fn derive_binder_predicate(_node: &SyntaxNode, _kinds: &KindInterner) -> Option<
 /// the OUTER node's own direct tokens (`last_ident_token_text`), not a
 /// node child at all.
 ///
-/// Known gap (undocumented by any fixture): `local`/`scoped` naming
-/// (`mangle_private_kind`'s oracle-confirmed `_private.0.` prefix for
-/// `local notation`/`mixfix`) is NOT replicated here for `syntax`/
-/// `macro`, even though `Lean/Elab/Syntax.lean`'s `elabSyntax` applies
-/// the identical `mkPrivateName` gate for `local syntax`/`local macro`
-/// too — left for a future task since no fixture in this corpus
-/// exercises `local`/`scoped` on the general `syntax`/`macro` surface
-/// (recorded in this task's report, not silently wrong: a `local
-/// syntax` declaration derives the PLAIN, non-private kind name here).
+/// M3b3 Task 3 (oracle-confirmed, `StxLocal.lean`): `local syntax`/
+/// `local macro` derive the PRIVATE kind name, the identical
+/// `mkPrivateName` gate `notation.rs`'s `is_local_attr_kind`/
+/// `private_kind_name` already pin for `local notation`/`local
+/// infixl`/… (`Lean/Elab/Syntax.lean:432-436`'s `elabSyntax` applies it
+/// uniformly regardless of which surface the declaration came through
+/// — this function and `derive_macro_cmd` both locate the same
+/// `attrKind` anchor already used for the prec/name slots below, so
+/// reading `is_local` off it here is free).
 fn derive_syntax_cmd(
     node: &SyntaxNode,
     kinds: &KindInterner,
@@ -131,6 +131,7 @@ fn derive_syntax_cmd(
     let attr_kind_pos = children
         .iter()
         .position(|c| kinds.name(c.kind()) == "Lean.Parser.Term.attrKind")?;
+    let is_local = is_local_attr_kind(&children[attr_kind_pos], kinds);
     let prec_wrapper = children.get(attr_kind_pos + 1)?;
     let explicit_prec = find_child(prec_wrapper, "Lean.Parser.precedence", kinds)
         .and_then(|pn| read_prec_num(&pn, kinds));
@@ -145,6 +146,7 @@ fn derive_syntax_cmd(
         &item_nodes,
         explicit_prec,
         explicit_name,
+        is_local,
         kinds,
         current_ns,
     )
@@ -204,6 +206,7 @@ fn derive_macro_cmd(
     let attr_kind_pos = children
         .iter()
         .position(|c| kinds.name(c.kind()) == "Lean.Parser.Term.attrKind")?;
+    let is_local = is_local_attr_kind(&children[attr_kind_pos], kinds);
     let prec_wrapper = children.get(attr_kind_pos + 1)?;
     let explicit_prec = find_child(prec_wrapper, "Lean.Parser.precedence", kinds)
         .and_then(|pn| read_prec_num(&pn, kinds));
@@ -229,6 +232,7 @@ fn derive_macro_cmd(
         &item_nodes,
         explicit_prec,
         explicit_name,
+        is_local,
         kinds,
         current_ns,
     )
@@ -252,6 +256,7 @@ fn build_from_items(
     item_nodes: &[SyntaxNode],
     explicit_prec: Option<u32>,
     explicit_name: Option<String>,
+    is_local: bool,
     kinds: &KindInterner,
     current_ns: &str,
 ) -> Option<GrammarDelta> {
@@ -281,10 +286,23 @@ fn build_from_items(
     // currNamespace ++ name` applies uniformly in `elabSyntax`/
     // `elabMacro`, regardless of whether the name came from
     // `mkNameFromParserSyntax` or a user override; the `StxNamespace`
-    // fixture's `probeNamed` probe pins this).
-    let kind_name = match explicit_name {
+    // fixture's `probeNamed` probe pins this). M3b3 Task 3
+    // (oracle-confirmed, `StxLocal.lean`): `local` then wraps the
+    // ALREADY-qualified name in `_private.0.` — `elabSyntax`'s own
+    // `stxNodeKind := (← getCurrNamespace) ++ name; if .. local then
+    // stxNodeKind := mkPrivateName .. stxNodeKind` (`Lean/Elab/
+    // Syntax.lean:434-436`) runs this gate AFTER qualifying, uniformly
+    // for both the explicit-name and derived-name branches — same
+    // ordering `notation.rs`'s `build_spec` now applies (that module's
+    // own `private_kind_name` doc comment has the full citation).
+    let qualified = match explicit_name {
         Some(n) => qualify_kind_name(current_ns, &escape_name_component(&n)),
         None => qualify_kind_name(current_ns, &mangle_items(category, item_nodes, kinds)),
+    };
+    let kind_name = if is_local {
+        private_kind_name(&qualified)
+    } else {
+        qualified
     };
 
     // ORACLE-PORT `elabSyntax`'s `precDefault` (`Lean/Elab/Syntax.lean`):
