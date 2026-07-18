@@ -175,6 +175,17 @@ fn register_stx_items(b: &mut SnapshotBuilder) {
     // never hit this because nothing else in THEIR grammars puts a
     // bare, non-precedence `":"` immediately after an optional-
     // precedence slot — a real, narrower ambiguity than this file's.
+    //
+    // Deliberate omission: the oracle's `optPrecedence` is ONE shared
+    // `optional (atomic precedence)` def, used uniformly at every
+    // optional-precedence call site. This port applies the `atomic`
+    // wrap only here, where the ambiguity above forces it, and leaves
+    // `notation`/`identPrec`'s own `opt(precedence(b))` un-atomic —
+    // `atomic` only changes BACKTRACK behavior on a failed inner parse,
+    // never the success-path tree shape, so this divergence produces
+    // byte-identical trees on any clean input; only a pathological
+    // failure shaped like `syntax num : widgetish`'s (absent from
+    // `notation`/`identPrec`'s own grammars) could tell the two apart.
     let prec = atomic(precedence(b));
     b.leading2(
         "stx",
@@ -307,6 +318,10 @@ fn cat_behavior(b: &mut SnapshotBuilder) -> Prim {
 /// `macro_arg` (that one has no kind at all; this one self-wraps).
 /// `atomic`'s backtrack scope doesn't affect the success-path shape
 /// (same reasoning as `command_notation.rs`'s own optPrecedence note).
+/// Omits the oracle's zero-width `checkNoWsBefore` between `ident` and
+/// `":"`: this port over-accepts a stray space there (`x : term` where
+/// the oracle requires `x:term`), nothing more — no other shape or
+/// success/failure divergence.
 fn macro_arg(b: &mut SnapshotBuilder) -> Prim {
     let k = b.kind("Lean.Parser.Command.macroArg");
     nd(
@@ -336,7 +351,10 @@ fn macro_tail(b: &mut SnapshotBuilder) -> Prim {
 /// `optKind := optional (" (" >> nonReservedSymbol "kind" >> " := " >>
 /// ident >> ")")` — `macro_rules`/`elab_rules`'s own optional kind-name
 /// override (only `macro_rules` is ported; `elab_rules`/`elab`/
-/// `binder_predicate` aren't surface-table rows this task owns).
+/// `binder_predicate` aren't surface-table rows this task owns). The
+/// populated shape (`(kind := myKind)`, module doc's `probe5` citation
+/// above) is dump-confirmed via that scratch probe only — no committed
+/// fixture exercises it; only the empty case round-trips through one.
 fn opt_kind_clause() -> Prim {
     opt(seq([
         sym("("),

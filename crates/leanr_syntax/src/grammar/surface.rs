@@ -499,7 +499,10 @@ fn is_atom_like(item_nodes: &[SyntaxNode], kinds: &KindInterner) -> bool {
 /// match). Confirmed byte-exact against `StxDeclareUse.stx.jsonl`'s
 /// `«termGrab[_]»` kind for `"grab[" widgetish "]"` too (`"Grab["` +
 /// `"_"` + `"]"`, guillemet-escaped since `[`/`]` aren't valid ident
-/// characters).
+/// characters). Omits the oracle's `Syntax.unicodeAtom` special case —
+/// unreachable here: `stx_item`'s own dispatch never produces one
+/// (skip-and-record, its own doc comment), so no tree reaching this
+/// walk can contain that node kind.
 fn mangle_visit(node: &SyntaxNode, kinds: &KindInterner, out: &mut String) {
     let name = kinds.name(node.kind());
     if name == "str" {

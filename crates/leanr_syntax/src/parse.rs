@@ -2476,6 +2476,10 @@ impl<'a> Ps<'a> {
     /// sufficient and keeps this from ever touching the immutable base
     /// tables, matching the "SAME-FILE overlay additions" scoping
     /// `category`'s own dispatch-merging code already uses elsewhere).
+    /// `find_map` below picks the FIRST matching leading production if
+    /// the overlay ever registers duplicate leaf-wrapping productions
+    /// for the same `kind_name` — arbitrary, but unexercised by any
+    /// fixture.
     fn leaf_antiquot_wrap_kind(&self, cat_name: &str, kind_name: &str) -> Option<SyntaxKind> {
         let cd = self.overlay.category_delta(cat_name)?;
         cd.leading.iter().find_map(|(_, p)| match p {
