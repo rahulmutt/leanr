@@ -328,14 +328,23 @@ pub(crate) fn scope_command_update(
         }
         // M3b3 Task 4: `open`'s single node child is one of the open
         // sub-forms (dump-pinned shapes, `dump_syntax` on the five
-        // forms): `openSimple`/`openScoped` list one-or-more idents,
-        // EACH its own dotted namespace (`open A B C` → three opens; a
-        // dotted `A.B` is a single ident token); `openOnly`/`openHiding`/
-        // `openRenaming` open exactly ONE namespace — their FIRST ident —
-        // followed by declaration-name idents (the `(a b)`/`hiding a`/
-        // `renaming a → b` lists) that are NOT namespaces and must be
-        // ignored. Total on any tree: a missing sub-form (no node child)
-        // or a form with no idents is a clean no-op.
+        // forms). Which forms ACTIVATE `ns`'s scoped notations/tokens is
+        // oracle-pinned to `elabOpenDecl` (`Elab/Open.lean:73-109`,
+        // v4.32.0-rc1), which calls `activateScoped` for exactly three:
+        //   - `openSimple` (`$nss*`, :76-80) and `openScoped`
+        //     (`scoped $nss*`, :81-84) — EACH listed ident is its own
+        //     dotted namespace (`open A B C` → three opens; a dotted
+        //     `A.B` is a single ident token), all activated;
+        //   - `openHiding` (`$ns hiding $ids*`, :92-100) — activates its
+        //     FIRST ident (`ns`); the `hiding` list names declarations,
+        //     not namespaces, and is ignored here.
+        // It does NOT call `activateScoped` for `openOnly`
+        // (`$ns ($ids*)`, :85-91) or `openRenaming`
+        // (`$ns renaming a -> b`, :101-108): those bring only named
+        // declarations into scope, never `ns`'s scoped grammar, so
+        // opening `ns` for them would over-activate (M3b3 final review
+        // I1). Total on any tree: a missing sub-form (no node child) or a
+        // form with no idents is a clean no-op.
         "Lean.Parser.Command.open" => {
             if let Some(decl) = root.children().next() {
                 match kinds.name(decl.kind()) {
@@ -348,11 +357,18 @@ pub(crate) fn scope_command_update(
                             }
                         }
                     }
-                    _ => {
+                    "Lean.Parser.Command.openHiding" => {
                         if let Some(ns) = first_ident_anywhere(&decl) {
                             stack.open_namespace(&ns);
                         }
                     }
+                    // `openOnly` (`$ns ($ids*)`) and `openRenaming`
+                    // (`$ns renaming a -> b`) do NOT activate `ns`'s
+                    // scoped entries (oracle omits `activateScoped` for
+                    // both) — they open only named declarations, which
+                    // this port models textually and does not track. Any
+                    // unrecognized sub-form is likewise a no-op.
+                    _ => {}
                 }
             }
         }
@@ -489,25 +505,39 @@ mod tests {
         assert!(s6.is_active(&top));
     }
 
-    /// M3b3 Task 4: the `open` arm of `scope_command_update` records each
-    /// opened namespace (dump-pinned open sub-form shapes) — driven
-    /// through the real parser so it also pins the `open` node shape the
-    /// walk depends on. `open A B` opens BOTH; `open Foo (bar)` opens
-    /// only `Foo` (the parenthesized names are declarations, not
-    /// namespaces).
+    /// M3b3 Task 4 + final review I1: the `open` arm of
+    /// `scope_command_update` ACTIVATES (records into `opens`) exactly the
+    /// sub-forms the oracle's `elabOpenDecl` calls `activateScoped` for
+    /// (`Elab/Open.lean:73-109`, v4.32.0-rc1) — driven through the real
+    /// parser so it also pins the `open` node shapes the walk depends on:
+    ///   - `openSimple` (`open A B`) activates BOTH `A` and `B`;
+    ///   - `openHiding` (`open Baz hiding c`) activates `Baz` (its first
+    ///     ident; the `hiding` list names declarations, not namespaces);
+    ///   - `openOnly` (`open Foo (bar)`) activates NOTHING — the oracle
+    ///     omits `activateScoped`; the parenthesized names are
+    ///     declarations, not namespaces;
+    ///   - `openRenaming` (`open Bar renaming a -> b`) activates NOTHING —
+    ///     same omission.
+    ///
+    /// Before the I1 fix, the fallback opened the first ident for all of
+    /// `openOnly`/`openHiding`/`openRenaming`, over-activating `Foo` and
+    /// `Bar`; this test now pins the oracle split.
     #[test]
-    fn open_arm_records_namespaces_from_each_subform() {
+    fn open_arm_activates_only_the_oracle_activating_subforms() {
         let snap = crate::builtin::snapshot();
-        let src = "open A B\nopen Foo (bar)\n";
+        let src = "open A B\nopen Foo (bar)\nopen Bar renaming a -> b\nopen Baz hiding c\n";
         let r = crate::parse_module(src, &snap);
         assert!(r.errors.is_empty(), "errs={:?}", r.errors);
         let mut stack = ScopeStack::new();
         for cmd in r.tree.root().children().skip(1) {
             scope_command_update(&mut stack, &cmd, &r.tree.kinds);
         }
+        // A, B (openSimple) and Baz (openHiding) — but NOT Foo (openOnly)
+        // or Bar (openRenaming).
         assert_eq!(
             stack.opens(),
-            ["A".to_string(), "B".to_string(), "Foo".to_string()]
+            ["A".to_string(), "B".to_string(), "Baz".to_string()],
+            "openOnly/openRenaming must not activate their namespace"
         );
     }
 
