@@ -32,6 +32,17 @@ use crate::tree::{build_tree, Event, SyntaxTree};
 pub struct ParseResult {
     pub tree: SyntaxTree,
     pub errors: Vec<ParseError>,
+    /// M3b3 Task 7 test-only accessor: the final overlay state, so a test
+    /// can hash it (`Overlay::fingerprint_into`) without a production
+    /// consumer needing to reach through `ParseResult` for it — no such
+    /// consumer exists yet (the M5 query-firewall seam `fingerprint_into`
+    /// itself documents is still future work; `grep fingerprint_into`
+    /// confirms every non-test caller today lives inside `overlay.rs`'s
+    /// own unit tests). `#[cfg(test)]` keeps this out of the public,
+    /// non-test API entirely, matching `Ps::new_for_test`'s own
+    /// test-only-surface convention in this file.
+    #[cfg(test)]
+    pub(crate) overlay: Overlay,
 }
 
 /// Parse one module: header, then commands to EOF. Never panics; a
@@ -313,8 +324,15 @@ fn run_module(mut ps: Ps<'_>, snap: &GrammarSnapshot) -> ParseResult {
     ps.finish();
 
     ps.finish(); // module
+    #[cfg(test)]
+    let overlay = ps.overlay.clone();
     let (tree, errors) = ps.finish_into_tree();
-    ParseResult { tree, errors }
+    ParseResult {
+        tree,
+        errors,
+        #[cfg(test)]
+        overlay,
+    }
 }
 
 /// Parse ONLY the module header and return the imported module names
@@ -972,6 +990,23 @@ pub(crate) struct Savepoint {
     events: usize,
     errors: usize,
     lhs_prec: u32,
+    /// M3b3 Task 7: `self.overlay.kind_count()` at `save` time — `restore`
+    /// truncates the overlay's kind table back to this, undoing any
+    /// `Overlay::intern` calls a failed speculative parse made in the
+    /// meantime (e.g. an antiquot attempt's `.antiquot`/`antiquotName`/
+    /// `antiquotNestedExpr` kinds). Sound because `register`/
+    /// `register_category` — the calls that grow the grammar's
+    /// PRODUCTIONS, as opposed to merely interning a kind NAME — never
+    /// run between a `save` and its matching `restore`: the one call site
+    /// (`run_module`'s grow arm) only registers a command AFTER that
+    /// command's own top-level `save`/`restore` span has already closed
+    /// (`Ok(())` branch, never followed by a `restore` on that same
+    /// `sp`). No other function in this file calls `register`/
+    /// `register_category`. This field deliberately carries NO scope
+    /// state (`Ps::scope`, M3b3 Task 6b) — scope commands (`namespace`/
+    /// `section`/`end`/`open`) are likewise never inside a save/restore
+    /// pair, by the same argument.
+    overlay_kinds: usize,
 }
 
 /// A `longest_match` winner: which candidate won, the events/errors it
@@ -1279,13 +1314,39 @@ impl<'a> Ps<'a> {
             events: self.events.len(),
             errors: self.errors.len(),
             lhs_prec: self.lhs_prec,
+            overlay_kinds: self.overlay.kind_count(),
         }
     }
     pub(crate) fn restore(&mut self, sp: &Savepoint) {
+        self.restore_to(sp, sp.overlay_kinds);
+    }
+    /// `restore`'s general form: rewinds `pos`/`events`/`errors`/
+    /// `lhs_prec` to `sp` exactly as `restore` does, but truncates the
+    /// overlay's kind table to `floor` instead of `sp.overlay_kinds`.
+    /// `restore` itself is just `floor == sp.overlay_kinds` — the only
+    /// caller that ever needs a HIGHER floor is `longest_match` (M3b3
+    /// Task 7 fix): it calls `self.restore(sp)` between every candidate,
+    /// including right after selecting a new best, so a naive `floor =
+    /// sp.overlay_kinds` there would truncate away a WINNING candidate's
+    /// own interned kinds (e.g. a category antiquot's `antiquotName`) the
+    /// instant the loop moves on to try the next sibling — even though
+    /// that winner's `events` (captured into `MatchWinner`, spliced back
+    /// into `self.events` by `longest_match`'s own caller) still
+    /// reference them. `longest_match` tracks the current best's own
+    /// `overlay.kind_count()` as a rising floor precisely so those kinds
+    /// survive every subsequent (possibly losing) sibling attempt and
+    /// the final restore-before-splice, while a LOSING sibling's own
+    /// speculative interns still get rolled back on the very next
+    /// iteration. `floor` is always `>= sp.overlay_kinds` (`sp.
+    /// overlay_kinds` itself, or a later candidate's own — necessarily
+    /// larger — count), so this never resurrects an index truncate_kinds
+    /// already dropped.
+    fn restore_to(&mut self, sp: &Savepoint, floor: usize) {
         self.pos = sp.pos;
         self.events.truncate(sp.events);
         self.errors.truncate(sp.errors);
         self.lhs_prec = sp.lhs_prec;
+        self.overlay.truncate_kinds(floor);
     }
     fn consumed_since(&self, sp: &Savepoint) -> bool {
         self.pos > sp.pos
@@ -3268,16 +3329,34 @@ impl<'a> Ps<'a> {
     /// trailing-loop caller additionally needs to insert a wrapping
     /// `Start` before doing so (the Pratt wrap), which a generic
     /// helper can't do on its own.
+    ///
+    /// M3b3 Task 7 fix: that per-attempt (and final) restore must NOT
+    /// truncate the overlay's kind table all the way to `sp.
+    /// overlay_kinds` once some candidate has already won — a winning
+    /// candidate's `events` (captured into `MatchWinner` below) can
+    /// itself reference a kind that candidate's own run interned (e.g. a
+    /// category antiquot's `antiquotName`/`.pseudo.antiquot`), and those
+    /// events are exactly what the caller splices back into `self.events`
+    /// on return, unlike every OTHER candidate's (discarded) events. So
+    /// `floor` tracks the current best's `overlay.kind_count()` — read
+    /// right after that candidate ran, before anything else touches the
+    /// overlay — and every `restore_to` call below (per-attempt and the
+    /// final one) truncates to `floor`, not `sp.overlay_kinds`, once it's
+    /// been raised; a losing sibling tried afterward still gets its own
+    /// speculative interns rolled back on the very next iteration (floor
+    /// only ever rises to a NEW winner's count, never to a loser's).
     fn longest_match(&mut self, sp: &Savepoint, parsers: &[Prim]) -> Option<MatchWinner> {
         let mut best: Option<MatchWinner> = None;
+        let mut floor = sp.overlay_kinds;
         for (i, p) in parsers.iter().enumerate() {
-            self.restore(sp);
+            self.restore_to(sp, floor);
             if self.run(p).is_ok() {
                 let better = match &best {
                     Some(w) => self.pos > w.end,
                     None => true,
                 };
                 if better {
+                    floor = self.overlay.kind_count();
                     best = Some(MatchWinner {
                         idx: i,
                         events: self.events[sp.events..].to_vec(),
@@ -3288,7 +3367,7 @@ impl<'a> Ps<'a> {
                 }
             }
         }
-        self.restore(sp);
+        self.restore_to(sp, floor);
         best
     }
 
@@ -5840,6 +5919,48 @@ mod tests {
         // territory / plain failure — exactly what depth 0 means).
         let r0 = crate::parse_module("def a := $x\n", &snap);
         assert!(!crate::canon::canon_jsonl(&r0.tree).contains("antiquot"));
+    }
+
+    /// M3b3 Task 7 Step 1 (RED first): a failed antiquot ATTEMPT must not
+    /// perturb the overlay's fingerprint. `` `($x:foo)`` inside a
+    /// quotation drives `try_category_antiquot` → `category_antiquot_
+    /// body`: the `:foo` suffix parses fine (interning the
+    /// `antiquotName` kind, `category_antiquot_body`'s colon-suffix arm)
+    /// but then fails classification (`foo` is neither the category's
+    /// own name `term` nor a `CATEGORY_LEAF_ANTIQUOT_NAMES` entry — that
+    /// fn's own `Some(_) => Err(..)` arm), so `try_category_antiquot`
+    /// restores. Confirmed by probing `Overlay::kind_count()` directly
+    /// (scratch check, not committed): before this task's fix, a clean
+    /// parse's overlay had `kind_count() == 0` while this stormy parse's
+    /// had `kind_count() == 1` (the leaked `antiquotName`) even though
+    /// `restore` had already rewound events/pos/errors — proof `restore`
+    /// wasn't rolling back the overlay's kind table. (A `$ $ $` storm,
+    /// the brief's original sketch, turns out NOT to exercise this: its
+    /// failure is `antiquot_dollar_prefix`'s `noWs` check, which fails
+    /// before `category_antiquot_body`/`antiquot` ever interns anything —
+    /// harmless either way, so it wouldn't have caught a regression here.)
+    /// `Savepoint::save`/`restore` now cover `Overlay::kind_count`/
+    /// `truncate_kinds` (this task), so the fingerprints below must be
+    /// equal.
+    #[test]
+    fn failed_antiquot_leaves_fingerprint_untouched() {
+        let snap = crate::builtin::snapshot();
+        let clean = crate::parse_module("#check 1\n", &snap);
+        // A category antiquot with an unrecognized `:suffix` — interns
+        // `antiquotName` while parsing the suffix, then fails
+        // classification and restores; before this task that left
+        // `antiquotName` interned in the overlay.
+        let stormy = crate::parse_module("def q := `($x:foo)\n#check 1\n", &snap);
+        let fp = |r: &crate::ParseResult| {
+            let mut h = blake3::Hasher::new();
+            r.overlay.fingerprint_into(&mut h);
+            h.finalize()
+        };
+        assert_eq!(
+            fp(&clean),
+            fp(&stormy),
+            "failed antiquot attempts must not perturb the overlay fingerprint"
+        );
     }
 
     /// M3b2b Task 7 Step 1 (RED first): end-to-end through the public

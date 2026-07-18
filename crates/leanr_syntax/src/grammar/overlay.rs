@@ -237,6 +237,37 @@ impl Overlay {
         SyntaxKind(k)
     }
 
+    /// How many kinds THIS overlay has interned so far — `Savepoint::save`
+    /// (parse.rs, M3b3 Task 7) snapshots this before a speculative parse
+    /// (e.g. an antiquot attempt) so a failed attempt's `restore` can roll
+    /// the overlay's kind table back to exactly this count, undoing any
+    /// `intern` calls the attempt made along the way. Never includes the
+    /// base snapshot's kinds (`base_kind_count`) — only this overlay's own.
+    pub(crate) fn kind_count(&self) -> usize {
+        self.kind_names.len()
+    }
+
+    /// Roll this overlay's kind table back to exactly `n` entries — the
+    /// `Savepoint::restore` (parse.rs, M3b3 Task 7) counterpart to
+    /// `kind_count`: removes every name with overlay index `>= n` from
+    /// BOTH `kind_names` (the registration-order view `kind_name`/
+    /// `fingerprint_into` walk) and `kind_map` (the by-name lookup
+    /// `intern`/`lookup_kind` use), so a re-attempt after restore interns
+    /// the same name fresh rather than finding a stale idempotent hit.
+    /// Sound only because `register`/`register_category` — the calls that
+    /// actually grow the grammar's PRODUCTIONS (`cats`/`categories`,
+    /// untouched here) — never run between a `save` and its `restore`
+    /// (parse.rs's command loop only calls them after a command's own
+    /// save/restore span has already closed); see that call site's own
+    /// doc comment for the full argument. `n` is always a value `kind_
+    /// count` itself returned earlier at a real savepoint, so `n <=
+    /// kind_names.len()` always holds and `drain(n..)` never panics.
+    pub(crate) fn truncate_kinds(&mut self, n: usize) {
+        for name in self.kind_names.drain(n..) {
+            self.kind_map.remove(&name);
+        }
+    }
+
     /// `k`'s overlay-local name, if `k` was interned by THIS overlay
     /// (`k.0 >= base_kind_count`) — a base-snapshot kind (or a kind from
     /// a different overlay) is never resolvable here, matching
@@ -281,17 +312,19 @@ impl Overlay {
     /// `encode_prim`'s own doc comment in `grammar/mod.rs` for why its
     /// kind-name resolver is a closure rather than a bare snapshot ref).
     ///
-    /// Widened semantics (`kind_names` above): a FAILED antiquot attempt
-    /// still interns its kind (e.g. `term.pseudo.antiquot`,
-    /// `parse.rs`'s `Ps::antiquot`) via `Overlay::intern` before the
-    /// caller's save/restore unwinds the attempt — `restore` rewinds
-    /// events/pos, not the overlay's kind table — so this fingerprint
-    /// depends on quotation CONTENTS parsed so far, not only on
-    /// registered grammar deltas (`register`/`register_category`).
-    /// Still deterministic per input (same source, same attempted
-    /// antiquots, same interning order) → caching stays sound; intern-
-    /// on-commit (only intern a kind once its production actually wins)
-    /// is the real fix, deferred (M3b3 candidate).
+    /// Precise semantics (M3b3 Task 7, superseding the previously
+    /// "widened" note that used to live here): a FAILED antiquot attempt
+    /// (e.g. `parse.rs`'s `Ps::antiquot` failing partway through) still
+    /// calls `Overlay::intern` for its kind (`term.pseudo.antiquot` and
+    /// friends) before the caller's `restore` unwinds the attempt, but
+    /// `Savepoint::save`/`restore` (parse.rs) now cover the overlay's
+    /// kind table too (`kind_count`/`truncate_kinds` above) — so that
+    /// `intern` call is rolled back along with the events/pos it was
+    /// interleaved with, and this fingerprint depends ONLY on kinds
+    /// whose production actually committed (`register`/
+    /// `register_category`), never on abandoned antiquot attempts. Intern-
+    /// on-commit is exactly what this now is: `restore` un-interns
+    /// anything a failed speculative parse interned in the meantime.
     pub fn fingerprint_into(&self, h: &mut blake3::Hasher) {
         // M3b3 Task 4: bumped from `leanr-m3b1-overlay-v1` when each
         // overlay entry gained its `SpecScope` activation tag (hashed
@@ -454,6 +487,55 @@ mod tests {
             h2.finalize(),
             "fingerprint_into must be deterministic for equivalent overlays"
         );
+    }
+
+    /// M3b3 Task 7 Step 1 (RED first): `truncate_kinds` must remove
+    /// exactly the names interned at or after `n`, from BOTH `kind_names`
+    /// (registration-order view) and `kind_map` (by-name lookup) — a
+    /// kind kept below `n` stays fully resolvable, a kind at/above `n` is
+    /// gone from both, and `kind_count()` reports the rolled-back count.
+    #[test]
+    fn truncate_kinds_removes_names_at_or_after_n_from_both_tables() {
+        let base = crate::builtin::snapshot();
+        let mut ov = Overlay::new(&base);
+        let k0 = ov.intern("kept.kind");
+        assert_eq!(ov.kind_count(), 1);
+        let n = ov.kind_count();
+        let k1 = ov.intern("rolled_back.kind_one");
+        let _k2 = ov.intern("rolled_back.kind_two");
+        assert_eq!(ov.kind_count(), 3);
+
+        ov.truncate_kinds(n);
+
+        assert_eq!(
+            ov.kind_count(),
+            n,
+            "kind_count must report the rolled-back count"
+        );
+        // The kept kind is still fully resolvable both ways.
+        assert_eq!(ov.kind_name(k0), Some("kept.kind"));
+        assert_eq!(ov.lookup_kind("kept.kind"), Some(k0));
+        // The rolled-back kinds are gone from both tables.
+        assert_eq!(
+            ov.kind_name(k1),
+            None,
+            "kind_names must not resolve a truncated kind"
+        );
+        assert_eq!(
+            ov.lookup_kind("rolled_back.kind_one"),
+            None,
+            "kind_map must not resolve a truncated kind's name"
+        );
+        assert_eq!(ov.lookup_kind("rolled_back.kind_two"), None);
+        // Re-interning the same name after truncation mints a FRESH kind
+        // at the same overlay index, not a stale idempotent hit — proof
+        // `kind_map`'s entry is truly gone, not just `kind_names`'s.
+        let k1_again = ov.intern("rolled_back.kind_one");
+        assert_eq!(
+            k1_again, k1,
+            "re-interning after truncate reuses the same freed index"
+        );
+        assert_eq!(ov.kind_count(), n + 1);
     }
 
     /// Task 10 Part B (absorbed from Task 5 review): `intern` (via
