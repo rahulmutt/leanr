@@ -31,6 +31,7 @@ use std::sync::Arc;
 // share helpers with.
 mod term_app;
 mod term_pragma;
+mod term_quot;
 // Re-exported (Task 9) so `do_notation.rs` (a SIBLING of `term`, not a
 // descendant) can reuse `matchExprPat`/`matchExprAlt(s)` for
 // `doLetExpr`/`doLetMetaExpr`/`doMatchExpr` without a second, drifting
@@ -1250,6 +1251,7 @@ pub fn register(b: &mut SnapshotBuilder) {
     register_set_option_in_term(b);
     term_app::register(b);
     term_pragma::register(b);
+    term_quot::register(b);
 }
 
 #[cfg(test)]

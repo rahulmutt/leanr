@@ -10,6 +10,7 @@ use std::sync::Arc;
 use leanr_grammar::assemble;
 use leanr_kernel::bank::Store;
 use leanr_olean::SearchPath;
+use rayon::prelude::*;
 
 fn passlist_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/syntax/mathlib-passlist.txt")
@@ -94,36 +95,99 @@ fn mathlib_sweep_ratchet() {
     // nor regressed; they simply weren't swept.
     let swept: BTreeSet<String> = files.iter().map(|f| rel_of(f)).collect();
 
-    // Snapshot cache keyed by the file's import list.
-    let mut snap_cache: BTreeMap<Vec<String>, Option<Arc<leanr_syntax::grammar::GrammarSnapshot>>> =
-        BTreeMap::new();
-
-    let mut green: BTreeSet<String> = BTreeSet::new();
+    // Group files by import list (sorted by `Vec<String>` order via
+    // `BTreeMap`, giving prefix locality: similar import lists land next to
+    // each other below).
+    let mut by_imports: BTreeMap<Vec<String>, Vec<PathBuf>> = BTreeMap::new();
     for file in &files {
-        let rel = rel_of(file);
         let Ok(src) = std::fs::read_to_string(file) else {
             continue;
         };
-        let imports = leanr_syntax::parse_header_imports(&src);
-        let snap = snap_cache.entry(imports.clone()).or_insert_with(|| {
-            let mut st = Store::persistent();
-            let targets: Vec<_> = imports.iter().map(|m| dotted_to_name(m)).collect();
-            leanr_olean::load_closure(&sp, &targets, &mut st)
-                .ok()
-                .map(|loaded| Arc::new(assemble(&loaded, &st).snapshot))
-        });
-        let Some(snap) = snap else { continue };
-        let r = leanr_syntax::parse_module(&src, snap);
-        if r.tree.text() != src || !r.errors.is_empty() {
-            continue;
-        }
-        let Some(want) = oracle_dump(&mathlib, &lean_path, &githash, file) else {
-            continue;
-        };
-        if leanr_syntax::canon::canon_jsonl(&r.tree) == want {
-            green.insert(rel);
-        }
+        by_imports
+            .entry(leanr_syntax::parse_header_imports(&src))
+            .or_default()
+            .push(file.clone());
     }
+
+    // Fused snapshot-build + sweep, one import set at a time, in parallel —
+    // no barrier between "build every snapshot" and "sweep every file"
+    // (was: phase A built and held all 7,738 `Arc<GrammarSnapshot>`s before
+    // phase B could sweep a single file). Each set still gets its OWN fresh
+    // `Store::persistent()` (unchanged from before this fix): a chunked,
+    // warm-store-per-worker variant of this (reusing one `Store` across many
+    // sets sequentially, to collapse decode of shared oleans like
+    // Init/Std/Mathlib.Init) was prototyped and passed its own correctness
+    // check (LIMIT=30 cold-vs-warm green-list diff was byte-identical, and
+    // an isolated single-chunk replay of the exact sequence one worker
+    // processed never reproduced any issue) but reliably panicked
+    // (`index out of bounds` in `leanr_syntax`'s `KindInterner::name`,
+    // reproduced twice) once multiple chunks' independent warm `Store`s ran
+    // concurrently at LEANR_SWEEP_LIMIT=200 — a real, reproducible-at-scale
+    // failure mode whose exact mechanism wasn't pinned down within budget
+    // (see task-1-optimize-report.md). Rather than ship that risk, this
+    // keeps the fresh-store-per-set decode cost (no change there) and banks
+    // three SAFE wins: no phase barrier; the decoded `Store` (the biggest
+    // per-worker allocation, multi-GB for deep Mathlib closures) is dropped
+    // immediately after `assemble` rather than held through the file sweep;
+    // and the inner per-file loop is sequential, since the real distribution
+    // is 7,738 import sets over 8,844 files (avg ~1.1 files/set) — nested
+    // parallelism buys nothing there but lets a thread blocked on a nested
+    // join steal another outer set, stacking a second live multi-GB `Store`
+    // on top. Live memory is therefore bounded by thread count ×
+    // max(one `Store` during load, one `Arc<GrammarSnapshot>` during sweep),
+    // instead of all 7,738 snapshots (or worse, stacked stores) held at once.
+    let import_sets: Vec<Vec<String>> = by_imports.keys().cloned().collect();
+    let total_sets = import_sets.len();
+    let sets_done = std::sync::atomic::AtomicUsize::new(0);
+    let green_count = std::sync::atomic::AtomicUsize::new(0);
+    let green: BTreeSet<String> = import_sets
+        .par_iter()
+        .flat_map(|imports| {
+            let snap = {
+                let mut st = Store::persistent();
+                let targets: Vec<_> = imports.iter().map(|m| dotted_to_name(m)).collect();
+                leanr_olean::load_closure(&sp, &targets, &mut st)
+                    .ok()
+                    .map(|loaded| Arc::new(assemble(&loaded, &st).snapshot))
+                // `st` (the decoded olean Store, the biggest allocation) drops here —
+                // only the assembled snapshot is needed to sweep the set's files.
+            };
+            let set_green: Vec<String> = match &snap {
+                Some(snap) => {
+                    let group = &by_imports[imports];
+                    // Sequential: sets average ~1.1 files, so nested
+                    // parallelism has nothing to gain, and it lets an idle
+                    // thread steal another outer set while still holding
+                    // this set's `Store`/`snap`, stacking a second live
+                    // multi-GB allocation.
+                    group
+                        .iter()
+                        .filter_map(|file| {
+                            let rel = rel_of(file);
+                            let src = std::fs::read_to_string(file).ok()?;
+                            let r = leanr_syntax::parse_module(&src, snap);
+                            if r.tree.text() != src || !r.errors.is_empty() {
+                                return None;
+                            }
+                            let want = oracle_dump(&mathlib, &lean_path, &githash, file)?;
+                            (leanr_syntax::canon::canon_jsonl(&r.tree) == want).then_some(rel)
+                        })
+                        .collect()
+                }
+                None => Vec::new(),
+            };
+            // `snap` (and its Arc<GrammarSnapshot>) drops here, right after
+            // this set's files are swept — never accumulated across sets.
+            use std::sync::atomic::Ordering;
+            let done = sets_done.fetch_add(1, Ordering::Relaxed) + 1;
+            let green_so_far =
+                green_count.fetch_add(set_green.len(), Ordering::Relaxed) + set_green.len();
+            if done.is_multiple_of(100) || done == total_sets {
+                eprintln!("[sweep] {done}/{total_sets} sets, {green_so_far} green so far");
+            }
+            set_green
+        })
+        .collect();
 
     let committed: BTreeSet<String> = std::fs::read_to_string(passlist_path())
         .unwrap_or_default()

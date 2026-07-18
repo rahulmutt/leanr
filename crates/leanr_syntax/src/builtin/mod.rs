@@ -34,6 +34,59 @@ pub fn builder() -> SnapshotBuilder {
     // definitions...").
     b.kind("module");
     b.kind("Lean.Parser.Command.eoi");
+    // M3b2b Task 4 — antiquot-splice suffix tokens (`many`/`sepBy`'s
+    // `withAntiquotSpliceAndSuffix` alternative, `parse.rs`'s
+    // `antiquot_splice`): these can't ride along with the rest of the
+    // token table (every OTHER token is auto-collected by `finish()`'s
+    // `walk_symbols` pass over the registered `Prim` tree — see that
+    // fn's own doc comment — because it walks `Prim::Symbol` NODES a
+    // real production's grammar contains); `antiquot_splice`'s suffix
+    // atoms are parsed by bare `expect_atom` calls in `parse.rs` itself,
+    // never wrapped in a `Prim::Symbol` any builtin production
+    // registers, so they need this explicit registration or the
+    // tokenizer would never maximal-munch them.
+    // - `"*"` — ORACLE `many(p)`/`many1(p)`'s shared suffix (`Extra.lean:
+    //   42,52,67`: `withAntiquotSpliceAndSuffix `many p (symbol "*")`).
+    //   Pinned: `QuotSplice.stx.jsonl` line b (`f $args*`), atom span
+    //   `[42,43]` — one char, one atom (no sibling registration collides
+    //   with it: `?`/`[`/`]` are already registered by unrelated
+    //   productions, e.g. `term.rs`'s synthetic-hole/binder-update/`open`
+    //   rows).
+    // - `",*"` — ORACLE `sepByElemParser p sep := withAntiquotSpliceAndSuffix
+    //   `sepBy p (symbol (sep.trimAscii.copy ++ "*"))` (`Basic.lean:
+    //   1895-1896`), instantiated here for `sep = ","` (`anonymousCtor`/
+    //   `matchDiscr`'s own separator — `term.rs`/`tactic.rs`'s `sep_by1(
+    //   .., ",")` call sites): pinned as ONE combined atom, not two
+    //   (`,` then `*` separately) — `QuotSplice.stx.jsonl` lines a/c/d,
+    //   atom spans `[17,19]`/`[64,66]`/`[102,104]`, each TWO bytes wide
+    //   under one `"a"` span, confirming Lean's own maximal-munch
+    //   registers the literal string `",*"` as a single token (same
+    //   mechanism any other multi-char symbol like `"=>"`/`"::"` uses),
+    //   not a token-table LOOKUP collision with the separately-registered
+    //   bare `","` (`term.rs`/`tactic.rs`'s own `sep_by1(.., ",")`)
+    //   forcing a two-token read. Only `sep = ","` is registered here —
+    //   this crate's OTHER `sepBy`/`sepBy1` separators (`"|"` —
+    //   `term.rs:502`; `"▸"` — `term_app.rs:121`) get their own `"|*"`/
+    //   `"▸*"` combined-token registration on demand, when (if) a future
+    //   fixture actually exercises a splice suffix at one of those
+    //   positions — same "don't force it" discipline this crate already
+    //   applies to `CATEGORY_LEAF_ANTIQUOT_NAMES` (`parse.rs`). Failure
+    //   mode while unregistered, named explicitly (M3b2b Task 4 review
+    //   fix): this is NOT a hard error at parse time. `antiquot_splice`'s
+    //   suffix-splice form (`parse.rs`) still runs `scope_body` and
+    //   checks `top_level_is_antiquot` on whatever it produced, then
+    //   attempts `expect_atom(suf, false)` for the combined suffix text
+    //   (e.g. `"|*"`) — with no such token registered, the tokenizer can
+    //   never maximal-munch it as one atom, so that `expect_atom` fails
+    //   and is treated as "suffix doesn't apply" (see `antiquot_splice`'s
+    //   own doc comment, alternative 2): the element's already-parsed
+    //   result stands UNWRAPPED (no `.antiquot_suffix_splice` node), and
+    //   the stray `|`/`*` text is left in the stream for whatever runs
+    //   next to trip over — a silent misparse, not a diagnosed one.
+    //   Tokens are added here only once a fixture actually pins that
+    //   separator's splice suffix.
+    b.token("*");
+    b.token(",*");
     // Each category's `LeadingIdentBehavior` (M3a Task 10 review Finding
     // 1) is read off its own `registerBuiltinParserAttribute` call site
     // in the pin — the `behavior` parameter defaults to `.default` when
@@ -69,6 +122,19 @@ pub fn builder() -> SnapshotBuilder {
     // `parse.rs::dispatch` and `LeadingIdentBehavior`'s own doc comment).
     b.category("attr", LeadingIdentBehavior::Symbol);
     b.category("prio", LeadingIdentBehavior::Both);
+    // `stx` category (M3b2b Task 6, surface table's `syntax`-item
+    // grammar, `Lean/Parser/Syntax.lean`'s `Syntax.paren`/`.cat`/
+    // `.unary`/`.binary`/`.sepBy`/`.sepBy1`/`.atom`/`.nonReserved` +
+    // the `+`/`*`/`?`/`,*` quantifier-suffix trailing productions,
+    // `command_syntax.rs`) — `Syntax.lean:17`'s own registration,
+    // `registerBuiltinParserAttribute \`builtin_syntax_parser
+    // ``Category.stx .both`, is EXPLICIT `.both` (unlike `command`/
+    // `term`/`level`/`doElem`/`structInstFieldDecl`, all omitted →
+    // `.default`) — pinned here rather than left at the `#[default]`
+    // `Default`, per this task's own brief instruction to read the
+    // behavior off the oracle's category-registration call site
+    // rather than assume.
+    b.category("stx", LeadingIdentBehavior::Both);
     command::register(&mut b);
     level::register(&mut b);
     tactic::register(&mut b);

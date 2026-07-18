@@ -1,0 +1,6 @@
+def a := `(f x)
+def b := `(fun x => x)
+def c := `(tactic| match h with | hp => _)
+def d := `(term| 42)
+def e := `(#check 1)
+def f := `(#check 1 #check 2)

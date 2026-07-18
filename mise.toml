@@ -3,7 +3,7 @@
 "github:EmbarkStudios/cargo-deny" = "0.20.2"
 "github:leanprover/elan" = "4.2.3"
 gitleaks = "8.30.1"
-rust = { version = "1.97.0", profile = "default" }
+rust = { version = "1.97.1", profile = "default" }
 
 # leanprover/elan's GitHub release asset ships a self-installing binary named
 # `elan-init` (mise pins and verifies *that* exact binary above), not `elan`
@@ -111,12 +111,19 @@ run = [
   "sh -c 'for p in aesop batteries Cli importGraph LeanSearchClient plausible Qq; do cp .mathlib/.lake/packages/$p/lakefile.toml crates/leanr_build/tests/fixtures/lakefiles/$p.toml; done'",
   # M3a parser fixtures: official parse trees in canonical JSON
   # (tests/fixtures/syntax/; dump_syntax.lean is the dumper itself).
-  # `Notation*.lean` (M3b1 same-file notation corpus, Task 8) are
-  # EXCLUDED here — they grow their own grammar mid-file, which
-  # `dump_syntax.lean`'s parse-only (no elaboration) loop cannot
+  # `Notation*.lean` (M3b1 same-file notation corpus, Task 8) and
+  # `Stx*.lean` (M3b2b Task 6 same-file `syntax`/`macro`/`macro_rules`
+  # corpus) are EXCLUDED here — they grow their own grammar mid-file,
+  # which `dump_syntax.lean`'s parse-only (no elaboration) loop cannot
   # observe; see the `fixtures:regen-notation` task below, which this
-  # task also depends on.
-  "sh -c 'for f in tests/fixtures/syntax/*.lean; do b=$(basename \"$f\"); case \"$b\" in dump_syntax.lean|dump_syntax_elab.lean|Notation*.lean) continue;; esac; lean --run tests/fixtures/syntax/dump_syntax.lean \"$f\" > \"${f%.lean}.stx.jsonl\"; done'",
+  # task also depends on. `Errors0.lean`/`Errors1.lean` are also
+  # excluded (fixing a pre-existing gap: this case pattern previously
+  # didn't list them despite the comment two tasks below claiming they
+  # were excluded from this very loop — they have no committed
+  # `.stx.jsonl` and are intentionally malformed, round-trip-only
+  # fixtures, so a stray dump here was always a no-op/harmless but
+  # never an intentional one).
+  "sh -c 'for f in tests/fixtures/syntax/*.lean; do b=$(basename \"$f\"); case \"$b\" in dump_syntax.lean|dump_syntax_elab.lean|Notation*.lean|Stx*.lean|QuotMacroRules.lean|Errors0.lean|Errors1.lean) continue;; esac; lean --run tests/fixtures/syntax/dump_syntax.lean \"$f\" > \"${f%.lean}.stx.jsonl\"; done'",
   # M3b2a Task 2: synthetic import-notation corpus
   # (tests/fixtures/syntax/import/). NotaDep{,Meta}.olean build against
   # the REAL toolchain Init (bare `lean`, no LEAN_PATH). The importer
@@ -157,6 +164,18 @@ run = [
   # error fixture (Errors0.lean/Errors1.lean) is excluded from the
   # M3a loop above.
   "sh -c 'for f in tests/fixtures/syntax/Notation*.lean; do [ -e \"$f\" ] || continue; [ \"$(basename $f)\" = NotationBadResync.lean ] && continue; lean --run tests/fixtures/syntax/dump_syntax_elab.lean \"$f\" > \"${f%.lean}.stx.jsonl\"; done'",
+  # M3b2b Task 6: `Stx*.lean` (`StxShapes.lean` — `declare_syntax_cat`/
+  # `syntax`/`syntaxAbbrev` grow the grammar mid-file the same way a
+  # `notation`/mixfix command does) gets the identical elab-dump
+  # treatment, duplicated rather than folded into the loop above
+  # (different glob, different — currently empty — exclusion set).
+  # `QuotMacroRules.lean` (committed at Task 8) needs this same
+  # elaborating dumper despite its `Quot*` name (its `syntax`/`macro`
+  # commands grow the grammar mid-file); it is excluded from the plain
+  # loop above and explicitly listed here — the other `Quot*` fixtures
+  # (`QuotBasic`/`QuotAntiquot`/`QuotSplice`) are quotation-only, no
+  # grammar growth, and stay on the plain parse-only loop.
+  "sh -c 'for f in tests/fixtures/syntax/Stx*.lean tests/fixtures/syntax/QuotMacroRules.lean; do [ -e \"$f\" ] || continue; lean --run tests/fixtures/syntax/dump_syntax_elab.lean \"$f\" > \"${f%.lean}.stx.jsonl\"; done'",
 ]
 
 [tasks."fixtures:mutations"]
@@ -185,7 +204,7 @@ depends = ["elan:bootstrap"]
 run = "sh -c 'LEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo run --release -p leanr_cli -- check --all'"
 
 [tasks."parse:mathlib"]
-description = "M3b2a Mathlib parse sweep vs the pass-list ratchet (needs mathlib:fetch). LEANR_SWEEP_LIMIT=N for a smoke run."
+description = "M3b2a Mathlib parse sweep vs the pass-list ratchet (needs mathlib:fetch). LEANR_SWEEP_LIMIT=N for a smoke run. Snapshot build + sweep are streamed per import set (no barrier, no accumulated snapshots) and run in parallel via rayon; set RAYON_NUM_THREADS=N to cap worker threads (e.g. under memory pressure from parallel oracle `lean` subprocesses)."
 depends = ["elan:bootstrap"]
 run = "sh -c 'LEANR_MATHLIB_DIR=\"$PWD/.mathlib\" LEANR_OLEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo test --release -p leanr_grammar --test mathlib_sweep -- --ignored --nocapture'"
 

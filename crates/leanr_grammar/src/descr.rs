@@ -160,9 +160,52 @@ impl Cx<'_> {
                 }
             }
             ("ParserDescr.nodeWithAntiquot", 3) => {
-                // Antiquot behavior itself is M3b2b; the real-source path
-                // is the plain node (compileParserDescr wraps only for
-                // quotation contexts).
+                // M3b2b Task 4: the antiquot alternative ITSELF is now
+                // engine-level — `Prim::Node`'s own `run` arm offers it
+                // for free whenever `quot_depth > 0` (Task 3's
+                // `try_antiquot` hook, gated on the SAME `kind` this arm
+                // already produces) — so this arm needs no antiquot
+                // logic of its own any more; a plain `Prim::Node` IS the
+                // whole story on both the real-source AND quotation
+                // paths.
+                //
+                // `args[0]` (`name`, the antiquot's `:suffix` compare
+                // text) is read but unused here — `Prim::Node`'s hook
+                // derives it itself from the kind's own last dotted
+                // component (`parse.rs`'s `Prim::Node` arm: `kind_name
+                // .rsplit('.').next()`), which is what `mkAntiquot`'s
+                // `name` argument is ALWAYS built from at every call site
+                // this constructor's own producer (`Elab/Syntax.lean:466`,
+                // `` `ParserDescr.nodeWithAntiquot $(quote (toString
+                // declName.getId)) $(quote stxNodeKind) $val` ``) uses —
+                // `declName.getId`'s string form and `stxNodeKind`'s last
+                // component are the same identifier for every
+                // `syntax`-elaborated notation, so the two can never
+                // actually disagree for anything this arm decodes.
+                //
+                // No `Prim::WithoutAnonymousAntiquot` wrap: pinned
+                // against the ACTUAL oracle interpreter, not just the
+                // 4-parameter `nodeWithAntiquot : Parser` runtime fn's
+                // OWN `anonymous := false` default (`Basic.lean:1888`,
+                // which is a DIFFERENT thing — a `Parser`-valued
+                // function, not this `ParserDescr` constructor).
+                // `ParserDescr.nodeWithAntiquot` (the constructor actually
+                // decoded here) has exactly 3 fields — confirmed by its
+                // ONE producer (`Elab/Syntax.lean:466`, 3 args
+                // constructed) and its interpreter
+                // (`Extension.lean:287`): `| ParserDescr.nodeWithAntiquot
+                // n k d => .. nodeWithAntiquot n k (← visit d) (anonymous
+                // := true)` — the compiler HARDCODES `anonymous := true`
+                // unconditionally when compiling this constructor into a
+                // real parser (same at `Parser.lean:91,126`, the
+                // formatter/parenthesizer twins) — no 4th field exists to
+                // decode, and even if the runtime fn's own default were
+                // consulted it would be overridden here regardless. This
+                // matches leanr's own default: `Ps::anon_antiquot_ok`
+                // inits `true`, so an unwrapped `Prim::Node` already
+                // behaves as `anonymous := true` without needing the
+                // wrap at all — golden regression:
+                // `wrap_bracket_notation_stays_an_unwrapped_node`, below.
                 let kind = self.intern_kind(args[1])?;
                 Ok(Prim::Node {
                     kind,
@@ -539,5 +582,23 @@ mod tests {
         };
         let dbg = format!("{prim:?}");
         assert!(dbg.contains("widget"), "no widget category in {dbg}");
+    }
+
+    /// M3b2b Task 4 regression guard: the `nodeWithAntiquot` arm's
+    /// comment-only update (antiquot behavior is now engine-level,
+    /// `Prim::Node`'s own hook) must not change what this arm actually
+    /// PRODUCES — still a bare, unwrapped `Prim::Node` (no
+    /// `Prim::WithoutAnonymousAntiquot`), same `"wrap["` notation
+    /// `category_reference_interprets` already exercises.
+    #[test]
+    fn wrap_bracket_notation_stays_an_unwrapped_node() {
+        let (r, _snap) = interpret_named("termWrap[_]");
+        let Interpreted::Leading(prim) = r.unwrap_or_else(|e| panic!("skip: {e:?}")) else {
+            panic!("expected leading")
+        };
+        assert!(
+            matches!(prim, Prim::Node { .. }),
+            "expected a bare Prim::Node (no WithoutAnonymousAntiquot wrap), got {prim:?}"
+        );
     }
 }

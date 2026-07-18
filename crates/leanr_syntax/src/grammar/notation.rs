@@ -119,11 +119,11 @@
 //! (category-scoped) name only, not a namespace-qualified one —
 //! matching the brief's category-only signature.
 
-use crate::kind::{KindInterner, KIND_ERROR, KIND_MISSING};
+use crate::kind::{KindInterner, KIND_ERROR, KIND_IDENT, KIND_MISSING};
 use crate::lex::{is_id_first, is_id_rest};
 use crate::tree::SyntaxNode;
 
-use super::{Prim, LEAD_PREC, MAX_PREC};
+use super::{LeadingIdentBehavior, Prim, LEAD_PREC, MAX_PREC};
 
 /// One atom of a notation's surface syntax, in declaration order.
 /// `Symbol` carries the *raw* (untrimmed) source text of a quoted
@@ -230,7 +230,14 @@ fn is_lean_whitespace(c: char) -> bool {
 /// `String.trimAscii` + interior-whitespace-to-`_` + `String.capitalize`
 /// (`Init/Data/String/{TakeDrop,Modify}.lean`), applied to one quoted
 /// symbol atom's raw text.
-fn mangle_symbol_atom(raw: &str) -> String {
+///
+/// `pub(super)` (M3b2b Task 8): `grammar::surface`'s own `mangle_visit`
+/// (the general `syntax`-command mangler, ORACLE-PORT of
+/// `mkNameFromParserSyntax`'s `visit`) needs this exact same per-atom
+/// transform for a `str`-shaped node it walks — reused rather than
+/// redefined, same "one pinned rule" discipline this file's own module
+/// doc already states for `mangle_kind`.
+pub(super) fn mangle_symbol_atom(raw: &str) -> String {
     let trimmed = raw.trim_matches(is_lean_whitespace);
     let underscored: String = trimmed
         .chars()
@@ -354,16 +361,35 @@ enum Item {
     Placeholder(Option<u32>),
 }
 
-/// Entry point (brief's `pub fn derive`). `None` iff `node.kind()` is
-/// not a notation/mixfix outer kind, OR the subtree doesn't match this
-/// module's oracle-confirmed shape for that kind (malformed/error-node
-/// trees — Task 9's formal remit, but every navigation step below is
-/// already `?`-propagated `Option`, so it falls out for free rather
-/// than needing a dedicated guard), OR (Task 9 Step 3, defense in
-/// depth — see `contains_error_or_missing`'s own doc comment)
-/// `node` contains an `<error>`/`<missing>` node anywhere in its
-/// structural slots.
-pub fn derive(node: &SyntaxNode, kinds: &KindInterner) -> Option<NotationSpec> {
+/// M3b2b Task 7: `derive`'s generalized return type — a grammar-growing
+/// command derives EITHER a new PRODUCTION to fold into an existing
+/// category (`notation`/`mixfix`, exactly the old `derive`'s plain
+/// `NotationSpec` result) OR a brand-new, initially-EMPTY CATEGORY
+/// (`declare_syntax_cat` — Task 8 registers productions into it; until
+/// then the category exists only for a category antiquot, `$x`, to
+/// resolve into — see `parse.rs`'s `category()` overlay fallback).
+#[derive(Clone, Debug)]
+pub enum GrammarDelta {
+    Production(NotationSpec),
+    NewCategory {
+        name: String,
+        behavior: LeadingIdentBehavior,
+    },
+}
+
+/// Entry point (brief's `pub fn derive_delta`, M3b2b Task 7 — supersedes
+/// M3b1's plain `derive`, single call site updated in place rather than
+/// kept as a wrapper, see this task's report for the `grep` that found
+/// no other call sites). `None` iff `node.kind()` is not a grammar-
+/// growing outer kind (`notation`/`mixfix`/`declare_syntax_cat`), OR the
+/// subtree doesn't match this module's oracle-confirmed shape for that
+/// kind (malformed/error-node trees — Task 9's formal remit, but every
+/// navigation step below is already `?`-propagated `Option`, so it falls
+/// out for free rather than needing a dedicated guard), OR (Task 9 Step
+/// 3, defense in depth — see `contains_error_or_missing`'s own doc
+/// comment) `node` contains an `<error>`/`<missing>` node anywhere in
+/// its structural slots.
+pub fn derive_delta(node: &SyntaxNode, kinds: &KindInterner) -> Option<GrammarDelta> {
     // M3b1 only ever registers into the `term` category (both
     // `mixfix`'s and `notation`'s own RHS recurse via `cat("term", 0)`
     // — command_notation.rs's `register`) — hardcoded per the task
@@ -373,24 +399,78 @@ pub fn derive(node: &SyntaxNode, kinds: &KindInterner) -> Option<NotationSpec> {
     // `elabNotation`'s `let cat := mkIdentFrom ref \`term`).
     let category = "term";
     let name = kinds.name(node.kind());
-    if name != "Lean.Parser.Command.mixfix" && name != "Lean.Parser.Command.notation" {
-        return None;
-    }
-    // Task 9 Step 3: refuse to derive a `NotationSpec` from a subtree
-    // that isn't STRUCTURALLY clean, even though it reached this call
-    // via the command loop's own clean `Ok(())` arm (`parse.rs`'s
-    // `run_module`, M3b1 Task 7) — see `contains_error_or_missing`'s
-    // own doc comment for why this is currently unreachable-by-
-    // construction on this crate's grammar, and why the guard is kept
-    // anyway.
+    // Task 9 Step 3: refuse to derive a delta from a subtree that isn't
+    // STRUCTURALLY clean, even though it reached this call via the
+    // command loop's own clean `Ok(())` arm (`parse.rs`'s `run_module`,
+    // M3b1 Task 7) — see `contains_error_or_missing`'s own doc comment
+    // for why this is currently unreachable-by-construction on this
+    // crate's grammar, and why the guard is kept anyway. Applies
+    // uniformly to every kind dispatched below — no slot in any of
+    // their oracle shapes is allowed to legitimately contain one.
     if contains_error_or_missing(node) {
         return None;
     }
     match name {
-        "Lean.Parser.Command.mixfix" => derive_mixfix(node, kinds, category),
-        "Lean.Parser.Command.notation" => derive_notation(node, kinds, category),
-        _ => unreachable!("checked above"),
+        "Lean.Parser.Command.mixfix" => {
+            derive_mixfix(node, kinds, category).map(GrammarDelta::Production)
+        }
+        "Lean.Parser.Command.notation" => {
+            derive_notation(node, kinds, category).map(GrammarDelta::Production)
+        }
+        "Lean.Parser.Command.syntaxCat" => derive_syntax_cat(node, kinds),
+        // M3b2b Task 8: the general `syntax`-command surface (`syntax`/
+        // `syntaxAbbrev`/`macro`/the imported `elab`-family) — one
+        // dispatch entry point for `run_module`, per this task's brief.
+        _ => super::surface::derive_surface(node, kinds),
     }
+}
+
+/// `declare_syntax_cat`'s oracle shape (`command_syntax.rs`'s module
+/// doc, Task 6's oracle dump): `Lean.Parser.Command.syntaxCat{
+/// null(doc), "declare_syntax_cat"(atom), ident(bare token),
+/// null(catBehavior) }`. Both `sym("declare_syntax_cat")` and
+/// `Prim::Ident` are bare TOKENS (no node wrap — the same token/node
+/// split `derive_notation`'s own doc comment already establishes for
+/// `notation`'s bare `"notation"` keyword and `identPrec`'s bare
+/// leading `ident`), so `node.children()` (nodes only) sees exactly 2
+/// node children: the `null(doc)` wrapper (unused here — doc comments
+/// are out of this task's scope) and the `null(catBehavior)` wrapper.
+fn derive_syntax_cat(node: &SyntaxNode, kinds: &KindInterner) -> Option<GrammarDelta> {
+    let name = first_ident_token_text(node)?;
+    let children: Vec<SyntaxNode> = node.children().collect();
+    let behavior_wrapper = children.get(1)?;
+    let behavior = match behavior_wrapper.children().next() {
+        Some(inner) => match kinds.name(inner.kind()) {
+            "Lean.Parser.Command.catBehaviorBoth" => LeadingIdentBehavior::Both,
+            "Lean.Parser.Command.catBehaviorSymbol" => LeadingIdentBehavior::Symbol,
+            // Malformed/unexpected behavior shape (Task 9's formal
+            // remit; never panic here either way) — bail out with
+            // `None`.
+            _ => return None,
+        },
+        None => LeadingIdentBehavior::Default,
+    };
+    Some(GrammarDelta::NewCategory { name, behavior })
+}
+
+/// First TOKEN child of `node` whose token KIND is `KIND_IDENT` —
+/// unlike `first_token_text` (which returns a node's ONE token,
+/// unconditionally the first), `declare_syntax_cat`'s outer node has
+/// TWO direct token children (the bare `"declare_syntax_cat"` keyword
+/// atom, then the category name ident) since neither is wrapped in its
+/// own node — this picks the ident out by token KIND rather than
+/// position, so it's robust regardless of what (if anything) sits
+/// ahead of it.
+///
+/// `pub(super)` (M3b2b Task 8): `grammar::surface` reuses this to pull
+/// the fn-name/category-name ident off `Syntax.cat`/`.unary`/`.binary`
+/// nodes, which have the identical "bare ident token, not the first
+/// CHILD element overall" shape.
+pub(super) fn first_ident_token_text(node: &SyntaxNode) -> Option<String> {
+    node.children_with_tokens().find_map(|el| {
+        let t = el.into_token()?;
+        (t.kind() == KIND_IDENT).then(|| t.text().to_string())
+    })
 }
 
 /// Task 9 Step 3 (defense in depth, task-9-brief's Step 3): `true` iff
@@ -678,7 +758,11 @@ fn build_spec(category: &str, items: Vec<Item>, prec: u32, is_local: bool) -> Op
 /// `mangle_symbol_atom`'s module-doc "Deliberately out of scope"): no
 /// fixture/oracle dump this crate has ever produced contains one, and
 /// a malformed/escaped atom is Task 9's formal remit, not this one's.
-fn strip_quotes(raw: &str) -> &str {
+///
+/// `pub(super)` (M3b2b Task 8): `grammar::surface` reuses this for the
+/// SAME shape (`Lean.Parser.Syntax.atom`/`.nonReserved`'s wrapped `str`
+/// child).
+pub(super) fn strip_quotes(raw: &str) -> &str {
     raw.strip_prefix('"')
         .and_then(|s| s.strip_suffix('"'))
         .unwrap_or(raw)
@@ -697,7 +781,15 @@ pub fn trim_lean_symbol(raw: &str) -> String {
 /// First child NODE (not token) of `node` whose own kind name is
 /// `name` — `SyntaxNode::children()` already skips tokens, so this is
 /// a plain linear search, never a panic on an empty/short child list.
-fn find_child(node: &SyntaxNode, name: &str, kinds: &KindInterner) -> Option<SyntaxNode> {
+///
+/// `pub(super)` (M3b2b Task 8): `grammar::surface` reuses this for the
+/// same "find the optional-wrapper's populated inner node" navigation
+/// (`namedName`, `Lean.Parser.precedence`, …).
+pub(super) fn find_child(
+    node: &SyntaxNode,
+    name: &str,
+    kinds: &KindInterner,
+) -> Option<SyntaxNode> {
     node.children().find(|c| kinds.name(c.kind()) == name)
 }
 
@@ -705,7 +797,10 @@ fn find_child(node: &SyntaxNode, name: &str, kinds: &KindInterner) -> Option<Syn
 /// `children_with_tokens()`, filtered to the `Token` arm) — every
 /// self-wrapping leaf this module reads (`str`, `num`, a `mixfixKind`
 /// alternative's own bare keyword atom) has exactly one.
-fn first_token_text(node: &SyntaxNode) -> Option<String> {
+///
+/// `pub(super)` (M3b2b Task 8): `grammar::surface` reuses this for the
+/// identical `str`-node shape its own stx-item walk reads.
+pub(super) fn first_token_text(node: &SyntaxNode) -> Option<String> {
     node.children_with_tokens()
         .find_map(|el| el.into_token())
         .map(|t| t.text().to_string())
@@ -716,7 +811,11 @@ fn first_token_text(node: &SyntaxNode) -> Option<String> {
 /// digit text. Never panics on a non-numeric/missing token — a failed
 /// `str::parse` or absent child both fall through to `None`, same as
 /// every other navigation step in this module.
-fn read_prec_num(precedence_node: &SyntaxNode, kinds: &KindInterner) -> Option<u32> {
+///
+/// `pub(super)` (M3b2b Task 8): `grammar::surface` reuses this for
+/// `Syntax.cat`'s own optional `:prec` slot (identical `precedence`
+/// shape).
+pub(super) fn read_prec_num(precedence_node: &SyntaxNode, kinds: &KindInterner) -> Option<u32> {
     let num_node = find_child(precedence_node, "num", kinds)?;
     first_token_text(&num_node)?.parse().ok()
 }
@@ -865,6 +964,23 @@ mod tests {
             .children()
             .find(|c| tree.kinds.name(c.kind()) == outer_kind)
             .unwrap_or_else(|| panic!("no {outer_kind} command node in parsed tree"))
+    }
+
+    /// Test-only shim reproducing the OLD `derive`'s signature/contract
+    /// (plain `Option<NotationSpec>`, `None` for anything that isn't a
+    /// `notation`/`mixfix` production) over the new `derive_delta` —
+    /// every `notation`/`mixfix` test below predates `GrammarDelta`
+    /// (M3b2b Task 7) and asserts directly against `NotationSpec`
+    /// fields; kept local to this test module (not part of the public
+    /// API — see `derive_delta`'s own doc comment for why the real
+    /// `derive` was removed rather than kept as a production wrapper)
+    /// so those assertions don't all need rewriting to match on
+    /// `GrammarDelta::Production` individually.
+    fn derive(node: &SyntaxNode, kinds: &KindInterner) -> Option<NotationSpec> {
+        match derive_delta(node, kinds) {
+            Some(GrammarDelta::Production(spec)) => Some(spec),
+            _ => None,
+        }
     }
 
     #[test]
@@ -1379,6 +1495,95 @@ mod tests {
         assert!(
             derive(&tree.root(), &tree.kinds).is_none(),
             "a <missing> nested inside `precedence`'s own `num` child must still be caught"
+        );
+    }
+
+    // ============================================================
+    // M3b2b Task 8 preliminary (controller-added, from Task 7's
+    // review): lock `derive_delta`'s `declare_syntax_cat`
+    // `(behavior := ..)` → `LeadingIdentBehavior` mapping with a real
+    // parse, mirroring `parse.rs`'s own
+    // `declare_syntax_cat_creates_a_quotable_category` test's technique
+    // (`crate::parse_module` + `crate::builtin::snapshot()`, not a
+    // hand-built tree) — the oracle-accepted `(behavior := symbol)`/
+    // `(behavior := both)` surface is `command_syntax.rs`'s own ported
+    // `cat_behavior` production (module doc there: `declare_syntax_cat
+    // gadget (behavior := symbol)` dump citation), reused verbatim here.
+    // ============================================================
+
+    #[test]
+    fn derive_delta_maps_declare_syntax_cat_behavior_clause() {
+        let snap = crate::builtin::snapshot();
+
+        let r = crate::parse_module("declare_syntax_cat widgetish\n", &snap);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        let cmd = find_command(&r.tree, "Lean.Parser.Command.syntaxCat");
+        match derive_delta(&cmd, &r.tree.kinds) {
+            Some(GrammarDelta::NewCategory { name, behavior }) => {
+                assert_eq!(name, "widgetish");
+                assert_eq!(behavior, LeadingIdentBehavior::Default);
+            }
+            other => panic!("expected NewCategory, got {other:?}"),
+        }
+
+        let r = crate::parse_module("declare_syntax_cat gadget (behavior := symbol)\n", &snap);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        let cmd = find_command(&r.tree, "Lean.Parser.Command.syntaxCat");
+        match derive_delta(&cmd, &r.tree.kinds) {
+            Some(GrammarDelta::NewCategory { name, behavior }) => {
+                assert_eq!(name, "gadget");
+                assert_eq!(behavior, LeadingIdentBehavior::Symbol);
+            }
+            other => panic!("expected NewCategory, got {other:?}"),
+        }
+
+        let r = crate::parse_module("declare_syntax_cat widget2 (behavior := both)\n", &snap);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        let cmd = find_command(&r.tree, "Lean.Parser.Command.syntaxCat");
+        match derive_delta(&cmd, &r.tree.kinds) {
+            Some(GrammarDelta::NewCategory { name, behavior }) => {
+                assert_eq!(name, "widget2");
+                assert_eq!(behavior, LeadingIdentBehavior::Both);
+            }
+            other => panic!("expected NewCategory, got {other:?}"),
+        }
+    }
+
+    /// M3b2b final review (Important 1): the `stx` `sepBy`/`sepBy1`
+    /// surface carries an OPTIONAL custom-`psep` slot
+    /// (`surface.rs`'s `children.get(2)`). The 2-arg form
+    /// (`sepBy(p, ", ")`) leaves it empty and derives a real
+    /// `Prim::SepBy`; a POPULATED psep (`sepBy(p, ", ", q)`) is an
+    /// unhandled combinator — skip-and-record (never guess) demands the
+    /// whole production derive NOTHING rather than silently dropping the
+    /// psep into a wrong `Prim::SepBy`.
+    #[test]
+    fn sepby_with_custom_psep_skips_and_records() {
+        let snap = crate::builtin::snapshot();
+
+        // 2-arg form: psep empty ⇒ a real trailing `Prim::SepBy`.
+        let r = crate::parse_module("syntax \"sepp\" sepBy(term, \", \") : term\n", &snap);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        let cmd = find_command(&r.tree, "Lean.Parser.Command.syntax");
+        let spec = derive(&cmd, &r.tree.kinds).expect("2-arg sepBy derives a production");
+        match &spec.body {
+            Prim::Seq(ps) => assert!(
+                matches!(ps.last(), Some(Prim::SepBy { .. })),
+                "expected a trailing Prim::SepBy, got {:?}",
+                spec.body
+            ),
+            other => panic!("expected a Prim::Seq body, got {other:?}"),
+        }
+
+        // Populated custom psep (3rd arg `term`): unhandled ⇒ the whole
+        // production derives NOTHING (the declaration itself is still
+        // well-formed `stx` and parses cleanly).
+        let r = crate::parse_module("syntax \"sepp\" sepBy(term, \", \", term) : term\n", &snap);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        let cmd = find_command(&r.tree, "Lean.Parser.Command.syntax");
+        assert!(
+            derive_delta(&cmd, &r.tree.kinds).is_none(),
+            "a populated custom psep must skip-and-record (derive None), not drop the psep"
         );
     }
 }

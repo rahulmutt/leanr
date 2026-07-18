@@ -8,7 +8,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::grammar::{encode_prim, index_entries, FirstTok, GrammarSnapshot, NotationSpec, Prim};
+use crate::grammar::{
+    encode_prim, index_entries, FirstTok, GrammarSnapshot, LeadingIdentBehavior, NotationSpec, Prim,
+};
 use crate::kind::SyntaxKind;
 use crate::lex::TokenTable;
 
@@ -25,6 +27,17 @@ pub struct Overlay {
     kind_map: HashMap<Arc<str>, u16>,
     base_kind_count: u16,
     cats: HashMap<String, CategoryDelta>,
+    /// M3b2b Task 7: brand-new categories a same-file
+    /// `declare_syntax_cat` command registers — distinct from `cats`
+    /// above, which only ever holds PRODUCTIONS added into a category
+    /// (base or overlay) that some `NotationSpec` names, never the fact
+    /// that the category itself exists. A category registered here has
+    /// no productions of its own yet (Task 8 registers `syntax`/etc.
+    /// into it via ordinary `register`/`cats`) — `category()`'s overlay
+    /// fallback (`parse.rs`) is what makes it resolvable at all in the
+    /// meantime, backed by an owned, empty `Category` carrying just
+    /// this behavior.
+    categories: HashMap<String, LeadingIdentBehavior>,
 }
 
 impl Overlay {
@@ -35,10 +48,44 @@ impl Overlay {
             kind_map: HashMap::new(),
             base_kind_count: base.kind_count(),
             cats: HashMap::new(),
+            categories: HashMap::new(),
         }
     }
     pub fn is_empty(&self) -> bool {
-        self.cats.is_empty() && self.kind_names.is_empty() && self.tokens.is_empty()
+        self.cats.is_empty()
+            && self.kind_names.is_empty()
+            && self.tokens.is_empty()
+            && self.categories.is_empty()
+    }
+
+    /// `declare_syntax_cat`'s registration (M3b2b Task 7): record a
+    /// brand-new category name + its `LeadingIdentBehavior` (`Default`
+    /// unless an explicit `(behavior := both/symbol)` clause said
+    /// otherwise — `notation.rs`'s `derive_syntax_cat`). Idempotent in
+    /// the same sense `register`'s `intern` is: re-declaring the same
+    /// name just overwrites the recorded behavior rather than erroring
+    /// (real Lean's own re-declaration diagnostics are out of scope
+    /// here, same as `register`'s own collision-suffixing note).
+    pub fn register_category(&mut self, name: &str, behavior: LeadingIdentBehavior) {
+        self.categories.insert(name.to_string(), behavior);
+    }
+
+    /// Whether `name` was registered via `register_category` — NOT
+    /// whether it merely has an entry in `cats` (a `NotationSpec` that
+    /// targets an as-yet-undeclared category name populates `cats` too,
+    /// but that's a bug elsewhere, not this method's concern; M3b1 only
+    /// ever targeted the base `term` category, so that case never arose
+    /// before this task).
+    pub fn has_category(&self, name: &str) -> bool {
+        self.categories.contains_key(name)
+    }
+
+    /// `name`'s registered `LeadingIdentBehavior`, if `register_category`
+    /// was ever called for it — `parse.rs`'s `category()` overlay
+    /// fallback consumes this directly to build the owned, empty
+    /// `Category` an overlay-only category resolves to.
+    pub fn category_behavior(&self, name: &str) -> Option<LeadingIdentBehavior> {
+        self.categories.get(name).copied()
     }
     pub fn tokens(&self) -> &TokenTable {
         &self.tokens
@@ -120,7 +167,7 @@ impl Overlay {
     /// to the same name) returns the SAME `SyntaxKind` rather than
     /// interning a duplicate — collision-suffixing (`_1`/`_2`, real
     /// Lean's `mkUnusedBaseName`) is out of scope for M3b1 (task brief).
-    fn intern(&mut self, name: &str) -> SyntaxKind {
+    pub(crate) fn intern(&mut self, name: &str) -> SyntaxKind {
         if let Some(&k) = self.kind_map.get(name) {
             return SyntaxKind(k);
         }
@@ -198,6 +245,24 @@ impl Overlay {
             for (_, p) in cd.leading.iter().chain(&cd.trailing) {
                 encode_prim(p, &kind_name, h);
             }
+        }
+        // M3b2b Task 7: brand-new categories (`declare_syntax_cat`),
+        // sorted by name (same `HashMap`-needs-sorting rationale as
+        // `cats` above) — name bytes + the behavior byte, SAME encoding
+        // `GrammarSnapshot::fingerprint`'s own per-category behavior
+        // byte uses (`grammar/mod.rs`), so a category that only differs
+        // in `ident_behavior` still changes the fingerprint here too.
+        let mut cat_names: Vec<&String> = self.categories.keys().collect();
+        cat_names.sort();
+        for name in cat_names {
+            h.update(name.as_bytes());
+            h.update(b"\x02");
+            let behavior_byte: u8 = match self.categories[name] {
+                LeadingIdentBehavior::Default => 0,
+                LeadingIdentBehavior::Symbol => 1,
+                LeadingIdentBehavior::Both => 2,
+            };
+            h.update(&[behavior_byte]);
         }
     }
 }
@@ -327,5 +392,63 @@ mod tests {
             k1, k2,
             "re-registering the same spec must not mint a new kind"
         );
+    }
+
+    /// M3b2b Task 7 Step 1 (RED first): `declare_syntax_cat` grows the
+    /// grammar by registering a brand-new, initially-empty CATEGORY
+    /// (not a production into an existing one) — the overlay needs its
+    /// own tracking for that, distinct from `cats`/`register` above,
+    /// which only ever adds productions into a category name a
+    /// `NotationSpec` names but never actually registers as existing on
+    /// its own.
+    #[test]
+    fn overlay_categories_register_and_fingerprint() {
+        let base = crate::builtin::snapshot();
+        let mut ov = Overlay::new(&base);
+        assert!(!ov.has_category("widgetish"));
+        ov.register_category("widgetish", LeadingIdentBehavior::Default);
+        assert!(ov.has_category("widgetish"));
+        // A new category changes the effective fingerprint.
+        let mut h1 = blake3::Hasher::new();
+        Overlay::new(&base).fingerprint_into(&mut h1);
+        let mut h2 = blake3::Hasher::new();
+        ov.fingerprint_into(&mut h2);
+        assert_ne!(h1.finalize(), h2.finalize());
+    }
+
+    /// M3b2b Task 8 preliminary (controller-added, from Task 7's
+    /// review): the SAME category name, differing ONLY in its
+    /// registered `LeadingIdentBehavior`, must still fingerprint
+    /// differently — locks the behavior BYTE into the hash (not just
+    /// "a category exists", which `overlay_categories_register_and_
+    /// fingerprint` above already covers). Mirrors
+    /// `GrammarSnapshot::fingerprint`'s own module-doc "v2" bump, which
+    /// added the identical per-category behavior byte for base
+    /// categories (M3a Task 10 review Finding 1) — this is that same
+    /// guarantee for an OVERLAY-registered (same-file
+    /// `declare_syntax_cat`) category.
+    #[test]
+    fn overlay_categories_differing_only_in_behavior_fingerprint_differently() {
+        let base = crate::builtin::snapshot();
+
+        let mut ov_default = Overlay::new(&base);
+        ov_default.register_category("widgetish", LeadingIdentBehavior::Default);
+        let mut h_default = blake3::Hasher::new();
+        ov_default.fingerprint_into(&mut h_default);
+
+        let mut ov_symbol = Overlay::new(&base);
+        ov_symbol.register_category("widgetish", LeadingIdentBehavior::Symbol);
+        let mut h_symbol = blake3::Hasher::new();
+        ov_symbol.fingerprint_into(&mut h_symbol);
+
+        let mut ov_both = Overlay::new(&base);
+        ov_both.register_category("widgetish", LeadingIdentBehavior::Both);
+        let mut h_both = blake3::Hasher::new();
+        ov_both.fingerprint_into(&mut h_both);
+
+        let (d, s, b) = (h_default.finalize(), h_symbol.finalize(), h_both.finalize());
+        assert_ne!(d, s, "Default vs Symbol must fingerprint differently");
+        assert_ne!(d, b, "Default vs Both must fingerprint differently");
+        assert_ne!(s, b, "Symbol vs Both must fingerprint differently");
     }
 }
