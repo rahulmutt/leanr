@@ -1021,6 +1021,19 @@ struct MatchWinner {
     errors: Vec<PError>,
     end: usize,
     lhs_prec: u32,
+    /// M3b3 Task 7 review fix: this candidate's own overlay-local kind
+    /// names, in registration order — `self.overlay.kind_names()[sp.
+    /// overlay_kinds..]` at the moment this candidate was chosen as the
+    /// (possibly temporary) best, captured by VALUE (not by index) since
+    /// `longest_match` fully truncates the overlay back to `sp.
+    /// overlay_kinds` before trying every subsequent candidate, which
+    /// would otherwise erase them. `longest_match` re-interns exactly
+    /// these names, in this order, once the whole candidate loop is
+    /// over and only the TRUE winner remains selected — `Overlay::intern`
+    /// is idempotent and append-only, so replaying them (into an overlay
+    /// freshly truncated back to `sp.overlay_kinds`) reproduces the exact
+    /// same `SyntaxKind` indices this winner's own `events` reference.
+    interned_names: Vec<Arc<str>>,
 }
 
 /// M3b2b Task 7: outer command kinds `derive_delta` (`grammar/
@@ -1317,36 +1330,25 @@ impl<'a> Ps<'a> {
             overlay_kinds: self.overlay.kind_count(),
         }
     }
+    /// Rewinds `pos`/`events`/`errors`/`lhs_prec` to `sp` AND truncates
+    /// the overlay's kind table back to `sp.overlay_kinds` — always a
+    /// full, unconditional rollback to exactly what `sp` recorded (M3b3
+    /// Task 7 review fix: a prior version of this method took an extra
+    /// "floor" argument so `longest_match` could dodge truncating a
+    /// still-wanted winner's kinds by never letting the floor fall back
+    /// to `sp`'s own count — that let a *superseded* temp-best's kinds
+    /// permanently leak below the (only ever rising) floor, since a
+    /// later, better candidate never actually got compared against
+    /// `sp.overlay_kinds` again. `longest_match` now keeps this method
+    /// dead simple — always a clean slate to `sp` — and instead
+    /// re-interns the ACTUAL winner's captured names itself once the
+    /// whole candidate loop is done; see its own doc comment).
     pub(crate) fn restore(&mut self, sp: &Savepoint) {
-        self.restore_to(sp, sp.overlay_kinds);
-    }
-    /// `restore`'s general form: rewinds `pos`/`events`/`errors`/
-    /// `lhs_prec` to `sp` exactly as `restore` does, but truncates the
-    /// overlay's kind table to `floor` instead of `sp.overlay_kinds`.
-    /// `restore` itself is just `floor == sp.overlay_kinds` — the only
-    /// caller that ever needs a HIGHER floor is `longest_match` (M3b3
-    /// Task 7 fix): it calls `self.restore(sp)` between every candidate,
-    /// including right after selecting a new best, so a naive `floor =
-    /// sp.overlay_kinds` there would truncate away a WINNING candidate's
-    /// own interned kinds (e.g. a category antiquot's `antiquotName`) the
-    /// instant the loop moves on to try the next sibling — even though
-    /// that winner's `events` (captured into `MatchWinner`, spliced back
-    /// into `self.events` by `longest_match`'s own caller) still
-    /// reference them. `longest_match` tracks the current best's own
-    /// `overlay.kind_count()` as a rising floor precisely so those kinds
-    /// survive every subsequent (possibly losing) sibling attempt and
-    /// the final restore-before-splice, while a LOSING sibling's own
-    /// speculative interns still get rolled back on the very next
-    /// iteration. `floor` is always `>= sp.overlay_kinds` (`sp.
-    /// overlay_kinds` itself, or a later candidate's own — necessarily
-    /// larger — count), so this never resurrects an index truncate_kinds
-    /// already dropped.
-    fn restore_to(&mut self, sp: &Savepoint, floor: usize) {
         self.pos = sp.pos;
         self.events.truncate(sp.events);
         self.errors.truncate(sp.errors);
         self.lhs_prec = sp.lhs_prec;
-        self.overlay.truncate_kinds(floor);
+        self.overlay.truncate_kinds(sp.overlay_kinds);
     }
     fn consumed_since(&self, sp: &Savepoint) -> bool {
         self.pos > sp.pos
@@ -3330,44 +3332,76 @@ impl<'a> Ps<'a> {
     /// `Start` before doing so (the Pratt wrap), which a generic
     /// helper can't do on its own.
     ///
-    /// M3b3 Task 7 fix: that per-attempt (and final) restore must NOT
-    /// truncate the overlay's kind table all the way to `sp.
-    /// overlay_kinds` once some candidate has already won — a winning
-    /// candidate's `events` (captured into `MatchWinner` below) can
-    /// itself reference a kind that candidate's own run interned (e.g. a
-    /// category antiquot's `antiquotName`/`.pseudo.antiquot`), and those
-    /// events are exactly what the caller splices back into `self.events`
-    /// on return, unlike every OTHER candidate's (discarded) events. So
-    /// `floor` tracks the current best's `overlay.kind_count()` — read
-    /// right after that candidate ran, before anything else touches the
-    /// overlay — and every `restore_to` call below (per-attempt and the
-    /// final one) truncates to `floor`, not `sp.overlay_kinds`, once it's
-    /// been raised; a losing sibling tried afterward still gets its own
-    /// speculative interns rolled back on the very next iteration (floor
-    /// only ever rises to a NEW winner's count, never to a loser's).
+    /// M3b3 Task 7 review fix: EVERY candidate — including a
+    /// currently-selected (possibly temporary) best — is tried from a
+    /// full, unconditional `self.restore(sp)` clean slate. A prior
+    /// version instead kept a "floor" that only ever rose to the current
+    /// best's kind count, meaning a candidate that WON TEMPORARILY but
+    /// was later superseded by a longer one never actually got rolled
+    /// back to `sp.overlay_kinds` — its interned kinds sat below the
+    /// floor forever, leaking into `kind_names`/`kind_map`/the
+    /// fingerprint with no surviving event referencing them (reproduced:
+    /// two same-first-token leading candidates, the first recursing into
+    /// a SHORT category and the second into a LONGER one that wins —
+    /// e.g. `#$x $y`, `#$x` alone wins nothing since `$y` extends it —
+    /// left BOTH candidates' antiquot kinds interned even though only
+    /// the second's events survived).
+    ///
+    /// The fix: capture the CURRENT best's own overlay-local kind names
+    /// (`self.overlay.kind_names()[sp.overlay_kinds..]`) into
+    /// `MatchWinner.interned_names` at selection time, by VALUE, exactly
+    /// as `events`/`errors` are already captured by value. Every
+    /// subsequent `self.restore(sp)` (per-attempt AND
+    /// the final one) is then a full, ordinary rollback to `sp` — no
+    /// floor, no partial preservation — and once the real winner is
+    /// settled, its captured names are re-interned in order (`Overlay::
+    /// intern` is idempotent and append-only/index-stable, confirmed by
+    /// `overlay.rs`'s own `truncate_kinds_removes_names_at_or_after_n_
+    /// from_both_tables` test), reproducing the exact same `SyntaxKind`s
+    /// its `events` reference. A losing candidate's kinds are simply
+    /// never re-interned — gone the moment the next candidate's clean
+    /// slate runs, same as this file's every other save/restore pair.
+    ///
+    /// Composes for a NESTED `longest_match` (a candidate `p` that
+    /// itself recurses into another `category()` call): by the time
+    /// `self.run(p)` returns, that inner call has ALREADY resolved its
+    /// own winner-vs-loser leak-cleanup by this same mechanism, so
+    /// whatever sits in `self.overlay.kind_names()` above the inner
+    /// call's own (higher) savepoint is exactly the inner winner's names
+    /// — sequentially part of THIS `[sp.overlay_kinds..]` slice, in the
+    /// same registration order they were originally interned. Capturing
+    /// this outer slice by value and later replaying it verbatim
+    /// reproduces the inner winner's re-interning too, with no special
+    /// casing needed at this level.
     fn longest_match(&mut self, sp: &Savepoint, parsers: &[Prim]) -> Option<MatchWinner> {
         let mut best: Option<MatchWinner> = None;
-        let mut floor = sp.overlay_kinds;
         for (i, p) in parsers.iter().enumerate() {
-            self.restore_to(sp, floor);
+            self.restore(sp);
             if self.run(p).is_ok() {
                 let better = match &best {
                     Some(w) => self.pos > w.end,
                     None => true,
                 };
                 if better {
-                    floor = self.overlay.kind_count();
+                    let interned_names: Vec<Arc<str>> =
+                        self.overlay.kind_names()[sp.overlay_kinds..].to_vec();
                     best = Some(MatchWinner {
                         idx: i,
                         events: self.events[sp.events..].to_vec(),
                         errors: self.errors[sp.errors..].to_vec(),
                         end: self.pos,
                         lhs_prec: self.lhs_prec,
+                        interned_names,
                     });
                 }
             }
         }
-        self.restore_to(sp, floor);
+        self.restore(sp);
+        if let Some(w) = &best {
+            for name in &w.interned_names {
+                self.overlay.intern(name);
+            }
+        }
         best
     }
 
@@ -5960,6 +5994,185 @@ mod tests {
             fp(&clean),
             fp(&stormy),
             "failed antiquot attempts must not perturb the overlay fingerprint"
+        );
+    }
+
+    /// M3b3 Task 7 REVIEW fix — Critical: `longest_match`'s rising
+    /// `floor` (the first version of this task's fix) never fell back
+    /// down once raised, so a candidate that won TEMPORARILY but was
+    /// later superseded by a longer sibling left its own interned kinds
+    /// permanently below that floor — a real leak, reproduced here with
+    /// the reviewer's own two-production shape: `idx0` (tried at the
+    /// LOWER list index, i.e. FIRST) recurses into a declared category
+    /// that only ever consumes ONE antiquot; `idx1` (tried second)
+    /// recurses into a DIFFERENT declared category TWICE, consuming
+    /// more input and superseding `idx0`'s temporary win. Builtin
+    /// grammars never exposed this (every sibling interns the SAME
+    /// idempotent name), which is why it needed a synthetic multi-
+    /// production overlay — this milestone's declared/imported grammars
+    /// are exactly the case that DOES hit distinct names per candidate.
+    #[test]
+    fn a_loser_interned_before_the_winner_at_a_lower_index_does_not_leak() {
+        let base = crate::builtin::snapshot();
+        let mut ov = Overlay::new(&base);
+        ov.register_category("shortcat", LeadingIdentBehavior::Default);
+        ov.register_category("longcat", LeadingIdentBehavior::Default);
+        // idx0 (list index 0 — tried FIRST): "☆" then ONE antiquot-able
+        // category read. Matches, but only ever advances through one `$..`.
+        ov.register(NotationSpec {
+            category: "term".into(),
+            kind_name: "term_hash_short".into(),
+            leading: true,
+            prec: 0,
+            lhs_prec: None,
+            tokens: vec!["☆".into()],
+            body: seq([sym("☆"), cat("shortcat", 0)]),
+            scope: SpecScope::Global,
+        });
+        // idx1 (list index 1 — tried SECOND): "☆" then TWO antiquot-able
+        // reads — advances FURTHER, so `longest_match` picks this one,
+        // superseding idx0's temporary win.
+        ov.register(NotationSpec {
+            category: "term".into(),
+            kind_name: "term_hash_long".into(),
+            leading: true,
+            prec: 0,
+            lhs_prec: None,
+            tokens: vec!["☆".into()],
+            body: seq([sym("☆"), cat("longcat", 0), cat("longcat", 0)]),
+            scope: SpecScope::Global,
+        });
+        let src = "def q := `(☆$x $y)\n";
+        let r = parse_module_with_overlay(src, &base, ov);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        let names: Vec<&str> = r.overlay.kind_names().iter().map(|s| &**s).collect();
+        assert!(
+            names.contains(&"longcat.pseudo.antiquot"),
+            "the winning candidate's antiquot kind must be interned: {names:?}"
+        );
+        assert!(
+            !names.contains(&"shortcat.pseudo.antiquot"),
+            "the superseded (lower-index, tried-first) candidate's \
+             antiquot kind must NOT leak: {names:?}"
+        );
+    }
+
+    /// M3b3 Task 7 review fix — the "loser → winner → loser" interleaving:
+    /// a temp-best that gets superseded (idx0, same leak risk as the test
+    /// above) AND a further sibling tried AFTER the eventual winner
+    /// (idx2, a plain loser the ORIGINAL floor-based code already handled
+    /// correctly) must BOTH fail to leave any trace, using three
+    /// DISTINCT kind names so a leak of either is independently visible.
+    #[test]
+    fn three_candidates_loser_then_winner_then_loser_leak_neither_losers_kind() {
+        let base = crate::builtin::snapshot();
+        let mut ov = Overlay::new(&base);
+        ov.register_category("catshort", LeadingIdentBehavior::Default);
+        ov.register_category("catlong", LeadingIdentBehavior::Default);
+        ov.register_category("cattrail", LeadingIdentBehavior::Default);
+        ov.register(NotationSpec {
+            // idx0: temp winner, later superseded.
+            category: "term".into(),
+            kind_name: "term_hash_a".into(),
+            leading: true,
+            prec: 0,
+            lhs_prec: None,
+            tokens: vec!["◆".into()],
+            body: seq([sym("◆"), cat("catshort", 0)]),
+            scope: SpecScope::Global,
+        });
+        ov.register(NotationSpec {
+            // idx1: the eventual (longer) winner.
+            category: "term".into(),
+            kind_name: "term_hash_b".into(),
+            leading: true,
+            prec: 0,
+            lhs_prec: None,
+            tokens: vec!["◆".into()],
+            body: seq([sym("◆"), cat("catlong", 0), cat("catlong", 0)]),
+            scope: SpecScope::Global,
+        });
+        ov.register(NotationSpec {
+            // idx2: tried AFTER the winner is already settled; also loses
+            // (same short advance as idx0).
+            category: "term".into(),
+            kind_name: "term_hash_c".into(),
+            leading: true,
+            prec: 0,
+            lhs_prec: None,
+            tokens: vec!["◆".into()],
+            body: seq([sym("◆"), cat("cattrail", 0)]),
+            scope: SpecScope::Global,
+        });
+        let src = "def q := `(◆$x $y)\n";
+        let r = parse_module_with_overlay(src, &base, ov);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        let names: Vec<&str> = r.overlay.kind_names().iter().map(|s| &**s).collect();
+        assert!(
+            names.contains(&"catlong.pseudo.antiquot"),
+            "the winner must survive: {names:?}"
+        );
+        assert!(
+            !names.contains(&"catshort.pseudo.antiquot"),
+            "the superseded temp-best (tried BEFORE the winner) must not leak: {names:?}"
+        );
+        assert!(
+            !names.contains(&"cattrail.pseudo.antiquot"),
+            "a loser tried AFTER the winner must not leak either: {names:?}"
+        );
+    }
+
+    /// M3b3 Task 7 review fix — nested `longest_match`: `` `(inner| ..)``
+    /// (`Term.dynamicQuot`) is itself one candidate the OUTER "term"
+    /// category's `longest_match` selects among several builtin siblings
+    /// sharing the "`(" token (`Term.quot`/`Command.quot`), and its own
+    /// body recurses into `category("inner", 0)` — a NESTED
+    /// `longest_match` over the two overlay candidates registered into
+    /// "inner" below. Verifies the fix composes: the OUTER candidate's
+    /// own captured `interned_names` slice (captured once `self.run(p)`
+    /// — which includes the ENTIRE nested resolution — returns) must
+    /// already reflect only the INNER call's own winner, with no inner
+    /// loser's kind surviving up through the outer splice either.
+    #[test]
+    fn nested_longest_match_winner_survives_the_outer_candidates_own_restore() {
+        let base = crate::builtin::snapshot();
+        let mut ov = Overlay::new(&base);
+        ov.register_category("inner", LeadingIdentBehavior::Default);
+        ov.register_category("leafshort", LeadingIdentBehavior::Default);
+        ov.register_category("leaflong", LeadingIdentBehavior::Default);
+        ov.register(NotationSpec {
+            // "inner" candidate idx0: temp winner, superseded.
+            category: "inner".into(),
+            kind_name: "inner_short".into(),
+            leading: true,
+            prec: 0,
+            lhs_prec: None,
+            tokens: vec!["◇".into()],
+            body: seq([sym("◇"), cat("leafshort", 0)]),
+            scope: SpecScope::Global,
+        });
+        ov.register(NotationSpec {
+            // "inner" candidate idx1: the eventual (longer) winner.
+            category: "inner".into(),
+            kind_name: "inner_long".into(),
+            leading: true,
+            prec: 0,
+            lhs_prec: None,
+            tokens: vec!["◇".into()],
+            body: seq([sym("◇"), cat("leaflong", 0), cat("leaflong", 0)]),
+            scope: SpecScope::Global,
+        });
+        let src = "def q := `(inner| ◇$x $y)\n";
+        let r = parse_module_with_overlay(src, &base, ov);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        let names: Vec<&str> = r.overlay.kind_names().iter().map(|s| &**s).collect();
+        assert!(
+            names.contains(&"leaflong.pseudo.antiquot"),
+            "the nested winner must survive the outer candidate's own restore: {names:?}"
+        );
+        assert!(
+            !names.contains(&"leafshort.pseudo.antiquot"),
+            "the nested superseded loser must not leak: {names:?}"
         );
     }
 

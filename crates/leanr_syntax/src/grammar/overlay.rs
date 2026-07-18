@@ -322,9 +322,33 @@ impl Overlay {
     /// `intern` call is rolled back along with the events/pos it was
     /// interleaved with, and this fingerprint depends ONLY on kinds
     /// whose production actually committed (`register`/
-    /// `register_category`), never on abandoned antiquot attempts. Intern-
-    /// on-commit is exactly what this now is: `restore` un-interns
-    /// anything a failed speculative parse interned in the meantime.
+    /// `register_category`) or whose interning kind a WINNING parse
+    /// still references, never on an abandoned speculative attempt.
+    ///
+    /// That last clause needed its own fix (M3b3 Task 7 review): a
+    /// first cut of `restore` truncated unconditionally to the
+    /// snapshot's own kind count, which broke `longest_match` (parse.rs)
+    /// — a candidate that WINS is itself run between two `restore`
+    /// calls (one per sibling attempt, one final one before its events
+    /// are spliced back in), so a naive restore would un-intern the
+    /// winner's own kinds right along with a loser's. Worse, an early
+    /// attempt to patch that (a "floor" that only ever rose to the
+    /// current best's kind count) introduced a real leak of its own: a
+    /// candidate that wins TEMPORARILY but is later superseded by a
+    /// longer sibling never actually got rolled back to the snapshot's
+    /// original count, so its kinds sat below the ever-rising floor
+    /// forever — interned, fingerprinted, and referenced by no surviving
+    /// event. The landed fix instead gives `longest_match` a full, plain
+    /// `restore` before every attempt (no special floor) and has it
+    /// separately capture the ACTUAL winner's own interned names by
+    /// value, re-interning exactly those (in order — `intern` is
+    /// idempotent and append-only, so replaying them reproduces the
+    /// identical `SyntaxKind`s) once the real winner is settled. With
+    /// that in place, this fingerprint is, in full: every kind whose
+    /// production committed (`register`/`register_category`), PLUS every
+    /// kind a winning parse anywhere in the tree still references —
+    /// nothing else, regardless of how many losing siblings or
+    /// abandoned attempts were tried along the way.
     pub fn fingerprint_into(&self, h: &mut blake3::Hasher) {
         // M3b3 Task 4: bumped from `leanr-m3b1-overlay-v1` when each
         // overlay entry gained its `SpecScope` activation tag (hashed
