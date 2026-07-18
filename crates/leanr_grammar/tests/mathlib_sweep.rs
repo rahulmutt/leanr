@@ -296,10 +296,37 @@ fn mathlib_sweep_ratchet() {
     // actually swept this run; entries outside the swept prefix are neither
     // green nor regressed.
     let committed_swept = committed.iter().filter(|f| swept.contains(*f)).count();
-    let regressions: Vec<_> = committed
+    let not_green: Vec<&String> = committed
         .iter()
         .filter(|f| (!truncated || swept.contains(*f)) && !green.contains(*f))
         .collect();
+    // A committed entry that isn't green is either corpus churn (upstream
+    // deleted/renamed the file — nothing to regress) or a genuine parse
+    // regression (the file is still there, it just no longer parses
+    // oracle-green). Only the update path (`LEANR_PASSLIST_UPDATE=1`, i.e.
+    // `mise run passlist:update`) is allowed to tell them apart and drop the
+    // former: its whole job is to reconcile the pass-list against upstream,
+    // so silently absorbing a deletion (while still gating and printing it
+    // loudly) is exactly the reconciliation it exists to do. The plain gate
+    // (`parse:mathlib` / `parse:mathlib:fast`, `passlist_update == false`)
+    // keeps failing on a missing file with zero exceptions: that gate's job
+    // is only to *notice* churn and report it, never to *absorb* it — the
+    // asymmetry is deliberate, not an oversight.
+    let regressions: Vec<&String> = if passlist_update {
+        let (missing, true_regressions) = split_missing_from_regressions(&mathlib, not_green);
+        if !missing.is_empty() {
+            eprintln!(
+                "[sweep] dropping {} pass-list entries whose files no longer exist:",
+                missing.len()
+            );
+            for f in &missing {
+                eprintln!("[sweep]   {f}");
+            }
+        }
+        true_regressions
+    } else {
+        not_green
+    };
     let newly_green: Vec<_> = green.iter().filter(|f| !committed.contains(*f)).collect();
     let mode = if passlist_only {
         "passlist-only"
@@ -321,14 +348,19 @@ fn mathlib_sweep_ratchet() {
 
     // Gate BEFORE writing, even in passlist-update mode: rewriting the
     // pass-list from `green` unconditionally would re-baseline over any
-    // regression (a file that used to be on the pass-list but no longer
-    // parses green would simply be dropped from the rewritten file instead
-    // of failing the run) — the same "NEVER hand-edit to hide a regression"
-    // philosophy the ratchet already states, now enforced for the automatic
-    // rewrite too. This also lets `parse:mathlib:nightly` collapse to a
-    // single full sweep that both gates and writes, instead of one sweep to
-    // gate followed by a second full sweep to write (~70h for a task
-    // documented and budgeted at ~35h).
+    // TRUE regression (a file that still exists but no longer parses green
+    // would simply be dropped from the rewritten file instead of failing
+    // the run) — the same "NEVER hand-edit to hide a regression" philosophy
+    // the ratchet already states, now enforced for the automatic rewrite
+    // too. `regressions` above has already had upstream-deleted entries
+    // reconciled out (loudly, see above) precisely so this assert can stay
+    // unconditional here: corpus churn was resolved before this point, so
+    // reaching this line with a non-empty `regressions` means a real parse
+    // regression, full stop, no further carve-outs needed. This also lets
+    // `parse:mathlib:nightly` collapse to a single full sweep that both
+    // gates and writes, instead of one sweep to gate followed by a second
+    // full sweep to write (~70h for a task documented and budgeted at
+    // ~35h).
     assert!(
         regressions.is_empty(),
         "pass-list regressions: {regressions:#?}"
@@ -345,6 +377,53 @@ fn mathlib_sweep_ratchet() {
         }
         std::fs::write(passlist_path(), out).unwrap();
     }
+}
+
+/// Split a not-green pass-list entry set into (upstream-deleted, true
+/// regression) by checking each relative path against the filesystem under
+/// `mathlib`. Pulled out of `mathlib_sweep_ratchet`'s update-mode branch so
+/// it's unit-testable without `.mathlib`/LEANR_MATHLIB_DIR/the oracle —
+/// this split is the entire fix for the update-path deadlock, so it earns
+/// its own cheap, always-run test.
+fn split_missing_from_regressions<'a>(
+    mathlib: &Path,
+    not_green: Vec<&'a String>,
+) -> (Vec<&'a String>, Vec<&'a String>) {
+    not_green
+        .into_iter()
+        .partition(|f| !mathlib.join(f).is_file())
+}
+
+#[test]
+fn split_missing_from_regressions_separates_deleted_files_from_true_regressions() {
+    let dir = std::env::temp_dir().join(format!(
+        "leanr-sweep-split-test-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(dir.join("Mathlib")).unwrap();
+    std::fs::write(dir.join("Mathlib/StillHere.lean"), "-- present\n").unwrap();
+    // "Mathlib/Deleted.lean" is deliberately NOT created — stands in for a
+    // pass-list entry whose file upstream renamed/deleted.
+
+    let present = "Mathlib/StillHere.lean".to_string();
+    let deleted = "Mathlib/Deleted.lean".to_string();
+    let not_green = vec![&present, &deleted];
+
+    let (missing, true_regressions) = split_missing_from_regressions(&dir, not_green);
+
+    assert_eq!(
+        missing,
+        vec![&deleted],
+        "the deleted file must be reconciled out, not gated"
+    );
+    assert_eq!(
+        true_regressions,
+        vec![&present],
+        "a file that still exists but isn't green must stay a hard regression"
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 fn collect_lean_files(dir: &Path, out: &mut Vec<PathBuf>) {

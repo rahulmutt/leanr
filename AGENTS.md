@@ -39,6 +39,13 @@ touching crate boundaries, and the design spec in
     full sweeps back to back, ~70h, and cannot fit a daily cron). Within that
     one sweep, `mathlib_sweep.rs` checks for regressions before it rewrites
     the pass-list, so a regression fails before the baseline is touched.
+    A committed entry whose file was deleted/renamed upstream is corpus
+    churn, not a regression: the update path (`passlist:update` /
+    `parse:mathlib:nightly`) drops it from the gate — loudly, logging every
+    dropped path — and reconciles it out of the rewritten pass-list. The
+    plain gate (`parse:mathlib`, no rewrite) has no rewrite to reconcile
+    into, so it still fails loudly on a missing file with no exceptions;
+    that asymmetry (gate reports churn, update absorbs it) is deliberate.
     Never run any of these outside a dedicated nightly job.
   - There is no GitHub Actions workflow for the discovery tier: CI runs
     hosted `ubuntu-latest` (no Lean toolchain, ~14GB disk, 6h job cap) and
