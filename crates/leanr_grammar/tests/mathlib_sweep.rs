@@ -222,7 +222,7 @@ fn mathlib_sweep_ratchet() {
             eprintln!("[merge]   {}", s.display());
         }
         let manifests = read_shard_manifests(dir);
-        let present = validate_shard_manifests(&manifests)
+        let present = validate_shard_manifests(&manifests, &committed)
             .unwrap_or_else(|e| panic!("shard manifests in {} are unusable: {e}", dir.display()));
         eprintln!(
             "[merge] {} shard manifest(s), {} import set(s) and {} file(s) swept in total, {} of \
@@ -998,7 +998,24 @@ fn read_shard_manifests(dir: &Path) -> Vec<ShardManifest> {
 /// two vacuity checks catch the other shape of the same bug: a shard that ran
 /// but swept nothing (empty `LEANR_OLEAN_PATH`, empty slice) reports 0 green
 /// and exits 0, which every count-based guard happily accepts.
-fn validate_shard_manifests(manifests: &[ShardManifest]) -> Result<BTreeSet<String>, String> {
+///
+/// `committed` (the actual pass-list) is threaded through for the very last
+/// check below: without it, a manifest set where EVERY shard is blind is
+/// internally consistent (every `present` is `{}`, which trivially equals
+/// the `{}` union) and nothing here would catch it. That is not a corner
+/// case — all 12 shard jobs run identical steps against one pinned Mathlib
+/// SHA, so "one shard blind" is the unlikely, independent-fault shape and
+/// "every shard blind" (a bad checkout step, a `mise run mathlib:fetch` that
+/// silently no-op'd) is the likely, CORRELATED one. It is also exactly the
+/// shape that shipped before this fix: a blind-everywhere manifest set used
+/// to satisfy `present.is_empty() => exempt`, sail through gating (every
+/// committed entry reads as "upstream deleted", never as a regression), and
+/// reach the pass-list rewrite — stopped, in the incident this guards
+/// against, only by the rewrite target being read-only.
+fn validate_shard_manifests(
+    manifests: &[ShardManifest],
+    committed: &BTreeSet<String>,
+) -> Result<BTreeSet<String>, String> {
     if manifests.is_empty() {
         return Err(
             "no *.manifest shard receipts found — refusing to merge without evidence of which \
@@ -1048,18 +1065,51 @@ fn validate_shard_manifests(manifests: &[ShardManifest]) -> Result<BTreeSet<Stri
         .iter()
         .flat_map(|m| m.present.iter().cloned())
         .collect();
-    let blind = if present.is_empty() {
-        None
-    } else {
-        manifests.iter().find(|m| m.present.is_empty())
-    };
-    if let Some(m) = blind {
+    // Every shard checks out the SAME Mathlib tree (including
+    // `.lake/packages/`) and tests the SAME committed pass-list against it,
+    // so under correct operation every shard's `present` IS the full set,
+    // which is therefore identical to the union. Requiring merely that the
+    // union be non-empty (the old check) only ever catches one shard being
+    // blind while its siblings are not — but blindness here is correlated,
+    // not independent, so the far likelier failure is several (or all)
+    // shards agreeing on a wrong, incomplete view. Requiring every shard's
+    // `present` to equal the union catches that whole family in one rule:
+    // any shard whose disk view disagrees with the others', whether it saw
+    // nothing or merely less, fails the merge.
+    if let Some(m) = manifests.iter().find(|m| m.present != present) {
         return Err(format!(
-            "shard {}/{n} observed 0 committed pass-list entries on disk while other shards \
-             observed {} — every shard sees the same tree, so this one's view of it was empty \
-             (a failed/partial Mathlib fetch) and its receipt cannot be trusted",
+            "shard {}/{n} observed {} committed pass-list entries on disk, but the union across \
+             all shards is {} — every shard checks out the SAME Mathlib tree and tests the SAME \
+             pass-list, so any shard whose observed-present set differs from the union has an \
+             incomplete or stale view of it (a failed/partial fetch), and merging it would \
+             silently absorb its blind spot's regressions as upstream deletions. Re-run the \
+             disagreeing shard(s).",
             m.shard,
+            m.present.len(),
             present.len()
+        ));
+    }
+    // The one shape the equality check above cannot see: ALL shards blind
+    // together. Every `present` is `{}`, so every `present` trivially equals
+    // the `{}` union and the check above passes. But a non-empty `committed`
+    // pass-list observed as wholly absent by every shard is not "the whole
+    // pass-list was deleted upstream" (23 files vanishing from one pinned
+    // Mathlib SHA in one nightly run) — it is correlated total blindness:
+    // the shards ran without the Mathlib tree/oleans actually materialized
+    // (e.g. a checkout or `mise run mathlib:fetch` step that silently
+    // no-op'd before the sweep). Reconciling the pass-list against that would
+    // drop every entry and rewrite the baseline out from under itself.
+    if present.is_empty() && !committed.is_empty() {
+        return Err(format!(
+            "every one of the {} shard manifest(s) observed 0 of the {} committed pass-list \
+             entries on disk — since all shards run identical steps against one pinned Mathlib \
+             SHA, this is not {} independent coincidences but a single correlated cause, most \
+             likely that the shards ran without the Mathlib tree/oleans actually materialized \
+             (e.g. a checkout or `mise run mathlib:fetch` step silently no-op'd before the \
+             sweep). Refusing to reconcile the entire pass-list away as upstream deletions.",
+            manifests.len(),
+            committed.len(),
+            manifests.len()
         ));
     }
     Ok(present)
@@ -1237,30 +1287,23 @@ fn shard_manifest_round_trips_through_its_artifact_form() {
 /// them is not enough — a duplicate covers for a missing shard, and the
 /// missing shard's pass-list entries would then be reconciled out of the
 /// baseline as "upstream deletions" while the run reports zero regressions.
+///
+/// This test's own focus is index validation (missing/duplicate/mismatched
+/// shard count) — what each shard claims to have seen on disk is a separate
+/// axis, covered by `shard_manifest_validation_rejects_correlated_partial_blindness`
+/// and `shard_manifest_validation_rejects_a_vacuous_shard` below.
 #[test]
 fn shard_manifest_validation_requires_exactly_one_per_shard() {
+    let committed: BTreeSet<String> = ["Mathlib/A.lean".to_string()].into_iter().collect();
     let full: Vec<ShardManifest> = (1..=4)
         .map(|i| manifest_fixture(i, 4, &["Mathlib/A.lean"]))
         .collect();
     assert_eq!(
-        validate_shard_manifests(&full),
+        validate_shard_manifests(&full, &committed),
         Ok(["Mathlib/A.lean".to_string()].into_iter().collect())
     );
 
-    // The union is what merge gates with: an entry any single shard saw
-    // counts as present.
-    let split = vec![
-        manifest_fixture(1, 2, &["Mathlib/A.lean"]),
-        manifest_fixture(2, 2, &["Mathlib/B.lean"]),
-    ];
-    assert_eq!(
-        validate_shard_manifests(&split),
-        Ok(["Mathlib/A.lean".to_string(), "Mathlib/B.lean".to_string()]
-            .into_iter()
-            .collect())
-    );
-
-    let err = |ms: &[ShardManifest]| validate_shard_manifests(ms).unwrap_err();
+    let err = |ms: &[ShardManifest]| validate_shard_manifests(ms, &committed).unwrap_err();
 
     assert!(
         err(&[]).contains("no *.manifest"),
@@ -1295,38 +1338,116 @@ fn shard_manifest_validation_requires_exactly_one_per_shard() {
     );
 }
 
+/// Correlated PARTIAL blindness: every shard checks out the SAME tree and
+/// tests the SAME pass-list, so under correct operation every shard's
+/// `present` set is identical (and therefore equal to the union). If two
+/// shards disagree — one's fetch step failed or only partially materialized
+/// the tree — that disagreement is itself the evidence, whether the shapes
+/// are disjoint (each vouches only for what it alone saw) or a strict
+/// subset (one shard simply saw fewer entries than its agreeing siblings).
+/// The OLD rule (`union non-empty => exempt`) didn't even look at this shape
+/// and would have merged both of these as `Ok(union)`.
+#[test]
+fn shard_manifest_validation_rejects_correlated_partial_blindness() {
+    let committed: BTreeSet<String> = [
+        "Mathlib/A.lean".to_string(),
+        "Mathlib/B.lean".to_string(),
+        "Mathlib/C.lean".to_string(),
+    ]
+    .into_iter()
+    .collect();
+
+    // Disjoint views: two shards, each vouching only for what it uniquely
+    // saw. The union (`{A, B}`) is non-empty, so the old check passed this
+    // straight through as `Ok(union)`.
+    let disjoint = vec![
+        manifest_fixture(1, 2, &["Mathlib/A.lean"]),
+        manifest_fixture(2, 2, &["Mathlib/B.lean"]),
+    ];
+    let e = validate_shard_manifests(&disjoint, &committed).unwrap_err();
+    assert!(
+        e.contains("shard 1/2") && e.contains("union across all shards is 2"),
+        "disagreeing shards must be rejected, got: {e}"
+    );
+
+    // Strict-subset view: shard 2 sees only 2 of the 3 entries its (agreeing)
+    // siblings see — not wholly blind, and not a disjoint split, just a
+    // genuine partial miss.
+    let subset = vec![
+        manifest_fixture(
+            1,
+            3,
+            &["Mathlib/A.lean", "Mathlib/B.lean", "Mathlib/C.lean"],
+        ),
+        manifest_fixture(2, 3, &["Mathlib/A.lean", "Mathlib/B.lean"]),
+        manifest_fixture(
+            3,
+            3,
+            &["Mathlib/A.lean", "Mathlib/B.lean", "Mathlib/C.lean"],
+        ),
+    ];
+    let e = validate_shard_manifests(&subset, &committed).unwrap_err();
+    assert!(
+        e.contains("shard 2/3") && e.contains("2 committed pass-list entries"),
+        "a shard that saw fewer entries than its siblings must be named, got: {e}"
+    );
+}
+
 /// Important 2: a shard that ran, swept nothing, and exited 0 satisfies every
 /// count-based guard. Its receipt is where it becomes visible.
 #[test]
 fn shard_manifest_validation_rejects_a_vacuous_shard() {
+    let committed: BTreeSet<String> = ["Mathlib/A.lean".to_string()].into_iter().collect();
+
     let mut vacuous = vec![
         manifest_fixture(1, 2, &["Mathlib/A.lean"]),
         manifest_fixture(2, 2, &["Mathlib/A.lean"]),
     ];
     vacuous[1].import_sets_swept = 0; // e.g. LEANR_OLEAN_PATH substituted in empty
-    let e = validate_shard_manifests(&vacuous).unwrap_err();
+    let e = validate_shard_manifests(&vacuous, &committed).unwrap_err();
     assert!(
         e.contains("shard 2/2 swept 0 import sets"),
         "a shard that swept nothing must fail the merge loudly, got: {e}"
     );
 
-    // The other vacuity shape: the shard swept, but its Mathlib tree was
-    // empty/partial, so it vouches for nothing while its siblings vouch for
-    // entries. Trusting it would mark those entries upstream-deleted.
-    let mut blind = vec![
+    // One shard blind while its sibling isn't: a disagreement, caught by the
+    // every-shard-equals-the-union check (see
+    // shard_manifest_validation_rejects_correlated_partial_blindness).
+    let one_blind = vec![
         manifest_fixture(1, 2, &["Mathlib/A.lean"]),
         manifest_fixture(2, 2, &[]),
     ];
-    let e = validate_shard_manifests(&blind).unwrap_err();
+    let e = validate_shard_manifests(&one_blind, &committed).unwrap_err();
     assert!(
         e.contains("shard 2/2 observed 0 committed pass-list entries"),
         "a shard blind to the tree must fail the merge loudly, got: {e}"
     );
 
+    // The Critical this re-review is for: EVERY shard blind TOGETHER. The
+    // every-shard-equals-the-union check above cannot see this on its own —
+    // every `present` is `{}`, which trivially equals the `{}` union — so it
+    // takes the separate committed-non-empty-but-union-empty check. This
+    // manifest set is exactly what shipped before this fix: the old
+    // `present.is_empty() => exempt` rule let it through as
+    // `Ok(BTreeSet::new())`, every committed pass-list entry was then
+    // classified "upstream deleted" rather than regressed (0 regressions
+    // reported), and the run proceeded to rewrite the pass-list.
+    let all_blind = vec![manifest_fixture(1, 2, &[]), manifest_fixture(2, 2, &[])];
+    let e = validate_shard_manifests(&all_blind, &committed).unwrap_err();
+    assert!(
+        e.contains("every one of the 2 shard manifest(s)")
+            && e.contains("0 of the 1 committed pass-list entries")
+            && e.contains("mathlib:fetch"),
+        "correlated total blindness must fail the merge loudly and name the likely cause, got: {e}"
+    );
+
     // But a pass-list that is genuinely empty everywhere is not a shard
-    // fault, and must not be reported as one.
-    blind[0].present.clear();
-    assert_eq!(validate_shard_manifests(&blind), Ok(BTreeSet::new()));
+    // fault, and must not be reported as one: with nothing committed, "every
+    // shard saw nothing" is simply true, not evidence of a broken fetch.
+    assert_eq!(
+        validate_shard_manifests(&all_blind, &BTreeSet::new()),
+        Ok(BTreeSet::new())
+    );
 }
 
 fn collect_lean_files(dir: &Path, out: &mut Vec<PathBuf>) {
