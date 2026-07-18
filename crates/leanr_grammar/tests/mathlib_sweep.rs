@@ -56,16 +56,6 @@ fn oracle_dump(mathlib: &Path, lean_path: &str, githash: &str, file: &Path) -> O
 #[ignore = "needs .mathlib (mise run mathlib:fetch); dev loop: mise run parse:mathlib:fast; \
             full discovery sweep: mise run parse:mathlib"]
 fn mathlib_sweep_ratchet() {
-    // `.mathlib` is needed by every mode, including merge — merge does no
-    // parsing, but the reconcile step has to test each not-green pass-list
-    // entry for existence on disk to tell upstream churn from a true
-    // regression.
-    let mathlib = PathBuf::from(std::env::var("LEANR_MATHLIB_DIR").expect(
-        "LEANR_MATHLIB_DIR is required in every mode, including LEANR_SWEEP_MERGE: the reconcile \
-         step tests each not-green pass-list entry for existence under it to separate \
-         upstream-deleted files from true parse regressions",
-    ));
-
     // All mode flags are read up front so the mutual-exclusion assertions
     // below fire before any expensive work — and, critically, before
     // anything can write the pass-list.
@@ -73,6 +63,7 @@ fn mathlib_sweep_ratchet() {
     let passlist_update = std::env::var("LEANR_PASSLIST_UPDATE").as_deref() == Ok("1");
     let shard_raw = non_empty_env("LEANR_SWEEP_SHARD");
     let green_out = non_empty_env("LEANR_SWEEP_GREEN_OUT").map(PathBuf::from);
+    let manifest_out = non_empty_env("LEANR_SWEEP_MANIFEST_OUT").map(PathBuf::from);
     let merge_dir = non_empty_env("LEANR_SWEEP_MERGE").map(PathBuf::from);
 
     // Rewriting the pass-list from a run that only swept the pass-list would
@@ -131,6 +122,27 @@ fn mathlib_sweep_ratchet() {
          green list is its ONLY output — a shard that wrote nothing would silently contribute an \
          empty slice to the merge."
     );
+    // The manifest is not optional bookkeeping: it is the ONLY evidence merge
+    // mode has that a pass-list entry still exists upstream (merge runs
+    // without a Mathlib tree, and `.lake/packages/` — where most pass-list
+    // entries live — is materialized by lake, not committed to mathlib4's
+    // git tree, so a filesystem test there would classify every true
+    // regression as an upstream deletion). A shard that emitted a green list
+    // but no manifest would contribute its green files while contributing no
+    // evidence about its slice's pass-list entries.
+    assert!(
+        !(shard_raw.is_some() && manifest_out.is_none()),
+        "LEANR_SWEEP_SHARD requires LEANR_SWEEP_MANIFEST_OUT=<path>: the merge job takes its \
+         existence set from the UNION of the shards' manifests (it has no Mathlib tree of its \
+         own), so a shard without a manifest would make its slice's pass-list entries look \
+         upstream-deleted and silently absorb any real regression among them."
+    );
+    assert!(
+        !(shard_raw.is_none() && manifest_out.is_some()),
+        "LEANR_SWEEP_MANIFEST_OUT without LEANR_SWEEP_SHARD is rejected: a manifest is a shard's \
+         receipt (its spec, the pass-list entries it observed on disk, and how much it swept), \
+         and only shard mode can honestly produce one."
+    );
 
     // `I/N`, 1-based. Parsed rather than `unwrap`ed so a typo (`12`, `0/12`,
     // `13/12`, `1/0`) says what is wrong with it instead of panicking on an
@@ -188,8 +200,17 @@ fn mathlib_sweep_ratchet() {
     // TOTALLY against the committed pass-list exactly as a single ~35h full
     // sweep would be. That equality is the whole point: sharding must change
     // only where the parsing happens, never what is gated. It is therefore
-    // dispatched here, before LEANR_OLEAN_PATH/the oracle githash are
-    // required, since neither is needed to union text files.
+    // dispatched here, before LEANR_MATHLIB_DIR/LEANR_OLEAN_PATH/the oracle
+    // githash are required, since none of them is needed to union text files.
+    //
+    // Merge deliberately has NO Mathlib tree: its "does this pass-list entry
+    // still exist upstream?" oracle is the union of the shards' manifests,
+    // not the local filesystem. A filesystem test here was actively wrong —
+    // the merge job checks out mathlib4's git tree, which does not contain
+    // `.lake/packages/` (lake materializes it), so every pass-list entry
+    // under a package would test as absent, and every true parse regression
+    // among them would be reconciled away as an "upstream deletion" while
+    // the run reported zero regressions.
     if let Some(dir) = &merge_dir {
         let (green, sources) = read_shard_green_lists(dir);
         eprintln!(
@@ -200,9 +221,22 @@ fn mathlib_sweep_ratchet() {
         for s in &sources {
             eprintln!("[merge]   {}", s.display());
         }
+        let manifests = read_shard_manifests(dir);
+        let present = validate_shard_manifests(&manifests)
+            .unwrap_or_else(|e| panic!("shard manifests in {} are unusable: {e}", dir.display()));
+        eprintln!(
+            "[merge] {} shard manifest(s), {} import set(s) and {} file(s) swept in total, {} of \
+             {} committed pass-list entries observed present on some shard's disk",
+            manifests.len(),
+            manifests.iter().map(|m| m.import_sets_swept).sum::<usize>(),
+            manifests.iter().map(|m| m.files_swept).sum::<usize>(),
+            committed.iter().filter(|f| present.contains(*f)).count(),
+            committed.len(),
+        );
+        let exists = |rel: &str| present.contains(rel);
         let before = committed.len();
         let newly_green = gate_and_maybe_rewrite(GateInput {
-            mathlib: &mathlib,
+            exists: &exists,
             committed: &committed,
             // `truncated` is false, so `swept` is never consulted; the union
             // itself is the only honest value to hand it.
@@ -220,6 +254,16 @@ fn mathlib_sweep_ratchet() {
         return;
     }
 
+    // Every SWEEPING mode needs the tree on disk (merge, handled above, does
+    // not): to walk the corpus, to read the files it parses, and — for the
+    // reconcile step and for a shard's manifest — to observe which pass-list
+    // entries still exist.
+    let mathlib = PathBuf::from(std::env::var("LEANR_MATHLIB_DIR").expect(
+        "LEANR_MATHLIB_DIR is required in every sweeping mode: it is the corpus root, and the \
+         reconcile step tests each not-green pass-list entry for existence under it to separate \
+         upstream-deleted files from true parse regressions",
+    ));
+
     let lean_path = std::env::var("LEANR_OLEAN_PATH").expect("LEANR_OLEAN_PATH");
     let githash = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/oracle-githash.txt"),
@@ -233,6 +277,20 @@ fn mathlib_sweep_ratchet() {
         .filter(|s| !s.is_empty())
         .map(Into::into)
         .collect();
+    // An empty LEANR_OLEAN_PATH is the cheapest way to make a sweep vacuous:
+    // `roots` filters to `[]`, every `load_closure` fails, and the run
+    // reports "0 green" and exits 0 — which, in shard mode, is a perfectly
+    // well-formed (empty) green list that satisfies the workflow's
+    // `if-no-files-found: error` and its artifact count check alike. The
+    // mise tasks build this value in `sh -c` without `set -e`, so a failing
+    // `lake env printenv LEAN_PATH` substitutes in as "". Fail at the source
+    // instead of three jobs later.
+    assert!(
+        !roots.is_empty(),
+        "LEANR_OLEAN_PATH resolved to no search roots ({lean_path:?}) — every olean closure would \
+         fail to load and the sweep would report 0 green as a PASS. Check that `lake env printenv \
+         LEAN_PATH` succeeds in .mathlib (mise run mathlib:fetch)."
+    );
     let sp = SearchPath::new(roots);
 
     // Three modes, each with distinct gating semantics (see the regression
@@ -360,6 +418,23 @@ fn mathlib_sweep_ratchet() {
         Some((i, n)) => shard_slice(&all_sets, i, n),
         None => all_sets,
     };
+    // A shard whose slice came out empty even though there was work to deal
+    // out never sweeps anything, and an empty green list is indistinguishable
+    // from "this whole slice regressed" once it reaches the merge. The merge
+    // rejects such a manifest too, but failing here names the shard that is
+    // actually broken instead of reporting it three jobs later. `n` above
+    // `by_imports.len()` is the one legitimate way to get an empty slice
+    // (more shards than import sets — only reachable under a smoke-run
+    // LEANR_SWEEP_LIMIT).
+    if let Some((i, n)) = shard {
+        assert!(
+            !import_sets.is_empty() || by_imports.len() < n,
+            "shard {i}/{n} swept 0 of {} import sets: its slice is empty even though there are at \
+             least {n} sets to deal out. It would emit an empty green list that the merge cannot \
+             tell from a mass regression.",
+            by_imports.len()
+        );
+    }
     let files_swept: usize = if shard.is_some() {
         import_sets.iter().map(|k| by_imports[k].len()).sum()
     } else {
@@ -431,12 +506,36 @@ fn mathlib_sweep_ratchet() {
     // `gate_and_maybe_rewrite`) over the union of every shard's green list,
     // which is exactly the set an unsharded full sweep would have produced.
     if let Some((i, n)) = shard {
+        // The shard's receipt for the merge job. The `present` set is the
+        // half the merge cannot compute for itself: only a shard has the
+        // materialized tree (including `.lake/packages/`, which is not in
+        // mathlib4's git tree) to answer "does this pass-list entry still
+        // exist upstream?". Every shard observes the SAME tree, so any one
+        // of them could answer it — the merge takes the union so that the
+        // answer survives as long as at least one shard reported.
+        let present: BTreeSet<String> = committed
+            .iter()
+            .filter(|rel| mathlib.join(rel).is_file())
+            .cloned()
+            .collect();
+        let manifest = ShardManifest {
+            shard: i,
+            shard_count: n,
+            import_sets_swept: import_sets.len(),
+            files_swept,
+            present,
+        };
+        if let Some(path) = &manifest_out {
+            write_shard_manifest(path, &manifest);
+        }
         eprintln!(
-            "sweep[shard {i}/{n}]: {} of {} import sets, {files_swept} files, {} green (no gate: \
-             the merge job gates the union)",
+            "sweep[shard {i}/{n}]: {} of {} import sets, {files_swept} files, {} green, {} of {} \
+             pass-list entries present on disk (no gate: the merge job gates the union)",
             import_sets.len(),
             by_imports.len(),
-            green.len()
+            green.len(),
+            manifest.present.len(),
+            committed.len(),
         );
         return;
     }
@@ -448,8 +547,9 @@ fn mathlib_sweep_ratchet() {
     } else {
         "full"
     };
+    let exists = |rel: &str| mathlib.join(rel).is_file();
     gate_and_maybe_rewrite(GateInput {
-        mathlib: &mathlib,
+        exists: &exists,
         committed: &committed,
         swept: &swept,
         green: &green,
@@ -467,7 +567,15 @@ fn mathlib_sweep_ratchet() {
 /// same logic, with the same missing-vs-regressed split, as an unsharded
 /// full sweep. Returns the newly-green count (the growth delta's numerator).
 struct GateInput<'a> {
-    mathlib: &'a Path,
+    /// "Does this pass-list entry still exist upstream?" — a filesystem test
+    /// under `.mathlib` in every sweeping mode, and the union of the shards'
+    /// manifests in merge mode, which has no tree of its own. Injected rather
+    /// than hardcoded to `Path::is_file` precisely because merge must NOT
+    /// consult its own filesystem: it checks out mathlib4's git tree, which
+    /// omits the lake-materialized `.lake/packages/` where most pass-list
+    /// entries live, so every regression there would be absorbed as an
+    /// upstream deletion.
+    exists: &'a dyn Fn(&str) -> bool,
     committed: &'a BTreeSet<String>,
     /// Files actually swept this run; only consulted when `truncated`.
     swept: &'a BTreeSet<String>,
@@ -481,7 +589,7 @@ struct GateInput<'a> {
 
 fn gate_and_maybe_rewrite(input: GateInput<'_>) -> usize {
     let GateInput {
-        mathlib,
+        exists,
         committed,
         swept,
         green,
@@ -516,7 +624,7 @@ fn gate_and_maybe_rewrite(input: GateInput<'_>) -> usize {
     // is only to *notice* churn and report it, never to *absorb* it — the
     // asymmetry is deliberate, not an oversight.
     let regressions: Vec<&String> = if passlist_update {
-        let (missing, true_regressions) = split_missing_from_regressions(mathlib, not_green);
+        let (missing, true_regressions) = split_missing_from_regressions(exists, not_green);
         if !missing.is_empty() {
             eprintln!(
                 "[sweep] dropping {} pass-list entries whose files no longer exist:",
@@ -579,18 +687,18 @@ fn gate_and_maybe_rewrite(input: GateInput<'_>) -> usize {
 }
 
 /// Split a not-green pass-list entry set into (upstream-deleted, true
-/// regression) by checking each relative path against the filesystem under
-/// `mathlib`. Pulled out of `mathlib_sweep_ratchet`'s update-mode branch so
-/// it's unit-testable without `.mathlib`/LEANR_MATHLIB_DIR/the oracle —
-/// this split is the entire fix for the update-path deadlock, so it earns
-/// its own cheap, always-run test.
+/// regression) by asking `exists` about each relative path. Pulled out of
+/// `mathlib_sweep_ratchet`'s update-mode branch so it's unit-testable without
+/// `.mathlib`/LEANR_MATHLIB_DIR/the oracle — this split is the entire fix for
+/// the update-path deadlock, so it earns its own cheap, always-run test.
+///
+/// `exists` is a parameter, not `mathlib.join(f).is_file()`, because merge
+/// mode's answer does not come from a filesystem at all (see `GateInput`).
 fn split_missing_from_regressions<'a>(
-    mathlib: &Path,
+    exists: &dyn Fn(&str) -> bool,
     not_green: Vec<&'a String>,
 ) -> (Vec<&'a String>, Vec<&'a String>) {
-    not_green
-        .into_iter()
-        .partition(|f| !mathlib.join(f).is_file())
+    not_green.into_iter().partition(|f| !exists(f))
 }
 
 #[test]
@@ -609,7 +717,8 @@ fn split_missing_from_regressions_separates_deleted_files_from_true_regressions(
     let deleted = "Mathlib/Deleted.lean".to_string();
     let not_green = vec![&present, &deleted];
 
-    let (missing, true_regressions) = split_missing_from_regressions(&dir, not_green);
+    let exists = |rel: &str| dir.join(rel).is_file();
+    let (missing, true_regressions) = split_missing_from_regressions(&exists, not_green);
 
     assert_eq!(
         missing,
@@ -738,6 +847,224 @@ fn read_shard_green_lists(dir: &Path) -> (BTreeSet<String>, Vec<PathBuf>) {
     (union, sources)
 }
 
+/// A shard's receipt, and the merge job's only source of truth about the
+/// world outside its own checkout.
+///
+/// The merge job runs with no Mathlib tree: it cannot walk the corpus, and it
+/// must not test the filesystem for pass-list entries (`.lake/packages/`,
+/// where most of them live, is materialized by lake and absent from
+/// mathlib4's git tree, so every entry there would read as upstream-deleted
+/// and every real regression among them would be silently absorbed). Each
+/// shard DOES have the full tree, so each one records what it saw; merge
+/// takes the union and cross-checks the receipts against each other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShardManifest {
+    /// 1-based shard index, and the N it was sharded against.
+    shard: usize,
+    shard_count: usize,
+    /// How many import sets this shard's slice contained. Zero means the
+    /// shard swept nothing at all — an empty green list that merge would
+    /// otherwise read as "this entire slice regressed".
+    import_sets_swept: usize,
+    files_swept: usize,
+    /// The committed pass-list entries this shard observed present on disk.
+    present: BTreeSet<String>,
+}
+
+/// Line-oriented on purpose: this is a CI artifact a human reads in a failed
+/// run's logs, and adding a serde dependency to a test binary to encode five
+/// fields would be the wrong trade.
+fn render_shard_manifest(m: &ShardManifest) -> String {
+    let mut out = String::from(
+        "# leanr shard manifest v1 — a shard's receipt for the merge job.\n\
+         # Machine input for `mise run parse:mathlib:merge`; see mathlib_sweep.rs.\n",
+    );
+    out.push_str(&format!("shard {}/{}\n", m.shard, m.shard_count));
+    out.push_str(&format!("import_sets_swept {}\n", m.import_sets_swept));
+    out.push_str(&format!("files_swept {}\n", m.files_swept));
+    for f in &m.present {
+        out.push_str("present ");
+        out.push_str(f);
+        out.push('\n');
+    }
+    out
+}
+
+/// Parse a manifest, returning `Err(reason)` rather than defaulting anything:
+/// a manifest that silently parsed as "0 import sets, no entries present"
+/// would reintroduce exactly the failure it exists to prevent.
+fn parse_shard_manifest(text: &str) -> Result<ShardManifest, String> {
+    let mut shard: Option<(usize, usize)> = None;
+    let mut import_sets_swept: Option<usize> = None;
+    let mut files_swept: Option<usize> = None;
+    let mut present = BTreeSet::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (key, value) = line
+            .split_once(' ')
+            .ok_or_else(|| format!("line {line:?} is not `<key> <value>`"))?;
+        let value = value.trim();
+        let once = |slot: &mut Option<usize>, what: &str| -> Result<(), String> {
+            if slot.is_some() {
+                return Err(format!("duplicate `{what}` line"));
+            }
+            *slot = Some(
+                value
+                    .parse::<usize>()
+                    .map_err(|e| format!("`{what} {value:?}` is not a count: {e}"))?,
+            );
+            Ok(())
+        };
+        match key {
+            "shard" => {
+                if shard.is_some() {
+                    return Err("duplicate `shard` line".to_string());
+                }
+                shard = Some(parse_shard_spec(value).map_err(|e| format!("`shard {value}`: {e}"))?);
+            }
+            "import_sets_swept" => once(&mut import_sets_swept, "import_sets_swept")?,
+            "files_swept" => once(&mut files_swept, "files_swept")?,
+            "present" => {
+                present.insert(value.to_string());
+            }
+            other => return Err(format!("unknown key {other:?}")),
+        }
+    }
+    let (shard, shard_count) = shard.ok_or("missing `shard I/N` line")?;
+    Ok(ShardManifest {
+        shard,
+        shard_count,
+        import_sets_swept: import_sets_swept.ok_or("missing `import_sets_swept` line")?,
+        files_swept: files_swept.ok_or("missing `files_swept` line")?,
+        present,
+    })
+}
+
+fn write_shard_manifest(path: &Path, m: &ShardManifest) {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).unwrap_or_else(|e| {
+            panic!(
+                "failed to create the LEANR_SWEEP_MANIFEST_OUT parent dir ({}): {e}",
+                parent.display()
+            )
+        });
+    }
+    std::fs::write(path, render_shard_manifest(m)).unwrap_or_else(|e| {
+        panic!(
+            "failed to write the shard manifest to LEANR_SWEEP_MANIFEST_OUT ({}): {e}",
+            path.display()
+        )
+    });
+}
+
+/// Read every `*.manifest` in `dir` (the same artifact directory the `*.txt`
+/// green lists arrive in — distinct extensions so neither reader can eat the
+/// other's files).
+fn read_shard_manifests(dir: &Path) -> Vec<ShardManifest> {
+    let rd = std::fs::read_dir(dir).unwrap_or_else(|e| {
+        panic!(
+            "LEANR_SWEEP_MERGE directory ({}) is not readable: {e}",
+            dir.display()
+        )
+    });
+    let mut paths: Vec<PathBuf> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "manifest"))
+        .collect();
+    paths.sort();
+    paths
+        .iter()
+        .map(|p| {
+            let text = std::fs::read_to_string(p)
+                .unwrap_or_else(|e| panic!("failed to read shard manifest {}: {e}", p.display()));
+            parse_shard_manifest(&text)
+                .unwrap_or_else(|e| panic!("shard manifest {} is malformed: {e}", p.display()))
+        })
+        .collect()
+}
+
+/// Validate the manifests as a SET and return the union of their `present`
+/// entries — the existence oracle merge mode gates with.
+///
+/// Counting manifests is not enough. The set has to be exactly one manifest
+/// per shard index `1..=N` for one agreed `N`, because "12 manifests" is also
+/// what you get from shard 7 uploaded twice and shard 4 missing — and shard
+/// 4's pass-list entries would then be absent from the union, i.e. classified
+/// as upstream deletions and reconciled straight out of the baseline. The
+/// two vacuity checks catch the other shape of the same bug: a shard that ran
+/// but swept nothing (empty `LEANR_OLEAN_PATH`, empty slice) reports 0 green
+/// and exits 0, which every count-based guard happily accepts.
+fn validate_shard_manifests(manifests: &[ShardManifest]) -> Result<BTreeSet<String>, String> {
+    if manifests.is_empty() {
+        return Err(
+            "no *.manifest shard receipts found — refusing to merge without evidence of which \
+             pass-list entries still exist upstream, since with none every entry would look \
+             upstream-deleted and any real regression would be reconciled away"
+                .to_string(),
+        );
+    }
+    let n = manifests[0].shard_count;
+    if let Some(m) = manifests.iter().find(|m| m.shard_count != n) {
+        return Err(format!(
+            "shards disagree on the shard count: shard {}/{} vs shard {}/{n} — these manifests \
+             come from different sweeps and cannot be merged",
+            m.shard, m.shard_count, manifests[0].shard
+        ));
+    }
+    let indices: BTreeSet<usize> = manifests.iter().map(|m| m.shard).collect();
+    if indices.len() != manifests.len() {
+        let mut dupes: Vec<usize> = manifests.iter().map(|m| m.shard).collect();
+        dupes.sort_unstable();
+        return Err(format!(
+            "duplicate shard manifests: got indices {dupes:?} for N={n}. A repeated shard hides a \
+             missing one, whose pass-list entries would then be absent from the union and \
+             reconciled out of the baseline as upstream deletions."
+        ));
+    }
+    let expected: BTreeSet<usize> = (1..=n).collect();
+    if indices != expected {
+        let missing: Vec<usize> = expected.difference(&indices).copied().collect();
+        let unexpected: Vec<usize> = indices.difference(&expected).copied().collect();
+        return Err(format!(
+            "shard manifests are not exactly 1..={n}: missing {missing:?}, unexpected \
+             {unexpected:?}. Every pass-list entry only a missing shard could vouch for would \
+             look upstream-deleted, so its regression would be silently absorbed. Re-run the \
+             failed shard(s)."
+        ));
+    }
+    if let Some(m) = manifests.iter().find(|m| m.import_sets_swept == 0) {
+        return Err(format!(
+            "shard {}/{n} swept 0 import sets — it produced a vacuously empty green list (an \
+             empty LEANR_OLEAN_PATH or an empty slice does exactly this while still exiting 0), \
+             and merging it would read its whole slice as a mass regression",
+            m.shard
+        ));
+    }
+    let present: BTreeSet<String> = manifests
+        .iter()
+        .flat_map(|m| m.present.iter().cloned())
+        .collect();
+    let blind = if present.is_empty() {
+        None
+    } else {
+        manifests.iter().find(|m| m.present.is_empty())
+    };
+    if let Some(m) = blind {
+        return Err(format!(
+            "shard {}/{n} observed 0 committed pass-list entries on disk while other shards \
+             observed {} — every shard sees the same tree, so this one's view of it was empty \
+             (a failed/partial Mathlib fetch) and its receipt cannot be trusted",
+            m.shard,
+            present.len()
+        ));
+    }
+    Ok(present)
+}
+
 /// The property that makes the sharded nightly's merge sound: the shards
 /// PARTITION the import-set list — every set lands in exactly one shard, and
 /// their union is the unsharded list. If this ever failed, a dropped set
@@ -819,6 +1146,187 @@ fn merged_green_lists_union_shard_outputs() {
     );
 
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+fn manifest_fixture(shard: usize, shard_count: usize, present: &[&str]) -> ShardManifest {
+    ShardManifest {
+        shard,
+        shard_count,
+        import_sets_swept: 685,
+        files_swept: 737,
+        present: present.iter().map(|s| (*s).to_string()).collect(),
+    }
+}
+
+/// The manifest is written by one CI job and read by another, so the
+/// round-trip through the artifact is load-bearing: a field that silently
+/// failed to survive it (`present`, above all) would put the merge back to
+/// classifying real regressions as upstream deletions.
+#[test]
+fn shard_manifest_round_trips_through_its_artifact_form() {
+    let dir = std::env::temp_dir().join(format!(
+        "leanr-sweep-manifest-test-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let m = manifest_fixture(
+        3,
+        12,
+        &[
+            ".lake/packages/batteries/Batteries/B.lean",
+            "Mathlib/A.lean",
+        ],
+    );
+    assert_eq!(
+        parse_shard_manifest(&render_shard_manifest(&m)),
+        Ok(m.clone())
+    );
+
+    // Through the filesystem, alongside a green list, exactly as the merge
+    // job receives them: neither reader may eat the other's files.
+    let path = dir.join("shard-3.manifest");
+    write_shard_manifest(&path, &m);
+    write_green_list(&dir.join("shard-3.txt"), &m.present);
+    let read = read_shard_manifests(&dir);
+    assert_eq!(
+        read,
+        vec![m.clone()],
+        "the manifest must survive the artifact round-trip"
+    );
+    let (union, sources) = read_shard_green_lists(&dir);
+    assert_eq!(
+        sources.len(),
+        1,
+        "the *.manifest must not be read as a green list"
+    );
+    assert_eq!(union, m.present);
+
+    // A manifest with an empty `present` set is legal on its own (that shard
+    // simply saw no pass-list entry) — it is only rejected in company, by
+    // validate_shard_manifests.
+    let empty = manifest_fixture(1, 1, &[]);
+    assert_eq!(
+        parse_shard_manifest(&render_shard_manifest(&empty)),
+        Ok(empty)
+    );
+
+    for bad in [
+        "",                                                             // no shard line
+        "shard 3/12\nfiles_swept 7\n",                                  // no import_sets_swept
+        "shard 3/12\nimport_sets_swept 5\n",                            // no files_swept
+        "shard 13/12\nimport_sets_swept 5\nfiles_swept 7\n",            // bad spec
+        "shard 3/12\nshard 4/12\nimport_sets_swept 5\nfiles_swept 7\n", // duplicate
+        "shard 3/12\nimport_sets_swept 5\nimport_sets_swept 6\nfiles_swept 7\n",
+        "shard 3/12\nimport_sets_swept x\nfiles_swept 7\n", // not a count
+        "shard 3/12\nimport_sets_swept 5\nfiles_swept 7\nbogus k\n", // unknown key
+        "shard 3/12\nimport_sets_swept 5\nfiles_swept 7\nlonely\n", // not key/value
+    ] {
+        assert!(
+            parse_shard_manifest(bad).is_err(),
+            "{bad:?} must be rejected, not defaulted into a vacuous manifest"
+        );
+    }
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The Critical this whole manifest mechanism exists for: merge must refuse
+/// any receipt set that is not exactly one manifest per shard 1..=N. Counting
+/// them is not enough — a duplicate covers for a missing shard, and the
+/// missing shard's pass-list entries would then be reconciled out of the
+/// baseline as "upstream deletions" while the run reports zero regressions.
+#[test]
+fn shard_manifest_validation_requires_exactly_one_per_shard() {
+    let full: Vec<ShardManifest> = (1..=4)
+        .map(|i| manifest_fixture(i, 4, &["Mathlib/A.lean"]))
+        .collect();
+    assert_eq!(
+        validate_shard_manifests(&full),
+        Ok(["Mathlib/A.lean".to_string()].into_iter().collect())
+    );
+
+    // The union is what merge gates with: an entry any single shard saw
+    // counts as present.
+    let split = vec![
+        manifest_fixture(1, 2, &["Mathlib/A.lean"]),
+        manifest_fixture(2, 2, &["Mathlib/B.lean"]),
+    ];
+    assert_eq!(
+        validate_shard_manifests(&split),
+        Ok(["Mathlib/A.lean".to_string(), "Mathlib/B.lean".to_string()]
+            .into_iter()
+            .collect())
+    );
+
+    let err = |ms: &[ShardManifest]| validate_shard_manifests(ms).unwrap_err();
+
+    assert!(
+        err(&[]).contains("no *.manifest"),
+        "an empty receipt set must be rejected"
+    );
+
+    let mut missing = full.clone();
+    missing.remove(2); // shard 3 never uploaded
+    let e = err(&missing);
+    assert!(
+        e.contains("not exactly 1..=4") && e.contains("missing [3]"),
+        "a missing shard must be named, got: {e}"
+    );
+
+    // Right COUNT, wrong SET: shard 2 twice, shard 3 absent. This is the case
+    // a `find | wc -l` guard cannot see.
+    let mut dup = full.clone();
+    dup[2] = manifest_fixture(2, 4, &["Mathlib/A.lean"]);
+    let e = err(&dup);
+    assert_eq!(
+        dup.len(),
+        full.len(),
+        "the duplicate case has the expected count"
+    );
+    assert!(e.contains("duplicate shard manifests"), "got: {e}");
+
+    let mut mixed = full.clone();
+    mixed[1] = manifest_fixture(2, 12, &["Mathlib/A.lean"]);
+    assert!(
+        err(&mixed).contains("disagree on the shard count"),
+        "manifests from two different sweeps must not merge"
+    );
+}
+
+/// Important 2: a shard that ran, swept nothing, and exited 0 satisfies every
+/// count-based guard. Its receipt is where it becomes visible.
+#[test]
+fn shard_manifest_validation_rejects_a_vacuous_shard() {
+    let mut vacuous = vec![
+        manifest_fixture(1, 2, &["Mathlib/A.lean"]),
+        manifest_fixture(2, 2, &["Mathlib/A.lean"]),
+    ];
+    vacuous[1].import_sets_swept = 0; // e.g. LEANR_OLEAN_PATH substituted in empty
+    let e = validate_shard_manifests(&vacuous).unwrap_err();
+    assert!(
+        e.contains("shard 2/2 swept 0 import sets"),
+        "a shard that swept nothing must fail the merge loudly, got: {e}"
+    );
+
+    // The other vacuity shape: the shard swept, but its Mathlib tree was
+    // empty/partial, so it vouches for nothing while its siblings vouch for
+    // entries. Trusting it would mark those entries upstream-deleted.
+    let mut blind = vec![
+        manifest_fixture(1, 2, &["Mathlib/A.lean"]),
+        manifest_fixture(2, 2, &[]),
+    ];
+    let e = validate_shard_manifests(&blind).unwrap_err();
+    assert!(
+        e.contains("shard 2/2 observed 0 committed pass-list entries"),
+        "a shard blind to the tree must fail the merge loudly, got: {e}"
+    );
+
+    // But a pass-list that is genuinely empty everywhere is not a shard
+    // fault, and must not be reported as one.
+    blind[0].present.clear();
+    assert_eq!(validate_shard_manifests(&blind), Ok(BTreeSet::new()));
 }
 
 fn collect_lean_files(dir: &Path, out: &mut Vec<PathBuf>) {

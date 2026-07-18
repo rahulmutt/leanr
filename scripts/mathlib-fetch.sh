@@ -44,18 +44,6 @@ if ! cmp -s "$mathlib_dir/lean-toolchain" "$our_toolchain_file"; then
 fi
 echo "mathlib-fetch: toolchain match OK ($(cat "$our_toolchain_file"))" >&2
 
-# LEANR_MATHLIB_SOURCE_ONLY=1 stops here, with the source tree checked out
-# but no .oleans. That is exactly what `mise run parse:mathlib:merge` needs:
-# merge decodes nothing, it only tests pass-list entries for existence on
-# disk. Skipping `lake exe cache get` saves that job a 5.8GB download and
-# means it needs no Lean toolchain at all (the toolchain-match check above is
-# a plain `cmp` of two text files). Unset/empty keeps the full behavior.
-if [ "${LEANR_MATHLIB_SOURCE_ONLY:-}" = "1" ]; then
-    echo "mathlib-fetch: LEANR_MATHLIB_SOURCE_ONLY=1 — skipping \`lake exe cache get\` (sources only)." >&2
-    echo "mathlib-fetch: done." >&2
-    exit 0
-fi
-
 echo "mathlib-fetch: lake exe cache get ..." >&2
 lake exe cache get
 

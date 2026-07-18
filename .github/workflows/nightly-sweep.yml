@@ -108,17 +108,29 @@ jobs:
           RAYON_NUM_THREADS: "3"
           LEANR_SWEEP_SHARD: ${{ matrix.shard }}/${{ env.SHARD_COUNT }}
           LEANR_SWEEP_GREEN_OUT: ${{ github.workspace }}/target/green/shard-${{ matrix.shard }}.txt
+          # The shard's receipt: its spec, how much it swept, and which
+          # committed pass-list entries it observed present on disk. Only a
+          # shard can report that last one — it has the lake-materialized
+          # tree (`.lake/packages/`, where most pass-list entries live, is
+          # NOT in mathlib4's git tree), and the merge job has no tree at
+          # all. Without it the merge cannot tell an upstream deletion from
+          # a parse regression.
+          LEANR_SWEEP_MANIFEST_OUT: ${{ github.workspace }}/target/green/shard-${{ matrix.shard }}.manifest
         run: mise run parse:mathlib:shard
 
-      - name: Upload shard green list
+      - name: Upload shard green list + manifest
         uses: actions/upload-artifact@v4
         with:
           name: green-shard-${{ matrix.shard }}
-          path: target/green/shard-${{ matrix.shard }}.txt
-          # A shard that somehow produced no green list must fail HERE, so
-          # the artifact is genuinely absent for the merge job's count check
+          path: |
+            target/green/shard-${{ matrix.shard }}.txt
+            target/green/shard-${{ matrix.shard }}.manifest
+          # A shard that somehow produced neither file must fail HERE, so the
+          # artifact is genuinely absent for the merge job's count check
           # rather than present-and-empty (which would merge as "everything
-          # in this slice regressed").
+          # in this slice regressed"). A partial upload (one file, not both)
+          # still fails the merge: the count check below tallies each
+          # extension separately, and merge mode re-validates the manifests.
           if-no-files-found: error
 
   merge:
@@ -139,7 +151,7 @@ jobs:
       - uses: jdx/mise-action@v2
       - run: mise exec -- cargo --version
 
-      - name: Download shard green lists
+      - name: Download shard green lists + manifests
         uses: actions/download-artifact@v4
         with:
           path: target/green
@@ -153,34 +165,39 @@ jobs:
       # gets dropped from the rewritten pass-list, silently deleting part of
       # the baseline. Neither is acceptable, so a missing shard fails here,
       # loudly, before merge mode ever runs.
-      - name: Assert every shard produced a green list
+      - name: Assert every shard produced a green list + manifest
         run: |
           set -eu
           mkdir -p target/green # every shard failing means no artifact dir at all
-          found=$(find target/green -maxdepth 1 -name '*.txt' | wc -l)
-          echo "shard green lists present: $found / $SHARD_COUNT"
-          find target/green -maxdepth 1 -name '*.txt' | sort
-          if [ "$found" -ne "$SHARD_COUNT" ]; then
-            echo "::error::only $found of $SHARD_COUNT shard green lists are present — refusing to merge a partial union (every import set in a missing shard would read as a mass parse regression, or be silently dropped from the pass-list). Re-run the failed shard(s)."
-            exit 1
-          fi
+          find target/green -maxdepth 1 \( -name '*.txt' -o -name '*.manifest' \) | sort
+          for ext in txt manifest; do
+            found=$(find target/green -maxdepth 1 -name "*.$ext" | wc -l)
+            echo "shard $ext files present: $found / $SHARD_COUNT"
+            if [ "$found" -ne "$SHARD_COUNT" ]; then
+              echo "::error::only $found of $SHARD_COUNT shard .$ext files are present — refusing to merge a partial union (every import set in a missing shard would read as a mass parse regression, or be silently dropped from the pass-list). Re-run the failed shard(s)."
+              exit 1
+            fi
+          done
 
-      # Sources only: merge decodes no oleans and runs no oracle, it just
-      # needs the file tree to tell an upstream-deleted pass-list entry from
-      # a true regression. Skips the 5.8GB `lake exe cache get` and needs no
-      # Lean toolchain at all.
-      - name: Fetch Mathlib sources (no oleans)
-        env:
-          LEANR_MATHLIB_SOURCE_ONLY: "1"
-        run: scripts/mathlib-fetch.sh
-
+      # NOTE: no Mathlib fetch here, deliberately. Merge needs no tree: it
+      # decodes no oleans, runs no oracle, and takes its "does this pass-list
+      # entry still exist upstream?" answer from the UNION of the shards'
+      # manifests. Checking out the tree here and testing it would be worse
+      # than useless — mathlib4's git tree has no `.lake/packages/` (lake
+      # materializes it), where every committed pass-list entry lives, so
+      # every true parse regression would test as an upstream deletion, be
+      # reconciled out of the rewritten pass-list, and this job would report
+      # zero regressions while deleting the evidence.
       - name: Record pass-list size before merge
         run: echo "PASSLIST_BEFORE=$(grep -cv '^#' "$PASSLIST" || true)" >> "$GITHUB_ENV"
 
-      # Gates the union exactly as an unsharded full sweep would, and
-      # rewrites the pass-list only if it passes. A true parse regression
-      # fails this step — that is the alarm this whole workflow exists to
-      # ring.
+      # Gates the union exactly as an unsharded full sweep would, and rewrites
+      # the pass-list only if it passes. A true parse regression fails this
+      # step — that is the alarm this whole workflow exists to ring. It also
+      # re-validates the manifests
+      # as a set — exactly one per shard 1..=N, none of them vacuous — which
+      # the count check above cannot do (12 manifests is also what shard 7
+      # uploaded twice plus shard 4 missing looks like).
       - name: Merge + gate the union
         env:
           LEANR_SWEEP_MERGE: ${{ github.workspace }}/target/green

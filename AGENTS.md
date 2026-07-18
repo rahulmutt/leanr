@@ -61,10 +61,24 @@ touching crate boundaries, and the design spec in
       shard is not a stricter check, it is a meaningless one.
       `mathlib_sweep.rs` asserts shard mode is incompatible with
       `LEANR_PASSLIST_UPDATE`/passlist-only, and returns before the gate.
+    - Each shard also uploads a MANIFEST (`LEANR_SWEEP_MANIFEST_OUT`): its
+      spec, how much it swept, and which committed pass-list entries it
+      observed present on disk. That last one is the merge job's only
+      existence oracle — merge has no Mathlib tree, and must not grow one:
+      mathlib4's git tree does not contain the lake-materialized
+      `.lake/packages/`, where every pass-list entry currently lives, so a
+      filesystem test there would call every true parse regression an
+      upstream deletion and reconcile it out of the baseline while
+      reporting zero regressions.
     - The merge job refuses to run unless all 12 shard artifacts are
       present. A partial union would report every import set in a missing
       shard as a parse regression, or silently drop those entries from the
-      rewritten pass-list.
+      rewritten pass-list. It validates the manifests as a SET — exactly
+      one per shard `1..=N`, none of them vacuous — because a count alone
+      cannot tell 12 manifests from "shard 7 twice, shard 4 missing", and
+      because a shard that swept 0 import sets (e.g. an empty
+      `LEANR_OLEAN_PATH`) exits 0 with an empty green list that no
+      count-based guard can distinguish from a mass regression.
     - A true regression fails the workflow. Otherwise a changed pass-list
       is proposed as a PR on the stable `nightly/mathlib-passlist` branch
       (force-updated nightly, so it is one PR, not one per night) — never
