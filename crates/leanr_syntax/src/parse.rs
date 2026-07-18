@@ -4295,8 +4295,12 @@ fn dispatch_scoped(
     entries
         .iter()
         .filter(|(f, _, ns)| {
-            scope.is_active(&crate::grammar::SpecScope::Scoped(ns.clone()))
-                && first_tok_matches(f, text, kind, suppress_plain_ident)
+            // M3b3 final review (Minor #7): run the allocation-free
+            // first-token test FIRST — it rejects almost every entry — so
+            // the `Scoped(ns.clone())` allocation + `is_active` walk only
+            // runs for the handful whose first token already matched.
+            first_tok_matches(f, text, kind, suppress_plain_ident)
+                && scope.is_active(&crate::grammar::SpecScope::Scoped(ns.clone()))
         })
         .map(|(_, p, _)| p.clone())
         .collect()
