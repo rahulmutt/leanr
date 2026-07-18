@@ -307,3 +307,146 @@ fn dollar_storms_terminate() {
         });
     }
 }
+
+/// M3b3 Task 6: `dollar_storms_terminate`'s idiom (timing bound via
+/// `in_worker`, losslessness) applied to the Task 1-5 scope/activation
+/// machinery — `ScopeStack`'s `namespace`/`section`/`end`/`open`
+/// tracking must stay total (never panic, never hang) under deep
+/// nesting, stray/mismatched `end`s, and `open` storms, and the
+/// quotation-isolation invariant (a `namespace` INSIDE a term
+/// quotation must never touch the scope stack) must hold under a
+/// storm shape too.
+///
+/// Every case here is a CLEAN (`errors.is_empty()`) parse: `namespace`/
+/// `section`/`end`/`open` are unconditional command-loop leading
+/// productions (`command_open.rs`'s `namespace_cmd`/`section_cmd`/
+/// `end_cmd`/`open` family — `end`'s trailing name is `opt(..)`, so
+/// even a completely bare `end` always matches), and `ScopeStack`'s own
+/// updates are total by construction (`scope.rs`'s module doc: "Updates
+/// are TOTAL: arbitrary stray/mismatched `end`s must never panic —
+/// worst case the stack diverges from the oracle's... never a crash");
+/// the M3b3 design spec's own Error-handling section says the same
+/// ("Worst case the stack is wrong and derivations produce
+/// oracle-divergent names... never a crash"). So — unlike
+/// `dollar_storms_terminate`'s depth-0 case, which hits a genuine
+/// GRAMMAR-level rejection (`$` has no top-level production) — there
+/// is no scope-storm shape here that the PARSER itself rejects: a
+/// stray/mismatched `end`/`open` is a semantic (scope-tracking)
+/// no-op, never a syntax error, so this suite pins clean parses
+/// throughout rather than fabricating a non-empty-errors expectation
+/// that the code doesn't (and per the design spec, structurally can't)
+/// produce. See the "stray end storm" case below for the one place
+/// this diverges from the task-6 brief's literal sketch, and the
+/// task-6 report for the concern writeup.
+#[test]
+fn scope_storms_terminate() {
+    for src in [
+        // Deep namespace nesting (400 * 3 = 1200 pushed components)
+        // followed by a BARE `end` storm: bare `end` only pops an
+        // ANONYMOUS `section` (`ScopeStack::end_scope`'s `None` arm),
+        // never a `namespace` component, so every one of the 1200
+        // trailing bare `end`s here is a no-op against the namespace
+        // stack — this pins that a long run of no-op `end_scope(None)`
+        // calls stays linear, not just that it terminates.
+        format!("{}{}", "namespace A.B.C\n".repeat(400), "end\n".repeat(1200)),
+        // end-storm on empty stack ("the stray-end storm" — see the
+        // dedicated pass below for its error-presence pin).
+        "end\n".repeat(2000),
+        // open-storm: 2000 same-name opens, each a cheap `Vec` push
+        // (`ScopeStack::open_namespace`) with no rollback (top level,
+        // no enclosing section) — never a namespace-prefix collision
+        // since there both is and isn't a common name repeated.
+        "open A\n".repeat(2000),
+        // section/namespace interleave with mismatched `end` names:
+        // per-iteration, `end X` is a no-op (the innermost entry is
+        // `section s`, not a `namespace` component matching `X`) while
+        // `end s` pops the section — so `namespace X` never actually
+        // closes and 300 unmatched `Namespace` entries accumulate on
+        // the stack. Exercises the mismatched-suffix-match path
+        // (`end_scope`'s `Some(d)` arm) at volume, not just once
+        // (`mismatched_end_is_total_and_best_effort`'s unit-level
+        // single case).
+        "namespace X\nsection s\nend X\nend s\n".repeat(300),
+    ] {
+        in_worker("scope storm", move || {
+            let snap = leanr_syntax::builtin::snapshot();
+            let r = leanr_syntax::parse_module(&src, &snap);
+            assert_eq!(r.tree.text(), src, "lossless");
+            assert!(
+                r.errors.is_empty(),
+                "scope-tracking is semantic, not syntactic — no scope-storm \
+                 shape should ever produce a parser-level error: {:?}",
+                r.errors
+            );
+        });
+    }
+
+    // "The stray-end storm" (task-6 brief, Step 1's closing
+    // parenthetical): "add an error-presence assertion on the
+    // stray-end storm" — modeled on `dollar_storms_terminate`'s own
+    // depth-0 case, which asserts NON-empty errors for a bare `$`
+    // outside any quotation. Empirically (and per the design spec's
+    // own "never a crash" language quoted above) a stray/mismatched
+    // `end` on an empty `ScopeStack` is a semantic no-op, NOT a parse
+    // error: `end`'s trailing name is optional
+    // (`command_open.rs::end_cmd`), so a bare `end` — or `end` with
+    // any name — always matches its own leading production regardless
+    // of what (if anything) is open. There is no grammar-level
+    // rejection analogous to `$`'s "no top-level production" here to
+    // assert non-empty errors against; asserting non-empty errors on
+    // this input would be false (verified: `r.errors` is empty for
+    // `"end\n".repeat(2000)`). This test therefore pins the actual
+    // (empty) behavior instead of the brief's literal expectation —
+    // flagged as a concern in the task-6 report rather than silently
+    // dropped or fabricated.
+    in_worker("stray end storm — error-presence pin", move || {
+        let snap = leanr_syntax::builtin::snapshot();
+        let src = "end\n".repeat(2000);
+        let r = leanr_syntax::parse_module(&src, &snap);
+        assert_eq!(r.tree.text(), src, "lossless");
+        assert!(
+            r.errors.is_empty(),
+            "a stray-end storm on an empty ScopeStack is a semantic \
+             no-op (scope.rs's own total/best-effort contract), never a \
+             parser-level error: got {:?}",
+            r.errors
+        );
+    });
+
+    // Quotation isolation: `namespace`/`end` INSIDE a term quotation
+    // must never touch `ScopeStack` — the command loop only inspects
+    // the OUTER command's kind (`SCOPE_COMMAND_KINDS`, `parse.rs`), and
+    // this whole command's outer kind is `Lean.Parser.Command.
+    // declaration` (a `def`), never `Lean.Parser.Command.namespace` —
+    // so the quoted `namespace Ghost ... end Ghost` can structurally
+    // never reach `scope_command_update`. The subsequent `syntax
+    // "wobqt" : term` + `#check wobqt` pins this behaviorally: its
+    // derived kind must be the plain unqualified `termWobqt`
+    // (`qualify_kind_name("", "termWobqt")` is the identity on an
+    // empty namespace — `grammar/notation.rs`), never
+    // `Ghost.termWobqt`.
+    in_worker("quotation isolation", move || {
+        let snap = leanr_syntax::builtin::snapshot();
+        let src = "def q := `(namespace Ghost end Ghost)\nsyntax \"wobqt\" : term\n\
+                   #check wobqt\n";
+        let r = leanr_syntax::parse_module(src, &snap);
+        assert_eq!(r.tree.text(), src, "lossless");
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        let kinds = r.tree.kinds.clone();
+        assert!(
+            r.tree
+                .root()
+                .descendants()
+                .any(|n| kinds.name(n.kind()) == "termWobqt"),
+            "expected the unqualified derived kind `termWobqt`"
+        );
+        assert!(
+            !r.tree
+                .root()
+                .descendants()
+                .any(|n| kinds.name(n.kind()).starts_with("Ghost.")),
+            "a `namespace` inside a quotation must not leak into the \
+             derived kind of a later top-level `syntax` command"
+        );
+    });
+}

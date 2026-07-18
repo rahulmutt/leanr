@@ -5683,6 +5683,64 @@ mod tests {
         );
     }
 
+    /// M3b3 Task 6 (DRAFT-semantics pin; ledger entry from the Task 4
+    /// report: "`local` deactivation predicate is unpinned (no
+    /// fixture) — DRAFT `>=`; Task 6 should add a storm/fixture that
+    /// uses a `local` after its scope pops"): `SpecScope::Local`'s
+    /// `is_active` predicate (`scope.rs`) is `scope_len() >= scope_len`
+    /// — a check purely on DEPTH, not on whether the CURRENT scope is
+    /// the SAME one that declared the `local`. So a `local syntax`
+    /// declared inside one `section`, whose section then closes
+    /// (dropping `scope_len` below the declaring depth), followed by an
+    /// UNRELATED section reaching the SAME depth, RE-ACTIVATES under
+    /// the current predicate — even though the unrelated section has
+    /// nothing to do with the declaring one.
+    ///
+    /// Per the task-6 brief this is intentionally NOT changed here —
+    /// only pinned, so any future change to the predicate is
+    /// deliberate.
+    ///
+    /// Oracle probe (throwaway, NOT a committed fixture — the brief:
+    /// "fixture commitment for it belongs to a later decision, not
+    /// this task"): running this exact source through
+    /// `dump_syntax_elab.lean` (the real Lean toolchain pinned by
+    /// `lean-toolchain`) shows `#check wobreentry` inside `section B`
+    /// dumping a plain `{"i":"wobreentry",...}` IDENT — i.e. the ORACLE
+    /// does NOT re-activate on unrelated re-entry to the same depth
+    /// (real Lean's scope tracking is keyed on the scope itself, not
+    /// merely its depth). So this crate's `>=` predicate is a KNOWN
+    /// semantic divergence from the oracle — recorded here for a
+    /// future task to pick up, not fixed in this one.
+    #[test]
+    fn local_reactivates_on_unrelated_reentry_to_the_same_depth_draft_semantics() {
+        let snap = crate::builtin::snapshot();
+        let src = "section A\nlocal syntax \"wobreentry\" : term\n\
+                   macro_rules | `(wobreentry) => `(99)\n#check wobreentry\nend A\n\
+                   section B\n#check wobreentry\nend B\n";
+        let r = crate::parse_module(src, &snap);
+        assert_eq!(r.tree.text(), src, "lossless");
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        let kinds = r.tree.kinds.clone();
+        let checks: Vec<_> = r
+            .tree
+            .root()
+            .children()
+            .filter(|n| kinds.name(n.kind()) == "Lean.Parser.Command.check")
+            .collect();
+        assert_eq!(checks.len(), 2, "expected exactly two #check commands");
+        for (i, chk) in checks.iter().enumerate() {
+            assert!(
+                chk.descendants()
+                    .any(|d| kinds.name(d.kind()) == "_private.0.termWobreentry"),
+                "check #{i}: DRAFT current predicate (`scope_len() >= \
+                 scope_len`) re-activates the private production even in \
+                 the unrelated section B — the oracle disagrees (plain \
+                 ident; see this test's doc comment) — pinning what \
+                 exists, not fixing it, per the task-6 brief"
+            );
+        }
+    }
+
     /// M3b1 Task 9 Step 1: a malformed `infixl` (missing the mandatory
     /// `=> rhs` tail) must register NOTHING — the overlay stays
     /// unmutated — and the command loop must resync cleanly so the
