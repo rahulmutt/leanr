@@ -207,21 +207,48 @@ description = "Kernel-check all of pinned Mathlib in parallel (needs mathlib:fet
 depends = ["elan:bootstrap"]
 run = "sh -c 'LEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo run --release -p leanr_cli -- check --all'"
 
-[tasks."parse:mathlib"]
-description = "M3b2a Mathlib parse sweep vs the pass-list ratchet (needs mathlib:fetch). LEANR_SWEEP_LIMIT=N for a smoke run. Snapshot build + sweep are streamed per import set (no barrier, no accumulated snapshots) and run in parallel via rayon; set RAYON_NUM_THREADS=N to cap worker threads (e.g. under memory pressure from parallel oracle `lean` subprocesses)."
-depends = ["elan:bootstrap"]
-run = "sh -c 'LEANR_MATHLIB_DIR=\"$PWD/.mathlib\" LEANR_OLEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo test --release -p leanr_grammar --test mathlib_sweep -- --ignored --nocapture'"
-
-[tasks."passlist:update"]
-description = "Rewrite tests/fixtures/syntax/mathlib-passlist.txt from a fresh sweep (review the diff before committing)"
+[tasks."parse:mathlib:fast"]
+description = "Fast regression gate: exact sweep over ONLY the committed pass-list (23 entries; needs mathlib:fetch). No corpus walk, no olean closure decode outside the pass-list's own import sets — this is the one to run in the dev loop. Gating is total: any pass-list entry that doesn't parse oracle-green, or whose file is missing, fails the run."
 depends = ["elan:bootstrap"]
 # LEANR_SWEEP_LIMIT="" neutralizes any smoke-run limit leaked in from the
-# calling shell's environment (e.g. a prior `LEANR_SWEEP_LIMIT=N mise run
-# parse:mathlib` smoke check): mathlib_sweep.rs parses it via
-# `.and_then(|s| s.parse().ok())`, so an empty string fails to parse →
-# None → unwrap_or(usize::MAX), i.e. unlimited. A leaked non-empty limit
-# here would silently truncate the pass-list this task writes.
-run = "sh -c 'LEANR_SWEEP_LIMIT=\"\" LEANR_PASSLIST_UPDATE=1 LEANR_MATHLIB_DIR=\"$PWD/.mathlib\" LEANR_OLEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo test --release -p leanr_grammar --test mathlib_sweep -- --ignored --nocapture'"
+# calling shell's environment; passlist-only mode ignores it regardless
+# (see mathlib_sweep.rs), but pinning it empty here keeps the invariant
+# explicit rather than incidental.
+run = "sh -c 'LEANR_SWEEP_LIMIT=\"\" LEANR_SWEEP_PASSLIST_ONLY=1 LEANR_MATHLIB_DIR=\"$PWD/.mathlib\" LEANR_OLEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo test --release -p leanr_grammar --test mathlib_sweep -- --ignored --nocapture'"
+
+[tasks."parse:mathlib"]
+description = "HEAVYWEIGHT/NIGHTLY tier — full Mathlib parse sweep vs the pass-list ratchet (needs mathlib:fetch). Walks the whole corpus and decodes an olean closure per distinct import set (~8,221 sets): ~35h at RAYON_NUM_THREADS=5 on 8 effective cores, dominated by closure decode, not the oracle. Do NOT run this in the dev loop — use parse:mathlib:fast for that. LEANR_SWEEP_LIMIT=N for a smoke run. Snapshot build + sweep are streamed per import set (no barrier, no accumulated snapshots) and run in parallel via rayon; set RAYON_NUM_THREADS=N to cap worker threads (e.g. under memory pressure from parallel oracle `lean` subprocesses)."
+depends = ["elan:bootstrap"]
+# LEANR_SWEEP_PASSLIST_ONLY="" neutralizes a leaked passlist-only flag from
+# the calling shell's environment: with it left set, this "full 8,221-set
+# gate" task would silently run as the 23-entry passlist-only sweep instead
+# (exits 0 in ~2min while advertising the full gate). See the matching
+# comment on passlist:update below for the identical LEANR_SWEEP_LIMIT
+# rationale (M3b2a leak-hardening).
+run = "sh -c 'LEANR_SWEEP_PASSLIST_ONLY=\"\" LEANR_MATHLIB_DIR=\"$PWD/.mathlib\" LEANR_OLEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo test --release -p leanr_grammar --test mathlib_sweep -- --ignored --nocapture'"
+
+[tasks."passlist:update"]
+description = "HEAVYWEIGHT/NIGHTLY tier — full sweep that gates the regression check FIRST and only then rewrites tests/fixtures/syntax/mathlib-passlist.txt (never re-baselines over a regression; review the diff before committing). Same ~35h cost as parse:mathlib (it IS parse:mathlib plus the rewrite); do NOT run this in the dev loop. This is also the single task `parse:mathlib:nightly` runs — one full sweep serves as both gate and write."
+depends = ["elan:bootstrap"]
+# LEANR_SWEEP_LIMIT="" and LEANR_SWEEP_PASSLIST_ONLY="" both neutralize a
+# leaked env var from the calling shell (e.g. a prior `LEANR_SWEEP_LIMIT=N
+# mise run parse:mathlib` smoke check, or a prior `parse:mathlib:fast` dev
+# loop run): mathlib_sweep.rs parses LEANR_SWEEP_LIMIT via
+# `.and_then(|s| s.parse().ok())`, so an empty string fails to parse → None
+# → unwrap_or(usize::MAX), i.e. unlimited; LEANR_SWEEP_PASSLIST_ONLY="" is
+# not "1", so passlist-only mode is off. A leaked non-empty LIMIT would
+# silently truncate the pass-list this task writes; a leaked
+# LEANR_SWEEP_PASSLIST_ONLY=1 would make this rewrite from only the 23
+# already-committed entries, freezing growth and (per the mutual-exclusion
+# assertion in mathlib_sweep.rs) failing outright once LEANR_PASSLIST_UPDATE=1
+# is also set — either way, pin both empty rather than rely on incidental
+# environment hygiene.
+run = "sh -c 'LEANR_SWEEP_LIMIT=\"\" LEANR_SWEEP_PASSLIST_ONLY=\"\" LEANR_PASSLIST_UPDATE=1 LEANR_MATHLIB_DIR=\"$PWD/.mathlib\" LEANR_OLEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo test --release -p leanr_grammar --test mathlib_sweep -- --ignored --nocapture'"
+
+[tasks."parse:mathlib:nightly"]
+description = "HEAVYWEIGHT/NIGHTLY tier — ONE full sweep that both gates and rewrites: mathlib_sweep.rs runs the regression check before the pass-list rewrite, so a regression fails before the baseline is touched (never re-baseline over a regression). Emits the pass-list growth delta (entries before vs after) to stdout. ~35h total (a single full sweep, not full-gate-then-full-rewrite — that would be ~70h and cannot fit a daily cron). Wrapped for cron by scripts/nightly-sweep.sh."
+depends = ["elan:bootstrap"]
+run = "sh -c 'before_file=$(mktemp -t leanr-passlist-before.XXXXXX); grep -cv \"^#\" tests/fixtures/syntax/mathlib-passlist.txt > \"$before_file\" || echo 0 > \"$before_file\"; if mise run passlist:update; then before=$(cat \"$before_file\"); after=$(grep -cv \"^#\" tests/fixtures/syntax/mathlib-passlist.txt); rm -f \"$before_file\"; echo \"[nightly] pass-list growth: $before -> $after entries ($((after - before)) new)\"; else rc=$?; rm -f \"$before_file\"; exit $rc; fi'"
 
 [tasks."build:differential"]
 description = "M2 differential oracles vs pinned lake: M2a bridge/import/module-set + M2b probe-project artifact byte-diff (needs mathlib:fetch + elan)"
