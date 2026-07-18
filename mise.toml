@@ -246,9 +246,44 @@ depends = ["elan:bootstrap"]
 run = "sh -c 'LEANR_SWEEP_LIMIT=\"\" LEANR_SWEEP_PASSLIST_ONLY=\"\" LEANR_PASSLIST_UPDATE=1 LEANR_MATHLIB_DIR=\"$PWD/.mathlib\" LEANR_OLEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo test --release -p leanr_grammar --test mathlib_sweep -- --ignored --nocapture'"
 
 [tasks."parse:mathlib:nightly"]
-description = "HEAVYWEIGHT/NIGHTLY tier — ONE full sweep that both gates and rewrites: mathlib_sweep.rs runs the regression check before the pass-list rewrite, so a regression fails before the baseline is touched (never re-baseline over a regression). Emits the pass-list growth delta (entries before vs after) to stdout. ~35h total (a single full sweep, not full-gate-then-full-rewrite — that would be ~70h and cannot fit a daily cron). Wrapped for cron by scripts/nightly-sweep.sh."
+description = "HEAVYWEIGHT/NIGHTLY tier — ONE full sweep that both gates and rewrites: mathlib_sweep.rs runs the regression check before the pass-list rewrite, so a regression fails before the baseline is touched (never re-baseline over a regression). Emits the pass-list growth delta (entries before vs after) to stdout. ~35h total (a single full sweep, not full-gate-then-full-rewrite — that would be ~70h and cannot fit a nightly). This is the UNSHARDED sweep: the scheduled nightly is .github/workflows/nightly-sweep.yml, which shards this same work across 12 CI jobs via parse:mathlib:shard + parse:mathlib:merge. Run this one by hand on a big local box (scripts/nightly-sweep.sh wraps it in a memory watchdog + flock); nothing schedules it."
 depends = ["elan:bootstrap"]
 run = "sh -c 'before_file=$(mktemp -t leanr-passlist-before.XXXXXX); grep -cv \"^#\" tests/fixtures/syntax/mathlib-passlist.txt > \"$before_file\" || echo 0 > \"$before_file\"; if mise run passlist:update; then before=$(cat \"$before_file\"); after=$(grep -cv \"^#\" tests/fixtures/syntax/mathlib-passlist.txt); rm -f \"$before_file\"; echo \"[nightly] pass-list growth: $before -> $after entries ($((after - before)) new)\"; else rc=$?; rm -f \"$before_file\"; exit $rc; fi'"
+
+[tasks."parse:mathlib:shard"]
+description = "One shard of the sharded nightly (.github/workflows/nightly-sweep.yml): sweeps the import sets with `index % N == I-1` of LEANR_SWEEP_SHARD=I/N, writes its green list to LEANR_SWEEP_GREEN_OUT and its receipt to LEANR_SWEEP_MANIFEST_OUT (both required). Striped, not chunked, because sorted import lists share prefixes and so share decode cost. A shard NEVER gates — it sees 1/N of the sets, so a pass-list entry in another shard's slice would look like a regression; only parse:mathlib:merge gates, over the union. The manifest is how the merge job — which has no Mathlib tree — learns which pass-list entries still exist upstream, and how much this shard actually swept. Set RAYON_NUM_THREADS (CI uses 3, ~1.7GB/thread observed)."
+depends = ["elan:bootstrap"]
+# LEANR_SWEEP_PASSLIST_ONLY/LEANR_PASSLIST_UPDATE are pinned empty for the
+# same leak-hardening reason as parse:mathlib/passlist:update below; here
+# mathlib_sweep.rs would reject either combination outright, so this turns a
+# leaked env var from a hard failure into a no-op. LEANR_SWEEP_SHARD,
+# LEANR_SWEEP_GREEN_OUT, LEANR_SWEEP_MANIFEST_OUT and LEANR_SWEEP_LIMIT come
+# from the caller and are deliberately passed through.
+#
+# LEANR_SWEEP_LIMIT is the deliberate ASYMMETRY with the sibling heavyweight
+# tasks (parse:mathlib, passlist:update, parse:mathlib:fast), which all pin
+# it empty: a shard is the one place a smoke run is useful (sharded runs at
+# a small LIMIT are how the shard/merge plumbing is exercised without ~35h
+# of sweep), so it is passed through rather than neutralized. The cost of
+# that choice: a LIMIT leaked in from the calling shell silently SHRINKS
+# this shard's slice — the corpus walk is truncated before it is striped —
+# so the shard emits a smaller green list that merge cannot distinguish from
+# "these files stopped parsing". Nothing but the caller's environment
+# hygiene prevents that here; CI never sets it.
+run = "sh -c 'LEANR_SWEEP_PASSLIST_ONLY=\"\" LEANR_PASSLIST_UPDATE=\"\" LEANR_SWEEP_MERGE=\"\" LEANR_MATHLIB_DIR=\"$PWD/.mathlib\" LEANR_OLEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo test --release -p leanr_grammar --test mathlib_sweep -- --ignored --nocapture'"
+
+[tasks."parse:mathlib:merge"]
+description = "Second half of the sharded nightly: unions every *.txt green list in LEANR_SWEEP_MERGE=<dir>, validates the shards' *.manifest receipts in the same dir (exactly one per shard 1..=N, none vacuous), and runs the SAME gate + reconcile + pass-list rewrite that passlist:update runs over that union — so sharding changes only where the parsing happens, never what is gated. Parses nothing (seconds, no LEANR_OLEAN_PATH, no toolchain) and needs NO Mathlib tree at all: the reconcile step's \"does this entry still exist upstream?\" oracle is the union of the manifests, not a local filesystem test. Fails on a true regression; emits the growth delta otherwise."
+# No `depends = ["elan:bootstrap"]`: merge decodes no oleans and runs no
+# oracle, so it needs neither lean nor lake. No LEANR_MATHLIB_DIR either, and
+# that is a correctness requirement rather than a saving: the merge job's
+# checkout of mathlib4 does NOT contain `.lake/packages/` (lake materializes
+# it), where most pass-list entries live, so a filesystem existence test here
+# would call every true regression an upstream deletion and reconcile it out
+# of the baseline while reporting zero regressions. The shards, which do have
+# the full tree, record what they saw; merge trusts only that. It is pinned
+# empty so a leaked LEANR_MATHLIB_DIR cannot resurrect that path.
+run = "sh -c 'LEANR_SWEEP_LIMIT=\"\" LEANR_SWEEP_PASSLIST_ONLY=\"\" LEANR_SWEEP_SHARD=\"\" LEANR_SWEEP_GREEN_OUT=\"\" LEANR_SWEEP_MANIFEST_OUT=\"\" LEANR_MATHLIB_DIR=\"\" cargo test --release -p leanr_grammar --test mathlib_sweep -- --ignored --nocapture'"
 
 [tasks."build:differential"]
 description = "M2 differential oracles vs pinned lake: M2a bridge/import/module-set + M2b probe-project artifact byte-diff (needs mathlib:fetch + elan)"
