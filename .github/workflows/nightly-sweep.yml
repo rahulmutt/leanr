@@ -136,12 +136,23 @@ jobs:
   merge:
     name: merge + gate
     needs: sweep
-    # `always()`, because the whole point is to report on a run where a
-    # shard failed — but the artifact-count check below then refuses to
-    # merge the partial union.
-    if: always()
+    # `!cancelled()`, because the whole point is to report on a run where a
+    # shard FAILED — but the artifact-count check below then refuses to merge
+    # the partial union. `always()` would also run this on a CANCELLED
+    # workflow, where it can only fail noisily at the artifact download or
+    # the count check and page someone about a run a human already stopped.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Cold `cargo build --release` of the sweep test binary is the whole
+    # budget here: this job does no Mathlib fetch, no olean decode and no
+    # oracle run (merge unions text files and gates — seconds). The repo
+    # carries no cargo cache anywhere (see ci.yml), so this build is cold
+    # every night at ~10-15 min for this workspace; 90 keeps a >4x margin
+    # over the measured cost rather than the ~1x that 60 would leave if the
+    # dependency graph grows. Raise, don't cache: a cargo cache here would
+    # add a third-party action and a cross-job cache key to a job whose
+    # correctness is the point and whose runtime is not.
+    timeout-minutes: 90
     steps:
       # fetch-depth: 0 — this job pushes the re-baseline branch, and GitHub
       # rejects pushes from a shallow clone.

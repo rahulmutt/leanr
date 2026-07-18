@@ -259,6 +259,17 @@ depends = ["elan:bootstrap"]
 # leaked env var from a hard failure into a no-op. LEANR_SWEEP_SHARD,
 # LEANR_SWEEP_GREEN_OUT, LEANR_SWEEP_MANIFEST_OUT and LEANR_SWEEP_LIMIT come
 # from the caller and are deliberately passed through.
+#
+# LEANR_SWEEP_LIMIT is the deliberate ASYMMETRY with the sibling heavyweight
+# tasks (parse:mathlib, passlist:update, parse:mathlib:fast), which all pin
+# it empty: a shard is the one place a smoke run is useful (sharded runs at
+# a small LIMIT are how the shard/merge plumbing is exercised without ~35h
+# of sweep), so it is passed through rather than neutralized. The cost of
+# that choice: a LIMIT leaked in from the calling shell silently SHRINKS
+# this shard's slice — the corpus walk is truncated before it is striped —
+# so the shard emits a smaller green list that merge cannot distinguish from
+# "these files stopped parsing". Nothing but the caller's environment
+# hygiene prevents that here; CI never sets it.
 run = "sh -c 'LEANR_SWEEP_PASSLIST_ONLY=\"\" LEANR_PASSLIST_UPDATE=\"\" LEANR_SWEEP_MERGE=\"\" LEANR_MATHLIB_DIR=\"$PWD/.mathlib\" LEANR_OLEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo test --release -p leanr_grammar --test mathlib_sweep -- --ignored --nocapture'"
 
 [tasks."parse:mathlib:merge"]
