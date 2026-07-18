@@ -4727,6 +4727,31 @@ mod tests {
     }
 
     #[test]
+    fn without_position_clears_the_position_marker() {
+        let mut b = SnapshotBuilder::new();
+        b.category("c", LeadingIdentBehavior::Default);
+        // "block" = 'do' then many1 idents, each WITHOUT saved position; CheckColGt
+        // sees empty stack (cleared by WithoutPosition) and passes unconditionally.
+        b.leading2(
+            "c",
+            "block",
+            MAX_PREC,
+            Prim::WithPosition(Arc::new(seq([
+                sym("do"),
+                many1(Prim::WithoutPosition(Arc::new(seq([
+                    Prim::CheckColGt,
+                    Prim::Ident,
+                ])))),
+            ]))),
+        );
+        let snap = b.finish();
+        // Even though `b` is at column 0, WithoutPosition clears the position marker,
+        // so CheckColGt passes; both `a` and `b` are accepted.
+        // Regression to `self.run(q)` instead of `std::mem::take` would fail this test.
+        assert_eq!(parse_cat(&snap, "do a\nb"), "(block 'do' (null a b))");
+    }
+
+    #[test]
     fn snapshot_fingerprint_is_stable_and_grammar_sensitive() {
         let s1 = arith_snapshot();
         let s2 = arith_snapshot();
