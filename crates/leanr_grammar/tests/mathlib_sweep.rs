@@ -58,10 +58,31 @@ fn mathlib_sweep_ratchet() {
     .expect("oracle-githash.txt (mise run fixtures:regen)")
     .trim()
     .to_string();
-    let limit: usize = std::env::var("LEANR_SWEEP_LIMIT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(usize::MAX);
+
+    let passlist_only = std::env::var("LEANR_SWEEP_PASSLIST_ONLY").as_deref() == Ok("1");
+    let passlist_update = std::env::var("LEANR_PASSLIST_UPDATE").as_deref() == Ok("1");
+    // Rewriting the pass-list from a run that only swept the pass-list would
+    // freeze growth forever (no new file is ever discovered) and would
+    // silently DROP any entry that regressed (a file not swept this run
+    // can't land in `green`, so it would just quietly disappear from the
+    // rewritten list instead of failing the gate). Make that footgun
+    // impossible rather than documenting it away.
+    assert!(
+        !(passlist_only && passlist_update),
+        "LEANR_SWEEP_PASSLIST_ONLY=1 with LEANR_PASSLIST_UPDATE=1 is rejected: rewriting the \
+         pass-list from a pass-list-only run would freeze growth and could silently drop a \
+         regressed entry. Use `mise run passlist:update` (full sweep) to rewrite the pass-list."
+    );
+
+    // Read the committed pass-list once, up front: passlist-only mode needs
+    // it to build the swept file set (instead of walking the corpus), and
+    // every mode needs it for the final gating check.
+    let committed: BTreeSet<String> = std::fs::read_to_string(passlist_path())
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(String::from)
+        .collect();
 
     let roots: Vec<PathBuf> = lean_path
         .split(':')
@@ -70,18 +91,62 @@ fn mathlib_sweep_ratchet() {
         .collect();
     let sp = SearchPath::new(roots);
 
-    // Enumerate: Mathlib/**/*.lean + each package's source tree.
-    let mut files: Vec<PathBuf> = Vec::new();
-    collect_lean_files(&mathlib.join("Mathlib"), &mut files);
-    if let Ok(pkgs) = std::fs::read_dir(mathlib.join(".lake/packages")) {
-        for p in pkgs.flatten() {
-            collect_lean_files(&p.path(), &mut files);
+    // Three modes, each with distinct gating semantics (see the regression
+    // check below, which reads `truncated`):
+    //   - bounded (LEANR_SWEEP_LIMIT=N): `files` is a truncated prefix of the
+    //     sorted corpus walk; only pass-list entries actually swept this run
+    //     are gated (`truncated = true`) — entries outside the prefix are
+    //     neither green nor regressed, just not exercised.
+    //   - full (no limit, not passlist-only): `files` is the whole corpus
+    //     walk; `truncated = false`, so every committed entry is gated,
+    //     including one whose file no longer exists on disk (it simply can't
+    //     appear in `green`, so it reports as a regression).
+    //   - passlist-only (LEANR_SWEEP_PASSLIST_ONLY=1): `files` is built
+    //     directly from the committed pass-list, skipping the corpus walk
+    //     entirely — no wasted directory I/O and, crucially, no olean
+    //     closure decode for any import set no pass-list file uses.
+    //     LEANR_SWEEP_LIMIT is ignored here (gating must stay total over the
+    //     pass-list); `truncated = false` unconditionally, so this can never
+    //     be silently downgraded to bounded-run semantics. A pass-list entry
+    //     missing on disk is a loud, distinct failure (not folded into
+    //     "regressions") — a deleted/renamed file must force a conscious
+    //     `passlist:update`, not a quiet gate pass.
+    let (files, truncated): (Vec<PathBuf>, bool) = if passlist_only {
+        let mut resolved = Vec::with_capacity(committed.len());
+        let mut missing = Vec::new();
+        for rel in &committed {
+            let p = mathlib.join(rel);
+            if p.is_file() {
+                resolved.push(p);
+            } else {
+                missing.push(rel.clone());
+            }
         }
-    }
-    files.sort();
-    let total = files.len();
-    files.truncate(limit);
-    let truncated = files.len() < total;
+        assert!(
+            missing.is_empty(),
+            "pass-list entries missing on disk (deleted/renamed — this is NOT a parse \
+             regression, it needs a conscious `mise run passlist:update`): {missing:#?}"
+        );
+        (resolved, false)
+    } else {
+        let limit: usize = std::env::var("LEANR_SWEEP_LIMIT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(usize::MAX);
+        // Enumerate: Mathlib/**/*.lean + each package's source tree.
+        let mut files: Vec<PathBuf> = Vec::new();
+        collect_lean_files(&mathlib.join("Mathlib"), &mut files);
+        if let Ok(pkgs) = std::fs::read_dir(mathlib.join(".lake/packages")) {
+            for p in pkgs.flatten() {
+                collect_lean_files(&p.path(), &mut files);
+            }
+        }
+        files.sort();
+        let total = files.len();
+        files.truncate(limit);
+        let truncated = files.len() < total;
+        (files, truncated)
+    };
 
     let rel_of = |file: &Path| -> String {
         file.strip_prefix(&mathlib)
@@ -92,7 +157,8 @@ fn mathlib_sweep_ratchet() {
 
     // The set of pass-list entries actually exercised this run — under a
     // bounded LEANR_SWEEP_LIMIT, files outside this set are neither green
-    // nor regressed; they simply weren't swept.
+    // nor regressed; they simply weren't swept. In full and passlist-only
+    // modes this is a no-op distinction since `truncated` is false.
     let swept: BTreeSet<String> = files.iter().map(|f| rel_of(f)).collect();
 
     // Group files by import list (sorted by `Vec<String>` order via
@@ -189,26 +255,27 @@ fn mathlib_sweep_ratchet() {
         })
         .collect();
 
-    let committed: BTreeSet<String> = std::fs::read_to_string(passlist_path())
-        .unwrap_or_default()
-        .lines()
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(String::from)
-        .collect();
-
-    // Full runs (no LEANR_SWEEP_LIMIT truncation) gate the whole committed
-    // list — a deleted/renamed/typo'd pass-list entry fails loudly, forcing
-    // a conscious passlist:update. Truncated runs only gate entries actually
-    // swept this run; entries outside the swept prefix are neither green nor
-    // regressed.
+    // Full and passlist-only runs (both `!truncated`) gate the whole
+    // committed list — a deleted/renamed/typo'd pass-list entry fails
+    // loudly (in passlist-only mode, even louder: the `missing` check above
+    // already aborted before the sweep ran). Bounded runs only gate entries
+    // actually swept this run; entries outside the swept prefix are neither
+    // green nor regressed.
     let committed_swept = committed.iter().filter(|f| swept.contains(*f)).count();
     let regressions: Vec<_> = committed
         .iter()
         .filter(|f| (!truncated || swept.contains(*f)) && !green.contains(*f))
         .collect();
     let newly_green: Vec<_> = green.iter().filter(|f| !committed.contains(*f)).collect();
+    let mode = if passlist_only {
+        "passlist-only"
+    } else if truncated {
+        "bounded"
+    } else {
+        "full"
+    };
     eprintln!(
-        "sweep: {} files, {} green, {} on pass-list, {}/{} pass-list entries swept, {} regressions, {} newly green",
+        "sweep[{mode}]: {} files, {} green, {} on pass-list, {}/{} pass-list entries swept, {} regressions, {} newly green",
         files.len(),
         green.len(),
         committed.len(),
@@ -218,7 +285,7 @@ fn mathlib_sweep_ratchet() {
         newly_green.len()
     );
 
-    if std::env::var("LEANR_PASSLIST_UPDATE").as_deref() == Ok("1") {
+    if passlist_update {
         let mut out = String::from(
             "# Mathlib-closure files that parse oracle-green (M3b2a ratchet).\n\
              # Regenerate: mise run passlist:update. NEVER hand-edit to hide a regression.\n",
