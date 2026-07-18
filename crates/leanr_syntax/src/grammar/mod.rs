@@ -49,14 +49,16 @@ pub enum SpecScope {
     /// derives `Scoped("Widgsc")`, active under `namespace Widgsc`,
     /// `open Widgsc`, and `namespace Widgsc.Inner`).
     Scoped(String),
-    /// `local` — active while at least `scope_len` scope entries remain
-    /// (deactivates when its declaring scope pops). `scope_len` is the
-    /// `ScopeStack::scope_len()` captured at the declaration site.
-    /// DRAFT semantics for the DEACTIVATION edge (no Task-4 fixture
-    /// forces a `local` use after its scope pops — every `StxLocal.lean`
-    /// use is in-scope); the `>=` predicate is the brief's draft, kept
-    /// until a storm/fixture (Task 6) pins it harder.
-    Local { scope_len: usize },
+    /// `local` — active while the exact scope entry that declared it is
+    /// still live. `anchor` is the id of the INNERMOST scope entry at the
+    /// declaration site (`ScopeStack::innermost_id()`), or `None` when
+    /// declared at top level (active for the rest of the file). M3b3
+    /// Task 6b replaced the earlier `scope_len` depth capture: keying on
+    /// a never-reused entry id (not depth) matches the oracle, which does
+    /// NOT re-activate a popped `local` when an unrelated later scope
+    /// reaches the same depth (`StxLocalInactive.lean`; the
+    /// `local_activation_anchors_to_its_declaring_scope` pin test).
+    Local { anchor: Option<u64> },
 }
 
 #[derive(Clone, Debug)]

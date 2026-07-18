@@ -17,8 +17,11 @@ use crate::lex::TokenTable;
 
 /// M3b3 Task 4: deterministic byte encoding of an entry's activation
 /// tag into the overlay fingerprint (`fingerprint_into`): `\x00` for
-/// `Global`, `\x01 ++ ns ++ \0` for `Scoped`, `\x02 ++ scope_len` for
-/// `Local`. Distinct lead bytes keep the three cases unambiguous.
+/// `Global`, `\x01 ++ ns ++ \0` for `Scoped`, `\x02 ++ anchor` for
+/// `Local` (M3b3 Task 6b: the anchor sub-encodes as `\x00` for `None`
+/// or `\x01 ++ id` for `Some(id)`). Distinct lead bytes keep the cases
+/// unambiguous. Ids are deterministic per input (assigned in scope-push
+/// order), so fingerprints stay reproducible.
 fn encode_spec_scope(scope: &SpecScope, h: &mut blake3::Hasher) {
     match scope {
         SpecScope::Global => h.update(b"\x00"),
@@ -27,9 +30,15 @@ fn encode_spec_scope(scope: &SpecScope, h: &mut blake3::Hasher) {
             h.update(ns.as_bytes());
             h.update(b"\0")
         }
-        SpecScope::Local { scope_len } => {
+        SpecScope::Local { anchor } => {
             h.update(b"\x02");
-            h.update(&(*scope_len as u64).to_le_bytes())
+            match anchor {
+                None => h.update(b"\x00"),
+                Some(id) => {
+                    h.update(b"\x01");
+                    h.update(&id.to_le_bytes())
+                }
+            }
         }
     };
 }
@@ -482,7 +491,7 @@ mod tests {
         };
         let g = fp(SpecScope::Global);
         let s = fp(SpecScope::Scoped("Widg".into()));
-        let l = fp(SpecScope::Local { scope_len: 1 });
+        let l = fp(SpecScope::Local { anchor: Some(1) });
         assert_ne!(g, s, "Global vs Scoped must differ");
         assert_ne!(g, l, "Global vs Local must differ");
         assert_ne!(s, l, "Scoped vs Local must differ");
@@ -491,6 +500,19 @@ mod tests {
             fp(SpecScope::Scoped("Widg".into())),
             fp(SpecScope::Scoped("Other".into())),
             "Scoped namespace must participate in the fingerprint"
+        );
+        // M3b3 Task 6b: the `Local` anchor participates too — a
+        // top-level (`None`) local and one anchored to a scope entry
+        // must fingerprint differently, as must two distinct anchor ids.
+        assert_ne!(
+            fp(SpecScope::Local { anchor: None }),
+            fp(SpecScope::Local { anchor: Some(1) }),
+            "Local anchor None vs Some must differ"
+        );
+        assert_ne!(
+            fp(SpecScope::Local { anchor: Some(1) }),
+            fp(SpecScope::Local { anchor: Some(2) }),
+            "distinct Local anchor ids must differ"
         );
     }
 

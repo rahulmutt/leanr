@@ -140,26 +140,28 @@ use super::{LeadingIdentBehavior, Prim, SpecScope, LEAD_PREC, MAX_PREC};
 /// &str` third parameter Task 2 added. Carries the two facts a producer
 /// needs to name AND scope a same-file declaration: the current
 /// namespace (for `stxNodeKind := currNamespace ++ name` and for a
-/// `scoped` entry's activation namespace) and the current scope depth
-/// (for a `local` entry's `SpecScope::Local { scope_len }`). A small
+/// `scoped` entry's activation namespace) and the innermost scope
+/// entry's id (for a `local` entry's `SpecScope::Local { anchor }` —
+/// M3b3 Task 6b, replacing Task 4's `scope_len` depth). A small
 /// borrow-only struct rather than a fourth positional argument, per the
 /// brief.
 #[derive(Clone, Copy, Debug)]
 pub struct NamingCtx<'a> {
     pub current_ns: &'a str,
-    pub scope_len: usize,
+    pub anchor: Option<u64>,
 }
 
 impl NamingCtx<'_> {
     /// Top-level context (no enclosing `namespace`/`section`): empty
-    /// namespace, zero scope depth — the identity for both naming
+    /// namespace, no enclosing scope — the identity for both naming
     /// (`qualify_kind_name`) and activation (`SpecScope::Global`/a
-    /// top-level `Local { scope_len: 0 }`). Used by the notation-
-    /// derivation unit tests, all of which parse at top level.
+    /// top-level `Local { anchor: None }`, always active for the rest of
+    /// the file). Used by the notation-derivation unit tests, all of
+    /// which parse at top level.
     pub fn top_level() -> Self {
         NamingCtx {
             current_ns: "",
-            scope_len: 0,
+            anchor: None,
         }
     }
 }
@@ -429,8 +431,9 @@ pub struct NotationSpec {
     pub body: Prim,
     /// M3b3 Task 4: activation tag — `Global` (plain `syntax`/`notation`,
     /// even inside a `namespace`), `Scoped(ns)` (`scoped`, active iff
-    /// `ns` is in the active set), or `Local { scope_len }` (`local`,
-    /// active while its declaring scope is live). Consulted by
+    /// `ns` is in the active set), or `Local { anchor }` (`local`,
+    /// active while its declaring scope entry is live — M3b3 Task 6b).
+    /// Consulted by
     /// `ScopeStack::is_active` at every overlay read point (`parse.rs`).
     pub scope: SpecScope,
 }
@@ -824,7 +827,7 @@ pub(crate) fn spec_scope_from_attr_kind(
 ) -> SpecScope {
     if is_local_attr_kind(attr_kind_node, kinds) {
         SpecScope::Local {
-            scope_len: ctx.scope_len,
+            anchor: ctx.anchor,
         }
     } else if is_scoped_attr_kind(attr_kind_node, kinds) {
         SpecScope::Scoped(ctx.current_ns.to_string())

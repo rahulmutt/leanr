@@ -219,14 +219,15 @@ fn run_module(mut ps: Ps<'_>, snap: &GrammarSnapshot) -> ParseResult {
                 let subtree = build_tree(ps.src, &cmd_events, cmd_kinds);
                 // M3b3 Task 4: `derive_delta` now needs both the current
                 // namespace (naming + `scoped` activation ns) and the
-                // current scope depth (`local` activation), bundled as
-                // `NamingCtx`. Read BEFORE registration (scope commands
+                // innermost scope entry's id (`local` activation anchor,
+                // M3b3 Task 6b), bundled as `NamingCtx`. Read BEFORE
+                // registration (scope commands
                 // are disjoint from grammar-growing ones, so this
                 // command's own namespace/depth was already recorded by
                 // an earlier scope command — no ordering hazard).
                 let ctx = crate::grammar::NamingCtx {
                     current_ns: ps.scope.current_namespace(),
-                    scope_len: ps.scope.scope_len(),
+                    anchor: ps.scope.innermost_id(),
                 };
                 if let Some(delta) =
                     crate::grammar::notation::derive_delta(&subtree.root(), &subtree.kinds, ctx)
@@ -5683,40 +5684,36 @@ mod tests {
         );
     }
 
-    /// M3b3 Task 6 (DRAFT-semantics pin; ledger entry from the Task 4
-    /// report: "`local` deactivation predicate is unpinned (no
-    /// fixture) — DRAFT `>=`; Task 6 should add a storm/fixture that
-    /// uses a `local` after its scope pops"): `SpecScope::Local`'s
-    /// `is_active` predicate (`scope.rs`) is `scope_len() >= scope_len`
-    /// — a check purely on DEPTH, not on whether the CURRENT scope is
-    /// the SAME one that declared the `local`. So a `local syntax`
-    /// declared inside one `section`, whose section then closes
-    /// (dropping `scope_len` below the declaring depth), followed by an
-    /// UNRELATED section reaching the SAME depth, RE-ACTIVATES under
-    /// the current predicate — even though the unrelated section has
-    /// nothing to do with the declaring one.
+    /// M3b3 Task 6b (fix — was Task 6's DRAFT-semantics pin): a `local`'s
+    /// activation is anchored to the EXACT scope entry that declared it
+    /// (a never-reused id — `SpecScope::Local { anchor }`), NOT to scope
+    /// DEPTH. The old `scope_len() >= scope_len` predicate wrongly
+    /// RE-ACTIVATED a popped `local` whenever any UNRELATED later scope
+    /// reached the same depth. Task 6's oracle probe disproved that:
+    /// running the source below through `dump_syntax_elab.lean` (the real
+    /// Lean toolchain pinned by `lean-toolchain`) shows `#check wobinact`
+    /// inside the unrelated `section B` dumping a PLAIN `{"i":"wobinact",
+    /// ...}` IDENT — real Lean's scope tracking is keyed on the scope
+    /// itself, not merely its depth. That probe is now the committed
+    /// fixture `StxLocalInactive.lean` (+ `.stx.jsonl` dump — the byte
+    /// authority, oracle-compared by `oracle_golden`).
     ///
-    /// Per the task-6 brief this is intentionally NOT changed here —
-    /// only pinned, so any future change to the predicate is
-    /// deliberate.
-    ///
-    /// Oracle probe (throwaway, NOT a committed fixture — the brief:
-    /// "fixture commitment for it belongs to a later decision, not
-    /// this task"): running this exact source through
-    /// `dump_syntax_elab.lean` (the real Lean toolchain pinned by
-    /// `lean-toolchain`) shows `#check wobreentry` inside `section B`
-    /// dumping a plain `{"i":"wobreentry",...}` IDENT — i.e. the ORACLE
-    /// does NOT re-activate on unrelated re-entry to the same depth
-    /// (real Lean's scope tracking is keyed on the scope itself, not
-    /// merely its depth). So this crate's `>=` predicate is a KNOWN
-    /// semantic divergence from the oracle — recorded here for a
-    /// future task to pick up, not fixed in this one.
+    /// This test asserts the CORRECT (oracle-matching) behavior:
+    ///   * inside the declaring `section A`, and in a `section C` nested
+    ///     BELOW the declaration, `wobinact` dispatches the private
+    ///     production `_private.0.termWobinact` — still active;
+    ///   * after `end A`, the unrelated `section B` at the SAME depth
+    ///     does NOT re-activate it: `#check wobinact` is a plain ident,
+    ///     with NO `_private.0.termWobinact` node anywhere under it.
     #[test]
-    fn local_reactivates_on_unrelated_reentry_to_the_same_depth_draft_semantics() {
+    fn local_activation_anchors_to_its_declaring_scope() {
         let snap = crate::builtin::snapshot();
-        let src = "section A\nlocal syntax \"wobreentry\" : term\n\
-                   macro_rules | `(wobreentry) => `(99)\n#check wobreentry\nend A\n\
-                   section B\n#check wobreentry\nend B\n";
+        // Same shape as `StxLocalInactive.lean` (novel symbol), driven
+        // through `parse_module` here for a per-`#check` assertion.
+        let src = "section A\nlocal syntax \"wobinact\" : term\n\
+                   macro_rules | `(wobinact) => `(99)\n\
+                   section C\n#check wobinact\nend C\n#check wobinact\nend A\n\
+                   section B\n#check wobinact\nend B\n";
         let r = crate::parse_module(src, &snap);
         assert_eq!(r.tree.text(), src, "lossless");
         assert!(r.errors.is_empty(), "errs={:?}", r.errors);
@@ -5727,18 +5724,29 @@ mod tests {
             .children()
             .filter(|n| kinds.name(n.kind()) == "Lean.Parser.Command.check")
             .collect();
-        assert_eq!(checks.len(), 2, "expected exactly two #check commands");
-        for (i, chk) in checks.iter().enumerate() {
-            assert!(
-                chk.descendants()
-                    .any(|d| kinds.name(d.kind()) == "_private.0.termWobreentry"),
-                "check #{i}: DRAFT current predicate (`scope_len() >= \
-                 scope_len`) re-activates the private production even in \
-                 the unrelated section B — the oracle disagrees (plain \
-                 ident; see this test's doc comment) — pinning what \
-                 exists, not fixing it, per the task-6 brief"
-            );
-        }
+        assert_eq!(checks.len(), 3, "expected exactly three #check commands");
+        let is_active = |chk: &crate::tree::SyntaxNode| {
+            chk.descendants()
+                .any(|d| kinds.name(d.kind()) == "_private.0.termWobinact")
+        };
+        // #check 0: nested `section C` (below the declaration) — active.
+        assert!(
+            is_active(&checks[0]),
+            "check #0 (nested section C): a local stays active in a scope \
+             nested below its declaration"
+        );
+        // #check 1: back in the declaring `section A` — active.
+        assert!(
+            is_active(&checks[1]),
+            "check #1 (declaring section A): the local is still in force"
+        );
+        // #check 2: unrelated `section B` at the same depth — INACTIVE.
+        assert!(
+            !is_active(&checks[2]),
+            "check #2 (unrelated section B): a popped local must NOT \
+             re-activate on unrelated re-entry to the same depth — the \
+             oracle (StxLocalInactive.stx.jsonl) dumps a plain ident here"
+        );
     }
 
     /// M3b1 Task 9 Step 1: a malformed `infixl` (missing the mandatory

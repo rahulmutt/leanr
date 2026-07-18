@@ -19,19 +19,43 @@ pub(crate) struct ScopeStack {
     /// `open Foo in`-less forms). Snapshot length is recorded by
     /// sections so `end` rolls opens back with their scope.
     opens: Vec<String>,
+    /// M3b3 Task 6b: monotonically increasing, never-reused id source.
+    /// Every pushed entry gets a fresh id from here (see `alloc_id`);
+    /// ids are NEVER recycled, so a popped scope's id can never be
+    /// impersonated by a later, unrelated scope reaching the same depth.
+    /// This is what `SpecScope::Local`'s `anchor` keys on instead of the
+    /// old depth check (`local_reactivates_on_unrelated_reentry...`'s
+    /// oracle probe confirmed real Lean does NOT re-activate by depth).
+    next_id: u64,
 }
 
 #[derive(Debug)]
 enum ScopeEntry {
     /// One dotted component of a `namespace` command; `namespace A.B`
-    /// pushes two. Carries the `opens` length at entry for rollback.
-    Namespace { part: String, opens_len: usize },
+    /// pushes two. Carries the `opens` length at entry for rollback,
+    /// plus its unique `id` (M3b3 Task 6b).
+    Namespace {
+        part: String,
+        opens_len: usize,
+        id: u64,
+    },
     /// `section` (anonymous or named). Contributes nothing to the
-    /// current namespace. Carries the `opens` length at entry.
+    /// current namespace. Carries the `opens` length at entry and its
+    /// unique `id` (M3b3 Task 6b).
     Section {
         name: Option<String>,
         opens_len: usize,
+        id: u64,
     },
+}
+
+impl ScopeEntry {
+    /// This entry's never-reused id (M3b3 Task 6b).
+    fn id(&self) -> u64 {
+        match self {
+            ScopeEntry::Namespace { id, .. } | ScopeEntry::Section { id, .. } => *id,
+        }
+    }
 }
 
 impl ScopeStack {
@@ -46,20 +70,33 @@ impl ScopeStack {
         &self.current
     }
 
+    /// M3b3 Task 6b: hand out the next never-reused entry id.
+    fn alloc_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
     pub(crate) fn enter_namespace(&mut self, dotted: &str) {
         for part in dotted.split('.').filter(|p| !p.is_empty()) {
+            let opens_len = self.opens.len();
+            let id = self.alloc_id();
             self.entries.push(ScopeEntry::Namespace {
                 part: part.to_string(),
-                opens_len: self.opens.len(),
+                opens_len,
+                id,
             });
         }
         self.rebuild();
     }
 
     pub(crate) fn enter_section(&mut self, name: Option<&str>) {
+        let opens_len = self.opens.len();
+        let id = self.alloc_id();
         self.entries.push(ScopeEntry::Section {
             name: name.map(str::to_string),
-            opens_len: self.opens.len(),
+            opens_len,
+            id,
         });
     }
 
@@ -136,12 +173,17 @@ impl ScopeStack {
         }
     }
 
-    /// Number of live scope entries (`namespace` components + `section`s)
-    /// — `SpecScope::Local`'s activation depth (M3b3 Task 4). A `local`
-    /// declared here captures this value; it stays active while at least
-    /// this many entries remain (`is_active`).
-    pub(crate) fn scope_len(&self) -> usize {
-        self.entries.len()
+    /// M3b3 Task 6b: the id of the INNERMOST live scope entry, or `None`
+    /// at top level. This is what a `local` declared here anchors to
+    /// (`SpecScope::Local { anchor }`): the `local` stays active exactly
+    /// while an entry with this id is still on the stack. A `None` anchor
+    /// (declared at top level) is active for the rest of the file. This
+    /// REPLACES Task 4's depth capture (`scope_len`), which wrongly
+    /// re-activated a popped local when any unrelated later scope reached
+    /// the same depth (oracle-disproven — see `scope.rs`'s
+    /// `activation_predicate` test + `StxLocalInactive.lean`).
+    pub(crate) fn innermost_id(&self) -> Option<u64> {
+        self.entries.last().map(ScopeEntry::id)
     }
 
     /// M3b3 Task 4: is a grammar entry with activation tag `scope`
@@ -153,7 +195,16 @@ impl ScopeStack {
         match scope {
             SpecScope::Global => true,
             SpecScope::Scoped(ns) => self.namespace_is_active(ns),
-            SpecScope::Local { scope_len } => self.scope_len() >= *scope_len,
+            // M3b3 Task 6b: a `local` is active iff the exact scope entry
+            // that declared it is still live — `None` (declared at top
+            // level) is always active; otherwise a linear scan for its
+            // anchor id (depth is tiny; scope events are per-command).
+            // Ids are never reused, so an unrelated later scope reaching
+            // the declaring depth can NOT re-activate a popped local.
+            SpecScope::Local { anchor } => match anchor {
+                None => true,
+                Some(id) => self.entries.iter().any(|e| e.id() == *id),
+            },
         }
     }
 
@@ -395,11 +446,47 @@ mod tests {
         let mut s4 = ScopeStack::new();
         s4.enter_section(None);
         let loc = SpecScope::Local {
-            scope_len: s4.scope_len(),
+            anchor: s4.innermost_id(),
         };
         assert!(s4.is_active(&loc));
         s4.end_scope(None);
         assert!(!s4.is_active(&loc));
+
+        // M3b3 Task 6b: a `local` anchors to its DECLARING scope entry's
+        // never-reused id, NOT to depth. It stays active in scopes nested
+        // BELOW the declaration, deactivates when the declaring scope
+        // pops, and — the fix — does NOT re-activate when an unrelated
+        // later scope reaches the same depth (oracle-confirmed by
+        // `StxLocalInactive.lean`; was the `>=`-depth bug).
+        let mut s5 = ScopeStack::new();
+        s5.enter_section(Some("A"));
+        let loc5 = SpecScope::Local {
+            anchor: s5.innermost_id(),
+        };
+        s5.enter_section(Some("C")); // nested below the declaration
+        assert!(
+            s5.is_active(&loc5),
+            "local stays active in a scope nested below its declaration"
+        );
+        s5.end_scope(Some("C"));
+        assert!(s5.is_active(&loc5)); // back in the declaring scope
+        s5.end_scope(Some("A")); // declaring scope pops
+        assert!(!s5.is_active(&loc5));
+        s5.enter_section(Some("B")); // UNRELATED re-entry to the same depth
+        assert!(
+            !s5.is_active(&loc5),
+            "unrelated same-depth re-entry must NOT re-activate a popped local"
+        );
+
+        // A top-level `local` (anchor `None`) is active for the rest of
+        // the file, regardless of scopes entered/left afterwards.
+        let top = SpecScope::Local { anchor: None };
+        let mut s6 = ScopeStack::new();
+        assert!(s6.is_active(&top));
+        s6.enter_section(None);
+        assert!(s6.is_active(&top));
+        s6.end_scope(None);
+        assert!(s6.is_active(&top));
     }
 
     /// M3b3 Task 4: the `open` arm of `scope_command_update` records each
