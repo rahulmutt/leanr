@@ -115,9 +115,19 @@
 //! of its contract (`mangle_kind(category, atoms) -> String`, no
 //! "already-used names" input); it's a concern for whatever registers
 //! the mangled kind into an `Overlay`, not for this pure mangler.
-//! Likewise `currNamespace ++ name`: this function returns the LOCAL
-//! (category-scoped) name only, not a namespace-qualified one —
-//! matching the brief's category-only signature.
+//!
+//! `currNamespace ++ name` (M3b3 Task 2): `mangle_kind`/`mangle_items`
+//! still return the LOCAL (category-scoped) name only — the
+//! namespace-qualification step is a separate, later concatenation
+//! (`qualify_kind_name`, below), applied once by `build_spec`/
+//! `build_from_items` after the local name is fully mangled, not folded
+//! into the mangler itself. Confirmed against the `StxNamespace` oracle
+//! fixture (`tests/fixtures/syntax/StxNamespace.lean` +
+//! `.stx.jsonl`): `Widgetish.termWobns`, `Widgetish.probeNamed` (an
+//! explicit `(name := ..)` override still qualifies), and
+//! `Widgetish.Inner.termWobnest` (nested `namespace` dot-joins, matching
+//! `ScopeStack::current_namespace`'s own dot-joined shape) — the
+//! brief's draft needed no correction; the dump matched it byte-exact.
 
 use crate::kind::{KindInterner, KIND_ERROR, KIND_IDENT, KIND_MISSING};
 use crate::lex::{is_id_first, is_id_rest};
@@ -300,6 +310,22 @@ pub fn needs_no_escape(s: &str) -> bool {
     }
 }
 
+/// `stxNodeKind := currNamespace ++ name` (module doc above) — the
+/// qualification this file's mangler deliberately omitted until M3b3.
+/// Components of `current_ns` are already legal ident parts (they came
+/// from parsed `Ident` tokens); `local` is already escaped. Empty
+/// `current_ns` (top-level, no enclosing `namespace`) is the identity —
+/// EVERY M3a/M3b1/M3b2b fixture parses at top level, so this is what
+/// keeps their committed dumps byte-identical (`Ps.scope`'s own
+/// `current_namespace()` returns `""` there — Task 1).
+pub(crate) fn qualify_kind_name(current_ns: &str, local: &str) -> String {
+    if current_ns.is_empty() {
+        local.to_string()
+    } else {
+        format!("{current_ns}.{local}")
+    }
+}
+
 // ============================================================
 // Derivation (M3b1 Task 4): notation/mixfix command subtree ->
 // `NotationSpec`. Pure — never panics on a malformed tree, returns
@@ -389,7 +415,11 @@ pub enum GrammarDelta {
 /// 3, defense in depth — see `contains_error_or_missing`'s own doc
 /// comment) `node` contains an `<error>`/`<missing>` node anywhere in
 /// its structural slots.
-pub fn derive_delta(node: &SyntaxNode, kinds: &KindInterner) -> Option<GrammarDelta> {
+pub fn derive_delta(
+    node: &SyntaxNode,
+    kinds: &KindInterner,
+    current_ns: &str,
+) -> Option<GrammarDelta> {
     // M3b1 only ever registers into the `term` category (both
     // `mixfix`'s and `notation`'s own RHS recurse via `cat("term", 0)`
     // — command_notation.rs's `register`) — hardcoded per the task
@@ -412,16 +442,16 @@ pub fn derive_delta(node: &SyntaxNode, kinds: &KindInterner) -> Option<GrammarDe
     }
     match name {
         "Lean.Parser.Command.mixfix" => {
-            derive_mixfix(node, kinds, category).map(GrammarDelta::Production)
+            derive_mixfix(node, kinds, category, current_ns).map(GrammarDelta::Production)
         }
         "Lean.Parser.Command.notation" => {
-            derive_notation(node, kinds, category).map(GrammarDelta::Production)
+            derive_notation(node, kinds, category, current_ns).map(GrammarDelta::Production)
         }
         "Lean.Parser.Command.syntaxCat" => derive_syntax_cat(node, kinds),
         // M3b2b Task 8: the general `syntax`-command surface (`syntax`/
         // `syntaxAbbrev`/`macro`/the imported `elab`-family) — one
         // dispatch entry point for `run_module`, per this task's brief.
-        _ => super::surface::derive_surface(node, kinds),
+        _ => super::surface::derive_surface(node, kinds, current_ns),
     }
 }
 
@@ -544,7 +574,12 @@ fn contains_error_or_missing(node: &SyntaxNode) -> bool {
 /// wrapper) can't shift anything: the 3-child `notation_prefix` always
 /// contributes exactly 3 node children regardless of what's inside
 /// them.
-fn derive_mixfix(node: &SyntaxNode, kinds: &KindInterner, category: &str) -> Option<NotationSpec> {
+fn derive_mixfix(
+    node: &SyntaxNode,
+    kinds: &KindInterner,
+    category: &str,
+    current_ns: &str,
+) -> Option<NotationSpec> {
     let children: Vec<SyntaxNode> = node.children().collect();
     let attr_kind_pos = children
         .iter()
@@ -597,7 +632,7 @@ fn derive_mixfix(node: &SyntaxNode, kinds: &KindInterner, category: &str) -> Opt
     // above), so unlike a hand-written `notation`, there is no
     // atom-like-defaulting case to consider here: the outer prec is
     // always exactly `p`.
-    build_spec(category, items, p, is_local)
+    build_spec(category, items, p, is_local, current_ns)
 }
 
 /// `notation`'s oracle shape (command_notation.rs module doc, oracle
@@ -611,6 +646,7 @@ fn derive_notation(
     node: &SyntaxNode,
     kinds: &KindInterner,
     category: &str,
+    current_ns: &str,
 ) -> Option<NotationSpec> {
     let children: Vec<SyntaxNode> = node.children().collect();
     let attr_kind_pos = children
@@ -659,7 +695,7 @@ fn derive_notation(
     let atom_like = matches!(items.first(), Some(Item::Symbol(_)))
         && matches!(items.last(), Some(Item::Symbol(_)));
     let outer_prec = explicit_prec.unwrap_or(if atom_like { MAX_PREC } else { LEAD_PREC });
-    build_spec(category, items, outer_prec, is_local)
+    build_spec(category, items, outer_prec, is_local, current_ns)
 }
 
 /// Whether `attr_kind_node` (a `Lean.Parser.Term.attrKind` node —
@@ -694,7 +730,13 @@ fn is_local_attr_kind(attr_kind_node: &SyntaxNode, kinds: &KindInterner) -> bool
 /// interior/trailing one) becomes an ordinary `Prim::Category`
 /// recursion at its own `:prec` (defaulting to `0` the same way,
 /// `processParserCategory`'s identical `prec?.getD 0`).
-fn build_spec(category: &str, items: Vec<Item>, prec: u32, is_local: bool) -> Option<NotationSpec> {
+fn build_spec(
+    category: &str,
+    items: Vec<Item>,
+    prec: u32,
+    is_local: bool,
+    current_ns: &str,
+) -> Option<NotationSpec> {
     if items.is_empty() {
         return None;
     }
@@ -709,11 +751,15 @@ fn build_spec(category: &str, items: Vec<Item>, prec: u32, is_local: bool) -> Op
     // notation`/`local infixl`/… gets a DIFFERENT generated kind name
     // than the same declaration without `local` — see
     // `mangle_private_kind`'s own doc comment for the oracle dump and
-    // source citation.
+    // source citation. M3b3 Task 2: the whole result — private-mangled
+    // or plain — is namespace-qualified (`stxNodeKind := currNamespace
+    // ++ name`); `qualify_kind_name`'s own doc comment covers the
+    // empty-namespace identity that keeps every pre-M3b3 fixture
+    // byte-identical.
     let kind_name = if is_local {
-        mangle_private_kind(category, &atoms)
+        qualify_kind_name(current_ns, &mangle_private_kind(category, &atoms))
     } else {
-        mangle_kind(category, &atoms)
+        qualify_kind_name(current_ns, &mangle_kind(category, &atoms))
     };
     let tokens: Vec<String> = items
         .iter()
@@ -975,9 +1021,14 @@ mod tests {
     /// API — see `derive_delta`'s own doc comment for why the real
     /// `derive` was removed rather than kept as a production wrapper)
     /// so those assertions don't all need rewriting to match on
-    /// `GrammarDelta::Production` individually.
+    /// `GrammarDelta::Production` individually. Always passes `""` for
+    /// `derive_delta`'s new `current_ns` param (M3b3 Task 2) — every
+    /// test below parses at top level; the namespace-qualification
+    /// itself is covered by `parse.rs`'s
+    /// `syntax_inside_namespace_derives_qualified_kind` and the
+    /// `StxNamespace` oracle fixture, not duplicated here.
     fn derive(node: &SyntaxNode, kinds: &KindInterner) -> Option<NotationSpec> {
-        match derive_delta(node, kinds) {
+        match derive_delta(node, kinds, "") {
             Some(GrammarDelta::Production(spec)) => Some(spec),
             _ => None,
         }
@@ -1518,7 +1569,7 @@ mod tests {
         let r = crate::parse_module("declare_syntax_cat widgetish\n", &snap);
         assert!(r.errors.is_empty(), "errs={:?}", r.errors);
         let cmd = find_command(&r.tree, "Lean.Parser.Command.syntaxCat");
-        match derive_delta(&cmd, &r.tree.kinds) {
+        match derive_delta(&cmd, &r.tree.kinds, "") {
             Some(GrammarDelta::NewCategory { name, behavior }) => {
                 assert_eq!(name, "widgetish");
                 assert_eq!(behavior, LeadingIdentBehavior::Default);
@@ -1529,7 +1580,7 @@ mod tests {
         let r = crate::parse_module("declare_syntax_cat gadget (behavior := symbol)\n", &snap);
         assert!(r.errors.is_empty(), "errs={:?}", r.errors);
         let cmd = find_command(&r.tree, "Lean.Parser.Command.syntaxCat");
-        match derive_delta(&cmd, &r.tree.kinds) {
+        match derive_delta(&cmd, &r.tree.kinds, "") {
             Some(GrammarDelta::NewCategory { name, behavior }) => {
                 assert_eq!(name, "gadget");
                 assert_eq!(behavior, LeadingIdentBehavior::Symbol);
@@ -1540,7 +1591,7 @@ mod tests {
         let r = crate::parse_module("declare_syntax_cat widget2 (behavior := both)\n", &snap);
         assert!(r.errors.is_empty(), "errs={:?}", r.errors);
         let cmd = find_command(&r.tree, "Lean.Parser.Command.syntaxCat");
-        match derive_delta(&cmd, &r.tree.kinds) {
+        match derive_delta(&cmd, &r.tree.kinds, "") {
             Some(GrammarDelta::NewCategory { name, behavior }) => {
                 assert_eq!(name, "widget2");
                 assert_eq!(behavior, LeadingIdentBehavior::Both);
@@ -1582,7 +1633,7 @@ mod tests {
         assert!(r.errors.is_empty(), "errs={:?}", r.errors);
         let cmd = find_command(&r.tree, "Lean.Parser.Command.syntax");
         assert!(
-            derive_delta(&cmd, &r.tree.kinds).is_none(),
+            derive_delta(&cmd, &r.tree.kinds, "").is_none(),
             "a populated custom psep must skip-and-record (derive None), not drop the psep"
         );
     }

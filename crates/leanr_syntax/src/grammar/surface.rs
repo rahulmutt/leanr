@@ -41,7 +41,8 @@ use std::sync::Arc;
 use super::alias::{self, AliasPrim};
 use super::notation::{
     escape_name_component, find_child, first_ident_token_text, first_token_text,
-    mangle_symbol_atom, read_prec_num, strip_quotes, trim_lean_symbol, GrammarDelta, NotationSpec,
+    mangle_symbol_atom, qualify_kind_name, read_prec_num, strip_quotes, trim_lean_symbol,
+    GrammarDelta, NotationSpec,
 };
 use super::{walk_symbols, Prim, LEAD_PREC, MAX_PREC};
 use crate::kind::{KindInterner, KIND_IDENT};
@@ -55,12 +56,16 @@ use crate::tree::SyntaxNode;
 /// own discipline). Dispatch mirrors `notation.rs::derive_delta`'s own
 /// outer-kind match, one arm per kind `command_syntax.rs`'s module doc
 /// pins against a real oracle dump — no speculative arms.
-pub fn derive_surface(node: &SyntaxNode, kinds: &KindInterner) -> Option<GrammarDelta> {
+pub fn derive_surface(
+    node: &SyntaxNode,
+    kinds: &KindInterner,
+    current_ns: &str,
+) -> Option<GrammarDelta> {
     let name = kinds.name(node.kind());
     match name {
-        "Lean.Parser.Command.syntax" => derive_syntax_cmd(node, kinds),
+        "Lean.Parser.Command.syntax" => derive_syntax_cmd(node, kinds, current_ns),
         "Lean.Parser.Command.syntaxAbbrev" => derive_syntax_abbrev(node, kinds),
-        "Lean.Parser.Command.macro" => derive_macro_cmd(node, kinds),
+        "Lean.Parser.Command.macro" => derive_macro_cmd(node, kinds, current_ns),
         // Imported shapes: NOT YET PINNED against a real Mathlib oracle
         // dump (Task 8 Step 5 — the full sweep was still running in
         // this checkout, and `target/leanr-stx-cache`'s existing ~116
@@ -117,7 +122,11 @@ fn derive_binder_predicate(_node: &SyntaxNode, _kinds: &KindInterner) -> Option<
 /// exercises `local`/`scoped` on the general `syntax`/`macro` surface
 /// (recorded in this task's report, not silently wrong: a `local
 /// syntax` declaration derives the PLAIN, non-private kind name here).
-fn derive_syntax_cmd(node: &SyntaxNode, kinds: &KindInterner) -> Option<GrammarDelta> {
+fn derive_syntax_cmd(
+    node: &SyntaxNode,
+    kinds: &KindInterner,
+    current_ns: &str,
+) -> Option<GrammarDelta> {
     let children: Vec<SyntaxNode> = node.children().collect();
     let attr_kind_pos = children
         .iter()
@@ -131,7 +140,14 @@ fn derive_syntax_cmd(node: &SyntaxNode, kinds: &KindInterner) -> Option<GrammarD
     let category = last_ident_token_text(node)?;
 
     let item_nodes: Vec<SyntaxNode> = items_wrapper.children().collect();
-    build_from_items(&category, &item_nodes, explicit_prec, explicit_name, kinds)
+    build_from_items(
+        &category,
+        &item_nodes,
+        explicit_prec,
+        explicit_name,
+        kinds,
+        current_ns,
+    )
 }
 
 /// `syntaxAbbrev` (ORACLE `elabSyntaxAbbrev`, `Lean/Elab/Syntax.lean`):
@@ -179,7 +195,11 @@ fn derive_syntax_abbrev(_node: &SyntaxNode, _kinds: &KindInterner) -> Option<Gra
 /// the companion `macro_rules` registration `elabMacro` also
 /// synthesizes is shape-only (`derive_surface`'s own `macro_rules`
 /// arm), Task 8's remit is the PARSER side only.
-fn derive_macro_cmd(node: &SyntaxNode, kinds: &KindInterner) -> Option<GrammarDelta> {
+fn derive_macro_cmd(
+    node: &SyntaxNode,
+    kinds: &KindInterner,
+    current_ns: &str,
+) -> Option<GrammarDelta> {
     let children: Vec<SyntaxNode> = node.children().collect();
     let attr_kind_pos = children
         .iter()
@@ -204,7 +224,14 @@ fn derive_macro_cmd(node: &SyntaxNode, kinds: &KindInterner) -> Option<GrammarDe
         let arg_children: Vec<SyntaxNode> = arg_node.children().collect();
         item_nodes.push(arg_children.get(1)?.clone());
     }
-    build_from_items(&category, &item_nodes, explicit_prec, explicit_name, kinds)
+    build_from_items(
+        &category,
+        &item_nodes,
+        explicit_prec,
+        explicit_name,
+        kinds,
+        current_ns,
+    )
 }
 
 /// Shared tail of `derive_syntax_cmd`/`derive_macro_cmd`: an ordered
@@ -226,6 +253,7 @@ fn build_from_items(
     explicit_prec: Option<u32>,
     explicit_name: Option<String>,
     kinds: &KindInterner,
+    current_ns: &str,
 ) -> Option<GrammarDelta> {
     if item_nodes.is_empty() {
         return None;
@@ -248,9 +276,15 @@ fn build_from_items(
         .map(|n| stx_item(n, kinds))
         .collect::<Option<_>>()?;
 
+    // M3b3 Task 2: both arms qualify — an explicit `(name := ..)`
+    // override also gets `currNamespace ++` prepended (`stxNodeKind :=
+    // currNamespace ++ name` applies uniformly in `elabSyntax`/
+    // `elabMacro`, regardless of whether the name came from
+    // `mkNameFromParserSyntax` or a user override; the `StxNamespace`
+    // fixture's `probeNamed` probe pins this).
     let kind_name = match explicit_name {
-        Some(n) => escape_name_component(&n),
-        None => mangle_items(category, item_nodes, kinds),
+        Some(n) => qualify_kind_name(current_ns, &escape_name_component(&n)),
+        None => qualify_kind_name(current_ns, &mangle_items(category, item_nodes, kinds)),
     };
 
     // ORACLE-PORT `elabSyntax`'s `precDefault` (`Lean/Elab/Syntax.lean`):

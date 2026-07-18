@@ -217,9 +217,11 @@ fn run_module(mut ps: Ps<'_>, snap: &GrammarSnapshot) -> ParseResult {
                 let cmd_events = flatten_events(&ps.events[sp.events..], &ps.subtrees);
                 let cmd_kinds = ps.merged_kinds();
                 let subtree = build_tree(ps.src, &cmd_events, cmd_kinds);
-                if let Some(delta) =
-                    crate::grammar::notation::derive_delta(&subtree.root(), &subtree.kinds)
-                {
+                if let Some(delta) = crate::grammar::notation::derive_delta(
+                    &subtree.root(),
+                    &subtree.kinds,
+                    ps.scope.current_namespace(),
+                ) {
                     match delta {
                         crate::grammar::GrammarDelta::Production(spec) => {
                             ps.overlay.register(spec);
@@ -5303,6 +5305,35 @@ mod tests {
             scope_command_update(&mut stack, &cmd, &r.tree.kinds);
             assert_eq!(stack.current_namespace(), want);
         }
+    }
+
+    /// M3b3 Task 2: a `syntax`/`macro_rules` pair declared INSIDE a
+    /// `namespace` derives a namespace-qualified kind name
+    /// (`stxNodeKind := currNamespace ++ name`) — the grow-arm's
+    /// `derive_delta` call must read `ps.scope.current_namespace()` as
+    /// of BEFORE this command (`SCOPE_COMMAND_KINDS` ∩
+    /// `GRAMMAR_GROWING_KINDS` = ∅, so no ordering hazard: a `syntax`
+    /// command is never itself a scope command, so its own namespace
+    /// membership was already recorded by the time it's derived).
+    #[test]
+    fn syntax_inside_namespace_derives_qualified_kind() {
+        let snap = crate::builtin::snapshot();
+        let src = "namespace Widgetish\nsyntax \"wobns\" : term\n\
+                   macro_rules | `(wobns) => `(42)\n#check wobns\nend Widgetish\n";
+        let r = crate::parse_module(src, &snap);
+        assert_eq!(r.tree.text(), src);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        // Confirmed byte-exact against the `StxNamespace` oracle dump
+        // (`tests/fixtures/syntax/StxNamespace.stx.jsonl`, Step 4): the
+        // brief's draft ("Widgetish." ++ category-mangled local name)
+        // needed no correction.
+        assert!(
+            r.tree
+                .root()
+                .descendants()
+                .any(|n| r.tree.kinds.name(n.kind()) == "Widgetish.termWobns"),
+            "expected namespace-qualified derived kind"
+        );
     }
 
     /// M3b1 Task 9 Step 1: a malformed `infixl` (missing the mandatory

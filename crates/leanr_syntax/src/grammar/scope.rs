@@ -35,13 +35,9 @@ impl ScopeStack {
         Self::default()
     }
 
-    // Same dead-code situation as `open_namespace` below: Task 2 is the
-    // first non-test caller (`stxNodeKind := currNamespace ++ name`);
-    // until then only `#[cfg(test)]` code reads it, so the plain
-    // (non-test) lib target sees it as unused despite the behavior
-    // being fully implemented and covered by this module's own tests.
-    // consumed by Task 2
-    #[cfg_attr(not(test), allow(dead_code))]
+    // M3b3 Task 2: `parse.rs`'s command loop passes this into
+    // `derive_delta`'s new `current_ns` param at the grammar-growing
+    // arm — no longer dead code outside `#[cfg(test)]`.
     pub(crate) fn current_namespace(&self) -> &str {
         &self.current
     }
