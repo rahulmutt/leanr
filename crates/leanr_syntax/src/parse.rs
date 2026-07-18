@@ -217,11 +217,20 @@ fn run_module(mut ps: Ps<'_>, snap: &GrammarSnapshot) -> ParseResult {
                 let cmd_events = flatten_events(&ps.events[sp.events..], &ps.subtrees);
                 let cmd_kinds = ps.merged_kinds();
                 let subtree = build_tree(ps.src, &cmd_events, cmd_kinds);
-                if let Some(delta) = crate::grammar::notation::derive_delta(
-                    &subtree.root(),
-                    &subtree.kinds,
-                    ps.scope.current_namespace(),
-                ) {
+                // M3b3 Task 4: `derive_delta` now needs both the current
+                // namespace (naming + `scoped` activation ns) and the
+                // current scope depth (`local` activation), bundled as
+                // `NamingCtx`. Read BEFORE registration (scope commands
+                // are disjoint from grammar-growing ones, so this
+                // command's own namespace/depth was already recorded by
+                // an earlier scope command — no ordering hazard).
+                let ctx = crate::grammar::NamingCtx {
+                    current_ns: ps.scope.current_namespace(),
+                    scope_len: ps.scope.scope_len(),
+                };
+                if let Some(delta) =
+                    crate::grammar::notation::derive_delta(&subtree.root(), &subtree.kinds, ctx)
+                {
                     match delta {
                         crate::grammar::GrammarDelta::Production(spec) => {
                             ps.overlay.register(spec);
@@ -236,6 +245,11 @@ fn run_module(mut ps: Ps<'_>, snap: &GrammarSnapshot) -> ParseResult {
                     // overlay state) and would replay stale
                     // leading/trailing candidate sets if hit again.
                     ps.clear_category_cache();
+                    // M3b3 Task 4: a just-registered `scoped`/`local`
+                    // token may already be active (declared inside its
+                    // own namespace/scope), so refresh the lexer's
+                    // active-token view too.
+                    ps.rebuild_active_overlay_tokens();
                 }
             }
             // M3b3 Task 1: a clean command whose outer kind is
@@ -260,6 +274,21 @@ fn run_module(mut ps: Ps<'_>, snap: &GrammarSnapshot) -> ParseResult {
                     &subtree.root(),
                     &subtree.kinds,
                 );
+                // M3b3 Task 4: the scope just changed, so activation may
+                // have flipped for some scoped/local entries. A memoized
+                // `cat_cache` candidate set (keyed on pos/name/rbp/…, with
+                // NO activation dependency — `CatCacheKey`) computed under
+                // the OLD activation could replay a now-stale
+                // include/exclude if hit again; clearing it here keeps the
+                // memo activation-safe WITHOUT touching `CatCacheKey`,
+                // exactly as the grammar-growth arm above does after a
+                // registration. Cheap: scope commands are rare (bounded by
+                // `namespace`/`section`/`end`/`open` count, never
+                // per-token). Then rebuild the lexer's active-token view so
+                // the NEXT command lexes against the correct in-force
+                // token set.
+                ps.clear_category_cache();
+                ps.rebuild_active_overlay_tokens();
             }
             Ok(()) => {}
             Err(_) => {
@@ -668,8 +697,9 @@ pub(crate) struct Ps<'a> {
     /// field rather than re-deriving from `snap` each time.
     kinds: Arc<KindInterner>,
     /// Same-file grammar growth (M3b1 Task 6): consulted AFTER the base
-    /// snapshot at the three grammar read points (munch — `overlay.tokens()`
-    /// in `peek_significant`/`peek_significant_readonly`/`bump`; dispatch —
+    /// snapshot at the three grammar read points (munch — the scope-
+    /// filtered `active_overlay_tokens` view of `overlay`'s tokens, M3b3
+    /// Task 4, in `peek_significant`/`peek_significant_readonly`/`bump`; dispatch —
     /// `category`'s leading/trailing candidate gathering; kind naming —
     /// `merged_kinds`, used by `finish_into_tree`). Starts empty
     /// (`Overlay::new(snap)`, `Ps::new`), so a `Ps` nobody calls
@@ -679,6 +709,18 @@ pub(crate) struct Ps<'a> {
     /// `merged_kinds` short-circuits to a plain `Arc::clone` of the base
     /// interner — see each site's own doc comment).
     overlay: Overlay,
+    /// M3b3 Task 4: the scope-FILTERED overlay token table `next_token`
+    /// actually lexes against (the third grammar read point — munch).
+    /// NOT `overlay.tokens()` (the full set): a `scoped`/`local` token is
+    /// only in force while its scope is active, so it must vanish from
+    /// the lexer's view when the scope pops (dump-pinned by
+    /// `StxScopedInactive.lean` — the inactive `wobsc2` lexes as an IDENT
+    /// because its token is absent, NOT as an atom). Rebuilt from
+    /// `overlay.token_scopes()` by `rebuild_active_overlay_tokens` on
+    /// every registration/scope event (same command-boundary discipline
+    /// as `clear_category_cache`); constant within a single command's
+    /// parse, so a per-token rebuild is never needed.
+    active_overlay_tokens: TokenTable,
     events: Vec<PEvent>,
     errors: Vec<PError>,
     /// Append-only arena of memoized `category()` subtrees — the backing
@@ -1004,6 +1046,7 @@ impl<'a> Ps<'a> {
             snap,
             kinds,
             overlay: Overlay::new(snap),
+            active_overlay_tokens: TokenTable::default(),
             events: Vec::new(),
             errors: Vec::new(),
             furthest_pos: 0,
@@ -1042,6 +1085,30 @@ impl<'a> Ps<'a> {
     /// overlay mid-parse as `notation`/mixfix commands are seen.
     pub(crate) fn install_overlay(&mut self, ov: Overlay) {
         self.overlay = ov;
+        // M3b3 Task 4: a manually-installed overlay's tokens must become
+        // lexable immediately (its entries are typically `Global` in the
+        // test that uses this) — rebuild the active-token view now, same
+        // as the command loop does after each mid-parse registration.
+        self.rebuild_active_overlay_tokens();
+    }
+
+    /// M3b3 Task 4: recompute `active_overlay_tokens` = every
+    /// `overlay.token_scopes()` entry whose scope `is_active` at the
+    /// CURRENT `self.scope`. Called at command boundaries only — after a
+    /// mid-parse registration (a new token may already be active, e.g. a
+    /// `scoped syntax` declared inside its own namespace) and after a
+    /// scope event (`namespace`/`section`/`end`/`open` change which
+    /// scoped/local tokens are in force). Cheap: `token_scopes` is
+    /// bounded by same-file command count, and this fires at most once
+    /// per command, never per token.
+    pub(crate) fn rebuild_active_overlay_tokens(&mut self) {
+        let mut active = TokenTable::default();
+        for (tok, scope) in self.overlay.token_scopes() {
+            if self.scope.is_active(scope) {
+                active.insert(tok);
+            }
+        }
+        self.active_overlay_tokens = active;
     }
 
     /// Empty `cat_cache` (Task 11b's `category()` memoization table —
@@ -1213,7 +1280,12 @@ impl<'a> Ps<'a> {
     /// (without consuming) plus its start offset.
     pub(crate) fn peek_significant(&mut self) -> (Token, usize) {
         loop {
-            let (t, err) = next_token(self.src, self.pos, self.table(), self.overlay.tokens());
+            let (t, err) = next_token(
+                self.src,
+                self.pos,
+                self.table(),
+                &self.active_overlay_tokens,
+            );
             let trivia = matches!(
                 t.kind,
                 TokenKind::Whitespace | TokenKind::LineComment | TokenKind::BlockComment
@@ -1260,7 +1332,7 @@ impl<'a> Ps<'a> {
     fn peek_significant_readonly(&self) -> (Token, usize) {
         let mut pos = self.pos;
         loop {
-            let (t, _err) = next_token(self.src, pos, self.table(), self.overlay.tokens());
+            let (t, _err) = next_token(self.src, pos, self.table(), &self.active_overlay_tokens);
             let trivia = matches!(
                 t.kind,
                 TokenKind::Whitespace | TokenKind::LineComment | TokenKind::BlockComment
@@ -1304,7 +1376,12 @@ impl<'a> Ps<'a> {
 
     /// Consume the peeked significant token as leaf `kind`.
     fn bump(&mut self, t: Token, kind: SyntaxKind) {
-        if let (_, Some(e)) = next_token(self.src, self.pos, self.table(), self.overlay.tokens()) {
+        if let (_, Some(e)) = next_token(
+            self.src,
+            self.pos,
+            self.table(),
+            &self.active_overlay_tokens,
+        ) {
             self.errors.push(PError::Err(ParseError {
                 code: e.code,
                 span: (self.pos as u32, (self.pos + t.len as usize) as u32),
@@ -2539,15 +2616,23 @@ impl<'a> Ps<'a> {
     /// fixture.
     fn leaf_antiquot_wrap_kind(&self, cat_name: &str, kind_name: &str) -> Option<SyntaxKind> {
         let cd = self.overlay.category_delta(cat_name)?;
-        cd.leading.iter().find_map(|(_, p)| match p {
-            Prim::Node { kind, body, .. } => {
-                let inner = match body.as_ref() {
-                    Prim::Seq(v) if v.len() == 1 => &v[0],
-                    other => other,
-                };
-                is_named_literal(inner, kind_name).then_some(*kind)
+        cd.leading.iter().find_map(|(_, p, scope)| {
+            // M3b3 Task 4: only an ACTIVE leaf-wrapping production can be
+            // the wrap for this antiquot — same is_active filter as every
+            // other overlay read point.
+            if !self.scope.is_active(scope) {
+                return None;
             }
-            _ => None,
+            match p {
+                Prim::Node { kind, body, .. } => {
+                    let inner = match body.as_ref() {
+                        Prim::Seq(v) if v.len() == 1 => &v[0],
+                        other => other,
+                    };
+                    is_named_literal(inner, kind_name).then_some(*kind)
+                }
+                _ => None,
+            }
         })
     }
 
@@ -3531,7 +3616,14 @@ impl<'a> Ps<'a> {
                 // above, byte-identical to M3a.
                 if let Some(cd) = self.overlay.category_delta(name) {
                     let suppress = suppress_plain_ident_for(cat, text, t.kind, true);
-                    parsers.extend(dispatch_overlay(cd, text, t.kind, true, suppress));
+                    parsers.extend(dispatch_overlay(
+                        cd,
+                        text,
+                        t.kind,
+                        true,
+                        suppress,
+                        &self.scope,
+                    ));
                 }
                 // ORACLE-PORT `runLongestMatchParser` (Basic.lean:1403):
                 // "we initialize [lhsPrec] to maxPrec in the leading case"
@@ -3617,7 +3709,14 @@ impl<'a> Ps<'a> {
                 // the same no-op-when-empty guarantee).
                 if let Some(cd) = self.overlay.category_delta(name) {
                     let suppress = suppress_plain_ident_for(cat, text, t.kind, false);
-                    candidates.extend(dispatch_overlay(cd, text, t.kind, false, suppress));
+                    candidates.extend(dispatch_overlay(
+                        cd,
+                        text,
+                        t.kind,
+                        false,
+                        suppress,
+                        &self.scope,
+                    ));
                 }
                 let qualifying: Vec<Prim> = candidates
                     .into_iter()
@@ -3937,12 +4036,19 @@ fn dispatch_overlay(
     kind: TokenKind,
     leading: bool,
     suppress_plain_ident: bool,
+    scope: &crate::grammar::scope::ScopeStack,
 ) -> Vec<Prim> {
     let table = if leading { &cd.leading } else { &cd.trailing };
     table
         .iter()
-        .filter(|(f, _)| first_tok_matches(f, text, kind, suppress_plain_ident))
-        .map(|(_, p)| p.clone())
+        // M3b3 Task 4: an overlay candidate only dispatches while its
+        // activation `SpecScope` is in force (`scoped`/`local`
+        // (de)activation) — same `is_active` predicate every overlay
+        // read point applies. `Global` entries always pass.
+        .filter(|(f, _, sc)| {
+            scope.is_active(sc) && first_tok_matches(f, text, kind, suppress_plain_ident)
+        })
+        .map(|(_, p, _)| p.clone())
         .collect()
 }
 
@@ -5132,6 +5238,7 @@ mod tests {
             lhs_prec: Some(65),
             tokens: vec!["⊕".into()],
             body: seq([sym("⊕"), cat("term", 66)]),
+            scope: crate::grammar::SpecScope::Global,
         }
     }
 
@@ -5307,6 +5414,121 @@ mod tests {
         }
     }
 
+    /// M3b3 Task 4 Step 3: a `scoped syntax` is active INSIDE its
+    /// declaring namespace, and re-active after `open`ing it — every use
+    /// in this source is in active scope (the inactive-between-`end`-and-
+    /// `open` use lives in the `StxScopedInactive.lean` fixture, whose
+    /// oracle dump — a clean IDENT parse, not an error — pins
+    /// deactivation). Confirmed byte-exact against `StxScoped.lean`'s own
+    /// oracle dump (elaborating dumper): every `wobsc` lexes as an ATOM
+    /// and parses via the scoped `Widgsc.termWobsc` production.
+    #[test]
+    fn scoped_syntax_activates_and_deactivates() {
+        let snap = crate::builtin::snapshot();
+        let src = "namespace Widgsc\nscoped syntax \"wobsc\" : term\n\
+                   macro_rules | `(wobsc) => `(48)\n#check wobsc\nend Widgsc\n\
+                   open Widgsc\n#check wobsc\n";
+        let r = crate::parse_module(src, &snap);
+        assert_eq!(r.tree.text(), src);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        // Both `#check` COMMANDS parse `wobsc` via the scoped production
+        // (`Widgsc.termWobsc`) — one inside the namespace, one after
+        // `open`. (The `macro_rules` quotation body also uses it, but we
+        // scope this to `#check` commands so the count is unambiguous.)
+        let kinds = r.tree.kinds.clone();
+        let active_checks = r
+            .tree
+            .root()
+            .children()
+            .filter(|n| kinds.name(n.kind()) == "Lean.Parser.Command.check")
+            .filter(|chk| {
+                chk.descendants()
+                    .any(|d| kinds.name(d.kind()) == "Widgsc.termWobsc")
+            })
+            .count();
+        assert_eq!(
+            active_checks, 2,
+            "both active #check uses parse via the scoped production"
+        );
+    }
+
+    /// M3b3 Task 4 (dump-forced correction to the brief's "tokens stay
+    /// global" DRAFT): a `scoped` token is NOT globally registered — when
+    /// its scope is inactive, the atom lexes as an IDENT, not an atom, so
+    /// the use parses cleanly (as an identifier) rather than erroring.
+    /// Oracle-pinned by `StxScopedInactive.lean`: the `#check wobsc2`
+    /// after `end Widgsc2` dumps `{"i":"wobsc2"}` (ident), no parse error.
+    #[test]
+    fn inactive_scoped_token_lexes_as_ident_not_atom() {
+        let snap = crate::builtin::snapshot();
+        let src = "namespace Widgsc2\nscoped syntax \"wobsc2\" : term\n\
+                   macro_rules | `(wobsc2) => `(49)\nend Widgsc2\n#check wobsc2\n";
+        let r = crate::parse_module(src, &snap);
+        assert_eq!(r.tree.text(), src);
+        // Clean parse: the inactive use is a plain identifier, not an
+        // unexpected-token error.
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        let kinds = r.tree.kinds.clone();
+        // Second-to-last command (last is the `eoi` node) is the inactive
+        // `#check wobsc2`. Its argument is a bare IDENT leaf, NOT the
+        // (now-inactive) `Widgsc2.termWobsc2` production. (The
+        // `macro_rules` quotation earlier, inside `namespace Widgsc2`,
+        // DOES use the production — so we scope this to the final check.)
+        let cmds: Vec<_> = r.tree.root().children().collect();
+        let last_check = &cmds[cmds.len() - 2];
+        assert_eq!(kinds.name(last_check.kind()), "Lean.Parser.Command.check");
+        assert!(
+            !last_check
+                .descendants()
+                .any(|n| kinds.name(n.kind()) == "Widgsc2.termWobsc2"),
+            "inactive scoped production must not parse the final use"
+        );
+        assert!(
+            last_check
+                .descendants_with_tokens()
+                .filter_map(|el| el.into_token())
+                .any(|t| t.kind() == crate::kind::KIND_IDENT && t.text() == "wobsc2"),
+            "inactive `wobsc2` must lex as an ident, not an atom"
+        );
+    }
+
+    /// M3b3 Task 4 Step 4: the SAME term text parses differently before
+    /// vs. after an activation event, and the command loop's
+    /// cache-clearing (`clear_category_cache` on scope events) keeps that
+    /// activation-sensitive. Here `wobsc` is inactive at the first
+    /// `#check` (top level, before the namespace) — a plain ident — and
+    /// active at the second (after `open Widgsc`) — the scoped
+    /// production. Two identical `#check wobsc` lines, two different
+    /// trees, proving the memo never leaks a stale candidate set across
+    /// the scope boundary.
+    #[test]
+    fn same_text_parses_differently_across_an_activation_event() {
+        let snap = crate::builtin::snapshot();
+        let src = "#check wobsc\nnamespace Widgsc\nscoped syntax \"wobsc\" : term\n\
+                   macro_rules | `(wobsc) => `(48)\nend Widgsc\nopen Widgsc\n#check wobsc\n";
+        let r = crate::parse_module(src, &snap);
+        assert_eq!(r.tree.text(), src);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        // Exactly ONE of the two `#check wobsc` COMMANDS is the scoped
+        // production (the post-`open` one); the pre-declaration one is a
+        // plain ident (its token wasn't even registered yet).
+        let kinds = r.tree.kinds.clone();
+        let active_checks = r
+            .tree
+            .root()
+            .children()
+            .filter(|n| kinds.name(n.kind()) == "Lean.Parser.Command.check")
+            .filter(|chk| {
+                chk.descendants()
+                    .any(|d| kinds.name(d.kind()) == "Widgsc.termWobsc")
+            })
+            .count();
+        assert_eq!(
+            active_checks, 1,
+            "only the post-open #check parses via the scoped production"
+        );
+    }
+
     /// M3b3 Task 2: a `syntax`/`macro_rules` pair declared INSIDE a
     /// `namespace` derives a namespace-qualified kind name
     /// (`stxNodeKind := currNamespace ++ name`) — the grow-arm's
@@ -5380,10 +5602,11 @@ mod tests {
         let r = crate::parse_module(src, &snap);
         assert!(r.errors.is_empty(), "errs={:?}", r.errors);
         assert!(
-            r.tree
-                .root()
-                .descendants()
-                .any(|n| r.tree.kinds.name(n.kind()).starts_with("_private.0.Widgloc.")),
+            r.tree.root().descendants().any(|n| r
+                .tree
+                .kinds
+                .name(n.kind())
+                .starts_with("_private.0.Widgloc.")),
             "local notation inside a namespace must derive a kind starting \
              `_private.0.Widgloc.`, not `Widgloc._private.0.`"
         );

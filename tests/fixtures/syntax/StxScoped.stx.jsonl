@@ -1,0 +1,12 @@
+{"c":[{"c":[],"k":"null"},{"c":[],"k":"null"},{"c":[],"k":"null"}],"k":"Lean.Parser.Module.header"}
+{"c":[{"a":"namespace","s":[0,9]},{"i":"Widgsc","s":[10,16]}],"k":"Lean.Parser.Command.namespace"}
+{"c":[{"c":[],"k":"null"},{"c":[],"k":"null"},{"c":[{"c":[{"c":[{"a":"scoped","s":[17,23]}],"k":"Lean.Parser.Term.scoped"}],"k":"null"}],"k":"Lean.Parser.Term.attrKind"},{"a":"syntax","s":[24,30]},{"c":[],"k":"null"},{"c":[],"k":"null"},{"c":[],"k":"null"},{"c":[{"c":[{"c":[{"a":"\"wobsc\"","s":[31,38]}],"k":"str"}],"k":"Lean.Parser.Syntax.atom"}],"k":"null"},{"a":":","s":[39,40]},{"i":"term","s":[41,45]}],"k":"Lean.Parser.Command.syntax"}
+{"c":[{"c":[],"k":"null"},{"c":[],"k":"null"},{"c":[{"c":[],"k":"null"}],"k":"Lean.Parser.Term.attrKind"},{"a":"macro_rules","s":[46,57]},{"c":[],"k":"null"},{"c":[{"c":[{"c":[{"a":"|","s":[58,59]},{"c":[{"c":[{"c":[{"a":"`(","s":[60,62]},{"c":[{"a":"wobsc","s":[62,67]}],"k":"Widgsc.termWobsc"},{"a":")","s":[67,68]}],"k":"Lean.Parser.Term.quot"}],"k":"null"}],"k":"null"},{"a":"=>","s":[69,71]},{"c":[{"a":"`(","s":[72,74]},{"c":[{"a":"48","s":[74,76]}],"k":"num"},{"a":")","s":[76,77]}],"k":"Lean.Parser.Term.quot"}],"k":"Lean.Parser.Term.matchAlt"}],"k":"null"}],"k":"Lean.Parser.Term.matchAlts"}],"k":"Lean.Parser.Command.macro_rules"}
+{"c":[{"a":"#check","s":[78,84]},{"c":[{"a":"wobsc","s":[85,90]}],"k":"Widgsc.termWobsc"}],"k":"Lean.Parser.Command.check"}
+{"c":[{"a":"end","s":[91,94]},{"c":[{"i":"Widgsc","s":[95,101]},{"c":[],"k":"null"}],"k":"null"}],"k":"Lean.Parser.Command.end"}
+{"c":[{"a":"open","s":[102,106]},{"c":[{"c":[{"i":"Widgsc","s":[107,113]}],"k":"null"}],"k":"Lean.Parser.Command.openSimple"}],"k":"Lean.Parser.Command.open"}
+{"c":[{"a":"#check","s":[114,120]},{"c":[{"a":"wobsc","s":[121,126]}],"k":"Widgsc.termWobsc"}],"k":"Lean.Parser.Command.check"}
+{"c":[{"a":"namespace","s":[127,136]},{"i":"Widgsc.Inner","s":[137,149]}],"k":"Lean.Parser.Command.namespace"}
+{"c":[{"a":"#check","s":[150,156]},{"c":[{"a":"wobsc","s":[157,162]}],"k":"Widgsc.termWobsc"}],"k":"Lean.Parser.Command.check"}
+{"c":[{"a":"end","s":[163,166]},{"c":[{"i":"Widgsc.Inner","s":[167,179]},{"c":[],"k":"null"}],"k":"null"}],"k":"Lean.Parser.Command.end"}
+{"c":[{"a":"","s":[180,180]}],"k":"Lean.Parser.Command.eoi"}

@@ -9,15 +9,39 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::grammar::{
-    encode_prim, index_entries, FirstTok, GrammarSnapshot, LeadingIdentBehavior, NotationSpec, Prim,
+    encode_prim, index_entries, FirstTok, GrammarSnapshot, LeadingIdentBehavior, NotationSpec,
+    Prim, SpecScope,
 };
 use crate::kind::SyntaxKind;
 use crate::lex::TokenTable;
 
+/// M3b3 Task 4: deterministic byte encoding of an entry's activation
+/// tag into the overlay fingerprint (`fingerprint_into`): `\x00` for
+/// `Global`, `\x01 ++ ns ++ \0` for `Scoped`, `\x02 ++ scope_len` for
+/// `Local`. Distinct lead bytes keep the three cases unambiguous.
+fn encode_spec_scope(scope: &SpecScope, h: &mut blake3::Hasher) {
+    match scope {
+        SpecScope::Global => h.update(b"\x00"),
+        SpecScope::Scoped(ns) => {
+            h.update(b"\x01");
+            h.update(ns.as_bytes());
+            h.update(b"\0")
+        }
+        SpecScope::Local { scope_len } => {
+            h.update(b"\x02");
+            h.update(&(*scope_len as u64).to_le_bytes())
+        }
+    };
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct CategoryDelta {
-    pub leading: Vec<(FirstTok, Prim)>,
-    pub trailing: Vec<(FirstTok, Prim)>,
+    /// M3b3 Task 4: each entry carries its activation `SpecScope`
+    /// alongside the `(FirstTok, Prim)` pair — every overlay read point
+    /// in `parse.rs` filters candidates by `ps.scope.is_active(scope)`
+    /// so a `scoped`/`local` production only dispatches while in force.
+    pub leading: Vec<(FirstTok, Prim, SpecScope)>,
+    pub trailing: Vec<(FirstTok, Prim, SpecScope)>,
 }
 
 #[derive(Clone, Debug)]
@@ -27,6 +51,17 @@ pub struct Overlay {
     kind_map: HashMap<Arc<str>, u16>,
     base_kind_count: u16,
     cats: HashMap<String, CategoryDelta>,
+    /// M3b3 Task 4: every overlay-registered token paired with its
+    /// entry's activation `SpecScope`. `self.tokens` (above) still holds
+    /// the FULL set — used for the fingerprint and `is_empty`, both of
+    /// which are activation-independent grammar identity — but LEXING
+    /// must only see tokens whose scope is currently active (dump-pinned:
+    /// `StxScopedInactive.lean`'s inactive `wobsc2` lexes as an IDENT,
+    /// not an atom, because its `scoped` token is NOT in force after
+    /// `end Widgsc2`). `Ps` (parse.rs) rebuilds an active-token table
+    /// from this list on every scope/registration event and feeds THAT
+    /// to `next_token`, never `self.tokens`.
+    token_scopes: Vec<(String, SpecScope)>,
     /// M3b2b Task 7: brand-new categories a same-file
     /// `declare_syntax_cat` command registers — distinct from `cats`
     /// above, which only ever holds PRODUCTIONS added into a category
@@ -48,6 +83,7 @@ impl Overlay {
             kind_map: HashMap::new(),
             base_kind_count: base.kind_count(),
             cats: HashMap::new(),
+            token_scopes: Vec::new(),
             categories: HashMap::new(),
         }
     }
@@ -56,6 +92,16 @@ impl Overlay {
             && self.kind_names.is_empty()
             && self.tokens.is_empty()
             && self.categories.is_empty()
+    }
+
+    /// M3b3 Task 4: every registered token paired with its activation
+    /// scope, in registration order — `Ps` (parse.rs) folds this into
+    /// its active-token table, including a token iff
+    /// `scope.is_active(scope)` at the current scope. Registration order
+    /// is irrelevant to the resulting `TokenTable` (a `BTreeSet`), but
+    /// this mirrors `kind_names`'s "registration-order view" contract.
+    pub(crate) fn token_scopes(&self) -> &[(String, SpecScope)] {
+        &self.token_scopes
     }
 
     /// `declare_syntax_cat`'s registration (M3b2b Task 7): record a
@@ -120,6 +166,9 @@ impl Overlay {
         let kind = self.intern(&spec.kind_name);
         for t in &spec.tokens {
             self.tokens.insert(t);
+            // M3b3 Task 4: record each token's activation scope so `Ps`
+            // can build a scope-filtered active-token table for lexing.
+            self.token_scopes.push((t.clone(), spec.scope.clone()));
         }
         // `spec.leading == spec.lhs_prec.is_none()` always holds (Task
         // 4's `build_spec`: a leading placeholder sets BOTH `leading =
@@ -148,12 +197,13 @@ impl Overlay {
             }
         };
         let fts = index_entries(&prim);
+        let scope = spec.scope;
         let cd = self.cats.entry(spec.category).or_default();
         for ft in fts {
             if is_trailing {
-                cd.trailing.push((ft, prim.clone()));
+                cd.trailing.push((ft, prim.clone(), scope.clone()));
             } else {
-                cd.leading.push((ft, prim.clone()));
+                cd.leading.push((ft, prim.clone(), scope.clone()));
             }
         }
         kind
@@ -234,7 +284,11 @@ impl Overlay {
     /// on-commit (only intern a kind once its production actually wins)
     /// is the real fix, deferred (M3b3 candidate).
     pub fn fingerprint_into(&self, h: &mut blake3::Hasher) {
-        h.update(b"leanr-m3b1-overlay-v1\0");
+        // M3b3 Task 4: bumped from `leanr-m3b1-overlay-v1` when each
+        // overlay entry gained its `SpecScope` activation tag (hashed
+        // below) — a grammar that only differs in an entry's scope must
+        // fingerprint differently.
+        h.update(b"leanr-m3b3-overlay-v1\0");
         for t in self.tokens.iter() {
             h.update(t.as_bytes());
             h.update(b"\0");
@@ -254,8 +308,9 @@ impl Overlay {
             h.update(name.as_bytes());
             h.update(b"\x01");
             let cd = &self.cats[name];
-            for (_, p) in cd.leading.iter().chain(&cd.trailing) {
+            for (_, p, scope) in cd.leading.iter().chain(&cd.trailing) {
                 encode_prim(p, &kind_name, h);
+                encode_spec_scope(scope, h);
             }
         }
         // M3b2b Task 7: brand-new categories (`declare_syntax_cat`),
@@ -311,6 +366,7 @@ mod tests {
                 crate::grammar::sym("⊕"),
                 crate::grammar::cat("term", 66),
             ]),
+            scope: SpecScope::Global,
         };
         let k = ov.register(spec);
         // kind numbered after the base
@@ -342,6 +398,7 @@ mod tests {
             lhs_prec: Some(65),
             tokens: vec!["⊕".into()],
             body: crate::grammar::seq([crate::grammar::sym("⊕"), crate::grammar::cat("term", 66)]),
+            scope: SpecScope::Global,
         }
     }
 
@@ -403,6 +460,37 @@ mod tests {
         assert_eq!(
             k1, k2,
             "re-registering the same spec must not mint a new kind"
+        );
+    }
+
+    /// M3b3 Task 4: two overlays identical except for ONE entry's
+    /// activation `SpecScope` tag must fingerprint differently — locks
+    /// the per-entry scope byte into the hash (`encode_spec_scope`), the
+    /// grammar-identity guarantee the `leanr-m3b3-overlay-v1` domain bump
+    /// exists for.
+    #[test]
+    fn entries_differing_only_in_scope_tag_fingerprint_differently() {
+        let base = crate::builtin::snapshot();
+        let fp = |scope: SpecScope| {
+            let mut ov = Overlay::new(&base);
+            let mut spec = sum_spec();
+            spec.scope = scope;
+            ov.register(spec);
+            let mut h = blake3::Hasher::new();
+            ov.fingerprint_into(&mut h);
+            h.finalize()
+        };
+        let g = fp(SpecScope::Global);
+        let s = fp(SpecScope::Scoped("Widg".into()));
+        let l = fp(SpecScope::Local { scope_len: 1 });
+        assert_ne!(g, s, "Global vs Scoped must differ");
+        assert_ne!(g, l, "Global vs Local must differ");
+        assert_ne!(s, l, "Scoped vs Local must differ");
+        // And the namespace inside `Scoped` participates.
+        assert_ne!(
+            fp(SpecScope::Scoped("Widg".into())),
+            fp(SpecScope::Scoped("Other".into())),
+            "Scoped namespace must participate in the fingerprint"
         );
     }
 

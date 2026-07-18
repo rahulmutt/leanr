@@ -41,10 +41,11 @@ use std::sync::Arc;
 use super::alias::{self, AliasPrim};
 use super::notation::{
     escape_name_component, find_child, first_ident_token_text, first_token_text,
-    is_local_attr_kind, mangle_symbol_atom, private_kind_name, qualify_kind_name, read_prec_num,
-    strip_quotes, trim_lean_symbol, GrammarDelta, NotationSpec,
+    mangle_symbol_atom, private_kind_name, qualify_kind_name, read_prec_num,
+    spec_scope_from_attr_kind, strip_quotes, trim_lean_symbol, GrammarDelta, NamingCtx,
+    NotationSpec,
 };
-use super::{walk_symbols, Prim, LEAD_PREC, MAX_PREC};
+use super::{walk_symbols, Prim, SpecScope, LEAD_PREC, MAX_PREC};
 use crate::kind::{KindInterner, KIND_IDENT};
 use crate::tree::SyntaxNode;
 
@@ -59,13 +60,13 @@ use crate::tree::SyntaxNode;
 pub fn derive_surface(
     node: &SyntaxNode,
     kinds: &KindInterner,
-    current_ns: &str,
+    ctx: NamingCtx<'_>,
 ) -> Option<GrammarDelta> {
     let name = kinds.name(node.kind());
     match name {
-        "Lean.Parser.Command.syntax" => derive_syntax_cmd(node, kinds, current_ns),
+        "Lean.Parser.Command.syntax" => derive_syntax_cmd(node, kinds, ctx),
         "Lean.Parser.Command.syntaxAbbrev" => derive_syntax_abbrev(node, kinds),
-        "Lean.Parser.Command.macro" => derive_macro_cmd(node, kinds, current_ns),
+        "Lean.Parser.Command.macro" => derive_macro_cmd(node, kinds, ctx),
         // Imported shapes: NOT YET PINNED against a real Mathlib oracle
         // dump (Task 8 Step 5 — the full sweep was still running in
         // this checkout, and `target/leanr-stx-cache`'s existing ~116
@@ -125,13 +126,13 @@ fn derive_binder_predicate(_node: &SyntaxNode, _kinds: &KindInterner) -> Option<
 fn derive_syntax_cmd(
     node: &SyntaxNode,
     kinds: &KindInterner,
-    current_ns: &str,
+    ctx: NamingCtx<'_>,
 ) -> Option<GrammarDelta> {
     let children: Vec<SyntaxNode> = node.children().collect();
     let attr_kind_pos = children
         .iter()
         .position(|c| kinds.name(c.kind()) == "Lean.Parser.Term.attrKind")?;
-    let is_local = is_local_attr_kind(&children[attr_kind_pos], kinds);
+    let scope = spec_scope_from_attr_kind(&children[attr_kind_pos], kinds, ctx);
     let prec_wrapper = children.get(attr_kind_pos + 1)?;
     let explicit_prec = find_child(prec_wrapper, "Lean.Parser.precedence", kinds)
         .and_then(|pn| read_prec_num(&pn, kinds));
@@ -146,9 +147,9 @@ fn derive_syntax_cmd(
         &item_nodes,
         explicit_prec,
         explicit_name,
-        is_local,
+        scope,
         kinds,
-        current_ns,
+        ctx.current_ns,
     )
 }
 
@@ -200,13 +201,13 @@ fn derive_syntax_abbrev(_node: &SyntaxNode, _kinds: &KindInterner) -> Option<Gra
 fn derive_macro_cmd(
     node: &SyntaxNode,
     kinds: &KindInterner,
-    current_ns: &str,
+    ctx: NamingCtx<'_>,
 ) -> Option<GrammarDelta> {
     let children: Vec<SyntaxNode> = node.children().collect();
     let attr_kind_pos = children
         .iter()
         .position(|c| kinds.name(c.kind()) == "Lean.Parser.Term.attrKind")?;
-    let is_local = is_local_attr_kind(&children[attr_kind_pos], kinds);
+    let scope = spec_scope_from_attr_kind(&children[attr_kind_pos], kinds, ctx);
     let prec_wrapper = children.get(attr_kind_pos + 1)?;
     let explicit_prec = find_child(prec_wrapper, "Lean.Parser.precedence", kinds)
         .and_then(|pn| read_prec_num(&pn, kinds));
@@ -232,9 +233,9 @@ fn derive_macro_cmd(
         &item_nodes,
         explicit_prec,
         explicit_name,
-        is_local,
+        scope,
         kinds,
-        current_ns,
+        ctx.current_ns,
     )
 }
 
@@ -256,13 +257,17 @@ fn build_from_items(
     item_nodes: &[SyntaxNode],
     explicit_prec: Option<u32>,
     explicit_name: Option<String>,
-    is_local: bool,
+    scope: SpecScope,
     kinds: &KindInterner,
     current_ns: &str,
 ) -> Option<GrammarDelta> {
     if item_nodes.is_empty() {
         return None;
     }
+    // Only `local` privatizes the kind name (`scoped` does not) — the
+    // `Local` variant is the privatize gate, same as `notation.rs`'s
+    // `build_spec`.
+    let is_local = matches!(scope, SpecScope::Local { .. });
     let first = &item_nodes[0];
     let (leading, lhs_prec, body_nodes): (bool, Option<u32>, &[SyntaxNode]) =
         if kinds.name(first.kind()) == "Lean.Parser.Syntax.cat" {
@@ -327,6 +332,7 @@ fn build_from_items(
         lhs_prec,
         tokens,
         body,
+        scope,
     }))
 }
 

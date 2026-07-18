@@ -1,0 +1,7 @@
+{"c":[{"c":[],"k":"null"},{"c":[],"k":"null"},{"c":[],"k":"null"}],"k":"Lean.Parser.Module.header"}
+{"c":[{"a":"namespace","s":[0,9]},{"i":"Widgsc2","s":[10,17]}],"k":"Lean.Parser.Command.namespace"}
+{"c":[{"c":[],"k":"null"},{"c":[],"k":"null"},{"c":[{"c":[{"c":[{"a":"scoped","s":[18,24]}],"k":"Lean.Parser.Term.scoped"}],"k":"null"}],"k":"Lean.Parser.Term.attrKind"},{"a":"syntax","s":[25,31]},{"c":[],"k":"null"},{"c":[],"k":"null"},{"c":[],"k":"null"},{"c":[{"c":[{"c":[{"a":"\"wobsc2\"","s":[32,40]}],"k":"str"}],"k":"Lean.Parser.Syntax.atom"}],"k":"null"},{"a":":","s":[41,42]},{"i":"term","s":[43,47]}],"k":"Lean.Parser.Command.syntax"}
+{"c":[{"c":[],"k":"null"},{"c":[],"k":"null"},{"c":[{"c":[],"k":"null"}],"k":"Lean.Parser.Term.attrKind"},{"a":"macro_rules","s":[48,59]},{"c":[],"k":"null"},{"c":[{"c":[{"c":[{"a":"|","s":[60,61]},{"c":[{"c":[{"c":[{"a":"`(","s":[62,64]},{"c":[{"a":"wobsc2","s":[64,70]}],"k":"Widgsc2.termWobsc2"},{"a":")","s":[70,71]}],"k":"Lean.Parser.Term.quot"}],"k":"null"}],"k":"null"},{"a":"=>","s":[72,74]},{"c":[{"a":"`(","s":[75,77]},{"c":[{"a":"49","s":[77,79]}],"k":"num"},{"a":")","s":[79,80]}],"k":"Lean.Parser.Term.quot"}],"k":"Lean.Parser.Term.matchAlt"}],"k":"null"}],"k":"Lean.Parser.Term.matchAlts"}],"k":"Lean.Parser.Command.macro_rules"}
+{"c":[{"a":"end","s":[81,84]},{"c":[{"i":"Widgsc2","s":[85,92]},{"c":[],"k":"null"}],"k":"null"}],"k":"Lean.Parser.Command.end"}
+{"c":[{"a":"#check","s":[93,99]},{"i":"wobsc2","s":[100,106]}],"k":"Lean.Parser.Command.check"}
+{"c":[{"a":"","s":[107,107]}],"k":"Lean.Parser.Command.eoi"}

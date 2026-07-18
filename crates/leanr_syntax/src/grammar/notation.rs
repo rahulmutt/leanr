@@ -133,7 +133,36 @@ use crate::kind::{KindInterner, KIND_ERROR, KIND_IDENT, KIND_MISSING};
 use crate::lex::{is_id_first, is_id_rest};
 use crate::tree::SyntaxNode;
 
-use super::{LeadingIdentBehavior, Prim, LEAD_PREC, MAX_PREC};
+use super::{LeadingIdentBehavior, Prim, SpecScope, LEAD_PREC, MAX_PREC};
+
+/// M3b3 Task 4: the naming/scope context threaded into `derive_delta`
+/// (and both derivation chains) — supersedes the plain `current_ns:
+/// &str` third parameter Task 2 added. Carries the two facts a producer
+/// needs to name AND scope a same-file declaration: the current
+/// namespace (for `stxNodeKind := currNamespace ++ name` and for a
+/// `scoped` entry's activation namespace) and the current scope depth
+/// (for a `local` entry's `SpecScope::Local { scope_len }`). A small
+/// borrow-only struct rather than a fourth positional argument, per the
+/// brief.
+#[derive(Clone, Copy, Debug)]
+pub struct NamingCtx<'a> {
+    pub current_ns: &'a str,
+    pub scope_len: usize,
+}
+
+impl NamingCtx<'_> {
+    /// Top-level context (no enclosing `namespace`/`section`): empty
+    /// namespace, zero scope depth — the identity for both naming
+    /// (`qualify_kind_name`) and activation (`SpecScope::Global`/a
+    /// top-level `Local { scope_len: 0 }`). Used by the notation-
+    /// derivation unit tests, all of which parse at top level.
+    pub fn top_level() -> Self {
+        NamingCtx {
+            current_ns: "",
+            scope_len: 0,
+        }
+    }
+}
 
 /// One atom of a notation's surface syntax, in declaration order.
 /// `Symbol` carries the *raw* (untrimmed) source text of a quoted
@@ -398,6 +427,12 @@ pub struct NotationSpec {
     /// child — see `Prim::TrailingNode`'s own doc comment in
     /// `grammar/mod.rs`).
     pub body: Prim,
+    /// M3b3 Task 4: activation tag — `Global` (plain `syntax`/`notation`,
+    /// even inside a `namespace`), `Scoped(ns)` (`scoped`, active iff
+    /// `ns` is in the active set), or `Local { scope_len }` (`local`,
+    /// active while its declaring scope is live). Consulted by
+    /// `ScopeStack::is_active` at every overlay read point (`parse.rs`).
+    pub scope: SpecScope,
 }
 
 /// One item of a notation/mixfix's surface syntax, in declaration
@@ -451,7 +486,7 @@ pub enum GrammarDelta {
 pub fn derive_delta(
     node: &SyntaxNode,
     kinds: &KindInterner,
-    current_ns: &str,
+    ctx: NamingCtx<'_>,
 ) -> Option<GrammarDelta> {
     // M3b1 only ever registers into the `term` category (both
     // `mixfix`'s and `notation`'s own RHS recurse via `cat("term", 0)`
@@ -475,16 +510,16 @@ pub fn derive_delta(
     }
     match name {
         "Lean.Parser.Command.mixfix" => {
-            derive_mixfix(node, kinds, category, current_ns).map(GrammarDelta::Production)
+            derive_mixfix(node, kinds, category, ctx).map(GrammarDelta::Production)
         }
         "Lean.Parser.Command.notation" => {
-            derive_notation(node, kinds, category, current_ns).map(GrammarDelta::Production)
+            derive_notation(node, kinds, category, ctx).map(GrammarDelta::Production)
         }
         "Lean.Parser.Command.syntaxCat" => derive_syntax_cat(node, kinds),
         // M3b2b Task 8: the general `syntax`-command surface (`syntax`/
         // `syntaxAbbrev`/`macro`/the imported `elab`-family) — one
         // dispatch entry point for `run_module`, per this task's brief.
-        _ => super::surface::derive_surface(node, kinds, current_ns),
+        _ => super::surface::derive_surface(node, kinds, ctx),
     }
 }
 
@@ -611,13 +646,13 @@ fn derive_mixfix(
     node: &SyntaxNode,
     kinds: &KindInterner,
     category: &str,
-    current_ns: &str,
+    ctx: NamingCtx<'_>,
 ) -> Option<NotationSpec> {
     let children: Vec<SyntaxNode> = node.children().collect();
     let attr_kind_pos = children
         .iter()
         .position(|c| kinds.name(c.kind()) == "Lean.Parser.Term.attrKind")?;
-    let is_local = is_local_attr_kind(&children[attr_kind_pos], kinds);
+    let scope = spec_scope_from_attr_kind(&children[attr_kind_pos], kinds, ctx);
     let mixfix_kind_node = children.get(attr_kind_pos + 1)?;
     let fixity = kinds.name(mixfix_kind_node.kind());
     let precedence_node = children.get(attr_kind_pos + 2)?;
@@ -665,7 +700,7 @@ fn derive_mixfix(
     // above), so unlike a hand-written `notation`, there is no
     // atom-like-defaulting case to consider here: the outer prec is
     // always exactly `p`.
-    build_spec(category, items, p, is_local, current_ns)
+    build_spec(category, items, p, scope, ctx.current_ns)
 }
 
 /// `notation`'s oracle shape (command_notation.rs module doc, oracle
@@ -679,13 +714,13 @@ fn derive_notation(
     node: &SyntaxNode,
     kinds: &KindInterner,
     category: &str,
-    current_ns: &str,
+    ctx: NamingCtx<'_>,
 ) -> Option<NotationSpec> {
     let children: Vec<SyntaxNode> = node.children().collect();
     let attr_kind_pos = children
         .iter()
         .position(|c| kinds.name(c.kind()) == "Lean.Parser.Term.attrKind")?;
-    let is_local = is_local_attr_kind(&children[attr_kind_pos], kinds);
+    let scope = spec_scope_from_attr_kind(&children[attr_kind_pos], kinds, ctx);
     let prec_wrapper = children.get(attr_kind_pos + 1)?;
     let explicit_prec = find_child(prec_wrapper, "Lean.Parser.precedence", kinds)
         .and_then(|pn| read_prec_num(&pn, kinds));
@@ -728,7 +763,7 @@ fn derive_notation(
     let atom_like = matches!(items.first(), Some(Item::Symbol(_)))
         && matches!(items.last(), Some(Item::Symbol(_)));
     let outer_prec = explicit_prec.unwrap_or(if atom_like { MAX_PREC } else { LEAD_PREC });
-    build_spec(category, items, outer_prec, is_local, current_ns)
+    build_spec(category, items, outer_prec, scope, ctx.current_ns)
 }
 
 /// Whether `attr_kind_node` (a `Lean.Parser.Term.attrKind` node —
@@ -749,11 +784,53 @@ fn derive_notation(
 /// surface (one pinned rule, two callers, same discipline as
 /// `mangle_symbol_atom`'s own `pub(super)` promotion above).
 pub(crate) fn is_local_attr_kind(attr_kind_node: &SyntaxNode, kinds: &KindInterner) -> bool {
+    attr_kind_inner_is(attr_kind_node, kinds, "Lean.Parser.Term.local")
+}
+
+/// Twin of `is_local_attr_kind` for the `scoped` modifier (M3b3 Task 4):
+/// whether `attr_kind_node` carries `scoped` specifically. Dump-pinned
+/// (`StxScoped.lean`): `scoped syntax` produces an `attrKind` whose
+/// `optional` wrapper holds a `Lean.Parser.Term.scoped` child — the
+/// same shape `local` uses, one kind name over. `scoped` does NOT
+/// privatize the kind name (unlike `local`; `StxScoped.lean`'s kind is
+/// the plain `Widgsc.termWobsc`, not `_private.0.…`) — it only sets
+/// `SpecScope::Scoped` for activation.
+pub(crate) fn is_scoped_attr_kind(attr_kind_node: &SyntaxNode, kinds: &KindInterner) -> bool {
+    attr_kind_inner_is(attr_kind_node, kinds, "Lean.Parser.Term.scoped")
+}
+
+/// Shared reader for `is_local_attr_kind`/`is_scoped_attr_kind`:
+/// `attrKind`'s single child is the `optional`'s `null` wrapper — 0
+/// children when the modifier is absent, 1 (`Term.local`/`Term.scoped`)
+/// when present.
+fn attr_kind_inner_is(attr_kind_node: &SyntaxNode, kinds: &KindInterner, want: &str) -> bool {
     attr_kind_node
         .children()
         .next()
         .and_then(|opt_wrapper| opt_wrapper.children().next())
-        .is_some_and(|inner| kinds.name(inner.kind()) == "Lean.Parser.Term.local")
+        .is_some_and(|inner| kinds.name(inner.kind()) == want)
+}
+
+/// M3b3 Task 4: the activation tag for a same-file declaration, from its
+/// `attrKind` node + the current naming context. `local` and `scoped`
+/// are mutually exclusive in the surface (`attrKind`'s `optional` holds
+/// at most one), so this checks `local` first, then `scoped`, else
+/// `Global`. Shared by `notation.rs`'s `derive_mixfix`/`derive_notation`
+/// and `surface.rs`'s `derive_syntax_cmd`/`derive_macro_cmd`.
+pub(crate) fn spec_scope_from_attr_kind(
+    attr_kind_node: &SyntaxNode,
+    kinds: &KindInterner,
+    ctx: NamingCtx<'_>,
+) -> SpecScope {
+    if is_local_attr_kind(attr_kind_node, kinds) {
+        SpecScope::Local {
+            scope_len: ctx.scope_len,
+        }
+    } else if is_scoped_attr_kind(attr_kind_node, kinds) {
+        SpecScope::Scoped(ctx.current_ns.to_string())
+    } else {
+        SpecScope::Global
+    }
 }
 
 /// Shared tail end of both `derive_mixfix`/`derive_notation`: turn an
@@ -775,12 +852,16 @@ fn build_spec(
     category: &str,
     items: Vec<Item>,
     prec: u32,
-    is_local: bool,
+    scope: SpecScope,
     current_ns: &str,
 ) -> Option<NotationSpec> {
     if items.is_empty() {
         return None;
     }
+    // `local` (and only `local`) privatizes the kind name — `scoped`
+    // does not (`is_scoped_attr_kind`'s own doc comment); the `Local`
+    // variant is exactly the privatize-gate here.
+    let is_local = matches!(scope, SpecScope::Local { .. });
     let atoms: Vec<NotationAtom> = items
         .iter()
         .map(|it| match it {
@@ -839,6 +920,7 @@ fn build_spec(
         lhs_prec,
         tokens,
         body: Prim::Seq(body_prims),
+        scope,
     })
 }
 
@@ -1075,7 +1157,7 @@ mod tests {
     /// `syntax_inside_namespace_derives_qualified_kind` and the
     /// `StxNamespace` oracle fixture, not duplicated here.
     fn derive(node: &SyntaxNode, kinds: &KindInterner) -> Option<NotationSpec> {
-        match derive_delta(node, kinds, "") {
+        match derive_delta(node, kinds, NamingCtx::top_level()) {
             Some(GrammarDelta::Production(spec)) => Some(spec),
             _ => None,
         }
@@ -1616,7 +1698,7 @@ mod tests {
         let r = crate::parse_module("declare_syntax_cat widgetish\n", &snap);
         assert!(r.errors.is_empty(), "errs={:?}", r.errors);
         let cmd = find_command(&r.tree, "Lean.Parser.Command.syntaxCat");
-        match derive_delta(&cmd, &r.tree.kinds, "") {
+        match derive_delta(&cmd, &r.tree.kinds, NamingCtx::top_level()) {
             Some(GrammarDelta::NewCategory { name, behavior }) => {
                 assert_eq!(name, "widgetish");
                 assert_eq!(behavior, LeadingIdentBehavior::Default);
@@ -1627,7 +1709,7 @@ mod tests {
         let r = crate::parse_module("declare_syntax_cat gadget (behavior := symbol)\n", &snap);
         assert!(r.errors.is_empty(), "errs={:?}", r.errors);
         let cmd = find_command(&r.tree, "Lean.Parser.Command.syntaxCat");
-        match derive_delta(&cmd, &r.tree.kinds, "") {
+        match derive_delta(&cmd, &r.tree.kinds, NamingCtx::top_level()) {
             Some(GrammarDelta::NewCategory { name, behavior }) => {
                 assert_eq!(name, "gadget");
                 assert_eq!(behavior, LeadingIdentBehavior::Symbol);
@@ -1638,7 +1720,7 @@ mod tests {
         let r = crate::parse_module("declare_syntax_cat widget2 (behavior := both)\n", &snap);
         assert!(r.errors.is_empty(), "errs={:?}", r.errors);
         let cmd = find_command(&r.tree, "Lean.Parser.Command.syntaxCat");
-        match derive_delta(&cmd, &r.tree.kinds, "") {
+        match derive_delta(&cmd, &r.tree.kinds, NamingCtx::top_level()) {
             Some(GrammarDelta::NewCategory { name, behavior }) => {
                 assert_eq!(name, "widget2");
                 assert_eq!(behavior, LeadingIdentBehavior::Both);
@@ -1680,7 +1762,7 @@ mod tests {
         assert!(r.errors.is_empty(), "errs={:?}", r.errors);
         let cmd = find_command(&r.tree, "Lean.Parser.Command.syntax");
         assert!(
-            derive_delta(&cmd, &r.tree.kinds, "").is_none(),
+            derive_delta(&cmd, &r.tree.kinds, NamingCtx::top_level()).is_none(),
             "a populated custom psep must skip-and-record (derive None), not drop the psep"
         );
     }

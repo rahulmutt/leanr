@@ -19,8 +19,45 @@ pub mod notation;
 pub mod overlay;
 pub(crate) mod scope;
 pub mod surface;
-pub use notation::{derive_delta, mangle_kind, GrammarDelta, NotationAtom, NotationSpec};
+pub use notation::{
+    derive_delta, mangle_kind, GrammarDelta, NamingCtx, NotationAtom, NotationSpec,
+};
 pub use overlay::{CategoryDelta, Overlay};
+
+/// M3b3 Task 4: a grammar entry's ACTIVATION scope — the tag that
+/// decides, at each grammar read point, whether a same-file (overlay)
+/// or imported (Task 5) production/token is currently in force. Task 5
+/// reuses this enum + `ScopeStack::is_active` verbatim for imported
+/// entries.
+///
+/// Dump-pinned (`StxScoped.lean`/`StxScopedInactive.lean`, elaborating
+/// dumper): a plain `syntax`/`notation` is `Global` even when declared
+/// inside a `namespace` (only its KIND NAME is namespace-qualified —
+/// `StxNamespace.lean`'s top-level `#check wobns` after `end Widgetish`
+/// still lexes `wobns` as an atom and parses via `Widgetish.termWobns`);
+/// `scoped` ties activation to its declaring namespace; `local` ties it
+/// to its declaring scope depth.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SpecScope {
+    /// Always active (plain `syntax`/`notation`/`mixfix`, and every
+    /// builtin base production).
+    Global,
+    /// `scoped` — active iff its namespace is in the active set (a
+    /// prefix of the current namespace path, or an explicit `open`).
+    /// Its `String` is the CURRENT namespace at the declaration site
+    /// (dump-pinned: `scoped syntax "wobsc"` inside `namespace Widgsc`
+    /// derives `Scoped("Widgsc")`, active under `namespace Widgsc`,
+    /// `open Widgsc`, and `namespace Widgsc.Inner`).
+    Scoped(String),
+    /// `local` — active while at least `scope_len` scope entries remain
+    /// (deactivates when its declaring scope pops). `scope_len` is the
+    /// `ScopeStack::scope_len()` captured at the declaration site.
+    /// DRAFT semantics for the DEACTIVATION edge (no Task-4 fixture
+    /// forces a `local` use after its scope pops — every `StxLocal.lean`
+    /// use is in-scope); the `>=` predicate is the brief's draft, kept
+    /// until a storm/fixture (Task 6) pins it harder.
+    Local { scope_len: usize },
+}
 
 #[derive(Clone, Debug)]
 pub enum Prim {
