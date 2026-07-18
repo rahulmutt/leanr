@@ -348,13 +348,39 @@ fn macro_tail(b: &mut SnapshotBuilder) -> Prim {
     nd(k, seq([sym(":"), Prim::Ident, sym("=>"), rhs]))
 }
 
+/// `Lean/Parser/Syntax.lean:126` (M3b3 Task 10) defines `elabTail` as
+/// `atomic (" : " ident (optional (" <= " ident)))` sequenced with
+/// `darrow` then `withPosition termParser`. UNLIKE `macroTail`, the RHS
+/// term is NOT wrapped in a named `macroRhs`-style node — dump-confirmed
+/// (`StxElab.stx.jsonl`): `elabTail`'s node-only children are just
+/// `[null(<= wrapper), <term node>]`, no intermediate node at all — and
+/// there's an extra optional `<= expectedType` binder slot before the
+/// `=>`. That slot is ignored by `derive_elab_cmd` (it never reads past
+/// the tail's own leading `ident`) and, structurally, can never shadow
+/// that read either: it's nested one level inside its own `null`
+/// wrapper, invisible to a direct (non-descending) token scan.
+fn elab_tail(b: &mut SnapshotBuilder) -> Prim {
+    let k = b.kind("Lean.Parser.Command.elabTail");
+    nd(
+        k,
+        seq([
+            sym(":"),
+            Prim::Ident,
+            opt(seq([sym("<="), Prim::Ident])),
+            sym("=>"),
+            cat("term", 0),
+        ]),
+    )
+}
+
 /// `optKind := optional (" (" >> nonReservedSymbol "kind" >> " := " >>
 /// ident >> ")")` — `macro_rules`/`elab_rules`'s own optional kind-name
-/// override (only `macro_rules` is ported; `elab_rules`/`elab`/
-/// `binder_predicate` aren't surface-table rows this task owns). The
-/// populated shape (`(kind := myKind)`, module doc's `probe5` citation
-/// above) is dump-confirmed via that scratch probe only — no committed
-/// fixture exercises it; only the empty case round-trips through one.
+/// override (only `macro_rules` is ported; `elab_rules` isn't a
+/// surface-table row this task owns — shape-only even in real Lean,
+/// `derive_surface`'s own `"elab_rules"` arm). The populated shape
+/// (`(kind := myKind)`, module doc's `probe5` citation above) is
+/// dump-confirmed via that scratch probe only — no committed fixture
+/// exercises it; only the empty case round-trips through one.
 fn opt_kind_clause() -> Prim {
     opt(seq([
         sym("("),
@@ -479,6 +505,76 @@ pub(super) fn register(b: &mut SnapshotBuilder) {
             np,
             many1(arg),
             tail,
+        ]),
+    );
+
+    // «elab» := leading_parser suppressInsideQuot <| optional docComment
+    // >> optional Term.«attributes» >> Term.attrKind >> "elab" >>
+    // optPrecedence >> optNamedName >> optNamedPrio >> many1 (ppSpace >>
+    // elabArg) >> elabTail (`Lean/Parser/Syntax.lean:127-129`, M3b3 Task
+    // 10). `elabArg := macroArg` (a plain alias — reuses `macro_arg`'s
+    // own node kind, never registering a distinct "elabArg" one,
+    // dump-confirmed) — mirrors `macro`'s own registration immediately
+    // above byte-for-byte except for the tail combinator.
+    let doc = doc_comment(b);
+    let attrs = attributes(b);
+    let ak = attr_kind(b);
+    let prec = opt(precedence(b));
+    let nn = opt(named_name(b));
+    let np = opt(named_prio(b));
+    let arg = macro_arg(b);
+    let tail = elab_tail(b);
+    b.leading2(
+        "command",
+        "Lean.Parser.Command.elab",
+        MAX_PREC,
+        seq([
+            opt(doc),
+            opt(attrs),
+            ak,
+            sym("elab"),
+            prec,
+            nn,
+            np,
+            many1(arg),
+            tail,
+        ]),
+    );
+
+    // binderPredicate := leading_parser optional docComment >> optional
+    // Term.attributes >> optional Term.attrKind >> "binder_predicate" >>
+    // optNamedName >> optNamedPrio >> ppSpace >> ident >> many (ppSpace
+    // >> macroArg) >> " => " >> termParser (`Lean/Parser/Syntax.lean:
+    // 137-139`, M3b3 Task 10). The DOUBLE-wrapped attrKind (`opt(ak)`,
+    // not the bare `ak` every other attrKind-anchored command above
+    // registers) is a genuine divergence, dump-confirmed
+    // (`StxElab.stx.jsonl`) — `derive_binder_predicate`'s own doc
+    // comment has the full citation. No `optPrecedence` slot at all
+    // (unlike `syntax`/`macro`/`elab`). The bound `ident` (`x` in
+    // `Init/BinderPredicates.lean`'s own declarations) is a bare token,
+    // read directly via `Prim::Ident`, same as `macroTail`'s target
+    // category ident.
+    let doc = doc_comment(b);
+    let attrs = attributes(b);
+    let ak = opt(attr_kind(b));
+    let nn = opt(named_name(b));
+    let np = opt(named_prio(b));
+    let arg = macro_arg(b);
+    b.leading2(
+        "command",
+        "Lean.Parser.Command.binderPredicate",
+        MAX_PREC,
+        seq([
+            opt(doc),
+            opt(attrs),
+            ak,
+            sym("binder_predicate"),
+            nn,
+            np,
+            Prim::Ident,
+            many(arg),
+            sym("=>"),
+            cat("term", 0),
         ]),
     );
 }

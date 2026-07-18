@@ -149,7 +149,11 @@ run = [
   "sh -c 'cd tests/fixtures/syntax/import && rm -f Init.olean'",
   "sh -c 'cd tests/fixtures/syntax/import && lean NotaDep.lean -o NotaDep.olean && lean NotaDepMeta.lean -o NotaDepMeta.olean'",
   "sh -c 'cd tests/fixtures/syntax/import && for f in ImportMixfix ImportMunch ImportCat; do LEAN_PATH=$PWD lean --run ../dump_syntax.lean $f.lean > $f.stx.jsonl; done'",
-  "sh -c 'cd tests/fixtures/syntax/import && LEAN_PATH=$PWD lean --run ../dump_syntax_elab.lean ImportOverload.lean > ImportOverload.stx.jsonl'",
+  # M3b3 Task 5: ImportScoped{Open,Ns} exercise imported `scoped`-entry
+  # activation and carry same-file `open`/`namespace` scope commands that
+  # must be LIVE for the later `#check` — so they use the ELABORATING
+  # dumper (like ImportOverload), never the parse-only one.
+  "sh -c 'cd tests/fixtures/syntax/import && for f in ImportOverload ImportScopedOpen ImportScopedNs; do LEAN_PATH=$PWD lean --run ../dump_syntax_elab.lean $f.lean > $f.stx.jsonl; done'",
   "sh -c 'cd tests/fixtures/syntax/import && lean Init.lean -o Init.olean'",
 ]
 depends_post = ["fixtures:regen-notation"]

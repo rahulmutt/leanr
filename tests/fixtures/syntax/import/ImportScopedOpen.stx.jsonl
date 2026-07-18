@@ -1,0 +1,4 @@
+{"c":[{"c":[],"k":"null"},{"c":[],"k":"null"},{"c":[{"c":[{"c":[],"k":"null"},{"c":[],"k":"null"},{"a":"import","s":[0,6]},{"c":[],"k":"null"},{"i":"NotaDep","s":[7,14]},{"c":[],"k":"null"}],"k":"Lean.Parser.Module.import"}],"k":"null"}],"k":"Lean.Parser.Module.header"}
+{"c":[{"a":"open","s":[15,19]},{"c":[{"c":[{"i":"NotaDep","s":[20,27]}],"k":"null"}],"k":"Lean.Parser.Command.openSimple"}],"k":"Lean.Parser.Command.open"}
+{"c":[{"a":"#check","s":[28,34]},{"c":[{"c":[{"a":"1","s":[35,36]}],"k":"num"},{"a":"⊖⊖","s":[37,43]},{"c":[{"a":"2","s":[44,45]}],"k":"num"}],"k":"NotaDep.«term_⊖⊖_»"}],"k":"Lean.Parser.Command.check"}
+{"c":[{"a":"","s":[46,46]}],"k":"Lean.Parser.Command.eoi"}

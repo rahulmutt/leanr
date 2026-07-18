@@ -32,6 +32,17 @@ use crate::tree::{build_tree, Event, SyntaxTree};
 pub struct ParseResult {
     pub tree: SyntaxTree,
     pub errors: Vec<ParseError>,
+    /// M3b3 Task 7 test-only accessor: the final overlay state, so a test
+    /// can hash it (`Overlay::fingerprint_into`) without a production
+    /// consumer needing to reach through `ParseResult` for it — no such
+    /// consumer exists yet (the M5 query-firewall seam `fingerprint_into`
+    /// itself documents is still future work; `grep fingerprint_into`
+    /// confirms every non-test caller today lives inside `overlay.rs`'s
+    /// own unit tests). `#[cfg(test)]` keeps this out of the public,
+    /// non-test API entirely, matching `Ps::new_for_test`'s own
+    /// test-only-surface convention in this file.
+    #[cfg(test)]
+    pub(crate) overlay: Overlay,
 }
 
 /// Parse one module: header, then commands to EOF. Never panics; a
@@ -143,6 +154,14 @@ fn run_module(mut ps: Ps<'_>, snap: &GrammarSnapshot) -> ParseResult {
             break;
         }
         let sp = ps.save();
+        // M3b3 final review (C1, re-review): anchor the command-committed
+        // watermark before this command parses anything. Everything the
+        // overlay holds now — earlier commands' registered kinds AND any
+        // surviving speculative (antiquot) kinds from a previous command's
+        // finalized tree — is below this count and is never truncated by a
+        // `restore` within THIS command, so it is the safe floor the
+        // `cat_cache` reconciliation records against.
+        ps.committed_overlay_kinds = ps.overlay.kind_count();
         match ps.run(&Prim::Category {
             name: "command".into(),
             rbp: 0,
@@ -217,8 +236,20 @@ fn run_module(mut ps: Ps<'_>, snap: &GrammarSnapshot) -> ParseResult {
                 let cmd_events = flatten_events(&ps.events[sp.events..], &ps.subtrees);
                 let cmd_kinds = ps.merged_kinds();
                 let subtree = build_tree(ps.src, &cmd_events, cmd_kinds);
+                // M3b3 Task 4: `derive_delta` now needs both the current
+                // namespace (naming + `scoped` activation ns) and the
+                // innermost scope entry's id (`local` activation anchor,
+                // M3b3 Task 6b), bundled as `NamingCtx`. Read BEFORE
+                // registration (scope commands
+                // are disjoint from grammar-growing ones, so this
+                // command's own namespace/depth was already recorded by
+                // an earlier scope command — no ordering hazard).
+                let ctx = crate::grammar::NamingCtx {
+                    current_ns: ps.scope.current_namespace(),
+                    anchor: ps.scope.innermost_id(),
+                };
                 if let Some(delta) =
-                    crate::grammar::notation::derive_delta(&subtree.root(), &subtree.kinds)
+                    crate::grammar::notation::derive_delta(&subtree.root(), &subtree.kinds, ctx)
                 {
                     match delta {
                         crate::grammar::GrammarDelta::Production(spec) => {
@@ -234,7 +265,50 @@ fn run_module(mut ps: Ps<'_>, snap: &GrammarSnapshot) -> ParseResult {
                     // overlay state) and would replay stale
                     // leading/trailing candidate sets if hit again.
                     ps.clear_category_cache();
+                    // M3b3 Task 4: a just-registered `scoped`/`local`
+                    // token may already be active (declared inside its
+                    // own namespace/scope), so refresh the lexer's
+                    // active-token view too.
+                    ps.rebuild_active_overlay_tokens();
                 }
+            }
+            // M3b3 Task 1: a clean command whose outer kind is
+            // scope-relevant (`SCOPE_COMMAND_KINDS`) updates `ps.scope`.
+            // Disjoint from the grammar-growing arm above (no kind is in
+            // both lists), so this never double-builds the same
+            // command's subtree; same cheap-peek-then-build-only-if-
+            // eligible shape as that arm, for the same reason (scope
+            // commands are rare — `namespace`/`section`/`end`/`open` —
+            // so the extra tree build is bounded by their count, not
+            // paid per command).
+            Ok(())
+                if ps
+                    .peek_command_kind_name(sp.events)
+                    .is_some_and(|n| SCOPE_COMMAND_KINDS.contains(&n)) =>
+            {
+                let cmd_events = flatten_events(&ps.events[sp.events..], &ps.subtrees);
+                let cmd_kinds = ps.merged_kinds();
+                let subtree = build_tree(ps.src, &cmd_events, cmd_kinds);
+                crate::grammar::scope::scope_command_update(
+                    &mut ps.scope,
+                    &subtree.root(),
+                    &subtree.kinds,
+                );
+                // M3b3 Task 4: the scope just changed, so activation may
+                // have flipped for some scoped/local entries. A memoized
+                // `cat_cache` candidate set (keyed on pos/name/rbp/…, with
+                // NO activation dependency — `CatCacheKey`) computed under
+                // the OLD activation could replay a now-stale
+                // include/exclude if hit again; clearing it here keeps the
+                // memo activation-safe WITHOUT touching `CatCacheKey`,
+                // exactly as the grammar-growth arm above does after a
+                // registration. Cheap: scope commands are rare (bounded by
+                // `namespace`/`section`/`end`/`open` count, never
+                // per-token). Then rebuild the lexer's active-token view so
+                // the NEXT command lexes against the correct in-force
+                // token set.
+                ps.clear_category_cache();
+                ps.rebuild_active_overlay_tokens();
             }
             Ok(()) => {}
             Err(_) => {
@@ -258,8 +332,15 @@ fn run_module(mut ps: Ps<'_>, snap: &GrammarSnapshot) -> ParseResult {
     ps.finish();
 
     ps.finish(); // module
+    #[cfg(test)]
+    let overlay = ps.overlay.clone();
     let (tree, errors) = ps.finish_into_tree();
-    ParseResult { tree, errors }
+    ParseResult {
+        tree,
+        errors,
+        #[cfg(test)]
+        overlay,
+    }
 }
 
 /// Parse ONLY the module header and return the imported module names
@@ -643,8 +724,9 @@ pub(crate) struct Ps<'a> {
     /// field rather than re-deriving from `snap` each time.
     kinds: Arc<KindInterner>,
     /// Same-file grammar growth (M3b1 Task 6): consulted AFTER the base
-    /// snapshot at the three grammar read points (munch — `overlay.tokens()`
-    /// in `peek_significant`/`peek_significant_readonly`/`bump`; dispatch —
+    /// snapshot at the three grammar read points (munch — the scope-
+    /// filtered `active_overlay_tokens` view of `overlay`'s tokens, M3b3
+    /// Task 4, in `peek_significant`/`peek_significant_readonly`/`bump`; dispatch —
     /// `category`'s leading/trailing candidate gathering; kind naming —
     /// `merged_kinds`, used by `finish_into_tree`). Starts empty
     /// (`Overlay::new(snap)`, `Ps::new`), so a `Ps` nobody calls
@@ -654,6 +736,18 @@ pub(crate) struct Ps<'a> {
     /// `merged_kinds` short-circuits to a plain `Arc::clone` of the base
     /// interner — see each site's own doc comment).
     overlay: Overlay,
+    /// M3b3 Task 4: the scope-FILTERED overlay token table `next_token`
+    /// actually lexes against (the third grammar read point — munch).
+    /// NOT `overlay.tokens()` (the full set): a `scoped`/`local` token is
+    /// only in force while its scope is active, so it must vanish from
+    /// the lexer's view when the scope pops (dump-pinned by
+    /// `StxScopedInactive.lean` — the inactive `wobsc2` lexes as an IDENT
+    /// because its token is absent, NOT as an atom). Rebuilt from
+    /// `overlay.token_scopes()` by `rebuild_active_overlay_tokens` on
+    /// every registration/scope event (same command-boundary discipline
+    /// as `clear_category_cache`); constant within a single command's
+    /// parse, so a per-token rebuild is never needed.
+    active_overlay_tokens: TokenTable,
     events: Vec<PEvent>,
     errors: Vec<PError>,
     /// Append-only arena of memoized `category()` subtrees — the backing
@@ -737,6 +831,21 @@ pub(crate) struct Ps<'a> {
     /// comment for the full citation, the key/entry shapes
     /// (`CatCacheKey`/`CatCacheEntry`), and the correctness argument.
     cat_cache: HashMap<CatCacheKey, CatCacheEntry>,
+    /// M3b3 final review (C1, re-review): the overlay kind count at the
+    /// current command's parse start — the "command-committed watermark".
+    /// `Overlay::register`/`register_category` (the only calls that grow
+    /// the grammar's PRODUCTIONS) run ONLY at command boundaries, never
+    /// inside a command's parse, and every surviving speculative kind from
+    /// an EARLIER command is likewise already below this count; so no
+    /// intra-command `Savepoint::restore` ever truncates the overlay below
+    /// it. `category`'s cache reconciliation anchors each entry here rather
+    /// than at the call-time baseline, because `Overlay::intern`'s
+    /// idempotency lets a call REFERENCE a speculative kind an ENCLOSING
+    /// frame interned below the call's own baseline — anchoring at the
+    /// watermark captures the FULL speculative prefix `kind_names[watermark
+    /// ..]` an entry's events can reference (see `accept_cached_overlay_
+    /// kinds`). Set once per command in the command loop (`run_module`).
+    committed_overlay_kinds: usize,
     /// Per-open-`category()`-call furthest-failure tally, pushed on
     /// entry and popped on exit (stack discipline mirrors `pos_stack`/
     /// `forbidden_stack`) — lets a cache HIT replay its exact effect on
@@ -793,6 +902,14 @@ pub(crate) struct Ps<'a> {
     /// save-and-restores around its inner `run` call, so backtracking
     /// can never leak a stale value.
     anon_antiquot_ok: bool,
+    /// Same-file namespace/section/open scope tracking (M3b3 Task 1) —
+    /// updated by the command loop after each successful `Category {
+    /// name: "command", .. }` parse whose outer kind is in
+    /// `SCOPE_COMMAND_KINDS` (`scope::scope_command_update`). Read by
+    /// no one yet this task (ZERO behavior change) — Task 2 consumes
+    /// `current_namespace()` for derived-kind naming, Task 4 consumes
+    /// `open_namespace`/`active_namespaces` for scoped activation.
+    scope: crate::grammar::scope::ScopeStack,
 }
 
 /// Memoization key for `category()`. ORACLE-PORT `ParserCacheKey`
@@ -876,6 +993,28 @@ struct CatCacheEntry {
     /// comment. No oracle counterpart: Lean has no cross-attempt
     /// "furthest failure" tally to keep sound under caching.
     furthest: Option<(usize, Vec<String>)>,
+    /// M3b3 final review (C1, re-review): the command-committed watermark
+    /// (`Ps::committed_overlay_kinds`) in force when this entry was stored
+    /// — the overlay-relative index at which the whole command's
+    /// speculative kind prefix begins. Anchoring here rather than at the
+    /// call-time baseline is what makes the reconciliation sound under
+    /// `Overlay::intern` idempotency: a call can REFERENCE a speculative
+    /// kind an enclosing frame interned below the call's own baseline, and
+    /// only a watermark-anchored record captures it (see
+    /// `Ps::accept_cached_overlay_kinds`).
+    watermark: usize,
+    /// M3b3 final review (C1, re-review): the FULL speculative kind prefix
+    /// `overlay.kind_names()[watermark..]` at store time — every overlay
+    /// kind interned during THIS command's parse and still live when the
+    /// entry was stored, in registration order. A superset of the kinds
+    /// THIS call interned itself (it also includes an enclosing frame's
+    /// speculative kinds the call may share by idempotency), which is
+    /// exactly the set the entry's replayed events can reference. Almost
+    /// always empty (a plain category recursion interns nothing). A cache
+    /// HIT must reproduce this whole prefix at these exact indices — either
+    /// it already matches index-for-index, or the overlay is back at the
+    /// watermark and it is re-interned in order — else the entry is a miss.
+    speculative_kinds: Vec<Arc<str>>,
 }
 
 #[derive(Clone)]
@@ -896,6 +1035,23 @@ pub(crate) struct Savepoint {
     events: usize,
     errors: usize,
     lhs_prec: u32,
+    /// M3b3 Task 7: `self.overlay.kind_count()` at `save` time — `restore`
+    /// truncates the overlay's kind table back to this, undoing any
+    /// `Overlay::intern` calls a failed speculative parse made in the
+    /// meantime (e.g. an antiquot attempt's `.antiquot`/`antiquotName`/
+    /// `antiquotNestedExpr` kinds). Sound because `register`/
+    /// `register_category` — the calls that grow the grammar's
+    /// PRODUCTIONS, as opposed to merely interning a kind NAME — never
+    /// run between a `save` and its matching `restore`: the one call site
+    /// (`run_module`'s grow arm) only registers a command AFTER that
+    /// command's own top-level `save`/`restore` span has already closed
+    /// (`Ok(())` branch, never followed by a `restore` on that same
+    /// `sp`). No other function in this file calls `register`/
+    /// `register_category`. This field deliberately carries NO scope
+    /// state (`Ps::scope`, M3b3 Task 6b) — scope commands (`namespace`/
+    /// `section`/`end`/`open`) are likewise never inside a save/restore
+    /// pair, by the same argument.
+    overlay_kinds: usize,
 }
 
 /// A `longest_match` winner: which candidate won, the events/errors it
@@ -910,6 +1066,19 @@ struct MatchWinner {
     errors: Vec<PError>,
     end: usize,
     lhs_prec: u32,
+    /// M3b3 Task 7 review fix: this candidate's own overlay-local kind
+    /// names, in registration order — `self.overlay.kind_names()[sp.
+    /// overlay_kinds..]` at the moment this candidate was chosen as the
+    /// (possibly temporary) best, captured by VALUE (not by index) since
+    /// `longest_match` fully truncates the overlay back to `sp.
+    /// overlay_kinds` before trying every subsequent candidate, which
+    /// would otherwise erase them. `longest_match` re-interns exactly
+    /// these names, in this order, once the whole candidate loop is
+    /// over and only the TRUE winner remains selected — `Overlay::intern`
+    /// is idempotent and append-only, so replaying them (into an overlay
+    /// freshly truncated back to `sp.overlay_kinds`) reproduces the exact
+    /// same `SyntaxKind` indices this winner's own `events` reference.
+    interned_names: Vec<Arc<str>>,
 }
 
 /// M3b2b Task 7: outer command kinds `derive_delta` (`grammar/
@@ -921,13 +1090,15 @@ struct MatchWinner {
 /// Task 7 adds `declare_syntax_cat`'s pinned kind name (StxShapes dump,
 /// `command_syntax.rs`).
 ///
-/// `elab`/`binderPredicate` are deliberately OFF this list (post-M3b2b
-/// minors cleanup): `grammar::surface::derive_elab_cmd`/
-/// `derive_binder_predicate` unconditionally return `None` (no oracle
-/// dump to pin their child layout against yet), so keeping them here
-/// only pays `flatten_events`+`merged_kinds`+`build_tree` for a
-/// guaranteed no-op on every such command. They rejoin the list when
-/// their derivation arms exist (M3b3).
+/// `elab`/`binderPredicate` REJOIN this list as of M3b3 Task 10,
+/// reverting the post-M3b2b PR #13 temporary drop (`grammar::surface::
+/// derive_elab_cmd`/`derive_binder_predicate` used to unconditionally
+/// return `None` for lack of a real oracle dump to pin their child
+/// layout against — that dump now exists, `StxElab.lean`/
+/// `.stx.jsonl`, oracle v4.32.0-rc1 — and both functions have real
+/// derivation arms, so keeping them off this list would only cost a
+/// silently-stale grammar: any `elab`/`binder_predicate` declaration's
+/// production would never register at all).
 pub(crate) const GRAMMAR_GROWING_KINDS: &[&str] = &[
     "Lean.Parser.Command.mixfix",
     "Lean.Parser.Command.notation",
@@ -943,6 +1114,21 @@ pub(crate) const GRAMMAR_GROWING_KINDS: &[&str] = &[
     "Lean.Parser.Command.syntax",
     "Lean.Parser.Command.syntaxAbbrev",
     "Lean.Parser.Command.macro",
+    // M3b3 Task 10: pinned against `StxElab.stx.jsonl` (real toolchain
+    // dump, oracle v4.32.0-rc1) — see `grammar::surface::
+    // derive_elab_cmd`/`derive_binder_predicate`'s own doc comments.
+    "Lean.Parser.Command.elab",
+    "Lean.Parser.Command.binderPredicate",
+];
+
+/// Commands whose successful parse updates `Ps::scope` (M3b3 Task 1).
+/// Same cheap-peek mechanism as `command_may_grow_grammar`
+/// (`peek_command_kind_name`).
+pub(crate) const SCOPE_COMMAND_KINDS: &[&str] = &[
+    "Lean.Parser.Command.namespace",
+    "Lean.Parser.Command.section",
+    "Lean.Parser.Command.end",
+    "Lean.Parser.Command.open",
 ];
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -961,6 +1147,7 @@ impl<'a> Ps<'a> {
             snap,
             kinds,
             overlay: Overlay::new(snap),
+            active_overlay_tokens: TokenTable::default(),
             events: Vec::new(),
             errors: Vec::new(),
             furthest_pos: 0,
@@ -972,11 +1159,13 @@ impl<'a> Ps<'a> {
             line_starts,
             cat_depth: 0,
             cat_cache: HashMap::new(),
+            committed_overlay_kinds: 0,
             subtrees: Vec::new(),
             furthest_stack: Vec::new(),
             cap_hits: 0,
             quot_depth: 0,
             anon_antiquot_ok: true,
+            scope: crate::grammar::scope::ScopeStack::new(),
         }
     }
 
@@ -998,6 +1187,45 @@ impl<'a> Ps<'a> {
     /// overlay mid-parse as `notation`/mixfix commands are seen.
     pub(crate) fn install_overlay(&mut self, ov: Overlay) {
         self.overlay = ov;
+        // M3b3 Task 4: a manually-installed overlay's tokens must become
+        // lexable immediately (its entries are typically `Global` in the
+        // test that uses this) — rebuild the active-token view now, same
+        // as the command loop does after each mid-parse registration.
+        self.rebuild_active_overlay_tokens();
+    }
+
+    /// M3b3 Task 4: recompute `active_overlay_tokens` = every
+    /// `overlay.token_scopes()` entry whose scope `is_active` at the
+    /// CURRENT `self.scope`. Called at command boundaries only — after a
+    /// mid-parse registration (a new token may already be active, e.g. a
+    /// `scoped syntax` declared inside its own namespace) and after a
+    /// scope event (`namespace`/`section`/`end`/`open` change which
+    /// scoped/local tokens are in force). Cheap: `token_scopes` is
+    /// bounded by same-file command count, and this fires at most once
+    /// per command, never per token.
+    pub(crate) fn rebuild_active_overlay_tokens(&mut self) {
+        let mut active = TokenTable::default();
+        for (tok, scope) in self.overlay.token_scopes() {
+            if self.scope.is_active(scope) {
+                active.insert(tok);
+            }
+        }
+        // M3b3 Task 5: imported `scoped` tokens go through the IDENTICAL
+        // scope-filtered active-token rebuild (never the always-active
+        // `snap.tokens` table) — a `scoped` notation's atom only becomes
+        // lexable once its namespace is opened, exactly like a same-file
+        // `scoped` token above. Both feed the SAME `active_overlay_tokens`
+        // view `next_token` reads. Empty `scoped_tokens` (scoped-free
+        // snapshot) adds nothing — byte-identical to pre-M3b3.
+        for (tok, ns) in &self.snap.scoped_tokens {
+            if self
+                .scope
+                .is_active(&crate::grammar::SpecScope::Scoped(ns.clone()))
+            {
+                active.insert(tok);
+            }
+        }
+        self.active_overlay_tokens = active;
     }
 
     /// Empty `cat_cache` (Task 11b's `category()` memoization table —
@@ -1067,24 +1295,37 @@ impl<'a> Ps<'a> {
     /// hook does; such a kind's name is never in `GRAMMAR_GROWING_KINDS`,
     /// so the membership check falls through to `false`.
     pub(crate) fn command_may_grow_grammar(&self, from_event: usize) -> bool {
-        let Some(&sub) = self.events[from_event..].iter().find_map(|e| match e {
+        self.peek_command_kind_name(from_event)
+            .is_some_and(|n| GRAMMAR_GROWING_KINDS.contains(&n))
+    }
+
+    /// M3b3 Task 1: the peek `command_may_grow_grammar` used to do
+    /// inline, generalized into "what IS this command's outer kind
+    /// name" (not just "is it grammar-growing") so the command loop can
+    /// also ask "is it scope-relevant" (`SCOPE_COMMAND_KINDS`) off the
+    /// exact same cheap, no-tree-build peek. Overlay-first kind
+    /// resolution preserved EXACTLY as `command_may_grow_grammar` had it
+    /// (commit 6807f05) — see that fn's own doc comment (now here) for
+    /// the full citation of why overlay-first-with-base-fallback is
+    /// required (a same-file `syntax .. : command` reuse lands an
+    /// overlay-numbered kind here, out of range for the base interner).
+    fn peek_command_kind_name(&self, from_event: usize) -> Option<&str> {
+        let &sub = self.events[from_event..].iter().find_map(|e| match e {
             PEvent::Sub(idx) => Some(idx),
             PEvent::Ev(_) => None,
-        }) else {
-            return false;
-        };
+        })?;
         let first_non_trivia = self.subtrees[sub].events.iter().find(|e| {
             !matches!(e, PEvent::Ev(Event::Token { kind, .. }) if crate::kind::is_trivia(*kind))
         });
         let Some(PEvent::Ev(Event::Start(kind))) = first_non_trivia else {
-            return false;
+            return None;
         };
         let kind = *kind;
-        let name = self
-            .overlay
-            .kind_name(kind)
-            .unwrap_or_else(|| self.kinds.name(kind));
-        GRAMMAR_GROWING_KINDS.contains(&name)
+        Some(
+            self.overlay
+                .kind_name(kind)
+                .unwrap_or_else(|| self.kinds.name(kind)),
+        )
     }
 
     /// Base kinds + this `Ps`'s overlay's own kinds, folded into ONE
@@ -1139,16 +1380,118 @@ impl<'a> Ps<'a> {
             events: self.events.len(),
             errors: self.errors.len(),
             lhs_prec: self.lhs_prec,
+            overlay_kinds: self.overlay.kind_count(),
         }
     }
+    /// Rewinds `pos`/`events`/`errors`/`lhs_prec` to `sp` AND truncates
+    /// the overlay's kind table back to `sp.overlay_kinds` — always a
+    /// full, unconditional rollback to exactly what `sp` recorded (M3b3
+    /// Task 7 review fix: a prior version of this method took an extra
+    /// "floor" argument so `longest_match` could dodge truncating a
+    /// still-wanted winner's kinds by never letting the floor fall back
+    /// to `sp`'s own count — that let a *superseded* temp-best's kinds
+    /// permanently leak below the (only ever rising) floor, since a
+    /// later, better candidate never actually got compared against
+    /// `sp.overlay_kinds` again. `longest_match` now keeps this method
+    /// dead simple — always a clean slate to `sp` — and instead
+    /// re-interns the ACTUAL winner's captured names itself once the
+    /// whole candidate loop is done; see its own doc comment).
     pub(crate) fn restore(&mut self, sp: &Savepoint) {
         self.pos = sp.pos;
         self.events.truncate(sp.events);
         self.errors.truncate(sp.errors);
         self.lhs_prec = sp.lhs_prec;
+        self.overlay.truncate_kinds(sp.overlay_kinds);
     }
     fn consumed_since(&self, sp: &Savepoint) -> bool {
         self.pos > sp.pos
+    }
+
+    /// M3b3 final review (C1, re-review): reconcile a `cat_cache` hit's
+    /// recorded speculative kind prefix (`CatCacheEntry::watermark`/
+    /// `speculative_kinds`) with the LIVE overlay before its events are
+    /// replayed, returning whether the entry is safe to replay.
+    ///
+    /// The entry's memoized subtree events embed ABSOLUTE overlay kind ids
+    /// (`base_kind_count + overlay_index`). Between insertion and this hit,
+    /// a `Savepoint::restore` (Task 7's per-candidate clean slate in
+    /// `longest_match`, or any enclosing failed speculative frame) may have
+    /// `truncate_kinds`'d those indices away — so replaying the events
+    /// either resolves an id to a DIFFERENT name a sibling re-interned
+    /// there (silent mis-kinding) or, worse, indexes past the table's end
+    /// (`KindInterner::name`'s unchecked `self.names[k.0]` → OOB panic at
+    /// canon/dump time, an input-reachable never-panic violation). Neither
+    /// `cat_cache` nor the `subtrees` arena is rolled back by `restore` (by
+    /// design — memoization across backtracking is their purpose), so the
+    /// stale ids can outlive the truncation and a same-position retry
+    /// (sibling `longest_match` candidate, recovery re-entry, …) hits them.
+    ///
+    /// Anchored at the command-committed WATERMARK, not the call baseline:
+    /// `Overlay::intern` idempotency lets an entry's events reference a
+    /// speculative kind an enclosing frame interned below the call's own
+    /// baseline (a first cut anchored at the baseline recorded an EMPTY
+    /// slice in that case yet still replayed a sub-baseline id — the
+    /// re-review's residual). The watermark is a floor no intra-command
+    /// `restore` descends below, so `kind_names[watermark..]` is the full
+    /// set of speculative ids the events can reach. Reconciliation, matching
+    /// what a FRESH re-run under the same watermark would leave interned:
+    ///  - overlay currently back at exactly the watermark (`kind_count ==
+    ///    watermark`) → the whole recorded prefix is re-internable and, since
+    ///    `Overlay::intern` is append-only + idempotent, reproduces its
+    ///    EXACT original indices; re-intern it in order and accept (the same
+    ///    mechanism `longest_match` uses to re-materialize its winner). This
+    ///    does NOT mean the prefix holds only the hit's own kinds — `cur ==
+    ///    watermark` constrains the HIT-time path, but the prefix was
+    ///    recorded on the STORING path and can carry kinds that path
+    ///    interned for something other than this entry's own events: a
+    ///    failed `antiquot` interns its kind (line 2320) before its own
+    ///    `save()` (line 2321), so that `save`'s `restore` never undoes it;
+    ///    an `Err` entry's `restore(&entry_sp)` likewise leaves enclosing-
+    ///    frame kinds recorded. What the clean slate DOES guarantee: every
+    ///    id the prefix records still resolves to its store-time name after
+    ///    re-intern (append-only intern from a clean slate reproduces the
+    ///    recorded indices in order), so replayed events are never
+    ///    mis-kinded and can never index OOB; and no live event stream's
+    ///    ids shift under it, since `longest_match` captures and replays
+    ///    `kind_names[sp.overlay_kinds..]` wholesale (lines 3565, 3580), not
+    ///    by index into this prefix. The residual cost is a kind name this
+    ///    hit never needed re-appended into `kind_names` (and hence the
+    ///    overlay fingerprint) — the same leak class Task 7's
+    ///    `longest_match` fix removed elsewhere (see its doc comment
+    ///    above). No reachable concrete input has been constructed for it
+    ///    (both paths must reach the same `CatCacheKey` while differing
+    ///    only in speculative-intern residue), so it is recorded here, not
+    ///    fixed;
+    ///  - the whole recorded prefix is still present index-for-index →
+    ///    accept as-is (the ubiquitous symmetric case: a sibling re-interned
+    ///    the same name at the same index);
+    ///  - anything else (truncated below/partway, or a name no longer
+    ///    matches at its index) → reject; the caller evicts the stale entry
+    ///    and re-parses, rebuilding a valid one.
+    fn accept_cached_overlay_kinds(&mut self, entry: &CatCacheEntry) -> bool {
+        let committed = entry.watermark;
+        let spec = &entry.speculative_kinds;
+        let cur = self.overlay.kind_count();
+        if cur == committed {
+            // Rolled back to the watermark — re-append the whole prefix to
+            // reproduce the exact ids the events reference (a no-op when the
+            // prefix is empty, the overwhelmingly common case).
+            for name in spec {
+                self.overlay.intern(name);
+            }
+            true
+        } else {
+            // Already present? The whole recorded prefix must sit UNCHANGED
+            // at its exact overlay indices (the `cur >= committed +
+            // spec.len()` guard also keeps the index access below in bounds,
+            // and holds vacuously for an empty prefix since `cur >=
+            // committed` always).
+            cur >= committed + spec.len()
+                && spec
+                    .iter()
+                    .enumerate()
+                    .all(|(j, nm)| self.overlay.kind_names()[committed + j].as_ref() == nm.as_ref())
+        }
     }
 
     // ---- tokens ----------------------------------------------------
@@ -1156,7 +1499,12 @@ impl<'a> Ps<'a> {
     /// (without consuming) plus its start offset.
     pub(crate) fn peek_significant(&mut self) -> (Token, usize) {
         loop {
-            let (t, err) = next_token(self.src, self.pos, self.table(), self.overlay.tokens());
+            let (t, err) = next_token(
+                self.src,
+                self.pos,
+                self.table(),
+                &self.active_overlay_tokens,
+            );
             let trivia = matches!(
                 t.kind,
                 TokenKind::Whitespace | TokenKind::LineComment | TokenKind::BlockComment
@@ -1203,7 +1551,7 @@ impl<'a> Ps<'a> {
     fn peek_significant_readonly(&self) -> (Token, usize) {
         let mut pos = self.pos;
         loop {
-            let (t, _err) = next_token(self.src, pos, self.table(), self.overlay.tokens());
+            let (t, _err) = next_token(self.src, pos, self.table(), &self.active_overlay_tokens);
             let trivia = matches!(
                 t.kind,
                 TokenKind::Whitespace | TokenKind::LineComment | TokenKind::BlockComment
@@ -1247,7 +1595,12 @@ impl<'a> Ps<'a> {
 
     /// Consume the peeked significant token as leaf `kind`.
     fn bump(&mut self, t: Token, kind: SyntaxKind) {
-        if let (_, Some(e)) = next_token(self.src, self.pos, self.table(), self.overlay.tokens()) {
+        if let (_, Some(e)) = next_token(
+            self.src,
+            self.pos,
+            self.table(),
+            &self.active_overlay_tokens,
+        ) {
             self.errors.push(PError::Err(ParseError {
                 code: e.code,
                 span: (self.pos as u32, (self.pos + t.len as usize) as u32),
@@ -1754,6 +2107,23 @@ impl<'a> Ps<'a> {
                 self.pos_stack.pop();
                 r
             }
+            Prim::WithoutPosition(q) => {
+                // ORACLE-PORT `withoutPosition` (Basic.lean,
+                // `register_parser_alias withoutPosition { stackSz? :=
+                // none }`): run `q` with the enclosing saved position
+                // DISCARDED, so any nested `checkCol*`/`checkLineEq` sees
+                // `savedPos? = none` and no-ops (the same "empty stack →
+                // pass" branch `check_col` already takes). The oracle
+                // scopes a SINGLE `savedPos?` field to `none`; because
+                // only `pos_stack.last()` is ever read, clearing the whole
+                // stack for the duration is equivalent. Restored on the
+                // way out — success or failure alike — same pure-scoping
+                // discipline as `WithPosition`/`WithForbidden`.
+                let saved = std::mem::take(&mut self.pos_stack);
+                let r = self.run(q);
+                self.pos_stack = saved;
+                r
+            }
             Prim::CheckColGt => self.check_col(|cur, saved| cur.1 > saved.1),
             Prim::CheckColGe => self.check_col(|cur, saved| cur.1 >= saved.1),
             Prim::CheckColEq => self.check_col(|cur, saved| cur.1 == saved.1),
@@ -1788,8 +2158,10 @@ impl<'a> Ps<'a> {
                     ])))));
                 self.run(&expanded)
             }
-            // skip-and-record (M3b2b Task 4): sepByIndent positions offer
-            // no antiquot splice yet — no fixture pins them.
+            // M3b3 Task 9: antiquot-splice support lives inside
+            // `sep_by_indent` itself now (see its own doc comment) —
+            // the M3b2b Task 4 gap this comment used to record is
+            // closed, pinned by `StxSepIndent.lean`.
             Prim::SepByIndent { item, sep, min } => self.sep_by_indent(item, sep, *min),
             Prim::WithForbidden(tok, q) => {
                 // ORACLE-PORT `withForbidden`/`adaptCacheableContext`
@@ -2482,15 +2854,23 @@ impl<'a> Ps<'a> {
     /// fixture.
     fn leaf_antiquot_wrap_kind(&self, cat_name: &str, kind_name: &str) -> Option<SyntaxKind> {
         let cd = self.overlay.category_delta(cat_name)?;
-        cd.leading.iter().find_map(|(_, p)| match p {
-            Prim::Node { kind, body, .. } => {
-                let inner = match body.as_ref() {
-                    Prim::Seq(v) if v.len() == 1 => &v[0],
-                    other => other,
-                };
-                is_named_literal(inner, kind_name).then_some(*kind)
+        cd.leading.iter().find_map(|(_, p, scope)| {
+            // M3b3 Task 4: only an ACTIVE leaf-wrapping production can be
+            // the wrap for this antiquot — same is_active filter as every
+            // other overlay read point.
+            if !self.scope.is_active(scope) {
+                return None;
             }
-            _ => None,
+            match p {
+                Prim::Node { kind, body, .. } => {
+                    let inner = match body.as_ref() {
+                        Prim::Seq(v) if v.len() == 1 => &v[0],
+                        other => other,
+                    };
+                    is_named_literal(inner, kind_name).then_some(*kind)
+                }
+                _ => None,
+            }
         })
     }
 
@@ -2902,7 +3282,46 @@ impl<'a> Ps<'a> {
             // both funnel into the SAME mandatory-first-vs-clean-stop
             // decision below.
             let item_result: PResult = match self.check_col(|cur, saved| cur.1 >= saved.1) {
-                Ok(()) => self.run(item),
+                Ok(()) => {
+                    // M3b3 Task 9: closes the gap the `Prim::SepByIndent`
+                    // match arm's own comment used to record ("sepByIndent
+                    // positions offer no antiquot splice yet"). ORACLE
+                    // `sepByIndent`/`sepBy1Indent` (Extra.lean:202-208):
+                    // `checkColGe "irrelevant" >> p` where `p :=
+                    // withAntiquotSpliceAndSuffix `sepBy p (symbol "*")`
+                    // — the antiquot-decorated item sits INSIDE the
+                    // column gate, so (unlike `sep_by_impl`, which has no
+                    // gate to sequence against) the splice attempt only
+                    // fires once `checkColGe` has already passed. The
+                    // suffix is the FIXED literal `"*"`, never
+                    // `"{sep}*"` — `sepByIndent`'s own `symbol "*"`
+                    // diverges here from `sepByElemParser`'s sep-
+                    // dependent `symbol (sep.trimAscii ++ "*")`
+                    // (Basic.lean:1895-1896) that `sep_by_impl` ports.
+                    // Same "break, never continue" reasoning as
+                    // `sep_by_impl`'s own call site: a successful splice
+                    // consumes the WHOLE remainder of the list. Unlike
+                    // `sep_by_impl` (which re-checks `n < min` once,
+                    // after its loop, so its own splice arm bumps `n`
+                    // first to satisfy that check), `sep_by_indent`
+                    // enforces `min` ENTIRELY through the in-loop
+                    // "item failed to parse another entry" branch below
+                    // (`after_sep || n >= min`) — a splice here always
+                    // exits through THIS `break`, never that branch, so
+                    // there is no later read of `n` to satisfy; treating
+                    // a successful splice as unconditionally clearing
+                    // `min` needs no counter bump, just the `break`
+                    // itself.
+                    if self.quot_depth > 0 {
+                        if let Some(r) = self.try_antiquot_splice("sepBy", Some("*"), item) {
+                            match r {
+                                Ok(()) => break 'outer Ok(()),
+                                Err(f) => break 'outer Err(f),
+                            }
+                        }
+                    }
+                    self.run(item)
+                }
                 Err(f) => Err(f),
             };
             match item_result {
@@ -3110,6 +3529,48 @@ impl<'a> Ps<'a> {
     /// trailing-loop caller additionally needs to insert a wrapping
     /// `Start` before doing so (the Pratt wrap), which a generic
     /// helper can't do on its own.
+    ///
+    /// M3b3 Task 7 review fix: EVERY candidate — including a
+    /// currently-selected (possibly temporary) best — is tried from a
+    /// full, unconditional `self.restore(sp)` clean slate. A prior
+    /// version instead kept a "floor" that only ever rose to the current
+    /// best's kind count, meaning a candidate that WON TEMPORARILY but
+    /// was later superseded by a longer one never actually got rolled
+    /// back to `sp.overlay_kinds` — its interned kinds sat below the
+    /// floor forever, leaking into `kind_names`/`kind_map`/the
+    /// fingerprint with no surviving event referencing them (reproduced:
+    /// two same-first-token leading candidates, the first recursing into
+    /// a SHORT category and the second into a LONGER one that wins —
+    /// e.g. `#$x $y`, `#$x` alone wins nothing since `$y` extends it —
+    /// left BOTH candidates' antiquot kinds interned even though only
+    /// the second's events survived).
+    ///
+    /// The fix: capture the CURRENT best's own overlay-local kind names
+    /// (`self.overlay.kind_names()[sp.overlay_kinds..]`) into
+    /// `MatchWinner.interned_names` at selection time, by VALUE, exactly
+    /// as `events`/`errors` are already captured by value. Every
+    /// subsequent `self.restore(sp)` (per-attempt AND
+    /// the final one) is then a full, ordinary rollback to `sp` — no
+    /// floor, no partial preservation — and once the real winner is
+    /// settled, its captured names are re-interned in order (`Overlay::
+    /// intern` is idempotent and append-only/index-stable, confirmed by
+    /// `overlay.rs`'s own `truncate_kinds_removes_names_at_or_after_n_
+    /// from_both_tables` test), reproducing the exact same `SyntaxKind`s
+    /// its `events` reference. A losing candidate's kinds are simply
+    /// never re-interned — gone the moment the next candidate's clean
+    /// slate runs, same as this file's every other save/restore pair.
+    ///
+    /// Composes for a NESTED `longest_match` (a candidate `p` that
+    /// itself recurses into another `category()` call): by the time
+    /// `self.run(p)` returns, that inner call has ALREADY resolved its
+    /// own winner-vs-loser leak-cleanup by this same mechanism, so
+    /// whatever sits in `self.overlay.kind_names()` above the inner
+    /// call's own (higher) savepoint is exactly the inner winner's names
+    /// — sequentially part of THIS `[sp.overlay_kinds..]` slice, in the
+    /// same registration order they were originally interned. Capturing
+    /// this outer slice by value and later replaying it verbatim
+    /// reproduces the inner winner's re-interning too, with no special
+    /// casing needed at this level.
     fn longest_match(&mut self, sp: &Savepoint, parsers: &[Prim]) -> Option<MatchWinner> {
         let mut best: Option<MatchWinner> = None;
         for (i, p) in parsers.iter().enumerate() {
@@ -3120,17 +3581,25 @@ impl<'a> Ps<'a> {
                     None => true,
                 };
                 if better {
+                    let interned_names: Vec<Arc<str>> =
+                        self.overlay.kind_names()[sp.overlay_kinds..].to_vec();
                     best = Some(MatchWinner {
                         idx: i,
                         events: self.events[sp.events..].to_vec(),
                         errors: self.errors[sp.errors..].to_vec(),
                         end: self.pos,
                         lhs_prec: self.lhs_prec,
+                        interned_names,
                     });
                 }
             }
         }
         self.restore(sp);
+        if let Some(w) = &best {
+            for name in &w.interned_names {
+                self.overlay.intern(name);
+            }
+        }
         best
     }
 
@@ -3330,6 +3799,25 @@ impl<'a> Ps<'a> {
             hit = self.cat_cache.get(&key).cloned();
             hit_is_depth_dependent = hit.is_some();
         }
+        // M3b3 final review (C1): a memoized entry's replayed events embed
+        // ABSOLUTE overlay kind ids; a `Savepoint::restore` (Task 7) since
+        // insertion may have truncated those ids (→ OOB at kind
+        // resolution) or a sibling parse may have re-interned DIFFERENT
+        // names at them (→ silent mis-kinding). Reconcile the recorded
+        // kinds with the live overlay BEFORE replaying — re-interning them
+        // when they were merely rolled back, or rejecting the entry as a
+        // miss (and evicting it) when they can no longer be reproduced, in
+        // which case we re-parse and rebuild a valid entry below.
+        let reject_hit = if let Some(entry) = &hit {
+            !self.accept_cached_overlay_kinds(entry)
+        } else {
+            false
+        };
+        if reject_hit {
+            self.cat_cache.remove(&key);
+            hit = None;
+            hit_is_depth_dependent = false;
+        }
         if let Some(entry) = hit {
             if hit_is_depth_dependent {
                 // Task 11b review wave 2 (Critical 1, reopened): a
@@ -3474,7 +3962,30 @@ impl<'a> Ps<'a> {
                 // above, byte-identical to M3a.
                 if let Some(cd) = self.overlay.category_delta(name) {
                     let suppress = suppress_plain_ident_for(cat, text, t.kind, true);
-                    parsers.extend(dispatch_overlay(cd, text, t.kind, true, suppress));
+                    parsers.extend(dispatch_overlay(
+                        cd,
+                        text,
+                        t.kind,
+                        true,
+                        suppress,
+                        &self.scope,
+                    ));
+                }
+                // M3b3 Task 5: imported `scoped` leading productions —
+                // ADDITIONS like the overlay ones (never displacing a
+                // base candidate), appended after them, each admitted only
+                // while its activation namespace is in force. Guarded on
+                // non-empty so a scoped-free snapshot's hot path is
+                // untouched (byte-identical to pre-M3b3).
+                if !cat.scoped_leading.is_empty() {
+                    let suppress = suppress_plain_ident_for(cat, text, t.kind, true);
+                    parsers.extend(dispatch_scoped(
+                        &cat.scoped_leading,
+                        text,
+                        t.kind,
+                        suppress,
+                        &self.scope,
+                    ));
                 }
                 // ORACLE-PORT `runLongestMatchParser` (Basic.lean:1403):
                 // "we initialize [lhsPrec] to maxPrec in the leading case"
@@ -3560,7 +4071,28 @@ impl<'a> Ps<'a> {
                 // the same no-op-when-empty guarantee).
                 if let Some(cd) = self.overlay.category_delta(name) {
                     let suppress = suppress_plain_ident_for(cat, text, t.kind, false);
-                    candidates.extend(dispatch_overlay(cd, text, t.kind, false, suppress));
+                    candidates.extend(dispatch_overlay(
+                        cd,
+                        text,
+                        t.kind,
+                        false,
+                        suppress,
+                        &self.scope,
+                    ));
+                }
+                // M3b3 Task 5: imported `scoped` trailing productions
+                // (e.g. NotaDep's `scoped infixl " ⊖⊖ "`), same
+                // append-after-base + activation-filter + non-empty-guard
+                // rule as the leading side above.
+                if !cat.scoped_trailing.is_empty() {
+                    let suppress = suppress_plain_ident_for(cat, text, t.kind, false);
+                    candidates.extend(dispatch_scoped(
+                        &cat.scoped_trailing,
+                        text,
+                        t.kind,
+                        suppress,
+                        &self.scope,
+                    ));
                 }
                 let qualifying: Vec<Prim> = candidates
                     .into_iter()
@@ -3686,6 +4218,22 @@ impl<'a> Ps<'a> {
             CatCacheEntry {
                 outcome,
                 furthest: local_furthest,
+                // M3b3 final review (C1, re-review): record the whole
+                // command's speculative kind prefix from the committed
+                // watermark — NOT just this call's own baseline slice.
+                // `Overlay::intern` idempotency means a call can reference
+                // a kind an enclosing frame interned below its baseline
+                // (the call's own `intern` no-appends), so a baseline slice
+                // would record an empty list yet the events would still
+                // reference that sub-baseline id. `kind_names[watermark..]`
+                // captures every speculative kind the events can reach.
+                // Nothing between the watermark and here is ever truncated
+                // below the watermark, and the `Err` arm's `restore(&entry_
+                // sp)` only rolls back to `entry_sp` (>= watermark), so this
+                // slice is exactly the live speculative prefix.
+                watermark: self.committed_overlay_kinds,
+                speculative_kinds: self.overlay.kind_names()[self.committed_overlay_kinds..]
+                    .to_vec(),
             },
         );
         r
@@ -3880,12 +4428,49 @@ fn dispatch_overlay(
     kind: TokenKind,
     leading: bool,
     suppress_plain_ident: bool,
+    scope: &crate::grammar::scope::ScopeStack,
 ) -> Vec<Prim> {
     let table = if leading { &cd.leading } else { &cd.trailing };
     table
         .iter()
-        .filter(|(f, _)| first_tok_matches(f, text, kind, suppress_plain_ident))
-        .map(|(_, p)| p.clone())
+        // M3b3 Task 4: an overlay candidate only dispatches while its
+        // activation `SpecScope` is in force (`scoped`/`local`
+        // (de)activation) — same `is_active` predicate every overlay
+        // read point applies. `Global` entries always pass.
+        .filter(|(f, _, sc)| {
+            scope.is_active(sc) && first_tok_matches(f, text, kind, suppress_plain_ident)
+        })
+        .map(|(_, p, _)| p.clone())
+        .collect()
+}
+
+/// M3b3 Task 5: the SNAPSHOT twin of `dispatch_overlay` for imported
+/// `scoped` entries (`Category::scoped_leading`/`scoped_trailing`). Each
+/// carries its activation namespace `ns` rather than a full `SpecScope`
+/// (imported scoped entries are always `Scoped(ns)` — never `Global`,
+/// which lives in the always-active `leading`/`trailing` tables, nor
+/// `local`, which is a same-file-only concept), so this reads through the
+/// SAME `ScopeStack::is_active` predicate via `SpecScope::Scoped`. Only
+/// called when the entry vec is NON-EMPTY (`category()` guards on that),
+/// so a scoped-free snapshot's hot path pays nothing.
+fn dispatch_scoped(
+    entries: &[(FirstTok, Prim, String)],
+    text: &str,
+    kind: TokenKind,
+    suppress_plain_ident: bool,
+    scope: &crate::grammar::scope::ScopeStack,
+) -> Vec<Prim> {
+    entries
+        .iter()
+        .filter(|(f, _, ns)| {
+            // M3b3 final review (Minor #7): run the allocation-free
+            // first-token test FIRST — it rejects almost every entry — so
+            // the `Scoped(ns.clone())` allocation + `is_active` walk only
+            // runs for the handful whose first token already matched.
+            first_tok_matches(f, text, kind, suppress_plain_ident)
+                && scope.is_active(&crate::grammar::SpecScope::Scoped(ns.clone()))
+        })
+        .map(|(_, p, _)| p.clone())
         .collect()
 }
 
@@ -4311,6 +4896,31 @@ mod tests {
         assert_eq!(parse_cat(&snap, "do a\n   b"), "(block 'do' (null a b))");
         // `b` at column 0 is OUTSIDE the block: many1 stops after `a`.
         assert_eq!(parse_cat(&snap, "do a\nb"), "(block 'do' (null a))");
+    }
+
+    #[test]
+    fn without_position_clears_the_position_marker() {
+        let mut b = SnapshotBuilder::new();
+        b.category("c", LeadingIdentBehavior::Default);
+        // "block" = 'do' then many1 idents, each WITHOUT saved position; CheckColGt
+        // sees empty stack (cleared by WithoutPosition) and passes unconditionally.
+        b.leading2(
+            "c",
+            "block",
+            MAX_PREC,
+            Prim::WithPosition(Arc::new(seq([
+                sym("do"),
+                many1(Prim::WithoutPosition(Arc::new(seq([
+                    Prim::CheckColGt,
+                    Prim::Ident,
+                ])))),
+            ]))),
+        );
+        let snap = b.finish();
+        // Even though `b` is at column 0, WithoutPosition clears the position marker,
+        // so CheckColGt passes; both `a` and `b` are accepted.
+        // Regression to `self.run(q)` instead of `std::mem::take` would fail this test.
+        assert_eq!(parse_cat(&snap, "do a\nb"), "(block 'do' (null a b))");
     }
 
     #[test]
@@ -5075,6 +5685,7 @@ mod tests {
             lhs_prec: Some(65),
             tokens: vec!["⊕".into()],
             body: seq([sym("⊕"), cat("term", 66)]),
+            scope: crate::grammar::SpecScope::Global,
         }
     }
 
@@ -5227,6 +5838,377 @@ mod tests {
         );
     }
 
+    /// M3b3 Task 10: `elab` rejoins `GRAMMAR_GROWING_KINDS` — mirrors
+    /// `same_file_command_syntax_is_usable_without_panicking` exactly,
+    /// swapping `syntax "…" : command` for `elab "…" : term => …`.
+    /// Dump-pinned (`StxElab.stx.jsonl`, oracle v4.32.0-rc1): a bare
+    /// `"wobel"` atom targeting `term` mangles to kind name `termWobel`
+    /// (`mangle_items`/`mangle_symbol_atom`, unchanged — the SAME
+    /// mangling `#check wobel` resolves to in the real toolchain dump),
+    /// so this also cross-checks the derivation's `category`/item
+    /// extraction against real oracle output, not just "some kind
+    /// appeared".
+    #[test]
+    fn same_file_elab_command_is_usable_without_panicking() {
+        let snap = crate::builtin::snapshot();
+        let src = "elab \"wobel\" : term => pure (Lean.mkNatLit 42)\n#check wobel\n";
+        let r = crate::parse_module(src, &snap);
+        assert_eq!(r.tree.text(), src);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        assert!(
+            r.tree
+                .root()
+                .descendants()
+                .any(|n| r.tree.kinds.name(n.kind()) == "termWobel"),
+            "declared `elab` command not live on the next line"
+        );
+    }
+
+    /// M3b3 Task 10: `local elab` reuses the SAME `spec_scope_from_attr_kind`
+    /// gate `derive_macro_cmd`/`derive_syntax_cmd` already exercise
+    /// (`StxLocal.lean`) — dump-confirmed (`StxElab.stx.jsonl`) that
+    /// `local elab "wobello" : term => …` mangles to a PRIVATE kind name
+    /// (`_private.0.` prefix, same as `local syntax`/`local macro`), so
+    /// pin that `derive_elab_cmd` produces the identical private name
+    /// here too, not just a same-namespace mangled one.
+    #[test]
+    fn local_elab_command_derives_private_kind_name() {
+        let snap = crate::builtin::snapshot();
+        let src = "local elab \"wobello\" : term => pure (Lean.mkNatLit 43)\n#check wobello\n";
+        let r = crate::parse_module(src, &snap);
+        assert_eq!(r.tree.text(), src);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        assert!(
+            r.tree
+                .root()
+                .descendants()
+                .any(|n| r.tree.kinds.name(n.kind()) == "_private.0.termWobello"),
+            "declared `local elab` command not live (private name) on the next line"
+        );
+    }
+
+    /// M3b3 Task 10: `binder_predicate` rejoins `GRAMMAR_GROWING_KINDS`,
+    /// registering a production into the oracle's own `binderPred`
+    /// category (`Init/BinderPredicates.lean:22`'s `declare_syntax_cat
+    /// binderPred`) — that category has no OTHER base/overlay wiring in
+    /// this crate yet (out of this task's grammar-only remit, no `∀`/`∃`
+    /// binder-predicate sugar), so unlike `elab`'s round-trip above,
+    /// there is no follow-up USE to parse; this pins that the command
+    /// itself parses clean and its derived kind (dump-pinned mangled
+    /// name `binderPredWobrel_` — `"binderPred"` + `mangle_symbol_atom`
+    /// on the `" wobrel "` atom + the `Syntax.cat` placeholder's `_`)
+    /// is live in the overlay, proving `derive_binder_predicate` ran.
+    #[test]
+    fn same_file_binder_predicate_command_derives_without_panicking() {
+        let snap = crate::builtin::snapshot();
+        // RHS kept trivial (`True`, no antiquotations) — `derive_
+        // binder_predicate` never reads it (this task's grammar-only
+        // remit, its own doc comment); the committed oracle fixture
+        // (`StxElab.lean`) pins a realistic `(f $wbx $wby)` RHS
+        // against the real toolchain instead (`QuotAntiquot.lean`'s own
+        // `f $x $y` pattern) — no infix operator is a registered
+        // term-level production in this crate yet (out of scope here),
+        // so this inline probe avoids one too.
+        let src = "binder_predicate wbx \" wobrel \" wby:term => `(True)\n";
+        let r = crate::parse_module(src, &snap);
+        assert_eq!(r.tree.text(), src);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        // No follow-up USE (module doc above) — the derived kind is
+        // registered in the overlay's kind table but no NODE in this
+        // tree carries it, so check the table directly (`lookup`),
+        // not `descendants()`.
+        assert!(
+            r.tree.kinds.lookup("binderPredWobrel_").is_some(),
+            "declared `binder_predicate` command's production never registered"
+        );
+    }
+
+    /// M3b3 Task 1: `ScopeStack` unit + `scope_command_update` wiring —
+    /// a `namespace`/`section`/`end`/`end` sequence updates
+    /// `current_namespace` exactly as tree-driven scope tracking
+    /// predicts, per-command, in parse order.
+    #[test]
+    fn scope_updates_follow_parsed_commands() {
+        use crate::grammar::scope::{scope_command_update, ScopeStack};
+        let snap = crate::builtin::snapshot();
+        let mut stack = ScopeStack::new();
+        let src = "namespace Foo.Bar\nsection\nend\nend Foo.Bar\n";
+        let r = crate::parse_module(src, &snap);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        let expected = ["Foo.Bar", "Foo.Bar", "Foo.Bar", ""];
+        // Skip the module's own leading `Lean.Parser.Module.header` node
+        // (`run_module` always emits exactly one, even for a header-less
+        // source like this fixture) — `expected` covers only the 4 real
+        // commands that follow it.
+        for (cmd, want) in r.tree.root().children().skip(1).zip(expected) {
+            scope_command_update(&mut stack, &cmd, &r.tree.kinds);
+            assert_eq!(stack.current_namespace(), want);
+        }
+    }
+
+    /// M3b3 Task 4 Step 3: a `scoped syntax` is active INSIDE its
+    /// declaring namespace, and re-active after `open`ing it — every use
+    /// in this source is in active scope (the inactive-between-`end`-and-
+    /// `open` use lives in the `StxScopedInactive.lean` fixture, whose
+    /// oracle dump — a clean IDENT parse, not an error — pins
+    /// deactivation). Confirmed byte-exact against `StxScoped.lean`'s own
+    /// oracle dump (elaborating dumper): every `wobsc` lexes as an ATOM
+    /// and parses via the scoped `Widgsc.termWobsc` production.
+    #[test]
+    fn scoped_syntax_activates_and_deactivates() {
+        let snap = crate::builtin::snapshot();
+        let src = "namespace Widgsc\nscoped syntax \"wobsc\" : term\n\
+                   macro_rules | `(wobsc) => `(48)\n#check wobsc\nend Widgsc\n\
+                   open Widgsc\n#check wobsc\n";
+        let r = crate::parse_module(src, &snap);
+        assert_eq!(r.tree.text(), src);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        // Both `#check` COMMANDS parse `wobsc` via the scoped production
+        // (`Widgsc.termWobsc`) — one inside the namespace, one after
+        // `open`. (The `macro_rules` quotation body also uses it, but we
+        // scope this to `#check` commands so the count is unambiguous.)
+        let kinds = r.tree.kinds.clone();
+        let active_checks = r
+            .tree
+            .root()
+            .children()
+            .filter(|n| kinds.name(n.kind()) == "Lean.Parser.Command.check")
+            .filter(|chk| {
+                chk.descendants()
+                    .any(|d| kinds.name(d.kind()) == "Widgsc.termWobsc")
+            })
+            .count();
+        assert_eq!(
+            active_checks, 2,
+            "both active #check uses parse via the scoped production"
+        );
+    }
+
+    /// M3b3 Task 4 (dump-forced correction to the brief's "tokens stay
+    /// global" DRAFT): a `scoped` token is NOT globally registered — when
+    /// its scope is inactive, the atom lexes as an IDENT, not an atom, so
+    /// the use parses cleanly (as an identifier) rather than erroring.
+    /// Oracle-pinned by `StxScopedInactive.lean`: the `#check wobsc2`
+    /// after `end Widgsc2` dumps `{"i":"wobsc2"}` (ident), no parse error.
+    #[test]
+    fn inactive_scoped_token_lexes_as_ident_not_atom() {
+        let snap = crate::builtin::snapshot();
+        let src = "namespace Widgsc2\nscoped syntax \"wobsc2\" : term\n\
+                   macro_rules | `(wobsc2) => `(49)\nend Widgsc2\n#check wobsc2\n";
+        let r = crate::parse_module(src, &snap);
+        assert_eq!(r.tree.text(), src);
+        // Clean parse: the inactive use is a plain identifier, not an
+        // unexpected-token error.
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        let kinds = r.tree.kinds.clone();
+        // Second-to-last command (last is the `eoi` node) is the inactive
+        // `#check wobsc2`. Its argument is a bare IDENT leaf, NOT the
+        // (now-inactive) `Widgsc2.termWobsc2` production. (The
+        // `macro_rules` quotation earlier, inside `namespace Widgsc2`,
+        // DOES use the production — so we scope this to the final check.)
+        let cmds: Vec<_> = r.tree.root().children().collect();
+        let last_check = &cmds[cmds.len() - 2];
+        assert_eq!(kinds.name(last_check.kind()), "Lean.Parser.Command.check");
+        assert!(
+            !last_check
+                .descendants()
+                .any(|n| kinds.name(n.kind()) == "Widgsc2.termWobsc2"),
+            "inactive scoped production must not parse the final use"
+        );
+        assert!(
+            last_check
+                .descendants_with_tokens()
+                .filter_map(|el| el.into_token())
+                .any(|t| t.kind() == crate::kind::KIND_IDENT && t.text() == "wobsc2"),
+            "inactive `wobsc2` must lex as an ident, not an atom"
+        );
+    }
+
+    /// M3b3 Task 4 Step 4: the SAME term text parses differently before
+    /// vs. after an activation event, and the command loop's
+    /// cache-clearing (`clear_category_cache` on scope events) keeps that
+    /// activation-sensitive. Here `wobsc` is inactive at the first
+    /// `#check` (top level, before the namespace) — a plain ident — and
+    /// active at the second (after `open Widgsc`) — the scoped
+    /// production. Two identical `#check wobsc` lines, two different
+    /// trees, proving the memo never leaks a stale candidate set across
+    /// the scope boundary.
+    #[test]
+    fn same_text_parses_differently_across_an_activation_event() {
+        let snap = crate::builtin::snapshot();
+        let src = "#check wobsc\nnamespace Widgsc\nscoped syntax \"wobsc\" : term\n\
+                   macro_rules | `(wobsc) => `(48)\nend Widgsc\nopen Widgsc\n#check wobsc\n";
+        let r = crate::parse_module(src, &snap);
+        assert_eq!(r.tree.text(), src);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        // Exactly ONE of the two `#check wobsc` COMMANDS is the scoped
+        // production (the post-`open` one); the pre-declaration one is a
+        // plain ident (its token wasn't even registered yet).
+        let kinds = r.tree.kinds.clone();
+        let active_checks = r
+            .tree
+            .root()
+            .children()
+            .filter(|n| kinds.name(n.kind()) == "Lean.Parser.Command.check")
+            .filter(|chk| {
+                chk.descendants()
+                    .any(|d| kinds.name(d.kind()) == "Widgsc.termWobsc")
+            })
+            .count();
+        assert_eq!(
+            active_checks, 1,
+            "only the post-open #check parses via the scoped production"
+        );
+    }
+
+    /// M3b3 Task 2: a `syntax`/`macro_rules` pair declared INSIDE a
+    /// `namespace` derives a namespace-qualified kind name
+    /// (`stxNodeKind := currNamespace ++ name`) — the grow-arm's
+    /// `derive_delta` call must read `ps.scope.current_namespace()` as
+    /// of BEFORE this command (`SCOPE_COMMAND_KINDS` ∩
+    /// `GRAMMAR_GROWING_KINDS` = ∅, so no ordering hazard: a `syntax`
+    /// command is never itself a scope command, so its own namespace
+    /// membership was already recorded by the time it's derived).
+    #[test]
+    fn syntax_inside_namespace_derives_qualified_kind() {
+        let snap = crate::builtin::snapshot();
+        let src = "namespace Widgetish\nsyntax \"wobns\" : term\n\
+                   macro_rules | `(wobns) => `(42)\n#check wobns\nend Widgetish\n";
+        let r = crate::parse_module(src, &snap);
+        assert_eq!(r.tree.text(), src);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        // Confirmed byte-exact against the `StxNamespace` oracle dump
+        // (`tests/fixtures/syntax/StxNamespace.stx.jsonl`, Step 4): the
+        // brief's draft ("Widgetish." ++ category-mangled local name)
+        // needed no correction.
+        assert!(
+            r.tree
+                .root()
+                .descendants()
+                .any(|n| r.tree.kinds.name(n.kind()) == "Widgetish.termWobns"),
+            "expected namespace-qualified derived kind"
+        );
+    }
+
+    /// M3b3 Task 3 (the recorded M3b2b gap, `derive_syntax_cmd`'s old
+    /// "Known gap" doc paragraph): `local syntax`/`local macro` derive
+    /// the PRIVATE (`_private.0.`-prefixed) kind name, not the plain
+    /// one — oracle-confirmed against `StxLocal.stx.jsonl`.
+    #[test]
+    fn local_syntax_derives_private_kind_name() {
+        let snap = crate::builtin::snapshot();
+        let src = "local syntax \"wobloc\" : term\n\
+                   macro_rules | `(wobloc) => `(45)\n#check wobloc\n";
+        let r = crate::parse_module(src, &snap);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        // Oracle-pinned exact shape (`StxLocal.stx.jsonl`):
+        // `_private.0.termWobloc`.
+        assert!(
+            r.tree
+                .root()
+                .descendants()
+                .any(|n| r.tree.kinds.name(n.kind()) == "_private.0.termWobloc"),
+            "local syntax must derive the private kind name"
+        );
+    }
+
+    /// M3b3 Task 3 REVIEW FIX: the private×namespace ORDERING fix
+    /// itself (`build_spec` in `grammar/notation.rs`: qualify with the
+    /// current namespace THEN privatize, never the reverse) had zero
+    /// regression coverage — every pre-existing `local notation`/
+    /// `local mixfix` fixture (`NotationLocal.lean`, `NotationMixfix.
+    /// lean`) sits at empty namespace, where the old (privatize-then-
+    /// qualify) and new (qualify-then-privatize) orderings produce the
+    /// SAME string, so a silent revert of the reordering would still
+    /// pass every one of them. This test exercises `local notation`
+    /// (the `notation` sugar surface, as opposed to
+    /// `local_syntax_derives_private_kind_name` above, which only
+    /// covers the general `syntax` surface) inside a real `namespace`
+    /// block. Oracle-pinned exact shape (`StxLocal.stx.jsonl`, the
+    /// `woblocnot` addition): `_private.0.Widgloc.termWoblocnot`.
+    #[test]
+    fn local_notation_inside_namespace_derives_private_qualified_kind_name() {
+        let snap = crate::builtin::snapshot();
+        let src = "namespace Widgloc\nlocal notation \"woblocnot\" => 47\n\
+                   #check woblocnot\nend Widgloc\n";
+        let r = crate::parse_module(src, &snap);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        assert!(
+            r.tree.root().descendants().any(|n| r
+                .tree
+                .kinds
+                .name(n.kind())
+                .starts_with("_private.0.Widgloc.")),
+            "local notation inside a namespace must derive a kind starting \
+             `_private.0.Widgloc.`, not `Widgloc._private.0.`"
+        );
+    }
+
+    /// M3b3 Task 6b (fix — was Task 6's DRAFT-semantics pin): a `local`'s
+    /// activation is anchored to the EXACT scope entry that declared it
+    /// (a never-reused id — `SpecScope::Local { anchor }`), NOT to scope
+    /// DEPTH. The old `scope_len() >= scope_len` predicate wrongly
+    /// RE-ACTIVATED a popped `local` whenever any UNRELATED later scope
+    /// reached the same depth. Task 6's oracle probe disproved that:
+    /// running the source below through `dump_syntax_elab.lean` (the real
+    /// Lean toolchain pinned by `lean-toolchain`) shows `#check wobinact`
+    /// inside the unrelated `section B` dumping a PLAIN `{"i":"wobinact",
+    /// ...}` IDENT — real Lean's scope tracking is keyed on the scope
+    /// itself, not merely its depth. That probe is now the committed
+    /// fixture `StxLocalInactive.lean` (+ `.stx.jsonl` dump — the byte
+    /// authority, oracle-compared by `oracle_golden`).
+    ///
+    /// This test asserts the CORRECT (oracle-matching) behavior:
+    ///   * inside the declaring `section A`, and in a `section C` nested
+    ///     BELOW the declaration, `wobinact` dispatches the private
+    ///     production `_private.0.termWobinact` — still active;
+    ///   * after `end A`, the unrelated `section B` at the SAME depth
+    ///     does NOT re-activate it: `#check wobinact` is a plain ident,
+    ///     with NO `_private.0.termWobinact` node anywhere under it.
+    #[test]
+    fn local_activation_anchors_to_its_declaring_scope() {
+        let snap = crate::builtin::snapshot();
+        // Same shape as `StxLocalInactive.lean` (novel symbol), driven
+        // through `parse_module` here for a per-`#check` assertion.
+        let src = "section A\nlocal syntax \"wobinact\" : term\n\
+                   macro_rules | `(wobinact) => `(99)\n\
+                   section C\n#check wobinact\nend C\n#check wobinact\nend A\n\
+                   section B\n#check wobinact\nend B\n";
+        let r = crate::parse_module(src, &snap);
+        assert_eq!(r.tree.text(), src, "lossless");
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        let kinds = r.tree.kinds.clone();
+        let checks: Vec<_> = r
+            .tree
+            .root()
+            .children()
+            .filter(|n| kinds.name(n.kind()) == "Lean.Parser.Command.check")
+            .collect();
+        assert_eq!(checks.len(), 3, "expected exactly three #check commands");
+        let is_active = |chk: &crate::tree::SyntaxNode| {
+            chk.descendants()
+                .any(|d| kinds.name(d.kind()) == "_private.0.termWobinact")
+        };
+        // #check 0: nested `section C` (below the declaration) — active.
+        assert!(
+            is_active(&checks[0]),
+            "check #0 (nested section C): a local stays active in a scope \
+             nested below its declaration"
+        );
+        // #check 1: back in the declaring `section A` — active.
+        assert!(
+            is_active(&checks[1]),
+            "check #1 (declaring section A): the local is still in force"
+        );
+        // #check 2: unrelated `section B` at the same depth — INACTIVE.
+        assert!(
+            !is_active(&checks[2]),
+            "check #2 (unrelated section B): a popped local must NOT \
+             re-activate on unrelated re-entry to the same depth — the \
+             oracle (StxLocalInactive.stx.jsonl) dumps a plain ident here"
+        );
+    }
+
     /// M3b1 Task 9 Step 1: a malformed `infixl` (missing the mandatory
     /// `=> rhs` tail) must register NOTHING — the overlay stays
     /// unmutated — and the command loop must resync cleanly so the
@@ -5318,6 +6300,416 @@ mod tests {
         // territory / plain failure — exactly what depth 0 means).
         let r0 = crate::parse_module("def a := $x\n", &snap);
         assert!(!crate::canon::canon_jsonl(&r0.tree).contains("antiquot"));
+    }
+
+    /// M3b3 Task 7 Step 1 (RED first): a failed antiquot ATTEMPT must not
+    /// perturb the overlay's fingerprint. `` `($x:foo)`` inside a
+    /// quotation drives `try_category_antiquot` → `category_antiquot_
+    /// body`: the `:foo` suffix parses fine (interning the
+    /// `antiquotName` kind, `category_antiquot_body`'s colon-suffix arm)
+    /// but then fails classification (`foo` is neither the category's
+    /// own name `term` nor a `CATEGORY_LEAF_ANTIQUOT_NAMES` entry — that
+    /// fn's own `Some(_) => Err(..)` arm), so `try_category_antiquot`
+    /// restores. Confirmed by probing `Overlay::kind_count()` directly
+    /// (scratch check, not committed): before this task's fix, a clean
+    /// parse's overlay had `kind_count() == 0` while this stormy parse's
+    /// had `kind_count() == 1` (the leaked `antiquotName`) even though
+    /// `restore` had already rewound events/pos/errors — proof `restore`
+    /// wasn't rolling back the overlay's kind table. (A `$ $ $` storm,
+    /// the brief's original sketch, turns out NOT to exercise this: its
+    /// failure is `antiquot_dollar_prefix`'s `noWs` check, which fails
+    /// before `category_antiquot_body`/`antiquot` ever interns anything —
+    /// harmless either way, so it wouldn't have caught a regression here.)
+    /// `Savepoint::save`/`restore` now cover `Overlay::kind_count`/
+    /// `truncate_kinds` (this task), so the fingerprints below must be
+    /// equal.
+    #[test]
+    fn failed_antiquot_leaves_fingerprint_untouched() {
+        let snap = crate::builtin::snapshot();
+        let clean = crate::parse_module("#check 1\n", &snap);
+        // A category antiquot with an unrecognized `:suffix` — interns
+        // `antiquotName` while parsing the suffix, then fails
+        // classification and restores; before this task that left
+        // `antiquotName` interned in the overlay.
+        let stormy = crate::parse_module("def q := `($x:foo)\n#check 1\n", &snap);
+        let fp = |r: &crate::ParseResult| {
+            let mut h = blake3::Hasher::new();
+            r.overlay.fingerprint_into(&mut h);
+            h.finalize()
+        };
+        assert_eq!(
+            fp(&clean),
+            fp(&stormy),
+            "failed antiquot attempts must not perturb the overlay fingerprint"
+        );
+    }
+
+    /// M3b3 Task 7 REVIEW fix — Critical: `longest_match`'s rising
+    /// `floor` (the first version of this task's fix) never fell back
+    /// down once raised, so a candidate that won TEMPORARILY but was
+    /// later superseded by a longer sibling left its own interned kinds
+    /// permanently below that floor — a real leak, reproduced here with
+    /// the reviewer's own two-production shape: `idx0` (tried at the
+    /// LOWER list index, i.e. FIRST) recurses into a declared category
+    /// that only ever consumes ONE antiquot; `idx1` (tried second)
+    /// recurses into a DIFFERENT declared category TWICE, consuming
+    /// more input and superseding `idx0`'s temporary win. Builtin
+    /// grammars never exposed this (every sibling interns the SAME
+    /// idempotent name), which is why it needed a synthetic multi-
+    /// production overlay — this milestone's declared/imported grammars
+    /// are exactly the case that DOES hit distinct names per candidate.
+    #[test]
+    fn a_loser_interned_before_the_winner_at_a_lower_index_does_not_leak() {
+        let base = crate::builtin::snapshot();
+        let mut ov = Overlay::new(&base);
+        ov.register_category("shortcat", LeadingIdentBehavior::Default);
+        ov.register_category("longcat", LeadingIdentBehavior::Default);
+        // idx0 (list index 0 — tried FIRST): "☆" then ONE antiquot-able
+        // category read. Matches, but only ever advances through one `$..`.
+        ov.register(NotationSpec {
+            category: "term".into(),
+            kind_name: "term_hash_short".into(),
+            leading: true,
+            prec: 0,
+            lhs_prec: None,
+            tokens: vec!["☆".into()],
+            body: seq([sym("☆"), cat("shortcat", 0)]),
+            scope: SpecScope::Global,
+        });
+        // idx1 (list index 1 — tried SECOND): "☆" then TWO antiquot-able
+        // reads — advances FURTHER, so `longest_match` picks this one,
+        // superseding idx0's temporary win.
+        ov.register(NotationSpec {
+            category: "term".into(),
+            kind_name: "term_hash_long".into(),
+            leading: true,
+            prec: 0,
+            lhs_prec: None,
+            tokens: vec!["☆".into()],
+            body: seq([sym("☆"), cat("longcat", 0), cat("longcat", 0)]),
+            scope: SpecScope::Global,
+        });
+        let src = "def q := `(☆$x $y)\n";
+        let r = parse_module_with_overlay(src, &base, ov);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        let names: Vec<&str> = r.overlay.kind_names().iter().map(|s| &**s).collect();
+        assert!(
+            names.contains(&"longcat.pseudo.antiquot"),
+            "the winning candidate's antiquot kind must be interned: {names:?}"
+        );
+        assert!(
+            !names.contains(&"shortcat.pseudo.antiquot"),
+            "the superseded (lower-index, tried-first) candidate's \
+             antiquot kind must NOT leak: {names:?}"
+        );
+    }
+
+    /// M3b3 Task 7 review fix — the "loser → winner → loser" interleaving:
+    /// a temp-best that gets superseded (idx0, same leak risk as the test
+    /// above) AND a further sibling tried AFTER the eventual winner
+    /// (idx2, a plain loser the ORIGINAL floor-based code already handled
+    /// correctly) must BOTH fail to leave any trace, using three
+    /// DISTINCT kind names so a leak of either is independently visible.
+    #[test]
+    fn three_candidates_loser_then_winner_then_loser_leak_neither_losers_kind() {
+        let base = crate::builtin::snapshot();
+        let mut ov = Overlay::new(&base);
+        ov.register_category("catshort", LeadingIdentBehavior::Default);
+        ov.register_category("catlong", LeadingIdentBehavior::Default);
+        ov.register_category("cattrail", LeadingIdentBehavior::Default);
+        ov.register(NotationSpec {
+            // idx0: temp winner, later superseded.
+            category: "term".into(),
+            kind_name: "term_hash_a".into(),
+            leading: true,
+            prec: 0,
+            lhs_prec: None,
+            tokens: vec!["◆".into()],
+            body: seq([sym("◆"), cat("catshort", 0)]),
+            scope: SpecScope::Global,
+        });
+        ov.register(NotationSpec {
+            // idx1: the eventual (longer) winner.
+            category: "term".into(),
+            kind_name: "term_hash_b".into(),
+            leading: true,
+            prec: 0,
+            lhs_prec: None,
+            tokens: vec!["◆".into()],
+            body: seq([sym("◆"), cat("catlong", 0), cat("catlong", 0)]),
+            scope: SpecScope::Global,
+        });
+        ov.register(NotationSpec {
+            // idx2: tried AFTER the winner is already settled; also loses
+            // (same short advance as idx0).
+            category: "term".into(),
+            kind_name: "term_hash_c".into(),
+            leading: true,
+            prec: 0,
+            lhs_prec: None,
+            tokens: vec!["◆".into()],
+            body: seq([sym("◆"), cat("cattrail", 0)]),
+            scope: SpecScope::Global,
+        });
+        let src = "def q := `(◆$x $y)\n";
+        let r = parse_module_with_overlay(src, &base, ov);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        let names: Vec<&str> = r.overlay.kind_names().iter().map(|s| &**s).collect();
+        assert!(
+            names.contains(&"catlong.pseudo.antiquot"),
+            "the winner must survive: {names:?}"
+        );
+        assert!(
+            !names.contains(&"catshort.pseudo.antiquot"),
+            "the superseded temp-best (tried BEFORE the winner) must not leak: {names:?}"
+        );
+        assert!(
+            !names.contains(&"cattrail.pseudo.antiquot"),
+            "a loser tried AFTER the winner must not leak either: {names:?}"
+        );
+    }
+
+    /// M3b3 Task 7 review fix — nested `longest_match`: `` `(inner| ..)``
+    /// (`Term.dynamicQuot`) is itself one candidate the OUTER "term"
+    /// category's `longest_match` selects among several builtin siblings
+    /// sharing the "`(" token (`Term.quot`/`Command.quot`), and its own
+    /// body recurses into `category("inner", 0)` — a NESTED
+    /// `longest_match` over the two overlay candidates registered into
+    /// "inner" below. Verifies the fix composes: the OUTER candidate's
+    /// own captured `interned_names` slice (captured once `self.run(p)`
+    /// — which includes the ENTIRE nested resolution — returns) must
+    /// already reflect only the INNER call's own winner, with no inner
+    /// loser's kind surviving up through the outer splice either.
+    #[test]
+    fn nested_longest_match_winner_survives_the_outer_candidates_own_restore() {
+        let base = crate::builtin::snapshot();
+        let mut ov = Overlay::new(&base);
+        ov.register_category("inner", LeadingIdentBehavior::Default);
+        ov.register_category("leafshort", LeadingIdentBehavior::Default);
+        ov.register_category("leaflong", LeadingIdentBehavior::Default);
+        ov.register(NotationSpec {
+            // "inner" candidate idx0: temp winner, superseded.
+            category: "inner".into(),
+            kind_name: "inner_short".into(),
+            leading: true,
+            prec: 0,
+            lhs_prec: None,
+            tokens: vec!["◇".into()],
+            body: seq([sym("◇"), cat("leafshort", 0)]),
+            scope: SpecScope::Global,
+        });
+        ov.register(NotationSpec {
+            // "inner" candidate idx1: the eventual (longer) winner.
+            category: "inner".into(),
+            kind_name: "inner_long".into(),
+            leading: true,
+            prec: 0,
+            lhs_prec: None,
+            tokens: vec!["◇".into()],
+            body: seq([sym("◇"), cat("leaflong", 0), cat("leaflong", 0)]),
+            scope: SpecScope::Global,
+        });
+        let src = "def q := `(inner| ◇$x $y)\n";
+        let r = parse_module_with_overlay(src, &base, ov);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        let names: Vec<&str> = r.overlay.kind_names().iter().map(|s| &**s).collect();
+        assert!(
+            names.contains(&"leaflong.pseudo.antiquot"),
+            "the nested winner must survive the outer candidate's own restore: {names:?}"
+        );
+        assert!(
+            !names.contains(&"leafshort.pseudo.antiquot"),
+            "the nested superseded loser must not leak: {names:?}"
+        );
+    }
+
+    /// M3b3 final review — C1 (Task 7 truncation × Task 11b memoization
+    /// seam). Two same-first-token overlay productions share a `category`
+    /// recursion INSIDE a quotation:
+    ///   P1 = `☆ acat`      (idx0, tried first — temp-best)
+    ///   P2 = `☆ acat bcat`  (idx1, tried second — the longer WINNER)
+    /// Both recurse into `category("acat")` at the identical inner
+    /// position, so P2's call CACHE-HITS the entry P1 memoized. P1 interned
+    /// `acat.pseudo.antiquot` at overlay index n and memoized the subtree;
+    /// `longest_match`'s `restore` before P2 then `truncate_kinds`'d index
+    /// n away. Before the C1 fix, P2's hit replayed `$x`'s events (which
+    /// embed absolute id n) WITHOUT re-interning, and P2's own
+    /// `category("bcat")` then re-interned `bcat.pseudo.antiquot` at the
+    /// reused index n — so the surviving `$x` node silently resolved to
+    /// `bcat.pseudo.antiquot`, a mis-kinded tree. `accept_cached_overlay_
+    /// kinds` re-interns the rolled-back `acat.pseudo.antiquot` on the hit
+    /// (overlay is back at n), so `bcat` lands at n+1 and both antiquots
+    /// keep their correct kinds. Counterfactually RED (asserts below fail:
+    /// `acat.pseudo.antiquot` absent, `bcat.pseudo.antiquot` doubled)
+    /// against the unfixed replay.
+    #[test]
+    fn cat_cache_hit_across_sibling_kind_truncation_keeps_correct_kinds() {
+        let base = crate::builtin::snapshot();
+        let mut ov = Overlay::new(&base);
+        ov.register_category("acat", LeadingIdentBehavior::Default);
+        ov.register_category("bcat", LeadingIdentBehavior::Default);
+        ov.register(NotationSpec {
+            category: "term".into(),
+            kind_name: "term_star_a".into(),
+            leading: true,
+            prec: 0,
+            lhs_prec: None,
+            tokens: vec!["☆".into()],
+            body: seq([sym("☆"), cat("acat", 0)]),
+            scope: SpecScope::Global,
+        });
+        ov.register(NotationSpec {
+            category: "term".into(),
+            kind_name: "term_star_ab".into(),
+            leading: true,
+            prec: 0,
+            lhs_prec: None,
+            tokens: vec!["☆".into()],
+            body: seq([sym("☆"), cat("acat", 0), cat("bcat", 0)]),
+            scope: SpecScope::Global,
+        });
+        let src = "def q := `(☆$x $y)\n";
+        // No panic (the OOB variant below covers the panic channel; here
+        // the reused index IS repopulated, so the failure mode is silent
+        // mis-kinding, not a crash).
+        let r = parse_module_with_overlay(src, &base, ov);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        let dump = crate::canon::canon_jsonl(&r.tree);
+        // Oracle-correct kinds: `$x` is the `acat` antiquot, `$y` the
+        // `bcat` one — each present EXACTLY once. Under the C1 bug `$x`
+        // would carry `bcat.pseudo.antiquot` too (acat absent, bcat
+        // doubled).
+        assert_eq!(
+            dump.matches("acat.pseudo.antiquot").count(),
+            1,
+            "the `$x` antiquot must keep its `acat` kind exactly once: {dump}"
+        );
+        assert_eq!(
+            dump.matches("bcat.pseudo.antiquot").count(),
+            1,
+            "the `$y` antiquot must be the only `bcat` antiquot: {dump}"
+        );
+        // Both survive in the overlay's kind table too.
+        let names: Vec<&str> = r.overlay.kind_names().iter().map(|s| &**s).collect();
+        assert!(names.contains(&"acat.pseudo.antiquot"), "{names:?}");
+        assert!(names.contains(&"bcat.pseudo.antiquot"), "{names:?}");
+    }
+
+    /// M3b3 final review — C1, the OOB-panic variant. Same seam, but the
+    /// longer winner interns NOTHING after the shared cache hit:
+    ///   P1 = `☆ acat`       (idx0, temp-best)
+    ///   P2 = `☆ acat "!"`   (idx1, longer winner — `"!"` is a token,
+    ///                         not a kind)
+    /// Before the fix, P2's `category("acat")` hit replayed `$x`'s events
+    /// referencing the truncated overlay index n, nothing re-populated n,
+    /// and the surviving tree carried a kind id past the merged interner's
+    /// end — `KindInterner::name`'s unchecked `self.names[k.0]` panicked at
+    /// canon/dump time, an input-reachable never-panic violation. The fix
+    /// re-interns `acat.pseudo.antiquot` on the hit, so the id resolves.
+    /// This test simply parsing + dumping WITHOUT panicking is the pin
+    /// (counterfactually it panics against the unfixed replay).
+    #[test]
+    fn cat_cache_hit_after_truncation_does_not_oob_panic() {
+        let base = crate::builtin::snapshot();
+        let mut ov = Overlay::new(&base);
+        ov.register_category("acat", LeadingIdentBehavior::Default);
+        ov.register(NotationSpec {
+            category: "term".into(),
+            kind_name: "term_star_a".into(),
+            leading: true,
+            prec: 0,
+            lhs_prec: None,
+            tokens: vec!["☆".into()],
+            body: seq([sym("☆"), cat("acat", 0)]),
+            scope: SpecScope::Global,
+        });
+        ov.register(NotationSpec {
+            category: "term".into(),
+            kind_name: "term_star_bang".into(),
+            leading: true,
+            prec: 0,
+            lhs_prec: None,
+            tokens: vec!["☆".into(), "!".into()],
+            body: seq([sym("☆"), cat("acat", 0), sym("!")]),
+            scope: SpecScope::Global,
+        });
+        let src = "def q := `(☆$x !)\n";
+        let r = parse_module_with_overlay(src, &base, ov);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        // The load-bearing assertion is that neither the parse above nor
+        // this dump panics; the `$x` antiquot must resolve to `acat`.
+        let dump = crate::canon::canon_jsonl(&r.tree);
+        assert!(
+            dump.contains("acat.pseudo.antiquot"),
+            "the `$x` antiquot's kind must resolve after the cache hit: {dump}"
+        );
+    }
+
+    /// M3b3 final review — C1 RE-REVIEW (the idempotent-share / sub-baseline
+    /// residual). The shared `category("acat")` call is reached AFTER an
+    /// EARLIER `acat` antiquot in the SAME candidate has already interned
+    /// `acat.pseudo.antiquot`, so the shared call's own `intern` is
+    /// idempotent and no-appends — under the call-BASELINE record
+    /// (dd6443a) its `interned_kinds` slice was EMPTY, yet its events
+    /// reference that sub-baseline id:
+    ///   P1 = `♠ acat , acat`        (idx0, temp-best; its 2nd `acat` call
+    ///                                 memoizes an EMPTY-slice entry whose
+    ///                                 events point at `acat`'s id)
+    ///   P2 = `♠ bcat , acat !`       (idx1, longer WINNER)
+    /// After P1's `restore` truncates `acat.pseudo.antiquot` away, P2
+    /// interns `bcat.pseudo.antiquot` at the SAME index, then cache-HITS
+    /// P1's empty-slice entry for the 2nd `acat` call — under dd6443a the
+    /// empty slice was accepted unconditionally and `$x` silently resolved
+    /// to `bcat.pseudo.antiquot`. The command-committed WATERMARK record
+    /// captures the full speculative prefix `[acat]` for that entry, so the
+    /// hit sees `bcat` at the recorded index, mismatches, and re-parses —
+    /// `$x` keeps its `acat` kind. Counterfactually RED against dd6443a's
+    /// baseline-anchored reconciliation (asserts below fail: `acat` absent,
+    /// `bcat` doubled).
+    #[test]
+    fn cat_cache_idempotent_share_across_truncation_keeps_correct_kinds() {
+        let base = crate::builtin::snapshot();
+        let mut ov = Overlay::new(&base);
+        ov.register_category("acat", LeadingIdentBehavior::Default);
+        ov.register_category("bcat", LeadingIdentBehavior::Default);
+        ov.register(NotationSpec {
+            category: "term".into(),
+            kind_name: "term_spade_a".into(),
+            leading: true,
+            prec: 0,
+            lhs_prec: None,
+            tokens: vec!["♠".into(), ",".into()],
+            body: seq([sym("♠"), cat("acat", 0), sym(","), cat("acat", 0)]),
+            scope: SpecScope::Global,
+        });
+        ov.register(NotationSpec {
+            category: "term".into(),
+            kind_name: "term_spade_b".into(),
+            leading: true,
+            prec: 0,
+            lhs_prec: None,
+            tokens: vec!["♠".into(), ",".into(), "!".into()],
+            body: seq([sym("♠"), cat("bcat", 0), sym(","), cat("acat", 0), sym("!")]),
+            scope: SpecScope::Global,
+        });
+        let src = "def q := `(♠$a , $x !)\n";
+        let r = parse_module_with_overlay(src, &base, ov);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        let dump = crate::canon::canon_jsonl(&r.tree);
+        // `$a` is the `bcat` antiquot (P2's first slot), `$x` the `acat`
+        // one (P2's fourth slot) — each present EXACTLY once. Under the
+        // dd6443a residual `$x` would carry `bcat.pseudo.antiquot` too
+        // (acat absent, bcat doubled).
+        assert_eq!(
+            dump.matches("acat.pseudo.antiquot").count(),
+            1,
+            "the `$x` antiquot must keep its `acat` kind exactly once: {dump}"
+        );
+        assert_eq!(
+            dump.matches("bcat.pseudo.antiquot").count(),
+            1,
+            "the `$a` antiquot must be the only `bcat` antiquot: {dump}"
+        );
     }
 
     /// M3b2b Task 7 Step 1 (RED first): end-to-end through the public

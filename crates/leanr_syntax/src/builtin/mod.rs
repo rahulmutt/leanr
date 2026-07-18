@@ -65,26 +65,46 @@ pub fn builder() -> SnapshotBuilder {
     //   not a token-table LOOKUP collision with the separately-registered
     //   bare `","` (`term.rs`/`tactic.rs`'s own `sep_by1(.., ",")`)
     //   forcing a two-token read. Only `sep = ","` is registered here —
-    //   this crate's OTHER `sepBy`/`sepBy1` separators (`"|"` —
-    //   `term.rs:502`; `"▸"` — `term_app.rs:121`) get their own `"|*"`/
-    //   `"▸*"` combined-token registration on demand, when (if) a future
-    //   fixture actually exercises a splice suffix at one of those
-    //   positions — same "don't force it" discipline this crate already
-    //   applies to `CATEGORY_LEAF_ANTIQUOT_NAMES` (`parse.rs`). Failure
-    //   mode while unregistered, named explicitly (M3b2b Task 4 review
-    //   fix): this is NOT a hard error at parse time. `antiquot_splice`'s
-    //   suffix-splice form (`parse.rs`) still runs `scope_body` and
-    //   checks `top_level_is_antiquot` on whatever it produced, then
-    //   attempts `expect_atom(suf, false)` for the combined suffix text
-    //   (e.g. `"|*"`) — with no such token registered, the tokenizer can
-    //   never maximal-munch it as one atom, so that `expect_atom` fails
-    //   and is treated as "suffix doesn't apply" (see `antiquot_splice`'s
-    //   own doc comment, alternative 2): the element's already-parsed
-    //   result stands UNWRAPPED (no `.antiquot_suffix_splice` node), and
-    //   the stray `|`/`*` text is left in the stream for whatever runs
-    //   next to trip over — a silent misparse, not a diagnosed one.
-    //   Tokens are added here only once a fixture actually pins that
-    //   separator's splice suffix.
+    //   this crate's OTHER `sepBy`/`sepBy1` separators hardcoded directly
+    //   in Rust (`"|"` — `term.rs:502`; `"▸"` — `term_app.rs:121`) still
+    //   get their own `"|*"`/`"▸*"` combined-token registration on
+    //   demand, when (if) a future fixture actually exercises a splice
+    //   suffix at one of those positions — same "don't force it"
+    //   discipline this crate already applies to
+    //   `CATEGORY_LEAF_ANTIQUOT_NAMES` (`parse.rs`). This crate's builtin
+    //   productions are hand-assembled via `SnapshotBuilder::leading2`/
+    //   `trailing2` (`nd`/`seq`/`sep_by1` calls throughout `builtin/`),
+    //   which deliberately do NOT run the M3b3 Task 8 suffix-derivation
+    //   walk below — doing so would auto-register `"|*"`/`"▸*"` as a
+    //   side effect of this refactor, an untested behavior change no
+    //   oracle dump has pinned for THOSE two separators, so the gap
+    //   documented here stays open for them on purpose.
+    //
+    //   M3b3 Task 8 CLOSES this gap for every OTHER separator, i.e. one
+    //   a `syntax`/`macro` declaration introduces at the source level
+    //   (same-file, via `Overlay::register`) or an imported module's
+    //   `ParserDescr` carries (via `SnapshotBuilder::leading_prim`/
+    //   `trailing_prim`/`scoped_leading_prim`/`scoped_trailing_prim`):
+    //   `sepby_suffix_tokens` (`grammar/mod.rs`) walks a production's body
+    //   for `SepBy`/`SepBy1` and derives `format!("{sep}*")` for each,
+    //   generalizing the ONE hand-written case below (`",*"`) to an
+    //   ARBITRARY separator — pinned against a real oracle dump by
+    //   `StxSepCustom.lean`'s `sepBy(term, "|")` declaration (`"|*"`,
+    //   `StxSepCustom.stx.jsonl`'s `sepBy.antiquot_suffix_splice`/
+    //   `sepBy.antiquot_scope` lines). Failure mode while unregistered,
+    //   named explicitly (M3b2b Task 4 review fix; still applies to the
+    //   builtin `"|"`/`"▸"` cases above): this is NOT a hard error at
+    //   parse time. `antiquot_splice`'s suffix-splice form (`parse.rs`)
+    //   still runs `scope_body` and checks `top_level_is_antiquot` on
+    //   whatever it produced, then attempts `expect_atom(suf, false)` for
+    //   the combined suffix text (e.g. `"|*"`) — with no such token
+    //   registered, the tokenizer can never maximal-munch it as one atom,
+    //   so that `expect_atom` fails and is treated as "suffix doesn't
+    //   apply" (see `antiquot_splice`'s own doc comment, alternative 2):
+    //   the element's already-parsed result stands UNWRAPPED (no
+    //   `.antiquot_suffix_splice` node), and the stray `|`/`*` text is
+    //   left in the stream for whatever runs next to trip over — a
+    //   silent misparse, not a diagnosed one.
     b.token("*");
     b.token(",*");
     // Each category's `LeadingIdentBehavior` (M3a Task 10 review Finding
