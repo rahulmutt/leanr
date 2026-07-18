@@ -1,6 +1,8 @@
 //! Local-only Mathlib parse sweep + pass-list ratchet (M3b2a
 //! acceptance; grows into M3b3's 100% gate). Needs `mise run
-//! mathlib:fetch` first. Run via `mise run parse:mathlib`.
+//! mathlib:fetch` first. Dev loop: `mise run parse:mathlib:fast`
+//! (fast regression gate over the committed pass-list only). Full
+//! discovery sweep (~35h; nightly only): `mise run parse:mathlib`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -48,7 +50,8 @@ fn oracle_dump(mathlib: &Path, lean_path: &str, githash: &str, file: &Path) -> O
 }
 
 #[test]
-#[ignore = "needs .mathlib (mise run mathlib:fetch); run via mise run parse:mathlib"]
+#[ignore = "needs .mathlib (mise run mathlib:fetch); dev loop: mise run parse:mathlib:fast; \
+            full discovery sweep: mise run parse:mathlib"]
 fn mathlib_sweep_ratchet() {
     let mathlib = PathBuf::from(std::env::var("LEANR_MATHLIB_DIR").expect("LEANR_MATHLIB_DIR"));
     let lean_path = std::env::var("LEANR_OLEAN_PATH").expect("LEANR_OLEAN_PATH");
@@ -77,12 +80,43 @@ fn mathlib_sweep_ratchet() {
     // Read the committed pass-list once, up front: passlist-only mode needs
     // it to build the swept file set (instead of walking the corpus), and
     // every mode needs it for the final gating check.
-    let committed: BTreeSet<String> = std::fs::read_to_string(passlist_path())
-        .unwrap_or_default()
-        .lines()
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(String::from)
-        .collect();
+    //
+    // In passlist-only mode `committed` IS the entire swept file set (the
+    // corpus walk is skipped entirely), so a read failure here must be a
+    // hard error, not `unwrap_or_default()`: a silently empty set would
+    // sweep zero files and report "0 files, 0 green, 0 regressions" —
+    // a GREEN test result with the baseline effectively gone. Full/bounded
+    // modes are unaffected: `committed` there is only the gating target,
+    // and an empty/missing pass-list still causes the corpus-walked files
+    // to be swept (just gated against nothing), so their behavior is left
+    // as-is.
+    let committed: BTreeSet<String> = if passlist_only {
+        let text = std::fs::read_to_string(passlist_path()).expect(
+            "failed to read the committed pass-list (tests/fixtures/syntax/mathlib-passlist.txt) \
+             in passlist-only mode — this mode's swept file set IS this file, so an unreadable \
+             file must fail loudly rather than silently gate zero files as a vacuous pass",
+        );
+        let set: BTreeSet<String> = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(String::from)
+            .collect();
+        assert!(
+            !set.is_empty(),
+            "committed pass-list is empty in passlist-only mode — refusing to gate vacuously \
+             (0 files swept, 0 green, 0 regressions would still report the test as passing)"
+        );
+        set
+    } else {
+        std::fs::read_to_string(passlist_path())
+            .unwrap_or_default()
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(String::from)
+            .collect()
+    };
 
     let roots: Vec<PathBuf> = lean_path
         .split(':')
@@ -285,6 +319,21 @@ fn mathlib_sweep_ratchet() {
         newly_green.len()
     );
 
+    // Gate BEFORE writing, even in passlist-update mode: rewriting the
+    // pass-list from `green` unconditionally would re-baseline over any
+    // regression (a file that used to be on the pass-list but no longer
+    // parses green would simply be dropped from the rewritten file instead
+    // of failing the run) — the same "NEVER hand-edit to hide a regression"
+    // philosophy the ratchet already states, now enforced for the automatic
+    // rewrite too. This also lets `parse:mathlib:nightly` collapse to a
+    // single full sweep that both gates and writes, instead of one sweep to
+    // gate followed by a second full sweep to write (~70h for a task
+    // documented and budgeted at ~35h).
+    assert!(
+        regressions.is_empty(),
+        "pass-list regressions: {regressions:#?}"
+    );
+
     if passlist_update {
         let mut out = String::from(
             "# Mathlib-closure files that parse oracle-green (M3b2a ratchet).\n\
@@ -295,12 +344,7 @@ fn mathlib_sweep_ratchet() {
             out.push('\n');
         }
         std::fs::write(passlist_path(), out).unwrap();
-        return;
     }
-    assert!(
-        regressions.is_empty(),
-        "pass-list regressions: {regressions:#?}"
-    );
 }
 
 fn collect_lean_files(dir: &Path, out: &mut Vec<PathBuf>) {
