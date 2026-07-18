@@ -4232,7 +4232,8 @@ impl<'a> Ps<'a> {
                 // sp)` only rolls back to `entry_sp` (>= watermark), so this
                 // slice is exactly the live speculative prefix.
                 watermark: self.committed_overlay_kinds,
-                speculative_kinds: self.overlay.kind_names()[self.committed_overlay_kinds..].to_vec(),
+                speculative_kinds: self.overlay.kind_names()[self.committed_overlay_kinds..]
+                    .to_vec(),
             },
         );
         r
@@ -6688,13 +6689,7 @@ mod tests {
             prec: 0,
             lhs_prec: None,
             tokens: vec!["♠".into(), ",".into(), "!".into()],
-            body: seq([
-                sym("♠"),
-                cat("bcat", 0),
-                sym(","),
-                cat("acat", 0),
-                sym("!"),
-            ]),
+            body: seq([sym("♠"), cat("bcat", 0), sym(","), cat("acat", 0), sym("!")]),
             scope: SpecScope::Global,
         });
         let src = "def q := `(♠$a , $x !)\n";

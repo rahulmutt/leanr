@@ -826,9 +826,7 @@ pub(crate) fn spec_scope_from_attr_kind(
     ctx: NamingCtx<'_>,
 ) -> SpecScope {
     if is_local_attr_kind(attr_kind_node, kinds) {
-        SpecScope::Local {
-            anchor: ctx.anchor,
-        }
+        SpecScope::Local { anchor: ctx.anchor }
     } else if is_scoped_attr_kind(attr_kind_node, kinds) {
         SpecScope::Scoped(ctx.current_ns.to_string())
     } else {

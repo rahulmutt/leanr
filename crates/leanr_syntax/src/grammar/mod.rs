@@ -1756,11 +1756,20 @@ pub(crate) fn sepby_suffix_tokens(p: &Prim, out: &mut Vec<String>) {
             }
         }
         Node { body, .. } | TrailingNode { body, .. } => sepby_suffix_tokens(body, out),
-        Optional(q) | Many(q) | Many1(q) | Atomic(q) | Lookahead(q) | NotFollowedBy(q)
-        | Group(q) | WithPosition(q) | WithoutPosition(q) | Many1Indent(q) | IncQuotDepth(q)
-        | DecQuotDepth(q) | Many1Unbox(q) | WithoutAnonymousAntiquot(q) => {
-            sepby_suffix_tokens(q, out)
-        }
+        Optional(q)
+        | Many(q)
+        | Many1(q)
+        | Atomic(q)
+        | Lookahead(q)
+        | NotFollowedBy(q)
+        | Group(q)
+        | WithPosition(q)
+        | WithoutPosition(q)
+        | Many1Indent(q)
+        | IncQuotDepth(q)
+        | DecQuotDepth(q)
+        | Many1Unbox(q)
+        | WithoutAnonymousAntiquot(q) => sepby_suffix_tokens(q, out),
         WithForbidden(_tok, q) => sepby_suffix_tokens(q, out),
         WithoutForbidden(q) => sepby_suffix_tokens(q, out),
         SepBy { item, sep, .. } | SepBy1 { item, sep, .. } => {
@@ -2062,6 +2071,9 @@ mod builder_seam_tests {
             );
             b.finish().fingerprint()
         };
-        assert_ne!(base, with_scoped, "a scoped entry must change the fingerprint");
+        assert_ne!(
+            base, with_scoped,
+            "a scoped entry must change the fingerprint"
+        );
     }
 }

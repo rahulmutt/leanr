@@ -348,7 +348,11 @@ fn scope_storms_terminate() {
         // trailing bare `end`s here is a no-op against the namespace
         // stack — this pins that a long run of no-op `end_scope(None)`
         // calls stays linear, not just that it terminates.
-        format!("{}{}", "namespace A.B.C\n".repeat(400), "end\n".repeat(1200)),
+        format!(
+            "{}{}",
+            "namespace A.B.C\n".repeat(400),
+            "end\n".repeat(1200)
+        ),
         // end-storm on empty stack ("the stray-end storm" — see the
         // dedicated pass below for its error-presence pin).
         "end\n".repeat(2000),
