@@ -920,6 +920,14 @@ struct MatchWinner {
 /// `run_module`'s grow arm. M3b1 only ever had the first two; M3b2b
 /// Task 7 adds `declare_syntax_cat`'s pinned kind name (StxShapes dump,
 /// `command_syntax.rs`).
+///
+/// `elab`/`binderPredicate` are deliberately OFF this list (post-M3b2b
+/// minors cleanup): `grammar::surface::derive_elab_cmd`/
+/// `derive_binder_predicate` unconditionally return `None` (no oracle
+/// dump to pin their child layout against yet), so keeping them here
+/// only pays `flatten_events`+`merged_kinds`+`build_tree` for a
+/// guaranteed no-op on every such command. They rejoin the list when
+/// their derivation arms exist (M3b3).
 pub(crate) const GRAMMAR_GROWING_KINDS: &[&str] = &[
     "Lean.Parser.Command.mixfix",
     "Lean.Parser.Command.notation",
@@ -935,8 +943,6 @@ pub(crate) const GRAMMAR_GROWING_KINDS: &[&str] = &[
     "Lean.Parser.Command.syntax",
     "Lean.Parser.Command.syntaxAbbrev",
     "Lean.Parser.Command.macro",
-    "Lean.Parser.Command.elab",
-    "Lean.Parser.Command.binderPredicate",
 ];
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -2470,6 +2476,10 @@ impl<'a> Ps<'a> {
     /// sufficient and keeps this from ever touching the immutable base
     /// tables, matching the "SAME-FILE overlay additions" scoping
     /// `category`'s own dispatch-merging code already uses elsewhere).
+    /// `find_map` below picks the FIRST matching leading production if
+    /// the overlay ever registers duplicate leaf-wrapping productions
+    /// for the same `kind_name` — arbitrary, but unexercised by any
+    /// fixture.
     fn leaf_antiquot_wrap_kind(&self, cat_name: &str, kind_name: &str) -> Option<SyntaxKind> {
         let cd = self.overlay.category_delta(cat_name)?;
         cd.leading.iter().find_map(|(_, p)| match p {

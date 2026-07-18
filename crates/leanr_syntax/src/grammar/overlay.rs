@@ -221,6 +221,18 @@ impl Overlay {
     /// overlay's own `kind_name` (never a `GrammarSnapshot`'s — see
     /// `encode_prim`'s own doc comment in `grammar/mod.rs` for why its
     /// kind-name resolver is a closure rather than a bare snapshot ref).
+    ///
+    /// Widened semantics (`kind_names` above): a FAILED antiquot attempt
+    /// still interns its kind (e.g. `term.pseudo.antiquot`,
+    /// `parse.rs`'s `Ps::antiquot`) via `Overlay::intern` before the
+    /// caller's save/restore unwinds the attempt — `restore` rewinds
+    /// events/pos, not the overlay's kind table — so this fingerprint
+    /// depends on quotation CONTENTS parsed so far, not only on
+    /// registered grammar deltas (`register`/`register_category`).
+    /// Still deterministic per input (same source, same attempted
+    /// antiquots, same interning order) → caching stays sound; intern-
+    /// on-commit (only intern a kind once its production actually wins)
+    /// is the real fix, deferred (M3b3 candidate).
     pub fn fingerprint_into(&self, h: &mut blake3::Hasher) {
         h.update(b"leanr-m3b1-overlay-v1\0");
         for t in self.tokens.iter() {

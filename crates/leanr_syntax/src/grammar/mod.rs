@@ -246,10 +246,14 @@ pub enum Prim {
     /// `nodeWithAntiquot` call it expands to, rather than wrapping an
     /// arbitrary sub-parser the way this primitive does; that shape
     /// isn't reachable from any M3b2b Task 1-3 builtin fixture. Plumbed
-    /// now (exhaustive match arms below) per the Task 3 brief's
-    /// interface contract — Task 4's imported-`ParserDescr` mapping is
-    /// the first real producer, wrapping a decoded parser whose OLean
-    /// `ParserDescr.node`/`.parser` entry carries the flag.
+    /// now (exhaustive match arms below, plus `encode`/`walk_symbols`)
+    /// per the Task 3 brief's interface contract, but currently
+    /// UNPRODUCED: Task 4's imported-`ParserDescr.nodeWithAntiquot`
+    /// mapping (`leanr_grammar::descr`) concluded the toolchain's
+    /// `compileParserDescr` hardcodes `anonymous := true`
+    /// unconditionally for that constructor — no decoded OLean entry
+    /// ever builds this wrap (`descr.rs`'s own doc comment on that arm;
+    /// pinned by `wrap_bracket_notation_stays_an_unwrapped_node`).
     WithoutAnonymousAntiquot(Arc<Prim>),
 }
 
