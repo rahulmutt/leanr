@@ -1974,6 +1974,23 @@ impl<'a> Ps<'a> {
                 self.pos_stack.pop();
                 r
             }
+            Prim::WithoutPosition(q) => {
+                // ORACLE-PORT `withoutPosition` (Basic.lean,
+                // `register_parser_alias withoutPosition { stackSz? :=
+                // none }`): run `q` with the enclosing saved position
+                // DISCARDED, so any nested `checkCol*`/`checkLineEq` sees
+                // `savedPos? = none` and no-ops (the same "empty stack →
+                // pass" branch `check_col` already takes). The oracle
+                // scopes a SINGLE `savedPos?` field to `none`; because
+                // only `pos_stack.last()` is ever read, clearing the whole
+                // stack for the duration is equivalent. Restored on the
+                // way out — success or failure alike — same pure-scoping
+                // discipline as `WithPosition`/`WithForbidden`.
+                let saved = std::mem::take(&mut self.pos_stack);
+                let r = self.run(q);
+                self.pos_stack = saved;
+                r
+            }
             Prim::CheckColGt => self.check_col(|cur, saved| cur.1 > saved.1),
             Prim::CheckColGe => self.check_col(|cur, saved| cur.1 >= saved.1),
             Prim::CheckColEq => self.check_col(|cur, saved| cur.1 == saved.1),

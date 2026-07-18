@@ -18,6 +18,7 @@ pub mod alias;
 pub mod notation;
 pub mod overlay;
 pub(crate) mod scope;
+pub(crate) mod shims;
 pub mod surface;
 pub use notation::{
     derive_delta, mangle_kind, GrammarDelta, NamingCtx, NotationAtom, NotationSpec,
@@ -123,6 +124,28 @@ pub enum Prim {
     Group(Arc<Prim>),
     // --- position/precedence checks (Task 6 implements semantics) ---
     WithPosition(Arc<Prim>),
+    /// `withoutPosition p` (Basic.lean, `register_parser_alias
+    /// withoutPosition { stackSz? := none }`, `Lean/Parser.lean:51`).
+    /// M3b3 Task 11 shim: the position-clearing counterpart to
+    /// `WithPosition`. In the oracle it is `adaptCacheableContext ({ ·
+    /// with savedPos? := none }) p` — running `p` with the enclosing
+    /// saved indentation position DISCARDED, so any `checkCol*`/
+    /// `checkLineEq` reached inside `p` sees `savedPos? = none` and
+    /// succeeds unconditionally (Lean's `checkColGtFn` et al. no-op when
+    /// `savedPos?` is `none` — the SAME "no saved marker → pass" branch
+    /// this port already takes when `pos_stack` is empty, see
+    /// `Ps::check_col` in parse.rs). Wraps NO structural node (`withFn`
+    /// leaves `info` untouched — `firstTokens`/`collectTokens` forward
+    /// through unchanged, exactly like `WithPosition`), so it cannot be
+    /// modelled as `Transparent` (identity): a bracketed, multi-line
+    /// item list such as `algebraizeTermSeq`'s `withoutPosition(term,*)`
+    /// occurs INSIDE a tactic block's own `withPosition`, and dropping
+    /// the clear would let an outer `colGe` reject a continuation line
+    /// the oracle accepts. The interpreter arm (parse.rs) saves and
+    /// clears the whole `pos_stack` for the duration of `p`, restoring
+    /// it on the way out — equivalent to the single-field `savedPos? :=
+    /// none` scoping, since only `pos_stack.last()` is ever read.
+    WithoutPosition(Arc<Prim>),
     CheckColGt,
     CheckColGe,
     CheckColEq,
@@ -862,6 +885,10 @@ pub(crate) fn encode_prim(
             h.update(&[23]);
             encode_prim(q, kind_name, h);
         }
+        WithoutPosition(q) => {
+            h.update(&[46]);
+            encode_prim(q, kind_name, h);
+        }
         CheckColGt => {
             h.update(&[24]);
         }
@@ -1404,7 +1431,7 @@ fn first_tokens(p: &Prim) -> Ft {
         // pure `withFn`-shaped context tweak — `info` untouched, see
         // `walk_symbols`'s own doc comment on the same pair) all forward
         // unchanged too.
-        WithPosition(body) | WithoutForbidden(body) => first_tokens(body),
+        WithPosition(body) | WithoutPosition(body) | WithoutForbidden(body) => first_tokens(body),
         WithForbidden(_, body) => first_tokens(body),
         Seq(ps) => {
             let mut it = ps.iter();
@@ -1615,8 +1642,8 @@ fn walk_symbols(p: &Prim, f: &mut impl FnMut(&str)) {
         }
         Node { body, .. } | TrailingNode { body, .. } => walk_symbols(body, f),
         Optional(q) | Many(q) | Many1(q) | Atomic(q) | Lookahead(q) | NotFollowedBy(q)
-        | Group(q) | WithPosition(q) | Many1Indent(q) | IncQuotDepth(q) | DecQuotDepth(q)
-        | Many1Unbox(q) | WithoutAnonymousAntiquot(q) => walk_symbols(q, f),
+        | Group(q) | WithPosition(q) | WithoutPosition(q) | Many1Indent(q) | IncQuotDepth(q)
+        | DecQuotDepth(q) | Many1Unbox(q) | WithoutAnonymousAntiquot(q) => walk_symbols(q, f),
         SepByIndent { item, sep, .. } => {
             // The oracle's `sep` args (`"; "`/`", "`) carry a pretty-
             // print-only trailing space; `sep_by_indent` matches the
@@ -1730,8 +1757,10 @@ pub(crate) fn sepby_suffix_tokens(p: &Prim, out: &mut Vec<String>) {
         }
         Node { body, .. } | TrailingNode { body, .. } => sepby_suffix_tokens(body, out),
         Optional(q) | Many(q) | Many1(q) | Atomic(q) | Lookahead(q) | NotFollowedBy(q)
-        | Group(q) | WithPosition(q) | Many1Indent(q) | IncQuotDepth(q) | DecQuotDepth(q)
-        | Many1Unbox(q) | WithoutAnonymousAntiquot(q) => sepby_suffix_tokens(q, out),
+        | Group(q) | WithPosition(q) | WithoutPosition(q) | Many1Indent(q) | IncQuotDepth(q)
+        | DecQuotDepth(q) | Many1Unbox(q) | WithoutAnonymousAntiquot(q) => {
+            sepby_suffix_tokens(q, out)
+        }
         WithForbidden(_tok, q) => sepby_suffix_tokens(q, out),
         WithoutForbidden(q) => sepby_suffix_tokens(q, out),
         SepBy { item, sep, .. } | SepBy1 { item, sep, .. } => {

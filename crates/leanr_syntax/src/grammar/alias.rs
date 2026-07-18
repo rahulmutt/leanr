@@ -115,7 +115,12 @@ pub fn lookup(alias: &str) -> Option<AliasPrim> {
         }
         "ppGroup" | "ppRealGroup" | "ppRealFill" | "ppIndent" | "ppDedent"
         | "ppDedentIfGrouped" | "patternIgnore" => Transparent,
-        _ => return None,
+        // Miss path: consult the data-ranked raw-`Parser` shim table
+        // (M3b3 Task 11) before conceding a true skip-and-record. This
+        // keeps the block above a byte-faithful transcription of Lean's
+        // `registerParserAlias` set while the corpus-ranked additions
+        // carry their own evidence in `shims.rs`.
+        _ => return super::shims::shim_lookup(alias),
     })
 }
 
