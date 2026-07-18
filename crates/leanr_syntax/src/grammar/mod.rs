@@ -1043,8 +1043,17 @@ impl SnapshotBuilder {
     /// its `Symbol`s into the token table, index it by every first token
     /// it can start with, and push it onto the category's
     /// `leading_parsers` list.
+    ///
+    /// M3b3 Task 8: also harvests any `SepBy`/`SepBy1` separator's
+    /// antiquot-splice-suffix token (`sepby_suffix_tokens`) — an
+    /// IMPORTED production with a non-`,` separator (e.g. a Mathlib
+    /// `syntax .. sepBy(p, "|")`) needs its own `"|*"` registered the
+    /// same way a same-file declaration does (`Overlay::register`),
+    /// or the same silent-misparse gap `builtin/mod.rs`'s `",*"`
+    /// comment documents would reopen for every imported separator.
     pub fn leading_prim(&mut self, cat: &str, prim: Prim) {
         self.harvest_tokens(&prim);
+        self.harvest_sepby_suffix_tokens(&prim);
         let fs = index_entries(&prim);
         let c = self
             .categories
@@ -1059,9 +1068,10 @@ impl SnapshotBuilder {
 
     /// Trailing counterpart of [`Self::leading_prim`] — `prim` arrives
     /// already `Prim::TrailingNode`-wrapped; otherwise identical to
-    /// `trailing2`.
+    /// `trailing2`, plus the same M3b3 Task 8 suffix-token harvest.
     pub fn trailing_prim(&mut self, cat: &str, prim: Prim) {
         self.harvest_tokens(&prim);
+        self.harvest_sepby_suffix_tokens(&prim);
         let fs = index_entries(&prim);
         let c = self
             .categories
@@ -1086,8 +1096,15 @@ impl SnapshotBuilder {
     /// `GrammarSnapshot::scoped_tokens`). The production itself lands in
     /// the category's `scoped_leading` (never `leading`/`leading_parsers`)
     /// so `category()`'s read path only admits it while `ns` is active.
+    ///
+    /// M3b3 Task 8: a scoped production's `SepBy`/`SepBy1` suffix token
+    /// must be scope-filtered exactly like its own separator — harvested
+    /// into `scoped_tokens` under the SAME `ns`, not the always-active
+    /// table, or an inactive scoped `sepBy` production's suffix token
+    /// would leak into lexing while the scope is off.
     pub fn scoped_leading_prim(&mut self, cat: &str, ns: &str, prim: Prim) {
         self.harvest_scoped_tokens(ns, &prim);
+        self.harvest_scoped_sepby_suffix_tokens(ns, &prim);
         let fs = index_entries(&prim);
         let c = self
             .categories
@@ -1100,9 +1117,11 @@ impl SnapshotBuilder {
 
     /// Trailing counterpart of [`Self::scoped_leading_prim`] — `prim`
     /// arrives already `Prim::TrailingNode`-wrapped; lands in the
-    /// category's `scoped_trailing`. Same activation/token-scoping story.
+    /// category's `scoped_trailing`. Same activation/token-scoping story,
+    /// including the M3b3 Task 8 scoped suffix-token harvest.
     pub fn scoped_trailing_prim(&mut self, cat: &str, ns: &str, prim: Prim) {
         self.harvest_scoped_tokens(ns, &prim);
+        self.harvest_scoped_sepby_suffix_tokens(ns, &prim);
         let fs = index_entries(&prim);
         let c = self
             .categories
@@ -1127,6 +1146,31 @@ impl SnapshotBuilder {
     fn harvest_scoped_tokens(&mut self, ns: &str, p: &Prim) {
         let scoped = &mut self.scoped_tokens;
         walk_symbols(p, &mut |s| scoped.push((s.to_string(), ns.to_string())));
+    }
+
+    /// M3b3 Task 8: the always-active twin of
+    /// [`Self::harvest_scoped_sepby_suffix_tokens`] — folds
+    /// `sepby_suffix_tokens`'s derived suffix tokens (if any) into the
+    /// always-active token table, called alongside `harvest_tokens` by
+    /// [`Self::leading_prim`]/[`Self::trailing_prim`].
+    fn harvest_sepby_suffix_tokens(&mut self, p: &Prim) {
+        let mut suffixes = Vec::new();
+        sepby_suffix_tokens(p, &mut suffixes);
+        for s in &suffixes {
+            self.tokens.insert(s);
+        }
+    }
+
+    /// M3b3 Task 8: scoped twin of [`Self::harvest_sepby_suffix_tokens`]
+    /// — folds `sepby_suffix_tokens`'s derived suffix tokens into
+    /// `scoped_tokens` under `ns`, exactly like `harvest_scoped_tokens`
+    /// does for the bare separator itself.
+    fn harvest_scoped_sepby_suffix_tokens(&mut self, ns: &str, p: &Prim) {
+        let mut suffixes = Vec::new();
+        sepby_suffix_tokens(p, &mut suffixes);
+        for s in suffixes {
+            self.scoped_tokens.push((s, ns.to_string()));
+        }
     }
 
     /// Register a leading parser candidate with NO extra `Node` wrap —
@@ -1625,6 +1669,52 @@ fn walk_symbols(p: &Prim, f: &mut impl FnMut(&str)) {
     }
 }
 
+/// M3b3 Task 8: derive the antiquot-splice-suffix TOKEN(s) a `SepBy`/
+/// `SepBy1` production's separator implies, closing the silent-misparse
+/// gap `builtin/mod.rs`'s own `",*"` comment documents — ORACLE
+/// `sepByElemParser p sep := withAntiquotSpliceAndSuffix `sepBy p (symbol
+/// (sep.trimAscii.copy ++ "*"))` (`Basic.lean:1895-1896`) applies
+/// UNCONDITIONALLY to every `sepBy`/`sepBy1` combinator, not just the
+/// hardcoded `sep = ","` case `builtin/mod.rs` registers by hand — this
+/// walk generalizes that registration to ANY separator a same-file
+/// `syntax`/`macro` declaration (`Overlay::register`) or an imported
+/// production (`SnapshotBuilder::leading_prim`/`trailing_prim`/
+/// `scoped_leading_prim`/`scoped_trailing_prim`) introduces.
+///
+/// Deliberately its OWN recursive walk rather than a `walk_symbols`
+/// callback: `walk_symbols` already harvests `sep` itself as a bare
+/// token (needed regardless of any suffix) every time it visits a
+/// `SepBy`/`SepBy1`/`SepByIndent` node; folding suffix derivation into
+/// the SAME callback would force every `walk_symbols` call site (in
+/// particular the builtin snapshot's own `leading2`/`trailing2`, which
+/// intentionally do NOT auto-register `"|*"`/`"▸*"` for `matchAlt`'s/
+/// `anonymousCtor`'s own hardcoded `|`/`▸` separators — see that
+/// comment's "don't force it" discipline) to gain suffix tokens it
+/// never asked for. `SepByIndent` is deliberately NOT handled here
+/// (M3b3 Task 9's remit, a distinct oracle combinator with its own
+/// antiquot-suffix story) — only `SepBy`/`SepBy1`.
+pub(crate) fn sepby_suffix_tokens(p: &Prim, out: &mut Vec<String>) {
+    use Prim::*;
+    match p {
+        Seq(ps) | OrElse(ps) => {
+            for q in ps {
+                sepby_suffix_tokens(q, out);
+            }
+        }
+        Node { body, .. } | TrailingNode { body, .. } => sepby_suffix_tokens(body, out),
+        Optional(q) | Many(q) | Many1(q) | Atomic(q) | Lookahead(q) | NotFollowedBy(q)
+        | Group(q) | WithPosition(q) | Many1Indent(q) | IncQuotDepth(q) | DecQuotDepth(q)
+        | Many1Unbox(q) | WithoutAnonymousAntiquot(q) => sepby_suffix_tokens(q, out),
+        WithForbidden(_tok, q) => sepby_suffix_tokens(q, out),
+        WithoutForbidden(q) => sepby_suffix_tokens(q, out),
+        SepBy { item, sep, .. } | SepBy1 { item, sep, .. } => {
+            out.push(format!("{sep}*"));
+            sepby_suffix_tokens(item, out);
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod ft_index_tests {
     use super::*;
@@ -1810,6 +1900,83 @@ mod builder_seam_tests {
             "post-`end Foo` use must deactivate and fail: {:?}",
             ns.errors
         );
+    }
+
+    /// M3b3 Task 8: `leading_prim` (the imported-production seam
+    /// `leanr_grammar::assemble` folds a decoded `ParserDescr.sepBy`/
+    /// `.sepBy1` through) must derive the SAME combined `"|*"`
+    /// antiquot-splice-suffix token a same-file `Overlay::register`
+    /// would for an identical `sepBy(.., "|")` shape — an imported
+    /// module's own non-`,` separator gets the identical treatment, not
+    /// just the hardcoded `sep = ","` builtin case.
+    #[test]
+    fn leading_prim_derives_sepby_suffix_token_for_imported_production() {
+        let mut b = crate::builtin::builder();
+        let kind = b.kind("Test.importedSepBy");
+        b.token("wobalt");
+        b.leading_prim(
+            "term",
+            Prim::Node {
+                kind,
+                prec: Some(MAX_PREC),
+                body: std::sync::Arc::new(Prim::Seq(vec![
+                    Prim::Symbol("wobalt".into()),
+                    Prim::SepBy {
+                        item: std::sync::Arc::new(Prim::Category {
+                            name: "term".into(),
+                            rbp: 0,
+                        }),
+                        sep: "|".into(),
+                        allow_trailing: false,
+                    },
+                ])),
+            },
+        );
+        let snap = b.finish();
+        assert!(
+            snap.tokens.contains("|*"),
+            "expected the derived \"|*\" splice-suffix token in the always-active table"
+        );
+    }
+
+    /// M3b3 Task 8: the scoped twin — `scoped_leading_prim`'s derived
+    /// suffix token must land in `scoped_tokens` under the SAME
+    /// namespace as the production itself, NOT the always-active table,
+    /// so an inactive scoped `sepBy` production's `"|*"` doesn't leak
+    /// into lexing before its namespace is opened (same discipline
+    /// `scoped_leading_prim_is_inactive_until_open_or_namespace` already
+    /// pins for the bare separator/atom case).
+    #[test]
+    fn scoped_leading_prim_scopes_the_sepby_suffix_token_to_its_namespace() {
+        let mut b = crate::builtin::builder();
+        let kind = b.kind("Foo.importedSepBy");
+        b.scoped_leading_prim(
+            "term",
+            "Foo",
+            Prim::Node {
+                kind,
+                prec: Some(MAX_PREC),
+                body: std::sync::Arc::new(Prim::Seq(vec![
+                    Prim::Symbol("gobalt".into()),
+                    Prim::SepBy {
+                        item: std::sync::Arc::new(Prim::Category {
+                            name: "term".into(),
+                            rbp: 0,
+                        }),
+                        sep: "|".into(),
+                        allow_trailing: false,
+                    },
+                ])),
+            },
+        );
+        let snap = b.finish();
+        // Never in the always-active table.
+        assert!(!snap.tokens.contains("|*"));
+        // Present, tagged with the declaring namespace.
+        assert!(snap
+            .scoped_tokens
+            .iter()
+            .any(|(t, ns)| t == "|*" && ns == "Foo"));
     }
 
     /// M3b3 Task 5: a scoped entry participates in the fingerprint (a

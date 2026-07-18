@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::grammar::{
-    encode_prim, index_entries, FirstTok, GrammarSnapshot, LeadingIdentBehavior, NotationSpec,
-    Prim, SpecScope,
+    encode_prim, index_entries, sepby_suffix_tokens, FirstTok, GrammarSnapshot,
+    LeadingIdentBehavior, NotationSpec, Prim, SpecScope,
 };
 use crate::kind::SyntaxKind;
 use crate::lex::TokenTable;
@@ -177,6 +177,23 @@ impl Overlay {
             self.tokens.insert(t);
             // M3b3 Task 4: record each token's activation scope so `Ps`
             // can build a scope-filtered active-token table for lexing.
+            self.token_scopes.push((t.clone(), spec.scope.clone()));
+        }
+        // M3b3 Task 8: derive antiquot-splice-suffix tokens for every
+        // `SepBy`/`SepBy1` reachable in the body — `spec.tokens` (above)
+        // only ever carries the BARE separator (`walk_symbols`'s own
+        // `SepBy`/`SepBy1` arm), never the combined `"<sep>*"` splice
+        // token `parse.rs`'s `antiquot_splice` needs to maximal-munch a
+        // `$xs<sep>*` splice suffix as ONE atom — see `sepby_suffix_
+        // tokens`'s own doc comment for why this is a separate walk
+        // rather than folded into `walk_symbols` itself. Inherits the
+        // SAME `spec.scope` tag as every other token this production
+        // introduces, so a `scoped`/`local` `sepBy` production's suffix
+        // token is scope-filtered exactly like its main tokens.
+        let mut suffix_tokens = Vec::new();
+        sepby_suffix_tokens(&spec.body, &mut suffix_tokens);
+        for t in &suffix_tokens {
+            self.tokens.insert(t);
             self.token_scopes.push((t.clone(), spec.scope.clone()));
         }
         // `spec.leading == spec.lhs_prec.is_none()` always holds (Task
@@ -448,6 +465,87 @@ mod tests {
         // a trailing entry exists for the term category
         assert!(ov.category_delta("term").unwrap().trailing.len() == 1);
         assert!(!ov.is_empty());
+    }
+
+    /// M3b3 Task 8: a `syntax .. sepBy(term, "|")`-shaped spec must get
+    /// its combined `"|*"` antiquot-splice-suffix token registered
+    /// alongside the bare `"|"` separator `spec.tokens` already carries
+    /// (mirrors `builtin/mod.rs`'s hand-written `",*"` registration, now
+    /// generalized to an arbitrary separator via `sepby_suffix_tokens`).
+    #[test]
+    fn register_derives_sepby_suffix_token_for_non_comma_separator() {
+        let base = crate::builtin::snapshot();
+        let mut ov = Overlay::new(&base);
+        let spec = NotationSpec {
+            category: "term".into(),
+            kind_name: "«termWobalt_|»".into(),
+            leading: true,
+            prec: crate::grammar::MAX_PREC,
+            lhs_prec: None,
+            tokens: vec!["wobalt".into(), "|".into()],
+            body: crate::grammar::seq([
+                crate::grammar::sym("wobalt"),
+                Prim::SepBy {
+                    item: std::sync::Arc::new(crate::grammar::cat("term", 0)),
+                    sep: "|".into(),
+                    allow_trailing: false,
+                },
+            ]),
+            scope: SpecScope::Global,
+        };
+        ov.register(spec);
+        // the derived combined suffix token now munches as ONE atom.
+        assert_eq!(
+            ov.tokens()
+                .munch_with("|* rest", &crate::lex::TokenTable::default()),
+            Some("|*")
+        );
+        // recorded with the SAME activation scope as every other token
+        // this production introduced (Global, here).
+        assert!(ov
+            .token_scopes()
+            .iter()
+            .any(|(t, s)| t == "|*" && matches!(s, SpecScope::Global)));
+    }
+
+    /// M3b3 Task 8: a `scoped`/`local` `sepBy` production's derived
+    /// suffix token must inherit that SAME non-`Global` scope tag — an
+    /// inactive scoped production's `"|*"` must not be a free-standing
+    /// always-active token (it would leak into lexing while the scope
+    /// is off, exactly the failure `StxScopedInactive.lean` pins for
+    /// ordinary tokens).
+    #[test]
+    fn register_scopes_sepby_suffix_token_to_the_spec_scope() {
+        let base = crate::builtin::snapshot();
+        let mut ov = Overlay::new(&base);
+        let scope = SpecScope::Scoped("Widg".into());
+        let spec = NotationSpec {
+            category: "term".into(),
+            kind_name: "«termGobalt_|»".into(),
+            leading: true,
+            prec: crate::grammar::MAX_PREC,
+            lhs_prec: None,
+            tokens: vec!["gobalt".into(), "|".into()],
+            body: crate::grammar::seq([
+                crate::grammar::sym("gobalt"),
+                Prim::SepBy {
+                    item: std::sync::Arc::new(crate::grammar::cat("term", 0)),
+                    sep: "|".into(),
+                    allow_trailing: false,
+                },
+            ]),
+            scope: scope.clone(),
+        };
+        ov.register(spec);
+        assert!(ov
+            .token_scopes()
+            .iter()
+            .any(|(t, s)| t == "|*" && *s == scope));
+        // never recorded as an unconditionally-active Global entry too.
+        assert!(!ov
+            .token_scopes()
+            .iter()
+            .any(|(t, s)| t == "|*" && matches!(s, SpecScope::Global)));
     }
 
     /// Mirrors `parse.rs::tests::sum_spec()` (Task 6) — same
