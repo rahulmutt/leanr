@@ -368,6 +368,15 @@ fn stx_item(node: &SyntaxNode, kinds: &KindInterner) -> Option<Prim> {
                 return None;
             }
             let sep = trim_lean_symbol(strip_quotes(&first_token_text(str_node)?));
+            // Children are `[items, str(sep), optional psep, optional
+            // allowTrailingSep]`; the psep null-wrapper is always present
+            // but empty for the plain `sepBy(p, ",")` form. A populated
+            // custom psep (`sepBy(p, ", ", ", " p)`) is an unhandled
+            // combinator — skip-and-record (never guess), so derive
+            // nothing rather than dropping it into a wrong `Prim::SepBy`.
+            if children.get(2)?.children_with_tokens().next().is_some() {
+                return None;
+            }
             let allow_wrapper = children.get(3)?;
             let allow_trailing = allow_wrapper.children_with_tokens().next().is_some();
             Some(if is1 {

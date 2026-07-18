@@ -1548,4 +1548,42 @@ mod tests {
             other => panic!("expected NewCategory, got {other:?}"),
         }
     }
+
+    /// M3b2b final review (Important 1): the `stx` `sepBy`/`sepBy1`
+    /// surface carries an OPTIONAL custom-`psep` slot
+    /// (`surface.rs`'s `children.get(2)`). The 2-arg form
+    /// (`sepBy(p, ", ")`) leaves it empty and derives a real
+    /// `Prim::SepBy`; a POPULATED psep (`sepBy(p, ", ", q)`) is an
+    /// unhandled combinator — skip-and-record (never guess) demands the
+    /// whole production derive NOTHING rather than silently dropping the
+    /// psep into a wrong `Prim::SepBy`.
+    #[test]
+    fn sepby_with_custom_psep_skips_and_records() {
+        let snap = crate::builtin::snapshot();
+
+        // 2-arg form: psep empty ⇒ a real trailing `Prim::SepBy`.
+        let r = crate::parse_module("syntax \"sepp\" sepBy(term, \", \") : term\n", &snap);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        let cmd = find_command(&r.tree, "Lean.Parser.Command.syntax");
+        let spec = derive(&cmd, &r.tree.kinds).expect("2-arg sepBy derives a production");
+        match &spec.body {
+            Prim::Seq(ps) => assert!(
+                matches!(ps.last(), Some(Prim::SepBy { .. })),
+                "expected a trailing Prim::SepBy, got {:?}",
+                spec.body
+            ),
+            other => panic!("expected a Prim::Seq body, got {other:?}"),
+        }
+
+        // Populated custom psep (3rd arg `term`): unhandled ⇒ the whole
+        // production derives NOTHING (the declaration itself is still
+        // well-formed `stx` and parses cleanly).
+        let r = crate::parse_module("syntax \"sepp\" sepBy(term, \", \", term) : term\n", &snap);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        let cmd = find_command(&r.tree, "Lean.Parser.Command.syntax");
+        assert!(
+            derive_delta(&cmd, &r.tree.kinds).is_none(),
+            "a populated custom psep must skip-and-record (derive None), not drop the psep"
+        );
+    }
 }
