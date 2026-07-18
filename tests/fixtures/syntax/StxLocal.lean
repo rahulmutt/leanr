@@ -8,7 +8,16 @@
 -- `namespace` block is included too, to pin the prefix ORDERING
 -- between the `_private.0.` wrap and the namespace qualification
 -- (`_private.0.Ns.x` vs `Ns._private.0.x` — both chains must agree,
--- whatever the oracle says).
+-- whatever the oracle says). Task 3 REVIEW fix: `local syntax`/`local
+-- macro` alone left the ordering fix (`notation.rs:806-810`, qualify
+-- THEN privatize) with zero regression coverage — every `local
+-- notation`/`local mixfix` fixture (`NotationLocal.lean`,
+-- `NotationMixfix.lean`) sits at empty namespace, where the OLD
+-- (privatize-then-qualify) and NEW orderings coincide byte-for-byte,
+-- so a silent revert of the reordering would still pass every
+-- existing test. `local notation "woblocnot" => 47` inside `Widgloc`
+-- below closes that gap for the `notation` sugar surface specifically
+-- (as opposed to `local syntax`, already covered by `woblocns` above).
 local syntax "wobloc" : term
 macro_rules | `(wobloc) => `(45)
 #check wobloc
@@ -16,6 +25,8 @@ namespace Widgloc
 local syntax "woblocns" : term
 macro_rules | `(woblocns) => `(46)
 #check woblocns
+local notation "woblocnot" => 47
+#check woblocnot
 end Widgloc
 local macro "woblocm" : term => `(47)
 #check woblocm

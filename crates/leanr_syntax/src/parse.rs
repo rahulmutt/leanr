@@ -5358,6 +5358,37 @@ mod tests {
         );
     }
 
+    /// M3b3 Task 3 REVIEW FIX: the private×namespace ORDERING fix
+    /// itself (`build_spec` in `grammar/notation.rs`: qualify with the
+    /// current namespace THEN privatize, never the reverse) had zero
+    /// regression coverage — every pre-existing `local notation`/
+    /// `local mixfix` fixture (`NotationLocal.lean`, `NotationMixfix.
+    /// lean`) sits at empty namespace, where the old (privatize-then-
+    /// qualify) and new (qualify-then-privatize) orderings produce the
+    /// SAME string, so a silent revert of the reordering would still
+    /// pass every one of them. This test exercises `local notation`
+    /// (the `notation` sugar surface, as opposed to
+    /// `local_syntax_derives_private_kind_name` above, which only
+    /// covers the general `syntax` surface) inside a real `namespace`
+    /// block. Oracle-pinned exact shape (`StxLocal.stx.jsonl`, the
+    /// `woblocnot` addition): `_private.0.Widgloc.termWoblocnot`.
+    #[test]
+    fn local_notation_inside_namespace_derives_private_qualified_kind_name() {
+        let snap = crate::builtin::snapshot();
+        let src = "namespace Widgloc\nlocal notation \"woblocnot\" => 47\n\
+                   #check woblocnot\nend Widgloc\n";
+        let r = crate::parse_module(src, &snap);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        assert!(
+            r.tree
+                .root()
+                .descendants()
+                .any(|n| r.tree.kinds.name(n.kind()).starts_with("_private.0.Widgloc.")),
+            "local notation inside a namespace must derive a kind starting \
+             `_private.0.Widgloc.`, not `Widgloc._private.0.`"
+        );
+    }
+
     /// M3b1 Task 9 Step 1: a malformed `infixl` (missing the mandatory
     /// `=> rhs` tail) must register NOTHING — the overlay stays
     /// unmutated — and the command loop must resync cleanly so the
