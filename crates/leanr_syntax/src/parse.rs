@@ -154,6 +154,14 @@ fn run_module(mut ps: Ps<'_>, snap: &GrammarSnapshot) -> ParseResult {
             break;
         }
         let sp = ps.save();
+        // M3b3 final review (C1, re-review): anchor the command-committed
+        // watermark before this command parses anything. Everything the
+        // overlay holds now — earlier commands' registered kinds AND any
+        // surviving speculative (antiquot) kinds from a previous command's
+        // finalized tree — is below this count and is never truncated by a
+        // `restore` within THIS command, so it is the safe floor the
+        // `cat_cache` reconciliation records against.
+        ps.committed_overlay_kinds = ps.overlay.kind_count();
         match ps.run(&Prim::Category {
             name: "command".into(),
             rbp: 0,
@@ -823,6 +831,21 @@ pub(crate) struct Ps<'a> {
     /// comment for the full citation, the key/entry shapes
     /// (`CatCacheKey`/`CatCacheEntry`), and the correctness argument.
     cat_cache: HashMap<CatCacheKey, CatCacheEntry>,
+    /// M3b3 final review (C1, re-review): the overlay kind count at the
+    /// current command's parse start — the "command-committed watermark".
+    /// `Overlay::register`/`register_category` (the only calls that grow
+    /// the grammar's PRODUCTIONS) run ONLY at command boundaries, never
+    /// inside a command's parse, and every surviving speculative kind from
+    /// an EARLIER command is likewise already below this count; so no
+    /// intra-command `Savepoint::restore` ever truncates the overlay below
+    /// it. `category`'s cache reconciliation anchors each entry here rather
+    /// than at the call-time baseline, because `Overlay::intern`'s
+    /// idempotency lets a call REFERENCE a speculative kind an ENCLOSING
+    /// frame interned below the call's own baseline — anchoring at the
+    /// watermark captures the FULL speculative prefix `kind_names[watermark
+    /// ..]` an entry's events can reference (see `accept_cached_overlay_
+    /// kinds`). Set once per command in the command loop (`run_module`).
+    committed_overlay_kinds: usize,
     /// Per-open-`category()`-call furthest-failure tally, pushed on
     /// entry and popped on exit (stack discipline mirrors `pos_stack`/
     /// `forbidden_stack`) — lets a cache HIT replay its exact effect on
@@ -970,24 +993,28 @@ struct CatCacheEntry {
     /// comment. No oracle counterpart: Lean has no cross-attempt
     /// "furthest failure" tally to keep sound under caching.
     furthest: Option<(usize, Vec<String>)>,
-    /// M3b3 final review (C1): the overlay kind-table baseline
-    /// (`Overlay::kind_count`) at the moment this call STARTED, i.e. the
-    /// overlay-relative index of the first kind name it interned. Together
-    /// with `interned_kinds` below this lets a cache hit verify the
-    /// absolute overlay kind ids its replayed events embed still resolve
-    /// to the names they did at insertion — see
-    /// `Ps::accept_cached_overlay_kinds` for the seam this closes (Task 7's
-    /// `Savepoint::restore` truncation × this memoization).
-    overlay_base: usize,
-    /// M3b3 final review (C1): the overlay kind NAMES this call left
-    /// interned, in registration order (overlay-relative indices
-    /// `overlay_base..`). Almost always empty (a plain category recursion
-    /// interns no kinds); non-empty only when a speculative antiquot
-    /// alternative interned `<cat>.pseudo.antiquot`/`antiquotName`/… . A
-    /// cache HIT must reproduce exactly these ids at exactly these indices
-    /// (re-interning them if a `restore` since insertion rolled them back)
-    /// or be rejected as a miss.
-    interned_kinds: Vec<Arc<str>>,
+    /// M3b3 final review (C1, re-review): the command-committed watermark
+    /// (`Ps::committed_overlay_kinds`) in force when this entry was stored
+    /// — the overlay-relative index at which the whole command's
+    /// speculative kind prefix begins. Anchoring here rather than at the
+    /// call-time baseline is what makes the reconciliation sound under
+    /// `Overlay::intern` idempotency: a call can REFERENCE a speculative
+    /// kind an enclosing frame interned below the call's own baseline, and
+    /// only a watermark-anchored record captures it (see
+    /// `Ps::accept_cached_overlay_kinds`).
+    watermark: usize,
+    /// M3b3 final review (C1, re-review): the FULL speculative kind prefix
+    /// `overlay.kind_names()[watermark..]` at store time — every overlay
+    /// kind interned during THIS command's parse and still live when the
+    /// entry was stored, in registration order. A superset of the kinds
+    /// THIS call interned itself (it also includes an enclosing frame's
+    /// speculative kinds the call may share by idempotency), which is
+    /// exactly the set the entry's replayed events can reference. Almost
+    /// always empty (a plain category recursion interns nothing). A cache
+    /// HIT must reproduce this whole prefix at these exact indices — either
+    /// it already matches index-for-index, or the overlay is back at the
+    /// watermark and it is re-interned in order — else the entry is a miss.
+    speculative_kinds: Vec<Arc<str>>,
 }
 
 #[derive(Clone)]
@@ -1132,6 +1159,7 @@ impl<'a> Ps<'a> {
             line_starts,
             cat_depth: 0,
             cat_cache: HashMap::new(),
+            committed_overlay_kinds: 0,
             subtrees: Vec::new(),
             furthest_stack: Vec::new(),
             cap_hits: 0,
@@ -1379,10 +1407,10 @@ impl<'a> Ps<'a> {
         self.pos > sp.pos
     }
 
-    /// M3b3 final review (C1): reconcile a `cat_cache` hit's recorded
-    /// overlay kinds (`CatCacheEntry::overlay_base`/`interned_kinds`) with
-    /// the LIVE overlay before its events are replayed, returning whether
-    /// the entry is safe to replay.
+    /// M3b3 final review (C1, re-review): reconcile a `cat_cache` hit's
+    /// recorded speculative kind prefix (`CatCacheEntry::watermark`/
+    /// `speculative_kinds`) with the LIVE overlay before its events are
+    /// replayed, returning whether the entry is safe to replay.
     ///
     /// The entry's memoized subtree events embed ABSOLUTE overlay kind ids
     /// (`base_kind_count + overlay_index`). Between insertion and this hit,
@@ -1398,44 +1426,52 @@ impl<'a> Ps<'a> {
     /// stale ids can outlive the truncation and a same-position retry
     /// (sibling `longest_match` candidate, recovery re-entry, …) hits them.
     ///
-    /// Reconciliation, matching what a FRESH re-run of the call would leave
-    /// interned (so the accepted replay is observationally identical):
-    ///  - no interned kinds → always safe (the overwhelmingly common case:
-    ///    a plain category recursion interns nothing);
-    ///  - the overlay is currently truncated to exactly this entry's
-    ///    baseline (`kind_count == overlay_base`) → the recorded names are
-    ///    re-internable and, since `Overlay::intern` is append-only +
-    ///    idempotent, reproduce their EXACT original indices; re-intern
-    ///    them and accept (this is the same mechanism `longest_match` uses
-    ///    to re-materialize its winner's own kinds);
-    ///  - the recorded names are all still present at their exact indices →
-    ///    accept as-is, nothing to do;
-    ///  - anything else (truncated below/partway the baseline, or a name no
-    ///    longer matches at its index) → reject; the caller evicts the
-    ///    stale entry and re-parses, rebuilding a valid one.
+    /// Anchored at the command-committed WATERMARK, not the call baseline:
+    /// `Overlay::intern` idempotency lets an entry's events reference a
+    /// speculative kind an enclosing frame interned below the call's own
+    /// baseline (a first cut anchored at the baseline recorded an EMPTY
+    /// slice in that case yet still replayed a sub-baseline id — the
+    /// re-review's residual). The watermark is a floor no intra-command
+    /// `restore` descends below, so `kind_names[watermark..]` is the full
+    /// set of speculative ids the events can reach. Reconciliation, matching
+    /// what a FRESH re-run under the same watermark would leave interned:
+    ///  - overlay currently back at exactly the watermark (`kind_count ==
+    ///    watermark`) → the whole recorded prefix is re-internable and, since
+    ///    `Overlay::intern` is append-only + idempotent, reproduces its
+    ///    EXACT original indices; re-intern it in order and accept (the same
+    ///    mechanism `longest_match` uses to re-materialize its winner). A
+    ///    clean slate here means the input consumed to reach the call
+    ///    interned nothing, so the prefix is precisely the shared parse's
+    ///    own kinds — re-interning it introduces no foreign sibling kind;
+    ///  - the whole recorded prefix is still present index-for-index →
+    ///    accept as-is (the ubiquitous symmetric case: a sibling re-interned
+    ///    the same name at the same index);
+    ///  - anything else (truncated below/partway, or a name no longer
+    ///    matches at its index) → reject; the caller evicts the stale entry
+    ///    and re-parses, rebuilding a valid one.
     fn accept_cached_overlay_kinds(&mut self, entry: &CatCacheEntry) -> bool {
-        let names = &entry.interned_kinds;
-        if names.is_empty() {
-            return true;
-        }
-        let base = entry.overlay_base;
+        let committed = entry.watermark;
+        let spec = &entry.speculative_kinds;
         let cur = self.overlay.kind_count();
-        if cur == base {
-            // Rolled back to exactly the call's start — re-append the same
-            // names to reproduce the same ids the events reference.
-            for name in names {
+        if cur == committed {
+            // Rolled back to the watermark — re-append the whole prefix to
+            // reproduce the exact ids the events reference (a no-op when the
+            // prefix is empty, the overwhelmingly common case).
+            for name in spec {
                 self.overlay.intern(name);
             }
             true
         } else {
-            // Already present? Every recorded name must sit UNCHANGED at
-            // its exact overlay index (the `cur >= base + names.len()`
-            // guard also keeps the index access below in bounds).
-            cur >= base + names.len()
-                && names
+            // Already present? The whole recorded prefix must sit UNCHANGED
+            // at its exact overlay indices (the `cur >= committed +
+            // spec.len()` guard also keeps the index access below in bounds,
+            // and holds vacuously for an empty prefix since `cur >=
+            // committed` always).
+            cur >= committed + spec.len()
+                && spec
                     .iter()
                     .enumerate()
-                    .all(|(j, nm)| self.overlay.kind_names()[base + j].as_ref() == nm.as_ref())
+                    .all(|(j, nm)| self.overlay.kind_names()[committed + j].as_ref() == nm.as_ref())
         }
     }
 
@@ -4163,17 +4199,21 @@ impl<'a> Ps<'a> {
             CatCacheEntry {
                 outcome,
                 furthest: local_furthest,
-                // M3b3 final review (C1): record the overlay kinds this
-                // call left interned (indices `entry_sp.overlay_kinds..`),
-                // so a later hit can validate/re-intern them against the
-                // live overlay before replaying events that embed their
-                // ids. Nothing between `entry_sp` and here truncates the
-                // overlay, so this slice is exactly this call's net interns
-                // (empty for the common no-antiquot recursion, and empty
-                // for the `Err` arm, whose `restore(&entry_sp)` above
-                // already rolled every speculative intern back).
-                overlay_base: entry_sp.overlay_kinds,
-                interned_kinds: self.overlay.kind_names()[entry_sp.overlay_kinds..].to_vec(),
+                // M3b3 final review (C1, re-review): record the whole
+                // command's speculative kind prefix from the committed
+                // watermark — NOT just this call's own baseline slice.
+                // `Overlay::intern` idempotency means a call can reference
+                // a kind an enclosing frame interned below its baseline
+                // (the call's own `intern` no-appends), so a baseline slice
+                // would record an empty list yet the events would still
+                // reference that sub-baseline id. `kind_names[watermark..]`
+                // captures every speculative kind the events can reach.
+                // Nothing between the watermark and here is ever truncated
+                // below the watermark, and the `Err` arm's `restore(&entry_
+                // sp)` only rolls back to `entry_sp` (>= watermark), so this
+                // slice is exactly the live speculative prefix.
+                watermark: self.committed_overlay_kinds,
+                speculative_kinds: self.overlay.kind_names()[self.committed_overlay_kinds..].to_vec(),
             },
         );
         r
@@ -6582,6 +6622,79 @@ mod tests {
         assert!(
             dump.contains("acat.pseudo.antiquot"),
             "the `$x` antiquot's kind must resolve after the cache hit: {dump}"
+        );
+    }
+
+    /// M3b3 final review — C1 RE-REVIEW (the idempotent-share / sub-baseline
+    /// residual). The shared `category("acat")` call is reached AFTER an
+    /// EARLIER `acat` antiquot in the SAME candidate has already interned
+    /// `acat.pseudo.antiquot`, so the shared call's own `intern` is
+    /// idempotent and no-appends — under the call-BASELINE record
+    /// (dd6443a) its `interned_kinds` slice was EMPTY, yet its events
+    /// reference that sub-baseline id:
+    ///   P1 = `♠ acat , acat`        (idx0, temp-best; its 2nd `acat` call
+    ///                                 memoizes an EMPTY-slice entry whose
+    ///                                 events point at `acat`'s id)
+    ///   P2 = `♠ bcat , acat !`       (idx1, longer WINNER)
+    /// After P1's `restore` truncates `acat.pseudo.antiquot` away, P2
+    /// interns `bcat.pseudo.antiquot` at the SAME index, then cache-HITS
+    /// P1's empty-slice entry for the 2nd `acat` call — under dd6443a the
+    /// empty slice was accepted unconditionally and `$x` silently resolved
+    /// to `bcat.pseudo.antiquot`. The command-committed WATERMARK record
+    /// captures the full speculative prefix `[acat]` for that entry, so the
+    /// hit sees `bcat` at the recorded index, mismatches, and re-parses —
+    /// `$x` keeps its `acat` kind. Counterfactually RED against dd6443a's
+    /// baseline-anchored reconciliation (asserts below fail: `acat` absent,
+    /// `bcat` doubled).
+    #[test]
+    fn cat_cache_idempotent_share_across_truncation_keeps_correct_kinds() {
+        let base = crate::builtin::snapshot();
+        let mut ov = Overlay::new(&base);
+        ov.register_category("acat", LeadingIdentBehavior::Default);
+        ov.register_category("bcat", LeadingIdentBehavior::Default);
+        ov.register(NotationSpec {
+            category: "term".into(),
+            kind_name: "term_spade_a".into(),
+            leading: true,
+            prec: 0,
+            lhs_prec: None,
+            tokens: vec!["♠".into(), ",".into()],
+            body: seq([sym("♠"), cat("acat", 0), sym(","), cat("acat", 0)]),
+            scope: SpecScope::Global,
+        });
+        ov.register(NotationSpec {
+            category: "term".into(),
+            kind_name: "term_spade_b".into(),
+            leading: true,
+            prec: 0,
+            lhs_prec: None,
+            tokens: vec!["♠".into(), ",".into(), "!".into()],
+            body: seq([
+                sym("♠"),
+                cat("bcat", 0),
+                sym(","),
+                cat("acat", 0),
+                sym("!"),
+            ]),
+            scope: SpecScope::Global,
+        });
+        let src = "def q := `(♠$a , $x !)\n";
+        let r = parse_module_with_overlay(src, &base, ov);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        let dump = crate::canon::canon_jsonl(&r.tree);
+        // `$a` is the `bcat` antiquot (P2's first slot), `$x` the `acat`
+        // one (P2's fourth slot) — each present EXACTLY once. Under the
+        // dd6443a residual `$x` would carry `bcat.pseudo.antiquot` too
+        // (acat absent, bcat doubled).
+        assert_eq!(
+            dump.matches("acat.pseudo.antiquot").count(),
+            1,
+            "the `$x` antiquot must keep its `acat` kind exactly once: {dump}"
+        );
+        assert_eq!(
+            dump.matches("bcat.pseudo.antiquot").count(),
+            1,
+            "the `$a` antiquot must be the only `bcat` antiquot: {dump}"
         );
     }
 
