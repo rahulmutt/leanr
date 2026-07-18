@@ -2001,8 +2001,10 @@ impl<'a> Ps<'a> {
                     ])))));
                 self.run(&expanded)
             }
-            // skip-and-record (M3b2b Task 4): sepByIndent positions offer
-            // no antiquot splice yet — no fixture pins them.
+            // M3b3 Task 9: antiquot-splice support lives inside
+            // `sep_by_indent` itself now (see its own doc comment) —
+            // the M3b2b Task 4 gap this comment used to record is
+            // closed, pinned by `StxSepIndent.lean`.
             Prim::SepByIndent { item, sep, min } => self.sep_by_indent(item, sep, *min),
             Prim::WithForbidden(tok, q) => {
                 // ORACLE-PORT `withForbidden`/`adaptCacheableContext`
@@ -3123,7 +3125,46 @@ impl<'a> Ps<'a> {
             // both funnel into the SAME mandatory-first-vs-clean-stop
             // decision below.
             let item_result: PResult = match self.check_col(|cur, saved| cur.1 >= saved.1) {
-                Ok(()) => self.run(item),
+                Ok(()) => {
+                    // M3b3 Task 9: closes the gap the `Prim::SepByIndent`
+                    // match arm's own comment used to record ("sepByIndent
+                    // positions offer no antiquot splice yet"). ORACLE
+                    // `sepByIndent`/`sepBy1Indent` (Extra.lean:202-208):
+                    // `checkColGe "irrelevant" >> p` where `p :=
+                    // withAntiquotSpliceAndSuffix `sepBy p (symbol "*")`
+                    // — the antiquot-decorated item sits INSIDE the
+                    // column gate, so (unlike `sep_by_impl`, which has no
+                    // gate to sequence against) the splice attempt only
+                    // fires once `checkColGe` has already passed. The
+                    // suffix is the FIXED literal `"*"`, never
+                    // `"{sep}*"` — `sepByIndent`'s own `symbol "*"`
+                    // diverges here from `sepByElemParser`'s sep-
+                    // dependent `symbol (sep.trimAscii ++ "*")`
+                    // (Basic.lean:1895-1896) that `sep_by_impl` ports.
+                    // Same "break, never continue" reasoning as
+                    // `sep_by_impl`'s own call site: a successful splice
+                    // consumes the WHOLE remainder of the list. Unlike
+                    // `sep_by_impl` (which re-checks `n < min` once,
+                    // after its loop, so its own splice arm bumps `n`
+                    // first to satisfy that check), `sep_by_indent`
+                    // enforces `min` ENTIRELY through the in-loop
+                    // "item failed to parse another entry" branch below
+                    // (`after_sep || n >= min`) — a splice here always
+                    // exits through THIS `break`, never that branch, so
+                    // there is no later read of `n` to satisfy; treating
+                    // a successful splice as unconditionally clearing
+                    // `min` needs no counter bump, just the `break`
+                    // itself.
+                    if self.quot_depth > 0 {
+                        if let Some(r) = self.try_antiquot_splice("sepBy", Some("*"), item) {
+                            match r {
+                                Ok(()) => break 'outer Ok(()),
+                                Err(f) => break 'outer Err(f),
+                            }
+                        }
+                    }
+                    self.run(item)
+                }
                 Err(f) => Err(f),
             };
             match item_result {

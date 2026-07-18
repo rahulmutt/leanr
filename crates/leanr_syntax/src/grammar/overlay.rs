@@ -548,6 +548,82 @@ mod tests {
             .any(|(t, s)| t == "|*" && matches!(s, SpecScope::Global)));
     }
 
+    /// M3b3 Task 9: a `syntax .. sepByIndentSemicolon(term)`-shaped spec
+    /// (`Prim::SepByIndent`, `sep = ";"` — the bare atom `sep_by_indent`
+    /// actually matches, not the oracle source's pretty-print-only
+    /// `"; "` default; see `alias.rs`'s own citation) must register the
+    /// FIXED `"*"` antiquot-splice-suffix token — NOT `";*"` — per
+    /// `sepByIndent`'s own `withAntiquotSpliceAndSuffix `sepBy p (symbol
+    /// "*")` (Extra.lean:202-208), which diverges from
+    /// `sepByElemParser`'s sep-dependent suffix that the `SepBy`/`SepBy1`
+    /// tests above pin.
+    #[test]
+    fn register_derives_the_fixed_star_suffix_token_for_sep_by_indent() {
+        let base = crate::builtin::snapshot();
+        let mut ov = Overlay::new(&base);
+        let spec = NotationSpec {
+            category: "term".into(),
+            kind_name: "«termWobind_»".into(),
+            leading: true,
+            prec: crate::grammar::MAX_PREC,
+            lhs_prec: None,
+            tokens: vec!["wobind".into(), ";".into()],
+            body: crate::grammar::seq([
+                crate::grammar::sym("wobind"),
+                Prim::SepByIndent {
+                    item: std::sync::Arc::new(crate::grammar::cat("term", 0)),
+                    sep: ";".into(),
+                    min: 0,
+                },
+            ]),
+            scope: SpecScope::Global,
+        };
+        ov.register(spec);
+        assert_eq!(
+            ov.tokens()
+                .munch_with("* rest", &crate::lex::TokenTable::default()),
+            Some("*")
+        );
+        // never the sep-dependent shape `SepBy`/`SepBy1` would derive.
+        assert!(!ov.token_scopes().iter().any(|(t, _)| t == ";*"));
+        assert!(ov
+            .token_scopes()
+            .iter()
+            .any(|(t, s)| t == "*" && matches!(s, SpecScope::Global)));
+    }
+
+    /// M3b3 Task 9: scoped twin — a `scoped`/`local` `sepByIndent`
+    /// production's derived `"*"` suffix token must inherit that SAME
+    /// non-`Global` scope tag (mirrors the `SepBy` scoping test above).
+    #[test]
+    fn register_scopes_sep_by_indent_suffix_token_to_the_spec_scope() {
+        let base = crate::builtin::snapshot();
+        let mut ov = Overlay::new(&base);
+        let scope = SpecScope::Scoped("Widg".into());
+        let spec = NotationSpec {
+            category: "term".into(),
+            kind_name: "«termGobind_»".into(),
+            leading: true,
+            prec: crate::grammar::MAX_PREC,
+            lhs_prec: None,
+            tokens: vec!["gobind".into(), ";".into()],
+            body: crate::grammar::seq([
+                crate::grammar::sym("gobind"),
+                Prim::SepByIndent {
+                    item: std::sync::Arc::new(crate::grammar::cat("term", 0)),
+                    sep: ";".into(),
+                    min: 0,
+                },
+            ]),
+            scope: scope.clone(),
+        };
+        ov.register(spec);
+        assert!(ov
+            .token_scopes()
+            .iter()
+            .any(|(t, s)| t == "*" && *s == scope));
+    }
+
     /// Mirrors `parse.rs::tests::sum_spec()` (Task 6) — same
     /// operator-first trailing shape (`seq([sym("⊕"), cat("term", 66)])`)
     /// — kept as a local copy since that helper lives in a different

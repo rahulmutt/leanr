@@ -151,6 +151,20 @@ pub enum Prim {
     /// only in `sep` and in `sepBy` vs. `sepBy1` (captured here as
     /// `min: 0` vs. `min: 1`) — `allowTrailingSep` is always `true` at
     /// every call site this port needs, so it isn't a separate field.
+    ///
+    /// `sep` below is the BARE atom `sep_by_indent`'s interpreter
+    /// actually `expect_atom`s against — every one of the oracle
+    /// citations above quotes the SOURCE parameter, which carries a
+    /// pretty-print-only trailing space (`"; "`/`", "`); the space is
+    /// never part of the matched token (ordinary trivia takes it
+    /// instead), so every builder (`sep_by_indent`/`sep_by1_indent`'s own
+    /// callers in `builtin/tactic.rs`/`builtin/term.rs`, and `alias.rs`'s
+    /// `sepByIndentSemicolon`/`sepBy1IndentSemicolon`) passes the trimmed
+    /// `";"`, matching `walk_symbols`'s own `SepByIndent` arm comment
+    /// (M3b3 Task 9: a first draft of the `alias.rs` entries used `"; "`
+    /// here and a fresh oracle dump caught the resulting span mismatch —
+    /// `StxSepIndent.stx.jsonl`'s `#check` line spans the bare `;`
+    /// alone).
     SepByIndent {
         item: Arc<Prim>,
         sep: String,
@@ -1690,9 +1704,22 @@ fn walk_symbols(p: &Prim, f: &mut impl FnMut(&str)) {
 /// intentionally do NOT auto-register `"|*"`/`"▸*"` for `matchAlt`'s/
 /// `anonymousCtor`'s own hardcoded `|`/`▸` separators — see that
 /// comment's "don't force it" discipline) to gain suffix tokens it
-/// never asked for. `SepByIndent` is deliberately NOT handled here
-/// (M3b3 Task 9's remit, a distinct oracle combinator with its own
-/// antiquot-suffix story) — only `SepBy`/`SepBy1`.
+/// never asked for.
+///
+/// M3b3 Task 9 adds the `SepByIndent` arm: ORACLE-PORT `sepByIndent`/
+/// `sepBy1Indent` (`Extra.lean:202-208`) wrap their item in
+/// `withAntiquotSpliceAndSuffix `sepBy p (symbol "*")` — note the FIXED
+/// literal `"*"`, NOT `sep.trimAscii ++ "*"` like `sepByElemParser`
+/// (`Basic.lean:1895-1896`) above. A `sepByIndent`-shaped production's
+/// splice-suffix token is therefore always the bare `"*"`, independent
+/// of its own `sep` field — confirmed directly from the toolchain
+/// source (no oracle dump can observe this token in isolation; the
+/// scope-splice form `$[$xs]*` a fixture DOES exercise
+/// (`StxSepIndent.lean`) only proves `"*"` parses as a suffix, not that
+/// it's `sep`-independent — that half of the claim rests on the source
+/// reading alone, same "read the definition, don't just pattern-match
+/// the dump" discipline `Prim::SepByIndent`'s own doc comment already
+/// applies).
 pub(crate) fn sepby_suffix_tokens(p: &Prim, out: &mut Vec<String>) {
     use Prim::*;
     match p {
@@ -1709,6 +1736,10 @@ pub(crate) fn sepby_suffix_tokens(p: &Prim, out: &mut Vec<String>) {
         WithoutForbidden(q) => sepby_suffix_tokens(q, out),
         SepBy { item, sep, .. } | SepBy1 { item, sep, .. } => {
             out.push(format!("{sep}*"));
+            sepby_suffix_tokens(item, out);
+        }
+        SepByIndent { item, .. } => {
+            out.push("*".to_string());
             sepby_suffix_tokens(item, out);
         }
         _ => {}
