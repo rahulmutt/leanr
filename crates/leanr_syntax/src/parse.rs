@@ -1049,9 +1049,17 @@ impl<'a> Ps<'a> {
     /// without paying for a green tree first. Every name in that slice
     /// is a BASE kind (`command.rs`'s `mixfix`/`notation`,
     /// `command_syntax.rs`'s `syntaxCat` — all builtin productions,
-    /// never overlay-registered), so the base `self.kinds` — not
-    /// `merged_kinds()` — is enough here; no `Arc<KindInterner>` clone
-    /// needed just to peek.
+    /// never overlay-registered), so no `merged_kinds()` clone is needed
+    /// to peek. But the outer kind READ here need not be one of them: a
+    /// same-file `syntax "…" : command` (M3b2b Task 8, `grammar::surface`)
+    /// registers an OVERLAY-numbered `command` production, and a later
+    /// USE of that command in the same file lands an overlay kind
+    /// (`>= snap.kind_count()`) here — out of range for the base
+    /// `self.kinds` (`KindInterner::name` is an unchecked index). Resolve
+    /// overlay-first with base fallback (`Overlay::kind_name` underflows
+    /// to `None` for a base kind), exactly as the `Prim::Node` antiquot
+    /// hook does; such a kind's name is never in `GRAMMAR_GROWING_KINDS`,
+    /// so the membership check falls through to `false`.
     pub(crate) fn command_may_grow_grammar(&self, from_event: usize) -> bool {
         let Some(&sub) = self.events[from_event..].iter().find_map(|e| match e {
             PEvent::Sub(idx) => Some(idx),
@@ -1066,7 +1074,10 @@ impl<'a> Ps<'a> {
             return false;
         };
         let kind = *kind;
-        let name = self.kinds.name(kind);
+        let name = self
+            .overlay
+            .kind_name(kind)
+            .unwrap_or_else(|| self.kinds.name(kind));
         GRAMMAR_GROWING_KINDS.contains(&name)
     }
 
@@ -5175,6 +5186,34 @@ mod tests {
             classifications,
             vec![true, true, false, false],
             "expected [infixl=mixfix, notation, def=skip, #check=skip]"
+        );
+    }
+
+    /// M3b2b final review (Critical 1): a same-file `syntax "…" : command`
+    /// (M3b2b Task 8, `grammar::surface`) registers an OVERLAY-numbered
+    /// production into the `command` category — the first time an overlay
+    /// kind can be a `command`'s OUTER node (M3b1 notation only ever
+    /// targeted `term`). A later USE of that command lands that overlay
+    /// kind (`>= snap.kind_count()`) as the `Event::Start`
+    /// `command_may_grow_grammar` reads; resolving it via the base
+    /// `KindInterner::name` (an unchecked index) panicked
+    /// index-out-of-bounds on well-formed input. Pin: declare-and-use in
+    /// one file parses cleanly, no panic (overlay-first kind resolution).
+    #[test]
+    fn same_file_command_syntax_is_usable_without_panicking() {
+        let snap = crate::builtin::snapshot();
+        let src = "syntax \"greetcmd\" : command\ngreetcmd\n";
+        let r = crate::parse_module(src, &snap);
+        assert_eq!(r.tree.text(), src);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        // the second line parsed via the just-registered overlay command
+        // production (mangled atom `Greetcmd`), not as an error/skip
+        assert!(
+            r.tree
+                .root()
+                .descendants()
+                .any(|n| r.tree.kinds.name(n.kind()).contains("Greetcmd")),
+            "declared command not live on the next line"
         );
     }
 
