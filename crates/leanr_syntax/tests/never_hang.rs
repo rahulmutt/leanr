@@ -285,16 +285,25 @@ fn nested_quotations_terminate() {
 /// (possibly erroring) parse.
 #[test]
 fn dollar_storms_terminate() {
-    for src in [
-        format!("def a := `({}x)\n", "$".repeat(500)),
-        format!("def a := `({} x)\n", "$ ".repeat(500)),
-        format!("def a := `(⟨{}⟩)\n", "$[".repeat(200)),
-        "def a := $x\n".to_string(), // depth 0: plain failure, fast
+    for (src, expect_errors) in [
+        (format!("def a := `({}x)\n", "$".repeat(500)), false),
+        (format!("def a := `({} x)\n", "$ ".repeat(500)), false),
+        (format!("def a := `(⟨{}⟩)\n", "$[".repeat(200)), false),
+        // depth 0: plain failure, fast — a bare `$` outside any
+        // quotation must be REJECTED (non-empty errors), not silently
+        // absorbed into a clean parse.
+        ("def a := $x\n".to_string(), true),
     ] {
         in_worker("dollar storm", move || {
             let snap = leanr_syntax::builtin::snapshot();
             let r = leanr_syntax::parse_module(&src, &snap);
             assert_eq!(r.tree.text(), src, "lossless");
+            if expect_errors {
+                assert!(
+                    !r.errors.is_empty(),
+                    "depth-0 $-storm must produce parse errors"
+                );
+            }
         });
     }
 }
