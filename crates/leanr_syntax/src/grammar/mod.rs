@@ -528,6 +528,23 @@ pub struct Category {
     /// ORACLE-PORT `ParserCategory.behavior` — see
     /// `LeadingIdentBehavior`'s own doc comment.
     pub ident_behavior: LeadingIdentBehavior,
+    /// M3b3 Task 5: imported `scoped` productions folded into this
+    /// category, PRESENT-but-INACTIVE. Each entry carries its own
+    /// first-token index (`FirstTok`, same `index_entries` computation as
+    /// the always-active `leading`/`trailing` above), its already-shaped
+    /// `Prim` (`Node`/`TrailingNode`, exactly like `leading_prim`), and
+    /// its activation namespace (`String`) — the current namespace at the
+    /// declaration site, decoded from the olean's `EntryScope::Scoped`.
+    /// `parse.rs`'s `category()` read path iterates these ALONGSIDE the
+    /// base tables but only admits an entry while
+    /// `ps.scope.is_active(&SpecScope::Scoped(ns))` — the SAME predicate
+    /// same-file overlay `scoped` entries go through (`dispatch_overlay`).
+    /// A separate short vec so the hot (no-scoped-entries) path pays
+    /// nothing: `category()` only iterates it when non-empty. Never the
+    /// always-active `leading`/`trailing` tables — a `scoped` production
+    /// must not dispatch until its namespace is opened.
+    pub scoped_leading: Vec<(FirstTok, Prim, String)>,
+    pub scoped_trailing: Vec<(FirstTok, Prim, String)>,
 }
 
 /// The whole parser state as one explicit, hash-fingerprintable value
@@ -539,6 +556,18 @@ pub struct Category {
 pub struct GrammarSnapshot {
     pub(crate) tokens: crate::lex::TokenTable,
     pub(crate) categories: std::collections::HashMap<String, Category>,
+    /// M3b3 Task 5: every imported `scoped` token paired with its
+    /// activation namespace `(token, ns)`, in registration order. The
+    /// PARALLEL of `Overlay::token_scopes` for the imported base: a
+    /// `scoped` notation's atom must NOT enter the always-active `tokens`
+    /// table above (an inactive one would then lex as an `Atom` instead
+    /// of an ident — the same-file `StxScopedInactive` pin forbids that),
+    /// so it lives here instead and `Ps` (parse.rs) folds only the
+    /// currently-active ones into its lexer view via
+    /// `rebuild_active_overlay_tokens`. Empty for every scoped-free
+    /// (pre-M3b3) snapshot, so the fingerprint and lexer behavior are
+    /// byte-identical there.
+    pub(crate) scoped_tokens: Vec<(String, String)>,
     kinds: std::sync::Arc<crate::kind::KindInterner>,
     /// The module-header grammar (spec §Oracle harness / Task 7's
     /// vertical slice): `builtin::snapshot()` always sets this via
@@ -567,6 +596,30 @@ impl GrammarSnapshot {
         self.header.clone()
     }
 
+    /// M3b3 Task 5: the set of activation namespaces carried by the
+    /// imported `scoped` entries folded into this snapshot — collected
+    /// across every category's `scoped_leading`/`scoped_trailing` plus
+    /// the snapshot-level `scoped_tokens`. Present-but-inactive: a member
+    /// namespace only brings its entries into force once a same-file
+    /// `open`/`namespace` activates it (`ScopeStack::is_active`). Empty
+    /// for every scoped-free snapshot (`builtin::snapshot()`, and any
+    /// import set with no `scoped` notations). Read-only query seam —
+    /// `leanr_grammar`'s assemble tests assert an imported `scoped`
+    /// notation lands here tagged with its namespace rather than in the
+    /// always-active tables.
+    pub fn scoped_namespaces(&self) -> std::collections::BTreeSet<String> {
+        let mut out = std::collections::BTreeSet::new();
+        for c in self.categories.values() {
+            for (_, _, ns) in c.scoped_leading.iter().chain(&c.scoped_trailing) {
+                out.insert(ns.clone());
+            }
+        }
+        for (_, ns) in &self.scoped_tokens {
+            out.insert(ns.clone());
+        }
+        out
+    }
+
     /// Stable hash of the whole grammar (spec: the query-ready
     /// parser-state firewall fingerprint). Tokens are walked in the
     /// `TokenTable`'s own (`BTreeSet`, hence sorted) iteration order;
@@ -588,6 +641,19 @@ impl GrammarSnapshot {
             h.update(t.as_bytes());
             h.update(b"\0");
         }
+        // M3b3 Task 5: imported `scoped` tokens participate in grammar
+        // identity too (a snapshot that only differs in a scoped token or
+        // its namespace must fingerprint differently). Appended AFTER the
+        // always-active `tokens` loop above with no domain-version bump:
+        // a scoped-free snapshot has an empty `scoped_tokens`, so this
+        // adds zero bytes and its fingerprint is byte-identical to
+        // pre-M3b3 (the M3b2a import goldens' guard).
+        for (tok, ns) in &self.scoped_tokens {
+            h.update(tok.as_bytes());
+            h.update(b"\0");
+            h.update(ns.as_bytes());
+            h.update(b"\0");
+        }
         let mut names: Vec<_> = self.categories.keys().collect();
         names.sort();
         for name in names {
@@ -603,6 +669,16 @@ impl GrammarSnapshot {
             let kind_name = |k: SyntaxKind| self.kinds.name(k).to_string();
             for p in c.leading_parsers.iter().chain(&c.trailing_parsers) {
                 encode_prim(p, &kind_name, &mut h);
+            }
+            // M3b3 Task 5: imported `scoped` productions, each followed by
+            // its activation namespace. Empty `scoped_leading`/
+            // `scoped_trailing` (every scoped-free category) contributes
+            // zero bytes here — byte-identical to pre-M3b3, same rationale
+            // as `scoped_tokens` above.
+            for (_, p, ns) in c.scoped_leading.iter().chain(&c.scoped_trailing) {
+                encode_prim(p, &kind_name, &mut h);
+                h.update(ns.as_bytes());
+                h.update(b"\0");
             }
         }
         h.finalize()
@@ -620,6 +696,7 @@ impl GrammarSnapshot {
         GrammarSnapshot {
             tokens,
             categories: Default::default(),
+            scoped_tokens: Vec::new(),
             kinds: std::sync::Arc::new(kinds),
             header: None,
         }
@@ -866,6 +943,10 @@ pub struct SnapshotBuilder {
     kinds: crate::kind::KindInterner,
     tokens: crate::lex::TokenTable,
     categories: std::collections::HashMap<String, Category>,
+    /// M3b3 Task 5: imported `scoped` tokens harvested here (with their
+    /// activation namespace) instead of into `tokens` above — see
+    /// `GrammarSnapshot::scoped_tokens`.
+    scoped_tokens: Vec<(String, String)>,
     header: Option<Prim>,
 }
 
@@ -881,6 +962,7 @@ impl SnapshotBuilder {
             kinds,
             tokens: Default::default(),
             categories: Default::default(),
+            scoped_tokens: Vec::new(),
             header: None,
         }
     }
@@ -990,6 +1072,61 @@ impl SnapshotBuilder {
         }
     }
 
+    /// M3b3 Task 5: register an imported `scoped` LEADING production —
+    /// the present-but-inactive twin of [`Self::leading_prim`]. `prim`
+    /// arrives already `Prim::Node`-wrapped (an interpreted imported
+    /// `ParserDescr`); `ns` is its activation namespace (the current
+    /// namespace at the declaration site, decoded from the olean's
+    /// `EntryScope::Scoped`). Unlike `leading_prim`, its `Symbol`s are
+    /// harvested into `scoped_tokens` (with `ns`) — NOT the always-active
+    /// `tokens` table — so an inactive scoped notation's atom lexes as an
+    /// ident, exactly like the same-file `StxScopedInactive` pin (see
+    /// `GrammarSnapshot::scoped_tokens`). The production itself lands in
+    /// the category's `scoped_leading` (never `leading`/`leading_parsers`)
+    /// so `category()`'s read path only admits it while `ns` is active.
+    pub fn scoped_leading_prim(&mut self, cat: &str, ns: &str, prim: Prim) {
+        self.harvest_scoped_tokens(ns, &prim);
+        let fs = index_entries(&prim);
+        let c = self
+            .categories
+            .get_mut(cat)
+            .expect("category registered before scoped_leading_prim");
+        for f in fs {
+            c.scoped_leading.push((f, prim.clone(), ns.to_string()));
+        }
+    }
+
+    /// Trailing counterpart of [`Self::scoped_leading_prim`] — `prim`
+    /// arrives already `Prim::TrailingNode`-wrapped; lands in the
+    /// category's `scoped_trailing`. Same activation/token-scoping story.
+    pub fn scoped_trailing_prim(&mut self, cat: &str, ns: &str, prim: Prim) {
+        self.harvest_scoped_tokens(ns, &prim);
+        let fs = index_entries(&prim);
+        let c = self
+            .categories
+            .get_mut(cat)
+            .expect("category registered before scoped_trailing_prim");
+        for f in fs {
+            c.scoped_trailing.push((f, prim.clone(), ns.to_string()));
+        }
+    }
+
+    /// M3b3 Task 5: record an imported `scoped` `ParserEntry::Token`
+    /// under its activation namespace `ns` — the scoped twin of
+    /// [`Self::token`]. A `scoped notation`'s olean carries its atom as a
+    /// SEPARATE `Scoped` `Token` entry (confirmed by decoding
+    /// `NotaDep.olean`: `Token("⊖⊖")` and `Parser{..}` are BOTH `Scoped`),
+    /// so it must go here — not the always-active `tokens` table — or an
+    /// inactive scoped atom would wrongly lex as an `Atom`.
+    pub fn scoped_token(&mut self, ns: &str, tok: &str) {
+        self.scoped_tokens.push((tok.to_string(), ns.to_string()));
+    }
+
+    fn harvest_scoped_tokens(&mut self, ns: &str, p: &Prim) {
+        let scoped = &mut self.scoped_tokens;
+        walk_symbols(p, &mut |s| scoped.push((s.to_string(), ns.to_string())));
+    }
+
     /// Register a leading parser candidate with NO extra `Node` wrap —
     /// for productions whose oracle shape is a bare leaf (`Prim::Ident`,
     /// a `Syntax.ident`) or that already self-wrap (`Prim::NumLit`
@@ -1031,6 +1168,7 @@ impl SnapshotBuilder {
         GrammarSnapshot {
             tokens: self.tokens,
             categories: self.categories,
+            scoped_tokens: self.scoped_tokens,
             kinds: std::sync::Arc::new(self.kinds),
             header: self.header,
         }
@@ -1609,5 +1747,92 @@ mod builder_seam_tests {
             crate::builtin::builder().finish().fingerprint(),
             crate::builtin::snapshot().fingerprint()
         );
+    }
+
+    /// M3b3 Task 5: `scoped_leading_prim` folds an imported `scoped`
+    /// production PRESENT-but-INACTIVE — its atom does NOT enter the
+    /// always-active token table (so it lexes as an ident until active),
+    /// and its production only dispatches once its namespace is brought
+    /// into force by `open`/`namespace`. Tests the snapshot mechanism in
+    /// isolation from the olean decode (the `leanr_grammar` assemble path
+    /// is pinned separately, against real oracle dumps).
+    #[test]
+    fn scoped_leading_prim_is_inactive_until_open_or_namespace() {
+        let build = || {
+            let mut b = crate::builtin::builder();
+            let kind = b.kind("Foo.imported");
+            b.scoped_leading_prim(
+                "term",
+                "Foo",
+                Prim::Node {
+                    kind,
+                    prec: Some(LEAD_PREC),
+                    body: std::sync::Arc::new(Prim::Seq(vec![
+                        Prim::Symbol("⊘⊘".into()),
+                        Prim::Category {
+                            name: "term".into(),
+                            rbp: MAX_PREC,
+                        },
+                    ])),
+                },
+            );
+            b.finish()
+        };
+        let snap = build();
+        // Tagged with its activation namespace, present in scoped storage.
+        assert!(snap.scoped_namespaces().contains("Foo"));
+        // Its atom is NOT in the always-active token table.
+        assert!(!snap.tokens.contains("⊘⊘"));
+
+        // Inactive: no `open Foo` in force → the scoped production never
+        // dispatches, so the term after `#check` cannot consume `⊘⊘1`.
+        let closed = crate::parse_module("#check ⊘⊘1\n", &snap);
+        assert!(!closed.errors.is_empty(), "{:?}", closed.errors);
+
+        // Active via `open Foo`.
+        let opened = crate::parse_module("open Foo\n#check ⊘⊘1\n", &snap);
+        assert!(opened.errors.is_empty(), "{:?}", opened.errors);
+        assert!(crate::canon::canon_jsonl(&opened.tree).contains("Foo.imported"));
+
+        // Active via `namespace Foo`, and DEACTIVATES again after `end`.
+        let ns = crate::parse_module("namespace Foo\n#check ⊘⊘1\nend Foo\n#check ⊘⊘1\n", &snap);
+        // The in-namespace use parses; the post-`end` use does not — so at
+        // least one error is recorded, but the first `#check` still built a
+        // `Foo.imported` node.
+        assert!(
+            crate::canon::canon_jsonl(&ns.tree).contains("Foo.imported"),
+            "in-namespace use must activate"
+        );
+        assert!(
+            !ns.errors.is_empty(),
+            "post-`end Foo` use must deactivate and fail: {:?}",
+            ns.errors
+        );
+    }
+
+    /// M3b3 Task 5: a scoped entry participates in the fingerprint (a
+    /// snapshot differing only in a scoped production/token/namespace must
+    /// hash differently), while a scoped-FREE builder still finishes
+    /// byte-identical to `builtin::snapshot()` (guarded by
+    /// `builder_finish_equals_builtin_snapshot` above — this adds the
+    /// "scoped changes it" direction).
+    #[test]
+    fn scoped_entries_change_the_fingerprint() {
+        let base = crate::builtin::builder().finish().fingerprint();
+        let with_scoped = {
+            let mut b = crate::builtin::builder();
+            let kind = b.kind("Foo.imported");
+            b.scoped_leading_prim(
+                "term",
+                "Foo",
+                Prim::Node {
+                    kind,
+                    prec: Some(LEAD_PREC),
+                    body: std::sync::Arc::new(Prim::Symbol("⊘⊘".into())),
+                },
+            );
+            b.finish().fingerprint()
+        };
+        assert_ne!(base, with_scoped, "a scoped entry must change the fingerprint");
     }
 }

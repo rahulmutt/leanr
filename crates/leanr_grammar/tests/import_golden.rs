@@ -42,28 +42,72 @@ fn importers_parse_green_against_oracle_dumps() {
     }
 }
 
+/// M3b3 Task 5 Step 1 (RED-first at the assemble layer): NotaDep declares
+/// exactly one scoped notation — `scoped infixl:65 " ⊖⊖ " => HSub.hSub`
+/// inside `namespace NotaDep`, whose decl is `NotaDep.term_⊖⊖_` and whose
+/// only `Scoped` parser_entries are `Token("⊖⊖")` and
+/// `Parser { decl: NotaDep.term_⊖⊖_, .. }` (confirmed empirically by
+/// decoding NotaDep.olean). It is no longer SKIPPED: `assemble` folds it
+/// PRESENT-but-INACTIVE, tagged with its activation namespace `NotaDep`,
+/// routed through the same `descr::interpret` the `Global` entries use.
 #[test]
-fn scoped_entry_is_skipped_and_recorded() {
+fn scoped_entry_is_folded_present_but_inactive_not_skipped() {
     let (st, g) = notadep_grammar();
-    // NotaDep declares exactly one scoped notation: `scoped infixl:65
-    // " ⊖⊖ " => HSub.hSub`, whose decl is `NotaDep.term_⊖⊖_` (confirmed
-    // empirically by decoding NotaDep.olean's scoped parser_entries: the
-    // only `Scoped` entries are `Token("⊖⊖")` and
-    // `Parser { decl: NotaDep.term_⊖⊖_, .. }`). Pin the recorded skip to
-    // that exact decl, not just the reason variant.
+    // No `ScopedInactive` skip is recorded anymore (the reason is no
+    // longer produced for parser decls — brief Step 2).
     assert!(
-        g.skipped
+        !g.skipped
             .iter()
-            .any(|s| s.reason == SkipReason::ScopedInactive && s.decl.ends_with("term_⊖⊖_")),
-        "scoped ⊖⊖ decl should be recorded: {:?}",
+            .any(|s| s.reason == SkipReason::ScopedInactive),
+        "no ScopedInactive skip must be recorded anymore: {:?}",
         g.skipped
     );
-    // And it must not have been folded as an active parser: parsing a
-    // term that uses ⊖⊖ infix must fail (no production registered for
-    // it under the assembled snapshot, since scoped activation is M3b3).
+    // It lands in the snapshot's SCOPED storage tagged with its
+    // namespace — not the always-active tables.
+    assert!(
+        g.snapshot.scoped_namespaces().contains("NotaDep"),
+        "scoped ⊖⊖ must be folded under activation namespace NotaDep, got {:?}",
+        g.snapshot.scoped_namespaces()
+    );
+    // And it is INACTIVE by default: with no `open`/`namespace NotaDep`
+    // in force, `⊖⊖` must not parse as an infix (its token stays
+    // unreserved, its production undispatched).
     let r = leanr_syntax::parse_module("#check 1 ⊖⊖ 2\n", &g.snapshot);
-    assert!(!r.errors.is_empty(), "scoped notation must not parse");
+    assert!(
+        !r.errors.is_empty(),
+        "inactive scoped notation must not parse: {:?}",
+        r.errors
+    );
     let _ = st;
+}
+
+/// M3b3 Task 5 Step 3/4 (oracle pin): the imported scoped `⊖⊖` notation
+/// ACTIVATES on both `open NotaDep` and `namespace NotaDep`, parsing as
+/// `NotaDep.«term_⊖⊖_»`. Byte-compared against real-toolchain elaborating
+/// dumps (`dump_syntax_elab.lean`, so the same-file `open`/`namespace`
+/// scope commands are live for the later `#check`, exactly as leanr's own
+/// command loop reproduces). Pins the SAME `ScopeStack::is_active`
+/// predicate same-file scoped entries (Task 4) go through — here for the
+/// IMPORTED base.
+#[test]
+fn imported_scoped_notation_activates_on_open_and_namespace() {
+    let (_st, g) = notadep_grammar();
+    for stem in ["ImportScopedOpen", "ImportScopedNs"] {
+        let src = std::fs::read_to_string(dir().join(format!("{stem}.lean"))).unwrap();
+        let want = std::fs::read_to_string(dir().join(format!("{stem}.stx.jsonl"))).unwrap();
+        let r = leanr_syntax::parse_module(&src, &g.snapshot);
+        assert_eq!(r.tree.text(), src, "{stem}: byte round-trip");
+        assert!(r.errors.is_empty(), "{stem}: {:?}", r.errors);
+        let got = leanr_syntax::canon::canon_jsonl(&r.tree);
+        for (i, (g_line, w_line)) in got.lines().zip(want.lines()).enumerate() {
+            assert_eq!(g_line, w_line, "{stem} line {i}");
+        }
+        assert_eq!(
+            got.lines().count(),
+            want.lines().count(),
+            "{stem} line count"
+        );
+    }
 }
 
 #[test]

@@ -1108,6 +1108,21 @@ impl<'a> Ps<'a> {
                 active.insert(tok);
             }
         }
+        // M3b3 Task 5: imported `scoped` tokens go through the IDENTICAL
+        // scope-filtered active-token rebuild (never the always-active
+        // `snap.tokens` table) — a `scoped` notation's atom only becomes
+        // lexable once its namespace is opened, exactly like a same-file
+        // `scoped` token above. Both feed the SAME `active_overlay_tokens`
+        // view `next_token` reads. Empty `scoped_tokens` (scoped-free
+        // snapshot) adds nothing — byte-identical to pre-M3b3.
+        for (tok, ns) in &self.snap.scoped_tokens {
+            if self
+                .scope
+                .is_active(&crate::grammar::SpecScope::Scoped(ns.clone()))
+            {
+                active.insert(tok);
+            }
+        }
         self.active_overlay_tokens = active;
     }
 
@@ -3625,6 +3640,22 @@ impl<'a> Ps<'a> {
                         &self.scope,
                     ));
                 }
+                // M3b3 Task 5: imported `scoped` leading productions —
+                // ADDITIONS like the overlay ones (never displacing a
+                // base candidate), appended after them, each admitted only
+                // while its activation namespace is in force. Guarded on
+                // non-empty so a scoped-free snapshot's hot path is
+                // untouched (byte-identical to pre-M3b3).
+                if !cat.scoped_leading.is_empty() {
+                    let suppress = suppress_plain_ident_for(cat, text, t.kind, true);
+                    parsers.extend(dispatch_scoped(
+                        &cat.scoped_leading,
+                        text,
+                        t.kind,
+                        suppress,
+                        &self.scope,
+                    ));
+                }
                 // ORACLE-PORT `runLongestMatchParser` (Basic.lean:1403):
                 // "we initialize [lhsPrec] to maxPrec in the leading case"
                 // — a leading candidate that is a real `leadingNode`
@@ -3714,6 +3745,20 @@ impl<'a> Ps<'a> {
                         text,
                         t.kind,
                         false,
+                        suppress,
+                        &self.scope,
+                    ));
+                }
+                // M3b3 Task 5: imported `scoped` trailing productions
+                // (e.g. NotaDep's `scoped infixl " ⊖⊖ "`), same
+                // append-after-base + activation-filter + non-empty-guard
+                // rule as the leading side above.
+                if !cat.scoped_trailing.is_empty() {
+                    let suppress = suppress_plain_ident_for(cat, text, t.kind, false);
+                    candidates.extend(dispatch_scoped(
+                        &cat.scoped_trailing,
+                        text,
+                        t.kind,
                         suppress,
                         &self.scope,
                     ));
@@ -4047,6 +4092,32 @@ fn dispatch_overlay(
         // read point applies. `Global` entries always pass.
         .filter(|(f, _, sc)| {
             scope.is_active(sc) && first_tok_matches(f, text, kind, suppress_plain_ident)
+        })
+        .map(|(_, p, _)| p.clone())
+        .collect()
+}
+
+/// M3b3 Task 5: the SNAPSHOT twin of `dispatch_overlay` for imported
+/// `scoped` entries (`Category::scoped_leading`/`scoped_trailing`). Each
+/// carries its activation namespace `ns` rather than a full `SpecScope`
+/// (imported scoped entries are always `Scoped(ns)` — never `Global`,
+/// which lives in the always-active `leading`/`trailing` tables, nor
+/// `local`, which is a same-file-only concept), so this reads through the
+/// SAME `ScopeStack::is_active` predicate via `SpecScope::Scoped`. Only
+/// called when the entry vec is NON-EMPTY (`category()` guards on that),
+/// so a scoped-free snapshot's hot path pays nothing.
+fn dispatch_scoped(
+    entries: &[(FirstTok, Prim, String)],
+    text: &str,
+    kind: TokenKind,
+    suppress_plain_ident: bool,
+    scope: &crate::grammar::scope::ScopeStack,
+) -> Vec<Prim> {
+    entries
+        .iter()
+        .filter(|(f, _, ns)| {
+            scope.is_active(&crate::grammar::SpecScope::Scoped(ns.clone()))
+                && first_tok_matches(f, text, kind, suppress_plain_ident)
         })
         .map(|(_, p, _)| p.clone())
         .collect()

@@ -1,0 +1,5 @@
+{"c":[{"c":[],"k":"null"},{"c":[],"k":"null"},{"c":[{"c":[{"c":[],"k":"null"},{"c":[],"k":"null"},{"a":"import","s":[0,6]},{"c":[],"k":"null"},{"i":"NotaDep","s":[7,14]},{"c":[],"k":"null"}],"k":"Lean.Parser.Module.import"}],"k":"null"}],"k":"Lean.Parser.Module.header"}
+{"c":[{"a":"namespace","s":[15,24]},{"i":"NotaDep","s":[25,32]}],"k":"Lean.Parser.Command.namespace"}
+{"c":[{"a":"#check","s":[33,39]},{"c":[{"c":[{"a":"1","s":[40,41]}],"k":"num"},{"a":"⊖⊖","s":[42,48]},{"c":[{"a":"2","s":[49,50]}],"k":"num"}],"k":"NotaDep.«term_⊖⊖_»"}],"k":"Lean.Parser.Command.check"}
+{"c":[{"a":"end","s":[51,54]},{"c":[{"i":"NotaDep","s":[55,62]},{"c":[],"k":"null"}],"k":"null"}],"k":"Lean.Parser.Command.end"}
+{"c":[{"a":"","s":[63,63]}],"k":"Lean.Parser.Command.eoi"}

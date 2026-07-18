@@ -21,6 +21,12 @@ pub enum SkipReason {
     /// Recursive `ParserDescr` reference cycle.
     Cycle,
     /// Scoped entry — activation semantics are M3b3.
+    ///
+    /// M3b3 Task 5: NO LONGER PRODUCED. Imported `scoped` parser entries
+    /// are now folded present-but-inactive (tagged with their activation
+    /// namespace) instead of skipped, so `assemble` never records this
+    /// reason anymore. The variant is retained (not deleted) as public
+    /// API surface; nothing in-tree constructs it.
     ScopedInactive,
 }
 
@@ -55,22 +61,32 @@ pub fn assemble(modules: &[(Arc<Name>, ModuleData)], store: &Store) -> Assembled
 
     for (_module, md) in modules {
         for entry in &md.parser_entries {
-            let e = match &entry.scope {
-                EntryScope::Global => &entry.entry,
-                EntryScope::Scoped(_) => {
-                    if let ParserEntry::Parser { decl, .. } = &entry.entry {
-                        skipped.push(SkippedEntry {
-                            decl: name_of(*decl),
-                            reason: SkipReason::ScopedInactive,
-                        });
-                    }
-                    // Scoped token/category/kind entries are likewise
-                    // inactive until M3b3; skip silently (nothing to name).
-                    continue;
-                }
+            // M3b3 Task 5: a `scoped` entry is no longer SKIPPED — it is
+            // folded PRESENT-but-INACTIVE, tagged with its activation
+            // namespace (`EntryScope::Scoped`'s decoded `NameId`), and
+            // routed through the SAME `descr::interpret` the `Global` arm
+            // uses. `ns` is `None` for `Global`, `Some(namespace)` for
+            // `Scoped`; each sub-entry then picks the global or the scoped
+            // builder method off it.
+            let ns: Option<String> = match &entry.scope {
+                EntryScope::Global => None,
+                EntryScope::Scoped(ns_id) => Some(name_of(*ns_id)),
             };
-            match e {
-                ParserEntry::Token(t) => b.token(t),
+            match &entry.entry {
+                // A `scoped notation`'s atom is a SEPARATE `Scoped`
+                // `Token` entry (empirically: `NotaDep.olean`'s `⊖⊖`), so
+                // route it to scoped-token storage — an inactive scoped
+                // atom must lex as an ident, not an `Atom`
+                // (`StxScopedInactive` pin), which the always-active
+                // `b.token(..)` table would break.
+                ParserEntry::Token(t) => match &ns {
+                    None => b.token(t),
+                    Some(ns) => b.scoped_token(ns, t),
+                },
+                // Kinds/categories are grammar IDENTITY, not activation:
+                // registered globally in both cases (the brief's DRAFT —
+                // interning a node kind or declaring a category cannot be
+                // "inactive"; only its productions/tokens gate on scope).
                 ParserEntry::Kind(k) => {
                     b.kind(&name_of(*k));
                 }
@@ -82,11 +98,17 @@ pub fn assemble(modules: &[(Arc<Name>, ModuleData)], store: &Store) -> Assembled
                     match crate::descr::interpret(*decl, &consts, store, &mut b) {
                         Ok(crate::descr::Interpreted::Leading(p)) => {
                             b.category(&cat_name, Default::default()); // ensure exists (idempotent)
-                            b.leading_prim(&cat_name, p);
+                            match &ns {
+                                None => b.leading_prim(&cat_name, p),
+                                Some(ns) => b.scoped_leading_prim(&cat_name, ns, p),
+                            }
                         }
                         Ok(crate::descr::Interpreted::Trailing(p)) => {
                             b.category(&cat_name, Default::default());
-                            b.trailing_prim(&cat_name, p);
+                            match &ns {
+                                None => b.trailing_prim(&cat_name, p),
+                                Some(ns) => b.scoped_trailing_prim(&cat_name, ns, p),
+                            }
                         }
                         Err(reason) => skipped.push(SkippedEntry {
                             decl: name_of(*decl),
