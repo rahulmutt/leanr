@@ -250,6 +250,24 @@ description = "HEAVYWEIGHT/NIGHTLY tier — ONE full sweep that both gates and r
 depends = ["elan:bootstrap"]
 run = "sh -c 'before_file=$(mktemp -t leanr-passlist-before.XXXXXX); grep -cv \"^#\" tests/fixtures/syntax/mathlib-passlist.txt > \"$before_file\" || echo 0 > \"$before_file\"; if mise run passlist:update; then before=$(cat \"$before_file\"); after=$(grep -cv \"^#\" tests/fixtures/syntax/mathlib-passlist.txt); rm -f \"$before_file\"; echo \"[nightly] pass-list growth: $before -> $after entries ($((after - before)) new)\"; else rc=$?; rm -f \"$before_file\"; exit $rc; fi'"
 
+[tasks."parse:mathlib:shard"]
+description = "One shard of the sharded nightly (.github/workflows/nightly-sweep.yml): sweeps the import sets with `index % N == I-1` of LEANR_SWEEP_SHARD=I/N and writes its green list to LEANR_SWEEP_GREEN_OUT. Striped, not chunked, because sorted import lists share prefixes and so share decode cost. A shard NEVER gates — it sees 1/N of the sets, so a pass-list entry in another shard's slice would look like a regression; only parse:mathlib:merge gates, over the union. Set RAYON_NUM_THREADS (CI uses 3, ~1.7GB/thread observed)."
+depends = ["elan:bootstrap"]
+# LEANR_SWEEP_PASSLIST_ONLY/LEANR_PASSLIST_UPDATE are pinned empty for the
+# same leak-hardening reason as parse:mathlib/passlist:update below; here
+# mathlib_sweep.rs would reject either combination outright, so this turns a
+# leaked env var from a hard failure into a no-op. LEANR_SWEEP_SHARD,
+# LEANR_SWEEP_GREEN_OUT and LEANR_SWEEP_LIMIT (smoke runs) come from the
+# caller and are deliberately passed through.
+run = "sh -c 'LEANR_SWEEP_PASSLIST_ONLY=\"\" LEANR_PASSLIST_UPDATE=\"\" LEANR_SWEEP_MERGE=\"\" LEANR_MATHLIB_DIR=\"$PWD/.mathlib\" LEANR_OLEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo test --release -p leanr_grammar --test mathlib_sweep -- --ignored --nocapture'"
+
+[tasks."parse:mathlib:merge"]
+description = "Second half of the sharded nightly: unions every *.txt green list in LEANR_SWEEP_MERGE=<dir> and runs the SAME gate + reconcile + pass-list rewrite that passlist:update runs, over that union — so sharding changes only where the parsing happens, never what is gated. Parses nothing (seconds, no LEANR_OLEAN_PATH, no toolchain), but DOES need .mathlib on disk: the reconcile step tests each not-green entry for existence to separate upstream deletions from true regressions. Fails on a true regression; emits the growth delta otherwise."
+# No `depends = ["elan:bootstrap"]`: merge decodes no oleans and runs no
+# oracle, so it needs neither lean nor lake — only the Mathlib source tree
+# (scripts/mathlib-fetch.sh LEANR_MATHLIB_SOURCE_ONLY=1 is enough).
+run = "sh -c 'LEANR_SWEEP_LIMIT=\"\" LEANR_SWEEP_PASSLIST_ONLY=\"\" LEANR_SWEEP_SHARD=\"\" LEANR_SWEEP_GREEN_OUT=\"\" LEANR_MATHLIB_DIR=\"$PWD/.mathlib\" cargo test --release -p leanr_grammar --test mathlib_sweep -- --ignored --nocapture'"
+
 [tasks."build:differential"]
 description = "M2 differential oracles vs pinned lake: M2a bridge/import/module-set + M2b probe-project artifact byte-diff (needs mathlib:fetch + elan)"
 depends = ["elan:bootstrap"]

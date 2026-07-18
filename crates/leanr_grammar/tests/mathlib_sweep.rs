@@ -53,17 +53,25 @@ fn oracle_dump(mathlib: &Path, lean_path: &str, githash: &str, file: &Path) -> O
 #[ignore = "needs .mathlib (mise run mathlib:fetch); dev loop: mise run parse:mathlib:fast; \
             full discovery sweep: mise run parse:mathlib"]
 fn mathlib_sweep_ratchet() {
-    let mathlib = PathBuf::from(std::env::var("LEANR_MATHLIB_DIR").expect("LEANR_MATHLIB_DIR"));
-    let lean_path = std::env::var("LEANR_OLEAN_PATH").expect("LEANR_OLEAN_PATH");
-    let githash = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/oracle-githash.txt"),
-    )
-    .expect("oracle-githash.txt (mise run fixtures:regen)")
-    .trim()
-    .to_string();
+    // `.mathlib` is needed by every mode, including merge — merge does no
+    // parsing, but the reconcile step has to test each not-green pass-list
+    // entry for existence on disk to tell upstream churn from a true
+    // regression.
+    let mathlib = PathBuf::from(std::env::var("LEANR_MATHLIB_DIR").expect(
+        "LEANR_MATHLIB_DIR is required in every mode, including LEANR_SWEEP_MERGE: the reconcile \
+         step tests each not-green pass-list entry for existence under it to separate \
+         upstream-deleted files from true parse regressions",
+    ));
 
+    // All mode flags are read up front so the mutual-exclusion assertions
+    // below fire before any expensive work — and, critically, before
+    // anything can write the pass-list.
     let passlist_only = std::env::var("LEANR_SWEEP_PASSLIST_ONLY").as_deref() == Ok("1");
     let passlist_update = std::env::var("LEANR_PASSLIST_UPDATE").as_deref() == Ok("1");
+    let shard_raw = non_empty_env("LEANR_SWEEP_SHARD");
+    let green_out = non_empty_env("LEANR_SWEEP_GREEN_OUT").map(PathBuf::from);
+    let merge_dir = non_empty_env("LEANR_SWEEP_MERGE").map(PathBuf::from);
+
     // Rewriting the pass-list from a run that only swept the pass-list would
     // freeze growth forever (no new file is ever discovered) and would
     // silently DROP any entry that regressed (a file not swept this run
@@ -76,6 +84,58 @@ fn mathlib_sweep_ratchet() {
          pass-list from a pass-list-only run would freeze growth and could silently drop a \
          regressed entry. Use `mise run passlist:update` (full sweep) to rewrite the pass-list."
     );
+
+    // Shard mode is a *fragment* of a full sweep: it sees only 1/N of the
+    // import sets, so by construction most pass-list entries cannot be green
+    // in it. That makes every gating/writing mode incompatible with it, for
+    // exactly the reason the passlist-only/update pair above is: a mode that
+    // gates or rewrites from a partial `green` either reports mass phantom
+    // regressions or silently drops every entry the shard never touched.
+    // Assert it rather than document it away.
+    assert!(
+        !(shard_raw.is_some() && passlist_update),
+        "LEANR_SWEEP_SHARD with LEANR_PASSLIST_UPDATE=1 is rejected: a shard sweeps only 1/N of \
+         the import sets, so rewriting the pass-list from its partial green list would drop every \
+         entry outside this shard's slice. Shards emit a green list (LEANR_SWEEP_GREEN_OUT); only \
+         LEANR_SWEEP_MERGE gates and rewrites, over the union of all shards."
+    );
+    assert!(
+        !(shard_raw.is_some() && passlist_only),
+        "LEANR_SWEEP_SHARD with LEANR_SWEEP_PASSLIST_ONLY=1 is rejected: passlist-only mode's \
+         swept set IS the committed pass-list and its gating is deliberately total, which is \
+         precisely what a shard cannot provide. Shard the full corpus sweep instead."
+    );
+    assert!(
+        !(shard_raw.is_some() && merge_dir.is_some()),
+        "LEANR_SWEEP_SHARD with LEANR_SWEEP_MERGE is rejected: they are the two halves of the \
+         sharded nightly (produce one green list vs. consume all of them), never one run."
+    );
+    assert!(
+        !(merge_dir.is_some() && passlist_only),
+        "LEANR_SWEEP_MERGE with LEANR_SWEEP_PASSLIST_ONLY=1 is rejected: merge mode's green set \
+         comes from the shard artifacts, not from a sweep, so passlist-only has nothing to mean \
+         here."
+    );
+    assert!(
+        !(passlist_only && green_out.is_some()),
+        "LEANR_SWEEP_GREEN_OUT with LEANR_SWEEP_PASSLIST_ONLY=1 is rejected: a passlist-only run's \
+         green list is at most the committed pass-list it was handed, so emitting it as a \
+         shard-style green list would invite merging a slice that discovered nothing."
+    );
+    assert!(
+        !(shard_raw.is_some() && green_out.is_none()),
+        "LEANR_SWEEP_SHARD requires LEANR_SWEEP_GREEN_OUT=<path>: a shard does not gate, so its \
+         green list is its ONLY output — a shard that wrote nothing would silently contribute an \
+         empty slice to the merge."
+    );
+
+    // `I/N`, 1-based. Parsed rather than `unwrap`ed so a typo (`12`, `0/12`,
+    // `13/12`, `1/0`) says what is wrong with it instead of panicking on an
+    // index or, worse, silently sweeping the wrong slice.
+    let shard: Option<(usize, usize)> = shard_raw.as_deref().map(|raw| {
+        parse_shard_spec(raw)
+            .unwrap_or_else(|e| panic!("LEANR_SWEEP_SHARD={raw:?} is malformed: {e}"))
+    });
 
     // Read the committed pass-list once, up front: passlist-only mode needs
     // it to build the swept file set (instead of walking the corpus), and
@@ -117,6 +177,53 @@ fn mathlib_sweep_ratchet() {
             .map(String::from)
             .collect()
     };
+
+    // Merge mode (LEANR_SWEEP_MERGE=<dir>): the second half of the sharded
+    // nightly. It parses nothing — its `green` is the union of the shards'
+    // green lists — and then runs the SAME gate + reconcile + rewrite path
+    // that full update mode runs, `truncated = false`, so the union is gated
+    // TOTALLY against the committed pass-list exactly as a single ~35h full
+    // sweep would be. That equality is the whole point: sharding must change
+    // only where the parsing happens, never what is gated. It is therefore
+    // dispatched here, before LEANR_OLEAN_PATH/the oracle githash are
+    // required, since neither is needed to union text files.
+    if let Some(dir) = &merge_dir {
+        let (green, sources) = read_shard_green_lists(dir);
+        eprintln!(
+            "[merge] union of {} shard green list(s) from {}:",
+            sources.len(),
+            dir.display()
+        );
+        for s in &sources {
+            eprintln!("[merge]   {}", s.display());
+        }
+        let before = committed.len();
+        let newly_green = gate_and_maybe_rewrite(GateInput {
+            mathlib: &mathlib,
+            committed: &committed,
+            // `truncated` is false, so `swept` is never consulted; the union
+            // itself is the only honest value to hand it.
+            swept: &green,
+            green: &green,
+            truncated: false,
+            passlist_update: true,
+            mode: "merge",
+            files_swept: green.len(),
+        });
+        eprintln!(
+            "[merge] pass-list growth: {before} -> {} entries ({newly_green} newly green)",
+            green.len()
+        );
+        return;
+    }
+
+    let lean_path = std::env::var("LEANR_OLEAN_PATH").expect("LEANR_OLEAN_PATH");
+    let githash = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/oracle-githash.txt"),
+    )
+    .expect("oracle-githash.txt (mise run fixtures:regen)")
+    .trim()
+    .to_string();
 
     let roots: Vec<PathBuf> = lean_path
         .split(':')
@@ -236,7 +343,25 @@ fn mathlib_sweep_ratchet() {
     // on top. Live memory is therefore bounded by thread count ×
     // max(one `Store` during load, one `Arc<GrammarSnapshot>` during sweep),
     // instead of all 7,738 snapshots (or worse, stacked stores) held at once.
-    let import_sets: Vec<Vec<String>> = by_imports.keys().cloned().collect();
+    //
+    // Shard mode (LEANR_SWEEP_SHARD=I/N) partitions THIS list — the import
+    // sets, i.e. the actual unit of work and of cost — by stride
+    // (`index % N == I-1`), not by contiguous chunk. `by_imports` is a
+    // `BTreeMap`, so the list is sorted, and sorted import lists share long
+    // prefixes: a contiguous chunk would therefore concentrate all the deep,
+    // expensive Mathlib closures in a few shards and leave others with the
+    // cheap `Init`-only sets, while a stride deals those neighbours out
+    // round-robin across every shard.
+    let all_sets: Vec<Vec<String>> = by_imports.keys().cloned().collect();
+    let import_sets: Vec<Vec<String>> = match shard {
+        Some((i, n)) => shard_slice(&all_sets, i, n),
+        None => all_sets,
+    };
+    let files_swept: usize = if shard.is_some() {
+        import_sets.iter().map(|k| by_imports[k].len()).sum()
+    } else {
+        files.len()
+    };
     let total_sets = import_sets.len();
     let sets_done = std::sync::atomic::AtomicUsize::new(0);
     let green_count = std::sync::atomic::AtomicUsize::new(0);
@@ -289,12 +414,86 @@ fn mathlib_sweep_ratchet() {
         })
         .collect();
 
-    // Full and passlist-only runs (both `!truncated`) gate the whole
+    // A green list can be emitted from any sweeping mode; in shard mode it
+    // is mandatory (asserted above) and is the run's ONLY output.
+    if let Some(path) = &green_out {
+        write_green_list(path, &green);
+    }
+
+    // Shard mode stops HERE, deliberately, before any gating: this run saw
+    // only 1/N of the import sets, so every pass-list entry whose file lives
+    // in another shard's slice is trivially not-green and would be reported
+    // as a regression. Gating a shard is not a stricter check, it is a
+    // meaningless one. The merge job re-enters this same gate (see
+    // `gate_and_maybe_rewrite`) over the union of every shard's green list,
+    // which is exactly the set an unsharded full sweep would have produced.
+    if let Some((i, n)) = shard {
+        eprintln!(
+            "sweep[shard {i}/{n}]: {} of {} import sets, {files_swept} files, {} green (no gate: \
+             the merge job gates the union)",
+            import_sets.len(),
+            by_imports.len(),
+            green.len()
+        );
+        return;
+    }
+
+    let mode = if passlist_only {
+        "passlist-only"
+    } else if truncated {
+        "bounded"
+    } else {
+        "full"
+    };
+    gate_and_maybe_rewrite(GateInput {
+        mathlib: &mathlib,
+        committed: &committed,
+        swept: &swept,
+        green: &green,
+        truncated,
+        passlist_update,
+        mode,
+        files_swept,
+    });
+}
+
+/// Everything a sweep does once it has a green set: gate, reconcile, report,
+/// and (in update mode) rewrite the pass-list. Extracted so merge mode runs
+/// literally this code rather than a shell reimplementation of it — the
+/// sharded nightly is only trustworthy if the union it gates is gated by the
+/// same logic, with the same missing-vs-regressed split, as an unsharded
+/// full sweep. Returns the newly-green count (the growth delta's numerator).
+struct GateInput<'a> {
+    mathlib: &'a Path,
+    committed: &'a BTreeSet<String>,
+    /// Files actually swept this run; only consulted when `truncated`.
+    swept: &'a BTreeSet<String>,
+    green: &'a BTreeSet<String>,
+    /// True only for bounded (LEANR_SWEEP_LIMIT) runs.
+    truncated: bool,
+    passlist_update: bool,
+    mode: &'a str,
+    files_swept: usize,
+}
+
+fn gate_and_maybe_rewrite(input: GateInput<'_>) -> usize {
+    let GateInput {
+        mathlib,
+        committed,
+        swept,
+        green,
+        truncated,
+        passlist_update,
+        mode,
+        files_swept,
+    } = input;
+
+    // Full, passlist-only and merge runs (all `!truncated`) gate the whole
     // committed list — a deleted/renamed/typo'd pass-list entry fails
-    // loudly (in passlist-only mode, even louder: the `missing` check above
-    // already aborted before the sweep ran). Bounded runs only gate entries
-    // actually swept this run; entries outside the swept prefix are neither
-    // green nor regressed.
+    // loudly (in passlist-only mode, even louder: the `missing` check in the
+    // caller already aborted before the sweep ran). Bounded runs only gate
+    // entries actually swept this run; entries outside the swept prefix are
+    // neither green nor regressed.
     let committed_swept = committed.iter().filter(|f| swept.contains(*f)).count();
     let not_green: Vec<&String> = committed
         .iter()
@@ -304,7 +503,8 @@ fn mathlib_sweep_ratchet() {
     // deleted/renamed the file — nothing to regress) or a genuine parse
     // regression (the file is still there, it just no longer parses
     // oracle-green). Only the update path (`LEANR_PASSLIST_UPDATE=1`, i.e.
-    // `mise run passlist:update`) is allowed to tell them apart and drop the
+    // `mise run passlist:update`, and merge mode, which is that same update
+    // path fed by the shards) is allowed to tell them apart and drop the
     // former: its whole job is to reconcile the pass-list against upstream,
     // so silently absorbing a deletion (while still gating and printing it
     // loudly) is exactly the reconciliation it exists to do. The plain gate
@@ -313,7 +513,7 @@ fn mathlib_sweep_ratchet() {
     // is only to *notice* churn and report it, never to *absorb* it — the
     // asymmetry is deliberate, not an oversight.
     let regressions: Vec<&String> = if passlist_update {
-        let (missing, true_regressions) = split_missing_from_regressions(&mathlib, not_green);
+        let (missing, true_regressions) = split_missing_from_regressions(mathlib, not_green);
         if !missing.is_empty() {
             eprintln!(
                 "[sweep] dropping {} pass-list entries whose files no longer exist:",
@@ -328,16 +528,9 @@ fn mathlib_sweep_ratchet() {
         not_green
     };
     let newly_green: Vec<_> = green.iter().filter(|f| !committed.contains(*f)).collect();
-    let mode = if passlist_only {
-        "passlist-only"
-    } else if truncated {
-        "bounded"
-    } else {
-        "full"
-    };
     eprintln!(
         "sweep[{mode}]: {} files, {} green, {} on pass-list, {}/{} pass-list entries swept, {} regressions, {} newly green",
-        files.len(),
+        files_swept,
         green.len(),
         committed.len(),
         committed_swept,
@@ -360,7 +553,8 @@ fn mathlib_sweep_ratchet() {
     // `parse:mathlib:nightly` collapse to a single full sweep that both
     // gates and writes, instead of one sweep to gate followed by a second
     // full sweep to write (~70h for a task documented and budgeted at
-    // ~35h).
+    // ~35h). In the sharded nightly this assert is the alarm: it is the one
+    // place a real regression turns into a red workflow run.
     assert!(
         regressions.is_empty(),
         "pass-list regressions: {regressions:#?}"
@@ -371,12 +565,14 @@ fn mathlib_sweep_ratchet() {
             "# Mathlib-closure files that parse oracle-green (M3b2a ratchet).\n\
              # Regenerate: mise run passlist:update. NEVER hand-edit to hide a regression.\n",
         );
-        for f in &green {
+        for f in green {
             out.push_str(f);
             out.push('\n');
         }
         std::fs::write(passlist_path(), out).unwrap();
     }
+
+    newly_green.len()
 }
 
 /// Split a not-green pass-list entry set into (upstream-deleted, true
@@ -421,6 +617,202 @@ fn split_missing_from_regressions_separates_deleted_files_from_true_regressions(
         true_regressions,
         vec![&present],
         "a file that still exists but isn't green must stay a hard regression"
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Read an env var, treating unset and empty/whitespace-only as equally
+/// absent. Every heavyweight mise task in this repo neutralizes a flag
+/// leaked in from the calling shell by pinning it to `""`, so an empty value
+/// must mean "off" here — never "malformed", and never a shard spec of `""`.
+fn non_empty_env(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|s| !s.trim().is_empty())
+}
+
+/// Parse `LEANR_SWEEP_SHARD` as 1-based `I/N`. Returns `Err(reason)` rather
+/// than panicking or silently defaulting: a mistyped shard spec that quietly
+/// swept the wrong slice would produce a green list that is wrong in a way
+/// the merge cannot detect (it would just look like fewer files parse).
+fn parse_shard_spec(raw: &str) -> Result<(usize, usize), String> {
+    let (i_raw, n_raw) = raw
+        .split_once('/')
+        .ok_or_else(|| "expected the form I/N (1-based), e.g. 3/12".to_string())?;
+    let parse = |s: &str, what: &str| -> Result<usize, String> {
+        s.trim()
+            .parse::<usize>()
+            .map_err(|e| format!("{what} {:?} is not a non-negative integer: {e}", s.trim()))
+    };
+    let i = parse(i_raw, "shard index")?;
+    let n = parse(n_raw, "shard count")?;
+    if n == 0 {
+        return Err("shard count N must be >= 1".to_string());
+    }
+    if i == 0 || i > n {
+        return Err(format!(
+            "shard index I must be in 1..={n} (1-based), got {i}"
+        ));
+    }
+    Ok((i, n))
+}
+
+/// The `I`-th of `N` stride shards of `items`: every element whose index is
+/// congruent to `I-1` mod `N`. Striding (not chunking) is deliberate — see
+/// the call site: the input is sorted by import list, so neighbours have
+/// near-identical decode cost and must be dealt out round-robin.
+fn shard_slice<T: Clone>(items: &[T], i: usize, n: usize) -> Vec<T> {
+    items
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| idx % n == i - 1)
+        .map(|(_, t)| t.clone())
+        .collect()
+}
+
+/// Write a green list: one relative path per line, sorted (`green` is a
+/// `BTreeSet`), no header — this is machine input for merge mode, not the
+/// committed pass-list.
+fn write_green_list(path: &Path, green: &BTreeSet<String>) {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).unwrap_or_else(|e| {
+            panic!(
+                "failed to create the LEANR_SWEEP_GREEN_OUT parent dir ({}): {e}",
+                parent.display()
+            )
+        });
+    }
+    let mut out = String::new();
+    for f in green {
+        out.push_str(f);
+        out.push('\n');
+    }
+    std::fs::write(path, out).unwrap_or_else(|e| {
+        panic!(
+            "failed to write the green list to LEANR_SWEEP_GREEN_OUT ({}): {e}",
+            path.display()
+        )
+    });
+}
+
+/// Union every `*.txt` green list in `dir`, returning `(union, sources)`.
+///
+/// An empty or unreadable directory is a hard error: merge mode rewrites the
+/// pass-list from this union, so an empty union would gate every committed
+/// entry as a regression (or, if every one of them happened to be gone from
+/// disk, reconcile the entire baseline away) — the exact partial-merge
+/// failure the CI job's artifact-count assertion also guards against, pinned
+/// here too so the guarantee does not live only in YAML.
+fn read_shard_green_lists(dir: &Path) -> (BTreeSet<String>, Vec<PathBuf>) {
+    let rd = std::fs::read_dir(dir).unwrap_or_else(|e| {
+        panic!(
+            "LEANR_SWEEP_MERGE directory ({}) is not readable: {e}",
+            dir.display()
+        )
+    });
+    let mut sources: Vec<PathBuf> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "txt"))
+        .collect();
+    sources.sort();
+    assert!(
+        !sources.is_empty(),
+        "no *.txt shard green lists found in the LEANR_SWEEP_MERGE directory ({}) — refusing to \
+         merge an empty union, which would gate every committed pass-list entry as a regression",
+        dir.display()
+    );
+    let mut union = BTreeSet::new();
+    for src in &sources {
+        let text = std::fs::read_to_string(src)
+            .unwrap_or_else(|e| panic!("failed to read shard green list {}: {e}", src.display()));
+        union.extend(
+            text.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .map(String::from),
+        );
+    }
+    (union, sources)
+}
+
+/// The property that makes the sharded nightly's merge sound: the shards
+/// PARTITION the import-set list — every set lands in exactly one shard, and
+/// their union is the unsharded list. If this ever failed, a dropped set
+/// would surface as phantom regressions in the merge (its files missing from
+/// the union) and a duplicated one would waste a shard's budget.
+#[test]
+fn shard_slices_partition_the_import_set_list() {
+    let items: Vec<usize> = (0..97).collect();
+    for n in 1..=13usize {
+        let mut seen: Vec<usize> = Vec::new();
+        for i in 1..=n {
+            let slice = shard_slice(&items, i, n);
+            // Stride shards differ in length by at most one — the load
+            // balance the striding exists to provide.
+            assert!(
+                slice.len().abs_diff(items.len() / n) <= 1,
+                "shard {i}/{n} is unbalanced: {} of {}",
+                slice.len(),
+                items.len()
+            );
+            seen.extend(slice);
+        }
+        let mut sorted = seen.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            seen.len(),
+            "N={n}: a set landed in more than one shard"
+        );
+        assert_eq!(sorted, items, "N={n}: the union of all shards lost a set");
+    }
+}
+
+#[test]
+fn shard_spec_parsing_rejects_malformed_values_with_a_reason() {
+    assert_eq!(parse_shard_spec("1/12"), Ok((1, 12)));
+    assert_eq!(parse_shard_spec("12/12"), Ok((12, 12)));
+    assert_eq!(parse_shard_spec(" 3 / 12 "), Ok((3, 12)));
+    for bad in [
+        "12", "", "a/12", "1/b", "0/12", "13/12", "1/0", "-1/12", "1/2/3",
+    ] {
+        assert!(
+            parse_shard_spec(bad).is_err(),
+            "{bad:?} must be rejected, not silently accepted"
+        );
+    }
+}
+
+#[test]
+fn merged_green_lists_union_shard_outputs() {
+    let dir = std::env::temp_dir().join(format!(
+        "leanr-sweep-merge-test-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let a: BTreeSet<String> = ["Mathlib/B.lean", "Mathlib/A.lean"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    let b: BTreeSet<String> = ["Mathlib/C.lean", "Mathlib/A.lean"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    write_green_list(&dir.join("shard-1.txt"), &a);
+    write_green_list(&dir.join("shard-2.txt"), &b);
+    // A non-.txt file in the artifact dir must be ignored, not merged.
+    std::fs::write(dir.join("notes.md"), "Mathlib/NotGreen.lean\n").unwrap();
+
+    let (union, sources) = read_shard_green_lists(&dir);
+    assert_eq!(sources.len(), 2, "only the *.txt green lists count");
+    assert_eq!(
+        union.into_iter().collect::<Vec<_>>(),
+        vec!["Mathlib/A.lean", "Mathlib/B.lean", "Mathlib/C.lean"],
+        "the union must be deduplicated and sorted"
     );
 
     std::fs::remove_dir_all(&dir).unwrap();
