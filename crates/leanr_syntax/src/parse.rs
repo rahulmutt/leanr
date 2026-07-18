@@ -1439,10 +1439,29 @@ impl<'a> Ps<'a> {
     ///    watermark`) → the whole recorded prefix is re-internable and, since
     ///    `Overlay::intern` is append-only + idempotent, reproduces its
     ///    EXACT original indices; re-intern it in order and accept (the same
-    ///    mechanism `longest_match` uses to re-materialize its winner). A
-    ///    clean slate here means the input consumed to reach the call
-    ///    interned nothing, so the prefix is precisely the shared parse's
-    ///    own kinds — re-interning it introduces no foreign sibling kind;
+    ///    mechanism `longest_match` uses to re-materialize its winner). This
+    ///    does NOT mean the prefix holds only the hit's own kinds — `cur ==
+    ///    watermark` constrains the HIT-time path, but the prefix was
+    ///    recorded on the STORING path and can carry kinds that path
+    ///    interned for something other than this entry's own events: a
+    ///    failed `antiquot` interns its kind (line 2320) before its own
+    ///    `save()` (line 2321), so that `save`'s `restore` never undoes it;
+    ///    an `Err` entry's `restore(&entry_sp)` likewise leaves enclosing-
+    ///    frame kinds recorded. What the clean slate DOES guarantee: every
+    ///    id the prefix records still resolves to its store-time name after
+    ///    re-intern (append-only intern from a clean slate reproduces the
+    ///    recorded indices in order), so replayed events are never
+    ///    mis-kinded and can never index OOB; and no live event stream's
+    ///    ids shift under it, since `longest_match` captures and replays
+    ///    `kind_names[sp.overlay_kinds..]` wholesale (lines 3565, 3580), not
+    ///    by index into this prefix. The residual cost is a kind name this
+    ///    hit never needed re-appended into `kind_names` (and hence the
+    ///    overlay fingerprint) — the same leak class Task 7's
+    ///    `longest_match` fix removed elsewhere (see its doc comment
+    ///    above). No reachable concrete input has been constructed for it
+    ///    (both paths must reach the same `CatCacheKey` while differing
+    ///    only in speculative-intern residue), so it is recorded here, not
+    ///    fixed;
     ///  - the whole recorded prefix is still present index-for-index →
     ///    accept as-is (the ubiquitous symmetric case: a sibling re-interned
     ///    the same name at the same index);
