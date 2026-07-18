@@ -91,6 +91,14 @@ echo "== [5/5] import corpus: fresh oracle dumps + CLI dump vs committed =="
   diff -u ImportOverload.stx.jsonl "$tmp2/ImportOverload.stx.jsonl" \
     || { echo "STALE IMPORT DUMP: ImportOverload"; exit 1; }
   echo "  ok ImportOverload"
+  LEAN_PATH="$PWD" lean --run ../dump_syntax_elab.lean ImportScopedOpen.lean > "$tmp2/ImportScopedOpen.stx.jsonl"
+  diff -u ImportScopedOpen.stx.jsonl "$tmp2/ImportScopedOpen.stx.jsonl" \
+    || { echo "STALE IMPORT DUMP: ImportScopedOpen"; exit 1; }
+  echo "  ok ImportScopedOpen"
+  LEAN_PATH="$PWD" lean --run ../dump_syntax_elab.lean ImportScopedNs.lean > "$tmp2/ImportScopedNs.stx.jsonl"
+  diff -u ImportScopedNs.stx.jsonl "$tmp2/ImportScopedNs.stx.jsonl" \
+    || { echo "STALE IMPORT DUMP: ImportScopedNs"; exit 1; }
+  echo "  ok ImportScopedNs"
   lean Init.lean -o Init.olean
 )
 for f in tests/fixtures/syntax/import/Import*.lean; do
