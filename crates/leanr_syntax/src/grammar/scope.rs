@@ -35,6 +35,13 @@ impl ScopeStack {
         Self::default()
     }
 
+    // Same dead-code situation as `open_namespace` below: Task 2 is the
+    // first non-test caller (`stxNodeKind := currNamespace ++ name`);
+    // until then only `#[cfg(test)]` code reads it, so the plain
+    // (non-test) lib target sees it as unused despite the behavior
+    // being fully implemented and covered by this module's own tests.
+    // consumed by Task 2
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn current_namespace(&self) -> &str {
         &self.current
     }
@@ -56,8 +63,27 @@ impl ScopeStack {
         });
     }
 
+    // Task 4 wires this into the `open` command arm below
+    // (`scope_command_update`'s `Lean.Parser.Command.open` case is still
+    // a deliberate no-op); nothing outside `#[cfg(test)]` calls it yet,
+    // so the plain (non-test) lib target sees it as dead code even
+    // though it's fully implemented and exercised by
+    // `open_namespace_rolls_back_with_its_section_scope` below. Same
+    // established idiom as the `Ps` impl blocks in parse.rs
+    // (`#[cfg_attr(not(test), allow(dead_code))]`) rather than deleting
+    // or stubbing out real, already-tested behavior.
+    // consumed by Task 4
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn open_namespace(&mut self, dotted: &str) {
         self.opens.push(dotted.to_string());
+    }
+
+    /// Test-only view of the explicitly opened namespaces, in the order
+    /// `open_namespace` recorded them — lets unit tests assert on
+    /// `opens` rollback semantics without exposing the field itself.
+    #[cfg(test)]
+    fn opens(&self) -> &[String] {
+        &self.opens
     }
 
     /// `end` (bare or with a dotted name). Rules, all total:
@@ -148,6 +174,40 @@ fn first_ident_anywhere(node: &SyntaxNode) -> Option<String> {
     })
 }
 
+/// ALL `KIND_IDENT` descendant tokens under `node`, joined with `.` in
+/// source order. Mirrors `parse_header_imports`' own import-name walk
+/// (`parse.rs:307-314`, joining every `KIND_IDENT` child found under a
+/// `Lean.Parser.Module.import` node) rather than `first_ident_anywhere`
+/// above: `end`'s name goes through `ident_with_partial_trailing_dot()`
+/// (`command_open.rs`) — `seq([Ident, opt(seq([CheckNoWsBefore, ".",
+/// CheckNoWsBefore, Ident]))])` — which the oracle can split into TWO
+/// `Ident` tokens around a `.` atom on some trailing-dot edge case;
+/// taking only the first `Ident` (as `first_ident_anywhere` does) would
+/// silently drop the second component whenever that split fires.
+///
+/// In THIS port that split is believed unreachable: `ident_len`
+/// (`lex.rs`) greedily continues a dotted ident through `.` whenever the
+/// following character `is_id_first` (or `«`), with no reserved-word or
+/// token-table carve-out for the continuation segment — so any text
+/// that could lex as a second `Ident` after the dot is, by that same
+/// rule, already swallowed into the FIRST `Ident` token, never left for
+/// a separate one. No fixture or hand-built input has been found that
+/// splits it. Joining every `KIND_IDENT` descendant is still adopted
+/// here, for parity with `parse_header_imports`' precedent and because
+/// it is a strict superset of the first-token read (correct whether or
+/// not this port's greedy-lexer assumption above ever turns out wrong).
+fn dotted_ident_anywhere(node: &SyntaxNode) -> Option<String> {
+    let mut parts = Vec::new();
+    for el in node.descendants_with_tokens() {
+        if let Some(t) = el.into_token() {
+            if t.kind() == KIND_IDENT {
+                parts.push(t.text().to_string());
+            }
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("."))
+}
+
 /// Applies one top-level command's scope effect, if any. Total on
 /// arbitrary trees (missing idents → no-op).
 pub(crate) fn scope_command_update(
@@ -167,12 +227,13 @@ pub(crate) fn scope_command_update(
         }
         "Lean.Parser.Command.end" => {
             // `end`'s name uses `ident_with_partial_trailing_dot()`
-            // (`command_open.rs`): ordinarily the whole dotted name
-            // lexes as ONE ident token, but its rare "partial trailing
-            // dot" split can leave a dangling `.` on the first token —
-            // trim it defensively (never observed on this crate's
-            // fixtures, but cheap to guard).
-            let name = first_ident_anywhere(root).map(|n| n.trim_end_matches('.').to_string());
+            // (`command_open.rs`): join every `KIND_IDENT` descendant,
+            // not just the first (`dotted_ident_anywhere`'s doc comment)
+            // — mirrors `parse_header_imports`' own join-all walk for
+            // the same combinator. Trim a defensively-possible dangling
+            // trailing `.` (never observed on this crate's fixtures, but
+            // cheap to guard).
+            let name = dotted_ident_anywhere(root).map(|n| n.trim_end_matches('.').to_string());
             stack.end_scope(name.as_deref());
         }
         // M3b3 Task 4: `open Foo` walk (all 5 sub-forms) fills this in —
@@ -224,5 +285,54 @@ mod tests {
         assert_eq!(s.current_namespace(), "A.B");
         s.end_scope(Some("B")); // suffix match pops one component
         assert_eq!(s.current_namespace(), "A");
+    }
+
+    #[test]
+    fn open_namespace_rolls_back_with_its_section_scope() {
+        let mut s = ScopeStack::new();
+        s.open_namespace("Top"); // top-level open: no enclosing scope to roll back with
+        assert_eq!(s.opens(), ["Top".to_string()]);
+        s.enter_section(Some("Sec"));
+        s.open_namespace("Inner");
+        assert_eq!(s.opens(), ["Top".to_string(), "Inner".to_string()]);
+        s.end_scope(Some("Sec")); // truncates opens back to the section's opens_len
+        assert_eq!(s.opens(), ["Top".to_string()]);
+        s.end_scope(None); // stray bare end on the now-empty stack: no-op
+        assert_eq!(s.opens(), ["Top".to_string()]); // top-level open persists
+    }
+
+    /// `end`'s name extraction must join EVERY `KIND_IDENT` descendant,
+    /// not just the first (`dotted_ident_anywhere`'s doc comment) — a
+    /// regression test for the bug where a genuine
+    /// `ident_with_partial_trailing_dot()` split would silently drop
+    /// the tail component. No input has been found that actually
+    /// splits the combinator in this port (see that doc comment for
+    /// why it's believed unreachable), so this exercises the join-all
+    /// path against an ordinary multi-component dotted name instead,
+    /// through the real parser + `scope_command_update` (not just
+    /// `ScopeStack` directly) so it also pins the `end`-node shape the
+    /// walk depends on.
+    #[test]
+    fn end_name_extraction_joins_every_ident_descendant() {
+        let snap = crate::builtin::snapshot();
+        let mut stack = ScopeStack::new();
+        let src = "namespace A.B.C\nend A.B.C\n";
+        let r = crate::parse_module(src, &snap);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        // Skip the module's own leading `Lean.Parser.Module.header` node
+        // (`run_module` always emits exactly one, even header-less, per
+        // `scope_updates_follow_parsed_commands`'s own comment above).
+        let mut cmds = r.tree.root().children().skip(1);
+        let ns_cmd = cmds.next().expect("namespace command");
+        scope_command_update(&mut stack, &ns_cmd, &r.tree.kinds);
+        assert_eq!(stack.current_namespace(), "A.B.C");
+        let end_cmd = cmds.next().expect("end command");
+        scope_command_update(&mut stack, &end_cmd, &r.tree.kinds);
+        assert_eq!(
+            stack.current_namespace(),
+            "",
+            "end A.B.C must pop all three namespace components, not just the \
+             first ident token's worth"
+        );
     }
 }
