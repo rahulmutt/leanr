@@ -970,6 +970,24 @@ struct CatCacheEntry {
     /// comment. No oracle counterpart: Lean has no cross-attempt
     /// "furthest failure" tally to keep sound under caching.
     furthest: Option<(usize, Vec<String>)>,
+    /// M3b3 final review (C1): the overlay kind-table baseline
+    /// (`Overlay::kind_count`) at the moment this call STARTED, i.e. the
+    /// overlay-relative index of the first kind name it interned. Together
+    /// with `interned_kinds` below this lets a cache hit verify the
+    /// absolute overlay kind ids its replayed events embed still resolve
+    /// to the names they did at insertion — see
+    /// `Ps::accept_cached_overlay_kinds` for the seam this closes (Task 7's
+    /// `Savepoint::restore` truncation × this memoization).
+    overlay_base: usize,
+    /// M3b3 final review (C1): the overlay kind NAMES this call left
+    /// interned, in registration order (overlay-relative indices
+    /// `overlay_base..`). Almost always empty (a plain category recursion
+    /// interns no kinds); non-empty only when a speculative antiquot
+    /// alternative interned `<cat>.pseudo.antiquot`/`antiquotName`/… . A
+    /// cache HIT must reproduce exactly these ids at exactly these indices
+    /// (re-interning them if a `restore` since insertion rolled them back)
+    /// or be rejected as a miss.
+    interned_kinds: Vec<Arc<str>>,
 }
 
 #[derive(Clone)]
@@ -1359,6 +1377,66 @@ impl<'a> Ps<'a> {
     }
     fn consumed_since(&self, sp: &Savepoint) -> bool {
         self.pos > sp.pos
+    }
+
+    /// M3b3 final review (C1): reconcile a `cat_cache` hit's recorded
+    /// overlay kinds (`CatCacheEntry::overlay_base`/`interned_kinds`) with
+    /// the LIVE overlay before its events are replayed, returning whether
+    /// the entry is safe to replay.
+    ///
+    /// The entry's memoized subtree events embed ABSOLUTE overlay kind ids
+    /// (`base_kind_count + overlay_index`). Between insertion and this hit,
+    /// a `Savepoint::restore` (Task 7's per-candidate clean slate in
+    /// `longest_match`, or any enclosing failed speculative frame) may have
+    /// `truncate_kinds`'d those indices away — so replaying the events
+    /// either resolves an id to a DIFFERENT name a sibling re-interned
+    /// there (silent mis-kinding) or, worse, indexes past the table's end
+    /// (`KindInterner::name`'s unchecked `self.names[k.0]` → OOB panic at
+    /// canon/dump time, an input-reachable never-panic violation). Neither
+    /// `cat_cache` nor the `subtrees` arena is rolled back by `restore` (by
+    /// design — memoization across backtracking is their purpose), so the
+    /// stale ids can outlive the truncation and a same-position retry
+    /// (sibling `longest_match` candidate, recovery re-entry, …) hits them.
+    ///
+    /// Reconciliation, matching what a FRESH re-run of the call would leave
+    /// interned (so the accepted replay is observationally identical):
+    ///  - no interned kinds → always safe (the overwhelmingly common case:
+    ///    a plain category recursion interns nothing);
+    ///  - the overlay is currently truncated to exactly this entry's
+    ///    baseline (`kind_count == overlay_base`) → the recorded names are
+    ///    re-internable and, since `Overlay::intern` is append-only +
+    ///    idempotent, reproduce their EXACT original indices; re-intern
+    ///    them and accept (this is the same mechanism `longest_match` uses
+    ///    to re-materialize its winner's own kinds);
+    ///  - the recorded names are all still present at their exact indices →
+    ///    accept as-is, nothing to do;
+    ///  - anything else (truncated below/partway the baseline, or a name no
+    ///    longer matches at its index) → reject; the caller evicts the
+    ///    stale entry and re-parses, rebuilding a valid one.
+    fn accept_cached_overlay_kinds(&mut self, entry: &CatCacheEntry) -> bool {
+        let names = &entry.interned_kinds;
+        if names.is_empty() {
+            return true;
+        }
+        let base = entry.overlay_base;
+        let cur = self.overlay.kind_count();
+        if cur == base {
+            // Rolled back to exactly the call's start — re-append the same
+            // names to reproduce the same ids the events reference.
+            for name in names {
+                self.overlay.intern(name);
+            }
+            true
+        } else {
+            // Already present? Every recorded name must sit UNCHANGED at
+            // its exact overlay index (the `cur >= base + names.len()`
+            // guard also keeps the index access below in bounds).
+            cur >= base + names.len()
+                && names
+                    .iter()
+                    .enumerate()
+                    .all(|(j, nm)| self.overlay.kind_names()[base + j].as_ref() == nm.as_ref())
+        }
     }
 
     // ---- tokens ----------------------------------------------------
@@ -3666,6 +3744,25 @@ impl<'a> Ps<'a> {
             hit = self.cat_cache.get(&key).cloned();
             hit_is_depth_dependent = hit.is_some();
         }
+        // M3b3 final review (C1): a memoized entry's replayed events embed
+        // ABSOLUTE overlay kind ids; a `Savepoint::restore` (Task 7) since
+        // insertion may have truncated those ids (→ OOB at kind
+        // resolution) or a sibling parse may have re-interned DIFFERENT
+        // names at them (→ silent mis-kinding). Reconcile the recorded
+        // kinds with the live overlay BEFORE replaying — re-interning them
+        // when they were merely rolled back, or rejecting the entry as a
+        // miss (and evicting it) when they can no longer be reproduced, in
+        // which case we re-parse and rebuild a valid entry below.
+        let reject_hit = if let Some(entry) = &hit {
+            !self.accept_cached_overlay_kinds(entry)
+        } else {
+            false
+        };
+        if reject_hit {
+            self.cat_cache.remove(&key);
+            hit = None;
+            hit_is_depth_dependent = false;
+        }
         if let Some(entry) = hit {
             if hit_is_depth_dependent {
                 // Task 11b review wave 2 (Critical 1, reopened): a
@@ -4066,6 +4163,17 @@ impl<'a> Ps<'a> {
             CatCacheEntry {
                 outcome,
                 furthest: local_furthest,
+                // M3b3 final review (C1): record the overlay kinds this
+                // call left interned (indices `entry_sp.overlay_kinds..`),
+                // so a later hit can validate/re-intern them against the
+                // live overlay before replaying events that embed their
+                // ids. Nothing between `entry_sp` and here truncates the
+                // overlay, so this slice is exactly this call's net interns
+                // (empty for the common no-antiquot recursion, and empty
+                // for the `Err` arm, whose `restore(&entry_sp)` above
+                // already rolled every speculative intern back).
+                overlay_base: entry_sp.overlay_kinds,
+                interned_kinds: self.overlay.kind_names()[entry_sp.overlay_kinds..].to_vec(),
             },
         );
         r
@@ -6352,6 +6460,128 @@ mod tests {
         assert!(
             !names.contains(&"leafshort.pseudo.antiquot"),
             "the nested superseded loser must not leak: {names:?}"
+        );
+    }
+
+    /// M3b3 final review — C1 (Task 7 truncation × Task 11b memoization
+    /// seam). Two same-first-token overlay productions share a `category`
+    /// recursion INSIDE a quotation:
+    ///   P1 = `☆ acat`      (idx0, tried first — temp-best)
+    ///   P2 = `☆ acat bcat`  (idx1, tried second — the longer WINNER)
+    /// Both recurse into `category("acat")` at the identical inner
+    /// position, so P2's call CACHE-HITS the entry P1 memoized. P1 interned
+    /// `acat.pseudo.antiquot` at overlay index n and memoized the subtree;
+    /// `longest_match`'s `restore` before P2 then `truncate_kinds`'d index
+    /// n away. Before the C1 fix, P2's hit replayed `$x`'s events (which
+    /// embed absolute id n) WITHOUT re-interning, and P2's own
+    /// `category("bcat")` then re-interned `bcat.pseudo.antiquot` at the
+    /// reused index n — so the surviving `$x` node silently resolved to
+    /// `bcat.pseudo.antiquot`, a mis-kinded tree. `accept_cached_overlay_
+    /// kinds` re-interns the rolled-back `acat.pseudo.antiquot` on the hit
+    /// (overlay is back at n), so `bcat` lands at n+1 and both antiquots
+    /// keep their correct kinds. Counterfactually RED (asserts below fail:
+    /// `acat.pseudo.antiquot` absent, `bcat.pseudo.antiquot` doubled)
+    /// against the unfixed replay.
+    #[test]
+    fn cat_cache_hit_across_sibling_kind_truncation_keeps_correct_kinds() {
+        let base = crate::builtin::snapshot();
+        let mut ov = Overlay::new(&base);
+        ov.register_category("acat", LeadingIdentBehavior::Default);
+        ov.register_category("bcat", LeadingIdentBehavior::Default);
+        ov.register(NotationSpec {
+            category: "term".into(),
+            kind_name: "term_star_a".into(),
+            leading: true,
+            prec: 0,
+            lhs_prec: None,
+            tokens: vec!["☆".into()],
+            body: seq([sym("☆"), cat("acat", 0)]),
+            scope: SpecScope::Global,
+        });
+        ov.register(NotationSpec {
+            category: "term".into(),
+            kind_name: "term_star_ab".into(),
+            leading: true,
+            prec: 0,
+            lhs_prec: None,
+            tokens: vec!["☆".into()],
+            body: seq([sym("☆"), cat("acat", 0), cat("bcat", 0)]),
+            scope: SpecScope::Global,
+        });
+        let src = "def q := `(☆$x $y)\n";
+        // No panic (the OOB variant below covers the panic channel; here
+        // the reused index IS repopulated, so the failure mode is silent
+        // mis-kinding, not a crash).
+        let r = parse_module_with_overlay(src, &base, ov);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        let dump = crate::canon::canon_jsonl(&r.tree);
+        // Oracle-correct kinds: `$x` is the `acat` antiquot, `$y` the
+        // `bcat` one — each present EXACTLY once. Under the C1 bug `$x`
+        // would carry `bcat.pseudo.antiquot` too (acat absent, bcat
+        // doubled).
+        assert_eq!(
+            dump.matches("acat.pseudo.antiquot").count(),
+            1,
+            "the `$x` antiquot must keep its `acat` kind exactly once: {dump}"
+        );
+        assert_eq!(
+            dump.matches("bcat.pseudo.antiquot").count(),
+            1,
+            "the `$y` antiquot must be the only `bcat` antiquot: {dump}"
+        );
+        // Both survive in the overlay's kind table too.
+        let names: Vec<&str> = r.overlay.kind_names().iter().map(|s| &**s).collect();
+        assert!(names.contains(&"acat.pseudo.antiquot"), "{names:?}");
+        assert!(names.contains(&"bcat.pseudo.antiquot"), "{names:?}");
+    }
+
+    /// M3b3 final review — C1, the OOB-panic variant. Same seam, but the
+    /// longer winner interns NOTHING after the shared cache hit:
+    ///   P1 = `☆ acat`       (idx0, temp-best)
+    ///   P2 = `☆ acat "!"`   (idx1, longer winner — `"!"` is a token,
+    ///                         not a kind)
+    /// Before the fix, P2's `category("acat")` hit replayed `$x`'s events
+    /// referencing the truncated overlay index n, nothing re-populated n,
+    /// and the surviving tree carried a kind id past the merged interner's
+    /// end — `KindInterner::name`'s unchecked `self.names[k.0]` panicked at
+    /// canon/dump time, an input-reachable never-panic violation. The fix
+    /// re-interns `acat.pseudo.antiquot` on the hit, so the id resolves.
+    /// This test simply parsing + dumping WITHOUT panicking is the pin
+    /// (counterfactually it panics against the unfixed replay).
+    #[test]
+    fn cat_cache_hit_after_truncation_does_not_oob_panic() {
+        let base = crate::builtin::snapshot();
+        let mut ov = Overlay::new(&base);
+        ov.register_category("acat", LeadingIdentBehavior::Default);
+        ov.register(NotationSpec {
+            category: "term".into(),
+            kind_name: "term_star_a".into(),
+            leading: true,
+            prec: 0,
+            lhs_prec: None,
+            tokens: vec!["☆".into()],
+            body: seq([sym("☆"), cat("acat", 0)]),
+            scope: SpecScope::Global,
+        });
+        ov.register(NotationSpec {
+            category: "term".into(),
+            kind_name: "term_star_bang".into(),
+            leading: true,
+            prec: 0,
+            lhs_prec: None,
+            tokens: vec!["☆".into(), "!".into()],
+            body: seq([sym("☆"), cat("acat", 0), sym("!")]),
+            scope: SpecScope::Global,
+        });
+        let src = "def q := `(☆$x !)\n";
+        let r = parse_module_with_overlay(src, &base, ov);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        // The load-bearing assertion is that neither the parse above nor
+        // this dump panics; the `$x` antiquot must resolve to `acat`.
+        let dump = crate::canon::canon_jsonl(&r.tree);
+        assert!(
+            dump.contains("acat.pseudo.antiquot"),
+            "the `$x` antiquot's kind must resolve after the cache hit: {dump}"
         );
     }
 
