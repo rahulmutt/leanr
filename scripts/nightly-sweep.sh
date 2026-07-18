@@ -9,25 +9,45 @@
 # dev loop — use `mise run parse:mathlib:fast` for that (see AGENTS.md).
 #
 # Idempotent-safe: refuses to start a second sweep while one is already
-# running (pgrep on this script's own basename).
+# running. Uses an flock on a fixed lockfile rather than a pgrep-on-basename
+# check — `pgrep -f "$self"` run from inside `$(...)` command substitution
+# matches the substitution's OWN subshell (which inherits this script's
+# cmdline), not just a genuinely concurrent invocation, so that guard always
+# sees a "competitor" and NEVER lets a sweep start. flock has no such
+# self-match failure class: the lock is only held by a process that actually
+# holds the fd.
 set -u
+set -o pipefail
 
 repo_root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$repo_root" || exit 1
 
 log="$repo_root/target/nightly_sweep.log"
 memlog="$repo_root/target/nightly_sweep_mem.log"
+lockfile="$repo_root/target/.nightly-sweep.lock"
+cgroup_memstat="/sys/fs/cgroup/memory.stat"
 limit_bytes=$((27 * 1024 * 1024 * 1024)) # anon bytes; container limit is 32Gi
-self="$(basename "$0")"
 
 mkdir -p "$repo_root/target"
 
-# Refuse to start if another sweep (this script, under any invocation) is
-# already running — one sweep at a time, so a cron misfire or a manual
-# re-run can't stack two ~35h jobs and double the memory pressure.
-other_pids=$(pgrep -f "$self" | grep -v "^$$\$" || true)
-if [ -n "$other_pids" ]; then
-    echo "nightly-sweep: already running (pid(s): $other_pids) — refusing to start a second sweep" | tee -a "$log"
+# The 27G guard below exists because an earlier unbounded run OOM-killed a
+# 32Gi container — if the cgroup memory-stat file this guard reads isn't
+# present (e.g. a host without cgroup v2 mounted the expected way), that is
+# not something to silently shrug off: fail loudly at startup rather than
+# run for hours with the guard quietly never arming.
+if [ ! -r "$cgroup_memstat" ]; then
+    echo "nightly-sweep: $cgroup_memstat not readable — the 27G memory watchdog cannot arm on \
+this host; refusing to run unguarded" | tee -a "$log"
+    exit 1
+fi
+
+# Refuse to start if another sweep is already running — one sweep at a
+# time, so a cron misfire or a manual re-run can't stack two ~35h jobs and
+# double the memory pressure.
+exec 9>"$lockfile"
+if ! flock -n 9; then
+    echo "nightly-sweep: another sweep is already running (lock held on $lockfile) — refusing to \
+start a second sweep" | tee -a "$log"
     exit 1
 fi
 
@@ -37,7 +57,7 @@ pid=$!
 pgid=$(ps -o pgid= -p "$pid" | tr -d ' ')
 
 while kill -0 "$pid" 2>/dev/null; do
-    anon=$(awk '$1=="anon"{print $2}' /sys/fs/cgroup/memory.stat 2>/dev/null)
+    anon=$(awk '$1=="anon"{print $2}' "$cgroup_memstat")
     echo "$(date +%s) anon=$anon" >>"$memlog"
     if [ -n "$anon" ] && [ "$anon" -gt "$limit_bytes" ]; then
         echo "[nightly-sweep] BREACH anon=$anon > $limit_bytes — killing sweep pgid $pgid $(date -u +%FT%TZ)" | tee -a "$log" >>"$memlog"
