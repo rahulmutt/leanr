@@ -1,6 +1,11 @@
 #!/bin/bash
-# Nightly discovery sweep: full Mathlib parse gate + pass-list rewrite
-# (`mise run parse:mathlib:nightly`), under the same memory watchdog pattern
+# MANUAL local full-sweep escape hatch: full Mathlib parse gate + pass-list
+# rewrite. This is NOT the scheduled nightly — that is
+# .github/workflows/nightly-sweep.yml, which shards the same work across 12
+# CI jobs and gates their union. Nothing schedules this script; run it by
+# hand when you have a big local box and want the unsharded sweep.
+#
+# It runs `mise run parse:mathlib:nightly` under the same memory watchdog pattern
 # proven by the earlier ad hoc target/full_sweep_watchdog.sh scratch script
 # (RAYON_NUM_THREADS=5, 27G anon-memory kill guard for a 32Gi container — an
 # earlier unbounded run OOM-killed the whole container). This is the
@@ -42,7 +47,7 @@ this host; refusing to run unguarded" | tee -a "$log"
 fi
 
 # Refuse to start if another sweep is already running — one sweep at a
-# time, so a cron misfire or a manual re-run can't stack two ~35h jobs and
+# time, so a stray re-run (or a leftover background sweep) can't stack two ~35h jobs and
 # double the memory pressure.
 exec 9>"$lockfile"
 if ! flock -n 9; then

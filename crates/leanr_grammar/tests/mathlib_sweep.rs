@@ -1,8 +1,11 @@
-//! Local-only Mathlib parse sweep + pass-list ratchet (M3b2a
-//! acceptance; grows into M3b3's 100% gate). Needs `mise run
-//! mathlib:fetch` first. Dev loop: `mise run parse:mathlib:fast`
-//! (fast regression gate over the committed pass-list only). Full
-//! discovery sweep (~35h; nightly only): `mise run parse:mathlib`.
+//! Mathlib parse sweep + pass-list ratchet (M3b2a acceptance; grows into
+//! M3b3's 100% gate). Needs `mise run mathlib:fetch` first. Dev loop:
+//! `mise run parse:mathlib:fast` (fast regression gate over the committed
+//! pass-list only). Full discovery sweep (~35h, unsharded, local):
+//! `mise run parse:mathlib`. The SCHEDULED nightly is
+//! `.github/workflows/nightly-sweep.yml`, which runs that same discovery
+//! sweep as 12 `parse:mathlib:shard` jobs plus one `parse:mathlib:merge`
+//! job that gates their union.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
