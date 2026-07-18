@@ -1045,13 +1045,15 @@ struct MatchWinner {
 /// Task 7 adds `declare_syntax_cat`'s pinned kind name (StxShapes dump,
 /// `command_syntax.rs`).
 ///
-/// `elab`/`binderPredicate` are deliberately OFF this list (post-M3b2b
-/// minors cleanup): `grammar::surface::derive_elab_cmd`/
-/// `derive_binder_predicate` unconditionally return `None` (no oracle
-/// dump to pin their child layout against yet), so keeping them here
-/// only pays `flatten_events`+`merged_kinds`+`build_tree` for a
-/// guaranteed no-op on every such command. They rejoin the list when
-/// their derivation arms exist (M3b3).
+/// `elab`/`binderPredicate` REJOIN this list as of M3b3 Task 10,
+/// reverting the post-M3b2b PR #13 temporary drop (`grammar::surface::
+/// derive_elab_cmd`/`derive_binder_predicate` used to unconditionally
+/// return `None` for lack of a real oracle dump to pin their child
+/// layout against — that dump now exists, `StxElab.lean`/
+/// `.stx.jsonl`, oracle v4.32.0-rc1 — and both functions have real
+/// derivation arms, so keeping them off this list would only cost a
+/// silently-stale grammar: any `elab`/`binder_predicate` declaration's
+/// production would never register at all).
 pub(crate) const GRAMMAR_GROWING_KINDS: &[&str] = &[
     "Lean.Parser.Command.mixfix",
     "Lean.Parser.Command.notation",
@@ -1067,6 +1069,11 @@ pub(crate) const GRAMMAR_GROWING_KINDS: &[&str] = &[
     "Lean.Parser.Command.syntax",
     "Lean.Parser.Command.syntaxAbbrev",
     "Lean.Parser.Command.macro",
+    // M3b3 Task 10: pinned against `StxElab.stx.jsonl` (real toolchain
+    // dump, oracle v4.32.0-rc1) — see `grammar::surface::
+    // derive_elab_cmd`/`derive_binder_predicate`'s own doc comments.
+    "Lean.Parser.Command.elab",
+    "Lean.Parser.Command.binderPredicate",
 ];
 
 /// Commands whose successful parse updates `Ps::scope` (M3b3 Task 1).
@@ -5614,6 +5621,91 @@ mod tests {
                 .descendants()
                 .any(|n| r.tree.kinds.name(n.kind()).contains("Greetcmd")),
             "declared command not live on the next line"
+        );
+    }
+
+    /// M3b3 Task 10: `elab` rejoins `GRAMMAR_GROWING_KINDS` — mirrors
+    /// `same_file_command_syntax_is_usable_without_panicking` exactly,
+    /// swapping `syntax "…" : command` for `elab "…" : term => …`.
+    /// Dump-pinned (`StxElab.stx.jsonl`, oracle v4.32.0-rc1): a bare
+    /// `"wobel"` atom targeting `term` mangles to kind name `termWobel`
+    /// (`mangle_items`/`mangle_symbol_atom`, unchanged — the SAME
+    /// mangling `#check wobel` resolves to in the real toolchain dump),
+    /// so this also cross-checks the derivation's `category`/item
+    /// extraction against real oracle output, not just "some kind
+    /// appeared".
+    #[test]
+    fn same_file_elab_command_is_usable_without_panicking() {
+        let snap = crate::builtin::snapshot();
+        let src = "elab \"wobel\" : term => pure (Lean.mkNatLit 42)\n#check wobel\n";
+        let r = crate::parse_module(src, &snap);
+        assert_eq!(r.tree.text(), src);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        assert!(
+            r.tree
+                .root()
+                .descendants()
+                .any(|n| r.tree.kinds.name(n.kind()) == "termWobel"),
+            "declared `elab` command not live on the next line"
+        );
+    }
+
+    /// M3b3 Task 10: `local elab` reuses the SAME `spec_scope_from_attr_kind`
+    /// gate `derive_macro_cmd`/`derive_syntax_cmd` already exercise
+    /// (`StxLocal.lean`) — dump-confirmed (`StxElab.stx.jsonl`) that
+    /// `local elab "wobello" : term => …` mangles to a PRIVATE kind name
+    /// (`_private.0.` prefix, same as `local syntax`/`local macro`), so
+    /// pin that `derive_elab_cmd` produces the identical private name
+    /// here too, not just a same-namespace mangled one.
+    #[test]
+    fn local_elab_command_derives_private_kind_name() {
+        let snap = crate::builtin::snapshot();
+        let src = "local elab \"wobello\" : term => pure (Lean.mkNatLit 43)\n#check wobello\n";
+        let r = crate::parse_module(src, &snap);
+        assert_eq!(r.tree.text(), src);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        assert!(
+            r.tree
+                .root()
+                .descendants()
+                .any(|n| r.tree.kinds.name(n.kind()) == "_private.0.termWobello"),
+            "declared `local elab` command not live (private name) on the next line"
+        );
+    }
+
+    /// M3b3 Task 10: `binder_predicate` rejoins `GRAMMAR_GROWING_KINDS`,
+    /// registering a production into the oracle's own `binderPred`
+    /// category (`Init/BinderPredicates.lean:22`'s `declare_syntax_cat
+    /// binderPred`) — that category has no OTHER base/overlay wiring in
+    /// this crate yet (out of this task's grammar-only remit, no `∀`/`∃`
+    /// binder-predicate sugar), so unlike `elab`'s round-trip above,
+    /// there is no follow-up USE to parse; this pins that the command
+    /// itself parses clean and its derived kind (dump-pinned mangled
+    /// name `binderPredWobrel_` — `"binderPred"` + `mangle_symbol_atom`
+    /// on the `" wobrel "` atom + the `Syntax.cat` placeholder's `_`)
+    /// is live in the overlay, proving `derive_binder_predicate` ran.
+    #[test]
+    fn same_file_binder_predicate_command_derives_without_panicking() {
+        let snap = crate::builtin::snapshot();
+        // RHS kept trivial (`True`, no antiquotations) — `derive_
+        // binder_predicate` never reads it (this task's grammar-only
+        // remit, its own doc comment); the committed oracle fixture
+        // (`StxElab.lean`) pins a realistic `(f $wbx $wby)` RHS
+        // against the real toolchain instead (`QuotAntiquot.lean`'s own
+        // `f $x $y` pattern) — no infix operator is a registered
+        // term-level production in this crate yet (out of scope here),
+        // so this inline probe avoids one too.
+        let src = "binder_predicate wbx \" wobrel \" wby:term => `(True)\n";
+        let r = crate::parse_module(src, &snap);
+        assert_eq!(r.tree.text(), src);
+        assert!(r.errors.is_empty(), "errs={:?}", r.errors);
+        // No follow-up USE (module doc above) — the derived kind is
+        // registered in the overlay's kind table but no NODE in this
+        // tree carries it, so check the table directly (`lookup`),
+        // not `descendants()`.
+        assert!(
+            r.tree.kinds.lookup("binderPredWobrel_").is_some(),
+            "declared `binder_predicate` command's production never registered"
         );
     }
 

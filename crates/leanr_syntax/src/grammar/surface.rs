@@ -67,16 +67,12 @@ pub fn derive_surface(
         "Lean.Parser.Command.syntax" => derive_syntax_cmd(node, kinds, ctx),
         "Lean.Parser.Command.syntaxAbbrev" => derive_syntax_abbrev(node, kinds),
         "Lean.Parser.Command.macro" => derive_macro_cmd(node, kinds, ctx),
-        // Imported shapes: NOT YET PINNED against a real Mathlib oracle
-        // dump (Task 8 Step 5 — the full sweep was still running in
-        // this checkout, and `target/leanr-stx-cache`'s existing ~116
-        // cached dumps, a prior BOUNDED sweep, held zero `elab`/
-        // `binderPredicate` samples to pin a layout against). Recorded
-        // skip, not a guess — see this task's report for the concrete
-        // Mathlib files that DO declare these (found by grep, not run)
-        // for Task 10 to pin against once the full sweep lands.
-        "Lean.Parser.Command.elab" => derive_elab_cmd(node, kinds),
-        "Lean.Parser.Command.binderPredicate" => derive_binder_predicate(node, kinds),
+        // M3b3 Task 10: real derivation, rejoining `GRAMMAR_GROWING_KINDS`
+        // (`parse.rs`'s own const doc comment) — pinned against a real
+        // toolchain dump (`StxElab.lean`/`.stx.jsonl`, oracle v4.32.0-rc1),
+        // not the M3b2b Task 8 recorded skip this comment used to describe.
+        "Lean.Parser.Command.elab" => derive_elab_cmd(node, kinds, ctx),
+        "Lean.Parser.Command.binderPredicate" => derive_binder_predicate(node, kinds, ctx),
         // Shape-only (`command_syntax.rs`'s own module doc): parses
         // fine, derives nothing — `macro_rules`/`elab_rules` pattern-
         // match against an ALREADY-registered kind, they never
@@ -87,17 +83,147 @@ pub fn derive_surface(
     }
 }
 
-/// See `derive_surface`'s own doc comment. Recorded skip: Task 8 Step 5
-/// could not pin `Lean.Parser.Command.elab`'s child layout against a
-/// real Mathlib oracle dump without running the still-in-flight full
-/// sweep (forbidden by this task's brief). `// pinned in Task 10`.
-fn derive_elab_cmd(_node: &SyntaxNode, _kinds: &KindInterner) -> Option<GrammarDelta> {
-    None // pinned in Task 10
+/// `elab`'s oracle shape (M3b3 Task 10, `StxElab.stx.jsonl`'s own dump,
+/// oracle v4.32.0-rc1): node-only children are BYTE-IDENTICAL in count
+/// and order to `macro`'s own (`derive_macro_cmd`'s doc comment) —
+/// `Lean/Parser/Syntax.lean:125-129`'s `elabArg := macroArg` and
+/// `elabTail`'s combinator (`atomic (" : " ident (optional (" <= "
+/// ident)))` sequenced with `darrow` then `withPosition termParser`)
+/// mirror `macroArg`/`macroTail` exactly except for the tail's own kind
+/// name and its extra (ignored) `<= expectedType` binder slot. That
+/// slot is nested ONE level inside its own `null` wrapper (the
+/// `optional` around `" <= " ident`), so it never appears as a direct
+/// token child of the tail node — `last_ident_token_text` (a direct,
+/// non-descending scan) reads the real target-category ident
+/// (`term`/`tactic`/`command`/…) whether or not `<= expectedType` is
+/// present, unchanged from
+/// `derive_macro_cmd`'s own use of it. `local elab`/`scoped elab` are
+/// real Mathlib patterns (`Mathlib/Tactic/Contrapose.lean`,
+/// `Mathlib/Geometry/Manifold/Notation.lean`) — `StxElab.lean`'s own
+/// `local elab` line pins that `spec_scope_from_attr_kind` (the same
+/// gate `derive_macro_cmd`/`derive_syntax_cmd` already use) applies
+/// here unchanged too (dump-confirmed: `#check wobello` resolves to
+/// `_private.0.termWobello`).
+///
+/// Grammar-side only (this task's remit, `derive_surface`'s own doc
+/// comment): the RHS elaborator body (`elabTail`'s own trailing term)
+/// is read NEVER, exactly like `derive_macro_cmd` never reads
+/// `macroRhs` — `elab_rules`'s own companion registration (shape-only,
+/// `derive_surface`'s `"elab_rules"` arm) is where real Lean threads
+/// that body to a handler; out of scope here (M4 elaborator semantics).
+fn derive_elab_cmd(
+    node: &SyntaxNode,
+    kinds: &KindInterner,
+    ctx: NamingCtx<'_>,
+) -> Option<GrammarDelta> {
+    let children: Vec<SyntaxNode> = node.children().collect();
+    let attr_kind_pos = children
+        .iter()
+        .position(|c| kinds.name(c.kind()) == "Lean.Parser.Term.attrKind")?;
+    let scope = spec_scope_from_attr_kind(&children[attr_kind_pos], kinds, ctx);
+    let prec_wrapper = children.get(attr_kind_pos + 1)?;
+    let explicit_prec = find_child(prec_wrapper, "Lean.Parser.precedence", kinds)
+        .and_then(|pn| read_prec_num(&pn, kinds));
+    let named_name_wrapper = children.get(attr_kind_pos + 2)?;
+    let explicit_name = named_name_ident(named_name_wrapper, kinds);
+    let args_wrapper = children.get(attr_kind_pos + 4)?;
+    let elab_tail = children.get(attr_kind_pos + 5)?;
+    if kinds.name(elab_tail.kind()) != "Lean.Parser.Command.elabTail" {
+        return None;
+    }
+    let category = last_ident_token_text(elab_tail)?;
+
+    let mut item_nodes = Vec::new();
+    for arg_node in args_wrapper.children() {
+        if kinds.name(arg_node.kind()) != "Lean.Parser.Command.macroArg" {
+            return None;
+        }
+        let arg_children: Vec<SyntaxNode> = arg_node.children().collect();
+        item_nodes.push(arg_children.get(1)?.clone());
+    }
+    build_from_items(
+        &category,
+        &item_nodes,
+        explicit_prec,
+        explicit_name,
+        scope,
+        kinds,
+        ctx.current_ns,
+    )
 }
 
-/// See `derive_elab_cmd`'s doc comment — identical status.
-fn derive_binder_predicate(_node: &SyntaxNode, _kinds: &KindInterner) -> Option<GrammarDelta> {
-    None // pinned in Task 10
+/// `binderPredicate`'s oracle shape (M3b3 Task 10, `StxElab.stx.jsonl`'s
+/// own dump, oracle v4.32.0-rc1): `Lean/Parser/Syntax.lean:137-139`'s
+///
+/// ```text
+/// optional docComment >> optional Term.attributes >> optional Term.attrKind >>
+/// "binder_predicate" >> optNamedName >> optNamedPrio >> ppSpace >> ident >>
+/// many (ppSpace >> macroArg) >> " => " >> termParser
+/// ```
+///
+/// has NO `optPrecedence` slot at all (unlike `syntax`/`macro`/`elab`),
+/// and — the one genuine structural divergence — its `attrKind` slot is
+/// DOUBLE-wrapped: `optional Term.attrKind`, not the bare `Term.attrKind`
+/// every other attrKind-anchored command here has. `Term.attrKind`
+/// itself is `leading_parser optional (scoped <|> local)`
+/// (`Lean/Parser/Term.lean:586`) — a parser that can never fail — so the
+/// OUTER `optional` around it always takes the "matched" branch: the
+/// wrapper is never truly absent, but it IS one extra `null` layer a
+/// direct `attrKind`-kind-name child search (`derive_syntax_cmd`/
+/// `derive_macro_cmd`/`derive_elab_cmd`'s own anchor) would never find.
+/// So the anchor here is "the null child whose OWN child is
+/// `Term.attrKind`", one `find_child` deeper.
+///
+/// Node-only children, in order: `[null(doc), null(attrs),
+/// null(attrKind-wrapper), null(namedName?), null(namedPrio?),
+/// null(many macroArg), <ignored RHS term node>]` — the bound `ident`
+/// (`x` in `Init/BinderPredicates.lean`'s own `binder_predicate x " > "
+/// y:term => ...`, `wbx` in the dump fixture) is a bare TOKEN, invisible
+/// to `.children()`, and is never part of the registered production
+/// (ORACLE-PORT `elabBinderPred`, `Lean/Elab/BinderPredicates.lean`: the
+/// generated `syntax ... : binderPred` command's own item list is built
+/// from `args` alone — the ident is threaded to the companion
+/// `macro_rules` registration instead, out of this task's grammar-only
+/// remit, same as `derive_elab_cmd`'s RHS). Target category is the
+/// oracle's own `declare_syntax_cat binderPred`
+/// (`Init/BinderPredicates.lean:22`) — confirmed from source AND the
+/// dump, not the brief's placeholder guess.
+fn derive_binder_predicate(
+    node: &SyntaxNode,
+    kinds: &KindInterner,
+    ctx: NamingCtx<'_>,
+) -> Option<GrammarDelta> {
+    let children: Vec<SyntaxNode> = node.children().collect();
+    let attr_wrapper_pos = children
+        .iter()
+        .position(|c| find_child(c, "Lean.Parser.Term.attrKind", kinds).is_some())?;
+    let attr_kind = find_child(
+        &children[attr_wrapper_pos],
+        "Lean.Parser.Term.attrKind",
+        kinds,
+    )?;
+    let scope = spec_scope_from_attr_kind(&attr_kind, kinds, ctx);
+    let named_name_wrapper = children.get(attr_wrapper_pos + 1)?;
+    let explicit_name = named_name_ident(named_name_wrapper, kinds);
+    let args_wrapper = children.get(attr_wrapper_pos + 3)?;
+
+    let mut item_nodes = Vec::new();
+    for arg_node in args_wrapper.children() {
+        if kinds.name(arg_node.kind()) != "Lean.Parser.Command.macroArg" {
+            return None;
+        }
+        let arg_children: Vec<SyntaxNode> = arg_node.children().collect();
+        item_nodes.push(arg_children.get(1)?.clone());
+    }
+    build_from_items(
+        "binderPred",
+        &item_nodes,
+        None,
+        explicit_name,
+        scope,
+        kinds,
+        ctx.current_ns,
+    )
 }
 
 /// `syntax`'s oracle shape (`command_syntax.rs`'s module doc,
