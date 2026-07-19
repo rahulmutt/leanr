@@ -51,17 +51,25 @@ fn import_original_text<'a>(node: &SyntaxNode, src: &'a str) -> &'a str {
 /// text is the `import` keyword and joins the significant tokens after
 /// it; falls back to joining all significant tokens if no `import`
 /// keyword is found (so a sort key always exists even under unexpected
-/// input shapes).
+/// input shapes). The grammar allows an `all` modifier directly after
+/// `import` (`import all Foo`, ORACLE-PORT `Lean.Parser.Module.all`); skip
+/// it too so it keys as "Foo", not "allFoo" — this only affects sort
+/// order, never the emitted text (see `import_original_text`).
 fn import_sort_key(node: &SyntaxNode) -> String {
     let sig: Vec<_> = tokens_of(node)
         .into_iter()
         .filter(|t| !leanr_syntax::kind::is_trivia(t.kind()))
         .collect();
     let kw_idx = sig.iter().position(|t| t.text() == "import");
-    let rest = match kw_idx {
+    let mut rest = match kw_idx {
         Some(i) => &sig[i + 1..],
         None => &sig[..],
     };
+    if let Some(first) = rest.first() {
+        if first.text() == "all" {
+            rest = &rest[1..];
+        }
+    }
     rest.iter().map(|t| t.text()).collect()
 }
 
@@ -203,6 +211,27 @@ mod tests {
         assert!(
             crate::verify::check_invariants(src, &snap).is_ok(),
             "semantics invariant must hold once `public` is preserved"
+        );
+    }
+
+    // REGRESSION (Task 9 gate-integrity review): `import all Foo` puts the
+    // `all` modifier (ORACLE-PORT `Lean.Parser.Module.all`) AFTER `import`
+    // and before the module name, so the sort key must skip it too — else
+    // `import all Foo` keys as "allFoo" instead of "Foo", sorting it out of
+    // module-name order relative to plain imports of the same prefix.
+    #[test]
+    fn import_all_sorts_by_module_name_not_all_prefix() {
+        // Without the fix, `import all Apple` keys as "allApple", which
+        // sorts AFTER "Banana" (lowercase 'a' > uppercase 'B' in ASCII) —
+        // so this case only passes once the sort key skips `all` and keys
+        // by "Apple" instead, sorting it BEFORE "Banana" as expected.
+        let src = "import Banana\nimport all Apple\n";
+        assert_eq!(fmt(src), "import all Apple\nimport Banana\n");
+
+        let snap = builtin::snapshot();
+        assert!(
+            crate::verify::check_invariants(src, &snap).is_ok(),
+            "semantics invariant must hold for `import all`"
         );
     }
 
