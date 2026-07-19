@@ -140,7 +140,9 @@ implementation or a thin frontend. Full design:
   trivia baseline, single-line operator spacing, import normalize+sort;
   everything else preserves the author's layout verbatim. Correctness is
   self-consistency — total, idempotent, semantics-preserving (canonical
-  tree unchanged), comments byte-identical modulo trailing whitespace —
+  tree unchanged modulo layout + import order, via span-stripped
+  import-sorted `canon_semantic`), comments byte-identical modulo
+  trailing whitespace —
   gated over the parser pass-list by `mise run fmt:mathlib`. Spec:
   docs/superpowers/specs/2026-07-19-m3c-fmt-thin-slice-design.md.
 

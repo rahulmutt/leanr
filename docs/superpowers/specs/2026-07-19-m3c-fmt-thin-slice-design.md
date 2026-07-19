@@ -208,7 +208,18 @@ Over that corpus, four invariants, each a gate:
    (never panics, never bails).
 2. **Idempotent** — `fmt(fmt(x)) == fmt(x)`, byte-exact.
 3. **Semantics-preserving** —
-   `canon_jsonl(parse(fmt(x))) == canon_jsonl(parse(x))`.
+   `canon_semantic(parse(fmt(x))) == canon_semantic(parse(x))`.
+   `canon_semantic` (in `leanr_fmt::verify`) is `canon_jsonl` with two
+   changes, and MUST be used here instead of raw `canon_jsonl`: (a) the
+   `"s":[start,stop]` byte spans are omitted — formatting legitimately
+   moves token positions, so absolute offsets are layout, not meaning;
+   (b) the header's import-command siblings are emitted in sorted order —
+   import sorting is semantics-neutral. Raw `canon_jsonl` equality was
+   found (during implementation) to fail on *every* format change, because
+   it embeds byte spans (shift on any length change) and preserves import
+   order — so the invariant is defined against `canon_semantic`, which
+   still catches real corruption (dropped/renamed/restructured token,
+   corrupted import name) while tolerating exactly layout + import order.
 4. **Comment invariant** — ordered comment tokens equal in ↔ out,
    byte-identical modulo trailing whitespace.
 
@@ -232,3 +243,25 @@ sweep.
   style, fixed 100-column width.
 - **salsa wiring** → M5; the grammar snapshot already threads as an
   explicit value, so wrapping `parse`/`format` in a query is mechanical.
+
+### Fast-follows discovered during M3c implementation (next slice)
+
+- **Apply the token-aware walk to import-bearing bodies.** Files WITH
+  imports currently emit the head/tail as raw source slices, so trivia
+  baseline + operator spacing do NOT run on their bodies (only import
+  sort + EOF `finalize` do). Since essentially every real corpus file has
+  imports, the corpus gate mainly exercises the import-splice + invariant
+  machinery; trivia/spacing are covered by the import-free hermetic
+  fixtures. Route the non-import spans through `render_tokens` so all
+  three rules apply uniformly.
+- **`fmt:mathlib` snapshot reuse.** The gate rebuilds a full snapshot per
+  file (~10 min release over the pass-list). Reuse snapshots per distinct
+  import set (as `mathlib_sweep.rs` does) to make the "fast" tier live up
+  to the name.
+- **Share `canon_semantic`'s despan with `canon.rs`.** `canon_semantic`
+  duplicates `canon_jsonl`'s node shape + `json_str`; export a span-less
+  core from `leanr_syntax::canon` to remove the schema-drift risk (it is
+  only ever compared against itself, so drift can only false-negative).
+- **CLI edge combos:** `leanr fmt --check -` (stdin) currently always
+  exits 0 without flagging a would-change; `leanr fmt` with zero file
+  args exits 0 silently. Define and handle these deliberately.
