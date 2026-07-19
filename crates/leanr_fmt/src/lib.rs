@@ -2,9 +2,11 @@
 //! over `leanr_syntax` lossless trees. Consumes trees only; never
 //! re-lexes source. See docs/superpowers/specs/2026-07-19-m3c-fmt-thin-slice-design.md.
 
+pub mod comments;
 pub mod doc;
 pub mod render;
 pub mod trivia;
+pub mod verify;
 
 use leanr_syntax::grammar::GrammarSnapshot;
 use leanr_syntax::{parse_module, SyntaxTree};

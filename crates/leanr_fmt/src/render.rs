@@ -53,10 +53,9 @@ fn emit_token_text(t: &SyntaxToken) -> String {
     }
 }
 
-/// Leaf tokens of a subtree in source order (shared by later rules — no
-/// caller yet at this task, hence `allow(dead_code)`; the import-block
-/// and whitespace-trivia rules land in later M3c tasks).
-#[allow(dead_code)]
+/// Leaf tokens of a subtree in source order (shared by later rules; used
+/// by `comments::has_interior_comment` and the import-block and
+/// whitespace-trivia rules landing in later M3c tasks).
 pub(crate) fn tokens_of(node: &SyntaxNode) -> Vec<SyntaxToken> {
     node.descendants_with_tokens()
         .filter_map(|el| match el {
