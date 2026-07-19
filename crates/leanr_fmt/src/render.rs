@@ -37,35 +37,60 @@ pub fn render_verbatim(tree: &SyntaxTree) -> Doc {
 }
 
 /// Every leaf token in source order, with each token's emitted text
-/// chosen by KIND (see `emit_token_text`). Whitespace-trivia and line
-/// comments are normalized; every other token — including string literals
-/// and block/doc comments — is emitted verbatim. This is the no-imports
-/// path; its behavior must stay byte-identical to the earlier spine.
+/// chosen by KIND (see `emit_token_text`). Whitespace-trivia is routed
+/// through the spacing rule first (`rules::spacing::normalize_ws`): for a
+/// single-line gap adjacent to a target operator (`:=`, `→`) spacing wins
+/// and normalizes it to one space; every other whitespace-trivia case
+/// (multi-line, or single-line but not near a target) falls back to
+/// `trivia::normalize_ws_trivia` (Task 3's indentation/blank-run
+/// handling and single-line passthrough). Line comments and every other
+/// token — including string literals and block/doc comments — are
+/// emitted verbatim/trimmed exactly as before (`emit_token_text`). This
+/// is the no-imports path; its behavior must stay byte-identical to the
+/// earlier spine for everything spacing does not touch.
 fn render_tokens(tree: &SyntaxTree) -> Doc {
-    let mut parts = Vec::new();
-    for el in tree.root().descendants_with_tokens() {
-        if let NodeOrToken::Token(t) = el {
-            parts.push(Doc::text(emit_token_text(&t)));
+    use leanr_syntax::kind::{is_trivia, KIND_WHITESPACE};
+    let toks = tokens_of(&tree.root());
+    let mut parts = Vec::with_capacity(toks.len());
+    for (i, t) in toks.iter().enumerate() {
+        if t.kind() == KIND_WHITESPACE {
+            let prev = toks[..i]
+                .iter()
+                .rev()
+                .find(|p| !is_trivia(p.kind()))
+                .map(|p| p.text());
+            let next = toks[i + 1..]
+                .iter()
+                .find(|p| !is_trivia(p.kind()))
+                .map(|p| p.text());
+            let ws = t.text();
+            let out = match crate::rules::spacing::normalize_ws(prev, ws, next) {
+                Some(s) => s,                                   // single-line near :=/→  -> one space
+                None => crate::trivia::normalize_ws_trivia(ws), // Task 3 fallback
+            };
+            parts.push(Doc::text(out));
+        } else {
+            parts.push(Doc::text(emit_token_text(t)));
         }
     }
     Doc::concat(parts)
 }
 
-/// Choose a token's emitted text by KIND. No reliance on byte-offset
-/// alignment, so it composes with later reordering/spacing tasks.
+/// Choose a NON-whitespace token's emitted text by KIND. `render_tokens`
+/// handles `KIND_WHITESPACE` itself (spacing rule, then `normalize_ws_trivia`
+/// fallback) before it ever reaches here, so this function never sees that
+/// kind. No reliance on byte-offset alignment, so it composes with later
+/// reordering/spacing tasks.
 ///
-/// - Whitespace trivia → `normalize_ws_trivia`.
 /// - Line comment → `trim_end` (a Lean line comment runs to EOL, so its
 ///   trailing whitespace is genuinely trailing and the comment invariant
 ///   compares modulo trailing whitespace).
 /// - Everything else (STRING literals, BLOCK/DOC comments, idents,
 ///   atoms, …) → emitted verbatim, byte-for-byte. NEVER trimmed.
 fn emit_token_text(t: &SyntaxToken) -> String {
-    use leanr_syntax::kind::{KIND_LINE_COMMENT, KIND_WHITESPACE};
+    use leanr_syntax::kind::KIND_LINE_COMMENT;
     let k = t.kind();
-    if k == KIND_WHITESPACE {
-        crate::trivia::normalize_ws_trivia(t.text())
-    } else if k == KIND_LINE_COMMENT {
+    if k == KIND_LINE_COMMENT {
         // The lexer folds the trailing newline INTO the line-comment token
         // (a line comment runs to EOL inclusive). Strip only trailing horizontal
         // whitespace; preserve the terminating newline (the line separator).
@@ -100,10 +125,17 @@ mod tests {
 
     #[test]
     fn all_fallback_round_trips_byte_exact() {
-        let src = "namespace Foo\ndef  x :=   1\nend Foo\n";
+        // `:=` already single-spaced on both sides, so none of the wired
+        // rules (imports/trivia/spacing) change anything here; `def  x`'s
+        // 2-space gap is untouched too (not adjacent to a target operator).
+        // This pins byte-identical passthrough for content no rule touches
+        // (Task 6 added a fixture-collision hazard here: an earlier draft
+        // of this fixture had `:=   1`, which the spacing rule now
+        // legitimately collapses — see `single_line_assign_spacing_normalized`
+        // for that behavior).
+        let src = "namespace Foo\ndef  x := 1\nend Foo\n";
         let snap = builtin::snapshot();
         let tree = parse_module(src, &snap).tree;
-        // No rules wired yet: output is byte-identical to input.
         assert_eq!(crate::format_tree(&tree), src);
     }
 
@@ -175,6 +207,40 @@ mod tests {
         assert_eq!(
             crate::format_tree(&tree),
             "def x := 1\n-- note\ndef y := 2\n"
+        );
+    }
+
+    // Task 6: single-line whitespace adjacent to `:=` collapses to one space.
+    #[test]
+    fn single_line_assign_spacing_normalized() {
+        let src = "def x :=   1\n";
+        let snap = leanr_syntax::builtin::snapshot();
+        let tree = leanr_syntax::parse_module(src, &snap).tree;
+        assert_eq!(crate::format_tree(&tree), "def x := 1\n");
+    }
+
+    // Task 6 idempotence: already single-spaced stays single-spaced.
+    #[test]
+    fn already_single_spaced_assign_stays_single_spaced() {
+        assert_eq!(fmt("def x := 1\n"), "def x := 1\n");
+    }
+
+    // Task 6 guard: multi-line whitespace near `:=` must NOT be collapsed
+    // by the spacing rule — it must still route to `normalize_ws_trivia`
+    // (proves the bail-to-trivia composition, not a regression of Task 3).
+    #[test]
+    fn multiline_ws_near_assign_not_collapsed() {
+        assert_eq!(fmt("def x :=\n  1\n"), "def x :=\n  1\n");
+    }
+
+    // Task 6 guard: a line comment adjacent to a spacing-affected region
+    // still keeps its terminating newline (Task 3's line-comment handling
+    // is untouched by the spacing branch).
+    #[test]
+    fn line_comment_near_spacing_change_keeps_newline() {
+        assert_eq!(
+            fmt("def x :=   1 -- note   \ndef y := 2\n"),
+            "def x := 1 -- note\ndef y := 2\n"
         );
     }
 }

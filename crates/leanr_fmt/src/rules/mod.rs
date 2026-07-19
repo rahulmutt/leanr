@@ -3,3 +3,4 @@
 //! without a rule is preserve-fallback.
 
 pub mod imports;
+pub mod spacing;
