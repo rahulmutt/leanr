@@ -21,7 +21,7 @@ pub enum FormatError {
 pub fn format_tree(tree: &SyntaxTree) -> String {
     let doc = render::render_verbatim(tree);
     let laid_out = doc::layout(&doc, WIDTH);
-    trivia::normalize(&laid_out)
+    trivia::finalize(&laid_out)
 }
 
 /// Parse then format. Enforces the "parseable input" precondition.
