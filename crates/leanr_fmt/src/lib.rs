@@ -5,6 +5,7 @@
 pub mod comments;
 pub mod doc;
 pub mod render;
+pub mod rules;
 pub mod trivia;
 pub mod verify;
 

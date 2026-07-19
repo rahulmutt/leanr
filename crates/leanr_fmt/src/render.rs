@@ -7,12 +7,41 @@ use leanr_syntax::tree::{NodeOrToken, SyntaxNode, SyntaxToken};
 use leanr_syntax::SyntaxTree;
 
 use crate::doc::Doc;
+use crate::rules::imports;
+
+/// The formatter spine. Imports are the ONLY reordered content in this
+/// slice: when `imports::detect` finds a contiguous import block, emit
+/// everything before it verbatim (raw source slice), the sorted imports
+/// (one `import <name>` per line), then everything after it verbatim.
+/// Otherwise (no imports, or a comment inside the import span) fall back
+/// to the token-aware verbatim walk (`render_tokens`), byte-identical to
+/// the pre-import-rule behavior.
+pub fn render_verbatim(tree: &SyntaxTree) -> Doc {
+    match imports::detect(tree) {
+        Some(block) => {
+            let src = tree.text();
+            let joined = block
+                .sorted
+                .iter()
+                .map(|m| format!("import {m}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            Doc::concat(vec![
+                Doc::text(src[..block.start].to_string()),
+                Doc::text(joined),
+                Doc::text(src[block.end..].to_string()),
+            ])
+        }
+        None => render_tokens(tree),
+    }
+}
 
 /// Every leaf token in source order, with each token's emitted text
 /// chosen by KIND (see `emit_token_text`). Whitespace-trivia and line
 /// comments are normalized; every other token — including string literals
-/// and block/doc comments — is emitted verbatim.
-pub fn render_verbatim(tree: &SyntaxTree) -> Doc {
+/// and block/doc comments — is emitted verbatim. This is the no-imports
+/// path; its behavior must stay byte-identical to the earlier spine.
+fn render_tokens(tree: &SyntaxTree) -> Doc {
     let mut parts = Vec::new();
     for el in tree.root().descendants_with_tokens() {
         if let NodeOrToken::Token(t) = el {
