@@ -17,28 +17,52 @@ pub struct ImportBlock {
 
 /// An import command node is one whose kind name is Lean's module-import
 /// command. Verified against an oracle dump (`import Foo`): the node's
-/// interned kind name is `Lean.Parser.Module.import`.
+/// interned kind name is `Lean.Parser.Module.import`. This also matches
+/// `public import Foo` (the module-system modifier prefixes the same
+/// command node; the kind name is unchanged).
 fn is_import_command(node: &SyntaxNode, tree: &SyntaxTree) -> bool {
     tree.kinds.name(node.kind()) == "Lean.Parser.Module.import"
 }
 
-/// The module name a single import command names, e.g. "Foo.Bar".
-fn import_name(node: &SyntaxNode) -> String {
-    // Significant (non-trivia) tokens after the `import` keyword joined
-    // verbatim reproduce the dotted name (a single ident token here).
-    let mut name = String::new();
-    let mut seen_kw = false;
-    for t in tokens_of(node) {
-        if leanr_syntax::kind::is_trivia(t.kind()) {
-            continue;
-        }
-        if !seen_kw {
-            seen_kw = true; // skip the `import` keyword atom
-            continue;
-        }
-        name.push_str(t.text());
-    }
-    name
+/// The full original source text of a single import command, spanning its
+/// first significant token through its last significant token. This is
+/// what gets EMITTED — verbatim, byte-for-byte — so any modifier
+/// (`public`, …), the `import` keyword itself, and exact intra-import
+/// spacing survive reordering untouched.
+fn import_original_text<'a>(node: &SyntaxNode, src: &'a str) -> &'a str {
+    let toks = tokens_of(node);
+    let sig: Vec<_> = toks
+        .iter()
+        .filter(|t| !leanr_syntax::kind::is_trivia(t.kind()))
+        .collect();
+    let start = sig
+        .first()
+        .map(|t| u32::from(t.text_range().start()) as usize)
+        .unwrap_or_else(|| u32::from(node.text_range().start()) as usize);
+    let end = sig
+        .last()
+        .map(|t| u32::from(t.text_range().end()) as usize)
+        .unwrap_or_else(|| u32::from(node.text_range().end()) as usize);
+    &src[start..end]
+}
+
+/// The module name a single import command names, e.g. "Foo.Bar". Used
+/// ONLY as a sort key — never emitted. Finds the significant token whose
+/// text is the `import` keyword and joins the significant tokens after
+/// it; falls back to joining all significant tokens if no `import`
+/// keyword is found (so a sort key always exists even under unexpected
+/// input shapes).
+fn import_sort_key(node: &SyntaxNode) -> String {
+    let sig: Vec<_> = tokens_of(node)
+        .into_iter()
+        .filter(|t| !leanr_syntax::kind::is_trivia(t.kind()))
+        .collect();
+    let kw_idx = sig.iter().position(|t| t.text() == "import");
+    let rest = match kw_idx {
+        Some(i) => &sig[i + 1..],
+        None => &sig[..],
+    };
+    rest.iter().map(|t| t.text()).collect()
 }
 
 pub fn detect(tree: &SyntaxTree) -> Option<ImportBlock> {
@@ -77,8 +101,16 @@ pub fn detect(tree: &SyntaxTree) -> Option<ImportBlock> {
     if imports.iter().any(has_interior_comment) || between_import_comment(&imports) {
         return None;
     }
-    let mut sorted: Vec<String> = imports.iter().map(import_name).collect();
-    sorted.sort();
+    let src = tree.text();
+    let mut keyed: Vec<(String, &str)> = imports
+        .iter()
+        .map(|n| (import_sort_key(n), import_original_text(n, &src)))
+        .collect();
+    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    let sorted: Vec<String> = keyed
+        .into_iter()
+        .map(|(_, text)| text.to_string())
+        .collect();
     Some(ImportBlock { start, end, sorted })
 }
 
@@ -153,6 +185,39 @@ mod tests {
             reparsed.errors.is_empty(),
             "formatted output failed to re-parse cleanly: {:?}",
             reparsed.errors
+        );
+    }
+
+    // REGRESSION (Mathlib corpus gate, Task 5): `public import Foo` is the
+    // module-system form real Mathlib package files use. The import rule
+    // must preserve the `public` modifier verbatim and sort by module name
+    // — not reconstruct `import <name>` from scratch (that dropped `public`
+    // and duplicated `import` into the name: `public import Foo.B` used to
+    // become `import importFoo.B`).
+    #[test]
+    fn public_imports_sorted_and_preserved() {
+        let src = "public import Foo.B\npublic import Foo.A\n";
+        assert_eq!(fmt(src), "public import Foo.A\npublic import Foo.B\n");
+
+        let snap = builtin::snapshot();
+        assert!(
+            crate::verify::check_invariants(src, &snap).is_ok(),
+            "semantics invariant must hold once `public` is preserved"
+        );
+    }
+
+    #[test]
+    fn module_header_with_public_imports() {
+        let src = "module\n\npublic import Foo.B\npublic import Foo.A\n";
+        assert_eq!(
+            fmt(src),
+            "module\n\npublic import Foo.A\npublic import Foo.B\n"
+        );
+
+        let snap = builtin::snapshot();
+        assert!(
+            crate::verify::check_invariants(src, &snap).is_ok(),
+            "semantics invariant must hold once `public` is preserved"
         );
     }
 }

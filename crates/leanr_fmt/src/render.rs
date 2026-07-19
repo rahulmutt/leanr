@@ -12,20 +12,17 @@ use crate::rules::imports;
 /// The formatter spine. Imports are the ONLY reordered content in this
 /// slice: when `imports::detect` finds a contiguous import block, emit
 /// everything before it verbatim (raw source slice), the sorted imports
-/// (one `import <name>` per line), then everything after it verbatim.
-/// Otherwise (no imports, or a comment inside the import span) fall back
-/// to the token-aware verbatim walk (`render_tokens`), byte-identical to
-/// the pre-import-rule behavior.
+/// (each import's ORIGINAL source text, verbatim — including any
+/// `public`/modifier prefix and the `import` keyword itself — one per
+/// line, reordered by module name only), then everything after it
+/// verbatim. Otherwise (no imports, or a comment inside the import span)
+/// fall back to the token-aware verbatim walk (`render_tokens`),
+/// byte-identical to the pre-import-rule behavior.
 pub fn render_verbatim(tree: &SyntaxTree) -> Doc {
     match imports::detect(tree) {
         Some(block) => {
             let src = tree.text();
-            let joined = block
-                .sorted
-                .iter()
-                .map(|m| format!("import {m}"))
-                .collect::<Vec<_>>()
-                .join("\n");
+            let joined = block.sorted.join("\n");
             Doc::concat(vec![
                 Doc::text(src[..block.start].to_string()),
                 Doc::text(joined),
