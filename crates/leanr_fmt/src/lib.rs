@@ -4,6 +4,7 @@
 
 pub mod doc;
 pub mod render;
+pub mod trivia;
 
 use leanr_syntax::grammar::GrammarSnapshot;
 use leanr_syntax::{parse_module, SyntaxTree};
@@ -19,7 +20,8 @@ pub enum FormatError {
 /// Format a parsed tree. Total: never panics, never bails.
 pub fn format_tree(tree: &SyntaxTree) -> String {
     let doc = render::render_verbatim(tree);
-    doc::layout(&doc, WIDTH)
+    let laid_out = doc::layout(&doc, WIDTH);
+    trivia::normalize(&laid_out)
 }
 
 /// Parse then format. Enforces the "parseable input" precondition.
