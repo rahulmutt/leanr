@@ -109,6 +109,17 @@ enum Command {
         #[arg(long)]
         verbose: bool,
     },
+    /// Format Lean source files (leanr fmt).
+    Fmt {
+        /// Files to format; `-` reads stdin and writes stdout.
+        files: Vec<PathBuf>,
+        /// Check mode: write nothing, exit non-zero if any file would change.
+        #[arg(long)]
+        check: bool,
+        /// Root(s) to resolve the import closure for the grammar snapshot.
+        #[arg(long)]
+        path: Vec<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -224,6 +235,7 @@ fn main() -> ExitCode {
             path,
             verbose,
         } => parse_cmd(&file, dump, path, verbose),
+        Command::Fmt { files, check, path } => fmt_cmd(files, check, path),
     }
 }
 
@@ -279,6 +291,47 @@ fn olean_decls(path: &std::path::Path) -> ExitCode {
     }
 }
 
+/// Owns whatever backs a grammar snapshot so callers can borrow it.
+enum SnapshotHolder {
+    Assembled(leanr_grammar::AssembledGrammar),
+    Builtin(leanr_syntax::grammar::GrammarSnapshot),
+}
+
+impl SnapshotHolder {
+    fn snapshot(&self) -> &leanr_syntax::grammar::GrammarSnapshot {
+        match self {
+            SnapshotHolder::Assembled(a) => &a.snapshot,
+            SnapshotHolder::Builtin(s) => s,
+        }
+    }
+}
+
+/// Build the grammar snapshot for `src` from its import closure (or the
+/// builtin snapshot when there are no imports / no roots). Mirrors the
+/// logic previously inline in `parse_cmd`.
+fn load_snapshot(src: &str, path: Vec<PathBuf>, verbose: bool) -> Result<SnapshotHolder, String> {
+    let imports = leanr_syntax::parse_header_imports(src);
+    if imports.is_empty() {
+        return Ok(SnapshotHolder::Builtin(leanr_syntax::builtin::snapshot()));
+    }
+    let roots = discover_roots(path);
+    if roots.is_empty() {
+        return Ok(SnapshotHolder::Builtin(leanr_syntax::builtin::snapshot()));
+    }
+    let sp = SearchPath::new(roots);
+    let targets: Vec<_> = imports.iter().map(|m| parse_module_name(m)).collect();
+    let mut st = leanr_kernel::bank::Store::persistent();
+    let loaded = leanr_olean::load_closure(&sp, &targets, &mut st)
+        .map_err(|e| format!("error[E0306]: cannot load imports: {e}"))?;
+    let assembled = leanr_grammar::assemble(&loaded, &st);
+    if verbose {
+        for s in &assembled.skipped {
+            eprintln!("skipped parser entry {} ({:?})", s.decl, s.reason);
+        }
+    }
+    Ok(SnapshotHolder::Assembled(assembled))
+}
+
 fn parse_cmd(file: &Path, dump: bool, path: Vec<PathBuf>, verbose: bool) -> ExitCode {
     let bytes = match std::fs::read(file) {
         Ok(b) => b,
@@ -294,43 +347,14 @@ fn parse_cmd(file: &Path, dump: bool, path: Vec<PathBuf>, verbose: bool) -> Exit
             return ExitCode::FAILURE;
         }
     };
-    let imports = leanr_syntax::parse_header_imports(&src);
-    let assembled; // keep alive alongside the `&snapshot` borrow below
-    let snap = if imports.is_empty() {
-        None
-    } else {
-        let roots = discover_roots(path);
-        if roots.is_empty() {
-            None // no roots: builtin-only (documented fallback)
-        } else {
-            let sp = SearchPath::new(roots);
-            let targets: Vec<_> = imports.iter().map(|m| parse_module_name(m)).collect();
-            let mut st = leanr_kernel::bank::Store::persistent();
-            match leanr_olean::load_closure(&sp, &targets, &mut st) {
-                Ok(loaded) => {
-                    assembled = leanr_grammar::assemble(&loaded, &st);
-                    if verbose {
-                        for s in &assembled.skipped {
-                            eprintln!("skipped parser entry {} ({:?})", s.decl, s.reason);
-                        }
-                    }
-                    Some(&assembled.snapshot)
-                }
-                Err(e) => {
-                    eprintln!("error[E0306]: cannot load imports: {e}");
-                    return ExitCode::FAILURE;
-                }
-            }
+    let holder = match load_snapshot(&src, path, verbose) {
+        Ok(h) => h,
+        Err(msg) => {
+            eprintln!("{msg}");
+            return ExitCode::FAILURE;
         }
     };
-    let builtin;
-    let snap = match snap {
-        Some(s) => s,
-        None => {
-            builtin = leanr_syntax::builtin::snapshot();
-            &builtin
-        }
-    };
+    let snap = holder.snapshot();
     let result = leanr_syntax::parse_module(&src, snap);
     if dump {
         print!("{}", leanr_syntax::canon::canon_jsonl(&result.tree));
@@ -346,6 +370,77 @@ fn parse_cmd(file: &Path, dump: bool, path: Vec<PathBuf>, verbose: bool) -> Exit
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+fn fmt_cmd(files: Vec<PathBuf>, check: bool, path: Vec<PathBuf>) -> ExitCode {
+    let mut any_would_change = false;
+    let mut had_error = false;
+    for file in &files {
+        let is_stdin = file.as_os_str() == "-";
+        let src = if is_stdin {
+            let mut s = String::new();
+            use std::io::Read;
+            if std::io::stdin().read_to_string(&mut s).is_err() {
+                eprintln!("error: stdin is not valid UTF-8");
+                had_error = true;
+                continue;
+            }
+            s
+        } else {
+            match std::fs::read(file) {
+                Ok(b) => match String::from_utf8(b) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        eprintln!("{}: error[E0305]: file is not valid UTF-8", file.display());
+                        had_error = true;
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    eprintln!("error: cannot read {}: {e}", file.display());
+                    had_error = true;
+                    continue;
+                }
+            }
+        };
+        let holder = match load_snapshot(&src, path.clone(), false) {
+            Ok(h) => h,
+            Err(msg) => {
+                eprintln!("{}: {msg}", file.display());
+                had_error = true;
+                continue;
+            }
+        };
+        let formatted = match leanr_fmt::format_src(&src, holder.snapshot()) {
+            Ok(s) => s,
+            Err(leanr_fmt::FormatError::Unparseable(msgs)) => {
+                eprintln!("{}: error: cannot format unparseable file:", file.display());
+                for m in msgs {
+                    eprintln!("  {m}");
+                }
+                had_error = true;
+                continue;
+            }
+        };
+        if is_stdin {
+            print!("{formatted}");
+            continue;
+        }
+        if formatted != src {
+            any_would_change = true;
+            if check {
+                eprintln!("{}", file.display());
+            } else if let Err(e) = std::fs::write(file, &formatted) {
+                eprintln!("error: cannot write {}: {e}", file.display());
+                had_error = true;
+            }
+        }
+    }
+    if had_error || (check && any_would_change) {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
     }
 }
 

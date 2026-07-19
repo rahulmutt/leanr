@@ -1,0 +1,14 @@
+[package]
+name = "leanr_fmt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+leanr_syntax = { path = "../leanr_syntax" }
+
+[dev-dependencies]
+leanr_grammar = { path = "../leanr_grammar" }
+leanr_olean = { path = "../leanr_olean" }
+leanr_kernel = { path = "../leanr_kernel" }

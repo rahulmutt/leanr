@@ -1,0 +1,4 @@
+import Foo.A
+import Foo.B
+
+def x := 1

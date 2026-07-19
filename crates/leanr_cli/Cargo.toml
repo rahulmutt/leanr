@@ -12,6 +12,7 @@ path = "src/main.rs"
 clap = { version = "4", features = ["derive"] }
 leanr_build = { version = "0.1.0", path = "../leanr_build" }
 leanr_check = { version = "0.1.0", path = "../leanr_check" }
+leanr_fmt = { version = "0.1.0", path = "../leanr_fmt" }
 leanr_grammar = { version = "0.1.0", path = "../leanr_grammar" }
 leanr_kernel = { version = "0.1.0", path = "../leanr_kernel" }
 leanr_olean = { version = "0.1.0", path = "../leanr_olean" }

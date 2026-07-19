@@ -819,6 +819,7 @@ dependencies = [
  "clap",
  "leanr_build",
  "leanr_check",
+ "leanr_fmt",
  "leanr_grammar",
  "leanr_kernel",
  "leanr_olean",
@@ -827,6 +828,16 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "leanr_fmt"
+version = "0.1.0"
+dependencies = [
+ "leanr_grammar",
+ "leanr_kernel",
+ "leanr_olean",
+ "leanr_syntax",
 ]
 
 [[package]]

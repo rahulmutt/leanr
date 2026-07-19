@@ -89,3 +89,6 @@ touching crate boundaries, and the design spec in
     memory-watchdog (`RAYON_NUM_THREADS=5`, 27G anon-memory kill guard for
     a 32Gi container) with an flock so two sweeps can't stack. Genuinely
     useful on a big local box; run it by hand, don't cron it.
+- **fmt gate:** `leanr fmt` self-consistency is gated by `mise run
+  fmt:mathlib` — a separate, FAST pass-list tier (same 23-entry committed
+  pass-list as `parse:mathlib:fast`), not the nightly discovery sweep.

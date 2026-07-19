@@ -207,6 +207,15 @@ description = "Kernel-check all of pinned Mathlib in parallel (needs mathlib:fet
 depends = ["elan:bootstrap"]
 run = "sh -c 'LEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo run --release -p leanr_cli -- check --all'"
 
+[tasks."fmt:mathlib"]
+description = "M3c fmt self-consistency gate over the parser pass-list (needs mathlib:fetch). FAST pass-list tier — NOT the ~35h discovery sweep. Asserts total + idempotent + semantics-preserving + comment-invariant on every green file."
+depends = ["elan:bootstrap"]
+# LEANR_OLEAN_PATH is computed the same way parse:mathlib:fast computes it
+# (`lake env printenv LEAN_PATH` run from inside .mathlib) — mathlib_corpus.rs's
+# support::snapshot_for reads that same env var, mirroring mathlib_sweep.rs's
+# search-path derivation exactly.
+run = "sh -c 'LEANR_FMT_CORPUS=1 LEANR_OLEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo test --release -p leanr_fmt --test mathlib_corpus -- --nocapture'"
+
 [tasks."parse:mathlib:fast"]
 description = "Fast regression gate: exact sweep over ONLY the committed pass-list (23 entries; needs mathlib:fetch). No corpus walk, no olean closure decode outside the pass-list's own import sets — this is the one to run in the dev loop. Gating is total: any pass-list entry that doesn't parse oracle-green, or whose file is missing, fails the run."
 depends = ["elan:bootstrap"]
