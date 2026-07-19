@@ -819,6 +819,7 @@ dependencies = [
  "clap",
  "leanr_build",
  "leanr_check",
+ "leanr_fmt",
  "leanr_grammar",
  "leanr_kernel",
  "leanr_olean",
