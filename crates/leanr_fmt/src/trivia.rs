@@ -20,8 +20,12 @@
 ///   line's indentation and is KEPT verbatim. Blank-line runs collapse to
 ///   at most 2 newlines (= at most 1 blank line).
 ///
-/// This also converts `\r\n` → `\n`: the `\r` lands at the end of a
-/// dropped pre-newline segment. That CRLF→LF normalization is intended.
+/// If `\r` were present it would land at the end of a dropped pre-newline
+/// segment (i.e. get dropped along with it), but in practice `\r` never
+/// reaches this function: the lexer rejects an isolated `\r` as an error
+/// token (lex.rs:235-242), so a `KIND_WHITESPACE` token can never contain
+/// one, and CRLF source fails to parse before `format_src` ever calls this
+/// helper. The `\r`-handling here is defensive only, not a real code path.
 pub fn normalize_ws_trivia(text: &str) -> String {
     if !text.contains('\n') {
         // Single-line inter-token gap: leave to the spacing rule.
@@ -79,8 +83,13 @@ mod tests {
         assert_eq!(normalize_ws_trivia("\n\n\n\n"), "\n\n");
     }
 
+    // Defensive-only coverage: the lexer rejects an isolated `\r` as an
+    // error token, so a KIND_WHITESPACE token can never actually contain
+    // `\r\n` in the real pipeline (CRLF source fails to parse before this
+    // helper is ever called). This test exercises the helper directly,
+    // bypassing the lexer, to pin the defensive behavior.
     #[test]
-    fn ws_crlf_becomes_lf() {
+    fn ws_crlf_becomes_lf_when_called_directly_bypassing_lexer() {
         assert_eq!(normalize_ws_trivia("\r\n"), "\n");
     }
 

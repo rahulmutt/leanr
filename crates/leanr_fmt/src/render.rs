@@ -37,7 +37,17 @@ fn emit_token_text(t: &SyntaxToken) -> String {
     if k == KIND_WHITESPACE {
         crate::trivia::normalize_ws_trivia(t.text())
     } else if k == KIND_LINE_COMMENT {
-        t.text().trim_end().to_string()
+        // The lexer folds the trailing newline INTO the line-comment token
+        // (a line comment runs to EOL inclusive). Strip only trailing horizontal
+        // whitespace; preserve the terminating newline (the line separator).
+        // A line comment holds at most one '\n', always at the very end.
+        let s = t.text();
+        let trimmed = s.trim_end();
+        if s.ends_with('\n') {
+            format!("{trimmed}\n")
+        } else {
+            trimmed.to_string()
+        }
     } else {
         t.text().to_string()
     }
@@ -123,6 +133,20 @@ mod tests {
         assert!(
             out.contains("a   \n b"),
             "block comment interior ws corrupted: {out:?}"
+        );
+    }
+
+    // REGRESSION: the lexer folds the trailing newline INTO a line-comment
+    // token (a line comment runs to EOL inclusive). `emit_token_text` must
+    // preserve that newline — trimming only trailing horizontal whitespace —
+    // or the following declaration gets glued onto the comment line.
+    #[test]
+    fn mid_file_line_comment_preserves_following_code() {
+        let snap = leanr_syntax::builtin::snapshot();
+        let tree = leanr_syntax::parse_module("def x := 1\n-- note   \ndef y := 2\n", &snap).tree;
+        assert_eq!(
+            crate::format_tree(&tree),
+            "def x := 1\n-- note\ndef y := 2\n"
         );
     }
 }
