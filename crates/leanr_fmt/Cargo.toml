@@ -7,10 +7,6 @@ repository.workspace = true
 
 [dependencies]
 leanr_syntax = { path = "../leanr_syntax" }
-# Same version leanr_syntax pins; no re-export of `NodeOrToken` exists in
-# leanr_syntax, and this adds no new crate to the resolved graph (already
-# present in Cargo.lock via leanr_syntax at 0.16.1).
-rowan = "0.16"
 
 [dev-dependencies]
 leanr_grammar = { path = "../leanr_grammar" }

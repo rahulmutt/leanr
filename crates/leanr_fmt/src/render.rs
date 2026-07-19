@@ -3,9 +3,8 @@
 //! layer every token is emitted verbatim (preserve-fallback); later
 //! tasks intercept the import block and whitespace-trivia.
 
-use leanr_syntax::tree::{SyntaxNode, SyntaxToken};
+use leanr_syntax::tree::{NodeOrToken, SyntaxNode, SyntaxToken};
 use leanr_syntax::SyntaxTree;
-use rowan::NodeOrToken;
 
 use crate::doc::Doc;
 
@@ -52,6 +51,6 @@ mod tests {
         let snap = builtin::snapshot();
         // A stray `)` with no matching command is a parse error.
         let err = crate::format_src(")", &snap).unwrap_err();
-        matches!(err, crate::FormatError::Unparseable(_));
+        assert!(matches!(err, crate::FormatError::Unparseable(_)));
     }
 }

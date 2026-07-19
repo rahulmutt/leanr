@@ -30,6 +30,7 @@ impl rowan::Language for Lang {
 
 pub type SyntaxNode = rowan::SyntaxNode<Lang>;
 pub type SyntaxToken = rowan::SyntaxToken<Lang>;
+pub use rowan::NodeOrToken;
 
 /// Flat parse event. Token text is carried by (offset, len) into the
 /// source — the builder slices the original `src`, which is what makes
