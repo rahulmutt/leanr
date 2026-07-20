@@ -23,14 +23,13 @@
 //! # A deliberate subset of the oracle's fields
 //!
 //! The oracle's `Config`/`toKey` covers 19 fields; this `Config` covers
-//! 11. That gap is intentional, not an oversight: `iota`,
-//! `proof_irrelevance`, `zeta_unused`, `zeta_have`, `offset_cnstrs`,
-//! `assign_synthetic_opaque`, and `eta_struct` arrive with the features
-//! that consult them, and `ASSERT_CONFIG_SIZE` forces the cache-key
-//! decision at that point rather than letting a field silently default
-//! to "unconsulted". `isDefEqStuckEx` is spec-mandated to become a
-//! typed error variant rather than a bool field, so it is not tracked
-//! here at all.
+//! 14. That gap is intentional, not an oversight: `proof_irrelevance`,
+//! `offset_cnstrs`, `assign_synthetic_opaque`, and `eta_struct` arrive
+//! with the features that consult them, and `ASSERT_CONFIG_SIZE` forces
+//! the cache-key decision at that point rather than letting a field
+//! silently default to "unconsulted". `isDefEqStuckEx` is spec-mandated
+//! to become a typed error variant rather than a bool field, so it is
+//! not tracked here at all.
 
 use std::hash::{Hash, Hasher};
 
@@ -43,6 +42,9 @@ pub enum ProjReduction {
     No,
     Yes,
     YesWithDelta,
+    /// like `YesWithDelta` but caps the discriminant whnf at `.instances`
+    /// transparency (oracle `ProjReductionKind.yesWithDeltaI`).
+    YesWithDeltaI,
 }
 
 /// Reduction and unification configuration.
@@ -69,6 +71,17 @@ pub struct Config {
     /// `false` to match its siblings; the oracle does not.
     pub univ_approx: bool,
     pub unification_hints: bool,
+    /// Reduce recursor/matcher applications (iota). oracle: Basic.lean,
+    /// `iota : Bool := true`; consulted by whnfCore's app arm
+    /// (WHNF.lean:685 `unless cfg.iota do return e`).
+    pub iota: bool,
+    /// Drop `let x := v; e` when `x` does not occur in `e`. oracle:
+    /// `zetaUnused : Bool := true`; takes precedence over zeta/zetaHave.
+    pub zeta_unused: bool,
+    /// Reduce nondependent lets (have) when zeta is enabled. oracle:
+    /// Basic.lean, `zetaHave : Bool := true`; consulted by whnfCore's
+    /// letE arm.
+    pub zeta_have: bool,
 }
 
 /// Breaks the build when `Config` changes size — i.e. when a field is
@@ -77,7 +90,7 @@ pub struct Config {
 /// `cache_key`, then update this constant. See the module doc for the
 /// two Lean bugs this guards against.
 const ASSERT_CONFIG_SIZE: () = assert!(
-    std::mem::size_of::<Config>() == 11,
+    std::mem::size_of::<Config>() == 14,
     "Config changed size: a field was added or removed. Decide whether \
      it is semantically relevant to definitional equality and therefore \
      belongs in Config::cache_key, then update this assertion. A field \
@@ -101,6 +114,9 @@ impl Default for Config {
             // Oracle default: Basic.lean:161, `univApprox : Bool := true`.
             univ_approx: true,
             unification_hints: true,
+            iota: true,
+            zeta_unused: true,
+            zeta_have: true,
         }
     }
 }
@@ -136,6 +152,16 @@ mod tests {
         assert!(!c.const_approx);
         assert!(c.univ_approx);
         assert!(c.unification_hints);
+    }
+
+    // Plan-2 additions match the oracle defaults (Basic.lean): iota,
+    // zetaUnused, zetaHave all default true.
+    #[test]
+    fn plan2_fields_default_on() {
+        let c = Config::default();
+        assert!(c.iota);
+        assert!(c.zeta_unused);
+        assert!(c.zeta_have);
     }
 
     #[test]
@@ -229,11 +255,23 @@ mod tests {
                 unification_hints: !base.unification_hints,
                 ..base
             },
+            Config {
+                iota: !base.iota,
+                ..base
+            },
+            Config {
+                zeta_unused: !base.zeta_unused,
+                ..base
+            },
+            Config {
+                zeta_have: !base.zeta_have,
+                ..base
+            },
         ];
 
         // One mutation per field: if this count drifts from the field
         // count, a field is untested.
-        assert_eq!(mutations.len(), 11);
+        assert_eq!(mutations.len(), 14);
 
         for (i, m) in mutations.iter().enumerate() {
             assert_ne!(m.cache_key(), k, "mutation {i} did not change the key");
@@ -258,8 +296,16 @@ mod tests {
             ..base
         }
         .cache_key();
+        let d = Config {
+            proj: ProjReduction::YesWithDeltaI,
+            ..base
+        }
+        .cache_key();
         assert_ne!(a, b);
         assert_ne!(b, c);
         assert_ne!(a, c);
+        assert_ne!(c, d);
+        assert_ne!(a, d);
+        assert_ne!(b, d);
     }
 }
