@@ -12,8 +12,10 @@
 
 mod config;
 mod error;
+mod mvar_ctx;
 mod transparency;
 
 pub use config::{Config, ProjReduction};
 pub use error::MetaError;
+pub use mvar_ctx::{MVarDecl, MVarId, MVarKind, MetavarContext};
 pub use transparency::{can_unfold, TransparencyMode};
