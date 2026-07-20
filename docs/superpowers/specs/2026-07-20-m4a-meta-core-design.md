@@ -104,8 +104,16 @@ dev loop, a nightly discovery sweep), with `leanr_kernel` unmodified.
 ### Crate & module structure — `crates/leanr_meta`
 
 Depends on `leanr_kernel` for `Expr` / `ExprId` / the term bank /
-`Environment` only. No reduction logic is shared in either direction,
-even where the rules coincide.
+`Environment`, and on `leanr_olean` for the decoded environment-
+extension data described under § Prerequisite (reducibility statuses,
+the instance table). No reduction logic is shared with the kernel in
+either direction, even where the rules coincide.
+
+The `leanr_olean` dependency follows the existing `leanr_grammar`
+pattern — a consumer of decoded `.olean` content — and is what keeps
+the reducibility and instance tables out of the kernel's
+`Environment`, which would otherwise mean TCB growth for data the
+kernel never reads.
 
 Ownership: the kernel owns terms (bank, interning, ids). `leanr_meta`
 owns everything metavariable-shaped — mvar declarations, the
@@ -136,6 +144,41 @@ contributes an `impl MetaCtx` block — Rust permits inherent impls
 split across files within a crate. The recursion stays direct calls,
 files stay single-concern, and there is no dynamic dispatch on the hot
 path.
+
+### Prerequisite: typed decode of two environment extensions
+
+Discovered while planning, and a genuine dependency of this slice
+rather than an implementation detail.
+
+`leanr_olean`'s `ModuleData` validates environment-extension entries
+but keeps them **opaque** (`num_entries`), with only
+`Lean.Parser.parserExtension` decoded typed (M3b2a). The in-source
+comment anticipates this: "interpreted by the elaborator in M4."
+
+Two of those opaque extensions are load-bearing for M4a:
+
+- **The reducibility attributes** (`@[reducible]`, `@[irreducible]`,
+  `@[instance_reducible]`, `@[implicit_reducible]`) carry
+  `ReducibilityStatus`. Without them `can_unfold` cannot be
+  implemented — every constant would look `semireducible`.
+- **The instance extension and the default-instance extension** hold
+  the synthesis candidates. Without them the instance table is empty
+  and TC synthesis answers "no instance" for everything.
+
+Note that `ReducibilityStatus` is **not** `ReducibilityHints`
+(`Regular` / `Opaque` / `Abbrev`), which is an unfolding-cost
+heuristic stored inline in `DefinitionVal` and already decoded. They
+are unrelated despite the similar names, and conflating them yields a
+`can_unfold` that is wrong in a way that typechecks.
+
+Both decodes land in `leanr_olean` alongside the parser-entry
+precedent, not in `leanr_meta`: they are olean-format concerns, and
+`.olean` bytes are untrusted input, so they inherit the existing
+never-panic obligation and its fuzz target.
+
+The reducibility decode is a prerequisite of `transparency.rs`; the
+instance decode is a prerequisite of `instances.rs` and may land with
+it.
 
 ### Transparency (`transparency.rs`)
 
