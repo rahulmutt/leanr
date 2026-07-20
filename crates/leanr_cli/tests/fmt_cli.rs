@@ -40,3 +40,55 @@ fn fmt_rewrites_in_place() {
         "import Foo.A\nimport Foo.B\n"
     );
 }
+
+#[test]
+fn fmt_with_no_args_walks_project_and_respects_gitignore() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("src/nested")).unwrap();
+    std::fs::create_dir_all(root.join("vendored")).unwrap();
+    std::fs::create_dir_all(root.join(".lake/packages")).unwrap();
+    std::fs::write(root.join(".gitignore"), "vendored/\n").unwrap();
+
+    let unformatted = "import Foo.B\nimport Foo.A\n";
+    let formatted = "import Foo.A\nimport Foo.B\n";
+    std::fs::write(root.join("src/A.lean"), unformatted).unwrap();
+    std::fs::write(root.join("src/nested/B.lean"), unformatted).unwrap();
+    std::fs::write(root.join("vendored/C.lean"), unformatted).unwrap();
+    std::fs::write(root.join(".lake/packages/D.lean"), unformatted).unwrap();
+
+    let out = leanr().arg("fmt").current_dir(root).output().unwrap();
+    assert!(out.status.success(), "project walk should succeed");
+
+    // Walked and rewritten, including nested.
+    assert_eq!(
+        std::fs::read_to_string(root.join("src/A.lean")).unwrap(),
+        formatted
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("src/nested/B.lean")).unwrap(),
+        formatted
+    );
+    // Gitignored: untouched.
+    assert_eq!(
+        std::fs::read_to_string(root.join("vendored/C.lean")).unwrap(),
+        unformatted
+    );
+    // Hidden directory (.lake, .git, .mathlib): untouched.
+    assert_eq!(
+        std::fs::read_to_string(root.join(".lake/packages/D.lean")).unwrap(),
+        unformatted
+    );
+}
+
+#[test]
+fn fmt_with_no_args_and_no_lean_files_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("README.md"), "# nothing here\n").unwrap();
+    let out = leanr().arg("fmt").current_dir(dir.path()).output().unwrap();
+    assert!(
+        out.status.success(),
+        "an empty project is not an error: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

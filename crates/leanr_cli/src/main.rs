@@ -111,7 +111,9 @@ enum Command {
     },
     /// Format Lean source files (leanr fmt).
     Fmt {
-        /// Files to format; `-` reads stdin and writes stdout.
+        /// Files to format; `-` reads stdin and writes stdout. With no
+        /// files, walks the current directory for `*.lean`, respecting
+        /// `.gitignore` and skipping hidden directories.
         files: Vec<PathBuf>,
         /// Check mode: write nothing, exit non-zero if any file would change.
         #[arg(long)]
@@ -373,10 +375,41 @@ fn parse_cmd(file: &Path, dump: bool, path: Vec<PathBuf>, verbose: bool) -> Exit
     }
 }
 
+/// The inputs to format. Explicit arguments win; with none, walk the
+/// current directory for `*.lean`, respecting `.gitignore`.
+///
+/// `ignore::WalkBuilder`'s defaults are almost exactly the wanted
+/// behavior: hidden entries are skipped (so `.lake`, `.git`, and
+/// `.mathlib` are excluded regardless of any ignore file), symlinks are
+/// not followed, and nested `.gitignore` files compose. The one default
+/// overridden is `require_git`, which otherwise only honors `.gitignore`
+/// inside a directory that itself contains a `.git`; a project without
+/// (or not yet inside) VCS metadata should still respect it. Results are
+/// sorted so output order does not depend on filesystem iteration order.
+fn resolve_inputs(files: Vec<PathBuf>) -> Vec<PathBuf> {
+    if !files.is_empty() {
+        return files;
+    }
+    let mut found: Vec<PathBuf> = ignore::WalkBuilder::new(".")
+        // Honor `.gitignore` even when the walked directory is not itself
+        // inside a `.git` repository (e.g. a project root without VCS
+        // metadata, or in tests): the file is still a statement of intent.
+        .require_git(false)
+        .build()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
+        .map(|e| e.into_path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("lean"))
+        .collect();
+    found.sort();
+    found
+}
+
 fn fmt_cmd(files: Vec<PathBuf>, check: bool, path: Vec<PathBuf>) -> ExitCode {
+    let inputs = resolve_inputs(files);
     let mut any_would_change = false;
     let mut had_error = false;
-    for file in &files {
+    for file in &inputs {
         let is_stdin = file.as_os_str() == "-";
         let src = if is_stdin {
             let mut s = String::new();
