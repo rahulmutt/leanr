@@ -40,8 +40,15 @@ fn fmt_holds_all_invariants_over_passlist() {
     );
     let list = std::fs::read_to_string(passlist_path()).unwrap();
     let root = mathlib_root();
+
+    // Group pass-list files by import set so one grammar snapshot is built
+    // per DISTINCT set rather than per file — the same per-import-set reuse
+    // `leanr_grammar/tests/mathlib_sweep.rs` does. The key is derived from
+    // the same `parse_header_imports` call the snapshot build itself makes,
+    // so there is no second notion of "this file's imports" to drift.
+    let mut groups: std::collections::BTreeMap<String, Vec<(String, String)>> =
+        std::collections::BTreeMap::new();
     let mut checked = 0;
-    let mut failures = Vec::new();
     for rel in list.lines() {
         let rel = rel.trim();
         if rel.is_empty() || rel.starts_with('#') {
@@ -52,27 +59,49 @@ fn fmt_holds_all_invariants_over_passlist() {
             Ok(s) => s,
             Err(_) => continue, // upstream churn: absent file, not a fmt regression
         };
-        // Build the grammar snapshot for this file's import closure. The
-        // file is confirmed PRESENT (the read above succeeded), so a `None`
-        // here means `load_closure` itself failed (roots-empty is already
-        // caught by the assert above) — a hard failure, not a skip: a
-        // present-but-unloadable pass-list file must never be silently
-        // dropped from the gate (that would let a "green" run quietly check
-        // fewer files than it claims).
+        // The file is confirmed PRESENT, so it is now counted — a
+        // present-but-unloadable file must never be silently dropped from
+        // the gate (that would let a "green" run quietly check fewer files
+        // than it claims).
         checked += 1;
-        let snap = match support::snapshot_for(&src, &root) {
+        let mut imports = leanr_syntax::parse_header_imports(&src);
+        imports.sort();
+        imports.dedup();
+        groups
+            .entry(imports.join("\0"))
+            .or_default()
+            .push((rel.to_string(), src));
+    }
+
+    let mut failures = Vec::new();
+    for (key, files) in &groups {
+        // Any file in the group resolves the same closure; use the first.
+        let (_, probe_src) = &files[0];
+        let snap = match support::snapshot_for(probe_src, &root) {
             Some(s) => s,
             None => {
-                failures.push(format!(
-                    "{rel}: import closure unavailable (LEANR_OLEAN_PATH / load_closure failed)"
-                ));
+                // Record ONE failure PER FILE, not per group: a broken
+                // closure must not shrink the effective checked count.
+                for (rel, _) in files {
+                    failures.push(format!(
+                        "{rel}: import closure unavailable (LEANR_OLEAN_PATH / load_closure \
+                         failed; import set {key:?})"
+                    ));
+                }
                 continue;
             }
         };
-        if let Err(e) = leanr_fmt::verify::check_invariants(&src, snap.snapshot()) {
-            failures.push(format!("{rel}: {e}"));
+        for (rel, src) in files {
+            if let Err(e) = leanr_fmt::verify::check_invariants(src, snap.snapshot()) {
+                failures.push(format!("{rel}: {e}"));
+            }
         }
     }
+
+    eprintln!(
+        "fmt corpus gate: {checked} file(s) across {} distinct import set(s)",
+        groups.len()
+    );
     assert!(
         checked > 0,
         "corpus empty — pass-list or checkout wiring broken"

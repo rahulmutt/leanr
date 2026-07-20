@@ -208,7 +208,7 @@ depends = ["elan:bootstrap"]
 run = "sh -c 'LEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo run --release -p leanr_cli -- check --all'"
 
 [tasks."fmt:mathlib"]
-description = "M3c fmt self-consistency gate over the parser pass-list (needs mathlib:fetch). FAST pass-list tier — NOT the ~35h discovery sweep. Asserts total + idempotent + semantics-preserving + comment-invariant on every green file."
+description = "M3c fmt self-consistency gate over the parser pass-list (needs mathlib:fetch). FAST pass-list tier — NOT the ~35h discovery sweep. Builds one grammar snapshot per distinct import set (not per file), mirroring parse:mathlib:fast. Asserts total + idempotent + semantics-preserving + comment-invariant on every green file."
 depends = ["elan:bootstrap"]
 # LEANR_OLEAN_PATH is computed the same way parse:mathlib:fast computes it
 # (`lake env printenv LEAN_PATH` run from inside .mathlib) — mathlib_corpus.rs's

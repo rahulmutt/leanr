@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+ignore = "0.4"
 leanr_build = { version = "0.1.0", path = "../leanr_build" }
 leanr_check = { version = "0.1.0", path = "../leanr_check" }
 leanr_fmt = { version = "0.1.0", path = "../leanr_fmt" }
@@ -19,6 +20,7 @@ leanr_olean = { version = "0.1.0", path = "../leanr_olean" }
 leanr_syntax = { version = "0.1.0", path = "../leanr_syntax" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+similar = "2"
 
 [dev-dependencies]
 assert_cmd = "2"

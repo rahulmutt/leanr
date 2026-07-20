@@ -111,9 +111,12 @@ enum Command {
     },
     /// Format Lean source files (leanr fmt).
     Fmt {
-        /// Files to format; `-` reads stdin and writes stdout.
+        /// Files to format; `-` reads stdin and writes stdout. With no
+        /// files, walks the current directory for `*.lean`, respecting
+        /// `.gitignore` and skipping hidden directories.
         files: Vec<PathBuf>,
-        /// Check mode: write nothing, exit non-zero if any file would change.
+        /// Check mode: write nothing, print a unified diff for each input
+        /// that would change, exit non-zero if any would.
         #[arg(long)]
         check: bool,
         /// Root(s) to resolve the import closure for the grammar snapshot.
@@ -373,10 +376,51 @@ fn parse_cmd(file: &Path, dump: bool, path: Vec<PathBuf>, verbose: bool) -> Exit
     }
 }
 
+/// The inputs to format. Explicit arguments win; with none, walk the
+/// current directory for `*.lean`, respecting `.gitignore`.
+///
+/// `ignore::WalkBuilder`'s defaults are almost exactly the wanted
+/// behavior: hidden entries are skipped (so `.lake`, `.git`, and
+/// `.mathlib` are excluded regardless of any ignore file), symlinks are
+/// not followed, and nested `.gitignore` files compose. The one default
+/// overridden is `require_git`, which otherwise only honors `.gitignore`
+/// inside a directory that itself contains a `.git`; a project without
+/// (or not yet inside) VCS metadata should still respect it. Results are
+/// sorted so output order does not depend on filesystem iteration order.
+fn resolve_inputs(files: Vec<PathBuf>) -> Vec<PathBuf> {
+    if !files.is_empty() {
+        return files;
+    }
+    let mut found: Vec<PathBuf> = ignore::WalkBuilder::new(".")
+        // Honor `.gitignore` even when the walked directory is not itself
+        // inside a `.git` repository (e.g. a project root without VCS
+        // metadata, or in tests): the file is still a statement of intent.
+        .require_git(false)
+        .build()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
+        .map(|e| e.into_path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("lean"))
+        .collect();
+    found.sort();
+    found
+}
+
+/// A unified diff of `before` → `after`, headed by `name` (a file path,
+/// or `<stdin>`). Printed by `--check` for every input that would change.
+fn unified_diff(name: &str, before: &str, after: &str) -> String {
+    similar::TextDiff::from_lines(before, after)
+        .unified_diff()
+        .context_radius(3)
+        .header(name, name)
+        .to_string()
+}
+
 fn fmt_cmd(files: Vec<PathBuf>, check: bool, path: Vec<PathBuf>) -> ExitCode {
+    let inputs = resolve_inputs(files);
     let mut any_would_change = false;
     let mut had_error = false;
-    for file in &files {
+    for file in &inputs {
         let is_stdin = file.as_os_str() == "-";
         let src = if is_stdin {
             let mut s = String::new();
@@ -423,15 +467,27 @@ fn fmt_cmd(files: Vec<PathBuf>, check: bool, path: Vec<PathBuf>) -> ExitCode {
                 continue;
             }
         };
+        let name = if is_stdin {
+            "<stdin>".to_string()
+        } else {
+            file.display().to_string()
+        };
+        if check {
+            // Check mode: never write a file, never emit the formatted
+            // text (that is the non-check stdin behavior and would be
+            // indistinguishable from it). Only diffs go to stdout.
+            if formatted != src {
+                any_would_change = true;
+                print!("{}", unified_diff(&name, &src, &formatted));
+            }
+            continue;
+        }
         if is_stdin {
             print!("{formatted}");
             continue;
         }
         if formatted != src {
-            any_would_change = true;
-            if check {
-                eprintln!("{}", file.display());
-            } else if let Err(e) = std::fs::write(file, &formatted) {
+            if let Err(e) = std::fs::write(file, &formatted) {
                 eprintln!("error: cannot write {}: {e}", file.display());
                 had_error = true;
             }
