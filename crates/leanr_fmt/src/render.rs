@@ -85,15 +85,24 @@ fn permute(len: usize, block: &imports::ImportBlock, toks: &[SyntaxToken]) -> Ve
 /// position-order gaps have to be recomputed here rather than reused from
 /// `block.runs`'s own adjacency.
 fn gap_tokens_are_all_trivia(block: &imports::ImportBlock, toks: &[SyntaxToken]) -> bool {
-    use leanr_syntax::kind::is_trivia;
+    use leanr_syntax::kind::KIND_WHITESPACE;
     let mut by_pos: Vec<(usize, usize)> = block.runs.clone();
     by_pos.sort_by_key(|&(s, _)| s);
     by_pos.windows(2).all(|w| {
         let (_, prev_end) = w[0];
         let (next_start, _) = w[1];
+        // WHITESPACE, not `is_trivia`: comments are trivia too, and the
+        // contract this guards is specifically "the only trivia dropped is
+        // whitespace". A comment attached as TRAILING trivia of a non-last
+        // import would sit in a gap and satisfy an `is_trivia` check while
+        // being silently deleted — it escapes `has_interior_comment` (it is
+        // at a boundary, not interior) and `between_import_comment` (which
+        // inspects only the NEXT import's leading trivia). Unreachable with
+        // this lexer, which attaches comments as leading trivia, but the
+        // predicate must match the contract rather than rely on that.
         toks[prev_end..next_start]
             .iter()
-            .all(|t| is_trivia(t.kind()))
+            .all(|t| t.kind() == KIND_WHITESPACE)
     })
 }
 

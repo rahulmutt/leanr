@@ -94,6 +94,18 @@ fn import_sort_key(node: &SyntaxNode) -> String {
 /// Returns `None` (preserve-fallback) when there are no imports, when a
 /// comment sits anywhere in the block, or when any run cannot be located.
 pub fn detect(tree: &SyntaxTree, toks: &[SyntaxToken]) -> Option<ImportBlock> {
+    // `tok_index_at` locates a token by binary search on start offsets, which
+    // is exact only while those offsets strictly increase. That holds for a
+    // clean parse (`format_src` rejects anything else), but a zero-width token
+    // sharing a start offset would silently shift a run boundary by one, so
+    // check the precondition once here rather than assume it.
+    debug_assert!(
+        toks.windows(2)
+            .all(|w| w[0].text_range().start() < w[1].text_range().start()),
+        "imports::detect: token start offsets are not strictly increasing, so \
+         the binary search in `tok_index_at` cannot locate run boundaries \
+         reliably — a zero-width token has entered the token list."
+    );
     let root = tree.root();
     // Import commands are not direct children of the module root: they live
     // under `Lean.Parser.Module.header` -> `null`. Walk descendants (preorder
