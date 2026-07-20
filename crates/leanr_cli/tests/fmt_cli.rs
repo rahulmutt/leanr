@@ -8,12 +8,32 @@
 //! builtin-only fallback. Every command below blanks `PATH` and removes
 //! `LEAN_PATH`, matching `tests/parse_imports.rs`.
 
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 fn leanr() -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_leanr"));
     c.env_remove("LEAN_PATH").env("PATH", "");
     c
+}
+
+/// Assert a unified diff body (after the `---`/`+++` headers) contains at
+/// least one removed and one added content line. Deliberately does not
+/// pin which of the two swapped lines the diff engine picks as the
+/// unchanged context line: for a pure two-line swap (our fixture
+/// throughout this file), that choice is an LCS tie-break internal to the
+/// diff algorithm — GNU `diff -u` and `similar`'s Myers implementation
+/// resolve it oppositely, and both are correct, minimal diffs.
+fn assert_shows_a_change(stdout: &str) {
+    let body: Vec<&str> = stdout.lines().skip(2).collect();
+    assert!(
+        body.iter().any(|l| l.starts_with('-')),
+        "diff must show a removed line: {stdout}"
+    );
+    assert!(
+        body.iter().any(|l| l.starts_with('+')),
+        "diff must show an added line: {stdout}"
+    );
 }
 
 #[test]
@@ -90,5 +110,79 @@ fn fmt_with_no_args_and_no_lean_files_succeeds() {
         out.status.success(),
         "an empty project is not an error: {}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn fmt_check_prints_unified_diff_naming_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("A.lean");
+    let unformatted = "import Foo.B\nimport Foo.A\n";
+    std::fs::write(&f, unformatted).unwrap();
+
+    let out = leanr().arg("fmt").arg("--check").arg(&f).output().unwrap();
+    assert!(
+        !out.status.success(),
+        "check must fail on a would-change file"
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("A.lean"),
+        "diff must name the input: {stdout}"
+    );
+    assert_shows_a_change(&stdout);
+    // Check mode never writes the file.
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), unformatted);
+}
+
+#[test]
+fn fmt_check_stdin_diffs_and_fails_without_emitting_formatted_text() {
+    let mut child = leanr()
+        .arg("fmt")
+        .arg("--check")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"import Foo.B\nimport Foo.A\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+
+    assert!(
+        !out.status.success(),
+        "check on would-change stdin must exit non-zero"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("<stdin>"),
+        "diff must name the input as <stdin>: {stdout}"
+    );
+    assert_shows_a_change(&stdout);
+    // The formatted text itself must NOT be emitted — that is the
+    // non-check behavior and would be indistinguishable from it.
+    assert!(
+        !stdout.contains("\nimport Foo.A\nimport Foo.B\n"),
+        "check mode must not emit the formatted output: {stdout}"
+    );
+}
+
+#[test]
+fn fmt_check_is_silent_and_succeeds_on_formatted_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("A.lean");
+    std::fs::write(&f, "import Foo.A\nimport Foo.B\n").unwrap();
+    let out = leanr().arg("fmt").arg("--check").arg(&f).output().unwrap();
+    assert!(out.status.success(), "already-formatted input must pass");
+    assert!(
+        out.stdout.is_empty(),
+        "no diff for unchanged input: {}",
+        String::from_utf8_lossy(&out.stdout)
     );
 }

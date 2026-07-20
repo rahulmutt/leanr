@@ -115,7 +115,8 @@ enum Command {
         /// files, walks the current directory for `*.lean`, respecting
         /// `.gitignore` and skipping hidden directories.
         files: Vec<PathBuf>,
-        /// Check mode: write nothing, exit non-zero if any file would change.
+        /// Check mode: write nothing, print a unified diff for each input
+        /// that would change, exit non-zero if any would.
         #[arg(long)]
         check: bool,
         /// Root(s) to resolve the import closure for the grammar snapshot.
@@ -405,6 +406,16 @@ fn resolve_inputs(files: Vec<PathBuf>) -> Vec<PathBuf> {
     found
 }
 
+/// A unified diff of `before` → `after`, headed by `name` (a file path,
+/// or `<stdin>`). Printed by `--check` for every input that would change.
+fn unified_diff(name: &str, before: &str, after: &str) -> String {
+    similar::TextDiff::from_lines(before, after)
+        .unified_diff()
+        .context_radius(3)
+        .header(name, name)
+        .to_string()
+}
+
 fn fmt_cmd(files: Vec<PathBuf>, check: bool, path: Vec<PathBuf>) -> ExitCode {
     let inputs = resolve_inputs(files);
     let mut any_would_change = false;
@@ -456,15 +467,27 @@ fn fmt_cmd(files: Vec<PathBuf>, check: bool, path: Vec<PathBuf>) -> ExitCode {
                 continue;
             }
         };
+        let name = if is_stdin {
+            "<stdin>".to_string()
+        } else {
+            file.display().to_string()
+        };
+        if check {
+            // Check mode: never write a file, never emit the formatted
+            // text (that is the non-check stdin behavior and would be
+            // indistinguishable from it). Only diffs go to stdout.
+            if formatted != src {
+                any_would_change = true;
+                print!("{}", unified_diff(&name, &src, &formatted));
+            }
+            continue;
+        }
         if is_stdin {
             print!("{formatted}");
             continue;
         }
         if formatted != src {
-            any_would_change = true;
-            if check {
-                eprintln!("{}", file.display());
-            } else if let Err(e) = std::fs::write(file, &formatted) {
+            if let Err(e) = std::fs::write(file, &formatted) {
                 eprintln!("error: cannot write {}: {e}", file.display());
                 had_error = true;
             }
