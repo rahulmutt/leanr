@@ -1,0 +1,11 @@
+[package]
+name = "leanr_meta"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+leanr_kernel = { path = "../leanr_kernel" }
+leanr_olean = { path = "../leanr_olean" }
+stacker = "0.1"
