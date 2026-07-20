@@ -2,10 +2,8 @@
 //! hermetic fixture tests and the Mathlib corpus sweep.
 
 use leanr_syntax::grammar::GrammarSnapshot;
-use leanr_syntax::kind::{
-    is_trivia, KIND_BLOCK_COMMENT, KIND_IDENT, KIND_LINE_COMMENT, KIND_MISSING,
-};
-use leanr_syntax::tree::{NodeOrToken, SyntaxNode};
+use leanr_syntax::kind::{KIND_BLOCK_COMMENT, KIND_LINE_COMMENT};
+use leanr_syntax::tree::NodeOrToken;
 use leanr_syntax::{parse_module, SyntaxTree};
 
 use crate::{format_src, format_tree};
@@ -29,107 +27,29 @@ pub fn comment_seq(tree: &SyntaxTree) -> Vec<String> {
     out
 }
 
-/// Semantics oracle for invariant 3. Mirrors `leanr_syntax::canon::canon_jsonl`
-/// (node `{"c":[..],"k":".."}`, atom `{"a":".."}`, ident `{"i":".."}`,
-/// missing `{"k":"<missing>"}`, keys alphabetical, trivia skipped) with the
-/// two changes that make it robust to *layout* while still catching genuine
-/// corruption:
+/// Semantics oracle for invariant 3: `leanr_syntax::canon`'s canonical
+/// form, despanned and with import commands order-normalized.
 ///
-///  1. **Spans omitted** — raw `canon_jsonl` embeds absolute byte spans
-///     (`"s":[start,stop]`) on every atom/ident. Formatting legitimately
-///     moves token positions (spacing collapse, trailing-ws strip), so those
-///     offsets are layout, not semantics. The token KIND + TEXT are the
-///     semantic content and are kept.
-///  2. **Import commands order-normalized** — the `import` command sibling
-///     nodes are emitted in SORTED order (by their rendered sub-string), so
-///     the formatter's alphabetical import sort is invisible here.
+///  1. **Spans omitted** — formatting legitimately moves token positions
+///     (spacing collapse, trailing-ws strip), so those offsets are layout,
+///     not semantics. The token KIND + TEXT are the semantic content and
+///     are kept.
+///  2. **Import commands order-normalized** — so the formatter's
+///     alphabetical import sort is invisible here.
 ///
 /// This still catches a dropped/renamed/restructured token, a corrupted
-/// import name, or a changed command body — any of those alter the
-/// despanned / import-sorted rendering. It tolerates exactly what the
-/// formatter is allowed to change: layout and import order.
+/// import name, or a changed command body. It tolerates exactly what the
+/// formatter is allowed to change: layout and import order. Sharing
+/// `canon`'s renderer (rather than mirroring it) removes the drift risk —
+/// a divergence in a private copy could only ever false-negative.
 pub fn canon_semantic(tree: &SyntaxTree) -> String {
-    let mut out = String::new();
-    for child in tree.root().children() {
-        node_semantic(&child, tree, &mut out);
-        out.push('\n');
-    }
-    out
-}
-
-fn node_semantic(node: &SyntaxNode, tree: &SyntaxTree, out: &mut String) {
-    // Render each child (node, or non-trivia token) to its own string, then
-    // reassemble. Rendering children independently lets us sort the
-    // import-command siblings without disturbing any other child's position.
-    let mut parts: Vec<String> = Vec::new();
-    let mut import_slots: Vec<usize> = Vec::new();
-    for el in node.children_with_tokens() {
-        match el {
-            NodeOrToken::Node(n) => {
-                if tree.kinds.name(n.kind()) == IMPORT_KIND {
-                    import_slots.push(parts.len());
-                }
-                let mut s = String::new();
-                node_semantic(&n, tree, &mut s);
-                parts.push(s);
-            }
-            NodeOrToken::Token(t) => {
-                let k = t.kind();
-                if is_trivia(k) {
-                    continue;
-                }
-                let mut s = String::new();
-                if k == KIND_MISSING {
-                    s.push_str("{\"k\":\"<missing>\"}");
-                } else if k == KIND_IDENT {
-                    s.push_str("{\"i\":");
-                    json_str(t.text(), &mut s);
-                    s.push('}');
-                } else {
-                    // KIND_ATOM (and never-oracle-compared KIND_ERROR_TOKEN).
-                    s.push_str("{\"a\":");
-                    json_str(t.text(), &mut s);
-                    s.push('}');
-                }
-                parts.push(s);
-            }
-        }
-    }
-    // Order-normalize the import-command siblings: sort their rendered
-    // strings among their own positions (contiguous in practice, but this
-    // is correct regardless of contiguity).
-    if import_slots.len() > 1 {
-        let mut rendered: Vec<String> = import_slots.iter().map(|&i| parts[i].clone()).collect();
-        rendered.sort();
-        for (slot, &i) in import_slots.iter().enumerate() {
-            parts[i] = rendered[slot].clone();
-        }
-    }
-    out.push_str("{\"c\":[");
-    out.push_str(&parts.join(","));
-    out.push_str("],\"k\":");
-    json_str(tree.kinds.name(node.kind()), out);
-    out.push('}');
-}
-
-/// JSON string escaping identical to `leanr_syntax::canon`'s private
-/// `json_str` (which mirrors Lean's `Json.compress` escapeAux): short forms
-/// only for `"`, `\`, `\n`, `\r`; every other control char < 0x20 as
-/// `\uXXXX`. Duplicated here (a handful of lines) rather than exported from
-/// `leanr_syntax`, to keep the oracle self-contained in `leanr_fmt`.
-fn json_str(s: &str, out: &mut String) {
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
+    leanr_syntax::canon::canon_to_string(
+        tree,
+        leanr_syntax::canon::CanonOpts {
+            spans: false,
+            sort_kind: Some(IMPORT_KIND),
+        },
+    )
 }
 
 /// Run all four self-consistency invariants over `src`, returning

@@ -12,56 +12,112 @@
 use crate::kind::{is_trivia, KindInterner, KIND_ATOM, KIND_ERROR_TOKEN, KIND_IDENT, KIND_MISSING};
 use crate::tree::{SyntaxNode, SyntaxTree};
 
+/// How to render the canonical form.
+///
+/// - `spans: true` emits `"s":[start,stop]` on every atom/ident — the
+///   oracle-comparison form. `false` omits them: formatting legitimately
+///   moves token positions, so offsets are layout, not semantics.
+/// - `sort_kind: Some(k)` renders the sibling nodes of kind `k` in sorted
+///   order of their own rendering, making a reordering of those siblings
+///   invisible. Used for import commands, whose order is semantics-neutral
+///   in Lean.
+#[derive(Clone, Copy)]
+pub struct CanonOpts<'a> {
+    pub spans: bool,
+    pub sort_kind: Option<&'a str>,
+}
+
 /// One JSON line per immediate child of the root (header node, then each
 /// command) — the exact line structure the oracle dump emits.
 pub fn canon_jsonl(tree: &SyntaxTree) -> String {
+    canon_to_string(
+        tree,
+        CanonOpts {
+            spans: true,
+            sort_kind: None,
+        },
+    )
+}
+
+/// The canonical form under `opts`. `canon_jsonl` is the
+/// `spans: true, sort_kind: None` configuration and MUST stay
+/// byte-identical to it — it is what the oracle fixtures compare.
+pub fn canon_to_string(tree: &SyntaxTree, opts: CanonOpts) -> String {
     let mut out = String::new();
     for child in tree.root().children() {
-        node_json(&child, &tree.kinds, &mut out);
+        node_json_opts(&child, &tree.kinds, opts, &mut out);
         out.push('\n');
     }
     out
 }
 
 pub fn node_json(node: &SyntaxNode, kinds: &KindInterner, out: &mut String) {
-    out.push_str("{\"c\":[");
-    let mut first = true;
+    node_json_opts(
+        node,
+        kinds,
+        CanonOpts {
+            spans: true,
+            sort_kind: None,
+        },
+        out,
+    );
+}
+
+/// Render one node. Children are rendered into their own strings first so
+/// that `opts.sort_kind` can reorder a subset of them in place without
+/// disturbing any other child's position.
+fn node_json_opts(node: &SyntaxNode, kinds: &KindInterner, opts: CanonOpts, out: &mut String) {
+    let mut parts: Vec<String> = Vec::new();
+    let mut sort_slots: Vec<usize> = Vec::new();
     for el in node.children_with_tokens() {
         match el {
             rowan::NodeOrToken::Node(n) => {
-                if !first {
-                    out.push(',');
+                if let Some(k) = opts.sort_kind {
+                    if kinds.name(n.kind()) == k {
+                        sort_slots.push(parts.len());
+                    }
                 }
-                first = false;
-                node_json(&n, kinds, out);
+                let mut s = String::new();
+                node_json_opts(&n, kinds, opts, &mut s);
+                parts.push(s);
             }
             rowan::NodeOrToken::Token(t) => {
                 let k = t.kind();
                 if is_trivia(k) {
                     continue;
                 }
-                if !first {
-                    out.push(',');
-                }
-                first = false;
-                let range = t.text_range();
-                let (s, e) = (u32::from(range.start()), u32::from(range.end()));
+                let mut s = String::new();
                 if k == KIND_MISSING {
-                    out.push_str("{\"k\":\"<missing>\"}");
-                } else if k == KIND_IDENT {
-                    out.push_str("{\"i\":");
-                    json_str(t.text(), out);
-                    push_span(s, e, out);
+                    s.push_str("{\"k\":\"<missing>\"}");
                 } else {
-                    // KIND_ATOM and (never oracle-compared) KIND_ERROR_TOKEN.
-                    debug_assert!(k == KIND_ATOM || k == KIND_ERROR_TOKEN);
-                    out.push_str("{\"a\":");
-                    json_str(t.text(), out);
-                    push_span(s, e, out);
+                    if k == KIND_IDENT {
+                        s.push_str("{\"i\":");
+                    } else {
+                        // KIND_ATOM and (never oracle-compared) KIND_ERROR_TOKEN.
+                        debug_assert!(k == KIND_ATOM || k == KIND_ERROR_TOKEN);
+                        s.push_str("{\"a\":");
+                    }
+                    json_str(t.text(), &mut s);
+                    if opts.spans {
+                        let range = t.text_range();
+                        push_span(u32::from(range.start()), u32::from(range.end()), &mut s);
+                    } else {
+                        s.push('}');
+                    }
                 }
+                parts.push(s);
             }
         }
     }
+    if sort_slots.len() > 1 {
+        let mut rendered: Vec<String> = sort_slots.iter().map(|&i| parts[i].clone()).collect();
+        rendered.sort();
+        for (slot, &i) in sort_slots.iter().enumerate() {
+            parts[i] = rendered[slot].clone();
+        }
+    }
+    out.push_str("{\"c\":[");
+    out.push_str(&parts.join(","));
     out.push_str("],\"k\":");
     json_str(kinds.name(node.kind()), out);
     out.push('}');
@@ -134,6 +190,53 @@ mod tests {
         assert_eq!(
             canon_jsonl(&tree),
             "{\"c\":[{\"a\":\"def\",\"s\":[0,3]},{\"i\":\"x\",\"s\":[4,5]}],\"k\":\"Lean.Parser.Command.declaration\"}\n"
+        );
+    }
+
+    #[test]
+    fn canon_to_string_despans_and_sorts_named_kind() {
+        use crate::{builtin, parse_module};
+        let snap = builtin::snapshot();
+        let despanned = CanonOpts {
+            spans: false,
+            sort_kind: Some("Lean.Parser.Module.import"),
+        };
+        let a = parse_module("import Foo.B\nimport Foo.A\n", &snap).tree;
+        let b = parse_module("import Foo.A\nimport Foo.B\n", &snap).tree;
+        // Despanned + import-order-normalized: reordering is invisible.
+        assert_eq!(
+            canon_to_string(&a, despanned),
+            canon_to_string(&b, despanned)
+        );
+        // No span keys survive when spans: false.
+        assert!(
+            !canon_to_string(&a, despanned).contains("\"s\":"),
+            "despanned form must not emit span keys"
+        );
+        // A corrupted import name is still caught.
+        let c = parse_module("import Foo.C\n", &snap).tree;
+        let d = parse_module("import Foo.D\n", &snap).tree;
+        assert_ne!(
+            canon_to_string(&c, despanned),
+            canon_to_string(&d, despanned)
+        );
+    }
+
+    #[test]
+    fn canon_jsonl_equals_spanned_unsorted_canon_to_string() {
+        use crate::{builtin, parse_module};
+        let snap = builtin::snapshot();
+        let tree = parse_module("import Foo.B\nimport Foo.A\ndef x := 1\n", &snap).tree;
+        assert_eq!(
+            canon_jsonl(&tree),
+            canon_to_string(
+                &tree,
+                CanonOpts {
+                    spans: true,
+                    sort_kind: None
+                }
+            ),
+            "canon_jsonl must be exactly the spanned, unsorted configuration"
         );
     }
 
