@@ -28,11 +28,6 @@ const STACK_CHUNK: usize = 4 * 1024 * 1024;
 /// that come near it must be excluded from the differential corpus.
 pub const DEFAULT_STEP_BUDGET: u64 = 10_000_000;
 
-// Foundation task: most of this surface has no caller yet outside this
-// file's own unit tests (concern modules — `whnf` task 4, `infer` task
-// 5+ — are the real callers, and land in later tasks of this plan).
-// Same posture as `tc/trace.rs`'s "no lib caller yet" allows.
-#[allow(dead_code)]
 pub struct MetaCtx<'e> {
     pub(crate) view: EnvView<'e>,
     pub(crate) scratch: &'e mut Store,
@@ -47,13 +42,22 @@ pub struct MetaCtx<'e> {
     /// (config cache key, expr) -> whnf result. Permanent entries only
     /// (mvar- and fvar-free inputs); the transient side arrives with
     /// defeq in plan 3. See `cacheable` below.
+    ///
+    /// Written by `new` only, never read yet: `infer_type` (task 4)
+    /// consults its own `infer_cache` alone; `whnf`/`whnf_core` (task 5)
+    /// are this field's real readers. Same posture for `smart_unfolding`
+    /// just below (the `smartUnfolding` option, unconsulted until
+    /// `whnf_core`'s matcher/projection arms exist).
+    #[allow(dead_code)]
     pub(crate) whnf_cache: HashMap<(u64, ExprId), ExprId>,
+    #[allow(dead_code)]
     pub(crate) whnf_core_cache: HashMap<(u64, ExprId), ExprId>,
     pub(crate) infer_cache: HashMap<(u64, ExprId), ExprId>,
     /// ReducibilityStatus per constant; absent => Semireducible.
     reducibility: HashMap<NameId, ReducibilityStatus>,
     matchers: HashMap<NameId, MatcherEntry>,
     /// The `smartUnfolding` option (oracle default: true).
+    #[allow(dead_code)]
     pub(crate) smart_unfolding: bool,
     /// Plan-3/4 seam: the `canUnfold?` override predicate channel
     /// (oracle: Meta.Context.canUnfold?). `whnf_matcher` (task 6) is
@@ -62,10 +66,6 @@ pub struct MetaCtx<'e> {
     pub(crate) can_unfold_override: bool,
 }
 
-// Same allowance as the struct above: `step`/`guarded`/the traversal
-// helpers/`cacheable` are called by later concern-module `impl MetaCtx`
-// blocks, not yet present in this plan.
-#[allow(dead_code)]
 impl<'e> MetaCtx<'e> {
     pub fn new(
         view: EnvView<'e>,
@@ -188,6 +188,10 @@ impl<'e> MetaCtx<'e> {
         args
     }
 
+    /// No non-test caller yet: `infer.rs` (task 4) always needs the
+    /// full argument spine (`get_app_args`), never just its length;
+    /// `whnf`/`whnf_core` (task 5) are this helper's expected consumer.
+    #[allow(dead_code)]
     pub(crate) fn get_app_num_args(&self, e: ExprId) -> usize {
         let mut n = 0;
         let mut cur = e;

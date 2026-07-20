@@ -12,6 +12,7 @@
 
 mod config;
 mod error;
+mod infer;
 mod metactx;
 mod mvar_ctx;
 mod transparency;
