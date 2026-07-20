@@ -11,5 +11,7 @@
 //! spec: docs/superpowers/specs/2026-07-20-m4a-meta-core-design.md
 
 mod error;
+mod transparency;
 
 pub use error::MetaError;
+pub use transparency::{can_unfold, TransparencyMode};
