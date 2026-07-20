@@ -597,14 +597,17 @@ impl<'s> InterpId<'s> {
     ///
     /// Tag 1 (`Semireducible`) is verified against the oracle's
     /// constructor declaration order (ReducibilityAttrs.lean:41) but is
-    /// the one cell NOT pinned by fixture bytes: no surgical fixture
+    /// the one cell NOT pinned by fixture bytes: no ordinary fixture
     /// can produce an explicit tag-1 entry. The oracle's validator
     /// unconditionally rejects a global `[semireducible]` attribute
     /// application (ReducibilityAttrs.lean's `validate`, the
     /// `.semireducible`/`.global` arm), and `local`-kind entries never
     /// serialize into the `.olean` (`ScopedEnvExtension.addCore`'s
     /// `.local` branch calls `addLocalEntry`, which never joins the
-    /// `newEntries` list `exportEntriesFn` reads).
+    /// `newEntries` list `exportEntriesFn` reads). The one escape
+    /// hatch is `set_option allowUnsafeReducibility true`, which skips
+    /// the validator — how tag-1 entries occur in the wild (Mathlib
+    /// uses it); a fixture via that route is a plan-2 candidate.
     fn reducibility_status(r: &Raw) -> Result<crate::ReducibilityStatus, OleanError> {
         match &**r {
             RawValue::Scalar(0) => Ok(crate::ReducibilityStatus::Reducible),
