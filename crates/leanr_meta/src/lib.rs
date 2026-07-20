@@ -10,8 +10,10 @@
 //!
 //! spec: docs/superpowers/specs/2026-07-20-m4a-meta-core-design.md
 
+mod config;
 mod error;
 mod transparency;
 
+pub use config::{Config, ProjReduction};
 pub use error::MetaError;
 pub use transparency::{can_unfold, TransparencyMode};
