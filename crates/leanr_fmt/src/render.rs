@@ -9,65 +9,93 @@ use leanr_syntax::SyntaxTree;
 use crate::doc::Doc;
 use crate::rules::imports;
 
-/// The formatter spine. Imports are the ONLY reordered content in this
-/// slice: when `imports::detect` finds a contiguous import block, emit
-/// everything before it verbatim (raw source slice), the sorted imports
-/// (each import's ORIGINAL source text, verbatim — including any
-/// `public`/modifier prefix and the `import` keyword itself — one per
-/// line, reordered by module name only), then everything after it
-/// verbatim. Otherwise (no imports, or a comment inside the import span)
-/// fall back to the token-aware verbatim walk (`render_tokens`),
-/// byte-identical to the pre-import-rule behavior.
-pub fn render_verbatim(tree: &SyntaxTree) -> Doc {
-    match imports::detect(tree) {
-        Some(block) => {
-            let src = tree.text();
-            let joined = block.sorted.join("\n");
-            Doc::concat(vec![
-                Doc::text(src[..block.start].to_string()),
-                Doc::text(joined),
-                Doc::text(src[block.end..].to_string()),
-            ])
-        }
-        None => render_tokens(tree),
-    }
+/// One emission slot in the output order: either a token from the file's
+/// flat token list, or a synthesized separator.
+enum Emit {
+    /// Index into the file's token list.
+    Tok(usize),
+    /// A synthesized newline between two reordered imports. The
+    /// between-import whitespace is NOT carried over (it is excluded from
+    /// every run), and this replaces it — the one-import-per-line rule.
+    /// Safe because `imports::detect` bails to preserve-fallback whenever
+    /// a comment sits anywhere in the block, so the only trivia dropped is
+    /// whitespace.
+    Newline,
 }
 
-/// Every leaf token in source order, with each token's emitted text
-/// chosen by KIND (see `emit_token_text`). Whitespace-trivia is routed
-/// through the spacing rule first (`rules::spacing::normalize_ws`): for a
-/// single-line gap adjacent to a target operator (`:=`, `→`) spacing wins
-/// and normalizes it to one space; every other whitespace-trivia case
-/// (multi-line, or single-line but not near a target) falls back to
-/// `trivia::normalize_ws_trivia` (Task 3's indentation/blank-run
-/// handling and single-line passthrough). Line comments and every other
-/// token — including string literals and block/doc comments — are
-/// emitted verbatim/trimmed exactly as before (`emit_token_text`). This
-/// is the no-imports path; its behavior must stay byte-identical to the
-/// earlier spine for everything spacing does not touch.
-fn render_tokens(tree: &SyntaxTree) -> Doc {
-    use leanr_syntax::kind::{is_trivia, KIND_WHITESPACE};
+/// The formatter spine. Builds ONE emission order over the file's tokens
+/// and walks it: there is no second rendering path. When
+/// `imports::detect` finds a reorderable block, the order is a
+/// permutation — head tokens in place, then each import's token run in
+/// sorted order separated by a synthesized newline, then tail tokens in
+/// place. Otherwise it is the identity order. Either way every token
+/// flows through the same rule application, so trivia, spacing, and every
+/// future rule cover the whole file — including the head and tail of
+/// import-bearing files, which earlier revisions emitted as raw source
+/// slices and never normalized.
+///
+/// Idempotence: after one pass the imports are sorted, so the permutation
+/// is the identity on the second pass.
+pub fn render_verbatim(tree: &SyntaxTree) -> Doc {
     let toks = tokens_of(&tree.root());
-    let mut parts = Vec::with_capacity(toks.len());
-    for (i, t) in toks.iter().enumerate() {
-        if t.kind() == KIND_WHITESPACE {
-            let prev = toks[..i]
-                .iter()
-                .rev()
-                .find(|p| !is_trivia(p.kind()))
-                .map(|p| p.text());
-            let next = toks[i + 1..]
-                .iter()
-                .find(|p| !is_trivia(p.kind()))
-                .map(|p| p.text());
-            let ws = t.text();
-            let out = match crate::rules::spacing::normalize_ws(prev, ws, next) {
-                Some(s) => s,                                   // single-line near :=/→  -> one space
-                None => crate::trivia::normalize_ws_trivia(ws), // Task 3 fallback
-            };
-            parts.push(Doc::text(out));
-        } else {
-            parts.push(Doc::text(emit_token_text(t)));
+    let order = match imports::detect(tree, &toks) {
+        Some(block) => permute(toks.len(), &block),
+        None => (0..toks.len()).map(Emit::Tok).collect(),
+    };
+    render_tokens(&toks, &order)
+}
+
+/// head ++ sorted runs (newline-separated) ++ tail.
+fn permute(len: usize, block: &imports::ImportBlock) -> Vec<Emit> {
+    let mut order = Vec::with_capacity(len + block.runs.len());
+    order.extend((0..block.head_end).map(Emit::Tok));
+    for (i, &(s, e)) in block.runs.iter().enumerate() {
+        if i > 0 {
+            order.push(Emit::Newline);
+        }
+        order.extend((s..e).map(Emit::Tok));
+    }
+    order.extend((block.tail_start..len).map(Emit::Tok));
+    order
+}
+
+/// Emit the order, with each token's text chosen by KIND (see
+/// `emit_token_text`). Whitespace-trivia routes through the spacing rule
+/// first (`rules::spacing::normalize_ws`): a single-line gap adjacent to a
+/// target operator (`:=`, `→`) normalizes to one space; every other
+/// whitespace case (multi-line, or single-line but not near a target)
+/// falls back to `trivia::normalize_ws_trivia`.
+///
+/// The `prev`/`next` significant-token scans walk the EMISSION order, not
+/// the source order. That is what they always meant — spacing is a
+/// property of what ends up adjacent in the output.
+fn render_tokens(toks: &[SyntaxToken], order: &[Emit]) -> Doc {
+    use leanr_syntax::kind::{is_trivia, KIND_WHITESPACE};
+    let sig_text = |slot: &Emit| -> Option<&str> {
+        match slot {
+            Emit::Newline => None,
+            Emit::Tok(i) => (!is_trivia(toks[*i].kind())).then(|| toks[*i].text()),
+        }
+    };
+    let mut parts = Vec::with_capacity(order.len());
+    for (i, slot) in order.iter().enumerate() {
+        match slot {
+            Emit::Newline => parts.push(Doc::text("\n".to_string())),
+            Emit::Tok(ti) => {
+                let t = &toks[*ti];
+                if t.kind() == KIND_WHITESPACE {
+                    let prev = order[..i].iter().rev().find_map(sig_text);
+                    let next = order[i + 1..].iter().find_map(sig_text);
+                    let ws = t.text();
+                    let out = match crate::rules::spacing::normalize_ws(prev, ws, next) {
+                        Some(s) => s,                                   // single-line near :=/→  -> one space
+                        None => crate::trivia::normalize_ws_trivia(ws), // Task 3 fallback
+                    };
+                    parts.push(Doc::text(out));
+                } else {
+                    parts.push(Doc::text(emit_token_text(t)));
+                }
+            }
         }
     }
     Doc::concat(parts)
@@ -228,6 +256,46 @@ mod tests {
     #[test]
     fn multiline_ws_near_assign_not_collapsed() {
         assert_eq!(fmt("def x :=\n  1\n"), "def x :=\n  1\n");
+    }
+
+    // The whole point of the permuted walk: before it, a file WITH imports
+    // emitted its body as a raw source slice, so neither the spacing rule
+    // nor the trivia rule ran there. `:=   1` survived uncollapsed and the
+    // trailing spaces survived unstripped. Both must now be normalized.
+    #[test]
+    fn rules_apply_to_body_of_import_bearing_file() {
+        assert_eq!(
+            fmt("import Foo.B\nimport Foo.A\n\ndef x :=   1  \ndef y := 2\n"),
+            "import Foo.A\nimport Foo.B\n\ndef x := 1\ndef y := 2\n"
+        );
+    }
+
+    // The head span (before the first import) goes through the walk too.
+    #[test]
+    fn rules_apply_to_head_of_import_bearing_file() {
+        assert_eq!(
+            fmt("module\n\n\n\nimport Foo.B\nimport Foo.A\n\ndef x := 1\n"),
+            "module\n\nimport Foo.A\nimport Foo.B\n\ndef x := 1\n"
+        );
+    }
+
+    // Idempotence across the permutation: the second pass sees sorted
+    // imports, so the permutation is the identity.
+    #[test]
+    fn permuted_walk_is_idempotent() {
+        let messy = "import Foo.B\nimport Foo.A\n\n\n\ndef x :=   1  \n";
+        let once = fmt(messy);
+        assert_eq!(fmt(&once), once);
+    }
+
+    // The blank-line run between the last import and the body is trivia in
+    // the TAIL span, so it collapses to a single blank line like any other.
+    #[test]
+    fn blank_run_after_imports_collapses() {
+        assert_eq!(
+            fmt("import Foo.A\n\n\n\ndef x := 1\n"),
+            "import Foo.A\n\ndef x := 1\n"
+        );
     }
 
     // Task 6 guard: a line comment adjacent to a spacing-affected region

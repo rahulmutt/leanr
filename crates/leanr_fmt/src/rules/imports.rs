@@ -3,16 +3,28 @@
 //! neutral for Lean imports. Bails (returns None) if a comment sits
 //! inside the import span, so comments are never reordered.
 
-use leanr_syntax::tree::SyntaxNode;
+use leanr_syntax::tree::{SyntaxNode, SyntaxToken};
 use leanr_syntax::SyntaxTree;
 
 use crate::comments::has_interior_comment;
 use crate::render::tokens_of;
 
+/// A detected, reorderable import block, expressed as token-index runs
+/// into the file's flat token list (`render::tokens_of` of the root).
+/// Byte offsets are deliberately NOT used: the spine emits a permutation
+/// of the token sequence, so indices are the natural currency.
 pub struct ImportBlock {
-    pub start: usize,
-    pub end: usize,
-    pub sorted: Vec<String>,
+    /// Token index of the first import's first significant token. Tokens
+    /// `[0, head_end)` are emitted unchanged, in place.
+    pub head_end: usize,
+    /// One past the last import's last significant token. Tokens
+    /// `[tail_start, len)` are emitted unchanged, in place.
+    pub tail_start: usize,
+    /// Per-import `[start, end)` token-index runs, in SORTED order. Each
+    /// run spans one import's first through last significant token
+    /// INCLUSIVE of its interior whitespace, so intra-import spacing
+    /// survives reordering exactly as before.
+    pub runs: Vec<(usize, usize)>,
 }
 
 /// An import command node is one whose kind name is Lean's module-import
@@ -24,26 +36,30 @@ fn is_import_command(node: &SyntaxNode, tree: &SyntaxTree) -> bool {
     tree.kinds.name(node.kind()) == "Lean.Parser.Module.import"
 }
 
-/// The full original source text of a single import command, spanning its
-/// first significant token through its last significant token. This is
-/// what gets EMITTED — verbatim, byte-for-byte — so any modifier
+/// The token index whose token starts at byte `offset`. `toks` is in
+/// source order, so token start offsets are strictly increasing and a
+/// binary search is exact.
+fn tok_index_at(toks: &[SyntaxToken], offset: usize) -> Option<usize> {
+    let i = toks.partition_point(|t| (u32::from(t.text_range().start()) as usize) < offset);
+    (i < toks.len() && u32::from(toks[i].text_range().start()) as usize == offset).then_some(i)
+}
+
+/// The `[start, end)` token-index run of one import command: its first
+/// through its last significant token, inclusive. The run is never
+/// rendered from reconstructed text — only reordered — so any modifier
 /// (`public`, …), the `import` keyword itself, and exact intra-import
 /// spacing survive reordering untouched.
-fn import_original_text<'a>(node: &SyntaxNode, src: &'a str) -> &'a str {
-    let toks = tokens_of(node);
-    let sig: Vec<_> = toks
+fn import_run(node: &SyntaxNode, toks: &[SyntaxToken]) -> Option<(usize, usize)> {
+    let own = tokens_of(node);
+    let sig: Vec<_> = own
         .iter()
         .filter(|t| !leanr_syntax::kind::is_trivia(t.kind()))
         .collect();
-    let start = sig
-        .first()
-        .map(|t| u32::from(t.text_range().start()) as usize)
-        .unwrap_or_else(|| u32::from(node.text_range().start()) as usize);
-    let end = sig
-        .last()
-        .map(|t| u32::from(t.text_range().end()) as usize)
-        .unwrap_or_else(|| u32::from(node.text_range().end()) as usize);
-    &src[start..end]
+    let first = sig.first()?;
+    let last = sig.last()?;
+    let s = tok_index_at(toks, u32::from(first.text_range().start()) as usize)?;
+    let e = tok_index_at(toks, u32::from(last.text_range().start()) as usize)?;
+    Some((s, e + 1))
 }
 
 /// The module name a single import command names, e.g. "Foo.Bar". Used
@@ -54,7 +70,7 @@ fn import_original_text<'a>(node: &SyntaxNode, src: &'a str) -> &'a str {
 /// input shapes). The grammar allows an `all` modifier directly after
 /// `import` (`import all Foo`, ORACLE-PORT `Lean.Parser.Module.all`); skip
 /// it too so it keys as "Foo", not "allFoo" — this only affects sort
-/// order, never the emitted text (see `import_original_text`).
+/// order, never the emitted text (see `import_run`).
 fn import_sort_key(node: &SyntaxNode) -> String {
     let sig: Vec<_> = tokens_of(node)
         .into_iter()
@@ -73,7 +89,11 @@ fn import_sort_key(node: &SyntaxNode) -> String {
     rest.iter().map(|t| t.text()).collect()
 }
 
-pub fn detect(tree: &SyntaxTree) -> Option<ImportBlock> {
+/// Detect a reorderable import block. `toks` must be
+/// `render::tokens_of(&tree.root())` — the same list the spine emits from.
+/// Returns `None` (preserve-fallback) when there are no imports, when a
+/// comment sits anywhere in the block, or when any run cannot be located.
+pub fn detect(tree: &SyntaxTree, toks: &[SyntaxToken]) -> Option<ImportBlock> {
     let root = tree.root();
     // Import commands are not direct children of the module root: they live
     // under `Lean.Parser.Module.header` -> `null`. Walk descendants (preorder
@@ -85,22 +105,6 @@ pub fn detect(tree: &SyntaxTree) -> Option<ImportBlock> {
     if imports.is_empty() {
         return None;
     }
-    // `text_range()` on a node includes its leading trivia (comments,
-    // blank lines, a preceding `prelude`'s trailing newline). Anchoring
-    // `start` there would delete that trivia when the caller replaces
-    // `src[start..end]` with the sorted block. Anchor instead to the
-    // first import's first SIGNIFICANT token (the `import` keyword), so
-    // `src[..start]` retains all leading trivia verbatim.
-    let first = imports.first().unwrap();
-    let start = tokens_of(first)
-        .iter()
-        .find(|t| !leanr_syntax::kind::is_trivia(t.kind()))
-        .map(|t| u32::from(t.text_range().start()) as usize)
-        .unwrap_or_else(|| u32::from(first.text_range().start()) as usize);
-    // `end` is left as-is: trailing trivia after the last import attaches
-    // as LEADING trivia of the following node, so the last import's own
-    // `text_range().end()` already stops cleanly at its last token.
-    let end = u32::from(imports.last().unwrap().text_range().end()) as usize;
     // If any import command carries an interior comment, or a comment sits
     // between imports, preserve the block verbatim. `has_interior_comment`
     // covers comments between an import's own significant tokens; a
@@ -109,17 +113,19 @@ pub fn detect(tree: &SyntaxTree) -> Option<ImportBlock> {
     if imports.iter().any(has_interior_comment) || between_import_comment(&imports) {
         return None;
     }
-    let src = tree.text();
-    let mut keyed: Vec<(String, &str)> = imports
-        .iter()
-        .map(|n| (import_sort_key(n), import_original_text(n, &src)))
-        .collect();
+    let mut keyed: Vec<(String, (usize, usize))> = Vec::with_capacity(imports.len());
+    for n in &imports {
+        keyed.push((import_sort_key(n), import_run(n, toks)?));
+    }
+    // Source-order extent, taken BEFORE sorting.
+    let head_end = keyed.iter().map(|(_, (s, _))| *s).min()?;
+    let tail_start = keyed.iter().map(|(_, (_, e))| *e).max()?;
     keyed.sort_by(|a, b| a.0.cmp(&b.0));
-    let sorted: Vec<String> = keyed
-        .into_iter()
-        .map(|(_, text)| text.to_string())
-        .collect();
-    Some(ImportBlock { start, end, sorted })
+    Some(ImportBlock {
+        head_end,
+        tail_start,
+        runs: keyed.into_iter().map(|(_, run)| run).collect(),
+    })
 }
 
 // A comment attached as leading trivia to any import after the first lives
