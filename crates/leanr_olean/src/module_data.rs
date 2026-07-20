@@ -84,6 +84,37 @@ pub struct ScopedParserEntry {
     pub entry: ParserEntry,
 }
 
+/// oracle: `ReducibilityStatus` (ReducibilityAttrs.lean:40-42). All
+/// constructors are nullary, so DECLARATION order is ctor-tag order:
+/// reducible=0, semireducible=1, irreducible=2, implicitReducible=3,
+/// instanceReducible=4.
+///
+/// Tag order is deliberately NOT unfolding order — the in-source comment
+/// records that the last two were appended out of semantic order for
+/// bootstrapping. Consumers must not derive an ordering from this enum's
+/// declaration order; see `leanr_meta::transparency`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReducibilityStatus {
+    Reducible,
+    Semireducible,
+    Irreducible,
+    ImplicitReducible,
+    InstanceReducible,
+}
+
+/// One decoded reducibility-attribute entry, from either
+/// `reducibilityCore` (always `Global`, unwrapped) or
+/// `reducibilityExtra` (wrapped in `ScopedEnvExtension.Entry`).
+///
+/// A constant with no entry has status `Semireducible`
+/// (`getReducibilityStatusCore`'s fallback, ReducibilityAttrs.lean:79-88).
+#[derive(Debug, Clone)]
+pub struct ReducibilityEntry {
+    pub scope: EntryScope,
+    pub name: NameId,
+    pub status: ReducibilityStatus,
+}
+
 /// The decoded contents of one `.olean` module, decoded directly into
 /// term-bank ids (term-bank phase 3 — the Arc decode path this used to
 /// have a twin of is deleted, along with the differential gate that
@@ -105,6 +136,10 @@ pub struct ModuleData {
     /// (M3b2a); all other extension entries stay opaque (folded into
     /// `num_entries` only).
     pub parser_entries: Vec<ScopedParserEntry>,
+    /// Typed decode of the `reducibilityCore` / `reducibilityExtra`
+    /// extension entries (M4a). All other extension entries stay opaque
+    /// (folded into `num_entries` only).
+    pub reducibility: Vec<ReducibilityEntry>,
 }
 
 impl ModuleData {
@@ -255,6 +290,7 @@ impl ModuleData {
             extra_const_names,
             num_entries: base.num_entries,
             parser_entries: std::mem::take(&mut base.parser_entries),
+            reducibility: std::mem::take(&mut base.reducibility),
         })
     }
 }
@@ -326,6 +362,60 @@ mod tests {
             stats.checked
         );
         assert_eq!(stats.skipped_unsafe, 0);
+    }
+
+    /// The reducibility extensions decode, and a constant with no
+    /// attribute is ABSENT (its status is the `.semireducible` default,
+    /// not a stored entry).
+    #[test]
+    fn reducibility_entries_decode() {
+        use crate::{EntryScope, ReducibilityStatus};
+
+        let bytes = fixture("Reducibility.olean");
+        let mut env = Environment::default();
+        let md = ModuleData::parse(&bytes, env.store_mut()).expect("decode");
+
+        let render = |env: &Environment, n: NameId| env.store().to_name(None, Some(n)).to_string();
+        let got: Vec<(String, ReducibilityStatus)> = md
+            .reducibility
+            .iter()
+            .map(|e| (render(&env, e.name), e.status))
+            .collect();
+
+        for (name, want) in [
+            ("redDef", ReducibilityStatus::Reducible),
+            ("irredDef", ReducibilityStatus::Irreducible),
+            ("instRedDef", ReducibilityStatus::InstanceReducible),
+            ("implRedDef", ReducibilityStatus::ImplicitReducible),
+        ] {
+            assert!(
+                got.contains(&(name.to_string(), want)),
+                "missing {name} => {want:?}; got {got:?}"
+            );
+        }
+
+        assert!(
+            !got.iter().any(|(n, _)| n == "plainDef"),
+            "plainDef carries no attribute so it must not appear: {got:?}"
+        );
+
+        // reducibilityCore is unwrapped, so every entry from it is Global.
+        assert!(md
+            .reducibility
+            .iter()
+            .all(|e| matches!(e.scope, EntryScope::Global)));
+    }
+
+    /// `reducibilityCore`'s array is sorted by `Name.quickLt` and
+    /// `getReducibilityStatusCore` binary-searches it. We do not depend
+    /// on the ordering, but a violation means the shape assumption is
+    /// wrong, so assert the array is non-empty and every entry resolved.
+    #[test]
+    fn reducibility_entries_are_nonempty() {
+        let bytes = fixture("Reducibility.olean");
+        let mut env = Environment::default();
+        let md = ModuleData::parse(&bytes, env.store_mut()).expect("decode");
+        assert!(!md.reducibility.is_empty());
     }
 
     #[test]

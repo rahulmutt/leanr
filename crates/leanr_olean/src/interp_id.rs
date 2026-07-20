@@ -582,20 +582,93 @@ impl<'s> InterpId<'s> {
         }
     }
 
+    /// oracle: `ReducibilityStatus` (ReducibilityAttrs.lean:40-42).
+    /// Arrives as a BOXED immediate, not in the ctor's scalar area:
+    /// `Prod`'s fields are polymorphic, so a nullary ctor in that
+    /// position is a `RawValue::Scalar(tag)`. (Contrast `parser_entry`'s
+    /// `LeadingIdentBehavior`, which is a monomorphic field and so is
+    /// unboxed into `scalars`.) Shape pinned empirically against
+    /// Reducibility.olean: a temporary probe printed each
+    /// `reducibilityCore` pair's second field, observing
+    /// `RawValue::Scalar(n)` for n in {0,2,3,4} (reducible, irreducible,
+    /// implicitReducible, instanceReducible — matching the fixture's
+    /// four attributed constants), confirming the brief's hypothesis
+    /// with no adaptation needed.
+    fn reducibility_status(r: &Raw) -> Result<crate::ReducibilityStatus, OleanError> {
+        match &**r {
+            RawValue::Scalar(0) => Ok(crate::ReducibilityStatus::Reducible),
+            RawValue::Scalar(1) => Ok(crate::ReducibilityStatus::Semireducible),
+            RawValue::Scalar(2) => Ok(crate::ReducibilityStatus::Irreducible),
+            RawValue::Scalar(3) => Ok(crate::ReducibilityStatus::ImplicitReducible),
+            RawValue::Scalar(4) => Ok(crate::ReducibilityStatus::InstanceReducible),
+            _ => Err(bad("ReducibilityStatus")),
+        }
+    }
+
+    /// `Name × ReducibilityStatus` — a bare 2-field `Prod` (tag 0).
+    fn reducibility_pair(
+        &mut self,
+        r: &Raw,
+    ) -> Result<(NameId, crate::ReducibilityStatus), OleanError> {
+        let (f, _) = ctor(r, 0, 2, "Name × ReducibilityStatus")?;
+        Ok((self.name_req(&f[0])?, Self::reducibility_status(&f[1])?))
+    }
+
     /// ModuleData (Environment.lean:109-129).
     pub(crate) fn module_data(&mut self, root: &Raw) -> Result<crate::ModuleData, OleanError> {
         let (f, s) = ctor(root, 0, 5, "ModuleData")?;
         // entries : Array (Name × Array EnvExtensionEntry). Only the
-        // parserExtension pair is decoded (M3b2a); others stay opaque.
+        // parserExtension and reducibility pairs are decoded (M3b2a,
+        // M4a); others stay opaque.
         let mut parser_entries = Vec::new();
+        let mut reducibility = Vec::new();
         for pair in array(&f[4])? {
             let (pf, _) = ctor(pair, 0, 2, "ModuleData.entries pair")?;
             let ext_name = self.name(&pf[0])?;
-            if self.st.to_name(None, ext_name).to_string() != "Lean.Parser.parserExtension" {
-                continue;
-            }
-            for e in array(&pf[1])? {
-                parser_entries.push(self.scoped_parser_entry(e)?);
+            match self.st.to_name(None, ext_name).to_string().as_str() {
+                "Lean.Parser.parserExtension" => {
+                    for e in array(&pf[1])? {
+                        parser_entries.push(self.scoped_parser_entry(e)?);
+                    }
+                }
+                // Unwrapped `Name × ReducibilityStatus`, sorted by
+                // `Name.quickLt`. No `ScopedEnvExtension.Entry` wrapper:
+                // this is a plain `registerPersistentEnvExtension`.
+                "reducibilityCore" => {
+                    for e in array(&pf[1])? {
+                        let (name, status) = self.reducibility_pair(e)?;
+                        reducibility.push(crate::ReducibilityEntry {
+                            scope: crate::EntryScope::Global,
+                            name,
+                            status,
+                        });
+                    }
+                }
+                // Wrapped in `ScopedEnvExtension.Entry`: tag 0 global(v),
+                // tag 1 scoped(ns, v). Usually empty in practice, but
+                // both constructors are decoded rather than assumed away.
+                "reducibilityExtra" => {
+                    for e in array(&pf[1])? {
+                        let RawValue::Ctor { tag, fields, .. } = &**e else {
+                            return Err(bad("ScopedEnvExtension.Entry"));
+                        };
+                        let (scope, payload) = match (tag, fields.len()) {
+                            (0, 1) => (crate::EntryScope::Global, &fields[0]),
+                            (1, 2) => (
+                                crate::EntryScope::Scoped(self.name_req(&fields[0])?),
+                                &fields[1],
+                            ),
+                            _ => return Err(bad("ScopedEnvExtension.Entry")),
+                        };
+                        let (name, status) = self.reducibility_pair(payload)?;
+                        reducibility.push(crate::ReducibilityEntry {
+                            scope,
+                            name,
+                            status,
+                        });
+                    }
+                }
+                _ => continue,
             }
         }
         Ok(crate::ModuleData {
@@ -618,6 +691,7 @@ impl<'s> InterpId<'s> {
                 .collect::<Result<_, _>>()?,
             num_entries: array(&f[4])?.len(),
             parser_entries,
+            reducibility,
         })
     }
 }
