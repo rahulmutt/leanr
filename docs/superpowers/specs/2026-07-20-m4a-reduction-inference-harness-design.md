@@ -74,9 +74,10 @@ unfolding requires.
   plan 4, once `is_def_eq` and synthesis exist to make the synthesized
   mvar queries meaningful).
 
-- **The transient/permanent cache split lands now**, not with defeq, so
-  plan 3's defeq cache drops into an existing shape instead of
-  retrofitting one.
+- **Whnf/infer caching lands now, in the oracle's actual shape** — a
+  permanent cache that declines mvar/fvar-bearing terms. See § Caching
+  for the correction to this spec's original transient/permanent
+  framing, which turned out to be a defeq-cache concern (plan 3).
 
 ## Architecture
 
@@ -156,15 +157,22 @@ standard rules. Inference without checking — the kernel remains the
 independent checker, so `infer.rs` never re-validates what it infers.
 `ExprId`-keyed cache.
 
-### Caching (`cache.rs`)
+### Caching
 
-The transient/permanent split from the parent spec: permanent for
-mvar-free terms under a standard config, transient otherwise. `whnf`
-and `infer` caches key on `(Config::cache_key(), ExprId)`, so the
-`size_of::<Config>()` guard from plan 1 protects these caches from the
-missing-key-field failure mode from day one. The transient cache is
-invalidated when mvar assignments change; the permanent cache never
-holds an mvar-dependent answer.
+`whnf` and `infer` caches key on `(Config::cache_key(), ExprId)`, so
+the `size_of::<Config>()` guard from plan 1 protects these caches from
+the missing-key-field failure mode from day one.
+
+**Correction found during planning** (recorded per this spec's
+Lean-source-wins rule): the oracle's whnf cache has no transient half —
+`useWHNFCache` (WHNF.lean:1082-1088) simply *declines to cache* terms
+with fvars/mvars or an active unfold-override predicate. So this slice
+implements exactly that: a permanent cache guarded by that predicate,
+with non-cacheable terms recomputed (correct and slow, never wrong).
+The parent spec's transient/permanent split is a *defeq*-cache concern
+and lands with `is_def_eq` in plan 3, where it actually exists in the
+oracle. A `cache.rs` module is therefore not created this slice; the
+predicate lives with `MetaCtx`.
 
 ## Error handling & edge cases
 
