@@ -19,6 +19,18 @@
 //! the build when a field is added, forcing whoever adds it to decide
 //! whether it belongs in the key rather than silently defaulting to
 //! "no".
+//!
+//! # A deliberate subset of the oracle's fields
+//!
+//! The oracle's `Config`/`toKey` covers 19 fields; this `Config` covers
+//! 11. That gap is intentional, not an oversight: `iota`,
+//! `proof_irrelevance`, `zeta_unused`, `zeta_have`, `offset_cnstrs`,
+//! `assign_synthetic_opaque`, and `eta_struct` arrive with the features
+//! that consult them, and `ASSERT_CONFIG_SIZE` forces the cache-key
+//! decision at that point rather than letting a field silently default
+//! to "unconsulted". `isDefEqStuckEx` is spec-mandated to become a
+//! typed error variant rather than a bool field, so it is not tracked
+//! here at all.
 
 use std::hash::{Hash, Hasher};
 
@@ -44,7 +56,6 @@ pub enum ProjReduction {
 pub struct Config {
     pub transparency: TransparencyMode,
     pub beta: bool,
-    pub eta: bool,
     pub zeta: bool,
     pub zeta_delta: bool,
     pub proj: ProjReduction,
@@ -52,6 +63,10 @@ pub struct Config {
     pub ctx_approx: bool,
     pub quasi_pattern_approx: bool,
     pub const_approx: bool,
+    /// Oracle default is `true` (`Basic.lean:161`,
+    /// `univApprox : Bool := true`) — unlike the other four
+    /// `*_approx` flags, which default off. Do not "fix" this back to
+    /// `false` to match its siblings; the oracle does not.
     pub univ_approx: bool,
     pub unification_hints: bool,
 }
@@ -62,7 +77,7 @@ pub struct Config {
 /// `cache_key`, then update this constant. See the module doc for the
 /// two Lean bugs this guards against.
 const ASSERT_CONFIG_SIZE: () = assert!(
-    std::mem::size_of::<Config>() == 12,
+    std::mem::size_of::<Config>() == 11,
     "Config changed size: a field was added or removed. Decide whether \
      it is semantically relevant to definitional equality and therefore \
      belongs in Config::cache_key, then update this assertion. A field \
@@ -76,7 +91,6 @@ impl Default for Config {
         Config {
             transparency: TransparencyMode::Default,
             beta: true,
-            eta: true,
             zeta: true,
             zeta_delta: true,
             proj: ProjReduction::YesWithDelta,
@@ -84,7 +98,8 @@ impl Default for Config {
             ctx_approx: false,
             quasi_pattern_approx: false,
             const_approx: false,
-            univ_approx: false,
+            // Oracle default: Basic.lean:161, `univApprox : Bool := true`.
+            univ_approx: true,
             unification_hints: true,
         }
     }
@@ -107,15 +122,19 @@ mod tests {
     use super::{Config, ProjReduction};
     use crate::TransparencyMode;
 
+    // Four of the five `*_approx` flags default off; `univ_approx` is the
+    // exception and defaults ON, matching the oracle (Basic.lean:161,
+    // `univApprox : Bool := true`). This is oracle fidelity, not a
+    // blanket "approximations off" policy.
     #[test]
-    fn default_is_default_transparency_with_no_approximations() {
+    fn default_matches_oracle_defaults() {
         let c = Config::default();
         assert_eq!(c.transparency, TransparencyMode::Default);
         assert!(!c.fo_approx);
         assert!(!c.ctx_approx);
         assert!(!c.quasi_pattern_approx);
         assert!(!c.const_approx);
-        assert!(!c.univ_approx);
+        assert!(c.univ_approx);
         assert!(c.unification_hints);
     }
 
@@ -175,10 +194,6 @@ mod tests {
                 ..base
             },
             Config {
-                eta: !base.eta,
-                ..base
-            },
-            Config {
                 zeta: !base.zeta,
                 ..base
             },
@@ -218,7 +233,7 @@ mod tests {
 
         // One mutation per field: if this count drifts from the field
         // count, a field is untested.
-        assert_eq!(mutations.len(), 12);
+        assert_eq!(mutations.len(), 11);
 
         for (i, m) in mutations.iter().enumerate() {
             assert_ne!(m.cache_key(), k, "mutation {i} did not change the key");

@@ -594,9 +594,21 @@ impl<'s> InterpId<'s> {
     /// implicitReducible, instanceReducible — matching the fixture's
     /// four attributed constants), confirming the brief's hypothesis
     /// with no adaptation needed.
+    ///
+    /// Tag 1 (`Semireducible`) is verified against the oracle's
+    /// constructor declaration order (ReducibilityAttrs.lean:41) but is
+    /// the one cell NOT pinned by fixture bytes: no surgical fixture
+    /// can produce an explicit tag-1 entry. The oracle's validator
+    /// unconditionally rejects a global `[semireducible]` attribute
+    /// application (ReducibilityAttrs.lean's `validate`, the
+    /// `.semireducible`/`.global` arm), and `local`-kind entries never
+    /// serialize into the `.olean` (`ScopedEnvExtension.addCore`'s
+    /// `.local` branch calls `addLocalEntry`, which never joins the
+    /// `newEntries` list `exportEntriesFn` reads).
     fn reducibility_status(r: &Raw) -> Result<crate::ReducibilityStatus, OleanError> {
         match &**r {
             RawValue::Scalar(0) => Ok(crate::ReducibilityStatus::Reducible),
+            // See the doc comment above: not pinned by fixture bytes.
             RawValue::Scalar(1) => Ok(crate::ReducibilityStatus::Semireducible),
             RawValue::Scalar(2) => Ok(crate::ReducibilityStatus::Irreducible),
             RawValue::Scalar(3) => Ok(crate::ReducibilityStatus::ImplicitReducible),
