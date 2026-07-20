@@ -244,7 +244,9 @@ sweep.
 - **salsa wiring** → M5; the grammar snapshot already threads as an
   explicit value, so wrapping `parse`/`format` in a query is mechanical.
 
-### Fast-follows discovered during M3c implementation (next slice)
+### Fast-follows discovered during M3c implementation
+
+Addressed by [2026-07-20-m3c-fast-follows-design.md](2026-07-20-m3c-fast-follows-design.md), except as noted.
 
 - **Apply the token-aware walk to import-bearing bodies.** Files WITH
   imports currently emit the head/tail as raw source slices, so trivia
@@ -255,9 +257,17 @@ sweep.
   fixtures. Route the non-import spans through `render_tokens` so all
   three rules apply uniformly.
 - **`fmt:mathlib` snapshot reuse.** The gate rebuilds a full snapshot per
-  file (~10 min release over the pass-list). Reuse snapshots per distinct
+  file (~10 min release over the pass-list — the baseline cited from the
+  previous milestone, not re-measured here). Reuse snapshots per distinct
   import set (as `mathlib_sweep.rs` does) to make the "fast" tier live up
-  to the name.
+  to the name. **Only partially addressed:** snapshots are now reused per
+  distinct import set, but the curated 23-file pass-list has 22 distinct
+  import sets, so there is almost nothing to group and the reuse buys
+  little. Measured gate wall-clock is ~8m45s (a prior run earlier this
+  milestone measured ~9m1s) — a modest improvement over the cited
+  baseline above, not the step change grouping was meant to deliver. The
+  real cost driver, per-closure olean decoding, is untouched. Revisit in
+  a later slice.
 - **Share `canon_semantic`'s despan with `canon.rs`.** `canon_semantic`
   duplicates `canon_jsonl`'s node shape + `json_str`; export a span-less
   core from `leanr_syntax::canon` to remove the schema-drift risk (it is
