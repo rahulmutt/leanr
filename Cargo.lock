@@ -891,6 +891,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "leanr_meta"
+version = "0.1.0"
+dependencies = [
+ "leanr_kernel",
+ "leanr_olean",
+ "stacker",
+]
+
+[[package]]
 name = "leanr_olean"
 version = "0.1.0"
 dependencies = [

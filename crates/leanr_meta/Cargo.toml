@@ -1,0 +1,12 @@
+[package]
+name = "leanr_meta"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+leanr_kernel = { path = "../leanr_kernel" }
+leanr_olean = { path = "../leanr_olean" }
+# Not yet used: reserved for plan 2's depth-proportional Meta traversal (matches leanr_kernel's pin).
+stacker = "0.1"

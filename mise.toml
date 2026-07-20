@@ -101,9 +101,27 @@ run = [
   # `module`-mode, `prelude` fixture: emits companion parts
   # `ModPriv.olean{,.server,.private}` (multi-region decode; M1b Task 13a).
   # The single `lean` invocation writes all three parts.
-  "lean tests/fixtures/ModPriv.lean -o tests/fixtures/ModPriv.olean",
-  # module mode also emits an unused `.ir` companion; drop it (not decoded).
-  "rm -f tests/fixtures/ModPriv.ir",
+  #
+  # Built from INSIDE tests/fixtures, not from the repo root, so the
+  # module name is `ModPriv` rather than a path-derived
+  # `tests.fixtures.ModPriv`. That name is not cosmetic: it is the prefix
+  # of the mangled private constant `_private.ModPriv.0.secret`, which
+  # this fixture exists to pin. As of the v4.33.0-rc1 oracle, `lean`
+  # derives the module name from the source path relative to the
+  # invocation cwd, so a root-relative invocation makes the mangled name
+  # depend on where regen was run from. Same `cd`-first shape the
+  # syntax/import fixtures below already use.
+  "sh -c 'cd tests/fixtures && lean ModPriv.lean -o ModPriv.olean'",
+  # module mode also emits unused `.ir` / `.ir.sig` companions; drop them
+  # (not decoded). `.ir.sig` is new as of the v4.33.0-rc1 oracle — before
+  # that only `.ir` was emitted, so regen left `.ir.sig` behind as an
+  # untracked file after the pin bump.
+  "rm -f tests/fixtures/ModPriv.ir tests/fixtures/ModPriv.ir.sig",
+  # M4a: reducibility-attribute fixture for the reducibilityCore /
+  # reducibilityExtra extension decode. Built from inside tests/fixtures
+  # for the same reason ModPriv is (module name must not depend on the
+  # invocation cwd).
+  "sh -c 'cd tests/fixtures && lean Reducibility.lean -o Reducibility.olean'",
   "sh -c 'lean --run tests/fixtures/dump_decls.lean tests/fixtures/Sample.olean > tests/fixtures/Sample.decls.txt'",
   "sh -c 'lean --run tests/fixtures/dump_decls.lean tests/fixtures/SampleRich.olean > tests/fixtures/SampleRich.decls.txt'",
   "sh -c 'lean --githash > tests/fixtures/oracle-githash.txt'",
