@@ -12,10 +12,12 @@
 
 mod config;
 mod error;
+mod metactx;
 mod mvar_ctx;
 mod transparency;
 
 pub use config::{Config, ProjReduction};
 pub use error::MetaError;
+pub use metactx::{MetaCtx, DEFAULT_STEP_BUDGET};
 pub use mvar_ctx::{MVarDecl, MVarId, MVarKind, MetavarContext};
 pub use transparency::{can_unfold, TransparencyMode};
