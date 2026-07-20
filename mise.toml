@@ -122,6 +122,12 @@ run = [
   # for the same reason ModPriv is (module name must not depend on the
   # invocation cwd).
   "sh -c 'cd tests/fixtures && lean Reducibility.lean -o Reducibility.olean'",
+  # M4a plan 2: matcher fixture for the Lean.Meta.Match.Extension
+  # decode. `prelude`-mode, import-free (the Prelude0 pattern) — see
+  # the fixture's own doc comment for the minimal Init-scaffold
+  # (lcAny/PProd/Eq/HEq/...) `match` elaboration needs even under
+  # `prelude`. cd-first for the same module-name reason as ModPriv.
+  "sh -c 'cd tests/fixtures && lean Matcher.lean -o Matcher.olean'",
   "sh -c 'lean --run tests/fixtures/dump_decls.lean tests/fixtures/Sample.olean > tests/fixtures/Sample.decls.txt'",
   "sh -c 'lean --run tests/fixtures/dump_decls.lean tests/fixtures/SampleRich.olean > tests/fixtures/SampleRich.decls.txt'",
   "sh -c 'lean --githash > tests/fixtures/oracle-githash.txt'",

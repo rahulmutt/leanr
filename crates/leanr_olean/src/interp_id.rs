@@ -629,6 +629,113 @@ impl<'s> InterpId<'s> {
         Ok((self.name_req(&f[0])?, Self::reducibility_status(&f[1])?))
     }
 
+    /// `Option Nat` arriving in a monomorphic-but-polymorphically-typed
+    /// field position: `none` is a boxed nullary tag (`RawValue::Scalar(0)`,
+    /// same reasoning as `reducibility_status`'s doc comment — `Option`
+    /// is itself polymorphic, so its `none` constructor is a boxed
+    /// immediate here, not unboxed into a `scalars` byte area), `some x`
+    /// is `Ctor { tag: 1, fields: [x] }`. Pinned empirically against
+    /// `Matcher.olean`'s `uElimPos?` field (`MatcherInfo.lean:58-61):
+    /// both fixture matchers eliminate into `N` (a `Type`, not `Prop`),
+    /// so both carry `some 0` (the matcher's motive is universe-generic,
+    /// position 0 of its level params) — `none` is not fixture-pinned by
+    /// this file, only verified against the oracle's tag-order
+    /// convention (`some` is Option's second declared constructor, tag 1).
+    fn opt_nat(r: &Raw) -> Result<Option<leanr_kernel::Nat>, OleanError> {
+        match &**r {
+            RawValue::Scalar(0) => Ok(None),
+            RawValue::Ctor { tag: 1, fields, .. } if fields.len() == 1 => {
+                Ok(Some(nat(&fields[0])?))
+            }
+            _ => Err(bad("Option Nat")),
+        }
+    }
+
+    /// `Option Name` arriving the same boxed-nullary way as `opt_nat`
+    /// above (`Option` is polymorphic, so its `none` is a boxed
+    /// immediate). Used for `DiscrInfo.hName?` — see `matcher_entry`'s
+    /// doc comment for why `DiscrInfo` itself does not appear as a
+    /// separate wrapper ctor here.
+    fn opt_name(&mut self, r: &Raw) -> Result<Option<NameId>, OleanError> {
+        match &**r {
+            RawValue::Scalar(0) => Ok(None),
+            RawValue::Ctor { tag: 1, fields, .. } if fields.len() == 1 => {
+                Ok(self.name(&fields[0])?)
+            }
+            _ => Err(bad("Option Name")),
+        }
+    }
+
+    /// oracle: `Lean.Meta.Match.Extension.Entry` — 2-field ctor
+    /// `{ name, info : MatcherInfo }`; `MatcherInfo` (MatcherInfo.lean:52-68)
+    /// is a 6-field ctor (numParams, numDiscrs, altInfos, uElimPos?,
+    /// discrInfos, overlaps) — NOT 5 as the task-1 brief's schematic
+    /// listed; the brief predated checking the oracle file directly and
+    /// omitted the trailing `overlaps : Overlaps` field. `overlaps` is
+    /// validated only by the exact-field-count `ctor` check below and is
+    /// never read (see `MatcherEntry`'s doc comment).
+    ///
+    /// Shape pinned empirically against `Matcher.olean` (temporary
+    /// `eprintln` probe over each field, per-field and one level into
+    /// each nested ctor/array):
+    /// - `numParams`/`numDiscrs`: plain `Nat`s riding directly in the
+    ///   ctor's pointer `fields` (as `RawValue::Scalar`/`BigInt`, decoded
+    ///   by the free `nat()` helper) — NOT in the `scalars` byte area.
+    ///   (Contrast `AltParamInfo` below: monomorphic-struct-position
+    ///   `Nat`s still decode via plain `nat()`, since `Nat` boxes small
+    ///   values as scalars regardless of the enclosing struct's
+    ///   polymorphism — only enum/bool DISCRIMINANTS move between the
+    ///   scalar area and boxed-immediate positions depending on whether
+    ///   the field's static type is polymorphic.)
+    /// - `altInfos`: `RawValue::Array` of `AltParamInfo` ctors, each
+    ///   `Ctor { tag: 0, fields: [numFields, numOverlaps], scalars: [hasUnitThunk, ..] }`
+    ///   — `hasUnitThunk : Bool` rides in `scalars[0]` (monomorphic bool
+    ///   field, same pattern as `RecursorVal.k`/`InductiveVal.isRec`),
+    ///   while the two `Nat` fields are boxed pointer fields.
+    /// - `uElimPos?`: boxed-nullary `Option Nat` (see `opt_nat` above);
+    ///   both fixture matchers observed `some 0`.
+    /// - `discrInfos`: `RawValue::Array` whose elements are `Option Name`
+    ///   values DIRECTLY (`RawValue::Scalar(0)` in this fixture, one per
+    ///   discriminant) — NOT a `DiscrInfo { hName? }` wrapper ctor. This
+    ///   deviates from the brief's schematic (`ctor(d, 0, 1, "DiscrInfo")`
+    ///   then read field 0): the oracle's runtime unboxes a single-field
+    ///   structure to its one field's own representation (no allocation),
+    ///   and `.olean` serialization mirrors that runtime object graph, so
+    ///   `DiscrInfo`'s wrapper never appears on the wire.
+    /// - `overlaps` (field 5): a `Ctor { tag: 0, fields: [2 ..] }` (the
+    ///   `Overlaps`/`Std.HashMap` internals) — confirmed present (so the
+    ///   ctor's exact-field-count check must ask for 6, not 5) but its
+    ///   contents are never decoded.
+    fn matcher_entry(&mut self, r: &Raw) -> Result<crate::MatcherEntry, OleanError> {
+        let (f, _) = ctor(r, 0, 2, "Match.Extension.Entry")?;
+        let name = self.name_req(&f[0])?;
+        let (mf, _) = ctor(&f[1], 0, 6, "MatcherInfo")?;
+        let num_params = nat(&mf[0])?;
+        let num_discrs = nat(&mf[1])?;
+        let mut alt_infos = Vec::new();
+        for a in array(&mf[2])? {
+            let (af, as_) = ctor(a, 0, 2, "AltParamInfo")?;
+            alt_infos.push(crate::MatcherAltInfo {
+                num_fields: nat(&af[0])?,
+                num_overlaps: nat(&af[1])?,
+                has_unit_thunk: boolean(as_.first(), "AltParamInfo.hasUnitThunk")?,
+            });
+        }
+        let u_elim_pos = Self::opt_nat(&mf[3])?;
+        let mut discr_infos = Vec::new();
+        for d in array(&mf[4])? {
+            discr_infos.push(self.opt_name(d)?);
+        }
+        Ok(crate::MatcherEntry {
+            name,
+            num_params,
+            num_discrs,
+            alt_infos,
+            u_elim_pos,
+            discr_infos,
+        })
+    }
+
     /// ModuleData (Environment.lean:109-129).
     pub(crate) fn module_data(&mut self, root: &Raw) -> Result<crate::ModuleData, OleanError> {
         let (f, s) = ctor(root, 0, 5, "ModuleData")?;
@@ -637,6 +744,7 @@ impl<'s> InterpId<'s> {
         // M4a); others stay opaque.
         let mut parser_entries = Vec::new();
         let mut reducibility = Vec::new();
+        let mut matchers = Vec::new();
         for pair in array(&f[4])? {
             let (pf, _) = ctor(pair, 0, 2, "ModuleData.entries pair")?;
             let ext_name = self.name(&pf[0])?;
@@ -683,6 +791,13 @@ impl<'s> InterpId<'s> {
                         });
                     }
                 }
+                // SimplePersistentEnvExtension: entries are bare
+                // Entry ctors, no scoped wrapper (like reducibilityCore).
+                "Lean.Meta.Match.Extension.extension" => {
+                    for e in array(&pf[1])? {
+                        matchers.push(self.matcher_entry(e)?);
+                    }
+                }
                 _ => continue,
             }
         }
@@ -707,6 +822,7 @@ impl<'s> InterpId<'s> {
             num_entries: array(&f[4])?.len(),
             parser_entries,
             reducibility,
+            matchers,
         })
     }
 }

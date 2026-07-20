@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use leanr_kernel::bank::{NameId, Store};
-use leanr_kernel::{ConstantInfo, Name};
+use leanr_kernel::{ConstantInfo, Name, Nat};
 
 use crate::interp_id::InterpId;
 use crate::{raw, OleanError};
@@ -115,6 +115,44 @@ pub struct ReducibilityEntry {
     pub status: ReducibilityStatus,
 }
 
+/// oracle: `Lean.Meta.Match.AltParamInfo` (MatcherInfo.lean:38-45).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatcherAltInfo {
+    pub num_fields: Nat,
+    pub num_overlaps: Nat,
+    pub has_unit_thunk: bool,
+}
+
+/// One decoded matcher-extension entry: oracle
+/// `Lean.Meta.Match.Extension.Entry` = `{ name, info : MatcherInfo }`
+/// (MatcherInfo.lean:113-115, 52-68). v4.33 stores `altInfos`
+/// (per-alternative field/overlap/thunk counts), NOT the older
+/// `altNumParams`; the consumer derives per-alt arity
+/// (`MatcherInfo.altNumParams`, MatcherInfo.lean:106-108).
+///
+/// `MatcherInfo` itself has a 6th field, `overlaps : Overlaps`
+/// (MatcherInfo.lean:64), not mentioned by the task-1 brief's 5-field
+/// schematic — verified against the real oracle source and confirmed
+/// empirically (the decoded ctor has 6 pointer fields). `overlaps` is
+/// validated only by the outer ctor's exact field-count check and is
+/// never read: no leanr consumer needs the overlap-approximation data,
+/// only `reduce_matcher`'s saturation/alternative-selection inputs.
+#[derive(Debug, Clone)]
+pub struct MatcherEntry {
+    pub name: NameId,
+    pub num_params: Nat,
+    pub num_discrs: Nat,
+    pub alt_infos: Vec<MatcherAltInfo>,
+    /// `uElimPos?` — `some pos` when the matcher eliminates into
+    /// polymorphic universes.
+    pub u_elim_pos: Option<Nat>,
+    /// `discrInfos[i].hName?` — the `h :` annotation name per
+    /// discriminant, flattened (DiscrInfo has exactly one field, and
+    /// the oracle's single-field-structure runtime representation
+    /// stores it unwrapped — see `interp_id.rs::matcher_entry`'s doc).
+    pub discr_infos: Vec<Option<NameId>>,
+}
+
 /// The decoded contents of one `.olean` module, decoded directly into
 /// term-bank ids (term-bank phase 3 — the Arc decode path this used to
 /// have a twin of is deleted, along with the differential gate that
@@ -140,6 +178,9 @@ pub struct ModuleData {
     /// extension entries (M4a). All other extension entries stay opaque
     /// (folded into `num_entries` only).
     pub reducibility: Vec<ReducibilityEntry>,
+    /// Typed decode of the `Lean.Meta.Match.Extension.extension`
+    /// entries (M4a plan 2). All other extension entries stay opaque.
+    pub matchers: Vec<MatcherEntry>,
 }
 
 impl ModuleData {
@@ -291,6 +332,7 @@ impl ModuleData {
             num_entries: base.num_entries,
             parser_entries: std::mem::take(&mut base.parser_entries),
             reducibility: std::mem::take(&mut base.reducibility),
+            matchers: std::mem::take(&mut base.matchers),
         })
     }
 }
@@ -416,6 +458,55 @@ mod tests {
         let mut env = Environment::default();
         let md = ModuleData::parse(&bytes, env.store_mut()).expect("decode");
         assert!(!md.reducibility.is_empty());
+    }
+
+    /// The matcher extension decodes: every `match` in Matcher.lean
+    /// registered one entry; `plainId` (no match) contributed none.
+    #[test]
+    fn matcher_entries_decode() {
+        let bytes = fixture("Matcher.olean");
+        let mut env = Environment::default();
+        let md = ModuleData::parse(&bytes, env.store_mut()).expect("decode");
+
+        assert!(
+            md.matchers.len() >= 2,
+            "isZero and both must each register a matcher: {:?}",
+            md.matchers.len()
+        );
+
+        let render = |n| env.store().to_name(None, Some(n)).to_string();
+        // Matcher aux names are `<decl>.match_<i>`-shaped.
+        assert!(
+            md.matchers
+                .iter()
+                .any(|m| render(m.name).contains("match_")),
+            "expected match_ aux names"
+        );
+        for m in &md.matchers {
+            // Every matcher in this fixture has 2 alternatives, and
+            // discrInfos has one entry per discriminant.
+            assert_eq!(
+                m.alt_infos.len(),
+                2,
+                "unexpected alt count: {:?}",
+                render(m.name)
+            );
+            assert_eq!(
+                leanr_kernel::Nat::from(m.discr_infos.len() as u64),
+                m.num_discrs,
+                "discrInfos length must equal numDiscrs: {:?}",
+                render(m.name)
+            );
+        }
+        // `isZero` has 1 discriminant, `both` has 2.
+        assert!(md
+            .matchers
+            .iter()
+            .any(|m| m.num_discrs == leanr_kernel::Nat::from(1u64)));
+        assert!(md
+            .matchers
+            .iter()
+            .any(|m| m.num_discrs == leanr_kernel::Nat::from(2u64)));
     }
 
     #[test]
