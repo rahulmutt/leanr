@@ -17,13 +17,26 @@ fn leanr() -> Command {
     c
 }
 
-/// Assert a unified diff body (after the `---`/`+++` headers) contains at
-/// least one removed and one added content line. Deliberately does not
-/// pin which of the two swapped lines the diff engine picks as the
-/// unchanged context line: for a pure two-line swap (our fixture
-/// throughout this file), that choice is an LCS tie-break internal to the
-/// diff algorithm — GNU `diff -u` and `similar`'s Myers implementation
-/// resolve it oppositely, and both are correct, minimal diffs.
+/// Assert a unified diff body (after the `---`/`+++` headers) contains the
+/// expected content, not merely the shape of a diff. Every call site in
+/// this file uses the same two-line-swap fixture:
+/// `"import Foo.B\nimport Foo.A\n"` -> `"import Foo.A\nimport Foo.B\n"`.
+///
+/// For that fixture, `similar` (the diff engine `leanr` actually uses,
+/// pinned in `Cargo.lock`) picks `import Foo.B` as the unchanged context
+/// line and treats `import Foo.A` as moved: it emits `+import Foo.A`
+/// followed by unchanged ` import Foo.B` followed by `-import Foo.A`. This
+/// was verified by directly executing the production call
+/// (`TextDiff::from_lines(before, after).unified_diff().context_radius(3)`)
+/// against the fixture, not assumed. Do not "fix" this to also assert on
+/// `import Foo.B` — GNU `diff -u` would pick the opposite, equally minimal,
+/// tie-break, but `similar` does not, and this assertion must match what
+/// the code under test actually produces.
+///
+/// Skipping the first two lines is REQUIRED, not cosmetic: the unified
+/// diff's own header lines (`--- name` / `+++ name`) themselves start with
+/// `-`/`+`, so without the skip a shape-only check would pass even on the
+/// header alone, with no real diff body at all. Do not simplify this away.
 fn assert_shows_a_change(stdout: &str) {
     let body: Vec<&str> = stdout.lines().skip(2).collect();
     assert!(
@@ -33,6 +46,17 @@ fn assert_shows_a_change(stdout: &str) {
     assert!(
         body.iter().any(|l| l.starts_with('+')),
         "diff must show an added line: {stdout}"
+    );
+    // Content, not just shape: pin the actual swapped line, verified
+    // against the real `similar`-backed production output (see doc
+    // comment above).
+    assert!(
+        body.iter().any(|l| l == &"-import Foo.A"),
+        "diff must remove the moved line `import Foo.A`: {stdout}"
+    );
+    assert!(
+        body.iter().any(|l| l == &"+import Foo.A"),
+        "diff must add the moved line `import Foo.A`: {stdout}"
     );
 }
 
