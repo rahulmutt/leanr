@@ -39,14 +39,35 @@ enum Emit {
 pub fn render_verbatim(tree: &SyntaxTree) -> Doc {
     let toks = tokens_of(&tree.root());
     let order = match imports::detect(tree, &toks) {
-        Some(block) => permute(toks.len(), &block),
+        Some(block) => permute(toks.len(), &block, &toks),
         None => (0..toks.len()).map(Emit::Tok).collect(),
     };
     render_tokens(&toks, &order)
 }
 
 /// head ++ sorted runs (newline-separated) ++ tail.
-fn permute(len: usize, block: &imports::ImportBlock) -> Vec<Emit> {
+///
+/// The tokens in the GAP between two consecutive runs (source order) are
+/// never emitted: `Emit::Newline` stands in for that whitespace instead
+/// (see `Emit::Newline`'s doc comment). That is only safe because a gap can
+/// never hold anything but whitespace-trivia — `imports::detect` bails to
+/// preserve-fallback whenever a comment sits in the import block, and
+/// Lean's header grammar places import commands consecutively, so nothing
+/// else can land in a gap. The second half is grammar-implied, not
+/// enforced by this code, so the assertion below converts it into a
+/// checked assumption: if the header grammar ever grows a construct that
+/// can be interleaved with imports, a significant token would otherwise be
+/// silently dropped from the formatted output.
+fn permute(len: usize, block: &imports::ImportBlock, toks: &[SyntaxToken]) -> Vec<Emit> {
+    debug_assert!(
+        gap_tokens_are_all_trivia(block, toks),
+        "permute: a significant (non-trivia) token was found in an inter-run \
+         gap between two imports and would be silently dropped from the \
+         formatted output. This violates the assumption that Lean's header \
+         grammar keeps import commands consecutive (nothing but whitespace \
+         between them) — investigate what now sits between two imports in \
+         this file's import block."
+    );
     let mut order = Vec::with_capacity(len + block.runs.len());
     order.extend((0..block.head_end).map(Emit::Tok));
     for (i, &(s, e)) in block.runs.iter().enumerate() {
@@ -57,6 +78,23 @@ fn permute(len: usize, block: &imports::ImportBlock) -> Vec<Emit> {
     }
     order.extend((block.tail_start..len).map(Emit::Tok));
     order
+}
+
+/// Predicate for the `debug_assert!` in `permute`. `block.runs` is sorted
+/// by import NAME (the emission order), not by source position, so the
+/// position-order gaps have to be recomputed here rather than reused from
+/// `block.runs`'s own adjacency.
+fn gap_tokens_are_all_trivia(block: &imports::ImportBlock, toks: &[SyntaxToken]) -> bool {
+    use leanr_syntax::kind::is_trivia;
+    let mut by_pos: Vec<(usize, usize)> = block.runs.clone();
+    by_pos.sort_by_key(|&(s, _)| s);
+    by_pos.windows(2).all(|w| {
+        let (_, prev_end) = w[0];
+        let (next_start, _) = w[1];
+        toks[prev_end..next_start]
+            .iter()
+            .all(|t| is_trivia(t.kind()))
+    })
 }
 
 /// Emit the order, with each token's text chosen by KIND (see
