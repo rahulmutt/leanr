@@ -22,6 +22,10 @@ pub enum MetaError {
     StepBudgetExhausted,
     /// The synthesis-reentrancy depth budget was exhausted.
     DepthBudgetExhausted,
+    /// Inference met a term it cannot type (loose bvar, unknown
+    /// constant, non-forall function type). Incompleteness, never
+    /// unsoundness — the kernel is the checker.
+    Infer(String),
 }
 
 impl From<leanr_kernel::KernelError> for MetaError {

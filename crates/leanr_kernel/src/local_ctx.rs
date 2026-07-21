@@ -172,15 +172,25 @@ impl LocalContext {
     /// (`crate::local_ctx.rs:154-164`) — NOT ported in Task 2 (that
     /// task's `LocalContext` doesn't need them; the checker, Task 4,
     /// does), added here per the module's own precedent rather than
-    /// duplicated inside `bank/tc.rs`. `pub(crate)`: only the in-crate
-    /// checker uses it.
-    pub(crate) fn save(&self) -> usize {
+    /// duplicated inside `bank/tc.rs`.
+    ///
+    /// `pub`, not `pub(crate)`: `leanr_meta`'s telescopes need the same
+    /// save/restore discipline the in-crate checker uses (the oracle's
+    /// `withLocalDecl`/`forallTelescope`/`lambdaTelescope` idiom) —
+    /// `infer_forall`/`infer_lambda` (M4a plan 2 task 4) restore the
+    /// local context on every exit path after minting telescope fvars,
+    /// and tasks 6-7's matcher reduction / smart-unfolding telescopes
+    /// are expected to need the same pattern. Visibility-only change
+    /// (user-authorized exception to that plan's kernel-untouched
+    /// constraint, M4a plan 2 task 4): no semantic delta, `save`/
+    /// `restore` behave identically to before.
+    pub fn save(&self) -> usize {
         self.decls.len()
     }
 
     /// Restore to a `save` checkpoint, removing later decls from both
     /// the insertion-ordered `decls` and the id `index`.
-    pub(crate) fn restore(&mut self, checkpoint: usize) {
+    pub fn restore(&mut self, checkpoint: usize) {
         for decl in self.decls.drain(checkpoint..) {
             self.index.remove(&decl.id);
         }

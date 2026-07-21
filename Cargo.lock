@@ -896,6 +896,7 @@ version = "0.1.0"
 dependencies = [
  "leanr_kernel",
  "leanr_olean",
+ "serde_json",
  "stacker",
 ]
 
