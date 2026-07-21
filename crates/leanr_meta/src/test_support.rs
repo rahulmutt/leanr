@@ -48,3 +48,32 @@ pub(crate) fn with_prelude0_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
     );
     f(&mut ctx)
 }
+
+/// Replay `Matcher.olean` (task 1's decode fixture; prelude-mode,
+/// import-free, replays from an empty environment exactly like
+/// `Prelude0` — see `Matcher.lean`'s own module doc for why a
+/// hermetic scaffold was needed to declare `match` under bare
+/// `prelude`). Same shape as [`with_prelude0_ctx`] above, just a
+/// different fixture and `&md.matchers` actually populated (task 6's
+/// first real consumer of that field, over `isZero`/`both`/`plainId`).
+pub(crate) fn with_matcher_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
+    let bytes = std::fs::read(fixture_path("Matcher.olean")).expect("Matcher.olean fixture");
+    let mut env = Environment::default();
+    let md = ModuleData::parse(&bytes, env.store_mut()).expect("Matcher.olean decodes");
+    let reducibility = md.reducibility;
+    let matchers = md.matchers;
+    let constants: HashMap<NameId, ConstantInfo> =
+        md.constants.into_iter().map(|c| (c.name(), c)).collect();
+    leanr_kernel::replay(&mut env, constants).expect("Matcher.olean replays");
+
+    let view = env.view();
+    let mut scratch = Store::scratch();
+    let mut ctx = MetaCtx::new(
+        view,
+        &mut scratch,
+        Config::default(),
+        &reducibility,
+        &matchers,
+    );
+    f(&mut ctx)
+}
