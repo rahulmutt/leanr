@@ -159,13 +159,11 @@ impl MetavarContext {
     /// Snapshot/restore support for `checkpointDefEq` (plan 3). Clones
     /// the assignment maps; declarations are not snapshotted (an mvar,
     /// once declared, stays declared even across a failed trial).
-    #[allow(dead_code)] // called by MetaCtx::checkpoint, no lib caller yet — task 3
     pub(crate) fn snapshot_assignments(
         &self,
     ) -> (HashMap<MVarId, ExprId>, HashMap<LMVarId, LevelId>) {
         (self.assignments.clone(), self.level_assignments.clone())
     }
-    #[allow(dead_code)] // called by MetaCtx::rollback, no lib caller yet — task 3
     pub(crate) fn restore_assignments(
         &mut self,
         expr: HashMap<MVarId, ExprId>,

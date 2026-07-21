@@ -451,6 +451,19 @@ fn encode_expr(store: &Store, base: Option<&Store>, e: ExprId, st: &mut EncSt) -
     }
 }
 
+/// profile -> config flags (mirrors `dump_defeq.lean::withProfile`):
+/// `"approx"` turns the four false-defaulting `*_approx` flags on;
+/// every other profile string (just `"default"` in the committed
+/// corpus) leaves `Config::default()` untouched.
+fn apply_profile(cfg: &mut Config, prof: &str) {
+    if prof == "approx" {
+        cfg.fo_approx = true;
+        cfg.ctx_approx = true;
+        cfg.quasi_pattern_approx = true;
+        cfg.const_approx = true;
+    }
+}
+
 fn transparency_of(s: &str) -> TransparencyMode {
     match s {
         "none" => TransparencyMode::None,
@@ -495,6 +508,41 @@ fn oracle_fast_gate() {
         // order-dependent) — controller-mandated contract point.
         let view: EnvView = env.view();
         let base = Some(view.store);
+
+        // `defeq` records carry `a`/`b`/`eq`/`prof`, not `in`/`out`, and
+        // are gated with a config profile the `whnf`/`infer` records
+        // never see — handled in its own branch, consuming `view` into
+        // its own `MetaCtx` and `continue`ing so the `in`/`out` decode
+        // below (which only `whnf`/`infer` need) never runs for it.
+        if kind == "defeq" {
+            let prof = q["prof"].as_str().expect("prof field");
+            let mut scratch = Store::scratch();
+            let mut fv = HashMap::new();
+            let mut mv = HashMap::new();
+            let a = decode_expr(&mut scratch, base, &q["a"], &mut fv, &mut mv);
+            let b = decode_expr(&mut scratch, base, &q["b"], &mut fv, &mut mv);
+            let mut cfg = Config {
+                transparency: transparency_of(tr),
+                ..Config::default()
+            };
+            apply_profile(&mut cfg, prof);
+            let mut ctx = MetaCtx::new(view, &mut scratch, cfg, &reducibility, &matchers);
+            match ctx.is_def_eq(a, b) {
+                Ok(got) => {
+                    let want = q["eq"].as_bool().expect("eq field");
+                    if got != want {
+                        failures.push(format!(
+                            "{id} (tr={tr},prof={prof}): leanr={got} oracle={want}"
+                        ));
+                    }
+                }
+                Err(e) => {
+                    failures.push(format!("{id} (tr={tr},prof={prof}): leanr errored: {e:?}"))
+                }
+            }
+            continue;
+        }
+
         let mut scratch = Store::scratch();
         let mut fvars = HashMap::new();
         let mut mvars = HashMap::new();

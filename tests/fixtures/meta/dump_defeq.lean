@@ -181,6 +181,34 @@ def whnfQueries : List (Name × Nat × Expr) :=
   , (`count,   1, mkApp (mkConst `count) (mkConst `N.zero))
   ]
 
+/-- (constant-or-tag, index, lhsBuilder, rhsBuilder). `defeq` records
+carry two exprs `a`/`b` and a boolean verdict `eq`, under each profile.
+Mvar-free and delta-independent this batch (plan 3 builds only the
+whnf_core + congruence slice of `is_def_eq`, so every committed pair
+must be decidable without delta or mvar assignment). -/
+def defeqQueries : List (Name × Nat × Expr × Expr) :=
+  [ (`refl,   0, mkConst `N.zero, mkConst `N.zero)               -- true, structural
+  , (`neq,    0, mkConst `N.zero, mkApp (mkConst `N.succ) (mkConst `N.zero)) -- false
+  , (`beta,   0, mkApp (mkLambda `x .default (mkConst `N) (.bvar 0)) (mkConst `N.zero), mkConst `N.zero) -- true, whnf_core only
+  ]
+
+/-- The two config profiles (spec § Config profiles). `default` leaves
+approximations at their oracle defaults; `approx` turns the four
+false-defaulting flags on (`univApprox` is already true). -/
+def withProfile (prof : String) (k : MetaM α) : MetaM α :=
+  match prof with
+  | "approx" => withConfig (fun c =>
+      { c with foApprox := true, ctxApprox := true,
+               quasiPatternApprox := true, constApprox := true }) k
+  | _ => k
+
+def profiles : List String := ["default", "approx"]
+
+def emitDefeq (id q tr prof : String) (aE bE : Json) (eq : Bool) : IO Unit :=
+  IO.println <| Json.compress <| Json.mkObj
+    [("id", id), ("q", q), ("tr", tr), ("prof", prof),
+     ("a", aE), ("b", bE), ("eq", eq)]
+
 def emit (id : String) (q : String) (tr : String) (inE outE : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj
     [("id", id), ("q", q), ("tr", tr), ("in", inE), ("out", outE)]
@@ -206,6 +234,12 @@ unsafe def main : IO Unit := do
         let r ← withTransparency tr <| whnf e
         let (inJ, outJ) := encPair e r
         emit s!"{name}/whnf/{i}" "whnf" trName inJ outJ
+    for (name, i, a, b) in defeqQueries do
+      for (trName, tr) in transparencies do
+        for prof in profiles do
+          let r ← withProfile prof <| withTransparency tr <| Meta.isDefEq a b
+          let (aj, bj) := encPair a b
+          emitDefeq s!"{name}/defeq/{i}" "defeq" trName prof aj bj r
     -- Constant loop: NOT filtered to "module Meta0" — Meta0 is
     -- import-free, so the environment here IS exactly Meta0's own
     -- constants and nothing else; a module filter would be a no-op.

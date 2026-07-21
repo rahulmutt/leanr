@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use leanr_kernel::bank::{NameId, Store};
-use leanr_kernel::{ConstantInfo, Environment};
+use leanr_kernel::{CheckedConstants, ConstSource, ConstantInfo, EnvView, Environment};
 use leanr_olean::ModuleData;
 
 use crate::{Config, MetaCtx};
@@ -17,6 +17,27 @@ pub(crate) fn fixture_path(name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures")
         .join(name)
+}
+
+/// The empty-environment idiom (no `.olean`, no constants, `Config::
+/// default`) — promoted from `metactx.rs::tests::with_ctx` (task 3):
+/// `defeq.rs`'s tests need the exact same tiny scaffold, and per-module
+/// duplication is precisely what this file exists to avoid (see the
+/// module doc). Reconcile against `schedule.rs:324` — the shape, not
+/// the letter: an `EnvView` over an empty persistent store and no
+/// constants.
+pub(crate) fn with_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
+    let base = Store::persistent();
+    let mut scratch = Store::scratch();
+    let empty = CheckedConstants::new(std::collections::HashMap::new());
+    let view = EnvView {
+        consts: ConstSource::Gated(&empty),
+        extra: None,
+        quot_initialized: false,
+        store: &base,
+    };
+    let mut ctx = MetaCtx::new(view, &mut scratch, Config::default(), &[], &[]);
+    f(&mut ctx)
 }
 
 /// Replay `Prelude0.olean` (import-free — see

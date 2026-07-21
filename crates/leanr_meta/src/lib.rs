@@ -11,6 +11,7 @@
 //! spec: docs/superpowers/specs/2026-07-20-m4a-meta-core-design.md
 
 mod config;
+mod defeq;
 mod error;
 mod infer;
 mod metactx;

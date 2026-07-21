@@ -102,3 +102,7 @@ def count (n : N) : N :=
   match n with
   | .zero => .zero
   | .succ m => .succ (count m)
+
+-- defeq (plan 3): mvar-free, delta-independent pairs
+def two : N := N.succ (N.succ N.zero)
+def alsoTwo : N := N.succ (N.succ N.zero)

@@ -61,18 +61,16 @@ pub struct MetaCtx<'e> {
     /// / `postponeIsLevelDefEq` (LevelDefEq.lean:87). Drained by
     /// `process_postponed` (task 4) at checkpoint boundaries; part of the
     /// snapshot so a failed trial unification restores it.
-    #[allow(dead_code)] // read by checkpoint (test only); wired in task 3
     pub(crate) postponed: Vec<(LevelId, LevelId)>,
     /// Permanent defeq cache: mvar/fvar-free pairs under a standard
     /// config. Survives across `is_def_eq` calls. oracle: the persistent
     /// half of the defeq cache (`getDefEqCacheKind`, ExprDefEq.lean:2238).
-    #[allow(dead_code)] // no reader/writer yet — is_def_eq lands in task 3
+    #[allow(dead_code)] // no reader/writer yet — is_def_eq consults it in task 8
     pub(crate) defeq_cache_perm: HashMap<(u64, ExprId, ExprId), bool>,
     /// Transient defeq cache: everything else. Cleared at every
     /// `checkpoint` (oracle: `modifyDefEqTransientCache fun _ => {}` in
     /// `checkpointDefEq`, Basic.lean:2446) — unsafe to keep across calls
     /// because the result depends on mctx state and config.
-    #[allow(dead_code)] // no reader/writer yet — is_def_eq lands in task 3
     pub(crate) defeq_cache_transient: HashMap<(u64, ExprId, ExprId), bool>,
     /// ReducibilityStatus per constant; absent => Semireducible.
     reducibility: HashMap<NameId, ReducibilityStatus>,
@@ -378,7 +376,6 @@ impl<'e> MetaCtx<'e> {
         self.step_budget = n;
     }
 
-    #[allow(dead_code)] // no lib caller yet — is_def_eq wires it in task 3
     pub(crate) fn checkpoint(&self) -> MetaSnapshot {
         let (expr_assignments, level_assignments) = self.mctx.snapshot_assignments();
         MetaSnapshot {
@@ -388,7 +385,6 @@ impl<'e> MetaCtx<'e> {
         }
     }
 
-    #[allow(dead_code)] // no lib caller yet — is_def_eq wires it in task 3
     pub(crate) fn rollback(&mut self, snap: MetaSnapshot) {
         self.mctx
             .restore_assignments(snap.expr_assignments, snap.level_assignments);
@@ -401,7 +397,6 @@ impl<'e> MetaCtx<'e> {
 /// level assignment maps and the postponed queue. NOT the permanent
 /// cache (it is monotone and shared) and NOT declarations (an mvar stays
 /// declared).
-#[allow(dead_code)] // constructed only by checkpoint (no lib caller yet — task 3)
 pub(crate) struct MetaSnapshot {
     expr_assignments: HashMap<MVarId, ExprId>,
     level_assignments: HashMap<LMVarId, LevelId>,
@@ -411,23 +406,8 @@ pub(crate) struct MetaSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::with_ctx;
     use crate::MetaError;
-
-    // Reconcile against schedule.rs:324 — the shape, not the letter:
-    // an EnvView over an empty persistent store and no constants.
-    fn with_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
-        let base = Store::persistent();
-        let mut scratch = Store::scratch();
-        let empty = leanr_kernel::CheckedConstants::new(HashMap::new());
-        let view = EnvView {
-            consts: leanr_kernel::ConstSource::Gated(&empty),
-            extra: None,
-            quot_initialized: false,
-            store: &base,
-        };
-        let mut ctx = MetaCtx::new(view, &mut scratch, Config::default(), &[], &[]);
-        f(&mut ctx)
-    }
 
     #[test]
     fn step_budget_exhausts_as_its_own_error() {
