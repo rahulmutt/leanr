@@ -1419,7 +1419,14 @@ impl<'e> MetaCtx<'e> {
     /// because that method is private to the kernel crate; verified
     /// against `Expr.lean`'s own worked examples (`betaRev (fun x y =>
     /// t x y) #[a] ==> fun y => t a y`, etc.).
-    fn beta_rev(&mut self, f: ExprId, args: &[ExprId]) -> Result<ExprId, MetaError> {
+    ///
+    /// `pub(crate)`: task 9's `infer.rs::ibr_app` (the
+    /// `instantiate_beta_rev` divergence fix, oracle:
+    /// `instantiateBetaRevRange`'s App arm calling `head.betaRev
+    /// revArgs`, InferType.lean:91) reuses this SAME function rather
+    /// than duplicating it — one oracle-cited `Expr.betaRev`
+    /// transcription, not two.
+    pub(crate) fn beta_rev(&mut self, f: ExprId, args: &[ExprId]) -> Result<ExprId, MetaError> {
         if args.is_empty() {
             return Ok(f);
         }

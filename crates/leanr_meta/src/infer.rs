@@ -124,6 +124,20 @@ impl<'e> MetaCtx<'e> {
     /// `App` arm and `inferProjType`'s constructor-parameter
     /// application (:140), exactly as the oracle reuses one function
     /// for both.
+    ///
+    /// Both instantiations of `f_type` use `instantiate_beta_rev`, not
+    /// plain `instantiate_rev` — oracle: `fType.instantiateBetaRevRange
+    /// j i args` / `fType.instantiateBetaRevRange j args.size args`
+    /// (InferType.lean:113, :116). The plain substitution was this
+    /// module's oracle-fast divergence (task 9 burn-down, 15/80 corpus
+    /// records — every recursor-shaped `infer` query: `count`, `add`,
+    /// `N.noConfusionType`, `N.brecOn.go`, `Eq.ndrec`, ...): a recursor's
+    /// motive parameter is substituted with a literal `fun x => T`, and
+    /// plain `instantiate_rev` leaves the unreduced redex `(fun x => T)
+    /// major` where the oracle's beta-aware substitution produces
+    /// `T[major/x]` directly (`instantiateBetaRevRange`'s own doc
+    /// comment cites this exact `motive`-substitution scenario as its
+    /// reason for existing).
     fn infer_app_type(&mut self, f: ExprId, args: &[ExprId]) -> Result<ExprId, MetaError> {
         let mut f_type = self.infer_type(f)?;
         let mut j = 0usize;
@@ -132,13 +146,7 @@ impl<'e> MetaCtx<'e> {
             if let Node::Forall { body, .. } = self.node(f_type) {
                 f_type = body;
             } else {
-                let pending = instantiate_rev(
-                    self.scratch,
-                    Some(self.view.store),
-                    f_type,
-                    &args[j..i],
-                    &mut self.guard,
-                )?;
+                let pending = self.instantiate_beta_rev(f_type, &args[j..i])?;
                 let w = self.whnf(pending)?;
                 match self.node(w) {
                     Node::Forall { body, .. } => {
@@ -149,14 +157,255 @@ impl<'e> MetaCtx<'e> {
                 }
             }
         }
-        Ok(instantiate_rev(
-            self.scratch,
-            Some(self.view.store),
-            f_type,
-            &args[j..nargs],
-            &mut self.guard,
-        )?)
+        self.instantiate_beta_rev(f_type, &args[j..nargs])
     }
+
+    /// oracle: `Expr.instantiateBetaRevRange` (Lean/Meta/InferType.lean:
+    /// 19-99, toolchain leanprover/lean4:v4.33.0-rc1). `instantiate_rev`'s
+    /// pure-substitution twin, except: whenever a substitution replaces a
+    /// bvar sitting at the HEAD of an application spine, the (already
+    /// substituted) spine is beta-reduced against it too (`Expr.betaRev`,
+    /// `ibr_app`/`beta_rev` below) — see `infer_app_type`'s doc comment
+    /// for why this matters. `subst` follows `instantiate_rev`'s own
+    /// convention (innermost-first: `subst[subst.len()-1]` replaces
+    /// `#0`).
+    fn instantiate_beta_rev(&mut self, e: ExprId, subst: &[ExprId]) -> Result<ExprId, MetaError> {
+        if subst.is_empty() {
+            return Ok(e);
+        }
+        self.ibr_visit(e, 0, subst)
+    }
+
+    /// Guarded recursive entry (the `infer_type`/`whnf` idiom: one
+    /// `guarded` call per logical recursive step, re-entered on every
+    /// call rather than grouped per-node like the kernel's own
+    /// `instantiate_go` — this module's established style, see this
+    /// file's own doc comment on recursing via guarded public entries).
+    fn ibr_visit(&mut self, e: ExprId, offset: u32, subst: &[ExprId]) -> Result<ExprId, MetaError> {
+        if (self.data(e).loose_bvar_range() as u64) <= offset as u64 {
+            return Ok(e);
+        }
+        self.guarded(|s| s.ibr_visit_core(e, offset, subst))
+    }
+
+    fn ibr_visit_core(
+        &mut self,
+        e: ExprId,
+        offset: u32,
+        subst: &[ExprId],
+    ) -> Result<ExprId, MetaError> {
+        match self.node(e) {
+            Node::BVar { idx } => self.ibr_bvar(e, idx as u64, offset, subst),
+            Node::BVarBig { idx } => {
+                let n = self.scratch.nat_at(Some(self.view.store), idx).clone();
+                let idxv = n.to_usize().ok_or_else(|| {
+                    MetaError::Infer(
+                        "instantiate_beta_rev: bvar index too large to represent".into(),
+                    )
+                })? as u64;
+                self.ibr_bvar(e, idxv, offset, subst)
+            }
+            // oracle: `visit`'s own comment — these atoms never carry
+            // loose bvars, so the range check above already short-
+            // circuited whenever it applies; kept as a non-panicking
+            // fallback.
+            Node::FVar { .. }
+            | Node::MVar { .. }
+            | Node::Sort { .. }
+            | Node::Const { .. }
+            | Node::LitNat { .. }
+            | Node::LitStr { .. } => Ok(e),
+            Node::App { .. } => self.ibr_app(e, offset, subst),
+            Node::Lam {
+                binder_name,
+                binder_type,
+                body,
+                binder_info,
+            } => {
+                let t2 = self.ibr_visit(binder_type, offset, subst)?;
+                let b2 = self.ibr_visit(body, offset + 1, subst)?;
+                if t2 == binder_type && b2 == body {
+                    Ok(e)
+                } else {
+                    Ok(self.scratch.expr_lam(
+                        Some(self.view.store),
+                        binder_name,
+                        t2,
+                        b2,
+                        binder_info,
+                    )?)
+                }
+            }
+            Node::Forall {
+                binder_name,
+                binder_type,
+                body,
+                binder_info,
+            } => {
+                let t2 = self.ibr_visit(binder_type, offset, subst)?;
+                let b2 = self.ibr_visit(body, offset + 1, subst)?;
+                if t2 == binder_type && b2 == body {
+                    Ok(e)
+                } else {
+                    Ok(self.scratch.expr_forall(
+                        Some(self.view.store),
+                        binder_name,
+                        t2,
+                        b2,
+                        binder_info,
+                    )?)
+                }
+            }
+            Node::LetE {
+                decl_name,
+                ty,
+                value,
+                body,
+                non_dep,
+            } => {
+                let t2 = self.ibr_visit(ty, offset, subst)?;
+                let v2 = self.ibr_visit(value, offset, subst)?;
+                let b2 = self.ibr_visit(body, offset + 1, subst)?;
+                if t2 == ty && v2 == value && b2 == body {
+                    Ok(e)
+                } else {
+                    Ok(self.scratch.expr_let(
+                        Some(self.view.store),
+                        decl_name,
+                        t2,
+                        v2,
+                        b2,
+                        non_dep,
+                    )?)
+                }
+            }
+            Node::MData { data, expr } => {
+                let e2 = self.ibr_visit(expr, offset, subst)?;
+                if e2 == expr {
+                    Ok(e)
+                } else {
+                    Ok(self.scratch.expr_mdata(Some(self.view.store), data, e2)?)
+                }
+            }
+            Node::Proj {
+                type_name,
+                idx,
+                structure,
+            } => {
+                let s2 = self.ibr_visit(structure, offset, subst)?;
+                if s2 == structure {
+                    Ok(e)
+                } else {
+                    Ok(self.scratch.expr_proj(
+                        Some(self.view.store),
+                        type_name,
+                        &Nat::from(idx as u64),
+                        s2,
+                    )?)
+                }
+            }
+            Node::ProjBig {
+                type_name,
+                idx,
+                structure,
+            } => {
+                let idxn = self.scratch.nat_at(Some(self.view.store), idx).clone();
+                let s2 = self.ibr_visit(structure, offset, subst)?;
+                if s2 == structure {
+                    Ok(e)
+                } else {
+                    Ok(self
+                        .scratch
+                        .expr_proj(Some(self.view.store), type_name, &idxn, s2)?)
+                }
+            }
+        }
+    }
+
+    /// oracle: `instantiateBetaRevRange`'s `visitBVar` (InferType.lean:
+    /// 51-58), reverse convention (`instantiate_rev`'s own doc comment /
+    /// `subst.rs::instantiate_bvar`'s `rev` branch — mirrored exactly:
+    /// `sub_idx = n - 1 - rel`).
+    fn ibr_bvar(
+        &mut self,
+        e: ExprId,
+        idx: u64,
+        offset: u32,
+        subst: &[ExprId],
+    ) -> Result<ExprId, MetaError> {
+        let off = offset as u64;
+        if idx < off {
+            // Refers to a binder outside this substitution's window,
+            // untouched — mirrors `subst.rs::instantiate_bvar`'s
+            // `idx.0 < s1_big` early return (defensive: `ibr_visit`'s
+            // range check makes this unreachable in practice, since any
+            // subterm containing only sub-`offset` bvars has
+            // `loose_bvar_range <= offset` and is filtered out earlier).
+            return Ok(e);
+        }
+        let n = subst.len() as u64;
+        if idx < off + n {
+            let rel = idx - off;
+            let sub_idx = (n - 1 - rel) as usize;
+            let chosen = subst[sub_idx];
+            if offset == 0 {
+                Ok(chosen)
+            } else {
+                Ok(leanr_kernel::lift_loose_bvars(
+                    self.scratch,
+                    Some(self.view.store),
+                    chosen,
+                    0,
+                    offset,
+                    &mut self.guard,
+                )?)
+            }
+        } else {
+            let new_idx = idx - n;
+            Ok(self
+                .scratch
+                .expr_bvar(Some(self.view.store), &Nat::from(new_idx))?)
+        }
+    }
+
+    /// oracle: `instantiateBetaRevRange`'s `App` arm (InferType.lean:
+    /// 84-93): if the WHOLE spine's head is syntactically a raw bvar,
+    /// substitute head and every argument, then beta-reduce
+    /// (`beta_rev` below); otherwise fall back to plain per-layer
+    /// recursion on `f`/`arg` (`visitApp`, :69-71) — which, since `f`'s
+    /// own spine head is the SAME as `e`'s (same spine), re-derives the
+    /// identical "not a bvar" verdict on its own recursive call, making
+    /// a separate `visitWithoutBeta` mode unnecessary here.
+    fn ibr_app(&mut self, e: ExprId, offset: u32, subst: &[ExprId]) -> Result<ExprId, MetaError> {
+        let head = self.get_app_fn(e);
+        let head_is_bvar = matches!(self.node(head), Node::BVar { .. } | Node::BVarBig { .. });
+        if head_is_bvar {
+            let args = self.get_app_args(e);
+            let head2 = self.ibr_visit(head, offset, subst)?;
+            let mut args2 = Vec::with_capacity(args.len());
+            for a in args {
+                args2.push(self.ibr_visit(a, offset, subst)?);
+            }
+            self.beta_rev(head2, &args2)
+        } else {
+            let (f, arg) = match self.node(e) {
+                Node::App { f, arg } => (f, arg),
+                _ => unreachable!("ibr_app called on a non-App node"),
+            };
+            let f2 = self.ibr_visit(f, offset, subst)?;
+            let arg2 = self.ibr_visit(arg, offset, subst)?;
+            if f2 == f && arg2 == arg {
+                Ok(e)
+            } else {
+                Ok(self.scratch.expr_app(Some(self.view.store), f2, arg2)?)
+            }
+        }
+    }
+
+    // `Expr.betaRev` itself: reuse `whnf.rs`'s existing `beta_rev`
+    // (oracle: `Expr.betaRev`, `Expr.lean:1592-1617`) rather than
+    // duplicating it — same `args`-in-application-order convention as
+    // `get_app_args`, which is exactly what `ibr_app` collects above.
 
     /// oracle: `inferTypeImp`'s `App` arm (`.app f .. =>
     /// inferAppType f.getAppFn e.getAppArgs`, :244).

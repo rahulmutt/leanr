@@ -10,3 +10,9 @@ leanr_kernel = { path = "../leanr_kernel" }
 leanr_olean = { path = "../leanr_olean" }
 # Not yet used: reserved for plan 2's depth-proportional Meta traversal (matches leanr_kernel's pin).
 stacker = "0.1"
+
+[dev-dependencies]
+# Parsing the committed oracle fixture (tests/fixtures/meta/meta-queries.jsonl)
+# in tests/oracle_fast.rs only. Pin matches the workspace's existing usage
+# (crates/leanr_olean, leanr_build, leanr_cli all pin "1").
+serde_json = "1"

@@ -254,6 +254,10 @@ depends = ["elan:bootstrap"]
 # explicit rather than incidental.
 run = "sh -c 'LEANR_SWEEP_LIMIT=\"\" LEANR_SWEEP_PASSLIST_ONLY=1 LEANR_MATHLIB_DIR=\"$PWD/.mathlib\" LEANR_OLEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo test --release -p leanr_grammar --test mathlib_sweep -- --ignored --nocapture'"
 
+[tasks."meta:fast"]
+description = "Tier-1 meta differential gate: every committed whnf/infer query agrees with the oracle. Hermetic, seconds; runs in the dev loop (also runs inside plain `mise run test`)."
+run = ["cargo test --release -p leanr_meta --test oracle_fast"]
+
 [tasks."parse:mathlib"]
 description = "HEAVYWEIGHT/NIGHTLY tier — full Mathlib parse sweep vs the pass-list ratchet (needs mathlib:fetch). Walks the whole corpus and decodes an olean closure per distinct import set (~8,221 sets): ~35h at RAYON_NUM_THREADS=5 on 8 effective cores, dominated by closure decode, not the oracle. Do NOT run this in the dev loop — use parse:mathlib:fast for that. LEANR_SWEEP_LIMIT=N for a smoke run. Snapshot build + sweep are streamed per import set (no barrier, no accumulated snapshots) and run in parallel via rayon; set RAYON_NUM_THREADS=N to cap worker threads (e.g. under memory pressure from parallel oracle `lean` subprocesses)."
 depends = ["elan:bootstrap"]
