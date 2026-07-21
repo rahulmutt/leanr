@@ -93,7 +93,14 @@ impl<'e> MetaCtx<'e> {
     /// `instantiateMVars` + defeq-cache stage (:2333-2354) is a named
     /// seam (task 8): until then this recomputes on every call, never
     /// caches — correct, only slower.
-    fn is_def_eq_core(&mut self, t: ExprId, s: ExprId) -> Result<bool, MetaError> {
+    ///
+    /// `pub(crate)`, not private (task 5): `assign.rs::
+    /// check_types_and_assign` calls this directly (not the
+    /// checkpoint-wrapped `is_def_eq`) to avoid double-checkpointing a
+    /// nested type comparison — see that function's own doc comment,
+    /// which makes the identical point `level.rs::is_level_def_eq`'s
+    /// doc comment makes about `isLevelDefEqAux` vs. `isLevelDefEq`.
+    pub(crate) fn is_def_eq_core(&mut self, t: ExprId, s: ExprId) -> Result<bool, MetaError> {
         self.step()?;
         self.guarded(|ctx| {
             if let Some(b) = ctx.is_def_eq_quick(t, s)? {
@@ -151,7 +158,18 @@ impl<'e> MetaCtx<'e> {
     ///   Deciding both directly here just skips a no-op `whnf_core`
     ///   round trip; the verdict is identical either way.
     /// - Lam/Forall: real oracle location, see module doc.
-    fn is_def_eq_quick(&mut self, t: ExprId, s: ExprId) -> Result<Option<bool>, MetaError> {
+    ///
+    /// `pub(crate)`, not private (task 5): `assign.rs::is_def_eq_mvar`
+    /// (the oracle's `isDefEqQuickOther`, this function's own catch-all
+    /// arm below) re-enters this SAME function after instantiating an
+    /// already-assigned mvar-headed side (oracle: `isAssigned tFn =>
+    /// let t ← instantiateMVars t; isDefEqQuick t s`), a genuine mutual
+    /// recursion across the module boundary.
+    pub(crate) fn is_def_eq_quick(
+        &mut self,
+        t: ExprId,
+        s: ExprId,
+    ) -> Result<Option<bool>, MetaError> {
         if t == s {
             return Ok(Some(true));
         }
@@ -226,10 +244,13 @@ impl<'e> MetaCtx<'e> {
                     ..
                 },
             ) => Ok(Some(self.is_def_eq_binding_shallow(d1, b1, d2, b2)?)),
-            // SEAM: mvar arms (`isDefEqQuickMVarMVar` / `processAssignment`,
-            // :1855-1927, :1963-1977) — assignment lands task 5.
-            (Node::MVar { .. }, _) | (_, Node::MVar { .. }) => Ok(None),
-            _ => Ok(None),
+            // oracle: `isDefEqQuick`'s own `| t, s => isDefEqQuickOther
+            // t s` fallthrough (:1841) — task 5's `assign.rs::
+            // is_def_eq_mvar` (the mvar-headed-application dispatch:
+            // detects `t`/`s` via `get_app_fn`, not just a literal top-
+            // level `MVar` node, since `?m a1 .. an` must be recognized
+            // even though its own top node is `App`).
+            _ => self.is_def_eq_mvar(t, s),
         }
     }
 
@@ -394,19 +415,13 @@ impl<'e> MetaCtx<'e> {
                 }
                 let t_args = self.get_app_args(t);
                 let s_args = self.get_app_args(s);
-                if t_args.len() != s_args.len() {
-                    return Ok(false);
-                }
-                // Plain pairwise comparison (oracle's assignment-aware
-                // `isDefEqArgsFirstPass`, ExprDefEq.lean:298-370, is
-                // task 5 — no higher-order/postponed-implicit handling
-                // here yet).
-                for (&a, &b) in t_args.iter().zip(s_args.iter()) {
-                    if !self.is_def_eq_core(a, b)? {
-                        return Ok(false);
-                    }
-                }
-                Ok(true)
+                // oracle: `isDefEqApp` (:2166-2178) delegates arg
+                // comparison to `isDefEqArgs` (:371-421) — task 5's
+                // `assign.rs::is_def_eq_args` (extracted from this
+                // arm's own former inline pairwise walk so
+                // `isDefEqMVarSelf` can share it too, per that
+                // function's own citation).
+                self.is_def_eq_args(t_fn, &t_args, &s_args)
             }
             _ => Ok(false),
         }

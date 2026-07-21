@@ -6,12 +6,13 @@
 //! cleaner rather than duplicating").
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use leanr_kernel::bank::{NameId, Store};
-use leanr_kernel::{CheckedConstants, ConstSource, ConstantInfo, EnvView, Environment};
+use leanr_kernel::bank::{ExprId, NameId, Store};
+use leanr_kernel::{CheckedConstants, ConstSource, ConstantInfo, EnvView, Environment, Nat};
 use leanr_olean::ModuleData;
 
-use crate::{Config, MetaCtx};
+use crate::{Config, MVarDecl, MVarId, MVarKind, MetaCtx};
 
 pub(crate) fn fixture_path(name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -38,6 +39,57 @@ pub(crate) fn with_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
     };
     let mut ctx = MetaCtx::new(view, &mut scratch, Config::default(), &[], &[]);
     f(&mut ctx)
+}
+
+/// Mint a fresh, declared (but unassigned) expr metavariable of type
+/// `ty` and return both its `Expr::mvar` reference and its `MVarId`
+/// (task 5). Promoted here rather than defined privately in `assign.rs`
+/// per task 5's own brief: task 8's plan text is expected to tell a
+/// later implementer to reuse this exact helper, so a private copy in
+/// `assign.rs` would force that later duplication instead of avoiding
+/// it. Name uniqueness is via a process-wide monotone counter (mirrors
+/// `level.rs::fresh_level_mvar`'s "fixed prefix + counter" idiom,
+/// scoped to the whole test binary rather than one `MetaCtx` since
+/// there is no production-code counter field to reuse for this
+/// test-only need); every caller uses its own fresh `Store` (`with_ctx`
+/// et al. each build one), so cross-test collisions cannot arise
+/// either way — the counter is just cheap insurance against two calls
+/// within the SAME test/`Store` colliding.
+pub(crate) fn fresh_mvar(ctx: &mut MetaCtx, ty: ExprId) -> (ExprId, MVarId) {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let idx = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let base = Some(ctx.view.store);
+    let prefix_str = ctx
+        .scratch
+        .intern_str(base, "_leanr_test_mvar")
+        .expect("interning a tiny fixed name is infallible");
+    let prefix = ctx
+        .scratch
+        .name_str(base, None, prefix_str)
+        .expect("interning a tiny fixed name is infallible");
+    let idx_id = ctx
+        .scratch
+        .intern_nat(base, &Nat::from(idx))
+        .expect("interning a small nat is infallible");
+    let name = ctx
+        .scratch
+        .name_num(base, Some(prefix), idx_id)
+        .expect("interning a tiny fixed name is infallible");
+    let id = MVarId(name);
+    ctx.mctx_mut().declare(
+        id,
+        MVarDecl {
+            user_name: None,
+            ty,
+            lctx: Default::default(),
+            kind: MVarKind::Natural,
+        },
+    );
+    let expr = ctx
+        .scratch
+        .expr_mvar(base, Some(name))
+        .expect("interning a fresh mvar reference is infallible");
+    (expr, id)
 }
 
 /// Replay `Prelude0.olean` (import-free — see

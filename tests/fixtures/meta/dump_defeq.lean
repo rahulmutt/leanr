@@ -205,6 +205,24 @@ def defeqQueries : List (Name × Nat × Expr × Expr) :=
       mkSort (mkLevelParam `u), mkSort (mkLevelParam `v)) -- false: genuinely distinct params, not just "not yet decidable"
   ]
 
+/-- (constant-or-tag, index, baseExprBuilder, argIdx). `defeq_mvar`
+records (task 5): `baseExpr` is a fixture application `f a₀ a₁ …`;
+`argIdx` names WHICH explicit argument gets replaced by a fresh
+metavariable (`← mkFreshExprMVar (← inferType arg)` under
+`withNewMCtxDepth (allowLevelAssignments := true)`) before running
+`Meta.isDefEq` against the untouched `baseExpr`. Every entry here is
+PATTERN-shaped for task 5's own assignment code (the fresh mvar always
+ends up in NULLARY position — it never itself carries further
+arguments — since it is substituted directly for one existing argument
+slot, never applied to anything else): `N.succ ?m =?= N.succ N.zero`
+and `add ?m one =?= add one one` (both argument positions), each
+solvable by a single pattern assignment with no approximation. -/
+def defeqMvarQueries : List (Name × Nat × Expr × Nat) :=
+  [ (`succ, 0, mkApp (mkConst `N.succ) (mkConst `N.zero), 0)
+  , (`add,  0, mkApp (mkApp (mkConst `add) one) one, 0)
+  , (`add,  1, mkApp (mkApp (mkConst `add) one) one, 1)
+  ]
+
 /-- The two config profiles (spec § Config profiles). `default` leaves
 approximations at their oracle defaults; `approx` turns the four
 false-defaulting flags on (`univApprox` is already true). -/
@@ -225,6 +243,18 @@ def emitDefeq (id q tr prof : String) (aE bE : Json) (eq : Bool) : IO Unit :=
 def emit (id : String) (q : String) (tr : String) (inE outE : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj
     [("id", id), ("q", q), ("tr", tr), ("in", inE), ("out", outE)]
+
+/-- `defeq_mvar` record emitter (task 5): like `emitDefeq`, plus an
+`assign` array of `{"m": <canonical mvar index>, "v": <E>}` — the
+"compare assignments, not just verdicts" requirement. The index is the
+mvar's first-occurrence number in the SAME `EncSt` that numbered `a`/
+`b` (so it matches how those already numbered it, exactly like
+`encPair` threads `in`→`out`), never a fresh one of its own. -/
+def emitDefeqMvar (id tr prof : String) (aE bE : Json)
+    (eq : Bool) (assign : Array Json) : IO Unit :=
+  IO.println <| Json.compress <| Json.mkObj
+    [("id", id), ("q", "defeq_mvar"), ("tr", tr), ("prof", prof),
+     ("a", aE), ("b", bE), ("eq", eq), ("assign", Json.arr assign)]
 
 unsafe def main : IO Unit := do
   -- Must run before any `importModules (loadExts := true)` or the
@@ -253,6 +283,35 @@ unsafe def main : IO Unit := do
           let r ← withProfile prof <| withTransparency tr <| Meta.isDefEq a b
           let (aj, bj) := encPair a b
           emitDefeq s!"{name}/defeq/{i}" "defeq" trName prof aj bj r
+    for (name, i, e, argIdx) in defeqMvarQueries do
+      for (trName, tr) in transparencies do
+        for prof in profiles do
+          let args := e.getAppArgs
+          if h : argIdx < args.size then
+            let arg := args[argIdx]
+            let (eqR, assignArr, aJ, bJ) ←
+                withNewMCtxDepth (allowLevelAssignments := true) <|
+                withProfile prof <| withTransparency tr do
+              let argTy ← inferType arg
+              let mvar ← mkFreshExprMVar argTy
+              let newArgs := args.set! argIdx mvar
+              let lhs := mkAppN e.getAppFn newArgs
+              let eqR ← Meta.isDefEq lhs e
+              let assignedOpt ← if eqR then getExprMVarAssignment? mvar.mvarId! else pure none
+              let assignedInst ← assignedOpt.mapM instantiateMVars
+              -- Thread ONE `EncSt` across `lhs` -> `e` -> the assigned
+              -- value, exactly like `encPair`'s `in`->`out` threading
+              -- (this function's own doc comment).
+              let (aJ, st1) := (encExpr lhs).run {}
+              let (bJ, st2) := (encExpr e).run st1
+              let assignArr : Array Json := match assignedInst with
+                | some v =>
+                  let vJ := (encExpr v).run' st2
+                  let idx := (st2.mvars.get? mvar.mvarId!).getD 0
+                  #[Json.mkObj [("m", idx), ("v", vJ)]]
+                | none => #[]
+              pure (eqR, assignArr, aJ, bJ)
+            emitDefeqMvar s!"{name}/defeq_mvar/{i}" trName prof aJ bJ eqR assignArr
     -- Constant loop: NOT filtered to "module Meta0" — Meta0 is
     -- import-free, so the environment here IS exactly Meta0's own
     -- constants and nothing else; a module filter would be a no-op.

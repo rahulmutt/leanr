@@ -10,6 +10,7 @@
 //!
 //! spec: docs/superpowers/specs/2026-07-20-m4a-meta-core-design.md
 
+mod assign;
 mod config;
 mod defeq;
 mod error;
