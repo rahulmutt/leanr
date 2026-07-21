@@ -6,6 +6,8 @@
 //! § Error handling & edge cases). Same posture as
 //! `KernelError::BankExhausted`.
 
+use leanr_kernel::bank::ExprId;
+
 /// A Meta-level failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MetaError {
@@ -26,6 +28,12 @@ pub enum MetaError {
     /// constant, non-forall function type). Incompleteness, never
     /// unsoundness — the kernel is the checker.
     Infer(String),
+    /// `isDefEqStuck`: the query is not decidable yet but may become so
+    /// once more mvars are assigned. NOT a negative verdict — collapsing
+    /// it to `false` loses the "not yet" and changes search results.
+    /// oracle: `throwIsDefEqStuck` (Basic.lean), the channel synthesis
+    /// (plan 4) reads. The payload is the blocking term.
+    IsDefEqStuck(ExprId),
 }
 
 impl From<leanr_kernel::KernelError> for MetaError {

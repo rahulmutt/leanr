@@ -9,11 +9,11 @@
 use std::collections::HashMap;
 
 use leanr_kernel::bank::terms::Node;
-use leanr_kernel::bank::{ExprId, NameId, Store};
+use leanr_kernel::bank::{ExprId, LevelId, NameId, Store};
 use leanr_kernel::{EnvView, ExprData, FVarIdGen, LocalContext, RecGuard, MAX_REC_DEPTH};
 use leanr_olean::{EntryScope, MatcherEntry, ReducibilityEntry, ReducibilityStatus};
 
-use crate::{Config, MetaError, MetavarContext, TransparencyMode};
+use crate::{Config, LMVarId, MVarId, MetaError, MetavarContext, TransparencyMode};
 
 /// Stack-growth constants — the same values `tc.rs` uses (private
 /// there, so restated; keep in sync by inspection). Verified against
@@ -56,6 +56,24 @@ pub struct MetaCtx<'e> {
     /// only how fast it's produced.
     pub(crate) whnf_core_cache: HashMap<(u64, ExprId), ExprId>,
     pub(crate) infer_cache: HashMap<(u64, ExprId), ExprId>,
+    /// Postponed level-equality constraints (`?u`-bearing `max`/`imax`
+    /// shapes neither decidable nor refutable yet). oracle: `getPostponed`
+    /// / `postponeIsLevelDefEq` (LevelDefEq.lean:87). Drained by
+    /// `process_postponed` (task 4) at checkpoint boundaries; part of the
+    /// snapshot so a failed trial unification restores it.
+    #[allow(dead_code)] // read by checkpoint (test only); wired in task 3
+    pub(crate) postponed: Vec<(LevelId, LevelId)>,
+    /// Permanent defeq cache: mvar/fvar-free pairs under a standard
+    /// config. Survives across `is_def_eq` calls. oracle: the persistent
+    /// half of the defeq cache (`getDefEqCacheKind`, ExprDefEq.lean:2238).
+    #[allow(dead_code)] // no reader/writer yet — is_def_eq lands in task 3
+    pub(crate) defeq_cache_perm: HashMap<(u64, ExprId, ExprId), bool>,
+    /// Transient defeq cache: everything else. Cleared at every
+    /// `checkpoint` (oracle: `modifyDefEqTransientCache fun _ => {}` in
+    /// `checkpointDefEq`, Basic.lean:2446) — unsafe to keep across calls
+    /// because the result depends on mctx state and config.
+    #[allow(dead_code)] // no reader/writer yet — is_def_eq lands in task 3
+    pub(crate) defeq_cache_transient: HashMap<(u64, ExprId, ExprId), bool>,
     /// ReducibilityStatus per constant; absent => Semireducible.
     reducibility: HashMap<NameId, ReducibilityStatus>,
     matchers: HashMap<NameId, MatcherEntry>,
@@ -216,6 +234,9 @@ impl<'e> MetaCtx<'e> {
             whnf_cache: HashMap::new(),
             whnf_core_cache: HashMap::new(),
             infer_cache: HashMap::new(),
+            postponed: Vec::new(),
+            defeq_cache_perm: HashMap::new(),
+            defeq_cache_transient: HashMap::new(),
             reducibility,
             matchers,
             smart_unfolding: true,
@@ -356,6 +377,35 @@ impl<'e> MetaCtx<'e> {
     pub(crate) fn set_step_budget(&mut self, n: u64) {
         self.step_budget = n;
     }
+
+    #[allow(dead_code)] // no lib caller yet — is_def_eq wires it in task 3
+    pub(crate) fn checkpoint(&self) -> MetaSnapshot {
+        let (expr_assignments, level_assignments) = self.mctx.snapshot_assignments();
+        MetaSnapshot {
+            expr_assignments,
+            level_assignments,
+            postponed: self.postponed.clone(),
+        }
+    }
+
+    #[allow(dead_code)] // no lib caller yet — is_def_eq wires it in task 3
+    pub(crate) fn rollback(&mut self, snap: MetaSnapshot) {
+        self.mctx
+            .restore_assignments(snap.expr_assignments, snap.level_assignments);
+        self.postponed = snap.postponed;
+    }
+}
+
+/// A save point for `checkpointDefEq` (oracle Basic.lean:2438). Holds
+/// exactly what a failed trial unification must restore: the expr and
+/// level assignment maps and the postponed queue. NOT the permanent
+/// cache (it is monotone and shared) and NOT declarations (an mvar stays
+/// declared).
+#[allow(dead_code)] // constructed only by checkpoint (no lib caller yet — task 3)
+pub(crate) struct MetaSnapshot {
+    expr_assignments: HashMap<MVarId, ExprId>,
+    level_assignments: HashMap<LMVarId, LevelId>,
+    postponed: Vec<(LevelId, LevelId)>,
 }
 
 #[cfg(test)]
@@ -410,6 +460,37 @@ mod tests {
             assert_eq!(ctx.get_app_fn(app), f);
             assert_eq!(ctx.get_app_args(app), vec![a, a]);
             assert_eq!(ctx.get_app_num_args(app), 2);
+        });
+    }
+
+    #[test]
+    fn rollback_restores_assignments_and_postponed() {
+        use crate::{MVarDecl, MVarId, MVarKind};
+        with_ctx(|ctx| {
+            let z = ctx.scratch.level_zero(None).expect("level");
+            let ty = ctx.scratch.expr_sort(None, z).expect("sort");
+            let s = ctx.scratch.intern_str(None, "m").expect("intern");
+            let nm = ctx.scratch.name_str(None, None, s).expect("name");
+            let m = MVarId(nm);
+            ctx.mctx.declare(
+                m,
+                MVarDecl {
+                    user_name: None,
+                    ty,
+                    lctx: Default::default(),
+                    kind: MVarKind::Natural,
+                },
+            );
+
+            let snap = ctx.checkpoint();
+            ctx.mctx.assign(m, ty).expect("assign");
+            ctx.postponed.push((z, z));
+            assert!(ctx.mctx.is_assigned(m));
+            assert_eq!(ctx.postponed.len(), 1);
+
+            ctx.rollback(snap);
+            assert!(!ctx.mctx.is_assigned(m), "assignment must be undone");
+            assert!(ctx.postponed.is_empty(), "postponed must be restored");
         });
     }
 }

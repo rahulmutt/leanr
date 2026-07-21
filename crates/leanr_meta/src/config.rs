@@ -23,9 +23,9 @@
 //! # A deliberate subset of the oracle's fields
 //!
 //! The oracle's `Config`/`toKey` covers 19 fields; this `Config` covers
-//! 14. That gap is intentional, not an oversight: `proof_irrelevance`,
-//! `offset_cnstrs`, `assign_synthetic_opaque`, and `eta_struct` arrive
-//! with the features that consult them, and `ASSERT_CONFIG_SIZE` forces
+//! 15. That gap is intentional, not an oversight: `offset_cnstrs`,
+//! `assign_synthetic_opaque`, and `eta_struct` arrive with the features
+//! that consult them, and `ASSERT_CONFIG_SIZE` forces
 //! the cache-key decision at that point rather than letting a field
 //! silently default to "unconsulted". `isDefEqStuckEx` is spec-mandated
 //! to become a typed error variant rather than a bool field, so it is
@@ -65,6 +65,11 @@ pub struct Config {
     pub ctx_approx: bool,
     pub quasi_pattern_approx: bool,
     pub const_approx: bool,
+    /// Use proof irrelevance in defeq: two proofs of the same `Prop`
+    /// are equal. oracle: `Config.proofIrrelevance` (Basic.lean:138,
+    /// default `true`), consulted by `isDefEqProofIrrel`
+    /// (ExprDefEq.lean:1766).
+    pub proof_irrelevance: bool,
     /// Oracle default is `true` (`Basic.lean:161`,
     /// `univApprox : Bool := true`) — unlike the other four
     /// `*_approx` flags, which default off. Do not "fix" this back to
@@ -90,7 +95,7 @@ pub struct Config {
 /// `cache_key`, then update this constant. See the module doc for the
 /// two Lean bugs this guards against.
 const ASSERT_CONFIG_SIZE: () = assert!(
-    std::mem::size_of::<Config>() == 14,
+    std::mem::size_of::<Config>() == 15,
     "Config changed size: a field was added or removed. Decide whether \
      it is semantically relevant to definitional equality and therefore \
      belongs in Config::cache_key, then update this assertion. A field \
@@ -111,6 +116,7 @@ impl Default for Config {
             ctx_approx: false,
             quasi_pattern_approx: false,
             const_approx: false,
+            proof_irrelevance: true,
             // Oracle default: Basic.lean:161, `univApprox : Bool := true`.
             univ_approx: true,
             unification_hints: true,
@@ -152,6 +158,7 @@ mod tests {
         assert!(!c.const_approx);
         assert!(c.univ_approx);
         assert!(c.unification_hints);
+        assert!(c.proof_irrelevance);
     }
 
     // Plan-2 additions match the oracle defaults (Basic.lean): iota,
@@ -267,11 +274,15 @@ mod tests {
                 zeta_have: !base.zeta_have,
                 ..base
             },
+            Config {
+                proof_irrelevance: !base.proof_irrelevance,
+                ..base
+            },
         ];
 
         // One mutation per field: if this count drifts from the field
         // count, a field is untested.
-        assert_eq!(mutations.len(), 14);
+        assert_eq!(mutations.len(), 15);
 
         for (i, m) in mutations.iter().enumerate() {
             assert_ne!(m.cache_key(), k, "mutation {i} did not change the key");
