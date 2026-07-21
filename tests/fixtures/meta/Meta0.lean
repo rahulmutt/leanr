@@ -106,3 +106,12 @@ def count (n : N) : N :=
 -- defeq (plan 3): mvar-free, delta-independent pairs
 def two : N := N.succ (N.succ N.zero)
 def alsoTwo : N := N.succ (N.succ N.zero)
+
+-- universe-polymorphic (plan 3 task 4): exercises inferType/whnf over a
+-- genuine `Sort u` parameter (not just the ground `Sort 0` every other
+-- Meta0 declaration above uses), via the constant-loop's automatic
+-- `infer` query. The hand-built `Sort`-level defeq pairs themselves
+-- (max/succ-normalization true cases, a genuinely-unequal case) are
+-- built directly in dump_defeq.lean, independent of any Meta0
+-- declaration — see that file's `defeqQueries` additions.
+def uid.{u} (α : Sort u) (a : α) : α := a

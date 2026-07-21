@@ -67,10 +67,8 @@ impl<'e> MetaCtx<'e> {
         match self.is_def_eq_core(t, s) {
             Ok(true) => {
                 if self.process_postponed()? {
-                    // merge saved + newly-postponed (task 4 provides a
-                    // real `process_postponed`; until then it is a
-                    // no-op stub returning `true`, so there is nothing
-                    // new to merge yet).
+                    // merge saved + newly-postponed (level.rs's real
+                    // `process_postponed`, task 4).
                     let mut merged = saved_postponed;
                     merged.append(&mut self.postponed);
                     self.postponed = merged;
@@ -127,16 +125,6 @@ impl<'e> MetaCtx<'e> {
         r
     }
 
-    /// oracle: `processPostponed` (Basic.lean:2401-2418) — drains
-    /// postponed level-equality constraints. SEAM (task 4): until
-    /// `is_level_def_eq` exists, nothing is ever postponed (this
-    /// task's `is_def_eq_quick` decides levels only when structurally
-    /// equal, or escalates without postponing), so a no-op `Ok(true)`
-    /// is exact here, not an approximation.
-    fn process_postponed(&mut self) -> Result<bool, MetaError> {
-        Ok(true)
-    }
-
     /// oracle: `isDefEqQuick` / `isDefEqQuickOther` (ExprDefEq.lean:
     /// 1819-1927). This task's subset: pointer equality, same-shape
     /// leaf decisions (`Lit`, `BVar`/`BVarBig`, `Sort` via structural
@@ -173,20 +161,12 @@ impl<'e> MetaCtx<'e> {
             (Node::BVar { idx: i1 }, Node::BVar { idx: i2 }) => Ok(Some(i1 == i2)),
             (Node::BVarBig { idx: i1 }, Node::BVarBig { idx: i2 }) => Ok(Some(i1 == i2)),
             (Node::Sort { level: l1 }, Node::Sort { level: l2 }) => {
-                // SEAM: the real `.sort u, .sort v` arm calls
-                // `isLevelDefEqAux` (LevelDefEq.lean), a decisive
-                // procedure (always true or false) — task 4's
-                // `is_level_def_eq`. Until then: `LevelId` equality
-                // *is* full structural equality (levels are
-                // hash-consed), so a structural mismatch does NOT mean
-                // "not defeq" (e.g. `max u u` vs `u`) — only "not
-                // decidable here yet". Punt (`None`) rather than
-                // assert a wrong `false`.
-                if l1 == l2 {
-                    Ok(Some(true))
-                } else {
-                    Ok(None)
-                }
+                // oracle: the real `.sort u, .sort v` arm calls
+                // `isLevelDefEqAux` (LevelDefEq.lean) — task 4's
+                // `is_level_def_eq`, a DECISIVE procedure (always true
+                // or false, possibly after postponing), so this never
+                // needs to escalate/punt.
+                Ok(Some(self.is_level_def_eq(l1, l2)?))
             }
             (
                 Node::Const {
@@ -207,14 +187,19 @@ impl<'e> MetaCtx<'e> {
                     // until then, is_def_eq_expensive returns false for
                     // distinct names, as correct.
                     Ok(None)
-                } else if ls1 == ls2 {
-                    // SEAM: is_level_def_eq (task 4) — `LevelsId`
-                    // equality is structural, not semantic; see the
-                    // `Sort` arm above for why a mismatch punts rather
-                    // than asserts `false`.
-                    Ok(Some(true))
                 } else {
-                    Ok(None)
+                    // oracle: `isListLevelDefEqAux` (task 4's
+                    // `is_def_eq_levels`) — decisive, so this never
+                    // needs to escalate/punt on a levels mismatch.
+                    let us = self
+                        .scratch
+                        .level_list_at(Some(self.view.store), ls1)
+                        .to_vec();
+                    let vs = self
+                        .scratch
+                        .level_list_at(Some(self.view.store), ls2)
+                        .to_vec();
+                    Ok(Some(self.is_def_eq_levels(&us, &vs)?))
                 }
             }
             (
@@ -357,12 +342,11 @@ impl<'e> MetaCtx<'e> {
     /// - `isDefEqDelta` (:2217) — task 7: lazy delta reduction, the
     ///   single biggest remaining ladder rung.
     /// - `isDefEqEtaStruct` x2 (:2219-2221) — task 6 (structure eta).
-    /// - a non-structurally-equal `Sort`/`Sort` pair reaching here (its
-    ///   levels differ under `LevelId` equality but might still be
-    ///   `is_level_def_eq`, task 4) — falls to this function's own
-    ///   `false` below; an incompleteness, not the oracle's own
-    ///   ladder shape (the real `isDefEqQuick` always fully resolves
-    ///   `Sort`, so the real `isExprDefEqExpensive` never sees one).
+    ///   (A `Sort`/`Sort` pair never reaches this function at all, as
+    ///   of task 4: `is_def_eq_quick`'s `.sort` arm now calls the
+    ///   DECISIVE `is_level_def_eq`, matching the real `isDefEqQuick`,
+    ///   which always fully resolves `Sort` before `isExprDefEqExpensive`
+    ///   ever runs.)
     /// - `isDefEqProjInst`/`isDefEqStringLit`/`isDefEqUnitLike`
     ///   (:2229-2231) — task 6/7.
     /// - `isDefEqOnFailure` (:2232, unification hints :2022-2028) —
@@ -388,8 +372,18 @@ impl<'e> MetaCtx<'e> {
                 if n1 != n2 {
                     Ok(false)
                 } else {
-                    // SEAM: is_level_def_eq (task 4); structural only.
-                    Ok(ls1 == ls2)
+                    // oracle: `isListLevelDefEqAux` (task 4's
+                    // `is_def_eq_levels`), same as the `is_def_eq_quick`
+                    // Const arm above.
+                    let us = self
+                        .scratch
+                        .level_list_at(Some(self.view.store), ls1)
+                        .to_vec();
+                    let vs = self
+                        .scratch
+                        .level_list_at(Some(self.view.store), ls2)
+                        .to_vec();
+                    self.is_def_eq_levels(&us, &vs)
                 }
             }
             (Node::App { .. }, Node::App { .. }) => {

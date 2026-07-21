@@ -14,6 +14,7 @@ mod config;
 mod defeq;
 mod error;
 mod infer;
+mod level;
 mod metactx;
 mod mvar_ctx;
 #[cfg(test)]

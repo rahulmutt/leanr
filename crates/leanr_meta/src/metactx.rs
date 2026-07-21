@@ -106,6 +106,13 @@ pub struct MetaCtx<'e> {
     /// names like `Nat.add`).
     pub(crate) sunfold_match: NameId,
     pub(crate) sunfold_match_alt: NameId,
+    /// Monotone counter backing `level.rs`'s `fresh_level_mvar` (oracle:
+    /// `mkFreshLevelMVar`, Basic.lean:861-863) — this crate's own
+    /// name-generator stand-in, mirroring `FVarIdGen`'s "fixed prefix +
+    /// counter" idiom (`local_ctx.rs::fresh_fvar_id`) rather than
+    /// reusing that type directly (a level mvar name is not an fvar
+    /// name, and the two counters must not collide on the same prefix).
+    pub(crate) level_mvar_gen: u64,
 }
 
 /// The `Nat.*` builtins `reduce_nat` folds on `LitNat`/`Nat.zero`
@@ -248,6 +255,7 @@ impl<'e> MetaCtx<'e> {
             wf_rec,
             sunfold_match,
             sunfold_match_alt,
+            level_mvar_gen: 0,
         }
     }
 

@@ -190,6 +190,19 @@ def defeqQueries : List (Name × Nat × Expr × Expr) :=
   [ (`refl,   0, mkConst `N.zero, mkConst `N.zero)               -- true, structural
   , (`neq,    0, mkConst `N.zero, mkApp (mkConst `N.succ) (mkConst `N.zero)) -- false
   , (`beta,   0, mkApp (mkLambda `x .default (mkConst `N) (.bvar 0)) (mkConst `N.zero), mkConst `N.zero) -- true, whnf_core only
+  -- universe-polymorphic (task 4, `is_level_def_eq`). Mvar-free by
+  -- design (spec risk 3): `Level.param `u`/`` `v`` here are FREE level
+  -- params, not universe metavariables — `isLevelDefEqAux` decides
+  -- them the same way whether or not they happen to correspond to a
+  -- real declaration's `.{u}` binder, so these do not need to reference
+  -- `uid` at all.
+  , (`sortMaxZero, 0,
+      mkSort (mkLevelMax .zero (mkLevelParam `u)), mkSort (mkLevelParam `u)) -- true: max 0 u = u (normalize)
+  , (`sortSuccMax, 0,
+      mkSort (mkLevelSucc (mkLevelMax (mkLevelParam `u) (mkLevelParam `v))),
+      mkSort (mkLevelMax (mkLevelSucc (mkLevelParam `u)) (mkLevelSucc (mkLevelParam `v)))) -- true: succ distributes over max (normalize)
+  , (`sortDistinctParams, 0,
+      mkSort (mkLevelParam `u), mkSort (mkLevelParam `v)) -- false: genuinely distinct params, not just "not yet decidable"
   ]
 
 /-- The two config profiles (spec § Config profiles). `default` leaves
