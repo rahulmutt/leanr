@@ -27,10 +27,30 @@
 //! "unimplemented" answer (never a wrong one, never a panic) for the
 //! oracle behavior it stands in for:
 //!
-//! - [`MetaCtx::unfold_definition`] — plain delta plus (task 6) the
-//!   `can_unfold_at_matcher` gate-swap when `whnf_matcher` sets
-//!   `can_unfold_override`; task 7 additionally adds smart unfolding
-//!   in place.
+//! - [`MetaCtx::unfold_definition`] — its final oracle shape (task 7,
+//!   :871-957): the `can_unfold_at_matcher` gate-swap (task 6) plus the
+//!   `_sunfold` smart-unfolding channel (`smart_unfolding_reduce`,
+//!   :747-776) ahead of plain delta.
+//! - [`MetaCtx::get_structural_rec_arg_pos`] (task 7) — the forward-
+//!   declared `getStructuralRecArgPos?` extern (:49-56; the real
+//!   implementation lives in the elaborator's
+//!   `Structural/Eqns.lean`, out of reach for a decode-only crate).
+//!   Always `None`; per the oracle's OWN doc comment (:...,
+//!   `unfoldDefinition?`'s "Remark 4"), a `none` here takes the SAME
+//!   branch the oracle itself takes for Binport-imported (Lean-3-era)
+//!   `.olean`s that never recorded a rec-arg position at all — this is
+//!   the oracle's own documented fallback, not merely an
+//!   approximation of it.
+//! - [`MetaCtx::synth_pending`] (task 7) — `Meta.synthPending`
+//!   (`Basic.lean:840`), resolving a pending typeclass-synthesis
+//!   problem blocking a stuck smart-unfolding match; this plan has no
+//!   unification/instance-synthesis engine yet (lands with plan 4's
+//!   unifier). Always `false`.
+//! - [`MetaCtx::unfold_proj_inst_when_instances`] (task 7) —
+//!   `unfoldProjInstWhenInstances?` (:824-848, gated at :874): the
+//!   class-projection registry (`getProjectionFnInfo?`) it needs is the
+//!   same undecoded extension `get_stuck_mvar` already elides (task 6,
+//!   below); always `None`.
 //! - the `Defn` arm of `whnf_core_app`'s recursor dispatch — aux-recursor
 //!   (`casesOn`/`brecOn`-shaped) unfolding inside `whnf_core` itself
 //!   (:696-701); lands with the extension that identifies
@@ -57,11 +77,12 @@
 //!   always `None` there (same posture as `to_ctor_when_structure`'s
 //!   `mkProjFn` elision, below).
 
+use leanr_kernel::bank::pools::DataValueRow;
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, LevelsId, NameId};
 use leanr_kernel::{
-    instantiate_level_params, instantiate_rev, ConstantInfo, Nat, QuotKind, QuotVal, RecursorRule,
-    RecursorVal,
+    abstract_fvars, instantiate, instantiate_level_params, instantiate_rev, ConstantInfo, Nat,
+    QuotKind, QuotVal, RecursorRule, RecursorVal,
 };
 use leanr_olean::ReducibilityStatus;
 
@@ -111,13 +132,10 @@ const MATCHER_UNFOLD_ALLOWLIST: &[&str] = &[
 
 /// oracle: `ReduceMatcherResult` (WHNF.lean:432-436). All four variants
 /// are constructed by `reduce_matcher`'s real transcription (task 6).
-/// `Stuck`'s own payload is legitimately unread this task: `whnf_core`'s
-/// call site discards it exactly as the oracle's own does
-/// (`| .stuck _ => pure e`, WHNF.lean:687) — the payload is only ever
-/// consumed by `smartUnfoldingReduce?` (:764-772, via `getStuckMVar?`),
-/// task 7's job, not this one's. Scoped `allow`: a genuine task-7
-/// remnant, not a leftover.
-#[allow(dead_code)]
+/// `Stuck`'s own payload is consumed by `sunfold_go_match` (task 7, via
+/// `get_stuck_mvar`) exactly as the oracle's own `smartUnfoldingReduce?`
+/// does (:770-772) — `whnf_core`'s OWN call site still discards it
+/// (`| .stuck _ => pure e`, WHNF.lean:687), unchanged from task 6.
 pub(crate) enum ReduceMatcherResult {
     Reduced(ExprId),
     Stuck(ExprId),
@@ -924,10 +942,8 @@ impl<'e> MetaCtx<'e> {
     /// registries — are SEAMS (see the module doc's "Named seams"
     /// list): always `None`.
     ///
-    /// Unused by any of this task's own code — task 7's
-    /// `smartUnfoldingReduce?` port is its first real caller. Scoped
-    /// `allow`: a genuine task-7 remnant, not a leftover.
-    #[allow(dead_code)]
+    /// `sunfold_go_match` (task 7's `smartUnfoldingReduce?` port) is its
+    /// first real caller.
     pub(crate) fn get_stuck_mvar(&mut self, e: ExprId) -> Result<Option<MVarId>, MetaError> {
         self.step()?;
         self.guarded(|s| s.get_stuck_mvar_body(e))
@@ -1022,6 +1038,371 @@ impl<'e> MetaCtx<'e> {
         }
         let major = self.whnf(args[pos])?;
         self.get_stuck_mvar(major)
+    }
+
+    /// oracle: `mkSmartUnfoldingNameFor` (WHNF.lean:50-51) —
+    /// `Name.mkStr declName smartUnfoldingSuffix` (`smartUnfoldingSuffix
+    /// := "_sunfold"`, :49). `Name.mkStr` APPENDS a NEW component onto
+    /// `declName` (this is not string concatenation on the last
+    /// component) — `f._sunfold` is `f ++ "_sunfold"` as its own name
+    /// component, built via the bank's own `name_str`, the same
+    /// primitive `mk_name2`/`intern_dotted` (above) use for every other
+    /// multi-part name in this file.
+    fn smart_unfolding_name_for(&mut self, decl_name: NameId) -> Result<NameId, MetaError> {
+        let base = Some(self.view.store);
+        let s = self.scratch.intern_str(base, "_sunfold")?;
+        Ok(self.scratch.name_str(base, Some(decl_name), s)?)
+    }
+
+    /// oracle: `Expr.annotation?` (`Expr.lean:2096-2100`) — `e = .mdata d
+    /// b` where `d.size == 1 && d.getBool kind false`; reconciled
+    /// against THIS bank's `KVMapRow` shape (`Store::kvmap_at`) rather
+    /// than rebuilding a full `leanr_kernel::KVMap` via the (Arc-
+    /// bridging) `Store::to_kvmap`, since only a length-1, single-key,
+    /// `DataValueRow::Bool(true)` shape is ever tested for here — the
+    /// two `mkAnnotation` kinds `smartUnfoldingReduce?` reads
+    /// (`` `sunfoldMatch ``/`` `sunfoldMatchAlt ``, WHNF.lean:64-70).
+    /// Returns the annotation's INNER expression (`b`), matching
+    /// `annotation?`'s own `some b`, not the whole `MData` node.
+    pub(crate) fn annotation(&self, e: ExprId, kind: NameId) -> Option<ExprId> {
+        match self.node(e) {
+            Node::MData { data, expr } => {
+                let row = self.scratch.kvmap_at(Some(self.view.store), data);
+                match row.0.as_ref() {
+                    [(Some(k), DataValueRow::Bool(true))] if *k == kind => Some(expr),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// SEAM: oracle `Meta.synthPending` (`Basic.lean:840`, `@[extern
+    /// "lean_synth_pending"] protected opaque synthPending : MVarId →
+    /// MetaM Bool`) — attempts to resolve a PENDING typeclass-synthesis
+    /// problem blocking a stuck metavariable. This plan has no
+    /// unification/instance-synthesis engine at all (arrives in a later
+    /// plan alongside the rest of unification/typeclass resolution), so
+    /// this is always `false`: a stuck inner match in
+    /// `sunfold_go_match` therefore always fails to "unstick", and
+    /// `smart_unfolding_reduce` vetoes the whole unfold — the same
+    /// conservative outcome the oracle's own `else failure` branch
+    /// takes whenever `synthPending` itself returns `false`.
+    fn synth_pending(&mut self, _mvar: MVarId) -> Result<bool, MetaError> {
+        Ok(false)
+    }
+
+    /// oracle: `smartUnfoldingReduce?` (WHNF.lean:747-776) — entry
+    /// point; `go`/`goMatch` are its `where`-clause mutual helpers,
+    /// split below into `sunfold_go`/`sunfold_go_match` (each
+    /// step+guarded, the `expr_contains_const`/`dite_transform` idiom
+    /// this file already uses for every other adversarial-depth
+    /// recursion).
+    pub fn smart_unfolding_reduce(&mut self, e: ExprId) -> Result<Option<ExprId>, MetaError> {
+        self.sunfold_go(e)
+    }
+
+    fn sunfold_go(&mut self, e: ExprId) -> Result<Option<ExprId>, MetaError> {
+        self.step()?;
+        self.guarded(|s| s.sunfold_go_body(e))
+    }
+
+    /// oracle: `go` (WHNF.lean:750-761). `None` propagates from any
+    /// child (the `OptionT` monad's `failure`); every non-failing arm
+    /// rebuilds via the SAME store constructors the rest of this file
+    /// uses (never `Store::to_expr`).
+    fn sunfold_go_body(&mut self, e: ExprId) -> Result<Option<ExprId>, MetaError> {
+        match self.node(e) {
+            // oracle :752: `mapLetDecl n t (← go v) (nondep := nondep)
+            // fun x => go (b.instantiate1 x)` — `t` itself is NEVER
+            // recursed into (only `v` is), matching the oracle exactly.
+            Node::LetE {
+                decl_name,
+                ty,
+                value,
+                body,
+                non_dep,
+            } => {
+                let v2 = match self.sunfold_go(value)? {
+                    Some(v) => v,
+                    None => return Ok(None),
+                };
+                let checkpoint = self.lctx.save();
+                let r = self.sunfold_go_let(decl_name, ty, v2, body, non_dep);
+                self.lctx.restore(checkpoint);
+                r
+            }
+            // oracle :753: `lambdaTelescope e fun xs b => mkLambdaFVars
+            // xs (← go b)` — mints one fvar per LEADING `Lam` binder
+            // only (never descends through a `LetE`, unlike
+            // `infer_lambda_body`'s mixed telescope); save/restore
+            // brackets the mint (`reduce_matcher`'s own idiom, above).
+            Node::Lam { .. } => {
+                let checkpoint = self.lctx.save();
+                let r = self.sunfold_go_lam(e);
+                self.lctx.restore(checkpoint);
+                r
+            }
+            Node::App { f, arg } => {
+                let f2 = match self.sunfold_go(f)? {
+                    Some(v) => v,
+                    None => return Ok(None),
+                };
+                let a2 = match self.sunfold_go(arg)? {
+                    Some(v) => v,
+                    None => return Ok(None),
+                };
+                Ok(Some(self.scratch.expr_app(
+                    Some(self.view.store),
+                    f2,
+                    a2,
+                )?))
+            }
+            Node::Proj {
+                type_name,
+                idx,
+                structure,
+            } => {
+                let s2 = match self.sunfold_go(structure)? {
+                    Some(v) => v,
+                    None => return Ok(None),
+                };
+                Ok(Some(self.scratch.expr_proj(
+                    Some(self.view.store),
+                    type_name,
+                    &Nat::from(idx as u64),
+                    s2,
+                )?))
+            }
+            Node::ProjBig {
+                type_name,
+                idx,
+                structure,
+            } => {
+                let s2 = match self.sunfold_go(structure)? {
+                    Some(v) => v,
+                    None => return Ok(None),
+                };
+                let n = self.scratch.nat_at(Some(self.view.store), idx).clone();
+                Ok(Some(self.scratch.expr_proj(
+                    Some(self.view.store),
+                    type_name,
+                    &n,
+                    s2,
+                )?))
+            }
+            // oracle :756-760: `sunfoldMatch`-annotated => `goMatch`;
+            // else recurse into the mdata's own child and rewrap.
+            Node::MData { data, expr } => {
+                if let Some(m) = self.annotation(e, self.sunfold_match) {
+                    self.sunfold_go_match(m)
+                } else {
+                    let b2 = match self.sunfold_go(expr)? {
+                        Some(v) => v,
+                        None => return Ok(None),
+                    };
+                    Ok(Some(self.scratch.expr_mdata(
+                        Some(self.view.store),
+                        data,
+                        b2,
+                    )?))
+                }
+            }
+            // oracle :761: `| _ => return e` — every other node shape
+            // (leaves: `Const`/`Sort`/`FVar`/`MVar`/`BVar`/`Lit*`/
+            // `Forall`) is returned unchanged.
+            _ => Ok(Some(e)),
+        }
+    }
+
+    /// The body of `sunfold_go`'s `LetE` arm: oracle `mapLetDecl`
+    /// (`Basic.lean:1925-1927`) = `withLetDecl` (mint a genuine let-fvar
+    /// in `lctx`, mirroring `infer_lambda_body`'s own `mk_let_decl`
+    /// call) then `mkLetFVars (usedLetOnly := true) (generalizeNondepLet
+    /// := false) #[x] result` — abstract the fvar back out; if it never
+    /// occurs in the (already go'd) result, DROP the let entirely
+    /// (`result` is already correct as-is), else rewrap as a `LetE`
+    /// preserving the original `non_dep`. Same "abstract, compare
+    /// against the pre-abstraction value" idiom as `infer.rs`'s
+    /// `rebuild_forall`.
+    fn sunfold_go_let(
+        &mut self,
+        decl_name: Option<NameId>,
+        ty: ExprId,
+        value: ExprId,
+        body: ExprId,
+        non_dep: bool,
+    ) -> Result<Option<ExprId>, MetaError> {
+        let fvar = self.lctx.mk_let_decl(
+            self.scratch,
+            Some(self.view.store),
+            &mut self.fvar_gen,
+            decl_name,
+            ty,
+            value,
+        )?;
+        let inst_body = instantiate(
+            self.scratch,
+            Some(self.view.store),
+            body,
+            fvar,
+            &mut self.guard,
+        )?;
+        let r = match self.sunfold_go(inst_body)? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let abstracted = abstract_fvars(
+            self.scratch,
+            Some(self.view.store),
+            r,
+            std::slice::from_ref(&fvar),
+            &mut self.guard,
+        )?;
+        if abstracted == r {
+            // `fvar` did not occur in `r`: unused let, drop it (`r` is
+            // already fvar-free and correct as-is).
+            Ok(Some(r))
+        } else {
+            Ok(Some(self.scratch.expr_let(
+                Some(self.view.store),
+                decl_name,
+                ty,
+                value,
+                abstracted,
+                non_dep,
+            )?))
+        }
+    }
+
+    /// The body of `sunfold_go`'s `Lam` arm: peel every LEADING `Lam`
+    /// binder with a fresh fvar (oracle `lambdaTelescope`'s own
+    /// `Lam`-only walk — never a `LetE`), recurse `go` on the fully-
+    /// instantiated body, then rebuild via `rebuild_lambda`.
+    fn sunfold_go_lam(&mut self, e0: ExprId) -> Result<Option<ExprId>, MetaError> {
+        let mut fvars: Vec<ExprId> = Vec::new();
+        let mut e = e0;
+        while let Node::Lam {
+            binder_name,
+            binder_type,
+            body,
+            binder_info,
+        } = self.node(e)
+        {
+            let d = instantiate_rev(
+                self.scratch,
+                Some(self.view.store),
+                binder_type,
+                &fvars,
+                &mut self.guard,
+            )?;
+            let fvar = self.lctx.mk_local_decl(
+                self.scratch,
+                Some(self.view.store),
+                &mut self.fvar_gen,
+                binder_name,
+                d,
+                binder_info,
+            )?;
+            fvars.push(fvar);
+            e = body;
+        }
+        let inst = instantiate_rev(
+            self.scratch,
+            Some(self.view.store),
+            e,
+            &fvars,
+            &mut self.guard,
+        )?;
+        let r = match self.sunfold_go(inst)? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        self.rebuild_lambda(&fvars, r)
+    }
+
+    /// oracle: `mkLambdaFVars xs r` (used only by `sunfold_go_lam`,
+    /// above — the other telescopes in this crate rebuild `Forall`/
+    /// `Let` shapes, not `Lam`). Unlike `infer.rs`'s `rebuild_forall`,
+    /// there is no unused-binder elision here (`mkLambdaFVars` has none,
+    /// unlike `mkForallFVars`'s let-case): every fvar is unconditionally
+    /// re-wrapped as a `Lam`, innermost first.
+    fn rebuild_lambda(
+        &mut self,
+        fvars: &[ExprId],
+        body: ExprId,
+    ) -> Result<Option<ExprId>, MetaError> {
+        let mut r = body;
+        let mut i = fvars.len();
+        while i > 0 {
+            i -= 1;
+            let (binder_name, ty, binder_info) = match self.node(fvars[i]) {
+                Node::FVar { id: Some(id) } => {
+                    let decl = self.lctx.get(id).ok_or_else(|| {
+                        MetaError::Infer("sunfold_go: telescope fvar not declared".into())
+                    })?;
+                    (decl.binder_name, decl.ty, decl.binder_info)
+                }
+                _ => {
+                    return Err(MetaError::Infer(
+                        "sunfold_go: telescope entry is not an fvar".into(),
+                    ))
+                }
+            };
+            r = abstract_fvars(
+                self.scratch,
+                Some(self.view.store),
+                r,
+                std::slice::from_ref(&fvars[i]),
+                &mut self.guard,
+            )?;
+            let ty2 = abstract_fvars(
+                self.scratch,
+                Some(self.view.store),
+                ty,
+                &fvars[..i],
+                &mut self.guard,
+            )?;
+            r = self
+                .scratch
+                .expr_lam(Some(self.view.store), binder_name, ty2, r, binder_info)?;
+        }
+        Ok(Some(r))
+    }
+
+    fn sunfold_go_match(&mut self, e: ExprId) -> Result<Option<ExprId>, MetaError> {
+        self.step()?;
+        self.guarded(|s| s.sunfold_go_match_body(e))
+    }
+
+    /// oracle: `goMatch` (WHNF.lean:763-776).
+    fn sunfold_go_match_body(&mut self, e: ExprId) -> Result<Option<ExprId>, MetaError> {
+        match self.reduce_matcher(e)? {
+            ReduceMatcherResult::Reduced(r) => {
+                // oracle :766-769: if the REDUCED VALUE itself carries
+                // the `sunfoldMatchAlt` marker, stop here and return it
+                // as-is (interrupted, per the module doc above
+                // `smartUnfoldingReduce?`'s own doc comment) — else keep
+                // reducing (`go e`, an equation compiler leaf may itself
+                // contain another nested annotated match).
+                match self.annotation(r, self.sunfold_match_alt) {
+                    Some(alt) => Ok(Some(alt)),
+                    None => self.sunfold_go(r),
+                }
+            }
+            ReduceMatcherResult::Stuck(e_prime) => {
+                let mv = match self.get_stuck_mvar(e_prime)? {
+                    Some(m) => m,
+                    None => return Ok(None),
+                };
+                if self.synth_pending(mv)? {
+                    self.sunfold_go_match(e)
+                } else {
+                    Ok(None)
+                }
+            }
+            ReduceMatcherResult::NotMatcher | ReduceMatcherResult::PartialApp => Ok(None),
+        }
     }
 
     /// Multi-binder beta step: consume as many leading `Lam` binders of
@@ -1676,41 +2057,78 @@ impl<'e> MetaCtx<'e> {
         }
     }
 
-    /// This task's plain-delta slice of `unfoldDefinition?`
-    /// (WHNF.lean:871-955): `Const` head only (bare or applied),
-    /// `Defn`-with-value only, gated by `can_unfold` — or, when
-    /// `whnf_matcher` has set `can_unfold_override` (task 6), by
-    /// `can_unfold_at_matcher` instead. No smart unfolding, no matcher
-    /// suppression — task 7 wraps this in place.
-    ///
-    /// oracle correction: the task brief's shorthand said theorems
-    /// unfold "at `.all` only". `GetUnfoldableConst.lean` (this
-    /// toolchain, v4.33.0-rc1) shows BOTH `getUnfoldableConst?` and
-    /// `getUnfoldableConstNoEx?` with `| some (.thmInfo _) => return none`
-    /// UNCONDITIONALLY — a theorem is never delta-unfolded via `whnf`,
-    /// at ANY transparency, including `.all`. The oracle file wins; this
-    /// method never unfolds a `Thm`.
+    /// SEAM: oracle `getStructuralRecArgPos?` (forward-declared
+    /// WHNF.lean:49-56, `@[extern "lean_get_structural_rec_arg_pos"]
+    /// opaque`; the real implementation is
+    /// `Structural.eqnInfoExt`/`Structural/Eqns.lean`, an elaborator
+    /// extension out of reach for this decode-only crate). Always
+    /// `None` — per the oracle's OWN doc comment on `unfoldDefinition?`
+    /// (its "Remark 4"), a `none` here takes the SAME branch the oracle
+    /// itself takes for Binport-imported (Lean-3-era) `.olean`s that
+    /// never recorded a rec-arg position at all: `| none => recordUnfold
+    /// fInfo.name; return some r` — this is a real, named oracle branch,
+    /// not merely an approximation of one. Divergence risk: a constant
+    /// where the REAL oracle has recorded a position (and would run the
+    /// extra constructor-application check on that argument) unifies
+    /// unconditionally under this seam instead; this plan's fixture
+    /// (`count`, recursing on its only argument) cannot expose that gap,
+    /// so the fix for any future corpus divergence is corpus selection,
+    /// not code (Task 9's job).
+    fn get_structural_rec_arg_pos(
+        &mut self,
+        _decl_name: NameId,
+    ) -> Result<Option<usize>, MetaError> {
+        Ok(None)
+    }
+
+    /// SEAM: oracle `unfoldProjInstWhenInstances?` (WHNF.lean:824-848
+    /// `unfoldProjInst?`, gated at `unfoldDefinition?`'s own call site
+    /// :874) — unfolding a class-field projection (e.g. `LE.le`) one
+    /// step further into its instance's own projection (e.g.
+    /// `instLENat.1`) at `.instances`/`.implicit` transparency. Needs
+    /// `getProjectionFnInfo?`, the SAME undecoded class-projection
+    /// registry `get_stuck_mvar` (task 6) already elides for the same
+    /// reason. Always `None`.
+    fn unfold_proj_inst_when_instances(&mut self, _e: ExprId) -> Result<Option<ExprId>, MetaError> {
+        Ok(None)
+    }
+
+    /// oracle: `unfoldDefinition?` (WHNF.lean:871-957), this crate's
+    /// `ignoreTransparency` always `false` (its only call site,
+    /// `whnf_imp`, never passes `true`). Two arms, matching the
+    /// oracle's own `.app`/`.const` split exactly (a bare `Const` and an
+    /// applied one are NOT simply "the same gate, then maybe beta" —
+    /// see `unfold_definition_const`'s own doc for why the smart-
+    /// unfolding check there is unconditional, unlike the app arm's).
     pub(crate) fn unfold_definition(&mut self, e: ExprId) -> Result<Option<ExprId>, MetaError> {
-        let is_app = matches!(self.node(e), Node::App { .. });
-        let f = if is_app { self.get_app_fn(e) } else { e };
+        match self.node(e) {
+            Node::App { .. } => self.unfold_definition_app(e),
+            Node::Const {
+                name: Some(n),
+                levels,
+            } => self.unfold_definition_const(n, levels),
+            _ => Ok(None),
+        }
+    }
+
+    /// oracle: `unfoldDefinition?`'s `.app` arm (WHNF.lean:872-925),
+    /// `matchConstAux`'s (:409-415) inlined `ignoreTransparency := false`
+    /// gate — `getConstInfo?` there is exactly `getUnfoldableConst?`,
+    /// which is this method's own `status_of`/`can_unfold`/
+    /// `can_unfold_at_matcher` gate (task 5/6), restricted to `.defn`
+    /// kind (`GetUnfoldableConst.lean`'s own `| .thm => none`/`| _ =>
+    /// none` arms — a `Thm`/`Axiom`/etc. never even reaches the gate).
+    fn unfold_definition_app(&mut self, e: ExprId) -> Result<Option<ExprId>, MetaError> {
+        let f = self.get_app_fn(e);
         let (name, levels) = match self.node(f) {
             Node::Const {
                 name: Some(n),
                 levels,
             } => (n, levels),
-            _ => return Ok(None),
+            // oracle: `matchConstAux`'s `failK` when `f.getAppFn` is not
+            // even a `Const` — `unfoldProjInstWhenInstances? e`.
+            _ => return self.unfold_proj_inst_when_instances(e),
         };
-        let defn = match self.view.get(name) {
-            Some(ConstantInfo::Defn(v)) => v,
-            // Thm/Axiom/Ctor/Induct/Rec/Quot/Opaque never delta-unfold
-            // here (see this method's oracle-correction note above for
-            // Thm specifically; the rest simply have no `value`).
-            _ => return Ok(None),
-        };
-        // oracle: plain `canUnfold?` (Meta.Context.canUnfold?) except
-        // when `whnf_matcher` (task 6) has set `can_unfold_override`,
-        // in which case `canUnfoldAtMatcher` is the predicate instead
-        // (WHNF.lean:528-529, `withCanUnfoldPred canUnfoldAtMatcher`).
         let status = self.status_of(name);
         let ok = if self.can_unfold_override {
             self.can_unfold_at_matcher(name, status)?
@@ -1718,12 +2136,89 @@ impl<'e> MetaCtx<'e> {
             crate::can_unfold(self.cfg.transparency, status)
         };
         if !ok {
-            return Ok(None);
+            // oracle: `matchConstAux`'s `failK` when the transparency
+            // gate itself fails.
+            return self.unfold_proj_inst_when_instances(e);
         }
         let level_ids = self
             .scratch
             .level_list_at(Some(self.view.store), levels)
             .to_vec();
+        let args = self.get_app_args(e);
+
+        if self.smart_unfolding {
+            let aux_name = self.smart_unfolding_name_for(name)?;
+            if let Some(ConstantInfo::Defn(aux)) = self.view.get(aux_name) {
+                if aux.val.level_params.len() != level_ids.len() {
+                    // oracle: `deltaBetaDefinition`'s `failK` (level-arity
+                    // mismatch) — `fun _ => pure none`.
+                    return Ok(None);
+                }
+                // oracle :880-882: `deltaBetaDefinition fAuxInfo fLvls
+                // e.getAppRevArgs (preserveMData := true) ..`. This
+                // crate's `beta_rev` has no separate `preserve_mdata`
+                // flag: verified (subst.rs's `instantiate_go`, the
+                // primitive `beta_rev` calls into for its final
+                // substitution) that `Node::MData` is always rebuilt
+                // through, never stripped, regardless of caller — so
+                // substitution alone already preserves every mdata node
+                // in the aux's body. `beta_rev`'s OWN lambda-peeling
+                // loop only ever matches `Node::Lam` directly (never
+                // looks THROUGH an `MData` wrapper to find a further
+                // curried lambda), which is exactly `preserveMData :=
+                // true`'s own "stop consuming lambdas at an mdata
+                // boundary" behavior (`Expr.betaRev`, Expr.lean:1592-
+                // 1613) — so this fixture's (and any single-mdata-layer)
+                // shape needs no new parameter to match the oracle here.
+                let value = instantiate_level_params(
+                    self.scratch,
+                    Some(self.view.store),
+                    aux.value,
+                    &aux.val.level_params,
+                    &level_ids,
+                    &mut self.guard,
+                )?;
+                let e1 = self.beta_rev(value, &args)?;
+                return match self.smart_unfolding_reduce(e1)? {
+                    None => Ok(None),
+                    Some(r) => match self.get_structural_rec_arg_pos(name)? {
+                        // oracle's own Binport-fallback branch (see
+                        // `get_structural_rec_arg_pos`'s doc).
+                        None => Ok(Some(r)),
+                        Some(pos) => {
+                            let num_args = args.len();
+                            if pos >= num_args {
+                                return Ok(None);
+                            }
+                            let rec_arg = args[pos];
+                            let w = self.whnf_matcher(rec_arg)?;
+                            if self.is_constructor_app(w) {
+                                Ok(Some(r))
+                            } else {
+                                Ok(None)
+                            }
+                        }
+                    },
+                };
+            }
+            // oracle :922-925: no `_sunfold` aux — `whnfCore` already
+            // tries matcher applications, so refuse here rather than
+            // exposing the matcher's own `brecOn`-shaped internals.
+            if self.matcher_of(name).is_some() {
+                return Ok(None);
+            }
+        }
+        // oracle: `unfoldDefault` (WHNF.lean:848-865), this crate's
+        // `recordUnfold`/`backward.whnf.reducibleClassField`-driven
+        // instance-projection refinement omitted (no diagnostics
+        // counters modeled anywhere in this crate, and the class-
+        // projection registry it needs is the same undecoded extension
+        // `unfold_proj_inst_when_instances` elides above) — plain
+        // delta-beta on an already-gated `Defn`.
+        let defn = match self.view.get(name) {
+            Some(ConstantInfo::Defn(v)) => v,
+            _ => return Ok(None),
+        };
         if defn.val.level_params.len() != level_ids.len() {
             return Ok(None);
         }
@@ -1735,13 +2230,75 @@ impl<'e> MetaCtx<'e> {
             &level_ids,
             &mut self.guard,
         )?;
-        if is_app {
-            // oracle: `deltaBetaDefinition` (WHNF.lean:423-430).
-            let args = self.get_app_args(e);
-            Ok(Some(self.beta_rev(value, &args)?))
+        Ok(Some(self.beta_rev(value, &args)?))
+    }
+
+    /// oracle: `unfoldDefinition?`'s `.const` arm (WHNF.lean:945-957) —
+    /// a BARE constant (no application at all). Deliberately NOT the
+    /// same shape as the app arm: when a `_sunfold` aux exists for
+    /// `name` (and smart unfolding is on), this returns `None`
+    /// UNCONDITIONALLY, with no fallback to plain delta or a matcher
+    /// check at all (`if .. then return none else ..`, :951-952) —
+    /// there is no discriminant argument here for smart unfolding to
+    /// reduce against, so exposing the bare value via plain delta would
+    /// unfold straight through to the `brecOn`-shaped internals smart
+    /// unfolding exists to hide (see this module's own top-of-file
+    /// doc). oracle correction: the task brief's shorthand said
+    /// theorems unfold "at `.all` only" — `GetUnfoldableConst.lean`
+    /// shows BOTH `getUnfoldableConst?`/`getUnfoldableConstNoEx?` with
+    /// `| some (.thmInfo _) => return none` UNCONDITIONALLY, at ANY
+    /// transparency; the oracle file wins, and this method never
+    /// unfolds a `Thm`.
+    fn unfold_definition_const(
+        &mut self,
+        name: NameId,
+        levels: LevelsId,
+    ) -> Result<Option<ExprId>, MetaError> {
+        let status = self.status_of(name);
+        let ok = if self.can_unfold_override {
+            self.can_unfold_at_matcher(name, status)?
         } else {
-            Ok(Some(value))
+            crate::can_unfold(self.cfg.transparency, status)
+        };
+        let cinfo = if ok { self.view.get(name) } else { None };
+        let cinfo = match cinfo {
+            Some(c) => c,
+            // `getConstInfoNoEx?`'s gate failure (or unknown name) =>
+            // `pure none`.
+            None => return Ok(None),
+        };
+        if self.smart_unfolding {
+            let aux_name = self.smart_unfolding_name_for(name)?;
+            if self.view.get(aux_name).is_some() {
+                return Ok(None);
+            }
         }
+        let defn = match cinfo {
+            ConstantInfo::Defn(v) => v,
+            // Thm/Axiom/Ctor/Induct/Rec/Quot/Opaque never delta-unfold
+            // here (Thm per this method's oracle-correction note above;
+            // the rest simply have no `value`). The oracle's
+            // `recordUnfoldAxiom` diagnostics side effect on the axiom
+            // case is bookkeeping this crate models nowhere (same
+            // omission as every other `recordUnfold*` call in this
+            // file).
+            _ => return Ok(None),
+        };
+        let level_ids = self
+            .scratch
+            .level_list_at(Some(self.view.store), levels)
+            .to_vec();
+        if defn.val.level_params.len() != level_ids.len() {
+            return Ok(None);
+        }
+        Ok(Some(instantiate_level_params(
+            self.scratch,
+            Some(self.view.store),
+            defn.value,
+            &defn.val.level_params,
+            &level_ids,
+            &mut self.guard,
+        )?))
     }
 }
 
@@ -2168,6 +2725,105 @@ mod tests {
                 matcher_app,
                 "a matcher stuck on a free discriminant must leave whnf_core's input \
                  unchanged, got {}",
+                dump(ctx, result)
+            );
+        });
+    }
+
+    /// `count (N.succ N.zero)` unfolds via the `count._sunfold`
+    /// auxiliary and reduces to `N.succ (count N.zero)` — a ctor-headed
+    /// result — in a SINGLE `unfold_definition` call, not the full
+    /// `whnf` loop.
+    ///
+    /// Step-1 failure-mode note (recorded in the task report, same
+    /// class of gotcha `matcher_application_reduces`'s own doc comment
+    /// already documents for `isZero`): asserting only on `ctx.whnf(..)`
+    /// here would NOT go red against task 6 — `count` itself compiles
+    /// to a `N.brecOn` application, and `N.brecOn` is an ordinary
+    /// `Defn` (not a builtin `Recursor`), so task 5/6's plain
+    /// delta+iota machinery ALREADY drives `whnf`'s outer loop through
+    /// `count` → `N.brecOn` → `N.below`/`N.rec` all the way to a
+    /// `N.succ`-headed term for this simple, one-layer-deep example,
+    /// with no smart-unfolding awareness at all (confirmed empirically:
+    /// a `whnf`-based version of this test passes unchanged with task
+    /// 7's own implementation reverted). The test is strengthened to
+    /// isolate the mechanism this task actually adds: a SINGLE
+    /// `unfold_definition` call, which `smart_unfolding_reduce`'s
+    /// one-shot match-and-substitute must land directly on
+    /// `N.succ (count N.zero)` — whereas plain delta's single step
+    /// only exposes the raw `N.brecOn ...` application (confirmed
+    /// empirically against task 6: that call returns
+    /// `((N.brecOn <lam>) (N.succ N.zero)) count._f`, not `N.succ`-headed
+    /// at all).
+    #[test]
+    fn smart_unfolding_reduces_structural_recursion() {
+        with_matcher_ctx(|ctx| {
+            let count = ctx.const_named("count");
+            let zero = ctx.const_named("N.zero");
+            let succ = ctx.const_named("N.succ");
+            let one = ctx.mk_app_spine(succ, &[zero]).expect("N.succ N.zero");
+            let app = ctx
+                .mk_app_spine(count, &[one])
+                .expect("count (N.succ N.zero)");
+            let once = ctx
+                .unfold_definition(app)
+                .expect("unfold_definition")
+                .expect("count has a value to unfold");
+            assert_eq!(
+                ctx.get_app_fn(once),
+                succ,
+                "a SINGLE unfold_definition call on count (N.succ N.zero) must already \
+                 land on a N.succ-headed term via the _sunfold aux, got {}",
+                dump(ctx, once)
+            );
+            // Confirm the FULL `whnf` loop agrees (it must — smart
+            // unfolding is one entry in that loop, not a separate path).
+            let result = ctx.whnf(app).expect("whnf");
+            assert_eq!(
+                ctx.get_app_fn(result),
+                succ,
+                "count (N.succ N.zero) must also whnf to a N.succ-headed term, got {}",
+                dump(ctx, result)
+            );
+        });
+    }
+
+    /// `count` applied to a stuck (fvar) discriminant does NOT unfold:
+    /// the `_sunfold` aux's inner `sunfoldMatch` is `Stuck` on a bare
+    /// fvar, `get_stuck_mvar` finds no mvar to try to unstick (this
+    /// plan's `synth_pending` seam is unreachable here for exactly that
+    /// reason), and `smart_unfolding_reduce` returns `None` —
+    /// `unfold_definition_app`'s smart-unfolding branch then returns
+    /// `None` itself rather than falling back to plain delta (an aux
+    /// exists for `count`, so the plain-delta fallback arm is never
+    /// reached at all), leaving `whnf`'s result exactly the original
+    /// `count n` application: never exposing the `N.brecOn` internals
+    /// underneath.
+    #[test]
+    fn smart_unfolding_blocks_on_stuck_argument() {
+        with_matcher_ctx(|ctx| {
+            let count = ctx.const_named("count");
+            let n_const = ctx.const_named("N");
+            let base = Some(ctx.view.store);
+            let n_str = ctx.scratch.intern_str(base, "n").expect("intern");
+            let n_name = ctx.scratch.name_str(base, None, n_str).expect("name");
+            let fvar = ctx
+                .lctx
+                .mk_local_decl(
+                    ctx.scratch,
+                    base,
+                    &mut ctx.fvar_gen,
+                    Some(n_name),
+                    n_const,
+                    leanr_kernel::BinderInfo::Default,
+                )
+                .expect("fvar");
+            let app = ctx.mk_app_spine(count, &[fvar]).expect("count n");
+            let result = ctx.whnf(app).expect("whnf");
+            assert_eq!(
+                result,
+                app,
+                "count applied to a stuck fvar must not unfold, got {}",
                 dump(ctx, result)
             );
         });

@@ -59,10 +59,8 @@ pub struct MetaCtx<'e> {
     /// ReducibilityStatus per constant; absent => Semireducible.
     reducibility: HashMap<NameId, ReducibilityStatus>,
     matchers: HashMap<NameId, MatcherEntry>,
-    /// The `smartUnfolding` option (oracle default: true). Still
-    /// unconsulted: task 5's `unfold_definition` is plain delta only;
-    /// task 7 wraps it with the smart-unfolding arm that reads this.
-    #[allow(dead_code)]
+    /// The `smartUnfolding` option (oracle default: true), consulted by
+    /// `unfold_definition`'s app/const arms (task 7).
     pub(crate) smart_unfolding: bool,
     /// Plan-3/4 seam: the `canUnfold?` override predicate channel
     /// (oracle: Meta.Context.canUnfold?). `whnf_matcher` (task 6) is
@@ -83,6 +81,15 @@ pub struct MetaCtx<'e> {
     /// in `reduce_rec` (oracle: WHNF.lean:207-209, :230-237).
     pub(crate) acc_rec: NameId,
     pub(crate) wf_rec: NameId,
+    /// `` `sunfoldMatch `` / `` `sunfoldMatchAlt `` — the two smart-
+    /// unfolding annotation kinds (oracle: `markSmartUnfoldingMatch`/
+    /// `markSmartUnfoldingMatchAlt`, WHNF.lean:64-70), read by
+    /// `whnf.rs`'s `annotation` (task 7). Root (single-component, no
+    /// parent) names, like Lean's own backtick literals — interned via
+    /// `mk_name1`, not `mk_name2` (that helper is for two-part dotted
+    /// names like `Nat.add`).
+    pub(crate) sunfold_match: NameId,
+    pub(crate) sunfold_match_alt: NameId,
 }
 
 /// The `Nat.*` builtins `reduce_nat` folds on `LitNat`/`Nat.zero`
@@ -110,6 +117,17 @@ pub(crate) enum NatOp {
 /// posture — a tiny fixed name can only fail to intern if the
 /// PERSISTENT bank is already exhausted, at which point every other
 /// kernel operation is already failing too.
+/// Single-component ("root") name — a `mk_name2` twin for names with no
+/// dotted parent, e.g. `` `sunfoldMatch ``.
+fn mk_name1(scratch: &mut Store, base: Option<&Store>, a: &str) -> NameId {
+    let a_str = scratch
+        .intern_str(base, a)
+        .expect("interning a tiny fixed name is infallible");
+    scratch
+        .name_str(base, None, a_str)
+        .expect("interning a tiny fixed name is infallible")
+}
+
 fn mk_name2(scratch: &mut Store, base: Option<&Store>, a: &str, b: &str) -> NameId {
     let a_str = scratch
         .intern_str(base, a)
@@ -165,6 +183,8 @@ impl<'e> MetaCtx<'e> {
         let bool_false = mk_name2(scratch, base, "Bool", "false");
         let acc_rec = mk_name2(scratch, base, "Acc", "rec");
         let wf_rec = mk_name2(scratch, base, "WellFounded", "rec");
+        let sunfold_match = mk_name1(scratch, base, "sunfoldMatch");
+        let sunfold_match_alt = mk_name1(scratch, base, "sunfoldMatchAlt");
 
         let mut nat_bin_ops = HashMap::new();
         nat_bin_ops.insert(nat_add, NatOp::Add);
@@ -207,6 +227,8 @@ impl<'e> MetaCtx<'e> {
             bool_false,
             acc_rec,
             wf_rec,
+            sunfold_match,
+            sunfold_match_alt,
         }
     }
 

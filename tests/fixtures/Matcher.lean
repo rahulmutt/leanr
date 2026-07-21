@@ -115,3 +115,11 @@ def both (a b : N) : N :=
   | _, _ => .succ .zero
 
 def plainId (n : N) : N := n
+
+-- Structural recursion => the equation compiler emits N.count._sunfold
+-- with sunfoldMatch/sunfoldMatchAlt markers (WHNF.lean:718-745), which
+-- task 7's smart unfolding consumes.
+def count (n : N) : N :=
+  match n with
+  | .zero => .zero
+  | .succ m => .succ (count m)

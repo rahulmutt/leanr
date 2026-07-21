@@ -509,6 +509,34 @@ mod tests {
             .any(|m| m.num_discrs == leanr_kernel::Nat::from(2u64)));
     }
 
+    /// Task 7: `count` (Matcher.lean) is structurally recursive, so the
+    /// equation compiler emits a `count._sunfold` auxiliary alongside it
+    /// (`mkSmartUnfoldingNameFor`, WHNF.lean:50-51) — a plain constant
+    /// in `const_names`, no separate extension involved. Probe-free:
+    /// this only needs `ModuleData.const_names` and `Store::to_name`.
+    #[test]
+    fn count_sunfold_decodes() {
+        let bytes = fixture("Matcher.olean");
+        let mut env = Environment::default();
+        let md = ModuleData::parse(&bytes, env.store_mut()).expect("decode");
+
+        let render = |n: NameId| env.store().to_name(None, Some(n)).to_string();
+        assert!(
+            md.const_names.iter().any(|&n| render(n) == "count"),
+            "count itself must be declared"
+        );
+        assert!(
+            md.const_names
+                .iter()
+                .any(|&n| render(n) == "count._sunfold"),
+            "structural recursion must emit a count._sunfold auxiliary: {:?}",
+            md.const_names
+                .iter()
+                .map(|&n| render(n))
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn parse_parts_requires_exactly_one_base() {
         let base = fixture("ModPriv.olean");
