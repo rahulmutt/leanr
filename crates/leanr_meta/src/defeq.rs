@@ -199,7 +199,14 @@ impl<'e> MetaCtx<'e> {
                 },
             ) => {
                 if n1 != n2 {
-                    Ok(Some(false))
+                    // Name mismatch escalates to is_def_eq_expensive,
+                    // where isDefEqDelta (ExprDefEq.lean:2217) runs BEFORE
+                    // the const-congruence arm (:2225-2226), allowing
+                    // delta-equal distinct-named consts (e.g. `def a := b`)
+                    // to still unify. Task 7 (delta) will implement this;
+                    // until then, is_def_eq_expensive returns false for
+                    // distinct names, as correct.
+                    Ok(None)
                 } else if ls1 == ls2 {
                     // SEAM: is_level_def_eq (task 4) — `LevelsId`
                     // equality is structural, not semantic; see the
