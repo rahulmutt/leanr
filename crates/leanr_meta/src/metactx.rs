@@ -43,20 +43,25 @@ pub struct MetaCtx<'e> {
     /// (mvar- and fvar-free inputs); the transient side arrives with
     /// defeq in plan 3. See `cacheable` below.
     ///
-    /// Written by `new` only, never read yet: `infer_type` (task 4)
-    /// consults its own `infer_cache` alone; `whnf`/`whnf_core` (task 5)
-    /// are this field's real readers. Same posture for `smart_unfolding`
-    /// just below (the `smartUnfolding` option, unconsulted until
-    /// `whnf_core`'s matcher/projection arms exist).
-    #[allow(dead_code)]
+    /// `whnf`/`whnf_core` (task 5, `whnf.rs`) are this field's real
+    /// readers/writers.
     pub(crate) whnf_cache: HashMap<(u64, ExprId), ExprId>,
-    #[allow(dead_code)]
+    /// `whnf_core`'s own memo table (task 5) — a leanr-specific
+    /// addition (the oracle's `whnfCore` itself carries no cache; only
+    /// `whnfImp` does, `whnf_cache` above). Since `whnf_core` recurses
+    /// on itself pervasively (beta/zeta/iota/proj chains), memoizing at
+    /// this layer too is a pure performance win under the same
+    /// `cacheable` predicate — reduction is a deterministic function of
+    /// `(Config, ExprId)`, so extra memoization cannot change a result,
+    /// only how fast it's produced.
     pub(crate) whnf_core_cache: HashMap<(u64, ExprId), ExprId>,
     pub(crate) infer_cache: HashMap<(u64, ExprId), ExprId>,
     /// ReducibilityStatus per constant; absent => Semireducible.
     reducibility: HashMap<NameId, ReducibilityStatus>,
     matchers: HashMap<NameId, MatcherEntry>,
-    /// The `smartUnfolding` option (oracle default: true).
+    /// The `smartUnfolding` option (oracle default: true). Still
+    /// unconsulted: task 5's `unfold_definition` is plain delta only;
+    /// task 7 wraps it with the smart-unfolding arm that reads this.
     #[allow(dead_code)]
     pub(crate) smart_unfolding: bool,
     /// Plan-3/4 seam: the `canUnfold?` override predicate channel
@@ -64,6 +69,60 @@ pub struct MetaCtx<'e> {
     /// its only setter this plan. When set, results are not cached
     /// (oracle useWHNFCache, WHNF.lean:1082-1088).
     pub(crate) can_unfold_override: bool,
+    /// `Nat.<op>` builtin name -> which op, for `whnf.rs`'s `reduce_nat`
+    /// (oracle: `reduceNat?`'s dispatch, WHNF.lean:1054-1078). Interned
+    /// once here — the `tc.rs` constructor idiom
+    /// (`TypeChecker::new`, tc.rs:508-556): tiny fixed names, `.expect()`
+    /// on the (persistent-bank-exhaustion-only) failure case.
+    pub(crate) nat_bin_ops: HashMap<NameId, NatOp>,
+    pub(crate) nat_succ: NameId,
+    pub(crate) nat_zero: NameId,
+    pub(crate) bool_true: NameId,
+    pub(crate) bool_false: NameId,
+    /// `Acc.rec` / `WellFounded.rec` — the `isWFRec` transparency bump
+    /// in `reduce_rec` (oracle: WHNF.lean:207-209, :230-237).
+    pub(crate) acc_rec: NameId,
+    pub(crate) wf_rec: NameId,
+}
+
+/// The `Nat.*` builtins `reduce_nat` folds on `LitNat`/`Nat.zero`
+/// operands (oracle: `reduceNat?`, WHNF.lean:1054-1078).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NatOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Gcd,
+    Beq,
+    Ble,
+    Land,
+    Lor,
+    Xor,
+    ShiftLeft,
+    ShiftRight,
+    Pow,
+}
+
+/// `mk_name2_id` (tc.rs:365-374), restated: that helper is private to
+/// `leanr_kernel`. `.expect(...)` matches tc.rs's own constructor
+/// posture — a tiny fixed name can only fail to intern if the
+/// PERSISTENT bank is already exhausted, at which point every other
+/// kernel operation is already failing too.
+fn mk_name2(scratch: &mut Store, base: Option<&Store>, a: &str, b: &str) -> NameId {
+    let a_str = scratch
+        .intern_str(base, a)
+        .expect("interning a tiny fixed name is infallible");
+    let parent = scratch
+        .name_str(base, None, a_str)
+        .expect("interning a tiny fixed name is infallible");
+    let b_str = scratch
+        .intern_str(base, b)
+        .expect("interning a tiny fixed name is infallible");
+    scratch
+        .name_str(base, Some(parent), b_str)
+        .expect("interning a tiny fixed name is infallible")
 }
 
 impl<'e> MetaCtx<'e> {
@@ -84,6 +143,45 @@ impl<'e> MetaCtx<'e> {
             .map(|e| (e.name, e.status))
             .collect();
         let matchers = matchers.iter().map(|m| (m.name, m.clone())).collect();
+
+        let base = Some(view.store);
+        let nat_add = mk_name2(scratch, base, "Nat", "add");
+        let nat_sub = mk_name2(scratch, base, "Nat", "sub");
+        let nat_mul = mk_name2(scratch, base, "Nat", "mul");
+        let nat_div = mk_name2(scratch, base, "Nat", "div");
+        let nat_mod = mk_name2(scratch, base, "Nat", "mod");
+        let nat_gcd = mk_name2(scratch, base, "Nat", "gcd");
+        let nat_beq = mk_name2(scratch, base, "Nat", "beq");
+        let nat_ble = mk_name2(scratch, base, "Nat", "ble");
+        let nat_land = mk_name2(scratch, base, "Nat", "land");
+        let nat_lor = mk_name2(scratch, base, "Nat", "lor");
+        let nat_xor = mk_name2(scratch, base, "Nat", "xor");
+        let nat_shift_left = mk_name2(scratch, base, "Nat", "shiftLeft");
+        let nat_shift_right = mk_name2(scratch, base, "Nat", "shiftRight");
+        let nat_pow = mk_name2(scratch, base, "Nat", "pow");
+        let nat_succ = mk_name2(scratch, base, "Nat", "succ");
+        let nat_zero = mk_name2(scratch, base, "Nat", "zero");
+        let bool_true = mk_name2(scratch, base, "Bool", "true");
+        let bool_false = mk_name2(scratch, base, "Bool", "false");
+        let acc_rec = mk_name2(scratch, base, "Acc", "rec");
+        let wf_rec = mk_name2(scratch, base, "WellFounded", "rec");
+
+        let mut nat_bin_ops = HashMap::new();
+        nat_bin_ops.insert(nat_add, NatOp::Add);
+        nat_bin_ops.insert(nat_sub, NatOp::Sub);
+        nat_bin_ops.insert(nat_mul, NatOp::Mul);
+        nat_bin_ops.insert(nat_div, NatOp::Div);
+        nat_bin_ops.insert(nat_mod, NatOp::Mod);
+        nat_bin_ops.insert(nat_gcd, NatOp::Gcd);
+        nat_bin_ops.insert(nat_beq, NatOp::Beq);
+        nat_bin_ops.insert(nat_ble, NatOp::Ble);
+        nat_bin_ops.insert(nat_land, NatOp::Land);
+        nat_bin_ops.insert(nat_lor, NatOp::Lor);
+        nat_bin_ops.insert(nat_xor, NatOp::Xor);
+        nat_bin_ops.insert(nat_shift_left, NatOp::ShiftLeft);
+        nat_bin_ops.insert(nat_shift_right, NatOp::ShiftRight);
+        nat_bin_ops.insert(nat_pow, NatOp::Pow);
+
         MetaCtx {
             view,
             scratch,
@@ -102,6 +200,13 @@ impl<'e> MetaCtx<'e> {
             matchers,
             smart_unfolding: true,
             can_unfold_override: false,
+            nat_bin_ops,
+            nat_succ,
+            nat_zero,
+            bool_true,
+            bool_false,
+            acc_rec,
+            wf_rec,
         }
     }
 
@@ -188,10 +293,11 @@ impl<'e> MetaCtx<'e> {
         args
     }
 
-    /// No non-test caller yet: `infer.rs` (task 4) always needs the
-    /// full argument spine (`get_app_args`), never just its length;
-    /// `whnf`/`whnf_core` (task 5) are this helper's expected consumer.
-    #[allow(dead_code)]
+    /// `infer.rs` always needs the full argument spine (`get_app_args`),
+    /// never just its length; `whnf.rs`'s `reduce_nat` (task 5) is this
+    /// helper's real consumer (mirroring
+    /// `leanr_kernel::tc::TypeChecker::reduce_nat`'s own use of its
+    /// twin, tc.rs:2007).
     pub(crate) fn get_app_num_args(&self, e: ExprId) -> usize {
         let mut n = 0;
         let mut cur = e;

@@ -139,7 +139,7 @@ impl<'e> MetaCtx<'e> {
                     &args[j..i],
                     &mut self.guard,
                 )?;
-                let w = self.whnf_for_infer(pending)?;
+                let w = self.whnf(pending)?;
                 match self.node(w) {
                     Node::Forall { body, .. } => {
                         j = i;
@@ -188,7 +188,7 @@ impl<'e> MetaCtx<'e> {
             _ => return Err(MetaError::Infer("infer_proj: not a projection".into())),
         };
         let sty = self.infer_type(structure)?;
-        let sty = self.whnf_for_infer(sty)?;
+        let sty = self.whnf(sty)?;
         let idxv = idx
             .to_usize()
             .ok_or_else(|| MetaError::Infer("invalid projection: index too large".into()))?;
@@ -243,7 +243,7 @@ impl<'e> MetaCtx<'e> {
         let mut ctor_type = self.infer_app_type(ctor_const, &struct_args[..nparams])?;
 
         for i in 0..idxv {
-            ctor_type = self.whnf_for_infer(ctor_type)?;
+            ctor_type = self.whnf(ctor_type)?;
             match self.node(ctor_type) {
                 Node::Forall { body, .. } => {
                     if self.data(body).loose_bvar_range() != 0 {
@@ -271,7 +271,7 @@ impl<'e> MetaCtx<'e> {
                 }
             }
         }
-        ctor_type = self.whnf_for_infer(ctor_type)?;
+        ctor_type = self.whnf(ctor_type)?;
         match self.node(ctor_type) {
             // oracle: `return d.consumeTypeAnnotations` (InferType.lean
             // :152) strips `outParam`/`optParam`/`autoParam` WRAPPER
@@ -501,7 +501,7 @@ impl<'e> MetaCtx<'e> {
     /// final `throwTypeExpected` fallback (:176).
     fn get_level(&mut self, ty: ExprId) -> Result<LevelId, MetaError> {
         let tty = self.infer_type(ty)?;
-        let w = self.whnf_for_infer(tty)?;
+        let w = self.whnf(tty)?;
         match self.node(w) {
             Node::Sort { level } => Ok(level),
             _ => Err(MetaError::Infer("type expected".into())),
@@ -661,98 +661,15 @@ impl<'e> MetaCtx<'e> {
             None => Err(MetaError::Infer("unknown constant (anonymous)".into())),
         }
     }
-
-    /// Task-4 scaffold; Task 5 replaces every call site with the real
-    /// `whnf` and deletes this. Just enough for `infer_type`'s own
-    /// needs: resolve an assigned mvar head, beta-reduce a
-    /// lambda-headed application, loop until neither applies.
-    fn whnf_for_infer(&mut self, e: ExprId) -> Result<ExprId, MetaError> {
-        let mut cur = e;
-        loop {
-            self.step()?;
-            if let Node::MVar { id: Some(id) } = self.node(cur) {
-                if let Some(assn) = self.mctx.assignment(MVarId(id)) {
-                    cur = assn;
-                    continue;
-                }
-            }
-            if let Node::App { .. } = self.node(cur) {
-                let args = self.get_app_args(cur);
-                let mut head = self.get_app_fn(cur);
-                let mut i = 0usize;
-                let mut changed = false;
-                while i < args.len() {
-                    if let Node::Lam { body, .. } = self.node(head) {
-                        head = instantiate(
-                            self.scratch,
-                            Some(self.view.store),
-                            body,
-                            args[i],
-                            &mut self.guard,
-                        )?;
-                        i += 1;
-                        changed = true;
-                    } else {
-                        break;
-                    }
-                }
-                if changed {
-                    cur = self.mk_app_spine(head, &args[i..])?;
-                    continue;
-                }
-            }
-            break;
-        }
-        Ok(cur)
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use super::*;
-    use leanr_kernel::bank::Store;
-    use leanr_kernel::{BinderInfo, ConstantInfo, Environment, LocalContext};
-    use leanr_olean::ModuleData;
+    use leanr_kernel::{BinderInfo, LocalContext};
 
-    use crate::{Config, MVarDecl, MVarKind};
-
-    fn fixture_path(name: &str) -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures")
-            .join(name)
-    }
-
-    /// Replay `Prelude0.olean` (import-free — see
-    /// `crates/leanr_olean/tests/check_fixtures.rs::prelude0_replays_from_empty_env`)
-    /// into a fresh `Environment`, then build a `MetaCtx` over its
-    /// `EnvView` (`Environment::view()`, the same shape
-    /// `crates/leanr_check/src/schedule.rs:316-329`'s `run_task` builds
-    /// by hand) plus a fresh scratch store — mirroring
-    /// `metactx.rs::tests::with_ctx`'s empty-env idiom, populated
-    /// instead of empty.
-    fn with_prelude0_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
-        let bytes = std::fs::read(fixture_path("Prelude0.olean")).expect("Prelude0.olean fixture");
-        let mut env = Environment::default();
-        let md = ModuleData::parse(&bytes, env.store_mut()).expect("Prelude0 decodes");
-        let reducibility = md.reducibility;
-        let matchers = md.matchers;
-        let constants: HashMap<NameId, ConstantInfo> =
-            md.constants.into_iter().map(|c| (c.name(), c)).collect();
-        leanr_kernel::replay(&mut env, constants).expect("Prelude0 replays");
-
-        let view = env.view();
-        let mut scratch = Store::scratch();
-        let mut ctx = MetaCtx::new(
-            view,
-            &mut scratch,
-            Config::default(),
-            &reducibility,
-            &matchers,
-        );
-        f(&mut ctx)
-    }
+    use crate::test_support::with_prelude0_ctx;
+    use crate::{MVarDecl, MVarKind};
 
     /// `Name::Str { parent: Name::Str { parent: Anonymous, part: a },
     /// part: b }`, resolved through the persistent store (`Some(base)`)

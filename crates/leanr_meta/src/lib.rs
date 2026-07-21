@@ -15,7 +15,10 @@ mod error;
 mod infer;
 mod metactx;
 mod mvar_ctx;
+#[cfg(test)]
+mod test_support;
 mod transparency;
+mod whnf;
 
 pub use config::{Config, ProjReduction};
 pub use error::MetaError;
