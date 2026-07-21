@@ -1509,6 +1509,17 @@ impl<'e> MetaCtx<'e> {
     /// transparency is ABOVE `.instances` (`all`/`default`/`implicit`),
     /// i.e. `min(saved, .instances)` by rank; leaves `.reducible`/
     /// `.instances`/`.none` untouched.
+    ///
+    /// TIER-1 CORPUS EXCLUSION: this path is only reachable via
+    /// `whnf_core_proj` when `cfg.proj == ProjReduction::YesWithDeltaI`,
+    /// but `Config::default`'s `proj` is `YesWithDelta` and no tier-1
+    /// corpus query overrides it — so no fixture replayed by `mise run
+    /// meta:fast` ever sets `YesWithDeltaI`, and this path has zero
+    /// coverage from the fast corpus gate. It is exercised only by this
+    /// module's hand-built `whnf_at_most_i`/`YesWithDeltaI` unit
+    /// test(s), which hand-insert reducibility entries the way
+    /// `delta_respects_transparency` does. Plan 4's nightly should not
+    /// expect this path to be reachable from the tier-1 corpus.
     fn whnf_at_most_i(&mut self, e: ExprId) -> Result<ExprId, MetaError> {
         let saved = self.cfg.transparency;
         if saved > TransparencyMode::Instances {
@@ -1910,6 +1921,18 @@ impl<'e> MetaCtx<'e> {
 
     /// oracle: `reduceQuotRec` (WHNF.lean:270-288). `Quot.lift`:
     /// majorPos 5, argPos 3; `Quot.ind`: majorPos 4, argPos 3.
+    ///
+    /// TIER-1 CORPUS EXCLUSION: prelude-mode fixtures (`Prelude0`/
+    /// `Meta0`/`Matcher`) never contain `Quot` — it is declared by the
+    /// `prelude`-but-not-core `Init.Prelude` companion the tier-1
+    /// corpus does not replay — so this path has zero coverage from the
+    /// fast corpus gate (`mise run meta:fast`). It is exercised only by
+    /// this module's hand-built `reduce_quot_rec_*` unit test(s), which
+    /// construct the `Quot`/`Quot.mk`/`Quot.lift` machinery directly as
+    /// `ConstantInfo::Quot` entries (mirroring
+    /// `leanr_kernel::quot::tests::quot_iota_gated_on_initialized`)
+    /// rather than via any corpus fixture. Plan 4's nightly should not
+    /// expect this path to be reachable from the tier-1 corpus.
     fn reduce_quot_rec(
         &mut self,
         quot_val: &QuotVal,
@@ -2338,7 +2361,8 @@ mod tests {
     use super::*;
     use leanr_kernel::bank::Store;
     use leanr_kernel::{
-        ConstSource, ConstantVal, DefinitionSafety, DefinitionVal, EnvView, ReducibilityHints,
+        ConstSource, ConstantVal, ConstructorVal, DefinitionSafety, DefinitionVal, EnvView,
+        ReducibilityHints,
     };
     use leanr_olean::{EntryScope, ReducibilityEntry, ReducibilityStatus};
 
@@ -2358,6 +2382,22 @@ mod tests {
             Node::FVar { .. } => "<fvar>".to_string(),
             other => format!("{other:?}"),
         }
+    }
+
+    /// Intern a dotted name (`"Quot"`, `"Quot.mk"`, `"Pair.mk"`, ...)
+    /// directly on `base`, the same idiom `MetaCtx::const_named` uses
+    /// through the crate's own `Store`/`scratch` split — used below by
+    /// tests that hand-build synthetic env entries (`reduce_quot_rec`'s
+    /// and `ProjReduction::YesWithDeltaI`'s) the way
+    /// `delta_respects_transparency` does, rather than through a
+    /// fixture.
+    fn dotted_name(base: &mut Store, parts: &[&str]) -> NameId {
+        let mut name = None;
+        for part in parts {
+            let s = base.intern_str(None, part).expect("intern");
+            name = Some(base.name_str(None, name, s).expect("name"));
+        }
+        name.expect("dotted_name: parts must be non-empty")
     }
 
     // Exemplar (Task 4's with_prelude0_ctx helper; the rest follow this
@@ -2834,5 +2874,270 @@ mod tests {
                 dump(ctx, result)
             );
         });
+    }
+
+    /// Final-review item 1: `reduce_quot_rec` (`Quot.lift` majorPos-5/
+    /// argPos-3 path, WHNF.lean:270-290) had zero coverage —
+    /// Meta0/Prelude0 are prelude-mode fixtures and never contain
+    /// `Quot` (see that method's own "TIER-1 CORPUS EXCLUSION" doc).
+    /// Built by hand, exactly like `delta_respects_transparency`: a
+    /// persistent `Store` with `Quot.mk`/`Quot.lift` inserted directly
+    /// as `ConstantInfo::Quot` entries — never through the kernel's
+    /// real `add_quot` (`reduce_quot_rec` only ever inspects
+    /// `QuotKind`/the head name, never typechecks the machinery),
+    /// mirroring `leanr_kernel::quot::tests::
+    /// quot_iota_gated_on_initialized`'s "AFTER add_quot" shape.
+    /// Exercises the oracle's own worked example: `Quot.lift f
+    /// (Quot.mk r a)` whnf-reduces to `f a`.
+    #[test]
+    fn reduce_quot_rec_lift_reduces_to_f_a() {
+        let mut base = Store::persistent();
+        let zero = base.level_zero(None).expect("level");
+        let no_levels = base.intern_level_list(None, &[]).expect("levels");
+        let placeholder_ty = base.expr_sort(None, zero).expect("sort0");
+
+        let quot_mk_name = dotted_name(&mut base, &["Quot", "mk"]);
+        let quot_lift_name = dotted_name(&mut base, &["Quot", "lift"]);
+
+        let cval = |name: NameId| ConstantVal {
+            name,
+            level_params: vec![],
+            ty: placeholder_ty,
+        };
+
+        let mut extra = HashMap::new();
+        extra.insert(
+            quot_mk_name,
+            ConstantInfo::Quot(QuotVal {
+                val: cval(quot_mk_name),
+                kind: QuotKind::Ctor,
+            }),
+        );
+        extra.insert(
+            quot_lift_name,
+            ConstantInfo::Quot(QuotVal {
+                val: cval(quot_lift_name),
+                kind: QuotKind::Lift,
+            }),
+        );
+
+        // Leaves: α, r, β, f, h, a — all free-standing (no
+        // `ConstantInfo` entry at all; reduction never looks them up,
+        // only the two `Quot` names above).
+        let alpha_name = dotted_name(&mut base, &["alpha"]);
+        let r_name = dotted_name(&mut base, &["r"]);
+        let beta_name = dotted_name(&mut base, &["beta"]);
+        let f_name = dotted_name(&mut base, &["f"]);
+        let h_name = dotted_name(&mut base, &["h"]);
+        let a_name = dotted_name(&mut base, &["a"]);
+        let alpha = base
+            .expr_const(None, Some(alpha_name), no_levels)
+            .expect("const");
+        let r = base
+            .expr_const(None, Some(r_name), no_levels)
+            .expect("const");
+        let beta = base
+            .expr_const(None, Some(beta_name), no_levels)
+            .expect("const");
+        let f = base
+            .expr_const(None, Some(f_name), no_levels)
+            .expect("const");
+        let h = base
+            .expr_const(None, Some(h_name), no_levels)
+            .expect("const");
+        let a = base
+            .expr_const(None, Some(a_name), no_levels)
+            .expect("const");
+
+        // `Quot.mk α r a`.
+        let quot_mk_const = base
+            .expr_const(None, Some(quot_mk_name), no_levels)
+            .expect("const");
+        let mk = base.expr_app(None, quot_mk_const, alpha).expect("app");
+        let mk = base.expr_app(None, mk, r).expect("app");
+        let mk = base.expr_app(None, mk, a).expect("app");
+
+        // `Quot.lift α r β f h (Quot.mk α r a)` — majorPos 5, argPos 3.
+        let quot_lift_const = base
+            .expr_const(None, Some(quot_lift_name), no_levels)
+            .expect("const");
+        let e = base.expr_app(None, quot_lift_const, alpha).expect("app");
+        let e = base.expr_app(None, e, r).expect("app");
+        let e = base.expr_app(None, e, beta).expect("app");
+        let e = base.expr_app(None, e, f).expect("app");
+        let e = base.expr_app(None, e, h).expect("app");
+        let e = base.expr_app(None, e, mk).expect("app");
+
+        let expected = base.expr_app(None, f, a).expect("app");
+
+        let empty_consts = leanr_kernel::CheckedConstants::new(HashMap::new());
+        let view = EnvView {
+            consts: ConstSource::Gated(&empty_consts),
+            extra: Some(&extra),
+            quot_initialized: true,
+            store: &base,
+        };
+        let mut scratch = Store::scratch();
+        let mut ctx = MetaCtx::new(view, &mut scratch, crate::Config::default(), &[], &[]);
+
+        let result = ctx.whnf(e).expect("whnf");
+        assert_eq!(
+            result, expected,
+            "Quot.lift f (Quot.mk r a) must whnf-reduce to f a"
+        );
+    }
+
+    /// Final-review item 2: the `ProjReduction::YesWithDeltaI` path
+    /// (`whnf_core_proj` → `whnf_at_most_i`) had zero coverage — the
+    /// tier-1 corpus never sets it (`Config::default`'s `proj` is
+    /// `YesWithDelta`; see `whnf_at_most_i`'s own "TIER-1 CORPUS
+    /// EXCLUSION" doc). Hand-built exactly like
+    /// `delta_respects_transparency`: a persistent `Store` with a
+    /// synthetic 2-field structure (`Pair.mk`, a bare
+    /// `ConstantInfo::Ctor` with 0 params) and two nullary `Defn`s whose
+    /// value is a `Pair.mk` application — one at `InstanceReducible`
+    /// (unfolds within the `.instances` cap `YesWithDeltaI` imposes),
+    /// one at `Semireducible` (unfolds at ambient `.default` but NOT at
+    /// the `.instances` cap — "Default-only-unfoldable", proving the
+    /// cap actually does something rather than being a no-op alias for
+    /// `YesWithDelta`).
+    #[test]
+    fn proj_yes_with_delta_i_caps_at_instances() {
+        let mut base = Store::persistent();
+        let zero = base.level_zero(None).expect("level");
+        let one_lvl = base.level_succ(None, zero).expect("succ");
+        let no_levels = base.intern_level_list(None, &[]).expect("levels");
+        let placeholder_ty = base.expr_sort(None, zero).expect("sort0");
+        // Two distinguishable field values.
+        let field0 = base.expr_sort(None, zero).expect("sort0 field");
+        let field1 = base.expr_sort(None, one_lvl).expect("sort1 field");
+
+        let pair_mk_name = dotted_name(&mut base, &["Pair", "mk"]);
+        let pair_induct_name = dotted_name(&mut base, &["Pair"]);
+        let struct_a_name = dotted_name(&mut base, &["structA"]);
+        let struct_b_name = dotted_name(&mut base, &["structB"]);
+
+        let cval = |name: NameId| ConstantVal {
+            name,
+            level_params: vec![],
+            ty: placeholder_ty,
+        };
+
+        let mut extra = HashMap::new();
+        extra.insert(
+            pair_mk_name,
+            ConstantInfo::Ctor(ConstructorVal {
+                val: cval(pair_mk_name),
+                induct: pair_induct_name,
+                cidx: Nat::from(0u64),
+                num_params: Nat::from(0u64),
+                num_fields: Nat::from(2u64),
+                is_unsafe: false,
+            }),
+        );
+
+        let pair_mk_const = base
+            .expr_const(None, Some(pair_mk_name), no_levels)
+            .expect("const");
+        let pair_value = base.expr_app(None, pair_mk_const, field0).expect("app");
+        let pair_value = base.expr_app(None, pair_value, field1).expect("app");
+
+        let mk_struct_defn = |name: NameId| {
+            ConstantInfo::Defn(DefinitionVal {
+                val: cval(name),
+                value: pair_value,
+                hints: ReducibilityHints::Regular(0),
+                safety: DefinitionSafety::Safe,
+                all: vec![name],
+            })
+        };
+        extra.insert(struct_a_name, mk_struct_defn(struct_a_name));
+        extra.insert(struct_b_name, mk_struct_defn(struct_b_name));
+
+        let reducibility = vec![
+            ReducibilityEntry {
+                scope: EntryScope::Global,
+                name: struct_a_name,
+                status: ReducibilityStatus::InstanceReducible,
+            },
+            ReducibilityEntry {
+                scope: EntryScope::Global,
+                name: struct_b_name,
+                status: ReducibilityStatus::Semireducible,
+            },
+        ];
+
+        let struct_a_const = base
+            .expr_const(None, Some(struct_a_name), no_levels)
+            .expect("const");
+        let struct_b_const = base
+            .expr_const(None, Some(struct_b_name), no_levels)
+            .expect("const");
+        // Project field 1 (index nparams(0) + 1).
+        let proj_a = base
+            .expr_proj(None, None, &Nat::from(1u64), struct_a_const)
+            .expect("proj");
+        let proj_b = base
+            .expr_proj(None, None, &Nat::from(1u64), struct_b_const)
+            .expect("proj");
+
+        let empty_consts = leanr_kernel::CheckedConstants::new(HashMap::new());
+        let view = EnvView {
+            consts: ConstSource::Gated(&empty_consts),
+            extra: Some(&extra),
+            quot_initialized: false,
+            store: &base,
+        };
+        let mut scratch = Store::scratch();
+        let cfg = crate::Config {
+            proj: ProjReduction::YesWithDeltaI,
+            transparency: TransparencyMode::Default, // above .instances
+            ..crate::Config::default()
+        };
+        let mut ctx = MetaCtx::new(view, &mut scratch, cfg, &reducibility, &[]);
+
+        let saved = ctx.cfg.transparency;
+
+        // (a) InstanceReducible discriminant unfolds within the cap.
+        let result_a = ctx.whnf(proj_a).expect("whnf proj_a");
+        assert_eq!(
+            result_a, field1,
+            "an InstanceReducible discriminant must reduce under \
+             YesWithDeltaI's .instances cap"
+        );
+        assert_eq!(
+            ctx.cfg.transparency, saved,
+            "ambient transparency must be restored after whnf_at_most_i"
+        );
+
+        // (b) Semireducible discriminant stays stuck under the cap —
+        // even though it WOULD unfold at the ambient .default
+        // transparency were it not capped (can_unfold(.default,
+        // Semireducible) == true; can_unfold(.instances, Semireducible)
+        // == false). This is the cap actually doing its job, not a
+        // no-op.
+        let result_b = ctx.whnf(proj_b).expect("whnf proj_b");
+        assert_eq!(
+            result_b, proj_b,
+            "a Semireducible (Default-only-unfoldable) discriminant must \
+             stay stuck under YesWithDeltaI's .instances cap"
+        );
+        assert_eq!(
+            ctx.cfg.transparency, saved,
+            "ambient transparency must be restored after whnf_at_most_i"
+        );
+
+        // Confirm (b)'s premise directly: the SAME proj_b, uncapped
+        // (YesWithDelta instead of YesWithDeltaI), DOES reduce —
+        // proving structB is genuinely "Default-only-unfoldable" and
+        // the YesWithDeltaI stuck result above is the cap's doing, not
+        // some unrelated reason `structB` never unfolds at all.
+        ctx.cfg.proj = ProjReduction::YesWithDelta;
+        let result_b_uncapped = ctx.whnf(proj_b).expect("whnf proj_b uncapped");
+        assert_eq!(
+            result_b_uncapped, field1,
+            "structB must reduce once the .instances cap is removed \
+             (YesWithDelta), confirming it is Default-only-unfoldable"
+        );
     }
 }

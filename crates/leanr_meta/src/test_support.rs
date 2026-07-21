@@ -60,6 +60,20 @@ pub(crate) fn with_matcher_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
     let bytes = std::fs::read(fixture_path("Matcher.olean")).expect("Matcher.olean fixture");
     let mut env = Environment::default();
     let md = ModuleData::parse(&bytes, env.store_mut()).expect("Matcher.olean decodes");
+    // Hermeticity check (final-review item 3): `Matcher.olean` must be
+    // import-free, exactly like `Prelude0.olean` (see
+    // `crates/leanr_olean/src/loader.rs:666`'s equivalent assert for
+    // that fixture). `leanr_kernel::replay` below replays into a FRESH
+    // empty `Environment` — if `Matcher.olean` ever gained a real
+    // import, replaying it here without also replaying its
+    // dependencies first would silently produce a wrong/incomplete
+    // environment instead of failing loudly.
+    assert!(
+        md.imports.is_empty(),
+        "Matcher.olean must be import-free (prelude-mode fixture) — \
+         with_matcher_ctx replays it into an empty Environment with no \
+         dependency loading"
+    );
     let reducibility = md.reducibility;
     let matchers = md.matchers;
     let constants: HashMap<NameId, ConstantInfo> =
