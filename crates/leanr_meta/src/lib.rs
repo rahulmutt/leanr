@@ -23,5 +23,5 @@ mod whnf;
 pub use config::{Config, ProjReduction};
 pub use error::MetaError;
 pub use metactx::{MetaCtx, DEFAULT_STEP_BUDGET};
-pub use mvar_ctx::{MVarDecl, MVarId, MVarKind, MetavarContext};
+pub use mvar_ctx::{LMVarId, MVarDecl, MVarId, MVarKind, MetavarContext};
 pub use transparency::{can_unfold, TransparencyMode};
