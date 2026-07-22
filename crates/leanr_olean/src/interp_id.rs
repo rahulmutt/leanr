@@ -736,6 +736,66 @@ impl<'s> InterpId<'s> {
         })
     }
 
+    /// `Lean.Meta.DiscrTree.Key` (Meta/DiscrTree/Types.lean:16-24,
+    /// v4.33.0-rc1) — see `crate::DiscrKey`'s doc comment for the full
+    /// ctor-tag transcription and the brief-vs-source disagreement (no
+    /// `Bvar`/`Sort` ctor exists on `Key`). Nullary ctors (`star`,
+    /// `other`, `arrow`) arrive as boxed scalar immediates
+    /// (`RawValue::Scalar(tag)`); the rest as `Ctor { tag, fields }`,
+    /// same posture as `reducibility_status`/`matcher_entry`. Dispatched
+    /// from `module_data`'s instanceExtension arm in Task A3 — not
+    /// wired in yet, hence the dead-code allow.
+    #[allow(dead_code)] // dispatched from module_data in A3
+    fn discr_key(&mut self, r: &Raw) -> Result<crate::DiscrKey, OleanError> {
+        use crate::DiscrKey;
+        // Untrusted-bignum arity/index: never truncate via `as usize`
+        // (see `Nat::to_usize`'s doc) — a value too large to fit is a
+        // shape error, not silently wrapped.
+        fn nat_usize(r: &Raw) -> Result<usize, OleanError> {
+            nat(r)?.to_usize().ok_or_else(|| bad("DiscrTree.Key Nat"))
+        }
+        match &**r {
+            RawValue::Scalar(0) => Ok(DiscrKey::Star),
+            RawValue::Scalar(1) => Ok(DiscrKey::Other),
+            RawValue::Scalar(5) => Ok(DiscrKey::Arrow),
+            RawValue::Ctor { tag: 2, fields, .. } if fields.len() == 1 => {
+                match &*fields[0] {
+                    RawValue::Ctor {
+                        tag: 0, fields: lf, ..
+                    } if lf.len() == 1 => Ok(DiscrKey::Lit(leanr_kernel::Literal::NatVal(nat(
+                        &lf[0],
+                    )?))),
+                    RawValue::Ctor {
+                        tag: 1, fields: lf, ..
+                    } if lf.len() == 1 => Ok(DiscrKey::Lit(leanr_kernel::Literal::StrVal(
+                        string(&lf[0])?,
+                    ))),
+                    _ => Err(bad("DiscrTree.Key.lit Literal")),
+                }
+            }
+            RawValue::Ctor { tag: 3, fields, .. } if fields.len() == 2 => {
+                // fields[0] is the fvar's FVarId, unboxed to its `Name`
+                // field on the wire (same as `Expr.fvar`'s field 0);
+                // identity is not stable across serialization, so only
+                // shape is validated and the name itself is discarded.
+                let _ = self.name(&fields[0])?;
+                Ok(DiscrKey::Fvar {
+                    arity: nat_usize(&fields[1])?,
+                })
+            }
+            RawValue::Ctor { tag: 4, fields, .. } if fields.len() == 2 => Ok(DiscrKey::Const {
+                name: self.name_req(&fields[0])?,
+                arity: nat_usize(&fields[1])?,
+            }),
+            RawValue::Ctor { tag: 6, fields, .. } if fields.len() == 3 => Ok(DiscrKey::Proj {
+                structure: self.name_req(&fields[0])?,
+                index: nat_usize(&fields[1])?,
+                arity: nat_usize(&fields[2])?,
+            }),
+            _ => Err(bad("DiscrTree.Key")),
+        }
+    }
+
     /// ModuleData (Environment.lean:109-129).
     pub(crate) fn module_data(&mut self, root: &Raw) -> Result<crate::ModuleData, OleanError> {
         let (f, s) = ctor(root, 0, 5, "ModuleData")?;

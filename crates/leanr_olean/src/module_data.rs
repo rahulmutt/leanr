@@ -123,6 +123,61 @@ pub struct MatcherAltInfo {
     pub has_unit_thunk: bool,
 }
 
+/// oracle: `Lean.Meta.DiscrTree.Key`
+/// (Meta/DiscrTree/Types.lean:16-24, pinned toolchain v4.33.0-rc1):
+///
+/// ```text
+/// inductive Key where
+///   | star  : Key                     -- 0, nullary
+///   | other : Key                     -- 1, nullary
+///   | lit   : Literal → Key           -- 2
+///   | fvar  : FVarId → Nat → Key      -- 3
+///   | const : Name → Nat → Key        -- 4
+///   | arrow : Key                     -- 5, nullary
+///   | proj  : Name → Nat → Nat → Key  -- 6
+/// ```
+///
+/// CONFIRMED against the source above: this is a 7-ctor inductive, NOT
+/// the 9-variant Const/Fvar/Bvar/Lit/Star/Other/Arrow/Proj/Sort shape a
+/// prior draft of this plan expected. There is no `Bvar` and no `Sort`
+/// constructor on `Key` — a bound variable's *type* is what gets
+/// indexed (never the de Bruijn variable itself, which cannot recur
+/// across unifiable instances), and `Sort` is deliberately folded into
+/// `other`/`star` by `DiscrTree.Main`'s key-pushing logic rather than
+/// carried as its own `Key` case. The source wins over the brief's
+/// schematic; ctor tags below are the declaration-order indices shown
+/// above, following the same convention already pinned by `Level` and
+/// `Option` in this crate (nullary ctors are boxed scalar immediates —
+/// `RawValue::Scalar(tag)` — at their plain declaration index; this is
+/// not something `DiscrKey` introduces, see `interp_id.rs::level`/
+/// `opt_nat`'s doc comments for the two prior confirmations of the
+/// rule). `fvar`'s `FVarId` field is decoded only for shape (an
+/// `FVarId` is a single-field `{ name : Name }` structure, unboxed to
+/// its one field on the wire — same reasoning as `matcher_entry`'s
+/// `DiscrInfo` note) and then discarded: fvar identity is not stable
+/// across serialization, so only `arity` is kept (field-order pinned
+/// against `DiscrTree/Main.lean:299-301`'s `.fvar fvarId nargs`).
+/// `proj`'s three fields are `structure`, `index`, `arity` in that
+/// order (`DiscrTree/Main.lean:291-300`'s `.proj s i nargs`). `Lit`
+/// reuses `leanr_kernel::Literal`, the same type `interp_id.rs`
+/// already builds for `Expr.lit` (see `build_expr`'s tag-9 arm) —
+/// no new literal type is introduced.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DiscrKey {
+    Star,
+    Other,
+    Lit(leanr_kernel::Literal),
+    /// `fvar` identity is not serialized stably; only arity survives.
+    Fvar { arity: usize },
+    Const { name: NameId, arity: usize },
+    Arrow,
+    Proj {
+        structure: NameId,
+        index: usize,
+        arity: usize,
+    },
+}
+
 /// One decoded matcher-extension entry: oracle
 /// `Lean.Meta.Match.Extension.Entry` = `{ name, info : MatcherInfo }`
 /// (MatcherInfo.lean:113-115, 52-68). v4.33 stores `altInfos`
