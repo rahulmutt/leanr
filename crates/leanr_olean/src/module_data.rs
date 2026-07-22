@@ -278,6 +278,50 @@ pub struct DefaultInstanceEntry {
     pub priority: usize,
 }
 
+/// One decoded `Lean.projectionFnInfoExt` entry: oracle
+/// `Lean.ProjectionFunctionInfo` (`ProjFns.lean:19-27`, pinned toolchain
+/// v4.33.0-rc1):
+///
+/// ```text
+/// structure ProjectionFunctionInfo where
+///   ctorName  : Name  -- 0
+///   numParams : Nat   -- 1
+///   i         : Nat   -- 2
+///   fromClass : Bool  -- scalar tail, not a 4th pointer field
+/// ```
+///
+/// `projectionFnInfoExt : MapDeclarationExtension ProjectionFunctionInfo`
+/// (`ProjFns.lean:30`). `MapDeclarationExtension` extends
+/// `PersistentEnvExtension (Name × α) (Name × α) (NameMap α)`
+/// (`EnvExtension.lean:129`) and is built via plain
+/// `registerPersistentEnvExtension` (`mkMapDeclarationExtension`,
+/// `EnvExtension.lean:132-152`) — no `ScopedEnvExtension` wrapper, same
+/// posture as `reducibilityCore`'s unwrapped `Name × ReducibilityStatus`
+/// pairs. So on the wire this extension's entries are a bare array of
+/// `Name × ProjectionFunctionInfo` pairs, the `Name` being the
+/// projection function's own name (the map key), not a field of the
+/// value struct.
+///
+/// `fromClass : Bool` is a concrete (non-generic) field of a 2-nullary-
+/// constructor enum, so — same mechanism as `InstanceEntry.attrKind`
+/// (see `interp_id.rs::instance_entry_payload`'s doc) — the compiler
+/// packs it into the ctor's raw scalar-byte tail instead of a 4th boxed
+/// pointer field: this is a 3-*pointer*-field ctor on the wire. `Bool`'s
+/// constructor order is `false = 0`, `true = 1` (`Init/Prelude.lean`),
+/// read via the same `boolean()` helper `ModuleData.isModule` uses.
+/// Pinned empirically against `Instances.olean`'s `Semigroup.toMul`
+/// entry (a class projection): scalar tail `Some(1)`, i.e.
+/// `from_class == true`.
+#[derive(Debug, Clone)]
+pub struct ProjectionFnInfo {
+    /// The map key: the projection function's own name.
+    pub proj_fn: NameId,
+    pub ctor: NameId,
+    pub num_params: usize,
+    pub index: usize,
+    pub from_class: bool,
+}
+
 /// The decoded contents of one `.olean` module, decoded directly into
 /// term-bank ids (term-bank phase 3 — the Arc decode path this used to
 /// have a twin of is deleted, along with the differential gate that
@@ -312,6 +356,9 @@ pub struct ModuleData {
     /// Typed decode of the `Lean.Meta.defaultInstanceExtension` entries
     /// (M4a plan 4). All other extension entries stay opaque.
     pub default_instances: Vec<DefaultInstanceEntry>,
+    /// Typed decode of the `Lean.projectionFnInfoExt` entries (M4a plan
+    /// 4). All other extension entries stay opaque.
+    pub projection_fns: Vec<ProjectionFnInfo>,
 }
 
 impl ModuleData {
@@ -466,6 +513,7 @@ impl ModuleData {
             matchers: std::mem::take(&mut base.matchers),
             instances: std::mem::take(&mut base.instances),
             default_instances: std::mem::take(&mut base.default_instances),
+            projection_fns: std::mem::take(&mut base.projection_fns),
         })
     }
 }
@@ -740,6 +788,33 @@ mod tests {
                 .iter()
                 .map(|e| render(e.instance_name))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// `Lean.projectionFnInfoExt` decodes: `Semigroup.toMul` is a class
+    /// projection and must be present with `from_class == true`.
+    #[test]
+    fn projection_fn_info_decodes() {
+        let bytes = fixture("Instances.olean");
+        let mut env = Environment::default();
+        let md = ModuleData::parse(&bytes, env.store_mut()).expect("decode");
+        let render = |n: NameId| env.store().to_name(None, Some(n)).to_string();
+        // Semigroup.toMul is a class projection.
+        let to_mul = md
+            .projection_fns
+            .iter()
+            .find(|p| render(p.proj_fn) == "Semigroup.toMul");
+        assert!(
+            to_mul.is_some(),
+            "projections: {:?}",
+            md.projection_fns
+                .iter()
+                .map(|p| render(p.proj_fn))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            to_mul.unwrap().from_class,
+            "toMul must be flagged fromClass"
         );
     }
 }

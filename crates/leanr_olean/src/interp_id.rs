@@ -886,6 +886,40 @@ impl<'s> InterpId<'s> {
         })
     }
 
+    /// `Name × ProjectionFunctionInfo` — the `Lean.projectionFnInfoExt`
+    /// map's unwrapped entry pair (see `crate::ProjectionFnInfo`'s doc
+    /// for the full `MapDeclarationExtension`/`reducibilityCore`
+    /// posture confirmation). The pair itself is a bare 2-field `Prod`
+    /// (tag 0), mirroring `reducibility_pair` above; `ProjectionFunctionInfo`
+    /// (`ProjFns.lean:19-27`) is a 3-pointer-field ctor (`ctorName`,
+    /// `numParams`, `i`) plus a scalar-tail `fromClass : Bool` — same
+    /// mechanism as `InstanceEntry.attrKind` (see
+    /// `instance_entry_payload`'s doc above), since `Bool` is a concrete
+    /// 2-nullary-constructor field here, not a generic-position field
+    /// like `reducibility_pair`'s boxed `ReducibilityStatus`.
+    fn projection_fn_pair(
+        &mut self,
+        r: &Raw,
+    ) -> Result<(NameId, NameId, usize, usize, bool), OleanError> {
+        // Untrusted-bignum numParams/i: never truncate via `as usize`
+        // (see `discr_key`/`instance_entry_payload`'s identical posture
+        // above) — a value too large to fit is a shape error, not
+        // silently wrapped.
+        fn nat_usize(r: &Raw) -> Result<usize, OleanError> {
+            nat(r)?
+                .to_usize()
+                .ok_or_else(|| bad("ProjectionFunctionInfo Nat"))
+        }
+        let (pf, _) = ctor(r, 0, 2, "Name × ProjectionFunctionInfo")?;
+        let proj_fn = self.name_req(&pf[0])?;
+        let (f, s) = ctor(&pf[1], 0, 3, "ProjectionFunctionInfo")?;
+        let ctor_name = self.name_req(&f[0])?;
+        let num_params = nat_usize(&f[1])?;
+        let index = nat_usize(&f[2])?;
+        let from_class = boolean(s.first(), "ProjectionFunctionInfo.fromClass")?;
+        Ok((proj_fn, ctor_name, num_params, index, from_class))
+    }
+
     /// ModuleData (Environment.lean:109-129).
     pub(crate) fn module_data(&mut self, root: &Raw) -> Result<crate::ModuleData, OleanError> {
         let (f, s) = ctor(root, 0, 5, "ModuleData")?;
@@ -897,6 +931,7 @@ impl<'s> InterpId<'s> {
         let mut matchers = Vec::new();
         let mut instances = Vec::new();
         let mut default_instances = Vec::new();
+        let mut projection_fns = Vec::new();
         for pair in array(&f[4])? {
             let (pf, _) = ctor(pair, 0, 2, "ModuleData.entries pair")?;
             let ext_name = self.name(&pf[0])?;
@@ -979,6 +1014,24 @@ impl<'s> InterpId<'s> {
                         default_instances.push(self.default_instance_entry(e)?);
                     }
                 }
+                // MapDeclarationExtension: unwrapped `Name × α` pairs,
+                // same posture as `reducibilityCore`/
+                // `Lean.Meta.defaultInstanceExtension` above — see
+                // `crate::ProjectionFnInfo`'s doc for the full source
+                // confirmation (`ProjFns.lean:30`, `EnvExtension.lean:129`).
+                "Lean.projectionFnInfoExt" => {
+                    for e in array(&pf[1])? {
+                        let (proj_fn, ctor_name, num_params, index, from_class) =
+                            self.projection_fn_pair(e)?;
+                        projection_fns.push(crate::ProjectionFnInfo {
+                            proj_fn,
+                            ctor: ctor_name,
+                            num_params,
+                            index,
+                            from_class,
+                        });
+                    }
+                }
                 _ => continue,
             }
         }
@@ -1006,6 +1059,7 @@ impl<'s> InterpId<'s> {
             matchers,
             instances,
             default_instances,
+            projection_fns,
         })
     }
 }
