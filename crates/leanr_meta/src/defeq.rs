@@ -63,14 +63,39 @@ impl<'e> MetaCtx<'e> {
     /// resets postponed, runs the core, and on success processes +
     /// merges postponed; on failure or throw, rolls back.
     ///
-    /// Two oracle steps are deliberately NOT ported here:
-    /// `resetDefEqPermCaches` (:2477) — moot, this task's
-    /// `is_def_eq_expensive` never reads or writes `defeq_cache_perm`,
-    /// which lands task 8 — and the `defEqCtx?` reader bump
-    /// (:2475-2476), elaborator-context this crate does not model.
+    /// One oracle step is deliberately NOT ported here: the `defEqCtx?`
+    /// reader bump (:2475-2476), elaborator-context this crate does not
+    /// model.
+    ///
+    /// `resetDefEqPermCaches` (Basic.lean:2477-2495) IS ported, right
+    /// below: `self.defeq_cache_perm.clear()`. Fix-wave-1 (Critical
+    /// finding on task 8): the permanent-cache eligibility check
+    /// (`getDefEqCacheKind`, ExprDefEq.lean:2238-2242, transcribed at
+    /// `cache.rs::defeq_cache_kind`) tests only `hasMVar` on `t`/`s`,
+    /// never `hasFVar`. That is sound ONLY under the compensating reset
+    /// here: an mvar-free `t`/`s` pair can still MENTION an fvar whose
+    /// *declared type* in `self.lctx` contains an unassigned mvar `?m`.
+    /// A permanent-cache entry for that pair is a verdict computed
+    /// under the CURRENT assignment of `?m`; once `?m` gets assigned (a
+    /// different `MCtx` state), the identical `(config, t, s)` key would
+    /// otherwise serve the STALE pre-assignment verdict on a later
+    /// top-level call over the same, reused `MetaCtx` — a wrong verdict,
+    /// possibly a wrong `true`. fvar *identity* is permanent in this
+    /// crate (`FVarId`s are never reused/mutated, per `cache.rs`'s own
+    /// module doc), but fvar *meaning under instantiation* is not, and
+    /// that is exactly the oracle's own rationale for
+    /// `resetDefEqPermCaches` (Basic.lean:2477-2495: "the map may
+    /// contain entries taking for granted a different local context /
+    /// assignment"). Clearing it here — at the TOP-LEVEL wrapper only,
+    /// never inside the recursive `is_def_eq_core` below — resets the
+    /// permanent cache between top-level `is_def_eq` calls (matching
+    /// the oracle) while still letting entries populated earlier in
+    /// THIS SAME query tree be reused for the rest of it (the
+    /// memoization the permanent cache exists for).
     pub fn is_def_eq(&mut self, t: ExprId, s: ExprId) -> Result<bool, MetaError> {
         let snap = self.checkpoint();
         self.defeq_cache_transient.clear();
+        self.defeq_cache_perm.clear();
         let saved_postponed = std::mem::take(&mut self.postponed);
         match self.is_def_eq_core(t, s) {
             Ok(true) => {

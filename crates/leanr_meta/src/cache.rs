@@ -84,6 +84,15 @@ impl<'e> MetaCtx<'e> {
     /// under config changes with no extra mechanism); looked up in the
     /// kind's own map (task 2's `defeq_cache_perm`/
     /// `defeq_cache_transient`).
+    ///
+    /// Note: the oracle's `mkCacheKey` (Basic.lean:667) canonicalizes
+    /// the pair via `Expr.quickLt` before hashing, so `(t, s)` and
+    /// `(s, t)` share one entry there. This crate keys on the UNORDERED
+    /// — i.e. positional, not canonicalized — `(config, t, s)` pair
+    /// instead, deliberately: a swapped-order re-query simply misses
+    /// and recomputes rather than reusing the other order's entry.
+    /// Fewer hits, never a false hit — sound, just less complete. Not a
+    /// bug to "fix" by restoring `quickLt` ordering.
     pub(crate) fn cache_lookup(&self, kind: DefEqCacheKind, t: ExprId, s: ExprId) -> Option<bool> {
         let key = (self.cfg.cache_key(), t, s);
         match kind {
@@ -148,6 +157,59 @@ mod tests {
             // a term with an mvar head is transient.
             let (m, _id) = fresh_mvar(ctx, s0);
             assert_eq!(ctx.defeq_cache_kind(m, s0), DefEqCacheKind::Transient);
+        });
+    }
+
+    /// Fix-wave-1 regression (Critical finding on task 8): oracle
+    /// `resetDefEqPermCaches` (Basic.lean:2477-2495) is called at the
+    /// START of every top-level `isDefEq`/`isExprDefEq`, precisely
+    /// because a permanent-cache entry can be sound at the moment it is
+    /// stored yet become stale later: `getDefEqCacheKind`
+    /// (ExprDefEq.lean:2238-2242, `defeq_cache_kind` above) only checks
+    /// `hasMVar` on `t`/`s` themselves, not whether some fvar THEY
+    /// mention has a declared type that still contains an unassigned
+    /// mvar. Once that mvar gets assigned, the old verdict for the same
+    /// `(config, t, s)` key is no longer trustworthy — but nothing else
+    /// in this crate invalidates the permanent-cache entry, so the only
+    /// thing standing between a reused `MetaCtx` and a stale (possibly
+    /// wrongly-`true`) verdict is this per-top-level-call reset.
+    ///
+    /// This test plants a permanent-cache entry directly (playing the
+    /// role of "an earlier top-level `is_def_eq` call populated it"),
+    /// then makes one further top-level `is_def_eq` call — deliberately
+    /// a trivial `s0 == s0` query, which resolves via `is_def_eq_quick`'s
+    /// leading pointer-equality check and never itself reads or writes
+    /// `defeq_cache_perm` — and asserts the map is empty immediately
+    /// after. `defeq_cache_perm` is `pub(crate)`, so the assertion reads
+    /// it directly rather than inferring it from an observable side
+    /// effect.
+    ///
+    /// This discriminates the fix precisely: pre-fix, `is_def_eq`
+    /// (`defeq.rs`) clears only `defeq_cache_transient` and never
+    /// touches `defeq_cache_perm`, so the planted entry survives the
+    /// call and the final assertion FAILS. Post-fix, `is_def_eq` clears
+    /// `defeq_cache_perm` unconditionally at entry (before running
+    /// `is_def_eq_core`), so the planted entry is gone and the
+    /// assertion PASSES.
+    #[test]
+    fn top_level_is_def_eq_resets_permanent_cache() {
+        with_ctx(|ctx| {
+            let z = ctx.scratch.level_zero(None).unwrap();
+            let s0 = ctx.scratch.expr_sort(None, z).unwrap();
+
+            // Plant a stale permanent-cache entry, as if an earlier
+            // top-level `is_def_eq` call had populated it.
+            let key = (ctx.cfg.cache_key(), s0, s0);
+            ctx.defeq_cache_perm.insert(key, true);
+            assert!(!ctx.defeq_cache_perm.is_empty());
+
+            assert!(ctx.is_def_eq(s0, s0).unwrap());
+            assert!(
+                ctx.defeq_cache_perm.is_empty(),
+                "defeq_cache_perm must be cleared at the start of every \
+                 top-level is_def_eq call (resetDefEqPermCaches, \
+                 Basic.lean:2477-2495)"
+            );
         });
     }
 }
