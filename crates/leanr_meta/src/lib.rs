@@ -15,6 +15,7 @@ mod config;
 mod defeq;
 mod error;
 mod infer;
+mod lazy_delta;
 mod level;
 mod metactx;
 mod mvar_ctx;

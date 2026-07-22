@@ -19,13 +19,21 @@
 //! const-levels/app-args congruence, projInst/stringLit/unitLike,
 //! onFailure).
 //!
-//! This task builds ONLY: the `checkpointDefEq` wrapper (task 2's
+//! Tasks 1-3 built ONLY: the `checkpointDefEq` wrapper (task 2's
 //! `checkpoint`/`rollback`/`postponed`), `isDefEqQuick`'s structural
 //! leaf cases, the `whnfCoreAtDefEq` loop, and `isExprDefEqExpensive`'s
 //! **congruence** arms (Const-with-equal-levels, App head+args,
-//! Lam/Forall binder congruence, Sort). No delta, no mvar assignment,
-//! no approximations, no proof irrelevance — those are tasks 4-7, and
-//! every one of them is a named seam below, never a silent `false`.
+//! Lam/Forall binder congruence, Sort). Tasks 4-5 added level defeq and
+//! expr-mvar assignment. **Task 6** (this task) fills every arm that
+//! still needed reduction: `isDefEqProofIrrel` (wired in
+//! [`MetaCtx::is_def_eq_core`] below), and `isExprDefEqExpensive`'s
+//! eta/eta-struct/proj/native/nat/offset/delta/projInst/stringLit/
+//! unitLike arms (wired in [`MetaCtx::is_def_eq_expensive`] below) —
+//! all actually IMPLEMENTED in `lazy_delta.rs`, except `isDefEqNative`/
+//! `isDefEqOffset` (permanently/plan-3 named seams, `isDefEqProjInst`
+//! (class-projection registry, undecoded everywhere in this crate) and
+//! `isDefEqOnFailure` (unification hints, task 7), both cited at their
+//! call site below and never silently dropped.
 //!
 //! # A transcription correction (brief vs. pinned source)
 //!
@@ -106,7 +114,11 @@ impl<'e> MetaCtx<'e> {
             if let Some(b) = ctx.is_def_eq_quick(t, s)? {
                 return Ok(b);
             }
-            // SEAM: isDefEqProofIrrel (ExprDefEq.lean:1766-1780) — task 6.
+            // oracle: `isDefEqProofIrrel` (ExprDefEq.lean:1766-1780) —
+            // task 6, `lazy_delta.rs`.
+            if let Some(b) = ctx.is_def_eq_proof_irrel(t, s)? {
+                return Ok(b);
+            }
             let t2 = ctx.whnf_core_at_defeq(t)?;
             let s2 = ctx.whnf_core_at_defeq(s)?;
             if t2 != t || s2 != s {
@@ -340,46 +352,76 @@ impl<'e> MetaCtx<'e> {
         self.is_def_eq_core(ib1, ib2)
     }
 
-    /// oracle: `isExprDefEqExpensive` (ExprDefEq.lean:2205-2232). This
-    /// task's subset is congruence ONLY — `Const`/`Const` (:2225-2226)
-    /// and `App`/`App` via `isDefEqApp`'s spine walk (:2166-2178,
-    /// simplified below). Every other rule the oracle defines here is
-    /// a named, uncommitted seam, landing tasks 4-7:
-    /// - `isDefEqEta` x2 (:183-195, called at :2206-2207) — task 6.
-    /// - `isDefEqProj` (:2099-2165, called at :2208) — task 6/7 (proj
-    ///   reduction machinery: `whnf_core_at_defeq` above already runs
-    ///   `proj := yesWithDeltaI`, but the dedicated projection-vs-
-    ///   projection unifier itself is not built).
-    /// - the internal plain-`whnfCore` round with recurse-if-changed
-    ///   (:2209-2212) — this task's `is_def_eq_core` already ran
-    ///   `whnf_core_at_defeq` (a DIFFERENT `proj` setting) immediately
-    ///   before calling this function; re-running plain `whnfCore` here
-    ///   too is a scope cut, since delta (the main thing a second pass
-    ///   could still change) is not built either.
-    /// - `isDefEqNative`/`isDefEqNat`/`isDefEqOffset` (:2214-2216) —
-    ///   task 7 (`isDefEqNative` is permanently out of scope: no
-    ///   native-code evaluator in a pure-Rust toolchain, same posture
-    ///   as `whnf.rs`'s own `reduceNative?` stub).
-    /// - `isDefEqDelta` (:2217) — task 7: lazy delta reduction, the
-    ///   single biggest remaining ladder rung.
-    /// - `isDefEqEtaStruct` x2 (:2219-2221) — task 6 (structure eta).
-    ///   (A `Sort`/`Sort` pair never reaches this function at all, as
-    ///   of task 4: `is_def_eq_quick`'s `.sort` arm now calls the
-    ///   DECISIVE `is_level_def_eq`, matching the real `isDefEqQuick`,
-    ///   which always fully resolves `Sort` before `isExprDefEqExpensive`
-    ///   ever runs.)
-    /// - `isDefEqProjInst`/`isDefEqStringLit`/`isDefEqUnitLike`
-    ///   (:2229-2231) — task 6/7.
+    /// oracle: `isExprDefEqExpensive` (ExprDefEq.lean:2205-2232). Task 6
+    /// fills every arm tasks 3-5 left as a named seam — eta (both
+    /// directions), projection, the post-eta/proj `whnfCore` recheck,
+    /// native/nat/offset/delta, structure eta (both directions) — all
+    /// actually implemented in `lazy_delta.rs` except `isDefEqNative`/
+    /// `isDefEqOffset`, which stay NAMED SEAMS wired below (never
+    /// silently skipped from the sequence — see their own doc comments
+    /// in `lazy_delta.rs`). Unchanged from task 3: Const/Const
+    /// (:2225-2226) and App/App via `isDefEqApp`'s spine walk
+    /// (:2166-2178, simplified). Two arms remain named-but-uncommitted
+    /// seams at their call site below, both because the class-
+    /// projection registry they would need is undecoded EVERYWHERE
+    /// else in this crate too (`whnf.rs`'s own
+    /// `unfold_proj_inst_when_instances`/`get_stuck_mvar` notes):
+    /// - `isDefEqProjInst` (:2229, `unfoldProjInstWhenInstances?`-gated,
+    ///   `.instances`/`.implicit` transparency only).
     /// - `isDefEqOnFailure` (:2232, unification hints :2022-2028) —
     ///   task 7.
     ///
-    /// All of the above fall through to this function's single
-    /// documented `false` — incompleteness, never unsoundness (spec §
-    /// Error handling): every fixture this task commits is chosen so
-    /// none of these seams are actually needed to reach the oracle's
-    /// own verdict.
+    /// (A `Sort`/`Sort` pair never reaches this function at all, as of
+    /// task 4: `is_def_eq_quick`'s `.sort` arm calls the DECISIVE
+    /// `is_level_def_eq`, matching the real `isDefEqQuick`, which
+    /// always fully resolves `Sort` before `isExprDefEqExpensive` ever
+    /// runs.)
     fn is_def_eq_expensive(&mut self, t: ExprId, s: ExprId) -> Result<bool, MetaError> {
-        match (self.node(t), self.node(s)) {
+        // oracle :2206-2207: `whenUndefDo (isDefEqEta t s) do whenUndefDo
+        // (isDefEqEta s t) do ..`.
+        if let Some(b) = self.is_def_eq_eta(t, s)? {
+            return Ok(b);
+        }
+        if let Some(b) = self.is_def_eq_eta(s, t)? {
+            return Ok(b);
+        }
+        // oracle :2208: `if (← isDefEqProj t s) then return true`.
+        if self.is_def_eq_proj(t, s)? {
+            return Ok(true);
+        }
+        // oracle :2209-2212: a second plain `whnfCore` round, recursing
+        // if either side changed. Now a REAL second pass (unlike tasks
+        // 3-5's scope cut): delta/eta/proj above can all still leave a
+        // `whnfCore`-reducible shape behind.
+        let t2 = self.whnf_core(t)?;
+        let s2 = self.whnf_core(s)?;
+        if t2 != t || s2 != s {
+            return self.is_def_eq_core(t2, s2);
+        }
+        // oracle :2214: `isDefEqNative` — permanent seam.
+        if let Some(b) = self.is_def_eq_native(t2, s2)? {
+            return Ok(b);
+        }
+        // oracle :2215: `isDefEqNat`.
+        if let Some(b) = self.is_def_eq_nat(t2, s2)? {
+            return Ok(b);
+        }
+        // oracle :2216: `isDefEqOffset` — plan-3 seam.
+        if let Some(b) = self.is_def_eq_offset(t2, s2)? {
+            return Ok(b);
+        }
+        // oracle :2217: `isDefEqDelta` — the heart of this task.
+        if let Some(b) = self.is_def_eq_delta(t2, s2)? {
+            return Ok(b);
+        }
+        // oracle :2219-2221: structure eta, tried AFTER lazy delta
+        // (oracle's own comment: trying it earlier would fire at every
+        // step of a reduction chain as soon as one side is a
+        // constructor application).
+        if self.is_def_eq_eta_struct(t2, s2)? || self.is_def_eq_eta_struct(s2, t2)? {
+            return Ok(true);
+        }
+        match (self.node(t2), self.node(s2)) {
             (
                 Node::Const {
                     name: n1,
@@ -408,13 +450,13 @@ impl<'e> MetaCtx<'e> {
                 }
             }
             (Node::App { .. }, Node::App { .. }) => {
-                let t_fn = self.get_app_fn(t);
-                let s_fn = self.get_app_fn(s);
+                let t_fn = self.get_app_fn(t2);
+                let s_fn = self.get_app_fn(s2);
                 if !self.is_def_eq_core(t_fn, s_fn)? {
                     return Ok(false);
                 }
-                let t_args = self.get_app_args(t);
-                let s_args = self.get_app_args(s);
+                let t_args = self.get_app_args(t2);
+                let s_args = self.get_app_args(s2);
                 // oracle: `isDefEqApp` (:2166-2178) delegates arg
                 // comparison to `isDefEqArgs` (:371-421) — task 5's
                 // `assign.rs::is_def_eq_args` (extracted from this
@@ -423,14 +465,30 @@ impl<'e> MetaCtx<'e> {
                 // function's own citation).
                 self.is_def_eq_args(t_fn, &t_args, &s_args)
             }
-            _ => Ok(false),
+            // oracle :2229-2231, reached only when `t`/`s` are neither
+            // both `Const` nor both `App` (the real oracle's own
+            // `if .. then .. else if .. isDefEqApp .. else ..`
+            // structure, ExprDefEq.lean:2223-2231).
+            _ => {
+                // SEAM: isDefEqProjInst (:2229) — see this function's
+                // own doc comment.
+                if let Some(b) = self.is_def_eq_string_lit(t2, s2)? {
+                    return Ok(b);
+                }
+                if self.is_def_eq_unit_like(t2, s2)? {
+                    return Ok(true);
+                }
+                // SEAM: isDefEqOnFailure (:2232, unification hints) —
+                // task 7.
+                Ok(false)
+            }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::test_support::with_ctx;
+    use crate::test_support::{fresh_fvar, with_ctx};
 
     #[test]
     fn reflexive_and_structural() {
@@ -463,26 +521,61 @@ mod tests {
         });
     }
 
+    /// Task 6 note: `A`/`B` are now real declared `Axiom`s, not bare
+    /// undeclared `Const`s — `is_def_eq_proof_irrel` (task 6)
+    /// unconditionally calls `infer_type` on every pair before any
+    /// other rung runs, and a `Const` naming nothing in the environment
+    /// is a genuinely malformed term to the oracle too (`getConstInfo`
+    /// throws on an unknown name), not merely an inert placeholder the
+    /// way it was while proof irrelevance was still a no-op seam.
     #[test]
     fn distinct_consts_are_not_def_eq() {
-        with_ctx(|ctx| {
-            let a_s = ctx.scratch.intern_str(None, "A").unwrap();
-            let a_n = ctx.scratch.name_str(None, None, a_s).unwrap();
-            let b_s = ctx.scratch.intern_str(None, "B").unwrap();
-            let b_n = ctx.scratch.name_str(None, None, b_s).unwrap();
-            let empty_levels = ctx.scratch.intern_level_list(None, &[]).unwrap();
-            let a = ctx
-                .scratch
-                .expr_const(None, Some(a_n), empty_levels)
-                .unwrap();
-            let b = ctx
-                .scratch
-                .expr_const(None, Some(b_n), empty_levels)
-                .unwrap();
-            assert!(!ctx.is_def_eq(a, b).unwrap());
-        });
+        use leanr_kernel::bank::Store;
+        use leanr_kernel::{AxiomVal, ConstSource, ConstantInfo, ConstantVal, EnvView};
+
+        let mut base = Store::persistent();
+        let z = base.level_zero(None).unwrap();
+        let sort0 = base.expr_sort(None, z).unwrap();
+        let a_s = base.intern_str(None, "A").unwrap();
+        let a_n = base.name_str(None, None, a_s).unwrap();
+        let b_s = base.intern_str(None, "B").unwrap();
+        let b_n = base.name_str(None, None, b_s).unwrap();
+        let empty_levels = base.intern_level_list(None, &[]).unwrap();
+        let a = base.expr_const(None, Some(a_n), empty_levels).unwrap();
+        let b = base.expr_const(None, Some(b_n), empty_levels).unwrap();
+
+        let mk_axiom = |name| {
+            ConstantInfo::Axiom(AxiomVal {
+                val: ConstantVal {
+                    name,
+                    level_params: vec![],
+                    ty: sort0,
+                },
+                is_unsafe: false,
+            })
+        };
+        let mut extra = std::collections::HashMap::new();
+        extra.insert(a_n, mk_axiom(a_n));
+        extra.insert(b_n, mk_axiom(b_n));
+
+        let empty_consts = leanr_kernel::CheckedConstants::new(std::collections::HashMap::new());
+        let view = EnvView {
+            consts: ConstSource::Gated(&empty_consts),
+            extra: Some(&extra),
+            quot_initialized: false,
+            store: &base,
+        };
+        let mut scratch = Store::scratch();
+        let mut ctx = crate::MetaCtx::new(view, &mut scratch, crate::Config::default(), &[], &[]);
+        assert!(!ctx.is_def_eq(a, b).unwrap());
     }
 
+    /// Task 6 note: `f` is now a properly-declared fvar (via
+    /// `fresh_fvar`, of a real `Forall` type), not a bare `Expr::fvar`
+    /// reference with no backing `lctx` decl — `is_def_eq_proof_irrel`
+    /// (task 6) calls `infer_type` on `lhs`/`rhs` (`f _`, an
+    /// application) before any other rung runs, and that needs `f`'s
+    /// OWN type to resolve `infer_app_type`'s `Forall` peel.
     #[test]
     fn app_congruence_recurses_into_args() {
         with_ctx(|ctx| {
@@ -491,12 +584,14 @@ mod tests {
             // is_def_eq_core into an arg pair that only agrees after a
             // beta reduction (whnf_core), not by pointer/structural
             // equality alone.
-            let f_s = ctx.scratch.intern_str(None, "f").unwrap();
-            let f_n = ctx.scratch.name_str(None, None, f_s).unwrap();
-            let f = ctx.scratch.expr_fvar(None, Some(f_n)).unwrap();
-
             let z = ctx.scratch.level_zero(None).unwrap();
             let s0 = ctx.scratch.expr_sort(None, z).unwrap();
+            let f_ty = ctx
+                .scratch
+                .expr_forall(None, None, s0, s0, leanr_kernel::BinderInfo::Default)
+                .unwrap();
+            let f = fresh_fvar(ctx, f_ty, "f");
+
             let bv = ctx
                 .scratch
                 .expr_bvar(None, &leanr_kernel::Nat::from(0u64))

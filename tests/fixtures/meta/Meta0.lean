@@ -115,3 +115,13 @@ def alsoTwo : N := N.succ (N.succ N.zero)
 -- built directly in dump_defeq.lean, independent of any Meta0
 -- declaration — see that file's `defeqQueries` additions.
 def uid.{u} (α : Sort u) (a : α) : α := a
+
+-- proof irrelevance (plan 3 task 6): two SEPARATE `theorem`s (never
+-- delta-unfold, at ANY transparency — `GetUnfoldableConst.lean`'s own
+-- `| .thm => none` — matching this crate's own
+-- `unfold_definition_const`'s doc) proving the exact same Prop
+-- `Eq N.zero N.zero`. Any def-eq between them can only come from
+-- `isDefEqProofIrrel`, never from delta — the dump_defeq.lean query
+-- built from these is a clean, single-rung isolation of that check.
+theorem twoZeroEqA : Eq N.zero N.zero := rfl
+theorem twoZeroEqB : Eq N.zero N.zero := rfl

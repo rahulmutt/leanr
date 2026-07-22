@@ -269,8 +269,14 @@ impl<'e> MetaCtx<'e> {
     // ===================================================================
 
     /// oracle: `processAssignment'` (ExprDefEq.lean:1367-1379): retry
-    /// against `v`'s `whnf` on failure.
-    fn process_assignment_prime(&mut self, mvar_app: ExprId, v: ExprId) -> Result<bool, MetaError> {
+    /// against `v`'s `whnf` on failure. `pub(crate)` (task 6):
+    /// `lazy_delta.rs`'s `isDefEqSingleton` (:2153-2163) calls this
+    /// directly, matching the oracle's own call there.
+    pub(crate) fn process_assignment_prime(
+        &mut self,
+        mvar_app: ExprId,
+        v: ExprId,
+    ) -> Result<bool, MetaError> {
         if self.process_assignment(mvar_app, v)? {
             return Ok(true);
         }

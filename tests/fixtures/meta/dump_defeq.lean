@@ -182,10 +182,16 @@ def whnfQueries : List (Name × Nat × Expr) :=
   ]
 
 /-- (constant-or-tag, index, lhsBuilder, rhsBuilder). `defeq` records
-carry two exprs `a`/`b` and a boolean verdict `eq`, under each profile.
-Mvar-free and delta-independent this batch (plan 3 builds only the
-whnf_core + congruence slice of `is_def_eq`, so every committed pair
-must be decidable without delta or mvar assignment). -/
+carry two exprs `a`/`b` and a boolean verdict `eq`, under each profile
+AND (task 6 addition) each transparency — the harness already loops
+`transparencies` around every entry here (see the `go` loop below), so
+a single entry whose oracle verdict genuinely DIFFERS across
+`.reducible`/`.default`/`.all` (the `deltaSemiDouble`/`deltaIrredId`
+entries below) is exactly what pins the `ReducibilityHints`-vs-
+`ReducibilityStatus` transparency gating, not three separate hand-
+written entries. Mvar-free throughout (delta/eta/proj/proof-irrelevance
+now genuinely exercised — plan 3 task 6 — but never mvar assignment,
+which stays `defeqMvarQueries`' own job below). -/
 def defeqQueries : List (Name × Nat × Expr × Expr) :=
   [ (`refl,   0, mkConst `N.zero, mkConst `N.zero)               -- true, structural
   , (`neq,    0, mkConst `N.zero, mkApp (mkConst `N.succ) (mkConst `N.zero)) -- false
@@ -203,6 +209,34 @@ def defeqQueries : List (Name × Nat × Expr × Expr) :=
       mkSort (mkLevelMax (mkLevelSucc (mkLevelParam `u)) (mkLevelSucc (mkLevelParam `v)))) -- true: succ distributes over max (normalize)
   , (`sortDistinctParams, 0,
       mkSort (mkLevelParam `u), mkSort (mkLevelParam `v)) -- false: genuinely distinct params, not just "not yet decidable"
+  -- lazy delta (task 6): `redId`/`semiDouble`/`irredId` carry the
+  -- three `ReducibilityStatus`es Meta0 declares them at (`@[reducible]`
+  -- / (no attribute, default semireducible) / `@[irreducible]`); each
+  -- pair is delta-true only once the LHS's own status permits
+  -- unfolding at the ambient transparency (`transparencies`, looped
+  -- automatically), so ONE entry per constant already yields a
+  -- verdict matrix across `.reducible`/`.default`/`.all`.
+  , (`deltaRedId, 0, mkApp (mkConst `redId) one, one)
+  , (`deltaSemiDouble, 0,
+      mkApp (mkConst `semiDouble) (mkConst `N.zero),
+      mkApp (mkConst `N.succ) (mkApp (mkConst `N.succ) (mkConst `N.zero)))
+  , (`deltaIrredId, 0, mkApp (mkConst `irredId) one, one)
+  -- eta (task 6, `isDefEqEta`): `fun x => N.succ x` vs the bare
+  -- constructor `N.succ` — `N.succ` itself never needs to be a `def`
+  -- for eta to apply (`isDefEqEta` only inspects the SIDE that is NOT
+  -- already a lambda's inferred type).
+  , (`etaSucc, 0,
+      mkLambda `x .default (mkConst `N) (mkApp (mkConst `N.succ) (.bvar 0)),
+      mkConst `N.succ)
+  -- proof irrelevance (task 6, `isDefEqProofIrrel`): two distinct,
+  -- permanently delta-opaque `theorem`s proving the identical Prop —
+  -- see `Meta0.lean`'s own doc comment on `twoZeroEqA`/`twoZeroEqB`.
+  , (`proofIrrel, 0, mkConst `twoZeroEqA, mkConst `twoZeroEqB)
+  -- projection (task 6, `isDefEqProj`/the post-eta/proj `whnfCore`
+  -- recheck): `(mkP).fst =?= N.zero`, built as a raw `Expr.proj` node
+  -- (not through the source-level `.fst` projection-FUNCTION sugar) —
+  -- `mkP : P := ⟨N.zero, N.succ N.zero⟩`.
+  , (`projFst, 0, Expr.proj `P 0 (mkConst `mkP), mkConst `N.zero)
   ]
 
 /-- (constant-or-tag, index, baseExprBuilder, argIdx). `defeq_mvar`

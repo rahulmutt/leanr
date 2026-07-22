@@ -9,7 +9,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use leanr_kernel::bank::{ExprId, NameId, Store};
-use leanr_kernel::{CheckedConstants, ConstSource, ConstantInfo, EnvView, Environment, Nat};
+use leanr_kernel::{
+    BinderInfo, CheckedConstants, ConstSource, ConstantInfo, EnvView, Environment, Nat,
+};
 use leanr_olean::ModuleData;
 
 use crate::{Config, MVarDecl, MVarId, MVarKind, MetaCtx};
@@ -90,6 +92,38 @@ pub(crate) fn fresh_mvar(ctx: &mut MetaCtx, ty: ExprId) -> (ExprId, MVarId) {
         .expr_mvar(base, Some(name))
         .expect("interning a fresh mvar reference is infallible");
     (expr, id)
+}
+
+/// Mint a fresh free variable of type `ty`, declared directly in
+/// `ctx.lctx` (task 6, promoted here per the task brief: `defeq.rs`'s
+/// own `is_def_eq_binding_shallow_body` is the production-code idiom
+/// this mirrors — `LocalContext::mk_local_decl`, reconciled against
+/// `crates/leanr_kernel/src/local_ctx.rs`'s bank-native signature —
+/// but that path opens a fvar mid-recursion and restores the context
+/// on exit; a *test* fvar is meant to outlive the single call that
+/// mints it, so this does not bracket it in a `save`/`restore` pair).
+/// Interns `name` as the fvar's (purely cosmetic, never consulted by
+/// `is_def_eq`) `binder_name` and returns the `Expr::fvar` reference.
+pub(crate) fn fresh_fvar(ctx: &mut MetaCtx, ty: ExprId, name: &str) -> ExprId {
+    let base = Some(ctx.view.store);
+    let s = ctx
+        .scratch
+        .intern_str(base, name)
+        .expect("interning a tiny fixed name is infallible");
+    let n = ctx
+        .scratch
+        .name_str(base, None, s)
+        .expect("interning a tiny fixed name is infallible");
+    ctx.lctx
+        .mk_local_decl(
+            ctx.scratch,
+            base,
+            &mut ctx.fvar_gen,
+            Some(n),
+            ty,
+            BinderInfo::Default,
+        )
+        .expect("declaring a test fvar is infallible")
 }
 
 /// Replay `Prelude0.olean` (import-free — see
