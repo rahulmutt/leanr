@@ -10,9 +10,14 @@
 //!
 //! spec: docs/superpowers/specs/2026-07-20-m4a-meta-core-design.md
 
+mod assign;
+mod cache;
 mod config;
+mod defeq;
 mod error;
 mod infer;
+mod lazy_delta;
+mod level;
 mod metactx;
 mod mvar_ctx;
 #[cfg(test)]
@@ -23,5 +28,5 @@ mod whnf;
 pub use config::{Config, ProjReduction};
 pub use error::MetaError;
 pub use metactx::{MetaCtx, DEFAULT_STEP_BUDGET};
-pub use mvar_ctx::{MVarDecl, MVarId, MVarKind, MetavarContext};
+pub use mvar_ctx::{LMVarId, MVarDecl, MVarId, MVarKind, MetavarContext};
 pub use transparency::{can_unfold, TransparencyMode};

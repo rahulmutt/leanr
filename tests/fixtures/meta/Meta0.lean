@@ -102,3 +102,26 @@ def count (n : N) : N :=
   match n with
   | .zero => .zero
   | .succ m => .succ (count m)
+
+-- defeq (plan 3): mvar-free, delta-independent pairs
+def two : N := N.succ (N.succ N.zero)
+def alsoTwo : N := N.succ (N.succ N.zero)
+
+-- universe-polymorphic (plan 3 task 4): exercises inferType/whnf over a
+-- genuine `Sort u` parameter (not just the ground `Sort 0` every other
+-- Meta0 declaration above uses), via the constant-loop's automatic
+-- `infer` query. The hand-built `Sort`-level defeq pairs themselves
+-- (max/succ-normalization true cases, a genuinely-unequal case) are
+-- built directly in dump_defeq.lean, independent of any Meta0
+-- declaration — see that file's `defeqQueries` additions.
+def uid.{u} (α : Sort u) (a : α) : α := a
+
+-- proof irrelevance (plan 3 task 6): two SEPARATE `theorem`s (never
+-- delta-unfold, at ANY transparency — `GetUnfoldableConst.lean`'s own
+-- `| .thm => none` — matching this crate's own
+-- `unfold_definition_const`'s doc) proving the exact same Prop
+-- `Eq N.zero N.zero`. Any def-eq between them can only come from
+-- `isDefEqProofIrrel`, never from delta — the dump_defeq.lean query
+-- built from these is a clean, single-rung isolation of that check.
+theorem twoZeroEqA : Eq N.zero N.zero := rfl
+theorem twoZeroEqB : Eq N.zero N.zero := rfl

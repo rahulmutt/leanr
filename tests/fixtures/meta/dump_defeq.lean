@@ -181,9 +181,175 @@ def whnfQueries : List (Name × Nat × Expr) :=
   , (`count,   1, mkApp (mkConst `count) (mkConst `N.zero))
   ]
 
+/-- (constant-or-tag, index, lhsBuilder, rhsBuilder). `defeq` records
+carry two exprs `a`/`b` and a boolean verdict `eq`, under each profile
+AND (task 6 addition) each transparency — the harness already loops
+`transparencies` around every entry here (see the `go` loop below), so
+a single entry whose oracle verdict genuinely DIFFERS across
+`.reducible`/`.default`/`.all` (the `deltaSemiDouble`/`deltaIrredId`
+entries below) is exactly what pins the `ReducibilityHints`-vs-
+`ReducibilityStatus` transparency gating, not three separate hand-
+written entries. Mvar-free throughout (delta/eta/proj/proof-irrelevance
+now genuinely exercised — plan 3 task 6 — but never mvar assignment,
+which stays `defeqMvarQueries`' own job below). -/
+def defeqQueries : List (Name × Nat × Expr × Expr) :=
+  [ (`refl,   0, mkConst `N.zero, mkConst `N.zero)               -- true, structural
+  , (`neq,    0, mkConst `N.zero, mkApp (mkConst `N.succ) (mkConst `N.zero)) -- false
+  , (`beta,   0, mkApp (mkLambda `x .default (mkConst `N) (.bvar 0)) (mkConst `N.zero), mkConst `N.zero) -- true, whnf_core only
+  -- universe-polymorphic (task 4, `is_level_def_eq`). Mvar-free by
+  -- design (spec risk 3): `Level.param `u`/`` `v`` here are FREE level
+  -- params, not universe metavariables — `isLevelDefEqAux` decides
+  -- them the same way whether or not they happen to correspond to a
+  -- real declaration's `.{u}` binder, so these do not need to reference
+  -- `uid` at all.
+  , (`sortMaxZero, 0,
+      mkSort (mkLevelMax .zero (mkLevelParam `u)), mkSort (mkLevelParam `u)) -- true: max 0 u = u (normalize)
+  , (`sortSuccMax, 0,
+      mkSort (mkLevelSucc (mkLevelMax (mkLevelParam `u) (mkLevelParam `v))),
+      mkSort (mkLevelMax (mkLevelSucc (mkLevelParam `u)) (mkLevelSucc (mkLevelParam `v)))) -- true: succ distributes over max (normalize)
+  , (`sortDistinctParams, 0,
+      mkSort (mkLevelParam `u), mkSort (mkLevelParam `v)) -- false: genuinely distinct params, not just "not yet decidable"
+  -- lazy delta (task 6): `redId`/`semiDouble`/`irredId` carry the
+  -- three `ReducibilityStatus`es Meta0 declares them at (`@[reducible]`
+  -- / (no attribute, default semireducible) / `@[irreducible]`); each
+  -- pair is delta-true only once the LHS's own status permits
+  -- unfolding at the ambient transparency (`transparencies`, looped
+  -- automatically), so ONE entry per constant already yields a
+  -- verdict matrix across `.reducible`/`.default`/`.all`.
+  , (`deltaRedId, 0, mkApp (mkConst `redId) one, one)
+  , (`deltaSemiDouble, 0,
+      mkApp (mkConst `semiDouble) (mkConst `N.zero),
+      mkApp (mkConst `N.succ) (mkApp (mkConst `N.succ) (mkConst `N.zero)))
+  , (`deltaIrredId, 0, mkApp (mkConst `irredId) one, one)
+  -- eta (task 6, `isDefEqEta`): `fun x => N.succ x` vs the bare
+  -- constructor `N.succ` — `N.succ` itself never needs to be a `def`
+  -- for eta to apply (`isDefEqEta` only inspects the SIDE that is NOT
+  -- already a lambda's inferred type).
+  , (`etaSucc, 0,
+      mkLambda `x .default (mkConst `N) (mkApp (mkConst `N.succ) (.bvar 0)),
+      mkConst `N.succ)
+  -- proof irrelevance (task 6, `isDefEqProofIrrel`): two distinct,
+  -- permanently delta-opaque `theorem`s proving the identical Prop —
+  -- see `Meta0.lean`'s own doc comment on `twoZeroEqA`/`twoZeroEqB`.
+  , (`proofIrrel, 0, mkConst `twoZeroEqA, mkConst `twoZeroEqB)
+  -- projection (task 6, `isDefEqProj`/the post-eta/proj `whnfCore`
+  -- recheck): `(mkP).fst =?= N.zero`, built as a raw `Expr.proj` node
+  -- (not through the source-level `.fst` projection-FUNCTION sugar) —
+  -- `mkP : P := ⟨N.zero, N.succ N.zero⟩`.
+  , (`projFst, 0, Expr.proj `P 0 (mkConst `mkP), mkConst `N.zero)
+  ]
+
+/-- (constant-or-tag, index, baseExprBuilder, argIdx). `defeq_mvar`
+records (task 5): `baseExpr` is a fixture application `f a₀ a₁ …`;
+`argIdx` names WHICH explicit argument gets replaced by a fresh
+metavariable (`← mkFreshExprMVar (← inferType arg)` under
+`withNewMCtxDepth (allowLevelAssignments := true)`) before running
+`Meta.isDefEq` against the untouched `baseExpr`. Every entry here is
+PATTERN-shaped for task 5's own assignment code (the fresh mvar always
+ends up in NULLARY position — it never itself carries further
+arguments — since it is substituted directly for one existing argument
+slot, never applied to anything else): `N.succ ?m =?= N.succ N.zero`
+and `add ?m one =?= add one one` (both argument positions), each
+solvable by a single pattern assignment with no approximation. -/
+def defeqMvarQueries : List (Name × Nat × Expr × Nat) :=
+  [ (`succ, 0, mkApp (mkConst `N.succ) (mkConst `N.zero), 0)
+  , (`add,  0, mkApp (mkApp (mkConst `add) one) one, 0)
+  , (`add,  1, mkApp (mkApp (mkConst `add) one) one, 1)
+  ]
+
+/-- `N → N`, needed below: `defeqMvarQueries`' own mvar is always typed
+FROM an existing argument's `inferType` (so it can only ever end up
+NULLARY, as that def's own doc comment explains — congruence over the
+surrounding application handles everything else, so the fresh mvar
+itself is never the thing being APPLIED to anything, and the strict
+pattern rule always suffices). The approximations task 7 wires
+(`foApprox`/`constApprox`) only ever relax a condition of the PATTERN
+rule for `?m a₁ … aₙ =?= v` with `n ≥ 1` — so firing either one for
+real needs a mvar that is ITSELF applied to at least one argument,
+which needs a genuine function TYPE to mint the mvar at, not an
+inferred scalar type. -/
+def nArrowN : Expr := Expr.forallE `_ (mkConst `N) (mkConst `N) .default
+
+/-- `defeq_mvar` queries whose success genuinely REQUIRES an
+approximation (task 7, spec § Config profiles' "wired-AND-gated proof"):
+unlike `defeqMvarQueries` above, each entry here mints `?m : mvarTy`
+DIRECTLY and builds the LHS around it via `lhsFn`, so `?m` ends up
+APPLIED to a real argument — a genuine (non-degenerate) pattern
+constraint, unlike every `defeqMvarQueries` entry. `(tag, index,
+mvarTy, lhsFn, rhs)`. Every entry's `default`-profile record is `false`
+and `approx`-profile record `true` (verified against the oracle before
+committing — see the task 7 report). `ctxApprox` coverage is
+deliberately NOT attempted here: task 7's own finding is that the
+oracle's `ctxApprox` rescue lives only in a term-REWRITING slow path
+this crate does not build (`assign.rs::check_assignment_scope`'s own
+doc comment) — a fixture would only prove the ORACLE'S verdict, not
+exercise anything this crate's `ctxApprox` flag actually does (it
+never fires), so none is added; the gap is intentional, not an
+oversight (spec risk 3, acknowledged-thin coverage). -/
+def approxMvarQueries : List (Name × Nat × Expr × (Expr → Expr) × Expr) :=
+  [ -- foApprox (ExprDefEq.lean:1184-1210): `?m N.zero =?= N.succ
+    -- N.zero` — `N.zero` is a non-fvar pattern argument, so the strict
+    -- pattern rule rejects outright; `processAssignmentFOApproxAux`'s
+    -- first-order decomposition (`N.zero =?= N.zero` and `?m =?=
+    -- N.succ`) only fires under `foApprox`, assigning `?m := N.succ`.
+    (`foApprox, 0, nArrowN,
+      fun mvar => mkApp mvar (mkConst `N.zero),
+      mkApp (mkConst `N.succ) (mkConst `N.zero))
+  , -- constApprox (ExprDefEq.lean:1271-1310, :1243-1254): `?m N.zero
+    -- =?= N.succ (N.succ N.zero)` where `?m : N → N`. The RHS's own
+    -- trailing argument, `N.succ N.zero` ("one"), is NOT def-eq to
+    -- `N.zero` (different constructors), so
+    -- `processAssignmentFOApproxAux`'s first check (`args.back! =?= a`,
+    -- i.e. `N.zero =?= N.succ N.zero`) fails outright, and `N.succ`'s
+    -- own head is a CONSTRUCTOR (no `unfoldDefinition?` value) so
+    -- `processAssignmentFOApprox`'s unfold-and-retry loop cannot rescue
+    -- it either — `foApprox` PROVABLY fails on this exact query,
+    -- isolating `constApprox` cleanly (unlike a bare, non-application
+    -- RHS, which `json_mvar_types` — `crates/leanr_meta/tests/
+    -- oracle_fast.rs`'s gate-side mvar-type-source walk, itself
+    -- outside this task's file list — cannot decode: it expects `a`/
+    -- `b` to stay structurally parallel down to the substituted mvar
+    -- position, panicking on a `b`-side leaf with no corresponding
+    -- `App` shape). `processConstApprox`'s `defaultCase` opens `?m`'s
+    -- own `N → N` telescope and assigns `?m := fun _ => N.succ (N.succ
+    -- N.zero)`.
+    (`constApprox, 0, nArrowN,
+      fun mvar => mkApp mvar (mkConst `N.zero),
+      mkApp (mkConst `N.succ) (mkApp (mkConst `N.succ) (mkConst `N.zero)))
+  ]
+
+/-- The two config profiles (spec § Config profiles). `default` leaves
+approximations at their oracle defaults; `approx` turns the four
+false-defaulting flags on (`univApprox` is already true). -/
+def withProfile (prof : String) (k : MetaM α) : MetaM α :=
+  match prof with
+  | "approx" => withConfig (fun c =>
+      { c with foApprox := true, ctxApprox := true,
+               quasiPatternApprox := true, constApprox := true }) k
+  | _ => k
+
+def profiles : List String := ["default", "approx"]
+
+def emitDefeq (id q tr prof : String) (aE bE : Json) (eq : Bool) : IO Unit :=
+  IO.println <| Json.compress <| Json.mkObj
+    [("id", id), ("q", q), ("tr", tr), ("prof", prof),
+     ("a", aE), ("b", bE), ("eq", eq)]
+
 def emit (id : String) (q : String) (tr : String) (inE outE : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj
     [("id", id), ("q", q), ("tr", tr), ("in", inE), ("out", outE)]
+
+/-- `defeq_mvar` record emitter (task 5): like `emitDefeq`, plus an
+`assign` array of `{"m": <canonical mvar index>, "v": <E>}` — the
+"compare assignments, not just verdicts" requirement. The index is the
+mvar's first-occurrence number in the SAME `EncSt` that numbered `a`/
+`b` (so it matches how those already numbered it, exactly like
+`encPair` threads `in`→`out`), never a fresh one of its own. -/
+def emitDefeqMvar (id tr prof : String) (aE bE : Json)
+    (eq : Bool) (assign : Array Json) : IO Unit :=
+  IO.println <| Json.compress <| Json.mkObj
+    [("id", id), ("q", "defeq_mvar"), ("tr", tr), ("prof", prof),
+     ("a", aE), ("b", bE), ("eq", eq), ("assign", Json.arr assign)]
 
 unsafe def main : IO Unit := do
   -- Must run before any `importModules (loadExts := true)` or the
@@ -206,6 +372,62 @@ unsafe def main : IO Unit := do
         let r ← withTransparency tr <| whnf e
         let (inJ, outJ) := encPair e r
         emit s!"{name}/whnf/{i}" "whnf" trName inJ outJ
+    for (name, i, a, b) in defeqQueries do
+      for (trName, tr) in transparencies do
+        for prof in profiles do
+          let r ← withProfile prof <| withTransparency tr <| Meta.isDefEq a b
+          let (aj, bj) := encPair a b
+          emitDefeq s!"{name}/defeq/{i}" "defeq" trName prof aj bj r
+    for (name, i, e, argIdx) in defeqMvarQueries do
+      for (trName, tr) in transparencies do
+        for prof in profiles do
+          let args := e.getAppArgs
+          if h : argIdx < args.size then
+            let arg := args[argIdx]
+            let (eqR, assignArr, aJ, bJ) ←
+                withNewMCtxDepth (allowLevelAssignments := true) <|
+                withProfile prof <| withTransparency tr do
+              let argTy ← inferType arg
+              let mvar ← mkFreshExprMVar argTy
+              let newArgs := args.set! argIdx mvar
+              let lhs := mkAppN e.getAppFn newArgs
+              let eqR ← Meta.isDefEq lhs e
+              let assignedOpt ← if eqR then getExprMVarAssignment? mvar.mvarId! else pure none
+              let assignedInst ← assignedOpt.mapM instantiateMVars
+              -- Thread ONE `EncSt` across `lhs` -> `e` -> the assigned
+              -- value, exactly like `encPair`'s `in`->`out` threading
+              -- (this function's own doc comment).
+              let (aJ, st1) := (encExpr lhs).run {}
+              let (bJ, st2) := (encExpr e).run st1
+              let assignArr : Array Json := match assignedInst with
+                | some v =>
+                  let vJ := (encExpr v).run' st2
+                  let idx := (st2.mvars.get? mvar.mvarId!).getD 0
+                  #[Json.mkObj [("m", idx), ("v", vJ)]]
+                | none => #[]
+              pure (eqR, assignArr, aJ, bJ)
+            emitDefeqMvar s!"{name}/defeq_mvar/{i}" trName prof aJ bJ eqR assignArr
+    for (name, i, mvarTy, lhsFn, rhs) in approxMvarQueries do
+      for (trName, tr) in transparencies do
+        for prof in profiles do
+          let (eqR, assignArr, aJ, bJ) ←
+              withNewMCtxDepth (allowLevelAssignments := true) <|
+              withProfile prof <| withTransparency tr do
+            let mvar ← mkFreshExprMVar mvarTy
+            let lhs := lhsFn mvar
+            let eqR ← Meta.isDefEq lhs rhs
+            let assignedOpt ← if eqR then getExprMVarAssignment? mvar.mvarId! else pure none
+            let assignedInst ← assignedOpt.mapM instantiateMVars
+            let (aJ, st1) := (encExpr lhs).run {}
+            let (bJ, st2) := (encExpr rhs).run st1
+            let assignArr : Array Json := match assignedInst with
+              | some v =>
+                let vJ := (encExpr v).run' st2
+                let idx := (st2.mvars.get? mvar.mvarId!).getD 0
+                #[Json.mkObj [("m", idx), ("v", vJ)]]
+              | none => #[]
+            pure (eqR, assignArr, aJ, bJ)
+          emitDefeqMvar s!"{name}/defeq_mvar/{i}" trName prof aJ bJ eqR assignArr
     -- Constant loop: NOT filtered to "module Meta0" — Meta0 is
     -- import-free, so the environment here IS exactly Meta0's own
     -- constants and nothing else; a module filter would be a no-op.

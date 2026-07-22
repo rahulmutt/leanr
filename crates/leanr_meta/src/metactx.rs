@@ -9,11 +9,11 @@
 use std::collections::HashMap;
 
 use leanr_kernel::bank::terms::Node;
-use leanr_kernel::bank::{ExprId, NameId, Store};
+use leanr_kernel::bank::{ExprId, LevelId, NameId, Store};
 use leanr_kernel::{EnvView, ExprData, FVarIdGen, LocalContext, RecGuard, MAX_REC_DEPTH};
 use leanr_olean::{EntryScope, MatcherEntry, ReducibilityEntry, ReducibilityStatus};
 
-use crate::{Config, MetaError, MetavarContext, TransparencyMode};
+use crate::{Config, LMVarId, MVarId, MetaError, MetavarContext, TransparencyMode};
 
 /// Stack-growth constants — the same values `tc.rs` uses (private
 /// there, so restated; keep in sync by inspection). Verified against
@@ -56,6 +56,27 @@ pub struct MetaCtx<'e> {
     /// only how fast it's produced.
     pub(crate) whnf_core_cache: HashMap<(u64, ExprId), ExprId>,
     pub(crate) infer_cache: HashMap<(u64, ExprId), ExprId>,
+    /// Postponed level-equality constraints (`?u`-bearing `max`/`imax`
+    /// shapes neither decidable nor refutable yet). oracle: `getPostponed`
+    /// / `postponeIsLevelDefEq` (LevelDefEq.lean:87). Drained by
+    /// `process_postponed` (task 4) at checkpoint boundaries; part of the
+    /// snapshot so a failed trial unification restores it.
+    pub(crate) postponed: Vec<(LevelId, LevelId)>,
+    /// Permanent defeq cache: mvar-free pairs (`hasExprMVar ||
+    /// hasLevelMVar`, oracle's `hasMVar`) under a standard config (no
+    /// `canUnfold?` override) — NOT fvar-free; see `cache.rs`'s module
+    /// doc for why an fvar-mentioning pair is still safe to cache here
+    /// forever. Survives across `is_def_eq` calls. oracle: the
+    /// persistent half of the defeq cache (`getDefEqCacheKind`,
+    /// ExprDefEq.lean:2238). Wired in by task 8 (`cache.rs`'s
+    /// `defeq_cache_kind`/`cache_lookup`/`cache_store`, consulted from
+    /// `defeq.rs::is_def_eq_core`'s cache seam).
+    pub(crate) defeq_cache_perm: HashMap<(u64, ExprId, ExprId), bool>,
+    /// Transient defeq cache: everything else. Cleared at every
+    /// `checkpoint` (oracle: `modifyDefEqTransientCache fun _ => {}` in
+    /// `checkpointDefEq`, Basic.lean:2446) — unsafe to keep across calls
+    /// because the result depends on mctx state and config.
+    pub(crate) defeq_cache_transient: HashMap<(u64, ExprId, ExprId), bool>,
     /// ReducibilityStatus per constant; absent => Semireducible.
     reducibility: HashMap<NameId, ReducibilityStatus>,
     matchers: HashMap<NameId, MatcherEntry>,
@@ -90,6 +111,20 @@ pub struct MetaCtx<'e> {
     /// names like `Nat.add`).
     pub(crate) sunfold_match: NameId,
     pub(crate) sunfold_match_alt: NameId,
+    /// Monotone counter backing `level.rs`'s `fresh_level_mvar` (oracle:
+    /// `mkFreshLevelMVar`, Basic.lean:861-863) — this crate's own
+    /// name-generator stand-in, mirroring `FVarIdGen`'s "fixed prefix +
+    /// counter" idiom (`local_ctx.rs::fresh_fvar_id`) rather than
+    /// reusing that type directly (a level mvar name is not an fvar
+    /// name, and the two counters must not collide on the same prefix).
+    pub(crate) level_mvar_gen: u64,
+    /// Monotone counter backing `assign.rs`'s `mk_aux_mvar` (oracle:
+    /// `mkAuxMVar`, `ExprDefEq.lean` — `constApprox`'s `isDefEqMVarSelf`
+    /// fallback fresh-EXPR-mvar mint, task 7). Mirrors `level_mvar_gen`'s
+    /// own "fixed prefix + counter" idiom, distinct from both it and
+    /// `FVarIdGen` (an expr-mvar name must not collide with either a
+    /// level-mvar or an fvar name).
+    pub(crate) expr_mvar_gen: u64,
 }
 
 /// The `Nat.*` builtins `reduce_nat` folds on `LitNat`/`Nat.zero`
@@ -216,6 +251,9 @@ impl<'e> MetaCtx<'e> {
             whnf_cache: HashMap::new(),
             whnf_core_cache: HashMap::new(),
             infer_cache: HashMap::new(),
+            postponed: Vec::new(),
+            defeq_cache_perm: HashMap::new(),
+            defeq_cache_transient: HashMap::new(),
             reducibility,
             matchers,
             smart_unfolding: true,
@@ -229,6 +267,8 @@ impl<'e> MetaCtx<'e> {
             wf_rec,
             sunfold_match,
             sunfold_match_alt,
+            level_mvar_gen: 0,
+            expr_mvar_gen: 0,
         }
     }
 
@@ -356,28 +396,39 @@ impl<'e> MetaCtx<'e> {
     pub(crate) fn set_step_budget(&mut self, n: u64) {
         self.step_budget = n;
     }
+
+    pub(crate) fn checkpoint(&self) -> MetaSnapshot {
+        let (expr_assignments, level_assignments) = self.mctx.snapshot_assignments();
+        MetaSnapshot {
+            expr_assignments,
+            level_assignments,
+            postponed: self.postponed.clone(),
+        }
+    }
+
+    pub(crate) fn rollback(&mut self, snap: MetaSnapshot) {
+        self.mctx
+            .restore_assignments(snap.expr_assignments, snap.level_assignments);
+        self.postponed = snap.postponed;
+    }
+}
+
+/// A save point for `checkpointDefEq` (oracle Basic.lean:2438). Holds
+/// exactly what a failed trial unification must restore: the expr and
+/// level assignment maps and the postponed queue. NOT the permanent
+/// cache (it is monotone and shared) and NOT declarations (an mvar stays
+/// declared).
+pub(crate) struct MetaSnapshot {
+    expr_assignments: HashMap<MVarId, ExprId>,
+    level_assignments: HashMap<LMVarId, LevelId>,
+    postponed: Vec<(LevelId, LevelId)>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::with_ctx;
     use crate::MetaError;
-
-    // Reconcile against schedule.rs:324 — the shape, not the letter:
-    // an EnvView over an empty persistent store and no constants.
-    fn with_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
-        let base = Store::persistent();
-        let mut scratch = Store::scratch();
-        let empty = leanr_kernel::CheckedConstants::new(HashMap::new());
-        let view = EnvView {
-            consts: leanr_kernel::ConstSource::Gated(&empty),
-            extra: None,
-            quot_initialized: false,
-            store: &base,
-        };
-        let mut ctx = MetaCtx::new(view, &mut scratch, Config::default(), &[], &[]);
-        f(&mut ctx)
-    }
 
     #[test]
     fn step_budget_exhausts_as_its_own_error() {
@@ -410,6 +461,37 @@ mod tests {
             assert_eq!(ctx.get_app_fn(app), f);
             assert_eq!(ctx.get_app_args(app), vec![a, a]);
             assert_eq!(ctx.get_app_num_args(app), 2);
+        });
+    }
+
+    #[test]
+    fn rollback_restores_assignments_and_postponed() {
+        use crate::{MVarDecl, MVarId, MVarKind};
+        with_ctx(|ctx| {
+            let z = ctx.scratch.level_zero(None).expect("level");
+            let ty = ctx.scratch.expr_sort(None, z).expect("sort");
+            let s = ctx.scratch.intern_str(None, "m").expect("intern");
+            let nm = ctx.scratch.name_str(None, None, s).expect("name");
+            let m = MVarId(nm);
+            ctx.mctx.declare(
+                m,
+                MVarDecl {
+                    user_name: None,
+                    ty,
+                    lctx: Default::default(),
+                    kind: MVarKind::Natural,
+                },
+            );
+
+            let snap = ctx.checkpoint();
+            ctx.mctx.assign(m, ty).expect("assign");
+            ctx.postponed.push((z, z));
+            assert!(ctx.mctx.is_assigned(m));
+            assert_eq!(ctx.postponed.len(), 1);
+
+            ctx.rollback(snap);
+            assert!(!ctx.mctx.is_assigned(m), "assignment must be undone");
+            assert!(ctx.postponed.is_empty(), "postponed must be restored");
         });
     }
 }

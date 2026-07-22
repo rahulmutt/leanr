@@ -9,9 +9,9 @@
 //! must not grow the machinery for assigning them (AGENTS.md: the TCB
 //! stays minimal).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use leanr_kernel::bank::{ExprId, NameId};
+use leanr_kernel::bank::{ExprId, LevelId, NameId};
 use leanr_kernel::LocalContext;
 
 use crate::MetaError;
@@ -24,6 +24,12 @@ use crate::MetaError;
 /// type cannot either.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MVarId(pub NameId);
+
+/// A level metavariable's identity. Newtype over `NameId`, mirroring
+/// `MVarId`; cannot be confused with an expr mvar. oracle:
+/// `Lean.LMVarId`. No `Ord` (NameId has none).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LMVarId(pub NameId);
 
 /// oracle: `MetavarKind`. `SyntheticOpaque` must never be assigned by
 /// unification — only by the elaborator that created it (e.g. a tactic
@@ -59,6 +65,8 @@ pub struct MVarDecl {
 pub struct MetavarContext {
     decls: HashMap<MVarId, MVarDecl>,
     assignments: HashMap<MVarId, ExprId>,
+    level_decls: HashSet<LMVarId>,
+    level_assignments: HashMap<LMVarId, LevelId>,
 }
 
 impl MetavarContext {
@@ -111,6 +119,58 @@ impl MetavarContext {
         }
         self.assignments.insert(id, val);
         Ok(())
+    }
+
+    /// Record that a level mvar exists. Levels carry no type or lctx,
+    /// so unlike `declare` there is nothing else to store. oracle:
+    /// fresh `lDepth` entry in `MetavarContext`.
+    pub fn declare_level(&mut self, id: LMVarId) {
+        self.level_decls.insert(id);
+    }
+
+    pub fn is_level_assigned(&self, id: LMVarId) -> bool {
+        self.level_assignments.contains_key(&id)
+    }
+
+    pub fn level_assignment(&self, id: LMVarId) -> Option<LevelId> {
+        self.level_assignments.get(&id).copied()
+    }
+
+    /// Assign `id := val`. Refuses an undeclared or already-assigned
+    /// level mvar, for the same reason `assign` does: silent overwrite
+    /// turns a unification bug into a wrong answer. The occurs check
+    /// (`!u.occurs v`) is the caller's obligation in `level.rs`, not
+    /// here — callers differ in what they do on a positive result.
+    pub fn assign_level(&mut self, id: LMVarId, val: LevelId) -> Result<(), MetaError> {
+        if !self.level_decls.contains(&id) {
+            return Err(MetaError::MVar(format!(
+                "assign_level: level metavariable {id:?} was never declared"
+            )));
+        }
+        if self.level_assignments.contains_key(&id) {
+            return Err(MetaError::MVar(format!(
+                "assign_level: level metavariable {id:?} is already assigned"
+            )));
+        }
+        self.level_assignments.insert(id, val);
+        Ok(())
+    }
+
+    /// Snapshot/restore support for `checkpointDefEq` (plan 3). Clones
+    /// the assignment maps; declarations are not snapshotted (an mvar,
+    /// once declared, stays declared even across a failed trial).
+    pub(crate) fn snapshot_assignments(
+        &self,
+    ) -> (HashMap<MVarId, ExprId>, HashMap<LMVarId, LevelId>) {
+        (self.assignments.clone(), self.level_assignments.clone())
+    }
+    pub(crate) fn restore_assignments(
+        &mut self,
+        expr: HashMap<MVarId, ExprId>,
+        level: HashMap<LMVarId, LevelId>,
+    ) {
+        self.assignments = expr;
+        self.level_assignments = level;
     }
 }
 
@@ -210,5 +270,45 @@ mod tests {
 
         assert_eq!(mctx.assignment(b), Some(ma));
         assert!(!mctx.is_assigned(a));
+    }
+
+    fn lmk(store: &mut Store, n: &str) -> super::LMVarId {
+        let base = store.intern_str(None, n).expect("intern");
+        let name = store.name_str(None, None, base).expect("name");
+        super::LMVarId(name)
+    }
+
+    #[test]
+    fn declare_then_assign_a_level_mvar() {
+        let mut store = Store::persistent();
+        let zero = store.level_zero(None).expect("level zero");
+        let id = lmk(&mut store, "u");
+        let mut mctx = MetavarContext::new();
+        assert!(!mctx.is_level_assigned(id));
+        mctx.declare_level(id);
+        assert_eq!(mctx.level_assignment(id), None);
+        mctx.assign_level(id, zero).expect("assign level");
+        assert!(mctx.is_level_assigned(id));
+        assert_eq!(mctx.level_assignment(id), Some(zero));
+    }
+
+    #[test]
+    fn reassigning_a_level_mvar_is_rejected() {
+        let mut store = Store::persistent();
+        let zero = store.level_zero(None).expect("level zero");
+        let id = lmk(&mut store, "u");
+        let mut mctx = MetavarContext::new();
+        mctx.declare_level(id);
+        mctx.assign_level(id, zero).expect("first");
+        assert!(mctx.assign_level(id, zero).is_err());
+    }
+
+    #[test]
+    fn assigning_an_undeclared_level_mvar_is_rejected() {
+        let mut store = Store::persistent();
+        let zero = store.level_zero(None).expect("level zero");
+        let id = lmk(&mut store, "ghost");
+        let mut mctx = MetavarContext::new();
+        assert!(mctx.assign_level(id, zero).is_err());
     }
 }

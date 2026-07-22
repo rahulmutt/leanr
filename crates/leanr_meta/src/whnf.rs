@@ -56,12 +56,16 @@
 //!   (:696-701); lands with the extension that identifies
 //!   `isAuxRecursor`-equivalent definitions.
 //! - [`MetaCtx::whnf_delayed_assigned`] — delayed-mvar-assignment
-//!   expansion (:587-606; plan 3, alongside the rest of unification).
+//!   expansion (:587-606); this plan's `MetavarContext` has no
+//!   delayed-assignment channel at all (`assign.rs`'s own citation) —
+//!   lands with plan 4 / M4b.
 //! - [`MetaCtx::to_ctor_when_k`] — compares structurally (`ExprId`
-//!   equality after `whnf`) instead of via `isDefEq` (plan 3 upgrades
-//!   this).
+//!   equality after `whnf`) instead of via `isDefEq`. `defeq.rs::
+//!   is_def_eq` (this plan's own unifier) now exists, but this call
+//!   site was never rewired to use it; open gap for a later task.
 //! - [`MetaCtx::cleanup_nat_offset_major`] — offset-constraint cleanup
-//!   (:218-226; plan 3, `offsetCnstrs`).
+//!   (:218-226; lands whenever `Config.offsetCnstrs` does — same gate
+//!   `isDefEqOffset` cites, `lazy_delta.rs`).
 //! - [`MetaCtx::to_ctor_if_lit`]'s `LitStr` arm — string-literal
 //!   `toCtorIfLit` (:27-28; no tier-1 corpus query needs it yet).
 //! - the `FVar` arm of `whnf_easy_cases` — `isImplementationDetail`/
@@ -438,8 +442,10 @@ impl<'e> MetaCtx<'e> {
 
     /// SEAM: oracle `whnfDelayedAssigned?` (WHNF.lean:587-606). The
     /// delayed-mvar-assignment channel (`getDelayedMVarAssignment?`)
-    /// does not exist on this plan's `MetavarContext` — arrives in
-    /// plan 3 alongside the rest of unification. Always `None`.
+    /// does not exist on this plan's `MetavarContext` at all — a later
+    /// plan (plan 4 / M4b), not this one (`assign.rs`'s own citation
+    /// on why this crate has no delayed-assignment concept yet). Always
+    /// `None`.
     fn whnf_delayed_assigned(
         &mut self,
         _f_prime: ExprId,
@@ -1468,8 +1474,11 @@ impl<'e> MetaCtx<'e> {
     /// arm (above) already makes for this file's other beta sites: an
     /// `MData`-wrapped lambda head is not exercised by any corpus this
     /// plan targets. Used by `reduce_matcher_telescope`'s `Reduced` arm
-    /// (oracle :563: `result.headBeta`).
-    fn head_beta(&mut self, e: ExprId) -> Result<ExprId, MetaError> {
+    /// (oracle :563: `result.headBeta`). `pub(crate)`, not private (task
+    /// 7): `assign.rs::process_assignment_fo_approx`'s own loop (oracle:
+    /// `processAssignmentFOApprox`, ExprDefEq.lean:1211, `let v :=
+    /// v.headBeta`) needs the exact same primitive.
+    pub(crate) fn head_beta(&mut self, e: ExprId) -> Result<ExprId, MetaError> {
         let f = self.get_app_fn(e);
         if matches!(self.node(f), Node::Lam { .. }) {
             let args = self.get_app_args(e);
@@ -1532,9 +1541,11 @@ impl<'e> MetaCtx<'e> {
 
     /// oracle: `whnfD` (Basic.lean:2116-2118) — `whnf` forced to
     /// `.default` transparency regardless of the ambient config,
-    /// restored after. Used only by `to_ctor_when_structure`'s "no eta
-    /// for propositions" check (WHNF.lean:194).
-    fn whnf_default(&mut self, e: ExprId) -> Result<ExprId, MetaError> {
+    /// restored after. Used by `to_ctor_when_structure`'s "no eta for
+    /// propositions" check (WHNF.lean:194); `pub(crate)` (task 6) so
+    /// `lazy_delta.rs`'s `isDefEqEta`/`isProp` (:172, `isDefEqEta`'s own
+    /// `whnfD bType`, and `isProp`'s `whnfD type`) can reuse it too.
+    pub(crate) fn whnf_default(&mut self, e: ExprId) -> Result<ExprId, MetaError> {
         let saved = self.cfg.transparency;
         self.set_transparency(TransparencyMode::Default);
         let r = self.whnf(e);
@@ -1542,8 +1553,14 @@ impl<'e> MetaCtx<'e> {
         r
     }
 
-    /// oracle: `projectCore?` (WHNF.lean:564-572).
-    fn project_core(&mut self, c: ExprId, i: usize) -> Result<Option<ExprId>, MetaError> {
+    /// oracle: `projectCore?` (WHNF.lean:564-572). `pub(crate)` (task 6):
+    /// `lazy_delta.rs`'s `isDefEqProjDelta` (`tryReduceProjs`, :2126-2129)
+    /// reuses this same primitive.
+    pub(crate) fn project_core(
+        &mut self,
+        c: ExprId,
+        i: usize,
+    ) -> Result<Option<ExprId>, MetaError> {
         let c = self.to_ctor_if_lit(c)?;
         let head = self.get_app_fn(c);
         let ctor_val = match self.node(head) {
@@ -1569,9 +1586,12 @@ impl<'e> MetaCtx<'e> {
     /// oracle: `Expr.toCtorIfLit` (WHNF.lean:23-29). The `LitStr` arm is
     /// a SEAM (returns unchanged): building `String.ofList` over a
     /// char-list literal (:27-28) has no tier-1 corpus query needing it
-    /// yet.
+    /// yet. `pub(crate)` (task 6): `lazy_delta.rs`'s `isDefEqStringLit`
+    /// (:202-209) calls this directly on its productive (`LitStr` vs
+    /// `String.ofList`) arm — still gated by this same seam until it is
+    /// filled in (see that function's own doc comment).
     #[allow(clippy::wrong_self_convention)] // oracle name; reduces `self`
-    fn to_ctor_if_lit(&mut self, e: ExprId) -> Result<ExprId, MetaError> {
+    pub(crate) fn to_ctor_if_lit(&mut self, e: ExprId) -> Result<ExprId, MetaError> {
         match self.node(e) {
             Node::LitNat { v } => {
                 let n = self.scratch.nat_at(Some(self.view.store), v).clone();
@@ -1732,8 +1752,10 @@ impl<'e> MetaCtx<'e> {
     /// compares the K-major's inferred type against the freshly-built
     /// nullary constructor application's inferred type STRUCTURALLY
     /// (`ExprId` equality after `whnf` on both sides) rather than via
-    /// `isDefEq` — a full unifier arrives in plan 3, which upgrades this
-    /// comparison. `instantiateMVars` (oracle :140) is elided: no
+    /// `isDefEq` — `defeq.rs::is_def_eq` (this plan's own unifier) now
+    /// exists, but this call site was never rewired to use it; left as
+    /// a named seam for whichever later task closes the gap.
+    /// `instantiateMVars` (oracle :140) is elided: no
     /// general recursive mvar-substitution utility exists yet in this
     /// crate; the structural `has_expr_mvar` bit already reflects
     /// unresolved metavariables closely enough for this bail-out check
@@ -1803,8 +1825,10 @@ impl<'e> MetaCtx<'e> {
         Ok(Some(self.mk_app_spine(ctor_const, &args[..nparams])?))
     }
 
-    /// oracle: `getFirstCtor` (WHNF.lean:122-125).
-    fn get_first_ctor(&self, name: NameId) -> Option<NameId> {
+    /// oracle: `getFirstCtor` (WHNF.lean:122-125). `pub(crate)` (task 6):
+    /// `lazy_delta.rs`'s `isDefEqUnitLike`/`isDefEqSingleton` reuse this
+    /// same lookup.
+    pub(crate) fn get_first_ctor(&self, name: NameId) -> Option<NameId> {
         match self.view.get(name) {
             Some(ConstantInfo::Induct(v)) => v.ctors.first().copied(),
             _ => None,
@@ -1812,8 +1836,9 @@ impl<'e> MetaCtx<'e> {
     }
 
     /// SEAM: oracle `cleanupNatOffsetMajor` (WHNF.lean:218-226). Offset
-    /// constraints (`isOffset?`/`offsetCnstrs`) are a plan-3 concern
-    /// (alongside `to_ctor_when_k`'s `isDefEq` upgrade); returns `major`
+    /// constraints (`isOffset?`/`offsetCnstrs`) need a `Config.
+    /// offsetCnstrs` field this plan's `Config` does not carry (same
+    /// gate `isDefEqOffset` cites, `lazy_delta.rs`); returns `major`
     /// unchanged.
     fn cleanup_nat_offset_major(&mut self, major: ExprId) -> Result<ExprId, MetaError> {
         Ok(major)
@@ -1822,8 +1847,10 @@ impl<'e> MetaCtx<'e> {
     /// oracle: `isConstructorApp?`, used by `toCtorWhenStructure`
     /// (WHNF.lean:184). Matches
     /// `leanr_kernel::tc::TypeChecker::is_constructor_app`'s own
-    /// (kernel-side) identical check (tc.rs:2399-2405).
-    fn is_constructor_app(&self, e: ExprId) -> bool {
+    /// (kernel-side) identical check (tc.rs:2399-2405). `pub(crate)`
+    /// (task 6): `lazy_delta.rs`'s `isDefEqEtaStruct` (`matchConstCtor
+    /// a.getAppFn`'s success arm, :129-131) reuses this same check.
+    pub(crate) fn is_constructor_app(&self, e: ExprId) -> bool {
         matches!(self.node(self.get_app_fn(e)), Node::Const { name: Some(n), .. }
             if matches!(self.view.get(n), Some(ConstantInfo::Ctor(_))))
     }
@@ -1980,7 +2007,9 @@ impl<'e> MetaCtx<'e> {
 
     /// oracle: `reduceNat?` (WHNF.lean:1054-1078), dispatching over the
     /// interned `Nat.*` names (`MetaCtx::new`'s `nat_bin_ops` map).
-    fn reduce_nat(&mut self, e: ExprId) -> Result<Option<ExprId>, MetaError> {
+    /// `pub(crate)` (task 6): `lazy_delta.rs`'s `isDefEqNat` (:189-200)
+    /// reuses this directly.
+    pub(crate) fn reduce_nat(&mut self, e: ExprId) -> Result<Option<ExprId>, MetaError> {
         let nargs = self.get_app_num_args(e);
         if nargs == 1 {
             let (f, arg) = match self.node(e) {

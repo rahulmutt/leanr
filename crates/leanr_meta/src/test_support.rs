@@ -6,17 +6,124 @@
 //! cleaner rather than duplicating").
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use leanr_kernel::bank::{NameId, Store};
-use leanr_kernel::{ConstantInfo, Environment};
+use leanr_kernel::bank::{ExprId, NameId, Store};
+use leanr_kernel::{
+    BinderInfo, CheckedConstants, ConstSource, ConstantInfo, EnvView, Environment, Nat,
+};
 use leanr_olean::ModuleData;
 
-use crate::{Config, MetaCtx};
+use crate::{Config, MVarDecl, MVarId, MVarKind, MetaCtx};
 
 pub(crate) fn fixture_path(name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures")
         .join(name)
+}
+
+/// The empty-environment idiom (no `.olean`, no constants, `Config::
+/// default`) — promoted from `metactx.rs::tests::with_ctx` (task 3):
+/// `defeq.rs`'s tests need the exact same tiny scaffold, and per-module
+/// duplication is precisely what this file exists to avoid (see the
+/// module doc). Reconcile against `schedule.rs:324` — the shape, not
+/// the letter: an `EnvView` over an empty persistent store and no
+/// constants.
+pub(crate) fn with_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
+    let base = Store::persistent();
+    let mut scratch = Store::scratch();
+    let empty = CheckedConstants::new(std::collections::HashMap::new());
+    let view = EnvView {
+        consts: ConstSource::Gated(&empty),
+        extra: None,
+        quot_initialized: false,
+        store: &base,
+    };
+    let mut ctx = MetaCtx::new(view, &mut scratch, Config::default(), &[], &[]);
+    f(&mut ctx)
+}
+
+/// Mint a fresh, declared (but unassigned) expr metavariable of type
+/// `ty` and return both its `Expr::mvar` reference and its `MVarId`
+/// (task 5). Promoted here rather than defined privately in `assign.rs`
+/// per task 5's own brief: task 8's plan text is expected to tell a
+/// later implementer to reuse this exact helper, so a private copy in
+/// `assign.rs` would force that later duplication instead of avoiding
+/// it. Name uniqueness is via a process-wide monotone counter (mirrors
+/// `level.rs::fresh_level_mvar`'s "fixed prefix + counter" idiom,
+/// scoped to the whole test binary rather than one `MetaCtx` since
+/// there is no production-code counter field to reuse for this
+/// test-only need); every caller uses its own fresh `Store` (`with_ctx`
+/// et al. each build one), so cross-test collisions cannot arise
+/// either way — the counter is just cheap insurance against two calls
+/// within the SAME test/`Store` colliding.
+pub(crate) fn fresh_mvar(ctx: &mut MetaCtx, ty: ExprId) -> (ExprId, MVarId) {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let idx = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let base = Some(ctx.view.store);
+    let prefix_str = ctx
+        .scratch
+        .intern_str(base, "_leanr_test_mvar")
+        .expect("interning a tiny fixed name is infallible");
+    let prefix = ctx
+        .scratch
+        .name_str(base, None, prefix_str)
+        .expect("interning a tiny fixed name is infallible");
+    let idx_id = ctx
+        .scratch
+        .intern_nat(base, &Nat::from(idx))
+        .expect("interning a small nat is infallible");
+    let name = ctx
+        .scratch
+        .name_num(base, Some(prefix), idx_id)
+        .expect("interning a tiny fixed name is infallible");
+    let id = MVarId(name);
+    ctx.mctx_mut().declare(
+        id,
+        MVarDecl {
+            user_name: None,
+            ty,
+            lctx: Default::default(),
+            kind: MVarKind::Natural,
+        },
+    );
+    let expr = ctx
+        .scratch
+        .expr_mvar(base, Some(name))
+        .expect("interning a fresh mvar reference is infallible");
+    (expr, id)
+}
+
+/// Mint a fresh free variable of type `ty`, declared directly in
+/// `ctx.lctx` (task 6, promoted here per the task brief: `defeq.rs`'s
+/// own `is_def_eq_binding_shallow_body` is the production-code idiom
+/// this mirrors — `LocalContext::mk_local_decl`, reconciled against
+/// `crates/leanr_kernel/src/local_ctx.rs`'s bank-native signature —
+/// but that path opens a fvar mid-recursion and restores the context
+/// on exit; a *test* fvar is meant to outlive the single call that
+/// mints it, so this does not bracket it in a `save`/`restore` pair).
+/// Interns `name` as the fvar's (purely cosmetic, never consulted by
+/// `is_def_eq`) `binder_name` and returns the `Expr::fvar` reference.
+pub(crate) fn fresh_fvar(ctx: &mut MetaCtx, ty: ExprId, name: &str) -> ExprId {
+    let base = Some(ctx.view.store);
+    let s = ctx
+        .scratch
+        .intern_str(base, name)
+        .expect("interning a tiny fixed name is infallible");
+    let n = ctx
+        .scratch
+        .name_str(base, None, s)
+        .expect("interning a tiny fixed name is infallible");
+    ctx.lctx
+        .mk_local_decl(
+            ctx.scratch,
+            base,
+            &mut ctx.fvar_gen,
+            Some(n),
+            ty,
+            BinderInfo::Default,
+        )
+        .expect("declaring a test fvar is infallible")
 }
 
 /// Replay `Prelude0.olean` (import-free — see
