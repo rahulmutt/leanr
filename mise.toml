@@ -128,6 +128,11 @@ run = [
   # (lcAny/PProd/Eq/HEq/...) `match` elaboration needs even under
   # `prelude`. cd-first for the same module-name reason as ModPriv.
   "sh -c 'cd tests/fixtures && lean Matcher.lean -o Matcher.olean'",
+  # M4a plan 4: typeclass-synthesis fixture for the instanceExtension /
+  # defaultInstanceExtension / projectionFnInfoExt decode.
+  # `prelude`-mode, import-free (the Prelude0/Matcher pattern). cd-first
+  # for the same module-name reason as ModPriv.
+  "sh -c 'cd tests/fixtures && lean Instances.lean -o Instances.olean'",
   # M4a plan 2: tier-1 meta corpus. Meta0 is prelude-mode/import-free;
   # the dumper imports ONLY Meta0 (LEAN_PATH=$PWD) so the oracle env
   # equals the env leanr replays from the committed .olean.
