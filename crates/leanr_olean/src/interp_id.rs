@@ -857,6 +857,35 @@ impl<'s> InterpId<'s> {
         })
     }
 
+    /// `Lean.Meta.DefaultInstanceEntry` (Meta/Instances.lean:378-381,
+    /// pinned toolchain v4.33.0-rc1): a bare 3-pointer-field ctor
+    /// (`className`, `instanceName`, `priority`), no scalar tail — see
+    /// `crate::DefaultInstanceEntry`'s doc comment for the full
+    /// confirmation that `defaultInstanceExtension` is a
+    /// `SimplePersistentEnvExtension` (unwrapped entries, same posture
+    /// as `reducibilityCore` above), NOT the `ScopedEnvExtension.Entry`-
+    /// wrapped shape `instanceExtension` uses.
+    fn default_instance_entry(
+        &mut self,
+        r: &Raw,
+    ) -> Result<crate::DefaultInstanceEntry, OleanError> {
+        // Untrusted-bignum priority: never truncate via `as usize` (see
+        // `Nat::to_usize`'s doc and `discr_key`/`instance_entry_payload`'s
+        // identical posture above) — a value too large to fit is a shape
+        // error, not silently wrapped.
+        fn nat_usize(r: &Raw) -> Result<usize, OleanError> {
+            nat(r)?
+                .to_usize()
+                .ok_or_else(|| bad("DefaultInstanceEntry Nat"))
+        }
+        let (f, _) = ctor(r, 0, 3, "DefaultInstanceEntry")?;
+        Ok(crate::DefaultInstanceEntry {
+            class_name: self.name_req(&f[0])?,
+            instance_name: self.name_req(&f[1])?,
+            priority: nat_usize(&f[2])?,
+        })
+    }
+
     /// ModuleData (Environment.lean:109-129).
     pub(crate) fn module_data(&mut self, root: &Raw) -> Result<crate::ModuleData, OleanError> {
         let (f, s) = ctor(root, 0, 5, "ModuleData")?;
@@ -867,6 +896,7 @@ impl<'s> InterpId<'s> {
         let mut reducibility = Vec::new();
         let mut matchers = Vec::new();
         let mut instances = Vec::new();
+        let mut default_instances = Vec::new();
         for pair in array(&f[4])? {
             let (pf, _) = ctor(pair, 0, 2, "ModuleData.entries pair")?;
             let ext_name = self.name(&pf[0])?;
@@ -939,6 +969,16 @@ impl<'s> InterpId<'s> {
                         instances.push(self.instance_entry_payload(scope, payload)?);
                     }
                 }
+                // SimplePersistentEnvExtension: entries are bare
+                // DefaultInstanceEntry ctors, no scoped wrapper (same
+                // posture as `reducibilityCore`/`Match.Extension.extension`
+                // above) — see `crate::DefaultInstanceEntry`'s doc for the
+                // source confirmation (Meta/Instances.lean:396).
+                "Lean.Meta.defaultInstanceExtension" => {
+                    for e in array(&pf[1])? {
+                        default_instances.push(self.default_instance_entry(e)?);
+                    }
+                }
                 _ => continue,
             }
         }
@@ -965,6 +1005,7 @@ impl<'s> InterpId<'s> {
             reducibility,
             matchers,
             instances,
+            default_instances,
         })
     }
 }

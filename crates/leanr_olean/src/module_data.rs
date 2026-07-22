@@ -252,6 +252,32 @@ pub struct InstanceEntry {
     pub global_name: Option<NameId>,
 }
 
+/// One decoded `Lean.Meta.defaultInstanceExtension` entry: oracle
+/// `Lean.Meta.DefaultInstanceEntry` (Meta/Instances.lean:378-381, pinned
+/// toolchain v4.33.0-rc1):
+///
+/// ```text
+/// structure DefaultInstanceEntry where
+///   className    : Name  -- 0
+///   instanceName : Name  -- 1
+///   priority     : Nat   -- 2
+/// ```
+///
+/// Three fields, all pointer-boxed (no nullary-enum scalar tail like
+/// `InstanceEntry.attrKind`). `defaultInstanceExtension` is a
+/// `SimplePersistentEnvExtension` (Meta/Instances.lean:396), NOT a
+/// `SimpleScopedEnvExtension`/`ScopedEnvExtension` like `instanceExtension`
+/// (Meta/Instances.lean:95) — its entries are a bare, unwrapped array of
+/// `DefaultInstanceEntry`, same posture as `reducibilityCore`'s unwrapped
+/// `Name × ReducibilityStatus` pairs. There is therefore no
+/// `ScopedEnvExtension.Entry` wrapper and no `scope` field here.
+#[derive(Debug, Clone)]
+pub struct DefaultInstanceEntry {
+    pub class_name: NameId,
+    pub instance_name: NameId,
+    pub priority: usize,
+}
+
 /// The decoded contents of one `.olean` module, decoded directly into
 /// term-bank ids (term-bank phase 3 — the Arc decode path this used to
 /// have a twin of is deleted, along with the differential gate that
@@ -283,6 +309,9 @@ pub struct ModuleData {
     /// Typed decode of the `Lean.Meta.instanceExtension` entries (M4a
     /// plan 4). All other extension entries stay opaque.
     pub instances: Vec<InstanceEntry>,
+    /// Typed decode of the `Lean.Meta.defaultInstanceExtension` entries
+    /// (M4a plan 4). All other extension entries stay opaque.
+    pub default_instances: Vec<DefaultInstanceEntry>,
 }
 
 impl ModuleData {
@@ -436,6 +465,7 @@ impl ModuleData {
             reducibility: std::mem::take(&mut base.reducibility),
             matchers: std::mem::take(&mut base.matchers),
             instances: std::mem::take(&mut base.instances),
+            default_instances: std::mem::take(&mut base.default_instances),
         })
     }
 }
@@ -691,5 +721,25 @@ mod tests {
             .find(|e| e.global_name.map(render) == Some("instAddProd".to_string()))
             .expect("instAddProd present");
         assert_eq!(prod.synth_order, vec![2, 3], "instAddProd synth_order");
+    }
+
+    /// `Lean.Meta.defaultInstanceExtension` decodes: `instOfNN` (the
+    /// fixture's sole `@[default_instance]`) must be present.
+    #[test]
+    fn default_instance_entries_decode() {
+        let bytes = fixture("Instances.olean");
+        let mut env = Environment::default();
+        let md = ModuleData::parse(&bytes, env.store_mut()).expect("decode");
+        let render = |n: NameId| env.store().to_name(None, Some(n)).to_string();
+        assert!(
+            md.default_instances
+                .iter()
+                .any(|e| render(e.instance_name) == "instOfNN"),
+            "defaults: {:?}",
+            md.default_instances
+                .iter()
+                .map(|e| render(e.instance_name))
+                .collect::<Vec<_>>()
+        );
     }
 }
