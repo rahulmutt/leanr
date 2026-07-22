@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use leanr_kernel::bank::{NameId, Store};
+use leanr_kernel::bank::{ExprId, NameId, Store};
 use leanr_kernel::{ConstantInfo, Name, Nat};
 
 use crate::interp_id::InterpId;
@@ -208,6 +208,45 @@ pub struct MatcherEntry {
     pub discr_infos: Vec<Option<NameId>>,
 }
 
+/// One decoded `Lean.Meta.instanceExtension` entry: oracle
+/// `Lean.Meta.InstanceEntry` (Meta/Instances.lean:50-66, pinned
+/// toolchain v4.33.0-rc1):
+///
+/// ```text
+/// structure InstanceEntry where
+///   keys        : Array InstanceKey     -- 0
+///   val         : Expr                  -- 1
+///   priority    : Nat                   -- 2
+///   globalName? : Option Name := none   -- 3
+///   synthOrder  : Array Nat             -- 4
+///   attrKind    : AttributeKind         -- 5
+/// ```
+///
+/// SIX fields are declared, not five: an earlier draft of this plan
+/// omitted `synthOrder`. But on the WIRE this is a 5-*pointer*-field
+/// ctor: `attrKind` (3 nullary constructors) is scalar-representable as
+/// a concrete field and the compiler packs it into the ctor's raw
+/// scalar-byte tail instead of a 6th boxed pointer — see
+/// `interp_id.rs::instance_entry_payload`'s doc for the full empirical
+/// pin (probed against `Instances.olean`) and its contrast with
+/// `reducibility_pair`'s generic-field `ReducibilityStatus`, which
+/// stays boxed. `attrKind` is validated (in-range scalar byte present)
+/// but never read: no leanr consumer needs `getInstanceAttrKind`.
+/// `synthOrder` IS decoded and exposed (controller decision) so PR-B's
+/// consumer reads the toolchain's own serialized argument-synthesis
+/// order rather than re-transcribing `computeSynthOrder`.
+#[derive(Debug, Clone)]
+pub struct InstanceEntry {
+    pub scope: EntryScope,
+    pub keys: Vec<DiscrKey>,
+    pub val: ExprId,
+    pub priority: usize,
+    /// `synthOrder` (field 4): the order in which the instance's
+    /// arguments are synthesized, as serialized by the toolchain.
+    pub synth_order: Vec<usize>,
+    pub global_name: Option<NameId>,
+}
+
 /// The decoded contents of one `.olean` module, decoded directly into
 /// term-bank ids (term-bank phase 3 — the Arc decode path this used to
 /// have a twin of is deleted, along with the differential gate that
@@ -236,6 +275,9 @@ pub struct ModuleData {
     /// Typed decode of the `Lean.Meta.Match.Extension.extension`
     /// entries (M4a plan 2). All other extension entries stay opaque.
     pub matchers: Vec<MatcherEntry>,
+    /// Typed decode of the `Lean.Meta.instanceExtension` entries (M4a
+    /// plan 4). All other extension entries stay opaque.
+    pub instances: Vec<InstanceEntry>,
 }
 
 impl ModuleData {
@@ -388,6 +430,7 @@ impl ModuleData {
             parser_entries: std::mem::take(&mut base.parser_entries),
             reducibility: std::mem::take(&mut base.reducibility),
             matchers: std::mem::take(&mut base.matchers),
+            instances: std::mem::take(&mut base.instances),
         })
     }
 }
@@ -599,5 +642,49 @@ mod tests {
         let err = ModuleData::parse_parts(&[(PartKind::Private, &base)], env.store_mut())
             .expect_err("no base part");
         assert!(matches!(err, OleanError::BadShape { .. }));
+    }
+
+    /// `Lean.Meta.instanceExtension` decodes: `instAddN` and `instAddProd`
+    /// must both be present as global instances, and every decoded
+    /// instance's first discrimination key is a const head (the
+    /// leading head symbol every registered instance indexes on).
+    #[test]
+    fn instance_entries_decode() {
+        let bytes = fixture("Instances.olean");
+        let mut env = Environment::default();
+        let md = ModuleData::parse(&bytes, env.store_mut()).expect("decode");
+        let render = |n: NameId| env.store().to_name(None, Some(n)).to_string();
+        // instAddN and instAddProd must both be present as global instances.
+        let names: Vec<String> = md
+            .instances
+            .iter()
+            .filter_map(|e| e.global_name.map(render))
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "instAddN"),
+            "instances: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "instAddProd"),
+            "instances: {names:?}"
+        );
+        // every instance carries at least one discrimination key headed by a const.
+        for e in &md.instances {
+            assert!(
+                matches!(e.keys.first(), Some(DiscrKey::Const { .. })),
+                "instance keys must start with a const head: {:?}",
+                e.keys
+            );
+        }
+        // instAddProd (Prod's Add instance) synthesizes its two
+        // component `Add` arguments out of order (pinned empirically
+        // against the fixture: [2, 3], i.e. metavariable-bearing
+        // arguments after the two explicit binders).
+        let prod = md
+            .instances
+            .iter()
+            .find(|e| e.global_name.map(render) == Some("instAddProd".to_string()))
+            .expect("instAddProd present");
+        assert_eq!(prod.synth_order, vec![2, 3], "instAddProd synth_order");
     }
 }

@@ -743,9 +743,8 @@ impl<'s> InterpId<'s> {
     /// `other`, `arrow`) arrive as boxed scalar immediates
     /// (`RawValue::Scalar(tag)`); the rest as `Ctor { tag, fields }`,
     /// same posture as `reducibility_status`/`matcher_entry`. Dispatched
-    /// from `module_data`'s instanceExtension arm in Task A3 — not
-    /// wired in yet, hence the dead-code allow.
-    #[allow(dead_code)] // dispatched from module_data in A3
+    /// from `module_data`'s `Lean.Meta.instanceExtension` arm
+    /// (Task A3).
     fn discr_key(&mut self, r: &Raw) -> Result<crate::DiscrKey, OleanError> {
         use crate::DiscrKey;
         // Untrusted-bignum arity/index: never truncate via `as usize`
@@ -796,6 +795,70 @@ impl<'s> InterpId<'s> {
         }
     }
 
+    /// `Lean.Meta.InstanceEntry` (Meta/Instances.lean:50-66, pinned
+    /// toolchain v4.33.0-rc1): six DECLARED fields —
+    /// `keys, val, priority, globalName?, synthOrder, attrKind` — not
+    /// the five-field `keys, val, priority, globalName?, attrKind`
+    /// shape an earlier draft of this plan expected (that draft omitted
+    /// `synthOrder`).
+    ///
+    /// On the WIRE, though, this is a 5-pointer-field ctor, not 6: a
+    /// probe over `Instances.olean`'s fixture entries showed
+    /// `Ctor { tag: 0, fields: [5 ..], .. }` for every decoded
+    /// `InstanceEntry`. `attrKind : AttributeKind` (3 nullary
+    /// constructors — `Attributes.lean:44-45`) is scalar-representable
+    /// as a concrete (non-generic) field, so the compiler packs it as a
+    /// raw byte in the ctor's `scalars` tail rather than a 6th boxed
+    /// pointer field — the same mechanism already pinned by
+    /// `ModuleData.isModule`'s `bool` (see `module_data`'s `s.first()`
+    /// read below). This differs from `reducibility_pair`'s
+    /// `ReducibilityStatus` field, which stays a boxed `Scalar(tag)`
+    /// pointer: that field sits in a *generic* `Prod α β`, whose
+    /// compiled ctor can't specialize per-instantiation and so always
+    /// keeps every field pointer-sized. `attrKind` is validated by
+    /// checking the scalar tail holds one in-range byte, but its value
+    /// is never read: no leanr consumer needs `getInstanceAttrKind`.
+    /// `synthOrder` (field 4) IS decoded and returned (controller
+    /// decision: PR-B reads the toolchain's own serialized argument
+    /// order rather than re-transcribing `computeSynthOrder`).
+    fn instance_entry_payload(
+        &mut self,
+        scope: crate::EntryScope,
+        r: &Raw,
+    ) -> Result<crate::InstanceEntry, OleanError> {
+        // Untrusted-bignum priority/synthOrder entries: never truncate
+        // via `as usize` (see `Nat::to_usize`'s doc and `discr_key`'s
+        // identical posture above) — a value too large to fit is a
+        // shape error, not silently wrapped.
+        fn nat_usize(r: &Raw) -> Result<usize, OleanError> {
+            nat(r)?.to_usize().ok_or_else(|| bad("InstanceEntry Nat"))
+        }
+        let (f, s) = ctor(r, 0, 5, "InstanceEntry")?;
+        match s.first() {
+            Some(0..=2) => {}
+            _ => return Err(bad("InstanceEntry.attrKind")),
+        }
+        let keys = array(&f[0])?
+            .iter()
+            .map(|k| self.discr_key(k))
+            .collect::<Result<_, _>>()?;
+        let val = self.expr(&f[1])?;
+        let priority = nat_usize(&f[2])?;
+        let global_name = self.opt_name(&f[3])?;
+        let synth_order = array(&f[4])?
+            .iter()
+            .map(nat_usize)
+            .collect::<Result<_, _>>()?;
+        Ok(crate::InstanceEntry {
+            scope,
+            keys,
+            val,
+            priority,
+            synth_order,
+            global_name,
+        })
+    }
+
     /// ModuleData (Environment.lean:109-129).
     pub(crate) fn module_data(&mut self, root: &Raw) -> Result<crate::ModuleData, OleanError> {
         let (f, s) = ctor(root, 0, 5, "ModuleData")?;
@@ -805,6 +868,7 @@ impl<'s> InterpId<'s> {
         let mut parser_entries = Vec::new();
         let mut reducibility = Vec::new();
         let mut matchers = Vec::new();
+        let mut instances = Vec::new();
         for pair in array(&f[4])? {
             let (pf, _) = ctor(pair, 0, 2, "ModuleData.entries pair")?;
             let ext_name = self.name(&pf[0])?;
@@ -858,6 +922,25 @@ impl<'s> InterpId<'s> {
                         matchers.push(self.matcher_entry(e)?);
                     }
                 }
+                // Wrapped in `ScopedEnvExtension.Entry`, same tag-0
+                // global(v) / tag-1 scoped(ns, v) shape as
+                // `reducibilityExtra` above (mirrored verbatim).
+                "Lean.Meta.instanceExtension" => {
+                    for e in array(&pf[1])? {
+                        let RawValue::Ctor { tag, fields, .. } = &**e else {
+                            return Err(bad("ScopedEnvExtension.Entry"));
+                        };
+                        let (scope, payload) = match (tag, fields.len()) {
+                            (0, 1) => (crate::EntryScope::Global, &fields[0]),
+                            (1, 2) => (
+                                crate::EntryScope::Scoped(self.name_req(&fields[0])?),
+                                &fields[1],
+                            ),
+                            _ => return Err(bad("ScopedEnvExtension.Entry")),
+                        };
+                        instances.push(self.instance_entry_payload(scope, payload)?);
+                    }
+                }
                 _ => continue,
             }
         }
@@ -883,6 +966,7 @@ impl<'s> InterpId<'s> {
             parser_entries,
             reducibility,
             matchers,
+            instances,
         })
     }
 }
