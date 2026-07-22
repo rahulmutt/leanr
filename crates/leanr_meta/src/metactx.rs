@@ -62,10 +62,15 @@ pub struct MetaCtx<'e> {
     /// `process_postponed` (task 4) at checkpoint boundaries; part of the
     /// snapshot so a failed trial unification restores it.
     pub(crate) postponed: Vec<(LevelId, LevelId)>,
-    /// Permanent defeq cache: mvar/fvar-free pairs under a standard
-    /// config. Survives across `is_def_eq` calls. oracle: the persistent
-    /// half of the defeq cache (`getDefEqCacheKind`, ExprDefEq.lean:2238).
-    #[allow(dead_code)] // no reader/writer yet — is_def_eq consults it in task 8
+    /// Permanent defeq cache: mvar-free pairs (`hasExprMVar ||
+    /// hasLevelMVar`, oracle's `hasMVar`) under a standard config (no
+    /// `canUnfold?` override) — NOT fvar-free; see `cache.rs`'s module
+    /// doc for why an fvar-mentioning pair is still safe to cache here
+    /// forever. Survives across `is_def_eq` calls. oracle: the
+    /// persistent half of the defeq cache (`getDefEqCacheKind`,
+    /// ExprDefEq.lean:2238). Wired in by task 8 (`cache.rs`'s
+    /// `defeq_cache_kind`/`cache_lookup`/`cache_store`, consulted from
+    /// `defeq.rs::is_def_eq_core`'s cache seam).
     pub(crate) defeq_cache_perm: HashMap<(u64, ExprId, ExprId), bool>,
     /// Transient defeq cache: everything else. Cleared at every
     /// `checkpoint` (oracle: `modifyDefEqTransientCache fun _ => {}` in

@@ -98,9 +98,15 @@ impl<'e> MetaCtx<'e> {
     }
 
     /// oracle: `isExprDefEqAuxImpl` (ExprDefEq.lean:2285-2354). The
-    /// `instantiateMVars` + defeq-cache stage (:2333-2354) is a named
-    /// seam (task 8): until then this recomputes on every call, never
-    /// caches — correct, only slower.
+    /// `instantiateMVars` + defeq-cache stage (:2333-2354) is wired in
+    /// task 8 (`cache.rs`): `instantiateMVars` both sides, look up the
+    /// permanent/transient cache (`defeq_cache_kind`/`cache_lookup`),
+    /// and on a miss run `is_def_eq_expensive` and store the result
+    /// (`cache_store`) ONLY IF the postponed-constraint count did not
+    /// change across that call (oracle: `numPostponed == (←
+    /// getNumPostponed)`, :2350-2353) — a verdict that leaned on a NEW
+    /// postponement is not yet grounded and must be recomputed next
+    /// time, not served stale.
     ///
     /// `pub(crate)`, not private (task 5): `assign.rs::
     /// check_types_and_assign` calls this directly (not the
@@ -124,9 +130,27 @@ impl<'e> MetaCtx<'e> {
             if t2 != t || s2 != s {
                 return ctx.is_def_eq_core(t2, s2);
             }
-            // SEAM: instantiateMVars + defeq cache (task 8) — recompute,
-            // never cache, until then.
-            ctx.is_def_eq_expensive(t2, s2)
+            // oracle :2333-2335: `instantiateMVars` both sides before
+            // the cache key is built (see also `cache.rs::cache_store`'s
+            // own doc comment for why the TRANSIENT branch instantiates
+            // a second time, after `is_def_eq_expensive` below).
+            let t3 = ctx.instantiate_mvars(t2)?;
+            let s3 = ctx.instantiate_mvars(s2)?;
+            // oracle :2336-2338: `mkCacheKey` + `getCachedResult`.
+            let kind = ctx.defeq_cache_kind(t3, s3);
+            if let Some(cached) = ctx.cache_lookup(kind, t3, s3) {
+                return Ok(cached);
+            }
+            // oracle :2347-2354: the postponed-count guard. A verdict
+            // that relied on a NEW postponed constraint during the
+            // expensive call is not yet grounded, so it is returned but
+            // never cached.
+            let num_postponed = ctx.postponed.len();
+            let result = ctx.is_def_eq_expensive(t3, s3)?;
+            if ctx.postponed.len() == num_postponed {
+                ctx.cache_store(kind, t3, s3, result)?;
+            }
+            Ok(result)
         })
     }
 
