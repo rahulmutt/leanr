@@ -757,21 +757,19 @@ impl<'s> InterpId<'s> {
             RawValue::Scalar(0) => Ok(DiscrKey::Star),
             RawValue::Scalar(1) => Ok(DiscrKey::Other),
             RawValue::Scalar(5) => Ok(DiscrKey::Arrow),
-            RawValue::Ctor { tag: 2, fields, .. } if fields.len() == 1 => {
-                match &*fields[0] {
-                    RawValue::Ctor {
-                        tag: 0, fields: lf, ..
-                    } if lf.len() == 1 => Ok(DiscrKey::Lit(leanr_kernel::Literal::NatVal(nat(
-                        &lf[0],
-                    )?))),
-                    RawValue::Ctor {
-                        tag: 1, fields: lf, ..
-                    } if lf.len() == 1 => Ok(DiscrKey::Lit(leanr_kernel::Literal::StrVal(
-                        string(&lf[0])?,
-                    ))),
-                    _ => Err(bad("DiscrTree.Key.lit Literal")),
+            RawValue::Ctor { tag: 2, fields, .. } if fields.len() == 1 => match &*fields[0] {
+                RawValue::Ctor {
+                    tag: 0, fields: lf, ..
+                } if lf.len() == 1 => {
+                    Ok(DiscrKey::Lit(leanr_kernel::Literal::NatVal(nat(&lf[0])?)))
                 }
-            }
+                RawValue::Ctor {
+                    tag: 1, fields: lf, ..
+                } if lf.len() == 1 => Ok(DiscrKey::Lit(leanr_kernel::Literal::StrVal(string(
+                    &lf[0],
+                )?))),
+                _ => Err(bad("DiscrTree.Key.lit Literal")),
+            },
             RawValue::Ctor { tag: 3, fields, .. } if fields.len() == 2 => {
                 // fields[0] is the fvar's FVarId, unboxed to its `Name`
                 // field on the wire (same as `Expr.fvar`'s field 0);

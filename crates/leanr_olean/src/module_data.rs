@@ -168,8 +168,13 @@ pub enum DiscrKey {
     Other,
     Lit(leanr_kernel::Literal),
     /// `fvar` identity is not serialized stably; only arity survives.
-    Fvar { arity: usize },
-    Const { name: NameId, arity: usize },
+    Fvar {
+        arity: usize,
+    },
+    Const {
+        name: NameId,
+        arity: usize,
+    },
     Arrow,
     Proj {
         structure: NameId,
