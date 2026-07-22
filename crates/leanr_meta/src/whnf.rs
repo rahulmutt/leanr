@@ -1468,8 +1468,11 @@ impl<'e> MetaCtx<'e> {
     /// arm (above) already makes for this file's other beta sites: an
     /// `MData`-wrapped lambda head is not exercised by any corpus this
     /// plan targets. Used by `reduce_matcher_telescope`'s `Reduced` arm
-    /// (oracle :563: `result.headBeta`).
-    fn head_beta(&mut self, e: ExprId) -> Result<ExprId, MetaError> {
+    /// (oracle :563: `result.headBeta`). `pub(crate)`, not private (task
+    /// 7): `assign.rs::process_assignment_fo_approx`'s own loop (oracle:
+    /// `processAssignmentFOApprox`, ExprDefEq.lean:1211, `let v :=
+    /// v.headBeta`) needs the exact same primitive.
+    pub(crate) fn head_beta(&mut self, e: ExprId) -> Result<ExprId, MetaError> {
         let f = self.get_app_fn(e);
         if matches!(self.node(f), Node::Lam { .. }) {
             let args = self.get_app_args(e);

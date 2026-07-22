@@ -67,9 +67,9 @@
 
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::ExprId;
-use leanr_kernel::{abstract_fvars, Nat};
+use leanr_kernel::{abstract_fvars, instantiate_rev, LocalContext, Nat};
 
-use crate::{MVarId, MVarKind, MetaCtx, MetaError};
+use crate::{MVarDecl, MVarId, MVarKind, MetaCtx, MetaError};
 
 impl<'e> MetaCtx<'e> {
     // ===================================================================
@@ -205,19 +205,37 @@ impl<'e> MetaCtx<'e> {
         if self.is_def_eq_args(mvar, args1, args2)? {
             return Ok(true);
         }
-        if self.unassigned_mvar_id(mvar).is_none() {
-            return Ok(false);
-        }
+        let mvar_id = match self.unassigned_mvar_id(mvar) {
+            Some(id) => id,
+            None => return Ok(false),
+        };
         // oracle gates the constant-function fallback
         // (`assignConst`/`mkAuxMVar`, :1243-1271) on
         // `mvarDecl.numScopeArgs == args.size || cfg.constApprox`.
         // `numScopeArgs` (delayed-assignment scope tracking) has no
         // analogue anywhere in this crate (no delayed-assignment
         // machinery at all, module doc), so the gate collapses to
-        // `cfg.const_approx` alone — which defaults `false` (and this
-        // task's fixtures never flip it). SEAM: task 7, `config.rs`'s
-        // `const_approx` field. Never a silent `true`.
-        Ok(false)
+        // `cfg.const_approx` alone (task 7) — which still defaults
+        // `false`, matching the oracle's own default, so this branch is
+        // dead on the `default` profile exactly as before.
+        if !self.cfg.const_approx {
+            return Ok(false);
+        }
+        // oracle :1799-1801: `type <- inferType (mkAppN mvar args₁);
+        // auxMVar <- mkAuxMVar mvarDecl.lctx mvarDecl.localInstances
+        // type; assignConst mvar args₁.size auxMVar`.
+        let mvar_app = self.mk_app_spine(mvar, args1)?;
+        let ty = self.infer_type(mvar_app)?;
+        let aux = match self.mk_aux_mvar_for(mvar_id, ty)? {
+            Some((expr, _id)) => expr,
+            // SEAM: `mvar`'s own declared lctx is non-empty — see
+            // `mk_aux_mvar_for`'s own doc comment (thin ctxApprox/
+            // constApprox-rescue coverage, task 7: `LocalContext` has
+            // no `Clone`/enumeration API to port `mkAuxMVar`'s general
+            // lctx-copy faithfully without touching `leanr_kernel`).
+            None => return Ok(false),
+        };
+        self.assign_const(mvar, args1.len(), aux)
     }
 
     // ===================================================================
@@ -291,10 +309,31 @@ impl<'e> MetaCtx<'e> {
     }
 
     /// oracle: `processAssignment` (ExprDefEq.lean:1313-1359), the
-    /// PATTERN case: `mvar_app` is the full `?m a₁ … aₙ` application
-    /// (peeled via `get_app_fn`/`get_app_args`, matching the oracle's
-    /// own `mvarApp.getAppFn`/`.getAppArgs`). Assumes `?m` is
+    /// PATTERN case, now with all four expr-side approximations wired
+    /// in at their real call sites (task 7 — every one of these was a
+    /// named seam through task 6). `mvar_app` is the full `?m a₁ … aₙ`
+    /// application (peeled via `get_app_fn`/`get_app_args`, matching the
+    /// oracle's own `mvarApp.getAppFn`/`.getAppArgs`). Assumes `?m` is
     /// unassigned (every real call site already established this).
+    ///
+    /// The oracle's own `process` is a recursive loop carrying an
+    /// ACCUMULATOR: the full `args` array, with the validated PREFIX
+    /// (indices `0..i`) already run through `simpAssignmentArg` and the
+    /// unvalidated SUFFIX (`i..`) still raw. On ANY per-arg rejection —
+    /// a repeated fvar, an fvar already visible in `?m`'s own lctx
+    /// (unless `quasiPatternApprox`), or a non-fvar arg — the oracle
+    /// does NOT abort outright; it falls to `useFOApprox args`
+    /// (`processAssignmentFOApprox <||> processConstApprox .. i ..`),
+    /// passing `i` as `patternVarPrefix` (:1319-1332). This function is
+    /// transcribed as that exact same loop-with-accumulator (`i`
+    /// tracked via a plain `while`, `args` mutated in place) rather than
+    /// task 5/6's `for`-loop-building-a-separate-`sim_args`-Vec-and-
+    /// bailing-immediately shape: with every `*_approx` flag off, every
+    /// `use_fo_approx` call below immediately returns `Ok(false)` (both
+    /// `process_assignment_fo_approx`/`process_const_approx` bail on
+    /// their own flag check before doing anything else), so this is
+    /// observably IDENTICAL to task 5/6's `Ok(false)` seams on the
+    /// `default` profile — the regression task 6's own fixtures pin.
     pub(crate) fn process_assignment(
         &mut self,
         mvar_app: ExprId,
@@ -305,17 +344,16 @@ impl<'e> MetaCtx<'e> {
             Node::MVar { id: Some(id) } => MVarId(id),
             _ => return Ok(false), // defensive: every call site already established mvar-headedness.
         };
-        let raw_args = self.get_app_args(mvar_app);
-        let mut sim_args: Vec<ExprId> = Vec::with_capacity(raw_args.len());
-        for &raw in &raw_args {
-            let arg = self.simp_assignment_arg(raw)?;
+        let mut args = self.get_app_args(mvar_app);
+        let mut i = 0usize;
+        while i < args.len() {
+            let arg = self.simp_assignment_arg(args[i])?;
+            args[i] = arg;
             match self.node(arg) {
                 Node::FVar { id: Some(fid) } => {
-                    if sim_args.contains(&arg) {
-                        // SEAM: repeated pattern var —
-                        // `processAssignmentFOApprox`/
-                        // `processConstApprox` (task 7).
-                        return Ok(false);
+                    if args[..i].contains(&arg) {
+                        // oracle :1320-1321: repeated pattern var.
+                        return self.use_fo_approx(mvar, &args, i, v);
                     }
                     let in_own_lctx = self
                         .mctx
@@ -323,41 +361,383 @@ impl<'e> MetaCtx<'e> {
                         .map(|d| d.lctx.get(fid).is_some())
                         .unwrap_or(false);
                     if in_own_lctx && !self.cfg.quasi_pattern_approx {
-                        // SEAM: `quasiPatternApprox` (task 7).
-                        return Ok(false);
+                        // oracle :1322-1323: ctx-local fvar, quasiPatternApprox off.
+                        return self.use_fo_approx(mvar, &args, i, v);
                     }
-                    sim_args.push(arg);
+                    i += 1;
                 }
                 _ => {
-                    // SEAM: non-fvar pattern argument —
-                    // `processAssignmentFOApprox`/`processConstApprox`
-                    // (task 7).
-                    return Ok(false);
+                    // oracle :1327-1328: non-fvar pattern argument.
+                    return self.use_fo_approx(mvar, &args, i, v);
                 }
             }
         }
         // oracle: `let v ← instantiateMVars v -- enforce A4` (:1336).
         let v = self.instantiate_mvars(v)?;
         if self.get_app_fn(v) == mvar {
-            // SEAM: "A6" — `processAssignmentFOApprox`/`processConstApprox`
-            // (task 7).
-            return Ok(false);
+            // oracle :1337-1339: "using A6".
+            return self.use_fo_approx(mvar, &args, args.len(), v);
         }
-        let checked = match self.check_assignment(mvar_id, &sim_args, v)? {
-            None => return Ok(false), // SEAM: see `check_assignment`'s own doc comment.
+        let checked = match self.check_assignment(mvar_id, &args, v)? {
+            None => return self.use_fo_approx(mvar, &args, args.len(), v),
             Some(v2) => v2,
         };
-        let lam = match self.mk_lambda_fvars_with_let_deps(&sim_args, checked)? {
-            None => return Ok(false), // SEAM: let-dependency abstraction (`mk_lambda_fvars_with_let_deps`'s own doc).
+        let lam = match self.mk_lambda_fvars_with_let_deps(&args, checked)? {
+            // oracle :1345: `let some v ← mkLambdaFVarsWithLetDeps args v
+            // | return false` — a bare `false`, NOT `useFOApprox`
+            // (unlike every other failure exit in this function).
+            None => return Ok(false),
             Some(l) => l,
         };
-        // The oracle's `args.any (mvarDecl.lctx.containsFVar)`
-        // `isTypeCorrect` guard (:1346-1352) can never fire here: any
-        // pattern arg found in `mvarDecl.lctx` was already rejected
-        // above (the `quasiPatternApprox` seam) before `sim_args` was
-        // ever finalized — so every entry in `sim_args` is, by
-        // construction, NOT in `mvarDecl.lctx`.
-        self.check_types_and_assign(mvar, lam)
+        // oracle :1346-1352. With `quasiPatternApprox` off this is
+        // vacuously false by construction (every entry in `args` was
+        // already rejected above were it ctx-local) — task 5/6's own
+        // reasoning, now genuinely reachable when the flag is on.
+        let has_ctx_locals = args.iter().any(|&a| match self.node(a) {
+            Node::FVar { id: Some(fid) } => self
+                .mctx
+                .decl(mvar_id)
+                .map(|d| d.lctx.get(fid).is_some())
+                .unwrap_or(false),
+            _ => false,
+        });
+        if has_ctx_locals {
+            if self.is_type_correct(lam)? {
+                self.check_types_and_assign(mvar, lam)
+            } else {
+                self.use_fo_approx(mvar, &args, args.len(), v)
+            }
+        } else {
+            self.check_types_and_assign(mvar, lam)
+        }
+    }
+
+    // ===================================================================
+    // useFOApprox / processAssignmentFOApprox / processConstApprox /
+    // assignConst — the four expr-side approximations (task 7).
+    // ===================================================================
+
+    /// oracle: `processAssignment`'s own local `useFOApprox` closure
+    /// (:1319-1321): `processAssignmentFOApprox mvar args v <||>
+    /// processConstApprox mvar args i v` — first-order approximation,
+    /// then (only if that also fails) constant-function approximation.
+    fn use_fo_approx(
+        &mut self,
+        mvar: ExprId,
+        args: &[ExprId],
+        pattern_var_prefix: usize,
+        v: ExprId,
+    ) -> Result<bool, MetaError> {
+        if self.process_assignment_fo_approx(mvar, args, v)? {
+            return Ok(true);
+        }
+        self.process_const_approx(mvar, args, pattern_var_prefix, v)
+    }
+
+    /// oracle: `processAssignmentFOApprox` (ExprDefEq.lean:1184-1210),
+    /// gated on `self.cfg.fo_approx`. Loops `v.headBeta`, tries the
+    /// first-order decomposition under its OWN checkpoint (oracle:
+    /// `checkpointDefEq`, mirrored here by this crate's own
+    /// `checkpoint`/`rollback` pair — same convention
+    /// `is_def_eq_mvar_mvar`, task 5, already established for a
+    /// checkpointed sub-attempt not itself worth a second postponed-
+    /// queue drain, since the ENCLOSING `is_def_eq` drains it once for
+    /// the whole call), and on failure unfolds `v` and retries.
+    fn process_assignment_fo_approx(
+        &mut self,
+        mvar: ExprId,
+        args: &[ExprId],
+        v: ExprId,
+    ) -> Result<bool, MetaError> {
+        if !self.cfg.fo_approx {
+            return Ok(false);
+        }
+        let mut v = v;
+        loop {
+            self.step()?;
+            let vb = self.head_beta(v)?;
+            let snap = self.checkpoint();
+            if self.process_assignment_fo_approx_aux(mvar, args, vb)? {
+                return Ok(true);
+            }
+            self.rollback(snap);
+            match self.unfold_definition(vb)? {
+                None => return Ok(false),
+                Some(v2) => v = v2,
+            }
+        }
+    }
+
+    /// oracle: `processAssignmentFOApproxAux` (ExprDefEq.lean:1177-1183).
+    /// `mkAppRange mvar 0 (args.size - 1) args` = `mvar` applied to
+    /// every arg but the last (`self.mk_app_spine(mvar, &args[..n-1])`).
+    /// Both nested comparisons run at `is_def_eq_core` (not the
+    /// checkpoint-wrapped `is_def_eq`): the CALLER already opened one
+    /// checkpoint for this whole attempt (oracle's own
+    /// `checkpointDefEq`), so nesting a second one here would double-
+    /// checkpoint — the same point this file's `check_types_and_assign`
+    /// doc comment makes.
+    fn process_assignment_fo_approx_aux(
+        &mut self,
+        mvar: ExprId,
+        args: &[ExprId],
+        v: ExprId,
+    ) -> Result<bool, MetaError> {
+        match self.node(v) {
+            Node::MData { expr, .. } => self.process_assignment_fo_approx_aux(mvar, args, expr),
+            Node::App { f, arg } => {
+                let last = match args.last() {
+                    Some(&l) => l,
+                    None => return Ok(false),
+                };
+                if !self.is_def_eq_core(last, arg)? {
+                    return Ok(false);
+                }
+                let mvar_prefix = self.mk_app_spine(mvar, &args[..args.len() - 1])?;
+                self.is_def_eq_core(mvar_prefix, f)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// oracle: `processConstApprox` (ExprDefEq.lean:1271-1310), gated on
+    /// `self.cfg.const_approx`.
+    ///
+    /// The `mvarDecl.numScopeArgs != numArgs && !cfg.constApprox` guard
+    /// collapses to `!cfg.const_approx` alone — the SAME reasoning
+    /// `is_def_eq_mvar_self`'s own doc comment gives (`numScopeArgs`
+    /// tracks delayed-assignment scope, a feature this crate's
+    /// `MetavarContext` has no analogue for at all).
+    ///
+    /// The `patternVarPrefix > 0` branch (:1284-1309) — searching for
+    /// the LONGEST valid pattern prefix before falling back to a fully
+    /// constant function — is a named SEAM here: this crate always goes
+    /// straight to `defaultCase` (`assignConst mvar args.size v`,
+    /// :1273), which is the search's OWN eventual fallback too (every
+    /// `go` iteration that fails re-tries a SHORTER prefix, terminating
+    /// at `defaultCase` when none work). Skipping straight to
+    /// `defaultCase` can therefore only make this crate accept STRICTLY
+    /// FEWER constraints than the oracle (never more): sound, just
+    /// incomplete for the corner where an actual proper prefix would
+    /// have let SOME of `v`'s free vars stay bound rather than escape
+    /// entirely. Acknowledged-thin coverage, matching the brief's own
+    /// allowance for the const-approx corner.
+    fn process_const_approx(
+        &mut self,
+        mvar: ExprId,
+        args: &[ExprId],
+        _pattern_var_prefix: usize,
+        v: ExprId,
+    ) -> Result<bool, MetaError> {
+        if !self.cfg.const_approx {
+            return Ok(false);
+        }
+        self.assign_const(mvar, args.len(), v)
+    }
+
+    /// oracle: `assignConst` (ExprDefEq.lean:1243-1254): assign `mvar :=
+    /// fun x₁ … x_numArgs => v`, where `x₁ … x_numArgs` are FRESH
+    /// fvars opened from `mvar`'s OWN declared type (a
+    /// `forallBoundedTelescope`, NOT the actual call-site args) — so `v`
+    /// ends up closed over none of them unless it already mentioned one
+    /// some other way, i.e. this really does assign a function that
+    /// (up to `mkLambdaFVarsWithLetDeps`'s own let-dependency
+    /// abstraction) ignores its arguments. Also `isDefEqMVarSelf`'s
+    /// (:1794, "We use it at `processConstApprox` and
+    /// `isDefEqMVarSelf`") own constant-function fallback, called with
+    /// `v` already an aux mvar there.
+    pub(crate) fn assign_const(
+        &mut self,
+        mvar: ExprId,
+        num_args: usize,
+        v: ExprId,
+    ) -> Result<bool, MetaError> {
+        let mvar_id = match self.node(mvar) {
+            Node::MVar { id: Some(id) } => MVarId(id),
+            _ => return Ok(false),
+        };
+        let mvar_ty = match self.mctx.decl(mvar_id) {
+            Some(d) => d.ty,
+            None => return Ok(false),
+        };
+        let checkpoint = self.lctx.save();
+        let result = self.assign_const_body(mvar, mvar_id, mvar_ty, num_args, v);
+        self.lctx.restore(checkpoint);
+        result
+    }
+
+    fn assign_const_body(
+        &mut self,
+        mvar: ExprId,
+        mvar_id: MVarId,
+        mvar_ty: ExprId,
+        num_args: usize,
+        v: ExprId,
+    ) -> Result<bool, MetaError> {
+        let xs = self.forall_bounded_telescope(mvar_ty, num_args)?;
+        if xs.len() != num_args {
+            return Ok(false);
+        }
+        let lam = match self.mk_lambda_fvars_with_let_deps(&xs, v)? {
+            None => return Ok(false),
+            Some(l) => l,
+        };
+        let checked = match self.check_assignment(mvar_id, &[], lam)? {
+            None => return Ok(false),
+            Some(c) => c,
+        };
+        self.check_types_and_assign(mvar, checked)
+    }
+
+    /// A restricted `forallBoundedTelescope` (the general combinator
+    /// this task's own callers need): peel up to `num_args` leading
+    /// `Forall` binders off `ty`, `whnf`-ing when the raw syntax runs
+    /// out before `num_args` binders are found (matching
+    /// `forallTelescopeReducingAuxAux`'s own `reducing := true` branch —
+    /// `whnf.rs::reduce_matcher_telescope`'s own citation of the exact
+    /// same oracle combinator; duplicated here rather than shared since
+    /// that method is tightly coupled to its own caller's checkpoint/
+    /// restore bracketing). Returns FEWER than `num_args` fvars (never
+    /// panics or errors) when the type's own Pi spine is too short even
+    /// after `whnf` — every caller here treats `len != num_args` as the
+    /// oracle's own `if xs.size != numArgs then pure false` guard.
+    fn forall_bounded_telescope(
+        &mut self,
+        ty: ExprId,
+        num_args: usize,
+    ) -> Result<Vec<ExprId>, MetaError> {
+        let mut xs: Vec<ExprId> = Vec::new();
+        let mut cur_ty = ty;
+        for _ in 0..num_args {
+            let t = if matches!(self.node(cur_ty), Node::Forall { .. }) {
+                cur_ty
+            } else {
+                self.whnf(cur_ty)?
+            };
+            let (binder_name, binder_type, body, binder_info) = match self.node(t) {
+                Node::Forall {
+                    binder_name,
+                    binder_type,
+                    body,
+                    binder_info,
+                } => (binder_name, binder_type, body, binder_info),
+                _ => break,
+            };
+            let d = instantiate_rev(
+                self.scratch,
+                Some(self.view.store),
+                binder_type,
+                &xs,
+                &mut self.guard,
+            )?;
+            let fvar = self.lctx.mk_local_decl(
+                self.scratch,
+                Some(self.view.store),
+                &mut self.fvar_gen,
+                binder_name,
+                d,
+                binder_info,
+            )?;
+            xs.push(fvar);
+            cur_ty = body;
+        }
+        Ok(xs)
+    }
+
+    /// oracle: `isTypeCorrect` (Check.lean:365-370): `try check e; true
+    /// catch _ => false`, where `check` is `Lean.Meta.check`'s own
+    /// separate elaborator-level re-typechecker (`Check.lean`, a large
+    /// distinct subsystem this crate does not build at all — no
+    /// citation anywhere in this task's brief). The nearest available
+    /// proxy already in this crate is `infer_type`: both ultimately ask
+    /// "does this term have SOME type under the current context", and
+    /// `infer_type` already `Err`s on the same structural shapes (an
+    /// ill-applied non-function head, etc.) that would make the real
+    /// `check` throw. SEAM, task 7: only reachable via
+    /// `quasiPatternApprox`'s own `hasCtxLocals` branch above, and
+    /// mirrors the oracle's own blanket `catch _ => false` by folding
+    /// EVERY `infer_type` error (not just "genuinely ill-typed" ones)
+    /// into `false`.
+    fn is_type_correct(&mut self, e: ExprId) -> Result<bool, MetaError> {
+        Ok(self.infer_type(e).is_ok())
+    }
+
+    /// oracle: `mkAuxMVar` (`Lean/MetavarContext.lean`'s
+    /// `mkFreshExprMVarAt`-family primitive, `@[extern]`-backed, no Lean
+    /// source to transcribe line-by-line — same posture as
+    /// `instantiate_mvars`'s own citation). Mints a globally-fresh
+    /// `MVarId` of kind `Natural`, declared with local context
+    /// `LocalContext::default()` (EMPTY) and type `ty`. This crate had
+    /// no production-code fresh-EXPR-mvar-minting facility before task
+    /// 7 (only `test_support::fresh_mvar`, `#[cfg(test)]`-gated); this
+    /// is that facility's first production use, mirroring
+    /// `level.rs::fresh_level_mvar`'s own "fixed prefix + counter"
+    /// idiom (`expr_mvar_gen`, `metactx.rs`) rather than reusing
+    /// `FVarIdGen` (an expr-mvar name must not collide with an fvar
+    /// name).
+    ///
+    /// Always mints with an EMPTY lctx: see `mk_aux_mvar_for`'s own doc
+    /// comment for why (this crate's only call site, `constApprox`'s
+    /// `isDefEqMVarSelf` fallback, only ever invokes this after
+    /// confirming the mvar being rescued already has an empty own
+    /// lctx).
+    fn mk_aux_mvar(&mut self, ty: ExprId) -> Result<(ExprId, MVarId), MetaError> {
+        let idx = self.expr_mvar_gen;
+        self.expr_mvar_gen += 1;
+        let base = Some(self.view.store);
+        let prefix_str = self.scratch.intern_str(base, "_leanr_aux_mvar")?;
+        let prefix = self.scratch.name_str(base, None, prefix_str)?;
+        let idx_id = self.scratch.intern_nat(base, &Nat::from(idx))?;
+        let name = self.scratch.name_num(base, Some(prefix), idx_id)?;
+        let id = MVarId(name);
+        self.mctx.declare(
+            id,
+            MVarDecl {
+                user_name: None,
+                ty,
+                lctx: LocalContext::default(),
+                kind: MVarKind::Natural,
+            },
+        );
+        let expr = self.scratch.expr_mvar(base, Some(name))?;
+        Ok((expr, id))
+    }
+
+    /// `mk_aux_mvar`, restricted to the ONE case this crate can port
+    /// soundly without touching `leanr_kernel`: the oracle's `mkAuxMVar`
+    /// call site this function backs (`isDefEqMVarSelf` :1800) passes
+    /// `mvarDecl.lctx` — the mvar BEING rescued's OWN declared local
+    /// context — as the new aux mvar's lctx too. `leanr_kernel::
+    /// LocalContext` has neither `Clone` nor any enumeration API
+    /// (`local_ctx.rs`: `decls`/`index` are private, `get` needs an
+    /// already-known fvar id) to copy an ARBITRARY such context, and
+    /// porting one is out of this task's reach (never modify
+    /// `leanr_kernel`, per the brief). The one case still reachable
+    /// without that: `mvar_id`'s own lctx is EMPTY, where
+    /// `LocalContext::default()` (`mk_aux_mvar`'s own hardcoded choice)
+    /// already IS that exact copy — an empty context has nothing to
+    /// lose. Every mvar this crate's own fixtures/helpers mint
+    /// (`test_support::fresh_mvar`'s own `lctx: Default::default()`)
+    /// falls in this case. Returns `None` (a named SEAM, not a wrong
+    /// answer) when `mvar_id`'s own lctx is non-empty — narrower than
+    /// the oracle, never unsound: acknowledged-thin `constApprox`-rescue
+    /// coverage (spec risk 3; `checkApp`'s SEPARATE `ctxApprox` rescue
+    /// does not use this helper at all any more — see
+    /// `check_assignment_scope`'s own doc comment for why it is not
+    /// implemented here).
+    fn mk_aux_mvar_for(
+        &mut self,
+        mvar_id: MVarId,
+        ty: ExprId,
+    ) -> Result<Option<(ExprId, MVarId)>, MetaError> {
+        let lctx_len = match self.mctx.decl(mvar_id) {
+            Some(d) => d.lctx.save(),
+            None => return Ok(None),
+        };
+        if lctx_len != 0 {
+            return Ok(None);
+        }
+        Ok(Some(self.mk_aux_mvar(ty)?))
     }
 
     /// oracle: `simpAssignmentArg`/`simpAssignmentArgAux` (ExprDefEq.
@@ -504,17 +884,22 @@ impl<'e> MetaCtx<'e> {
 
     /// oracle: `checkAssignment` (ExprDefEq.lean:1151-1176). `hasCtxLocals`
     /// (whether some pattern arg is itself already visible in `mvar_id`'s
-    /// own declared local context) is ALWAYS `false` on this crate's only
-    /// call path: `process_assignment`'s own loop already rejects (as
-    /// the named `quasiPatternApprox` seam) any pattern arg found in
-    /// `mvarDecl.lctx` before this function is ever reached. So the
-    /// branch that would otherwise fall back to the expensive
-    /// `CheckAssignment.check` monadic rewrite (`elimMVarDeps`-style
-    /// context-shrinking, `checkApp`'s `ctxApprox` rescue,
-    /// ExprDefEq.lean:864-1030) never needs to run here — SEAM, task 7,
-    /// folded into `check_assignment_scope`'s own escalation-to-`None`
-    /// case (mirroring `CheckAssignmentQuick.check`'s own "return
-    /// false, let the expensive path decide" contract, :1129).
+    /// own declared local context) is `false` on this crate's call path
+    /// UNLESS `quasiPatternApprox` is on and actually let a ctx-local
+    /// pattern arg through (`process_assignment`'s own loop, task 7):
+    /// with the flag off, every pattern arg found in `mvarDecl.lctx` is
+    /// still rejected before this function is ever reached, exactly as
+    /// before. Either way, this function's own machinery
+    /// (`check_assignment_scope`/`type_occurs_check`) does not itself
+    /// branch on `hasCtxLocals` — the oracle's `hasCtxLocals`-gated
+    /// choice between the "quick" check (`CheckAssignmentQuick.check`,
+    /// what `check_assignment_scope` transcribes) and the expensive,
+    /// term-REWRITING `CheckAssignment.checkAssignmentAux` (`ctxApprox`'s
+    /// real home, ExprDefEq.lean:864-1030) stays a named SEAM, folded
+    /// into `check_assignment_scope`'s own escalation-to-`None`/`false`
+    /// case — see that function's own doc comment for why `ctxApprox`
+    /// specifically cannot be soundly grafted into the quick, bool-only
+    /// path instead (task 7 finding).
     pub(crate) fn check_assignment(
         &mut self,
         mvar_id: MVarId,
@@ -544,26 +929,41 @@ impl<'e> MetaCtx<'e> {
         Ok(Some(v))
     }
 
-    /// oracle: `CheckAssignmentQuick.check` (ExprDefEq.lean:1083-1130),
-    /// specialized to `hasCtxLocals == false` (see `check_assignment`'s
-    /// own doc comment for why that's this crate's only reachable
-    /// case). The genuine content that survives: every FVAR met in `v`
-    /// must be either one of the abstracted pattern `fvars`, or already
-    /// visible in `mvar_id`'s own declared local context
-    /// (`mvar_decl.lctx`) — anything else is a real, oracle-agreeing
-    /// out-of-scope rejection (`throwOutOfScopeFVar`, :870 — not an
-    /// approximation gap; the ONE rescue for a bare out-of-scope fvar,
-    /// `checkFVar`'s non-dep-let value-follow, :864-870, is excluded
-    /// defensively below since this crate's own machinery never mints a
-    /// let-bound fvar, matching `mk_lambda_fvars_with_let_deps`'s own
-    /// reasoning). `mvar_id == id` (the metavariable being assigned
-    /// occurring directly in `v`) is the ONE non-approximated `MVar`
-    /// case (:1113: `if mvarId' == mvarId then return false`). Every
-    /// OTHER metavariable met is SEAM: `isSubPrefixOf` (:1114) — this
-    /// crate's `LocalContext` exposes no positional/enumeration API to
-    /// port that lctx-subset check faithfully; at tier 1 (same posture
-    /// as `level.rs`'s single-mctx-depth seam), every declared mvar is
-    /// treated as mutually visible.
+    /// oracle: `CheckAssignmentQuick.check` (ExprDefEq.lean:1083-1130).
+    /// The genuine content that survives: every FVAR met in `v` must be
+    /// either one of the abstracted pattern `fvars`, or already visible
+    /// in `mvar_id`'s own declared local context (`mvar_decl.lctx`) —
+    /// anything else is a real, oracle-agreeing out-of-scope rejection
+    /// (`throwOutOfScopeFVar`, :870 — not an approximation gap; the ONE
+    /// rescue for a bare out-of-scope fvar, `checkFVar`'s non-dep-let
+    /// value-follow, :864-870, is excluded defensively below since this
+    /// crate's own machinery never mints a let-bound fvar, matching
+    /// `mk_lambda_fvars_with_let_deps`'s own reasoning). `mvar_id == id`
+    /// (the metavariable being assigned occurring directly in `v`) is
+    /// the ONE non-approximated `MVar` case (:1113: `if mvarId' ==
+    /// mvarId then return false`). Every OTHER metavariable met is
+    /// SEAM: `isSubPrefixOf` (:1114) — this crate's `LocalContext`
+    /// exposes no positional/enumeration API to port that lctx-subset
+    /// check faithfully; at tier 1 (same posture as `level.rs`'s
+    /// single-mctx-depth seam), every declared mvar is treated as
+    /// mutually visible. `ctxApprox`'s rescue does NOT belong here at
+    /// all (task 7 finding): this function transcribes
+    /// `CheckAssignmentQuick.check`, which the oracle's own
+    /// `checkAssignment` driver only ever uses to decide whether the
+    /// SLOW, term-rewriting `CheckAssignment.checkAssignmentAux` path
+    /// is even needed (:1160-1163) — `ctxApprox`'s rescue lives
+    /// EXCLUSIVELY inside that slow path (`checkApp`/`checkMVar`,
+    /// :864-1030), which rebuilds the checked term (substituting the
+    /// rescued subterm) rather than returning a bare bool. Grafting the
+    /// rescue's SIDE EFFECT (assigning the inner mvar) onto this
+    /// function while still returning the ORIGINAL, un-rewritten `v` up
+    /// through `check_assignment`'s quick-success path (`pure v`,
+    /// :1162) would produce an assignment for `mvar_id` that still
+    /// syntactically references a variable outside its own declared
+    /// scope — ill-formed, not merely approximate. See
+    /// `check_assignment_scope_body`'s `Node::App` arm for the fuller
+    /// account (a first attempt at this task built exactly that grafted
+    /// version and reverted it).
     fn check_assignment_scope(
         &mut self,
         mvar_id: MVarId,
@@ -607,6 +1007,31 @@ impl<'e> MetaCtx<'e> {
                 // always true.
                 Ok(true)
             }
+            // oracle: `checkApp`'s `ctxApprox` rescue (ExprDefEq.lean:
+            // 952-978) lives ONLY in the SLOW path this arm does not
+            // implement — see this function's own doc comment for why
+            // (`CheckAssignmentQuick.check`, the function THIS ARM
+            // transcribes, is a pure exception-free bool predicate,
+            // :1040-1080: its OWN `.app`/`.fvar` cases have no rescue at
+            // all, just `visit f <&&> visit a` and a plain out-of-scope
+            // `false`; `checkAssignment`'s outer driver, :1160-1163,
+            // only ever calls the SLOW, term-REWRITING
+            // `CheckAssignment.checkAssignmentAux` — a different
+            // function this crate does not build — when the quick check
+            // here returns `false`). A first attempt at this task
+            // (reverted) grafted the rescue into this bool-only
+            // function anyway: it could get the VERDICT right by
+            // mutating the inner mvar's assignment as a side effect,
+            // but `checkAssignment`'s quick-success path uses `v`
+            // UNCHANGED (`pure v`, :1162) — never the REWRITTEN term the
+            // real rescue produces — so the surviving syntactic subterm
+            // would still reference the rescued fvar, producing an
+            // assignment that is free in a variable outside its own
+            // declared scope. Left as a named SEAM instead: `ctxApprox`
+            // never fires via this path (task 7, spec risk 3 —
+            // acknowledged-thin, here meaning NOT reachable at all
+            // rather than merely narrow; see the task report for the
+            // full reasoning).
             Node::App { f, arg } => Ok(self.check_assignment_scope(mvar_id, fvars, f)?
                 && self.check_assignment_scope(mvar_id, fvars, arg)?),
             Node::Lam {
@@ -888,7 +1313,7 @@ mod tests {
         AxiomVal, CheckedConstants, ConstSource, ConstantInfo, ConstantVal, EnvView,
     };
 
-    use crate::test_support::fresh_mvar;
+    use crate::test_support::{fresh_fvar, fresh_mvar};
     use crate::{Config, MetaCtx};
 
     /// A tiny bespoke environment (NOT `test_support::with_ctx`'s
@@ -902,6 +1327,15 @@ mod tests {
     /// always runs). Neither test below depends on what "N" MEANS —
     /// only that `N.zero : Sort 0` matches `n_type`'s own `Sort 0`.
     fn with_n_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
+        with_n_ctx_cfg(Config::default(), f)
+    }
+
+    /// `with_n_ctx`, parameterized over `Config` (task 7: the
+    /// approximation flag-gating tests below need `fo_approx`/
+    /// `const_approx` on, everything else identical to `with_n_ctx`'s
+    /// own env — same two `N.zero`/`N.succ` axioms, so both helpers stay
+    /// interchangeable for existing tests).
+    fn with_n_ctx_cfg<R>(cfg: Config, f: impl FnOnce(&mut MetaCtx) -> R) -> R {
         let mut base = Store::persistent();
         let z = base.level_zero(None).expect("level zero");
         let sort0 = base.expr_sort(None, z).expect("sort 0");
@@ -940,7 +1374,7 @@ mod tests {
             quot_initialized: false,
             store: &base,
         };
-        let mut ctx = MetaCtx::new(view, &mut scratch, Config::default(), &[], &[]);
+        let mut ctx = MetaCtx::new(view, &mut scratch, cfg, &[], &[]);
         f(&mut ctx)
     }
 
@@ -965,6 +1399,143 @@ mod tests {
         ctx.scratch
             .expr_app(Some(ctx.view.store), f, a)
             .expect("app")
+    }
+
+    /// A non-dependent `dom -> cod` Pi, needed by the `const_approx`
+    /// test below: `assignConst`/`assign_const` opens a
+    /// `forallBoundedTelescope` over the mvar's OWN declared type, which
+    /// must therefore actually BE a `Forall` (not a bare `Sort`, unlike
+    /// every other test in this module) for that telescope to open
+    /// anything at all.
+    fn mk_forall(ctx: &mut MetaCtx, dom: ExprId, cod: ExprId) -> ExprId {
+        ctx.scratch
+            .expr_forall(
+                Some(ctx.view.store),
+                None,
+                dom,
+                cod,
+                leanr_kernel::BinderInfo::Default,
+            )
+            .expect("forall")
+    }
+
+    /// oracle: `processAssignmentFOApprox` (ExprDefEq.lean:1184-1210),
+    /// gated by `self.cfg.fo_approx` — `?m N.zero =?= N.succ N.zero`.
+    /// `N.zero` is a non-fvar pattern argument, so `process_assignment`'s
+    /// per-arg loop seams straight to `use_fo_approx` at `i = 0`
+    /// regardless of the flag; only with `fo_approx` on does
+    /// `processAssignmentFOApproxAux`'s first-order decomposition
+    /// (`args.back! =?= a` and `?m args[..n-1] =?= f`, here trivially
+    /// `N.zero =?= N.zero` and `?m =?= N.succ`) actually fire, assigning
+    /// `?m := N.succ`. Flag off must reproduce task 5/6's own `Ok(false)`
+    /// seam exactly (the `default`-profile regression this task's brief
+    /// requires).
+    #[test]
+    fn fo_approx_flag_gates_first_order_unification() {
+        for (fo_approx, expected) in [(false, false), (true, true)] {
+            with_n_ctx_cfg(
+                Config {
+                    fo_approx,
+                    ..Config::default()
+                },
+                |ctx| {
+                    let ty = n_type(ctx);
+                    let (m_expr, m_id) = fresh_mvar(ctx, ty);
+                    let zero = mk_const(ctx, "N.zero");
+                    let succ = mk_const(ctx, "N.succ");
+                    let lhs = mk_app(ctx, m_expr, zero);
+                    let rhs = mk_app(ctx, succ, zero);
+                    assert_eq!(
+                        ctx.is_def_eq(lhs, rhs).unwrap(),
+                        expected,
+                        "fo_approx={fo_approx}"
+                    );
+                    assert_eq!(ctx.mctx.is_assigned(m_id), expected);
+                    if expected {
+                        assert_eq!(ctx.mctx.assignment(m_id), Some(succ));
+                    }
+                },
+            );
+        }
+    }
+
+    /// oracle: `processConstApprox`/`assignConst` (ExprDefEq.lean:
+    /// 1271-1310, :1243-1254), gated by `self.cfg.const_approx` —
+    /// `?m N.zero =?= N.succ` where `?m : Sort 0 -> Sort 0`. `N.zero` is
+    /// again a non-fvar pattern arg (same seam site as the `fo_approx`
+    /// test above), but this time the RHS `N.succ` is NOT an
+    /// application, so `processAssignmentFOApproxAux` can never match
+    /// regardless of `fo_approx` — isolating `const_approx` cleanly.
+    /// With the flag on, `processConstApprox`'s `patternVarPrefix == 0`
+    /// case (`defaultCase`) opens ONE fresh fvar from `?m`'s own
+    /// declared `Sort 0 -> Sort 0` telescope and assigns `?m := fun _ =>
+    /// N.succ` — the exact scenario the brief's own step 1 names.
+    #[test]
+    fn const_approx_flag_gates_constant_function_assignment() {
+        for (const_approx, expected) in [(false, false), (true, true)] {
+            with_n_ctx_cfg(
+                Config {
+                    const_approx,
+                    ..Config::default()
+                },
+                |ctx| {
+                    let s0 = n_type(ctx);
+                    let mvar_ty = mk_forall(ctx, s0, s0);
+                    let (m_expr, m_id) = fresh_mvar(ctx, mvar_ty);
+                    let zero = mk_const(ctx, "N.zero");
+                    let succ = mk_const(ctx, "N.succ");
+                    let lhs = mk_app(ctx, m_expr, zero);
+                    assert_eq!(
+                        ctx.is_def_eq(lhs, succ).unwrap(),
+                        expected,
+                        "const_approx={const_approx}"
+                    );
+                    assert_eq!(ctx.mctx.is_assigned(m_id), expected);
+                },
+            );
+        }
+    }
+
+    /// oracle: `isDefEqMVarSelf`'s OWN separate `constApprox` fallback
+    /// (ExprDefEq.lean:1799-1801) — a SECOND `constApprox` call site,
+    /// distinct from `process_assignment`'s (the test above): `?m a =?=
+    /// ?m b` (SAME mvar both sides) with `a ≠ b` DISTINCT fvars, so
+    /// `is_def_eq_args`'s pairwise unification fails outright (`a` and
+    /// `b` are unrelated fvars — no rule makes them def-eq) and
+    /// `isDefEqMVarSelf` falls to `mkAuxMVar mvarDecl.lctx .. <;>
+    /// assignConst`. `Sort 1` (not `Sort 0`/`Prop`), deliberately: `a`,
+    /// `b : Sort 1` keeps proof irrelevance (`is_def_eq_proof_irrel`,
+    /// task 6) from ALSO making `a =?= b` true for an unrelated reason
+    /// (any two `Sort 0`-typed terms are proof-irrelevant-equal), which
+    /// would make this test pass without ever reaching `constApprox` at
+    /// all.
+    #[test]
+    fn const_approx_gates_is_def_eq_mvar_self_fallback() {
+        for (const_approx, expected) in [(false, false), (true, true)] {
+            with_n_ctx_cfg(
+                Config {
+                    const_approx,
+                    ..Config::default()
+                },
+                |ctx| {
+                    let z = ctx.scratch.level_zero(None).unwrap();
+                    let one = ctx.scratch.level_succ(None, z).unwrap();
+                    let sort1 = ctx.scratch.expr_sort(None, one).unwrap();
+                    let mvar_ty = mk_forall(ctx, sort1, sort1);
+                    let (m_expr, m_id) = fresh_mvar(ctx, mvar_ty);
+                    let a = fresh_fvar(ctx, sort1, "a");
+                    let b = fresh_fvar(ctx, sort1, "b");
+                    let lhs = mk_app(ctx, m_expr, a);
+                    let rhs = mk_app(ctx, m_expr, b);
+                    assert_eq!(
+                        ctx.is_def_eq(lhs, rhs).unwrap(),
+                        expected,
+                        "const_approx={const_approx}"
+                    );
+                    assert_eq!(ctx.mctx.is_assigned(m_id), expected);
+                },
+            );
+        }
     }
 
     #[test]

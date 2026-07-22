@@ -257,6 +257,67 @@ def defeqMvarQueries : List (Name × Nat × Expr × Nat) :=
   , (`add,  1, mkApp (mkApp (mkConst `add) one) one, 1)
   ]
 
+/-- `N → N`, needed below: `defeqMvarQueries`' own mvar is always typed
+FROM an existing argument's `inferType` (so it can only ever end up
+NULLARY, as that def's own doc comment explains — congruence over the
+surrounding application handles everything else, so the fresh mvar
+itself is never the thing being APPLIED to anything, and the strict
+pattern rule always suffices). The approximations task 7 wires
+(`foApprox`/`constApprox`) only ever relax a condition of the PATTERN
+rule for `?m a₁ … aₙ =?= v` with `n ≥ 1` — so firing either one for
+real needs a mvar that is ITSELF applied to at least one argument,
+which needs a genuine function TYPE to mint the mvar at, not an
+inferred scalar type. -/
+def nArrowN : Expr := Expr.forallE `_ (mkConst `N) (mkConst `N) .default
+
+/-- `defeq_mvar` queries whose success genuinely REQUIRES an
+approximation (task 7, spec § Config profiles' "wired-AND-gated proof"):
+unlike `defeqMvarQueries` above, each entry here mints `?m : mvarTy`
+DIRECTLY and builds the LHS around it via `lhsFn`, so `?m` ends up
+APPLIED to a real argument — a genuine (non-degenerate) pattern
+constraint, unlike every `defeqMvarQueries` entry. `(tag, index,
+mvarTy, lhsFn, rhs)`. Every entry's `default`-profile record is `false`
+and `approx`-profile record `true` (verified against the oracle before
+committing — see the task 7 report). `ctxApprox` coverage is
+deliberately NOT attempted here: task 7's own finding is that the
+oracle's `ctxApprox` rescue lives only in a term-REWRITING slow path
+this crate does not build (`assign.rs::check_assignment_scope`'s own
+doc comment) — a fixture would only prove the ORACLE'S verdict, not
+exercise anything this crate's `ctxApprox` flag actually does (it
+never fires), so none is added; the gap is intentional, not an
+oversight (spec risk 3, acknowledged-thin coverage). -/
+def approxMvarQueries : List (Name × Nat × Expr × (Expr → Expr) × Expr) :=
+  [ -- foApprox (ExprDefEq.lean:1184-1210): `?m N.zero =?= N.succ
+    -- N.zero` — `N.zero` is a non-fvar pattern argument, so the strict
+    -- pattern rule rejects outright; `processAssignmentFOApproxAux`'s
+    -- first-order decomposition (`N.zero =?= N.zero` and `?m =?=
+    -- N.succ`) only fires under `foApprox`, assigning `?m := N.succ`.
+    (`foApprox, 0, nArrowN,
+      fun mvar => mkApp mvar (mkConst `N.zero),
+      mkApp (mkConst `N.succ) (mkConst `N.zero))
+  , -- constApprox (ExprDefEq.lean:1271-1310, :1243-1254): `?m N.zero
+    -- =?= N.succ (N.succ N.zero)` where `?m : N → N`. The RHS's own
+    -- trailing argument, `N.succ N.zero` ("one"), is NOT def-eq to
+    -- `N.zero` (different constructors), so
+    -- `processAssignmentFOApproxAux`'s first check (`args.back! =?= a`,
+    -- i.e. `N.zero =?= N.succ N.zero`) fails outright, and `N.succ`'s
+    -- own head is a CONSTRUCTOR (no `unfoldDefinition?` value) so
+    -- `processAssignmentFOApprox`'s unfold-and-retry loop cannot rescue
+    -- it either — `foApprox` PROVABLY fails on this exact query,
+    -- isolating `constApprox` cleanly (unlike a bare, non-application
+    -- RHS, which `json_mvar_types` — `crates/leanr_meta/tests/
+    -- oracle_fast.rs`'s gate-side mvar-type-source walk, itself
+    -- outside this task's file list — cannot decode: it expects `a`/
+    -- `b` to stay structurally parallel down to the substituted mvar
+    -- position, panicking on a `b`-side leaf with no corresponding
+    -- `App` shape). `processConstApprox`'s `defaultCase` opens `?m`'s
+    -- own `N → N` telescope and assigns `?m := fun _ => N.succ (N.succ
+    -- N.zero)`.
+    (`constApprox, 0, nArrowN,
+      fun mvar => mkApp mvar (mkConst `N.zero),
+      mkApp (mkConst `N.succ) (mkApp (mkConst `N.succ) (mkConst `N.zero)))
+  ]
+
 /-- The two config profiles (spec § Config profiles). `default` leaves
 approximations at their oracle defaults; `approx` turns the four
 false-defaulting flags on (`univApprox` is already true). -/
@@ -346,6 +407,27 @@ unsafe def main : IO Unit := do
                 | none => #[]
               pure (eqR, assignArr, aJ, bJ)
             emitDefeqMvar s!"{name}/defeq_mvar/{i}" trName prof aJ bJ eqR assignArr
+    for (name, i, mvarTy, lhsFn, rhs) in approxMvarQueries do
+      for (trName, tr) in transparencies do
+        for prof in profiles do
+          let (eqR, assignArr, aJ, bJ) ←
+              withNewMCtxDepth (allowLevelAssignments := true) <|
+              withProfile prof <| withTransparency tr do
+            let mvar ← mkFreshExprMVar mvarTy
+            let lhs := lhsFn mvar
+            let eqR ← Meta.isDefEq lhs rhs
+            let assignedOpt ← if eqR then getExprMVarAssignment? mvar.mvarId! else pure none
+            let assignedInst ← assignedOpt.mapM instantiateMVars
+            let (aJ, st1) := (encExpr lhs).run {}
+            let (bJ, st2) := (encExpr rhs).run st1
+            let assignArr : Array Json := match assignedInst with
+              | some v =>
+                let vJ := (encExpr v).run' st2
+                let idx := (st2.mvars.get? mvar.mvarId!).getD 0
+                #[Json.mkObj [("m", idx), ("v", vJ)]]
+              | none => #[]
+            pure (eqR, assignArr, aJ, bJ)
+          emitDefeqMvar s!"{name}/defeq_mvar/{i}" trName prof aJ bJ eqR assignArr
     -- Constant loop: NOT filtered to "module Meta0" — Meta0 is
     -- import-free, so the environment here IS exactly Meta0's own
     -- constants and nothing else; a module filter would be a no-op.

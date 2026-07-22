@@ -113,6 +113,13 @@ pub struct MetaCtx<'e> {
     /// reusing that type directly (a level mvar name is not an fvar
     /// name, and the two counters must not collide on the same prefix).
     pub(crate) level_mvar_gen: u64,
+    /// Monotone counter backing `assign.rs`'s `mk_aux_mvar` (oracle:
+    /// `mkAuxMVar`, `ExprDefEq.lean` — `constApprox`'s `isDefEqMVarSelf`
+    /// fallback fresh-EXPR-mvar mint, task 7). Mirrors `level_mvar_gen`'s
+    /// own "fixed prefix + counter" idiom, distinct from both it and
+    /// `FVarIdGen` (an expr-mvar name must not collide with either a
+    /// level-mvar or an fvar name).
+    pub(crate) expr_mvar_gen: u64,
 }
 
 /// The `Nat.*` builtins `reduce_nat` folds on `LitNat`/`Nat.zero`
@@ -256,6 +263,7 @@ impl<'e> MetaCtx<'e> {
             sunfold_match,
             sunfold_match_alt,
             level_mvar_gen: 0,
+            expr_mvar_gen: 0,
         }
     }
 
