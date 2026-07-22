@@ -56,12 +56,16 @@
 //!   (:696-701); lands with the extension that identifies
 //!   `isAuxRecursor`-equivalent definitions.
 //! - [`MetaCtx::whnf_delayed_assigned`] — delayed-mvar-assignment
-//!   expansion (:587-606; plan 3, alongside the rest of unification).
+//!   expansion (:587-606); this plan's `MetavarContext` has no
+//!   delayed-assignment channel at all (`assign.rs`'s own citation) —
+//!   lands with plan 4 / M4b.
 //! - [`MetaCtx::to_ctor_when_k`] — compares structurally (`ExprId`
-//!   equality after `whnf`) instead of via `isDefEq` (plan 3 upgrades
-//!   this).
+//!   equality after `whnf`) instead of via `isDefEq`. `defeq.rs::
+//!   is_def_eq` (this plan's own unifier) now exists, but this call
+//!   site was never rewired to use it; open gap for a later task.
 //! - [`MetaCtx::cleanup_nat_offset_major`] — offset-constraint cleanup
-//!   (:218-226; plan 3, `offsetCnstrs`).
+//!   (:218-226; lands whenever `Config.offsetCnstrs` does — same gate
+//!   `isDefEqOffset` cites, `lazy_delta.rs`).
 //! - [`MetaCtx::to_ctor_if_lit`]'s `LitStr` arm — string-literal
 //!   `toCtorIfLit` (:27-28; no tier-1 corpus query needs it yet).
 //! - the `FVar` arm of `whnf_easy_cases` — `isImplementationDetail`/
@@ -438,8 +442,10 @@ impl<'e> MetaCtx<'e> {
 
     /// SEAM: oracle `whnfDelayedAssigned?` (WHNF.lean:587-606). The
     /// delayed-mvar-assignment channel (`getDelayedMVarAssignment?`)
-    /// does not exist on this plan's `MetavarContext` — arrives in
-    /// plan 3 alongside the rest of unification. Always `None`.
+    /// does not exist on this plan's `MetavarContext` at all — a later
+    /// plan (plan 4 / M4b), not this one (`assign.rs`'s own citation
+    /// on why this crate has no delayed-assignment concept yet). Always
+    /// `None`.
     fn whnf_delayed_assigned(
         &mut self,
         _f_prime: ExprId,
@@ -1746,8 +1752,10 @@ impl<'e> MetaCtx<'e> {
     /// compares the K-major's inferred type against the freshly-built
     /// nullary constructor application's inferred type STRUCTURALLY
     /// (`ExprId` equality after `whnf` on both sides) rather than via
-    /// `isDefEq` — a full unifier arrives in plan 3, which upgrades this
-    /// comparison. `instantiateMVars` (oracle :140) is elided: no
+    /// `isDefEq` — `defeq.rs::is_def_eq` (this plan's own unifier) now
+    /// exists, but this call site was never rewired to use it; left as
+    /// a named seam for whichever later task closes the gap.
+    /// `instantiateMVars` (oracle :140) is elided: no
     /// general recursive mvar-substitution utility exists yet in this
     /// crate; the structural `has_expr_mvar` bit already reflects
     /// unresolved metavariables closely enough for this bail-out check
@@ -1828,8 +1836,9 @@ impl<'e> MetaCtx<'e> {
     }
 
     /// SEAM: oracle `cleanupNatOffsetMajor` (WHNF.lean:218-226). Offset
-    /// constraints (`isOffset?`/`offsetCnstrs`) are a plan-3 concern
-    /// (alongside `to_ctor_when_k`'s `isDefEq` upgrade); returns `major`
+    /// constraints (`isOffset?`/`offsetCnstrs`) need a `Config.
+    /// offsetCnstrs` field this plan's `Config` does not carry (same
+    /// gate `isDefEqOffset` cites, `lazy_delta.rs`); returns `major`
     /// unchanged.
     fn cleanup_nat_offset_major(&mut self, major: ExprId) -> Result<ExprId, MetaError> {
         Ok(major)

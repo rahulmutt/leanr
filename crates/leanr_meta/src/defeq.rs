@@ -32,7 +32,7 @@
 //! all actually IMPLEMENTED in `lazy_delta.rs`, except `isDefEqNative`/
 //! `isDefEqOffset` (permanently/plan-3 named seams, `isDefEqProjInst`
 //! (class-projection registry, undecoded everywhere in this crate) and
-//! `isDefEqOnFailure` (unification hints, task 7), both cited at their
+//! `isDefEqOnFailure` (unification hints, M4b), both cited at their
 //! call site below and never silently dropped.
 //!
 //! # A transcription correction (brief vs. pinned source)
@@ -262,9 +262,8 @@ impl<'e> MetaCtx<'e> {
                     // where isDefEqDelta (ExprDefEq.lean:2217) runs BEFORE
                     // the const-congruence arm (:2225-2226), allowing
                     // delta-equal distinct-named consts (e.g. `def a := b`)
-                    // to still unify. Task 7 (delta) will implement this;
-                    // until then, is_def_eq_expensive returns false for
-                    // distinct names, as correct.
+                    // to still unify. Task 6 (`is_def_eq_delta`, below)
+                    // implements this.
                     Ok(None)
                 } else {
                     // oracle: `isListLevelDefEqAux` (task 4's
@@ -418,7 +417,7 @@ impl<'e> MetaCtx<'e> {
     /// - `isDefEqProjInst` (:2229, `unfoldProjInstWhenInstances?`-gated,
     ///   `.instances`/`.implicit` transparency only).
     /// - `isDefEqOnFailure` (:2232, unification hints :2022-2028) —
-    ///   task 7.
+    ///   M4b.
     ///
     /// (A `Sort`/`Sort` pair never reaches this function at all, as of
     /// task 4: `is_def_eq_quick`'s `.sort` arm calls the DECISIVE
@@ -528,7 +527,7 @@ impl<'e> MetaCtx<'e> {
                     return Ok(true);
                 }
                 // SEAM: isDefEqOnFailure (:2232, unification hints) —
-                // task 7.
+                // M4b.
                 Ok(false)
             }
         }
