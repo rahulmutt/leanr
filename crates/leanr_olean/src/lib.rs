@@ -213,6 +213,7 @@ mod raw;
 
 pub use loader::{load_closure, LoadError, SearchPath};
 pub use module_data::{
-    CatBehavior, EntryScope, Import, MatcherAltInfo, MatcherEntry, ModuleData, ParserEntry,
-    PartKind, ReducibilityEntry, ReducibilityStatus, ScopedParserEntry,
+    CatBehavior, DefaultInstanceEntry, DiscrKey, EntryScope, Import, InstanceEntry, MatcherAltInfo,
+    MatcherEntry, ModuleData, ParserEntry, PartKind, ProjectionFnInfo, ReducibilityEntry,
+    ReducibilityStatus, ScopedParserEntry,
 };

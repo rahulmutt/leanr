@@ -736,6 +736,190 @@ impl<'s> InterpId<'s> {
         })
     }
 
+    /// `Lean.Meta.DiscrTree.Key` (Meta/DiscrTree/Types.lean:16-24,
+    /// v4.33.0-rc1) — see `crate::DiscrKey`'s doc comment for the full
+    /// ctor-tag transcription and the brief-vs-source disagreement (no
+    /// `Bvar`/`Sort` ctor exists on `Key`). Nullary ctors (`star`,
+    /// `other`, `arrow`) arrive as boxed scalar immediates
+    /// (`RawValue::Scalar(tag)`); the rest as `Ctor { tag, fields }`,
+    /// same posture as `reducibility_status`/`matcher_entry`. Dispatched
+    /// from `module_data`'s `Lean.Meta.instanceExtension` arm
+    /// (Task A3).
+    fn discr_key(&mut self, r: &Raw) -> Result<crate::DiscrKey, OleanError> {
+        use crate::DiscrKey;
+        // Untrusted-bignum arity/index: never truncate via `as usize`
+        // (see `Nat::to_usize`'s doc) — a value too large to fit is a
+        // shape error, not silently wrapped.
+        fn nat_usize(r: &Raw) -> Result<usize, OleanError> {
+            nat(r)?.to_usize().ok_or_else(|| bad("DiscrTree.Key Nat"))
+        }
+        match &**r {
+            RawValue::Scalar(0) => Ok(DiscrKey::Star),
+            RawValue::Scalar(1) => Ok(DiscrKey::Other),
+            RawValue::Scalar(5) => Ok(DiscrKey::Arrow),
+            RawValue::Ctor { tag: 2, fields, .. } if fields.len() == 1 => match &*fields[0] {
+                RawValue::Ctor {
+                    tag: 0, fields: lf, ..
+                } if lf.len() == 1 => {
+                    Ok(DiscrKey::Lit(leanr_kernel::Literal::NatVal(nat(&lf[0])?)))
+                }
+                RawValue::Ctor {
+                    tag: 1, fields: lf, ..
+                } if lf.len() == 1 => Ok(DiscrKey::Lit(leanr_kernel::Literal::StrVal(string(
+                    &lf[0],
+                )?))),
+                _ => Err(bad("DiscrTree.Key.lit Literal")),
+            },
+            RawValue::Ctor { tag: 3, fields, .. } if fields.len() == 2 => {
+                // fields[0] is the fvar's FVarId, unboxed to its `Name`
+                // field on the wire (same as `Expr.fvar`'s field 0);
+                // identity is not stable across serialization, so only
+                // shape is validated and the name itself is discarded.
+                let _ = self.name(&fields[0])?;
+                Ok(DiscrKey::Fvar {
+                    arity: nat_usize(&fields[1])?,
+                })
+            }
+            RawValue::Ctor { tag: 4, fields, .. } if fields.len() == 2 => Ok(DiscrKey::Const {
+                name: self.name_req(&fields[0])?,
+                arity: nat_usize(&fields[1])?,
+            }),
+            RawValue::Ctor { tag: 6, fields, .. } if fields.len() == 3 => Ok(DiscrKey::Proj {
+                structure: self.name_req(&fields[0])?,
+                index: nat_usize(&fields[1])?,
+                arity: nat_usize(&fields[2])?,
+            }),
+            _ => Err(bad("DiscrTree.Key")),
+        }
+    }
+
+    /// `Lean.Meta.InstanceEntry` (Meta/Instances.lean:50-66, pinned
+    /// toolchain v4.33.0-rc1): six DECLARED fields —
+    /// `keys, val, priority, globalName?, synthOrder, attrKind` — not
+    /// the five-field `keys, val, priority, globalName?, attrKind`
+    /// shape an earlier draft of this plan expected (that draft omitted
+    /// `synthOrder`).
+    ///
+    /// On the WIRE, though, this is a 5-pointer-field ctor, not 6: a
+    /// probe over `Instances.olean`'s fixture entries showed
+    /// `Ctor { tag: 0, fields: [5 ..], .. }` for every decoded
+    /// `InstanceEntry`. `attrKind : AttributeKind` (3 nullary
+    /// constructors — `Attributes.lean:44-45`) is scalar-representable
+    /// as a concrete (non-generic) field, so the compiler packs it as a
+    /// raw byte in the ctor's `scalars` tail rather than a 6th boxed
+    /// pointer field — the same mechanism already pinned by
+    /// `ModuleData.isModule`'s `bool` (see `module_data`'s `s.first()`
+    /// read below). This differs from `reducibility_pair`'s
+    /// `ReducibilityStatus` field, which stays a boxed `Scalar(tag)`
+    /// pointer: that field sits in a *generic* `Prod α β`, whose
+    /// compiled ctor can't specialize per-instantiation and so always
+    /// keeps every field pointer-sized. `attrKind` is validated by
+    /// checking the scalar tail holds one in-range byte, but its value
+    /// is never read: no leanr consumer needs `getInstanceAttrKind`.
+    /// `synthOrder` (field 4) IS decoded and returned (controller
+    /// decision: PR-B reads the toolchain's own serialized argument
+    /// order rather than re-transcribing `computeSynthOrder`).
+    fn instance_entry_payload(
+        &mut self,
+        scope: crate::EntryScope,
+        r: &Raw,
+    ) -> Result<crate::InstanceEntry, OleanError> {
+        // Untrusted-bignum priority/synthOrder entries: never truncate
+        // via `as usize` (see `Nat::to_usize`'s doc and `discr_key`'s
+        // identical posture above) — a value too large to fit is a
+        // shape error, not silently wrapped.
+        fn nat_usize(r: &Raw) -> Result<usize, OleanError> {
+            nat(r)?.to_usize().ok_or_else(|| bad("InstanceEntry Nat"))
+        }
+        let (f, s) = ctor(r, 0, 5, "InstanceEntry")?;
+        match s.first() {
+            Some(0..=2) => {}
+            _ => return Err(bad("InstanceEntry.attrKind")),
+        }
+        let keys = array(&f[0])?
+            .iter()
+            .map(|k| self.discr_key(k))
+            .collect::<Result<_, _>>()?;
+        let val = self.expr(&f[1])?;
+        let priority = nat_usize(&f[2])?;
+        let global_name = self.opt_name(&f[3])?;
+        let synth_order = array(&f[4])?
+            .iter()
+            .map(nat_usize)
+            .collect::<Result<_, _>>()?;
+        Ok(crate::InstanceEntry {
+            scope,
+            keys,
+            val,
+            priority,
+            synth_order,
+            global_name,
+        })
+    }
+
+    /// `Lean.Meta.DefaultInstanceEntry` (Meta/Instances.lean:378-381,
+    /// pinned toolchain v4.33.0-rc1): a bare 3-pointer-field ctor
+    /// (`className`, `instanceName`, `priority`), no scalar tail — see
+    /// `crate::DefaultInstanceEntry`'s doc comment for the full
+    /// confirmation that `defaultInstanceExtension` is a
+    /// `SimplePersistentEnvExtension` (unwrapped entries, same posture
+    /// as `reducibilityCore` above), NOT the `ScopedEnvExtension.Entry`-
+    /// wrapped shape `instanceExtension` uses.
+    fn default_instance_entry(
+        &mut self,
+        r: &Raw,
+    ) -> Result<crate::DefaultInstanceEntry, OleanError> {
+        // Untrusted-bignum priority: never truncate via `as usize` (see
+        // `Nat::to_usize`'s doc and `discr_key`/`instance_entry_payload`'s
+        // identical posture above) — a value too large to fit is a shape
+        // error, not silently wrapped.
+        fn nat_usize(r: &Raw) -> Result<usize, OleanError> {
+            nat(r)?
+                .to_usize()
+                .ok_or_else(|| bad("DefaultInstanceEntry Nat"))
+        }
+        let (f, _) = ctor(r, 0, 3, "DefaultInstanceEntry")?;
+        Ok(crate::DefaultInstanceEntry {
+            class_name: self.name_req(&f[0])?,
+            instance_name: self.name_req(&f[1])?,
+            priority: nat_usize(&f[2])?,
+        })
+    }
+
+    /// `Name × ProjectionFunctionInfo` — the `Lean.projectionFnInfoExt`
+    /// map's unwrapped entry pair (see `crate::ProjectionFnInfo`'s doc
+    /// for the full `MapDeclarationExtension`/`reducibilityCore`
+    /// posture confirmation). The pair itself is a bare 2-field `Prod`
+    /// (tag 0), mirroring `reducibility_pair` above; `ProjectionFunctionInfo`
+    /// (`ProjFns.lean:19-27`) is a 3-pointer-field ctor (`ctorName`,
+    /// `numParams`, `i`) plus a scalar-tail `fromClass : Bool` — same
+    /// mechanism as `InstanceEntry.attrKind` (see
+    /// `instance_entry_payload`'s doc above), since `Bool` is a concrete
+    /// 2-nullary-constructor field here, not a generic-position field
+    /// like `reducibility_pair`'s boxed `ReducibilityStatus`.
+    fn projection_fn_pair(
+        &mut self,
+        r: &Raw,
+    ) -> Result<(NameId, NameId, usize, usize, bool), OleanError> {
+        // Untrusted-bignum numParams/i: never truncate via `as usize`
+        // (see `discr_key`/`instance_entry_payload`'s identical posture
+        // above) — a value too large to fit is a shape error, not
+        // silently wrapped.
+        fn nat_usize(r: &Raw) -> Result<usize, OleanError> {
+            nat(r)?
+                .to_usize()
+                .ok_or_else(|| bad("ProjectionFunctionInfo Nat"))
+        }
+        let (pf, _) = ctor(r, 0, 2, "Name × ProjectionFunctionInfo")?;
+        let proj_fn = self.name_req(&pf[0])?;
+        let (f, s) = ctor(&pf[1], 0, 3, "ProjectionFunctionInfo")?;
+        let ctor_name = self.name_req(&f[0])?;
+        let num_params = nat_usize(&f[1])?;
+        let index = nat_usize(&f[2])?;
+        let from_class = boolean(s.first(), "ProjectionFunctionInfo.fromClass")?;
+        Ok((proj_fn, ctor_name, num_params, index, from_class))
+    }
+
     /// ModuleData (Environment.lean:109-129).
     pub(crate) fn module_data(&mut self, root: &Raw) -> Result<crate::ModuleData, OleanError> {
         let (f, s) = ctor(root, 0, 5, "ModuleData")?;
@@ -745,6 +929,9 @@ impl<'s> InterpId<'s> {
         let mut parser_entries = Vec::new();
         let mut reducibility = Vec::new();
         let mut matchers = Vec::new();
+        let mut instances = Vec::new();
+        let mut default_instances = Vec::new();
+        let mut projection_fns = Vec::new();
         for pair in array(&f[4])? {
             let (pf, _) = ctor(pair, 0, 2, "ModuleData.entries pair")?;
             let ext_name = self.name(&pf[0])?;
@@ -798,6 +985,53 @@ impl<'s> InterpId<'s> {
                         matchers.push(self.matcher_entry(e)?);
                     }
                 }
+                // Wrapped in `ScopedEnvExtension.Entry`, same tag-0
+                // global(v) / tag-1 scoped(ns, v) shape as
+                // `reducibilityExtra` above (mirrored verbatim).
+                "Lean.Meta.instanceExtension" => {
+                    for e in array(&pf[1])? {
+                        let RawValue::Ctor { tag, fields, .. } = &**e else {
+                            return Err(bad("ScopedEnvExtension.Entry"));
+                        };
+                        let (scope, payload) = match (tag, fields.len()) {
+                            (0, 1) => (crate::EntryScope::Global, &fields[0]),
+                            (1, 2) => (
+                                crate::EntryScope::Scoped(self.name_req(&fields[0])?),
+                                &fields[1],
+                            ),
+                            _ => return Err(bad("ScopedEnvExtension.Entry")),
+                        };
+                        instances.push(self.instance_entry_payload(scope, payload)?);
+                    }
+                }
+                // SimplePersistentEnvExtension: entries are bare
+                // DefaultInstanceEntry ctors, no scoped wrapper (same
+                // posture as `reducibilityCore`/`Match.Extension.extension`
+                // above) — see `crate::DefaultInstanceEntry`'s doc for the
+                // source confirmation (Meta/Instances.lean:396).
+                "Lean.Meta.defaultInstanceExtension" => {
+                    for e in array(&pf[1])? {
+                        default_instances.push(self.default_instance_entry(e)?);
+                    }
+                }
+                // MapDeclarationExtension: unwrapped `Name × α` pairs,
+                // same posture as `reducibilityCore`/
+                // `Lean.Meta.defaultInstanceExtension` above — see
+                // `crate::ProjectionFnInfo`'s doc for the full source
+                // confirmation (`ProjFns.lean:30`, `EnvExtension.lean:129`).
+                "Lean.projectionFnInfoExt" => {
+                    for e in array(&pf[1])? {
+                        let (proj_fn, ctor_name, num_params, index, from_class) =
+                            self.projection_fn_pair(e)?;
+                        projection_fns.push(crate::ProjectionFnInfo {
+                            proj_fn,
+                            ctor: ctor_name,
+                            num_params,
+                            index,
+                            from_class,
+                        });
+                    }
+                }
                 _ => continue,
             }
         }
@@ -823,6 +1057,9 @@ impl<'s> InterpId<'s> {
             parser_entries,
             reducibility,
             matchers,
+            instances,
+            default_instances,
+            projection_fns,
         })
     }
 }

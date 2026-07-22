@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use leanr_kernel::bank::{NameId, Store};
+use leanr_kernel::bank::{ExprId, NameId, Store};
 use leanr_kernel::{ConstantInfo, Name, Nat};
 
 use crate::interp_id::InterpId;
@@ -123,6 +123,66 @@ pub struct MatcherAltInfo {
     pub has_unit_thunk: bool,
 }
 
+/// oracle: `Lean.Meta.DiscrTree.Key`
+/// (Meta/DiscrTree/Types.lean:16-24, pinned toolchain v4.33.0-rc1):
+///
+/// ```text
+/// inductive Key where
+///   | star  : Key                     -- 0, nullary
+///   | other : Key                     -- 1, nullary
+///   | lit   : Literal → Key           -- 2
+///   | fvar  : FVarId → Nat → Key      -- 3
+///   | const : Name → Nat → Key        -- 4
+///   | arrow : Key                     -- 5, nullary
+///   | proj  : Name → Nat → Nat → Key  -- 6
+/// ```
+///
+/// CONFIRMED against the source above: this is a 7-ctor inductive, NOT
+/// the 9-variant Const/Fvar/Bvar/Lit/Star/Other/Arrow/Proj/Sort shape a
+/// prior draft of this plan expected. There is no `Bvar` and no `Sort`
+/// constructor on `Key` — a bound variable's *type* is what gets
+/// indexed (never the de Bruijn variable itself, which cannot recur
+/// across unifiable instances), and `Sort` is deliberately folded into
+/// `other`/`star` by `DiscrTree.Main`'s key-pushing logic rather than
+/// carried as its own `Key` case. The source wins over the brief's
+/// schematic; ctor tags below are the declaration-order indices shown
+/// above, following the same convention already pinned by `Level` and
+/// `Option` in this crate (nullary ctors are boxed scalar immediates —
+/// `RawValue::Scalar(tag)` — at their plain declaration index; this is
+/// not something `DiscrKey` introduces, see `interp_id.rs::level`/
+/// `opt_nat`'s doc comments for the two prior confirmations of the
+/// rule). `fvar`'s `FVarId` field is decoded only for shape (an
+/// `FVarId` is a single-field `{ name : Name }` structure, unboxed to
+/// its one field on the wire — same reasoning as `matcher_entry`'s
+/// `DiscrInfo` note) and then discarded: fvar identity is not stable
+/// across serialization, so only `arity` is kept (field-order pinned
+/// against `DiscrTree/Main.lean:299-301`'s `.fvar fvarId nargs`).
+/// `proj`'s three fields are `structure`, `index`, `arity` in that
+/// order (`DiscrTree/Main.lean:291-300`'s `.proj s i nargs`). `Lit`
+/// reuses `leanr_kernel::Literal`, the same type `interp_id.rs`
+/// already builds for `Expr.lit` (see `build_expr`'s tag-9 arm) —
+/// no new literal type is introduced.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DiscrKey {
+    Star,
+    Other,
+    Lit(leanr_kernel::Literal),
+    /// `fvar` identity is not serialized stably; only arity survives.
+    Fvar {
+        arity: usize,
+    },
+    Const {
+        name: NameId,
+        arity: usize,
+    },
+    Arrow,
+    Proj {
+        structure: NameId,
+        index: usize,
+        arity: usize,
+    },
+}
+
 /// One decoded matcher-extension entry: oracle
 /// `Lean.Meta.Match.Extension.Entry` = `{ name, info : MatcherInfo }`
 /// (MatcherInfo.lean:113-115, 52-68). v4.33 stores `altInfos`
@@ -153,6 +213,115 @@ pub struct MatcherEntry {
     pub discr_infos: Vec<Option<NameId>>,
 }
 
+/// One decoded `Lean.Meta.instanceExtension` entry: oracle
+/// `Lean.Meta.InstanceEntry` (Meta/Instances.lean:50-66, pinned
+/// toolchain v4.33.0-rc1):
+///
+/// ```text
+/// structure InstanceEntry where
+///   keys        : Array InstanceKey     -- 0
+///   val         : Expr                  -- 1
+///   priority    : Nat                   -- 2
+///   globalName? : Option Name := none   -- 3
+///   synthOrder  : Array Nat             -- 4
+///   attrKind    : AttributeKind         -- 5
+/// ```
+///
+/// SIX fields are declared, not five: an earlier draft of this plan
+/// omitted `synthOrder`. But on the WIRE this is a 5-*pointer*-field
+/// ctor: `attrKind` (3 nullary constructors) is scalar-representable as
+/// a concrete field and the compiler packs it into the ctor's raw
+/// scalar-byte tail instead of a 6th boxed pointer — see
+/// `interp_id.rs::instance_entry_payload`'s doc for the full empirical
+/// pin (probed against `Instances.olean`) and its contrast with
+/// `reducibility_pair`'s generic-field `ReducibilityStatus`, which
+/// stays boxed. `attrKind` is validated (in-range scalar byte present)
+/// but never read: no leanr consumer needs `getInstanceAttrKind`.
+/// `synthOrder` IS decoded and exposed (controller decision) so PR-B's
+/// consumer reads the toolchain's own serialized argument-synthesis
+/// order rather than re-transcribing `computeSynthOrder`.
+#[derive(Debug, Clone)]
+pub struct InstanceEntry {
+    pub scope: EntryScope,
+    pub keys: Vec<DiscrKey>,
+    pub val: ExprId,
+    pub priority: usize,
+    /// `synthOrder` (field 4): the order in which the instance's
+    /// arguments are synthesized, as serialized by the toolchain.
+    pub synth_order: Vec<usize>,
+    pub global_name: Option<NameId>,
+}
+
+/// One decoded `Lean.Meta.defaultInstanceExtension` entry: oracle
+/// `Lean.Meta.DefaultInstanceEntry` (Meta/Instances.lean:378-381, pinned
+/// toolchain v4.33.0-rc1):
+///
+/// ```text
+/// structure DefaultInstanceEntry where
+///   className    : Name  -- 0
+///   instanceName : Name  -- 1
+///   priority     : Nat   -- 2
+/// ```
+///
+/// Three fields, all pointer-boxed (no nullary-enum scalar tail like
+/// `InstanceEntry.attrKind`). `defaultInstanceExtension` is a
+/// `SimplePersistentEnvExtension` (Meta/Instances.lean:396), NOT a
+/// `SimpleScopedEnvExtension`/`ScopedEnvExtension` like `instanceExtension`
+/// (Meta/Instances.lean:95) — its entries are a bare, unwrapped array of
+/// `DefaultInstanceEntry`, same posture as `reducibilityCore`'s unwrapped
+/// `Name × ReducibilityStatus` pairs. There is therefore no
+/// `ScopedEnvExtension.Entry` wrapper and no `scope` field here.
+#[derive(Debug, Clone)]
+pub struct DefaultInstanceEntry {
+    pub class_name: NameId,
+    pub instance_name: NameId,
+    pub priority: usize,
+}
+
+/// One decoded `Lean.projectionFnInfoExt` entry: oracle
+/// `Lean.ProjectionFunctionInfo` (`ProjFns.lean:19-27`, pinned toolchain
+/// v4.33.0-rc1):
+///
+/// ```text
+/// structure ProjectionFunctionInfo where
+///   ctorName  : Name  -- 0
+///   numParams : Nat   -- 1
+///   i         : Nat   -- 2
+///   fromClass : Bool  -- scalar tail, not a 4th pointer field
+/// ```
+///
+/// `projectionFnInfoExt : MapDeclarationExtension ProjectionFunctionInfo`
+/// (`ProjFns.lean:30`). `MapDeclarationExtension` extends
+/// `PersistentEnvExtension (Name × α) (Name × α) (NameMap α)`
+/// (`EnvExtension.lean:129`) and is built via plain
+/// `registerPersistentEnvExtension` (`mkMapDeclarationExtension`,
+/// `EnvExtension.lean:132-152`) — no `ScopedEnvExtension` wrapper, same
+/// posture as `reducibilityCore`'s unwrapped `Name × ReducibilityStatus`
+/// pairs. So on the wire this extension's entries are a bare array of
+/// `Name × ProjectionFunctionInfo` pairs, the `Name` being the
+/// projection function's own name (the map key), not a field of the
+/// value struct.
+///
+/// `fromClass : Bool` is a concrete (non-generic) field of a 2-nullary-
+/// constructor enum, so — same mechanism as `InstanceEntry.attrKind`
+/// (see `interp_id.rs::instance_entry_payload`'s doc) — the compiler
+/// packs it into the ctor's raw scalar-byte tail instead of a 4th boxed
+/// pointer field: this is a 3-*pointer*-field ctor on the wire. `Bool`'s
+/// constructor order is `false = 0`, `true = 1` (`Init/Prelude.lean`),
+/// read via the same `boolean()` helper `ModuleData.isModule` uses.
+/// Pinned empirically against `Instances.olean`'s `Semigroup.toMul`
+/// entry (a class projection): scalar tail `Some(1)`, i.e.
+/// `from_class == true`.
+#[derive(Debug, Clone)]
+pub struct ProjectionFnInfo {
+    /// The map key: the projection function's own name.
+    pub proj_fn: NameId,
+    pub ctor: NameId,
+    pub num_params: usize,
+    pub index: usize,
+    pub from_class: bool,
+}
+
 /// The decoded contents of one `.olean` module, decoded directly into
 /// term-bank ids (term-bank phase 3 — the Arc decode path this used to
 /// have a twin of is deleted, along with the differential gate that
@@ -181,6 +350,15 @@ pub struct ModuleData {
     /// Typed decode of the `Lean.Meta.Match.Extension.extension`
     /// entries (M4a plan 2). All other extension entries stay opaque.
     pub matchers: Vec<MatcherEntry>,
+    /// Typed decode of the `Lean.Meta.instanceExtension` entries (M4a
+    /// plan 4). All other extension entries stay opaque.
+    pub instances: Vec<InstanceEntry>,
+    /// Typed decode of the `Lean.Meta.defaultInstanceExtension` entries
+    /// (M4a plan 4). All other extension entries stay opaque.
+    pub default_instances: Vec<DefaultInstanceEntry>,
+    /// Typed decode of the `Lean.projectionFnInfoExt` entries (M4a plan
+    /// 4). All other extension entries stay opaque.
+    pub projection_fns: Vec<ProjectionFnInfo>,
 }
 
 impl ModuleData {
@@ -333,6 +511,9 @@ impl ModuleData {
             parser_entries: std::mem::take(&mut base.parser_entries),
             reducibility: std::mem::take(&mut base.reducibility),
             matchers: std::mem::take(&mut base.matchers),
+            instances: std::mem::take(&mut base.instances),
+            default_instances: std::mem::take(&mut base.default_instances),
+            projection_fns: std::mem::take(&mut base.projection_fns),
         })
     }
 }
@@ -544,5 +725,96 @@ mod tests {
         let err = ModuleData::parse_parts(&[(PartKind::Private, &base)], env.store_mut())
             .expect_err("no base part");
         assert!(matches!(err, OleanError::BadShape { .. }));
+    }
+
+    /// `Lean.Meta.instanceExtension` decodes: `instAddN` and `instAddProd`
+    /// must both be present as global instances, and every decoded
+    /// instance's first discrimination key is a const head (the
+    /// leading head symbol every registered instance indexes on).
+    #[test]
+    fn instance_entries_decode() {
+        let bytes = fixture("Instances.olean");
+        let mut env = Environment::default();
+        let md = ModuleData::parse(&bytes, env.store_mut()).expect("decode");
+        let render = |n: NameId| env.store().to_name(None, Some(n)).to_string();
+        // instAddN and instAddProd must both be present as global instances.
+        let names: Vec<String> = md
+            .instances
+            .iter()
+            .filter_map(|e| e.global_name.map(render))
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "instAddN"),
+            "instances: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "instAddProd"),
+            "instances: {names:?}"
+        );
+        // every instance carries at least one discrimination key headed by a const.
+        for e in &md.instances {
+            assert!(
+                matches!(e.keys.first(), Some(DiscrKey::Const { .. })),
+                "instance keys must start with a const head: {:?}",
+                e.keys
+            );
+        }
+        // instAddProd (Prod's Add instance) synthesizes its two
+        // component `Add` arguments out of order (pinned empirically
+        // against the fixture: [2, 3], i.e. metavariable-bearing
+        // arguments after the two explicit binders).
+        let prod = md
+            .instances
+            .iter()
+            .find(|e| e.global_name.map(render) == Some("instAddProd".to_string()))
+            .expect("instAddProd present");
+        assert_eq!(prod.synth_order, vec![2, 3], "instAddProd synth_order");
+    }
+
+    /// `Lean.Meta.defaultInstanceExtension` decodes: `instOfNN` (the
+    /// fixture's sole `@[default_instance]`) must be present.
+    #[test]
+    fn default_instance_entries_decode() {
+        let bytes = fixture("Instances.olean");
+        let mut env = Environment::default();
+        let md = ModuleData::parse(&bytes, env.store_mut()).expect("decode");
+        let render = |n: NameId| env.store().to_name(None, Some(n)).to_string();
+        assert!(
+            md.default_instances
+                .iter()
+                .any(|e| render(e.instance_name) == "instOfNN"),
+            "defaults: {:?}",
+            md.default_instances
+                .iter()
+                .map(|e| render(e.instance_name))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// `Lean.projectionFnInfoExt` decodes: `Semigroup.toMul` is a class
+    /// projection and must be present with `from_class == true`.
+    #[test]
+    fn projection_fn_info_decodes() {
+        let bytes = fixture("Instances.olean");
+        let mut env = Environment::default();
+        let md = ModuleData::parse(&bytes, env.store_mut()).expect("decode");
+        let render = |n: NameId| env.store().to_name(None, Some(n)).to_string();
+        // Semigroup.toMul is a class projection.
+        let to_mul = md
+            .projection_fns
+            .iter()
+            .find(|p| render(p.proj_fn) == "Semigroup.toMul");
+        assert!(
+            to_mul.is_some(),
+            "projections: {:?}",
+            md.projection_fns
+                .iter()
+                .map(|p| render(p.proj_fn))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            to_mul.unwrap().from_class,
+            "toMul must be flagged fromClass"
+        );
     }
 }
