@@ -1,0 +1,281 @@
+name: Nightly Mathlib synthesis sweep
+
+# The tier-2 typeclass-synthesis DISCOVERY sweep (M4a plan-4, PR-C): "what
+# synthInstance queries mined out of real Mathlib declarations does leanr's
+# tabled resolver answer the same way as the real elaborator". Structurally
+# this mirrors nightly-sweep.yml (the parse sweep) exactly — same shard/merge
+# shape, same guards, same re-baseline PR mechanics — but it is a genuinely
+# SEPARATE workflow with its own pass-list and its own re-baseline branch
+# (global constraint: the two nightlies must NEVER race). See
+# tests/fixtures/meta/dump_synth_mathlib.lean (C1) and
+# crates/leanr_meta/tests/synth_sweep.rs (C2) for the corpus + gate this
+# orchestrates, and mise.toml's `meta:nightly:*` tasks (C3) for the
+# per-shard/merge commands invoked below.
+#
+# Unlike the parse sweep, each shard job here does TWO things, not one:
+# first it runs the C1 Lean dumper itself (`dump_synth_mathlib.lean`) to
+# produce this shard's slice of the oracle JSONL, THEN it runs the C2 sweep
+# (`meta:nightly:shard`) over that JSONL. Both steps run in the SAME job on
+# the SAME runner/workspace, so the oracle JSONL never needs to leave the
+# job — it is produced and consumed locally and is deliberately NOT uploaded
+# as an artifact. This matters: it was measured at ~683MiB per shard
+# (~8GB across all 12 shards), so uploading it would be both wasteful and
+# slow; only the green list + manifest (tiny) travel to the merge job.
+
+on:
+  schedule:
+    # 41 6 UTC — several hours after the parse sweep's 02:17 UTC, and off
+    # the hour for the same "GitHub's scheduler delays on-the-hour jobs"
+    # reason nightly-sweep.yml picks its own offset. This is a distinct time
+    # from the parse sweep's specifically so the two nightlies never queue
+    # for runners (public repo, 20-job limit) or race on anything at the
+    # same wall-clock moment. A late nightly is fine; this is a discovery
+    # tier, not a merge gate.
+    - cron: "41 6 * * *"
+  workflow_dispatch:
+
+# One synthesis sweep at a time, same rationale as the parse sweep's
+# `nightly-sweep` group: two overlapping runs would race on THIS workflow's
+# own re-baseline branch. This group name is DISTINCT from the parse
+# sweep's `nightly-sweep` group — the two workflows must be free to run
+# concurrently with each other (they touch different branches/pass-lists),
+# they must just never overlap with THEMSELVES.
+concurrency:
+  group: nightly-synth-sweep
+  cancel-in-progress: false
+
+permissions:
+  contents: write # push the re-baseline branch
+  pull-requests: write # open/update the re-baseline PR
+
+env:
+  SHARD_COUNT: "12"
+  # DISTINCT from the parse sweep's tests/fixtures/syntax/mathlib-passlist.txt.
+  PASSLIST: tests/fixtures/meta/synth-passlist.txt
+  # DISTINCT from the parse sweep's nightly/mathlib-passlist.
+  REBASELINE_BRANCH: nightly/mathlib-synth-passlist
+
+jobs:
+  sweep:
+    name: sweep ${{ matrix.shard }}/12
+    runs-on: ubuntu-latest
+    # Well under the 6h cap: a shard budgeted well inside that window that
+    # hits 5h is hung, and should fail visibly rather than burn the cap
+    # silently. Same margin as the parse sweep.
+    timeout-minutes: 300
+    permissions:
+      contents: read # shards only read; only the merge job proposes a PR
+    strategy:
+      # A failed shard must NOT cancel its siblings: the merge job needs to
+      # see exactly which shards are missing, and re-running 11 healthy
+      # shards to recover one is hours of runner time.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    steps:
+      # ubuntu-latest ships ~14GB free, and this job needs Mathlib's source
+      # checkout plus prebuilt .oleans plus a release cargo target PLUS this
+      # shard's own ~683MiB oracle JSONL (transient, deleted with the
+      # runner at job end). Reclaiming the preinstalled runtimes we never
+      # use is the standard way to buy that room; `df -h` before/after so a
+      # future shrink of the image shows up in the log instead of as a
+      # mystery ENOSPC.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get clean
+          df -h /
+
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      # Same rationale as ci.yml: provision the toolchain serially up front
+      # rather than let the build race the rustup download.
+      - run: mise exec -- cargo --version
+      - run: mise run elan:bootstrap
+
+      - name: Fetch Mathlib + prebuilt oleans
+        run: mise run mathlib:fetch
+
+      - name: Build the sweep (release)
+        run: mise exec -- cargo build --release -p leanr_meta --tests
+
+      # Step 1/2: run the C1 oracle dumper for JUST this shard's slice of
+      # the mined constants. Writes to a scratch path under target/ that is
+      # never uploaded (see the file header above) — it is consumed by the
+      # very next step, in this same job, on this same runner.
+      - name: Dump shard ${{ matrix.shard }}/12 oracle (C1)
+        env:
+          LEANR_SYNTH_SHARD: ${{ matrix.shard }}/${{ env.SHARD_COUNT }}
+          LEANR_SYNTH_OUT: ${{ github.workspace }}/target/synth-oracle/shard-${{ matrix.shard }}.jsonl
+        run: |
+          set -eu
+          mkdir -p "$(dirname "$LEANR_SYNTH_OUT")"
+          lean_path="$(cd .mathlib && mise exec -- lake env printenv LEAN_PATH)"
+          LEAN_PATH="$lean_path" mise exec -- lean --run tests/fixtures/meta/dump_synth_mathlib.lean
+
+      # Step 2/2: run the C2 sweep over the JSONL the step above just wrote,
+      # for the SAME shard spec (LEANR_SYNTH_SHARD is passed to the dumper
+      # above and to the sweep here — both must agree, per C1/C2's shared
+      # sort-and-stride scheme, see synth_sweep.rs).
+      - name: Sweep shard ${{ matrix.shard }}/12 (C2)
+        env:
+          # Measured peak was ~1.7GB of anon memory per rayon worker (8.3GB
+          # at 5 threads locally) for the parse sweep; the synth sweep's
+          # tabled resolver plus parallel oracle `lean` subprocesses have
+          # the same profile, so this task keeps the same 3-thread cap
+          # rather than let rayon default to nproc, which OOM-kills the
+          # runner.
+          RAYON_NUM_THREADS: "3"
+          LEANR_SYNTH_SHARD: ${{ matrix.shard }}/${{ env.SHARD_COUNT }}
+          LEANR_SYNTH_ORACLE: ${{ github.workspace }}/target/synth-oracle/shard-${{ matrix.shard }}.jsonl
+          LEANR_SYNTH_GREEN_OUT: ${{ github.workspace }}/target/green/shard-${{ matrix.shard }}.txt
+          # The shard's receipt: its spec, how much it swept, and which
+          # committed pass-list entries it observed present on disk. Only a
+          # shard can report that last one — it has the lake-materialized
+          # tree, and the merge job has no tree at all. Without it the
+          # merge cannot tell an upstream deletion from a synthesis
+          # regression.
+          LEANR_SYNTH_MANIFEST_OUT: ${{ github.workspace }}/target/green/shard-${{ matrix.shard }}.manifest
+        run: mise run meta:nightly:shard
+
+      - name: Upload shard green list + manifest
+        uses: actions/upload-artifact@v4
+        with:
+          # DISTINCT prefix from the parse sweep's `green-shard-*` (artifacts
+          # are scoped to their own workflow run so a bare collision cannot
+          # actually happen, but the discipline is to keep every name in
+          # this workflow textually distinct from the parse sweep's too).
+          name: synth-green-shard-${{ matrix.shard }}
+          path: |
+            target/green/shard-${{ matrix.shard }}.txt
+            target/green/shard-${{ matrix.shard }}.manifest
+          # A shard that somehow produced neither file must fail HERE, so the
+          # artifact is genuinely absent for the merge job's count check
+          # rather than present-and-empty (which would merge as "everything
+          # in this slice regressed"). A partial upload (one file, not both)
+          # still fails the merge: the count check below tallies each
+          # extension separately, and merge mode re-validates the manifests.
+          # NOTE: this shard's ~683MiB oracle JSONL (target/synth-oracle/)
+          # is deliberately NOT part of this upload — it was produced and
+          # consumed entirely within this job and dies with the runner.
+          if-no-files-found: error
+
+  merge:
+    name: merge + gate
+    needs: sweep
+    # `!cancelled()`, because the whole point is to report on a run where a
+    # shard FAILED — but the artifact-count check below then refuses to merge
+    # the partial union. `always()` would also run this on a CANCELLED
+    # workflow, where it can only fail noisily at the artifact download or
+    # the count check and page someone about a run a human already stopped.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    # Cold `cargo build --release` of the sweep test binary is the whole
+    # budget here: this job does no Mathlib fetch, no olean decode and no
+    # oracle run (merge unions text files and gates — seconds). The repo
+    # carries no cargo cache anywhere (see ci.yml), so this build is cold
+    # every night; 90 keeps a wide margin over the measured cost, same as
+    # the parse sweep's merge job.
+    timeout-minutes: 90
+    steps:
+      # fetch-depth: 0 — this job pushes the re-baseline branch, and GitHub
+      # rejects pushes from a shallow clone.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: jdx/mise-action@v2
+      - run: mise exec -- cargo --version
+
+      - name: Download shard green lists + manifests
+        uses: actions/download-artifact@v4
+        with:
+          path: target/green
+          pattern: synth-green-shard-*
+          merge-multiple: true
+
+      # THE guard for this design. Merging a partial union is not a smaller
+      # sweep, it is a wrong one: every pass-list entry belonging to a
+      # missing shard's constant slice looks like a synthesis regression (a
+      # red herring that would page someone) or — if the gate somehow
+      # passed — gets dropped from the rewritten pass-list, silently
+      # deleting part of the baseline. Neither is acceptable, so a missing
+      # shard fails here, loudly, before merge mode ever runs. Mirrors the
+      # parse sweep's guard exactly.
+      - name: Assert every shard produced a green list + manifest
+        run: |
+          set -eu
+          mkdir -p target/green # every shard failing means no artifact dir at all
+          find target/green -maxdepth 1 \( -name '*.txt' -o -name '*.manifest' \) | sort
+          for ext in txt manifest; do
+            found=$(find target/green -maxdepth 1 -name "*.$ext" | wc -l)
+            echo "shard $ext files present: $found / $SHARD_COUNT"
+            if [ "$found" -ne "$SHARD_COUNT" ]; then
+              echo "::error::only $found of $SHARD_COUNT shard .$ext files are present — refusing to merge a partial union (every constant in a missing shard would read as a mass synthesis regression, or be silently dropped from the pass-list). Re-run the failed shard(s)."
+              exit 1
+            fi
+          done
+
+      # NOTE: no Mathlib fetch here, deliberately. Merge needs no tree: it
+      # decodes no oleans, runs no oracle, and takes its "does this pass-list
+      # entry still exist upstream?" answer from the UNION of the shards'
+      # manifests. Same reasoning as the parse sweep's merge job.
+      - name: Record pass-list size before merge
+        run: echo "PASSLIST_BEFORE=$(grep -cv '^#' "$PASSLIST" || true)" >> "$GITHUB_ENV"
+
+      # Gates the union exactly as an unsharded full sweep would, and rewrites
+      # the pass-list only if it passes. A true synthesis regression fails
+      # this step — that is the alarm this whole workflow exists to ring. It
+      # also re-validates the manifests as a set — exactly one per shard
+      # 1..=N, none of them vacuous — which the count check above cannot do.
+      - name: Merge + gate the union
+        env:
+          LEANR_SYNTH_MERGE: ${{ github.workspace }}/target/green
+        run: mise run meta:nightly:merge
+
+      - name: Record pass-list size after merge
+        run: echo "PASSLIST_AFTER=$(grep -cv '^#' "$PASSLIST" || true)" >> "$GITHUB_ENV"
+
+      # The pass-list is a ratchet artifact and every other change to it
+      # lands via review, so the nightly proposes rather than pushes. The
+      # branch name is stable, so consecutive nightlies update ONE PR
+      # instead of opening one per night. Note that a PR opened by
+      # GITHUB_TOKEN does not itself trigger CI on this repo (see
+      # AGENTS.md) — re-run CI on it manually before merging, same as the
+      # parse sweep's re-baseline PR.
+      - name: Propose the re-baselined pass-list
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          if git diff --quiet -- "$PASSLIST"; then
+            echo "pass-list unchanged at $PASSLIST_AFTER entries — nothing to propose"
+            exit 0
+          fi
+          title="chore(passlist): nightly synth re-baseline ($PASSLIST_BEFORE -> $PASSLIST_AFTER entries)"
+          body=$(cat <<EOF
+          Automated by \`.github/workflows/nightly-synth-sweep.yml\` (run [$GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)).
+
+          Full-closure typeclass-synthesis sweep over all $SHARD_COUNT shards, union gated as one unsharded full sweep:
+          **$PASSLIST_BEFORE -> $PASSLIST_AFTER entries** ($((PASSLIST_AFTER - PASSLIST_BEFORE)) net).
+
+          Zero true synthesis regressions — the merge job gates before it rewrites, so this
+          branch cannot exist if a query that synthesizes today stopped synthesizing green.
+          Entries dropped here are upstream deletions/renames, reconciled out and logged
+          in the merge job's output.
+
+          This branch is force-updated by each nightly; review the diff, do not hand-edit.
+          EOF
+          )
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$REBASELINE_BRANCH"
+          git add -- "$PASSLIST"
+          git commit -m "$title"
+          git push --force origin "$REBASELINE_BRANCH"
+          if [ -n "$(gh pr list --head "$REBASELINE_BRANCH" --state open --json number --jq '.[].number')" ]; then
+            gh pr edit "$REBASELINE_BRANCH" --title "$title" --body "$body"
+          else
+            gh pr create --base main --head "$REBASELINE_BRANCH" --title "$title" --body "$body"
+          fi
