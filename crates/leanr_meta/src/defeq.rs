@@ -614,7 +614,16 @@ mod tests {
             store: &base,
         };
         let mut scratch = Store::scratch();
-        let mut ctx = crate::MetaCtx::new(view, &mut scratch, crate::Config::default(), &[], &[]);
+        let mut ctx = crate::MetaCtx::new(
+            view,
+            &mut scratch,
+            crate::Config::default(),
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
         assert!(!ctx.is_def_eq(a, b).unwrap());
     }
 

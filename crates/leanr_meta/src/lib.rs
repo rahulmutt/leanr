@@ -14,18 +14,23 @@ mod assign;
 mod cache;
 mod config;
 mod defeq;
+mod discr_path;
+pub mod discr_tree;
 mod error;
 mod infer;
+mod instances;
 mod lazy_delta;
 mod level;
 mod metactx;
 mod mvar_ctx;
+mod synth;
 #[cfg(test)]
 mod test_support;
 mod transparency;
 mod whnf;
 
 pub use config::{Config, ProjReduction};
+pub use discr_tree::DiscrTree;
 pub use error::MetaError;
 pub use metactx::{MetaCtx, DEFAULT_STEP_BUDGET};
 pub use mvar_ctx::{LMVarId, MVarDecl, MVarId, MVarKind, MetavarContext};

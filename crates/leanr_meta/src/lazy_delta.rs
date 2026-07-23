@@ -153,7 +153,12 @@ impl<'e> MetaCtx<'e> {
     /// universe is a non-normalized-but-provably-zero `max`/`imax` is
     /// reported "not Prop" instead, incompleteness only, no fixture
     /// this task commits needs the general case).
-    fn is_prop(&mut self, e: ExprId) -> Result<bool, MetaError> {
+    ///
+    /// `pub(crate)` (task B2): `discr_path.rs`'s `ignoreArg` transcription
+    /// (`isProof e = isProp (inferType e)`, InferType.lean:448-451) reuses
+    /// this exact primitive rather than a second copy — same
+    /// `whnf_default`-sharing precedent this method's own doc cites.
+    pub(crate) fn is_prop(&mut self, e: ExprId) -> Result<bool, MetaError> {
         let ty = self.infer_type(e)?;
         let ty = self.whnf_default(ty)?;
         match self.node(ty) {
@@ -1041,7 +1046,16 @@ mod tests {
             store: &base,
         };
         let mut scratch = Store::scratch();
-        let mut ctx = crate::MetaCtx::new(view, &mut scratch, crate::Config::default(), &[], &[]);
+        let mut ctx = crate::MetaCtx::new(
+            view,
+            &mut scratch,
+            crate::Config::default(),
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
         ctx.set_step_budget(300);
 
         assert_eq!(

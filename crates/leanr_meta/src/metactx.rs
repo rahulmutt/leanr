@@ -11,8 +11,12 @@ use std::collections::HashMap;
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, LevelId, NameId, Store};
 use leanr_kernel::{EnvView, ExprData, FVarIdGen, LocalContext, RecGuard, MAX_REC_DEPTH};
-use leanr_olean::{EntryScope, MatcherEntry, ReducibilityEntry, ReducibilityStatus};
+use leanr_olean::{
+    DefaultInstanceEntry, EntryScope, InstanceEntry, MatcherEntry, ProjectionFnInfo,
+    ReducibilityEntry, ReducibilityStatus,
+};
 
+use crate::instances::InstanceTable;
 use crate::{Config, LMVarId, MVarId, MetaError, MetavarContext, TransparencyMode};
 
 /// Stack-growth constants — the same values `tc.rs` uses (private
@@ -37,6 +41,17 @@ pub struct MetaCtx<'e> {
     pub(crate) fvar_gen: FVarIdGen,
     pub(crate) guard: RecGuard,
     guard_depth: u32,
+    /// oracle: `Context.synthPendingDepth` (`Meta/Basic.lean:502`) — a
+    /// counter DISTINCT from `guard_depth` above: the general recursion
+    /// guard bounds total `MetaM` call-stack depth (`withIncRecDepth`),
+    /// while this one bounds only NESTED `synthPending` invocations
+    /// specifically (`withIncSynthPending`, `Meta/Basic.lean:1177`),
+    /// against the much tighter `maxSynthPendingDepth` option (default
+    /// `1`, `Meta/Basic.lean:458-461` — this crate has no options table,
+    /// so the default is restated as `whnf.rs`'s own
+    /// `MAX_SYNTH_PENDING_DEPTH` constant). See `whnf.rs::synth_pending`
+    /// (task B6) for the increment/check/decrement span.
+    pub(crate) synth_pending_depth: u32,
     steps: u64,
     step_budget: u64,
     /// (config cache key, expr) -> whnf result. Permanent entries only
@@ -80,6 +95,17 @@ pub struct MetaCtx<'e> {
     /// ReducibilityStatus per constant; absent => Semireducible.
     reducibility: HashMap<NameId, ReducibilityStatus>,
     matchers: HashMap<NameId, MatcherEntry>,
+    /// The instance table (Task B3): a discrimination tree over decoded
+    /// `instanceExtension` entries plus the flat `defaultInstanceExtension`
+    /// list, built once here and queried per-goal by
+    /// `instances.rs::{get_instances,default_instances,instance_named}`.
+    /// `pub(crate)` (unlike `reducibility`/`matchers` just above, which
+    /// stay module-private behind `status_of`/`matcher_of` accessors)
+    /// because its own consumer methods live in a SEPARATE file
+    /// (`instances.rs`, the `discr_path.rs`/`whnf.rs` cross-module
+    /// `impl MetaCtx` idiom), which needs direct field access the way
+    /// `self.cfg`/`self.mctx` already get it.
+    pub(crate) instances: InstanceTable,
     /// The `smartUnfolding` option (oracle default: true), consulted by
     /// `unfold_definition`'s app/const arms (task 7).
     pub(crate) smart_unfolding: bool,
@@ -125,6 +151,14 @@ pub struct MetaCtx<'e> {
     /// `FVarIdGen` (an expr-mvar name must not collide with either a
     /// level-mvar or an fvar name).
     pub(crate) expr_mvar_gen: u64,
+    /// Decoded `Lean.projectionFnInfoExt` entries (task B6), keyed by
+    /// the projection function's own name — oracle `getProjectionFnInfo?`
+    /// (`ProjFns.lean:37-59`, a plain `NameMap` point lookup). Consulted
+    /// by `whnf.rs`'s `get_stuck_mvar`'s `Const` arm and
+    /// `unfold_proj_inst_when_instances`, both task B6's own seams. Point
+    /// lookup only (never iterated in an order-significant way — Global
+    /// Constraints: no `HashMap` iteration on order-significant paths).
+    pub(crate) projection_fns: HashMap<NameId, ProjectionFnInfo>,
 }
 
 /// The `Nat.*` builtins `reduce_nat` folds on `LitNat`/`Nat.zero`
@@ -179,12 +213,35 @@ fn mk_name2(scratch: &mut Store, base: Option<&Store>, a: &str, b: &str) -> Name
 }
 
 impl<'e> MetaCtx<'e> {
+    /// Task B6 adds the 8th (`projection_fn_entries`) decoded-slice
+    /// parameter, crossing clippy's default `too_many_arguments`
+    /// threshold (7) — same "decoded slices in, private fields out"
+    /// constructor shape B3's `instance_entries`/`default_instance_entries`
+    /// pair already established (this module's own doc, above); adding a
+    /// 9th builder/options-struct layer here would be a bigger refactor
+    /// than this task's own scope, for a constructor that already has
+    /// exactly one call style (every call site passes all eight slices
+    /// positionally, `grep`-verified, no partial-application anywhere).
+    ///
+    /// **Follow-up, explicitly flagged (opus review round 1): the NEXT
+    /// decoded extension makes this 9.** At that point, stop widening
+    /// this positional list and instead introduce a `DecodedExtensions`
+    /// (or similarly named) params struct bundling every
+    /// `&[XyzEntry]` slice this constructor takes, with each call site
+    /// building one from a `ModuleData` (`md.reducibility`, `md.matchers`,
+    /// ..., `md.projection_fns`, ...) — a mechanical, low-risk refactor
+    /// deferred out of THIS task's scope, not an open question about
+    /// whether it should happen.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         view: EnvView<'e>,
         scratch: &'e mut Store,
         cfg: Config,
         reducibility: &[ReducibilityEntry],
         matchers: &[MatcherEntry],
+        instance_entries: &[InstanceEntry],
+        default_instance_entries: &[DefaultInstanceEntry],
+        projection_fn_entries: &[ProjectionFnInfo],
     ) -> MetaCtx<'e> {
         // Global entries only: scoped reducibility entries require the
         // M3b3-style activation model, out of scope for the meta core
@@ -196,6 +253,20 @@ impl<'e> MetaCtx<'e> {
             .map(|e| (e.name, e.status))
             .collect();
         let matchers = matchers.iter().map(|m| (m.name, m.clone())).collect();
+        let instances = InstanceTable::build(view, instance_entries, default_instance_entries);
+        // oracle: `projectionFnInfoExt`'s own `NameMap` (`ProjFns.lean:30,
+        // 37-59`) — the extension's own key IS `ProjectionFnInfo.projFn`
+        // (see that struct's doc, `leanr_olean::ProjectionFnInfo`), so no
+        // filtering/dedup decision is needed here beyond keying by it;
+        // a real `.olean` never registers the same projection fn name
+        // twice (`mkMapDeclarationExtension`'s own map semantics), so a
+        // colliding second entry (last-write-wins) is reachable only via
+        // adversarial/malformed bytes, same untrusted-input posture as
+        // every other decoder in this crate (never panics either way).
+        let projection_fns = projection_fn_entries
+            .iter()
+            .map(|p| (p.proj_fn, p.clone()))
+            .collect();
 
         let base = Some(view.store);
         let nat_add = mk_name2(scratch, base, "Nat", "add");
@@ -246,6 +317,7 @@ impl<'e> MetaCtx<'e> {
             fvar_gen: FVarIdGen::default(),
             guard: RecGuard::new(),
             guard_depth: 0,
+            synth_pending_depth: 0,
             steps: 0,
             step_budget: DEFAULT_STEP_BUDGET,
             whnf_cache: HashMap::new(),
@@ -256,6 +328,7 @@ impl<'e> MetaCtx<'e> {
             defeq_cache_transient: HashMap::new(),
             reducibility,
             matchers,
+            instances,
             smart_unfolding: true,
             can_unfold_override: false,
             nat_bin_ops,
@@ -269,6 +342,7 @@ impl<'e> MetaCtx<'e> {
             sunfold_match_alt,
             level_mvar_gen: 0,
             expr_mvar_gen: 0,
+            projection_fns,
         }
     }
 
@@ -418,6 +492,13 @@ impl<'e> MetaCtx<'e> {
 /// level assignment maps and the postponed queue. NOT the permanent
 /// cache (it is monotone and shared) and NOT declarations (an mvar stays
 /// declared).
+///
+/// `Clone` (task B5): the tabled-synthesis driver stores one snapshot
+/// PER NODE (the oracle's own `GeneratorNode.mctx`/`ConsumerNode.mctx`
+/// fields, `SynthInstance.lean:49`/`:57`) and re-enters it repeatedly
+/// via a `withMCtx`-equivalent, so it must be able to restore the same
+/// snapshot more than once — `rollback` consumes its argument.
+#[derive(Clone)]
 pub(crate) struct MetaSnapshot {
     expr_assignments: HashMap<MVarId, ExprId>,
     level_assignments: HashMap<LMVarId, LevelId>,

@@ -34,6 +34,16 @@ pub enum MetaError {
     /// oracle: `throwIsDefEqStuck` (Basic.lean), the channel synthesis
     /// (plan 4) reads. The payload is the blocking term.
     IsDefEqStuck(ExprId),
+    /// A NAMED SEAM was reached: an oracle code path this crate has not
+    /// transcribed yet met a term shaped so that no answer can be given
+    /// without it. NOT a negative verdict and NOT a budget exhaustion —
+    /// the question was never answered, and the payload names the seam
+    /// (function + oracle citation + owning task) so a divergence is
+    /// attributable instead of silently absorbed. Introduced by task B5
+    /// (`synth.rs`), whose `try_resolve` needs `forallTelescopeReducing`
+    /// over a FORALL-shaped synthesis goal (`SynthInstance.lean:351`) —
+    /// see that function's own doc comment.
+    Unsupported(String),
 }
 
 impl From<leanr_kernel::KernelError> for MetaError {
