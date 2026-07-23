@@ -257,20 +257,23 @@
 //! constant private / is the environment exporting" state to check
 //! against), not yet exercised by `Instances.olean`.
 //!
-//! # Landed ahead of its consumer
+//! # Dead-code allow, narrowed
 //!
-//! `get_instances`/`default_instances`/`instance_named` are `pub(crate)`
-//! per this task's own interface spec (not part of `leanr_meta`'s
-//! external API), and PR-B's tabled resolution driver (task B5) — the
-//! real, non-test call site — has not landed yet. Until it does, every
-//! item in this module (and, transitively through `get_instances` ->
-//! `discr_get_match`, every item in `discr_path.rs` too — see that
-//! module's own updated doc) is reachable only from this module's own
-//! `#[cfg(test)]` tests, exactly the situation `discr_path.rs` was in
-//! before this task landed (its own now-removed blanket
-//! `#![allow(dead_code)]`). `#![allow(dead_code)]` below is scoped to
-//! this one module (an inner attribute on the `instances` module, not
-//! the whole crate) and should be removed once B5 wires this table in.
+//! PR-B's tabled resolution driver (task B5) has landed and is the real,
+//! non-test call site for this module: `get_instances` is on `synth.rs`'s
+//! resolution path (transitively through `discr_get_match`, every item
+//! in `discr_path.rs` too — see that module's own doc), so the blanket
+//! `#![allow(dead_code)]` this module used to carry is gone. What
+//! remains is six narrow, per-item allows, each with its own oracle
+//! citation and owning task, for the items B5 does NOT put on the
+//! resolution path: `Instance::ty`/`Instance::global_name`,
+//! `InstanceTable::{by_name, get_by_name}` + `MetaCtx::instance_named`
+//! (the name-indexed half of the table), and
+//! `InstanceTable::defaults` + `MetaCtx::default_instances` (default
+//! instances are consumed one layer above synthesis, by
+//! `synthesizeUsingDefault`, not by `SynthInstance.main`). Each allow
+//! site below carries its own reasoning; none of them is a stand-in for
+//! the removed blanket allow.
 
 use std::collections::HashMap;
 

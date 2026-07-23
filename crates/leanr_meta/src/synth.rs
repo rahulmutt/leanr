@@ -347,18 +347,18 @@
 //! `add_answer`) never advance `next` themselves, so nothing in THIS
 //! task violates the constraint -- it binds only the driver B5 writes.
 //!
-//! # Landed ahead of its consumer
+//! # Dead-code allow, narrowed
 //!
-//! Every item in this module is `pub(crate)` and reachable only from
-//! this module's own `#[cfg(test)]` tests until B5's driver lands and
-//! calls into it -- the same "table mechanics land before the driver
-//! that drives them" posture `instances.rs`'s own module doc records for
-//! itself (search that module's own final section, "Landed ahead of its
-//! consumer"). `#![allow(dead_code)]` below is scoped to this module
-//! alone (an inner attribute, not a crate-wide one) and is a SEPARATE
-//! allow from `instances.rs`'s own -- neither module's allow should be
-//! used to cover for the other; both are removed independently once B5
-//! wires each one in.
+//! B5's tabled-resolution driver has landed (`synth_instance` /
+//! `synth_instance_main` / `synth_instance_body` below), and every item
+//! in this module -- and, transitively, every item in
+//! `instances.rs`/`discr_path.rs`/`discr_tree.rs` -- is now reachable
+//! from it. The blanket `#![allow(dead_code)]` this module used to carry
+//! is gone; the one narrow, per-item allow that remains sits on
+//! `synth_instance` itself (its own doc comment explains why: it is the
+//! crate's typeclass-synthesis ENTRY POINT, but has no non-test caller
+//! until the elaborator layer lands, owner M4b). No other item in this
+//! module carries an allow.
 
 use std::collections::HashMap;
 
@@ -1566,16 +1566,71 @@ impl<'e> MetaCtx<'e> {
 
     fn synth_instance_main(&mut self, ty: ExprId) -> Result<Option<ExprId>, MetaError> {
         let snap = self.checkpoint();
-        // Every instance `is_def_eq` in this search runs at `.instances`
-        // transparency (oracle: `synthInstance` is invoked under
-        // `withReducibleAndInstances`, `Meta/Basic.lean`'s
-        // `instantiateMVarDeclMVars`/`synthInstance` wrappers). Saved
-        // and restored around the whole search -- the `whnf_default`
-        // precedent (`whnf.rs:1548`).
-        let saved_transparency = self.cfg.transparency;
+        // oracle: `main` wraps the ENTIRE search in `withConfig`
+        // (`SynthInstance.lean:963-964`):
+        //   { c with isDefEqStuckEx := true, transparency := .instances,
+        //            foApprox := true, ctxApprox := true,
+        //            constApprox := false, univApprox := false }
+        // `Config` is `Copy`, so the whole struct is saved/restored
+        // around the search -- the same `whnf_default` save/restore
+        // precedent (`whnf.rs:1548`) this module already used for
+        // `transparency` alone, now widened to every field this crate
+        // HAS a home for:
+        //  - `transparency := .instances` -- as before.
+        //  - `foApprox := true`, `constApprox := false` -- both real,
+        //    consulted fields (`assign.rs::use_fo_approx`/
+        //    `process_const_approx`); setting them narrows/widens
+        //    higher-order unification exactly as the oracle does during
+        //    synthesis.
+        //  - `univApprox := false` -- the UNSAFE direction: this
+        //    crate's `Config::default` has `univ_approx: true`
+        //    (`config.rs`'s own doc says do not "fix" this back to
+        //    `false` to match its siblings for the GENERAL defeq
+        //    default, which is correct -- but `withConfig` overrides it
+        //    to `false` for synthesis specifically, and until now this
+        //    driver silently left it `true`, which is MORE PERMISSIVE
+        //    than the oracle: a universe unification the oracle refuses
+        //    could succeed here, admitting a candidate the oracle
+        //    rejects. Fixed here.
+        //  - `ctxApprox := true` -- set for fidelity to the wrapper, but
+        //    it is presently a NO-OP in this crate: no call site reads
+        //    `cfg.ctx_approx` anywhere (`grep` confirms the only
+        //    occurrences are `config.rs`'s own declaration/default/
+        //    tests). The plan-3 ctxApprox rescue lives in the oracle's
+        //    slow term-rewriting path, which this crate has not built;
+        //    a naive graft of it onto the bool-result path was reverted
+        //    as unsound (plan-3 notes). Setting the flag here does not
+        //    resurrect that graft -- it just matches the field to the
+        //    oracle's wrapper for the day a real consultation site
+        //    lands.
+        //  - `isDefEqStuckEx := true` -- NAMED SEAM, not settable: this
+        //    crate has no `Config` field for it at all
+        //    (`config.rs`'s own doc: "spec-mandated to become a typed
+        //    error variant..., so it is not tracked here"), and every
+        //    site that would branch on it (`level.rs`, `assign.rs`) has
+        //    the `false` case hard-coded into the control flow itself,
+        //    not gated through a field this function could flip.
+        //    Actually wiring it through requires those sites to grow a
+        //    real `MetaError::IsDefEqStuck`-throwing branch, which is
+        //    out of this task's scope (`synth.rs`/`instances.rs`(doc)/
+        //    `config.rs` only). Owner M4b, citing
+        //    `SynthInstance.lean:958-968` and `level.rs`'s own
+        //    `isDefEqStuckEx` seam doc.
+        //  - `preprocess`/`preprocessOutParam`, and
+        //    `withNewMCtxDepth (allowLevelAssignments := true)` -- NAMED
+        //    SEAM, no field/mechanism in this crate at all (no
+        //    preprocessing pass over the goal type before search; no
+        //    mctx-depth model at tier 1, per `level.rs`'s own "Depth /
+        //    read-only seam"). Owner M4b, citing
+        //    `SynthInstance.lean:958-968`.
+        let saved_cfg = self.cfg;
         self.cfg.transparency = TransparencyMode::Instances;
+        self.cfg.fo_approx = true;
+        self.cfg.ctx_approx = true;
+        self.cfg.const_approx = false;
+        self.cfg.univ_approx = false;
         let r = self.synth_instance_body(ty);
-        self.cfg.transparency = saved_transparency;
+        self.cfg = saved_cfg;
         self.rollback(snap);
         r
     }
@@ -1780,6 +1835,16 @@ impl<'e> MetaCtx<'e> {
     /// a negative verdict. Not exercised by either fixture (every goal
     /// in `Instances.olean`/`InstancesCyclic.olean` is a bare class
     /// application).
+    ///
+    /// This is the correct loud direction, but its BLAST RADIUS is
+    /// strictly larger than the oracle's: the oracle handles a
+    /// forall-shaped goal wherever it turns up in the search (root goal
+    /// or any nested subgoal) and keeps exploring every other branch,
+    /// whereas here a single forall-shaped subgoal anywhere in the
+    /// search aborts the WHOLE `synth_instance` call via `?`, even if
+    /// other candidates or other branches would have answered. M4b
+    /// should be aware this seam is not "isolated to the unsupported
+    /// goal" the way the oracle's per-branch handling is.
     fn try_resolve(
         &mut self,
         mvar: ExprId,
@@ -2407,11 +2472,27 @@ mod tests {
     /// `instAddProd {a b} [Add a] [Add b] : Add (Prod a b)` plus two
     /// `Add N` subgoals — the first goal in this crate whose answer is
     /// built by a CONSUMER node completing, not by a generator alone.
+    ///
+    /// Hand-checked against the pinned toolchain: `#synth Add (Prod N N)`
+    /// = `@instAddProd N N instAddN instAddN`. `is_def_eq`-to-goal alone
+    /// does not pin the TERM (B7's tier-1 gate compares terms, not just
+    /// inhabitation), so this also asserts the head constant, the same
+    /// idiom as `mul_n_matches_the_oracles_synth_answer_via_the_corrected_
+    /// discr_tree_order`.
     #[test]
     fn synthesizes_via_subgoal_chaining() {
         with_instances_ctx(|ctx| {
             let goal = parse_goal(ctx, "Add (Prod N N)");
             let inst = ctx.synth_instance(goal).unwrap().expect("an instance");
+            let head = ctx.get_app_fn(inst);
+            let Node::Const { name: Some(n), .. } = ctx.node(head) else {
+                panic!("synthesized term is not a constant application")
+            };
+            assert_eq!(
+                render_name(ctx, n),
+                "instAddProd",
+                "matches the oracle's own `#synth Add (Prod N N)` answer's head constant"
+            );
             let ty = ctx.infer_type(inst).unwrap();
             assert!(ctx.is_def_eq(ty, goal).unwrap());
         });
@@ -2446,17 +2527,21 @@ mod tests {
     /// cannot distinguish.
     #[test]
     fn cyclic_instances_terminate() {
-        with_instances_ctx(|ctx| {
-            let goal = parse_goal(ctx, "Mul N");
-            let insts = ctx.get_instances(goal).unwrap();
-            let names: Vec<String> = insts
-                .iter()
-                .map(|i| crate::test_support::render_name(ctx, i.global_name.unwrap()))
-                .collect();
-            eprintln!("PROBE try-order Mul N = {names:?}");
-        });
         with_cyclic_instances_ctx(|ctx| {
             let goal = parse_goal(ctx, "A N");
+            // Non-vacuity guard: if `InstancesCyclic.olean`'s instances
+            // ever failed to decode, `get_instances` would return an
+            // empty candidate list and the `Ok(None)` below would still
+            // pass -- silently testing nothing about termination. Pin
+            // that the cyclic goal really does have a registered
+            // candidate (`instAofB`) before asserting the property that
+            // actually matters.
+            let insts = ctx.get_instances(goal).unwrap();
+            assert_eq!(
+                insts.len(),
+                1,
+                "the fixture must register exactly one candidate (instAofB) for `A N`"
+            );
             ctx.set_step_budget(50_000);
             assert_eq!(
                 ctx.synth_instance(goal),
