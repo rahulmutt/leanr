@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/leanr_kernel", "crates/leanr_check", "crates/leanr_cli", "crates/leanr_query", "crates/leanr_syntax", "crates/leanr_olean", "crates/leanr_grammar", "crates/leanr_build", "crates/leanr_fmt", "crates/leanr_meta"]
+members = ["crates/leanr_kernel", "crates/leanr_check", "crates/leanr_cli", "crates/leanr_query", "crates/leanr_syntax", "crates/leanr_olean", "crates/leanr_grammar", "crates/leanr_build", "crates/leanr_fmt", "crates/leanr_meta", "crates/leanr_elab"]
 exclude = ["crates/leanr_olean/fuzz", "crates/leanr_syntax/fuzz"]
 
 [workspace.package]
