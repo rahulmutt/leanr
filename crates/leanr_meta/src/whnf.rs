@@ -1233,7 +1233,7 @@ impl<'e> MetaCtx<'e> {
     ///    - WIDER than the oracle on plain `Const`-headed NON-class
     ///      types (e.g. `N`, `Eq a b`): the oracle's `isClassApp?`
     ///      rejects these after checking the real class-extension
-    ///      registry (`Basic.lean:1358-1362`), while this approximation
+    ///      registry (`Basic.lean:1350-1356,1510-1518`), while this approximation
     ///      accepts any `Const` head unconditionally;
     ///    - NARROWER than the oracle on pi-/`letE`-/`proj`-headed types
     ///      and on types that only reduce to a class head under `whnf`:

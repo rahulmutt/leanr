@@ -390,8 +390,9 @@ fn seam_excluded_mvar_goal_is_incompleteness_not_an_error() {
 /// `synthInstanceCore?` runs `SynthInstance.main` under
 /// `withNewMCtxDepth` with `isDefEqStuckEx := true`
 /// (`SynthInstance.lean:963`), so the first unification against the
-/// lower-depth `?a` throws instead of assigning
-/// (`SynthInstance.lean:1052`). leanr has neither `isDefEqStuckEx` nor a
+/// lower-depth `?a` throws instead of assigning (the throw sites are
+/// `ExprDefEq.lean:1993-2018` and `:1954-1956`; `SynthInstance.lean:1052`
+/// is where `synthPending` CATCHES it). leanr has neither `isDefEqStuckEx` nor a
 /// depth model (same gap `SEAM_EXCLUSIONS`'s `mvarGoal/synth/0` entry and
 /// `synth.rs::synth_instance_main`'s own comment document), so it simply
 /// assigns `?a := N` and answers `instAddN`.
@@ -482,8 +483,9 @@ fn exc_record_stuck_synth_0_pins_leanrs_current_divergent_answer() {
             (true, Some("instAddN")),
             "leanr's answer for `Add ?a` (`stuck/synth/0`) changed to {got:?}/{got_name:?} — \
              this test PINS the CURRENT DIVERGENT behavior (oracle throws \
-             isDefEqStuckException here: SynthInstance.lean:963 `isDefEqStuckEx := true`, \
-             :1052 where the stuck unification actually throws). If this changed because the \
+             isDefEqStuckException here: SynthInstance.lean:963 `isDefEqStuckEx := true`; \
+             the throw is ExprDefEq.lean:1993-2018, and SynthInstance.lean:1052 is the \
+             catch site). If this changed because the \
              `isDefEqStuckEx` seam closed, UPDATE this test to expect stuck-not-an-answer \
              instead of silently accepting whatever leanr now returns."
         );

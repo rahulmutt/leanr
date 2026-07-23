@@ -1553,10 +1553,12 @@ impl<'e> MetaCtx<'e> {
     // (removed by this task): `synth_instance` is the crate's typeclass-
     // synthesis ENTRY POINT, and every other item in this module and in
     // `instances.rs`/`discr_path.rs`/`discr_tree.rs` is now reachable
-    // from it -- but the entry point itself has no non-test caller until
-    // the ELABORATOR layer lands (oracle: `Lean.Elab.Term.synthesizeInst
-    // MVarCore` / `synthesizeUsingDefault`, `Elab/SyntheticMVars.lean`),
-    // which no task in this plan builds. Owner: M4b. This one allow
+    // from it. The entry point itself IS reached from non-test code --
+    // `whnf.rs::synth_pending_body` (M4a plan-4 task B6) calls it -- but
+    // not yet from the ELABORATOR layer (oracle: `Lean.Elab.Term.synthes
+    // izeInstMVarCore` / `synthesizeUsingDefault`,
+    // `Elab/SyntheticMVars.lean`), which no task in this plan builds, so
+    // some items below remain test-only. Owner: M4b. This one allow
     // covers the whole reachable chain below it; it is deliberately the
     // ONLY dead-code allow in this module.
     //
