@@ -15,35 +15,26 @@ use crate::error::ElabError;
 
 /// The registered leaf kinds. Returns a stable label for a registered
 /// kind, `None` otherwise. Grown as Tasks 4-6 land their elaborators.
-///
-/// `match_single_binding` allowed: this is a single-arm placeholder
-/// only until Tasks 4-6 add one arm per registered leaf kind — the
-/// `match` shape is deliberate, not a `None`-returning stub to be
-/// simplified away.
-#[allow(clippy::match_single_binding)]
 pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
     match kind {
-        // filled in by Tasks 4-6
+        "str" => Some("str"),
+        // filled in by Tasks 5-6 (sort/ident/ascription/hole)
         _ => None,
     }
 }
 
 /// Dispatch a term node to its leaf elaborator. Unregistered kind ->
 /// UnsupportedSyntax (never a panic, never a wrong ExprId).
-///
-/// `match_single_binding` allowed for the same reason as
-/// `elaborator_name_for` above.
-#[allow(clippy::match_single_binding)]
 pub fn dispatch(
     elab: &mut TermElabM,
     node: &SyntaxNode,
     kinds: &KindInterner,
     expected: Option<ExprId>,
 ) -> Result<ExprId, ElabError> {
-    let _ = (elab, expected);
+    let _ = expected;
     let name = kinds.name(node.kind());
     match name {
-        // Tasks 4-6 add one arm each, delegating to builtin::*.
+        "str" => crate::builtin::lit::elab_str(elab, node, kinds),
         other => Err(ElabError::UnsupportedSyntax(other.to_string())),
     }
 }

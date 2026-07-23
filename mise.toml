@@ -151,6 +151,12 @@ run = [
   # the committed Synth0.olean.
   "sh -c 'cd tests/fixtures/meta && lean Synth0.lean -o Synth0.olean'",
   "sh -c 'cd tests/fixtures/meta && LEAN_PATH=$PWD lean --run dump_synth.lean > synth-queries.jsonl'",
+  # M4b-1 Task 4: tier-1 leaf-elaboration corpus. Elab0 is prelude-mode/
+  # import-free, same shape as Meta0/Synth0 above; the query DUMP itself
+  # (dump_elab.lean's `str`-slice loop) is its own `fixtures:regen-elab`
+  # task (depends_post below) rather than inlined here, mirroring how
+  # `fixtures:regen-notation` is split out.
+  "sh -c 'cd tests/fixtures/elab && lean Elab0.lean -o Elab0.olean'",
   "sh -c 'lean --run tests/fixtures/dump_decls.lean tests/fixtures/Sample.olean > tests/fixtures/Sample.decls.txt'",
   "sh -c 'lean --run tests/fixtures/dump_decls.lean tests/fixtures/SampleRich.olean > tests/fixtures/SampleRich.decls.txt'",
   "sh -c 'lean --githash > tests/fixtures/oracle-githash.txt'",
@@ -203,7 +209,17 @@ run = [
   "sh -c 'cd tests/fixtures/syntax/import && for f in ImportOverload ImportScopedOpen ImportScopedNs; do LEAN_PATH=$PWD lean --run ../dump_syntax_elab.lean $f.lean > $f.stx.jsonl; done'",
   "sh -c 'cd tests/fixtures/syntax/import && lean Init.lean -o Init.olean'",
 ]
-depends_post = ["fixtures:regen-notation"]
+depends_post = ["fixtures:regen-notation", "fixtures:regen-elab"]
+
+[tasks."fixtures:regen-elab"]
+description = "Regenerate the M4b-1 leaf-elaboration oracle corpus (dump_elab.lean parses each term source, elaborates via Lean.Elab.Term.elabTerm, and dumps the canonical Expr). Needs the elan toolchain; never runs in CI."
+depends = ["elan:bootstrap"]
+run = [
+  # Elab0.olean is built above, in fixtures:regen's own run list
+  # (alongside Meta0.olean/Synth0.olean) — this task only re-runs the
+  # dumper, matching how fixtures:regen-notation is split out.
+  "sh -c 'cd tests/fixtures/elab && LEAN_PATH=$PWD lean --run dump_elab.lean > elab-queries.jsonl'",
+]
 
 [tasks."fixtures:regen-notation"]
 description = "Regenerate the M3b1 same-file-notation oracle dumps (dump_syntax_elab.lean — ELABORATES each command so a notation/mixfix declaration's grammar growth is live for later commands, unlike the parse-only dump_syntax.lean; see that file's module doc). Run standalone, or via fixtures:regen (depends_post)."
@@ -278,6 +294,10 @@ run = [
   "cargo test --release -p leanr_meta --test oracle_fast",
   "cargo test --release -p leanr_meta --test oracle_synth",
 ]
+
+[tasks."elab:fast"]
+description = "M4b-1 tier-1 elaboration gate: every committed leaf-term query elaborates to the oracle's Expr byte-for-byte after canonicalization. Hermetic (committed Elab0.olean + elab-queries.jsonl; no Lean, no network)."
+run = "cargo test --release --package leanr_elab --test oracle_elab"
 
 [tasks."meta:nightly:shard"]
 description = "One shard of the sharded synthesis nightly (M4a plan-4 PR-C; a SEPARATE workflow from nightly-sweep.yml, with its own pass-list, so the two never race): runs ONLY the C2 sweep (crates/leanr_meta/tests/synth_sweep.rs) for LEANR_SYNTH_SHARD=I/N over the oracle JSONL the CALLER already produced at LEANR_SYNTH_ORACLE. This task does NOT run the C1 dumper (tests/fixtures/meta/dump_synth_mathlib.lean) — per C4's two-step workflow, each shard's job runs the dumper itself as a prior, separate step (writing LEANR_SYNTH_OUT), then invokes this task with LEANR_SYNTH_ORACLE=<that file>; embedding the dump here would either double it (12x cost across shards) or overwrite the file the caller's own dump step just wrote. Writes its green list to LEANR_SYNTH_GREEN_OUT and its receipt to LEANR_SYNTH_MANIFEST_OUT (both required). A shard NEVER gates — it sees 1/N of the constants, so only meta:nightly:merge gates, over the union. Set RAYON_NUM_THREADS if desired; this task does not."

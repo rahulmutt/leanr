@@ -1,0 +1,10 @@
+{"exp":{"k":"str","v":"hello"},"id":"str/hello","src":"\"hello\""}
+{"exp":{"k":"str","v":""},"id":"str/empty","src":"\"\""}
+{"exp":{"k":"str","v":"a\nb"},"id":"str/newline","src":"\"a\\nb\""}
+{"exp":{"k":"str","v":"a\u0009b"},"id":"str/tab","src":"\"a\\tb\""}
+{"exp":{"k":"str","v":"a\\b"},"id":"str/backslash","src":"\"a\\\\b\""}
+{"exp":{"k":"str","v":"a\"b"},"id":"str/quote","src":"\"a\\\"b\""}
+{"exp":{"k":"str","v":"a'b"},"id":"str/apostrophe","src":"\"a\\'b\""}
+{"exp":{"k":"str","v":"AB"},"id":"str/hexEscape","src":"\"\\x41\\x42\""}
+{"exp":{"k":"str","v":"é"},"id":"str/unicodeEscape","src":"\"\\u00e9\""}
+{"exp":{"k":"str","v":"héllo"},"id":"str/nonAscii","src":"\"héllo\""}
