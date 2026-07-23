@@ -66,9 +66,17 @@ fn oracle_elab_gate() {
             "{id}: leanr parse errors for {src:?}: {:?}",
             parsed.errors
         );
+        // `first_child_or_token`, not `first_child` (Task 5
+        // reconciliation): a term position is not always a rowan NODE —
+        // a bare identifier is an unwrapped leaf TOKEN
+        // (`crate::dispatch`'s own module doc has the full citation:
+        // `Prim::Ident`'s `self.bump(t, KIND_IDENT)` never node-wraps,
+        // unlike `str`/`num`/`char`'s `self.lit`). `SynElem`
+        // (`leanr_elab::dispatch::SynElem`, a `rowan::NodeOrToken`)
+        // covers both.
         let root = parsed.tree.root();
-        let term_node = root
-            .first_child()
+        let term_elem: leanr_elab::dispatch::SynElem = root
+            .first_child_or_token()
             .unwrap_or_else(|| panic!("{id}: parse_term produced no term child for {src:?}"));
 
         let mut scratch = Store::scratch();
@@ -82,7 +90,7 @@ fn oracle_elab_gate() {
             &default_instances,
             &projection_fns,
         );
-        let mut elab = TermElabM::new(mctx);
+        let mut elab = TermElabM::new(mctx, view);
         // Slice 1's pinned entry point, matching `dump_elab.lean`'s own
         // module doc: `elab_term` (dispatch to the leaf elaborator)
         // then `instantiate_mvars` — no postponement/synthesis pass
@@ -93,7 +101,7 @@ fn oracle_elab_gate() {
         // `elab_term` directly so this gate exercises the SAME method
         // a future ascription-bearing query (Task 6) will.
         let got = elab
-            .elab_term_ensuring_type(&term_node, &parsed.tree.kinds, None)
+            .elab_term_ensuring_type(&term_elem, &parsed.tree.kinds, None)
             .and_then(|e| {
                 elab.mctx
                     .instantiate_mvars(e)
@@ -102,8 +110,18 @@ fn oracle_elab_gate() {
 
         match got {
             Ok(g) => {
+                // `base = Some(view.store)` (Task 5 reconciliation,
+                // mirroring `oracle_fast.rs`'s own `let base =
+                // Some(view.store);`): `g` can now embed a
+                // PERSISTENT-region `NameId` (`ident`'s resolved global
+                // constant name), which `elab.mctx.store()` — the
+                // elaborator's own SCRATCH store — cannot resolve on its
+                // own; `encode_expr`'s internal `to_name` needs the
+                // persistent store as a fallback base, exactly like
+                // every kernel-side `Store` method with a `base`
+                // parameter.
                 let mut st = EncSt::default();
-                let got_json = encode_expr(elab.mctx.store(), None, g, &mut st);
+                let got_json = encode_expr(elab.mctx.store(), Some(view.store), g, &mut st);
                 if got_json != q["exp"] {
                     failures.push(format!("{id}: leanr={got_json} oracle={}", q["exp"]));
                 }

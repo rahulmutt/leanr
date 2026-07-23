@@ -1,4 +1,5 @@
 //! Leaf elaborators, one module per family (design spec § Crate and
-//! module layout). `sort`/`ident`/`ascription`/`hole` land in Tasks
-//! 5-6; `lit` (this task) is the first.
+//! module layout). `sort`/`ascription`/`hole` land in Task 6; `lit`
+//! (Task 4) and `ident` (this task) are the first two.
+pub mod ident;
 pub mod lit;

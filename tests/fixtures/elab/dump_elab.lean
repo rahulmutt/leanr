@@ -183,6 +183,15 @@ def strQueries : List (String × String) :=
   , ("str/nonAscii", "\"héllo\"")
   ]
 
+/-- Task 5: the identifier leaf elaborator. `Nat` has zero universe
+params (`const Nat []`, no fresh level mvar); `List` has exactly one
+(`const List [?u]`, one fresh level mvar per `levelParams` — the first
+query to exercise `lmvar` end-to-end). -/
+def identQueries : List (String × String) :=
+  [ ("ident/Nat", "Nat")
+  , ("ident/List", "List")
+  ]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -196,7 +205,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries do
+    for (id, src) in strQueries ++ identQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>

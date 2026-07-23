@@ -76,3 +76,48 @@ structure Prod (α : Type u) (β : Type v) where
 -- reach; grow to the real definition in whichever later task first
 -- needs String's actual shape.
 axiom String : Type
+
+-- === Task 5 corpus: identifier leaf elaborator (`ident`) ===
+--
+-- `Nat` (zero universe params) and `List` (exactly one universe param,
+-- `u`) exercise `elab_ident`'s two shapes: `const Nat []` (no fresh
+-- level mvars minted) and `const List [?u]` (one fresh level mvar per
+-- `levelParams`, canonicalizing to `lmvar` index 0) — the first task to
+-- exercise `lmvar` end-to-end. Minimal but real inductives (Nat's own
+-- constructors are never consulted by the `ident` slice — no
+-- `inferType`/defeq call touches them, same "opaque stand-in is fine"
+-- reasoning as `axiom String` above — but a real `inductive` is used
+-- anyway per this task's own scope, rather than another axiom, so a
+-- later slice needing Nat's actual constructors/recursor has less to
+-- redo).
+-- `genCtorIdx false`: Lean's `inductive` elaborator auto-generates
+-- `T.ctorIdx`/`T.ctor.elim` for every multi-constructor inductive
+-- IFF the environment already `.contains \`Nat` (`Lean/Elab/
+-- MutualInductive.lean`'s `mkAuxConstructions`, `hasNat := env.contains
+-- \`\`Nat`) — a purely name-based check, not a semantic one. The moment
+-- THIS declaration brings a constant literally named `Nat` into scope
+-- (itself, and after it, `List`), that generator activates and tries
+-- to build a `Nat`-valued lookup table (`Lean.mkNatLookupTable`) using
+-- the REAL `cond`/`Nat.ble`/`Nat.decEq` primitives — none of which
+-- exist in this minimal prelude-mode fixture (confirmed empirically:
+-- omitting this option fails with `unknown constant 'cond'`/
+-- `'Nat.decEq'`). `set_option genCtorIdx false` (checked directly by
+-- `mkCtorIdx`'s own guard) suppresses `T.ctorIdx`, which in turn makes
+-- `mkCtorElim`'s own "does `T.ctorIdx` exist" precondition false, so
+-- neither ever runs. Harmless here: the `ident` slice never calls
+-- either.
+set_option genCtorIdx false in
+inductive Nat : Type where
+  | zero : Nat
+  | succ : Nat → Nat
+
+universe u
+
+-- `List`, universe-polymorphic in exactly one parameter `u` — the
+-- minimal shape that produces a single fresh `lmvar` per `ident/List`
+-- query. `genCtorIdx false`: same reasoning as `Nat` above (this
+-- declaration is itself now past the `hasNat` tripwire).
+set_option genCtorIdx false in
+inductive List (α : Type u) where
+  | nil : List α
+  | cons : α → List α → List α

@@ -8,3 +8,5 @@
 {"exp":{"k":"str","v":"AB"},"id":"str/hexEscape","src":"\"\\x41\\x42\""}
 {"exp":{"k":"str","v":"é"},"id":"str/unicodeEscape","src":"\"\\u00e9\""}
 {"exp":{"k":"str","v":"héllo"},"id":"str/nonAscii","src":"\"héllo\""}
+{"exp":{"k":"const","n":"Nat","us":[]},"id":"ident/Nat","src":"Nat"}
+{"exp":{"k":"const","n":"List","us":[{"i":0,"k":"lmvar"}]},"id":"ident/List","src":"List"}
