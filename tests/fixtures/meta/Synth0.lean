@@ -135,3 +135,20 @@ class Chain (a : Type u) where ch : a
 instance instChainN : Chain N where ch := N.zero
 instance instChainProd {a b : Type u} [Chain a] [Chain b] : Chain (Prod a b) where
   ch := Prod.mk Chain.ch Chain.ch
+
+-- CYCLIC instance graph (design spec § tier-1 corpus shapes lists this
+-- alongside diamond/negative/stuck; B7's curated list had omitted it —
+-- see the B7 review report). `CycA`/`CycB` are derivable ONLY from each
+-- other (`CycA a` from `CycB a`, `CycB a` from `CycA a`), with NO base
+-- instance anywhere in the 2-cycle, so `CycA N` is genuinely
+-- unsolvable — same shape as B5's `InstancesCyclic.lean`
+-- (`synth.rs::cyclic_instances_terminate`), but exercised here
+-- DIFFERENTIALLY against the oracle rather than only as a leanr-side
+-- termination unit test. The point of the query is that deciding
+-- "no instance" TERMINATES rather than loops; `cyclic/synth/0`'s
+-- `near_budget` flag would catch it if it came anywhere near the
+-- oracle's own heartbeat budget.
+class CycA (a : Type u) where mkA : a → a
+class CycB (a : Type u) where mkB : a → a
+instance instCycAofB {a : Type u} [CycB a] : CycA a where mkA := fun x => x
+instance instCycBofA {a : Type u} [CycA a] : CycB a where mkB := fun x => x

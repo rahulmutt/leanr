@@ -10,5 +10,6 @@
 {"goal":{"a":{"k":"const","n":"N","us":[]},"f":{"k":"const","n":"Pri","us":[{"k":"zero"}]},"k":"app"},"id":"priority/synth/0","mvars":[],"near_budget":false,"ok":true,"q":"synth","val":{"k":"const","n":"instPriHigh","us":[]}}
 {"goal":{"a":{"k":"const","n":"N","us":[]},"f":{"k":"const","n":"NoInst","us":[{"k":"zero"}]},"k":"app"},"id":"negative/synth/0","mvars":[],"near_budget":false,"ok":false,"q":"synth"}
 {"goal":{"a":{"a":{"k":"const","n":"N","us":[]},"f":{"a":{"k":"const","n":"NoBase","us":[]},"f":{"k":"const","n":"Prod","us":[{"k":"zero"},{"k":"zero"}]},"k":"app"},"k":"app"},"f":{"k":"const","n":"Chain","us":[{"k":"zero"}]},"k":"app"},"id":"negativeSub/synth/0","mvars":[],"near_budget":false,"ok":false,"q":"synth"}
+{"goal":{"a":{"k":"const","n":"N","us":[]},"f":{"k":"const","n":"CycA","us":[{"k":"zero"}]},"k":"app"},"id":"cyclic/synth/0","mvars":[],"near_budget":false,"ok":false,"q":"synth"}
 {"goal":{"a":{"k":"const","n":"N","us":[]},"f":{"a":{"i":0,"k":"mvar"},"f":{"k":"const","n":"OfN","us":[{"k":"zero"}]},"k":"app"},"k":"app"},"id":"mvarGoal/synth/0","mvars":[{"i":0,"t":{"k":"const","n":"N","us":[]}}],"near_budget":false,"ok":true,"q":"synth","val":{"a":{"i":0,"k":"mvar"},"f":{"k":"const","n":"instOfNN","us":[]},"k":"app"}}
-{"id":"stuck/synth/0","msg":"internal exception #7","q":"exc"}
+{"goal":{"a":{"i":0,"k":"mvar"},"f":{"k":"const","n":"Add","us":[{"k":"zero"}]},"k":"app"},"id":"stuck/synth/0","msg":"internal exception #7","mvars":[{"i":0,"t":{"k":"sort","u":{"k":"succ","u":{"k":"zero"}}}}],"q":"exc"}
