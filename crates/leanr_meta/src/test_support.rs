@@ -156,6 +156,115 @@ pub(crate) fn with_prelude0_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
     f(&mut ctx)
 }
 
+/// Replay `Instances.olean` (PR-A's decode fixture for the typeclass-
+/// synthesis extensions: `instanceExtension`/`defaultInstanceExtension`/
+/// `projectionFnInfoExt`; task B2's own fixture). Same shape as
+/// [`with_matcher_ctx`] just above — `prelude`-mode, import-free, replayed
+/// into a fresh empty `Environment` (see `Instances.lean`'s own module doc
+/// for the fixture's classes/instances: `Add`/`Mul`/`Semigroup extends
+/// Mul`/`Monoid extends Semigroup`, `inductive N`, `instAddN`/`instMulN`/
+/// `instSemigroupN`/`instMonoidN`, the parametrized `instAddProd {a b}
+/// [Add a] [Add b] : Add (Prod a b)`, and `OfN`/`@[default_instance]
+/// instOfNN`).
+pub(crate) fn with_instances_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
+    let bytes = std::fs::read(fixture_path("Instances.olean")).expect("Instances.olean fixture");
+    let mut env = Environment::default();
+    let md = ModuleData::parse(&bytes, env.store_mut()).expect("Instances.olean decodes");
+    assert!(
+        md.imports.is_empty(),
+        "Instances.olean must be import-free (prelude-mode fixture) — \
+         with_instances_ctx replays it into an empty Environment with no \
+         dependency loading"
+    );
+    let reducibility = md.reducibility;
+    let matchers = md.matchers;
+    let constants: HashMap<NameId, ConstantInfo> =
+        md.constants.into_iter().map(|c| (c.name(), c)).collect();
+    leanr_kernel::replay(&mut env, constants).expect("Instances.olean replays");
+
+    let view = env.view();
+    let mut scratch = Store::scratch();
+    let mut ctx = MetaCtx::new(
+        view,
+        &mut scratch,
+        Config::default(),
+        &reducibility,
+        &matchers,
+    );
+    f(&mut ctx)
+}
+
+/// Build an `Expr.const` for `name`, filling its universe-level
+/// arguments with `Level.zero` repeated once per the constant's OWN
+/// declared `level_params` arity (mirrors `infer.rs::tests::
+/// const_type_instantiates_levels`'s idiom: a bare empty level list is
+/// only valid for a level-param-free constant, and every class/instance
+/// in `Instances.lean` is declared with at least one `u`, so a real
+/// `MetaCtx::infer_type` call on the result — which `discr_path.rs`'s
+/// `ignoreArg`/`isType`/`isProof` machinery makes constantly — would
+/// otherwise fail `infer_const`'s own level-arity check). `Level.zero`
+/// is an arbitrary-but-safe placeholder: nothing this task's tests probe
+/// (binder info, `Sort`-headedness, `Prop`-headedness) depends on which
+/// universe is actually chosen.
+fn const_expr_for(ctx: &mut MetaCtx, name: NameId) -> ExprId {
+    let base = Some(ctx.view.store);
+    let arity = ctx
+        .view
+        .get(name)
+        .map(|info| info.constant_val().level_params.len())
+        .unwrap_or(0);
+    let z = ctx.scratch.level_zero(base).expect("level");
+    let levels = vec![z; arity];
+    let levels = ctx
+        .scratch
+        .intern_level_list(base, &levels)
+        .expect("levels");
+    ctx.scratch
+        .expr_const(base, Some(name), levels)
+        .expect("const")
+}
+
+/// An `Expr.const` for a root (single-component) name, interned against
+/// the CURRENT store's persistent base — the `infer.rs::tests::single`+
+/// `const_expr` idiom, promoted here (task B2) since `discr_path.rs`'s
+/// tests need the exact same "look up a fixture-declared constant by its
+/// plain name" shape, and per this file's own module doc, duplication
+/// per module is what it exists to avoid. See [`const_expr_for`] for why
+/// this fills in real (`Level.zero`) universe arguments rather than an
+/// empty list.
+pub(crate) fn const_named(ctx: &mut MetaCtx, name: &str) -> ExprId {
+    let base = Some(ctx.view.store);
+    let s = ctx.scratch.intern_str(base, name).expect("intern");
+    let n = ctx.scratch.name_str(base, None, s).expect("name");
+    const_expr_for(ctx, n)
+}
+
+/// An `Expr.const` for a two-component dotted name (`"Add.add"`,
+/// `"N.zero"`, ...), same interning/level-filling convention as
+/// [`const_named`] above.
+pub(crate) fn const_dotted(ctx: &mut MetaCtx, a: &str, b: &str) -> ExprId {
+    let base = Some(ctx.view.store);
+    let a_str = ctx.scratch.intern_str(base, a).expect("intern");
+    let a_name = ctx.scratch.name_str(base, None, a_str).expect("name");
+    let b_str = ctx.scratch.intern_str(base, b).expect("intern");
+    let n = ctx
+        .scratch
+        .name_str(base, Some(a_name), b_str)
+        .expect("name");
+    const_expr_for(ctx, n)
+}
+
+/// Render a `NameId` to its plain dotted string, resolved through the
+/// CURRENT store's persistent base — the assertion-readability helper
+/// `discr_path.rs`'s tests use to check a `DiscrKey::Const { name, .. }`
+/// against a name like `"Add"` without hand-rolling `NameId` equality at
+/// every call site.
+pub(crate) fn render_name(ctx: &MetaCtx, name: NameId) -> String {
+    ctx.scratch
+        .to_name(Some(ctx.view.store), Some(name))
+        .to_string()
+}
+
 /// Replay `Matcher.olean` (task 1's decode fixture; prelude-mode,
 /// import-free, replays from an empty environment exactly like
 /// `Prelude0` — see `Matcher.lean`'s own module doc for why a

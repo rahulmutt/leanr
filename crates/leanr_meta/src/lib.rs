@@ -14,6 +14,7 @@ mod assign;
 mod cache;
 mod config;
 mod defeq;
+mod discr_path;
 pub mod discr_tree;
 mod error;
 mod infer;
