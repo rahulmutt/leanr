@@ -31,17 +31,24 @@
 //! (`Meta/Basic.lean:424-429`) -- the two algorithms B4 named as a seam
 //! it was leaving to B5.
 //!
-//! # Divergence recorded, not absorbed
+//! # `Mul N` agrees with the oracle's `#synth`
 //!
-//! `Mul N` over the `Instances.olean` fixture resolves to
-//! `Semigroup.toMul instSemigroupN` here where the pinned toolchain's
-//! own `#synth Mul N` answers `instMulN`. Both inhabit the goal (defeq,
-//! never unsound), and the cause is upstream of this module -- B1's
-//! `DiscrTree::process` inverts `getUnify`'s `visitStar`-then-
-//! `visitNonStar` order (`DiscrTree/Main.lean:606`), so candidates
-//! reach `generate` in the opposite try-order. Pinned by
-//! `mul_n_picks_the_wrong_candidate_first_because_of_the_discr_tree_order`
-//! below, which must FAIL (and be updated) once B1 is corrected.
+//! `Mul N` over the `Instances.olean` fixture resolves to `instMulN`
+//! here, matching the pinned toolchain's own `#synth Mul N` exactly (not
+//! merely a defeq alternative). This was NOT always true: an earlier
+//! version of `DiscrTree::process` (B1) inverted `getUnify`'s
+//! `visitStar`-then-`visitNonStar` order (`DiscrTree/Main.lean:606`), so
+//! candidates reached `generate` in the opposite try-order and this
+//! goal resolved to `Semigroup.toMul instSemigroupN` instead -- still a
+//! genuine inhabitant of the goal (defeq, never unsound), but a
+//! DIFFERENT term from the oracle's. That was pinned as a characterized
+//! divergence by
+//! `mul_n_matches_the_oracles_synth_answer_via_the_corrected_discr_tree_order`
+//! below (formerly named for the divergence it characterized); B1 has
+//! since been corrected to match the oracle's order, and that same test
+//! now pins the positive result: leanr's canonical instance term for
+//! this goal agrees with Lean's `#synth`, which is what Task B7's tier-1
+//! differential gate needs to compare against an oracle dump.
 //!
 //! # `GoalKey`: a hash-consed `ExprId`, not a hand-rolled digest
 //!
@@ -2484,16 +2491,24 @@ mod tests {
         });
     }
 
-    /// **CHARACTERIZATION TEST for a CONFIRMED DIVERGENCE from the
-    /// oracle, attributable to B1, not to this task's driver.**
+    /// **POSITIVE CONFIRMATION that leanr agrees with the oracle's
+    /// `#synth`, no longer a divergence characterization.**
     ///
     /// Probed against the pinned toolchain (`#synth Mul N` over
     /// `tests/fixtures/Instances.lean`, v4.33.0-rc1): Lean answers
-    /// `instMulN`. This crate answers `Semigroup.toMul instSemigroupN`
-    /// instead. Both inhabit `Mul N` and are definitionally equal, so
-    /// this is a divergent-answer, never an unsound one -- but it IS a
-    /// divergence, and this test exists so it is pinned and loud rather
-    /// than silently absorbed.
+    /// `instMulN`. This crate now answers `instMulN` too -- the exact
+    /// same term, not merely a defeq alternative.
+    ///
+    /// This test used to pin a CONFIRMED DIVERGENCE (named
+    /// `mul_n_picks_the_wrong_candidate_first_because_of_the_discr_tree_order`,
+    /// asserting `Semigroup.toMul instSemigroupN`): an earlier version of
+    /// `DiscrTree::process` (B1) inverted the oracle's try-order (see
+    /// below), so `get_instances` handed this driver
+    /// `["Semigroup.toMul", "instMulN"]` where the oracle's own order is
+    /// `["instMulN", "Semigroup.toMul"]`, and the driver -- correctly --
+    /// returned the first candidate that produced an answer, which was
+    /// therefore the wrong TERM (still a genuine inhabitant of the goal,
+    /// defeq, never unsound, but a different term from the oracle's).
     ///
     /// Root cause, traced: `getUnify.process`'s non-root arm is
     /// `visitNonStar k args (← visitStar result)`
@@ -2501,21 +2516,14 @@ mod tests {
     /// output is the accumulator `visitNonStar` appends to, so the
     /// oracle's result array is `[<star matches>, <specific matches>]`,
     /// which `generate`'s back-to-front read (`SynthInstance.lean:
-    /// 630-631`) turns into "specific candidate tried FIRST".
-    /// `discr_tree.rs::DiscrTree::process` (B1) deliberately inverts
-    /// that pair ("specific before wildcard", its own comment at the
-    /// `visitNonStar`/`visitStar` call site), so `get_instances`'s
-    /// already-reversed try-order hands this driver
-    /// `["Semigroup.toMul", "instMulN"]` where the oracle would hand it
-    /// `["instMulN", "Semigroup.toMul"]`, and the driver -- correctly --
-    /// returns the first candidate that produces an answer.
-    ///
-    /// The fix belongs to `DiscrTree::process` (swap those two calls),
-    /// which this task is explicitly scoped out of modifying. When B1 is
-    /// corrected, THIS TEST MUST FAIL and be updated to expect
-    /// `instMulN` -- that failure is the point.
+    /// 630-631`) turns into "specific candidate tried FIRST". B1 has
+    /// been corrected (user decision, oracle wins over the plan's
+    /// "specific-before-wildcard" wording -- see `discr_tree.rs`'s
+    /// module doc, "Superseded plan wording") to match that order, so
+    /// `get_instances`'s try-order now agrees with the oracle's, and so
+    /// does the synthesized term.
     #[test]
-    fn mul_n_picks_the_wrong_candidate_first_because_of_the_discr_tree_order() {
+    fn mul_n_matches_the_oracles_synth_answer_via_the_corrected_discr_tree_order() {
         with_instances_ctx(|ctx| {
             let goal = parse_goal(ctx, "Mul N");
             let insts = ctx.get_instances(goal).expect("get_instances");
@@ -2525,8 +2533,8 @@ mod tests {
                 .collect();
             assert_eq!(
                 order,
-                vec!["Semigroup.toMul".to_string(), "instMulN".to_string()],
-                "B1 try-order (oracle would be the reverse)"
+                vec!["instMulN".to_string(), "Semigroup.toMul".to_string()],
+                "corrected try-order, matching the oracle's own getUnify order"
             );
 
             let inst = ctx.synth_instance(goal).unwrap().expect("an instance");
@@ -2536,11 +2544,11 @@ mod tests {
             };
             assert_eq!(
                 render_name(ctx, n),
-                "Semigroup.toMul",
-                "oracle answers `instMulN` here -- see this test's doc"
+                "instMulN",
+                "matches the oracle's own `#synth Mul N` answer exactly"
             );
-            // Still a genuine inhabitant of the goal: the divergence is
-            // in WHICH answer, never in whether the answer type-checks.
+            // A genuine inhabitant of the goal, and now the SAME term
+            // the oracle produces, not just a defeq alternative.
             let ty = ctx.infer_type(inst).unwrap();
             assert!(ctx.is_def_eq(ty, goal).unwrap());
         });

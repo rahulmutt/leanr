@@ -172,9 +172,11 @@
 //! 1. `getInstances` builds `result := globalInstances.getUnify type`
 //!    (`SynthInstance.lean:210-211`) — B1's own `DiscrTree::get_match_keys`
 //!    transcribes exactly this `getUnify`, so `result`'s order IS this
-//!    crate's `get_match_keys` output order (specific-before-wildcard,
-//!    deterministic sibling/insertion order — `discr_tree.rs`'s module
-//!    doc).
+//!    crate's `get_match_keys` output order (wildcard-before-specific,
+//!    matching the oracle's own `getUnify.process` order —
+//!    `discr_tree.rs`'s module doc, "Match order: wildcard before
+//!    specific (oracle order)" — plus deterministic sibling/insertion
+//!    order).
 //! 2. `result := result.insertionSort fun e1 e2 => e1.priority < e2.priority`
 //!    (`SynthInstance.lean:212-214`) — a STABLE sort, ASCENDING by
 //!    priority (ties keep their step-1 relative order).

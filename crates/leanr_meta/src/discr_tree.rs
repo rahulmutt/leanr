@@ -76,6 +76,38 @@
 //! (`Main.lean:579-584` vs. `585-606`). Termination is structural (each
 //! recursive call descends one real trie level into a finite tree), not
 //! metric on `skip`, which can legitimately grow before it shrinks.
+//!
+//! ## Match order: wildcard before specific (oracle order)
+//!
+//! At a concrete query key, `process` visits the stored `Star` child
+//! BEFORE the exact/specific-key child, so a query's matches come back
+//! wildcard-matches-first. This is a direct transcription of
+//! `getUnify.process`'s non-root arm,
+//! `visitNonStar k args (← visitStar result)` (`Main.lean:606`):
+//! `visitStar` runs first and its resulting array is the accumulator
+//! that `visitNonStar` then appends the specific-key matches onto, so
+//! the oracle's own `result` array is ordered
+//! `[<star matches>, <specific matches>]` before `generate` ever reads
+//! it — the oracle's order is wildcard-then-specific, not the reverse.
+//!
+//! **Superseded plan wording:** B1's implementation plan described this
+//! module's contract as "matches specific-before-wildcard", and an
+//! earlier version of `process` implemented exactly that by visiting
+//! the exact-key child before the stored-`Star` child — a deliberate
+//! (at the time) reversal of the oracle's own order, justified in-place
+//! as brief-mandated. That reversal is retired. In this project,
+//! differential agreement with the pinned Lean oracle defines
+//! correctness (AGENTS.md, "Oracle discipline") — not the plan's prose
+//! paraphrase of it — and Task B7's tier-1 differential gate compares
+//! the canonical *instance term* B5's synthesis driver returns against
+//! an oracle dump: try-order feeds directly into which candidate
+//! `generate` returns first (`SynthInstance.lean`'s back-to-front
+//! `currInstanceIdx` read), so getting this order backwards was
+//! observably wrong at the term level, not just a cosmetic ordering
+//! choice (see `synth.rs`'s `Mul N` test, formerly a pinned divergence,
+//! now a positive agreement check). The plan's wording is superseded by
+//! this decision; the code now matches `Main.lean:606` and the tests
+//! below assert wildcard-before-specific.
 
 use leanr_olean::DiscrKey;
 
@@ -179,11 +211,13 @@ impl<V> DiscrTree<V> {
     }
 
     /// Return every value whose stored path matches `path`, informally
-    /// "unifying" `Star` positions in either side, specific matches
-    /// before wildcard matches (an explicit contract for this generic
-    /// trie — see this module's doc for why the plainer oracle
-    /// `getMatch` isn't the transcription target for the `Star`-query
-    /// side).
+    /// "unifying" `Star` positions in either side. Order: wildcard
+    /// matches before specific matches, matching the oracle's own
+    /// `getUnify.process` (`Main.lean:606`: `visitStar` runs first and
+    /// seeds the accumulator `visitNonStar` appends onto) — see this
+    /// module's doc, "Superseded plan wording", and this module's doc
+    /// for why the plainer oracle `getMatch` isn't the transcription
+    /// target for the `Star`-query side.
     pub fn get_match_keys(&self, path: &[DiscrKey]) -> Vec<&V> {
         let mut out = Vec::new();
         Self::process(0, path, &self.root, &mut out);
@@ -222,15 +256,18 @@ impl<V> DiscrTree<V> {
                     Self::process(key_arity(key), rest, child, out);
                 }
             }
-            // Main.lean:600-603 (`visitNonStar`) then Main.lean:594-599
-            // (`visitStar`) — specific before wildcard, per this
-            // module's contract (the oracle itself accumulates
-            // wildcard-then-specific; deliberately reversed here, see
-            // the module doc and `specific_beats_wildcard`).
+            // Main.lean:606: `visitNonStar k args (← visitStar result)` —
+            // `visitStar` is evaluated FIRST and its output array is the
+            // accumulator `visitNonStar` then appends the specific-key
+            // matches onto, so the oracle's own order is
+            // wildcard-THEN-specific. Matched here: we visit the stored
+            // `Star` child before the exact/specific-key child. (An
+            // earlier version of this function visited them in the
+            // opposite order — see the module doc's "Superseded" note —
+            // that was wrong; this is the corrected, oracle-matching
+            // order, pinned by
+            // `wildcard_precedes_specific_matching_the_oracle`.)
             Some((key, rest)) => {
-                if let Some(child) = node.child(key) {
-                    Self::process(0, rest, child, out);
-                }
                 // Main.lean:594-599 (`visitStar`): a *stored* `Star`
                 // child swallows the query's entire current subterm
                 // `e`, arguments included — so unlike `visitNonStar`
@@ -251,6 +288,12 @@ impl<V> DiscrTree<V> {
                 // query `f (g x)`).
                 if let Some(star_child) = node.child(&DiscrKey::Star) {
                     Self::process(0, skip_args(rest, key_arity(key)), star_child, out);
+                }
+                // Main.lean:600-603 (`visitNonStar`): the exact/specific
+                // child, visited SECOND so its matches are appended
+                // after the star child's (see the arm comment above).
+                if let Some(child) = node.child(key) {
+                    Self::process(0, rest, child, out);
                 }
             }
         }
@@ -306,15 +349,24 @@ mod tests {
         }
     }
 
+    /// Pins the oracle's own match order (`Main.lean:606`:
+    /// `visitNonStar k args (← visitStar result)` — `visitStar` runs
+    /// first and seeds the accumulator `visitNonStar` appends onto), at
+    /// a concrete query key with both a stored wildcard sibling and a
+    /// stored exact-match sibling. Formerly named `specific_beats_wildcard`
+    /// and asserting the reverse order, per B1's plan wording
+    /// ("specific-before-wildcard") — superseded by user decision in
+    /// favor of the oracle's actual order (see the module doc's
+    /// "Superseded plan wording" note).
     #[test]
-    fn specific_beats_wildcard() {
+    fn wildcard_precedes_specific_matching_the_oracle() {
         let mut t: DiscrTree<&'static str> = DiscrTree::default();
         // Add a → [Const Add 1, Const N 0] and a wildcard a → [Const Add 1, Star]
         t.insert(&[/*Add*/ c((1, 1)), /*N*/ c((2, 0))], "specific");
         t.insert(&[/*Add*/ c((1, 1)), DiscrKey::Star], "wildcard");
-        // A concrete query Add N returns specific FIRST, then wildcard.
+        // A concrete query Add N returns wildcard FIRST, then specific.
         let got = t.get_match_keys(&[c((1, 1)), c((2, 0))]);
-        assert_eq!(got, vec![&"specific", &"wildcard"]);
+        assert_eq!(got, vec![&"wildcard", &"specific"]);
     }
 
     #[test]
