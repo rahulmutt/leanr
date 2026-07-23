@@ -8,6 +8,41 @@
 //! (`Lean/Meta/Instances.lean:385-436`), pinned toolchain
 //! `leanprover/lean4:v4.33.0-rc1`.
 //!
+//! # `val`'s level params are NOT refreshed here (named seam — owned by B5)
+//!
+//! **Read this before consuming `Instance::val`.** `getInstances`'s own
+//! decode step (`SynthInstance.lean:222-226`) does not hand back `e.val`
+//! verbatim:
+//! ```text
+//! val := e.val.updateConst! (← us.mapM (fun _ => mkFreshLevelMVar))
+//! ```
+//! i.e. for a universe-polymorphic instance, EVERY universe argument of
+//! the decoded `Const` is replaced by a FRESH level metavariable before
+//! the candidate is ever handed to `tryResolve`. `Instance::val` below is
+//! `e.val` copied verbatim from the decoded `InstanceEntry`
+//! (`InstanceTable::build`, the `val: e.val` field below) —
+//! `mkConstWithLevelParams declName`, i.e. a `Const` still carrying the
+//! DECLARATION's own RIGID `Level.param`s, not fresh mvars. If a
+//! synthesis driver unifies the goal's levels against `Instance::val` as
+//! stored here without first performing this refresh, a
+//! universe-polymorphic instance's levels are rigid params rather than
+//! mvars: unification against the goal's (typically concrete-or-mvar)
+//! levels will spuriously FAIL for the common case, or — in the unlucky
+//! case where a param name happens to satisfy defeq some other way —
+//! could "succeed" for the wrong reason. This is the one step of
+//! `getInstances` this table does not transcribe.
+//!
+//! It is intentionally NOT implemented here: minting fresh level mvars
+//! needs a live `mctx` (to allocate them into), which this
+//! table-construction code does not have — `InstanceTable::build` runs
+//! once, off a bare `EnvView`, with no `MetaCtx` in scope at all — and
+//! which only a query-time caller holds. **B5 owns implementing this
+//! refresh**: once per candidate, immediately after reading
+//! `Instance::val` out of `get_instances`'s result and before attempting
+//! to unify or apply it, B5 must replace each of `val`'s universe
+//! arguments with a freshly-minted level mvar, exactly as
+//! `SynthInstance.lean:222-226` does.
+//!
 //! # `synth_order`: read, never recomputed (controller decision)
 //!
 //! The design/plan text for this task described `synth_order` as a
@@ -43,6 +78,14 @@
 //! (this task's fixture) declares no `scoped instance`, so this seam is
 //! not exercised either way by the fixture.
 //!
+//! **Ownership**: closing this gap needs the same M3b3-style
+//! namespace-open-tracking/activation model `MetaCtx::new`'s own
+//! `ReducibilityEntry` comment already defers — no task in this plan
+//! owns building that model, so this stays an explicitly unowned seam for
+//! M4b/future work, revisited if a corpus divergence ever implicates a
+//! `scoped instance` — same unowned-seam treatment as the
+//! erasure/private-instance seam documented further below.
+//!
 //! # `global_name: None` (named seam, not a silent skip)
 //!
 //! `addInstance` (`Instances.lean:283-304`) is the ONLY producer of a
@@ -77,7 +120,7 @@
 //! rather than panicking or fabricating a `ty` — same incompleteness-only
 //! reasoning as the `global_name: None` case above.
 //!
-//! # Erasure / private-instance filtering (named seam)
+//! # Erasure / private-instance filtering (named seam — DIVERGENT-ANSWER risk, unowned)
 //!
 //! `getInstances` (`SynthInstance.lean:215-223`) filters its
 //! `getUnify` result against two RUNTIME (not `.olean`-decoded) sources
@@ -91,14 +134,33 @@
 //! side, and there is no `.olean`-level "is this constant private /
 //! exporting" flag consumed here either. `get_instances` below therefore
 //! never filters against either: an erased or private-and-leaking
-//! instance name can still surface as a candidate. This is
-//! incompleteness-shaped only in the SAME direction as every other seam
-//! in this crate (more candidates offered, not fewer/wrong): a synthesis
-//! driver (B5) that goes on to actually build and kernel-check a term
-//! from a stale/erased instance will simply fail elaboration for that
-//! candidate, never produce an unsound kernel-accepted term. Not
-//! exercised by `Instances.lean` (no `attribute [-instance]`, no
-//! `private`/module-exporting distinction in the fixture).
+//! instance name can still surface as a candidate.
+//!
+//! **This is NOT merely incompleteness — it is a divergent-answer risk.**
+//! Synthesis returns the FIRST successful candidate it tries (`generate`'s
+//! back-to-front walk, `SynthInstance.lean:589-621`), so an extra
+//! candidate that the oracle itself would have filtered out (an
+//! `attribute [-instance]`-erased instance, or a private one that would
+//! have been rejected by the exporting check) can be tried, SUCCEED, and
+//! be returned as THE synthesis answer where the oracle would have
+//! skipped it and picked a different instance (or none at all). That is a
+//! silently DIFFERENT answer from the oracle's, not just a dropped or
+//! incomplete one. The kernel independently re-checking the resulting
+//! term still guarantees no UNSOUND term is ever accepted, but this
+//! project's constraint is "never a silent wrong answer", and this seam
+//! can violate that constraint at the synthesis layer even while kernel
+//! soundness holds.
+//!
+//! **Ownership**: closing this gap needs a new `.olean` decode —
+//! `leanr_olean` would have to decode `Instances.erased` (a
+//! `PHashSet Name`) and, separately, a private/exporting flag per
+//! constant, before `get_instances` here could filter on either. No task
+//! in this plan owns building that decoder; it is PR-A-shaped work this
+//! plan does not contain, and is explicitly left as an unowned seam for
+//! M4b/future work rather than silently deferred. Not exercised by
+//! `Instances.lean` (no `attribute [-instance]`, no private/exporting
+//! distinction in the fixture) — no test in this module currently
+//! observes the gap.
 //!
 //! # `get_instances` ordering (source wins over the brief's paraphrase)
 //!
@@ -174,6 +236,25 @@
 //! preserves the subsequence's own reversal" reason `get_instances`
 //! relies on above.
 //!
+//! `getDefaultInstances` (`Instances.lean:432-436`) also applies its OWN
+//! private-instance filter that is separate from, and not modeled by, the
+//! erasure/private seam documented above:
+//! ```text
+//! if env.isExporting then
+//!   -- private instances must not leak into public scope
+//!   return insts.filter fun (n, _) => env.contains n
+//! else
+//!   return insts
+//! ```
+//! i.e. when the environment is in "exporting" mode, a default-instance
+//! entry whose declared name is not itself visible/contained in the
+//! current environment is dropped. `default_instances` below does not
+//! model this at all — no `isExporting`/`contains` check anywhere in this
+//! table or method — same unowned, PR-A-shaped-decoder gap as the
+//! erasure/private seam above (this crate has no decoded "is this
+//! constant private / is the environment exporting" state to check
+//! against), not yet exercised by `Instances.olean`.
+//!
 //! # Landed ahead of its consumer
 //!
 //! `get_instances`/`default_instances`/`instance_named` are `pub(crate)`
@@ -230,6 +311,21 @@ pub(crate) struct Instance {
 /// win to precomputing it). No `erased` field: see this module's own
 /// doc on erasure filtering — nothing here ever populates or consults
 /// one.
+///
+/// **Divergence from the oracle's `insertVal` (owned by B1, not this
+/// task)**: `DiscrTree::insert` (`discr_tree.rs`) unconditionally pushes
+/// onto a node's value vec. The oracle's `insertVal`
+/// (`DiscrTree/Basic.lean:139-150`) instead REPLACES the first `vs[i]`
+/// with `v == vs[i]`, where `InstanceEntry`'s `BEq` compares only
+/// `.val` (`e₁.val == e₂.val`, `Instances.lean:66-67`). So re-registering
+/// an instance under the same `val` (e.g. `attribute [instance 100] foo`
+/// changing only `foo`'s priority) yields ONE entry in Lean's tree but
+/// TWO entries here — the stale one keeps its old priority, and
+/// [`InstanceTable::get_by_name`]'s `by_name` map (last-write-wins, a
+/// plain `HashMap::insert`) then disagrees with what `tree` returns. The
+/// fix belongs to B1's `DiscrTree::insert`, not here — see that module's
+/// own doc — but `InstanceTable::build` is the first consumer where
+/// duplicate values become semantically possible, hence the note here.
 #[derive(Default)]
 pub(crate) struct InstanceTable {
     tree: DiscrTree<Instance>,
@@ -266,6 +362,9 @@ impl InstanceTable {
                 continue;
             };
             let inst = Instance {
+                // `val: e.val` verbatim — level params NOT refreshed to
+                // fresh mvars here; see module doc's "`val`'s level
+                // params are NOT refreshed here" seam (owned by B5).
                 val: e.val,
                 ty: info.constant_val().ty,
                 priority: e.priority,
@@ -298,6 +397,14 @@ impl<'e> MetaCtx<'e> {
     /// of `getUnify`'s own traversal order, not forward registration
     /// order).
     ///
+    /// **Consumption contract for callers (B5): element 0 is the FIRST
+    /// candidate to try — consume this result FRONT-TO-BACK.** This is
+    /// the opposite direction from the oracle's own array, which
+    /// `generate` reads BACK-TO-FRONT (see the module doc's derivation);
+    /// the whole point of composing the stable-ascending sort with a
+    /// `reverse()` here is to undo that back-to-front reading so this
+    /// method's result is already in try-order. Do not re-reverse it.
+    ///
     /// Swaps `self.instances` out via `mem::take` before calling
     /// `discr_get_match` (same idiom as `defeq.rs`/`level.rs`'s own
     /// `mem::take(&mut self.postponed)`): `discr_get_match(&mut self,
@@ -310,6 +417,18 @@ impl<'e> MetaCtx<'e> {
     /// `InstanceTable::default()`, an empty table, for the duration of
     /// the call) and put back immediately after.
     pub(crate) fn get_instances(&mut self, goal: ExprId) -> Result<Vec<Instance>, MetaError> {
+        // INVARIANT (re-entrancy): `self.instances` is `InstanceTable::default()`
+        // (empty) for the whole duration of the `discr_get_match` call
+        // below. Harmless today because `mk_path`/`whnf` never consult
+        // the instance table, so nothing reachable from
+        // `discr_get_match` can observe the table being briefly taken.
+        // If a future change makes path construction (or anything else
+        // `discr_get_match` transitively calls) re-entrant into instance
+        // lookup, a nested `get_instances` call here would silently see
+        // this now-empty placeholder table and report "no instances"
+        // rather than erroring — there is no assertion below that would
+        // catch that, so a future change widening what `discr_get_match`
+        // touches must re-check this invariant by inspection.
         let table = std::mem::take(&mut self.instances);
         let result: Result<Vec<Instance>, MetaError> = self
             .discr_get_match(&table.tree, goal)
