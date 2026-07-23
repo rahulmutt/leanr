@@ -23,6 +23,7 @@ mod lazy_delta;
 mod level;
 mod metactx;
 mod mvar_ctx;
+mod synth;
 #[cfg(test)]
 mod test_support;
 mod transparency;
