@@ -1559,8 +1559,19 @@ impl<'e> MetaCtx<'e> {
     // which no task in this plan builds. Owner: M4b. This one allow
     // covers the whole reachable chain below it; it is deliberately the
     // ONLY dead-code allow in this module.
+    //
+    // Visibility (M4a plan-4 task B7): `pub`, not `pub(crate)`, because
+    // the tier-1 differential gate `crates/leanr_meta/tests/
+    // oracle_synth.rs` is a separate crate and must call it. This
+    // matches how every other entry point this crate's gates replay
+    // against is already exposed (`MetaCtx::whnf`/`infer_type`/
+    // `is_def_eq`). Behavior is unchanged; the `#[allow(dead_code)]`
+    // above is kept because the ELABORATOR caller described there still
+    // does not exist (a `pub` item in a lib crate is never dead-code-
+    // linted, so the attribute is now belt-and-braces, retained so the
+    // seam's ownership note stays attached to the item it describes).
     #[allow(dead_code)]
-    pub(crate) fn synth_instance(&mut self, ty: ExprId) -> Result<Option<ExprId>, MetaError> {
+    pub fn synth_instance(&mut self, ty: ExprId) -> Result<Option<ExprId>, MetaError> {
         self.guarded(|ctx| ctx.synth_instance_main(ty))
     }
 

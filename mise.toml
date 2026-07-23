@@ -144,6 +144,13 @@ run = [
   # equals the env leanr replays from the committed .olean.
   "sh -c 'cd tests/fixtures/meta && lean Meta0.lean -o Meta0.olean'",
   "sh -c 'cd tests/fixtures/meta && LEAN_PATH=$PWD lean --run dump_defeq.lean > meta-queries.jsonl'",
+  # M4a plan 4 task B7: tier-1 SYNTHESIS corpus. Same hermetic shape as
+  # Meta0/dump_defeq just above — Synth0 is prelude-mode/import-free and
+  # the dumper imports ONLY Synth0 (LEAN_PATH=$PWD), so the oracle env
+  # equals the env crates/leanr_meta/tests/oracle_synth.rs replays from
+  # the committed Synth0.olean.
+  "sh -c 'cd tests/fixtures/meta && lean Synth0.lean -o Synth0.olean'",
+  "sh -c 'cd tests/fixtures/meta && LEAN_PATH=$PWD lean --run dump_synth.lean > synth-queries.jsonl'",
   "sh -c 'lean --run tests/fixtures/dump_decls.lean tests/fixtures/Sample.olean > tests/fixtures/Sample.decls.txt'",
   "sh -c 'lean --run tests/fixtures/dump_decls.lean tests/fixtures/SampleRich.olean > tests/fixtures/SampleRich.decls.txt'",
   "sh -c 'lean --githash > tests/fixtures/oracle-githash.txt'",
@@ -266,8 +273,11 @@ depends = ["elan:bootstrap"]
 run = "sh -c 'LEANR_SWEEP_LIMIT=\"\" LEANR_SWEEP_PASSLIST_ONLY=1 LEANR_MATHLIB_DIR=\"$PWD/.mathlib\" LEANR_OLEAN_PATH=\"$(cd .mathlib && lake env printenv LEAN_PATH)\" cargo test --release -p leanr_grammar --test mathlib_sweep -- --ignored --nocapture'"
 
 [tasks."meta:fast"]
-description = "Tier-1 meta differential gate: every committed whnf/infer query agrees with the oracle. Hermetic, seconds; runs in the dev loop (also runs inside plain `mise run test`)."
-run = ["cargo test --release -p leanr_meta --test oracle_fast"]
+description = "Tier-1 meta differential gate: every committed whnf/infer/defeq query (oracle_fast) and every committed typeclass-synthesis query (oracle_synth) agrees with the oracle. Hermetic, seconds; runs in the dev loop (also runs inside plain `mise run test`)."
+run = [
+  "cargo test --release -p leanr_meta --test oracle_fast",
+  "cargo test --release -p leanr_meta --test oracle_synth",
+]
 
 [tasks."parse:mathlib"]
 description = "HEAVYWEIGHT/NIGHTLY tier — full Mathlib parse sweep vs the pass-list ratchet (needs mathlib:fetch). Walks the whole corpus and decodes an olean closure per distinct import set (~8,221 sets): ~35h at RAYON_NUM_THREADS=5 on 8 effective cores, dominated by closure decode, not the oracle. Do NOT run this in the dev loop — use parse:mathlib:fast for that. LEANR_SWEEP_LIMIT=N for a smoke run. Snapshot build + sweep are streamed per import set (no barrier, no accumulated snapshots) and run in parallel via rayon; set RAYON_NUM_THREADS=N to cap worker threads (e.g. under memory pressure from parallel oracle `lean` subprocesses)."
