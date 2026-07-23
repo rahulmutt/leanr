@@ -87,6 +87,30 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 /// `ident` as a token, always the same way — but is still routed to
 /// `UnsupportedSyntax` rather than panicking, per this crate's
 /// never-panic-on-a-named-seam discipline.
+///
+/// Named-seam audit (Task 7): both `match` blocks that read a kind name
+/// in this crate — this one, and `builtin::sort::elab_level`'s nested
+/// dispatch over `Lean.Parser.Level.*` kinds — end in a catch-all `(other,
+/// _) => Err(ElabError::UnsupportedSyntax(other.to_string()))` arm. There
+/// is no third place in `leanr_elab` that pattern-matches on a kind name
+/// (`resolve.rs`'s `resolve_global` never inspects syntax at all), so
+/// every non-leaf term/level kind that reaches either dispatch point is
+/// named, never silently skipped or defaulted.
+///
+/// Deferred (each hits `UnsupportedSyntax` until its slice lands):
+/// ```text
+///   binders (fun/forall/let/have/show) ......... M4b-2
+///   application, @, named/optional args ........ M4b-3
+///   num / char literals (OfNat / Char.ofNat) ... M4b-3
+///   coercions (mkCoe) .......................... M4b-3
+///   elabAsElim, dot-notation, binop%, ⟨⟩ ....... M4b-4
+///   macro expansion in dispatch ................ first macro-form slice
+///   open / alias / export / _root_ resolution .. later slice
+/// ```
+/// (`Lean.Parser.Level.max`/`.imax`/`.paren`/`.addLit`, the level-scope
+/// analogue of the above, are named seams inside `elab_level` itself —
+/// see `builtin::sort`'s own module doc — rather than this table, since
+/// they are not term-position kinds `dispatch` ever sees directly.)
 pub fn dispatch(
     elab: &mut TermElabM,
     elem: &SynElem,
