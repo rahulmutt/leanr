@@ -14,6 +14,7 @@ mod assign;
 mod cache;
 mod config;
 mod defeq;
+pub mod discr_tree;
 mod error;
 mod infer;
 mod lazy_delta;
@@ -26,6 +27,7 @@ mod transparency;
 mod whnf;
 
 pub use config::{Config, ProjReduction};
+pub use discr_tree::DiscrTree;
 pub use error::MetaError;
 pub use metactx::{MetaCtx, DEFAULT_STEP_BUDGET};
 pub use mvar_ctx::{LMVarId, MVarDecl, MVarId, MVarKind, MetavarContext};
