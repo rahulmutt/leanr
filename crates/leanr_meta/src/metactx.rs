@@ -222,6 +222,16 @@ impl<'e> MetaCtx<'e> {
     /// than this task's own scope, for a constructor that already has
     /// exactly one call style (every call site passes all eight slices
     /// positionally, `grep`-verified, no partial-application anywhere).
+    ///
+    /// **Follow-up, explicitly flagged (opus review round 1): the NEXT
+    /// decoded extension makes this 9.** At that point, stop widening
+    /// this positional list and instead introduce a `DecodedExtensions`
+    /// (or similarly named) params struct bundling every
+    /// `&[XyzEntry]` slice this constructor takes, with each call site
+    /// building one from a `ModuleData` (`md.reducibility`, `md.matchers`,
+    /// ..., `md.projection_fns`, ...) — a mechanical, low-risk refactor
+    /// deferred out of THIS task's scope, not an open question about
+    /// whether it should happen.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         view: EnvView<'e>,

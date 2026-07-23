@@ -83,6 +83,25 @@
 //!   but never this one — out of that task's stated scope); always
 //!   `None` there (same posture as `to_ctor_when_structure`'s `mkProjFn`
 //!   elision, below).
+//! - (task B6, opus review round 1) `synth_pending`'s missing
+//!   `catchInternalId isDefEqStuckExceptionId` (`SynthInstance.lean:
+//!   1052`): the oracle CATCHES an internal `isDefEqStuck` exception
+//!   raised by the nested `synthInstance?` attempt and returns `false`
+//!   in its place; this crate's `synth_pending_body` instead lets
+//!   `MetaError::IsDefEqStuck` escape (via `?`) all the way out through
+//!   `sunfold_go_match` to `whnf`'s own caller. Direction: safe — an
+//!   `Err` surfaces where the oracle would have produced an `Ok`
+//!   ANSWER, never a WRONG one — but it IS a genuine, currently
+//!   unreconciled divergence in observable control flow (the
+//!   differential gate will report an ERROR where the oracle recorded
+//!   an answer for any query that routes a stuck sub-defeq through
+//!   here), not merely a stricter restatement of the oracle's own
+//!   discipline. See `synth_pending`'s own doc comment for why this
+//!   crate's Global Constraints forbid the alternative (collapsing
+//!   `IsDefEqStuck` to `false`) without also fixing this by actually
+//!   catching-and-reconciling it. Owner: M4b / future — no task number
+//!   assigned yet; this is a deliberate, tracked divergence, not a
+//!   silent one.
 
 use leanr_kernel::bank::pools::DataValueRow;
 use leanr_kernel::bank::terms::Node;
@@ -1195,27 +1214,61 @@ impl<'e> MetaCtx<'e> {
     ///    independent class registry exists anywhere in this crate to
     ///    confirm that `Const` truly names a REGISTERED class — the same
     ///    posture `discr_path.rs`'s and `lazy_delta.rs`'s own
-    ///    `isClass?`/`isClass` seams already document). This can only
-    ///    make `synth_pending` attempt synthesis for STRICTLY MORE types
-    ///    than the oracle's own quick check would (any `Const`-headed
-    ///    type, not just class-headed ones), never fewer — and attempting
-    ///    synthesis on a non-class type is SAFE, not merely
-    ///    incomplete-safe: `InstanceTable`'s discrimination tree is keyed
-    ///    ONLY by real class `Const`s (every key comes from `mk_path` on
-    ///    some registered INSTANCE's own declared type, `instances.rs`'s
-    ///    `InstanceTable::build`), so a query under a non-class name
-    ///    structurally cannot match any stored candidate — `synth_instance`
-    ///    itself returns `Ok(None)`, the exact same `false` outcome the
-    ///    oracle's own quick check would have produced, just reached one
-    ///    call layer further in. `instantiateMVars` (also :1040, folded
-    ///    into `isClass?`'s own argument) is elided per this module's
-    ///    established posture elsewhere (`get_stuck_mvar`'s own doc):
-    ///    only a bare head-mvar dereference is threaded through here (via
-    ///    `mctx.decl`'s already-fully-substituted `ty`, since a
-    ///    metavariable's DECLARED type is fixed at `declare` time and
-    ///    never itself carries a not-yet-assigned "outer" mvar-of-a-mvar
-    ///    layer worth chasing beyond what `get_app_fn` alone already
-    ///    sees).
+    ///    `isClass?`/`isClass` seams already document).
+    ///
+    ///    **Correction (opus review, round 1): the direction is NOT
+    ///    "strictly more, never fewer" — an earlier draft of this doc
+    ///    claimed that, and it is false.** The real oracle predicate is
+    ///    wider than a bare `Const`-head test in BOTH directions, not
+    ///    just one: `isClassQuick?` (`Basic.lean:1366`) recurses through
+    ///    `.forallE` binders (so `∀ α, Inhabited α` IS a class type to
+    ///    the oracle, but its head is a `Forall`, never a `Const`), and
+    ///    `isClassExpensive?` (:1520-1522, reached whenever the quick
+    ///    check is inconclusive) runs `forallTelescopeReducingAux ..
+    ///    (whnfType := true)` BEFORE its own `isClassApp?` check (so a
+    ///    `.letE`-/`.proj`-headed type, or one that only reduces to a
+    ///    class head under `whnf`, also counts to the oracle —
+    ///    `Basic.lean:1358-1381,1508-1528`). So this seam actually
+    ///    diverges in both directions at once:
+    ///    - WIDER than the oracle on plain `Const`-headed NON-class
+    ///      types (e.g. `N`, `Eq a b`): the oracle's `isClassApp?`
+    ///      rejects these after checking the real class-extension
+    ///      registry (`Basic.lean:1358-1362`), while this approximation
+    ///      accepts any `Const` head unconditionally;
+    ///    - NARROWER than the oracle on pi-/`letE`-/`proj`-headed types
+    ///      and on types that only reduce to a class head under `whnf`:
+    ///      the oracle accepts these (`Basic.lean:1366,1508-1528`), but
+    ///      a `Forall`/`LetE`/`Proj` node handed to `get_app_fn` is never
+    ///      a `Const` node, so this approximation rejects all of them.
+    ///
+    ///    Both directions are still safe overall — the failure mode is
+    ///    always incompleteness-or-refusal, never a wrong synthesis —
+    ///    but for two DIFFERENT reasons, not one shared one:
+    ///    - the WIDER direction is safe because `InstanceTable`'s
+    ///      discrimination tree is keyed ONLY by real class `Const`s
+    ///      (every key comes from `mk_path` on some registered
+    ///      INSTANCE's own declared type, `instances.rs`'s
+    ///      `InstanceTable::build`), so a query under a non-class
+    ///      `Const` name structurally cannot match any stored candidate
+    ///      — `synth_instance` itself returns `Ok(None)`, the exact same
+    ///      `false` outcome the oracle's own quick check would have
+    ///      produced, just reached one call layer further in (never a
+    ///      WRONG synthesis result, only extra unproductive work);
+    ///    - the NARROWER direction is safe because refusing to even
+    ///      ATTEMPT a legitimate pending synthesis is pure incompleteness
+    ///      (the oracle would have made progress here; this crate leaves
+    ///      the mvar unresolved and returns `false` instead) — the same
+    ///      "refuse rather than guess" posture every other named seam in
+    ///      this module already takes, never a wrong verdict.
+    ///
+    ///    `instantiateMVars` (also :1040, folded into `isClass?`'s own
+    ///    argument) is elided per this module's established posture
+    ///    elsewhere (`get_stuck_mvar`'s own doc): only a bare head-mvar
+    ///    dereference is threaded through here (via `mctx.decl`'s
+    ///    already-fully-substituted `ty`, since a metavariable's
+    ///    DECLARED type is fixed at `declare` time and never itself
+    ///    carries a not-yet-assigned "outer" mvar-of-a-mvar layer worth
+    ///    chasing beyond what `get_app_fn` alone already sees).
     /// 4. `synthPendingDepth > maxSynthPendingDepth` (:1044-1048) — this
     ///    crate's own `synth_pending_depth` counter against
     ///    `MAX_SYNTH_PENDING_DEPTH` (both above), bumped for the
@@ -1224,16 +1277,36 @@ impl<'e> MetaCtx<'e> {
     ///    tighter bound than `guard_depth`'s (condition 1's own doc
     ///    explains why the two must not be conflated).
     ///
-    /// `catchInternalId isDefEqStuckExceptionId` (:1052) is a no-op here:
-    /// `IsDefEqStuck` is this crate's own typed `MetaError` variant, not
-    /// an internal exception id, and this method's `?` on
-    /// `synth_instance`'s result already PROPAGATES it untouched — per
-    /// this crate's own discipline (Global Constraints: `IsDefEqStuck`
-    /// never collapses to `false`), which is stricter than, and
-    /// deliberately does not replicate, the oracle's own `catch _ => pure
-    /// none` (the oracle silently treats a stuck defeq as an ordinary
-    /// synthesis failure; this crate refuses to and lets the caller see
-    /// the budget/stuck error instead).
+    /// `mvarId.withContext` (`SynthInstance.lean:1033`) — NAMED SEAM
+    /// (opus review round 1; not previously called out): the oracle
+    /// runs the WHOLE `synthPendingImp` body under `mvarDecl.lctx` (the
+    /// mvar's OWN local context at declaration time), not whatever local
+    /// context happens to be ambient at the call site. This method never
+    /// swaps `self.lctx` to `decl.lctx` before calling `synth_instance`
+    /// below — a silent drop, not an undecoded-oracle-feature gap:
+    /// `MVarDecl.lctx` (`mvar_ctx.rs`) carries exactly this context, and
+    /// `assign.rs:734` (`mk_aux_mvar_for`) already has precedent for
+    /// consulting it. Effect: incompleteness only (a subgoal needing a
+    /// local hypothesis visible only under the mvar's OWN context, not
+    /// the ambient one, may fail to synthesize where the oracle would
+    /// have succeeded) — never a wrong synthesis, since a term assigned
+    /// under a mismatched local context would fail the kernel's own
+    /// re-check rather than pass it silently.
+    ///
+    /// `catchInternalId isDefEqStuckExceptionId` (:1052) is NOT
+    /// replicated here — NAMED SEAM (see the module doc's "Named seams"
+    /// list, above, for the full citation and owner): `IsDefEqStuck` is
+    /// this crate's own typed `MetaError` variant, not an internal
+    /// exception id, and this method's `?` on `synth_instance`'s result
+    /// PROPAGATES it untouched rather than catching it and returning
+    /// `false` the way the oracle's own `catch _ => pure none` does.
+    /// Direction: safe (an `Err` surfaces where the oracle would have
+    /// produced an `Ok` ANSWER, never a WRONG one) — but this crate's own
+    /// discipline (Global Constraints: `IsDefEqStuck` never collapses to
+    /// `false`) is a reason NOT to fix this by catching it here, not a
+    /// reason the divergence isn't real: a caller expecting bit-for-bit
+    /// oracle control flow will observe an `Err` where the oracle returns
+    /// `Ok(false)`.
     ///
     /// The final `mvarId.isAssigned` re-check (:1057-1058) is folded into
     /// an UPFRONT short-circuit here instead (`synth_pending`, below,
@@ -1256,8 +1329,22 @@ impl<'e> MetaCtx<'e> {
         if self.mctx.is_assigned(mvar) {
             return Ok(false);
         }
+        // oracle: `mvarId.getDecl` (`MetavarContext.lean`) THROWS
+        // `throwUnknownMVarAt` on an undeclared mvar rather than
+        // returning `false` — reconciled here (opus review round 1;
+        // every OTHER `false` in this method carries an oracle line,
+        // this one used to carry none). `get_stuck_mvar`'s `Node::MVar
+        // { id }` arm (this module) can hand back an id that was never
+        // `declare`d in THIS `MetavarContext` (e.g. a bank `MVar` node
+        // reached by traversal that this crate itself never minted), so
+        // the case is real, not merely hypothetical. Reuses the crate's
+        // existing "caller-bug" error variant (`MetaError::MVar`, the
+        // SAME one `assign.rs`/`synth.rs` already raise for this exact
+        // oracle exception) rather than inventing a new one.
         let Some(decl) = self.mctx.decl(mvar) else {
-            return Ok(false);
+            return Err(MetaError::MVar(format!(
+                "synth_pending: mvar {mvar:?} is not declared"
+            )));
         };
         if decl.kind == MVarKind::SyntheticOpaque {
             return Ok(false);
@@ -3630,6 +3717,181 @@ mod tests {
             ctx.set_transparency(TransparencyMode::Default);
             let r = ctx.unfold_proj_inst_when_instances(e).unwrap();
             assert_eq!(r, None, "must not fire outside .instances/.implicit");
+        });
+    }
+
+    // -----------------------------------------------------------------
+    // Task B6 fix round 1 (opus review): tests for the headline
+    // SEMANTICS the four tests above never exercised — the depth guard
+    // (condition 4) and the `from_class == false` gate (the whole
+    // "no fixture answer changed" regression argument's real
+    // mechanism, per the corrected report). Plus the two optional ones
+    // (condition 2's early return, the explicit-args fallback loop)
+    // since both turned out straightforward.
+    // -----------------------------------------------------------------
+
+    /// (b), REQUIRED: the depth guard itself (oracle
+    /// `synthPendingDepth greater than maxSynthPendingDepth`,
+    /// `SynthInstance.lean:1044-1048`, default `1`) — this task's own
+    /// crux. Forcing `synth_pending_depth` past
+    /// `MAX_SYNTH_PENDING_DEPTH` BEFORE the call must refuse WITHOUT
+    /// assigning the mvar, distinguishing this from the general
+    /// `guard_depth`/`MAX_REC_DEPTH` bound (a much larger budget that
+    /// would not fire at depth 2) — this is what actually pins
+    /// `MAX_SYNTH_PENDING_DEPTH`, not merely "synth_pending eventually
+    /// terminates".
+    #[test]
+    fn synth_pending_depth_guard_refuses_without_assigning() {
+        use crate::test_support::with_instances_ctx;
+        with_instances_ctx(|ctx| {
+            let (_goal, mvar) = stuck_mul_over_fresh_instance(ctx);
+            ctx.synth_pending_depth = MAX_SYNTH_PENDING_DEPTH + 1;
+            let progressed = ctx.synth_pending(mvar).unwrap();
+            assert!(
+                !progressed,
+                "must refuse once synth_pending_depth exceeds \
+                 MAX_SYNTH_PENDING_DEPTH, even though the goal is \
+                 otherwise identical to the resolving test above"
+            );
+            assert!(
+                !ctx.mctx().is_assigned(mvar),
+                "a refused attempt must not assign the mvar as a side \
+                 effect"
+            );
+        });
+    }
+
+    /// (d), REQUIRED: the `from_class == false` gate (oracle
+    /// `getProjectionFnInfo?`'s own `fromClass` field, `WHNF.lean:349`;
+    /// `isProjInst`, `WHNF.lean:782-784`) is what the ENTIRE "no fixture
+    /// answer changed" regression argument for this task actually rests
+    /// on (see the task report's corrected argument, Minor 6) — not an
+    /// empty `projection_fns` registry, which this test disproves by
+    /// construction. `Matcher.olean` declares a PLAIN (non-class)
+    /// `structure Prod` with field `fst`; `projectionFnInfoExt` (Lean's
+    /// own extension) registers a `ProjectionFnInfo` for EVERY structure
+    /// field, class or not, so `projection_fns` genuinely contains a
+    /// `Prod.fst` entry here with `from_class == false`. Building an
+    /// application that genuinely carries an unresolved mvar in the
+    /// structure-argument position and confirming BOTH class-projection
+    /// seams still answer `None` proves the `from_class` check — not an
+    /// absent lookup — is what stops them.
+    #[test]
+    fn from_class_false_gates_plain_structure_projection() {
+        use crate::test_support::{const_dotted, const_named, fresh_mvar, with_matcher_ctx};
+        with_matcher_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let prod = const_named(ctx, "Prod");
+            let prod_n_n = ctx.mk_app_spine(prod, &[n, n]).expect("Prod N N");
+            let (s_expr, _s_mvar) = fresh_mvar(ctx, prod_n_n);
+            let prod_fst = const_dotted(ctx, "Prod", "fst");
+            let e = ctx
+                .mk_app_spine(prod_fst, &[n, n, s_expr])
+                .expect("Prod.fst N N ?s");
+
+            // Confirm the premise: `projection_fns` genuinely has an
+            // entry for `Prod.fst`, and it is genuinely `from_class ==
+            // false` — proving the seams below gate on that field, not
+            // on an empty/missing lookup.
+            let fst_name = match ctx.node(prod_fst) {
+                Node::Const { name: Some(n), .. } => n,
+                other => panic!("expected Prod.fst to be a bare Const, got {other:?}"),
+            };
+            let info = ctx.projection_fns.get(&fst_name).expect(
+                "Prod.fst must have a projection_fns entry: every \
+                         structure field registers one, not only classes'",
+            );
+            assert!(
+                !info.from_class,
+                "Prod is declared with plain `structure`, not `class` — \
+                 from_class must be false"
+            );
+
+            let found = ctx.get_stuck_mvar(e).unwrap();
+            assert_eq!(
+                found, None,
+                "get_stuck_mvar must stop at the from_class gate even \
+                 though a real unresolved mvar sits in the structure \
+                 argument position"
+            );
+
+            ctx.set_transparency(TransparencyMode::Instances);
+            let unfolded = ctx.unfold_proj_inst_when_instances(e).unwrap();
+            assert_eq!(
+                unfolded, None,
+                "unfold_proj_inst_when_instances must stop at the same \
+                 from_class gate (isProjInst), independent of transparency"
+            );
+        });
+    }
+
+    /// (a), optional but straightforward: condition 2's early return
+    /// (oracle `mvarDecl.kind matches .syntheticOpaque => return false`,
+    /// `SynthInstance.lean:1035-1036`) — a synthetic-opaque mvar must be
+    /// refused even when its declared type is otherwise class-headed and
+    /// genuinely synthesizable (isolates condition 2 from condition 3:
+    /// this reuses the SAME class-headed type `stuck_mul_over_fresh_
+    /// instance` already proved synthesizable, on a mvar declared with
+    /// the ONE differing field, `kind`).
+    #[test]
+    fn synth_pending_refuses_synthetic_opaque_mvar() {
+        use crate::test_support::{const_named, fresh_mvar, with_instances_ctx};
+        with_instances_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let mul_const = const_named(ctx, "Mul");
+            let mul_n = ctx.mk_app_spine(mul_const, &[n]).expect("Mul N");
+            let (_m_expr, m_id) = fresh_mvar(ctx, mul_n);
+            ctx.mctx_mut().declare(
+                m_id,
+                MVarDecl {
+                    user_name: None,
+                    ty: mul_n,
+                    lctx: Default::default(),
+                    kind: MVarKind::SyntheticOpaque,
+                },
+            );
+            let progressed = ctx.synth_pending(m_id).unwrap();
+            assert!(
+                !progressed,
+                "a syntheticOpaque mvar must never be resolved by \
+                 synth_pending, even over an otherwise-synthesizable type"
+            );
+            assert!(!ctx.mctx().is_assigned(m_id));
+        });
+    }
+
+    /// (c), optional but straightforward: the explicit-args fallback
+    /// loop (oracle `getStuckMVar?`'s :354-364, "recurse on the explicit
+    /// arguments") — reached only when the major-instance-arg check
+    /// (:350-353) does NOT find a stuck mvar because the instance itself
+    /// is already resolved (`instMulN`, concrete). Puts the stuck mvar
+    /// in an EXPLICIT argument position instead (`Mul.mul N instMulN ?x
+    /// y`), so a green result here can only come from the fallback loop,
+    /// not the major-arg check `get_stuck_mvar_descends_class_projection_
+    /// to_instance_mvar` (above) already exercises.
+    #[test]
+    fn get_stuck_mvar_falls_back_to_explicit_arg_when_major_resolved() {
+        use crate::test_support::{
+            const_dotted, const_named, fresh_fvar, fresh_mvar, with_instances_ctx,
+        };
+        with_instances_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let mul_mul = const_dotted(ctx, "Mul", "mul");
+            let inst_mul_n = const_named(ctx, "instMulN");
+            let (x_expr, x_mvar) = fresh_mvar(ctx, n);
+            let y = fresh_fvar(ctx, n, "y");
+            let e = ctx
+                .mk_app_spine(mul_mul, &[n, inst_mul_n, x_expr, y])
+                .expect("Mul.mul N instMulN ?x y");
+            let found = ctx.get_stuck_mvar(e).unwrap();
+            assert_eq!(
+                found,
+                Some(x_mvar),
+                "the major instance arg (instMulN) is already resolved, \
+                 so the stuck mvar must be found via the :354-364 \
+                 explicit-args fallback loop, not the :350-353 \
+                 major-instance-arg check"
+            );
         });
     }
 }
