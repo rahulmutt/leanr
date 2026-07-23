@@ -18,6 +18,7 @@ mod discr_path;
 pub mod discr_tree;
 mod error;
 mod infer;
+mod instances;
 mod lazy_delta;
 mod level;
 mod metactx;

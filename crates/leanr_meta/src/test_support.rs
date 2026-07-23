@@ -39,7 +39,7 @@ pub(crate) fn with_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
         quot_initialized: false,
         store: &base,
     };
-    let mut ctx = MetaCtx::new(view, &mut scratch, Config::default(), &[], &[]);
+    let mut ctx = MetaCtx::new(view, &mut scratch, Config::default(), &[], &[], &[], &[]);
     f(&mut ctx)
 }
 
@@ -140,6 +140,8 @@ pub(crate) fn with_prelude0_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
     let md = ModuleData::parse(&bytes, env.store_mut()).expect("Prelude0 decodes");
     let reducibility = md.reducibility;
     let matchers = md.matchers;
+    let instances = md.instances;
+    let default_instances = md.default_instances;
     let constants: HashMap<NameId, ConstantInfo> =
         md.constants.into_iter().map(|c| (c.name(), c)).collect();
     leanr_kernel::replay(&mut env, constants).expect("Prelude0 replays");
@@ -152,6 +154,8 @@ pub(crate) fn with_prelude0_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
         Config::default(),
         &reducibility,
         &matchers,
+        &instances,
+        &default_instances,
     );
     f(&mut ctx)
 }
@@ -178,6 +182,8 @@ pub(crate) fn with_instances_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
     );
     let reducibility = md.reducibility;
     let matchers = md.matchers;
+    let instances = md.instances;
+    let default_instances = md.default_instances;
     let constants: HashMap<NameId, ConstantInfo> =
         md.constants.into_iter().map(|c| (c.name(), c)).collect();
     leanr_kernel::replay(&mut env, constants).expect("Instances.olean replays");
@@ -190,6 +196,8 @@ pub(crate) fn with_instances_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
         Config::default(),
         &reducibility,
         &matchers,
+        &instances,
+        &default_instances,
     );
     f(&mut ctx)
 }
@@ -254,6 +262,35 @@ pub(crate) fn const_dotted(ctx: &mut MetaCtx, a: &str, b: &str) -> ExprId {
     const_expr_for(ctx, n)
 }
 
+/// Build a goal expression from a space-separated spec: the head is a
+/// bare (root-name) constant, each remaining token another bare
+/// constant applied as an argument — e.g. `"Add N"` builds `@Add N`
+/// (task B3's own `instance_table_finds_add_n` test; brief's suggested
+/// helper name, reimplemented here as a free function per this file's
+/// existing style rather than a `MetaCtx` method — see [`const_named`]
+/// for the same level-filling convention this reuses per token).
+pub(crate) fn parse_goal(ctx: &mut MetaCtx, spec: &str) -> ExprId {
+    let mut tokens = spec.split_whitespace();
+    let head_name = tokens.next().expect("parse_goal: empty spec");
+    let head = const_named(ctx, head_name);
+    let args: Vec<ExprId> = tokens.map(|t| const_named(ctx, t)).collect();
+    ctx.mk_app_spine(head, &args)
+        .expect("parse_goal: mk_app_spine")
+}
+
+/// Find one instance by its bare declaration name (task B3's own
+/// `instance_named` brief helper, reimplemented as a free function per
+/// this file's existing style — see [`parse_goal`]'s doc for why).
+/// Returns an owned clone (`Instance: Clone`) since `MetaCtx::
+/// instance_named`'s borrow cannot outlive the `&str`-interning calls
+/// this needs to make first.
+pub(crate) fn instance_named(ctx: &mut MetaCtx, name: &str) -> Option<crate::instances::Instance> {
+    let base = Some(ctx.view.store);
+    let s = ctx.scratch.intern_str(base, name).expect("intern");
+    let n = ctx.scratch.name_str(base, None, s).expect("name");
+    ctx.instance_named(n).cloned()
+}
+
 /// Render a `NameId` to its plain dotted string, resolved through the
 /// CURRENT store's persistent base — the assertion-readability helper
 /// `discr_path.rs`'s tests use to check a `DiscrKey::Const { name, .. }`
@@ -292,6 +329,8 @@ pub(crate) fn with_matcher_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
     );
     let reducibility = md.reducibility;
     let matchers = md.matchers;
+    let instances = md.instances;
+    let default_instances = md.default_instances;
     let constants: HashMap<NameId, ConstantInfo> =
         md.constants.into_iter().map(|c| (c.name(), c)).collect();
     leanr_kernel::replay(&mut env, constants).expect("Matcher.olean replays");
@@ -304,6 +343,8 @@ pub(crate) fn with_matcher_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
         Config::default(),
         &reducibility,
         &matchers,
+        &instances,
+        &default_instances,
     );
     f(&mut ctx)
 }

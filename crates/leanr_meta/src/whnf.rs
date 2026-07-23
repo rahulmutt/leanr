@@ -2630,6 +2630,8 @@ mod tests {
             crate::Config::default(),
             &reducibility,
             &[],
+            &[],
+            &[],
         );
 
         ctx.set_transparency(TransparencyMode::Reducible);
@@ -3007,7 +3009,15 @@ mod tests {
             store: &base,
         };
         let mut scratch = Store::scratch();
-        let mut ctx = MetaCtx::new(view, &mut scratch, crate::Config::default(), &[], &[]);
+        let mut ctx = MetaCtx::new(
+            view,
+            &mut scratch,
+            crate::Config::default(),
+            &[],
+            &[],
+            &[],
+            &[],
+        );
 
         let result = ctx.whnf(e).expect("whnf");
         assert_eq!(
@@ -3123,7 +3133,7 @@ mod tests {
             transparency: TransparencyMode::Default, // above .instances
             ..crate::Config::default()
         };
-        let mut ctx = MetaCtx::new(view, &mut scratch, cfg, &reducibility, &[]);
+        let mut ctx = MetaCtx::new(view, &mut scratch, cfg, &reducibility, &[], &[], &[]);
 
         let saved = ctx.cfg.transparency;
 

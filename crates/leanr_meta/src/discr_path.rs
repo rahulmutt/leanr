@@ -216,18 +216,26 @@
 //!   could in principle surface a spurious `Forall` and thus a wrong
 //!   `BinderInfo`, but no such behavior is known to exist here.
 //!
-//! # Landed ahead of its consumer
+//! # Consumer (one hop out, not yet fully landed)
 //!
 //! `mk_path`/`discr_get_match` are `pub(crate)` per this task's own
-//! interface spec (not part of `leanr_meta`'s external API), and PR-B's
-//! instance table (task B3) — the real, non-test call site — has not
-//! landed yet. Until it does, every item in this module is reachable
-//! only from this module's own `#[cfg(test)]` tests, which the plain
-//! `lib`/`lib test` clippy/rustc targets do not count as a "live root"
-//! for the former. `#![allow(dead_code)]` below is scoped to this one
-//! module (an inner attribute on the `discr_path` module, not the whole
-//! crate) and should be removed once B3 wires this module in.
-#![allow(dead_code)]
+//! interface spec (not part of `leanr_meta`'s external API). PR-B's
+//! instance table (`instances.rs`, task B3) is now a real, non-test
+//! call site: `MetaCtx::get_instances` calls `discr_get_match`, which
+//! transitively reaches every other function in this module (`mk_path`
+//! -> `mk_path_aux` -> `push_args` -> `push_proj`/`push_args_aux` ->
+//! `ignore_arg`/`param_binder_infos`/`is_type`/`is_proof` ->
+//! `reduce_dt`/`reduce`/`reduce_until_bad_key` -> `is_bad_key`/
+//! `to_nat_lit`/`should_add_as_star`). This module's own blanket
+//! `#![allow(dead_code)]` is removed accordingly — but the dead-code
+//! boundary has only moved one hop OUT, not disappeared: `get_instances`
+//! itself is still `pub(crate)` with no caller outside `instances.rs`'s
+//! own tests until PR-B's tabled resolution driver (task B5) lands, so
+//! `instances.rs` now carries the scoped `#![allow(dead_code)]` this
+//! module used to carry (see that module's own "Landed ahead of its
+//! consumer" doc) — moving the allow outward with each landed task,
+//! rather than stacking a redundant one here too, keeps exactly one
+//! copy of this bookkeeping alive at a time.
 
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, NameId};

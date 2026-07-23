@@ -529,6 +529,8 @@ fn oracle_fast_gate() {
     assert!(md.imports.is_empty(), "Meta0 must stay import-free");
     let reducibility = md.reducibility;
     let matchers = md.matchers;
+    let instances = md.instances;
+    let default_instances = md.default_instances;
     let constants: HashMap<NameId, ConstantInfo> = md
         .constants
         .iter()
@@ -581,7 +583,15 @@ fn oracle_fast_gate() {
                 ..Config::default()
             };
             apply_profile(&mut cfg, prof);
-            let mut ctx = MetaCtx::new(view, &mut scratch, cfg, &reducibility, &matchers);
+            let mut ctx = MetaCtx::new(
+                view,
+                &mut scratch,
+                cfg,
+                &reducibility,
+                &matchers,
+                &instances,
+                &default_instances,
+            );
             // Declare every mvar `a` introduced (unlike `whnf`/`infer`/
             // `defeq`, `decode_expr` alone never declares an mvar into
             // `ctx.mctx()` — no prior query kind ever needed it to be
@@ -720,7 +730,15 @@ fn oracle_fast_gate() {
                 ..Config::default()
             };
             apply_profile(&mut cfg, prof);
-            let mut ctx = MetaCtx::new(view, &mut scratch, cfg, &reducibility, &matchers);
+            let mut ctx = MetaCtx::new(
+                view,
+                &mut scratch,
+                cfg,
+                &reducibility,
+                &matchers,
+                &instances,
+                &default_instances,
+            );
             match ctx.is_def_eq(a, b) {
                 Ok(got) => {
                     let want = q["eq"].as_bool().expect("eq field");
@@ -748,6 +766,8 @@ fn oracle_fast_gate() {
             Config::default(),
             &reducibility,
             &matchers,
+            &instances,
+            &default_instances,
         );
         ctx.set_transparency(transparency_of(tr));
 

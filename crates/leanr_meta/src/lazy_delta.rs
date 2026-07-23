@@ -1046,7 +1046,15 @@ mod tests {
             store: &base,
         };
         let mut scratch = Store::scratch();
-        let mut ctx = crate::MetaCtx::new(view, &mut scratch, crate::Config::default(), &[], &[]);
+        let mut ctx = crate::MetaCtx::new(
+            view,
+            &mut scratch,
+            crate::Config::default(),
+            &[],
+            &[],
+            &[],
+            &[],
+        );
         ctx.set_step_budget(300);
 
         assert_eq!(

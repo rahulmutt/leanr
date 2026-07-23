@@ -11,8 +11,12 @@ use std::collections::HashMap;
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, LevelId, NameId, Store};
 use leanr_kernel::{EnvView, ExprData, FVarIdGen, LocalContext, RecGuard, MAX_REC_DEPTH};
-use leanr_olean::{EntryScope, MatcherEntry, ReducibilityEntry, ReducibilityStatus};
+use leanr_olean::{
+    DefaultInstanceEntry, EntryScope, InstanceEntry, MatcherEntry, ReducibilityEntry,
+    ReducibilityStatus,
+};
 
+use crate::instances::InstanceTable;
 use crate::{Config, LMVarId, MVarId, MetaError, MetavarContext, TransparencyMode};
 
 /// Stack-growth constants — the same values `tc.rs` uses (private
@@ -80,6 +84,17 @@ pub struct MetaCtx<'e> {
     /// ReducibilityStatus per constant; absent => Semireducible.
     reducibility: HashMap<NameId, ReducibilityStatus>,
     matchers: HashMap<NameId, MatcherEntry>,
+    /// The instance table (Task B3): a discrimination tree over decoded
+    /// `instanceExtension` entries plus the flat `defaultInstanceExtension`
+    /// list, built once here and queried per-goal by
+    /// `instances.rs::{get_instances,default_instances,instance_named}`.
+    /// `pub(crate)` (unlike `reducibility`/`matchers` just above, which
+    /// stay module-private behind `status_of`/`matcher_of` accessors)
+    /// because its own consumer methods live in a SEPARATE file
+    /// (`instances.rs`, the `discr_path.rs`/`whnf.rs` cross-module
+    /// `impl MetaCtx` idiom), which needs direct field access the way
+    /// `self.cfg`/`self.mctx` already get it.
+    pub(crate) instances: InstanceTable,
     /// The `smartUnfolding` option (oracle default: true), consulted by
     /// `unfold_definition`'s app/const arms (task 7).
     pub(crate) smart_unfolding: bool,
@@ -185,6 +200,8 @@ impl<'e> MetaCtx<'e> {
         cfg: Config,
         reducibility: &[ReducibilityEntry],
         matchers: &[MatcherEntry],
+        instance_entries: &[InstanceEntry],
+        default_instance_entries: &[DefaultInstanceEntry],
     ) -> MetaCtx<'e> {
         // Global entries only: scoped reducibility entries require the
         // M3b3-style activation model, out of scope for the meta core
@@ -196,6 +213,7 @@ impl<'e> MetaCtx<'e> {
             .map(|e| (e.name, e.status))
             .collect();
         let matchers = matchers.iter().map(|m| (m.name, m.clone())).collect();
+        let instances = InstanceTable::build(view, instance_entries, default_instance_entries);
 
         let base = Some(view.store);
         let nat_add = mk_name2(scratch, base, "Nat", "add");
@@ -256,6 +274,7 @@ impl<'e> MetaCtx<'e> {
             defeq_cache_transient: HashMap::new(),
             reducibility,
             matchers,
+            instances,
             smart_unfolding: true,
             can_unfold_override: false,
             nat_bin_ops,

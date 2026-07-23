@@ -1374,7 +1374,7 @@ mod tests {
             quot_initialized: false,
             store: &base,
         };
-        let mut ctx = MetaCtx::new(view, &mut scratch, cfg, &[], &[]);
+        let mut ctx = MetaCtx::new(view, &mut scratch, cfg, &[], &[], &[], &[]);
         f(&mut ctx)
     }
 
