@@ -26,7 +26,7 @@
 //! and Task 6's `sort`/hole) through a token-shaped API.
 
 use leanr_kernel::bank::ExprId;
-use leanr_syntax::kind::KindInterner;
+use leanr_syntax::kind::{is_trivia, KindInterner};
 use leanr_syntax::tree::{NodeOrToken, SyntaxNode, SyntaxToken};
 
 use crate::elab::TermElabM;
@@ -38,18 +38,43 @@ use crate::error::ElabError;
 /// the one bare-leaf-token kind so far; see this module's doc comment).
 pub type SynElem = NodeOrToken<SyntaxNode, SyntaxToken>;
 
+/// Every syntactically-meaningful (non-trivia) child of `node`, in
+/// source order. Task 6's multi-child leaves (`sort`/`type`'s optional
+/// level argument, `paren`/`typeAscription`'s inner term(s)) all need
+/// to navigate by POSITION, which the raw `children_with_tokens()`
+/// stream doesn't support directly — it interleaves real syntax with
+/// whitespace/comment trivia tokens (`is_trivia`, `leanr_syntax::kind`).
+/// This is the leanr-tree equivalent of Lean's own `Syntax.getArg`/
+/// `stx[i]`, which indexes into an ALREADY-trivia-stripped `Array
+/// Syntax` (a `Syntax.node`'s `args` field never carries whitespace —
+/// that lives only in each leaf's own `SourceInfo`), not a new
+/// convention invented here.
+pub(crate) fn non_trivia_children(node: &SyntaxNode) -> Vec<SynElem> {
+    node.children_with_tokens()
+        .filter(|el| !is_trivia(el.kind()))
+        .collect()
+}
+
 /// The registered leaf kinds. Returns a stable label for a registered
-/// kind, `None` otherwise. Grown as Tasks 4-6 land their elaborators.
-/// Keyed on the kind's INTERNED name — `"<ident>"` for a bare
+/// kind, `None` otherwise. Grown by Tasks 4-6, now complete for M4b-1
+/// slice 1. Keyed on the kind's INTERNED name — `"<ident>"` for a bare
 /// identifier (`KindInterner`'s fixed-slot name, not the string
 /// `"ident"` a dynamically-interned node kind would have; see this
 /// module's doc comment), `"str"` for a string literal (a real
-/// `leading2`/`self.lit`-wrapped node kind).
+/// `leading2`/`self.lit`-wrapped node kind), and Task 6's five
+/// `Lean.Parser.Term.*` kinds (all real `leading2`-wrapped nodes,
+/// confirmed against a fresh parse dump — see `builtin::ascription`'s
+/// module doc for the `paren`/`typeAscription` shape correction).
 pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
     match kind {
         "str" => Some("str"),
         "<ident>" => Some("ident"),
-        // filled in by Task 6 (sort/ascription/hole)
+        "Lean.Parser.Term.prop" => Some("prop"),
+        "Lean.Parser.Term.type" => Some("type"),
+        "Lean.Parser.Term.sort" => Some("sort"),
+        "Lean.Parser.Term.paren" => Some("paren"),
+        "Lean.Parser.Term.typeAscription" => Some("typeAscription"),
+        "Lean.Parser.Term.hole" => Some("hole"),
         _ => None,
     }
 }
@@ -68,11 +93,28 @@ pub fn dispatch(
     kinds: &KindInterner,
     expected: Option<ExprId>,
 ) -> Result<ExprId, ElabError> {
-    let _ = expected;
     let name = kinds.name(elem.kind());
     match (name, elem) {
         ("str", NodeOrToken::Node(node)) => crate::builtin::lit::elab_str(elab, node, kinds),
         ("<ident>", NodeOrToken::Token(tok)) => crate::builtin::ident::elab_ident(elab, tok, kinds),
+        ("Lean.Parser.Term.prop", NodeOrToken::Node(node)) => {
+            crate::builtin::sort::elab_prop(elab, node, kinds)
+        }
+        ("Lean.Parser.Term.type", NodeOrToken::Node(node)) => {
+            crate::builtin::sort::elab_type(elab, node, kinds)
+        }
+        ("Lean.Parser.Term.sort", NodeOrToken::Node(node)) => {
+            crate::builtin::sort::elab_sort(elab, node, kinds)
+        }
+        ("Lean.Parser.Term.paren", NodeOrToken::Node(node)) => {
+            crate::builtin::ascription::elab_paren(elab, node, kinds, expected)
+        }
+        ("Lean.Parser.Term.typeAscription", NodeOrToken::Node(node)) => {
+            crate::builtin::ascription::elab_ascription(elab, node, kinds, expected)
+        }
+        ("Lean.Parser.Term.hole", NodeOrToken::Node(node)) => {
+            crate::builtin::hole::elab_hole(elab, node, kinds, expected)
+        }
         (other, _) => Err(ElabError::UnsupportedSyntax(other.to_string())),
     }
 }

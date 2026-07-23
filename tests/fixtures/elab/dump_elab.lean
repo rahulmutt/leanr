@@ -192,6 +192,38 @@ def identQueries : List (String × String) :=
   , ("ident/List", "List")
   ]
 
+/-- Task 6: `Prop`/`Type`/`Sort e`, `(e)`/`(e : T)`, and `_`.
+`sort/Prop` = `Sort 0`; `sort/Type` (bare, no level argument) = `Sort
+(succ zero)`, NOT a fresh level mvar (`elabOptLevel`'s `isNone` branch
+returns `Level.zero` directly — confirmed against the pinned toolchain
+source, `Lean/Elab/BuiltinTerm.lean`); `sort/TypeN`/`sort/SortN`
+exercise a `num` level argument (`Level.ofNat`, decimal digits -> that
+many `succ`s); `sort/SortHole` exercises `Sort _`'s level-hole branch
+(`Lean.Parser.Level.hole` -> a fresh level mvar, canonicalizing to an
+`lmvar` node) — confirmed standalone-reachable by a throwaway probe
+against the real oracle (unlike `Sort u`, which hits an uncaught
+auto-bound-implicit signal even in the real elaborator with no
+enclosing declaration — see `crates/leanr_elab/src/builtin/sort.rs`'s
+own module doc). `paren/nat` and `asc/natInType` exercise `(e)` and
+`(e : T)` respectively (real tree shape: `typeAscription` is NOT
+`paren` wrapping a nested node — see `crates/leanr_elab/src/builtin/
+ascription.rs`'s own module doc for the parse-dump correction).
+`hole/bare` exercises `_` with `expectedType? := none` (this dumper's
+own pinned entry point), which mints a fresh TYPE mvar first
+(`mkFreshExprMVarImpl`'s `none` arm) and the hole itself second — only
+the hole's own index shows up in the canonical `mvar` encoding, the
+type mvar it points at is never walked. -/
+def sortAscHoleQueries : List (String × String) :=
+  [ ("sort/Prop", "Prop")
+  , ("sort/Type", "Type")
+  , ("sort/TypeN", "Type 3")
+  , ("sort/SortN", "Sort 3")
+  , ("sort/SortHole", "Sort _")
+  , ("paren/nat", "(Nat)")
+  , ("asc/natInType", "(Nat : Type)")
+  , ("hole/bare", "_")
+  ]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -205,7 +237,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>

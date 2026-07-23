@@ -4,8 +4,8 @@
 //! `TermElabM` can elaborate nodes drawn from different snapshots.
 
 use leanr_kernel::bank::{ExprId, LevelId, NameId};
-use leanr_kernel::{EnvView, Nat};
-use leanr_meta::{LMVarId, MetaCtx};
+use leanr_kernel::{EnvView, LocalContext, Nat};
+use leanr_meta::{LMVarId, MVarDecl, MVarId, MVarKind, MetaCtx};
 use leanr_syntax::kind::KindInterner;
 
 use crate::dispatch::{self, SynElem};
@@ -37,6 +37,12 @@ pub struct TermElabM<'e> {
     /// names from ever colliding with `leanr_meta`'s internal fresh
     /// mvars, even though both mint into the same scratch `Store`.
     level_mvar_gen: u64,
+    /// Monotone counter backing `mk_fresh_expr_mvar` (Task 6) — the
+    /// same "fixed prefix + counter" idiom as `level_mvar_gen`, but a
+    /// SEPARATE counter and a DISTINCT prefix
+    /// (`_leanr_elab_expr_fresh`, below) so an expr-mvar name can never
+    /// collide with a level-mvar name even at the same counter value.
+    expr_mvar_gen: u64,
 }
 
 impl<'e> TermElabM<'e> {
@@ -46,6 +52,7 @@ impl<'e> TermElabM<'e> {
             view,
             level_names: Vec::new(),
             level_mvar_gen: 0,
+            expr_mvar_gen: 0,
         }
     }
 
@@ -90,6 +97,58 @@ impl<'e> TermElabM<'e> {
             .level_mvar(None, Some(name))
             .map_err(leanr_meta::MetaError::from)?;
         Ok(level_id)
+    }
+
+    /// oracle: `mkFreshExprMVarCore`/`mkFreshMVarId`
+    /// (`Lean/Meta/Basic.lean:864-877`) — mints a globally-fresh
+    /// `MVarId` (own `expr_mvar_gen` counter, mirroring
+    /// `mk_fresh_level_mvar`'s `level_mvar_gen` exactly), `declare`s it
+    /// in `mctx` with an EMPTY `LocalContext` — slice 1 elaborates no
+    /// binder/lambda/pi, so no leaf elaborator ever runs under a
+    /// nonempty local context; `LocalContext::default()` is the correct
+    /// context here, not a placeholder — and `MVarKind::Natural` (see
+    /// `builtin::hole`'s own doc for why every hole is minted `Natural`
+    /// rather than replicating `elabHole`'s `Natural`/`SyntheticOpaque`
+    /// branch), and returns the `ExprId` of `Expr.mvar` referencing it.
+    /// `base = None` throughout, matching `mk_fresh_level_mvar`'s own
+    /// reasoning: every id minted here (prefix string, the mvar's own
+    /// synthetic name, the `Expr.mvar` row) is self-contained fresh
+    /// scratch data with nothing in the PERSISTENT store to dedup
+    /// against — `ty` itself (the caller-supplied type, possibly
+    /// persistent-region) is stored VERBATIM in `MVarDecl::ty`, never
+    /// re-interned, so it needs no `base` here either.
+    pub fn mk_fresh_expr_mvar(&mut self, ty: ExprId) -> Result<ExprId, ElabError> {
+        let idx = self.expr_mvar_gen;
+        self.expr_mvar_gen += 1;
+        let store = self.mctx.store_mut();
+        let prefix_str = store
+            .intern_str(None, "_leanr_elab_expr_fresh")
+            .map_err(leanr_meta::MetaError::from)?;
+        let prefix = store
+            .name_str(None, None, prefix_str)
+            .map_err(leanr_meta::MetaError::from)?;
+        let idx_id = store
+            .intern_nat(None, &Nat::from(idx))
+            .map_err(leanr_meta::MetaError::from)?;
+        let name = store
+            .name_num(None, Some(prefix), idx_id)
+            .map_err(leanr_meta::MetaError::from)?;
+        let id = MVarId(name);
+        self.mctx.mctx_mut().declare(
+            id,
+            MVarDecl {
+                user_name: None,
+                ty,
+                lctx: LocalContext::default(),
+                kind: MVarKind::Natural,
+            },
+        );
+        let mvar_id = self
+            .mctx
+            .store_mut()
+            .expr_mvar(None, Some(name))
+            .map_err(leanr_meta::MetaError::from)?;
+        Ok(mvar_id)
     }
 
     pub fn elab_term(

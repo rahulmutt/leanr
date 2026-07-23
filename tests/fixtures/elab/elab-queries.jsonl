@@ -10,3 +10,11 @@
 {"exp":{"k":"str","v":"héllo"},"id":"str/nonAscii","src":"\"héllo\""}
 {"exp":{"k":"const","n":"Nat","us":[]},"id":"ident/Nat","src":"Nat"}
 {"exp":{"k":"const","n":"List","us":[{"i":0,"k":"lmvar"}]},"id":"ident/List","src":"List"}
+{"exp":{"k":"sort","u":{"k":"zero"}},"id":"sort/Prop","src":"Prop"}
+{"exp":{"k":"sort","u":{"k":"succ","u":{"k":"zero"}}},"id":"sort/Type","src":"Type"}
+{"exp":{"k":"sort","u":{"k":"succ","u":{"k":"succ","u":{"k":"succ","u":{"k":"succ","u":{"k":"zero"}}}}}},"id":"sort/TypeN","src":"Type 3"}
+{"exp":{"k":"sort","u":{"k":"succ","u":{"k":"succ","u":{"k":"succ","u":{"k":"zero"}}}}},"id":"sort/SortN","src":"Sort 3"}
+{"exp":{"k":"sort","u":{"i":0,"k":"lmvar"}},"id":"sort/SortHole","src":"Sort _"}
+{"exp":{"k":"const","n":"Nat","us":[]},"id":"paren/nat","src":"(Nat)"}
+{"exp":{"k":"const","n":"Nat","us":[]},"id":"asc/natInType","src":"(Nat : Type)"}
+{"exp":{"i":0,"k":"mvar"},"id":"hole/bare","src":"_"}
