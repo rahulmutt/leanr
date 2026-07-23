@@ -1,0 +1,2 @@
+# Mathlib constants whose typeclass synthesis matches the oracle (M4a plan-4 nightly synthesis ratchet).
+# Regenerate: the nightly synthesis sweep merge job. NEVER hand-edit to hide a regression.
