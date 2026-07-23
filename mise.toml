@@ -133,6 +133,12 @@ run = [
   # `prelude`-mode, import-free (the Prelude0/Matcher pattern). cd-first
   # for the same module-name reason as ModPriv.
   "sh -c 'cd tests/fixtures && lean Instances.lean -o Instances.olean'",
+  # M4a plan 4 task B5: CYCLIC instance-graph fixture for the tabled
+  # synthesis driver's termination test (`A a` from `B a` and `B a` from
+  # `A a`, no base case). Same `prelude`-mode, import-free shape as
+  # Instances.lean above; cd-first for the same module-name reason as
+  # ModPriv.
+  "sh -c 'cd tests/fixtures && lean InstancesCyclic.lean -o InstancesCyclic.olean'",
   # M4a plan 2: tier-1 meta corpus. Meta0 is prelude-mode/import-free;
   # the dumper imports ONLY Meta0 (LEAN_PATH=$PWD) so the oracle env
   # equals the env leanr replays from the committed .olean.

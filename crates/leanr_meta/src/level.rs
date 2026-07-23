@@ -686,7 +686,7 @@ impl<'e> MetaCtx<'e> {
     /// This crate has no name-generator type of its own, so this
     /// mirrors `local_ctx.rs::fresh_fvar_id`'s "distinct fixed prefix +
     /// monotone counter" idiom instead: `_leanr_lvl_fresh.<n>`.
-    fn fresh_level_mvar(&mut self) -> Result<(LMVarId, LevelId), MetaError> {
+    pub(crate) fn fresh_level_mvar(&mut self) -> Result<(LMVarId, LevelId), MetaError> {
         let idx = self.level_mvar_gen;
         self.level_mvar_gen += 1;
         let base = Some(self.view.store);

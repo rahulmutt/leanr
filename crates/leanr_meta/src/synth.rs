@@ -1,9 +1,18 @@
 //! Tabled type-class-synthesis engine: table state, table keys, and
-//! waiter/answer bookkeeping (task B4) -- DATA STRUCTURES + TABLE
-//! MECHANICS ONLY. The resolution driver (an oracle `synth`/`generate`/
-//! `consume`/`resume`-equivalent, `synth_instance`) is task B5's; no
-//! function in this module drives resolution, opens a subgoal on its
-//! own initiative, or calls anything B5 owns.
+//! waiter/answer bookkeeping (task B4), plus the RESOLUTION DRIVER
+//! itself ([`MetaCtx::synth_instance`], task B5).
+//!
+//! Everything above the "The resolution driver (task B5)" banner is
+//! table mechanics; everything below it drives resolution. Much of the
+//! doc that follows was written by B4 while the driver was still
+//! unwritten and phrases open questions as constraints ON B5 -- each
+//! such passage now carries a note recording how B5 answered it, and
+//! the two structural HARD REQUIREMENTS (universe-level refresh and the
+//! append-only consumer arena) are answered at
+//! [`MetaCtx::refresh_instance_levels`] and [`ConsumerNode`]'s own doc
+//! respectively. B4's original framing is kept rather than rewritten,
+//! because the reasoning it records is what makes those answers
+//! checkable.
 //!
 //! oracle: `Lean.Meta.SynthInstance` (`SynthInstance.lean`), toolchain
 //! leanprover/lean4:v4.33.0-rc1 -- specifically `Instance`/`GeneratorNode`
@@ -11,7 +20,28 @@
 //! namespace and `mkTableKey` (:92-199), `Answer`/`TableEntry` (:232-239),
 //! and `SynthInstance.State` (:244-254) -- plus `Lean.Meta.
 //! AbstractMVarsResult` (`Meta/Basic.lean:338-346`), which `Answer.result`
-//! is typed by.
+//! is typed by. The driver half transcribes `main` (:676-690), `synth`
+//! (:668-674), `step` (:660-667), `generate` (:625-658), `resume`
+//! (:635-651), `consume` (:534-579), `newSubgoal` (:281-292),
+//! `mkGeneratorNode?` (:243-256), `mkTableKeyFor` (:298-302),
+//! `getSubgoals` (:317-337), `tryResolve` (:345-420), `tryAnswer`
+//! (:441-449), `wakeUp` (:422-434), `mkAnswer` (:453-459) and
+//! `addAnswer` (:463-478), plus `Lean.Meta.abstractMVars`
+//! (`Meta/AbstractMVars.lean:127-133`) and `openAbstractMVarsResult`
+//! (`Meta/Basic.lean:424-429`) -- the two algorithms B4 named as a seam
+//! it was leaving to B5.
+//!
+//! # Divergence recorded, not absorbed
+//!
+//! `Mul N` over the `Instances.olean` fixture resolves to
+//! `Semigroup.toMul instSemigroupN` here where the pinned toolchain's
+//! own `#synth Mul N` answers `instMulN`. Both inhabit the goal (defeq,
+//! never unsound), and the cause is upstream of this module -- B1's
+//! `DiscrTree::process` inverts `getUnify`'s `visitStar`-then-
+//! `visitNonStar` order (`DiscrTree/Main.lean:606`), so candidates
+//! reach `generate` in the opposite try-order. Pinned by
+//! `mul_n_picks_the_wrong_candidate_first_because_of_the_discr_tree_order`
+//! below, which must FAIL (and be updated) once B1 is corrected.
 //!
 //! # `GoalKey`: a hash-consed `ExprId`, not a hand-rolled digest
 //!
@@ -322,17 +352,18 @@
 //! allow from `instances.rs`'s own -- neither module's allow should be
 //! used to cover for the other; both are removed independently once B5
 //! wires each one in.
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 
 use leanr_kernel::bank::levels::LevelRow;
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, LevelId, LevelsId, NameId};
+use leanr_kernel::{abstract_fvars, instantiate, instantiate_level_params, instantiate_rev};
 use leanr_kernel::{Nat, MAX_REC_DEPTH};
 
 use crate::instances::Instance;
-use crate::{LMVarId, MVarId, MetaCtx, MetaError};
+use crate::metactx::MetaSnapshot;
+use crate::{LMVarId, MVarId, MetaCtx, MetaError, TransparencyMode};
 
 /// Stack-growth constants for [`KeyNormalizer`]'s own depth guard --
 /// restated from `metactx.rs::{RED_ZONE,STACK_CHUNK}` (private there),
@@ -822,10 +853,24 @@ pub(crate) enum Waiter {
 /// representation -- popping the front as instances are tried, rather
 /// than indexing back-to-front, per `get_instances`'s own module doc:
 /// its result is already delivered in TRY order, front-to-back).
+///
+/// **B5 closed the `mctx`/`typeHasMVars` seams recorded above**:
+/// `mctx` is this crate's [`MetaSnapshot`] (the assignment maps + the
+/// postponed queue — see `metactx.rs`), re-entered via
+/// `MetaCtx::with_synth_mctx`, which is this crate's `withMCtx`
+/// analogue; `type_has_mvars` is the oracle's `typeHasMVars` verbatim
+/// (`mvarType.hasMVar`, :253), read by `generate`'s canonical-instances
+/// short-circuit.
 pub(crate) struct GeneratorNode {
     pub goal: ExprId,
     pub key: GoalKey,
     pub remaining: Vec<Instance>,
+    /// oracle: `GeneratorNode.mctx` (:49) — the state every candidate
+    /// trial for this node restarts from.
+    pub mctx: MetaSnapshot,
+    /// oracle: `GeneratorNode.typeHasMVars` (:52, set at :253 from
+    /// `mvarType.hasMVar`).
+    pub type_has_mvars: bool,
 }
 
 /// oracle: `Lean.Meta.SynthInstance.ConsumerNode` (`SynthInstance.lean:
@@ -846,11 +891,29 @@ pub(crate) struct GeneratorNode {
 /// `Waiter::Consumer(usize)` indexes into a mutable arena of these** --
 /// advancing it in place on an already-waited-on slot is a wrong-answer
 /// bug, not just a perf one.
+///
+/// **B5's answer to that HARD constraint: option (a), APPEND-ONLY.**
+/// [`SynthState::consumers`] is a module-PRIVATE field whose only
+/// mutator is [`SynthState::push_consumer`] (there is no `consumers_mut`,
+/// no `IndexMut`, and no other `&mut` path to a slot anywhere in this
+/// crate), so a slot, once pushed, is immutable for the rest of the
+/// search and `next` below is frozen at exactly the position the waiter
+/// that points at it was waiting on. Advancing to the next subgoal
+/// builds a WHOLE NEW node with `next + 1` and pushes it, mirroring the
+/// oracle's own `resume` (:650), which likewise constructs a new
+/// `ConsumerNode` with `subgoals := rest` and never touches the
+/// waited-on snapshot.
+#[derive(Clone)]
 pub(crate) struct ConsumerNode {
     pub key: GoalKey,
     pub mvar: MVarId,
     pub subgoals: Vec<ExprId>,
     pub next: usize,
+    /// oracle: `ConsumerNode.mctx` (:57).
+    pub mctx: MetaSnapshot,
+    /// oracle: `ConsumerNode.size` (:58) — "instance size so far",
+    /// checked against `synthInstance.maxSize` in `addAnswer` (:466).
+    pub size: usize,
 }
 
 /// oracle: `Lean.Meta.SynthInstance.State` (`SynthInstance.lean:
@@ -866,12 +929,68 @@ pub(crate) struct ConsumerNode {
 /// increments it -- B5 owns bumping it once per iteration of its own
 /// resolution loop, the same role `checkSystem`'s per-iteration budget
 /// check plays in the oracle (:191-193).
+///
+/// **B5 closed the `result?`/`resumeStack` seams recorded above**:
+/// [`SynthState::result`] is the oracle's `result?` (:250, set by
+/// `wakeUp`'s `.root` arm) and [`SynthState::resume_stack`] is its
+/// `resumeStack` (:245), re-represented as `(consumer index, Answer)`
+/// pairs rather than `(ConsumerNode × Answer)` values, per the
+/// index-into-an-arena re-representation this module already chose for
+/// [`Waiter`].
+///
+/// # Determinism
+///
+/// `answers` is a `HashMap`, but nothing in this module or its driver
+/// ever ITERATES it — every access is a keyed `get`/`get_mut`/`insert`.
+/// The order-significant sequences (`generators`, `resume_stack`,
+/// `TableEntry::waiters`, `TableEntry::answers`, `GeneratorNode::
+/// remaining`) are all `Vec`s, walked in a fixed direction. Global
+/// Constraints: "no `HashMap` iteration on any order-significant path".
 #[derive(Default)]
 pub(crate) struct SynthState {
     pub answers: HashMap<GoalKey, TableEntry>,
     pub generators: Vec<GeneratorNode>,
-    pub consumers: Vec<ConsumerNode>,
+    /// **APPEND-ONLY ARENA — see [`ConsumerNode`]'s own doc for why this
+    /// is a correctness requirement and not a style preference.**
+    /// Deliberately NOT `pub`: [`SynthState::push_consumer`] is the only
+    /// mutator and [`SynthState::consumer`] the only reader, both
+    /// defined below, so no code path anywhere can obtain a `&mut` to a
+    /// slot an outstanding `Waiter::Consumer` still points at. B4's own
+    /// shape had this field `pub`; narrowing it is how option (a) of
+    /// that task's HARD constraint is ENFORCED rather than merely
+    /// promised.
+    consumers: Vec<ConsumerNode>,
+    /// oracle: `State.resumeStack` (:245), as `(consumer arena index,
+    /// the answer that woke it)`.
+    pub resume_stack: Vec<(usize, Answer)>,
+    /// oracle: `State.result?` (:250).
+    pub result: Option<AbstractMVarsResult>,
     pub step: u64,
+}
+
+impl SynthState {
+    /// Push a brand-new consumer node and return its arena index. The
+    /// ONLY mutator of `consumers` — see that field's own doc.
+    pub(crate) fn push_consumer(&mut self, node: ConsumerNode) -> usize {
+        self.consumers.push(node);
+        self.consumers.len() - 1
+    }
+
+    /// Read back an (immutable, frozen-at-push-time) consumer node.
+    /// Panics on an out-of-range index: every index handed out came from
+    /// `push_consumer` on this same state and the arena never shrinks,
+    /// so this is an internal-invariant violation, the same posture
+    /// `add_waiter`/`add_answer` take for a missing entry.
+    pub(crate) fn consumer(&self, idx: usize) -> &ConsumerNode {
+        self.consumers
+            .get(idx)
+            .expect("consumer: index out of range -- the arena is append-only")
+    }
+
+    /// oracle: `findEntry?` (:288-289).
+    pub(crate) fn find_entry(&self, key: &GoalKey) -> Option<&TableEntry> {
+        self.answers.get(key)
+    }
 }
 
 impl SynthState {
@@ -946,12 +1065,1067 @@ impl SynthState {
     }
 }
 
+// =======================================================================
+// abstractMVars / openAbstractMVarsResult (task B5 -- the seam B4 named)
+// =======================================================================
+
+/// Per-call scratch state for [`MetaCtx::abstract_mvars`]. oracle:
+/// `Lean.Meta.AbstractMVars.State` (`Meta/AbstractMVars.lean:15-26`),
+/// minus the fields this crate's re-shaping does not need: `ngen`
+/// (fresh fvar names come off `MetaCtx::expr_mvar_gen` instead -- see
+/// [`MVarAbstractor::fresh_fvar`]), `mctx` (threaded as `ctx` here, the
+/// same choice [`KeyNormalizer`] made), `lctx` (the oracle accumulates
+/// abstracted binder types into a `LocalContext` purely so its final
+/// `mkLambdaFVars` can look them up; this walk carries them in the
+/// parallel `fvar_types`/`fvar_names` vecs instead and never touches
+/// `MetaCtx::lctx` at all, so abstraction leaves no residue in the
+/// caller's local context), and `abstractLevels` (the oracle's own
+/// `abstractMVars` entry point, :127, hardcodes it `true`; the `false`
+/// setting belongs to `abstractMVars'`, which synthesis never calls).
+struct MVarAbstractor<'a, 'e> {
+    ctx: &'a mut MetaCtx<'e>,
+    next_param_idx: u64,
+    param_names: Vec<NameId>,
+    lmap: HashMap<LMVarId, LevelId>,
+    emap: HashMap<MVarId, ExprId>,
+    /// The fresh fvars standing in for abstracted expr mvars, in
+    /// abstraction order (oracle: `State.fvars`), with their already-
+    /// abstracted types and binder names alongside.
+    fvars: Vec<ExprId>,
+    fvar_types: Vec<ExprId>,
+    fvar_names: Vec<Option<NameId>>,
+    /// oracle: `State.mvars` -- the ORIGINAL mvar expressions, which
+    /// `AbstractMVarsResult.mvars` reports back.
+    mvars: Vec<ExprId>,
+    /// `` `_abstMVar `` interned once (oracle: `Name.mkNum `_abstMVar
+    /// s.nextParamIdx`, :63).
+    abst_prefix: NameId,
+    depth: u32,
+}
+
+impl<'a, 'e> MVarAbstractor<'a, 'e> {
+    fn new(ctx: &'a mut MetaCtx<'e>) -> Result<MVarAbstractor<'a, 'e>, MetaError> {
+        let base = Some(ctx.view.store);
+        let s = ctx.scratch.intern_str(base, "_abstMVar")?;
+        let abst_prefix = ctx.scratch.name_str(base, None, s)?;
+        Ok(MVarAbstractor {
+            ctx,
+            next_param_idx: 0,
+            param_names: Vec::new(),
+            lmap: HashMap::new(),
+            emap: HashMap::new(),
+            fvars: Vec::new(),
+            fvar_types: Vec::new(),
+            fvar_names: Vec::new(),
+            mvars: Vec::new(),
+            abst_prefix,
+            depth: 0,
+        })
+    }
+
+    /// [`KeyNormalizer::guarded`]'s body again, for the same reason (see
+    /// the module-level `RED_ZONE`/`STACK_CHUNK` doc).
+    fn guarded<R>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<R, MetaError>,
+    ) -> Result<R, MetaError> {
+        if self.depth >= MAX_REC_DEPTH {
+            return Err(MetaError::DepthBudgetExhausted);
+        }
+        self.depth += 1;
+        let r = stacker::maybe_grow(RED_ZONE, STACK_CHUNK, || f(self));
+        self.depth -= 1;
+        r
+    }
+
+    /// Mint `` `_abstMVar.<nextParamIdx> `` (oracle: :63-66).
+    fn fresh_param_name(&mut self) -> Result<NameId, MetaError> {
+        let base = Some(self.ctx.view.store);
+        let idx = self.next_param_idx;
+        self.next_param_idx += 1;
+        let idx_id = self.ctx.scratch.intern_nat(base, &Nat::from(idx))?;
+        let n = self
+            .ctx
+            .scratch
+            .name_num(base, Some(self.abst_prefix), idx_id)?;
+        self.param_names.push(n);
+        Ok(n)
+    }
+
+    /// oracle: `mkFreshFVarId` (:38-39) off the state's own `NameGenerator`.
+    /// This crate has no `MetaM`-wide name generator to borrow, so the
+    /// fresh fvar name comes off `MetaCtx::expr_mvar_gen` (a
+    /// process-monotone counter already threaded through `MetaCtx` for
+    /// `mk_aux_mvar`) under its own distinct prefix. These fvars are
+    /// purely internal: every one of them is abstracted back into a
+    /// `BVar` by [`MVarAbstractor::mk_lambda_over`] before the result
+    /// escapes, so the name is never observable in the answer -- it only
+    /// has to be distinct from any fvar ALREADY in the term being
+    /// abstracted, which a dedicated prefix plus a monotone counter
+    /// gives (the oracle's own `ngen` makes exactly the same
+    /// freshness-by-construction argument).
+    fn fresh_fvar(&mut self) -> Result<ExprId, MetaError> {
+        let base = Some(self.ctx.view.store);
+        let idx = self.ctx.expr_mvar_gen;
+        self.ctx.expr_mvar_gen += 1;
+        let prefix_str = self.ctx.scratch.intern_str(base, "_leanr_abst_fvar")?;
+        let prefix = self.ctx.scratch.name_str(base, None, prefix_str)?;
+        let idx_id = self.ctx.scratch.intern_nat(base, &Nat::from(idx))?;
+        let name = self.ctx.scratch.name_num(base, Some(prefix), idx_id)?;
+        Ok(self.ctx.scratch.expr_fvar(base, Some(name))?)
+    }
+
+    /// oracle: `abstractLevelMVars` (`Meta/AbstractMVars.lean:43-66`).
+    /// Structurally [`KeyNormalizer::norm_level`] with a different
+    /// naming scheme and a `param_names` side-effect; the two are kept
+    /// separate rather than parametrized because they answer different
+    /// oracle functions with different (accumulating vs. not)
+    /// post-conditions.
+    fn level(&mut self, l: LevelId) -> Result<LevelId, MetaError> {
+        self.ctx.step()?;
+        let base = Some(self.ctx.view.store);
+        if self.ctx.scratch.level_flags(base, l) & 0b10 == 0 {
+            return Ok(l);
+        }
+        self.guarded(|a| a.level_body(l))
+    }
+
+    fn level_body(&mut self, l: LevelId) -> Result<LevelId, MetaError> {
+        let base = Some(self.ctx.view.store);
+        match *self.ctx.scratch.level_row(base, l) {
+            LevelRow::Zero | LevelRow::Param(_) => Ok(l),
+            LevelRow::MVar(name) => {
+                let Some(name) = name else { return Ok(l) };
+                let lid = LMVarId(name);
+                if let Some(v) = self.ctx.mctx.level_assignment(lid) {
+                    return self.level(v);
+                }
+                if let Some(&renamed) = self.lmap.get(&lid) {
+                    return Ok(renamed);
+                }
+                let pname = self.fresh_param_name()?;
+                let renamed = self.ctx.scratch.level_param(base, Some(pname))?;
+                self.lmap.insert(lid, renamed);
+                Ok(renamed)
+            }
+            LevelRow::Succ(a) => {
+                let a2 = self.level(a)?;
+                if a2 == a {
+                    Ok(l)
+                } else {
+                    Ok(self.ctx.scratch.level_succ(base, a2)?)
+                }
+            }
+            LevelRow::Max(a, b) => {
+                let (a2, b2) = (self.level(a)?, self.level(b)?);
+                if a2 == a && b2 == b {
+                    Ok(l)
+                } else {
+                    Ok(self.ctx.scratch.level_max(base, a2, b2)?)
+                }
+            }
+            LevelRow::IMax(a, b) => {
+                let (a2, b2) = (self.level(a)?, self.level(b)?);
+                if a2 == a && b2 == b {
+                    Ok(l)
+                } else {
+                    Ok(self.ctx.scratch.level_imax(base, a2, b2)?)
+                }
+            }
+        }
+    }
+
+    /// oracle: `abstractExprMVars` (`Meta/AbstractMVars.lean:71-113`).
+    fn expr(&mut self, e: ExprId) -> Result<ExprId, MetaError> {
+        self.ctx.step()?;
+        let d = self.ctx.data(e);
+        if !d.has_expr_mvar() && !d.has_level_mvar() {
+            return Ok(e);
+        }
+        self.guarded(|a| a.expr_body(e))
+    }
+
+    fn expr_body(&mut self, e: ExprId) -> Result<ExprId, MetaError> {
+        let base = Some(self.ctx.view.store);
+        match self.ctx.node(e) {
+            Node::MVar { id: Some(id) } => {
+                let mid = MVarId(id);
+                if let Some(v) = self.ctx.mctx.assignment(mid) {
+                    return self.expr(v);
+                }
+                // oracle: `if decl.depth != mctx.depth then return e`
+                // (:91-93) -- under this crate's flat-depth collapse
+                // (see this module's doc), the only "treated as a
+                // constant" case left is an mvar with no declaration at
+                // all, which has no type to abstract by either.
+                let Some(decl_ty) = self.ctx.mctx.decl(mid).map(|d| d.ty) else {
+                    return Ok(e);
+                };
+                let user_name = self.ctx.mctx.decl(mid).and_then(|d| d.user_name);
+                if let Some(&fvar) = self.emap.get(&mid) {
+                    return Ok(fvar);
+                }
+                let inst_ty = self.ctx.instantiate_mvars(decl_ty)?;
+                let ty = self.expr(inst_ty)?;
+                let fvar = self.fresh_fvar()?;
+                self.emap.insert(mid, fvar);
+                self.fvars.push(fvar);
+                self.fvar_types.push(ty);
+                self.fvar_names.push(user_name);
+                self.mvars.push(e);
+                Ok(fvar)
+            }
+            Node::MVar { id: None } => Ok(e),
+            Node::Sort { level } => {
+                let l2 = self.level(level)?;
+                if l2 == level {
+                    Ok(e)
+                } else {
+                    Ok(self.ctx.scratch.expr_sort(base, l2)?)
+                }
+            }
+            Node::Const { name, levels } => {
+                let list = self.ctx.scratch.level_list_at(base, levels).to_vec();
+                let mut changed = false;
+                let mut new_list = Vec::with_capacity(list.len());
+                for lv in list {
+                    let lv2 = self.level(lv)?;
+                    changed |= lv2 != lv;
+                    new_list.push(lv2);
+                }
+                if !changed {
+                    Ok(e)
+                } else {
+                    let levels2 = self.ctx.scratch.intern_level_list(base, &new_list)?;
+                    Ok(self.ctx.scratch.expr_const(base, name, levels2)?)
+                }
+            }
+            Node::App { f, arg } => {
+                let (f2, a2) = (self.expr(f)?, self.expr(arg)?);
+                if f2 == f && a2 == arg {
+                    Ok(e)
+                } else {
+                    Ok(self.ctx.scratch.expr_app(base, f2, a2)?)
+                }
+            }
+            Node::Lam {
+                binder_name,
+                binder_type,
+                body,
+                binder_info,
+            } => {
+                let (t2, b2) = (self.expr(binder_type)?, self.expr(body)?);
+                if t2 == binder_type && b2 == body {
+                    Ok(e)
+                } else {
+                    Ok(self
+                        .ctx
+                        .scratch
+                        .expr_lam(base, binder_name, t2, b2, binder_info)?)
+                }
+            }
+            Node::Forall {
+                binder_name,
+                binder_type,
+                body,
+                binder_info,
+            } => {
+                let (t2, b2) = (self.expr(binder_type)?, self.expr(body)?);
+                if t2 == binder_type && b2 == body {
+                    Ok(e)
+                } else {
+                    Ok(self
+                        .ctx
+                        .scratch
+                        .expr_forall(base, binder_name, t2, b2, binder_info)?)
+                }
+            }
+            Node::LetE {
+                decl_name,
+                ty,
+                value,
+                body,
+                non_dep,
+            } => {
+                let (t2, v2, b2) = (self.expr(ty)?, self.expr(value)?, self.expr(body)?);
+                if t2 == ty && v2 == value && b2 == body {
+                    Ok(e)
+                } else {
+                    Ok(self
+                        .ctx
+                        .scratch
+                        .expr_let(base, decl_name, t2, v2, b2, non_dep)?)
+                }
+            }
+            Node::MData { data, expr } => {
+                let e2 = self.expr(expr)?;
+                if e2 == expr {
+                    Ok(e)
+                } else {
+                    Ok(self.ctx.scratch.expr_mdata(base, data, e2)?)
+                }
+            }
+            Node::Proj {
+                type_name,
+                idx,
+                structure,
+            } => {
+                let s2 = self.expr(structure)?;
+                if s2 == structure {
+                    Ok(e)
+                } else {
+                    Ok(self
+                        .ctx
+                        .scratch
+                        .expr_proj(base, type_name, &Nat::from(idx as u64), s2)?)
+                }
+            }
+            Node::ProjBig {
+                type_name,
+                idx,
+                structure,
+            } => {
+                let idxn = self.ctx.scratch.nat_at(base, idx).clone();
+                let s2 = self.expr(structure)?;
+                if s2 == structure {
+                    Ok(e)
+                } else {
+                    Ok(self.ctx.scratch.expr_proj(base, type_name, &idxn, s2)?)
+                }
+            }
+            _ => Ok(e),
+        }
+    }
+
+    /// `mkLambdaFVars s.fvars e` (oracle: `abstractMVars`, :131) --
+    /// `assign.rs::mk_lambda_over_fvars`'s exact fold, except the binder
+    /// name/type come from this walk's own parallel vecs rather than
+    /// from `MetaCtx::lctx` (nothing here declares these fvars in a
+    /// local context; see [`MVarAbstractor`]'s own doc). Every binder is
+    /// `BinderInfo::Default`, matching `LocalContext.mkLocalDecl`'s own
+    /// default at :110.
+    fn mk_lambda_over(&mut self, body: ExprId) -> Result<ExprId, MetaError> {
+        let base = Some(self.ctx.view.store);
+        let mut r = body;
+        let mut i = self.fvars.len();
+        while i > 0 {
+            i -= 1;
+            r = abstract_fvars(
+                self.ctx.scratch,
+                base,
+                r,
+                std::slice::from_ref(&self.fvars[i]),
+                &mut self.ctx.guard,
+            )?;
+            let ty = abstract_fvars(
+                self.ctx.scratch,
+                base,
+                self.fvar_types[i],
+                &self.fvars[..i],
+                &mut self.ctx.guard,
+            )?;
+            r = self.ctx.scratch.expr_lam(
+                base,
+                self.fvar_names[i],
+                ty,
+                r,
+                leanr_kernel::BinderInfo::Default,
+            )?;
+        }
+        Ok(r)
+    }
+}
+
+// =======================================================================
+// The resolution driver (task B5)
+// =======================================================================
+
+/// oracle: `synthInstance.maxSize`'s default (`SynthInstance.lean:24-27`),
+/// threaded by `main`'s `maxResultSize` parameter into `addAnswer`'s
+/// own `cNode.size >= maxResultSize` guard (:466). Fixed here rather
+/// than made configurable: this crate has no `Options` channel, and
+/// `Config` (`config.rs`) models `whnf`/`isDefEq` knobs only.
+const MAX_RESULT_SIZE: usize = 128;
+
+impl<'e> MetaCtx<'e> {
+    // -------------------------------------------------------------------
+    // abstractMVars / openAbstractMVarsResult
+    // -------------------------------------------------------------------
+
+    /// oracle: `Lean.Meta.abstractMVars` (`Meta/AbstractMVars.lean:
+    /// 127-133`) -- abstract every (assignable, current-depth)
+    /// metavariable in `e`, returning the fresh universe params that
+    /// replaced its level mvars, the expr mvars that were abstracted,
+    /// and `fun (m_1 : A_1) .. (m_k : A_k) => e'`.
+    pub(crate) fn abstract_mvars(&mut self, e: ExprId) -> Result<AbstractMVarsResult, MetaError> {
+        // oracle: `let e ← instantiateMVars e` (:128). See
+        // `normalize_goal_key`'s own doc for why this crate's
+        // `instantiate_mvars` covers the EXPR side only, and why the
+        // LEVEL side is folded into the walk's own mvar arm instead.
+        let e = self.instantiate_mvars(e)?;
+        let mut a = MVarAbstractor::new(self)?;
+        let body = a.expr(e)?;
+        let expr = a.mk_lambda_over(body)?;
+        Ok(AbstractMVarsResult {
+            param_names: a.param_names,
+            mvars: a.mvars,
+            expr,
+        })
+    }
+
+    /// oracle: `Lean.Meta.openAbstractMVarsResult` (`Meta/Basic.lean:
+    /// 424-429`): mint one fresh level mvar per abstracted param,
+    /// substitute, then `lambdaMetaTelescope` the result back open,
+    /// replacing exactly `numMVars` binders with fresh expr mvars.
+    /// Returns only the resulting EXPRESSION -- the oracle's own
+    /// `(mvars, binderInfos, e)` triple's first two components are
+    /// unused by both of its synthesis call sites (`tryAnswer` :423-429
+    /// and `wakeUp`'s trace at :430, which only ever `isDefEq`/print the
+    /// expression).
+    pub(crate) fn open_abstract_mvars_result(
+        &mut self,
+        r: &AbstractMVarsResult,
+    ) -> Result<ExprId, MetaError> {
+        let base = Some(self.view.store);
+        let mut us = Vec::with_capacity(r.param_names.len());
+        for _ in &r.param_names {
+            us.push(self.fresh_level_mvar()?.1);
+        }
+        let mut e = instantiate_level_params(
+            self.scratch,
+            base,
+            r.expr,
+            &r.param_names,
+            &us,
+            &mut self.guard,
+        )?;
+        for _ in 0..r.num_mvars() {
+            self.step()?;
+            let Node::Lam {
+                binder_type, body, ..
+            } = self.node(e)
+            else {
+                // Unreachable by construction: `abstract_mvars` builds
+                // exactly `num_mvars` leading lambdas. Stopping early is
+                // incompleteness (a partially-opened answer simply fails
+                // the caller's `isDefEq`), never a wrong assignment.
+                break;
+            };
+            let (m, _) = self.mk_aux_mvar(binder_type)?;
+            e = instantiate(self.scratch, base, body, m, &mut self.guard)?;
+        }
+        Ok(e)
+    }
+
+    // -------------------------------------------------------------------
+    // main / synth / step
+    // -------------------------------------------------------------------
+
+    /// Synthesize an instance of `ty`. oracle: `Lean.Meta.SynthInstance.
+    /// main` (`SynthInstance.lean:676-690`) composed with `synth`
+    /// (:668-674) -- seed one root subgoal for `ty` and step the
+    /// resolution loop until the root is answered or nothing is left to
+    /// do.
+    ///
+    /// Returns the synthesized TERM (`Ok(Some(_))`), `Ok(None)` when the
+    /// search completed with no answer, or an `Err` -- never a `false`
+    /// stand-in for a budget or stuck condition:
+    /// [`MetaError::StepBudgetExhausted`] (the deterministic per-step
+    /// budget, this crate's replacement for the oracle's `checkSystem`
+    /// heartbeat check at :662), [`MetaError::DepthBudgetExhausted`]
+    /// (re-entrancy, via the `guarded` wrapper below), or
+    /// [`MetaError::IsDefEqStuck`] propagated out of a subgoal
+    /// unification, which is NEVER collapsed to "this candidate failed".
+    ///
+    /// The whole trial runs under ONE `checkpoint`/`rollback` pair, so a
+    /// failed -- or successful -- synthesis leaves the caller's `mctx`
+    /// exactly as it found it; the returned term is already fully
+    /// instantiated and metavariable-free on the expr side (`mk_answer`
+    /// -> `abstract_mvars`), so it survives that rollback.
+    // Narrowed from this module's former blanket `#![allow(dead_code)]`
+    // (removed by this task): `synth_instance` is the crate's typeclass-
+    // synthesis ENTRY POINT, and every other item in this module and in
+    // `instances.rs`/`discr_path.rs`/`discr_tree.rs` is now reachable
+    // from it -- but the entry point itself has no non-test caller until
+    // the ELABORATOR layer lands (oracle: `Lean.Elab.Term.synthesizeInst
+    // MVarCore` / `synthesizeUsingDefault`, `Elab/SyntheticMVars.lean`),
+    // which no task in this plan builds. Owner: M4b. This one allow
+    // covers the whole reachable chain below it; it is deliberately the
+    // ONLY dead-code allow in this module.
+    #[allow(dead_code)]
+    pub(crate) fn synth_instance(&mut self, ty: ExprId) -> Result<Option<ExprId>, MetaError> {
+        self.guarded(|ctx| ctx.synth_instance_main(ty))
+    }
+
+    fn synth_instance_main(&mut self, ty: ExprId) -> Result<Option<ExprId>, MetaError> {
+        let snap = self.checkpoint();
+        // Every instance `is_def_eq` in this search runs at `.instances`
+        // transparency (oracle: `synthInstance` is invoked under
+        // `withReducibleAndInstances`, `Meta/Basic.lean`'s
+        // `instantiateMVarDeclMVars`/`synthInstance` wrappers). Saved
+        // and restored around the whole search -- the `whnf_default`
+        // precedent (`whnf.rs:1548`).
+        let saved_transparency = self.cfg.transparency;
+        self.cfg.transparency = TransparencyMode::Instances;
+        let r = self.synth_instance_body(ty);
+        self.cfg.transparency = saved_transparency;
+        self.rollback(snap);
+        r
+    }
+
+    fn synth_instance_body(&mut self, ty: ExprId) -> Result<Option<ExprId>, MetaError> {
+        // oracle: `main` (:676-690) -- `mkFreshExprMVar type`,
+        // `mkTableKey type`, `newSubgoal .. Waiter.root`, then `synth`.
+        let ty = self.instantiate_mvars(ty)?;
+        let (mvar, _id) = self.mk_aux_mvar(ty)?;
+        let key = self.normalize_goal_key(ty)?;
+        let mut st = SynthState::default();
+        let root_mctx = self.checkpoint();
+        self.new_subgoal(&mut st, &root_mctx, key, mvar, Waiter::Root)?;
+        // oracle: `synth` (:668-674) -- step until a result appears or
+        // `step` reports there is nothing left to do.
+        while st.result.is_none() {
+            if !self.synth_step(&mut st)? {
+                break;
+            }
+        }
+        match st.result.take() {
+            None => Ok(None),
+            Some(result) => Ok(Some(self.open_abstract_mvars_result(&result)?)),
+        }
+    }
+
+    /// oracle: `step` (`SynthInstance.lean:660-667`) -- resume before
+    /// generate, and `false` when both stacks are empty. `checkSystem`
+    /// (:661) becomes `MetaCtx::step`, this crate's deterministic
+    /// counter (Global Constraints: a step counter, never
+    /// `maxHeartbeats`).
+    fn synth_step(&mut self, st: &mut SynthState) -> Result<bool, MetaError> {
+        self.step()?;
+        st.step += 1;
+        if !st.resume_stack.is_empty() {
+            self.resume(st)?;
+            Ok(true)
+        } else if !st.generators.is_empty() {
+            self.generate(st)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// This crate's `withMCtx` (oracle: `Lean.MonadMCtx.withMCtx`, used
+    /// pervasively throughout `SynthInstance.lean` to run a step under a
+    /// NODE's recorded metavariable context rather than the ambient
+    /// one). Restores the caller's own state afterwards, on the error
+    /// path too. Note `MetaSnapshot` covers assignments + the postponed
+    /// queue, NOT declarations: an mvar declared inside `f` stays
+    /// declared afterwards, which is harmless (declarations are
+    /// monotone and nothing outside `f` ever names those mvars) and is
+    /// the same collapse `metactx.rs::checkpoint`'s own doc records.
+    fn with_synth_mctx<R>(
+        &mut self,
+        snap: &MetaSnapshot,
+        f: impl FnOnce(&mut Self) -> Result<R, MetaError>,
+    ) -> Result<R, MetaError> {
+        let outer = self.checkpoint();
+        self.rollback(snap.clone());
+        let r = f(self);
+        self.rollback(outer);
+        r
+    }
+
+    // -------------------------------------------------------------------
+    // newSubgoal / mkGeneratorNode? / mkTableKeyFor
+    // -------------------------------------------------------------------
+
+    /// oracle: `newSubgoal` (`SynthInstance.lean:281-292`) -- build a
+    /// generator node for `mvar` under `mctx` and register a brand-new
+    /// table entry seeded with exactly `waiter`. When there are no
+    /// candidate instances at all, `mkGeneratorNode?` returns `none` and
+    /// the oracle registers NOTHING: no generator, and -- deliberately
+    /// -- no table entry either, so `waiter` is simply never woken and
+    /// that branch of the search dies. Reproduced exactly.
+    fn new_subgoal(
+        &mut self,
+        st: &mut SynthState,
+        mctx: &MetaSnapshot,
+        key: GoalKey,
+        mvar: ExprId,
+        waiter: Waiter,
+    ) -> Result<(), MetaError> {
+        let node = self.with_synth_mctx(mctx, |ctx| ctx.mk_generator_node(key, mvar))?;
+        if let Some(node) = node {
+            st.generators.push(node);
+            st.new_entry(key);
+            st.add_waiter(&key, waiter);
+        }
+        Ok(())
+    }
+
+    /// oracle: `mkGeneratorNode?` (`SynthInstance.lean:243-256`).
+    fn mk_generator_node(
+        &mut self,
+        key: GoalKey,
+        mvar: ExprId,
+    ) -> Result<Option<GeneratorNode>, MetaError> {
+        let mvar_type = self.infer_type(mvar)?;
+        let mvar_type = self.instantiate_mvars(mvar_type)?;
+        let instances = self.get_instances(mvar_type)?;
+        if instances.is_empty() {
+            return Ok(None);
+        }
+        let d = self.data(mvar_type);
+        Ok(Some(GeneratorNode {
+            goal: mvar,
+            key,
+            // `get_instances` delivers TRY order already (element 0
+            // first) -- see `instances.rs`'s "Consumption contract for
+            // callers (B5)". `generate` below consumes the front; it
+            // must NOT re-reverse.
+            remaining: instances,
+            mctx: self.checkpoint(),
+            type_has_mvars: d.has_expr_mvar() || d.has_level_mvar(),
+        }))
+    }
+
+    /// oracle: `mkTableKeyFor` (`SynthInstance.lean:298-302`) -- the key
+    /// of the mvar's TYPE. `normalize_goal_key` (B4) already runs
+    /// `instantiate_mvars` itself, so that step is not repeated here.
+    fn mk_table_key_for(&mut self, mvar: ExprId) -> Result<GoalKey, MetaError> {
+        let ty = self.infer_type(mvar)?;
+        self.normalize_goal_key(ty)
+    }
+
+    // -------------------------------------------------------------------
+    // generate / tryResolve / getSubgoals
+    // -------------------------------------------------------------------
+
+    /// oracle: `generate` (`SynthInstance.lean:625-660`) -- try the next
+    /// instance on the generator stack's top node.
+    fn generate(&mut self, st: &mut SynthState) -> Result<(), MetaError> {
+        let top = st.generators.len() - 1;
+        // oracle: `if gNode.currInstanceIdx == 0 then pop` (:627-628) --
+        // here, "no candidates left in the front-to-back cursor".
+        if st.generators[top].remaining.is_empty() {
+            st.generators.pop();
+            return Ok(());
+        }
+        let key = st.generators[top].key;
+        let goal = st.generators[top].goal;
+        let mctx = st.generators[top].mctx.clone();
+        // oracle: the `backward.synthInstance.canonInstances`
+        // short-circuit (:636-655). That option's default is `true`
+        // (:29-32) and this crate has no `Options` channel to turn it
+        // off, so the guard is transcribed unconditionally.
+        if !st.generators[top].type_has_mvars {
+            if let Some(entry) = st.find_entry(&key) {
+                if entry.answers.iter().any(|a| a.result.num_mvars() == 0) {
+                    st.generators.pop();
+                    return Ok(());
+                }
+            }
+        }
+        // oracle: `modifyTop { currInstanceIdx := idx }` (:657) happens
+        // BEFORE `tryResolve`, i.e. a candidate is consumed whether or
+        // not it resolves. Removing from the front here has the same
+        // effect (and cannot leave a failed candidate to be retried).
+        let inst = st.generators[top].remaining.remove(0);
+        let resolved = self.with_synth_mctx(&mctx, |ctx| ctx.try_resolve(goal, &inst))?;
+        if let Some((mctx2, subgoals)) = resolved {
+            let Node::MVar { id: Some(id) } = self.node(goal) else {
+                // Every `GeneratorNode.goal` is an `Expr.mvar` by
+                // construction (`main`/`consume` only ever pass one).
+                return Err(MetaError::MVar(
+                    "generate: generator goal is not a metavariable reference".into(),
+                ));
+            };
+            self.consume(
+                st,
+                ConsumerNode {
+                    key,
+                    mvar: MVarId(id),
+                    subgoals,
+                    next: 0,
+                    mctx: mctx2,
+                    size: 0,
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    /// oracle: `tryResolve` (`SynthInstance.lean:345-420`). Runs under
+    /// the generator node's `mctx` (the caller's `with_synth_mctx`), in
+    /// which `mvar` is unassigned.
+    ///
+    /// **NAMED SEAM -- `forallTelescopeReducing mvarType` (:351), owned
+    /// by M4b.** The oracle telescopes a FORALL-shaped synthesis goal
+    /// (`∀ xs, C ..`) and solves `C ..` in the extended context, then
+    /// re-abstracts with `mkLambdaFVars xs instVal (etaReduce := true)`
+    /// (:361); `getSubgoals` correspondingly builds each subgoal mvar at
+    /// type `∀ xs, A_i` and applies it to `xs` so `?m xs` stays a
+    /// higher-order pattern (:317-330). None of that is transcribed
+    /// here: this function handles the `xs = #[]` case only. Rather than
+    /// answer `None` for a forall-shaped goal -- a SILENT WRONG ANSWER,
+    /// since such goals are genuinely solvable -- it reports
+    /// [`MetaError::Unsupported`], which is an unanswered question, not
+    /// a negative verdict. Not exercised by either fixture (every goal
+    /// in `Instances.olean`/`InstancesCyclic.olean` is a bare class
+    /// application).
+    fn try_resolve(
+        &mut self,
+        mvar: ExprId,
+        inst: &Instance,
+    ) -> Result<Option<(MetaSnapshot, Vec<ExprId>)>, MetaError> {
+        let mvar_type = self.infer_type(mvar)?;
+        let mvar_type = self.instantiate_mvars(mvar_type)?;
+        // `forallTelescopeReducing` reduces before looking, so the check
+        // has to too -- a goal whose head unfolds to a forall must not
+        // slip through as if it were a bare class application.
+        let reduced = self.whnf(mvar_type)?;
+        if matches!(self.node(reduced), Node::Forall { .. }) {
+            return Err(MetaError::Unsupported(
+                "synth.rs::try_resolve: forall-shaped synthesis goal needs \
+                 forallTelescopeReducing (SynthInstance.lean:351) -- seam owned by M4b"
+                    .into(),
+            ));
+        }
+        let (mvars, inst_val, inst_type_body) = self.get_subgoals(inst)?;
+        // oracle: `subgoals := inst.synthOrder.map (mvars[·]!)` (:334).
+        // `synth_order` is decoded from untrusted `.olean` bytes (Global
+        // Constraints), so an out-of-range index is possible in
+        // principle; the oracle's `!` would panic. Dropping the
+        // candidate instead is incompleteness only -- NAMED SEAM, no
+        // real toolchain output can produce it (Lean computed the order
+        // against this very declaration's own telescope at
+        // registration).
+        let mut subgoals = Vec::with_capacity(inst.synth_order.len());
+        for &i in &inst.synth_order {
+            match mvars.get(i) {
+                Some(&m) => subgoals.push(m),
+                None => return Ok(None),
+            }
+        }
+        if !self.is_def_eq(mvar_type, inst_type_body)? {
+            return Ok(None);
+        }
+        // oracle: :361-416 -- `mkLambdaFVars xs instVal` is the identity
+        // for `xs = #[]`. Then: assign `mvar` DIRECTLY when the goal
+        // type is metavariable-free (:412-414, the expensive redundant
+        // recheck skipped), else re-unify (:415-416, whose `isDefEqArgs`
+        // side effects elaboration depends on).
+        let goal_body = self.instantiate_mvars(mvar_type)?;
+        if !self.data(goal_body).has_expr_mvar() {
+            let Node::MVar { id: Some(id) } = self.node(mvar) else {
+                return Err(MetaError::MVar(
+                    "try_resolve: goal is not a metavariable reference".into(),
+                ));
+            };
+            self.mctx.assign(MVarId(id), inst_val)?;
+        } else if !self.is_def_eq(mvar, inst_val)? {
+            return Ok(None);
+        }
+        Ok(Some((self.checkpoint(), subgoals)))
+    }
+
+    /// oracle: `getSubgoals` (`SynthInstance.lean:317-337`), specialized
+    /// to the `xs = #[]` case -- see [`MetaCtx::try_resolve`]'s own
+    /// doc for the named seam covering `xs != #[]`. With no telescope
+    /// variables, `mkForallFVars xs d` is `d`, `mkAppN mvar xs` is
+    /// `mvar`, and the whole thing reduces to: peel each `forallE`
+    /// binder off the instance's type, mint a fresh metavariable at that
+    /// binder's (substituted) type, apply it, and `whnf` whenever the
+    /// type stops being a syntactic forall to see whether more binders
+    /// hide behind a definition.
+    ///
+    /// Returns `(all binder mvars in order, instVal, instTypeBody)`.
+    #[allow(clippy::type_complexity)]
+    fn get_subgoals(
+        &mut self,
+        inst: &Instance,
+    ) -> Result<(Vec<ExprId>, ExprId, ExprId), MetaError> {
+        let base = Some(self.view.store);
+        // **HARD REQUIREMENT (B3's named seam, closed here).** oracle:
+        // `getInstances` (:222-226) hands `tryResolve` a candidate whose
+        // `val` is `e.val.updateConst! (← us.mapM (fun _ =>
+        // mkFreshLevelMVar))` -- EVERY universe argument replaced by a
+        // fresh level metavariable. `Instance::val` as stored by
+        // `instances.rs` is `mkConstWithLevelParams`, i.e. still the
+        // declaration's own RIGID `Level.param`s, so the refresh has to
+        // happen HERE, before anything unifies against it.
+        let mut inst_val = self.refresh_instance_levels(inst.val)?;
+        let mut inst_type = self.infer_type(inst_val)?;
+        let mut mvars: Vec<ExprId> = Vec::new();
+        let mut subst: Vec<ExprId> = Vec::new();
+        loop {
+            self.step()?;
+            if let Node::Forall {
+                binder_type, body, ..
+            } = self.node(inst_type)
+            {
+                let d = instantiate_rev(self.scratch, base, binder_type, &subst, &mut self.guard)?;
+                let (m, _) = self.mk_aux_mvar(d)?;
+                subst.push(m);
+                inst_val = self.scratch.expr_app(base, inst_val, m)?;
+                inst_type = body;
+                mvars.push(m);
+            } else {
+                let t = instantiate_rev(self.scratch, base, inst_type, &subst, &mut self.guard)?;
+                inst_type = self.whnf(t)?;
+                inst_val = instantiate_rev(self.scratch, base, inst_val, &subst, &mut self.guard)?;
+                subst.clear();
+                if !matches!(self.node(inst_type), Node::Forall { .. }) {
+                    break;
+                }
+            }
+        }
+        let inst_val = instantiate_rev(self.scratch, base, inst_val, &subst, &mut self.guard)?;
+        let inst_type_body =
+            instantiate_rev(self.scratch, base, inst_type, &subst, &mut self.guard)?;
+        Ok((mvars, inst_val, inst_type_body))
+    }
+
+    /// **HARD REQUIREMENT 1 (universe-level refresh).** oracle:
+    /// `getInstances`'s `val := e.val.updateConst! (← us.mapM (fun _ =>
+    /// mkFreshLevelMVar))` (`SynthInstance.lean:222-226`). See
+    /// `instances.rs`'s module doc ("`val`'s level params are NOT
+    /// refreshed here") for why this could not live at
+    /// table-construction time (no live `mctx` there to mint into) and
+    /// what goes wrong without it: a universe-polymorphic instance's
+    /// levels stay RIGID params, so unification against the goal's
+    /// levels spuriously fails -- or, in the unlucky param-vs-param
+    /// case, "succeeds" for the wrong reason.
+    ///
+    /// A non-`Const` `val` is returned unchanged: the oracle `panic!`s
+    /// there ("global instance is not a constant", :227), and
+    /// `InstanceTable::build` only ever stores the `val` of a decoded
+    /// `InstanceEntry`, which `addInstance` always builds as a `Const`.
+    fn refresh_instance_levels(&mut self, val: ExprId) -> Result<ExprId, MetaError> {
+        let base = Some(self.view.store);
+        let Node::Const { name, levels } = self.node(val) else {
+            return Ok(val);
+        };
+        let arity = self.scratch.level_list_at(base, levels).len();
+        if arity == 0 {
+            return Ok(val);
+        }
+        let mut fresh = Vec::with_capacity(arity);
+        for _ in 0..arity {
+            fresh.push(self.fresh_level_mvar()?.1);
+        }
+        let base = Some(self.view.store);
+        let levels2 = self.scratch.intern_level_list(base, &fresh)?;
+        Ok(self.scratch.expr_const(base, name, levels2)?)
+    }
+
+    // -------------------------------------------------------------------
+    // consume / addAnswer / mkAnswer / wakeUp
+    // -------------------------------------------------------------------
+
+    /// oracle: `consume` (`SynthInstance.lean:534-579`) -- process the
+    /// consumer's next subgoal.
+    ///
+    /// **`consume`'s subgoal RE-FILTER (:535-548).** The oracle rebuilds
+    /// `cNode.subgoals` on EVERY entry, dropping any subgoal that has
+    /// been assigned incidentally while solving an earlier one (its own
+    /// comment cites `@Submodule.setLike`, where a local instance type
+    /// depends on other local instances). This crate's `subgoals` is a
+    /// FROZEN vec with a monotone `next` cursor rather than a shrinking
+    /// list, so the same rule is expressed as a skip-if-assigned scan
+    /// from `next` forward, run under the node's own `mctx` (assignment
+    /// status is mctx-relative). Subgoals BEFORE `next` were already
+    /// consumed, so not rescanning them is not a behavioral difference:
+    /// the oracle's filter can only ever drop from the not-yet-processed
+    /// tail, since the head it already destructured is gone from its
+    /// list too.
+    ///
+    /// **NAMED SEAM -- `removeUnusedArguments?` (:556-575), owned by
+    /// M4b.** When a subgoal's type has an unused leading argument, the
+    /// oracle tables the ARGUMENT-STRIPPED goal instead and transports
+    /// answers back through a transformer (Tomas Skrivan's
+    /// optimization, :481-533). Not transcribed: it only ever applies to
+    /// a `hasUnusedArguments` (i.e. FORALL-shaped, :484-486) subgoal
+    /// type, which `try_resolve`'s own forall seam already refuses
+    /// upstream, so this branch is unreachable here rather than silently
+    /// skipped. Its absence is a tabling-granularity/perf difference, not
+    /// a different answer.
+    fn consume(&mut self, st: &mut SynthState, mut c: ConsumerNode) -> Result<(), MetaError> {
+        let mctx = c.mctx.clone();
+        let next = self.with_synth_mctx(&mctx, |ctx| {
+            let mut next = c.next;
+            while next < c.subgoals.len() {
+                let assigned = match ctx.node(c.subgoals[next]) {
+                    Node::MVar { id: Some(id) } => ctx.mctx.is_assigned(MVarId(id)),
+                    // Not an mvar reference at all: nothing left to
+                    // solve for it, so treat it as done (the oracle's
+                    // `.mvarId!` would panic; every subgoal this driver
+                    // builds IS an mvar reference).
+                    _ => true,
+                };
+                if assigned {
+                    next += 1;
+                } else {
+                    break;
+                }
+            }
+            Ok(next)
+        })?;
+        c.next = next;
+
+        // oracle: `| [] => addAnswer cNode` (:550).
+        if c.next >= c.subgoals.len() {
+            return self.add_answer(st, c);
+        }
+        let mvar = c.subgoals[c.next];
+        let key = self.with_synth_mctx(&mctx, |ctx| ctx.mk_table_key_for(mvar))?;
+        // oracle: `let waiter := Waiter.consumerNode cNode` (:553) --
+        // an IMMUTABLE SNAPSHOT of the node as it is right now. Here:
+        // push it into the append-only arena and hand out its index.
+        let idx = st.push_consumer(c);
+        let waiter = Waiter::Consumer(idx);
+        match st.find_entry(&key) {
+            // oracle: `| some entry => ...` (:576-579) -- schedule a
+            // resume for every answer already recorded, and join the
+            // waiter list. THIS is what makes a cyclic instance graph
+            // terminate: a goal reached a second time never spawns a
+            // second generator.
+            Some(entry) => {
+                let existing: Vec<Answer> = entry.answers.clone();
+                for a in existing {
+                    st.resume_stack.push((idx, a));
+                }
+                st.add_waiter(&key, waiter);
+                Ok(())
+            }
+            // oracle: `| none => newSubgoal cNode.mctx key mvar waiter`
+            // (:558, the `removeUnusedArguments? = none` branch -- see
+            // this function's own seam note).
+            None => self.new_subgoal(st, &mctx, key, mvar, waiter),
+        }
+    }
+
+    /// oracle: `addAnswer` (`SynthInstance.lean:463-478`).
+    fn add_answer(&mut self, st: &mut SynthState, c: ConsumerNode) -> Result<(), MetaError> {
+        // oracle: `if cNode.size ≥ maxResultSize then <trace only>`
+        // (:466-467) -- the answer is simply not recorded.
+        if c.size >= MAX_RESULT_SIZE {
+            return Ok(());
+        }
+        let mctx = c.mctx.clone();
+        let answer = self.with_synth_mctx(&mctx, |ctx| ctx.mk_answer(&c))?;
+        // `SynthState::add_answer` (B4) is `addAnswer`'s table-touching
+        // half: `isNewAnswer` dedup, store, and hand back the waiters to
+        // wake. Waking them (`wakeUp`, :422-434) is this function's job.
+        let woken = st.add_answer(&c.key, answer.clone());
+        for w in woken {
+            self.wake_up(st, &answer, w);
+        }
+        Ok(())
+    }
+
+    /// oracle: `mkAnswer` (`SynthInstance.lean:453-459`). Runs under
+    /// `cNode.mctx` (the caller's `with_synth_mctx`).
+    fn mk_answer(&mut self, c: &ConsumerNode) -> Result<Answer, MetaError> {
+        let base = Some(self.view.store);
+        let mvar_expr = self.scratch.expr_mvar(base, Some(c.mvar.0))?;
+        let val = self.instantiate_mvars(mvar_expr)?;
+        let result = self.abstract_mvars(val)?;
+        let result_type = self.infer_type(result.expr)?;
+        Ok(Answer {
+            result,
+            result_type,
+            size: c.size + 1,
+        })
+    }
+
+    /// oracle: `wakeUp` (`SynthInstance.lean:422-434`). The root arm
+    /// accepts an answer only when it abstracted NO expr metavariables
+    /// (`answer.result.numMVars == 0`, :428) -- an answer still
+    /// parametric in an unsolved metavariable is not a solution to the
+    /// original query. Level params are explicitly fine (the oracle's
+    /// own comment at :424-427).
+    fn wake_up(&mut self, st: &mut SynthState, answer: &Answer, waiter: Waiter) {
+        match waiter {
+            Waiter::Root => {
+                if answer.result.num_mvars() == 0 {
+                    st.result = Some(answer.result.clone());
+                }
+            }
+            Waiter::Consumer(idx) => st.resume_stack.push((idx, answer.clone())),
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // resume / tryAnswer
+    // -------------------------------------------------------------------
+
+    /// oracle: `resume` (`SynthInstance.lean:635-651`) composed with
+    /// `getNextToResume` (:628-632). Note the oracle builds a WHOLE NEW
+    /// `ConsumerNode` with `subgoals := rest` (:650) and never mutates
+    /// the waited-on snapshot -- reproduced here by pushing a new arena
+    /// node (via `consume`) with `next + 1`, leaving `consumers[idx]`
+    /// untouched. See [`ConsumerNode`]'s doc for why that discipline is
+    /// a correctness requirement.
+    fn resume(&mut self, st: &mut SynthState) -> Result<(), MetaError> {
+        let Some((idx, answer)) = st.resume_stack.pop() else {
+            return Ok(());
+        };
+        let c = st.consumer(idx).clone();
+        if c.next >= c.subgoals.len() {
+            // oracle: `| [] => panic! "resume found no remaining
+            // subgoals"` (:637). An internal-invariant violation, so a
+            // structured caller-bug error rather than a verdict.
+            return Err(MetaError::MVar(
+                "resume: woken consumer has no remaining subgoals".into(),
+            ));
+        }
+        let mvar = c.subgoals[c.next];
+        let Some(mctx2) = self.try_answer(&c.mctx, mvar, &answer)? else {
+            return Ok(());
+        };
+        self.consume(
+            st,
+            ConsumerNode {
+                key: c.key,
+                mvar: c.mvar,
+                subgoals: c.subgoals,
+                next: c.next + 1,
+                mctx: mctx2,
+                size: c.size + answer.size,
+            },
+        )
+    }
+
+    /// oracle: `tryAnswer` (`SynthInstance.lean:441-449`) -- reopen the
+    /// abstracted answer fresh in THIS consumer's metavariable context
+    /// and unify it with the subgoal.
+    fn try_answer(
+        &mut self,
+        mctx: &MetaSnapshot,
+        mvar: ExprId,
+        answer: &Answer,
+    ) -> Result<Option<MetaSnapshot>, MetaError> {
+        self.with_synth_mctx(mctx, |ctx| {
+            let val = ctx.open_abstract_mvars_result(&answer.result)?;
+            if ctx.is_def_eq(mvar, val)? {
+                Ok(Some(ctx.checkpoint()))
+            } else {
+                Ok(None)
+            }
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
-    use crate::test_support::{const_named, fresh_mvar, with_instances_ctx};
+    use crate::test_support::{
+        const_named, fresh_mvar, parse_goal, render_expr, render_name, with_cyclic_instances_ctx,
+        with_instances_ctx,
+    };
     use leanr_kernel::bank::ExprId;
 
     /// Build `Type` (`Sort (succ Level.zero)`) as an mvar's type -- the
@@ -1201,6 +2375,210 @@ mod tests {
                 .expect("app");
 
             assert_eq!(key, GoalKey(expected));
+        });
+    }
+
+    // ===================================================================
+    // Driver tests (task B5)
+    // ===================================================================
+
+    /// B5 Step-1 brief test: the goal `Add N` resolves, and the term the
+    /// driver hands back really does inhabit the goal (`infer_type` of it
+    /// is defeq the goal — the same property the kernel independently
+    /// re-checks).
+    #[test]
+    fn synthesizes_simple_instance() {
+        with_instances_ctx(|ctx| {
+            let goal = parse_goal(ctx, "Add N");
+            let inst = ctx.synth_instance(goal).unwrap().expect("an instance");
+            let ty = ctx.infer_type(inst).unwrap();
+            assert!(ctx.is_def_eq(ty, goal).unwrap());
+        });
+    }
+
+    /// B5 Step-1 brief test: subgoal chaining. `Add (Prod N N)` needs
+    /// `instAddProd {a b} [Add a] [Add b] : Add (Prod a b)` plus two
+    /// `Add N` subgoals — the first goal in this crate whose answer is
+    /// built by a CONSUMER node completing, not by a generator alone.
+    #[test]
+    fn synthesizes_via_subgoal_chaining() {
+        with_instances_ctx(|ctx| {
+            let goal = parse_goal(ctx, "Add (Prod N N)");
+            let inst = ctx.synth_instance(goal).unwrap().expect("an instance");
+            let ty = ctx.infer_type(inst).unwrap();
+            assert!(ctx.is_def_eq(ty, goal).unwrap());
+        });
+    }
+
+    /// B5 Step-1 brief test: `Instances.olean` has no `Mul (Prod _ _)`
+    /// instance at all, so this must be a clean `None` — not an error,
+    /// not a budget exhaustion.
+    #[test]
+    fn no_instance_returns_none() {
+        with_instances_ctx(|ctx| {
+            let goal = parse_goal(ctx, "Mul (Prod N N)");
+            assert_eq!(ctx.synth_instance(goal).unwrap(), None);
+        });
+    }
+
+    /// B5 Step-5 brief test: a CYCLIC instance graph must TERMINATE.
+    /// `InstancesCyclic.olean` derives `A a` only from `B a` and `B a`
+    /// only from `A a`, with no base instance — a naive
+    /// memoized-backtracking resolver diverges; a tabled one terminates
+    /// because the second occurrence of the goal `A N` finds the table
+    /// entry the first occurrence created and registers a waiter rather
+    /// than spawning a second generator.
+    ///
+    /// The assertion is deliberately STRONGER than the brief's `matches!
+    /// (.., Ok(_))`: the step budget is turned DOWN to 50_000 (from
+    /// `DEFAULT_STEP_BUDGET`'s 10_000_000) and the result must still be
+    /// `Ok(None)`. A budget error is an `Err`, so `Ok(None)` is
+    /// positive evidence that termination came from tabling and not from
+    /// the budget quietly cutting a real loop short — which is exactly
+    /// the failure mode a `matches!(.., Ok(_))`-plus-huge-budget test
+    /// cannot distinguish.
+    #[test]
+    fn cyclic_instances_terminate() {
+        with_instances_ctx(|ctx| {
+            let goal = parse_goal(ctx, "Mul N");
+            let insts = ctx.get_instances(goal).unwrap();
+            let names: Vec<String> = insts
+                .iter()
+                .map(|i| crate::test_support::render_name(ctx, i.global_name.unwrap()))
+                .collect();
+            eprintln!("PROBE try-order Mul N = {names:?}");
+        });
+        with_cyclic_instances_ctx(|ctx| {
+            let goal = parse_goal(ctx, "A N");
+            ctx.set_step_budget(50_000);
+            assert_eq!(
+                ctx.synth_instance(goal),
+                Ok(None),
+                "a cyclic instance graph must terminate WITHOUT a budget error"
+            );
+        });
+    }
+
+    /// B5 Step-5 brief test. NOTE (PR-A finding, carried into this
+    /// task's own brief): `Instances.olean`'s superclass chain is LINEAR
+    /// (`Monoid -> Semigroup -> Mul`), not a multi-parent diamond, so
+    /// "diamond" here is the REDUNDANT-PATH sense: `Mul N` is reachable
+    /// BOTH directly (`instMulN`) and transitively (`Semigroup.toMul`
+    /// applied to `instSemigroupN`, itself reachable again via
+    /// `Monoid.toSemigroup`). Two candidates can therefore both produce
+    /// an answer, and which one the driver returns must not vary between
+    /// runs. Two calls in the SAME `MetaCtx` (so the fresh-mvar
+    /// generators have already advanced for the second call) must render
+    /// identically.
+    #[test]
+    fn diamond_resolves_deterministically() {
+        with_instances_ctx(|ctx| {
+            let goal = parse_goal(ctx, "Mul N");
+            let a = ctx.synth_instance(goal).unwrap();
+            let b = ctx.synth_instance(goal).unwrap();
+            assert!(a.is_some(), "Mul N is reachable via instMulN");
+            assert_eq!(
+                a.map(|e| render_expr(ctx, e)),
+                b.map(|e| render_expr(ctx, e))
+            );
+        });
+    }
+
+    /// **CHARACTERIZATION TEST for a CONFIRMED DIVERGENCE from the
+    /// oracle, attributable to B1, not to this task's driver.**
+    ///
+    /// Probed against the pinned toolchain (`#synth Mul N` over
+    /// `tests/fixtures/Instances.lean`, v4.33.0-rc1): Lean answers
+    /// `instMulN`. This crate answers `Semigroup.toMul instSemigroupN`
+    /// instead. Both inhabit `Mul N` and are definitionally equal, so
+    /// this is a divergent-answer, never an unsound one -- but it IS a
+    /// divergence, and this test exists so it is pinned and loud rather
+    /// than silently absorbed.
+    ///
+    /// Root cause, traced: `getUnify.process`'s non-root arm is
+    /// `visitNonStar k args (← visitStar result)`
+    /// (`DiscrTree/Main.lean:606`) -- `visitStar` runs FIRST and its
+    /// output is the accumulator `visitNonStar` appends to, so the
+    /// oracle's result array is `[<star matches>, <specific matches>]`,
+    /// which `generate`'s back-to-front read (`SynthInstance.lean:
+    /// 630-631`) turns into "specific candidate tried FIRST".
+    /// `discr_tree.rs::DiscrTree::process` (B1) deliberately inverts
+    /// that pair ("specific before wildcard", its own comment at the
+    /// `visitNonStar`/`visitStar` call site), so `get_instances`'s
+    /// already-reversed try-order hands this driver
+    /// `["Semigroup.toMul", "instMulN"]` where the oracle would hand it
+    /// `["instMulN", "Semigroup.toMul"]`, and the driver -- correctly --
+    /// returns the first candidate that produces an answer.
+    ///
+    /// The fix belongs to `DiscrTree::process` (swap those two calls),
+    /// which this task is explicitly scoped out of modifying. When B1 is
+    /// corrected, THIS TEST MUST FAIL and be updated to expect
+    /// `instMulN` -- that failure is the point.
+    #[test]
+    fn mul_n_picks_the_wrong_candidate_first_because_of_the_discr_tree_order() {
+        with_instances_ctx(|ctx| {
+            let goal = parse_goal(ctx, "Mul N");
+            let insts = ctx.get_instances(goal).expect("get_instances");
+            let order: Vec<String> = insts
+                .iter()
+                .map(|i| render_name(ctx, i.global_name.expect("global_name")))
+                .collect();
+            assert_eq!(
+                order,
+                vec!["Semigroup.toMul".to_string(), "instMulN".to_string()],
+                "B1 try-order (oracle would be the reverse)"
+            );
+
+            let inst = ctx.synth_instance(goal).unwrap().expect("an instance");
+            let head = ctx.get_app_fn(inst);
+            let Node::Const { name: Some(n), .. } = ctx.node(head) else {
+                panic!("synthesized term is not a constant application")
+            };
+            assert_eq!(
+                render_name(ctx, n),
+                "Semigroup.toMul",
+                "oracle answers `instMulN` here -- see this test's doc"
+            );
+            // Still a genuine inhabitant of the goal: the divergence is
+            // in WHICH answer, never in whether the answer type-checks.
+            let ty = ctx.infer_type(inst).unwrap();
+            assert!(ctx.is_def_eq(ty, goal).unwrap());
+        });
+    }
+
+    /// Pins the APPEND-ONLY arena discipline (this module's doc, point
+    /// (3), and [`ConsumerNode`]'s own doc): advancing a consumer to its
+    /// next subgoal must PUSH a new node, never mutate the slot an
+    /// outstanding `Waiter::Consumer` points at. `SynthState::consumers`
+    /// is module-private with `push_consumer` as its only mutator, so
+    /// the compiler already enforces this -- this test pins the INTENT,
+    /// so a future refactor that re-exposes the field (or adds an
+    /// in-place `advance`) has to delete an explicit assertion rather
+    /// than silently reintroduce the wrong-answer bug.
+    #[test]
+    fn advancing_a_consumer_does_not_disturb_an_outstanding_waiter() {
+        with_instances_ctx(|ctx| {
+            let goal = parse_goal(ctx, "Add N");
+            let mvar = ctx.mk_aux_mvar(goal).expect("mvar").1;
+            let node = ConsumerNode {
+                key: GoalKey::for_test(7),
+                mvar,
+                subgoals: vec![goal, goal],
+                next: 0,
+                mctx: ctx.checkpoint(),
+                size: 0,
+            };
+            let mut st = SynthState::default();
+            let waited_on = st.push_consumer(node.clone());
+            // "Advance": a NEW node at the next cursor position.
+            let advanced = st.push_consumer(ConsumerNode { next: 1, ..node });
+            assert_ne!(waited_on, advanced, "advancing must mint a new index");
+            assert_eq!(
+                st.consumer(waited_on).next,
+                0,
+                "the waited-on snapshot's cursor must be frozen"
+            );
+            assert_eq!(st.consumer(advanced).next, 1);
         });
     }
 

@@ -437,6 +437,13 @@ impl<'e> MetaCtx<'e> {
 /// level assignment maps and the postponed queue. NOT the permanent
 /// cache (it is monotone and shared) and NOT declarations (an mvar stays
 /// declared).
+///
+/// `Clone` (task B5): the tabled-synthesis driver stores one snapshot
+/// PER NODE (the oracle's own `GeneratorNode.mctx`/`ConsumerNode.mctx`
+/// fields, `SynthInstance.lean:49`/`:57`) and re-enters it repeatedly
+/// via a `withMCtx`-equivalent, so it must be able to restore the same
+/// snapshot more than once — `rollback` consumes its argument.
+#[derive(Clone)]
 pub(crate) struct MetaSnapshot {
     expr_assignments: HashMap<MVarId, ExprId>,
     level_assignments: HashMap<LMVarId, LevelId>,

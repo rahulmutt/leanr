@@ -269,7 +269,6 @@
 //! `#![allow(dead_code)]`). `#![allow(dead_code)]` below is scoped to
 //! this one module (an inner attribute on the `instances` module, not
 //! the whole crate) and should be removed once B5 wires this table in.
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 
@@ -291,9 +290,38 @@ use crate::{MetaCtx, MetaError};
 #[derive(Debug, Clone)]
 pub(crate) struct Instance {
     pub val: ExprId,
+    /// The instance's DECLARED type (`ConstantVal.ty`), still carrying
+    /// the declaration's own rigid `Level.param`s.
+    ///
+    /// Narrowed from this module's former blanket
+    /// `#![allow(dead_code)]` (removed by task B5): B5's `get_subgoals`
+    /// deliberately does NOT read this cache -- it transcribes the
+    /// oracle's own `inferType instVal` (`SynthInstance.lean:349`)
+    /// against the LEVEL-REFRESHED `val`, which is the only spelling
+    /// that gets the fresh universe metavariables into the telescoped
+    /// type. Reading `ty` there instead would additionally require
+    /// re-running `instantiate_level_params` with those same fresh
+    /// levels, i.e. redoing by hand exactly what `infer_const` already
+    /// does. Kept (it is free at table-construction time) for the
+    /// elaborator-layer consumers that will want a candidate's declared
+    /// type without a live `mctx` -- `synthesizeUsingDefault`
+    /// (`Elab/SyntheticMVars.lean:213-221`) and instance diagnostics.
+    /// Owner: M4b.
+    #[allow(dead_code)]
     pub ty: ExprId,
     pub priority: usize,
     pub synth_order: Vec<usize>,
+    /// Narrowed from this module's former blanket
+    /// `#![allow(dead_code)]` (removed by task B5): the resolution
+    /// driver identifies a candidate by its `val` (the `Const` it
+    /// applies), never by name -- the oracle only reads `declName` off
+    /// `inst.val.getAppFn` for DIAGNOSTICS (`recordInstance`,
+    /// `SynthInstance.lean:347-348`, gated on `isDiagnosticsEnabled`),
+    /// which this crate has no channel for. Read today only by
+    /// `#[cfg(test)]` assertions and by `InstanceTable::by_name`'s own
+    /// keying; owner of the real consumer (instance diagnostics /
+    /// erasure filtering, this module's own erasure seam): M4b.
+    #[allow(dead_code)]
     pub global_name: Option<NameId>,
 }
 
@@ -329,7 +357,11 @@ pub(crate) struct Instance {
 #[derive(Default)]
 pub(crate) struct InstanceTable {
     tree: DiscrTree<Instance>,
+    /// See [`InstanceTable::get_by_name`] for the allow's rationale.
+    #[allow(dead_code)]
     by_name: HashMap<NameId, Instance>,
+    /// See [`MetaCtx::default_instances`] for the allow's rationale.
+    #[allow(dead_code)]
     defaults: Vec<(NameId, NameId, usize)>,
 }
 
@@ -385,6 +417,15 @@ impl InstanceTable {
         }
     }
 
+    /// Narrowed from this module's former blanket
+    /// `#![allow(dead_code)]` (removed by task B5): the name-indexed
+    /// half of the table (mirroring the real `Instances.instanceNames`,
+    /// `Instances.lean:78`) is not on B5's resolution path at all --
+    /// that path is `get_instances` -> discrimination tree. Its only
+    /// callers are `#[cfg(test)]` (`test_support::instance_named`) and
+    /// the elaborator-layer instance diagnostics that will want a
+    /// by-name lookup. Owner: M4b.
+    #[allow(dead_code)]
     pub(crate) fn get_by_name(&self, name: NameId) -> Option<&Instance> {
         self.by_name.get(&name)
     }
@@ -453,6 +494,8 @@ impl<'e> MetaCtx<'e> {
     /// task's own Step-1 test, `parametrized_instance_has_two_synth_subgoals`)
     /// without hand-constructing a discrimination-tree query for a
     /// parametrized instance's own (metavariable-shaped) type.
+    /// See [`InstanceTable::get_by_name`] for the allow's rationale.
+    #[allow(dead_code)]
     pub(crate) fn instance_named(&self, name: NameId) -> Option<&Instance> {
         self.instances.get_by_name(name)
     }
@@ -461,6 +504,14 @@ impl<'e> MetaCtx<'e> {
     /// `Lean.Meta.getDefaultInstances` itself returns (most-recently
     /// -registered first) — see this module's doc for why that is NOT a
     /// priority sort.
+    /// Narrowed from this module's former blanket
+    /// `#![allow(dead_code)]` (removed by task B5): default instances
+    /// are consumed one layer ABOVE synthesis, by `synthesizeUsingDefault`
+    /// (`Elab/SyntheticMVars.lean:213-221`), never by
+    /// `SynthInstance.main` itself -- so B5's driver correctly has no
+    /// call to this, and no task in this plan builds that elaborator
+    /// layer. Owner: M4b.
+    #[allow(dead_code)]
     pub(crate) fn default_instances(&self, class: NameId) -> Vec<(NameId, usize)> {
         self.instances
             .defaults

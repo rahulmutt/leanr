@@ -681,7 +681,7 @@ impl<'e> MetaCtx<'e> {
     /// `isDefEqMVarSelf` fallback, only ever invokes this after
     /// confirming the mvar being rescued already has an empty own
     /// lctx).
-    fn mk_aux_mvar(&mut self, ty: ExprId) -> Result<(ExprId, MVarId), MetaError> {
+    pub(crate) fn mk_aux_mvar(&mut self, ty: ExprId) -> Result<(ExprId, MVarId), MetaError> {
         let idx = self.expr_mvar_gen;
         self.expr_mvar_gen += 1;
         let base = Some(self.view.store);

@@ -202,6 +202,46 @@ pub(crate) fn with_instances_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
     f(&mut ctx)
 }
 
+/// Replay `InstancesCyclic.olean` (task B5's own fixture: a CYCLIC
+/// instance graph — `instAofB {a} [B a] : A a` and `instBofA {a} [A a] :
+/// B a`, with no base instance for either class, so `A N` is genuinely
+/// unsolvable and the only question is whether DECIDING so terminates).
+/// Same `prelude`-mode, import-free, replay-into-an-empty-`Environment`
+/// shape as [`with_instances_ctx`] just above — see `InstancesCyclic.lean`'s
+/// own module doc for the fixture's contents and why it exists.
+pub(crate) fn with_cyclic_instances_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
+    let bytes = std::fs::read(fixture_path("InstancesCyclic.olean"))
+        .expect("InstancesCyclic.olean fixture");
+    let mut env = Environment::default();
+    let md = ModuleData::parse(&bytes, env.store_mut()).expect("InstancesCyclic.olean decodes");
+    assert!(
+        md.imports.is_empty(),
+        "InstancesCyclic.olean must be import-free (prelude-mode fixture) — \
+         with_cyclic_instances_ctx replays it into an empty Environment with no \
+         dependency loading"
+    );
+    let reducibility = md.reducibility;
+    let matchers = md.matchers;
+    let instances = md.instances;
+    let default_instances = md.default_instances;
+    let constants: HashMap<NameId, ConstantInfo> =
+        md.constants.into_iter().map(|c| (c.name(), c)).collect();
+    leanr_kernel::replay(&mut env, constants).expect("InstancesCyclic.olean replays");
+
+    let view = env.view();
+    let mut scratch = Store::scratch();
+    let mut ctx = MetaCtx::new(
+        view,
+        &mut scratch,
+        Config::default(),
+        &reducibility,
+        &matchers,
+        &instances,
+        &default_instances,
+    );
+    f(&mut ctx)
+}
+
 /// Build an `Expr.const` for `name`, filling its universe-level
 /// arguments with `Level.zero` repeated once per the constant's OWN
 /// declared `level_params` arity (mirrors `infer.rs::tests::
@@ -269,13 +309,73 @@ pub(crate) fn const_dotted(ctx: &mut MetaCtx, a: &str, b: &str) -> ExprId {
 /// helper name, reimplemented here as a free function per this file's
 /// existing style rather than a `MetaCtx` method — see [`const_named`]
 /// for the same level-filling convention this reuses per token).
+///
+/// Task B5 additionally taught this NESTED APPLICATION via parentheses
+/// (`"Add (Prod N N)"` -> `@Add (@Prod N N)`), which that task's own
+/// `synthesizes_via_subgoal_chaining`/`no_instance_returns_none` tests
+/// (and their brief, which spells the spec exactly that way) need. The
+/// previous flat `split_whitespace` version did not merely ignore the
+/// parentheses — it interned `"(Prod"` and `"N)"` as literal root NAMES,
+/// silently building a four-argument application of two constants that
+/// do not exist in any environment. Grammar: `app := atom+`,
+/// `atom := IDENT | '(' app ')'`.
 pub(crate) fn parse_goal(ctx: &mut MetaCtx, spec: &str) -> ExprId {
-    let mut tokens = spec.split_whitespace();
-    let head_name = tokens.next().expect("parse_goal: empty spec");
-    let head = const_named(ctx, head_name);
-    let args: Vec<ExprId> = tokens.map(|t| const_named(ctx, t)).collect();
+    let padded = spec.replace('(', " ( ").replace(')', " ) ");
+    let tokens: Vec<&str> = padded.split_whitespace().collect();
+    let mut pos = 0usize;
+    let e = parse_app(ctx, &tokens, &mut pos);
+    assert_eq!(pos, tokens.len(), "parse_goal: trailing input in {spec:?}");
+    e
+}
+
+/// `app := atom+` — juxtaposition, left-associated. Stops at `)` or EOF.
+fn parse_app(ctx: &mut MetaCtx, tokens: &[&str], pos: &mut usize) -> ExprId {
+    let head = parse_atom(ctx, tokens, pos);
+    let mut args = Vec::new();
+    while *pos < tokens.len() && tokens[*pos] != ")" {
+        args.push(parse_atom(ctx, tokens, pos));
+    }
     ctx.mk_app_spine(head, &args)
         .expect("parse_goal: mk_app_spine")
+}
+
+/// `atom := IDENT | '(' app ')'`.
+fn parse_atom(ctx: &mut MetaCtx, tokens: &[&str], pos: &mut usize) -> ExprId {
+    let t = *tokens
+        .get(*pos)
+        .expect("parse_goal: unexpected end of spec");
+    *pos += 1;
+    if t == "(" {
+        let e = parse_app(ctx, tokens, pos);
+        assert_eq!(
+            tokens.get(*pos).copied(),
+            Some(")"),
+            "parse_goal: unbalanced parentheses"
+        );
+        *pos += 1;
+        e
+    } else {
+        assert_ne!(t, ")", "parse_goal: unexpected ')'");
+        const_named(ctx, t)
+    }
+}
+
+/// Render an expression to a stable string, for assertions that compare
+/// two independently-synthesized terms for STRUCTURAL identity without
+/// asserting anything about the particular ids involved (task B5's
+/// `diamond_resolves_deterministically`). Goes through
+/// `Store::to_expr`'s `Debug`, the same "bridge to the Arc form only in
+/// test assertions, never on a hot path" posture [`render_name`] takes
+/// for names.
+pub(crate) fn render_expr(ctx: &mut MetaCtx, e: ExprId) -> String {
+    let base = Some(ctx.view.store);
+    let mut guard = leanr_kernel::RecGuard::new();
+    format!(
+        "{:?}",
+        ctx.scratch
+            .to_expr(base, e, &mut guard)
+            .expect("render_expr: bridging a synthesized term to its Arc form")
+    )
 }
 
 /// Find one instance by its bare declaration name (task B3's own
