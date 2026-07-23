@@ -30,13 +30,23 @@ smallest verifiable surface.
 
 ## Scope
 
-**Leaf forms only.** A leaf is a term with no binder and no application:
+**Leaf forms only.** A leaf is a term whose elaboration emits an `Expr`
+with no binder, no application, and no instance search:
 
-- literals — `num` / `str` / `char`
+- **string** literals (`str`) — the only literal that is a leaf
 - sorts — `Sort` / `Type` / `Prop`
 - identifiers resolving to a **global constant**
 - type ascription — `(e : T)`
 - the hole — `_`
+
+**Numeric and character literals are deliberately excluded** (discovered
+during planning, corrected here): at the elaborator level `num`
+elaborates through `OfNat.ofNat` and `char` through `Char.ofNat` — both
+are *applications* that require instance synthesis and default
+instances, not direct `Expr.lit` nodes. They are therefore not leaves;
+they land in M4b-3 (application + coercion), the slice that first has the
+`OfNat`/app machinery. Only the string literal produces a direct
+`Expr.lit (.strVal _)` and stays a leaf.
 
 No binders, no application, no postponement, no coercions, no macro
 expansion, no `open`/alias/`export`/dot-notation resolution. Each
@@ -112,10 +122,9 @@ dispatch path in the slice that first needs it.
 
 The elaborators:
 
-- **literals** — `num`/`str`/`char` build the corresponding literal
-  `Expr` (`Nat`/`String`/`Char`). `num` with an expected type stays a
-  `Nat` literal in slice 1; `OfNat`-driven numeric literals route
-  through coercion/app machinery and are that slice's concern.
+- **string literals** — `str` builds `Expr.lit (.strVal _)` directly.
+  (`num`/`char` are not leaves — see *Scope* — and are not registered in
+  slice 1; their kinds hit `UnsupportedSyntax`.)
 - **sorts** — `Prop` = `Sort 0`; `Type` = `Sort (u+1)` with a fresh
   level metavariable; `Sort u` reads its level argument. Universe
   metavariables so produced are representable in the harness (see
@@ -279,7 +288,9 @@ Per devkit testing-practices, tiered:
 - **The application elaborator (`elabApp`), implicit/instance-implicit
   argument insertion, named/optional args, `@`** → M4b-3. Coercion
   insertion (`mkCoe`) enters here — hence slice 1's ascription errors
-  rather than coerces on a type mismatch.
+  rather than coerces on a type mismatch. **Numeric (`num`, via
+  `OfNat.ofNat`) and character (`char`, via `Char.ofNat`) literals also
+  land here**, since both are applications requiring instance synthesis.
 - **`elabAsElim`, dot notation, `binop%`, anonymous constructor `⟨⟩`**
   → M4b-4.
 - **`open` / alias / `export` / `_root_` name resolution and overload
