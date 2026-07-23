@@ -243,6 +243,19 @@ enum LeanrAns {
     /// leanr itself errored (a `MetaError`) — always a divergence, since the
     /// oracle answered this record cleanly (a comparable record has `ok`).
     Errored,
+    /// The decoded goal, re-encoded under a fresh `EncSt`, did NOT
+    /// round-trip to the record's committed `goal` JSON (the
+    /// `oracle_synth.rs:250-258` check). This means the SAME `EncSt` that
+    /// numbered the goal — and that `Synth`'s term would have been encoded
+    /// under — has already diverged from the oracle dumper's own
+    /// numbering, so trusting a `val` comparison made under it "could
+    /// silently agree for the wrong reason" (`oracle_synth.rs`'s own
+    /// words). `query_agrees` never agrees with this variant (it falls
+    /// through the same wildcard `Errored` does), so a constant that hits
+    /// this is reported not-green rather than gated on an untrustworthy
+    /// `val` — a phantom non-green, not a hidden real regression. Carries
+    /// both sides so the sweep's log line can show the actual mismatch.
+    GoalMismatch { got: Value, want: Value },
 }
 
 /// Does leanr's answer for ONE comparable oracle record agree with it?
@@ -251,6 +264,11 @@ enum LeanrAns {
 /// `near_budget` records must be filtered out by the caller before reaching
 /// here (their `ok` is `None`, which this treats as non-agreeing so a
 /// mis-filtered record fails loudly rather than passing vacuously).
+/// `GoalMismatch` also never agrees (falls through the same wildcards as
+/// `Errored`) — see its doc comment on `LeanrAns`: comparing `val` at all
+/// under a numbering that failed to round-trip is exactly what must NOT
+/// happen, so this variant is deliberately never routed into the `Synth`
+/// arm below.
 fn query_agrees(oracle: &OracleRecord, got: &LeanrAns) -> bool {
     match oracle.ok {
         Some(true) => match got {
@@ -307,8 +325,19 @@ fn constant_is_green(_const: &str, oracle: &[OracleRecord], leanr: &[(String, Le
 /// leaks between them). The mined goal is closed w.r.t. bvars AND mvars by
 /// C1's construction (`dump_synth_mathlib.lean`, MINING ALGORITHM + FATAL
 /// GUARDS), so — unlike `oracle_synth.rs` — there are no goal mvars to
-/// declare. The `EncSt` is seeded by encoding `goal` first (round-trip),
-/// then the answer, matching the oracle dumper's own `EncSt` threading.
+/// declare. The `EncSt` is seeded by encoding `goal` first, and — matching
+/// `oracle_synth.rs:250-258`'s idiom exactly — that re-encoding MUST
+/// round-trip to the committed `goal_json` before the answer is encoded
+/// under the same `est`; a re-encoding that disagrees means `est`'s
+/// numbering has already diverged from the oracle dumper's, and comparing
+/// `val` under it "could silently agree for the wrong reason"
+/// (`oracle_synth.rs`'s own comment). `oracle_synth.rs` is a single
+/// hand-curated differential test, so it can afford to `assert!`
+/// (via its `failures` vec + a final assert) and fail the whole run; this
+/// is a Mathlib-scale nightly sweep over ~931k constants, where one bad
+/// record must not abort the shard, so a mismatch here is returned as
+/// `LeanrAns::GoalMismatch` — a divergence for THIS query/constant, loudly
+/// logged by the caller, but not a panic.
 #[allow(clippy::too_many_arguments)]
 fn run_leanr_query(
     env: &Environment,
@@ -349,7 +378,13 @@ fn run_leanr_query(
         Ok(None) => LeanrAns::NoInstance,
         Ok(Some(v)) => {
             let mut est = EncSt::default();
-            let _seed = encode_expr(&scratch, base, goal, &mut est);
+            let seed = encode_expr(&scratch, base, goal, &mut est);
+            if seed != *goal_json {
+                return LeanrAns::GoalMismatch {
+                    got: seed,
+                    want: goal_json.clone(),
+                };
+            }
             LeanrAns::Synth(encode_expr(&scratch, base, v, &mut est))
         }
     }
@@ -706,6 +741,21 @@ fn synth_sweep_ratchet() {
                 &projection_fns,
                 &r.goal,
             );
+            // Loud, per-query: a `GoalMismatch` means this query's `val`
+            // comparison (had we made one) would have run under a numbering
+            // that already diverged from the oracle dumper's — see
+            // `LeanrAns::GoalMismatch`'s doc comment. It never agrees
+            // (`query_agrees`), so `name` will report not-green; this line
+            // is what lets a human tell that apart from a true synthesis
+            // regression.
+            if let LeanrAns::GoalMismatch { got, want } = &ans {
+                eprintln!(
+                    "[sweep] {name} {}: GOAL ROUND-TRIP MISMATCH — re-encoded goal {got} != \
+                     oracle goal {want}; EncSt numbering diverged from the oracle dumper \
+                     (oracle_synth.rs:250-258), refusing to trust a `val` comparison under it",
+                    r.id
+                );
+            }
             leanr.push((r.id.clone(), ans));
         }
         if constant_is_green(name, recs, &leanr) {
@@ -1279,6 +1329,37 @@ mod tests {
         // A comparable oracle query with no leanr answer at all diverges.
         let leanr_missing = vec![("c/synth/0".to_string(), LeanrAns::Synth(a_term()))];
         assert!(!constant_is_green("c", &recs, &leanr_missing));
+    }
+
+    /// A goal round-trip mismatch (`LeanrAns::GoalMismatch`, the C2 review
+    /// fix) is caught: it never agrees with EITHER verdict, even when the
+    /// mismatched re-encoding happens to carry a `got` that coincidentally
+    /// equals what a naive `val`-only comparison would have accepted. This
+    /// is the property `oracle_synth.rs:250-258`'s round-trip check exists
+    /// to guarantee — an `EncSt` that didn't round-trip must never be
+    /// trusted to compare `val` "for the wrong reason".
+    #[test]
+    fn goal_round_trip_mismatch_never_agrees() {
+        let mismatch = LeanrAns::GoalMismatch {
+            // Deliberately equal to `a_term()`: even a `val` that LOOKS
+            // right must not be trusted once the goal itself failed to
+            // round-trip.
+            got: a_term(),
+            want: json!({"k": "const", "n": "G", "us": []}),
+        };
+        let ok_rec = oracle_rec("c/synth/0", true);
+        let neg_rec = oracle_rec("c/synth/0", false);
+        assert!(!query_agrees(&ok_rec, &mismatch));
+        assert!(!query_agrees(&neg_rec, &mismatch));
+
+        // And it makes the whole constant NOT green — a phantom
+        // non-green, exactly like `Errored`, rather than a silent
+        // wrong-reason agreement.
+        assert!(!constant_is_green(
+            "c",
+            &[ok_rec],
+            &[("c/synth/0".to_string(), mismatch)]
+        ));
     }
 
     /// `ok:false` records agree only with `NoInstance`; `exc`/`near_budget`
