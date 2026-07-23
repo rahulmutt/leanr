@@ -280,7 +280,7 @@ run = [
 ]
 
 [tasks."meta:nightly:shard"]
-description = "One shard of the sharded synthesis nightly (M4a plan-4 PR-C; a SEPARATE workflow from nightly-sweep.yml, with its own pass-list, so the two never race): runs the C1 oracle dumper (tests/fixtures/meta/dump_synth_mathlib.lean) for LEANR_SYNTH_SHARD=I/N, writing its JSONL to LEANR_SYNTH_ORACLE (LEANR_SYNTH_OUT is set to that same path, so C1's dump for this shard becomes C2's input for this shard within one task), then runs the C2 sweep (crates/leanr_meta/tests/synth_sweep.rs) over that dump, writing its green list to LEANR_SYNTH_GREEN_OUT and its receipt to LEANR_SYNTH_MANIFEST_OUT (both required). A shard NEVER gates — it sees 1/N of the constants, so only meta:nightly:merge gates, over the union. Set RAYON_NUM_THREADS if desired; this task does not."
+description = "One shard of the sharded synthesis nightly (M4a plan-4 PR-C; a SEPARATE workflow from nightly-sweep.yml, with its own pass-list, so the two never race): runs ONLY the C2 sweep (crates/leanr_meta/tests/synth_sweep.rs) for LEANR_SYNTH_SHARD=I/N over the oracle JSONL the CALLER already produced at LEANR_SYNTH_ORACLE. This task does NOT run the C1 dumper (tests/fixtures/meta/dump_synth_mathlib.lean) — per C4's two-step workflow, each shard's job runs the dumper itself as a prior, separate step (writing LEANR_SYNTH_OUT), then invokes this task with LEANR_SYNTH_ORACLE=<that file>; embedding the dump here would either double it (12x cost across shards) or overwrite the file the caller's own dump step just wrote. Writes its green list to LEANR_SYNTH_GREEN_OUT and its receipt to LEANR_SYNTH_MANIFEST_OUT (both required). A shard NEVER gates — it sees 1/N of the constants, so only meta:nightly:merge gates, over the union. Set RAYON_NUM_THREADS if desired; this task does not."
 depends = ["elan:bootstrap"]
 # LEANR_SYNTH_PASSLIST_ONLY/LEANR_SYNTH_PASSLIST_UPDATE are pinned empty for
 # the same leak-hardening reason as parse:mathlib:shard's identical pins:
@@ -290,15 +290,20 @@ depends = ["elan:bootstrap"]
 # for the same reason (shard and merge are asserted mutually exclusive
 # too). LEANR_SYNTH_SHARD, LEANR_SYNTH_GREEN_OUT, LEANR_SYNTH_MANIFEST_OUT
 # and LEANR_SYNTH_ORACLE come from the caller and are deliberately passed
-# through untouched here — LEANR_SYNTH_SHARD is read by BOTH the C1 dumper
-# and the C2 sweep below (same env var name in both files, by design).
+# through untouched here — LEANR_SYNTH_ORACLE is the JSONL the caller's own
+# prior dump step produced (this task never writes it).
+#
+# `depends = ["elan:bootstrap"]` is kept even with no dumper in this task's
+# `run`: the C2 sweep below still needs `lake env printenv LEAN_PATH` (and
+# the sweep's own `load_closure`) against the real toolchain to resolve the
+# olean/mathlib env, so lean/lake must still be present.
 #
 # Unlike parse:mathlib:shard, there is no LEANR_SYNTH_LIMIT to pin or pass
 # through here: synth_sweep.rs's shard branch strides the FULL sorted
 # constant list unconditionally (`shard_slice`) and never reads
 # LEANR_SYNTH_LIMIT — a shard is already a fragment, so there is nothing
 # left for a limit to truncate.
-run = "sh -c 'lean_path=\"$(cd .mathlib && lake env printenv LEAN_PATH)\"; LEAN_PATH=\"$lean_path\" LEANR_SYNTH_OUT=\"$LEANR_SYNTH_ORACLE\" lean --run tests/fixtures/meta/dump_synth_mathlib.lean && LEANR_SYNTH_PASSLIST_ONLY=\"\" LEANR_SYNTH_PASSLIST_UPDATE=\"\" LEANR_SYNTH_MERGE=\"\" LEANR_OLEAN_PATH=\"$lean_path\" cargo test --release -p leanr_meta --test synth_sweep -- --ignored --nocapture'"
+run = "sh -c 'lean_path=\"$(cd .mathlib && lake env printenv LEAN_PATH)\"; LEANR_SYNTH_PASSLIST_ONLY=\"\" LEANR_SYNTH_PASSLIST_UPDATE=\"\" LEANR_SYNTH_MERGE=\"\" LEANR_OLEAN_PATH=\"$lean_path\" cargo test --release -p leanr_meta --test synth_sweep -- --ignored --nocapture'"
 
 [tasks."meta:nightly:merge"]
 description = "Second half of the sharded synthesis nightly: unions every *.txt green list in LEANR_SYNTH_MERGE=<dir>, validates the shards' *.manifest receipts in the same dir (exactly one per shard 1..=N, none vacuous), and runs the SAME gate + reconcile + synth-pass-list rewrite that a full update run does over that union — so sharding changes only WHERE the sweep happens, never what is gated. Diffs no oleans and runs no dumper/oracle (seconds) and needs NO Mathlib tree or toolchain at all: the reconcile step's \"does this constant still exist upstream?\" oracle is the union of the shards' manifests, not a local environment. Fails on a true regression; emits the synth pass-list growth delta otherwise."
@@ -344,7 +349,19 @@ depends = ["elan:bootstrap"]
 # shard's receipt only), and a leaked LEANR_SYNTH_GREEN_OUT would just write
 # an unwanted side artifact — pinned explicitly rather than relying on
 # incidental environment hygiene.
-run = "sh -c 'oracle=$(mktemp -t leanr-synth-oracle.XXXXXX.jsonl); lean_path=\"$(cd .mathlib && lake env printenv LEAN_PATH)\"; if LEAN_PATH=\"$lean_path\" LEANR_SYNTH_OUT=\"$oracle\" LEANR_SYNTH_SHARD=1/1 lean --run tests/fixtures/meta/dump_synth_mathlib.lean && LEANR_SYNTH_SHARD=\"\" LEANR_SYNTH_PASSLIST_ONLY=\"\" LEANR_SYNTH_MERGE=\"\" LEANR_SYNTH_GREEN_OUT=\"\" LEANR_SYNTH_MANIFEST_OUT=\"\" LEANR_SYNTH_PASSLIST_UPDATE=1 LEANR_SYNTH_ORACLE=\"$oracle\" LEANR_OLEAN_PATH=\"$lean_path\" cargo test --release -p leanr_meta --test synth_sweep -- --ignored --nocapture; then rc=0; else rc=$?; fi; rm -f \"$oracle\"; exit $rc'"
+#
+# LEANR_SYNTH_LIMIT="" matters MORE here than merge's identical pin (which is
+# purely discipline, since merge mode returns before ever reading it): this
+# C2 invocation has LEANR_SYNTH_SHARD unset and LEANR_SYNTH_PASSLIST_ONLY=""
+# too, so it falls into synth_sweep.rs's full/bounded else-branch — the ONE
+# branch that DOES read LEANR_SYNTH_LIMIT from the ambient env — while also
+# running with LEANR_SYNTH_PASSLIST_UPDATE=1. A leaked LEANR_SYNTH_LIMIT would
+# silently truncate this Mathlib-scale sweep to a prefix, and
+# gate_and_maybe_rewrite would then rewrite tests/fixtures/meta/synth-passlist.txt
+# from only that truncated prefix's green set — silently dropping every
+# already-passing entry outside the prefix from the committed pass-list, with
+# no error. Pinned empty so a leaked LIMIT cannot reach this branch at all.
+run = "sh -c 'oracle=$(mktemp -t leanr-synth-oracle.XXXXXX.jsonl); lean_path=\"$(cd .mathlib && lake env printenv LEAN_PATH)\"; if LEAN_PATH=\"$lean_path\" LEANR_SYNTH_OUT=\"$oracle\" LEANR_SYNTH_SHARD=1/1 lean --run tests/fixtures/meta/dump_synth_mathlib.lean && LEANR_SYNTH_SHARD=\"\" LEANR_SYNTH_PASSLIST_ONLY=\"\" LEANR_SYNTH_MERGE=\"\" LEANR_SYNTH_GREEN_OUT=\"\" LEANR_SYNTH_MANIFEST_OUT=\"\" LEANR_SYNTH_LIMIT=\"\" LEANR_SYNTH_PASSLIST_UPDATE=1 LEANR_SYNTH_ORACLE=\"$oracle\" LEANR_OLEAN_PATH=\"$lean_path\" cargo test --release -p leanr_meta --test synth_sweep -- --ignored --nocapture; then rc=0; else rc=$?; fi; rm -f \"$oracle\"; exit $rc'"
 
 [tasks."parse:mathlib"]
 description = "HEAVYWEIGHT/NIGHTLY tier — full Mathlib parse sweep vs the pass-list ratchet (needs mathlib:fetch). Walks the whole corpus and decodes an olean closure per distinct import set (~8,221 sets): ~35h at RAYON_NUM_THREADS=5 on 8 effective cores, dominated by closure decode, not the oracle. Do NOT run this in the dev loop — use parse:mathlib:fast for that. LEANR_SWEEP_LIMIT=N for a smoke run. Snapshot build + sweep are streamed per import set (no barrier, no accumulated snapshots) and run in parallel via rayon; set RAYON_NUM_THREADS=N to cap worker threads (e.g. under memory pressure from parallel oracle `lean` subprocesses)."
