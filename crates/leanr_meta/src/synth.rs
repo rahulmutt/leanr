@@ -29,10 +29,22 @@
 //! hand-rolled `u64` digest can collide two DIFFERENT goals (the exact
 //! vacuity risk this task's own negative test,
 //! `different_goals_produce_different_keys`, exists to catch), where
-//! reusing the bank's own dedup table has zero collision risk by
-//! construction and costs nothing extra (the interning calls that BUILD
-//! the normalized expression already perform the structural comparison
-//! that would otherwise have to be redone by a hasher).
+//! reusing the bank's own dedup table costs nothing extra (the interning
+//! calls that BUILD the normalized expression already perform the
+//! structural comparison that would otherwise have to be redone by a
+//! hasher) and -- scoped precisely to the ID REPRESENTATION, not to key
+//! collisions in general (Minor 7, review round 1) -- has zero collision
+//! risk BY CONSTRUCTION for that representation step: hash-consing
+//! itself never conflates two structurally-different trees, full stop.
+//! It does NOT make the `_tc.<idx>` NAMING SCHEME collision-free: a goal
+//! that genuinely mentions a real fvar or level-param already named
+//! `` _tc.0 `` (however unlikely in practice) normalizes to the exact
+//! same tree as one whose canonical rename minted that same name, and
+//! the two collide. This is not a bug to fix here -- it is ORACLE-
+//! IDENTICAL (the real `mkTableKey` mints the literal, unqualified name
+//! `` Name.mkNum `_tc idx ``, `:156`, with no freshness check against
+//! names already present in `e`, so the real Lean has the exact same
+//! exposure) -- just a claim this doc must not overstate.
 //!
 //! # `normalize_goal_key` / `mkTableKey`
 //!
@@ -45,17 +57,32 @@
 //! (the module doc a few lines above `MkTableKey`, :78-90, gives the
 //! worked example: `f ?m ?m ?n` normalizes to `f _tc.0 _tc.0 _tc.1`,
 //! same mvar reusing its FIRST index on every later occurrence). Both
-//! `normLevel`/`normExpr` gate renaming on assignability
-//! (`getLevelDepth mvarId != mctx.depth` / an implicit depth check via
-//! `isAssignable`) -- this crate has no per-mvar depth model (`level.rs`/
-//! `assign.rs`'s own module docs record every such collapse as the
-//! standing tier-1 seam: "every declared mvar is mutually assignable,
-//! single flat mctx depth"), so both walks below collapse that check to
-//! "always assignable" too, except for the one REAL (non-seamed)
-//! exclusion this crate does track: an expr mvar declared
-//! `MVarKind::SyntheticOpaque` is never renamed, left as itself, mirroring
-//! `assign.rs::unassigned_mvar_id`'s identical posture for the identical
-//! reason.
+//! `normLevel`/`normExpr` gate renaming on assignability, but via TWO
+//! DIFFERENT oracle functions that must not be conflated with each
+//! other or with `assign.rs`'s own check of a similar name:
+//! `normLevel`'s inline check (`getLevelDepth mvarId != mctx.depth`,
+//! :119) and `normExpr`'s call to the PUBLIC `MVarId.isAssignable`
+//! (`MetavarContext.lean:483-486`: `decl.depth == mctx.depth`) are both
+//! DEPTH-ONLY. Neither is `ExprDefEq.lean:1731-1734`'s PRIVATE
+//! `isAssignable` (`isReadOnlyOrSyntheticOpaque`) -- the different
+//! function `assign.rs::unassigned_mvar_id` correctly transcribes, for a
+//! DIFFERENT purpose (occurs-check-time assignment safety during
+//! unification, not table keying). Under the real oracle, a
+//! `MVarKind.syntheticOpaque` mvar IS renamed by `mkTableKey`: kind plays
+//! no role in `MVarId.isAssignable` at all, only depth does. This crate
+//! has no per-mvar depth model whatsoever (`MVarDecl`, `mvar_ctx.rs`,
+//! carries no depth field; `level.rs`/`assign.rs`'s own module docs
+//! record every such collapse as the standing tier-1 seam: "every
+//! declared mvar is mutually assignable, single flat mctx depth"), so
+//! under that collapse `decl.depth == mctx.depth` /
+//! `getLevelDepth mvarId != mctx.depth` are always (respectively)
+//! true/false for any DECLARED mvar -- both walks below collapse the
+//! check to "always assignable" for every declared mvar, KIND INCLUDED:
+//! `norm_expr_body`'s mvar arm does not special-case
+//! `MVarKind::SyntheticOpaque` (it IS renamed, same as any other
+//! declared mvar), deliberately NOT mirroring
+//! `assign.rs::unassigned_mvar_id`'s kind check, because that check
+//! answers a different oracle question than this one does.
 //!
 //! `mkTableKey`'s own doc (:195) states it "assumes `e` does not contain
 //! assigned metavariables" -- callers (`mkTableKeyFor`, :262-266) run
@@ -198,6 +225,24 @@
 //! rather than embed by value" idiom B5's own `mctx` field is likely to
 //! want to follow.
 //!
+//! **Minor 6 (review round 1):** `GeneratorNode.typeHasMVars` (:52, :58,
+//! :253: `mvarType.hasMVar`) is a THIRD missing field, distinct from
+//! `mctx`/`size` above and not previously named as a seam anywhere but
+//! this struct's own field-list doc -- adding it here too. It is not
+//! cosmetic: `generate` (:589-624) reads it to decide whether the
+//! canonical-instances short-circuit (:600-624, gated on
+//! `backward.synthInstance.canonInstances`) is even eligible for this
+//! generator at all -- `unless gNode.typeHasMVars do ...` (:602) skips
+//! the whole "stop early, we already have one metavariable-free answer"
+//! optimization whenever the goal's own type still mentions a
+//! metavariable, since a canonical-looking answer found against an
+//! not-yet-fully-elaborated type isn't actually guaranteed unique.
+//! Missing this field changes how MANY answers a generator produces
+//! (functionally: it forces the "always search fully, never
+//! short-circuit" behavior for every generator, since B5 will have
+//! nothing to read for `typeHasMVars` either way) -- a real behavioral
+//! gap for B5 to close alongside `mctx`, not a data-shape footnote.
+//!
 //! # `Waiter`: an index into an arena, not the oracle's by-value embed
 //!
 //! oracle `Waiter` (:61-66) is `| consumerNode : ConsumerNode → Waiter |
@@ -219,7 +264,7 @@
 //! consequences of the re-representation, both left as named seams for
 //! B5 (no table-mechanics function in this module needs to resolve
 //! them): (1) the oracle's `resumeStack` pairs a WOKEN consumer with the
-//! SPECIFIC `Answer` that woke it (`resume`, :594-605, reads that exact
+//! SPECIFIC `Answer` that woke it (`resume`, :635-651, reads that exact
 //! pair back off the stack); a `Waiter::Consumer(usize)` alone does not
 //! carry which answer woke it, so `SynthState` below has no
 //! `resumeStack`-equivalent field at all -- B5 owns adding one (e.g. a
@@ -228,6 +273,42 @@
 //! `State.result?` directly when a level-mvar-free answer reaches it;
 //! `SynthState` below has no `result` field either, for the same
 //! "B5's driver decides how to surface it" reason.
+//!
+//! **(3) -- a HARD REQUIREMENT for B5, not just a note (review round 1,
+//! Important 3):** the oracle's `Waiter.consumerNode` embeds an
+//! IMMUTABLE SNAPSHOT of the consumer as it was at the moment it started
+//! waiting -- `consume` (:534-579) builds that snapshot once, at
+//! `waiter := Waiter.consumerNode cNode` (:553), from a `cNode` whose
+//! `subgoals` still has its ORIGINAL (not-yet-advanced) head; when an
+//! answer later arrives, `resume` (:635-651) does NOT mutate that
+//! snapshot in place -- it builds a WHOLE NEW `ConsumerNode` with
+//! `subgoals := rest` (:650) and feeds that fresh node to `consume`
+//! again. The old, waited-on snapshot is never touched again. This
+//! module's own re-representation combines TWO choices that are each
+//! individually fine but JOINTLY dangerous: `Waiter::Consumer(usize)` is
+//! an INDEX into `SynthState::consumers` rather than an embedded
+//! snapshot, AND `ConsumerNode.next` (below) is documented (see that
+//! field's own doc) as a CURSOR meant to be ADVANCED IN PLACE as
+//! subgoals are solved. Put those together and a driver that advances
+//! `next` in place on `consumers[i]` corrupts every OUTSTANDING
+//! `Waiter::Consumer(i)` still waiting on that slot's ORIGINAL position:
+//! when it is finally woken, it resumes from wherever `next` has since
+//! reached, not from where it actually started waiting -- silently
+//! propagating an answer to the WRONG subgoal (a wrong-answer bug, not
+//! merely a perf/incompleteness one, unlike every other seam recorded in
+//! this module's doc). **Binding constraint for B5**: EITHER (a)
+//! `SynthState::consumers` must be APPEND-ONLY -- a driver may push new
+//! `ConsumerNode`s but must never mutate a slot that any outstanding
+//! `Waiter::Consumer` still points at (advancing to the next subgoal
+//! means pushing a NEW node and handing out a NEW index, mirroring the
+//! oracle's own "build a new node" discipline above), OR (b) the
+//! resume-position cursor must live ON THE WAITER itself (e.g.
+//! `Waiter::Consumer { node: usize, next: usize }`) rather than inside
+//! the mutable arena slot, so a stale waiter's own recorded position
+//! cannot be overwritten by a later advance of the same slot. This
+//! module's own table-mechanics functions (`new_entry`/`add_waiter`/
+//! `add_answer`) never advance `next` themselves, so nothing in THIS
+//! task violates the constraint -- it binds only the driver B5 writes.
 //!
 //! # Landed ahead of its consumer
 //!
@@ -251,7 +332,7 @@ use leanr_kernel::bank::{ExprId, LevelId, LevelsId, NameId};
 use leanr_kernel::{Nat, MAX_REC_DEPTH};
 
 use crate::instances::Instance;
-use crate::{LMVarId, MVarId, MVarKind, MetaCtx, MetaError};
+use crate::{LMVarId, MVarId, MetaCtx, MetaError};
 
 /// Stack-growth constants for [`KeyNormalizer`]'s own depth guard --
 /// restated from `metactx.rs::{RED_ZONE,STACK_CHUNK}` (private there),
@@ -455,15 +536,35 @@ impl<'a, 'e> KeyNormalizer<'a, 'e> {
         match self.ctx.node(e) {
             Node::MVar { id: Some(id) } => {
                 let mid = MVarId(id);
+                // Minor 5 (review round 1): resolve an ALREADY-ASSIGNED
+                // mvar first, symmetric with `norm_level_body`'s own
+                // `level_assignment` check just above. This arm's
+                // precondition ("no assigned expr mvar reaches here") is
+                // otherwise enforced only by the caller having already
+                // run `instantiate_mvars` (`normalize_goal_key` below) --
+                // a comment-enforced invariant, not a code-enforced one;
+                // this one line makes the arm correct standalone too,
+                // matching `mkTableKey`'s own doc-stated precondition
+                // defensively rather than assuming every future caller
+                // honors it.
+                if let Some(v) = self.ctx.mctx.assignment(mid) {
+                    return self.norm_expr(v);
+                }
                 // oracle: `if !(← mvarId.isAssignable) then return e`
-                // (:151-152), collapsed to the one non-seamed exclusion
-                // this crate tracks -- see `assign.rs::
-                // unassigned_mvar_id`'s identical match shape.
-                let assignable = match self.ctx.mctx.decl(mid) {
-                    Some(d) if d.kind == MVarKind::SyntheticOpaque => false,
-                    Some(_) => true,
-                    None => false,
-                };
+                // (:151-152) -- `MVarId.isAssignable`
+                // (`MetavarContext.lean:483-486`) is DEPTH-ONLY (`decl.depth
+                // == mctx.depth`), a different function from
+                // `assign.rs::unassigned_mvar_id`'s `isReadOnlyOrSyntheticOpaque`
+                // check (see this module's own doc for why the two must not
+                // be conflated). Under this crate's flat-depth collapse
+                // (no per-mvar depth model at all, `mvar_ctx.rs`) that
+                // depth check is always true for any DECLARED mvar,
+                // `MVarKind` included -- a syntheticOpaque mvar IS renamed
+                // here, matching the real `mkTableKey`. `None` (no
+                // declaration at all) is the one genuine "not assignable"
+                // case left: not a mvar this crate's `MetavarContext` knows
+                // about, so nothing to rename by.
+                let assignable = self.ctx.mctx.decl(mid).is_some();
                 if !assignable {
                     return Ok(e);
                 }
@@ -737,9 +838,14 @@ pub(crate) struct GeneratorNode {
 /// of a bare `Expr` wherever the shape is statically known to be an
 /// mvar reference). `next` is a cursor index into `subgoals`, standing
 /// in for the oracle's own `subgoals : List Expr` head/tail consumption
-/// (`consume`'s `mvar :: rest` pattern, :591-593) -- an index avoids
+/// (`consume`'s `mvar :: _` pattern match, :550-552) -- an index avoids
 /// repeatedly reallocating/shifting a `Vec`'s front, at the cost of
 /// `subgoals` here being the FULL original list rather than shrinking.
+/// **B5: see this module's doc ("`Waiter`: an index into an arena...",
+/// point (3)) for a HARD constraint on how `next` may be advanced once
+/// `Waiter::Consumer(usize)` indexes into a mutable arena of these** --
+/// advancing it in place on an already-waited-on slot is a wrong-answer
+/// bug, not just a perf one.
 pub(crate) struct ConsumerNode {
     pub key: GoalKey,
     pub mvar: MVarId,
@@ -842,6 +948,8 @@ impl SynthState {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::*;
     use crate::test_support::{const_named, fresh_mvar, with_instances_ctx};
     use leanr_kernel::bank::ExprId;
@@ -859,6 +967,50 @@ mod tests {
         ctx.scratch
             .expr_sort(Some(ctx.view.store), s)
             .expect("sort")
+    }
+
+    /// Mint a fresh, declared (but unassigned) LEVEL metavariable --
+    /// this module's own tests are the only caller needing one (`norm_level`
+    /// was otherwise entirely untested, minor 4), so this is inlined here
+    /// rather than promoted to `test_support`, mirroring `type_sort`/
+    /// `goal_add` above. Same "fixed prefix + monotone counter" idiom as
+    /// `test_support::fresh_mvar` (and `level.rs::fresh_level_mvar`'s own
+    /// production-code counterpart), scoped to the whole test binary since
+    /// there is no production-code counter field to reuse for this
+    /// test-only need.
+    fn fresh_level_mvar_for_test(ctx: &mut MetaCtx) -> LevelId {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let idx = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let base = Some(ctx.view.store);
+        let prefix_str = ctx
+            .scratch
+            .intern_str(base, "_leanr_test_lvl_mvar")
+            .expect("intern");
+        let prefix = ctx.scratch.name_str(base, None, prefix_str).expect("name");
+        let idx_id = ctx.scratch.intern_nat(base, &Nat::from(idx)).expect("nat");
+        let name = ctx
+            .scratch
+            .name_num(base, Some(prefix), idx_id)
+            .expect("name");
+        ctx.mctx_mut().declare_level(LMVarId(name));
+        ctx.scratch
+            .level_mvar(base, Some(name))
+            .expect("level mvar")
+    }
+
+    /// Build the canonical `` _tc.<idx> `` name the normalizer would mint
+    /// for the `idx`-th fresh metavariable it renames (oracle: `Name.mkNum
+    /// \`_tc idx`, `SynthInstance.lean:123`/`:169`) -- used by tests that
+    /// pin the EXACT normalized shape by hand rather than only comparing
+    /// two calls to `normalize_goal_key` against each other.
+    fn tc_name(ctx: &mut MetaCtx, idx: u64) -> NameId {
+        let base = Some(ctx.view.store);
+        let s = ctx.scratch.intern_str(base, "_tc").expect("intern");
+        let prefix = ctx.scratch.name_str(base, None, s).expect("name");
+        let idx_id = ctx.scratch.intern_nat(base, &Nat::from(idx)).expect("nat");
+        ctx.scratch
+            .name_num(base, Some(prefix), idx_id)
+            .expect("name")
     }
 
     /// Build `Add arg1 .. argn` over already-constructed argument
@@ -892,6 +1044,14 @@ mod tests {
     /// that always returned one constant would pass that test vacuously,
     /// so this pins that two GENUINELY different goals (different head
     /// constants, no mvar renaming involved at all) must not collide.
+    /// NOTE (review round 1): both goals here are bare `Expr.const`s with
+    /// NO metavariable at all, so `norm_expr`'s `!e.hasMVar` early-exit
+    /// (`:438-449` above) returns immediately for both -- this test
+    /// exercises ONLY that early-exit path, never the counter-minting
+    /// body (`norm_expr_body`/`norm_level_body`). It rules out a `fn
+    /// key(_) -> CONST` stub but says nothing about the counter
+    /// discipline; see `distinct_mvars_are_not_collapsed_together` below
+    /// for the test that actually guards THAT property.
     #[test]
     fn different_goals_produce_different_keys() {
         with_instances_ctx(|ctx| {
@@ -900,6 +1060,39 @@ mod tests {
             assert_ne!(
                 ctx.normalize_goal_key(g1).unwrap(),
                 ctx.normalize_goal_key(g2).unwrap()
+            );
+        });
+    }
+
+    /// The counter-discipline negative test (review round 1, Important 2):
+    /// none of the other tests in this module can fail against a
+    /// normalizer that mints `_tc.0` for EVERY unassigned mvar and never
+    /// bumps `next_idx` at all -- that "collapse everything" bug still
+    /// passes `table_key_is_stable_up_to_mvar_renaming` (both goals still
+    /// key identically, just for the wrong reason) and
+    /// `repeated_mvar_occurrence_reuses_its_canonical_index` (`Add ?a ?a`
+    /// collapsing every occurrence to `_tc.0` is indistinguishable from
+    /// correctly reusing `?a`'s own first-occurrence index, since there is
+    /// only ONE mvar in that goal anyway). This test uses TWO DISTINCT
+    /// mvars (`?a`, `?b`) against the SAME mvar repeated (`?a`, `?a`) --
+    /// the collapse-everything bug maps both to `Add _tc.0 _tc.0`,
+    /// merging two genuinely different goals into one table entry (the
+    /// exact collision failure mode this task's counter discipline
+    /// exists to prevent); the correct normalizer maps them to `Add
+    /// _tc.0 _tc.1` and `Add _tc.0 _tc.0` respectively, which must differ.
+    /// Confirmed as real RED against that exact bug (see the task-B4
+    /// report's "Fix round 1" section for the injected-bug run).
+    #[test]
+    fn distinct_mvars_are_not_collapsed_together() {
+        with_instances_ctx(|ctx| {
+            let ty = type_sort(ctx);
+            let (m1, _) = fresh_mvar(ctx, ty);
+            let (m2, _) = fresh_mvar(ctx, ty);
+            let g_distinct = goal_add(ctx, &[m1, m2]);
+            let g_repeated = goal_add(ctx, &[m1, m1]);
+            assert_ne!(
+                ctx.normalize_goal_key(g_distinct).unwrap(),
+                ctx.normalize_goal_key(g_repeated).unwrap()
             );
         });
     }
@@ -922,6 +1115,92 @@ mod tests {
                 ctx.normalize_goal_key(g1).unwrap(),
                 ctx.normalize_goal_key(g2).unwrap()
             );
+        });
+    }
+
+    /// Minor 4 (review round 1): `norm_level`/`norm_level_body` were
+    /// entirely untested -- no prior test constructed a level mvar at
+    /// all. Pins the ONE `next_idx` counter's shared-interleaving claim
+    /// (module doc, "one shared `next_idx` counter across both level and
+    /// expr mvars") directly, by building the EXACT expected normalized
+    /// tree by hand (via [`tc_name`]) rather than only comparing two
+    /// `normalize_goal_key` calls against each other: goal `(Sort ?u)
+    /// ?a` (an `App` whose function position is a `Sort` of an
+    /// unassigned level mvar, applied to an unassigned expr mvar) visits
+    /// the level mvar FIRST (it's in function position) and must mint
+    /// `_tc.0` for it; the expr mvar, visited second, must then mint
+    /// `_tc.1` -- NOT `_tc.0` again, which is exactly what two
+    /// independent per-kind counters (rather than one shared one) would
+    /// produce.
+    #[test]
+    fn level_mvar_and_expr_mvar_share_one_counter() {
+        with_instances_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let u = fresh_level_mvar_for_test(ctx);
+            let sort_u = ctx.scratch.expr_sort(base, u).expect("sort");
+            let ty = type_sort(ctx);
+            let (m_a, _) = fresh_mvar(ctx, ty);
+            let goal = ctx.scratch.expr_app(base, sort_u, m_a).expect("app");
+
+            let key = ctx.normalize_goal_key(goal).unwrap();
+
+            let name0 = tc_name(ctx, 0);
+            let name1 = tc_name(ctx, 1);
+            let base = Some(ctx.view.store);
+            let expected_level = ctx.scratch.level_param(base, Some(name0)).expect("param");
+            let expected_sort = ctx.scratch.expr_sort(base, expected_level).expect("sort");
+            let expected_fvar = ctx.scratch.expr_fvar(base, Some(name1)).expect("fvar");
+            let expected = ctx
+                .scratch
+                .expr_app(base, expected_sort, expected_fvar)
+                .expect("app");
+
+            assert_eq!(key, GoalKey(expected));
+        });
+    }
+
+    /// Companion to the shared-counter test above: an ASSIGNED level
+    /// mvar must be resolved to its (recursively normalized) assignment
+    /// FIRST, and that resolution must NOT consume a `next_idx` slot --
+    /// `norm_level_body`'s `LevelRow::MVar` arm's `level_assignment`
+    /// check (this task's own "one deliberate recomposition", module
+    /// doc). Goal `(Sort ?u_assigned) ?a` with `?u_assigned := Level.zero`
+    /// must normalize to `(Sort Level.zero) _tc.0` -- the expr mvar
+    /// getting index `0`, not `1`, is exactly what proves the assigned
+    /// level mvar minted no canonical name of its own.
+    #[test]
+    fn assigned_level_mvar_resolves_without_consuming_a_counter_index() {
+        with_instances_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let u = fresh_level_mvar_for_test(ctx);
+            let zero = ctx.scratch.level_zero(base).expect("zero");
+            // `u` is a `LevelId`, not an `ExprId` -- assign it directly
+            // via its `LMVarId`, mirroring `level.rs::tests`' own idiom
+            // for building an already-assigned level mvar fixture.
+            let lmvar_id = match *ctx.scratch.level_row(base, u) {
+                LevelRow::MVar(Some(name)) => LMVarId(name),
+                _ => unreachable!("fresh_level_mvar_for_test always builds a named level mvar"),
+            };
+            ctx.mctx_mut()
+                .assign_level(lmvar_id, zero)
+                .expect("assigning a fresh level mvar cannot fail");
+            let sort_u = ctx.scratch.expr_sort(base, u).expect("sort");
+            let ty = type_sort(ctx);
+            let (m_a, _) = fresh_mvar(ctx, ty);
+            let goal = ctx.scratch.expr_app(base, sort_u, m_a).expect("app");
+
+            let key = ctx.normalize_goal_key(goal).unwrap();
+
+            let name0 = tc_name(ctx, 0);
+            let base = Some(ctx.view.store);
+            let expected_sort = ctx.scratch.expr_sort(base, zero).expect("sort");
+            let expected_fvar = ctx.scratch.expr_fvar(base, Some(name0)).expect("fvar");
+            let expected = ctx
+                .scratch
+                .expr_app(base, expected_sort, expected_fvar)
+                .expect("app");
+
+            assert_eq!(key, GoalKey(expected));
         });
     }
 
