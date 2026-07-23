@@ -89,6 +89,65 @@ touching crate boundaries, and the design spec in
     memory-watchdog (`RAYON_NUM_THREADS=5`, 27G anon-memory kill guard for
     a 32Gi container) with an flock so two sweeps can't stack. Genuinely
     useful on a big local box; run it by hand, don't cron it.
+- **Typeclass-synthesis verification is also two tiers**, mirroring the
+  parse sweep above, but a genuinely separate pair of pipelines with their
+  own pass-list and their own nightly workflow so the two never race:
+  - `mise run meta:fast` — regression gate. Runs BOTH `oracle_fast` (every
+    committed whnf/infer/defeq query) and `oracle_synth` (every committed
+    typeclass-synthesis query) against the oracle. Hermetic — committed
+    `.olean` + `.jsonl` fixtures only, no Mathlib checkout, no network.
+    Seconds, not hours. Run this in the dev loop; it also runs inside plain
+    `mise run test`.
+  - `mise run meta:nightly` / `meta:nightly:shard` / `meta:nightly:merge` —
+    discovery. "What `synthInstance` queries mined out of real Mathlib
+    declarations does leanr's tabled resolver answer the same way as the
+    real elaborator." Each shard first runs the C1 Lean oracle dumper
+    (`tests/fixtures/meta/dump_synth_mathlib.lean`) to mine `synthInstance`
+    queries directly out of real Mathlib constants and record the oracle's
+    verdict + instance term for each, THEN the Rust sweep
+    (`crates/leanr_meta/tests/synth_sweep.rs`) runs leanr's own
+    `synth_instance` on the same queries and diffs against that JSONL —
+    green per constant means EVERY query for it agrees with the oracle on
+    BOTH the verdict AND (when `ok`) the canonical instance term, not just
+    yes/no. `meta:nightly` is the local unsharded dump-then-diff-then-update
+    convenience (Mathlib-scale; do not run it in the dev loop).
+    - Shards here stride by CONSTANT INDEX, not import set: after loading
+      the full pinned Mathlib closure (`load_closure`, so every shard's
+      environment and constant list is identical), constants are sorted by
+      rendered name and a shard `I/N` takes `idx % N == I-1`. This is
+      deliberately different from the parse sweep's per-import-set
+      sharding above — synthesis queries are mined from individual
+      constants' binders and application sites, not from whole files, so
+      the natural unit of work (and thus the natural shard key) is the
+      constant, not the import set a file pulls in. The dumper mines two
+      kinds of query per constant: each of its own `instImplicit` binder
+      positions (a hypothesis the constant demands of a caller), and — the
+      higher-signal source — instance arguments already saturated at
+      application sites inside its type/value, where the real elaborator
+      already solved that exact goal once.
+    - The pass-list (`tests/fixtures/meta/synth-passlist.txt`) and
+      re-baseline branch (`nightly/mathlib-synth-passlist`) are DISTINCT
+      from the parse sweep's (`tests/fixtures/syntax/mathlib-passlist.txt`,
+      `nightly/mathlib-passlist`) — same reasoning as the parse sweep's own
+      committed-vs-discovery split, just for a different pass-list: keeping
+      them separate means a synthesis regression/re-baseline can never be
+      confused with, or block on, a parse one, and the two nightly
+      workflows never need to touch the same branch or file.
+    - **The nightly is `.github/workflows/nightly-synth-sweep.yml`** —
+      structurally the same shard/merge/re-baseline shape as
+      `nightly-sweep.yml` (12 shards, a merge job that refuses to run
+      unless all 12 shard artifacts are present, gate-before-rewrite, a
+      force-updated re-baseline PR rather than a push to main), but a
+      genuinely separate workflow: distinct cron (`41 6 * * *`, offset from
+      the parse sweep's `17 2 * * *` so the two never queue for runners or
+      race at the same wall-clock moment) and a distinct concurrency group
+      (`nightly-synth-sweep`, vs. the parse sweep's `nightly-sweep`) so the
+      two workflows can run concurrently with each other and only ever
+      serialize against themselves. Unlike the parse sweep, each shard job
+      does two steps, not one: run the C1 dumper to produce this shard's
+      oracle JSONL, then run `meta:nightly:shard` over it in the same job —
+      the JSONL (~683MiB/shard) never leaves the runner; only the green
+      list + manifest are uploaded.
 - **fmt gate:** `leanr fmt` self-consistency is gated by `mise run
   fmt:mathlib` — a separate, FAST pass-list tier (same 23-entry committed
   pass-list as `parse:mathlib:fast`), not the nightly discovery sweep.
