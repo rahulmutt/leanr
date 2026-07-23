@@ -106,6 +106,82 @@ fn parse_module_here(src: &str, snap: &GrammarSnapshot) -> ParseResult {
     run_module(Ps::new(src, snap), snap)
 }
 
+/// Parse `src` as a single `term`-category node (M4b-1 Task 1): the
+/// elaborator's input entry point. `parse_module` parses whole files
+/// (header + a command loop to EOF), but a term elaborator consumes one
+/// term — this is the single-category analogue of `run_module`'s command
+/// loop, run exactly once instead of looped to EOF, with no `recover_command`
+/// resync (there is no "next command" to resync to for a single term).
+///
+/// Same `MIN_STACK_BYTES` worker as `parse_module` — the Pratt recursion
+/// through nested terms needs the deep stack; a term parse can nest just
+/// as deeply as a command's term arguments can (Global Constraint: never
+/// segfault — see `parse_module`'s own doc comment for the full
+/// citation).
+pub fn parse_term(src: &str, snap: &GrammarSnapshot) -> ParseResult {
+    std::thread::scope(|scope| {
+        let worker = std::thread::Builder::new()
+            .stack_size(MIN_STACK_BYTES)
+            .spawn_scoped(scope, || parse_term_here(src, snap))
+            .expect("spawn the parse worker thread");
+        match worker.join() {
+            Ok(r) => r,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    })
+}
+
+/// `parse_term`'s body, on whatever stack the caller is standing on.
+/// Private on purpose, mirroring `parse_module_here`.
+fn parse_term_here(src: &str, snap: &GrammarSnapshot) -> ParseResult {
+    // A synthetic single-node root, mirroring `run_module`'s `module`
+    // wrap, so `finish_parse` sees exactly one balanced root
+    // (`build_tree`'s single-root contract). `KIND_NULL` — not a
+    // registered grammar kind like "module" — is this file's existing
+    // idiom for exactly this "structural container, not a real Lean
+    // node" role (`parse_cat`/`parse_cat_with_trivia` test helpers below,
+    // and every `self.start(KIND_NULL)` call in the interpreter itself);
+    // it needs no `KindInterner` lookup, so there is no failure mode to
+    // `.expect()` around. The term is its single child.
+    let mut ps = Ps::new(src, snap);
+    ps.start(KIND_NULL);
+    // A failed top-level category call records exactly one furthest-
+    // failure diagnostic (mirrors `parse_cat`/`recover_command`'s own
+    // "record, don't panic, don't invent a recovered node" contract) —
+    // untrusted-input totality: this must never panic, but a single term
+    // has no "next command" to resync to, so there is no recovery node
+    // to insert, only the diagnostic.
+    if ps
+        .run(&Prim::Category {
+            name: "term".into(),
+            rbp: 0,
+        })
+        .is_err()
+    {
+        ps.push_furthest_error();
+    }
+    finish_parse(ps)
+}
+
+/// Close the single open root and fold the event stream into a
+/// `ParseResult` — the tail shared by `run_module` (after its trailing
+/// `eoi` node) and `parse_term_here` (after its single `Category` call).
+/// Both callers have exactly one node still open at this point (the
+/// `module`/`KIND_NULL` root each `ps.start`ed up front), so `ps.finish()`
+/// here closes that root, matching `build_tree`'s single-root contract.
+fn finish_parse(mut ps: Ps<'_>) -> ParseResult {
+    ps.finish();
+    #[cfg(test)]
+    let overlay = ps.overlay.clone();
+    let (tree, errors) = ps.finish_into_tree();
+    ParseResult {
+        tree,
+        errors,
+        #[cfg(test)]
+        overlay,
+    }
+}
+
 /// Test-only entry point (M3b1 Task 6 brief interfaces: "a `pub(crate)`
 /// variant of `parse_module` that accepts a pre-seeded overlay"):
 /// installs `ov` on a fresh `Ps` before running the header + command
@@ -331,16 +407,7 @@ fn run_module(mut ps: Ps<'_>, snap: &GrammarSnapshot) -> ParseResult {
     ps.emit_token(KIND_ATOM, 0);
     ps.finish();
 
-    ps.finish(); // module
-    #[cfg(test)]
-    let overlay = ps.overlay.clone();
-    let (tree, errors) = ps.finish_into_tree();
-    ParseResult {
-        tree,
-        errors,
-        #[cfg(test)]
-        overlay,
-    }
+    finish_parse(ps) // module
 }
 
 /// Parse ONLY the module header and return the imported module names
@@ -4517,6 +4584,19 @@ mod tests {
     use crate::kind::KindInterner;
     use crate::lex::TokenTable;
     use std::sync::Arc;
+
+    #[test]
+    fn parse_term_roundtrips_a_leaf() {
+        let snap = crate::builtin::snapshot();
+        for src in ["\"hello\"", "Nat", "Type", "Prop", "(x : Nat)", "_"] {
+            let res = super::parse_term(src, &snap);
+            assert_eq!(
+                res.tree.text(),
+                src,
+                "parse_term must be lossless for {src:?}"
+            );
+        }
+    }
 
     /// Run `p` against `src` with tokens from `toks`; return
     /// (canon-ish sexpr of the tree, errors) for terse assertions. A
