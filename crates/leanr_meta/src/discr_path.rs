@@ -47,22 +47,29 @@
 //!    tree consumers this crate will grow later (`discr_tree.rs`'s own
 //!    doc: "simp/rw slices reuse this module later"), where insertion
 //!    genuinely needs `ignoreArg`.
-//! 2. It is FUNCTIONALLY EQUIVALENT to the unfiltered query path for
-//!    `get_match_keys`'s purposes, for every position that was
-//!    instance-implicit/proof in the ORIGINAL declaration the goal's
-//!    head resolves through: the insert side ALWAYS stores `Star` at
-//!    such a position (that's what `pushArgs`'s own `ignoreArg`
-//!    substitution guarantees for every instance ever written to the
-//!    tree), so `process`'s `visitStar` arm (Main.lean:594-599;
-//!    `discr_tree.rs`'s `skip_args`) unconditionally swallows whatever
-//!    the query pushes there, real subterm or `Star` alike — the
-//!    swallowed subtree's own internal shape is provably irrelevant to
-//!    the match outcome, only its FLATTENED LENGTH matters (which
-//!    `Star`'s own `key_arity == 0` and a real subterm's own recursive
-//!    key count both correctly report to `skip_args`/the `skip` debt
-//!    counter). Since a stored non-`Star` key never occupies an
-//!    instance-implicit/proof position in the first place, `findKey`
-//!    can never match there either way.
+//! 2. Filtering here is SUPERSET-SAFE for `get_match_keys`'s purposes,
+//!    at every position, not just the ones `ignoreArg` fires on (this is
+//!    the reviewer's simpler, actually-valid argument — a prior draft of
+//!    this doc argued "the insert side ALWAYS stores `Star` there too",
+//!    which is not strictly true: insert-side `ignoreArg`'s own
+//!    `Implicit ⇒ !isType a` verdict depends on the STORED argument,
+//!    which can differ from what the query happens to pass at the same
+//!    position, so the two sides are not guaranteed to agree on
+//!    `Star`-vs-real independently of this argument). The real
+//!    invariant is about `findKey`/`process` (`discr_tree.rs`'s own
+//!    transcription), not about the two sides agreeing: for ANY
+//!    position, a `Star` QUERY key visits every child of the current
+//!    trie node with `skip = key_arity(child)`, resuming the SAME
+//!    continuation regardless of which child that is (Main.lean:
+//!    594-599's `visitStar`; `discr_tree.rs`'s `skip_args`) — i.e. it
+//!    is the query-side equivalent of "match anything here, then keep
+//!    going". Replacing a real subterm's key with `Star` in the query
+//!    path therefore visits a SUPERSET of what querying the real key
+//!    would visit at that node: `results(Star-at-position) ⊇
+//!    results(real-key-at-position)`, pointwise over every stored entry.
+//!    Filtering here can only ADD candidates B1's own `is_def_eq` will
+//!    later re-check and reject, never DROP one that a real match
+//!    should have found.
 //! 3. For THIS plan's actual synthesis goals (`Add N`, `Add (Prod a
 //!    b)`, ...) `ignoreArg` never fires at all: `getInstances`
 //!    (`SynthInstance.lean:201-211`) hands `getUnify` the CLASS
@@ -100,6 +107,61 @@
 //!   structure argument is `no_index`-annotated. Always `false`: no
 //!   class registry exists in this crate (same posture as
 //!   `is_def_eq_singleton`'s own `isClass` elision, `lazy_delta.rs`).
+//! - `isClass?` — SECOND, INDEPENDENT dependency (do not conflate with
+//!   the `isClass` seam directly above, which is only the `.proj` arm's
+//!   `no_index` gate): `ignoreArg`'s `Implicit`/`StrictImplicit` case
+//!   (Main.lean:107-112) reads `ParamInfo.isInstance`, and
+//!   `ParamInfo.isInstance` is NOT a `binderInfo == instImplicit` test —
+//!   unlike `isImplicit`/`isStrictImplicit`/`isExplicit`, which really
+//!   are (`Meta/Basic.lean:282-292`). `isInstance` is COMPUTED
+//!   (`FunInfo.lean:111`): `className?.isSome && !decl.binderInfo.
+//!   isExplicit`, i.e. "the parameter's TYPE is a registered class AND
+//!   the binder is not `Default`" — deliberately not a pure binder-info
+//!   test, per `FunInfo.lean:91-108`'s own worked examples: an implicit
+//!   binder over a class type (`{_ : Hashable α}`) must still count as
+//!   an instance, while `structure … extends`-generated constructors use
+//!   EXPLICIT binders for their class-typed superclass fields, which
+//!   must NOT count as instances.
+//!
+//!   `ignore_arg` below approximates `isInstance ≈ (binderInfo ==
+//!   InstImplicit)` (its `Some(BinderInfo::InstImplicit) => Ok(true)`
+//!   arm) because this crate has no class registry (`isClass?` needs
+//!   one) to consult — same gap as the `isClass` seam above, just
+//!   surfacing at a different call site. Four-case check of where this
+//!   approximation lands relative to the oracle, `a` the argument value:
+//!
+//!   1. `[x : C]` (`InstImplicit`), `C` a class → oracle `true`
+//!      (`isInstance`); code `true` (`InstImplicit` arm). Agree — the
+//!      common case, and the only one this module's tests exercise.
+//!   2. `{x : C}` (`Implicit`), `C` a class → oracle `true`
+//!      (`isInstance`, per the `Hashable`/`OrdSet` example above); code
+//!      falls to the `Implicit` arm, `!is_type(a)` — an instance VALUE's
+//!      type is `C args`, not a `Sort`, so `is_type(a) == false` and the
+//!      arm returns `true` too. Agree, but by ACCIDENT (via `is_type`,
+//!      not via any class check) rather than by construction.
+//!   3. `(x : C)` (`Default`, explicit), any `C` → oracle `false`
+//!      (`!decl.binderInfo.isExplicit` is `false`), i.e. `isProof a`;
+//!      code's `Default` arm is also `is_proof(a)`. Agree.
+//!   4. `[x : T]` (`InstImplicit`), `T` NOT a class → oracle `false`
+//!      (`className?` is `none`), i.e. `isProof a`; code's
+//!      `InstImplicit` arm still returns `true` unconditionally.
+//!      **DIVERGES**: the approximation stars a position the oracle
+//!      would index structurally.
+//!
+//!   Case 4 is the only divergence, and it is QUERY-side superset-safe
+//!   (point 2 below: a `Star` query key only ever visits a superset of
+//!   what the real key would). **It would NOT be safe for insertion**:
+//!   an insert-side `mk_path` call that hits case 4 would STORE `Star`
+//!   at a position the oracle stores a real, structural key at — a
+//!   wrong stored key, not merely a permissive query. `mk_path`
+//!   is `pub(crate)` and currently query-side only (see "Insert-side vs.
+//!   query-side" above), so this cannot bite today, but **any future
+//!   insert-side use of `mk_path` (a future simp/rw indexer, per this
+//!   module's own "reusable for other consumers" framing above) must
+//!   first resolve `isClass?` properly** — i.e. own a real class
+//!   registry — before reusing `ignore_arg` for insertion. No such
+//!   registry exists anywhere in `leanr_meta` today; this is M4b/future
+//!   work, not a task number this plan owns.
 //! - `toNatLit?`/`isNumeral`/`shouldAddAsStar`/`isOffset`
 //!   (Main.lean:126-198) — Nat-literal/offset recognition that collapses
 //!   a numeral-shaped subterm to a single `Lit`/`Star` key. Always
@@ -142,7 +204,17 @@
 //!   hidden behind a `whnf` that itself depends on substituting an
 //!   earlier binder — a shape no real Lean function TYPE (as opposed to
 //!   its arguments) exhibits; every declaration's own Pi telescope is
-//!   syntactically nested `Forall`s all the way down.
+//!   syntactically nested `Forall`s all the way down. Residual risk this
+//!   substitution omission does NOT cover: when the peeled `body` is not
+//!   syntactically a `Forall`, `param_binder_infos` calls `self.whnf` on
+//!   it directly, and that `body` carries loose bvars from the binder(s)
+//!   already peeled off — i.e. `whnf` runs on an open term there. For
+//!   every real declaration type this branch is unreachable (nested
+//!   `Forall`s all the way down, per the paragraph above), so the
+//!   practical outcome is at worst the early-stop incompleteness already
+//!   described; a `whnf` implementation that behaved badly on open terms
+//!   could in principle surface a spurious `Forall` and thus a wrong
+//!   `BinderInfo`, but no such behavior is known to exist here.
 //!
 //! # Landed ahead of its consumer
 //!
@@ -310,11 +382,22 @@ impl<'e> MetaCtx<'e> {
                 idx,
                 structure,
             } => {
+                // A `.proj` index that doesn't fit `usize` is malformed
+                // decoded data (no real structure has that many fields);
+                // erroring here (rather than substituting a bogus
+                // `usize::MAX` sentinel and silently mis-keying the
+                // path) matches this crate's never-silently-wrong
+                // discipline for out-of-range decodes elsewhere.
                 let idxv = self
                     .scratch
                     .nat_at(Some(self.view.store), idx)
                     .to_usize()
-                    .unwrap_or(usize::MAX);
+                    .ok_or_else(|| {
+                        MetaError::Olean(format!(
+                            "ProjBig index does not fit usize: {:?}",
+                            self.scratch.nat_at(Some(self.view.store), idx)
+                        ))
+                    })?;
                 self.push_proj(fn_, tn, idxv, structure, e, todo)
             }
             // oracle: `| _ => return (.other, todo)` (Main.lean:311) —
@@ -393,6 +476,12 @@ impl<'e> MetaCtx<'e> {
     /// — both fall to the same "treat as a plain explicit argument, only
     /// check `isProof`" branch once `i` runs past the available
     /// `ParamInfo`s (an over-applied head).
+    ///
+    /// The `InstImplicit` arm below is an APPROXIMATION of the oracle's
+    /// `ParamInfo.isInstance` (which is not a `BinderInfo` test at all —
+    /// see the module doc's "Named seams" list, `isClass?` entry, for
+    /// the full four-case divergence analysis and why it is query-side
+    /// safe but not insert-side safe).
     fn ignore_arg(&mut self, a: ExprId, i: usize, infos: &[BinderInfo]) -> Result<bool, MetaError> {
         match infos.get(i) {
             Some(BinderInfo::InstImplicit) => Ok(true),
@@ -401,17 +490,25 @@ impl<'e> MetaCtx<'e> {
         }
     }
 
-    /// Stand-in for `getFunInfoNArgs`'s `ParamInfo.isInstance`/
-    /// `isImplicit`/`isStrictImplicit` fields (`FunInfo.lean`), reduced to
-    /// exactly what `ignoreArg` reads: the `BinderInfo` of each of
-    /// `head`'s first `nargs` `Forall` binders, peeled via `infer_type`
-    /// and `whnf` together (the `infer_app_type`, `InferType.lean:106-116`,
-    /// idiom: use the CURRENT type directly if it is already a `Forall`,
-    /// else `whnf` once to try to expose one). Stops early (returning fewer
-    /// than `nargs` entries) if the type runs out of binders — `ignoreArg`
-    /// treats a missing entry the same way (see its own doc comment). No
-    /// telescope substitution is performed; see this module's doc comment
-    /// on why that's sound here.
+    /// Stand-in for `getFunInfoNArgs`'s `ParamInfo.isImplicit`/
+    /// `isStrictImplicit`/`isExplicit` fields (`Meta/Basic.lean:282-292`),
+    /// which really are `binderInfo ==`-tests, reduced to exactly the raw
+    /// `BinderInfo` of each of `head`'s first `nargs` `Forall` binders,
+    /// peeled via `infer_type` and `whnf` together (the `infer_app_type`,
+    /// `InferType.lean:106-116`, idiom: use the CURRENT type directly if
+    /// it is already a `Forall`, else `whnf` once to try to expose one).
+    /// NOTE: `ParamInfo.isInstance` (`FunInfo.lean:111`) is NOT one of
+    /// these `binderInfo ==` fields — it is a computed
+    /// `isClass?-and-non-explicit` predicate this crate cannot decide
+    /// (no class registry); `ignore_arg`'s `InstImplicit` arm
+    /// approximates it with a `BinderInfo` test anyway. See the module
+    /// doc's "Named seams" `isClass?` entry for the resulting divergence.
+    /// Stops early (returning fewer than `nargs` entries) if the type
+    /// runs out of binders — `ignoreArg` treats a missing entry the same
+    /// way (see its own doc comment). No telescope substitution is
+    /// performed; see this module's doc comment (the `getFunInfoNArgs`
+    /// seam entry, which also covers the residual `whnf`-on-an-open-term
+    /// risk below) for why that's sound here.
     fn param_binder_infos(
         &mut self,
         head: ExprId,
@@ -642,6 +739,101 @@ mod tests {
             let goal = ctx.mk_app_spine(add, &[n]).expect("Add N");
             ctx.mk_path(goal).expect("mk_path");
             assert_eq!(ctx.cfg().transparency, saved);
+        });
+    }
+
+    /// Pins the OTHER half of risk 6 (`mk_path_restores_transparency`
+    /// above only pins save/restore, which passes even if `mk_path`
+    /// never overrode transparency at all): the traversal must actually
+    /// RUN at reducible-tier transparency, not the ambient
+    /// `Config::default()` (`TransparencyMode::Default`). `id {α : Sort
+    /// u} (a : α) : α := a` is a plain `def` with no reducibility
+    /// attribute — `Semireducible` status — so it is NOT unfoldable at
+    /// `.reducible`/`.instances`/`.implicit` (`can_unfold`,
+    /// `transparency.rs`) but IS unfoldable at the ambient `.default`.
+    /// If `mk_path` ran at `.default` (e.g. the override were dropped or
+    /// a no-op), `reduce_until_bad_key` would delta-unfold `id N N.zero`
+    /// all the way to `N.zero`, and this test would see `Const N 0` as
+    /// the head instead of `Const id 2` — the assertion below is a real,
+    /// falsifiable probe of the transparency actually in effect, not a
+    /// vacuous one.
+    #[test]
+    fn mk_path_does_not_unfold_a_semireducible_def_at_reducible_transparency() {
+        with_instances_ctx(|ctx| {
+            let id = const_named(ctx, "id");
+            let n = const_named(ctx, "N");
+            let n_zero = const_dotted(ctx, "N", "zero");
+            let goal = ctx.mk_app_spine(id, &[n, n_zero]).expect("id N N.zero");
+
+            let path = ctx.mk_path(goal).expect("mk_path");
+
+            let id_name = if let Node::Const { name: Some(nm), .. } = ctx.node(id) {
+                nm
+            } else {
+                panic!("id is not a bare const")
+            };
+            let n_name = if let Node::Const { name: Some(nm), .. } = ctx.node(n) {
+                nm
+            } else {
+                panic!("N is not a bare const")
+            };
+            let n_zero_name = if let Node::Const { name: Some(nm), .. } = ctx.node(n_zero) {
+                nm
+            } else {
+                panic!("N.zero is not a bare const")
+            };
+            assert_eq!(
+                path,
+                vec![
+                    DiscrKey::Const {
+                        name: id_name,
+                        arity: 2,
+                    },
+                    DiscrKey::Const {
+                        name: n_name,
+                        arity: 0,
+                    },
+                    DiscrKey::Const {
+                        name: n_zero_name,
+                        arity: 0,
+                    },
+                ],
+                "path: {path:?} — if this shows a Const N/N.zero head instead \
+                 of Const id, mk_path is running at .default (or another \
+                 non-reducible-tier mode), not .reducible"
+            );
+        });
+    }
+
+    /// Companion to the test above, ruling out the OTHER failure
+    /// direction (`.none`, which would also leave a `Semireducible` `id`
+    /// unreduced, so the test above alone can't distinguish `.none` from
+    /// `.reducible`): `abbrev Unit : Type := PUnit` desugars to a
+    /// `@[reducible] def`, so it IS unfoldable at `.reducible` (and every
+    /// coarser mode) but NOT at `.none`. Together, the two tests pin the
+    /// traversal to the reducible tier (`.reducible`/`.instances`/
+    /// `.implicit` — the three are not distinguishable by any probe
+    /// available in this fixture, but `mk_path`'s own source sets
+    /// exactly `TransparencyMode::Reducible`, matching `mkPath`'s
+    /// `withReducible`).
+    #[test]
+    fn mk_path_unfolds_a_reducible_abbrev_at_reducible_transparency() {
+        with_instances_ctx(|ctx| {
+            let unit = const_named(ctx, "Unit");
+            let path = ctx.mk_path(unit).expect("mk_path");
+
+            match path.first() {
+                Some(DiscrKey::Const { name, arity: 0 }) => {
+                    assert_eq!(
+                        crate::test_support::render_name(ctx, *name),
+                        "PUnit",
+                        "path: {path:?}"
+                    );
+                }
+                _ => panic!(
+                    "expected Unit to unfold to PUnit under reducible transparency, path: {path:?}"
+                ),
+            }
         });
     }
 
