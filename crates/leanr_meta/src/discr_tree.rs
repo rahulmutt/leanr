@@ -28,13 +28,23 @@
 //! unconditionally: a key's own `arity` is never consulted to decide
 //! how many *trie levels* a key spans, only baked into the `Key` value
 //! itself (so e.g. `Const Add 1` and `Const Add 2` hash/compare
-//! unequal). We use a `HashMap<DiscrKey, Node<V>>` in place of the
-//! sorted array — this changes nothing observable because we never
-//! rely on iteration order for the specific/star precedence; that
-//! precedence is branched on explicitly (see `process` below), exactly
-//! as the oracle's `getMatchLoop`/`getUnify.process` explicitly branch
-//! on `first.1 == .star` rather than relying on array order beyond the
-//! documented "`Key.star` is minimal" convention.
+//! unequal). We use a `Vec<(DiscrKey, Node<V>)>` in insertion order in
+//! place of the sorted array (fan-out per node is small, so linear
+//! lookup is fine, and it matches the oracle's array shape more
+//! closely than a `HashMap` would): iteration order over siblings must
+//! be deterministic because `getUnify`'s query-`Star` and skip-debt
+//! arms both fold over *every* child and any nondeterminism there
+//! would propagate to nondeterministic instance-resolution order in
+//! B3 — see `deterministic_multi_child_order` below. The
+//! specific-vs-star precedence itself is branched on explicitly (see
+//! `process` below) rather than depended on via array order: the
+//! oracle's `getMatchLoop`/`getUnify.process` `visitStar` inspects
+//! *only* `cs[0]!` (`Main.lean:594-599`) and thus fully *relies on*
+//! the sorted-array "`Key.star` is minimal" invariant to find the star
+//! child (if any) at index 0 — it is not an order-independent search.
+//! We branch on an explicit map/vec lookup for the star child instead,
+//! which is observably equivalent (same star-child-or-none outcome)
+//! without requiring sorted storage.
 //!
 //! ## Match traversal
 //!
@@ -67,28 +77,50 @@
 //! recursive call descends one real trie level into a finite tree), not
 //! metric on `skip`, which can legitimately grow before it shrinks.
 
-use std::collections::HashMap;
-
 use leanr_olean::DiscrKey;
 
 /// One trie level: values terminating exactly here, plus the outgoing
 /// edges keyed by the next `DiscrKey` in a stored path. Mirrors
 /// `Lean.Meta.DiscrTree.Trie` (`Basic.lean`'s `.node vs cs`), with `cs`
-/// represented as a map instead of a sorted array (see the module doc).
+/// represented as an insertion-ordered `Vec` instead of a sorted array
+/// (see the module doc) — sibling order is otherwise unspecified by
+/// `DiscrKey`'s (deliberately absent) `Ord`, and a `HashMap` would make
+/// it vary per process/run, which every multi-child fold in `process`
+/// below would silently leak into `get_match_keys`'s output order.
 struct Node<V> {
     values: Vec<V>,
-    children: HashMap<DiscrKey, Node<V>>,
+    children: Vec<(DiscrKey, Node<V>)>,
+}
+
+impl<V> Node<V> {
+    /// Linear lookup by key, in insertion order — mirrors the oracle's
+    /// `findKey`'s *outcome* (`Main.lean:436`, a `binSearch` over the
+    /// sorted array) without requiring sorted storage: fan-out per
+    /// node is small in practice, so a scan is fine.
+    fn child(&self, key: &DiscrKey) -> Option<&Node<V>> {
+        self.children.iter().find(|(k, _)| k == key).map(|(_, n)| n)
+    }
+
+    /// Insertion-order-preserving "entry or insert `Node::default()`".
+    fn child_or_default(&mut self, key: &DiscrKey) -> &mut Node<V> {
+        if let Some(pos) = self.children.iter().position(|(k, _)| k == key) {
+            &mut self.children[pos].1
+        } else {
+            self.children.push((key.clone(), Node::default()));
+            &mut self.children.last_mut().expect("just pushed").1
+        }
+    }
 }
 
 // Written by hand (not `#[derive(Default)]`) so `Node<V>: Default`
-// holds for every `V`, not just `V: Default` — `Vec::new()` and
-// `HashMap::new()` never need it, and a derived impl would wrongly
-// demand it of every `DiscrTree<V>` caller.
+// holds for every `V`, not just `V: Default` — `Vec::new()` never
+// needs it, and a derived impl would wrongly demand it of every
+// `DiscrTree<V>` caller.
 impl<V> Default for Node<V> {
     fn default() -> Self {
         Node {
             values: Vec::new(),
-            children: HashMap::new(),
+            children: Vec::new(),
         }
     }
 }
@@ -130,14 +162,18 @@ impl<V> DiscrTree<V> {
     /// Mirrors `insertKeyValue`/`insertAux`/`createNodes`
     /// (`Basic.lean:125-173`): one trie level per path element,
     /// regardless of that element's own arity (arity is match-time-only
-    /// metadata, never a level-count). An empty `path` inserts at the
-    /// root rather than panicking (`Basic.lean:166`'s `insertKeyValue`
-    /// panics on `keys.isEmpty`) — this crate never panics on caller
-    /// input, only on already-validated invariants.
+    /// metadata, never a level-count).
+    ///
+    /// **Oracle deviation** (documented, intentional, not a transcription
+    /// gap): the oracle's `insertKeyValue` `panic!`s when `keys.isEmpty`
+    /// (`Basic.lean:166`). We do not: an empty `path` inserts at the root
+    /// instead, consistent with this crate's posture of never panicking
+    /// on caller-supplied input, only on already-validated internal
+    /// invariants. Pinned by `empty_query_matches_root_values_only`.
     pub fn insert(&mut self, path: &[DiscrKey], value: V) {
         let mut node = &mut self.root;
         for key in path {
-            node = node.children.entry(key.clone()).or_default();
+            node = node.child_or_default(key);
         }
         node.values.push(value);
     }
@@ -192,15 +228,62 @@ impl<V> DiscrTree<V> {
             // wildcard-then-specific; deliberately reversed here, see
             // the module doc and `specific_beats_wildcard`).
             Some((key, rest)) => {
-                if let Some(child) = node.children.get(key) {
+                if let Some(child) = node.child(key) {
                     Self::process(0, rest, child, out);
                 }
-                if let Some(star_child) = node.children.get(&DiscrKey::Star) {
-                    Self::process(0, rest, star_child, out);
+                // Main.lean:594-599 (`visitStar`): a *stored* `Star`
+                // child swallows the query's entire current subterm
+                // `e`, arguments included — so unlike `visitNonStar`
+                // (`todo ++ args`, which KEEPS `e`'s args), `visitStar`
+                // passes `todo` UNCHANGED, i.e. `e`'s args are DROPPED
+                // from what's matched against the star child. In our
+                // flattened-path model, `rest` already contains `key`'s
+                // own flattened arguments (they immediately follow
+                // `key` in the path), so the analogue of "drop `e`'s
+                // args" is skipping exactly those argument sub-paths
+                // before descending into the stored star child — that's
+                // what `skip_args(rest, key_arity(key))` does. Passing
+                // `rest` unchanged here (as an earlier version of this
+                // function did) would silently perform `visitNonStar`'s
+                // arithmetic in `visitStar`'s position, and would fail
+                // to match any stored `Star` against a query argument
+                // that is itself compound (e.g. stored `f ?x` against
+                // query `f (g x)`).
+                if let Some(star_child) = node.child(&DiscrKey::Star) {
+                    Self::process(0, skip_args(rest, key_arity(key)), star_child, out);
                 }
             }
         }
     }
+}
+
+/// Skip past the flattened sub-paths of `n` query positions' worth of
+/// arguments in `q`, returning what follows them. Each position
+/// consumed contributes its own `key_arity` more positions to skip
+/// (that key's own arguments are also nested immediately after it in
+/// the flattened path), exactly mirroring `getUnify.process`'s `skip`
+/// debt accumulator (`Main.lean:579-584`) but run head-to-tail over an
+/// already-flattened path instead of recursing node-by-node — this is
+/// the query-side analogue of that same "arity tells you how many
+/// further path positions to swallow" mechanism, used here to drop
+/// `key`'s own argument sub-paths before descending into a *stored*
+/// `Star` child (`visitStar`, `Main.lean:594-599`; see `process`'s
+/// comment at the `Some((key, rest))` arm above for why this is
+/// needed). Runs off the end gracefully (returns whatever is left) if
+/// `q` is shorter than what `n` claims to need — that shouldn't happen
+/// for a well-formed flattened path, but this is not a validated
+/// internal invariant worth panicking over.
+fn skip_args(mut q: &[DiscrKey], mut n: usize) -> &[DiscrKey] {
+    while n > 0 {
+        match q.split_first() {
+            None => return q,
+            Some((k, rest)) => {
+                n = n - 1 + key_arity(k);
+                q = rest;
+            }
+        }
+    }
+    q
 }
 
 #[cfg(test)]
@@ -239,9 +322,11 @@ mod tests {
         let mut t: DiscrTree<&'static str> = DiscrTree::default();
         t.insert(&[c((1, 1)), c((2, 0))], "n");
         t.insert(&[c((1, 1)), c((3, 0))], "m");
-        // Query Add ?  (Star) returns both stored branches.
+        // Query Add ?  (Star) returns both stored branches, in
+        // insertion order (see `deterministic_multi_child_order` for a
+        // dedicated ≥3-sibling pin of this).
         let got = t.get_match_keys(&[c((1, 1)), DiscrKey::Star]);
-        assert_eq!(got.len(), 2);
+        assert_eq!(got, vec![&"n", &"m"]);
     }
 
     #[test]
@@ -266,5 +351,60 @@ mod tests {
         // Query: f applied to a wildcard argument of unknown shape.
         let got = t.get_match_keys(&[c((10, 1)), DiscrKey::Star]);
         assert_eq!(got, vec![&"deep"]);
+    }
+
+    /// Regression for the CRITICAL review finding: descending into a
+    /// *stored* `Star` child must skip the query key's own flattened
+    /// argument sub-paths (`visitStar`, `Main.lean:594-599`, drops
+    /// `todo`'s args entirely), not just its immediate next slot. Before
+    /// the fix, `skip_args` was missing and `rest` (which still
+    /// contained `g`'s and `x`'s keys) was passed to the star child
+    /// unchanged, so a compound query argument under a stored `Star`
+    /// never matched.
+    #[test]
+    fn stored_star_swallows_compound_query_argument() {
+        let mut t: DiscrTree<&'static str> = DiscrTree::default();
+        // stored: f ?x = [Const f 1, Star]
+        t.insert(&[/*f*/ c((20, 1)), DiscrKey::Star], "f_star");
+        // query: f (g x) = [Const f 1, Const g 1, Const x 0] -- the
+        // query's argument to `f` is itself a compound application, not
+        // a bare atom.
+        let got = t.get_match_keys(&[c((20, 1)), /*g*/ c((21, 1)), /*x*/ c((22, 0))]);
+        assert_eq!(got, vec![&"f_star"]);
+    }
+
+    /// Regression for the CRITICAL review finding, root-star-bucket
+    /// shape: a root-level stored `Star` (the oracle's `getStarResult`
+    /// bucket, `Main.lean:429-433`, unconditionally part of every
+    /// non-star `getUnify` result) must match a fully concrete query
+    /// whose head key has nonzero arity, not just an arity-0 query key.
+    #[test]
+    fn root_star_bucket_matches_any_concrete_query() {
+        let mut t: DiscrTree<&'static str> = DiscrTree::default();
+        // stored: [Star] at the root -- "matches anything".
+        t.insert(&[DiscrKey::Star], "anything");
+        // query: f x = [Const f 1, Const x 0] -- no Star anywhere in
+        // the query itself.
+        let got = t.get_match_keys(&[/*f*/ c((30, 1)), /*x*/ c((31, 0))]);
+        assert_eq!(got, vec![&"anything"]);
+    }
+
+    /// Regression for the IMPORTANT review finding: sibling iteration
+    /// order must be deterministic (insertion order), not
+    /// `HashMap`-random, because every multi-child fold in `process`
+    /// (query-`Star` and skip-debt) walks *all* siblings and its output
+    /// order is observable in `get_match_keys`'s result order. Uses 3
+    /// siblings (not 2, as the weaker pre-fix `wildcard_query_matches_both`
+    /// did) so a `len() == 3` check alone couldn't mask an order bug.
+    #[test]
+    fn deterministic_multi_child_order() {
+        let mut t: DiscrTree<&'static str> = DiscrTree::default();
+        t.insert(&[c((40, 1)), c((41, 0))], "alpha");
+        t.insert(&[c((40, 1)), c((42, 0))], "beta");
+        t.insert(&[c((40, 1)), c((43, 0))], "gamma");
+        // A Star query at the second position must visit the three
+        // siblings in insertion order, deterministically.
+        let got = t.get_match_keys(&[c((40, 1)), DiscrKey::Star]);
+        assert_eq!(got, vec![&"alpha", &"beta", &"gamma"]);
     }
 }
