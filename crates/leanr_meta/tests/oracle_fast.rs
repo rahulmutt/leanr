@@ -531,6 +531,7 @@ fn oracle_fast_gate() {
     let matchers = md.matchers;
     let instances = md.instances;
     let default_instances = md.default_instances;
+    let projection_fns = md.projection_fns;
     let constants: HashMap<NameId, ConstantInfo> = md
         .constants
         .iter()
@@ -591,6 +592,7 @@ fn oracle_fast_gate() {
                 &matchers,
                 &instances,
                 &default_instances,
+                &projection_fns,
             );
             // Declare every mvar `a` introduced (unlike `whnf`/`infer`/
             // `defeq`, `decode_expr` alone never declares an mvar into
@@ -738,6 +740,7 @@ fn oracle_fast_gate() {
                 &matchers,
                 &instances,
                 &default_instances,
+                &projection_fns,
             );
             match ctx.is_def_eq(a, b) {
                 Ok(got) => {
@@ -768,6 +771,7 @@ fn oracle_fast_gate() {
             &matchers,
             &instances,
             &default_instances,
+            &projection_fns,
         );
         ctx.set_transparency(transparency_of(tr));
 

@@ -622,6 +622,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         );
         assert!(!ctx.is_def_eq(a, b).unwrap());
     }

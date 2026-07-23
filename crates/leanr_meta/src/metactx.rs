@@ -12,8 +12,8 @@ use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, LevelId, NameId, Store};
 use leanr_kernel::{EnvView, ExprData, FVarIdGen, LocalContext, RecGuard, MAX_REC_DEPTH};
 use leanr_olean::{
-    DefaultInstanceEntry, EntryScope, InstanceEntry, MatcherEntry, ReducibilityEntry,
-    ReducibilityStatus,
+    DefaultInstanceEntry, EntryScope, InstanceEntry, MatcherEntry, ProjectionFnInfo,
+    ReducibilityEntry, ReducibilityStatus,
 };
 
 use crate::instances::InstanceTable;
@@ -41,6 +41,17 @@ pub struct MetaCtx<'e> {
     pub(crate) fvar_gen: FVarIdGen,
     pub(crate) guard: RecGuard,
     guard_depth: u32,
+    /// oracle: `Context.synthPendingDepth` (`Meta/Basic.lean:502`) — a
+    /// counter DISTINCT from `guard_depth` above: the general recursion
+    /// guard bounds total `MetaM` call-stack depth (`withIncRecDepth`),
+    /// while this one bounds only NESTED `synthPending` invocations
+    /// specifically (`withIncSynthPending`, `Meta/Basic.lean:1177`),
+    /// against the much tighter `maxSynthPendingDepth` option (default
+    /// `1`, `Meta/Basic.lean:458-461` — this crate has no options table,
+    /// so the default is restated as `whnf.rs`'s own
+    /// `MAX_SYNTH_PENDING_DEPTH` constant). See `whnf.rs::synth_pending`
+    /// (task B6) for the increment/check/decrement span.
+    pub(crate) synth_pending_depth: u32,
     steps: u64,
     step_budget: u64,
     /// (config cache key, expr) -> whnf result. Permanent entries only
@@ -140,6 +151,14 @@ pub struct MetaCtx<'e> {
     /// `FVarIdGen` (an expr-mvar name must not collide with either a
     /// level-mvar or an fvar name).
     pub(crate) expr_mvar_gen: u64,
+    /// Decoded `Lean.projectionFnInfoExt` entries (task B6), keyed by
+    /// the projection function's own name — oracle `getProjectionFnInfo?`
+    /// (`ProjFns.lean:37-59`, a plain `NameMap` point lookup). Consulted
+    /// by `whnf.rs`'s `get_stuck_mvar`'s `Const` arm and
+    /// `unfold_proj_inst_when_instances`, both task B6's own seams. Point
+    /// lookup only (never iterated in an order-significant way — Global
+    /// Constraints: no `HashMap` iteration on order-significant paths).
+    pub(crate) projection_fns: HashMap<NameId, ProjectionFnInfo>,
 }
 
 /// The `Nat.*` builtins `reduce_nat` folds on `LitNat`/`Nat.zero`
@@ -194,6 +213,16 @@ fn mk_name2(scratch: &mut Store, base: Option<&Store>, a: &str, b: &str) -> Name
 }
 
 impl<'e> MetaCtx<'e> {
+    /// Task B6 adds the 8th (`projection_fn_entries`) decoded-slice
+    /// parameter, crossing clippy's default `too_many_arguments`
+    /// threshold (7) — same "decoded slices in, private fields out"
+    /// constructor shape B3's `instance_entries`/`default_instance_entries`
+    /// pair already established (this module's own doc, above); adding a
+    /// 9th builder/options-struct layer here would be a bigger refactor
+    /// than this task's own scope, for a constructor that already has
+    /// exactly one call style (every call site passes all eight slices
+    /// positionally, `grep`-verified, no partial-application anywhere).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         view: EnvView<'e>,
         scratch: &'e mut Store,
@@ -202,6 +231,7 @@ impl<'e> MetaCtx<'e> {
         matchers: &[MatcherEntry],
         instance_entries: &[InstanceEntry],
         default_instance_entries: &[DefaultInstanceEntry],
+        projection_fn_entries: &[ProjectionFnInfo],
     ) -> MetaCtx<'e> {
         // Global entries only: scoped reducibility entries require the
         // M3b3-style activation model, out of scope for the meta core
@@ -214,6 +244,19 @@ impl<'e> MetaCtx<'e> {
             .collect();
         let matchers = matchers.iter().map(|m| (m.name, m.clone())).collect();
         let instances = InstanceTable::build(view, instance_entries, default_instance_entries);
+        // oracle: `projectionFnInfoExt`'s own `NameMap` (`ProjFns.lean:30,
+        // 37-59`) — the extension's own key IS `ProjectionFnInfo.projFn`
+        // (see that struct's doc, `leanr_olean::ProjectionFnInfo`), so no
+        // filtering/dedup decision is needed here beyond keying by it;
+        // a real `.olean` never registers the same projection fn name
+        // twice (`mkMapDeclarationExtension`'s own map semantics), so a
+        // colliding second entry (last-write-wins) is reachable only via
+        // adversarial/malformed bytes, same untrusted-input posture as
+        // every other decoder in this crate (never panics either way).
+        let projection_fns = projection_fn_entries
+            .iter()
+            .map(|p| (p.proj_fn, p.clone()))
+            .collect();
 
         let base = Some(view.store);
         let nat_add = mk_name2(scratch, base, "Nat", "add");
@@ -264,6 +307,7 @@ impl<'e> MetaCtx<'e> {
             fvar_gen: FVarIdGen::default(),
             guard: RecGuard::new(),
             guard_depth: 0,
+            synth_pending_depth: 0,
             steps: 0,
             step_budget: DEFAULT_STEP_BUDGET,
             whnf_cache: HashMap::new(),
@@ -288,6 +332,7 @@ impl<'e> MetaCtx<'e> {
             sunfold_match_alt,
             level_mvar_gen: 0,
             expr_mvar_gen: 0,
+            projection_fns,
         }
     }
 

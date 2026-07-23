@@ -1054,6 +1054,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         );
         ctx.set_step_budget(300);
 

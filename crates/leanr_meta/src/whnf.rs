@@ -41,16 +41,17 @@
 //!   `.olean`s that never recorded a rec-arg position at all — this is
 //!   the oracle's own documented fallback, not merely an
 //!   approximation of it.
-//! - [`MetaCtx::synth_pending`] (task 7) — `Meta.synthPending`
-//!   (`Basic.lean:840`), resolving a pending typeclass-synthesis
-//!   problem blocking a stuck smart-unfolding match; this plan has no
-//!   unification/instance-synthesis engine yet (lands with plan 4's
-//!   unifier). Always `false`.
-//! - [`MetaCtx::unfold_proj_inst_when_instances`] (task 7) —
-//!   `unfoldProjInstWhenInstances?` (:824-848, gated at :874): the
-//!   class-projection registry (`getProjectionFnInfo?`) it needs is the
-//!   same undecoded extension `get_stuck_mvar` already elides (task 6,
-//!   below); always `None`.
+//! - [`MetaCtx::synth_pending`] — LANDED (PR-B task B6): `Meta.synthPending`
+//!   (`Basic.lean:840`, real impl `synthPendingImp`,
+//!   `SynthInstance.lean:1031-1061`), resolving a pending typeclass-
+//!   synthesis problem blocking a stuck smart-unfolding match, now that
+//!   B4/B5's tabled `synth_instance` exists. See its own doc comment for
+//!   the four oracle conditions and the `synth_pending_depth` guard.
+//! - [`MetaCtx::unfold_proj_inst_when_instances`] — LANDED (PR-B task
+//!   B6): `unfoldProjInstWhenInstances?`/`unfoldProjInst?` (:814-818,
+//!   :793-806, gated at `unfoldDefinition?`'s own :874), now that
+//!   `projection_fns` decodes `getProjectionFnInfo?`'s own registry. See
+//!   `unfold_proj_inst`'s own doc comment.
 //! - the `Defn` arm of `whnf_core_app`'s recursor dispatch — aux-recursor
 //!   (`casesOn`/`brecOn`-shaped) unfolding inside `whnf_core` itself
 //!   (:696-701); lands with the extension that identifies
@@ -75,23 +76,25 @@
 //! - (task 6) `hasMatchPatternAttribute` (:504-505, inside
 //!   `can_unfold_at_matcher`) — the `@[match_pattern]` attribute
 //!   extension is undecoded; always `false` here.
-//! - (task 6) `getProjectionFnInfo?`/`getAuxParentProjectionInfo?`
-//!   (:347/:367, inside `get_stuck_mvar`) — the type-class-projection
-//!   and diamond-inheritance-projection registries do not exist yet;
-//!   always `None` there (same posture as `to_ctor_when_structure`'s
-//!   `mkProjFn` elision, below).
+//! - (task 6) `getAuxParentProjectionInfo?` (:367, inside
+//!   `get_stuck_mvar_proj_fn`) — the diamond-inheritance auxiliary-
+//!   parent-projection registry does not exist (task B6 decoded
+//!   `getProjectionFnInfo?`/`projection_fns`, its OWN sibling at :347,
+//!   but never this one — out of that task's stated scope); always
+//!   `None` there (same posture as `to_ctor_when_structure`'s `mkProjFn`
+//!   elision, below).
 
 use leanr_kernel::bank::pools::DataValueRow;
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, LevelsId, NameId};
 use leanr_kernel::{
-    abstract_fvars, instantiate, instantiate_level_params, instantiate_rev, ConstantInfo, Nat,
-    QuotKind, QuotVal, RecursorRule, RecursorVal,
+    abstract_fvars, instantiate, instantiate_level_params, instantiate_rev, BinderInfo,
+    ConstantInfo, Nat, QuotKind, QuotVal, RecursorRule, RecursorVal,
 };
 use leanr_olean::ReducibilityStatus;
 
 use crate::metactx::NatOp;
-use crate::{MVarId, MetaCtx, MetaError, ProjReduction, TransparencyMode};
+use crate::{MVarId, MVarKind, MetaCtx, MetaError, ProjReduction, TransparencyMode};
 
 /// oracle: `exponentiation.threshold`, default `256`
 /// (`SafeExponentiation.lean:15-22`), consulted by `checkExponent`
@@ -104,6 +107,16 @@ use crate::{MVarId, MetaCtx, MetaError, ProjReduction, TransparencyMode};
 /// much-larger threshold for `Nat.rec`/`whnf`'s internal reduction (a
 /// different oracle layer entirely) — the two must not be conflated.
 const EXPONENTIATION_THRESHOLD: usize = 256;
+
+/// oracle: `maxSynthPendingDepth`, default `1` (`Meta/Basic.lean:458-
+/// 461`), consulted by `synthPendingImp` (`SynthInstance.lean:1044-
+/// 1048`) against its own reader-context `synthPendingDepth` counter
+/// (`Meta/Basic.lean:502`) — restated as a plain constant for the same
+/// "no options table" reason `EXPONENTIATION_THRESHOLD` above is. See
+/// `MetaCtx::synth_pending_depth`'s own doc (`metactx.rs`) for why this
+/// is a SEPARATE counter/bound from the general `guard_depth`/
+/// `MAX_REC_DEPTH` recursion guard.
+const MAX_SYNTH_PENDING_DEPTH: u32 = 1;
 
 /// oracle: `canUnfoldAtMatcher`'s allowlist (WHNF.lean:506-520),
 /// beyond `hasMatchPatternAttribute` — root (fully-qualified) names
@@ -985,9 +998,7 @@ impl<'e> MetaCtx<'e> {
                         match self.view.get(n) {
                             Some(ConstantInfo::Rec(rec_val)) => self.is_rec_stuck(rec_val, &args),
                             Some(ConstantInfo::Quot(qv)) => self.is_quot_rec_stuck(qv, &args),
-                            // SEAM: class-projection / diamond-inheritance
-                            // registries (see this method's doc comment).
-                            _ => Ok(None),
+                            _ => self.get_stuck_mvar_proj_fn(e, f, n, &args),
                         }
                     }
                     Node::Proj { structure, .. } | Node::ProjBig { structure, .. } => {
@@ -999,6 +1010,77 @@ impl<'e> MetaCtx<'e> {
             }
             _ => Ok(None),
         }
+    }
+
+    /// oracle: `getStuckMVar?`'s `Const` arm's own fallback (WHNF.lean:
+    /// 343-374), reached once neither `Rec`/`Quot` matched `n`. `e` is
+    /// the WHOLE application (`f` applied to `args`); `f`/`n`/`args` are
+    /// the SAME decomposition `get_stuck_mvar_body`'s caller already
+    /// computed, passed through rather than re-derived.
+    ///
+    /// `unless e.hasExprMVar do return none` (:344) — a bare `Const`
+    /// (`Node::Const`, no mvar anywhere in `f` itself) can still have an
+    /// mvar buried in `args`, so this checks the WHOLE app `e`'s cached
+    /// bit, not just `f`'s.
+    ///
+    /// `getAuxParentProjectionInfo?` (:367) — the diamond-inheritance
+    /// auxiliary-parent-projection registry — is a SEAM this task does
+    /// not decode (out of scope: the brief names only
+    /// `projection_fns`/`ProjectionFnInfo`, PR-A's own decode of
+    /// `projectionFnInfoExt`, never the separate
+    /// `getAuxParentProjectionInfo?` extension). Always `None` there,
+    /// same posture the module doc's "Named seams" list already
+    /// recorded for this whole branch before this task landed —
+    /// incompleteness only: a diamond-inheritance-shaped stuck term
+    /// simply is not detected as stuck (falls through to the whnf
+    /// caller's own generic "irreducible, return unchanged" answer),
+    /// never a wrong verdict.
+    fn get_stuck_mvar_proj_fn(
+        &mut self,
+        e: ExprId,
+        f: ExprId,
+        n: NameId,
+        args: &[ExprId],
+    ) -> Result<Option<MVarId>, MetaError> {
+        if !self.data(e).has_expr_mvar() {
+            return Ok(None);
+        }
+        let Some(info) = self.projection_fns.get(&n).cloned() else {
+            // SEAM: `getAuxParentProjectionInfo?` (see this method's doc).
+            return Ok(None);
+        };
+        if !info.from_class {
+            return Ok(None);
+        }
+        // oracle :350-353: "First check whether `e`'s instance is
+        // stuck" -- `args[projInfo.numParams]?`, `whnf`'d, then
+        // recursed into (NOT the raw arg -- `is_rec_stuck`'s own major-
+        // arg convention, above, does the same `whnf`-before-recurse).
+        if let Some(&major) = args.get(info.num_params) {
+            let w = self.whnf(major)?;
+            if let Some(mv) = self.get_stuck_mvar(w)? {
+                return Ok(Some(mv));
+            }
+        }
+        // oracle :354-364: "recurse on the explicit arguments" -- zip
+        // `f`'s own `ParamInfo`s (here: `param_binder_infos`, B1/B2's
+        // `discr_path.rs` primitive, widened `pub(crate)` for this
+        // reuse -- see that method's own doc) against `args`, stopping
+        // at whichever is shorter (`param_binder_infos(f, args.len())`
+        // already caps its own output at `args.len()`, reproducing the
+        // oracle's `for .. in .., .. in ..` zip exactly). Each EXPLICIT
+        // position (`BinderInfo::Default`, `ParamInfo.isExplicit`,
+        // `Meta/Basic.lean:291-292`) is recursed into RAW (no `whnf`
+        // first -- unlike the major-instance-arg check just above).
+        let infos = self.param_binder_infos(f, args.len())?;
+        for (i, &a) in args.iter().enumerate() {
+            if matches!(infos.get(i), Some(BinderInfo::Default)) {
+                if let Some(mv) = self.get_stuck_mvar(a)? {
+                    return Ok(Some(mv));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// oracle: `isRecStuck?` (WHNF.lean:295-306).
@@ -1083,19 +1165,136 @@ impl<'e> MetaCtx<'e> {
         }
     }
 
-    /// SEAM: oracle `Meta.synthPending` (`Basic.lean:840`, `@[extern
+    /// oracle `Meta.synthPending` (`Basic.lean:840`, `@[extern
     /// "lean_synth_pending"] protected opaque synthPending : MVarId →
-    /// MetaM Bool`) — attempts to resolve a PENDING typeclass-synthesis
-    /// problem blocking a stuck metavariable. This plan has no
-    /// unification/instance-synthesis engine at all (arrives in a later
-    /// plan alongside the rest of unification/typeclass resolution), so
-    /// this is always `false`: a stuck inner match in
-    /// `sunfold_go_match` therefore always fails to "unstick", and
-    /// `smart_unfolding_reduce` vetoes the whole unfold — the same
-    /// conservative outcome the oracle's own `else failure` branch
-    /// takes whenever `synthPending` itself returns `false`.
-    fn synth_pending(&mut self, _mvar: MVarId) -> Result<bool, MetaError> {
-        Ok(false)
+    /// MetaM Bool`), extern-swapped for its real implementation,
+    /// `synthPendingImp` (`SynthInstance.lean:1031-1061`) — attempts to
+    /// resolve a PENDING typeclass-synthesis problem blocking a stuck
+    /// metavariable, now that B4/B5's tabled synthesis engine
+    /// (`synth_instance`) exists. Four oracle conditions, all modeled
+    /// (task B6 — the brief's own paraphrase names only the third; the
+    /// other three are this method's own read of the real source):
+    ///
+    /// 1. `withIncRecDepth` (:1033) — the general `MetaM` recursion-depth
+    ///    guard: `self.guarded` around the whole body (`guard_depth` /
+    ///    `MAX_REC_DEPTH`, `metactx.rs`), the SAME mechanism every other
+    ///    `MetaM`-shaped entry point in this crate already uses. This is
+    ///    what actually bounds the `synth_pending` → `synth_instance` →
+    ///    `is_def_eq` → `whnf` → `synth_pending` cycle the task brief
+    ///    warns about: each hop through that cycle is itself wrapped in
+    ///    a `guarded` call (`synth_instance`'s own `self.guarded`,
+    ///    `synth.rs:1564`), so `guard_depth` strictly increases per lap
+    ///    and the cycle terminates in a bounded, deterministic
+    ///    `MetaError::DepthBudgetExhausted` rather than a stack overflow.
+    /// 2. `mvarDecl.kind matches .syntheticOpaque => return false`
+    ///    (:1035-1036) — a syntheticOpaque mvar is never resolved by
+    ///    unification/synthesis, only by the elaborator that created it
+    ///    (`MVarKind`'s own doc, `mvar_ctx.rs`); modeled identically.
+    /// 3. `isClass? mvarDecl.type` (:1040-1042) — SEAM: approximated as
+    ///    "`get_app_fn` of the mvar's declared type is a `Const`" (no
+    ///    independent class registry exists anywhere in this crate to
+    ///    confirm that `Const` truly names a REGISTERED class — the same
+    ///    posture `discr_path.rs`'s and `lazy_delta.rs`'s own
+    ///    `isClass?`/`isClass` seams already document). This can only
+    ///    make `synth_pending` attempt synthesis for STRICTLY MORE types
+    ///    than the oracle's own quick check would (any `Const`-headed
+    ///    type, not just class-headed ones), never fewer — and attempting
+    ///    synthesis on a non-class type is SAFE, not merely
+    ///    incomplete-safe: `InstanceTable`'s discrimination tree is keyed
+    ///    ONLY by real class `Const`s (every key comes from `mk_path` on
+    ///    some registered INSTANCE's own declared type, `instances.rs`'s
+    ///    `InstanceTable::build`), so a query under a non-class name
+    ///    structurally cannot match any stored candidate — `synth_instance`
+    ///    itself returns `Ok(None)`, the exact same `false` outcome the
+    ///    oracle's own quick check would have produced, just reached one
+    ///    call layer further in. `instantiateMVars` (also :1040, folded
+    ///    into `isClass?`'s own argument) is elided per this module's
+    ///    established posture elsewhere (`get_stuck_mvar`'s own doc):
+    ///    only a bare head-mvar dereference is threaded through here (via
+    ///    `mctx.decl`'s already-fully-substituted `ty`, since a
+    ///    metavariable's DECLARED type is fixed at `declare` time and
+    ///    never itself carries a not-yet-assigned "outer" mvar-of-a-mvar
+    ///    layer worth chasing beyond what `get_app_fn` alone already
+    ///    sees).
+    /// 4. `synthPendingDepth > maxSynthPendingDepth` (:1044-1048) — this
+    ///    crate's own `synth_pending_depth` counter against
+    ///    `MAX_SYNTH_PENDING_DEPTH` (both above), bumped for the
+    ///    DURATION of the `synth_instance` attempt exactly as
+    ///    `withIncSynthPending` (:1177) scopes it — a SEPARATE, much
+    ///    tighter bound than `guard_depth`'s (condition 1's own doc
+    ///    explains why the two must not be conflated).
+    ///
+    /// `catchInternalId isDefEqStuckExceptionId` (:1052) is a no-op here:
+    /// `IsDefEqStuck` is this crate's own typed `MetaError` variant, not
+    /// an internal exception id, and this method's `?` on
+    /// `synth_instance`'s result already PROPAGATES it untouched — per
+    /// this crate's own discipline (Global Constraints: `IsDefEqStuck`
+    /// never collapses to `false`), which is stricter than, and
+    /// deliberately does not replicate, the oracle's own `catch _ => pure
+    /// none` (the oracle silently treats a stuck defeq as an ordinary
+    /// synthesis failure; this crate refuses to and lets the caller see
+    /// the budget/stuck error instead).
+    ///
+    /// The final `mvarId.isAssigned` re-check (:1057-1058) is folded into
+    /// an UPFRONT short-circuit here instead (`synth_pending`, below,
+    /// checks `is_assigned` before even reading `mvarDecl`): the oracle
+    /// itself has no such upfront check (its own call sites, `getStuckMVar?`'s
+    /// `.mvar` arm and `WHNF.lean:773`, only ever pass an UNASSIGNED mvar
+    /// by construction, so the check never actually fires there before
+    /// synthesis), but on an ALREADY-assigned mvar the oracle would run
+    /// the whole synthesis attempt and then return `false` at this exact
+    /// final check anyway — same answer, strictly less work, and the
+    /// FINAL check is kept too (a nested `synth_instance` call could in
+    /// principle assign this SAME mvar via its own subgoal unification
+    /// before returning here) so double-assignment is impossible either
+    /// way.
+    fn synth_pending(&mut self, mvar: MVarId) -> Result<bool, MetaError> {
+        self.guarded(|s| s.synth_pending_body(mvar))
+    }
+
+    fn synth_pending_body(&mut self, mvar: MVarId) -> Result<bool, MetaError> {
+        if self.mctx.is_assigned(mvar) {
+            return Ok(false);
+        }
+        let Some(decl) = self.mctx.decl(mvar) else {
+            return Ok(false);
+        };
+        if decl.kind == MVarKind::SyntheticOpaque {
+            return Ok(false);
+        }
+        let ty = decl.ty;
+        // SEAM (condition 3, doc above): "is a class" approximated as
+        // "concrete `Const` head".
+        if !matches!(
+            self.node(self.get_app_fn(ty)),
+            Node::Const { name: Some(_), .. }
+        ) {
+            return Ok(false);
+        }
+        if self.synth_pending_depth > MAX_SYNTH_PENDING_DEPTH {
+            return Ok(false);
+        }
+        // `synth_instance` (B5, `synth.rs`) already wraps ITSELF in
+        // `self.guarded` (its own `withIncRecDepth`-equivalent, one
+        // `guard_depth` bump per attempt) -- calling it directly here,
+        // rather than wrapping it in a SECOND `guarded`, matches the
+        // oracle exactly: `synthPendingImp` (:1033) has exactly ONE
+        // `withIncRecDepth`, around the WHOLE function (this method's
+        // own outer `self.guarded` call, above), not a second one
+        // around just the `synthInstance?` sub-call.
+        self.synth_pending_depth += 1;
+        let val = self.synth_instance(ty);
+        self.synth_pending_depth -= 1;
+        match val? {
+            None => Ok(false),
+            Some(val) => {
+                if self.mctx.is_assigned(mvar) {
+                    return Ok(false);
+                }
+                self.mctx.assign(mvar, val)?;
+                Ok(true)
+            }
+        }
     }
 
     /// oracle: `smartUnfoldingReduce?` (WHNF.lean:747-776) — entry
@@ -2140,16 +2339,162 @@ impl<'e> MetaCtx<'e> {
         Ok(None)
     }
 
-    /// SEAM: oracle `unfoldProjInstWhenInstances?` (WHNF.lean:824-848
-    /// `unfoldProjInst?`, gated at `unfoldDefinition?`'s own call site
-    /// :874) — unfolding a class-field projection (e.g. `LE.le`) one
-    /// step further into its instance's own projection (e.g.
-    /// `instLENat.1`) at `.instances`/`.implicit` transparency. Needs
-    /// `getProjectionFnInfo?`, the SAME undecoded class-projection
-    /// registry `get_stuck_mvar` (task 6) already elides for the same
-    /// reason. Always `None`.
-    fn unfold_proj_inst_when_instances(&mut self, _e: ExprId) -> Result<Option<ExprId>, MetaError> {
-        Ok(None)
+    /// oracle `unfoldProjInstWhenInstances?` (WHNF.lean:814-818), gated
+    /// at `unfoldDefinition?`'s own call site (:874, `matchConstAux`'s
+    /// `failK` — `unfold_definition_app`'s own TWO
+    /// `self.unfold_proj_inst_when_instances(e)` call sites above are
+    /// this ONE oracle `failK`, split into its two firing sub-conditions
+    /// exactly as that method's own doc comment already explains) —
+    /// unfolding a class-field projection (e.g. `LE.le`) one step
+    /// further into its instance's own projection (e.g. `instLENat.1`)
+    /// at `.instances`/`.implicit` transparency. The outer gate here
+    /// reads the AMBIENT transparency (`getTransparency`, :815) BEFORE
+    /// `unfold_proj_inst` (below) does any of its own transparency
+    /// bumping.
+    fn unfold_proj_inst_when_instances(&mut self, e: ExprId) -> Result<Option<ExprId>, MetaError> {
+        if !matches!(
+            self.cfg.transparency,
+            TransparencyMode::Instances | TransparencyMode::Implicit
+        ) {
+            return Ok(None);
+        }
+        self.unfold_proj_inst(e)
+    }
+
+    /// oracle `unfoldProjInst?` (WHNF.lean:793-806) — transcribed in
+    /// full now that `projection_fns` (task B6) decodes
+    /// `getProjectionFnInfo?`'s own registry:
+    ///
+    /// 1. `f := e.getAppFn`; must be a bare `Const` (:794-795), else
+    ///    `none`.
+    /// 2. `isProjInst declName` (:782-784, inlined here rather than as
+    ///    its own method — it is a two-line `getProjectionFnInfo?`
+    ///    `fromClass` read with no other caller in this crate):
+    ///    `projection_fns.get(&name)` with `from_class == true`, else
+    ///    `none`.
+    /// 3. `withDefault <| getUnfoldableConst? declName` (:797) — the
+    ///    SAME `status_of`/`can_unfold`/`can_unfold_override` gate
+    ///    `unfold_definition_const` (task 6/7) already uses, but with
+    ///    `cfg.transparency` temporarily forced to `.default` for just
+    ///    this ONE check (class fields are never marked `[reducible]`
+    ///    themselves, so gating at the AMBIENT `.instances`/`.implicit`
+    ///    transparency would always fail here — `withDefault` is the
+    ///    whole point: confirm `declName` is unfoldable AT ALL, at the
+    ///    most permissive ordinary transparency, before proceeding).
+    ///    Restricted to `.defn` kind, matching `getUnfoldableConst?`'s
+    ///    own `| _ => return none` non-defn arms — same restriction
+    ///    `unfold_definition_const` already applies via its own
+    ///    `ConstantInfo::Defn(v) => v, _ => return Ok(None)` match.
+    /// 4. `deltaBetaDefinition fInfo us e.getAppRevArgs .. fun e' => ..`
+    ///    (:798) — level-arity check, `instantiate_level_params`,
+    ///    `beta_rev`: the SAME inline sequence `unfold_definition_const`
+    ///    (task 7) already performs for its own plain-delta case, here
+    ///    producing `e'` (e.g. `instLENat.1 a b`, an application headed
+    ///    by a `Proj`/`ProjBig`).
+    /// 5. `withReducibleAndInstances <| reduceProj? e'.getAppFn` (:804)
+    ///    — `withReducibleAndInstances` sets transparency to `.instances`
+    ///    (`Meta/Basic.lean:1286-1290`); `reduceProj?` (WHNF.lean:578-581)
+    ///    is `project?` (:574-575, `whnf` the structure then
+    ///    `project_core`) restricted to a literal `.proj`/`.projBig`
+    ///    head. `none` here (a non-`Proj` head, or a stuck/non-
+    ///    constructor structure term) propagates to the whole method's
+    ///    own `none`.
+    /// 6. `mkAppN r e'.getAppArgs |>.headBeta` (:806) — reapply the
+    ///    projected field value to `e'`'s own remaining args and
+    ///    `head_beta` the result (this crate's own `Expr.headBeta` port,
+    ///    already `pub(crate)` for `reduce_matcher_telescope`'s sake,
+    ///    above).
+    ///
+    /// `recordUnfold declName` (:805) is a no-op here — this crate
+    /// models no unfold-diagnostics counters anywhere (same omission as
+    /// every OTHER `recordUnfold*` call site in this file, e.g.
+    /// `unfold_definition_const`'s own doc comment).
+    fn unfold_proj_inst(&mut self, e: ExprId) -> Result<Option<ExprId>, MetaError> {
+        let f = self.get_app_fn(e);
+        let (name, levels) = match self.node(f) {
+            Node::Const {
+                name: Some(n),
+                levels,
+            } => (n, levels),
+            _ => return Ok(None),
+        };
+        let is_proj_inst = matches!(
+            self.projection_fns.get(&name),
+            Some(info) if info.from_class
+        );
+        if !is_proj_inst {
+            return Ok(None);
+        }
+        // `withDefault <| getUnfoldableConst? declName` (:797) — bump to
+        // `.default` for JUST this gate check, restored immediately
+        // after (this file's own `whnf_default`/`whnf_at_most_i`
+        // save/restore precedent).
+        let saved = self.cfg.transparency;
+        self.cfg.transparency = TransparencyMode::Default;
+        let status = self.status_of(name);
+        let ok = if self.can_unfold_override {
+            self.can_unfold_at_matcher(name, status)
+        } else {
+            Ok(crate::can_unfold(self.cfg.transparency, status))
+        };
+        self.cfg.transparency = saved;
+        if !ok? {
+            return Ok(None);
+        }
+        let defn = match self.view.get(name) {
+            Some(ConstantInfo::Defn(v)) => v,
+            _ => return Ok(None),
+        };
+        let level_ids = self
+            .scratch
+            .level_list_at(Some(self.view.store), levels)
+            .to_vec();
+        if defn.val.level_params.len() != level_ids.len() {
+            return Ok(None);
+        }
+        let args = self.get_app_args(e);
+        let value = instantiate_level_params(
+            self.scratch,
+            Some(self.view.store),
+            defn.value,
+            &defn.val.level_params,
+            &level_ids,
+            &mut self.guard,
+        )?;
+        let e2 = self.beta_rev(value, &args)?;
+        let f2 = self.get_app_fn(e2);
+        let proj = match self.node(f2) {
+            Node::Proj { idx, structure, .. } => Some((idx as usize, structure)),
+            Node::ProjBig { idx, structure, .. } => {
+                let n = self.scratch.nat_at(Some(self.view.store), idx).clone();
+                n.to_usize().map(|v| (v, structure))
+            }
+            _ => None,
+        };
+        let Some((idx, structure)) = proj else {
+            return Ok(None);
+        };
+        // `withReducibleAndInstances <| reduceProj? e'.getAppFn` (:804).
+        let saved2 = self.cfg.transparency;
+        self.cfg.transparency = TransparencyMode::Instances;
+        let field = self.reduce_proj(structure, idx);
+        self.cfg.transparency = saved2;
+        let Some(field_val) = field? else {
+            return Ok(None);
+        };
+        let e2_args = self.get_app_args(e2);
+        let applied = self.mk_app_spine(field_val, &e2_args)?;
+        Ok(Some(self.head_beta(applied)?))
+    }
+
+    /// oracle `project?` (WHNF.lean:574-575) — `projectCore?` (this
+    /// file's own `project_core`) applied to the WHNF of the structure
+    /// term, not the raw term (a bare `Const` instance name, e.g.
+    /// `instLENat`, must itself be delta-unfolded to expose the
+    /// constructor application `project_core` needs).
+    fn reduce_proj(&mut self, structure: ExprId, idx: usize) -> Result<Option<ExprId>, MetaError> {
+        let w = self.whnf(structure)?;
+        self.project_core(w, idx)
     }
 
     /// oracle: `unfoldDefinition?` (WHNF.lean:871-957), this crate's
@@ -2632,6 +2977,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         );
 
         ctx.set_transparency(TransparencyMode::Reducible);
@@ -3017,6 +3363,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         );
 
         let result = ctx.whnf(e).expect("whnf");
@@ -3133,7 +3480,7 @@ mod tests {
             transparency: TransparencyMode::Default, // above .instances
             ..crate::Config::default()
         };
-        let mut ctx = MetaCtx::new(view, &mut scratch, cfg, &reducibility, &[], &[], &[]);
+        let mut ctx = MetaCtx::new(view, &mut scratch, cfg, &reducibility, &[], &[], &[], &[]);
 
         let saved = ctx.cfg.transparency;
 
@@ -3178,5 +3525,111 @@ mod tests {
             "structB must reduce once the .instances cap is removed \
              (YesWithDelta), confirming it is Default-only-unfoldable"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Task B6: `synth_pending` + the `get_stuck_mvar`/
+    // `unfold_proj_inst_when_instances` class-projection seams.
+    // -----------------------------------------------------------------
+
+    /// `Mul.mul N ?inst x y` — a class-projection application stuck on
+    /// an unresolved (but synthesizable, `Instances.olean` declares
+    /// `instMulN : Mul N`) instance metavariable. Brief's own suggested
+    /// helper name/shape (`stuck_mul_over_fresh_instance`); reused by
+    /// all three of this task's seam tests below.
+    fn stuck_mul_over_fresh_instance(ctx: &mut MetaCtx) -> (ExprId, MVarId) {
+        use crate::test_support::{const_dotted, const_named, fresh_fvar, fresh_mvar};
+        let n = const_named(ctx, "N");
+        let mul = const_named(ctx, "Mul");
+        let mul_n = ctx.mk_app_spine(mul, &[n]).expect("Mul N");
+        let (inst_expr, inst_mvar) = fresh_mvar(ctx, mul_n);
+        let mul_mul = const_dotted(ctx, "Mul", "mul");
+        let x = fresh_fvar(ctx, n, "x");
+        let y = fresh_fvar(ctx, n, "y");
+        let goal = ctx
+            .mk_app_spine(mul_mul, &[n, inst_expr, x, y])
+            .expect("Mul.mul N ?inst x y");
+        (goal, inst_mvar)
+    }
+
+    /// Brief's Step-1 test (verbatim shape): `synth_pending` on the
+    /// blocking instance mvar now makes progress instead of the old
+    /// stub's unconditional `false`.
+    #[test]
+    fn synth_pending_resolves_stuck_class_projection() {
+        use crate::test_support::with_instances_ctx;
+        with_instances_ctx(|ctx| {
+            let (_goal, mvar) = stuck_mul_over_fresh_instance(ctx);
+            assert!(ctx.synth_pending(mvar).unwrap(), "expected progress");
+            assert!(ctx.mctx().is_assigned(mvar));
+        });
+    }
+
+    /// The `get_stuck_mvar` `Const`-arm class-projection descent (oracle
+    /// `getStuckMVar?`'s `getProjectionFnInfo?` branch, WHNF.lean:347-
+    /// 365): over the SAME stuck goal, `get_stuck_mvar` must itself find
+    /// the blocking instance mvar by descending through `Mul.mul`'s own
+    /// `projection_fns`-decoded `num_params` position — this is a
+    /// DIFFERENT code path from `synth_pending` above (that test never
+    /// calls `get_stuck_mvar` at all), so a green `synth_pending` test
+    /// does not exercise this seam.
+    #[test]
+    fn get_stuck_mvar_descends_class_projection_to_instance_mvar() {
+        use crate::test_support::with_instances_ctx;
+        with_instances_ctx(|ctx| {
+            let (goal, mvar) = stuck_mul_over_fresh_instance(ctx);
+            let found = ctx.get_stuck_mvar(goal).unwrap();
+            assert_eq!(found, Some(mvar), "expected the instance mvar itself");
+        });
+    }
+
+    /// `unfold_proj_inst_when_instances` (oracle `unfoldProjInstWhenInstances?`
+    /// / `unfoldProjInst?`, WHNF.lean:793-818) reducing a FULLY RESOLVED
+    /// class projection at `.instances` transparency: `Mul.mul N
+    /// instMulN x y` -- delta-beta to `instMulN.1 x y`, then reduce the
+    /// instance projection itself (`instMulN` is `InstanceReducible`,
+    /// unfolds at `.instances`) down to `instMulN`'s own `mul` field
+    /// (`fun _ b => b`) applied to `x y`, which beta-reduces to plain
+    /// `y`.
+    #[test]
+    fn unfold_proj_inst_when_instances_reduces_class_projection() {
+        use crate::test_support::{const_dotted, const_named, fresh_fvar, with_instances_ctx};
+        with_instances_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let mul_mul = const_dotted(ctx, "Mul", "mul");
+            let inst_mul_n = const_named(ctx, "instMulN");
+            let x = fresh_fvar(ctx, n, "x");
+            let y = fresh_fvar(ctx, n, "y");
+            let e = ctx
+                .mk_app_spine(mul_mul, &[n, inst_mul_n, x, y])
+                .expect("Mul.mul N instMulN x y");
+            ctx.set_transparency(TransparencyMode::Instances);
+            let r = ctx.unfold_proj_inst_when_instances(e).unwrap();
+            assert_eq!(r, Some(y), "expected Mul.mul N instMulN x y to reduce to y");
+        });
+    }
+
+    /// The outer transparency gate (`unfoldProjInstWhenInstances?`'s own
+    /// `matches .instances | .implicit`, WHNF.lean:815): at `.default`
+    /// transparency this must stay `None` — the SAME class projection
+    /// that reduces at `.instances` just above must NOT reduce here,
+    /// proving the gate is load-bearing and not a no-op that happens to
+    /// agree with the reduced answer.
+    #[test]
+    fn unfold_proj_inst_when_instances_gated_by_transparency() {
+        use crate::test_support::{const_dotted, const_named, fresh_fvar, with_instances_ctx};
+        with_instances_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let mul_mul = const_dotted(ctx, "Mul", "mul");
+            let inst_mul_n = const_named(ctx, "instMulN");
+            let x = fresh_fvar(ctx, n, "x");
+            let y = fresh_fvar(ctx, n, "y");
+            let e = ctx
+                .mk_app_spine(mul_mul, &[n, inst_mul_n, x, y])
+                .expect("Mul.mul N instMulN x y");
+            ctx.set_transparency(TransparencyMode::Default);
+            let r = ctx.unfold_proj_inst_when_instances(e).unwrap();
+            assert_eq!(r, None, "must not fire outside .instances/.implicit");
+        });
     }
 }

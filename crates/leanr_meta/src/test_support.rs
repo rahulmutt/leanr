@@ -39,7 +39,16 @@ pub(crate) fn with_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
         quot_initialized: false,
         store: &base,
     };
-    let mut ctx = MetaCtx::new(view, &mut scratch, Config::default(), &[], &[], &[], &[]);
+    let mut ctx = MetaCtx::new(
+        view,
+        &mut scratch,
+        Config::default(),
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+    );
     f(&mut ctx)
 }
 
@@ -142,6 +151,7 @@ pub(crate) fn with_prelude0_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
     let matchers = md.matchers;
     let instances = md.instances;
     let default_instances = md.default_instances;
+    let projection_fns = md.projection_fns;
     let constants: HashMap<NameId, ConstantInfo> =
         md.constants.into_iter().map(|c| (c.name(), c)).collect();
     leanr_kernel::replay(&mut env, constants).expect("Prelude0 replays");
@@ -156,6 +166,7 @@ pub(crate) fn with_prelude0_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
         &matchers,
         &instances,
         &default_instances,
+        &projection_fns,
     );
     f(&mut ctx)
 }
@@ -184,6 +195,7 @@ pub(crate) fn with_instances_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
     let matchers = md.matchers;
     let instances = md.instances;
     let default_instances = md.default_instances;
+    let projection_fns = md.projection_fns;
     let constants: HashMap<NameId, ConstantInfo> =
         md.constants.into_iter().map(|c| (c.name(), c)).collect();
     leanr_kernel::replay(&mut env, constants).expect("Instances.olean replays");
@@ -198,6 +210,7 @@ pub(crate) fn with_instances_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
         &matchers,
         &instances,
         &default_instances,
+        &projection_fns,
     );
     f(&mut ctx)
 }
@@ -224,6 +237,7 @@ pub(crate) fn with_cyclic_instances_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) ->
     let matchers = md.matchers;
     let instances = md.instances;
     let default_instances = md.default_instances;
+    let projection_fns = md.projection_fns;
     let constants: HashMap<NameId, ConstantInfo> =
         md.constants.into_iter().map(|c| (c.name(), c)).collect();
     leanr_kernel::replay(&mut env, constants).expect("InstancesCyclic.olean replays");
@@ -238,6 +252,7 @@ pub(crate) fn with_cyclic_instances_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) ->
         &matchers,
         &instances,
         &default_instances,
+        &projection_fns,
     );
     f(&mut ctx)
 }
@@ -431,6 +446,7 @@ pub(crate) fn with_matcher_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
     let matchers = md.matchers;
     let instances = md.instances;
     let default_instances = md.default_instances;
+    let projection_fns = md.projection_fns;
     let constants: HashMap<NameId, ConstantInfo> =
         md.constants.into_iter().map(|c| (c.name(), c)).collect();
     leanr_kernel::replay(&mut env, constants).expect("Matcher.olean replays");
@@ -445,6 +461,7 @@ pub(crate) fn with_matcher_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
         &matchers,
         &instances,
         &default_instances,
+        &projection_fns,
     );
     f(&mut ctx)
 }

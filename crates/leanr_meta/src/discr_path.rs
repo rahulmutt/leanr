@@ -517,7 +517,14 @@ impl<'e> MetaCtx<'e> {
     /// performed; see this module's doc comment (the `getFunInfoNArgs`
     /// seam entry, which also covers the residual `whnf`-on-an-open-term
     /// risk below) for why that's sound here.
-    fn param_binder_infos(
+    ///
+    /// `pub(crate)` (task B6): `whnf.rs`'s `get_stuck_mvar`'s `Const` arm
+    /// (oracle `getStuckMVar?`, WHNF.lean:360, `getFunInfo f` +
+    /// `pinfo.isExplicit` zip over a class-projection's own args) needs
+    /// the exact same `binderInfo == BinderInfo.default` reading of a
+    /// head's own Pi telescope, so it reuses this primitive rather than
+    /// re-deriving a second copy — no logic change, visibility only.
+    pub(crate) fn param_binder_infos(
         &mut self,
         head: ExprId,
         nargs: usize,
