@@ -26,3 +26,8 @@
 {"exp":{"b":{"b":{"k":"const","n":"Nat","us":[]},"bi":"d","k":"pi","t":{"k":"const","n":"Nat","us":[]}},"bi":"d","k":"pi","t":{"k":"const","n":"Nat","us":[]}},"id":"forall/twoGroups","src":"forall (x : Nat) (y : Nat), Nat"}
 {"exp":{"b":{"k":"const","n":"Nat","us":[]},"bi":"d","k":"pi","t":{"k":"const","n":"Nat","us":[]}},"id":"depArrow/nondep","src":"(x : Nat) -> Nat"}
 {"exp":{"b":{"i":0,"k":"bvar"},"bi":"d","k":"pi","t":{"k":"sort","u":{"k":"succ","u":{"k":"zero"}}}},"id":"depArrow/dep","src":"(a : Type) -> a"}
+{"exp":{"b":{"i":0,"k":"bvar"},"bi":"d","k":"lam","t":{"k":"const","n":"Nat","us":[]}},"id":"fun/explicitBinder","src":"fun (x : Nat) => x"}
+{"exp":{"b":{"i":0,"k":"bvar"},"bi":"d","k":"lam","t":{"i":0,"k":"mvar"}},"id":"fun/elidedBinder","src":"fun x => x"}
+{"exp":{"b":{"b":{"i":1,"k":"bvar"},"bi":"d","k":"lam","t":{"k":"const","n":"Nat","us":[]}},"bi":"d","k":"lam","t":{"k":"const","n":"Nat","us":[]}},"id":"fun/twoBinders","src":"fun (x : Nat) (y : Nat) => x"}
+{"exp":{"b":{"i":0,"k":"bvar"},"bi":"d","k":"lam","t":{"k":"const","n":"Nat","us":[]}},"id":"fun/ascribedElided","src":"(fun x => x : Nat -> Nat)"}
+{"exp":{"b":{"i":0,"k":"bvar"},"bi":"d","k":"lam","t":{"k":"const","n":"Nat","us":[]}},"id":"fun/ascribedExplicit","src":"(fun (x : Nat) => x : Nat -> Nat)"}
