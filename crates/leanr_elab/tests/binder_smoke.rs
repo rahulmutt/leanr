@@ -200,3 +200,123 @@ fn fun_ascribed_explicit_binder() {
     );
     assert_eq!(j["b"], serde_json::json!({"k": "bvar", "i": 0}));
 }
+
+#[test]
+fn let_typed_binding() {
+    // let x : Nat := Nat.zero; x  →  letE Nat Nat.zero (bvar 0), nd=false
+    let j = elab_json("let x : Nat := Nat.zero; x");
+    assert_eq!(j["k"], "let");
+    assert_eq!(j["nd"], false);
+    assert_eq!(
+        j["t"],
+        serde_json::json!({"k": "const", "n": "Nat", "us": []})
+    );
+    assert_eq!(
+        j["v"],
+        serde_json::json!({"k": "const", "n": "Nat.zero", "us": []})
+    );
+    assert_eq!(j["b"], serde_json::json!({"k": "bvar", "i": 0}));
+}
+
+#[test]
+fn have_is_a_let_with_non_dep_set() {
+    // have h : Nat := Nat.zero; h  →  byte-identical to the `let` above
+    // EXCEPT nd=true (design spec § Amendment 2).
+    let j = elab_json("have h : Nat := Nat.zero; h");
+    assert_eq!(j["k"], "let");
+    assert_eq!(j["nd"], true);
+    assert_eq!(
+        j["t"],
+        serde_json::json!({"k": "const", "n": "Nat", "us": []})
+    );
+    assert_eq!(
+        j["v"],
+        serde_json::json!({"k": "const", "n": "Nat.zero", "us": []})
+    );
+    assert_eq!(j["b"], serde_json::json!({"k": "bvar", "i": 0}));
+}
+
+#[test]
+fn let_elided_type_is_inferred_from_the_value() {
+    // let x := Nat.zero; x — the elided type is a fresh mvar the value's
+    // `elab_term_ensuring_type` assigns to Nat; instantiate_mvars fills it.
+    let j = elab_json("let x := Nat.zero; x");
+    assert_eq!(j["k"], "let");
+    assert_eq!(
+        j["t"],
+        serde_json::json!({"k": "const", "n": "Nat", "us": []})
+    );
+    assert_eq!(j["b"], serde_json::json!({"k": "bvar", "i": 0}));
+}
+
+#[test]
+fn let_unused_binding_is_retained() {
+    // let x : Nat := Nat.zero; Nat — `usedLetOnly := false` on the oracle
+    // side, so the binding survives even though the body ignores it.
+    let j = elab_json("let x : Nat := Nat.zero; Nat");
+    assert_eq!(j["k"], "let");
+    assert_eq!(
+        j["b"],
+        serde_json::json!({"k": "const", "n": "Nat", "us": []})
+    );
+}
+
+#[test]
+fn let_anonymous_binder() {
+    // let _ : Nat := Nat.zero; Nat — the `Term.hole` letId shape.
+    let j = elab_json("let _ : Nat := Nat.zero; Nat");
+    assert_eq!(j["k"], "let");
+    assert_eq!(
+        j["t"],
+        serde_json::json!({"k": "const", "n": "Nat", "us": []})
+    );
+}
+
+#[test]
+fn let_bracketed_binder_telescope() {
+    // let f (y : Nat) : Nat := y; f  →  letE (Nat → Nat) (fun y => bvar 0) (bvar 0)
+    let j = elab_json("let f (y : Nat) : Nat := y; f");
+    assert_eq!(j["k"], "let");
+    assert_eq!(j["t"]["k"], "pi");
+    assert_eq!(j["v"]["k"], "lam");
+    assert_eq!(j["v"]["b"], serde_json::json!({"k": "bvar", "i": 0}));
+    assert_eq!(j["b"], serde_json::json!({"k": "bvar", "i": 0}));
+}
+
+#[test]
+fn let_bare_ident_binder_unifies_its_domain() {
+    // let f y : Nat := y; f — the bare-ident binder's domain is a fresh
+    // mvar unified to Nat by the value's use site, so this matches the
+    // bracketed form exactly.
+    let j = elab_json("let f y : Nat := y; f");
+    assert_eq!(j["k"], "let");
+    assert_eq!(j["t"]["k"], "pi");
+    assert_eq!(
+        j["t"]["t"],
+        serde_json::json!({"k": "const", "n": "Nat", "us": []})
+    );
+    assert_eq!(j["v"]["k"], "lam");
+}
+
+#[test]
+fn have_hygiene_binder_is_named_this() {
+    // have : Nat := Nat.zero; this — the `hygieneInfo` letId shape; the
+    // oracle names the binder `this`, and the body's `this` must resolve
+    // to it (binder names are erased by the encoder, but resolution is
+    // what makes the body a `bvar` rather than an UnknownIdent error).
+    let j = elab_json("have : Nat := Nat.zero; this");
+    assert_eq!(j["k"], "let");
+    assert_eq!(j["nd"], true);
+    assert_eq!(j["b"], serde_json::json!({"k": "bvar", "i": 0}));
+}
+
+#[test]
+fn let_nested_indexes_bvars() {
+    // let x : Nat := Nat.zero; let y : Nat := x; y
+    //   →  letE Nat Nat.zero (letE Nat (bvar 0) (bvar 0))
+    let j = elab_json("let x : Nat := Nat.zero; let y : Nat := x; y");
+    assert_eq!(j["k"], "let");
+    assert_eq!(j["b"]["k"], "let");
+    assert_eq!(j["b"]["v"], serde_json::json!({"k": "bvar", "i": 0}));
+    assert_eq!(j["b"]["b"], serde_json::json!({"k": "bvar", "i": 0}));
+}

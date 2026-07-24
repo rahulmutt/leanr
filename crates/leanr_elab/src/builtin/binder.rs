@@ -170,9 +170,34 @@ pub(crate) fn extract_binder_group(
     Ok(BinderGroup { names, ty, bi })
 }
 
-/// Shared telescope driver: elaborate each group's type once (in the
-/// context BEFORE that group's names), introduce one fvar per name via
-/// `push_local_decl`, elaborate `body_elem` as a type under the full
+/// Push one bracketed binder group's names into the local context,
+/// returning their fvars in declaration order. The group's shared type
+/// elaborates ONCE, before its own names enter scope (so `(x y : T)`
+/// elaborates `T` in the context that excludes x and y) — the rule
+/// `elabBinders` follows for a single `bracketedBinder` item. Shared by
+/// `elab_binders_and_forall` (the `forall`/`depArrow` telescope) and
+/// `push_let_binders` (the `let`/`have` telescope), which differ only in
+/// what they do with the returned fvars (`mk_forall` vs. also
+/// `mk_lambda`-ing a value).
+fn push_binder_group(
+    elab: &mut TermElabM,
+    g: &BinderGroup,
+    kinds: &KindInterner,
+) -> Result<Vec<ExprId>, ElabError> {
+    let dom = elab_type(elab, &g.ty, kinds)?;
+    let mut fvars = Vec::with_capacity(g.names.len());
+    for &name in &g.names {
+        fvars.push(
+            elab.mctx
+                .push_local_decl(name, dom, g.bi)
+                .map_err(ElabError::from)?,
+        );
+    }
+    Ok(fvars)
+}
+
+/// Shared telescope driver: push every group's binders via
+/// `push_binder_group`, elaborate `body_elem` as a type under the full
 /// telescope, and `mk_forall` over all collected fvars. Reused by both
 /// `elab_forall` and `elab_dep_arrow` (Task 4). oracle: `elabBinders …
 /// fun xs => mkForallFVars xs (← elabType body)`.
@@ -193,17 +218,7 @@ pub(crate) fn elab_binders_and_forall(
     let result = (|| {
         let mut fvars: Vec<ExprId> = Vec::new();
         for g in groups {
-            // Elaborate the group's shared type ONCE, before its own
-            // names enter scope (so `(x y : T)` elaborates `T` in the
-            // context that excludes x and y).
-            let dom = elab_type(elab, &g.ty, kinds)?;
-            for &name in &g.names {
-                let fvar = elab
-                    .mctx
-                    .push_local_decl(name, dom, g.bi)
-                    .map_err(ElabError::from)?;
-                fvars.push(fvar);
-            }
+            fvars.extend(push_binder_group(elab, g, kinds)?);
         }
         let body = elab_type(elab, body_elem, kinds)?;
         elab.mctx.mk_forall(&fvars, body).map_err(ElabError::from)
@@ -438,5 +453,244 @@ pub fn elab_fun(
         elab.mctx.mk_lambda(&fvars, body).map_err(ElabError::from)
     })();
     elab.mctx.lctx_restore(checkpoint);
+    result
+}
+
+/// Extract the binder name from a `Term.letId` node. Three
+/// probe-confirmed shapes: a bare `<ident>` token (`let x := …`); a
+/// `Term.hole` node (`let _ := …`) → anonymous; a `hygieneInfo` node
+/// (`have : T := v; …`), which the oracle names `this`
+/// (`mkLetIdDeclView`: `HygieneInfo.mkIdent letId[0] `this`).
+///
+/// leanr has no macro-scope hygiene, so the `this` minted here resolves
+/// to a body occurrence of `this` by plain `NameId` equality — correct
+/// for every non-shadowing term, a stated simplification of the design
+/// spec (§ Plan 3 — canonical, "Stated simplification: hygiene").
+fn extract_let_id_name(
+    elab: &mut TermElabM,
+    let_id: &SyntaxNode,
+    kinds: &KindInterner,
+) -> Result<Option<NameId>, ElabError> {
+    let ch = non_trivia_children(let_id);
+    let first = ch
+        .first()
+        .ok_or_else(|| ElabError::UnsupportedSyntax("let: empty letId".into()))?;
+    match first {
+        NodeOrToken::Token(tok) if kinds.name(tok.kind()) == "<ident>" => {
+            Ok(Some(intern_binder_name(elab, tok.text())?))
+        }
+        NodeOrToken::Node(n) => match kinds.name(n.kind()) {
+            "Lean.Parser.Term.hole" => Ok(None),
+            "hygieneInfo" => Ok(Some(intern_binder_name(elab, "this")?)),
+            other => Err(ElabError::UnsupportedSyntax(format!("let: letId {other}"))),
+        },
+        _ => Err(ElabError::UnsupportedSyntax("let: letId shape".into())),
+    }
+}
+
+/// Push the `letIdBinders` telescope (`let f (y : Nat) : Nat := …`) into
+/// the local context, returning its fvars in declaration order. Each
+/// item is either a bracketed binder group (plan 1's
+/// `extract_binder_group`, pushed via the shared `push_binder_group`) or
+/// a bare ident (`let f y := …`), whose domain is a fresh type mvar
+/// unified at the value's use site — exactly plan 2's elided-`fun`-binder
+/// treatment.
+///
+/// Named seams (→ `UnsupportedSyntax`): implicit / strict-implicit /
+/// instance bracketed binders (M4b-3, which brings implicit and
+/// instance arguments), and any other item shape.
+///
+/// The CALLER owns the `lctx_checkpoint`/`lctx_restore` bracket.
+fn push_let_binders(
+    elab: &mut TermElabM,
+    items: &[SynElem],
+    kinds: &KindInterner,
+) -> Result<Vec<ExprId>, ElabError> {
+    let mut fvars: Vec<ExprId> = Vec::new();
+    for item in items {
+        match item {
+            NodeOrToken::Node(n) => {
+                let g = extract_binder_group(elab, n, kinds)?;
+                if !matches!(g.bi, BinderInfo::Default) {
+                    return Err(ElabError::UnsupportedSyntax(
+                        "let: implicit/strict/instance binder (M4b-3)".into(),
+                    ));
+                }
+                fvars.extend(push_binder_group(elab, &g, kinds)?);
+            }
+            NodeOrToken::Token(tok) if kinds.name(tok.kind()) == "<ident>" => {
+                let name = intern_binder_name(elab, tok.text())?;
+                let dom = fresh_type_mvar(elab)?;
+                let fvar = elab
+                    .mctx
+                    .push_local_decl(Some(name), dom, BinderInfo::Default)
+                    .map_err(ElabError::from)?;
+                fvars.push(fvar);
+            }
+            _ => {
+                return Err(ElabError::UnsupportedSyntax(format!(
+                    "let: unsupported binder kind {}",
+                    kinds.name(item.kind())
+                )))
+            }
+        }
+    }
+    Ok(fvars)
+}
+
+/// oracle: `elabLetDeclCore` (Binders.lean:891) → `elabLetDeclAux`
+/// (:745), the `letIdDecl` alternative. ONE elaborator for both forms:
+/// `Lean.Parser.Term.let` passes `non_dep = false` (`elabLetDecl`, :939)
+/// and `Lean.Parser.Term.have` passes `non_dep = true` (`elabHaveDecl`,
+/// :942, i.e. `elabLetDeclCore … { nondep := true }`). The two outputs
+/// differ by exactly that bit — probe-pinned, design spec § Amendment 2.
+///
+/// Elaboration order mirrors the oracle: binders → type → value →
+/// (declare) → body. The value is checked against the declared type, and
+/// the BODY is what receives `expected` (the oracle's
+/// `elabTermEnsuringType body expectedType?`); this is plain
+/// propagation, not the deferred postponement machinery.
+///
+/// `Term.let`/`Term.have` children: `[("let"|"have"), letConfig,
+/// letDecl, ";", body]`. `Term.letIdDecl` children: `[letId,
+/// null(binders), null(optType), ":=", value]`.
+///
+/// Named seams: a `letDecl` alternative other than `letIdDecl`
+/// (`letPatDecl`/`letEqnsDecl` — leanr's parser does not emit them, so
+/// the guard is defensive), a non-empty `letConfig` (leanr's parser
+/// models the item list as always-empty), and the binder forms
+/// `push_let_binders` rejects.
+pub fn elab_let_like(
+    elab: &mut TermElabM,
+    node: &SyntaxNode,
+    kinds: &KindInterner,
+    expected: Option<ExprId>,
+    non_dep: bool,
+) -> Result<ExprId, ElabError> {
+    let ch = non_trivia_children(node);
+
+    // [1] letConfig: `+nondep` / `(eq := h)` / … are not ported by
+    // leanr's parser (always-empty `many(never())`), so a non-empty
+    // item list is unreachable today — guarded as a named seam anyway.
+    let cfg = ch
+        .get(1)
+        .and_then(|el| el.as_node())
+        .ok_or_else(|| ElabError::UnsupportedSyntax("let: letConfig slot".into()))?;
+    if let Some(items) = non_trivia_children(cfg).first().and_then(|el| el.as_node()) {
+        if !non_trivia_children(items).is_empty() {
+            return Err(ElabError::UnsupportedSyntax("let: letConfig items".into()));
+        }
+    }
+
+    // [2] letDecl → its single alternative.
+    let let_decl = ch
+        .get(2)
+        .and_then(|el| el.as_node())
+        .ok_or_else(|| ElabError::UnsupportedSyntax("let: letDecl slot".into()))?;
+    let id_decl = non_trivia_children(let_decl)
+        .first()
+        .and_then(|el| el.as_node())
+        .cloned()
+        .ok_or_else(|| ElabError::UnsupportedSyntax("let: empty letDecl".into()))?;
+    let id_kind = kinds.name(id_decl.kind());
+    if id_kind != "Lean.Parser.Term.letIdDecl" {
+        // letPatDecl / letEqnsDecl → not ported by leanr's parser.
+        return Err(ElabError::UnsupportedSyntax(format!("let: {id_kind}")));
+    }
+
+    // letIdDecl: [letId, null(binders), null(optType), ":=", value].
+    let dch = non_trivia_children(&id_decl);
+    let let_id = dch
+        .first()
+        .and_then(|el| el.as_node())
+        .ok_or_else(|| ElabError::UnsupportedSyntax("let: letId slot".into()))?;
+    let binders_null = dch
+        .get(1)
+        .and_then(|el| el.as_node())
+        .ok_or_else(|| ElabError::UnsupportedSyntax("let: binders slot".into()))?;
+    let opt_type = dch
+        .get(2)
+        .and_then(|el| el.as_node())
+        .ok_or_else(|| ElabError::UnsupportedSyntax("let: optType slot".into()))?;
+    let value_elem = dch
+        .get(4)
+        .cloned()
+        .ok_or_else(|| ElabError::UnsupportedSyntax("let: value".into()))?;
+    // [4] the body, after the `;`.
+    let body_elem = ch
+        .get(4)
+        .cloned()
+        .ok_or_else(|| ElabError::UnsupportedSyntax("let: body".into()))?;
+
+    // optType: empty (elided) or one `typeSpec` whose children are
+    // `[":", T]`.
+    let ty_syntax: Option<SynElem> = match non_trivia_children(opt_type)
+        .first()
+        .and_then(|el| el.as_node())
+    {
+        Some(spec) => {
+            let spec_kind = kinds.name(spec.kind());
+            if spec_kind != "Lean.Parser.Term.typeSpec" {
+                return Err(ElabError::UnsupportedSyntax(format!(
+                    "let: optType {spec_kind}"
+                )));
+            }
+            Some(
+                non_trivia_children(spec)
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| ElabError::UnsupportedSyntax("let: typeSpec type".into()))?,
+            )
+        }
+        None => None,
+    };
+
+    let name = extract_let_id_name(elab, let_id, kinds)?;
+    let binder_items = non_trivia_children(binders_null);
+
+    // Bracket 1 — the `letIdBinders` telescope. Type and value are
+    // elaborated UNDER the binders (oracle: `elabBindersEx binders fun
+    // xs => …`), then abstracted back out with `mk_forall`/`mk_lambda`.
+    // With no binders both abstractions are no-ops. Restores `lctx` on
+    // EVERY exit path (Ok or Err), exactly as `elab_binders_and_forall`
+    // does.
+    let cp_binders = elab.mctx.lctx_checkpoint();
+    let built = (|| {
+        let fvars = push_let_binders(elab, &binder_items, kinds)?;
+        let ty = match &ty_syntax {
+            Some(t) => elab_type(elab, t, kinds)?,
+            // Elided type: a fresh mvar, the observable twin of the
+            // oracle's `expandOptType`-to-`_` hole; the value's
+            // `elab_term_ensuring_type` assigns it.
+            None => fresh_type_mvar(elab)?,
+        };
+        let value = elab.elab_term_ensuring_type(&value_elem, kinds, Some(ty))?;
+        // oracle: `mkLambdaFVars fvars val (usedLetOnly := false)` and
+        // `mkForallFVars fvars type`.
+        let value = elab
+            .mctx
+            .mk_lambda(&fvars, value)
+            .map_err(ElabError::from)?;
+        let ty = elab.mctx.mk_forall(&fvars, ty).map_err(ElabError::from)?;
+        Ok::<(ExprId, ExprId), ElabError>((ty, value))
+    })();
+    elab.mctx.lctx_restore(cp_binders);
+    let (ty, value) = built?;
+
+    // Bracket 2 — the let-bound decl itself (oracle: `withLetDecl …
+    // (nondep := config.nondep) fun x => …`), same restore-on-every-path
+    // discipline.
+    let cp_let = elab.mctx.lctx_checkpoint();
+    let result = (|| {
+        let fvar = elab
+            .mctx
+            .push_let_decl(name, ty, value)
+            .map_err(ElabError::from)?;
+        let body = elab.elab_term_ensuring_type(&body_elem, kinds, expected)?;
+        elab.mctx
+            .mk_let_expr(fvar, body, non_dep)
+            .map_err(ElabError::from)
+    })();
+    elab.mctx.lctx_restore(cp_let);
     result
 }

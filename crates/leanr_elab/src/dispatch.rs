@@ -79,6 +79,8 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
         "Lean.Parser.Term.forall" => Some("forall"),
         "Lean.Parser.Term.depArrow" => Some("depArrow"),
         "Lean.Parser.Term.fun" => Some("fun"),
+        "Lean.Parser.Term.let" => Some("let"),
+        "Lean.Parser.Term.have" => Some("have"),
         _ => None,
     }
 }
@@ -103,7 +105,7 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 ///
 /// Deferred (each hits `UnsupportedSyntax` until its slice lands):
 /// ```text
-///   binders: let/have ........................... M4b-2 plan 3 (fun/forall/arrow/depArrow landed)
+///   letI / haveI / let_fun / let_delayed / letrec  later slice (own oracle tier each)
 ///   application, @, named/optional args ........ M4b-3
 ///   num / char literals (OfNat / Char.ofNat) ... M4b-3
 ///   coercions (mkCoe) .......................... M4b-3
@@ -154,6 +156,12 @@ pub fn dispatch(
         }
         ("Lean.Parser.Term.fun", NodeOrToken::Node(node)) => {
             crate::builtin::binder::elab_fun(elab, node, kinds)
+        }
+        ("Lean.Parser.Term.let", NodeOrToken::Node(node)) => {
+            crate::builtin::binder::elab_let_like(elab, node, kinds, expected, false)
+        }
+        ("Lean.Parser.Term.have", NodeOrToken::Node(node)) => {
+            crate::builtin::binder::elab_let_like(elab, node, kinds, expected, true)
         }
         (other, _) => Err(ElabError::UnsupportedSyntax(other.to_string())),
     }
