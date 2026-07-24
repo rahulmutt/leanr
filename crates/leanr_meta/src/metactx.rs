@@ -476,6 +476,40 @@ impl<'e> MetaCtx<'e> {
         Ok(fvar)
     }
 
+    /// Mint an ldecl fvar `(name : ty := value)` into the ambient `lctx`
+    /// and return its `Expr::fvar` — the let twin of `push_local_decl`,
+    /// wrapping the kernel's existing `LocalContext::mk_let_decl` (the
+    /// ldecl overload, local_ctx.rs:128). Oracle: `withLetDecl`'s
+    /// declaration half. The caller brackets with `lctx_checkpoint`/
+    /// `lctx_restore`. Additive + behavior-neutral: no new state, no
+    /// existing path changed.
+    pub fn push_let_decl(
+        &mut self,
+        name: Option<NameId>,
+        ty: ExprId,
+        value: ExprId,
+    ) -> Result<ExprId, MetaError> {
+        debug_assert_eq!(
+            self.local_names.len(),
+            self.lctx.save(),
+            "local_names/lctx lockstep invariant violated"
+        );
+        let fvar = self.lctx.mk_let_decl(
+            self.scratch,
+            Some(self.view.store),
+            &mut self.fvar_gen,
+            name,
+            ty,
+            value,
+        )?;
+        // Same `local_names` bookkeeping as `push_local_decl`: one entry
+        // per call, matching `lctx.decls`'s own growth exactly, so a body
+        // occurrence of the binder name resolves via
+        // `lctx_lookup_by_name`.
+        self.local_names.push((name, fvar));
+        Ok(fvar)
+    }
+
     /// Look up `name` in the ambient local context, most-recently-pushed
     /// first (a later same-named binder shadows an earlier one — ordinary
     /// lexical shadowing; oracle: `LocalContext.findFromUserName?` scans
@@ -526,6 +560,21 @@ impl<'e> MetaCtx<'e> {
                     let decl = self.lctx.get(id).ok_or_else(|| {
                         MetaError::Infer("mk_binding: telescope fvar not declared".into())
                     })?;
+                    // The kernel's own rebuild twin (`subst.rs::mk_binding`,
+                    // fn at :1020) has a `Some(value)` branch that emits
+                    // `expr_let` for an ldecl entry (subst.rs:1038-1040).
+                    // This accessor has no such branch — deliberately: it
+                    // is `mkForallFVars`/`mkLambdaFVars`'s cdecl-only case
+                    // (see this fn's own doc), and a `letI`/`letrec`/mixed
+                    // telescope is a later slice's problem, not this one's.
+                    // Refuse rather than silently building a `lam`/`forallE`
+                    // that drops the ldecl's value on the floor — a wrong
+                    // `ExprId`, not a named seam.
+                    if decl.value.is_some() {
+                        return Err(MetaError::Infer(
+                            "mk_binding: let-decl fvar in a cdecl telescope".into(),
+                        ));
+                    }
                     (decl.binder_name, decl.ty, decl.binder_info)
                 }
                 _ => {
@@ -569,6 +618,54 @@ impl<'e> MetaCtx<'e> {
     /// state, changes no existing path.
     pub fn mk_lambda(&mut self, fvars: &[ExprId], body: ExprId) -> Result<ExprId, MetaError> {
         self.mk_binding(true, fvars, body)
+    }
+
+    /// oracle: `mkLetFVars #[fvar] body (usedLetOnly := false)
+    /// (generalizeNondepLet := false)` — abstract `body` over the single
+    /// let-bound `fvar` and wrap in `Expr.letE`, carrying `non_dep`
+    /// (`false` for `let`, `true` for `have`; design spec § Amendment 2).
+    ///
+    /// Deliberately NOT a `mk_binding` case: the kernel's own rebuild
+    /// path (`subst.rs`'s `mk_binding`, :1020) hardcodes `non_dep =
+    /// false` for a rebuilt `LetE`, so it cannot express `have`. Reads
+    /// `ty`/`value` off the lctx decl exactly as `mk_binding` reads
+    /// `ty`/`binder_info`. Additive + behavior-neutral: exposes
+    /// capability the crate already exercises (`expr_let` +
+    /// `abstract_fvars`), adds no state, changes no existing path.
+    pub fn mk_let_expr(
+        &mut self,
+        fvar: ExprId,
+        body: ExprId,
+        non_dep: bool,
+    ) -> Result<ExprId, MetaError> {
+        let (binder_name, ty, value) = match self.node(fvar) {
+            Node::FVar { id: Some(id) } => {
+                let decl = self
+                    .lctx
+                    .get(id)
+                    .ok_or_else(|| MetaError::Infer("mk_let_expr: fvar not declared".into()))?;
+                let value = decl.value.ok_or_else(|| {
+                    MetaError::Infer("mk_let_expr: fvar is not a let-bound decl".into())
+                })?;
+                (decl.binder_name, decl.ty, value)
+            }
+            _ => {
+                return Err(MetaError::Infer(
+                    "mk_let_expr: telescope entry is not an fvar".into(),
+                ))
+            }
+        };
+        let body = abstract_fvars(
+            self.scratch,
+            Some(self.view.store),
+            body,
+            std::slice::from_ref(&fvar),
+            &mut self.guard,
+        )?;
+        let e =
+            self.scratch
+                .expr_let(Some(self.view.store), binder_name, ty, value, body, non_dep)?;
+        Ok(e)
     }
 
     pub fn status_of(&self, n: NameId) -> ReducibilityStatus {
@@ -779,6 +876,83 @@ mod tests {
                 }
                 other => panic!("expected Lam, got {other:?}"),
             }
+        });
+    }
+
+    /// TDD RED/GREEN for M4b-2 plan3 task 1: the let-decl pair
+    /// (`push_let_decl` + `mk_let_expr`). Structure only — the value
+    /// here is `Nat` rather than a `Nat`-typed term, since abstraction
+    /// and the `non_dep` bit are what is under test, not type checking.
+    /// Both `non_dep` values are exercised: `false` is `let`, `true` is
+    /// `have` (the ONLY difference between the two forms, design spec
+    /// § Amendment 2).
+    #[test]
+    fn push_let_decl_and_mk_let_expr_carry_non_dep() {
+        with_prelude0_ctx(|ctx| {
+            let nat = const_named(ctx, "Nat");
+            for want_non_dep in [false, true] {
+                let checkpoint = ctx.lctx_checkpoint();
+                let fvar = ctx.push_let_decl(None, nat, nat).expect("push_let_decl");
+                assert!(matches!(ctx.node(fvar), Node::FVar { .. }));
+                // body = the fvar itself → `let x : Nat := Nat; x`
+                // (a `LetE` whose body is `bvar 0`).
+                let built = ctx
+                    .mk_let_expr(fvar, fvar, want_non_dep)
+                    .expect("mk_let_expr");
+                ctx.lctx_restore(checkpoint);
+                assert_eq!(ctx.lctx.save(), checkpoint);
+                match ctx.node(built) {
+                    Node::LetE {
+                        ty,
+                        value,
+                        body,
+                        non_dep,
+                        ..
+                    } => {
+                        assert_eq!(ty, nat);
+                        assert_eq!(value, nat);
+                        assert!(matches!(ctx.node(body), Node::BVar { idx: 0 }));
+                        assert_eq!(non_dep, want_non_dep);
+                    }
+                    other => panic!("expected LetE, got {other:?}"),
+                }
+            }
+        });
+    }
+
+    /// `mk_let_expr` on a cdecl (non-let) fvar is an error, never a
+    /// silently wrong node: a `LetE` needs a value and a cdecl has none.
+    #[test]
+    fn mk_let_expr_rejects_a_cdecl_fvar() {
+        with_prelude0_ctx(|ctx| {
+            let nat = const_named(ctx, "Nat");
+            let checkpoint = ctx.lctx_checkpoint();
+            let fvar = ctx
+                .push_local_decl(None, nat, BinderInfo::Default)
+                .expect("push_local_decl");
+            let err = ctx.mk_let_expr(fvar, fvar, false);
+            ctx.lctx_restore(checkpoint);
+            assert!(err.is_err(), "expected Err for a cdecl fvar, got {err:?}");
+        });
+    }
+
+    /// `mk_forall`/`mk_lambda` (`mk_binding`'s two callers) on an ldecl
+    /// (let-bound) fvar is an error, never a silently wrong `lam`/`forallE`
+    /// that drops the ldecl's value. Pins the guard added for the
+    /// whole-branch-review finding: `mk_binding` is the cdecl-only case
+    /// (see its own doc), and unlike the kernel's `subst.rs::mk_binding`
+    /// twin it has no `Some(value)` branch, so it must refuse rather than
+    /// build a wrong `ExprId`. Mirrors `mk_let_expr_rejects_a_cdecl_fvar`
+    /// above, with the roles of ldecl/cdecl swapped.
+    #[test]
+    fn mk_binding_rejects_an_ldecl_fvar() {
+        with_prelude0_ctx(|ctx| {
+            let nat = const_named(ctx, "Nat");
+            let checkpoint = ctx.lctx_checkpoint();
+            let fvar = ctx.push_let_decl(None, nat, nat).expect("push_let_decl");
+            let err = ctx.mk_forall(std::slice::from_ref(&fvar), fvar);
+            ctx.lctx_restore(checkpoint);
+            assert!(err.is_err(), "expected Err for an ldecl fvar, got {err:?}");
         });
     }
 
