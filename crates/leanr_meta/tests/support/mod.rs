@@ -53,12 +53,12 @@ pub struct Replayed {
     pub projection_fns: Vec<ProjectionFnInfo>,
 }
 
-/// Decode `tests/fixtures/meta/<name>`, assert it is import-free (the
-/// hermeticity contract: the committed `.olean` is the ENTIRE input —
-/// nothing is loaded from a search path, and CI never installs Lean),
-/// and replay its constants into a fresh `Environment`.
-pub fn replay_fixture(name: &str) -> Replayed {
-    let bytes = std::fs::read(fixture(name)).expect("committed fixture");
+/// Decode `tests/fixtures/<subdir>/<name>`, assert it is import-free
+/// (the hermeticity contract: the committed `.olean` is the ENTIRE
+/// input — nothing is loaded from a search path, and CI never installs
+/// Lean), and replay its constants into a fresh `Environment`.
+pub fn replay_fixture_in(subdir: &str, name: &str) -> Replayed {
+    let bytes = std::fs::read(fixture_in(subdir, name)).expect("committed fixture");
     let mut env = Environment::default();
     let md = ModuleData::parse(&bytes, env.store_mut()).expect("decode");
     assert!(md.imports.is_empty(), "{name} must stay import-free");
@@ -79,10 +79,26 @@ pub fn replay_fixture(name: &str) -> Replayed {
     }
 }
 
-pub fn fixture(name: &str) -> PathBuf {
+/// `replay_fixture_in("meta", name)` — the gate helpers' original
+/// subdir, kept as the unparameterized default so existing callers
+/// (`oracle_fast.rs`, `oracle_synth.rs`, `synth_sweep.rs`) are
+/// unbroken.
+pub fn replay_fixture(name: &str) -> Replayed {
+    replay_fixture_in("meta", name)
+}
+
+/// `tests/fixtures/<subdir>/<name>` — the subdir-parameterized form so
+/// a later crate (`leanr_elab`) can point this shared loader at
+/// `tests/fixtures/elab` instead of `tests/fixtures/meta`.
+pub fn fixture_in(subdir: &str, name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/meta")
+        .join("../../tests/fixtures")
+        .join(subdir)
         .join(name)
+}
+
+pub fn fixture(name: &str) -> PathBuf {
+    fixture_in("meta", name)
 }
 
 // ===== decode: JSON -> ExprId (interning through the store) =====
@@ -151,24 +167,33 @@ pub fn decode_nat_decimal(s: &str) -> Nat {
     n
 }
 
-pub fn decode_level(scratch: &mut Store, base: Option<&Store>, v: &Value) -> LevelId {
+/// `lvars` numbers first-occurrence-within-one-decode level-mvar
+/// indices to synthetic names, exactly like `decode_expr`'s
+/// `fvars`/`mvars` (brief: "interning a fresh level mvar per distinct
+/// `i`").
+pub fn decode_level(
+    scratch: &mut Store,
+    base: Option<&Store>,
+    v: &Value,
+    lvars: &mut HashMap<u64, NameId>,
+) -> LevelId {
     let k = v["k"]
         .as_str()
         .unwrap_or_else(|| panic!("decode_level: missing k in {v} (committed fixture malformed)"));
     match k {
         "zero" => scratch.level_zero(base).expect("intern level zero"),
         "succ" => {
-            let u = decode_level(scratch, base, &v["u"]);
+            let u = decode_level(scratch, base, &v["u"], lvars);
             scratch.level_succ(base, u).expect("intern level succ")
         }
         "max" => {
-            let a = decode_level(scratch, base, &v["a"]);
-            let b = decode_level(scratch, base, &v["b"]);
+            let a = decode_level(scratch, base, &v["a"], lvars);
+            let b = decode_level(scratch, base, &v["b"], lvars);
             scratch.level_max(base, a, b).expect("intern level max")
         }
         "imax" => {
-            let a = decode_level(scratch, base, &v["a"]);
-            let b = decode_level(scratch, base, &v["b"]);
+            let a = decode_level(scratch, base, &v["a"], lvars);
+            let b = decode_level(scratch, base, &v["b"], lvars);
             scratch.level_imax(base, a, b).expect("intern level imax")
         }
         "param" => {
@@ -179,6 +204,17 @@ pub fn decode_level(scratch: &mut Store, base: Option<&Store>, v: &Value) -> Lev
             scratch
                 .level_param(base, Some(nid))
                 .expect("intern level param")
+        }
+        "lmvar" => {
+            let i = v["i"].as_u64().unwrap_or_else(|| {
+                panic!("decode_level: missing i in {v} (committed fixture malformed)")
+            });
+            let nid = *lvars
+                .entry(i)
+                .or_insert_with(|| synth_name(scratch, base, "u", i));
+            scratch
+                .level_mvar(base, Some(nid))
+                .expect("intern level mvar")
         }
         other => panic!("decode_level: unknown level kind {other:?} (committed fixture malformed)"),
     }
@@ -202,6 +238,27 @@ pub fn decode_expr(
     fvars: &mut HashMap<u64, NameId>,
     mvars: &mut HashMap<u64, NameId>,
 ) -> ExprId {
+    // Level-mvar numbering (`lvars`) is scoped to this one top-level
+    // call rather than threaded through the public signature: unlike
+    // `fvars`/`mvars`, which every caller already threads across a
+    // record's `in`/`out` pair from outside, no caller in this crate
+    // needs level-mvar identity shared across separate `decode_expr`
+    // calls today (the committed corpus has no level mvars at all —
+    // brief/Task 2), and widening this signature would break every
+    // other call site of this shared helper (`oracle_synth.rs`,
+    // `synth_sweep.rs`), which are out of scope for this task.
+    let mut lvars = HashMap::new();
+    decode_expr_inner(scratch, base, v, fvars, mvars, &mut lvars)
+}
+
+fn decode_expr_inner(
+    scratch: &mut Store,
+    base: Option<&Store>,
+    v: &Value,
+    fvars: &mut HashMap<u64, NameId>,
+    mvars: &mut HashMap<u64, NameId>,
+    lvars: &mut HashMap<u64, NameId>,
+) -> ExprId {
     let k = v["k"]
         .as_str()
         .unwrap_or_else(|| panic!("decode_expr: missing k in {v} (committed fixture malformed)"));
@@ -214,7 +271,7 @@ pub fn decode_expr(
             scratch.expr_bvar(base, &n).expect("intern bvar")
         }
         "sort" => {
-            let u = decode_level(scratch, base, &v["u"]);
+            let u = decode_level(scratch, base, &v["u"], lvars);
             scratch.expr_sort(base, u).expect("intern sort")
         }
         "const" => {
@@ -226,7 +283,7 @@ pub fn decode_expr(
                 .as_array()
                 .unwrap_or_else(|| panic!("decode_expr: missing us in {v}"))
                 .iter()
-                .map(|u| decode_level(scratch, base, u))
+                .map(|u| decode_level(scratch, base, u, lvars))
                 .collect();
             let levels = scratch
                 .intern_level_list(base, &us)
@@ -236,8 +293,8 @@ pub fn decode_expr(
                 .expect("intern const")
         }
         "app" => {
-            let f = decode_expr(scratch, base, &v["f"], fvars, mvars);
-            let a = decode_expr(scratch, base, &v["a"], fvars, mvars);
+            let f = decode_expr_inner(scratch, base, &v["f"], fvars, mvars, lvars);
+            let a = decode_expr_inner(scratch, base, &v["a"], fvars, mvars, lvars);
             scratch.expr_app(base, f, a).expect("intern app")
         }
         "lam" => {
@@ -246,8 +303,8 @@ pub fn decode_expr(
                     .as_str()
                     .unwrap_or_else(|| panic!("decode_expr: missing bi in {v}")),
             );
-            let t = decode_expr(scratch, base, &v["t"], fvars, mvars);
-            let b = decode_expr(scratch, base, &v["b"], fvars, mvars);
+            let t = decode_expr_inner(scratch, base, &v["t"], fvars, mvars, lvars);
+            let b = decode_expr_inner(scratch, base, &v["b"], fvars, mvars, lvars);
             // Binder name erased on decode too: it never survived
             // encoding, so `None` is the only faithful choice.
             scratch.expr_lam(base, None, t, b, bi).expect("intern lam")
@@ -258,16 +315,16 @@ pub fn decode_expr(
                     .as_str()
                     .unwrap_or_else(|| panic!("decode_expr: missing bi in {v}")),
             );
-            let t = decode_expr(scratch, base, &v["t"], fvars, mvars);
-            let b = decode_expr(scratch, base, &v["b"], fvars, mvars);
+            let t = decode_expr_inner(scratch, base, &v["t"], fvars, mvars, lvars);
+            let b = decode_expr_inner(scratch, base, &v["b"], fvars, mvars, lvars);
             scratch
                 .expr_forall(base, None, t, b, bi)
                 .expect("intern pi")
         }
         "let" => {
-            let t = decode_expr(scratch, base, &v["t"], fvars, mvars);
-            let val = decode_expr(scratch, base, &v["v"], fvars, mvars);
-            let b = decode_expr(scratch, base, &v["b"], fvars, mvars);
+            let t = decode_expr_inner(scratch, base, &v["t"], fvars, mvars, lvars);
+            let val = decode_expr_inner(scratch, base, &v["v"], fvars, mvars, lvars);
+            let b = decode_expr_inner(scratch, base, &v["b"], fvars, mvars, lvars);
             let nd = v["nd"]
                 .as_bool()
                 .unwrap_or_else(|| panic!("decode_expr: missing nd in {v}"));
@@ -297,7 +354,7 @@ pub fn decode_expr(
                 .as_u64()
                 .unwrap_or_else(|| panic!("decode_expr: missing i in {v}"));
             let idx = Nat::from(i);
-            let e = decode_expr(scratch, base, &v["e"], fvars, mvars);
+            let e = decode_expr_inner(scratch, base, &v["e"], fvars, mvars, lvars);
             scratch
                 .expr_proj(base, Some(sid), &idx, e)
                 .expect("intern proj")
@@ -352,6 +409,31 @@ pub struct EncSt {
     pub fnext: u64,
     pub mvars: HashMap<NameId, u64>,
     pub mnext: u64,
+    // Level-mvar side of the same first-occurrence scheme (M4b-1 Task
+    // 2). Keyed by `Option<NameId>` rather than `NameId` because
+    // `LevelRow::MVar` — unlike `Node::MVar` — allows an anonymous
+    // (`None`) name (see `leanr_kernel::bank::levels`'s module doc
+    // comment); that is also exactly what the store's own hash-consing
+    // does (`Store::level_mvar` hashes `Option<NameId>` directly), so
+    // two anonymous level mvars are indistinguishable at the `LevelId`
+    // level too and collapsing them to one index here is consistent,
+    // not a loss of information this layer could otherwise preserve.
+    pub lvars: HashMap<Option<NameId>, u64>,
+    pub lnext: u64,
+}
+
+impl EncSt {
+    /// First-occurrence index for a level mvar, assigning the next
+    /// unused index on first sight — the level-side counterpart of how
+    /// `encode_expr`'s `Node::MVar`/`Node::FVar` arms number `mvars`/
+    /// `fvars` inline.
+    pub fn level_mvar_index(&mut self, n: Option<NameId>) -> u64 {
+        *self.lvars.entry(n).or_insert_with(|| {
+            let i = self.lnext;
+            self.lnext += 1;
+            i
+        })
+    }
 }
 
 pub fn name_to_string(store: &Store, base: Option<&Store>, n: Option<NameId>) -> String {
@@ -373,24 +455,24 @@ pub fn encode_bi(bi: BinderInfo) -> &'static str {
     }
 }
 
-pub fn encode_level(store: &Store, base: Option<&Store>, l: LevelId) -> Value {
+/// `st` numbers level mvars by first occurrence exactly like
+/// `encode_expr` numbers expr mvars/fvars (`EncSt::level_mvar_index`) —
+/// shared across a whole query record's `in`/`out` pair the same way
+/// (M4b-1 Task 2: a universe-polymorphic constant elaborates to a term
+/// carrying an unassigned level mvar, which this `lmvar` node now
+/// represents).
+pub fn encode_level(store: &Store, base: Option<&Store>, l: LevelId, st: &mut EncSt) -> Value {
     match *store.level_row(base, l) {
         LevelRow::Zero => json!({"k": "zero"}),
-        LevelRow::Succ(u) => json!({"k": "succ", "u": encode_level(store, base, u)}),
+        LevelRow::Succ(u) => json!({"k": "succ", "u": encode_level(store, base, u, st)}),
         LevelRow::Max(a, b) => {
-            json!({"k": "max", "a": encode_level(store, base, a), "b": encode_level(store, base, b)})
+            json!({"k": "max", "a": encode_level(store, base, a, st), "b": encode_level(store, base, b, st)})
         }
         LevelRow::IMax(a, b) => {
-            json!({"k": "imax", "a": encode_level(store, base, a), "b": encode_level(store, base, b)})
+            json!({"k": "imax", "a": encode_level(store, base, a, st), "b": encode_level(store, base, b, st)})
         }
         LevelRow::Param(n) => json!({"k": "param", "n": name_to_string(store, base, n)}),
-        // Not in the canonical scheme (no `lmvar` case) — see
-        // dump_defeq.lean's `encLevel` doc comment: a fully-elaborated
-        // corpus never carries a level mvar, so hitting one here is a
-        // real gap, not a cosmetic one.
-        LevelRow::MVar(_) => {
-            panic!("encode_level: unexpected level mvar (not in the canonical scheme)")
-        }
+        LevelRow::MVar(n) => json!({"k": "lmvar", "i": st.level_mvar_index(n)}),
     }
 }
 
@@ -422,13 +504,13 @@ pub fn encode_expr(store: &Store, base: Option<&Store>, e: ExprId, st: &mut EncS
             });
             json!({"k": "mvar", "i": i})
         }
-        Node::Sort { level } => json!({"k": "sort", "u": encode_level(store, base, level)}),
+        Node::Sort { level } => json!({"k": "sort", "u": encode_level(store, base, level, st)}),
         Node::Const { name, levels } => {
             let n = name_to_string(store, base, name);
             let us: Vec<Value> = store
                 .level_list_at(base, levels)
                 .iter()
-                .map(|&l| encode_level(store, base, l))
+                .map(|&l| encode_level(store, base, l, st))
                 .collect();
             json!({"k": "const", "n": n, "us": us})
         }

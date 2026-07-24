@@ -362,6 +362,34 @@ impl<'e> MetaCtx<'e> {
         &mut self.mctx
     }
 
+    /// The `scratch` term/level bank this `MetaCtx` was constructed
+    /// with — the same store every internal `whnf`/`infer`/`is_def_eq`
+    /// call already interns new nodes into via `self.scratch` directly.
+    /// **M4b-1 addition**: a term ELABORATOR (`leanr_elab`, layered on
+    /// top of this crate) has to construct brand-new `Expr` nodes
+    /// *during* elaboration — e.g. `Store::expr_lit_str` for a string
+    /// literal — while it (necessarily) also holds a live `MetaCtx` for
+    /// the same query, so it needs the identical capability this
+    /// module's own free functions (`mk_name1`/`mk_name2` above) have
+    /// always had from *inside* the crate. Before this there was no
+    /// external accessor at all — `scratch` is `pub(crate)` — which
+    /// made `leanr_elab`'s leaf elaborators (M4b-1 Task 4) literally
+    /// unimplementable: there is no id-translation between two
+    /// independent `Store`s (`ExprId` is only meaningful relative to
+    /// the exact `Store` that produced it), so a caller cannot work
+    /// around this with a Store of its own. Read-only/mutable pair
+    /// mirrors the existing `mctx()`/`mctx_mut()` precedent immediately
+    /// above, and `leanr_kernel::Environment::store()`/`store_mut()`'s
+    /// own public-accessor precedent for the persistent side.
+    pub fn store(&self) -> &Store {
+        self.scratch
+    }
+
+    /// See `store`'s doc comment.
+    pub fn store_mut(&mut self) -> &mut Store {
+        self.scratch
+    }
+
     pub fn status_of(&self, n: NameId) -> ReducibilityStatus {
         // Absent => Semireducible (getReducibilityStatusCore's
         // fallback; plan-1 Global Constraint).

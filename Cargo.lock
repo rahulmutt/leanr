@@ -862,6 +862,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "leanr_elab"
+version = "0.1.0"
+dependencies = [
+ "leanr_kernel",
+ "leanr_meta",
+ "leanr_olean",
+ "leanr_syntax",
+ "serde_json",
+]
+
+[[package]]
 name = "leanr_fmt"
 version = "0.1.0"
 dependencies = [

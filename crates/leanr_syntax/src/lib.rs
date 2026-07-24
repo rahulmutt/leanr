@@ -30,7 +30,7 @@ pub mod parse;
 pub mod tree;
 
 pub use parse::{
-    parse_header_imports, parse_module, render_error, ParseError, ParseResult, MAX_CATEGORY_DEPTH,
-    MIN_STACK_BYTES,
+    parse_header_imports, parse_module, parse_term, render_error, ParseError, ParseResult,
+    MAX_CATEGORY_DEPTH, MIN_STACK_BYTES,
 };
 pub use tree::SyntaxTree;

@@ -506,3 +506,45 @@ fn encode_threads_numbering_from_in_into_out_like_the_oracles_enc_pair() {
         "threaded and fresh-per-out numbering must disagree for this construction"
     );
 }
+
+/// The canonical scheme's `lmvar` node (M4b-1 Task 2): a universe-
+/// polymorphic constant elaborates to a term carrying an unassigned
+/// level metavariable, which `encode_level` previously had no case for.
+/// Builds `max(max(?u0, ?u1), ?u0)` — two distinct level mvars plus a
+/// second occurrence of the first — so first-occurrence numbering
+/// (`?u0` -> 0, `?u1` -> 1, reuse -> 0) and decode/re-encode round-trip
+/// sharing are both exercised, mirroring the expr-mvar numbering test
+/// above (`encode_threads_numbering_from_in_into_out_like_the_oracles_enc_pair`)
+/// for the level side.
+#[test]
+fn encode_decode_level_mvar_roundtrips() {
+    let mut scratch = Store::scratch();
+    // Build `max(max(?u0, ?u1), ?u0)` where ?u0/?u1 are two distinct
+    // mvars, plus a second occurrence of ?u0, so numbering + sharing
+    // are both exercised.
+    let n0 = support::synth_name(&mut scratch, None, "u", 0);
+    let n1 = support::synth_name(&mut scratch, None, "u", 1);
+    let u0 = scratch.level_mvar(None, Some(n0)).unwrap();
+    let u1 = scratch.level_mvar(None, Some(n1)).unwrap();
+    let m = scratch.level_max(None, u0, u1).unwrap();
+    let mm = scratch.level_max(None, m, u0).unwrap(); // ?u0 appears again
+    let level_json = {
+        let mut st = EncSt::default();
+        support::encode_level(&scratch, None, mm, &mut st)
+    };
+    // First occurrence order: ?u0 -> 0, ?u1 -> 1, reuse -> 0.
+    assert_eq!(
+        level_json,
+        json!({"k":"max",
+               "a":{"k":"max","a":{"k":"lmvar","i":0},"b":{"k":"lmvar","i":1}},
+               "b":{"k":"lmvar","i":0}})
+    );
+    // Decode back and re-encode: must be identical (round-trip).
+    let mut lm = HashMap::new();
+    let back = support::decode_level(&mut scratch, None, &level_json, &mut lm);
+    let mut st2 = EncSt::default();
+    assert_eq!(
+        support::encode_level(&scratch, None, back, &mut st2),
+        level_json
+    );
+}

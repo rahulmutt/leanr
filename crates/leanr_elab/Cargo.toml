@@ -1,0 +1,15 @@
+[package]
+name = "leanr_elab"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+leanr_kernel = { path = "../leanr_kernel" }
+leanr_meta = { path = "../leanr_meta" }
+leanr_syntax = { path = "../leanr_syntax" }
+
+[dev-dependencies]
+leanr_olean = { path = "../leanr_olean" }
+serde_json = "1"
