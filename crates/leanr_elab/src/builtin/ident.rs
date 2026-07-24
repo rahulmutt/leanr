@@ -40,6 +40,20 @@ pub fn elab_ident(
 ) -> Result<ExprId, ElabError> {
     let raw = tok.text();
     let name = intern_dotted(elab, raw)?;
+    // Task 3 (binders) addition: a local variable shadows a same-named
+    // global constant, and must be checked FIRST — oracle: `elabIdent`
+    // consults the local context before falling back to
+    // `resolveGlobalConst`. `MetaCtx::lctx_lookup_by_name` (leanr_meta,
+    // additive/TCB-neutral, mirroring the oracle's own
+    // `LocalContext.findFromUserName?`) is a no-op (`None`) whenever
+    // `lctx` is empty — every leaf query that never enters a binder falls
+    // straight through to `resolve_global` exactly as before this
+    // existed. Bypasses `resolve_global`/fresh-level-mvar minting
+    // entirely on a hit: an fvar carries no separate `levelParams` the
+    // way a global constant does.
+    if let Some(fvar) = elab.mctx.lctx_lookup_by_name(name) {
+        return Ok(fvar);
+    }
     // `raw` (the identifier's own source text) doubles as `resolve_global`'s
     // error-message `display` — see that function's own doc comment for why
     // `name` itself (frequently a SCRATCH-region id here, minted by

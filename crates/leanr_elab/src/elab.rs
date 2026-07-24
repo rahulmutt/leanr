@@ -67,6 +67,32 @@ impl<'e> TermElabM<'e> {
     /// standalone transcription of `leanr_meta::level::fresh_level_mvar`
     /// (which is `pub(crate)` there, so unreachable from here), not a
     /// call to it.
+    ///
+    /// `base = Some(self.view.store)` throughout (M4b-2 task 2 fix,
+    /// bound before `store_mut()` — the same disjoint-field-borrow
+    /// convention `ident.rs` uses): NOT the self-contained-scratch
+    /// `base = None` `mk_fresh_expr_mvar` uses below. A fresh level
+    /// mvar's `Sort ?u` is fed into `elab_term_ensuring_type`
+    /// (`binder::elab_type`, M4b-2), whose `is_def_eq` — on a Sort-vs-Sort
+    /// compare — round-trips the mvar's `LevelId` through
+    /// `level.rs::level_normalize` (`to_level` then `intern_level`),
+    /// ALWAYS with `base = Some(view.store)` (that module's own fixed
+    /// convention, never `None`). `intern_nat`'s `base`-first dedup
+    /// lookup means interning the SAME small index (e.g. `0`) once
+    /// under `base = None` and once under `base = Some(persistent)` can
+    /// resolve to two DIFFERENT `NatId`s — the persistent store already
+    /// has small `Nat`s interned, so the `base = Some` call finds
+    /// persistent's row while a `base = None` call would have kept the
+    /// original scratch row — which in turn mints a genuinely different
+    /// `NameId` for the "same" mvar name on the round trip, so the
+    /// later `assign_level` targets an id that was never `declare_level`-d
+    /// (confirmed empirically: this was `elab_arrow`'s exact RED-phase
+    /// failure, `assign_level: level metavariable .. was never
+    /// declared`, traced to this mismatch, not to `binder.rs` itself).
+    /// Minting under `base = Some(view.store)` from the start — matching
+    /// `level.rs::fresh_level_mvar`'s own convention exactly — makes the
+    /// mint and every later re-intern agree on the same persistent-backed
+    /// ids, closing the gap.
     pub fn mk_fresh_level_mvar(&mut self) -> Result<LevelId, ElabError> {
         let idx = self.level_mvar_gen;
         self.level_mvar_gen += 1;
@@ -76,25 +102,26 @@ impl<'e> TermElabM<'e> {
         // `MetaError::from` so `?` reuses that existing impl rather
         // than adding a second `From<KernelError>` to `error.rs`
         // (outside this task's file scope).
+        let base = self.view.store;
         let store = self.mctx.store_mut();
         let prefix_str = store
-            .intern_str(None, "_leanr_elab_lvl_fresh")
+            .intern_str(Some(base), "_leanr_elab_lvl_fresh")
             .map_err(leanr_meta::MetaError::from)?;
         let prefix = store
-            .name_str(None, None, prefix_str)
+            .name_str(Some(base), None, prefix_str)
             .map_err(leanr_meta::MetaError::from)?;
         let idx_id = store
-            .intern_nat(None, &Nat::from(idx))
+            .intern_nat(Some(base), &Nat::from(idx))
             .map_err(leanr_meta::MetaError::from)?;
         let name = store
-            .name_num(None, Some(prefix), idx_id)
+            .name_num(Some(base), Some(prefix), idx_id)
             .map_err(leanr_meta::MetaError::from)?;
         let id = LMVarId(name);
         self.mctx.mctx_mut().declare_level(id);
         let level_id = self
             .mctx
             .store_mut()
-            .level_mvar(None, Some(name))
+            .level_mvar(Some(base), Some(name))
             .map_err(leanr_meta::MetaError::from)?;
         Ok(level_id)
     }
@@ -110,13 +137,19 @@ impl<'e> TermElabM<'e> {
     /// `builtin::hole`'s own doc for why every hole is minted `Natural`
     /// rather than replicating `elabHole`'s `Natural`/`SyntheticOpaque`
     /// branch), and returns the `ExprId` of `Expr.mvar` referencing it.
-    /// `base = None` throughout, matching `mk_fresh_level_mvar`'s own
-    /// reasoning: every id minted here (prefix string, the mvar's own
-    /// synthetic name, the `Expr.mvar` row) is self-contained fresh
-    /// scratch data with nothing in the PERSISTENT store to dedup
-    /// against — `ty` itself (the caller-supplied type, possibly
-    /// persistent-region) is stored VERBATIM in `MVarDecl::ty`, never
-    /// re-interned, so it needs no `base` here either.
+    /// `base = None` throughout — unlike `mk_fresh_level_mvar` (M4b-2
+    /// task 2 fix, see its own doc comment for why THAT one now needs
+    /// `base = Some(view.store)`): every id minted here (prefix string,
+    /// the mvar's own synthetic name, the `Expr.mvar` row) is
+    /// self-contained fresh scratch data with nothing in the PERSISTENT
+    /// store to dedup against, and — the part that actually matters —
+    /// nothing in this crate re-interns an expr mvar's own synthetic
+    /// name through a `base = Some(persistent)` path the way
+    /// `level.rs::level_normalize` does for level mvars, so there is no
+    /// analogous round-trip mismatch to guard against here. `ty` itself
+    /// (the caller-supplied type, possibly persistent-region) is stored
+    /// VERBATIM in `MVarDecl::ty`, never re-interned, so it needs no
+    /// `base` here either.
     pub fn mk_fresh_expr_mvar(&mut self, ty: ExprId) -> Result<ExprId, ElabError> {
         let idx = self.expr_mvar_gen;
         self.expr_mvar_gen += 1;

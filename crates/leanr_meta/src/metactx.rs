@@ -8,9 +8,12 @@
 
 use std::collections::HashMap;
 
+use leanr_kernel::abstract_fvars;
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, LevelId, NameId, Store};
-use leanr_kernel::{EnvView, ExprData, FVarIdGen, LocalContext, RecGuard, MAX_REC_DEPTH};
+use leanr_kernel::{
+    BinderInfo, EnvView, ExprData, FVarIdGen, LocalContext, RecGuard, MAX_REC_DEPTH,
+};
 use leanr_olean::{
     DefaultInstanceEntry, EntryScope, InstanceEntry, MatcherEntry, ProjectionFnInfo,
     ReducibilityEntry, ReducibilityStatus,
@@ -38,6 +41,28 @@ pub struct MetaCtx<'e> {
     pub(crate) cfg: Config,
     pub(crate) mctx: MetavarContext,
     pub(crate) lctx: LocalContext,
+    /// Task 3 (M4b-2) addition, additive/TCB-neutral: a by-user-name
+    /// index parallel to `lctx`'s own decl list, one entry per
+    /// `push_local_decl` call (`None` name for an anonymous binder, kept
+    /// so the two stay 1:1 in length). Exists ONLY because
+    /// `LocalContext`'s `decls`/`index` fields are private even within
+    /// `leanr_kernel` (module-private to `local_ctx.rs`) — the kernel's
+    /// own public surface is `get(fvar_id)` (by id) and `save`/`restore`
+    /// (by count), no by-name scan, and adding one to `LocalContext`
+    /// itself would touch the byte-untouched kernel TCB. Every OTHER
+    /// internal `self.lctx.mk_local_decl`/`mk_let_decl`/`save`/`restore`
+    /// call site (`infer.rs`, `whnf.rs`, `assign.rs`, `defeq.rs`) already
+    /// brackets its own additions with an unconditional restore before
+    /// returning to its caller (the same `save -> push -> restore` stack
+    /// discipline this field's own `lctx_checkpoint`/`lctx_restore`
+    /// pairing uses), so `lctx.decls.len()` net-changes, across any span
+    /// bracketed by `lctx_checkpoint`/`lctx_restore`, ONLY via
+    /// `push_local_decl` — which is this field's sole writer too. The two
+    /// therefore stay in lockstep, and `lctx_restore`'s existing
+    /// `checkpoint: usize` (already `lctx.save()`'s own return value)
+    /// doubles as this field's truncation point with no second
+    /// checkpoint API. See `lctx_lookup_by_name` (the reader) below.
+    pub(crate) local_names: Vec<(Option<NameId>, ExprId)>,
     pub(crate) fvar_gen: FVarIdGen,
     pub(crate) guard: RecGuard,
     guard_depth: u32,
@@ -314,6 +339,7 @@ impl<'e> MetaCtx<'e> {
             cfg,
             mctx: MetavarContext::new(),
             lctx: LocalContext::default(),
+            local_names: Vec::new(),
             fvar_gen: FVarIdGen::default(),
             guard: RecGuard::new(),
             guard_depth: 0,
@@ -388,6 +414,136 @@ impl<'e> MetaCtx<'e> {
     /// See `store`'s doc comment.
     pub fn store_mut(&mut self) -> &mut Store {
         self.scratch
+    }
+
+    /// Record the current `lctx` depth. Pair with `lctx_restore` to bracket
+    /// a telescope (the `flet<local_ctx> save_lctx` idiom, assign.rs:563).
+    /// Additive + behavior-neutral.
+    pub fn lctx_checkpoint(&mut self) -> usize {
+        debug_assert_eq!(
+            self.local_names.len(),
+            self.lctx.save(),
+            "local_names/lctx lockstep invariant violated"
+        );
+        self.lctx.save()
+    }
+
+    /// Restore `lctx` to a `lctx_checkpoint` depth, dropping every decl
+    /// added since (fvar ids are globally unique via `fvar_gen`, so the
+    /// truncation is exact). Also truncates `local_names` to the same
+    /// point (Task 3 addition — see that field's own doc comment for why
+    /// the single `checkpoint` value is valid for both).
+    pub fn lctx_restore(&mut self, checkpoint: usize) {
+        debug_assert_eq!(
+            self.local_names.len(),
+            self.lctx.save(),
+            "local_names/lctx lockstep invariant violated"
+        );
+        self.lctx.restore(checkpoint);
+        self.local_names.truncate(checkpoint);
+    }
+
+    /// Mint a cdecl fvar `(name : ty)` with binder-info `bi` into the ambient
+    /// `lctx` and return its `Expr::fvar`. The additive elab-layer seam for
+    /// `mk_local_decl`, already used internally at assign.rs:633. The caller
+    /// brackets with `lctx_checkpoint`/`lctx_restore`. The invariant (checked
+    /// via debug_assert) is safe because `leanr_meta` internal code never
+    /// re-enters the elab layer, so no internal `mk_local_decl` decl is ever
+    /// transiently present in `lctx` at a `checkpoint`/`restore` boundary.
+    pub fn push_local_decl(
+        &mut self,
+        name: Option<NameId>,
+        ty: ExprId,
+        bi: BinderInfo,
+    ) -> Result<ExprId, MetaError> {
+        debug_assert_eq!(
+            self.local_names.len(),
+            self.lctx.save(),
+            "local_names/lctx lockstep invariant violated"
+        );
+        let fvar = self.lctx.mk_local_decl(
+            self.scratch,
+            Some(self.view.store),
+            &mut self.fvar_gen,
+            name,
+            ty,
+            bi,
+        )?;
+        // Task 3 addition: record `(name, fvar)` in `local_names` too —
+        // see that field's own doc comment. One entry per call, matching
+        // `lctx.decls`'s own growth exactly (including `None` names).
+        self.local_names.push((name, fvar));
+        Ok(fvar)
+    }
+
+    /// Look up `name` in the ambient local context, most-recently-pushed
+    /// first (a later same-named binder shadows an earlier one — ordinary
+    /// lexical shadowing; oracle: `LocalContext.findFromUserName?` scans
+    /// from the innermost decl outward). Returns the SAME `ExprId`
+    /// `push_local_decl` returned for that binder (an `Expr::fvar`
+    /// referencing `lctx`'s own decl — `mk_forall`/`abstract_fvars`
+    /// recognize it identically, since `local_names` never stores
+    /// anything but a verbatim copy of a `push_local_decl` return value).
+    /// `None` on a miss (including an empty `lctx`) — the caller falls
+    /// back to global-constant resolution exactly as before this field
+    /// existed, so this is a pure no-op for any query that never enters a
+    /// binder (`local_names` stays empty, `None` unconditionally).
+    pub fn lctx_lookup_by_name(&self, name: NameId) -> Option<ExprId> {
+        self.local_names
+            .iter()
+            .rev()
+            .find(|(n, _)| *n == Some(name))
+            .map(|(_, fvar)| *fvar)
+    }
+
+    /// oracle: `mkForallFVars` (the cdecl case). Abstract `body` over the
+    /// telescope `fvars` (each an fvar declared in `self.lctx`, no let
+    /// value in this plan) and wrap in nested `forallE`, innermost fvar
+    /// last. Transcribed from `infer.rs::rebuild_forall`'s `None`-value
+    /// branch (infer.rs:802), the crate's own oracle-verified abstraction
+    /// loop, since the kernel's `mk_pi` is not re-exported from
+    /// `leanr_kernel`.
+    pub fn mk_forall(&mut self, fvars: &[ExprId], body: ExprId) -> Result<ExprId, MetaError> {
+        let mut r = body;
+        let mut i = fvars.len();
+        while i > 0 {
+            i -= 1;
+            r = abstract_fvars(
+                self.scratch,
+                Some(self.view.store),
+                r,
+                std::slice::from_ref(&fvars[i]),
+                &mut self.guard,
+            )?;
+            let (binder_name, ty, binder_info) = match self.node(fvars[i]) {
+                Node::FVar { id: Some(id) } => {
+                    let decl = self.lctx.get(id).ok_or_else(|| {
+                        MetaError::Infer("mk_forall: telescope fvar not declared".into())
+                    })?;
+                    (decl.binder_name, decl.ty, decl.binder_info)
+                }
+                _ => {
+                    return Err(MetaError::Infer(
+                        "mk_forall: telescope entry is not an fvar".into(),
+                    ))
+                }
+            };
+            let ty2 = abstract_fvars(
+                self.scratch,
+                Some(self.view.store),
+                ty,
+                &fvars[..i],
+                &mut self.guard,
+            )?;
+            r = self.scratch.expr_forall(
+                Some(self.view.store),
+                binder_name,
+                ty2,
+                r,
+                binder_info,
+            )?;
+        }
+        Ok(r)
     }
 
     pub fn status_of(&self, n: NameId) -> ReducibilityStatus {
@@ -536,8 +692,43 @@ pub(crate) struct MetaSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::with_ctx;
+    use crate::test_support::{const_named, with_ctx, with_prelude0_ctx};
     use crate::MetaError;
+
+    /// TDD RED for the checkpoint/push/restore + `mk_forall` accessors
+    /// (M4b-2 plan1 task 1): declares a local `(x : Nat)`, checks the
+    /// fvar is visible while the checkpoint is open, abstracts it back
+    /// into `∀ (x : Nat), x`, then restores and checks `lctx` is back to
+    /// the checkpoint depth. Uses `with_prelude0_ctx`/`const_named` (this
+    /// crate's real test-context/constant-lookup helpers, `test_support.rs`)
+    /// rather than the task brief's sketched `with_test_ctx`/`const_nat` —
+    /// `with_ctx`'s empty environment has no `Nat` constant to look up.
+    #[test]
+    fn push_local_decl_scopes_and_mk_forall_abstracts() {
+        with_prelude0_ctx(|ctx| {
+            let nat = const_named(ctx, "Nat");
+            let checkpoint = ctx.lctx_checkpoint();
+            let fvar = ctx
+                .push_local_decl(None, nat, BinderInfo::Default)
+                .expect("push_local_decl");
+            // fvar is a declared local while the checkpoint is open
+            assert!(matches!(ctx.node(fvar), Node::FVar { .. }));
+            // body = the fvar itself → ∀ (x : Nat), x  (a `pi` whose body is `bvar 0`)
+            let built = ctx
+                .mk_forall(std::slice::from_ref(&fvar), fvar)
+                .expect("mk_forall");
+            ctx.lctx_restore(checkpoint);
+            // lctx restored: the decl count is back to the checkpoint
+            assert_eq!(ctx.lctx.save(), checkpoint);
+            // built is a Forall node whose body is bvar 0
+            match ctx.node(built) {
+                Node::Forall { body, .. } => {
+                    assert!(matches!(ctx.node(body), Node::BVar { idx: 0 }));
+                }
+                other => panic!("expected Forall, got {other:?}"),
+            }
+        });
+    }
 
     #[test]
     fn step_budget_exhausts_as_its_own_error() {
