@@ -496,14 +496,20 @@ impl<'e> MetaCtx<'e> {
             .map(|(_, fvar)| *fvar)
     }
 
-    /// oracle: `mkForallFVars` (the cdecl case). Abstract `body` over the
-    /// telescope `fvars` (each an fvar declared in `self.lctx`, no let
-    /// value in this plan) and wrap in nested `forallE`, innermost fvar
-    /// last. Transcribed from `infer.rs::rebuild_forall`'s `None`-value
-    /// branch (infer.rs:802), the crate's own oracle-verified abstraction
-    /// loop, since the kernel's `mk_pi` is not re-exported from
-    /// `leanr_kernel`.
-    pub fn mk_forall(&mut self, fvars: &[ExprId], body: ExprId) -> Result<ExprId, MetaError> {
+    /// Shared telescope-abstraction loop backing `mk_forall`/`mk_lambda`
+    /// (oracles `mkForallFVars`/`mkLambdaFVars`, the cdecl case). Abstracts
+    /// `body` over the telescope `fvars` (each an fvar declared in
+    /// `self.lctx`, no let value in this plan) and wraps in nested
+    /// `forallE`/`lam` (per `is_lambda`), innermost fvar last. Transcribed
+    /// from `infer.rs::rebuild_forall`'s `None`-value branch (infer.rs:802),
+    /// the crate's own oracle-verified abstraction loop, since the kernel's
+    /// `mk_pi`/`mk_lambda` are not re-exported from `leanr_kernel`.
+    fn mk_binding(
+        &mut self,
+        is_lambda: bool,
+        fvars: &[ExprId],
+        body: ExprId,
+    ) -> Result<ExprId, MetaError> {
         let mut r = body;
         let mut i = fvars.len();
         while i > 0 {
@@ -518,13 +524,13 @@ impl<'e> MetaCtx<'e> {
             let (binder_name, ty, binder_info) = match self.node(fvars[i]) {
                 Node::FVar { id: Some(id) } => {
                     let decl = self.lctx.get(id).ok_or_else(|| {
-                        MetaError::Infer("mk_forall: telescope fvar not declared".into())
+                        MetaError::Infer("mk_binding: telescope fvar not declared".into())
                     })?;
                     (decl.binder_name, decl.ty, decl.binder_info)
                 }
                 _ => {
                     return Err(MetaError::Infer(
-                        "mk_forall: telescope entry is not an fvar".into(),
+                        "mk_binding: telescope entry is not an fvar".into(),
                     ))
                 }
             };
@@ -535,15 +541,34 @@ impl<'e> MetaCtx<'e> {
                 &fvars[..i],
                 &mut self.guard,
             )?;
-            r = self.scratch.expr_forall(
-                Some(self.view.store),
-                binder_name,
-                ty2,
-                r,
-                binder_info,
-            )?;
+            r = if is_lambda {
+                self.scratch
+                    .expr_lam(Some(self.view.store), binder_name, ty2, r, binder_info)?
+            } else {
+                self.scratch
+                    .expr_forall(Some(self.view.store), binder_name, ty2, r, binder_info)?
+            };
         }
         Ok(r)
+    }
+
+    /// oracle: `mkForallFVars` (the cdecl case). Abstract `body` over the
+    /// telescope `fvars` (each an fvar declared in `self.lctx`, no let
+    /// value in this plan) and wrap in nested `forallE`, innermost fvar
+    /// last. See `mk_binding` for the shared implementation.
+    pub fn mk_forall(&mut self, fvars: &[ExprId], body: ExprId) -> Result<ExprId, MetaError> {
+        self.mk_binding(false, fvars, body)
+    }
+
+    /// oracle: `mkLambdaFVars` (the cdecl case). Abstract `body` over the
+    /// telescope `fvars` (each an fvar declared in `self.lctx`, no let
+    /// value in this plan) and wrap in nested `lam`, innermost fvar last.
+    /// The `mk_forall` twin — see `mk_binding` for the shared
+    /// implementation. Additive + behavior-neutral: exposes capability the
+    /// crate already exercises (`expr_lam` + `abstract_fvars`), adds no
+    /// state, changes no existing path.
+    pub fn mk_lambda(&mut self, fvars: &[ExprId], body: ExprId) -> Result<ExprId, MetaError> {
+        self.mk_binding(true, fvars, body)
     }
 
     pub fn status_of(&self, n: NameId) -> ReducibilityStatus {
@@ -726,6 +751,33 @@ mod tests {
                     assert!(matches!(ctx.node(body), Node::BVar { idx: 0 }));
                 }
                 other => panic!("expected Forall, got {other:?}"),
+            }
+        });
+    }
+
+    /// TDD RED/GREEN for M4b-2 plan2 task 1: `mk_lambda`, the
+    /// `mkLambdaFVars` twin of `mk_forall`. Mirrors
+    /// `push_local_decl_scopes_and_mk_forall_abstracts` above, using the
+    /// same real test helpers (`with_prelude0_ctx`/`const_named`) rather
+    /// than the task brief's sketched `with_test_ctx`/`const_nat`.
+    #[test]
+    fn mk_lambda_abstracts_body_over_fvar() {
+        with_prelude0_ctx(|ctx| {
+            let nat = const_named(ctx, "Nat");
+            let checkpoint = ctx.lctx_checkpoint();
+            let fvar = ctx
+                .push_local_decl(None, nat, BinderInfo::Default)
+                .expect("push_local_decl");
+            // body = the fvar itself → fun (x : Nat) => x  (a `lam` whose body is `bvar 0`)
+            let built = ctx
+                .mk_lambda(std::slice::from_ref(&fvar), fvar)
+                .expect("mk_lambda");
+            ctx.lctx_restore(checkpoint);
+            match ctx.node(built) {
+                Node::Lam { body, .. } => {
+                    assert!(matches!(ctx.node(body), Node::BVar { idx: 0 }));
+                }
+                other => panic!("expected Lam, got {other:?}"),
             }
         });
     }
