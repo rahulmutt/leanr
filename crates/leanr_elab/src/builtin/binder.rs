@@ -253,3 +253,26 @@ pub fn elab_forall(
     }
     elab_binders_and_forall(elab, &groups, &body_elem, kinds)
 }
+
+/// oracle: `elabDepArrow` (Binders.lean:310). depArrow children
+/// (term.rs:1103): `[bracketedBinder, "->", body]` — always exactly one
+/// bracketed binder with a mandatory type (`require_type = true`).
+/// Dependent: the body may reference the binder, so it goes through the
+/// full `push_local_decl` + `mk_forall` telescope, unlike `arrow`.
+pub fn elab_dep_arrow(
+    elab: &mut TermElabM,
+    node: &SyntaxNode,
+    kinds: &KindInterner,
+) -> Result<ExprId, ElabError> {
+    let ch = non_trivia_children(node);
+    let binder_node = ch
+        .first()
+        .and_then(|el| el.as_node())
+        .ok_or_else(|| ElabError::UnsupportedSyntax("depArrow: binder".into()))?;
+    let body_elem = ch
+        .get(2)
+        .cloned()
+        .ok_or_else(|| ElabError::UnsupportedSyntax("depArrow: body".into()))?;
+    let group = extract_binder_group(elab, binder_node, kinds)?;
+    elab_binders_and_forall(elab, &[group], &body_elem, kinds)
+}

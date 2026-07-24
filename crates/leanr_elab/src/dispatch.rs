@@ -77,6 +77,7 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
         "Lean.Parser.Term.hole" => Some("hole"),
         "Lean.Parser.Term.arrow" => Some("arrow"),
         "Lean.Parser.Term.forall" => Some("forall"),
+        "Lean.Parser.Term.depArrow" => Some("depArrow"),
         _ => None,
     }
 }
@@ -146,6 +147,9 @@ pub fn dispatch(
         }
         ("Lean.Parser.Term.forall", NodeOrToken::Node(node)) => {
             crate::builtin::binder::elab_forall(elab, node, kinds)
+        }
+        ("Lean.Parser.Term.depArrow", NodeOrToken::Node(node)) => {
+            crate::builtin::binder::elab_dep_arrow(elab, node, kinds)
         }
         (other, _) => Err(ElabError::UnsupportedSyntax(other.to_string())),
     }

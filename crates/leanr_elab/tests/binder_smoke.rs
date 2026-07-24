@@ -113,3 +113,21 @@ fn forall_two_groups_nests() {
     assert_eq!(j["k"], "pi");
     assert_eq!(j["b"]["k"], "pi");
 }
+
+#[test]
+fn dep_arrow_nondependent() {
+    // (x : Nat) -> Nat
+    let j = elab_json("(x : Nat) -> Nat");
+    assert_eq!(j["k"], "pi");
+    assert_eq!(j["bi"], "d");
+    assert_eq!(j["t"]["n"], "Nat");
+    assert_eq!(j["b"], serde_json::json!({"k": "const", "n": "Nat", "us": []}));
+}
+
+#[test]
+fn dep_arrow_dependent_body_is_bvar() {
+    // (a : Type) -> a
+    let j = elab_json("(a : Type) -> a");
+    assert_eq!(j["k"], "pi");
+    assert_eq!(j["b"], serde_json::json!({"k": "bvar", "i": 0}));
+}
