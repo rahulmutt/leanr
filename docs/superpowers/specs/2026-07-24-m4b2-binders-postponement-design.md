@@ -91,7 +91,7 @@ set is therefore **`fun` / `forall`(+`arrow`+`depArrow`) / `let` /
 
 ### The canonical entry-point pipeline
 
-Lands in Plan 1 and never changes shape again in M4b-2:
+The final pipeline is:
 
 ```
 elab_term(elem, expected)         // dispatch → leaf / binder elaborator
@@ -99,10 +99,22 @@ elab_term(elem, expected)         // dispatch → leaf / binder elaborator
   → instantiate_mvars(e)          // final substitution before the oracle compare
 ```
 
-M4b-1's entry point was `elab_term → instantiate_mvars`. The
-`synthesize_synthetic_mvars` step is inserted from Plan 1 on, so **every
-binder form is verified on the final pipeline** — never a throwaway
-pre-ladder one. `oracle_elab.rs` is updated to call the new pipeline.
+**The `synthesize_synthetic_mvars` step lands in Plan 2, not Plan 1** —
+a correction discovered during planning against the actual dumper. The
+oracle dumper (`dump_elab.lean`) elaborates every term with
+`expectedType := none` and does **not** run the top-level unassigned-mvar
+error report: it emits an unresolved top-level hole as a bare `mvar`
+(committed record `hole/bare` → `{"k":"mvar","i":0}`), not an error. A
+Plan-1 fixpoint that errored on unassigned holes would therefore diverge
+from the oracle. Plan 1's terms (the three type-former forms) fully
+elaborate with no synthetic mvars — even `∀ (x : _), x` emits a `pi`
+whose domain is a bare `mvar`, no error. So Plan 1 keeps M4b-1's entry
+point (`elab_term → instantiate_mvars`) unchanged; the pipeline step +
+fixpoint arrive in Plan 2 with postponement and the matching
+`withSynthesize` change to the dumper. Inserting a step that is a no-op
+for Plan 1 terms keeps every Plan 1 corpus entry green, so deferring it
+costs no re-verification — and it respects the project's "no speculative
+surface" discipline (the same reason M4b-1 deferred these fields).
 
 ### Plan decomposition
 
