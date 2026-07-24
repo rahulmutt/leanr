@@ -420,6 +420,11 @@ impl<'e> MetaCtx<'e> {
     /// a telescope (the `flet<local_ctx> save_lctx` idiom, assign.rs:563).
     /// Additive + behavior-neutral.
     pub fn lctx_checkpoint(&mut self) -> usize {
+        debug_assert_eq!(
+            self.local_names.len(),
+            self.lctx.save(),
+            "local_names/lctx lockstep invariant violated"
+        );
         self.lctx.save()
     }
 
@@ -429,6 +434,11 @@ impl<'e> MetaCtx<'e> {
     /// point (Task 3 addition — see that field's own doc comment for why
     /// the single `checkpoint` value is valid for both).
     pub fn lctx_restore(&mut self, checkpoint: usize) {
+        debug_assert_eq!(
+            self.local_names.len(),
+            self.lctx.save(),
+            "local_names/lctx lockstep invariant violated"
+        );
         self.lctx.restore(checkpoint);
         self.local_names.truncate(checkpoint);
     }
@@ -436,13 +446,21 @@ impl<'e> MetaCtx<'e> {
     /// Mint a cdecl fvar `(name : ty)` with binder-info `bi` into the ambient
     /// `lctx` and return its `Expr::fvar`. The additive elab-layer seam for
     /// `mk_local_decl`, already used internally at assign.rs:633. The caller
-    /// brackets with `lctx_checkpoint`/`lctx_restore`.
+    /// brackets with `lctx_checkpoint`/`lctx_restore`. The invariant (checked
+    /// via debug_assert) is safe because `leanr_meta` internal code never
+    /// re-enters the elab layer, so no internal `mk_local_decl` decl is ever
+    /// transiently present in `lctx` at a `checkpoint`/`restore` boundary.
     pub fn push_local_decl(
         &mut self,
         name: Option<NameId>,
         ty: ExprId,
         bi: BinderInfo,
     ) -> Result<ExprId, MetaError> {
+        debug_assert_eq!(
+            self.local_names.len(),
+            self.lctx.save(),
+            "local_names/lctx lockstep invariant violated"
+        );
         let fvar = self.lctx.mk_local_decl(
             self.scratch,
             Some(self.view.store),
