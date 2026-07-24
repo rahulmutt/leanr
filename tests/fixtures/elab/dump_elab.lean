@@ -253,6 +253,31 @@ def funQueries : List (String × String) := [
   ("fun/ascribedExplicit", "(fun (x : Nat) => x : Nat -> Nat)")
 ]
 
+def letQueries : List (String × String) := [
+  ("let/typed",       "let x : Nat := Nat.zero; x"),
+  ("let/elided",      "let x := Nat.zero; x"),
+  ("let/unused",      "let x : Nat := Nat.zero; Nat"),
+  ("let/anon",        "let _ : Nat := Nat.zero; Nat"),
+  ("let/nested",      "let x : Nat := Nat.zero; let y : Nat := x; y"),
+  ("let/typeValue",   "let a : Type := Nat; a"),
+  ("let/funValue",    "let f : Nat -> Nat := fun y => y; f"),
+  ("let/binders",     "let f (y : Nat) : Nat := y; f"),
+  ("let/twoBinders",  "let f (y : Nat) (z : Nat) : Nat := y; f"),
+  ("let/binderIdent", "let f y : Nat := y; f"),
+  ("let/inFun",       "fun (z : Nat) => let x : Nat := z; x"),
+  ("let/ascribed",    "(let x : Nat := Nat.zero; x : Nat)")
+]
+
+def haveQueries : List (String × String) := [
+  ("have/typed",    "have h : Nat := Nat.zero; h"),
+  ("have/elided",   "have h := Nat.zero; h"),
+  ("have/unused",   "have h : Nat := Nat.zero; Nat"),
+  ("have/hygiene",  "have : Nat := Nat.zero; this"),
+  ("have/nested",   "have h : Nat := Nat.zero; have g : Nat := h; g"),
+  ("have/funValue", "have f : Nat -> Nat := fun y => y; f"),
+  ("have/ascribed", "(have h : Nat := Nat.zero; h : Nat)")
+]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -266,7 +291,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>
