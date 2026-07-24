@@ -491,10 +491,12 @@ fn extract_let_id_name(
 /// Push the `letIdBinders` telescope (`let f (y : Nat) : Nat := …`) into
 /// the local context, returning its fvars in declaration order. Each
 /// item is either a bracketed binder group (plan 1's
-/// `extract_binder_group`, pushed via the shared `push_binder_group`) or
-/// a bare ident (`let f y := …`), whose domain is a fresh type mvar
-/// unified at the value's use site — exactly plan 2's elided-`fun`-binder
-/// treatment.
+/// `extract_binder_group`, pushed via the shared `push_binder_group`), a
+/// bare ident (`let f y := …`), or a `_` hole (`let f _ : Nat := …`)
+/// whose domain is a fresh type mvar unified at the value's use site —
+/// exactly plan 2's elided-`fun`-binder treatment, with the hole arm the
+/// anonymous twin of the bare-ident arm (`letIdBinder := binderIdent <|>
+/// bracketedBinder`, `binderIdent = Ident <|> hole`).
 ///
 /// Named seams (→ `UnsupportedSyntax`): implicit / strict-implicit /
 /// instance bracketed binders (M4b-3, which brings implicit and
@@ -509,6 +511,19 @@ fn push_let_binders(
     let mut fvars: Vec<ExprId> = Vec::new();
     for item in items {
         match item {
+            // `_` hole binder (`let f _ : Nat := …`) → anonymous, a
+            // fresh type mvar domain. Must come before the general
+            // `Node` arm below, which would otherwise hand it to
+            // `extract_binder_group` and misreport it as an unsupported
+            // bracketed-binder kind.
+            NodeOrToken::Node(n) if kinds.name(n.kind()) == "Lean.Parser.Term.hole" => {
+                let dom = fresh_type_mvar(elab)?;
+                let fvar = elab
+                    .mctx
+                    .push_local_decl(None, dom, BinderInfo::Default)
+                    .map_err(ElabError::from)?;
+                fvars.push(fvar);
+            }
             NodeOrToken::Node(n) => {
                 let g = extract_binder_group(elab, n, kinds)?;
                 if !matches!(g.bi, BinderInfo::Default) {
@@ -576,8 +591,10 @@ pub fn elab_let_like(
         .get(1)
         .and_then(|el| el.as_node())
         .ok_or_else(|| ElabError::UnsupportedSyntax("let: letConfig slot".into()))?;
-    if let Some(items) = non_trivia_children(cfg).first().and_then(|el| el.as_node()) {
-        if !non_trivia_children(items).is_empty() {
+    // The `many(never())` wrapper node, not the items themselves — its
+    // own children (checked below) are the actual `letConfig` item list.
+    if let Some(cfg_items_wrapper) = non_trivia_children(cfg).first().and_then(|el| el.as_node()) {
+        if !non_trivia_children(cfg_items_wrapper).is_empty() {
             return Err(ElabError::UnsupportedSyntax("let: letConfig items".into()));
         }
     }
@@ -616,7 +633,12 @@ pub fn elab_let_like(
         .get(4)
         .cloned()
         .ok_or_else(|| ElabError::UnsupportedSyntax("let: value".into()))?;
-    // [4] the body, after the `;`.
+    // [4] the body, after the `;`. Safe only because leanr's parser
+    // ports the explicit-`";"` form of `optSemicolon`, not the
+    // `checkLinebreakBefore` alternative (term.rs:786-790) — with `;`
+    // absent the node would have 4 children, so `ch.get(4)` degrades to
+    // `None` and this returns `UnsupportedSyntax("let: body")` rather
+    // than picking a wrong child.
     let body_elem = ch
         .get(4)
         .cloned()

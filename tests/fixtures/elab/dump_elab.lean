@@ -265,7 +265,9 @@ def letQueries : List (String × String) := [
   ("let/twoBinders",  "let f (y : Nat) (z : Nat) : Nat := y; f"),
   ("let/binderIdent", "let f y : Nat := y; f"),
   ("let/inFun",       "fun (z : Nat) => let x : Nat := z; x"),
-  ("let/ascribed",    "(let x : Nat := Nat.zero; x : Nat)")
+  ("let/ascribed",    "(let x : Nat := Nat.zero; x : Nat)"),
+  ("let/depBinders",  "let f (a : Type) (z : a) : a := z; f"),
+  ("let/holeBinder",  "let f _ : Nat := Nat.zero; f")
 ]
 
 def haveQueries : List (String × String) := [

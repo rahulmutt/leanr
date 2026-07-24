@@ -560,6 +560,21 @@ impl<'e> MetaCtx<'e> {
                     let decl = self.lctx.get(id).ok_or_else(|| {
                         MetaError::Infer("mk_binding: telescope fvar not declared".into())
                     })?;
+                    // The kernel's own rebuild twin (`subst.rs::mk_binding`,
+                    // fn at :1020) has a `Some(value)` branch that emits
+                    // `expr_let` for an ldecl entry (subst.rs:1038-1040).
+                    // This accessor has no such branch — deliberately: it
+                    // is `mkForallFVars`/`mkLambdaFVars`'s cdecl-only case
+                    // (see this fn's own doc), and a `letI`/`letrec`/mixed
+                    // telescope is a later slice's problem, not this one's.
+                    // Refuse rather than silently building a `lam`/`forallE`
+                    // that drops the ldecl's value on the floor — a wrong
+                    // `ExprId`, not a named seam.
+                    if decl.value.is_some() {
+                        return Err(MetaError::Infer(
+                            "mk_binding: let-decl fvar in a cdecl telescope".into(),
+                        ));
+                    }
                     (decl.binder_name, decl.ty, decl.binder_info)
                 }
                 _ => {
@@ -611,7 +626,7 @@ impl<'e> MetaCtx<'e> {
     /// (`false` for `let`, `true` for `have`; design spec § Amendment 2).
     ///
     /// Deliberately NOT a `mk_binding` case: the kernel's own rebuild
-    /// path (`subst.rs`'s `mk_binding`, :1017) hardcodes `non_dep =
+    /// path (`subst.rs`'s `mk_binding`, :1020) hardcodes `non_dep =
     /// false` for a rebuilt `LetE`, so it cannot express `have`. Reads
     /// `ty`/`value` off the lctx decl exactly as `mk_binding` reads
     /// `ty`/`binder_info`. Additive + behavior-neutral: exposes
@@ -918,6 +933,26 @@ mod tests {
             let err = ctx.mk_let_expr(fvar, fvar, false);
             ctx.lctx_restore(checkpoint);
             assert!(err.is_err(), "expected Err for a cdecl fvar, got {err:?}");
+        });
+    }
+
+    /// `mk_forall`/`mk_lambda` (`mk_binding`'s two callers) on an ldecl
+    /// (let-bound) fvar is an error, never a silently wrong `lam`/`forallE`
+    /// that drops the ldecl's value. Pins the guard added for the
+    /// whole-branch-review finding: `mk_binding` is the cdecl-only case
+    /// (see its own doc), and unlike the kernel's `subst.rs::mk_binding`
+    /// twin it has no `Some(value)` branch, so it must refuse rather than
+    /// build a wrong `ExprId`. Mirrors `mk_let_expr_rejects_a_cdecl_fvar`
+    /// above, with the roles of ldecl/cdecl swapped.
+    #[test]
+    fn mk_binding_rejects_an_ldecl_fvar() {
+        with_prelude0_ctx(|ctx| {
+            let nat = const_named(ctx, "Nat");
+            let checkpoint = ctx.lctx_checkpoint();
+            let fvar = ctx.push_let_decl(None, nat, nat).expect("push_let_decl");
+            let err = ctx.mk_forall(std::slice::from_ref(&fvar), fvar);
+            ctx.lctx_restore(checkpoint);
+            assert!(err.is_err(), "expected Err for an ldecl fvar, got {err:?}");
         });
     }
 

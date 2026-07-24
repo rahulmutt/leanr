@@ -105,7 +105,7 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 ///
 /// Deferred (each hits `UnsupportedSyntax` until its slice lands):
 /// ```text
-///   letI / haveI / let_fun / let_delayed / letrec  later slice (own oracle tier each)
+///   letI / haveI / let_fun / let_delayed / let_tmp / letrec  later slice (own oracle tier each)
 ///   application, @, named/optional args ........ M4b-3
 ///   num / char literals (OfNat / Char.ofNat) ... M4b-3
 ///   coercions (mkCoe) .......................... M4b-3
