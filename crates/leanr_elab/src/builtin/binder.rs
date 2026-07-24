@@ -278,3 +278,165 @@ pub fn elab_dep_arrow(
     let group = extract_binder_group(elab, binder_node, kinds)?;
     elab_binders_and_forall(elab, &[group], &body_elem, kinds)
 }
+
+/// A fresh type metavariable `?α : Sort ?u` — the elided-binder domain
+/// (oracle: `mkFreshTypeMVar`). Mirrors `elab_type`'s `Sort ?u`
+/// construction (fresh level mvar, `expr_sort(None, u)`), then mints a
+/// fresh expr mvar of that sort. The mvar is never assigned unless a
+/// later `is_def_eq` unifies it (e.g. an enclosing ascription), in which
+/// case `instantiate_mvars` fills it in; otherwise it surfaces as a bare
+/// `mvar`, exactly like an M4b-1 `_` hole.
+fn fresh_type_mvar(elab: &mut TermElabM) -> Result<ExprId, ElabError> {
+    let u = elab.mk_fresh_level_mvar()?;
+    let sort = elab
+        .mctx
+        .store_mut()
+        .expr_sort(None, u)
+        .map_err(leanr_meta::MetaError::from)?;
+    elab.mk_fresh_expr_mvar(sort)
+}
+
+/// Intern a binder name from token text, `base = Some(view.store)` — the
+/// same convention `extract_binder_group` uses, so a body occurrence of
+/// the name resolves to this binder via `lctx_lookup_by_name` (a plain
+/// `NameId` equality check). Binder names are erased by the differential
+/// encoder, so this never affects the gate, but the code must resolve.
+fn intern_binder_name(elab: &mut TermElabM, text: &str) -> Result<NameId, ElabError> {
+    let base = elab.view.store;
+    let store = elab.mctx.store_mut();
+    let s = store
+        .intern_str(Some(base), text)
+        .map_err(leanr_meta::MetaError::from)?;
+    let n = store
+        .name_str(Some(base), None, s)
+        .map_err(leanr_meta::MetaError::from)?;
+    Ok(n)
+}
+
+/// Extract `(binder_name, optional-type-syntax)` from one `funBinder`.
+/// M4b-2 handles a bare ident token (elided type → `None`) and a
+/// single-name parenthesised binder `(x : T)`, which the grammar parses
+/// as a `Term.typeAscription` node (probe-confirmed), NOT an
+/// `explicitBinder`. Named seams (→ `UnsupportedSyntax`): implicit /
+/// strict / instance binder nodes, a paren binder whose leading child is
+/// not a lone ident (`(x y : T)` / `(f a : T)`), and a paren binder with
+/// no type slot.
+fn extract_fun_binder(
+    elab: &mut TermElabM,
+    item: &SynElem,
+    kinds: &KindInterner,
+) -> Result<(Option<NameId>, Option<SynElem>), ElabError> {
+    match item {
+        // Bare ident binder: `fun x => …` — elided type.
+        NodeOrToken::Token(tok) if kinds.name(tok.kind()) == "<ident>" => {
+            let name = intern_binder_name(elab, tok.text())?;
+            Ok((Some(name), None))
+        }
+        // Parenthesised binder `(x : T)` — a typeAscription node with
+        // children [hygienicLParen, name, ":", null[T], ")"].
+        NodeOrToken::Node(n) if kinds.name(n.kind()) == "Lean.Parser.Term.typeAscription" => {
+            let tch = non_trivia_children(n);
+            let name_tok = tch
+                .get(1)
+                .and_then(|el| el.as_token())
+                .filter(|t| kinds.name(t.kind()) == "<ident>")
+                .ok_or_else(|| {
+                    ElabError::UnsupportedSyntax(
+                        "fun: paren binder is not a single ident (M4b-3)".into(),
+                    )
+                })?;
+            let name = intern_binder_name(elab, name_tok.text())?;
+            let ty_null = tch
+                .get(3)
+                .and_then(|el| el.as_node())
+                .ok_or_else(|| ElabError::UnsupportedSyntax("fun: binder type slot".into()))?;
+            let ty_elem = non_trivia_children(ty_null)
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    ElabError::UnsupportedSyntax("fun: paren binder without a type (M4b-3)".into())
+                })?;
+            Ok((Some(name), Some(ty_elem)))
+        }
+        _ => Err(ElabError::UnsupportedSyntax(format!(
+            "fun: unsupported binder kind {}",
+            kinds.name(item.kind())
+        ))),
+    }
+}
+
+/// oracle: `elabFun` (Binders.lean:678) → `elabFunBinders`, `basicFun`
+/// arm only. M4b-2: no scheduler, and the expected type is NOT consumed
+/// here (see the plan's § Task 2 design note) — an elided binder's domain
+/// is a fresh type mvar unified by the outer `elab_term_ensuring_type`.
+/// Named seams: the `matchAlts` (pattern) arm, `optType`
+/// (`fun x : T => e`), and the funBinder forms `extract_fun_binder`
+/// rejects.
+///
+/// `Term.fun` children: `[("λ"|"fun"), (basicFun | matchAlts)]`.
+/// `Term.basicFun` children: `[binderList(null), optType(null),
+/// ("↦"|"=>"), body]`.
+pub fn elab_fun(
+    elab: &mut TermElabM,
+    node: &SyntaxNode,
+    kinds: &KindInterner,
+) -> Result<ExprId, ElabError> {
+    let ch = non_trivia_children(node);
+    let basic = ch
+        .get(1)
+        .and_then(|el| el.as_node())
+        .ok_or_else(|| ElabError::UnsupportedSyntax("fun: body node".into()))?;
+    let basic_kind = kinds.name(basic.kind());
+    if basic_kind != "Lean.Parser.Term.basicFun" {
+        // The `matchAlts` (pattern-matching `fun`) arm → match slice (M4b-4).
+        return Err(ElabError::UnsupportedSyntax(format!("fun: {basic_kind}")));
+    }
+    let bch = non_trivia_children(basic);
+    let binder_list = bch
+        .first()
+        .and_then(|el| el.as_node())
+        .ok_or_else(|| ElabError::UnsupportedSyntax("fun: binder list".into()))?;
+    // `optType` (`fun x : T => e`) → named seam (M4b-3). Child [1] is the
+    // null-wrapped optional; a non-empty wrapper means a return type was
+    // written.
+    if let Some(opt) = bch.get(1).and_then(|el| el.as_node()) {
+        if !non_trivia_children(opt).is_empty() {
+            return Err(ElabError::UnsupportedSyntax(
+                "fun: return-type optType (M4b-3)".into(),
+            ));
+        }
+    }
+    let body_elem = bch
+        .get(3)
+        .cloned()
+        .ok_or_else(|| ElabError::UnsupportedSyntax("fun: body".into()))?;
+
+    let items = non_trivia_children(binder_list);
+    if items.is_empty() {
+        return Err(ElabError::UnsupportedSyntax("fun: no binders".into()));
+    }
+
+    // Bracket the telescope: restore `lctx` on EVERY exit path (Ok or
+    // Err), exactly as `elab_binders_and_forall` does.
+    let checkpoint = elab.mctx.lctx_checkpoint();
+    let result = (|| {
+        let mut fvars: Vec<ExprId> = Vec::new();
+        for item in &items {
+            let (name, ty_syntax) = extract_fun_binder(elab, item, kinds)?;
+            let dom = match ty_syntax {
+                Some(ty_elem) => elab_type(elab, &ty_elem, kinds)?,
+                None => fresh_type_mvar(elab)?,
+            };
+            let fvar = elab
+                .mctx
+                .push_local_decl(name, dom, BinderInfo::Default)
+                .map_err(ElabError::from)?;
+            fvars.push(fvar);
+        }
+        // Body with expected `None` (see § Task 2 design note).
+        let body = elab.elab_term(&body_elem, kinds, None)?;
+        elab.mctx.mk_lambda(&fvars, body).map_err(ElabError::from)
+    })();
+    elab.mctx.lctx_restore(checkpoint);
+    result
+}

@@ -245,6 +245,14 @@ def binderQueries : List (String × String) := [
   ("depArrow/dep",        "(a : Type) -> a")
 ]
 
+def funQueries : List (String × String) := [
+  ("fun/explicitBinder",   "fun (x : Nat) => x"),
+  ("fun/elidedBinder",     "fun x => x"),
+  ("fun/twoBinders",       "fun (x : Nat) (y : Nat) => x"),
+  ("fun/ascribedElided",   "(fun x => x : Nat -> Nat)"),
+  ("fun/ascribedExplicit", "(fun (x : Nat) => x : Nat -> Nat)")
+]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -258,7 +266,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>

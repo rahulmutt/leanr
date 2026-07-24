@@ -78,6 +78,7 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
         "Lean.Parser.Term.arrow" => Some("arrow"),
         "Lean.Parser.Term.forall" => Some("forall"),
         "Lean.Parser.Term.depArrow" => Some("depArrow"),
+        "Lean.Parser.Term.fun" => Some("fun"),
         _ => None,
     }
 }
@@ -102,7 +103,7 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 ///
 /// Deferred (each hits `UnsupportedSyntax` until its slice lands):
 /// ```text
-///   binders (fun/forall/let/have/show) ......... M4b-2 (in progress; arrow landed)
+///   binders: let/have ........................... M4b-2 plan 3 (fun/forall/arrow/depArrow landed)
 ///   application, @, named/optional args ........ M4b-3
 ///   num / char literals (OfNat / Char.ofNat) ... M4b-3
 ///   coercions (mkCoe) .......................... M4b-3
@@ -150,6 +151,9 @@ pub fn dispatch(
         }
         ("Lean.Parser.Term.depArrow", NodeOrToken::Node(node)) => {
             crate::builtin::binder::elab_dep_arrow(elab, node, kinds)
+        }
+        ("Lean.Parser.Term.fun", NodeOrToken::Node(node)) => {
+            crate::builtin::binder::elab_fun(elab, node, kinds)
         }
         (other, _) => Err(ElabError::UnsupportedSyntax(other.to_string())),
     }
