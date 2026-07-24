@@ -34,7 +34,7 @@ pub fn elab_str(
         .mctx
         .store_mut()
         .expr_lit_str(None, &s)
-        .expect("interning a string literal is infallible short of persistent-bank exhaustion");
+        .map_err(leanr_meta::MetaError::from)?;
     Ok(id)
 }
 

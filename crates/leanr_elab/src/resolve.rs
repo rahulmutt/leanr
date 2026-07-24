@@ -26,19 +26,31 @@ use crate::error::ElabError;
 /// `AmbiguousIdent` branch is dead code today but stays wired for when
 /// namespace-prefix search (M4b-3/4) can produce more than one
 /// candidate; see the module doc.
-pub fn resolve_global(view: &EnvView, name: NameId) -> Result<NameId, ElabError> {
+///
+/// `display` is the identifier's raw SOURCE TEXT (what the user actually
+/// wrote — `elab_ident`'s own `tok.text()`), used verbatim in either
+/// error's message. This is deliberate, not a shortcut: `name` may be a
+/// SCRATCH-region `NameId` (`elab_ident`'s `intern_dotted` mints one for
+/// any identifier not already interned in the persistent store — i.e.
+/// every unknown identifier, the exact case that lands here) with no
+/// meaning against `view.store` (the PERSISTENT store) alone —
+/// `view.store.to_name(None, Some(name))` would route a scratch id's
+/// index through `Store::store_for`'s `scratch_bit=true` branch, which
+/// returns `self` (persistent) unconditionally, i.e. read the
+/// PERSISTENT pool at the SCRATCH row's index: a wrong/garbage name, or
+/// an out-of-bounds panic in `name_row`'s own `.expect(..)` if that
+/// index exceeds the persistent pool's length. Taking `display` as the
+/// already-known-correct text sidesteps that store round-trip entirely
+/// rather than routing it through the right store.
+pub fn resolve_global(view: &EnvView, name: NameId, display: &str) -> Result<NameId, ElabError> {
     let mut candidates: Vec<NameId> = Vec::new();
     if view.get(name).is_some() {
         candidates.push(name);
     }
     match candidates.len() {
-        0 => Err(ElabError::UnknownIdent(
-            view.store.to_name(None, Some(name)).to_string(),
-        )),
+        0 => Err(ElabError::UnknownIdent(display.to_string())),
         1 => Ok(candidates[0]),
-        _ => Err(ElabError::AmbiguousIdent(
-            view.store.to_name(None, Some(name)).to_string(),
-        )),
+        _ => Err(ElabError::AmbiguousIdent(display.to_string())),
     }
 }
 
@@ -90,15 +102,23 @@ mod tests {
     fn resolves_declared_global() {
         let (env, foo) = env_with_foo();
         let view = env.view();
-        assert_eq!(resolve_global(&view, foo).unwrap(), foo);
+        assert_eq!(resolve_global(&view, foo, "Foo").unwrap(), foo);
     }
 
+    /// Unit-level check that an unresolved name (interned directly in
+    /// the PERSISTENT store here — the scratch-region pipeline
+    /// `elab_ident` actually drives is covered separately, by
+    /// `builtin::ident::tests::unknown_ident_via_real_scratch_pipeline`,
+    /// since `resolve_global` alone can no longer reproduce that
+    /// region-routing bug: it takes `display` verbatim from the caller
+    /// instead of re-deriving it from `name` through any store) still
+    /// produces `UnknownIdent` with the caller-supplied display text.
     #[test]
     fn unknown_ident_when_not_declared() {
         let (mut env, _foo) = env_with_foo();
         let nope = name_id(&mut env, "Nope");
         let view = env.view();
-        match resolve_global(&view, nope) {
+        match resolve_global(&view, nope, "Nope") {
             Err(crate::ElabError::UnknownIdent(s)) => assert_eq!(s, "Nope"),
             other => panic!("expected UnknownIdent, got {other:?}"),
         }

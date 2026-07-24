@@ -40,7 +40,13 @@ pub fn elab_ident(
 ) -> Result<ExprId, ElabError> {
     let raw = tok.text();
     let name = intern_dotted(elab, raw)?;
-    let cname = resolve_global(&elab.view, name)?;
+    // `raw` (the identifier's own source text) doubles as `resolve_global`'s
+    // error-message `display` — see that function's own doc comment for why
+    // `name` itself (frequently a SCRATCH-region id here, minted by
+    // `intern_dotted` just above for any identifier not already interned in
+    // the persistent store) cannot safely be re-rendered through
+    // `view.store` alone.
+    let cname = resolve_global(&elab.view, name, raw)?;
 
     let info = elab
         .view
@@ -116,4 +122,98 @@ fn intern_dotted(elab: &mut TermElabM, raw: &str) -> Result<leanr_kernel::bank::
         );
     }
     Ok(id.expect("ident node's text is never empty (parser-validated token)"))
+}
+
+#[cfg(test)]
+mod tests {
+    use leanr_kernel::bank::Store;
+    use leanr_kernel::{AxiomVal, ConstantInfo, ConstantVal, Environment};
+    use leanr_meta::{Config, MetaCtx};
+    use leanr_syntax::{builtin, parse_term, tree::NodeOrToken};
+
+    use crate::elab::TermElabM;
+
+    /// A tiny persistent env declaring one axiom `Foo : Sort 0`, built
+    /// directly against the public id-native API — same shape as
+    /// `resolve::tests::env_with_foo` (duplicated rather than shared:
+    /// this task's scope is `resolve.rs`/`builtin/ident.rs`/
+    /// `builtin/lit.rs` only, and the two `#[cfg(test)]` modules are
+    /// compiled as entirely separate units with no path between them).
+    fn env_with_foo() -> Environment {
+        let mut env = Environment::default();
+        let prop = {
+            let store = env.store_mut();
+            let zero = store.level_zero(None).unwrap();
+            store.expr_sort(None, zero).unwrap()
+        };
+        let foo = {
+            let store = env.store_mut();
+            let s = store.intern_str(None, "Foo").unwrap();
+            store.name_str(None, None, s).unwrap()
+        };
+        let ci = ConstantInfo::Axiom(AxiomVal {
+            val: ConstantVal {
+                name: foo,
+                level_params: vec![],
+                ty: prop,
+            },
+            is_unsafe: false,
+        });
+        env.admit_unchecked(ci).unwrap();
+        env
+    }
+
+    /// The regression this task exists for: `elab_ident`'s OWN pipeline
+    /// (`intern_dotted` then `resolve_global`) on an identifier NOT
+    /// declared in `env` — unlike `resolve::tests::
+    /// unknown_ident_when_not_declared`, which mints the unknown name
+    /// directly in the PERSISTENT store and so never reproduces the bug:
+    /// `intern_dotted` mints a SCRATCH-region `NameId` for any name not
+    /// already interned in the persistent store, which is exactly what
+    /// happens for a genuinely unknown/typo'd identifier. Against the
+    /// pre-fix `resolve_global` (which re-derived the error text via
+    /// `view.store.to_name(None, Some(name))`, `view.store` being the
+    /// PERSISTENT store, on a SCRATCH-region `name`) this test either
+    /// panicked in `name_row`'s `.expect(..)` or — as observed here,
+    /// since the persistent pool from `env_with_foo` is non-empty —
+    /// silently returned the WRONG identifier text (a row from the
+    /// persistent pool, not "Bar"). Post-fix, `resolve_global` takes the
+    /// display text verbatim from `elab_ident`'s own `raw` (the token's
+    /// real source text), so this passes without touching the store at
+    /// all for the error path.
+    #[test]
+    fn unknown_ident_via_real_scratch_pipeline() {
+        let env = env_with_foo();
+        let view = env.view();
+        let mut scratch = Store::scratch();
+        let mctx = MetaCtx::new(
+            view,
+            &mut scratch,
+            Config::default(),
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+        let mut elab = TermElabM::new(mctx, view);
+
+        let snap = builtin::snapshot();
+        let parsed = parse_term("Bar", &snap);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        let root = parsed.tree.root();
+        let tok = match root.first_child_or_token() {
+            Some(NodeOrToken::Token(t)) => t,
+            other => panic!("expected a bare ident token, got {other:?}"),
+        };
+
+        match super::elab_ident(&mut elab, &tok, &parsed.tree.kinds) {
+            Err(crate::ElabError::UnknownIdent(s)) => assert_eq!(s, "Bar"),
+            other => panic!("expected UnknownIdent(\"Bar\"), got {other:?}"),
+        }
+    }
 }
