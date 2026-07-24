@@ -143,3 +143,60 @@ fn dep_arrow_dependent_body_is_bvar() {
     assert_eq!(j["k"], "pi");
     assert_eq!(j["b"], serde_json::json!({"k": "bvar", "i": 0}));
 }
+
+#[test]
+fn fun_explicit_binder() {
+    // fun (x : Nat) => x  →  lam (Nat) (bvar 0)
+    let j = elab_json("fun (x : Nat) => x");
+    assert_eq!(j["k"], "lam");
+    assert_eq!(j["bi"], "d");
+    assert_eq!(
+        j["t"],
+        serde_json::json!({"k": "const", "n": "Nat", "us": []})
+    );
+    assert_eq!(j["b"], serde_json::json!({"k": "bvar", "i": 0}));
+}
+
+#[test]
+fn fun_elided_binder_is_bare_mvar_domain() {
+    // fun x => x  →  lam (?m) (bvar 0); the domain mvar is never assigned
+    // (no expected type), so instantiate_mvars leaves it a bare `mvar`.
+    let j = elab_json("fun x => x");
+    assert_eq!(j["k"], "lam");
+    assert_eq!(j["t"]["k"], "mvar");
+    assert_eq!(j["b"], serde_json::json!({"k": "bvar", "i": 0}));
+}
+
+#[test]
+fn fun_two_binders_nests_and_bvar_indexes() {
+    // fun (x : Nat) (y : Nat) => x  →  lam (lam (bvar 1))
+    let j = elab_json("fun (x : Nat) (y : Nat) => x");
+    assert_eq!(j["k"], "lam");
+    assert_eq!(j["b"]["k"], "lam");
+    assert_eq!(j["b"]["b"], serde_json::json!({"k": "bvar", "i": 1}));
+}
+
+#[test]
+fn fun_ascribed_elided_binder_unifies_domain() {
+    // (fun x => x : Nat -> Nat)  →  lam (Nat) (bvar 0); the ascription's
+    // is_def_eq unifies the elided domain mvar to Nat.
+    let j = elab_json("(fun x => x : Nat -> Nat)");
+    assert_eq!(j["k"], "lam");
+    assert_eq!(
+        j["t"],
+        serde_json::json!({"k": "const", "n": "Nat", "us": []})
+    );
+    assert_eq!(j["b"], serde_json::json!({"k": "bvar", "i": 0}));
+}
+
+#[test]
+fn fun_ascribed_explicit_binder() {
+    // (fun (x : Nat) => x : Nat -> Nat)  →  lam (Nat) (bvar 0)
+    let j = elab_json("(fun (x : Nat) => x : Nat -> Nat)");
+    assert_eq!(j["k"], "lam");
+    assert_eq!(
+        j["t"],
+        serde_json::json!({"k": "const", "n": "Nat", "us": []})
+    );
+    assert_eq!(j["b"], serde_json::json!({"k": "bvar", "i": 0}));
+}
