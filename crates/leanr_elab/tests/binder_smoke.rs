@@ -79,3 +79,37 @@ fn arrow_right_associates() {
     assert_eq!(j["b"]["k"], "pi"); // body is itself an arrow
     assert_eq!(j["b"]["b"]["n"], "Nat");
 }
+
+#[test]
+fn forall_nondependent() {
+    // forall (x : Nat), Nat  — body ignores x → same shape as an arrow
+    let j = elab_json("forall (x : Nat), Nat");
+    assert_eq!(j["k"], "pi");
+    assert_eq!(j["bi"], "d");
+    assert_eq!(j["t"]["n"], "Nat");
+    assert_eq!(j["b"], serde_json::json!({"k": "const", "n": "Nat", "us": []}));
+}
+
+#[test]
+fn forall_dependent_body_is_bvar() {
+    // forall (a : Type), a  — body is the binder → bvar 0
+    let j = elab_json("forall (a : Type), a");
+    assert_eq!(j["k"], "pi");
+    assert_eq!(j["b"], serde_json::json!({"k": "bvar", "i": 0}));
+}
+
+#[test]
+fn forall_two_names_one_group_nests() {
+    // forall (x y : Nat), Nat  → pi (pi ...)
+    let j = elab_json("forall (x y : Nat), Nat");
+    assert_eq!(j["k"], "pi");
+    assert_eq!(j["b"]["k"], "pi");
+    assert_eq!(j["b"]["b"]["n"], "Nat");
+}
+
+#[test]
+fn forall_two_groups_nests() {
+    let j = elab_json("forall (x : Nat) (y : Nat), Nat");
+    assert_eq!(j["k"], "pi");
+    assert_eq!(j["b"]["k"], "pi");
+}

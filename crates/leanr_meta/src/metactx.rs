@@ -41,6 +41,28 @@ pub struct MetaCtx<'e> {
     pub(crate) cfg: Config,
     pub(crate) mctx: MetavarContext,
     pub(crate) lctx: LocalContext,
+    /// Task 3 (M4b-2) addition, additive/TCB-neutral: a by-user-name
+    /// index parallel to `lctx`'s own decl list, one entry per
+    /// `push_local_decl` call (`None` name for an anonymous binder, kept
+    /// so the two stay 1:1 in length). Exists ONLY because
+    /// `LocalContext`'s `decls`/`index` fields are private even within
+    /// `leanr_kernel` (module-private to `local_ctx.rs`) — the kernel's
+    /// own public surface is `get(fvar_id)` (by id) and `save`/`restore`
+    /// (by count), no by-name scan, and adding one to `LocalContext`
+    /// itself would touch the byte-untouched kernel TCB. Every OTHER
+    /// internal `self.lctx.mk_local_decl`/`mk_let_decl`/`save`/`restore`
+    /// call site (`infer.rs`, `whnf.rs`, `assign.rs`, `defeq.rs`) already
+    /// brackets its own additions with an unconditional restore before
+    /// returning to its caller (the same `save -> push -> restore` stack
+    /// discipline this field's own `lctx_checkpoint`/`lctx_restore`
+    /// pairing uses), so `lctx.decls.len()` net-changes, across any span
+    /// bracketed by `lctx_checkpoint`/`lctx_restore`, ONLY via
+    /// `push_local_decl` — which is this field's sole writer too. The two
+    /// therefore stay in lockstep, and `lctx_restore`'s existing
+    /// `checkpoint: usize` (already `lctx.save()`'s own return value)
+    /// doubles as this field's truncation point with no second
+    /// checkpoint API. See `lctx_lookup_by_name` (the reader) below.
+    pub(crate) local_names: Vec<(Option<NameId>, ExprId)>,
     pub(crate) fvar_gen: FVarIdGen,
     pub(crate) guard: RecGuard,
     guard_depth: u32,
@@ -317,6 +339,7 @@ impl<'e> MetaCtx<'e> {
             cfg,
             mctx: MetavarContext::new(),
             lctx: LocalContext::default(),
+            local_names: Vec::new(),
             fvar_gen: FVarIdGen::default(),
             guard: RecGuard::new(),
             guard_depth: 0,
@@ -402,9 +425,12 @@ impl<'e> MetaCtx<'e> {
 
     /// Restore `lctx` to a `lctx_checkpoint` depth, dropping every decl
     /// added since (fvar ids are globally unique via `fvar_gen`, so the
-    /// truncation is exact).
+    /// truncation is exact). Also truncates `local_names` to the same
+    /// point (Task 3 addition — see that field's own doc comment for why
+    /// the single `checkpoint` value is valid for both).
     pub fn lctx_restore(&mut self, checkpoint: usize) {
         self.lctx.restore(checkpoint);
+        self.local_names.truncate(checkpoint);
     }
 
     /// Mint a cdecl fvar `(name : ty)` with binder-info `bi` into the ambient
@@ -425,7 +451,31 @@ impl<'e> MetaCtx<'e> {
             ty,
             bi,
         )?;
+        // Task 3 addition: record `(name, fvar)` in `local_names` too —
+        // see that field's own doc comment. One entry per call, matching
+        // `lctx.decls`'s own growth exactly (including `None` names).
+        self.local_names.push((name, fvar));
         Ok(fvar)
+    }
+
+    /// Look up `name` in the ambient local context, most-recently-pushed
+    /// first (a later same-named binder shadows an earlier one — ordinary
+    /// lexical shadowing; oracle: `LocalContext.findFromUserName?` scans
+    /// from the innermost decl outward). Returns the SAME `ExprId`
+    /// `push_local_decl` returned for that binder (an `Expr::fvar`
+    /// referencing `lctx`'s own decl — `mk_forall`/`abstract_fvars`
+    /// recognize it identically, since `local_names` never stores
+    /// anything but a verbatim copy of a `push_local_decl` return value).
+    /// `None` on a miss (including an empty `lctx`) — the caller falls
+    /// back to global-constant resolution exactly as before this field
+    /// existed, so this is a pure no-op for any query that never enters a
+    /// binder (`local_names` stays empty, `None` unconditionally).
+    pub fn lctx_lookup_by_name(&self, name: NameId) -> Option<ExprId> {
+        self.local_names
+            .iter()
+            .rev()
+            .find(|(n, _)| *n == Some(name))
+            .map(|(_, fvar)| *fvar)
     }
 
     /// oracle: `mkForallFVars` (the cdecl case). Abstract `body` over the
