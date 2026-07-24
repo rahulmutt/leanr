@@ -66,8 +66,14 @@ fn arrow_is_nondependent_pi() {
     let j = elab_json("Nat -> Nat");
     assert_eq!(j["k"], "pi");
     assert_eq!(j["bi"], "d");
-    assert_eq!(j["t"], serde_json::json!({"k": "const", "n": "Nat", "us": []}));
-    assert_eq!(j["b"], serde_json::json!({"k": "const", "n": "Nat", "us": []}));
+    assert_eq!(
+        j["t"],
+        serde_json::json!({"k": "const", "n": "Nat", "us": []})
+    );
+    assert_eq!(
+        j["b"],
+        serde_json::json!({"k": "const", "n": "Nat", "us": []})
+    );
 }
 
 #[test]
@@ -87,7 +93,10 @@ fn forall_nondependent() {
     assert_eq!(j["k"], "pi");
     assert_eq!(j["bi"], "d");
     assert_eq!(j["t"]["n"], "Nat");
-    assert_eq!(j["b"], serde_json::json!({"k": "const", "n": "Nat", "us": []}));
+    assert_eq!(
+        j["b"],
+        serde_json::json!({"k": "const", "n": "Nat", "us": []})
+    );
 }
 
 #[test]
@@ -121,7 +130,10 @@ fn dep_arrow_nondependent() {
     assert_eq!(j["k"], "pi");
     assert_eq!(j["bi"], "d");
     assert_eq!(j["t"]["n"], "Nat");
-    assert_eq!(j["b"], serde_json::json!({"k": "const", "n": "Nat", "us": []}));
+    assert_eq!(
+        j["b"],
+        serde_json::json!({"k": "const", "n": "Nat", "us": []})
+    );
 }
 
 #[test]

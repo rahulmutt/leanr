@@ -163,7 +163,9 @@ pub(crate) fn extract_binder_group(
         names.push(id);
     }
     if names.is_empty() {
-        return Err(ElabError::UnsupportedSyntax("binder group: no names".into()));
+        return Err(ElabError::UnsupportedSyntax(
+            "binder group: no names".into(),
+        ));
     }
     Ok(BinderGroup { names, ty, bi })
 }
