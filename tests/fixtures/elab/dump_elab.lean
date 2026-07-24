@@ -224,6 +224,27 @@ def sortAscHoleQueries : List (String × String) :=
   , ("hole/bare", "_")
   ]
 
+/-- Task 5 (M4b-2 plan1): the three universal-quantifier binder
+elaborators — `elab_arrow` (non-dependent `Nat -> Nat`, right-
+associated `Nat -> Nat -> Nat`), `elab_forall` (`forall (x : Nat),
+Nat` non-dependent, `forall (a : Type), a` dependent — the bound
+variable escapes into the body as a `bvar` — plus a two-name binder
+group `forall (x y : Nat), Nat` and two separate binder groups
+`forall (x : Nat) (y : Nat), Nat`), and `elab_dep_arrow` (`(x : Nat)
+-> Nat` non-dependent, `(a : Type) -> a` dependent). Every term here
+references only `Nat`/`Type`, both already in scope (`Elab0.lean`);
+no new constant needed. -/
+def binderQueries : List (String × String) := [
+  ("arrow/natNat",        "Nat -> Nat"),
+  ("arrow/rightAssoc",    "Nat -> Nat -> Nat"),
+  ("forall/nondep",       "forall (x : Nat), Nat"),
+  ("forall/dep",          "forall (a : Type), a"),
+  ("forall/twoNames",     "forall (x y : Nat), Nat"),
+  ("forall/twoGroups",    "forall (x : Nat) (y : Nat), Nat"),
+  ("depArrow/nondep",     "(x : Nat) -> Nat"),
+  ("depArrow/dep",        "(a : Type) -> a")
+]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -237,7 +258,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>

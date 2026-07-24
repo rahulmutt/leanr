@@ -18,3 +18,11 @@
 {"exp":{"k":"const","n":"Nat","us":[]},"id":"paren/nat","src":"(Nat)"}
 {"exp":{"k":"const","n":"Nat","us":[]},"id":"asc/natInType","src":"(Nat : Type)"}
 {"exp":{"i":0,"k":"mvar"},"id":"hole/bare","src":"_"}
+{"exp":{"b":{"k":"const","n":"Nat","us":[]},"bi":"d","k":"pi","t":{"k":"const","n":"Nat","us":[]}},"id":"arrow/natNat","src":"Nat -> Nat"}
+{"exp":{"b":{"b":{"k":"const","n":"Nat","us":[]},"bi":"d","k":"pi","t":{"k":"const","n":"Nat","us":[]}},"bi":"d","k":"pi","t":{"k":"const","n":"Nat","us":[]}},"id":"arrow/rightAssoc","src":"Nat -> Nat -> Nat"}
+{"exp":{"b":{"k":"const","n":"Nat","us":[]},"bi":"d","k":"pi","t":{"k":"const","n":"Nat","us":[]}},"id":"forall/nondep","src":"forall (x : Nat), Nat"}
+{"exp":{"b":{"i":0,"k":"bvar"},"bi":"d","k":"pi","t":{"k":"sort","u":{"k":"succ","u":{"k":"zero"}}}},"id":"forall/dep","src":"forall (a : Type), a"}
+{"exp":{"b":{"b":{"k":"const","n":"Nat","us":[]},"bi":"d","k":"pi","t":{"k":"const","n":"Nat","us":[]}},"bi":"d","k":"pi","t":{"k":"const","n":"Nat","us":[]}},"id":"forall/twoNames","src":"forall (x y : Nat), Nat"}
+{"exp":{"b":{"b":{"k":"const","n":"Nat","us":[]},"bi":"d","k":"pi","t":{"k":"const","n":"Nat","us":[]}},"bi":"d","k":"pi","t":{"k":"const","n":"Nat","us":[]}},"id":"forall/twoGroups","src":"forall (x : Nat) (y : Nat), Nat"}
+{"exp":{"b":{"k":"const","n":"Nat","us":[]},"bi":"d","k":"pi","t":{"k":"const","n":"Nat","us":[]}},"id":"depArrow/nondep","src":"(x : Nat) -> Nat"}
+{"exp":{"b":{"i":0,"k":"bvar"},"bi":"d","k":"pi","t":{"k":"sort","u":{"k":"succ","u":{"k":"zero"}}}},"id":"depArrow/dep","src":"(a : Type) -> a"}
