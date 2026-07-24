@@ -20,7 +20,8 @@ M4b. Per the M4b slicing:
 |---|---|
 | M4b-1 (shipped) | crate skeleton, dispatch, oracle harness, leaf elaborators |
 | M4b-2 plan 1 (shipped) | binder foundation: `forall`+`arrow`+`depArrow` + `MetaCtx` local-context accessors |
-| **M4b-2 plans 2-3 (this spec)** | binder elaborators `fun` (plan 2) and `let`/`have` (plan 3) — **no scheduler** |
+| M4b-2 plan 2 (shipped) | binder elaborator `fun` (`basicFun` arm) + `MetaCtx::mk_lambda` — **no scheduler** |
+| **M4b-2 plan 3 (this spec)** | binder elaborators `let` + `have` — **no scheduler** |
 | M4b-3 | the application elaborator (`elabApp`) + coercion insertion + num/char literals + **the `synthesizeSyntheticMVars` fixpoint** |
 | M4b-4 | `elabAsElim`, dot notation, `binop%`, anonymous constructor `⟨⟩` |
 | later M4 | macro expansion + `by` tactic blocks (**`show` lands here**, see § Scope correction), structure instances, match/equation compiler, `do` |
@@ -58,9 +59,11 @@ of these mvars from source and gives every one differential oracle
 coverage. What remains in M4b-2 is the two remaining binder forms, `fun`
 (plan 2) and `let`/`have` (plan 3), each fully oracle-verifiable with **no
 scheduler machinery**. The § Plan 2 and § Out-of-scope sections below are
-rewritten to match; the original § canonical entry-point pipeline and the
-Plan 3 section stand (the entry point stays `elab_term_ensuring_type →
-instantiate_mvars`, now unchanged through all of M4b-2).
+rewritten to match; the original § canonical entry-point pipeline stands,
+as did the Plan 3 section at the time this amendment was written
+(§ Amendment 2 later pinned and re-scoped it). The entry point stays
+`elab_term_ensuring_type → instantiate_mvars`, unchanged through all of
+M4b-2 including plan 3.
 
 ## What M4b-2 ships — and the stated non-shipping
 
@@ -116,7 +119,8 @@ set is therefore **`fun` / `forall`(+`arrow`+`depArrow`) / `let` /
   needs. Any non-additive / behavior-changing `leanr_meta` change must
   still be flagged. M4b-2's additions are the plan-1 local-context
   accessor family (`lctx_checkpoint`/`push_local_decl`/`lctx_restore` +
-  `mk_forall`, shipped) and plan 2's `mk_lambda`. `MVarDecl` reads
+  `mk_forall`, shipped), plan 2's `mk_lambda` (shipped), and plan 3's
+  `push_let_decl` + `mk_let_expr`. `MVarDecl` reads
   (`mctx().decl`/`is_assigned`/`assignment`) are already public, so no new
   read-accessor is needed.
 - **Named-seam discipline.** Every new dispatch arm is a named seam;
@@ -163,8 +167,8 @@ mirroring M4a's rhythm (foundation → hard core → breadth):
 | Plan | New capability | Oracle tier added |
 |---|---|---|
 | **Plan 1** (shipped, #28) | `MetaCtx` local-context accessor family (`lctx_checkpoint`/`push_local_decl`/`lctx_restore` + `mk_forall`); the three universal-quantifier forms `forall`/`arrow`/`depArrow`. **No** ladder fields and **no** fixpoint (the design's "thin fixpoint" was dropped: the oracle dumper emits an unresolved hole as a bare `mvar`, not an error, so there was nothing oracle-verifiable to ship). Entry point unchanged. | `∀`/`→`/`(x:A)→B` terms |
-| **Plan 2** (this spec) | `fun` (`basicFun` arm) + `MetaCtx::mk_lambda`. **No scheduler** — see § Amendment. The postpone branch (expected = unassigned expr mvar) is a **named seam** unreachable from M4b-2 source. | `fun` terms (expected `None` and expected `∀`), incl. elided binder → bare-mvar domain |
-| **Plan 3** | `let` + `have` (letE/letFun-family forms + expected-type propagation); no new scheduler machinery | `let` / `have` terms |
+| **Plan 2** (shipped, #29) | `fun` (`basicFun` arm) + `MetaCtx::mk_lambda`. **No scheduler** — see § Amendment. The postpone branch (expected = unassigned expr mvar) is a **named seam** unreachable from M4b-2 source. | `fun` terms (expected `None` and expected `∀`), incl. elided binder → bare-mvar domain |
+| **Plan 3** (this spec) | `let` + `have` as ONE elaborator differing by a `non_dep` bool (`MetaCtx::push_let_decl` + `mk_let_expr`), incl. the `letIdBinders` telescope and the `hygieneInfo`/`this` binder; expected-type propagated to the body; no new scheduler machinery | `let` / `have` terms (19), the two tiers separated by the encoder's `nd` bit |
 
 ## Plan 1 — local-context foundation, scheduler seam, universal-quantifier forms
 
@@ -336,7 +340,7 @@ as the `∀` telescope driver does.
 The `mkLambdaFVars` twin of plan 1's `mk_forall`: the same
 `abstract_fvars` + build loop, emitting `Expr::lam` instead of
 `Expr::forallE`. Additive and behavior-neutral under the M4b accessor
-precedent (`with_let_decl` / `mk_let_expr` remain plan 3's additions).
+precedent (`push_let_decl` / `mk_let_expr` are plan 3's additions).
 
 ### Entry point / state: unchanged
 
@@ -344,7 +348,156 @@ No `synthesize_synthetic_mvars`, no ladder fields, no `may_postpone`
 threading. The pipeline stays `elab_term_ensuring_type →
 instantiate_mvars` exactly as plan 1 left it.
 
-## Plan 3 — `let` and `have`
+## Amendment 2 (2026-07-24, post-plan-2): `have` is `letE` + `nondep`
+
+The original § Plan 3 (preserved below as § Plan 3 — superseded,
+historical) left `have`'s output node open: "the `letFun`/`letE`-family
+shape and whether the value is retained is **pinned against the oracle
+corpus during Plan 3**, not asserted here". Plan 3's design work pinned
+it with a throwaway probe (not committed — the same probe rhythm plan 2
+used for the `fun` grammar) running the pinned toolchain's own elaborator
+over the committed `Elab0` fixture environment:
+
+```
+let  x : Nat := Nat.zero; x   →  {"k":"let","nd":false,"t":Nat,"v":Nat.zero,"b":{"k":"bvar","i":0}}
+have h : Nat := Nat.zero; h   →  {"k":"let","nd":true ,"t":Nat,"v":Nat.zero,"b":{"k":"bvar","i":0}}
+```
+
+**`have` is byte-identical to `let` except for the `non_dep` bit.**
+There is no `letFun`, no application node, and the value is retained.
+This follows from the pinned source: `elabHaveDecl` is literally
+`elabLetDeclCore stx expectedType? { nondep := true }`
+(`Binders.lean:942`) over the *same* `elabLetDeclAux`, which ends in
+`mkLetFVars #[x] body (usedLetOnly := config.usedOnly)
+(generalizeNondepLet := false)` — `usedOnly` is `false` for both forms
+(so an unused binding is kept), and `generalizeNondepLet := false` keeps
+a nondep decl a `letE` carrying the bit rather than generalizing it
+away. leanr's kernel already stores `non_dep` on the `LetE` row
+(`bank/terms.rs`, bit 6 of the packed tag byte) and the differential
+encoder already emits it as `"nd"`, so the two tiers are distinguished
+by the existing gate with no encoder change.
+
+Three consequences for plan 3, all reflected in § Plan 3 below:
+
+1. `let` and `have` are **one elaborator plus a bool**, matching the
+   oracle's own `LetConfig.nondep` structure — not two elaborators.
+2. The builder cannot route through the kernel's `mk_lambda`/`mk_binding`
+   (`subst.rs:1017` hardcodes `non_dep = false` for a rebuilt `LetE`, a
+   deliberate kernel-side choice), so plan 3's `MetaCtx::mk_let_expr`
+   takes `non_dep` explicitly. The kernel stays byte-untouched.
+3. The probe also settled the two surfaces the original § Plan 3 did not
+   scope — the `letIdBinders` telescope (`let f (y : Nat) : Nat := y; f`
+   → `letE (Nat → Nat) (fun y => y) …`) and the `hygieneInfo` binder
+   (`have : Nat := Nat.zero; this`). Both are fully oracle-verifiable in
+   this slice using only shipped machinery (plan 1's `mk_forall`, plan
+   2's `mk_lambda`), so they are **in scope** rather than seams: the "no
+   speculative surface" rule bars shipping what the oracle cannot
+   exercise, and it can exercise both today.
+
+## Plan 3 — `let` and `have` (canonical)
+
+One elaborator, `elab_let_like(elab, node, kinds, expected, non_dep)`,
+registered on two dispatch arms: `Lean.Parser.Term.let` → `non_dep =
+false` (oracle: `elabLetDecl`, `Binders.lean:939`) and
+`Lean.Parser.Term.have` → `non_dep = true` (`elabHaveDecl`, `:942`).
+No scheduler machinery; the entry point stays `elab_term_ensuring_type
+→ instantiate_mvars`.
+
+### Grammar (confirmed against leanr's own parser, throwaway probe)
+
+```
+Term.let / Term.have : [ "let"|"have" , Term.letConfig , Term.letDecl , ";" , body ]
+Term.letDecl         : [ Term.letIdDecl ]
+Term.letIdDecl       : [ Term.letId , null(binders) , null(optType) , ":=" , value ]
+Term.letId           : [ <ident> ] | [ hygieneInfo ] | [ Term.hole ]
+null(optType)        : empty (elided) | [ Term.typeSpec [ ":" , T ] ]
+null(binders)        : Term.explicitBinder items, or bare ident tokens
+```
+
+`Term.let` and `Term.have` are structurally identical — the keyword is
+the only difference, which is what makes the single-elaborator shape
+exact rather than merely convenient.
+
+### New `MetaCtx` accessors (additive, TCB-neutral, behavior-neutral)
+
+```rust
+pub fn push_let_decl(&mut self, name: Option<NameId>, ty: ExprId, value: ExprId) -> Result<ExprId, MetaError>;
+pub fn mk_let_expr(&mut self, fvar: ExprId, body: ExprId, non_dep: bool) -> Result<ExprId, MetaError>;
+```
+
+`push_let_decl` wraps the kernel's existing `LocalContext::mk_let_decl`
+(the ldecl overload, already present and already used inside
+`leanr_meta`); `mk_let_expr` is `abstract_fvars(body, [fvar])` then
+`Store::expr_let(.., ty, value, body', non_dep)`, reading `ty`/`value`
+off the lctx decl — the same shape as plan 1's `mk_forall` and plan 2's
+`mk_lambda`, with the `non_dep` bit added for the reason in § Amendment 2
+point 2. Scoping reuses plan 1's `lctx_checkpoint`/`lctx_restore`
+bracket unchanged; the closure-shaped `with_let_decl` sketched in the
+superseded plan-1 section is **not** built (same reason plan 1 dropped
+`with_local_decl`: the closure cannot reach the outer `TermElabM`).
+
+`infer_type` and `whnf` already handle `LetE` in full (M4a — zeta in
+`whnf_core_let`, the let telescope in `inferLambdaType`), so ascribed
+corpus terms need no further `leanr_meta` capability.
+
+### Flow (mirrors `elabLetDeclAux`'s pinned order)
+
+1. Children → `letConfig`, `letDecl` → `letIdDecl`, `;`, body element.
+2. `letId` → binder name: `<ident>` → intern its text; `Term.hole` (`_`)
+   → `None` (anonymous); `hygieneInfo` → intern `this` (oracle:
+   ``HygieneInfo.mkIdent letId[0] `this``).
+3. Binder telescope, bracketed by `lctx_checkpoint`/`lctx_restore`:
+   elaborate `optType` **under** the binders (`elab_type`, or a fresh
+   type mvar when elided — the observable twin of the oracle's
+   `expandOptType`-to-`_`), then the value via
+   `elab_term_ensuring_type(value, Some(type))`, then
+   `value = mk_lambda(fvars, value)` and `type = mk_forall(fvars, type)`
+   (oracle: `mkLambdaFVars … (usedLetOnly := false)` /
+   `mkForallFVars`). With no binders this collapses to the plain path.
+4. Second bracket: `fvar = push_let_decl(name, type, value)`;
+   `body = elab_term_ensuring_type(body_elem, expected)`;
+   `mk_let_expr(fvar, body, non_dep)`; restore on **every** exit path
+   including `Err`.
+
+Step 4 propagates the expected type into the body, matching the
+oracle's own `elabTermEnsuringType body expectedType?`. This is *not*
+the deferred bidirectional-propagation machinery — no postponement, no
+`may_postpone`, just passing the existing dispatch-threaded option down
+one level. (Plan 2's `elab_fun` ignores `expected` for a reason specific
+to `fun`: its expected-type path *is* the postponement machinery.)
+
+### Binder surface and named seams
+
+In scope: bracketed **explicit** binders via plan 1's
+`extract_binder_group`, and bare-ident binders (`let f y : Nat := y; f`)
+via a fresh type mvar unified at the value's use site — exactly plan 2's
+elided-`fun`-binder treatment.
+
+Named seams, each an `UnsupportedSyntax` naming its owner: implicit /
+strict-implicit / instance bracketed let binders (M4b-3, with implicit
+and instance arguments); a `letDecl` alternative other than `letIdDecl`
+(`letPatDecl` / `letEqnsDecl` — leanr's parser does not emit them, so
+the guard is defensive); a non-empty `letConfig` (leanr's parser models
+the item list as always-empty). `letI` / `haveI` / `let_fun` /
+`let_delayed` / `let_tmp` / `letrec` are distinct `SyntaxKind`s and
+already fall through to the dispatch catch-all — a doc note names them,
+no guard is added.
+
+### Stated simplification: hygiene
+
+leanr has no macro-scope hygiene, so the `hygieneInfo` binder's `this`
+resolves to a body occurrence of `this` by plain `NameId` equality. That
+is correct for every non-shadowing term (including the whole corpus) and
+diverges from the oracle only where hygiene actually discriminates
+between two `this`-named binders. Recorded as a named risk here rather
+than left as an unexamined assumption; the fix arrives with whichever
+slice first needs real hygiene.
+
+## Plan 3 — `let` and `have` (superseded, historical)
+
+> **Superseded by § Amendment 2 and § Plan 3 — canonical.** Recorded for
+> context: this is the original sketch, whose open question about
+> `have`'s output node the probe answered.
 
 Neither form adds scheduler machinery; both build on the Plan 1 lctx
 seam.
@@ -378,10 +531,30 @@ seam.
   `(fun x => x : Nat → Nat)` (∀ expected, elided domain from `A`);
   `(fun (x : Nat) => x : Nat → Nat)` (∀ expected, explicit domain via
   `is_def_eq`).
+- **Plan 3 corpus terms** (19, all closed; every one's oracle output is
+  already pinned by the design-phase probe, so regeneration confirms
+  rather than discovers). `let` tier (12): `let x : Nat := Nat.zero; x`;
+  `let x := Nat.zero; x` (elided type); `let x : Nat := Nat.zero; Nat`
+  (unused binding, retained); `let _ : Nat := Nat.zero; Nat`
+  (anonymous); `let x : Nat := Nat.zero; let y : Nat := x; y` (nested);
+  `let a : Type := Nat; a`; `let f : Nat -> Nat := fun y => y; f`;
+  `let f (y : Nat) : Nat := y; f` and `let f (y : Nat) (z : Nat) : Nat
+  := y; f` (bracketed binder telescope); `let f y : Nat := y; f`
+  (bare-ident binder, domain mvar unified at the use site);
+  `fun (z : Nat) => let x : Nat := z; x` (under a `fun`);
+  `(let x : Nat := Nat.zero; x : Nat)` (expected-type propagation).
+  `have` tier (7): the `typed` / `elided` / `unused` / `nested` /
+  `funValue` / `ascribed` twins of the above, plus
+  `have : Nat := Nat.zero; this` (the `hygieneInfo` binder). The two
+  tiers are separated by the encoder's `nd` bit, so a `let`/`have`
+  mix-up fails the gate loudly.
 - **Regeneration.** The oracle-side dumper (`dump_elab.lean` behind
   `mise run fixtures:regen`) is extended with the new terms; the
   committed `Elab0.olean` gains any constants they reference. Hermetic —
-  CI never installs Lean (`docs/ORACLE.md`).
+  CI never installs Lean (`docs/ORACLE.md`). Plan 3 adds **no**
+  constant: every corpus term references only `Nat` / `Nat.zero` /
+  `Type`, all already in `Elab0.lean`, so `Elab0.olean` is not
+  regenerated.
 - **Gate wiring.** The existing `oracle_elab.rs` regression gate runs
   under `mise run meta:fast` and plain `mise run test`; no new nightly.
 
@@ -400,9 +573,15 @@ seam.
   through the existing `is_def_eq` seam (`ElabError::TypeMismatch`);
   coercion insertion on that mismatch is M4b-3.
 - The plan-1 telescope bracket (`lctx_checkpoint` / `push_local_decl` /
-  `lctx_restore`, and plan 3's `with_let_decl`) restores the local
-  context on **every** exit path including `Err`, so a failed body
-  elaboration never leaks a decl into the ambient `lctx`.
+  `lctx_restore`, and plan 3's second bracket around
+  `push_let_decl`) restores the local context on **every** exit path
+  including `Err`, so a failed value or body elaboration never leaks a
+  decl into the ambient `lctx`.
+- Within `let`/`have`, the implicit/strict/instance let binders, a
+  non-`letIdDecl` `letDecl` alternative, and a non-empty `letConfig` are
+  each their own named seam (§ Plan 3 — canonical). A value that
+  mismatches the declared type flows through the existing `is_def_eq`
+  seam (`ElabError::TypeMismatch`); coercion on that mismatch is M4b-3.
 - The fixpoint's error pass (`mvarErrorInfos`) is deferred to M4b-3 with
   the rest of the scheduler (§ Amendment).
 
@@ -421,5 +600,10 @@ seam.
   M4b-4
 - macro expansion in dispatch, `by` tactic blocks, **`show`** (both
   arms), `suffices`, `let rec` / `let_recs_to_lift` producer — later M4
-- `letI` / `haveI` / `let_delayed` (distinct builtin kinds) — not in
-  this slice's binder set; a later slice as needed
+- `let`/`have` implicit/strict/instance binders — M4b-3;
+  `letPatDecl` / `letEqnsDecl` and `letConfig` items — not ported by
+  leanr's parser, so no slice owns them until it does
+- `letI` / `haveI` / `let_fun` / `let_delayed` / `let_tmp` / `letrec`
+  (distinct builtin kinds whose `zeta` / `postponeValue` / `usedOnly`
+  configs change the emitted term, so each needs its own oracle tier);
+  `let rec` / `let_recs_to_lift` producer — later M4
