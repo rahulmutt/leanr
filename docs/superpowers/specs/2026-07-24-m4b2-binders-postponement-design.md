@@ -19,8 +19,9 @@ M4b. Per the M4b slicing:
 | Slice | Content |
 |---|---|
 | M4b-1 (shipped) | crate skeleton, dispatch, oracle harness, leaf elaborators |
-| **M4b-2 (this spec)** | binder elaborators (`fun`/`forall`+`arrow`+`depArrow`/`let`/`have`) + the `synthesizeSyntheticMVars` fixpoint |
-| M4b-3 | the application elaborator (`elabApp`) + coercion insertion + num/char literals |
+| M4b-2 plan 1 (shipped) | binder foundation: `forall`+`arrow`+`depArrow` + `MetaCtx` local-context accessors |
+| **M4b-2 plans 2-3 (this spec)** | binder elaborators `fun` (plan 2) and `let`/`have` (plan 3) — **no scheduler** |
+| M4b-3 | the application elaborator (`elabApp`) + coercion insertion + num/char literals + **the `synthesizeSyntheticMVars` fixpoint** |
 | M4b-4 | `elabAsElim`, dot notation, `binop%`, anonymous constructor `⟨⟩` |
 | later M4 | macro expansion + `by` tactic blocks (**`show` lands here**, see § Scope correction), structure instances, match/equation compiler, `do` |
 
@@ -28,15 +29,51 @@ Pinned oracle: `leanprover/lean4:v4.33.0-rc1` (`lean-toolchain`). All
 oracle citations below are against that toolchain's
 `src/lean/Lean/{Elab,Parser}`.
 
+## Amendment (2026-07-24, post-plan-1): the fixpoint moves to M4b-3
+
+This spec originally paired the `synthesizeSyntheticMVars` fixpoint with
+`fun` in plan 2. Reality-checking plan 2 against the shipped plan-1 code
+and the pinned grammar surfaced a finding of the same class as M4b-1's
+"num/char are not leaves" and plan-1's "no thin fixpoint" corrections:
+
+> **No closed source term in M4b-2's grammar creates a synthetic mvar the
+> fixpoint must drain.** `fun` postponement fires only when the expected
+> type is an *unassigned expr mvar* — which arises only in an argument
+> position whose parameter type is a metavariable, i.e. requires
+> **application** (`elabApp`, M4b-3). Ascription supplies a concrete
+> expected type (→ the `∀` path, no postpone); a bare `fun` has expected
+> `None` (→ the `None` path, no postpone). `TypeClass` mvars likewise have
+> no source producer until `elabApp`. The default-instance drain and the
+> `mvarErrorInfos` error pass have no differential coverage either (the
+> oracle dumper emits an unresolved hole as a bare `mvar`, not an error).
+
+The entire scheduler ladder is therefore forward-investment the
+differential oracle cannot exercise until M4b-3. Per the project's
+verify-driven discipline (fields arrive with the code that uses them; no
+speculative surface), **the whole fixpoint — postponement resume,
+`TypeClass` drain, `synthesizeUsingDefault`, `mvarErrorInfos`, the ladder
+fields, the entry-point pipeline change, `mayPostpone` threading — moves
+to M4b-3**, landing with `elabApp`, the first construct that creates each
+of these mvars from source and gives every one differential oracle
+coverage. What remains in M4b-2 is the two remaining binder forms, `fun`
+(plan 2) and `let`/`have` (plan 3), each fully oracle-verifiable with **no
+scheduler machinery**. The § Plan 2 and § Out-of-scope sections below are
+rewritten to match; the original § canonical entry-point pipeline and the
+Plan 3 section stand (the entry point stays `elab_term_ensuring_type →
+instantiate_mvars`, now unchanged through all of M4b-2).
+
 ## What M4b-2 ships — and the stated non-shipping
 
 Like all of M4a and M4b-1, **M4b-2 does not ship independently useful
 user value**, and this is recorded rather than papered over: an elaborator
 that handles binders but not application still cannot elaborate a real
 declaration. What M4b-2 delivers is a `leanr_elab` term elaborator for
-binder forms plus a faithful postponement scheduler, **independently
-verified** against the pinned oracle by the hermetic `oracle_elab.rs`
-regression gate. User-facing value arrives when the elaborator handles
+the binder forms (`∀`/`→`/`(x:A)→B`, `fun`, `let`/`have`),
+**independently verified** against the pinned oracle by the hermetic
+`oracle_elab.rs` regression gate. The postponement scheduler that M4b's
+fidelity ultimately rides on moves to M4b-3 with `elabApp` — its first
+source producer (§ Amendment). User-facing value arrives when the
+elaborator handles
 enough of the language to elaborate a real declaration — an M4
 milestone-level claim, not a per-slice one.
 
@@ -77,9 +114,11 @@ set is therefore **`fun` / `forall`(+`arrow`+`depArrow`) / `let` /
   may add purely-**additive**, **TCB-neutral**, **behavior-neutral**
   public accessors on `leanr_meta` that the `leanr_elab` layer genuinely
   needs. Any non-additive / behavior-changing `leanr_meta` change must
-  still be flagged. M4b-2's additions are the `with_local_decl` accessor
-  family (§ Plan 1) and, if needed, a read-accessor for `MVarDecl`
-  (§ Plan 2).
+  still be flagged. M4b-2's additions are the plan-1 local-context
+  accessor family (`lctx_checkpoint`/`push_local_decl`/`lctx_restore` +
+  `mk_forall`, shipped) and plan 2's `mk_lambda`. `MVarDecl` reads
+  (`mctx().decl`/`is_assigned`/`assignment`) are already public, so no new
+  read-accessor is needed.
 - **Named-seam discipline.** Every new dispatch arm is a named seam;
   unregistered kinds fall through to `ElabError::UnsupportedSyntax`
   (never a panic, never a wrong `ExprId`).
@@ -91,7 +130,7 @@ set is therefore **`fun` / `forall`(+`arrow`+`depArrow`) / `let` /
 
 ### The canonical entry-point pipeline
 
-The final pipeline is:
+The eventual pipeline (M4b-3 onward) is:
 
 ```
 elab_term(elem, expected)         // dispatch → leaf / binder elaborator
@@ -99,22 +138,21 @@ elab_term(elem, expected)         // dispatch → leaf / binder elaborator
   → instantiate_mvars(e)          // final substitution before the oracle compare
 ```
 
-**The `synthesize_synthetic_mvars` step lands in Plan 2, not Plan 1** —
-a correction discovered during planning against the actual dumper. The
-oracle dumper (`dump_elab.lean`) elaborates every term with
+That is the **eventual (M4b-3+) shape**. Through all of M4b-2 the entry
+point stays M4b-1's `elab_term_ensuring_type → instantiate_mvars`, with
+**no** `synthesize_synthetic_mvars` step — see § Amendment. The reason is
+the dumper: `dump_elab.lean` elaborates every term with
 `expectedType := none` and does **not** run the top-level unassigned-mvar
-error report: it emits an unresolved top-level hole as a bare `mvar`
-(committed record `hole/bare` → `{"k":"mvar","i":0}`), not an error. A
-Plan-1 fixpoint that errored on unassigned holes would therefore diverge
-from the oracle. Plan 1's terms (the three type-former forms) fully
-elaborate with no synthetic mvars — even `∀ (x : _), x` emits a `pi`
-whose domain is a bare `mvar`, no error. So Plan 1 keeps M4b-1's entry
-point (`elab_term → instantiate_mvars`) unchanged; the pipeline step +
-fixpoint arrive in Plan 2 with postponement and the matching
-`withSynthesize` change to the dumper. Inserting a step that is a no-op
-for Plan 1 terms keeps every Plan 1 corpus entry green, so deferring it
-costs no re-verification — and it respects the project's "no speculative
-surface" discipline (the same reason M4b-1 deferred these fields).
+error report — it emits an unresolved hole as a bare `mvar` (committed
+record `hole/bare` → `{"k":"mvar","i":0}`), not an error. Every M4b-2 term
+(the three type-formers, `fun`, `let`/`have`) fully elaborates with no
+synthetic mvar the fixpoint must drain — even `∀ (x : _), x` and
+`fun x => x` emit a bare-`mvar` domain, no error, no scheduling. A
+fixpoint step would be a pure no-op on every M4b-2 corpus entry, so it is
+deferred to M4b-3, where `elabApp` first produces synthetic mvars from
+source and the step becomes both necessary and differentially verifiable.
+This respects the project's "no speculative surface" discipline (the same
+reason M4b-1 deferred these fields and plan 1 shipped no thin fixpoint).
 
 ### Plan decomposition
 
@@ -124,11 +162,24 @@ mirroring M4a's rhythm (foundation → hard core → breadth):
 
 | Plan | New capability | Oracle tier added |
 |---|---|---|
-| **Plan 1** | `MetaCtx` `with_local_decl` accessor family; TermElabM ladder fields; canonical entry point with a real-but-thin fixpoint (drains nothing postponed yet; reports unassigned `_` holes); the three universal-quantifier forms `forall`/`arrow`/`depArrow` | `∀`/`→`/`(x:A)→B` terms; unassigned-hole error parity |
-| **Plan 2** | the `synthesizeSyntheticMVars` **fixpoint proper** (postponed-term resumption, pending- + default-instance draining, `mvarErrorInfos`); `fun` (its first real customer) | `fun` terms; postpone→resume terms |
+| **Plan 1** (shipped, #28) | `MetaCtx` local-context accessor family (`lctx_checkpoint`/`push_local_decl`/`lctx_restore` + `mk_forall`); the three universal-quantifier forms `forall`/`arrow`/`depArrow`. **No** ladder fields and **no** fixpoint (the design's "thin fixpoint" was dropped: the oracle dumper emits an unresolved hole as a bare `mvar`, not an error, so there was nothing oracle-verifiable to ship). Entry point unchanged. | `∀`/`→`/`(x:A)→B` terms |
+| **Plan 2** (this spec) | `fun` (`basicFun` arm) + `MetaCtx::mk_lambda`. **No scheduler** — see § Amendment. The postpone branch (expected = unassigned expr mvar) is a **named seam** unreachable from M4b-2 source. | `fun` terms (expected `None` and expected `∀`), incl. elided binder → bare-mvar domain |
 | **Plan 3** | `let` + `have` (letE/letFun-family forms + expected-type propagation); no new scheduler machinery | `let` / `have` terms |
 
 ## Plan 1 — local-context foundation, scheduler seam, universal-quantifier forms
+
+> **Superseded — historical (shipped as #28).** This section records the
+> *original* plan-1 design. What actually shipped differs in two ways,
+> both now canonical (see the plan-1 implementation plan and § Amendment):
+> (1) the closure `with_local_decl(name, ty, bi, f)` sketched below became
+> the flat `lctx_checkpoint` / `push_local_decl` / `lctx_restore` trio
+> (the closure could not reach the outer `TermElabM` state); (2) the
+> "TermElabM ladder fields" and "thin-but-real fixpoint" subsections were
+> **not** built — the entry point stayed `elab_term_ensuring_type →
+> instantiate_mvars`, since the dumper emits an unresolved hole as a bare
+> `mvar` (no error to verify). The universal-quantifier forms and the
+> `mk_forall` accessor shipped as described. Read the subsections below
+> for context, not as the shipped surface.
 
 ### The `MetaCtx` accessor family (additive, TCB-neutral, behavior-neutral)
 
@@ -217,90 +268,81 @@ Multi-binder groups nest `with_local_decl` left-to-right, collect
 `fvars` in order, then one `mk_forall` over all of them (matching the
 kernel's telescope abstraction).
 
-## Plan 2 — the `synthesizeSyntheticMVars` fixpoint and `fun`
+## Plan 2 — the `fun` elaborator (no scheduler)
 
-This plan concentrates M4b's stated fidelity risk. It mirrors the
-oracle's `synthesizeSyntheticMVars` exactly.
+Per § Amendment, the `synthesizeSyntheticMVars` fixpoint moves to M4b-3.
+Plan 2 ships `fun` alone, in the two expected-type shapes reachable from
+closed M4b-2 source, each differentially oracle-verified with **no**
+synthetic-mvar machinery.
 
-### State
+### The enabling fact
 
-```rust
-struct SyntheticMVarDecl { mvar: MVarId, ref_syntax: SynElem, kind: SyntheticMVarKind }
+An unassigned binder-type mvar behaves exactly like an M4b-1 `_` hole:
+`instantiate_mvars` leaves it as a bare `mvar`, and the oracle dumper
+(`expectedType := none`) emits the same bare `mvar`. So `fun (x) => …`
+with an elided, uninferrable binder type produces a `lam` whose domain is
+a bare `mvar` — no error, no fixpoint. The shipped `mk_fresh_expr_mvar`
+(M4b-1) is the binder-type source; nothing new is scheduled.
 
-enum SyntheticMVarKind {
-    TypeClass,                 // pending instance search (built now; see stated exception)
-    Postponed { expected: Option<ExprId>, lctx: LocalContext, level_names: Vec<NameId> },
-    // Coe { … }    → M4b-3       (named, not built)
-    // Tactic { … } → later M4    (named, not built)
-}
+### Grammar (confirmed against leanr's own parser, `term.rs:461-528`)
+
+```
+fun      := ("λ" | "fun") (basicFun | matchAlts)
+basicFun := many1(funBinder), optType, ("↦" | "=>"), body
+funBinder := strictImplicit | implicit | instBinder | term@maxPrec
 ```
 
-A `Postponed` decl carries its **own** `lctx` snapshot (like an mvar's
-declared local context): the fixpoint runs at the entry point after the
-outer elaboration has already restored the ambient `lctx`, so resumption
-must restore the saved context rather than assume the ambient one.
-`SynElem` is a rowan `NodeOrToken` (a cheap Arc-backed cursor), so
-capturing `ref_syntax` is cheap.
-
-### The fixpoint
-
-`synthesize_synthetic_mvars` (oracle `synthesizeSyntheticMVars`), run
-once at the entry point after `elab_term`, before `instantiate_mvars`:
-
-1. **Step pass** — walk `synthetic_mvars` in registration order; per
-   pending, unassigned mvar dispatch on kind:
-   - `TypeClass` → run the already-shipped `mctx.synth_instance(ty)`;
-     assign + drop on success, keep if stuck.
-   - `Postponed { expected, lctx, level_names }` → **resume**: restore
-     the saved `lctx`/`level_names`, re-run
-     `elab_term(ref_syntax, expected, may_postpone = false)`,
-     `is_def_eq`-assign the result into the mvar. A resumption that no
-     longer postpones is progress.
-   - Track whether the pass assigned anything.
-2. **No progress + may_postpone** → `synthesize_using_default` (apply
-   default instances at successively lower priority,
-   `may_postpone = false`); if it assigns anything, loop to step 1.
-3. **Still stuck** → drain `mvar_error_infos` into oracle-faithful
-   errors ("don't know how to synthesize implicit argument" /
-   placeholder).
-4. **Termination:** every pass either strictly shrinks the pending set
-   or transitions to the default→error phase; the pending set is finite
-   and never grows during synthesis, so the loop is bounded.
-
-If reading a pending `TypeClass` mvar's goal type requires an `MVarDecl`
-read that `leanr_meta` does not already expose, Plan 2 adds an
-additive read-accessor under the accessor precedent.
+- Only the **`basicFun`** arm is in scope; the **`matchAlts`** arm
+  (pattern-matching `fun`) is a **named seam** → the match slice (M4b-4).
+- A `funBinder` is **not** an `explicitBinder` node. A bare ident (`x`)
+  and a parenthesised binder (`(x : T)` / `(x)`) both arrive through the
+  `term@maxPrec` alternative — `x` as a bare ident token, `(x : T)` as a
+  `paren`/`typeAscription` **term** node. So `fun`'s binder extraction is
+  its **own** logic, deliberately **not** a reuse of plan 1's
+  `extract_binder_group` (which reads `explicitBinder`-family nodes).
+- `strictImplicit` / `implicit` / `instBinder` funBinders → **named seam
+  → M4b-3** (they need the implicit/instance-argument handling that
+  arrives with `elabApp`); no corpus term uses them.
+- **`optType`** (the `fun x : T => e` return-type ascription) → **named
+  seam → M4b-3**; keeps plan 2 to the minimal oracle-coverable core.
 
 ### The `fun` elaborator
 
 `Lean.Parser.Term.fun` → `elabFun` (`Binders.lean:678`) → `elabFunBinders`.
-The fixpoint's first real customer:
+Whnf the expected type once, then:
 
-- **expected is `∀ A, B` (after whnf):** match the binder domain against
-  `A` (explicit binder type ⇒ `is_def_eq dom A`; elided ⇒ `dom := A`),
-  elaborate the body with expected `B` under `with_local_decl (x : dom)`,
-  then `mk_lambda`.
-- **expected is an unassigned mvar `?m`:** `postpone_elab_term` — mint a
-  `Postponed` synthetic mvar capturing
-  `(ref_syntax, expected, lctx.clone(), level_names.clone())`, return it
-  as the result. The outer elaboration proceeds; the fixpoint resumes it
-  once `?m` is (maybe) assigned.
-- **expected is None:** each binder elaborated by its explicit type
-  (elided-and-uninferrable ⇒ oracle-faithful "failed to infer binder
-  type" error), body with expected None; `mk_lambda`.
+- **expected is `∀ A, B` (after whnf):** per binder, take the domain from
+  `A` (elided binder ⇒ `dom := A`; explicit `(x : T)` ⇒ elaborate `T` and
+  `is_def_eq(T, A)`), scope `push_local_decl (x : dom)`, recurse on the
+  telescope with expected `B`; body elaborated with the residual expected;
+  `mk_lambda` over the collected fvars.
+- **expected is None:** per binder, explicit `(x : T)` ⇒ elaborate `T`;
+  elided `x` ⇒ fresh `mk_fresh_expr_mvar` domain (surfaces as a bare
+  `mvar`); scope `push_local_decl`; body elaborated with expected None;
+  `mk_lambda`.
+- **expected is an unassigned expr mvar `?m` (after whnf):** the oracle's
+  `postpone_elab_term` path. **Unreachable from any M4b-2 source term**
+  (needs application to arise), so this branch is a **named seam** →
+  M4b-3: it returns `ElabError::UnsupportedSyntax` with a
+  "fun postponement requires application (M4b-3)" note rather than
+  shipping a resume path the oracle cannot exercise this slice.
 
-### Stated exception: `TypeClass` has no M4b-2 source producer
+Binder scoping reuses plan 1's `lctx_checkpoint`/`push_local_decl`/
+`lctx_restore` trio (restore on every exit path, `Err` included) exactly
+as the `∀` telescope driver does.
 
-M4b-2 has no application elaborator, so nothing **creates** a `TypeClass`
-synthetic mvar from source — instance arguments arrive with `elabApp` in
-M4b-3. Per the "full ladder now" scope decision, the `TypeClass` +
-default-instance drain code is **built** in Plan 2 but has **no green
-entry in the differential corpus** this slice. It is instead covered by
-a targeted `leanr_elab` unit test that directly injects a `TypeClass`
-synthetic mvar over a real instance goal (e.g. `Inhabited Nat`) and
-asserts the fixpoint drains it via `synth_instance`. The
-oracle-differential corpus exercises only `Postponed` (via `fun`) in this
-slice. This mirrors M4b-1's stated-exception discipline.
+### New accessor: `MetaCtx::mk_lambda` (additive, TCB-neutral)
+
+The `mkLambdaFVars` twin of plan 1's `mk_forall`: the same
+`abstract_fvars` + build loop, emitting `Expr::lam` instead of
+`Expr::forallE`. Additive and behavior-neutral under the M4b accessor
+precedent (`with_let_decl` / `mk_let_expr` remain plan 3's additions).
+
+### Entry point / state: unchanged
+
+No `synthesize_synthetic_mvars`, no ladder fields, no `may_postpone`
+threading. The pipeline stays `elab_term_ensuring_type →
+instantiate_mvars` exactly as plan 1 left it.
 
 ## Plan 3 — `let` and `have`
 
@@ -322,18 +364,24 @@ seam.
 ## Verification
 
 - **Corpus.** `elab-queries.jsonl` grows one tier per plan
-  (`∀`/`→`/`(x:A)→B`; `fun` + postpone→resume; `let`/`have`). Inputs
-  stay **closed source-text** — `fun (x:A) => x` is closed even though
-  its body elaborates under a local context — so the harness shape from
-  M4b-1 carries over: leanr parse (its own parser) → elaborate →
-  `synthesize_synthetic_mvars` → `instantiate_mvars` → byte-compare
-  against the oracle's canonical `Expr` after canonicalization.
+  (plan 1: `∀`/`→`/`(x:A)→B` — shipped; plan 2: `fun`; plan 3:
+  `let`/`have`). Inputs stay **closed source-text** — `fun (x:A) => x`
+  is closed even though its body elaborates under a local context — so
+  the harness shape from M4b-1 carries over: leanr parse (its own
+  parser) → elaborate → `instantiate_mvars` → byte-compare against the
+  oracle's canonical `Expr` after canonicalization. (No
+  `synthesize_synthetic_mvars` step — that pipeline change lands in
+  M4b-3 with the fixpoint; see § Amendment.)
+- **Plan 2 corpus terms** (all closed, all oracle-verified): `fun (x :
+  Nat) => x`; `fun (x : Nat) (y : Nat) => x` (nested `lam`, body `bvar
+  1`); `fun x => x` (elided → `lam` with a bare-`mvar` domain);
+  `(fun x => x : Nat → Nat)` (∀ expected, elided domain from `A`);
+  `(fun (x : Nat) => x : Nat → Nat)` (∀ expected, explicit domain via
+  `is_def_eq`).
 - **Regeneration.** The oracle-side dumper (`dump_elab.lean` behind
   `mise run fixtures:regen`) is extended with the new terms; the
   committed `Elab0.olean` gains any constants they reference. Hermetic —
   CI never installs Lean (`docs/ORACLE.md`).
-- **The `TypeClass`/default-instance drain** is covered by the targeted
-  unit test (§ Plan 2 stated exception), not the differential corpus.
 - **Gate wiring.** The existing `oracle_elab.rs` regression gate runs
   under `mise run meta:fast` and plain `mise run test`; no new nightly.
 
@@ -341,22 +389,34 @@ seam.
 
 - Every new dispatch arm (`forall`/`arrow`/`depArrow`/`fun`/`let`/`have`)
   is a named seam; unknown kinds still fall through to
-  `UnsupportedSyntax`.
-- New oracle-faithful `ElabError` variants as needed: unassigned-mvar /
-  placeholder (Plan 1), "failed to infer binder type" for elided,
-  uninferrable `fun` binders (Plan 2), type-mismatch via the existing
-  `ensure_has_type` → `is_def_eq` seam.
-- `with_local_decl` / `with_let_decl` restore the local context on
-  **every** exit path including `Err`, so a failed body elaboration never
-  leaks a decl into the ambient `lctx`.
-- The fixpoint's error pass (`mvar_error_infos`) reports remaining
-  unassigned synthetic mvars with the oracle's message shape, verified by
-  the error-parity corpus entries.
+  `UnsupportedSyntax`. Within `fun`, the `matchAlts` arm, the
+  implicit/strict/instance funBinders, `optType`, and the
+  expected-unassigned-mvar postpone branch are each their own named seam
+  → M4b-3 / match slice (§ Plan 2).
+- An elided, uninferrable `fun` binder type is **not** an error: it is a
+  fresh mvar that `instantiate_mvars` leaves as a bare `mvar` (§ Plan 2
+  enabling fact), matching the oracle dumper's `expectedType := none`
+  emission. Type-mismatch on the `∀`-expected explicit-binder path flows
+  through the existing `is_def_eq` seam (`ElabError::TypeMismatch`);
+  coercion insertion on that mismatch is M4b-3.
+- The plan-1 telescope bracket (`lctx_checkpoint` / `push_local_decl` /
+  `lctx_restore`, and plan 3's `with_let_decl`) restores the local
+  context on **every** exit path including `Err`, so a failed body
+  elaboration never leaks a decl into the ambient `lctx`.
+- The fixpoint's error pass (`mvarErrorInfos`) is deferred to M4b-3 with
+  the rest of the scheduler (§ Amendment).
 
 ## Out of scope (each names the slice that owns it)
 
 - application / `@` / named / optional args, coercions, num/char
   literals — M4b-3
+- **the entire `synthesizeSyntheticMVars` fixpoint** (postponement
+  resume, `TypeClass` drain, `synthesizeUsingDefault`, `mvarErrorInfos`),
+  the `TermElabM` ladder fields, the entry-point pipeline change, and
+  `mayPostpone` threading — M4b-3 (§ Amendment; each first gets a source
+  producer and differential coverage there)
+- `fun`'s `matchAlts` (pattern-matching) arm — M4b-4 / match slice;
+  `fun` implicit/strict/instance funBinders and `optType` — M4b-3
 - `elabAsElim`, dot notation, `binop%`, anonymous constructor `⟨⟩` —
   M4b-4
 - macro expansion in dispatch, `by` tactic blocks, **`show`** (both
