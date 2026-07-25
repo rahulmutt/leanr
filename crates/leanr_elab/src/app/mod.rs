@@ -13,3 +13,4 @@
 //!   elabAsElim, dot notation, LVal machinery ............. M4b-4
 
 pub mod expand;
+pub mod state;

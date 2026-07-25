@@ -75,3 +75,44 @@ fn expand_app_rejects_duplicate_named_arg() {
         other => panic!("expected DuplicateNamedArg, got {other:?}"),
     }
 }
+
+mod support;
+
+/// `f_type_is_forall` must WHNF a non-forall `fType` into one and cache
+/// the result (oracle: `fTypeIsForall`, `App.lean:238-249`), and report
+/// false without mutating `fType` when it does not reduce to a forall.
+#[test]
+fn f_type_is_forall_whnfs_and_caches() {
+    support::with_app_harness("Nat.succ", |app| {
+        // `Nat.succ : Nat -> Nat` is already a forall.
+        assert!(app.f_type_is_forall().unwrap());
+        let cached = app.st.f_type;
+        assert!(app.f_type_is_forall().unwrap());
+        assert_eq!(app.st.f_type, cached, "second call must not re-reduce");
+    });
+}
+
+#[test]
+fn f_type_is_forall_false_for_non_function() {
+    support::with_app_harness("Nat.zero", |app| {
+        assert!(
+            !app.f_type_is_forall().unwrap(),
+            "Nat.zero : Nat is not a function type"
+        );
+    });
+}
+
+/// `get_param_info` reads the CURRENT parameter's binder info, and
+/// `param_idx` tracks `f_args.len()` (oracle: `State.paramIdx`,
+/// `App.lean:230`).
+#[test]
+fn param_idx_tracks_f_args_len() {
+    support::with_app_harness("Nat.succ", |app| {
+        assert_eq!(app.param_idx(), 0);
+        assert!(app.f_type_is_forall().unwrap());
+        assert_eq!(
+            app.get_param_info().unwrap(),
+            leanr_kernel::BinderInfo::Default
+        );
+    });
+}
