@@ -416,10 +416,10 @@ Additive, TCB-neutral, behavior-neutral public accessors, by plan:
 
 | Plan | Additions |
 |---|---|
-| P1 | `whnf_r`, `instantiate_beta_rev_range`, `mk_arrow` |
+| P1 | `instantiate_beta_rev_range` — and only this one. `Expr` destructuring (`fTypeIsForall`, `bindingDomain!`, `getAppFn`) uses the already-public `Store::expr_node` (`leanr_kernel/src/bank/terms.rs:615`) via `mctx.store()` + `view.store`, and `whnfForall` composes from the public `MetaCtx::whnf`, so neither needs an accessor. `instantiate_beta_rev_range` does: its beta step needs `whnf.rs`'s `beta_rev`/`head_beta`, which are `pub(crate)`. |
 | P2 | `process_postponed` + the postponed-queue checkpoint, `default_instances` (currently `pub(crate)`, `instances.rs:520`), `with_assignable_synthetic_opaque` config toggle |
 | P3 | `get_dec_level`, `mk_raw_nat_lit` |
-| P4 | `unfold_definition`, `get_level`, and the **new modules** `coe.rs` + `transform.rs` (§ Global constraints — the one deliberate widening) |
+| P4 | `unfold_definition`, `get_level`, `whnf_r`, `mk_arrow`, and the **new modules** `coe.rs` + `transform.rs` (§ Global constraints — the one deliberate widening) |
 | P5 | none expected |
 
 ## Error handling
