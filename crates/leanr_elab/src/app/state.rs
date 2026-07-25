@@ -202,7 +202,17 @@ impl<'a, 'e> AppElab<'a, 'e> {
 
     /// oracle: `Expr.consumeTypeAnnotations` — strip `optParam _ _` and
     /// `autoParam _ _` wrappers from the head.
-    fn consume_type_annotations(&mut self, mut t: ExprId) -> Result<ExprId, ElabError> {
+    ///
+    /// `pub(crate)` for `app::args::has_opt_or_auto_param`, which applies
+    /// it to EVERY binder type in the remaining telescope, not just the
+    /// current parameter's (`App.lean:873`'s `hasOptAutoParams
+    /// (← getFType)`). Safe on a binder type carrying LOOSE BVARS (a
+    /// deeper binder's domain may reference an earlier binder): this only
+    /// walks the application spine and reads the head's `Const` name,
+    /// never instantiating or inferring, so an un-instantiated bvar is
+    /// simply a spine node that is not a `Const` and falls through the
+    /// `_ => return Ok(t)` arm.
+    pub(crate) fn consume_type_annotations(&mut self, mut t: ExprId) -> Result<ExprId, ElabError> {
         loop {
             let (f, arg0) = match self.app_fn_and_first_arg(t) {
                 Some(pair) => pair,

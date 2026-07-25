@@ -9,6 +9,7 @@
 //! inside `AppElab` alongside the `&mut TermElabM` would add a lifetime
 //! parameter that buys nothing.
 
+use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, NameId};
 use leanr_kernel::BinderInfo;
 use leanr_syntax::kind::KindInterner;
@@ -119,15 +120,47 @@ fn process_explicit_arg(
     Ok(false)
 }
 
-/// oracle: `hasOptAutoParams` (`App.lean:121-127`) restricted to the
-/// CURRENT parameter — enough to detect the deferred default-filling
-/// path without walking the whole remaining telescope (Task 7 widens
-/// this to the oracle's full `forallTelescopeReducing` form, which the
-/// eta decision needs).
+/// oracle: `hasOptAutoParams` (`App.lean:121-127`) over the WHOLE
+/// remaining telescope, as `App.lean:873`'s `hasOptAutoParams
+/// (← getFType)` demands — `getFType` is the entire remaining function
+/// type, not the current parameter's.
+///
+/// The narrower current-parameter-only test the plan originally
+/// specified here is a named-seam hole, not just an imprecision: for
+/// `f : (a : Nat) → (b : Nat := 0) → Nat` applied with no positional
+/// arguments, the oracle takes `addEtaArg` and builds `fun a => f a 0`,
+/// while a test that finds no wrapper on `a` would return `false` and
+/// let `main` finalize the bare partial application `f` — a DIFFERENT
+/// term, silently, with no error and no seam. Over-detection is the
+/// safe direction: it can only turn a would-be-wrong term into a named
+/// `UnsupportedSyntax`.
+///
+/// Task 7 replaces this with the oracle's full
+/// `forallTelescopeReducing` form (which WHNFs each body as it goes,
+/// and which the eta decision needs anyway); this walks the already-
+/// instantiated spine without reducing, which is strictly more
+/// conservative — a telescope that only reveals a wrapper after
+/// reduction is missed here, and Task 7 closes that.
 fn has_opt_or_auto_param(app: &mut AppElab) -> Result<bool, ElabError> {
-    let raw = app.get_param_type()?;
-    let stripped = app.get_arg_expected_type()?;
-    Ok(raw != stripped)
+    // oracle: `(← getFType)` — the remaining type with every argument
+    // consumed so far instantiated into it.
+    let mut cur = app.get_f_type()?;
+    // Walking into `body` carries LOOSE BVARS (a deeper binder's domain
+    // may reference an earlier binder of this same telescope). That is
+    // fine: `consume_type_annotations` only walks the application spine
+    // and reads the head's `Const` name — it never instantiates, infers,
+    // or reduces — so a loose bvar is just a non-`Const` head it falls
+    // through on. See that method's own doc comment.
+    while let Node::Forall {
+        binder_type, body, ..
+    } = app.node(cur)
+    {
+        if app.consume_type_annotations(binder_type)? != binder_type {
+            return Ok(true);
+        }
+        cur = body;
+    }
+    Ok(false)
 }
 
 /// oracle: `addNewArg` (`App.lean:418-429`) — `f := f arg`, push onto
@@ -137,7 +170,7 @@ fn has_opt_or_auto_param(app: &mut AppElab) -> Result<bool, ElabError> {
 /// source of truth).
 pub fn add_new_arg(app: &mut AppElab, arg: ExprId) -> Result<(), ElabError> {
     let body = match app.node(app.st.f_type) {
-        leanr_kernel::bank::terms::Node::Forall { body, .. } => body,
+        Node::Forall { body, .. } => body,
         _ => {
             return Err(ElabError::IllFormedSyntax(
                 "add_new_arg on a non-forall fType".to_string(),
