@@ -20,6 +20,14 @@ pub enum ElabError {
         got: ExprId,
     },
     Meta(MetaError),
+    /// oracle: `addNamedArg`'s "Argument `x` was already set"
+    /// (`Arg.lean:55-59`).
+    DuplicateNamedArg(String),
+    /// A syntax node whose shape contradicts the grammar (missing child,
+    /// wrong node/token variant, a non-trailing `..`). Distinct from
+    /// `UnsupportedSyntax`, which means "this construct's slice has not
+    /// landed"; this means "this tree cannot be what it claims to be".
+    IllFormedSyntax(String),
 }
 
 impl From<MetaError> for ElabError {

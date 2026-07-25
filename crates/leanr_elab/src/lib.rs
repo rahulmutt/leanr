@@ -41,6 +41,7 @@
 //! See `dispatch.rs`'s own doc comment for the exact deferral list and
 //! the named-seam audit (Task 7) confirming nothing above is silently
 //! skipped.
+pub mod app; // M4b-3 P1
 pub mod builtin; // Tasks 4-6
 pub mod dispatch;
 pub mod elab;
