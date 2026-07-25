@@ -42,6 +42,17 @@ fn expand_app_collects_named_args() {
     let (_head, named, args, _e) = expand_app(&node, &parsed.tree.kinds).unwrap();
     assert_eq!(named.len(), 1, "named args: {:?}", named.len());
     assert_eq!(named[0].name, "n");
+    let val_text = match &named[0].val {
+        Arg::Stx(el) => match el {
+            leanr_syntax::tree::NodeOrToken::Token(t) => t.text().to_string(),
+            leanr_syntax::tree::NodeOrToken::Node(n) => n.text().to_string(),
+        },
+        other => panic!("expected Arg::Stx, got {other:?}"),
+    };
+    assert_eq!(
+        val_text, "Nat.zero",
+        "named arg's value must be the `:=` RHS (stx[3]), not a punctuation atom"
+    );
     assert!(args.is_empty(), "a named arg is not positional");
 }
 
