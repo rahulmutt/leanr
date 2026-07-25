@@ -81,6 +81,7 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
         "Lean.Parser.Term.fun" => Some("fun"),
         "Lean.Parser.Term.let" => Some("let"),
         "Lean.Parser.Term.have" => Some("have"),
+        "Lean.Parser.Term.app" => Some("app"),
         _ => None,
     }
 }
@@ -106,13 +107,22 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 /// Deferred (each hits `UnsupportedSyntax` until its slice lands):
 /// ```text
 ///   letI / haveI / let_fun / let_delayed / let_tmp / letrec  later slice (own oracle tier each)
-///   application, @, named/optional args ........ M4b-3
-///   num / char literals (OfNat / Char.ofNat) ... M4b-3
-///   coercions (mkCoe) .......................... M4b-3
+///   implicit / strict-implicit insertion ....... M4b-3 P1 task 5
+///   named arguments, eta expansion ............. M4b-3 P1 task 7
+///   @ explicit mode, .{u} explicit universes ... M4b-3 P1 task 8
+///   instance-implicit args + mvar fixpoint ..... M4b-3 P2
+///   num / char literals (OfNat / Char.ofNat) ... M4b-3 P3
+///   coercions (CoeT / CoeFun / CoeSort, mkCoe) . M4b-3 P4
+///   optParam defaults / autoParam / `..` ....... M4b-3 P5
+///   implicit-lambda insertion .................. M4b-3 P5
 ///   elabAsElim, dot-notation, binop%, ⟨⟩ ....... M4b-4
 ///   macro expansion in dispatch ................ first macro-form slice
 ///   open / alias / export / _root_ resolution .. later slice
 /// ```
+/// The application arms above are registered, so the `M4b-3` seams in
+/// that list are raised from INSIDE `app::args`/`app::finalize`/
+/// `app::head` (each naming its owning slice) rather than from this
+/// table's catch-all.
 /// (`Lean.Parser.Level.max`/`.imax`/`.paren`/`.addLit`, the level-scope
 /// analogue of the above, are named seams inside `elab_level` itself —
 /// see `builtin::sort`'s own module doc — rather than this table, since
@@ -126,7 +136,15 @@ pub fn dispatch(
     let name = kinds.name(elem.kind());
     match (name, elem) {
         ("str", NodeOrToken::Node(node)) => crate::builtin::lit::elab_str(elab, node, kinds),
-        ("<ident>", NodeOrToken::Token(tok)) => crate::builtin::ident::elab_ident(elab, tok, kinds),
+        // A bare identifier is a ZERO-ARGUMENT APPLICATION, not a leaf:
+        // `elabIdent := elabAtom` (`App.lean:2246`). M4b-1's
+        // `builtin/ident.rs` was a simplification of exactly this path
+        // and is gone; its constant resolution now lives in
+        // `app::head::elab_app_fn` (M4b-3 P1 task 4).
+        ("<ident>", NodeOrToken::Token(_)) => crate::app::elab_atom(elab, elem, kinds, expected),
+        ("Lean.Parser.Term.app", NodeOrToken::Node(node)) => {
+            crate::app::elab_app(elab, node, kinds, expected)
+        }
         ("Lean.Parser.Term.prop", NodeOrToken::Node(node)) => {
             crate::builtin::sort::elab_prop(elab, node, kinds)
         }

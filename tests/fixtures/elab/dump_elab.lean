@@ -280,6 +280,19 @@ def haveQueries : List (String × String) := [
   ("have/ascribed", "(have h : Nat := Nat.zero; h : Nat)")
 ]
 
+/-- M4b-3 P1 task 4: EXPLICIT-argument applications only. `Nat.succ`
+takes one explicit `Nat` and no implicit/instance parameters, so these
+exercise `ElabAppArgs.main`'s `processExplicitArg` arm, `addNewArg`, and
+`finalize` with an empty `etaArgs`/`instMVars` — no implicit insertion
+(task 5), no expected-type propagation (task 6), no instance synthesis
+(P2). `app/nested` checks that the inner application elaborates through
+the same path as an argument. -/
+def appExplicitQueries : List (String × String) :=
+  [ ("app/succZero",  "Nat.succ Nat.zero")
+  , ("app/nested",    "Nat.succ (Nat.succ Nat.zero)")
+  , ("app/ascribed",  "(Nat.succ Nat.zero : Nat)")
+  ]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -293,7 +306,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>

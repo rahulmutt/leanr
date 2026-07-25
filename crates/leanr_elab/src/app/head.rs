@@ -1,56 +1,76 @@
-//! The identifier leaf: an identifier resolving to a global constant
-//! elaborates to `Expr.const name levels`, with ONE FRESH universe
-//! level metavariable per the constant's `levelParams` — oracle:
-//! `Lean.Elab.Term.elabIdent` (`Lean/Elab/App.lean:2246`, `:= elabAtom`)
-//! reduces, for a bare identifier with no application/explicit
-//! universes/dot-notation (this slice's scope — see `resolve.rs`'s own
-//! doc comment), to `Lean.Elab.Term.resolveName`/`resolveName'`
-//! (`Lean/Elab/Term/TermElabM.lean:2170`, `:2201`) calling `mkConsts`
-//! (`:2145`) calling `Lean.Elab.Term.mkConst`
-//! (`Lean/Elab/Term/TermElabM.lean:2117-2126`): "Create an `Expr.const`
-//! using the given name and explicit levels. Remark: fresh universe
-//! metavariables are created if the constant has more universe
-//! parameters than `explicitLevels`" — slice 1 has no `.{...}` explicit
-//! universe syntax, so `explicitLevels` is always empty and EVERY
-//! `levelParams` entry gets its own fresh mvar.
+//! `elabAppFn`: resolve the application head to a candidate list.
+//! Oracle: `App.lean`'s `elabAppFn` ident case, which for a bare
+//! identifier reduces to `resolveName`/`mkConsts`/`mkConst`
+//! (`Lean/Elab/Term/TermElabM.lean:2117-2126`, `:2145`, `:2170`).
+//!
+//! This file is where M4b-1's `builtin/ident.rs` went. That module was
+//! a SIMPLIFICATION, not a layer: `elabIdent := elabAtom`
+//! (`App.lean:2246`), so a bare identifier is a zero-argument
+//! application in the oracle and its implicit parameters are inserted
+//! by `ElabAppArgs.main` like any other application's. Keeping a
+//! separate leaf path would diverge on every polymorphic constant.
+//!
+//! Returns a Vec because the oracle's `elabAppFn` returns a candidate
+//! ARRAY (overloaded names). Exactly-one is the only P1 shape; see
+//! `overload.rs`.
 
-use leanr_kernel::bank::ExprId;
+use leanr_kernel::bank::{ExprId, LevelId, NameId};
 use leanr_syntax::kind::KindInterner;
-use leanr_syntax::tree::SyntaxToken;
 
+use crate::dispatch::SynElem;
 use crate::elab::TermElabM;
 use crate::error::ElabError;
 use crate::resolve::resolve_global;
 
-/// `tok` is the `ident` syntax TOKEN itself — NOT a `SyntaxNode` (Task 5
-/// reconciliation, see `dispatch.rs`'s own module doc: a bare identifier
-/// is an unwrapped rowan leaf token, `Prim::Ident`'s `self.bump(t,
-/// KIND_IDENT)`, never node-wrapped the way `str`/`num`/`char` are).
-/// Its `.text()` is the identifier's raw source text — a single lexer
-/// token that already includes every `.`-separated component
-/// (`leanr_syntax::lex`'s `hierarchical_idents_are_one_token`), so a
-/// dotted name like `Nat.succ` arrives here as ONE string, split below
+pub fn elab_app_fn(
+    elab: &mut TermElabM,
+    elem: &SynElem,
+    kinds: &KindInterner,
+    explicit_levels: &[LevelId],
+) -> Result<Vec<ExprId>, ElabError> {
+    match (kinds.name(elem.kind()), elem) {
+        ("<ident>", leanr_syntax::tree::NodeOrToken::Token(tok)) => {
+            Ok(vec![elab_ident_head(elab, tok.text(), explicit_levels)?])
+        }
+        (other, _) => Err(ElabError::UnsupportedSyntax(format!(
+            "application head `{other}` — dot notation / LVal machinery is M4b-4"
+        ))),
+    }
+}
+
+/// The former `builtin::ident::elab_ident`, plus `explicit_levels`
+/// (Task 8's `.{u}`): oracle `mkConst` creates fresh universe mvars only
+/// for the levelParams NOT covered by explicit levels
+/// (`TermElabM.lean:2117-2126`) — "Create an `Expr.const` using the
+/// given name and explicit levels. Remark: fresh universe metavariables
+/// are created if the constant has more universe parameters than
+/// `explicitLevels`". Until Task 8 lands `.{...}` syntax there is no
+/// producer of a non-empty `explicit_levels`, so every `levelParams`
+/// entry gets its own fresh mvar, exactly as M4b-1's leaf elaborator did.
+///
+/// `raw` is the identifier's raw source text — a single lexer token that
+/// already includes every `.`-separated component (`leanr_syntax::lex`'s
+/// `hierarchical_idents_are_one_token`), so a dotted name like
+/// `Nat.succ` arrives here as ONE string, split by `intern_dotted` below
 /// exactly the way every other dotted-name builder in this workspace
 /// does (`leanr_meta`'s own `intern_dotted`/`dotted_name` test helpers,
 /// `pub(crate)`/test-only there and so not reusable from this crate).
-pub fn elab_ident(
+fn elab_ident_head(
     elab: &mut TermElabM,
-    tok: &SyntaxToken,
-    _kinds: &KindInterner,
+    raw: &str,
+    explicit_levels: &[LevelId],
 ) -> Result<ExprId, ElabError> {
-    let raw = tok.text();
     let name = intern_dotted(elab, raw)?;
-    // Task 3 (binders) addition: a local variable shadows a same-named
-    // global constant, and must be checked FIRST — oracle: `elabIdent`
-    // consults the local context before falling back to
-    // `resolveGlobalConst`. `MetaCtx::lctx_lookup_by_name` (leanr_meta,
-    // additive/TCB-neutral, mirroring the oracle's own
-    // `LocalContext.findFromUserName?`) is a no-op (`None`) whenever
-    // `lctx` is empty — every leaf query that never enters a binder falls
-    // straight through to `resolve_global` exactly as before this
-    // existed. Bypasses `resolve_global`/fresh-level-mvar minting
-    // entirely on a hit: an fvar carries no separate `levelParams` the
-    // way a global constant does.
+    // M4b-2 (binders): a local variable shadows a same-named global
+    // constant, and must be checked FIRST — oracle: `elabIdent` consults
+    // the local context before falling back to `resolveGlobalConst`.
+    // `MetaCtx::lctx_lookup_by_name` (leanr_meta, additive/TCB-neutral,
+    // mirroring the oracle's own `LocalContext.findFromUserName?`) is a
+    // no-op (`None`) whenever `lctx` is empty — every query that never
+    // enters a binder falls straight through to `resolve_global` exactly
+    // as before this existed. Bypasses `resolve_global`/fresh-level-mvar
+    // minting entirely on a hit: an fvar carries no separate
+    // `levelParams` the way a global constant does.
     if let Some(fvar) = elab.mctx.lctx_lookup_by_name(name) {
         return Ok(fvar);
     }
@@ -67,8 +87,14 @@ pub fn elab_ident(
         .get(cname)
         .expect("resolve_global only returns names EnvView::get resolves");
     let n_params = info.constant_val().level_params.len();
+    // oracle: `mkConst` errors when the user wrote MORE explicit levels
+    // than the constant has parameters, rather than truncating.
+    if explicit_levels.len() > n_params {
+        return Err(ElabError::TooManyUniverseLevels(raw.to_string()));
+    }
     let mut levels = Vec::with_capacity(n_params);
-    for _ in 0..n_params {
+    levels.extend_from_slice(explicit_levels);
+    for _ in explicit_levels.len()..n_params {
         levels.push(elab.mk_fresh_level_mvar()?);
     }
     // `base = Some(elab.view.store)` from here on: `cname` is a
@@ -84,7 +110,9 @@ pub fn elab_ident(
     // read the WRONG name row in a release build per that same method's
     // documented hazard). The freshly-minted `levels` are pure scratch
     // data with nothing to dedup against, so `intern_level_list` keeps
-    // `base = None`.
+    // `base = None` (Task 8, which first supplies a non-empty
+    // `explicit_levels`, must re-check that: a caller-supplied `LevelId`
+    // is no longer guaranteed to be freshly-minted scratch data).
     let base = elab.view.store;
     let levels_id = elab
         .mctx
@@ -121,9 +149,9 @@ pub fn elab_ident(
 /// with `base = None` — is `EnvView::get_with`'s own documented
 /// misrouting hazard, which is how the divergence surfaced as an
 /// unrelated existing name (`Nat.brecOn.go`) rather than a clean miss).
-fn intern_dotted(elab: &mut TermElabM, raw: &str) -> Result<leanr_kernel::bank::NameId, ElabError> {
+pub(super) fn intern_dotted(elab: &mut TermElabM, raw: &str) -> Result<NameId, ElabError> {
     let base = elab.view.store;
-    let mut id: Option<leanr_kernel::bank::NameId> = None;
+    let mut id: Option<NameId> = None;
     for part in raw.split('.') {
         let store = elab.mctx.store_mut();
         let s = store
@@ -150,9 +178,8 @@ mod tests {
     /// A tiny persistent env declaring one axiom `Foo : Sort 0`, built
     /// directly against the public id-native API — same shape as
     /// `resolve::tests::env_with_foo` (duplicated rather than shared:
-    /// this task's scope is `resolve.rs`/`builtin/ident.rs`/
-    /// `builtin/lit.rs` only, and the two `#[cfg(test)]` modules are
-    /// compiled as entirely separate units with no path between them).
+    /// the two `#[cfg(test)]` modules are compiled as entirely separate
+    /// units with no path between them).
     fn env_with_foo() -> Environment {
         let mut env = Environment::default();
         let prop = {
@@ -177,9 +204,10 @@ mod tests {
         env
     }
 
-    /// The regression this task exists for: `elab_ident`'s OWN pipeline
-    /// (`intern_dotted` then `resolve_global`) on an identifier NOT
-    /// declared in `env` — unlike `resolve::tests::
+    /// The regression M4b-1's `builtin/ident.rs` carried, moved here
+    /// with the code it guards (M4b-3 P1 task 4): `elab_ident_head`'s
+    /// OWN pipeline (`intern_dotted` then `resolve_global`) on an
+    /// identifier NOT declared in `env` — unlike `resolve::tests::
     /// unknown_ident_when_not_declared`, which mints the unknown name
     /// directly in the PERSISTENT store and so never reproduces the bug:
     /// `intern_dotted` mints a SCRATCH-region `NameId` for any name not
@@ -188,13 +216,12 @@ mod tests {
     /// pre-fix `resolve_global` (which re-derived the error text via
     /// `view.store.to_name(None, Some(name))`, `view.store` being the
     /// PERSISTENT store, on a SCRATCH-region `name`) this test either
-    /// panicked in `name_row`'s `.expect(..)` or — as observed here,
+    /// panicked in `name_row`'s `.expect(..)` or — as observed then,
     /// since the persistent pool from `env_with_foo` is non-empty —
     /// silently returned the WRONG identifier text (a row from the
     /// persistent pool, not "Bar"). Post-fix, `resolve_global` takes the
-    /// display text verbatim from `elab_ident`'s own `raw` (the token's
-    /// real source text), so this passes without touching the store at
-    /// all for the error path.
+    /// display text verbatim from the token's real source text, so this
+    /// passes without touching the store at all for the error path.
     #[test]
     fn unknown_ident_via_real_scratch_pipeline() {
         let env = env_with_foo();
@@ -225,7 +252,7 @@ mod tests {
             other => panic!("expected a bare ident token, got {other:?}"),
         };
 
-        match super::elab_ident(&mut elab, &tok, &parsed.tree.kinds) {
+        match super::elab_ident_head(&mut elab, tok.text(), &[]) {
             Err(crate::ElabError::UnknownIdent(s)) => assert_eq!(s, "Bar"),
             other => panic!("expected UnknownIdent(\"Bar\"), got {other:?}"),
         }

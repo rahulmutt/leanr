@@ -52,3 +52,6 @@
 {"exp":{"b":{"b":{"i":0,"k":"bvar"},"k":"let","nd":true,"t":{"k":"const","n":"Nat","us":[]},"v":{"i":0,"k":"bvar"}},"k":"let","nd":true,"t":{"k":"const","n":"Nat","us":[]},"v":{"k":"const","n":"Nat.zero","us":[]}},"id":"have/nested","src":"have h : Nat := Nat.zero; have g : Nat := h; g"}
 {"exp":{"b":{"i":0,"k":"bvar"},"k":"let","nd":true,"t":{"b":{"k":"const","n":"Nat","us":[]},"bi":"d","k":"pi","t":{"k":"const","n":"Nat","us":[]}},"v":{"b":{"i":0,"k":"bvar"},"bi":"d","k":"lam","t":{"k":"const","n":"Nat","us":[]}}},"id":"have/funValue","src":"have f : Nat -> Nat := fun y => y; f"}
 {"exp":{"b":{"i":0,"k":"bvar"},"k":"let","nd":true,"t":{"k":"const","n":"Nat","us":[]},"v":{"k":"const","n":"Nat.zero","us":[]}},"id":"have/ascribed","src":"(have h : Nat := Nat.zero; h : Nat)"}
+{"exp":{"a":{"k":"const","n":"Nat.zero","us":[]},"f":{"k":"const","n":"Nat.succ","us":[]},"k":"app"},"id":"app/succZero","src":"Nat.succ Nat.zero"}
+{"exp":{"a":{"a":{"k":"const","n":"Nat.zero","us":[]},"f":{"k":"const","n":"Nat.succ","us":[]},"k":"app"},"f":{"k":"const","n":"Nat.succ","us":[]},"k":"app"},"id":"app/nested","src":"Nat.succ (Nat.succ Nat.zero)"}
+{"exp":{"a":{"k":"const","n":"Nat.zero","us":[]},"f":{"k":"const","n":"Nat.succ","us":[]},"k":"app"},"id":"app/ascribed","src":"(Nat.succ Nat.zero : Nat)"}

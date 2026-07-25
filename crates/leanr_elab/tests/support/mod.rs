@@ -28,10 +28,10 @@ pub use meta_support::*;
 /// Construction mirrors `oracle_elab.rs:29-93` verbatim: replay the
 /// fixture env, build a scratch `Store` + `MetaCtx` + `TermElabM`,
 /// parse `head_src` through leanr's own parser, and elaborate it via
-/// `elab_term` — which for a bare identifier still routes to M4b-1's
-/// `builtin::ident` until Task 4 rewires application heads through
-/// `AppElab::main`. The elaborated head's inferred type seeds
-/// `State.f_type`.
+/// `elab_term` — which for a bare identifier routes through
+/// `app::elab_atom` (a zero-argument application) since Task 4 retired
+/// M4b-1's leaf `builtin::ident`. The elaborated head's inferred type
+/// seeds `State.f_type`.
 pub fn with_app_harness<R>(
     head_src: &str,
     k: impl FnOnce(&mut leanr_elab::app::state::AppElab) -> R,
