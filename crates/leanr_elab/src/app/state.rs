@@ -120,11 +120,21 @@ impl<'a, 'e> AppElab<'a, 'e> {
                 .mctx
                 .instantiate_beta_rev_range(binder_type, &args)?;
             if d != binder_type {
+                // `body` is the original Forall's child, very likely a
+                // PERSISTENT-region `ExprId` (`self.node`/
+                // `consume_type_annotations` both use this exact
+                // `base = Some(view.store)` pairing for the same
+                // reason) — `base = None` would route a persistent id
+                // through the scratch store's own row space
+                // (`Store::store_for`), a silent wrong-row read in
+                // release builds (caught only by a `debug_assert!` in
+                // debug builds).
+                let base = self.elab.view.store;
                 let f_type = self
                     .elab
                     .mctx
                     .store_mut()
-                    .expr_forall(None, binder_name, d, body, binder_info)
+                    .expr_forall(Some(base), binder_name, d, body, binder_info)
                     .map_err(leanr_meta::MetaError::from)?;
                 self.st.f_type = f_type;
             }

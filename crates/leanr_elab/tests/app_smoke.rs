@@ -116,3 +116,135 @@ fn param_idx_tracks_f_args_len() {
         );
     });
 }
+
+/// Fix round 1, Critical 1 regression: the Forall reconstruction inside
+/// `f_type_is_forall`'s `d != binder_type` branch (`state.rs`) must
+/// route through `Some(base)`, not `None`. `body` there is the ORIGINAL
+/// Forall's child, and for any function type inferred straight off the
+/// environment — exactly `Nat.succ`'s own `Nat -> Nat`, since
+/// `infer_const`'s `instantiate_level_params` short-circuits to `Ok(e)`
+/// for a constant with no level params (`leanr_kernel/src/
+/// subst.rs:754-756`) — that child is a PERSISTENT-region `ExprId`.
+/// `base = None` on the scratch store either panics the
+/// `debug_assert!` in `Store::store_for`
+/// (`leanr_kernel/src/bank/mod.rs:143-146`, this is a debug build) or
+/// silently reads the wrong row in release.
+///
+/// Elab0 has no dependently-typed declaration until Task 7, so this
+/// builds a synthetic dependent `fType` by hand — `∀ (_ : #0), <Nat.succ's
+/// own persistent codomain>`, domain = `BVar 0` — the same
+/// "construct `State` directly" technique Task 5's brief uses for its
+/// strict-implicit test. With `f_args = [<persistent arg>]`,
+/// `instantiate_beta_rev_range` substitutes `#0` with that persistent
+/// arg, so `d != binder_type` and the reconstruction genuinely runs.
+///
+/// Before/after evidence (fix round 1 report has the actual command
+/// output): reverting `state.rs`'s `Some(base)` back to `None` makes
+/// this test PANIC (the `debug_assert!` above fires, since both `d`
+/// and `body` are persistent-region ids passed with `base = None` on a
+/// scratch store) rather than merely fail an assertion — this test
+/// could not pass against the pre-fix code.
+#[test]
+fn f_type_is_forall_reconstructs_dependent_domain_with_correct_base() {
+    support::with_app_harness("Nat.succ", |app| {
+        let (persistent_dom, persistent_body) = match app.node(app.st.f_type) {
+            leanr_kernel::bank::terms::Node::Forall {
+                binder_type, body, ..
+            } => (binder_type, body),
+            other => panic!("Nat.succ's inferred type must be a Forall, got {other:?}"),
+        };
+        assert!(
+            !persistent_dom.is_scratch() && !persistent_body.is_scratch(),
+            "test precondition: Nat.succ's `Nat -> Nat` must be entirely \
+             persistent-region (infer_const's no-level-params short circuit) \
+             for this regression to be meaningful"
+        );
+
+        let base = app.elab.view.store;
+        let bvar0 = app
+            .elab
+            .mctx
+            .store_mut()
+            .expr_bvar(None, &leanr_kernel::Nat::from(0u64))
+            .unwrap();
+        let dep_forall = app
+            .elab
+            .mctx
+            .store_mut()
+            .expr_forall(
+                Some(base),
+                None,
+                bvar0,
+                persistent_body,
+                leanr_kernel::BinderInfo::Default,
+            )
+            .unwrap();
+
+        app.st.f_type = dep_forall;
+        app.st.f_args = vec![persistent_dom];
+
+        assert!(app.f_type_is_forall().unwrap());
+        match app.node(app.st.f_type) {
+            leanr_kernel::bank::terms::Node::Forall { binder_type, .. } => {
+                assert_eq!(
+                    binder_type, persistent_dom,
+                    "reconstructed domain must be the substituted (persistent) arg, \
+                     not the unsubstituted BVar"
+                );
+            }
+            other => panic!("expected Forall after reconstruction, got {other:?}"),
+        }
+    });
+}
+
+/// Fix round 1, Important 2: exercises `f_type_is_forall`'s WHNF
+/// reduction path, which `f_type_is_forall_whnfs_and_caches` (Task 3's
+/// original, brief-verbatim test) never reaches — `Nat.succ`'s type is
+/// already syntactically a `Forall`, so that test takes the fast path.
+/// Here `fType` starts as `(fun (_ : Sort 0) => #0) (Nat.succ's own
+/// `Nat -> Nat`)` — an `App`, not a `Forall` — so `f_type_is_forall`
+/// must fall through to `get_f_type` + `whnf_forall`, whose beta
+/// reduction produces the underlying Forall, which then gets cached
+/// into `st.f_type`.
+#[test]
+fn f_type_is_forall_whnfs_non_forall_into_forall() {
+    support::with_app_harness("Nat.succ", |app| {
+        let nat_to_nat = app.st.f_type;
+        let base = app.elab.view.store;
+
+        let zero = app.elab.mctx.store_mut().level_zero(None).unwrap();
+        let sort0 = app.elab.mctx.store_mut().expr_sort(None, zero).unwrap();
+        let bvar0 = app
+            .elab
+            .mctx
+            .store_mut()
+            .expr_bvar(None, &leanr_kernel::Nat::from(0u64))
+            .unwrap();
+        let id_lam = app
+            .elab
+            .mctx
+            .store_mut()
+            .expr_lam(None, None, sort0, bvar0, leanr_kernel::BinderInfo::Default)
+            .unwrap();
+        let redex = app
+            .elab
+            .mctx
+            .store_mut()
+            .expr_app(Some(base), id_lam, nat_to_nat)
+            .unwrap();
+        assert!(
+            !matches!(
+                app.node(redex),
+                leanr_kernel::bank::terms::Node::Forall { .. }
+            ),
+            "the redex must NOT be syntactically a Forall — that's the whole point"
+        );
+
+        app.st.f_type = redex;
+        assert!(app.f_type_is_forall().unwrap());
+        assert_eq!(
+            app.st.f_type, nat_to_nat,
+            "WHNF must beta-reduce the redex down to the original Forall and cache it"
+        );
+    });
+}
