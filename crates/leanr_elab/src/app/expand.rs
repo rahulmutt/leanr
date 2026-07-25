@@ -3,9 +3,7 @@
 //! built here, and nothing in this file touches `MetaCtx`.
 //!
 //! Confirmed `Term.app` child layout (probe, Task 2 step 2: `cargo test
-//! -p leanr_elab --test app_smoke probe_app_tree_shape -- --nocapture`,
-//! and the follow-up `probe_app_args_and_named_arg_shape`, both run
-//! before being deleted per Step 7):
+//! -p leanr_elab --test app_smoke probe_app_tree_shape -- --nocapture`):
 //!
 //! ```text
 //! Nat.succ Nat.zero:
@@ -24,52 +22,51 @@
 //! `null` wrapper — the leading space before `Nat.zero` lives inside the
 //! `null` node's own child stream (stripped by that second call).
 //!
-//! Confirmed argument-item shape:
+//! Confirmed argument-item shape (fix round 1: `leanr_syntax`'s
+//! `named_argument`/`ellipsis_arg` (`crates/leanr_syntax/src/builtin/
+//! term.rs`) originally left named arguments and the ellipsis as bare
+//! `seq(...)`s whose tokens flattened into this `null` node with no
+//! kind of their own — a real gap against the oracle, whose
+//! `namedArgument`/`ellipsis` are genuine `leading_parser`s. Fixed at
+//! the grammar level (see that file's doc comments on those two
+//! functions), then re-probed here — `cargo test -p leanr_elab --test
+//! app_smoke -- --nocapture` with a throwaway probe, since deleted per
+//! the same M4b-1 "never landed" precedent as Step 2's probe — against
+//! a fresh oracle dump (`lean --run dump_syntax.lean`, pinned
+//! v4.33.0-rc1) of the same two sources, confirmed byte-for-byte
+//! identical):
 //!
 //! ```text
 //! Nat.succ (n := Nat.zero):
 //!   args-null non-trivia children:
-//!     [0] kind=<atom>  text="("
-//!     [1] kind=<ident> text="n"
-//!     [2] kind=<atom>  text=":="
-//!     [3] kind=<ident> text="Nat.zero"
-//!     [4] kind=<atom>  text=")"
+//!     [0] kind=Lean.Parser.Term.namedArgument text="(n := Nat.zero)"
+//!       [0] kind=<atom>  text="("
+//!       [1] kind=<ident> text="n"
+//!       [2] kind=<atom>  text=":="
+//!       [3] kind=<ident> text="Nat.zero"
+//!       [4] kind=<atom>  text=")"
 //!
 //! Nat.succ ..:
 //!   args-null non-trivia children:
-//!     [0] kind=<atom>  text=".."
+//!     [0] kind=Lean.Parser.Term.ellipsis text=".."
+//!       [0] kind=<atom>  text=".."
 //! ```
 //!
-//! A PLAIN positional argument is one item (a `Node`, e.g.
-//! `Lean.Parser.Term.paren`, or a bare `<ident>` token) as expected. A
-//! NAMED argument and a trailing `..`, however, are **not** wrapped in
-//! their own node at all: `leanr_syntax`'s `named_argument()` and
-//! `ellipsis_arg()` (`crates/leanr_syntax/src/builtin/term.rs`) are
-//! built from a bare `seq(...)`/`Prim::Symbol`, never a `Prim::Node`-
-//! opening `b.leading`/`b.leading2` call the way every OTHER
-//! term-category parser (including `paren`/`tuple`, which also start
-//! with `(`) is registered — so their tokens flatten directly into the
-//! enclosing `null` node instead of collecting under a
-//! `Lean.Parser.Term.namedArgument` / `Lean.Parser.Term.ellipsis` kind
-//! the way the oracle's `leading_parser`-based grammar does. This is a
-//! genuine `leanr_syntax` grammar gap relative to the oracle — out of
-//! scope for this task to fix (Global Constraints / ambiguity
-//! resolution #3: a missing/malformed surface belongs to `leanr_syntax`'s
-//! slice, not this one) — so `expand_args` below matches on ATOM TEXT
-//! (`"("`, `":="`, `")"`, `".."`) and reassembles the flat run into a
-//! `NamedArg`, rather than on a `"Lean.Parser.Term.namedArgument"` kind
-//! name the current tree never produces. A raw `"("` atom sibling can
-//! only originate from an unwrapped `named_argument()` run: every other
-//! term-category parser capable of starting with `(` opens its own node
-//! (`b.leading`/`b.leading2`), so a genuine positional parenthesized
-//! argument always arrives as a single `Node` item, never a bare `(`
-//! atom.
+//! A PLAIN positional argument, a NAMED argument, and the ellipsis are
+//! ALL a single item in the args-null's own child list, distinguished
+//! by kind name — exactly how `Lean/Elab/Arg.lean`'s own `expandArgs`
+//! dispatches on `stx.getKind`, and exactly how `expand_args` below
+//! matches. Inside a `Lean.Parser.Term.namedArgument` node, `stx[1]`
+//! (this file's index 1, via `non_trivia_children`) is the name and
+//! `stx[3]` (index 3) is the value, matching the oracle's own
+//! `stx[1]`/`stx[3]` indexing exactly (no trivia sits between these
+//! children, so the trivia-stripped and raw positions coincide here).
 
 use crate::dispatch::{non_trivia_children, SynElem};
 use crate::error::ElabError;
 use leanr_kernel::bank::ExprId;
 use leanr_syntax::kind::KindInterner;
-use leanr_syntax::tree::{NodeOrToken, SyntaxNode};
+use leanr_syntax::tree::SyntaxNode;
 
 /// oracle: `inductive Arg` (`Arg.lean:19-21`) — an argument is either
 /// unelaborated syntax or an already-elaborated `Expr`. The `Expr` arm
@@ -97,17 +94,6 @@ pub struct NamedArg {
     pub num_implicit_params: usize,
 }
 
-/// `item` is a bare atom token (`KIND_ATOM`) whose text is exactly
-/// `text`. See the module doc: the only way to recognize the unwrapped
-/// `(`/`:=`/`)`/`..` pieces `leanr_syntax` emits for named arguments and
-/// the ellipsis, since none of them carry a distinguishing node kind.
-fn is_atom(item: &SynElem, kinds: &KindInterner, text: &str) -> bool {
-    match item {
-        NodeOrToken::Token(tok) => kinds.name(tok.kind()) == "<atom>" && tok.text() == text,
-        NodeOrToken::Node(_) => false,
-    }
-}
-
 /// oracle: `expandApp` (`Arg.lean:82-84`).
 pub fn expand_app(
     node: &SyntaxNode,
@@ -130,76 +116,58 @@ pub fn expand_app(
 /// oracle: `expandArgs` (`Arg.lean:62-80`). Note the exact order: the
 /// trailing `..` is popped FIRST (so a `..` anywhere else is the error
 /// case), then each remaining item is classified.
-///
-/// As the module doc explains, `items` here is a FLAT list — a named
-/// argument is not one item but a five-item run (`(`, name, `:=`,
-/// value, `)`) and the ellipsis is a single bare `..` atom, not a node
-/// of a distinguishing kind. This loop reassembles both from that flat
-/// shape rather than matching a wrapping node's kind name.
 pub fn expand_args(
     items: &[SynElem],
     kinds: &KindInterner,
 ) -> Result<(Vec<NamedArg>, Vec<Arg>, bool), ElabError> {
+    let mut items = items.to_vec();
     let mut ellipsis = false;
-    let mut end = items.len();
-    if end > 0 && is_atom(&items[end - 1], kinds, "..") {
-        end -= 1;
-        ellipsis = true;
+    if let Some(last) = items.last() {
+        if kinds.name(last.kind()) == "Lean.Parser.Term.ellipsis" {
+            items.pop();
+            ellipsis = true;
+        }
     }
-
     let mut named: Vec<NamedArg> = Vec::new();
     let mut args: Vec<Arg> = Vec::new();
-    let mut idx = 0;
-    while idx < end {
-        let item = &items[idx];
-        if is_atom(item, kinds, "..") {
-            // oracle: `throwErrorAt stx "unexpected '..'"` — only a
-            // TRAILING `..` is legal, and that one was popped above.
-            return Err(ElabError::IllFormedSyntax("unexpected '..'".to_string()));
+    for item in items {
+        match kinds.name(item.kind()) {
+            "Lean.Parser.Term.namedArgument" => {
+                let node = item.as_node().ok_or_else(|| {
+                    ElabError::IllFormedSyntax("namedArgument is not a node".to_string())
+                })?;
+                let nch = non_trivia_children(node);
+                // oracle: `stx[1].getId` is the name, `stx[3]` the
+                // value — confirmed against both a fresh oracle dump and
+                // leanr's own (now node-wrapped) tree, module doc above.
+                let name_tok = nch.get(1).ok_or_else(|| {
+                    ElabError::IllFormedSyntax("namedArgument: no name".to_string())
+                })?;
+                let name = match name_tok {
+                    leanr_syntax::tree::NodeOrToken::Token(t) => t.text().to_string(),
+                    leanr_syntax::tree::NodeOrToken::Node(n) => n.text().to_string(),
+                };
+                let val = nch.get(3).cloned().ok_or_else(|| {
+                    ElabError::IllFormedSyntax("namedArgument: no value".to_string())
+                })?;
+                // oracle: `addNamedArg` (`Arg.lean:55-59`) errors on a
+                // repeated name rather than silently keeping one.
+                if named.iter().any(|na| na.name == name) {
+                    return Err(ElabError::DuplicateNamedArg(name));
+                }
+                named.push(NamedArg {
+                    name,
+                    val: Arg::Stx(val),
+                    num_implicit_params: 0,
+                });
+            }
+            "Lean.Parser.Term.ellipsis" => {
+                // oracle: `throwErrorAt stx "unexpected '..'"` — only a
+                // TRAILING `..` is legal, and that one was popped above.
+                return Err(ElabError::IllFormedSyntax("unexpected '..'".to_string()));
+            }
+            _ => args.push(Arg::Stx(item)),
         }
-        if is_atom(item, kinds, "(") {
-            // Unwrapped named-argument run (module doc): `(` name `:=`
-            // value `)`, five flat siblings.
-            let name_item = items
-                .get(idx + 1)
-                .ok_or_else(|| ElabError::IllFormedSyntax("namedArgument: no name".to_string()))?;
-            let name = match name_item {
-                NodeOrToken::Token(t) => t.text().to_string(),
-                NodeOrToken::Node(n) => n.text().to_string(),
-            };
-            let has_assign = items
-                .get(idx + 2)
-                .is_some_and(|el| is_atom(el, kinds, ":="));
-            if !has_assign {
-                return Err(ElabError::IllFormedSyntax(
-                    "namedArgument: missing ':='".to_string(),
-                ));
-            }
-            let val = items
-                .get(idx + 3)
-                .cloned()
-                .ok_or_else(|| ElabError::IllFormedSyntax("namedArgument: no value".to_string()))?;
-            let has_close = items.get(idx + 4).is_some_and(|el| is_atom(el, kinds, ")"));
-            if !has_close {
-                return Err(ElabError::IllFormedSyntax(
-                    "namedArgument: missing ')'".to_string(),
-                ));
-            }
-            // oracle: `addNamedArg` (`Arg.lean:55-59`) errors on a
-            // repeated name rather than silently keeping one.
-            if named.iter().any(|na| na.name == name) {
-                return Err(ElabError::DuplicateNamedArg(name));
-            }
-            named.push(NamedArg {
-                name,
-                val: Arg::Stx(val),
-                num_implicit_params: 0,
-            });
-            idx += 5;
-            continue;
-        }
-        args.push(Arg::Stx(item.clone()));
-        idx += 1;
     }
     Ok((named, args, ellipsis))
 }

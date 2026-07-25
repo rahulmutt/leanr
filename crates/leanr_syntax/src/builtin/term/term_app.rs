@@ -76,19 +76,14 @@ fn register_named_pattern(b: &mut SnapshotBuilder) {
 /// empty `null`s (the unexercised `optional explicitUnivSuffix`/`many
 /// argument` slots).
 fn register_pipe_proj(b: &mut SnapshotBuilder) {
-    b.trailing2(
-        "term",
-        "Lean.Parser.Term.pipeProj",
-        MIN_PREC,
-        0,
-        seq([
-            sym("|>."),
-            Prim::CheckNoWsBefore,
-            or_else([Prim::FieldIdx, Prim::Ident]),
-            opt(explicit_univ_suffix()),
-            many(argument()),
-        ]),
-    );
+    let body = seq([
+        sym("|>."),
+        Prim::CheckNoWsBefore,
+        or_else([Prim::FieldIdx, Prim::Ident]),
+        opt(explicit_univ_suffix()),
+        many(argument(b)),
+    ]);
+    b.trailing2("term", "Lean.Parser.Term.pipeProj", MIN_PREC, 0, body);
     // pipeCompletion := trailing_parser:minPrec " |>." (bare symbol,
     // same token as `pipeProj`'s prefix — ordinary longest-match tells
     // them apart, same mechanism as `cdot`/`dotIdent`'s shared "." lead:

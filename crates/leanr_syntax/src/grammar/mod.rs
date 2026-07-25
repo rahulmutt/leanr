@@ -436,6 +436,13 @@ pub fn with_forbidden(tok: &str, p: Prim) -> Prim {
 pub fn without_forbidden(p: Prim) -> Prim {
     Prim::WithoutForbidden(Arc::new(p))
 }
+/// ORACLE `leading_parser (withAnonymousAntiquot := false) ..` — see
+/// `Prim::WithoutAnonymousAntiquot`'s doc comment. First real producer:
+/// `named_argument`/`ellipsis_arg` (`builtin/term.rs`, M4b-3 Task 2
+/// review fix), whose own oracle definitions carry exactly this flag.
+pub fn without_anonymous_antiquot(p: Prim) -> Prim {
+    Prim::WithoutAnonymousAntiquot(Arc::new(p))
+}
 pub fn raw_char(c: char) -> Prim {
     Prim::RawChar(c)
 }
