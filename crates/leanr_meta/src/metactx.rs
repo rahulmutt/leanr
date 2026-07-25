@@ -668,6 +668,36 @@ impl<'e> MetaCtx<'e> {
         Ok(e)
     }
 
+    /// oracle: `Expr.instantiateBetaRevRange 0 args.size args`, as used by
+    /// `ElabAppArgs.State.getFType` (`Lean/Elab/App.lean:232-237`) to
+    /// instantiate a partially-applied function type's loose bvars with the
+    /// arguments consumed so far. `args` is innermost-first — the same
+    /// convention `leanr_kernel::instantiate_rev` documents
+    /// (`subst[len-1]` replaces `#0`).
+    ///
+    /// Additive + behavior-neutral, and the reason it lives HERE rather than
+    /// in `leanr_elab`: the substitution half (`instantiate_rev`) is public
+    /// kernel API the elaborator could call itself, but the beta half
+    /// (`head_beta`, `whnf.rs:1767`) is `pub(crate)` to this crate. Exposes
+    /// no new capability, adds no state, changes no existing path.
+    pub fn instantiate_beta_rev_range(
+        &mut self,
+        e: ExprId,
+        args: &[ExprId],
+    ) -> Result<ExprId, MetaError> {
+        if args.is_empty() {
+            return Ok(e);
+        }
+        let inst = leanr_kernel::instantiate_rev(
+            self.scratch,
+            Some(self.view.store),
+            e,
+            args,
+            &mut self.guard,
+        )?;
+        self.head_beta(inst)
+    }
+
     pub fn status_of(&self, n: NameId) -> ReducibilityStatus {
         // Absent => Semireducible (getReducibilityStatusCore's
         // fallback; plan-1 Global Constraint).
@@ -1018,6 +1048,32 @@ mod tests {
             ctx.rollback(snap);
             assert!(!ctx.mctx.is_assigned(m), "assignment must be undone");
             assert!(ctx.postponed.is_empty(), "postponed must be restored");
+        });
+    }
+
+    /// `instantiate_beta_rev_range` on a forall BODY with one loose bvar:
+    /// substituting `Nat` for `#0` yields `Nat` itself. Mirrors what
+    /// `ElabAppArgs.State.getFType` does after one argument is consumed.
+    #[test]
+    fn instantiate_beta_rev_range_substitutes_loose_bvar() {
+        with_prelude0_ctx(|ctx| {
+            let nat = const_named(ctx, "Nat");
+            // `#0` — a loose bvar standing for the consumed argument.
+            let bvar = ctx
+                .store_mut()
+                .expr_bvar(None, &leanr_kernel::Nat::from(0u64))
+                .unwrap();
+            let got = ctx.instantiate_beta_rev_range(bvar, &[nat]).unwrap();
+            assert_eq!(got, nat, "#0 must be replaced by the single argument");
+        });
+    }
+
+    /// The empty-args fast path is the identity, and must not re-intern.
+    #[test]
+    fn instantiate_beta_rev_range_empty_is_identity() {
+        with_prelude0_ctx(|ctx| {
+            let nat = const_named(ctx, "Nat");
+            assert_eq!(ctx.instantiate_beta_rev_range(nat, &[]).unwrap(), nat);
         });
     }
 }
