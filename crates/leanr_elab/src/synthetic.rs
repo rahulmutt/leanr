@@ -14,6 +14,7 @@
 //! both the table and `&mut self` would need a `mem::take`/restore dance
 //! for no structural gain (design spec § P2a).
 
+use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, NameId};
 use leanr_meta::MVarId;
 use leanr_syntax::kind::KindInterner;
@@ -315,13 +316,130 @@ impl<'e> TermElabM<'e> {
         }
     }
 
-    /// Task 4: real typeclass instance synthesis. Stub returns `false`
-    /// ("not ready yet") so the ladder never mistakes an unimplemented
-    /// rung for success.
-    // Task 4
-    pub fn synthesize_pending_inst_mvar(&mut self, mvar_id: MVarId) -> Result<bool, ElabError> {
-        let _ = mvar_id;
-        Ok(false)
+    /// oracle: `synthesizeInstMVarCore` (`TermElabM.lean:1232-1288`).
+    ///
+    /// Returns `true` when the instance was synthesized, `false` when it
+    /// is blocked by unassigned mvars ("try again later"), and errors
+    /// when resolution or assignment irrevocably fails.
+    pub fn synthesize_inst_mvar_core(&mut self, inst_mvar: MVarId) -> Result<bool, ElabError> {
+        let ty = self
+            .mctx
+            .mctx()
+            .decl(inst_mvar)
+            .expect("instance mvar is declared")
+            .ty;
+        let ty = self.mctx.instantiate_mvars(ty)?;
+        // The trichotomy: `Ok(Some)` = `.some`, `Err(IsDefEqStuck)` =
+        // `.undef`, `Ok(None)` = `.none`. Preserving `undef` as "not
+        // ready yet" rather than failure is the whole reason
+        // postponement works.
+        let val = match self.mctx.synth_instance(ty) {
+            Ok(Some(val)) => val,
+            Ok(None) => return Err(ElabError::InstanceSynthesisFailed { goal: ty }),
+            Err(leanr_meta::MetaError::IsDefEqStuck(_)) => return Ok(false),
+            Err(e) => return Err(ElabError::from(e)),
+        };
+        if self.mctx.mctx().is_assigned(inst_mvar) {
+            // oracle: :1240-1272 — the mvar may already carry a value
+            // inferred by typing. Reconcile rather than overwrite.
+            let old_val = self
+                .mctx
+                .mctx()
+                .assignment(inst_mvar)
+                .expect("just checked assigned");
+            let old_val = self.mctx.instantiate_mvars(old_val)?;
+            if !self.mctx.is_def_eq(old_val, val)? {
+                // oracle: :1243-1262 — if EITHER side still mentions a
+                // pending mvar, the mismatch is not yet grounded: return
+                // `false` and retry later rather than throwing. Dropping
+                // this branch turns a resolvable dependency between
+                // postponed mvars into a hard error.
+                if self.contains_pending_mvar(old_val)? || self.contains_pending_mvar(val)? {
+                    return Ok(false);
+                }
+                let inferred = self.mctx.infer_type(old_val)?;
+                return Err(ElabError::InstanceMismatch {
+                    synthesized: val,
+                    inferred,
+                });
+            }
+        } else {
+            // oracle: :1271-1272 — assign via `isDefEq`, not a raw
+            // assign: the mvar's type may still need unification.
+            //
+            // `is_def_eq_mvar_value` is not a `MetaCtx` method (and one
+            // must not be added — Task 1's three accessors are the
+            // entire `leanr_meta` allowance for this plan): build the
+            // `Expr.mvar` node for `inst_mvar` exactly as
+            // `mk_fresh_expr_mvar_of_kind` builds its own
+            // (`elab.rs`, `store.expr_mvar(None, Some(name))`), then call
+            // the existing `is_def_eq` on it.
+            let mvar_expr = self
+                .mctx
+                .store_mut()
+                .expr_mvar(None, Some(inst_mvar.0))
+                .map_err(leanr_meta::MetaError::from)?;
+            if !self.mctx.is_def_eq(mvar_expr, val)? {
+                return Err(ElabError::InstanceMismatch {
+                    synthesized: val,
+                    inferred: ty,
+                });
+            }
+        }
+        Ok(true)
+    }
+
+    /// oracle: `synthesizePendingInstMVar` (`SyntheticMVars.lean:79-85`)
+    /// — `synthesizeInstMVarCore` with errors LOGGED rather than
+    /// propagated, returning `true` so the mvar leaves the pending list.
+    ///
+    /// leanr has no message log, so a synthesis failure propagates as an
+    /// `ElabError` instead of being logged and swallowed. That is the
+    /// deliberate difference: the oracle keeps elaborating to collect
+    /// more errors, leanr stops at the first. Recorded rather than
+    /// hidden — the slice that adds a diagnostics layer revisits it.
+    pub fn synthesize_pending_inst_mvar(&mut self, inst_mvar: MVarId) -> Result<bool, ElabError> {
+        self.synthesize_inst_mvar_core(inst_mvar)
+    }
+
+    /// oracle: `containsPendingMVar` — does `e` mention an mvar that is
+    /// still on the pending list?
+    ///
+    /// Walks `e` collecting mvar ids and testing membership in
+    /// `pending_mvars`, using the same traversal idiom `app/finalize.rs`'s
+    /// `update_binder_names` uses (`Store::expr_node` over `Node`) rather
+    /// than a new visitor abstraction.
+    fn contains_pending_mvar(&mut self, e: ExprId) -> Result<bool, ElabError> {
+        let base = self.view.store;
+        match self.mctx.store().expr_node(Some(base), e) {
+            Node::MVar { id: Some(name) } => Ok(self.pending_mvars.contains(&MVarId(name))),
+            Node::MVar { id: None } => Ok(false),
+            Node::App { f, arg } => {
+                Ok(self.contains_pending_mvar(f)? || self.contains_pending_mvar(arg)?)
+            }
+            Node::Lam {
+                binder_type, body, ..
+            }
+            | Node::Forall {
+                binder_type, body, ..
+            } => Ok(self.contains_pending_mvar(binder_type)? || self.contains_pending_mvar(body)?),
+            Node::LetE {
+                ty, value, body, ..
+            } => Ok(self.contains_pending_mvar(ty)?
+                || self.contains_pending_mvar(value)?
+                || self.contains_pending_mvar(body)?),
+            Node::MData { expr, .. } => self.contains_pending_mvar(expr),
+            Node::Proj { structure, .. } | Node::ProjBig { structure, .. } => {
+                self.contains_pending_mvar(structure)
+            }
+            Node::BVar { .. }
+            | Node::BVarBig { .. }
+            | Node::FVar { .. }
+            | Node::Sort { .. }
+            | Node::Const { .. }
+            | Node::LitNat { .. }
+            | Node::LitStr { .. } => Ok(false),
+        }
     }
 
     /// Task 5: resuming a postponed elaboration. Stub returns `false`

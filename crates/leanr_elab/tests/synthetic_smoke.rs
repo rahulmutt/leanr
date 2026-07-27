@@ -130,6 +130,71 @@ fn step_merges_new_pending_before_still_unsolved() {
     });
 }
 
+/// `Err(IsDefEqStuck)` from synthesis means POSTPONE, never fail.
+///
+/// oracle: `trySynthInstance`'s `.undef` -> `return false -- we will try
+/// later` (`TermElabM.lean:1274`). This is the distinction the whole
+/// postponement scheme rests on: `Ok(None)` is a real failure that
+/// throws, `Err(IsDefEqStuck)` is "not ready yet" that survives to the
+/// next rung.
+#[test]
+#[ignore = "needs the Elab0 class scaffold (Task 7)"]
+fn stuck_synthesis_is_not_ready_rather_than_failure() {
+    support::with_app_harness("Nat.zero", |app| {
+        // `Wrap ?m` — a class goal whose type argument is an unassigned
+        // mvar, which is exactly what `synth_instance` reports stuck.
+        let goal = support::wrap_of_fresh_mvar(app);
+        let (_e, id) = app
+            .elab
+            .mk_fresh_expr_mvar_of_kind(goal, leanr_meta::MVarKind::Synthetic)
+            .expect("fresh mvar");
+        let ready = app
+            .elab
+            .synthesize_inst_mvar_core(id)
+            .expect("stuck is not an error");
+        assert!(!ready, "stuck -> not ready yet");
+        assert!(
+            !app.elab.mctx.mctx().is_assigned(id),
+            "a stuck goal assigns nothing"
+        );
+    });
+}
+
+/// A solvable goal is synthesized and ASSIGNED.
+#[test]
+#[ignore = "needs the Elab0 class scaffold (Task 7)"]
+fn solvable_instance_is_synthesized_and_assigned() {
+    support::with_app_harness("Nat.zero", |app| {
+        let goal = support::wrap_of_nat(app);
+        let (_e, id) = app
+            .elab
+            .mk_fresh_expr_mvar_of_kind(goal, leanr_meta::MVarKind::Synthetic)
+            .expect("fresh mvar");
+        assert!(app.elab.synthesize_inst_mvar_core(id).expect("no error"));
+        assert!(app.elab.mctx.mctx().is_assigned(id));
+    });
+}
+
+/// A class with no instance is a real failure, not a postponement.
+///
+/// oracle: `trySynthInstance`'s `.none` arm throws
+/// (`TermElabM.lean:1275+`).
+#[test]
+#[ignore = "needs the Elab0 class scaffold (Task 7)"]
+fn unsolvable_instance_is_a_synthesis_failure() {
+    support::with_app_harness("Nat.zero", |app| {
+        let goal = support::no_inst_of_nat(app);
+        let (_e, id) = app
+            .elab
+            .mk_fresh_expr_mvar_of_kind(goal, leanr_meta::MVarKind::Synthetic)
+            .expect("fresh mvar");
+        assert!(matches!(
+            app.elab.synthesize_inst_mvar_core(id),
+            Err(leanr_elab::ElabError::InstanceSynthesisFailed { .. })
+        ));
+    });
+}
+
 /// Progress is a COUNT comparison, not "any succeeded".
 ///
 /// oracle: `return numSyntheticMVars != remainingPendingMVars.length`

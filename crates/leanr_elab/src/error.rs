@@ -35,6 +35,27 @@ pub enum ElabError {
     /// `UnsupportedSyntax`, which means "this construct's slice has not
     /// landed"; this means "this tree cannot be what it claims to be".
     IllFormedSyntax(String),
+    /// oracle: `synthesizeInstMVarCore`'s `.none` arm — "failed to
+    /// synthesize" (`TermElabM.lean:1275-1288`). Carries the goal type;
+    /// the oracle's `extraErrorMsg?` prose is deferred (design spec
+    /// § Amendment, item 2).
+    InstanceSynthesisFailed {
+        goal: ExprId,
+    },
+    /// oracle: `reportStuckSyntheticMVar`'s `.typeClass` arm —
+    /// "typeclass instance problem is stuck"
+    /// (`SyntheticMVars.lean:295-303`). Carries the goal type; the note
+    /// and hint prose are deferred.
+    StuckSyntheticMVar {
+        goal: ExprId,
+    },
+    /// oracle: `synthesizeInstMVarCore`'s assignment-mismatch throws
+    /// (`TermElabM.lean:1265-1272`) — the synthesized instance is not
+    /// defeq to the one typing already inferred.
+    InstanceMismatch {
+        synthesized: ExprId,
+        inferred: ExprId,
+    },
 }
 
 impl From<MetaError> for ElabError {

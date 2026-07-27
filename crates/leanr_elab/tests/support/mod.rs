@@ -216,3 +216,37 @@ pub fn step_solving_none(app: &mut leanr_elab::app::state::AppElab) -> bool {
         .step_with(|_elab, _mvar_id| Ok(false))
         .expect("step_with: stub outcome is infallible")
 }
+
+// === Task 4's `synthesize_inst_mvar_core` fixtures (placeholders until
+// Task 7) ===
+//
+// `synthetic_smoke.rs`'s trichotomy tests need real class goals — `Wrap`,
+// solvable only for `Nat`, and `NoInst`, solvable for nothing — neither of
+// which exists in `Elab0.lean` yet (M4b-3 P2a Task 7 adds that scaffold and
+// regenerates `Elab0.olean`; growing the fixture is that task's own scope,
+// not this one's). The three helpers below exist purely so those tests
+// compile NOW under `#[ignore]`: each panics if actually called, since
+// there is no `Wrap`/`NoInst` constant to resolve yet. Task 7 replaces
+// these bodies with real term construction and removes the callers'
+// `#[ignore]` in the same step.
+
+/// `Wrap Nat` — a solvable instance goal, once `Wrap`/`Wrap.instWrapNat`
+/// exist. See the module section doc above.
+pub fn wrap_of_nat(_app: &mut leanr_elab::app::state::AppElab) -> leanr_kernel::bank::ExprId {
+    unimplemented!("Wrap Nat needs the Elab0 class scaffold — M4b-3 P2a Task 7")
+}
+
+/// `Wrap ?m` — the same class goal as `wrap_of_nat`, but applied to a
+/// freshly-minted unassigned mvar so `synth_instance` reports the goal
+/// stuck rather than solved or failed. See the module section doc above.
+pub fn wrap_of_fresh_mvar(
+    _app: &mut leanr_elab::app::state::AppElab,
+) -> leanr_kernel::bank::ExprId {
+    unimplemented!("Wrap ?m needs the Elab0 class scaffold — M4b-3 P2a Task 7")
+}
+
+/// `NoInst Nat` — a class goal with no instance, exercising the real
+/// synthesis-failure (`.none`) arm. See the module section doc above.
+pub fn no_inst_of_nat(_app: &mut leanr_elab::app::state::AppElab) -> leanr_kernel::bank::ExprId {
+    unimplemented!("NoInst Nat needs the Elab0 class scaffold — M4b-3 P2a Task 7")
+}
