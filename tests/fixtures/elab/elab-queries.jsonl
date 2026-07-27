@@ -66,3 +66,6 @@
 {"exp":{"b":{"a":{"k":"const","n":"Nat.zero","us":[]},"f":{"a":{"i":0,"k":"bvar"},"f":{"k":"const","n":"pick","us":[]},"k":"app"},"k":"app"},"bi":"d","k":"lam","t":{"k":"const","n":"Nat","us":[]}},"id":"app/namedEta","src":"pick (y := Nat.zero)"}
 {"exp":{"a":{"k":"const","n":"Nat.zero","us":[]},"f":{"a":{"k":"const","n":"Nat","us":[]},"f":{"k":"const","n":"dep","us":[]},"k":"app"},"k":"app"},"id":"app/namedDep","src":"dep (z := Nat.zero)"}
 {"exp":{"a":{"k":"const","n":"Nat.zero","us":[]},"f":{"a":{"k":"const","n":"Nat","us":[]},"f":{"a":{"k":"const","n":"PUnit.unit","us":[{"k":"succ","u":{"k":"zero"}}]},"f":{"a":{"k":"const","n":"Unit","us":[]},"f":{"k":"const","n":"dpick","us":[]},"k":"app"},"k":"app"},"k":"app"},"k":"app"},"id":"app/namedDepPropagate2","src":"(dpick PUnit.unit (z := Nat.zero) : Unit)"}
+{"exp":{"a":{"k":"const","n":"Nat.zero","us":[]},"f":{"a":{"k":"const","n":"Nat","us":[]},"f":{"k":"const","n":"id","us":[{"k":"succ","u":{"k":"zero"}}]},"k":"app"},"k":"app"},"id":"app/atId","src":"@id Nat Nat.zero"}
+{"exp":{"k":"const","n":"Nat.succ","us":[]},"id":"app/atBare","src":"@Nat.succ"}
+{"exp":{"k":"const","n":"List","us":[{"k":"zero"}]},"id":"app/univList","src":"List.{0}"}

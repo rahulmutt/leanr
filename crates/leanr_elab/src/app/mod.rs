@@ -20,13 +20,13 @@ pub mod overload;
 pub mod propagate;
 pub mod state;
 
-use leanr_kernel::bank::ExprId;
+use leanr_kernel::bank::{ExprId, LevelId};
 use leanr_syntax::kind::KindInterner;
 use leanr_syntax::tree::SyntaxNode;
 
 use crate::app::expand::{Arg, NamedArg};
 use crate::app::state::{Context, State};
-use crate::dispatch::SynElem;
+use crate::dispatch::{non_trivia_children, SynElem};
 use crate::elab::TermElabM;
 use crate::error::ElabError;
 
@@ -40,9 +40,7 @@ pub fn elab_app(
     expected: Option<ExprId>,
 ) -> Result<ExprId, ElabError> {
     let (head, named_args, args, ellipsis) = expand::expand_app(node, kinds)?;
-    elab_app_aux(
-        elab, &head, kinds, named_args, args, ellipsis, false, expected,
-    )
+    elab_app_aux(elab, &head, kinds, named_args, args, ellipsis, expected)
 }
 
 /// oracle: `elabAtom` (`App.lean:2243-2244`) — a zero-argument
@@ -54,30 +52,176 @@ pub fn elab_atom(
     kinds: &KindInterner,
     expected: Option<ExprId>,
 ) -> Result<ExprId, ElabError> {
-    elab_app_aux(
-        elab,
-        elem,
-        kinds,
-        Vec::new(),
-        Vec::new(),
-        false,
-        false,
-        expected,
-    )
+    elab_app_aux(elab, elem, kinds, Vec::new(), Vec::new(), false, expected)
+}
+
+/// oracle: `elabExplicit` (`App.lean:2260-2271`), the `@`-in-TERM-
+/// position elaborator. It is a pure shape dispatch over seven
+/// `elabAtom` forms and two `elabTerm .. (implicitLambda := false)`
+/// forms:
+///
+/// ```text
+/// | `(@$_:ident)               => elabAtom stx expectedType?
+/// | `(@$_:ident.{$_us,*})      => elabAtom stx expectedType?
+/// | `(@$(_).$_:fieldIdx)       => elabAtom stx expectedType?
+/// | `(@$(_).$_:ident)          => elabAtom stx expectedType?
+/// | `(@$(_).$_:ident.{$_us,*}) => elabAtom stx expectedType?
+/// | `(@.$_:ident)              => elabAtom stx expectedType?
+/// | `(@.$_:ident.{$_us,*})     => elabAtom stx expectedType?
+/// | `(@($t))                   => elabTerm t expectedType? (implicitLambda := false)
+/// | `(@$t)                     => elabTerm t expectedType? (implicitLambda := false)
+/// ```
+///
+/// P1 implements the first family and NAMES the other two, because
+/// `@t` exists precisely to disable implicit-lambda insertion (P5's) —
+/// so routing it to `elab_atom` would not merely be incomplete, it
+/// would enter explicit mode the oracle never enters.
+///
+/// The `.field` forms are the LVal machinery (M4b-4); in leanr's tree
+/// a dotted name like `@Nat.succ` is a single `<ident>` TOKEN
+/// (`leanr_syntax::lex`'s `hierarchical_idents_are_one_token`), so only
+/// a genuine projection off a non-identifier base reaches that seam.
+///
+/// Note this passes the WHOLE `@..` node to `elab_atom`, exactly as the
+/// oracle passes `stx` (not `stx[1]`): `elabAppFn` is what strips the
+/// `@`, and `peel_head` below is leanr's transliteration of that.
+pub fn elab_explicit(
+    elab: &mut TermElabM,
+    elem: &SynElem,
+    kinds: &KindInterner,
+    expected: Option<ExprId>,
+) -> Result<ExprId, ElabError> {
+    let inner = explicit_inner(elem)?;
+    match kinds.name(inner.kind()) {
+        "<ident>" | "Lean.Parser.Term.explicitUniv" => elab_atom(elab, elem, kinds, expected),
+        "Lean.Parser.Term.proj" | "Lean.Parser.Term.dotIdent" => Err(ElabError::UnsupportedSyntax(
+            "`@` on a projection / dot-identifier head — dot notation / LVal \
+             machinery is M4b-4"
+                .to_string(),
+        )),
+        other => Err(ElabError::UnsupportedSyntax(format!(
+            "`@` applied to `{other}` does not enter explicit mode — it DISABLES \
+             implicit-lambda insertion (App.lean:2269-2270) — M4b-3 P5"
+        ))),
+    }
+}
+
+/// The single non-trivia child after the `@` atom of a
+/// `Lean.Parser.Term.explicit` node (`term.rs`'s own registration:
+/// `seq([sym("@"), cat("term", MAX_PREC)])`, so the layout is exactly
+/// `[<atom "@">, <inner term>]` — the oracle's `f.getArg 1`,
+/// `App.lean:2117`).
+fn explicit_inner(elem: &SynElem) -> Result<SynElem, ElabError> {
+    let node = elem.as_node().ok_or_else(|| {
+        ElabError::IllFormedSyntax("`@`: Term.explicit is not a node".to_string())
+    })?;
+    non_trivia_children(node)
+        .into_iter()
+        .nth(1)
+        .ok_or_else(|| ElabError::IllFormedSyntax("`@`: no term after `@`".to_string()))
+}
+
+/// The base term and the level syntaxes of a
+/// `Lean.Parser.Term.explicitUniv` node. Layout (confirmed by a
+/// throwaway parse probe, never landed — same precedent as
+/// `expand.rs`'s own recorded shapes):
+///
+/// ```text
+/// List.{0, 0}:
+///   [0] <ident> "List"
+///   [1] <atom>  ".{"
+///   [2] null    "0, 0"     <- sepBy1's own wrapper
+///         [0] num "0"
+///         [1] <atom> ","
+///         [2] num "0"
+///   [3] <atom>  "}"
+/// ```
+///
+/// The separator atoms live in the `null` wrapper alongside the levels,
+/// so the levels are its EVEN-indexed children — the oracle's own
+/// `Syntax.getSepArgs` (`$us,*` in `App.lean:2103`'s quotation pattern
+/// expands to `getSepArgs`, which takes `args[0], args[2], ..`), not a
+/// kind filter invented here.
+fn explicit_univ_parts(elem: &SynElem) -> Result<(SynElem, Vec<SynElem>), ElabError> {
+    let node = elem.as_node().ok_or_else(|| {
+        ElabError::IllFormedSyntax("`.{u}`: Term.explicitUniv is not a node".to_string())
+    })?;
+    let ch = non_trivia_children(node);
+    let inner = ch
+        .first()
+        .cloned()
+        .ok_or_else(|| ElabError::IllFormedSyntax("`.{u}`: no base term".to_string()))?;
+    let list = ch
+        .get(2)
+        .and_then(|el| el.as_node())
+        .ok_or_else(|| ElabError::IllFormedSyntax("`.{u}`: no level list".to_string()))?;
+    let lvls = non_trivia_children(list).into_iter().step_by(2).collect();
+    Ok((inner, lvls))
+}
+
+/// oracle: the head-WRAPPER arms of `elabAppFn` — `@` (`App.lean:2110-2118`)
+/// and `.{us}` (`App.lean:2103-2105`) — peeled here rather than inside
+/// `head.rs`, which stays about NAMES only. `@f a b` and `f.{u} a` wrap
+/// the SAME head syntax the plain form has, so stripping the wrapper
+/// (setting `explicit := true` / collecting the explicit level list)
+/// before `elab_app_fn` is exactly what the oracle's own recursion does.
+///
+/// ORDER is the oracle's: `@` is stripped FIRST (`App.lean:2117` recurses
+/// on `f.getArg 1` with `explicit := true`), and the recursive call is
+/// what then matches `` `($id:ident.{$us,*}) `` — which is also the order
+/// leanr's tree has (`@List.{0}` parses as `explicit(explicitUniv(..))`).
+///
+/// `@` applied to anything outside the seven `elabAtom` shapes is
+/// `App.lean:2118`'s `` `(@$_) => throwUnsupportedSyntax `` — an INVALID
+/// occurrence of `@` in a function position, NOT the implicit-lambda-
+/// disabling form (that one is only reachable when the `@..` node is the
+/// whole term, i.e. through `elab_explicit` above).
+fn peel_head(
+    elab: &mut TermElabM,
+    head: &SynElem,
+    kinds: &KindInterner,
+) -> Result<(SynElem, bool, Vec<LevelId>), ElabError> {
+    let mut cur = head.clone();
+    let mut explicit = false;
+    if kinds.name(cur.kind()) == "Lean.Parser.Term.explicit" {
+        cur = explicit_inner(&cur)?;
+        explicit = true;
+        match kinds.name(cur.kind()) {
+            "<ident>" | "Lean.Parser.Term.explicitUniv" => {}
+            "Lean.Parser.Term.proj" | "Lean.Parser.Term.dotIdent" => {
+                return Err(ElabError::UnsupportedSyntax(
+                    "`@` on a projection / dot-identifier head — dot notation / LVal \
+                     machinery is M4b-4"
+                        .to_string(),
+                ))
+            }
+            other => {
+                return Err(ElabError::UnsupportedSyntax(format!(
+                    "invalid occurrence of `@` in a function position (`{other}`) \
+                     — App.lean:2118"
+                )))
+            }
+        }
+    }
+    let mut explicit_levels = Vec::new();
+    if kinds.name(cur.kind()) == "Lean.Parser.Term.explicitUniv" {
+        let (inner, lvls) = explicit_univ_parts(&cur)?;
+        explicit_levels = head::elab_explicit_univs(elab, &lvls, kinds)?;
+        cur = inner;
+    }
+    Ok((cur, explicit, explicit_levels))
 }
 
 /// oracle: `elabAppAux` (`App.lean:2202-2217`) resolving the head, then
 /// `elabAppArgs` (`App.lean:1351-1394`) building the `Context`/`State`
 /// the loop runs over.
 ///
-/// Task 8 peels `@` and `.{u, v}` HERE, not in `head.rs`: `@f a b` and
-/// `f.{u} a` wrap the SAME head syntax the plain form has, so stripping
-/// the wrapper (setting `explicit := true` / collecting the explicit
-/// level list) before `elab_app_fn` keeps `head.rs` about NAMES only.
-/// Until then `explicit` is always `false` and the explicit-level list
-/// always empty; `elab_app_fn` names any non-`ident` head as an M4b-4
-/// seam rather than mis-elaborating it.
-#[allow(clippy::too_many_arguments)]
+/// Task 8 peels `@` and `.{u, v}` HERE, not in `head.rs` (`peel_head`
+/// above): `@f a b` and `f.{u} a` wrap the SAME head syntax the plain
+/// form has, so stripping the wrapper (setting `explicit := true` /
+/// collecting the explicit level list) before `elab_app_fn` keeps
+/// `head.rs` about NAMES only. `elab_app_fn` still names any remaining
+/// non-`ident` head as an M4b-4 seam rather than mis-elaborating it.
 fn elab_app_aux(
     elab: &mut TermElabM,
     head: &SynElem,
@@ -85,10 +229,10 @@ fn elab_app_aux(
     named_args: Vec<NamedArg>,
     args: Vec<Arg>,
     ellipsis: bool,
-    explicit: bool,
     expected: Option<ExprId>,
 ) -> Result<ExprId, ElabError> {
-    let candidates = head::elab_app_fn(elab, head, kinds, &[])?;
+    let (head, explicit, explicit_levels) = peel_head(elab, head, kinds)?;
+    let candidates = head::elab_app_fn(elab, &head, kinds, &explicit_levels)?;
     let f = overload::expect_single(candidates)?;
 
     // oracle: `elabAppArgs`'s first two lines — `let fType ← inferType f;

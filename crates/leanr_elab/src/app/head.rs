@@ -38,15 +38,36 @@ pub fn elab_app_fn(
     }
 }
 
+/// oracle: `elabExplicitUnivs` (`App.lean:1899-1900`) —
+/// `lvls.foldrM (init := []) fun stx lvls => return (← elabLevel stx)::lvls`,
+/// i.e. elaborate every level of a `.{u, v}` suffix and keep them in
+/// SOURCE ORDER (the `foldrM` builds the list right-to-left by consing,
+/// which preserves order; it is not a reversal).
+///
+/// The level elaborator itself is `builtin::sort::elab_level`, the same
+/// `Lean.Elab.Level.elabLevel` the `Sort u`/`Type u` path already calls
+/// — reused, not re-implemented, so `max`/`imax`/`paren`/`addLit` stay
+/// named seams in exactly one place.
+pub(super) fn elab_explicit_univs(
+    elab: &mut TermElabM,
+    lvls: &[SynElem],
+    kinds: &KindInterner,
+) -> Result<Vec<LevelId>, ElabError> {
+    lvls.iter()
+        .map(|stx| crate::builtin::sort::elab_level(elab, stx, kinds))
+        .collect()
+}
+
 /// The former `builtin::ident::elab_ident`, plus `explicit_levels`
 /// (Task 8's `.{u}`): oracle `mkConst` creates fresh universe mvars only
 /// for the levelParams NOT covered by explicit levels
 /// (`TermElabM.lean:2117-2126`) — "Create an `Expr.const` using the
 /// given name and explicit levels. Remark: fresh universe metavariables
 /// are created if the constant has more universe parameters than
-/// `explicitLevels`". Until Task 8 lands `.{...}` syntax there is no
-/// producer of a non-empty `explicit_levels`, so every `levelParams`
-/// entry gets its own fresh mvar, exactly as M4b-1's leaf elaborator did.
+/// `explicitLevels`". Task 8's `.{u, v}` suffix (`app::mod`'s
+/// `peel_head` -> `elab_explicit_univs`) is the only producer of a
+/// non-empty `explicit_levels`; without one, every `levelParams` entry
+/// gets its own fresh mvar, exactly as M4b-1's leaf elaborator did.
 ///
 /// `raw` is the identifier's raw source text — a single lexer token that
 /// already includes every `.`-separated component (`leanr_syntax::lex`'s
@@ -108,11 +129,21 @@ fn elab_ident_head(
     // misrouting `debug_assert` (confirmed empirically: the gate panicked
     // on exactly this before the fix, and worse, would have silently
     // read the WRONG name row in a release build per that same method's
-    // documented hazard). The freshly-minted `levels` are pure scratch
-    // data with nothing to dedup against, so `intern_level_list` keeps
-    // `base = None` (Task 8, which first supplies a non-empty
-    // `explicit_levels`, must re-check that: a caller-supplied `LevelId`
-    // is no longer guaranteed to be freshly-minted scratch data).
+    // documented hazard).
+    //
+    // `intern_level_list` keeps `base = None`, and Task 8 RE-CHECKED
+    // that now that `explicit_levels` has a producer and a
+    // caller-supplied `LevelId` is no longer guaranteed to be
+    // freshly-minted scratch data: `intern_level_list`'s `base` is a
+    // DEDUP-ONLY parameter (`bank/mod.rs:564-584` — it consults
+    // `b.level_lists` for an existing row and otherwise stores the
+    // `LevelId`s VERBATIM), unlike every `store_for`-routing accessor.
+    // It never resolves a child id, so no child's region can be
+    // misrouted by it, whatever `base` is; the only effect of `None` is
+    // skipping the persistent-side dedup lookup and minting a scratch
+    // row. Each `LevelId` inside is re-routed by its OWN scratch bit at
+    // every later read (`level_list_at` then `level_row`, both
+    // `base`-taking), so mixing regions inside the list is safe.
     let base = elab.view.store;
     let levels_id = elab
         .mctx

@@ -82,6 +82,8 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
         "Lean.Parser.Term.let" => Some("let"),
         "Lean.Parser.Term.have" => Some("have"),
         "Lean.Parser.Term.app" => Some("app"),
+        "Lean.Parser.Term.explicit" => Some("explicit"),
+        "Lean.Parser.Term.explicitUniv" => Some("explicitUniv"),
         _ => None,
     }
 }
@@ -109,7 +111,6 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 ///   letI / haveI / let_fun / let_delayed / let_tmp / letrec  later slice (own oracle tier each)
 ///   implicit / strict-implicit insertion ....... M4b-3 P1 task 5
 ///   named arguments, eta expansion ............. M4b-3 P1 task 7
-///   @ explicit mode, .{u} explicit universes ... M4b-3 P1 task 8
 ///   instance-implicit args + mvar fixpoint ..... M4b-3 P2
 ///   num / char literals (OfNat / Char.ofNat) ... M4b-3 P3
 ///   coercions (CoeT / CoeFun / CoeSort, mkCoe) . M4b-3 P4
@@ -144,6 +145,18 @@ pub fn dispatch(
         ("<ident>", NodeOrToken::Token(_)) => crate::app::elab_atom(elab, elem, kinds, expected),
         ("Lean.Parser.Term.app", NodeOrToken::Node(node)) => {
             crate::app::elab_app(elab, node, kinds, expected)
+        }
+        // oracle: `elabExplicit` (`App.lean:2260-2271`) — a SHAPE
+        // dispatch, not a plain `elabAtom` alias; see `app::elab_explicit`.
+        ("Lean.Parser.Term.explicit", NodeOrToken::Node(_)) => {
+            crate::app::elab_explicit(elab, elem, kinds, expected)
+        }
+        // oracle: `@[builtin_term_elab explicitUniv] elabExplicitUniv :=
+        // elabAtom` (`App.lean:2249`) — a zero-argument application whose
+        // head carries an explicit universe list; `app::peel_head` strips
+        // the `.{us}` suffix exactly as `elabAppFn` does (`App.lean:2103`).
+        ("Lean.Parser.Term.explicitUniv", NodeOrToken::Node(_)) => {
+            crate::app::elab_atom(elab, elem, kinds, expected)
         }
         ("Lean.Parser.Term.prop", NodeOrToken::Node(node)) => {
             crate::builtin::sort::elab_prop(elab, node, kinds)

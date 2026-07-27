@@ -372,6 +372,18 @@ def appNamedQueries : List (String × String) :=
   , ("app/namedDepPropagate2", "(dpick PUnit.unit (z := Nat.zero) : Unit)")
   ]
 
+/-- M4b-3 P1 task 8: `@` and `.{u}`. Under `@`, implicit parameters are
+supplied positionally (`processImplicitArg` delegates to
+`processExplicitArg`, App.lean:879-885) and `resultIsOutParamSupport`
+is forced off (App.lean:1355). `.{u}` supplies explicit universe levels
+so `mkConst` mints FEWER fresh level mvars (TermElabM.lean:2117-2126) —
+`app/univList` should carry a concrete `zero`, not an `lmvar`. -/
+def appExplicitModeQueries : List (String × String) :=
+  [ ("app/atId",     "@id Nat Nat.zero")
+  , ("app/atBare",   "@Nat.succ")
+  , ("app/univList", "List.{0}")
+  ]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -385,7 +397,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>

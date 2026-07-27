@@ -634,3 +634,499 @@ fn get_resulting_type_escapes_past_a_parameter_a_named_arg_determines() {
         );
     });
 }
+
+// ================================================================
+// M4b-3 P1 task 8: `@` explicit mode, `.{u}` explicit universes, and
+// the implicit-lambda guard.
+// ================================================================
+
+/// Elaborate `src` as a whole term, in the fixture environment, and
+/// return the raw `Result`. `with_app_harness`'s head is irrelevant
+/// here (`Nat.zero`, the cheapest constant) — only its `TermElabM` is
+/// used. Mirrors `eta_expansion_leaves_no_fvar_in_the_ambient_lctx`'s
+/// own in-harness `elab_term` call.
+fn elab_src(src: &str) -> Result<leanr_kernel::bank::ExprId, leanr_elab::ElabError> {
+    support::with_app_harness("Nat.zero", |app| {
+        let snap = builtin::snapshot();
+        let parsed = parse_term(src, &snap);
+        assert!(parsed.errors.is_empty(), "{src}: {:?}", parsed.errors);
+        let elem = parsed
+            .tree
+            .root()
+            .first_child_or_token()
+            .unwrap_or_else(|| panic!("{src}: no term child"));
+        app.elab.elab_term(&elem, &parsed.tree.kinds, None)
+    })
+}
+
+/// oracle: `mkConst` (`TermElabM.lean:2128-2136`) — "too many explicit
+/// universe levels" is an ERROR, not a truncation. Elab0's `List` has
+/// exactly one level parameter, so `List.{0, 0}` is the case.
+///
+/// Task 4 added the `TooManyUniverseLevels` check with no producer for
+/// `explicit_levels`; this task is the producer, so this is the first
+/// test that can reach it at all. The corpus cannot: a query whose
+/// oracle side is an ERROR is never emitted by `dump_elab.lean` (it
+/// logs to stderr and writes no record), so an over-long `.{..}` has no
+/// possible corpus row.
+#[test]
+fn too_many_explicit_universe_levels_is_an_error() {
+    match elab_src("List.{0, 0}") {
+        Err(leanr_elab::ElabError::TooManyUniverseLevels(n)) => assert_eq!(n, "List"),
+        other => panic!("expected TooManyUniverseLevels(\"List\"), got {other:?}"),
+    }
+}
+
+/// The `.{u, v}` suffix's levels are the sepBy1 wrapper's EVEN-indexed
+/// children (the oracle's `Syntax.getSepArgs`). Taking every child
+/// instead would hand the `,` atom to `elab_level`; taking only the
+/// first would silently drop `v`. `List.{0, 0}` discriminates both:
+/// with `getSepArgs` it reaches `mkConst` with TWO levels and errors as
+/// above, with a naive `first()` it would reach it with one and
+/// succeed, and with no filtering at all it would fail inside
+/// `elab_level` on the `<atom>` kind instead.
+#[test]
+fn explicit_univ_list_uses_sep_args_not_every_child() {
+    // Single level: no separator involved, must succeed.
+    assert!(elab_src("List.{0}").is_ok());
+    // Two levels: both are seen (hence "too many"), and neither the
+    // `,` atom nor a dropped second level is what surfaced.
+    assert!(matches!(
+        elab_src("List.{0, 0}"),
+        Err(leanr_elab::ElabError::TooManyUniverseLevels(_))
+    ));
+}
+
+/// oracle: `elabExplicit`'s `` `(@($t)) ``/`` `(@$t) `` arms
+/// (`App.lean:2269-2270`) do NOT enter explicit mode — they elaborate
+/// `t` with `implicitLambda := false`, which is M4b-3 P5. Routing them
+/// to `elab_atom` would enter explicit mode the oracle never enters, so
+/// the seam must NAME P5 rather than fall through.
+#[test]
+fn at_on_a_non_atom_names_the_p5_seam() {
+    match elab_src("@(Nat.succ Nat.zero)") {
+        Err(leanr_elab::ElabError::UnsupportedSyntax(m)) => {
+            assert!(
+                m.contains("M4b-3 P5") && m.contains("implicit-lambda"),
+                "the `@t` seam must name P5 and say why, got {m:?}"
+            );
+        }
+        other => panic!("expected the P5 seam, got {other:?}"),
+    }
+}
+
+/// oracle: `elabAppFn`'s `` `(@$_) => throwUnsupportedSyntax ``
+/// (`App.lean:2118`) — in a FUNCTION position `@` on anything outside
+/// the seven `elabAtom` shapes is simply invalid; it is NOT the
+/// implicit-lambda-disabling form (that one is only reachable when the
+/// `@..` node is the whole term). Two different oracle arms, so two
+/// different seams.
+#[test]
+fn at_on_a_non_atom_head_is_an_invalid_occurrence() {
+    match elab_src("@(Nat.succ) Nat.zero") {
+        Err(leanr_elab::ElabError::UnsupportedSyntax(m)) => {
+            assert!(
+                m.contains("invalid occurrence of `@`"),
+                "a head-position `@` seam must cite App.lean:2118, got {m:?}"
+            );
+        }
+        other => panic!("expected the head-position `@` seam, got {other:?}"),
+    }
+}
+
+/// Under `@`, `processImplicitArg` delegates to `processExplicitArg`
+/// (`App.lean:882-886`), so an implicit parameter is filled from the
+/// POSITIONAL arguments. The corpus record `app/atId` covers the
+/// success shape; this covers the complementary one the corpus cannot:
+/// WITHOUT `@`, the same positional argument list is one too many, and
+/// the oracle's `explicit` flag is the only thing that tells the two
+/// apart.
+#[test]
+fn explicit_mode_consumes_implicit_params_positionally() {
+    // `id {α : Sort u} (a : α) : α`. With `@`, `Nat` fills `α`.
+    assert!(
+        elab_src("@id Nat Nat.zero").is_ok(),
+        "`@id Nat Nat.zero` must fill the implicit `α` positionally"
+    );
+    // Without `@`, `α` is inserted as an mvar and `Nat`/`Nat.zero` are
+    // two arguments for the single explicit parameter `a` — one too
+    // many, which is `main`'s own "too many arguments" seam.
+    match elab_src("id Nat Nat.zero") {
+        Err(leanr_elab::ElabError::UnsupportedSyntax(m)) => {
+            assert!(
+                m.contains("too many arguments"),
+                "without `@` the second positional argument has no parameter, got {m:?}"
+            );
+        }
+        other => panic!("expected the too-many-arguments seam without `@`, got {other:?}"),
+    }
+}
+
+/// oracle: `useImplicitLambda` (`TermElabM.lean:1743-1779`) fires only
+/// when the whnf'd expected type is a `forallE` whose binder info is
+/// IMPLICIT or INST-IMPLICIT — `unless c.isImplicit || c.isInstImplicit
+/// do return .no` (`:1751`), with the function's own doc comment
+/// spelling out the exclusion: "implicit lambdas are not triggered by
+/// the strict implicit binder annotation `{{a : α}} → β`".
+///
+/// The corpus cannot discriminate this at all: no committed record has
+/// an implicit-`forall` expected type (source ascription is the only
+/// expected-type source, and no fixture declaration is ascribed to one),
+/// so a guard that tested all three implicit flavours — the shape this
+/// task's own brief paraphrased — would keep every record green while
+/// diverging from the oracle. Each binder info is asserted directly.
+#[test]
+fn implicit_lambda_guard_fires_only_for_implicit_and_inst_implicit() {
+    use leanr_kernel::BinderInfo::*;
+    for (bi, should_fire) in [
+        (Implicit, true),
+        (InstImplicit, true),
+        (StrictImplicit, false),
+        (Default, false),
+    ] {
+        support::with_app_harness("Nat.zero", |app| {
+            // `∀ (_ : Nat) , Nat` at binder info `bi`, built from
+            // `Nat.zero`'s own PERSISTENT type — `base = Some(..)`
+            // throughout, per `Store::store_for`'s misrouting hazard.
+            let nat = app.elab.mctx.infer_type(app.st.f).unwrap();
+            let base = app.elab.view.store;
+            let expected = app
+                .elab
+                .mctx
+                .store_mut()
+                .expr_forall(Some(base), None, nat, nat, bi)
+                .unwrap();
+
+            let snap = builtin::snapshot();
+            let parsed = parse_term("Nat.zero", &snap);
+            let elem = parsed.tree.root().first_child_or_token().unwrap();
+            let got = app
+                .elab
+                .elab_term(&elem, &parsed.tree.kinds, Some(expected));
+            let fired = matches!(
+                &got,
+                Err(leanr_elab::ElabError::UnsupportedSyntax(m))
+                    if m.contains("implicit lambda insertion")
+            );
+            assert_eq!(fired, should_fire, "binder info {bi:?}: got {got:?}");
+        });
+    }
+}
+
+/// oracle: `blockImplicitLambda` (`TermElabM.lean:1715-1720`) runs
+/// BEFORE the expected type is examined, and its exclusion list is what
+/// keeps the guard above from firing on shapes the oracle elaborates
+/// normally. Each entry is checked against the SAME implicit-`forall`
+/// expected type that makes the guard fire for a bare identifier — so a
+/// missing disjunct is a test failure, not a silent widening.
+///
+/// This is the property the full corpus gate can only test negatively
+/// (a guard that over-fires turns green records red); here it is tested
+/// positively, one disjunct at a time.
+#[test]
+fn block_implicit_lambda_covers_the_oracles_exclusion_list() {
+    for src in [
+        // isExplicit — `@f`
+        "@Nat.succ",
+        // isExplicitApp — `@f a`
+        "@id Nat Nat.zero",
+        // isHole — `_`
+        "_",
+        // isTypeAscription — `(e : T)`
+        "(Nat.zero : Nat)",
+        // isLambdaWithImplicit — `fun {α} => ..`
+        "fun {a : Nat} => Nat.zero",
+        // dropParens: the disjuncts see through leading `(..)`
+        "(@Nat.succ)",
+    ] {
+        support::with_app_harness("Nat.zero", |app| {
+            let nat = app.elab.mctx.infer_type(app.st.f).unwrap();
+            let base = app.elab.view.store;
+            let expected = app
+                .elab
+                .mctx
+                .store_mut()
+                .expr_forall(
+                    Some(base),
+                    None,
+                    nat,
+                    nat,
+                    leanr_kernel::BinderInfo::Implicit,
+                )
+                .unwrap();
+
+            let snap = builtin::snapshot();
+            let parsed = parse_term(src, &snap);
+            assert!(parsed.errors.is_empty(), "{src}: {:?}", parsed.errors);
+            let elem = parsed.tree.root().first_child_or_token().unwrap();
+            let got = app
+                .elab
+                .elab_term(&elem, &parsed.tree.kinds, Some(expected));
+            if let Err(leanr_elab::ElabError::UnsupportedSyntax(m)) = &got {
+                assert!(
+                    !m.contains("implicit lambda insertion"),
+                    "{src}: blockImplicitLambda must suppress the guard, got {m:?}"
+                );
+            }
+        });
+    }
+}
+
+/// oracle: `processStrictImplicitArg` (`App.lean:891-897`) — under `@`
+/// it delegates to `processExplicitArg`, so a strict-implicit parameter
+/// is filled from the POSITIONAL arguments; without `@` (and with
+/// arguments left) it inserts an mvar instead and the positional
+/// argument survives to become a "too many arguments" error.
+///
+/// Newly live in Task 8: `ctx.explicit` was permanently `false` when
+/// this arm was written, so its `explicit` half had never executed.
+/// The corpus still cannot reach it (Elab0 declares no strict-implicit
+/// constant), hence the synthetic `fType` — the same technique
+/// `strict_implicit_without_args_finalizes` above uses, `Some(base)`
+/// throughout per that test's store-routing citation.
+#[test]
+fn explicit_mode_fills_a_strict_implicit_from_positional_args() {
+    for explicit in [false, true] {
+        support::with_app_harness("pick", |app| {
+            let base = app.elab.view.store;
+            let nat = match app.node(app.st.f_type) {
+                leanr_kernel::bank::terms::Node::Forall { binder_type, .. } => binder_type,
+                other => panic!("pick's type must be a Forall, got {other:?}"),
+            };
+            // `∀ {{_ : Nat}}, Nat`.
+            app.st.f_type = app
+                .elab
+                .mctx
+                .store_mut()
+                .expr_forall(
+                    Some(base),
+                    None,
+                    nat,
+                    nat,
+                    leanr_kernel::BinderInfo::StrictImplicit,
+                )
+                .unwrap();
+            app.st.f_args = Vec::new();
+
+            let snap = builtin::snapshot();
+            let parsed = parse_term("Nat.zero", &snap);
+            let elem = parsed.tree.root().first_child_or_token().unwrap();
+            app.st.args = vec![Arg::Stx(elem)];
+            app.ctx.explicit = explicit;
+
+            let kinds = snap.kinds();
+            let got = leanr_elab::app::args::main(app, &kinds);
+            if explicit {
+                let got = got.expect("under `@` the positional argument fills the parameter");
+                let arg = match app.node(got) {
+                    leanr_kernel::bank::terms::Node::App { arg, .. } => arg,
+                    other => panic!("expected an application, got {other:?}"),
+                };
+                assert!(
+                    matches!(app.node(arg), leanr_kernel::bank::terms::Node::Const { .. }),
+                    "under `@` the argument is the ELABORATED `Nat.zero`, not a fresh mvar"
+                );
+            } else {
+                match got {
+                    Err(leanr_elab::ElabError::UnsupportedSyntax(m)) => assert!(
+                        m.contains("too many arguments"),
+                        "without `@` the strict implicit takes an mvar and the \
+                         positional argument is left over, got {m:?}"
+                    ),
+                    other => panic!("expected the leftover-argument seam, got {other:?}"),
+                }
+            }
+        });
+    }
+}
+
+/// `optParam Nat Nat` built by hand — Elab0 declares no `optParam`
+/// parameter. `consume_type_annotations` only reads the head constant's
+/// NAME and the first spine argument, so the default value's own type is
+/// irrelevant. `Some(base)` throughout, per
+/// `f_type_is_forall_reconstructs_dependent_domain_with_correct_base`'s
+/// store-routing citation.
+fn opt_param_of(
+    app: &mut leanr_elab::app::state::AppElab,
+    nat: leanr_kernel::bank::ExprId,
+) -> leanr_kernel::bank::ExprId {
+    let base = app.elab.view.store;
+    let opt_name = {
+        let store = app.elab.mctx.store_mut();
+        let s = store.intern_str(Some(base), "optParam").unwrap();
+        store.name_str(Some(base), None, s).unwrap()
+    };
+    let no_levels = app
+        .elab
+        .mctx
+        .store_mut()
+        .intern_level_list(None, &[])
+        .unwrap();
+    let opt_const = app
+        .elab
+        .mctx
+        .store_mut()
+        .expr_const(Some(base), Some(opt_name), no_levels)
+        .unwrap();
+    let partial = app
+        .elab
+        .mctx
+        .store_mut()
+        .expr_app(Some(base), opt_const, nat)
+        .unwrap();
+    app.elab
+        .mctx
+        .store_mut()
+        .expr_app(Some(base), partial, nat)
+        .unwrap()
+}
+
+/// `pick`'s own persistent `Nat` (its first binder's domain).
+fn nat_of(app: &leanr_elab::app::state::AppElab) -> leanr_kernel::bank::ExprId {
+    match app.node(app.st.f_type) {
+        leanr_kernel::bank::terms::Node::Forall { binder_type, .. } => binder_type,
+        other => panic!("pick's type must be a Forall, got {other:?}"),
+    }
+}
+
+/// oracle: `processExplicitArg`'s optParam/autoParam block
+/// (`App.lean:826-854`) is `match (← read).explicit, ..` whose every
+/// default-filling arm has `false` as its first scrutinee — under `@`
+/// none of them match and control falls through to `App.lean:855`'s
+/// `| _, _, _ =>` arm. `fType` here is `∀ (y : optParam Nat Nat), Nat`,
+/// so the CURRENT parameter is the wrapped one:
+///   * `explicit = false` — leanr's P5 seam for the deferred default;
+///   * `explicit = true`  — falls through to `finalize`, `f` unchanged.
+///
+/// This gate was written in Task 4/5 while `ctx.explicit` was
+/// permanently `false`, so its `!` had never mattered; the corpus cannot
+/// reach it either (Elab0 declares no `optParam` parameter).
+#[test]
+fn explicit_mode_skips_the_optparam_default() {
+    for explicit in [false, true] {
+        support::with_app_harness("pick", |app| {
+            let base = app.elab.view.store;
+            let nat = nat_of(app);
+            let opt_nat = opt_param_of(app, nat);
+            app.st.f_type = app
+                .elab
+                .mctx
+                .store_mut()
+                .expr_forall(
+                    Some(base),
+                    None,
+                    opt_nat,
+                    nat,
+                    leanr_kernel::BinderInfo::Default,
+                )
+                .unwrap();
+            app.st.f_args = Vec::new();
+            app.st.args = Vec::new();
+            app.ctx.explicit = explicit;
+
+            let f_before = app.st.f;
+            let snap = builtin::snapshot();
+            let kinds = snap.kinds();
+            let got = leanr_elab::app::args::main(app, &kinds);
+            if explicit {
+                assert_eq!(
+                    got.expect("under `@` the default is not filled — finalize"),
+                    f_before,
+                    "under `@` the optParam default arm does not match \
+                     (App.lean:827-828)"
+                );
+            } else {
+                match got {
+                    Err(leanr_elab::ElabError::UnsupportedSyntax(m)) => assert!(
+                        m.contains("optParam default"),
+                        "without `@` the default-filling arm is reached, got {m:?}"
+                    ),
+                    other => panic!("expected the P5 optParam seam without `@`, got {other:?}"),
+                }
+            }
+        });
+    }
+}
+
+/// oracle: the eta escape at `App.lean:870-873` — `else if !(← read)
+/// .explicit then if (← hasOptAutoParams (← getFType)) then addEtaArg`.
+/// A LATER parameter carrying a default eta-expands the application,
+/// but only when `@` was NOT used; under `@` control reaches
+/// `finalize` (`App.lean:877`) instead. `fType` here is
+/// `∀ (x : Nat) (y : optParam Nat Nat), Nat`, so the current parameter
+/// (`x`) is unwrapped and only `hasOptAutoParams` can see `y`:
+///   * `explicit = false` — `x` becomes an eta argument, and the loop
+///     then hits `y`'s own P5 optParam seam;
+///   * `explicit = true`  — finalizes `f` unchanged, no eta argument.
+///
+/// A separate test from `explicit_mode_skips_the_optparam_default`
+/// above because the two `!`s are separate gates: measured, each shape
+/// discriminates only its own (the current-parameter shape leaves the
+/// eta gate unreached, and this shape leaves the default gate's `if`
+/// body unreached).
+#[test]
+fn explicit_mode_skips_the_optparam_eta_escape() {
+    for explicit in [false, true] {
+        support::with_app_harness("pick", |app| {
+            let base = app.elab.view.store;
+            let nat = nat_of(app);
+            let opt_nat = opt_param_of(app, nat);
+            let inner = app
+                .elab
+                .mctx
+                .store_mut()
+                .expr_forall(
+                    Some(base),
+                    None,
+                    opt_nat,
+                    nat,
+                    leanr_kernel::BinderInfo::Default,
+                )
+                .unwrap();
+            app.st.f_type = app
+                .elab
+                .mctx
+                .store_mut()
+                .expr_forall(
+                    Some(base),
+                    None,
+                    nat,
+                    inner,
+                    leanr_kernel::BinderInfo::Default,
+                )
+                .unwrap();
+            app.st.f_args = Vec::new();
+            app.st.args = Vec::new();
+            app.ctx.explicit = explicit;
+
+            let f_before = app.st.f;
+            let snap = builtin::snapshot();
+            let kinds = snap.kinds();
+            let got = leanr_elab::app::args::main(app, &kinds);
+            if explicit {
+                assert_eq!(
+                    got.expect("under `@` the application finalizes as-is"),
+                    f_before,
+                    "under `@` the `hasOptAutoParams` eta escape is skipped"
+                );
+                assert!(
+                    app.st.eta_args.is_empty(),
+                    "under `@` no eta argument is added"
+                );
+            } else {
+                match got {
+                    Err(leanr_elab::ElabError::UnsupportedSyntax(m)) => assert!(
+                        m.contains("optParam default"),
+                        "without `@` the eta escape exposes `y`'s optParam seam, got {m:?}"
+                    ),
+                    other => panic!("expected the P5 optParam seam without `@`, got {other:?}"),
+                }
+                assert_eq!(
+                    app.st.eta_args.len(),
+                    1,
+                    "without `@` `x` becomes an eta argument (App.lean:873)"
+                );
+            }
+        });
+    }
+}
