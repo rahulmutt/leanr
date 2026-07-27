@@ -349,12 +349,27 @@ and the result is a LAMBDA (App.lean:191-205). `app/namedDep` supplies
 a named argument that depends on the missing parameter, which becomes
 IMPLICIT instead of eta (findNamedArgDependsOnCurrent?,
 App.lean:340-348) — the two paths emit structurally different terms, so
-both are corpus entries, not one. -/
+both are corpus entries, not one.
+
+`app/namedDepPropagate2` covers the SAME dependency test in its OTHER
+oracle call site: `getResultingTypeCore?`'s `if (← findNamedArgDependsOn?
+fType' namedArgs).isSome then processImplicit'` escape (App.lean:477-479),
+which lets expected-type propagation continue past a missing parameter a
+named argument determines, instead of postponing. It needs an ascription
+(propagation's only P1 source), an explicit argument elaborated before the
+escape point, and a result type that is itself a metavariable — see
+`Elab0.lean`'s own comment on `dpick` for why each piece is required, and
+the task-7 fix report for the measured before/after. The plan's simpler
+`(dep2 Nat.zero (z := Nat.zero) : Nat)` was tried first and REJECTED: it
+reaches the escape, but its resulting type is the closed `Nat`, so
+propagating early and propagating one parameter later converge on the
+same term and the record cannot tell the escape from the postponement. -/
 def appNamedQueries : List (String × String) :=
   [ ("app/namedBoth",  "pick (x := Nat.zero) (y := Nat.zero)")
   , ("app/namedFirst", "pick (x := Nat.zero) Nat.zero")
   , ("app/namedEta",   "pick (y := Nat.zero)")
   , ("app/namedDep",   "dep (z := Nat.zero)")
+  , ("app/namedDepPropagate2", "(dpick PUnit.unit (z := Nat.zero) : Unit)")
   ]
 
 def emit (id src : String) (expJ : Json) : IO Unit :=

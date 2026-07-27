@@ -583,3 +583,54 @@ fn has_opt_auto_params_reduces_to_find_a_hidden_optparam() {
         );
     });
 }
+
+/// `getResultingTypeCore?`'s `findNamedArgDependsOn?` ESCAPE
+/// (`App.lean:477-479`): when named arguments remain, the simulation
+/// continues past the current parameter (`processImplicit' ()`) if one of
+/// them DETERMINES it, and only postpones (`return none`) otherwise.
+///
+/// This is the branch Task 6 collapsed onto the postponement and Task 7
+/// restored, so it gets a direct test on top of `app/namedDepPropagate2`:
+/// the corpus record discriminates it only through the
+/// `Unit`-is-a-reducible-abbrev-of-`PUnit` coincidence
+/// (`app/propagateAbbrev`'s mechanism), which is a real but indirect
+/// signal. Here the branch's own return value is the assertion —
+/// `Some(?a)` with the escape, `None` without it — so a future
+/// re-collapse fails on the shape rather than on an unfolding accident.
+#[test]
+fn get_resulting_type_escapes_past_a_parameter_a_named_arg_determines() {
+    let snap = builtin::snapshot();
+    let w = parse_term("PUnit.unit", &snap);
+    let z = parse_term("Nat.zero", &snap);
+    let w_elem = w.tree.root().first_child_or_token().expect("PUnit.unit");
+    let z_elem = z.tree.root().first_child_or_token().expect("Nat.zero");
+    support::with_app_harness("dpick", |app| {
+        // `dpick {a : Type} (w : a) (x : Type) (z : x) : a` — the harness
+        // already inserted `a`'s implicit mvar, so `f_type` is
+        // `∀ (w : ?a) (x : Type) (z : x), ?a`.
+        app.st.args = vec![Arg::Stx(w_elem.clone())];
+        app.st.named_args = vec![NamedArg {
+            name: "z".to_string(),
+            val: Arg::Stx(z_elem.clone()),
+            num_implicit_params: 0,
+        }];
+
+        let got = leanr_elab::app::propagate::get_resulting_type(app).unwrap();
+        let resulting = got.expect(
+            "the simulation must reach the result type: `w` consumes the positional \
+             argument, then `x` is missing but `z : x` DEPENDS on it, so \
+             `findNamedArgDependsOn?` returns `some` and the walk continues \
+             (App.lean:478) instead of postponing",
+        );
+        assert!(
+            matches!(
+                app.node(resulting),
+                leanr_kernel::bank::terms::Node::MVar { .. }
+            ),
+            "the resulting type is `dpick`'s own result parameter `?a` — an \
+             UNASSIGNED mvar, which is exactly why the escape is observable: \
+             propagating unifies the expected type with it here rather than \
+             letting a later argument assign it"
+        );
+    });
+}

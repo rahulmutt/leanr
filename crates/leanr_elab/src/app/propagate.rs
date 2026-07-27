@@ -262,6 +262,19 @@ pub fn get_resulting_type(app: &mut AppElab) -> Result<Option<ExprId>, ElabError
             // exactly as `App.lean:478` passes it. Without it, an
             // application whose named argument determines a missing
             // parameter would postpone propagation the oracle performs.
+            //
+            // DISCRIMINATED, not merely reasoned about — collapsing this
+            // back onto the postponement fails both of:
+            //   * `app/namedDepPropagate2` in the oracle corpus
+            //     (`(dpick PUnit.unit (z := Nat.zero) : Unit)`; the
+            //     escape emits `dpick Unit ..`, the postponement
+            //     `dpick PUnit.{1} ..`), and
+            //   * `app_smoke.rs`'s
+            //     `get_resulting_type_escapes_past_a_parameter_a_named_arg_determines`,
+            //     which asserts this function's own return value rather
+            //     than a downstream term.
+            // Both were measured against a collapsed build; see the
+            // task-7 fix report. Do not re-collapse.
             if find_named_arg_depends_on(app, ty_prime, &named)?.is_some() {
                 param_idx += 1;
                 ty = body;
