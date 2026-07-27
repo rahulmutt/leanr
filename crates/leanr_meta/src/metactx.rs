@@ -774,6 +774,51 @@ impl<'e> MetaCtx<'e> {
         self.matchers.get(&n)
     }
 
+    /// oracle: `processPostponed (mayPostpone := false)`
+    /// (`Lean/Meta/LevelDefEq.lean`), reached from
+    /// `Lean.Elab.Term.processPostponedUniverseConstraints`
+    /// (`SyntheticMVars.lean:409-411`) — the ladder's final step when
+    /// `postpone == .no`.
+    ///
+    /// Additive and behavior-neutral: a thin `pub` forwarder to the
+    /// existing `pub(crate)` `level::process_postponed`
+    /// (`level.rs:741`), which `defeq.rs:102` already calls on the same
+    /// queue. No new logic, no TCB surface — `leanr_elab` simply cannot
+    /// reach a `pub(crate)` item from another crate.
+    ///
+    /// Returns `true` when every postponed constraint was solved.
+    /// leanr does NOT model the oracle's `exceptionOnFailure` parameter:
+    /// that flag exists to guarantee `throwStuckAtUniverseCnstr`'s
+    /// "entries is not empty" precondition, and leanr's caller reports
+    /// stuck constraints from the `false` verdict instead of from a
+    /// thrown exception (`synthetic.rs`'s
+    /// `process_postponed_universe_constraints`).
+    pub fn process_postponed_levels(&mut self) -> Result<bool, MetaError> {
+        self.process_postponed()
+    }
+
+    /// The number of postponed level constraints. The oracle's
+    /// `getNumPostponed` (`Lean/Meta/Basic.lean`), used by
+    /// `defeq.rs:173`'s own postponed-count guard and, from P2a on, by
+    /// the ladder's checkpoint bookkeeping.
+    pub fn postponed_len(&self) -> usize {
+        self.postponed.len()
+    }
+
+    /// oracle: `getDefaultInstances` (`Lean/Meta/Instances.lean`),
+    /// consumed by `synthesizeSomeUsingDefaultPrio`
+    /// (`SyntheticMVars.lean:213-221`).
+    ///
+    /// Additive: a `pub` forwarder to the existing `pub(crate)`
+    /// `MetaCtx::default_instances` (`instances.rs:520`). P2a uses it
+    /// only to shape-guard the `synthesize_using_default` seam — "are
+    /// there default instances that WOULD apply here?" — so that P3 can
+    /// replace the seam body without the guard having lied in the
+    /// meantime. Each entry is `(instance name, priority)`.
+    pub fn default_instances_of(&self, class: NameId) -> Vec<(NameId, usize)> {
+        self.default_instances(class)
+    }
+
     /// One deterministic step. Every whnf_core / whnf / infer entry
     /// calls this once; exhaustion is a distinct error, never a
     /// verdict (spec § Error handling).
@@ -907,7 +952,9 @@ pub(crate) struct MetaSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{const_named, with_ctx, with_prelude0_ctx};
+    use crate::test_support::{
+        const_named, render_name, with_ctx, with_instances_ctx, with_prelude0_ctx,
+    };
     use crate::MetaError;
 
     /// TDD RED for the checkpoint/push/restore + `mk_forall` accessors
@@ -1244,6 +1291,46 @@ mod tests {
         with_prelude0_ctx(|ctx| {
             let nat = const_named(ctx, "Nat");
             assert_eq!(ctx.instantiate_beta_rev_range(nat, &[]).unwrap(), nat);
+        });
+    }
+
+    #[test]
+    fn process_postponed_levels_drains_an_empty_queue() {
+        with_ctx(|ctx| {
+            assert_eq!(ctx.postponed_len(), 0);
+            // An empty queue is vacuously solvable: the oracle's
+            // `processPostponed` returns `true` when there is nothing
+            // left to solve (`level.rs::process_postponed`'s own
+            // contract), which is what makes the ladder's final
+            // `process_postponed_universe_constraints` a no-op on every
+            // term that never postponed a level constraint.
+            assert!(ctx.process_postponed_levels().expect("no error"));
+            assert_eq!(ctx.postponed_len(), 0);
+        });
+    }
+
+    /// Mirrors `default_instances_finds_the_default_instance`
+    /// (instances.rs) through the new public accessor: the same
+    /// fixture (`with_instances_ctx` — the task brief's sketched
+    /// `with_default_instance_ctx` does not exist; `instances.rs`'s own
+    /// test builds its context inline the same way), the same class,
+    /// the same expected entry — proving the accessor forwards rather
+    /// than reimplementing.
+    #[test]
+    fn default_instances_of_reads_the_default_instance_table() {
+        with_instances_ctx(|ctx| {
+            let of_n = const_named(ctx, "OfN");
+            let of_n_name = if let Node::Const { name: Some(n), .. } = ctx.node(of_n) {
+                n
+            } else {
+                panic!("OfN is not a bare const")
+            };
+            let found = ctx.default_instances_of(of_n_name);
+            let names: Vec<String> = found.iter().map(|(n, _)| render_name(ctx, *n)).collect();
+            assert!(
+                names.contains(&"instOfNN".to_string()),
+                "default_instances_of(OfN): {names:?}"
+            );
         });
     }
 }
