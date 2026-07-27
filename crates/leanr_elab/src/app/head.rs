@@ -32,10 +32,45 @@ pub fn elab_app_fn(
         ("<ident>", leanr_syntax::tree::NodeOrToken::Token(tok)) => {
             Ok(vec![elab_ident_head(elab, tok.text(), explicit_levels)?])
         }
+        // Task 9's seam audit split this from the catch-all below: the
+        // two are DIFFERENT oracle arms with different owners, and one
+        // message for both named the wrong one. `(f) a`, `(fun x => x) a`
+        // and `(f : T) a` reach no LVal machinery at all in the oracle
+        // (verified against the pinned oracle: `(Nat.succ) Nat.zero` and
+        // `(fun (x : Nat) => x) Nat.zero` both elaborate cleanly there),
+        // so calling them "dot notation" pointed a reader at M4b-4's
+        // `resolveLValAux` for a construct that never touches it.
+        (other, _) if is_lval_head(other) => Err(ElabError::UnsupportedSyntax(format!(
+            "application head `{other}` needs the dot-notation / LVal machinery \
+             (`elabAppFn`'s field/fieldIdx/dotIdent arms, App.lean:2067-2109, and its \
+             `choiceKind` fan-out at :2062-2065) — M4b-4"
+        ))),
         (other, _) => Err(ElabError::UnsupportedSyntax(format!(
-            "application head `{other}` — dot notation / LVal machinery is M4b-4"
+            "application head `{other}` is a general term in function position — the \
+             oracle takes `elabAppFn`'s generic branch (App.lean:2120-2138: `elabTerm f \
+             none` then `elabAppLVals`), which succeeds; M4b-3 P1 scopes `elabAppFn` to \
+             its ident case (design spec § P1), so the rest of `elabAppFn` is deferred \
+             with the LVal machinery to M4b-4"
         ))),
     }
+}
+
+/// The application-head kinds whose oracle arm is the LVal / dot-notation
+/// subsystem: `elabAppFn`'s `` `($(e).$field:ident) ``/`` `($e |>.$..) ``/
+/// `` `($(e).$idx:fieldIdx) `` arms (`App.lean:2084-2097`), its
+/// `` `(.$id:ident) `` arms (`:2106-2109`), the `namedPattern` arm
+/// (`:2098-2100`, an outright error outside pattern position), and the
+/// `choiceKind` fan-out (`:2062-2065`). None of them is routed by
+/// `dispatch` either — see that module's deferral table.
+fn is_lval_head(kind: &str) -> bool {
+    matches!(
+        kind,
+        "Lean.Parser.Term.proj"
+            | "Lean.Parser.Term.pipeProj"
+            | "Lean.Parser.Term.dotIdent"
+            | "Lean.Parser.Term.namedPattern"
+            | "choice"
+    )
 }
 
 /// oracle: `elabExplicitUnivs` (`App.lean:1899-1900`) —

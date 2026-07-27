@@ -3,14 +3,46 @@
 //! docs/superpowers/specs/2026-07-25-m4b3-application-elaborator-design.md
 //! § P1 — the application machinery.
 //!
-//! NOT in this plan, each a named seam (never a silent fall-through):
-//!   instance-implicit arguments + the synthetic-mvar fixpoint . P2
-//!   num/char/scientific literals ......................... P3
-//!   coercions (CoeT/CoeFun/CoeSort, mkCoe) ............... P4
-//!   optParam defaults / autoParam / `..` ellipsis ........ P5
-//!   implicit-lambda insertion ............................ P5
-//!   overload resolution (candidates > 1) ................. resolve_global slice
-//!   elabAsElim, dot notation, LVal machinery ............. M4b-4
+//! IN this plan, so NOT seams (Task 9's reconciliation of this list
+//! against what P1 actually shipped): explicit arguments, implicit and
+//! strict-implicit insertion, `propagateExpectedType`, named arguments,
+//! eta-expansion, the `..` ellipsis (task 7 — `args.rs`'s
+//! `if app.ctx.ellipsis { add_implicit_arg }`, oracle `App.lean:856-857`),
+//! `@` explicit mode, and `.{u}` explicit universes.
+//!
+//! NOT in this plan, each a named seam (never a silent fall-through).
+//! `Where` is the site that raises it; every message below carries its
+//! owning slice, and `tests/seam_audit.rs` asserts that:
+//!
+//! ```text
+//!   instance-implicit args + synthetic-mvar fixpoint . P2  args.rs (InstImplicit arm)
+//!   pending instance mvars (3 guards) ................ P2  propagate.rs, finalize.rs
+//!   local-instance outParam result type .............. P2  args.rs, finalize.rs
+//!   normalizing a non-forall fType (too many args) ... P2+P4 args.rs (`main`)
+//!   num/char/scientific literals ..................... P3  dispatch.rs (not routed)
+//!   coercions (CoeT/CoeFun/CoeSort, mkCoe) ........... P4  args.rs (ensureArgType)
+//!   optParam defaults / autoParam .................... P5  args.rs
+//!   implicit-lambda insertion ........................ P5  elab.rs, and `@t`/`@(t)` here
+//!   overload resolution (candidates > 1) ............. resolve_global slice  overload.rs
+//!   elabAsElim, dot notation, LVal machinery ......... M4b-4 head.rs, here, dispatch.rs
+//!   numImplicitParams (structure projection) ......... M4b-4 args.rs
+//! ```
+//!
+//! Three of those are not reachable from any source term the hermetic
+//! `Elab0` fixture can express, and `tests/seam_audit.rs` records why
+//! rather than pretending otherwise:
+//!   * the P5 optParam/autoParam seam — no fixture parameter carries
+//!     either wrapper, so it is asserted white-box instead
+//!     (`app_smoke.rs`'s `explicit_mode_skips_the_optparam_default`);
+//!   * the P2 instance-implicit seams — `Elab0.lean` declares no `class`
+//!     and no `instance`, so no fixture constant has an `instImplicit`
+//!     binder and nothing can push onto `inst_mvars`. P2 brings the
+//!     fixture classes and the tests with them;
+//!   * the P4 coercion seam, which is an `ElabError::TypeMismatch` from
+//!     `elab_and_add_new_arg`'s `ensureArgType` rather than an
+//!     `UnsupportedSyntax` — that IS M4b-1's documented behavior (error
+//!     on a defeq mismatch instead of inserting a coercion), so it is a
+//!     deliberate wrong-shaped seam, not a missing one.
 
 pub mod args;
 pub mod expand;
@@ -240,13 +272,32 @@ fn elab_app_aux(
     let f_type = elab.mctx.infer_type(f)?;
     let f_type = elab.mctx.instantiate_mvars(f_type)?;
 
-    // oracle: `App.lean:1374`'s `if (← isElabAsElim ..) then
-    // elabAppArgsAux ..` branch reads the `@[elab_as_elim]` attribute —
-    // an environment EXTENSION leanr does not decode, so there is no way
-    // to consult it here and no way for it to be true. Task 9 records
-    // this as a fixture-scoped seam and adds the fixture-source gate
-    // (no `@[elab_as_elim]` declaration in `Elab0.lean`) that keeps the
-    // branch inert rather than silently mis-taken.
+    // oracle: `App.lean:1373`'s `if let some elimInfo ← elabAsElim? then
+    // .. ElabElim.main ..` branch, which diverts the WHOLE application
+    // to the eliminator elaborator. leanr never takes it.
+    //
+    // Task 9 correction — the branch is NOT attribute-only, and the plan
+    // said it was. `elabAsElim?` (`App.lean:1397-1401`) calls
+    // `shouldElabAsElim` (`:1322-1328`), which is
+    //   `isRec declName || isCasesOnRecursor env declName
+    //    || isBRecOnRecursor env declName || isRecOnRecursor env declName
+    //    || elabAsElim.hasTag env declName`
+    // — the `@[elab_as_elim]` tag is only the LAST of five triggers.
+    // `isRec` is a plain `ConstantInfo` kind test leanr could decide;
+    // the three `is*Recursor`s read `auxRecExt` and the tag reads
+    // `elabAsElim`, two more extensions leanr does not decode.
+    //
+    // This is live in the hermetic fixture, not hypothetical: measured
+    // against the pinned oracle through `dump_elab.lean`'s own entry
+    // point, `Nat.rec`, `Nat.recOn` and `Nat.casesOn` each elaborate to
+    // a bare `?m` (the branch postpones on the missing expected type),
+    // where leanr emits `const Nat.rec [?u]`. No committed record covers
+    // an eliminator-headed query, and `seam_audit.rs`'s
+    // `fixture_declares_no_undecoded_elab_attributes` gates BOTH halves
+    // — the attribute in `Elab0.lean` and an eliminator head in
+    // `elab-queries.jsonl` — so the divergence cannot be committed
+    // without the gate failing first. The real guard needs the
+    // extension decodes and `ElabElim` itself: M4b-4 owns it.
     let ctx = Context {
         ellipsis,
         explicit,
@@ -274,10 +325,15 @@ fn elab_app_aux(
         eta_args: Vec::new(),
         to_set_error_ctx: Vec::new(),
         inst_mvars: Vec::new(),
-        // oracle: `propagateExpectedTypeFor f` (`App.lean:1381`) consults
-        // the `elab_without_expected_type` attribute — another extension
-        // leanr does not decode, so this is `true` for every head, which
-        // is the attribute's own default. Task 9 records the seam.
+        // oracle: `propagateExpectedTypeFor f` (`App.lean:1330-1333`,
+        // called at `:1393`) is `!hasElabWithoutExpectedType env declName`
+        // — and unlike `shouldElabAsElim` above, this one really IS
+        // attribute-only (`App.lean:28-32`: a single `TagAttribute`
+        // lookup). leanr does not decode that extension, so this is
+        // `true` for every head, which is the attribute's own default;
+        // `seam_audit.rs`'s fixture-source gate is what keeps that
+        // default correct by keeping `@[elab_without_expected_type]` out
+        // of `Elab0.lean`.
         propagate_expected: true,
         result_type_out_param: None,
         found_named_args: Vec::new(),

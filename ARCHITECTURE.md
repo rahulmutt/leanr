@@ -132,6 +132,45 @@ implementation or a thin frontend. Full design:
   parsers, in closure order). Depends on `leanr_olean`, `leanr_kernel`,
   `leanr_syntax`; exists so the untrusted-bytes decoder never
   interprets and the parser keeps zero workspace deps.
+- `crates/leanr_meta` — the elaborator-level `MetaM` core (M4a):
+  reduction (`whnf`, lazy delta), definitional equality, type inference,
+  and typeclass synthesis over terms containing metavariables, plus the
+  `MetavarContext`/`LocalContext` those need. Deliberately NOT the
+  kernel's `whnf`/`is_def_eq`: the kernel asks a total question about
+  closed, mvar-free terms and stays an INDEPENDENT check on what this
+  crate produces, so no reduction logic is shared in either direction
+  even where the rules coincide. Correctness is differential against the
+  oracle (`mise run meta:fast` for the committed regression tier,
+  `meta:nightly` for Mathlib-scale discovery). Spec:
+  `docs/superpowers/specs/2026-07-20-m4a-meta-core-design.md`.
+- `crates/leanr_elab` — the term elaborator (M4b): syntax tree +
+  expected type in, `Expr` out, over `leanr_meta`'s `MetaM` core.
+  `dispatch.rs` is the single kind → elaborator table; anything it does
+  not register is `ElabError::UnsupportedSyntax(kind)`, never a silent
+  no-op and never a wrong `ExprId`. Slices so far: leaf forms (M4b-1),
+  binders and the let/have family (M4b-2), and application (M4b-3 P1).
+  Correctness is differential against the oracle over a hermetic
+  committed corpus (`tests/fixtures/elab/`, regen via
+  `mise run fixtures:regen-elab`).
+
+  `crates/leanr_elab/src/app/` is the application elaborator — the
+  oracle's `ElabAppArgs` namespace (`Lean/Elab/App.lean`): `expandApp`,
+  head resolution, the parameter-kind loop that inserts implicit and
+  strict-implicit arguments, `propagateExpectedType`, eta-expansion, and
+  `finalize`. A bare identifier is elaborated here too, not as a leaf,
+  because `elabIdent := elabAtom` in the oracle — an identifier is a
+  zero-argument application, and its implicit parameters are inserted by
+  the same loop. The oracle's `abbrev M := ReaderT Context (StateRefT
+  State TermElabM)` becomes ONE struct, `AppElab { ctx, st, elab }`,
+  with each `private def foo : M α` a method on it, rather than a Rust
+  monad-transformer stack: the reader half is immutable after
+  construction and the state half is a plain `&mut`, so a transformer
+  stack would buy nothing and cost the borrow checker a great deal.
+  Every `Context`/`State` field exists from the first slice even when
+  unused — a missing *arm* is a named seam, but a missing *field* is a
+  silent fidelity hole, because the oracle branches on these fields far
+  from where they are set. Spec:
+  `docs/superpowers/specs/2026-07-25-m4b3-application-elaborator-design.md`.
 - `crates/leanr_cli` — the `leanr` binary. Thin: argument parsing and
   printing only, so CLI and (future) LSP can never diverge in behavior.
 - `crates/leanr_fmt` — the `leanr fmt` engine (M3c): a preserve-fallback

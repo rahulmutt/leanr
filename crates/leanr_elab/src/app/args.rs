@@ -87,10 +87,27 @@ pub fn main(app: &mut AppElab, kinds: &KindInterner) -> Result<ExprId, ElabError
                     }
                 }
                 BinderInfo::InstImplicit => {
-                    // oracle: `processInstImplicitArg` (`App.lean:900+`)
+                    // oracle: `processInstImplicitArg` (`App.lean:903-923`)
                     // creates an instance mvar and pushes it onto
                     // `instMVars` for `synthesizeAppInstMVars`. Both need
                     // the synthesis client and the fixpoint.
+                    //
+                    // SEAM ATTRIBUTION (Task 9): this is the one place in
+                    // `app/` where the oracle reads `explicit` and leanr
+                    // does not. `processInstImplicitArg` is
+                    // `if (← read).explicit then <hole?-or-processExplicitArg>
+                    // else discard <| mkInstMVar ..` (`App.lean:904-917`),
+                    // so under `@` an instance-implicit parameter is filled
+                    // POSITIONALLY (or, for a literal `_`, still synthesized)
+                    // and only the `else` half is P2's. Returning the P2 seam
+                    // unconditionally therefore over-attributes the `@` slice
+                    // to P2 — which is harmless today because it is
+                    // UNREACHABLE: `Elab0.lean` declares no `class` and no
+                    // `instance`, so no fixture constant has an
+                    // `instImplicit` binder for either branch to reach.
+                    // Splitting the arm would mean writing the explicit half
+                    // with no way to test it; P2, which brings the fixture
+                    // classes, owns both halves.
                     return Err(ElabError::UnsupportedSyntax(
                         "instance-implicit arguments require typeclass synthesis \
                          and the synthetic-mvar fixpoint — M4b-3 P2"

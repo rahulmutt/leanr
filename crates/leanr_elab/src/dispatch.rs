@@ -97,33 +97,67 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 /// `UnsupportedSyntax` rather than panicking, per this crate's
 /// never-panic-on-a-named-seam discipline.
 ///
-/// Named-seam audit (Task 7): both `match` blocks that read a kind name
-/// in this crate — this one, and `builtin::sort::elab_level`'s nested
-/// dispatch over `Lean.Parser.Level.*` kinds — end in a catch-all `(other,
-/// _) => Err(ElabError::UnsupportedSyntax(other.to_string()))` arm. There
-/// is no third place in `leanr_elab` that pattern-matches on a kind name
-/// (`resolve.rs`'s `resolve_global` never inspects syntax at all), so
-/// every non-leaf term/level kind that reaches either dispatch point is
-/// named, never silently skipped or defaulted.
+/// Named-seam audit (M4b-1 Task 7, re-run and widened by M4b-3 P1
+/// task 9). Every `match` block in this crate that reads a kind name
+/// ends in a catch-all that NAMES what it saw — never a silent skip,
+/// never a default. There are five, not the two the M4b-1 audit found,
+/// because M4b-3 P1 added three kind-matching sites inside `app/`:
+/// ```text
+///   dispatch (here) ................ Err(UnsupportedSyntax(kind))
+///   builtin::sort::elab_level ...... Err(UnsupportedSyntax(kind))    Lean.Parser.Level.*
+///   app::elab_explicit ............. Err(UnsupportedSyntax(..))      `@`-in-term shape dispatch
+///   app::peel_head ................. Err(UnsupportedSyntax(..))      `@`-in-head shape dispatch
+///   app::head::elab_app_fn ......... Err(UnsupportedSyntax(..))      application-head kinds
+/// ```
+/// The three in `app/` carry a slice owner in the message rather than
+/// the bare kind, since each corresponds to a specific oracle arm; see
+/// `app/mod.rs`'s module doc for the index and `tests/seam_audit.rs`
+/// for the gate. `resolve.rs`'s `resolve_global` still inspects no
+/// syntax at all.
 ///
-/// Deferred (each hits `UnsupportedSyntax` until its slice lands):
+/// Deferred (each hits `UnsupportedSyntax` until its slice lands).
+/// Reconciled by Task 9 against what M4b-3 P1 actually shipped —
+/// implicit/strict-implicit insertion (task 5), named arguments and eta
+/// expansion (task 7), the `..` ellipsis (task 7), `@` and `.{u}`
+/// (task 8) all landed and are no longer deferred:
 /// ```text
 ///   letI / haveI / let_fun / let_delayed / let_tmp / letrec  later slice (own oracle tier each)
-///   implicit / strict-implicit insertion ....... M4b-3 P1 task 5
-///   named arguments, eta expansion ............. M4b-3 P1 task 7
 ///   instance-implicit args + mvar fixpoint ..... M4b-3 P2
 ///   num / char literals (OfNat / Char.ofNat) ... M4b-3 P3
 ///   coercions (CoeT / CoeFun / CoeSort, mkCoe) . M4b-3 P4
-///   optParam defaults / autoParam / `..` ....... M4b-3 P5
+///   optParam defaults / autoParam .............. M4b-3 P5
 ///   implicit-lambda insertion .................. M4b-3 P5
-///   elabAsElim, dot-notation, binop%, ⟨⟩ ....... M4b-4
+///   Term.proj / pipeProj / dotIdent ............ M4b-4 (LVal machinery)
+///   Term.namedPattern / choice ................. M4b-4 (same elabAppFn arms)
+///   elabAsElim, binop%, anonymous ctor ⟨⟩ ...... M4b-4
 ///   macro expansion in dispatch ................ first macro-form slice
 ///   open / alias / export / _root_ resolution .. later slice
 /// ```
 /// The application arms above are registered, so the `M4b-3` seams in
 /// that list are raised from INSIDE `app::args`/`app::finalize`/
-/// `app::head` (each naming its owning slice) rather than from this
-/// table's catch-all.
+/// `app::head`/`app::propagate`/`app::overload` (each naming its owning
+/// slice) rather than from this table's catch-all; `app/mod.rs`'s own
+/// module doc is the site-by-site index.
+///
+/// `Term.proj`, `Term.pipeProj`, `Term.dotIdent`, `Term.namedPattern`
+/// and `choice` are deliberately NOT routed, even though the oracle
+/// aliases four of them straight to `elabAtom`
+/// (`App.lean:2247-2248`, `:2273-2274`; `elabPipeProj` at `:2250-2258`
+/// desugars to `elabAppAux`) — which `app::elab_atom` already
+/// implements. Routing them would be wrong, not merely early:
+/// `elabAtom`'s work for these kinds happens inside `elabAppFn`, whose
+/// field/fieldIdx/dotIdent arms (`App.lean:2084-2109`) build an `LVal`
+/// list that `elabAppLVals`/`resolveLValAux` then resolves — the
+/// dot-notation subsystem M4b-4 owns. Sending them to `elab_atom`
+/// today would reach `app::head::elab_app_fn` with a non-ident head
+/// and produce that module's M4b-4 seam anyway, one indirection later.
+/// As whole terms they land on this table's catch-all instead, named by
+/// their kind.
+///
+/// `num`/`char` are the M4b-3 P3 seam and likewise land on the
+/// catch-all, named by kind: both elaborate through an application
+/// (`OfNat.ofNat` / `Char.ofNat`) needing instance synthesis and default
+/// instances, so neither is a leaf (`builtin::lit`'s own module doc).
 /// (`Lean.Parser.Level.max`/`.imax`/`.paren`/`.addLit`, the level-scope
 /// analogue of the above, are named seams inside `elab_level` itself —
 /// see `builtin::sort`'s own module doc — rather than this table, since
