@@ -121,3 +121,15 @@ set_option genCtorIdx false in
 inductive List (α : Type u) where
   | nil : List α
   | cons : α → List α → List α
+
+-- === M4b-3 P1 task 7 corpus: named arguments and eta-expansion ===
+--
+-- `pick` is the minimal shape that makes eta-expansion observable: TWO
+-- explicit parameters, so `pick (y := Nat.zero)` leaves `x` missing and
+-- the oracle emits `fun x => pick x Nat.zero` (App.lean:206's own
+-- worked example) rather than an application. `dep` makes a named
+-- argument's DEPENDENCY on an earlier parameter reachable
+-- (`findNamedArgDependsOnCurrent?`, App.lean:340), which turns the
+-- missing parameter implicit instead of eta.
+def pick (x : Nat) (y : Nat) : Nat := x
+def dep (a : Type) (z : a) : a := z

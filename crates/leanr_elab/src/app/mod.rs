@@ -139,7 +139,19 @@ fn elab_app_aux(
         found_named_args: Vec::new(),
     };
     let mut app = state::AppElab { ctx, st, elab };
-    args::main(&mut app, kinds)
+    // Bracket the whole loop (M4b-2's `binder.rs:217,226` idiom):
+    // `args::add_eta_arg` pushes one fvar per eta-expanded parameter
+    // into the ambient `lctx`, and `finalize`'s `mkLambdaFVars`
+    // abstracts them back out — but only on the success path. Restoring
+    // on EVERY exit is what keeps an eta fvar (or one left behind by a
+    // failed argument elaboration) from leaking into the context a
+    // caller goes on to elaborate in. The oracle gets this for free from
+    // `withLocalDeclD`'s scoping in `addEtaArg`; leanr's
+    // `push_local_decl` is unscoped, so the bracket is explicit.
+    let checkpoint = app.elab.mctx.lctx_checkpoint();
+    let result = args::main(&mut app, kinds);
+    app.elab.mctx.lctx_restore(checkpoint);
+    result
 }
 
 /// oracle: `env.contains ``Lean.Internal.coeM` (`App.lean:1355`). The

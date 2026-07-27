@@ -17,6 +17,7 @@ use leanr_kernel::bank::ExprId;
 use leanr_kernel::BinderInfo;
 use leanr_syntax::kind::KindInterner;
 
+use crate::app::args::find_named_arg_depends_on;
 use crate::app::expand::Arg;
 use crate::app::state::AppElab;
 use crate::error::ElabError;
@@ -127,22 +128,6 @@ fn is_prop(app: &AppElab, e: ExprId) -> bool {
     }
 }
 
-/// `Expr.hasLooseBVars` — read straight off the packed per-node metadata
-/// (`ExprData::loose_bvar_range`, `leanr_kernel/src/expr.rs:246`), which
-/// `Store::expr_data` already exposes publicly. The saturation sentinel
-/// documented on `loose_bvar_range_exact` does not affect this test: a
-/// packed range of `0` is `min(actual, SAT)`, so it is exact, and any
-/// nonzero packed value (saturated or not) proves `actual > 0`.
-fn has_loose_bvars(app: &AppElab, e: ExprId) -> bool {
-    let base = app.elab.view.store;
-    app.elab
-        .mctx
-        .store()
-        .expr_data(Some(base), e)
-        .loose_bvar_range()
-        > 0
-}
-
 /// oracle: `BinderInfo.isExplicit`.
 fn is_explicit_binder(bi: BinderInfo) -> bool {
     matches!(bi, BinderInfo::Default)
@@ -184,7 +169,7 @@ pub fn get_resulting_type(app: &mut AppElab) -> Result<Option<ExprId>, ElabError
         // OPEN term: `main'` recurses into the binding BODY without
         // instantiating, so `ty` carries loose bvars from the second
         // iteration on whenever the telescope is dependent.
-        let ty_prime = if matches!(app.node(ty), Node::Forall { .. }) || has_loose_bvars(app, ty) {
+        let ty_prime = if matches!(app.node(ty), Node::Forall { .. }) || app.has_loose_bvars(ty) {
             ty
         } else {
             app.whnf_forall(ty)?
@@ -214,7 +199,7 @@ pub fn get_resulting_type(app: &mut AppElab) -> Result<Option<ExprId>, ElabError
         // is never empty).
         if !named.is_empty() {
             if let Some(n) = binder_name {
-                let rendered = render_name(app, n);
+                let rendered = app.render_name(n);
                 if named.contains(&rendered) {
                     // oracle: `main' (paramIdx+1) numArgs (eraseNamedArg
                     // ..) fTypeBody` — the named argument fills this
@@ -257,7 +242,7 @@ pub fn get_resulting_type(app: &mut AppElab) -> Result<Option<ExprId>, ElabError
             param_idx += 1;
             ty = body;
             continue;
-        } else if has_loose_bvars(app, ty_prime) {
+        } else if app.has_loose_bvars(ty_prime) {
             // POSTPONEMENT 1: the resulting type still depends on
             // arguments that have not been elaborated yet.
             return Ok(None);
@@ -266,21 +251,25 @@ pub fn get_resulting_type(app: &mut AppElab) -> Result<Option<ExprId>, ElabError
             // .isSome then processImplicit' () else` POSTPONEMENT 2 —
             // named arguments remain and eta arguments would be needed.
             //
-            // The `isSome` half needs `forallTelescopeReducing` +
-            // `exprDependsOn` over real fvars, which arrives with Task
-            // 7's eta/named-argument machinery. Collapsing both halves
-            // onto the POSTPONEMENT is the conservative direction (it can
-            // only propagate LESS, never more) and is unobservable in P1:
-            // `main` has no named-argument path at all yet, so any
-            // application whose `named_args` are non-empty necessarily
-            // ends in `process_explicit_arg`'s "named arguments with
-            // missing positional arguments (eta expansion) — M4b-3 P1
-            // task 7" seam or `main`'s "too many arguments" seam. Task 7
-            // restores the `isSome` half together with the eta arm it
-            // belongs to.
+            // Task 6 collapsed both halves onto the POSTPONEMENT because
+            // the `isSome` half needs `forallTelescopeReducing` +
+            // `exprDependsOn` over real fvars, which did not exist yet;
+            // that was sound only because every P1 path with non-empty
+            // `named_args` terminated in `process_explicit_arg`'s
+            // eta-expansion seam. Task 7 removes that seam, so the escape
+            // is restored here — the SAME `find_named_arg_depends_on`
+            // `main`'s own eta-vs-implicit fork calls, on `fType'`
+            // exactly as `App.lean:478` passes it. Without it, an
+            // application whose named argument determines a missing
+            // parameter would postpone propagation the oracle performs.
+            if find_named_arg_depends_on(app, ty_prime, &named)?.is_some() {
+                param_idx += 1;
+                ty = body;
+                continue;
+            }
             return Ok(None);
         } else if !explicit {
-            if crate::app::args::has_opt_or_auto_param(app, ty_prime)? {
+            if crate::app::args::has_opt_auto_params(app, ty_prime)? {
                 // POSTPONEMENT 3: the resulting type still has
                 // optParams or autoParams to fill.
                 return Ok(None);
@@ -296,7 +285,7 @@ pub fn get_resulting_type(app: &mut AppElab) -> Result<Option<ExprId>, ElabError
 /// it takes `fType`, NOT `fType'`: the caller deliberately returns the
 /// type that was never WHNF-ed.
 fn finalize_resulting(app: &AppElab, f_type: ExprId) -> Option<ExprId> {
-    if has_loose_bvars(app, f_type) {
+    if app.has_loose_bvars(f_type) {
         // POSTPONEMENT 1 again, at the end of the telescope.
         None
     } else {
@@ -307,19 +296,7 @@ fn finalize_resulting(app: &AppElab, f_type: ExprId) -> Option<ExprId> {
 /// oracle: `Expr.isOptParam || Expr.isAutoParam` for ONE parameter type.
 /// `consume_type_annotations` strips exactly those two wrappers, so
 /// "stripping changed the term" is the same predicate — the equivalence
-/// `app::args::has_opt_or_auto_param` already relies on.
+/// `app::args::has_opt_auto_params` already relies on.
 fn is_opt_or_auto_param(app: &mut AppElab, param_type: ExprId) -> Result<bool, ElabError> {
     Ok(app.consume_type_annotations(param_type)? != param_type)
-}
-
-/// `NameId` -> the rendered dotted name a `NamedArg` carries as a
-/// `String` (`expand::NamedArg`'s own doc explains why named-argument
-/// names stay source text rather than becoming `NameId`s).
-fn render_name(app: &AppElab, n: leanr_kernel::bank::NameId) -> String {
-    let base = app.elab.view.store;
-    app.elab
-        .mctx
-        .store()
-        .to_name(Some(base), Some(n))
-        .to_string()
 }

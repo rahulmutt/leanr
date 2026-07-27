@@ -10,7 +10,7 @@
 
 use leanr_syntax::{builtin, parse_term};
 
-use leanr_elab::app::expand::{expand_app, Arg};
+use leanr_elab::app::expand::{expand_app, Arg, NamedArg};
 
 fn app_node(
     src: &str,
@@ -314,6 +314,272 @@ fn strict_implicit_without_args_finalizes() {
         assert!(
             app.st.f_args.is_empty(),
             "finalize must not have consumed/added any argument"
+        );
+    });
+}
+
+// ===== M4b-3 P1 task 7: named arguments and eta-expansion =====
+//
+// The corpus (`app/namedBoth`, `app/namedFirst`, `app/namedEta`,
+// `app/namedDep`) already discriminates the named-argument lookup in
+// `main`, `find_named_arg_depends_on_current`'s `Some` (implicit) vs
+// `None` (eta) fork, `add_eta_arg`, and `finalize`'s `mkLambdaFVars`.
+// What it CANNOT see is everything below: `found_named_args` (pure
+// diagnostic bookkeeping, never part of the emitted term), the eta
+// binder's NAME (the oracle encoder erases binder names —
+// `dump_elab.lean`'s "binder names erased" rule), the ellipsis arm (no
+// `..` query exists), and the reducing half of `has_opt_auto_params`
+// (Elab0 declares no `optParam`/`autoParam` parameter at all).
+
+/// `pushFoundNamedArg` (`App.lean:940-941`) records a binder name only
+/// when `findNamedArg?` MISSED it, and `addEtaArg` (`App.lean:734-740`)
+/// then makes the missing parameter a lambda binder carrying the
+/// PARAMETER's name — not the fresh name `push_local_decl` was given.
+/// Neither is visible in the oracle corpus: `found_named_args` never
+/// reaches the emitted `Expr`, and the canonical encoder erases binder
+/// names on both sides.
+#[test]
+fn eta_records_found_named_args_and_restores_the_parameter_name() {
+    let snap = builtin::snapshot();
+    let parsed = parse_term("Nat.zero", &snap);
+    let val = parsed
+        .tree
+        .root()
+        .first_child_or_token()
+        .expect("Nat.zero term");
+    support::with_app_harness("pick", |app| {
+        // `pick (y := Nat.zero)`: `x` is missing, `y` is named.
+        app.st.named_args = vec![NamedArg {
+            name: "y".to_string(),
+            val: Arg::Stx(val.clone()),
+            num_implicit_params: 0,
+        }];
+        let got = leanr_elab::app::args::main(app, &parsed.tree.kinds).unwrap();
+
+        assert_eq!(
+            app.st.found_named_args,
+            vec!["x".to_string()],
+            "only the binder `findNamedArg?` MISSED is recorded — `y` matched \
+             a named argument, so `main` takes the erase/elaborate branch and \
+             never reaches `pushFoundNamedArg`"
+        );
+
+        let (binder_name, body) = match app.node(got) {
+            leanr_kernel::bank::terms::Node::Lam {
+                binder_name, body, ..
+            } => (binder_name, body),
+            other => panic!("eta expansion must emit a lambda, got {other:?}"),
+        };
+        let base = app.elab.view.store;
+        let rendered = app
+            .elab
+            .mctx
+            .store()
+            .to_name(Some(base), binder_name)
+            .to_string();
+        assert_eq!(
+            rendered, "x",
+            "`finalize`'s `updateBinderNames` step (App.lean:623) must put the \
+             PARAMETER's name back on the binder — `add_eta_arg` declares the \
+             fvar under a fresh `_leanr_elab_binder_fresh` name so later \
+             arguments cannot capture it, and that name must not survive"
+        );
+        assert!(
+            matches!(app.node(body), leanr_kernel::bank::terms::Node::App { .. }),
+            "the lambda's body is the saturated application `pick #0 Nat.zero`"
+        );
+    });
+}
+
+/// `elab_app_aux` brackets the whole `main` loop with
+/// `lctx_checkpoint`/`lctx_restore`, so the fvars `add_eta_arg` pushes
+/// are gone by the time the caller resumes. The oracle gets this from
+/// `withLocalDeclD`'s scoping; leanr's `push_local_decl` is unscoped, so
+/// a missing bracket would leak an eta fvar into every subsequent
+/// `lctx_lookup_by_name` — invisible to the corpus, which elaborates
+/// each query in a fresh `MetaCtx`.
+#[test]
+fn eta_expansion_leaves_no_fvar_in_the_ambient_lctx() {
+    support::with_app_harness("Nat.zero", |app| {
+        let before = app.elab.mctx.lctx_checkpoint();
+        let snap = builtin::snapshot();
+        let parsed = parse_term("pick (y := Nat.zero)", &snap);
+        let elem = parsed
+            .tree
+            .root()
+            .first_child_or_token()
+            .expect("application term");
+        let got = app
+            .elab
+            .elab_term(&elem, &parsed.tree.kinds, None)
+            .expect("pick (y := Nat.zero) elaborates");
+        assert!(
+            matches!(app.node(got), leanr_kernel::bank::terms::Node::Lam { .. }),
+            "end-to-end: a named argument with an earlier missing parameter \
+             elaborates to a LAMBDA, not an application"
+        );
+        assert_eq!(
+            before,
+            app.elab.mctx.lctx_checkpoint(),
+            "the eta fvar must not outlive the application elaborator"
+        );
+    });
+}
+
+/// oracle: `if (← read).ellipsis then addImplicitArg argName`
+/// (`App.lean:856-857`) — with `..`, eta-expansion is DISABLED and every
+/// missing argument becomes `_` (`App.lean:202-204`). No corpus query
+/// uses `..` (it is otherwise M4b-3 P5's), so the arm is only reachable
+/// from here: without it `pick ..` would finalize as the bare partial
+/// application, a silently different term.
+#[test]
+fn ellipsis_fills_missing_explicit_args_with_implicit_mvars() {
+    support::with_app_harness("pick", |app| {
+        app.ctx.ellipsis = true;
+        let snap = builtin::snapshot();
+        let kinds = snap.kinds();
+        let got = leanr_elab::app::args::main(app, &kinds).unwrap();
+        assert!(
+            app.st.eta_args.is_empty(),
+            "`..` disables eta-expansion entirely"
+        );
+        // `pick ?m ?n` — two `App` spine nodes, both arguments mvars.
+        let mut spine = Vec::new();
+        let mut cur = got;
+        while let leanr_kernel::bank::terms::Node::App { f, arg } = app.node(cur) {
+            spine.push(arg);
+            cur = f;
+        }
+        assert_eq!(spine.len(), 2, "both explicit parameters must be filled");
+        for arg in spine {
+            assert!(
+                matches!(app.node(arg), leanr_kernel::bank::terms::Node::MVar { .. }),
+                "`..` fills a missing argument with a fresh mvar"
+            );
+        }
+    });
+}
+
+/// `has_opt_auto_params` is the oracle's `hasOptAutoParams`
+/// (`App.lean:121-127`), which walks the telescope with
+/// `forallTelescopeReducing` — it REDUCES as it goes. Task 4's version
+/// walked the already-instantiated spine without reducing, so a binder
+/// only revealed by WHNF was missed, and `main` finalized a bare partial
+/// application where the oracle eta-expands.
+///
+/// Elab0 declares no `optParam` parameter (and no declaration whose type
+/// hides a telescope behind a redex), so the type is built by hand:
+/// `∀ (x : Nat), (fun (_ : Sort 0) => ∀ (y : optParam Nat Nat), Nat) (Sort 0)`.
+/// Only a REDUCING walk sees `y`'s wrapper. With it, `x` becomes an eta
+/// argument and the loop then hits `y`'s own P5 optParam seam; without
+/// it, `main` would return the unchanged `pick`.
+#[test]
+fn has_opt_auto_params_reduces_to_find_a_hidden_optparam() {
+    support::with_app_harness("pick", |app| {
+        let base = app.elab.view.store;
+        // `pick : ∀ (x : Nat), ∀ (y : Nat), Nat` — reuse its own
+        // persistent `Nat` rather than re-resolving the constant.
+        let nat = match app.node(app.st.f_type) {
+            leanr_kernel::bank::terms::Node::Forall { binder_type, .. } => binder_type,
+            other => panic!("pick's type must be a Forall, got {other:?}"),
+        };
+        let opt_name = {
+            let store = app.elab.mctx.store_mut();
+            let s = store.intern_str(Some(base), "optParam").unwrap();
+            store.name_str(Some(base), None, s).unwrap()
+        };
+        let no_levels = app
+            .elab
+            .mctx
+            .store_mut()
+            .intern_level_list(None, &[])
+            .unwrap();
+        let opt_const = app
+            .elab
+            .mctx
+            .store_mut()
+            .expr_const(Some(base), Some(opt_name), no_levels)
+            .unwrap();
+        // `optParam Nat Nat` — `consume_type_annotations` reads the head
+        // constant's name and takes the FIRST spine argument, so the
+        // default value's own type is irrelevant to this test and never
+        // inferred on the path it exercises.
+        let opt_nat = {
+            let partial = app
+                .elab
+                .mctx
+                .store_mut()
+                .expr_app(Some(base), opt_const, nat)
+                .unwrap();
+            app.elab
+                .mctx
+                .store_mut()
+                .expr_app(Some(base), partial, nat)
+                .unwrap()
+        };
+        let inner = app
+            .elab
+            .mctx
+            .store_mut()
+            .expr_forall(
+                Some(base),
+                None,
+                opt_nat,
+                nat,
+                leanr_kernel::BinderInfo::Default,
+            )
+            .unwrap();
+        let zero = app.elab.mctx.store_mut().level_zero(None).unwrap();
+        let sort0 = app.elab.mctx.store_mut().expr_sort(None, zero).unwrap();
+        let hidden = {
+            let lam = app
+                .elab
+                .mctx
+                .store_mut()
+                .expr_lam(
+                    Some(base),
+                    None,
+                    sort0,
+                    inner,
+                    leanr_kernel::BinderInfo::Default,
+                )
+                .unwrap();
+            app.elab
+                .mctx
+                .store_mut()
+                .expr_app(Some(base), lam, sort0)
+                .unwrap()
+        };
+        app.st.f_type = app
+            .elab
+            .mctx
+            .store_mut()
+            .expr_forall(
+                Some(base),
+                None,
+                nat,
+                hidden,
+                leanr_kernel::BinderInfo::Default,
+            )
+            .unwrap();
+
+        let snap = builtin::snapshot();
+        let kinds = snap.kinds();
+        match leanr_elab::app::args::main(app, &kinds) {
+            Err(leanr_elab::ElabError::UnsupportedSyntax(msg)) => assert!(
+                msg.contains("optParam default"),
+                "expected the P5 optParam seam once the eta argument exposed \
+                 the hidden binder, got {msg:?}"
+            ),
+            other => panic!(
+                "a non-reducing `has_opt_auto_params` would finalize the bare \
+                 partial application instead of eta-expanding; got {other:?}"
+            ),
+        }
+        assert_eq!(
+            app.st.eta_args.len(),
+            1,
+            "the first parameter must have become an eta argument"
         );
     });
 }

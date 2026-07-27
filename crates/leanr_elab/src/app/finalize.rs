@@ -1,6 +1,7 @@
 //! oracle: `finalize` (`App.lean:610-660`).
 
-use leanr_kernel::bank::ExprId;
+use leanr_kernel::bank::terms::Node;
+use leanr_kernel::bank::{ExprId, NameId};
 
 use crate::app::state::AppElab;
 use crate::error::ElabError;
@@ -10,14 +11,29 @@ pub fn finalize(app: &mut AppElab) -> Result<ExprId, ElabError> {
     // registerMVarErrorImplicitArgInfo ..` — error CONTEXT only, never
     // part of the emitted `Expr`. The ladder field it writes into
     // arrives in P2; until then the collected ids are simply unused.
-    let e = app.st.f;
+    let mut e = app.st.f;
 
-    // oracle: `unless s.etaArgs.isEmpty do e ← mkLambdaFVars ..`
-    // (Task 7 populates `eta_args`).
+    // oracle: `unless s.etaArgs.isEmpty do
+    //   e ← mkLambdaFVars (s.etaArgs.map (·.2)) e
+    //   e := e.updateBinderNames (s.etaArgs.map (some <| ·.1)).toList`
+    // (`App.lean:621-624`). The eta fvars are still live in the ambient
+    // `lctx` here — `app::elab_app_aux` brackets the whole `main` call
+    // and only restores AFTER `finalize` has abstracted them away.
     if !app.st.eta_args.is_empty() {
-        return Err(ElabError::UnsupportedSyntax(
-            "eta-expanded application (mkLambdaFVars over etaArgs) — M4b-3 P1 task 7".to_string(),
-        ));
+        let fvars: Vec<ExprId> = app.st.eta_args.iter().map(|(_, fvar)| *fvar).collect();
+        e = app
+            .elab
+            .mctx
+            .mk_lambda(&fvars, e)
+            .map_err(ElabError::from)?;
+        // `mk_lambda` takes each binder's name off its `lctx` decl, and
+        // `add_eta_arg` declared those with FRESH names (so remaining
+        // arguments could not capture the parameter's name). This step
+        // puts the user-facing parameter names back, exactly as the
+        // oracle's own `updateBinderNames` call does for exactly the same
+        // reason.
+        let names: Vec<Option<NameId>> = app.st.eta_args.iter().map(|(n, _)| *n).collect();
+        e = update_binder_names(app, e, &names)?;
     }
 
     // oracle: `let eType ← inferType e` (`App.lean:633`), computed here
@@ -60,4 +76,64 @@ pub fn finalize(app: &mut AppElab) -> Result<ExprId, ElabError> {
         ));
     }
     Ok(e)
+}
+
+/// oracle: `Expr.updateBinderNames` (`Lean/Expr.lean:1394-1402`) — walk
+/// `e`'s OUTERMOST binders in order, replacing each one's binder name
+/// with the corresponding entry of `names`, and stop as soon as either
+/// list runs out or `e` stops being a binder.
+///
+/// The oracle's parameter is `List (Option Name)`, where `none` means
+/// "keep the existing name". This one is `&[Option<NameId>]` where the
+/// `Option` is the NAME ITSELF (`None` = anonymous), because the sole
+/// call site passes `s.etaArgs.map (some <| ·.1)` — every entry is
+/// `some`, so the oracle's keep-existing case is unreachable and
+/// modelling it would mean nesting `Option` twice for no caller.
+fn update_binder_names(
+    app: &mut AppElab,
+    e: ExprId,
+    names: &[Option<NameId>],
+) -> Result<ExprId, ElabError> {
+    let Some((name, rest)) = names.split_first() else {
+        return Ok(e);
+    };
+    // `base = Some(view.store)`, never `None`: `binder_type` and `body`
+    // are children of a term whose leaves can be PERSISTENT-region
+    // `ExprId`s (the head constant, the fixture's own parameter types),
+    // and `store_mut()` is the SCRATCH store — routing a persistent id
+    // through it with no base is `Store::store_for`'s documented "silent
+    // wrong-row read". Same convention as `args::add_new_arg` and
+    // `state::f_type_is_forall`.
+    let base = app.elab.view.store;
+    match app.node(e) {
+        Node::Lam {
+            binder_type,
+            body,
+            binder_info,
+            ..
+        } => {
+            let body = update_binder_names(app, body, rest)?;
+            Ok(app
+                .elab
+                .mctx
+                .store_mut()
+                .expr_lam(Some(base), *name, binder_type, body, binder_info)
+                .map_err(leanr_meta::MetaError::from)?)
+        }
+        Node::Forall {
+            binder_type,
+            body,
+            binder_info,
+            ..
+        } => {
+            let body = update_binder_names(app, body, rest)?;
+            Ok(app
+                .elab
+                .mctx
+                .store_mut()
+                .expr_forall(Some(base), *name, binder_type, body, binder_info)
+                .map_err(leanr_meta::MetaError::from)?)
+        }
+        _ => Ok(e),
+    }
 }

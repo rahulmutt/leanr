@@ -342,6 +342,21 @@ def appPropagateQueries : List (String × String) :=
   , ("app/propagateAbbrev", "(id PUnit.unit : Unit)")
   ]
 
+/-- M4b-3 P1 task 7: named arguments and eta-expansion. `app/namedBoth`
+supplies both parameters by name (no eta). `app/namedEta` supplies only
+the LATER one, so the earlier missing parameter becomes an eta argument
+and the result is a LAMBDA (App.lean:191-205). `app/namedDep` supplies
+a named argument that depends on the missing parameter, which becomes
+IMPLICIT instead of eta (findNamedArgDependsOnCurrent?,
+App.lean:340-348) — the two paths emit structurally different terms, so
+both are corpus entries, not one. -/
+def appNamedQueries : List (String × String) :=
+  [ ("app/namedBoth",  "pick (x := Nat.zero) (y := Nat.zero)")
+  , ("app/namedFirst", "pick (x := Nat.zero) Nat.zero")
+  , ("app/namedEta",   "pick (y := Nat.zero)")
+  , ("app/namedDep",   "dep (z := Nat.zero)")
+  ]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -355,7 +370,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>

@@ -15,7 +15,7 @@ use leanr_kernel::BinderInfo;
 use leanr_meta::MVarId;
 use leanr_syntax::kind::KindInterner;
 
-use crate::app::expand::Arg;
+use crate::app::expand::{Arg, NamedArg};
 use crate::app::state::AppElab;
 use crate::error::ElabError;
 
@@ -24,9 +24,52 @@ pub fn main(app: &mut AppElab, kinds: &KindInterner) -> Result<ExprId, ElabError
     loop {
         if app.f_type_is_forall()? {
             let binder_name = app.get_param_name();
-            // Task 7 inserts the named-argument lookup here, BEFORE the
-            // binder-info dispatch (the oracle checks `findNamedArg?`
-            // first, `App.lean:930-938`).
+            // Rendering a `NameId` allocates (`AppElab::render_name`), so
+            // render ONCE per iteration and reuse it for both the
+            // `findNamedArg?` lookup and `pushFoundNamedArg` — a
+            // `NamedArg::name` is the identifier's raw source text
+            // (`expand::NamedArg`'s own doc), so every comparison against
+            // a binder name goes through a rendering.
+            let rendered = binder_name.map(|n| app.render_name(n));
+            // oracle: `findNamedArg? s.namedArgs binderName`
+            // (`App.lean:930-938`) — checked BEFORE the binder-info
+            // dispatch, so a named argument fills its parameter no matter
+            // what that parameter's binder info is.
+            //
+            // NAMED SEAM: the oracle's `findDeprecatedBinderName?`
+            // fallback (`App.lean:85-115`, reached at `App.lean:932` when
+            // the direct lookup misses) resolves a DEPRECATED ALIAS of the
+            // binder name by reading the `deprecatedArgExt` environment
+            // extension and the `linter.deprecated.arg` option. leanr
+            // decodes neither, so the alias can never be found here; the
+            // effect is that `f (oldName := v)` reports an unknown
+            // argument where the oracle would accept it with a warning.
+            // Not a silent divergence on any P1 corpus term (Elab0
+            // declares no `@[deprecated]` argument aliases), and Task 9's
+            // fixture-source audit is what keeps it that way.
+            if let Some(na) = rendered.as_deref().and_then(|r| find_named_arg(app, r)) {
+                crate::app::propagate::propagate_expected_type(app, kinds, &na.val)?;
+                erase_named_arg(app, &na.name);
+                elab_and_add_new_arg(app, kinds, binder_name, na.val)?;
+                continue;
+            }
+            // oracle: `unless binderName.hasMacroScopes do
+            // pushFoundNamedArg binderName` (`App.lean:940-941`).
+            // leanr's binder names carry NO macro scopes — they come
+            // either from an `.olean` declaration's own binder names or
+            // from `builtin/binder.rs`'s surface-syntax identifiers,
+            // neither of which goes through Lean's hygiene machinery — so
+            // the guard is vacuously true here and scope stripping is
+            // deliberately not implemented. An ANONYMOUS binder
+            // (`binder_name == None`) is skipped instead of pushing a
+            // rendered `[anonymous]`: `foundNamedArgs` exists solely to
+            // list the VALID argument names in the oracle's "invalid
+            // argument name" diagnostic (`App.lean:401`), which leanr does
+            // not emit yet, and an anonymous parameter has no name a user
+            // could have written.
+            if let Some(r) = rendered {
+                push_found_named_arg(app, r);
+            }
             match app.get_param_info()? {
                 BinderInfo::Default => {
                     if !process_explicit_arg(app, kinds, binder_name)? {
@@ -72,6 +115,210 @@ pub fn main(app: &mut AppElab, kinds: &KindInterner) -> Result<ExprId, ElabError
     }
 }
 
+/// oracle: `Term.findNamedArg?` (`App.lean:81-83`) — the entry for
+/// `binder_name`, if `named_args` has one. Cloned rather than borrowed:
+/// every caller goes on to mutate `app` (`propagate_expected_type`,
+/// `erase_named_arg`) while still holding the result.
+fn find_named_arg(app: &AppElab, binder_name: &str) -> Option<NamedArg> {
+    app.st
+        .named_args
+        .iter()
+        .find(|na| na.name == binder_name)
+        .cloned()
+}
+
+/// oracle: `eraseNamedArg` (`App.lean:117-119` + its `M` wrapper at
+/// `App.lean:305-307`) — drop EVERY entry for `binder_name`, not just
+/// the first. `expand::expand_args` already rejects duplicates
+/// (`addNamedArg`, `Arg.lean:55-59`), so at most one can match today;
+/// the oracle filters anyway, and so does this.
+fn erase_named_arg(app: &mut AppElab, binder_name: &str) {
+    app.st.named_args.retain(|na| na.name != binder_name);
+}
+
+/// oracle: `pushFoundNamedArg` (`App.lean:309-311`) — record a VALID
+/// named-argument name seen while walking the function's type. Pure
+/// bookkeeping for the oracle's "invalid argument name" diagnostic
+/// (`App.lean:401`); it never affects the emitted term.
+fn push_found_named_arg(app: &mut AppElab, name: String) {
+    app.st.found_named_args.push(name);
+}
+
+/// oracle: `findNamedArgDependsOnCurrent?` (`App.lean:337-346`) — is
+/// there a remaining named argument whose parameter's type mentions the
+/// parameter now being processed? If so, that parameter is DETERMINED by
+/// the named argument and must become an implicit mvar rather than an
+/// eta binder (`App.lean:860-864`). Returns the matching named
+/// argument's name.
+fn find_named_arg_depends_on_current(app: &mut AppElab) -> Result<Option<String>, ElabError> {
+    if app.st.named_args.is_empty() {
+        return Ok(None);
+    }
+    // oracle: `(← get).fType.isArrow` — the RAW `s.fType`, checked
+    // before `getFType` is even called: nothing in a non-dependent
+    // arrow's body can mention the current parameter, so no named
+    // argument can depend on it.
+    if app.is_arrow(app.st.f_type) {
+        return Ok(None);
+    }
+    let f_type = app.get_f_type()?;
+    let named: Vec<String> = app.st.named_args.iter().map(|na| na.name.clone()).collect();
+    find_named_arg_depends_on(app, f_type, &named)
+}
+
+/// oracle: `findNamedArgDependsOn?` (`App.lean:320-335`). Walks
+/// `f_type`'s telescope and returns the name of the first named argument
+/// whose parameter's type depends on the telescope's FIRST binder.
+///
+/// Takes the candidate names rather than `NamedArg`s (and returns a
+/// name rather than a `NamedArg`): the oracle's own two callers use the
+/// result only for `.isSome` plus a trace of `.name`, and
+/// `propagate.rs`'s `main'` simulation carries names alone — its
+/// `namedArgs` is a progressively erased `Vec<String>`, not the state's
+/// `named_args`.
+pub(crate) fn find_named_arg_depends_on(
+    app: &mut AppElab,
+    f_type: ExprId,
+    named: &[String],
+) -> Result<Option<String>, ElabError> {
+    if app.is_arrow(f_type) {
+        return Ok(None);
+    }
+    let mut named: Vec<String> = named.to_vec();
+    app.forall_telescope_reducing(f_type, move |app, xs| {
+        // oracle: `let curr := xs[0]!`. Guarded rather than panicking:
+        // both call sites reach here only with a non-arrow `f_type`,
+        // which `forallTelescopeReducing` always opens into at least one
+        // binder, but a partial function on a `pub(crate)` helper is a
+        // worse contract than an early `None`.
+        let Some(curr) = xs.first().map(|b| b.fvar) else {
+            return Ok(None);
+        };
+        for b in xs.iter().skip(1) {
+            let Some(name) = b.name else { continue };
+            let rendered = app.render_name(name);
+            if !named.contains(&rendered) {
+                continue;
+            }
+            // oracle Remark (`App.lean:330`): "a default value at
+            // `optParam` does not count as a dependency" — hence
+            // `xDecl.type.cleanupAnnotations`. `consume_type_annotations`
+            // is the optParam/autoParam half of `cleanupAnnotations`;
+            // the `consumeMData` half is not modelled, so an `MData`-
+            // wrapped `optParam` would keep its wrapper here and its
+            // default value would count as a dependency. No fixture
+            // parameter type carries either wrapper, let alone under
+            // `MData`.
+            let ty = app.consume_type_annotations(b.ty)?;
+            if expr_depends_on(app, ty, curr) {
+                return Ok(Some(rendered));
+            }
+            // oracle: "Erase, since `xDecl.userName` can be repeated, and
+            // we can otherwise get false dependencies."
+            named.retain(|n| *n != rendered);
+        }
+        Ok(None)
+    })
+}
+
+/// oracle: `exprDependsOn e fvarId`
+/// (`Lean/MetavarContext.lean:755`, worker `DependsOn.dep` at :690-720)
+/// — does `e` mention the free variable `fvar`? A plain structural walk
+/// is exact here: `ExprId`s are hash-consed, so identity IS structural
+/// identity and the `visited` set makes a DAG-shaped term linear.
+///
+/// The oracle's walk does two extra things at a metavariable, and
+/// NEITHER can change the answer at this call site, because `fvar` is
+/// always a binder `forall_telescope_reducing` minted moments ago:
+///   - an ASSIGNED `?m` is followed into its value. No assignment can
+///     mention `fvar`: every assignment in the `mctx` predates the
+///     telescope, and nothing assigns during the walk.
+///   - an UNASSIGNED `?m` counts as a "may dependency" when `fvar` is in
+///     `?m`'s own local context. Same argument, plus `mk_fresh_expr_mvar`
+///     declares every P1 mvar with an EMPTY `LocalContext` (`elab.rs`),
+///     so that test is `false` for any mvar this elaborator can produce.
+fn expr_depends_on(app: &AppElab, e: ExprId, fvar: ExprId) -> bool {
+    let mut stack = vec![e];
+    let mut visited: std::collections::HashSet<ExprId> = std::collections::HashSet::new();
+    while let Some(cur) = stack.pop() {
+        if cur == fvar {
+            return true;
+        }
+        if !visited.insert(cur) {
+            continue;
+        }
+        match app.node(cur) {
+            Node::App { f, arg } => {
+                stack.push(f);
+                stack.push(arg);
+            }
+            Node::Lam {
+                binder_type, body, ..
+            }
+            | Node::Forall {
+                binder_type, body, ..
+            } => {
+                stack.push(binder_type);
+                stack.push(body);
+            }
+            Node::LetE {
+                ty, value, body, ..
+            } => {
+                stack.push(ty);
+                stack.push(value);
+                stack.push(body);
+            }
+            Node::MData { expr, .. } => stack.push(expr),
+            Node::Proj { structure, .. } | Node::ProjBig { structure, .. } => stack.push(structure),
+            // Leaves. `FVar` included: the `cur == fvar` test above is
+            // the whole comparison — an fvar's identity is its `ExprId`
+            // (hash-consed over its `NameId`).
+            Node::BVar { .. }
+            | Node::BVarBig { .. }
+            | Node::FVar { .. }
+            | Node::MVar { .. }
+            | Node::Sort { .. }
+            | Node::Const { .. }
+            | Node::LitNat { .. }
+            | Node::LitStr { .. } => {}
+        }
+    }
+    false
+}
+
+/// oracle: `addEtaArg` (`App.lean:730-740`) — the missing explicit
+/// parameter becomes a fresh local, is applied to `f` like any other
+/// argument, and is recorded so `finalize` can `mkLambdaFVars` it back
+/// out. This is what turns `pick (y := Nat.zero)` into
+/// `fun x => pick x Nat.zero` (`App.lean:191-205`'s own worked example).
+fn add_eta_arg(app: &mut AppElab, binder_name: Option<NameId>) -> Result<(), ElabError> {
+    let ty = app.get_arg_expected_type()?;
+    // oracle: `withLocalDeclD (← Core.mkFreshUserName argName) type` —
+    // a FRESH name, not `argName`, "to ensure that the remaining
+    // arguments can't capture this parameter's name". That matters in
+    // leanr for the same reason: `builtin::ident` resolves a bare
+    // identifier through `MetaCtx::lctx_lookup_by_name`, so pushing the
+    // parameter's own name would let a LATER argument's `x` bind to this
+    // eta fvar instead of to whatever `x` meant at the application site.
+    // `TermElabM::mk_fresh_binder_name` is this crate's own
+    // `_leanr_elab_*` prefix+counter fresh-name idiom (`elab.rs`), used
+    // here in place of the oracle's macro-scope mechanism; `finalize`
+    // restores the user-facing name on the emitted binder
+    // (`Expr.updateBinderNames`, `App.lean:623`).
+    let fresh = app.elab.mk_fresh_binder_name()?;
+    // `withLocalDeclD` is `withLocalDecl` at `BinderInfo.default`.
+    let fvar = app
+        .elab
+        .mctx
+        .push_local_decl(Some(fresh), ty, BinderInfo::Default)
+        .map_err(ElabError::from)?;
+    // oracle: `etaArgs := s.etaArgs.push (argName, x)` — the pair keeps
+    // the USER-facing name alongside the fresh fvar, which is exactly
+    // what `finalize`'s `updateBinderNames` step consumes.
+    app.st.eta_args.push((binder_name, fvar));
+    add_new_arg(app, fvar)
+}
+
 /// oracle: `processExplicitArg` (`App.lean:765-877`). Returns `false`
 /// when the oracle's own control flow reaches `finalize` (no argument
 /// left to consume and no eta/optParam path applies), so `main` can
@@ -100,80 +347,108 @@ fn process_explicit_arg(
         elab_and_add_new_arg(app, kinds, binder_name, arg)?;
         return Ok(true);
     }
-    // No positional argument left. The oracle now branches on ellipsis,
-    // optParam, autoParam, named args, and eta — Tasks 7-8 and P5. With
-    // none of those in P1, this is `finalize`.
-    if app.ctx.ellipsis {
-        return Err(ElabError::UnsupportedSyntax(
-            "`..` ellipsis argument filling — M4b-3 P5".to_string(),
-        ));
-    }
-    if !app.st.named_args.is_empty() {
-        return Err(ElabError::UnsupportedSyntax(
-            "named arguments with missing positional arguments (eta expansion) — \
-             M4b-3 P1 task 7"
-                .to_string(),
-        ));
-    }
+    // No positional argument left. What follows is `App.lean:809-877`
+    // IN THE ORACLE'S OWN ORDER, which is load-bearing: the current
+    // parameter's optParam/autoParam DEFAULT is filled (827-855) BEFORE
+    // the ellipsis/named/eta chain (855-877) ever runs.
+
+    // oracle: `App.lean:810-825` — inside a PATTERN, `..` fills even an
+    // optParam/autoParam parameter with an implicit mvar. `inPattern` is
+    // `Term.Context`'s flag, set only by the match/pattern elaborator
+    // (M4b-4); no P1 entry point can set it, so this arm is inert rather
+    // than omitted, and the plain-ellipsis arm below is what `..` takes.
+
     // oracle: the `optParam`/`autoParam` default-filling arms
-    // (`App.lean:827-855`) live here. `get_arg_expected_type` already
-    // STRIPS the wrapper (task 3), so an explicitly-supplied argument to
-    // a wrapped parameter is handled above; only the DEFAULT path is
-    // deferred. Detect it rather than finalizing a shorter application
-    // than the oracle would build.
-    let f_type = app.get_f_type()?;
-    if has_opt_or_auto_param(app, f_type)? {
-        return Err(ElabError::UnsupportedSyntax(
-            "optParam default / autoParam tactic argument — M4b-3 P5".to_string(),
-        ));
+    // (`App.lean:827-854`), on the CURRENT parameter's type and gated on
+    // `!explicit` exactly as the oracle's `match` scrutinee is.
+    // `get_arg_expected_type` already STRIPS the wrapper (task 3), so an
+    // explicitly-supplied argument to a wrapped parameter is handled
+    // above; only the DEFAULT path is deferred. Detect it rather than
+    // falling through to the eta chain and building a different term.
+    if !app.ctx.explicit {
+        let param_type = app.get_param_type()?;
+        if app.consume_type_annotations(param_type)? != param_type {
+            return Err(ElabError::UnsupportedSyntax(
+                "optParam default / autoParam tactic argument — M4b-3 P5".to_string(),
+            ));
+        }
     }
+
+    // oracle: `if (← read).ellipsis then addImplicitArg argName`
+    // (`App.lean:856-857`) — with `..`, eta-expansion is DISABLED and
+    // every missing argument is treated as `_` (`App.lean:202-204`).
+    if app.ctx.ellipsis {
+        add_implicit_arg(app)?;
+        return Ok(true);
+    }
+
+    // oracle: `App.lean:858-869` — named arguments remain, so the
+    // missing parameter is either DETERMINED by one of them (implicit)
+    // or genuinely missing (eta).
+    if !app.st.named_args.is_empty() {
+        if find_named_arg_depends_on_current(app)?.is_some() {
+            // "Dependencies of named arguments cannot be turned into eta
+            // arguments since they are determined by the named
+            // arguments. Instead we can turn them into implicit
+            // arguments." (`App.lean:860-863`)
+            add_implicit_arg(app)?;
+        } else {
+            add_eta_arg(app, binder_name)?;
+        }
+        return Ok(true);
+    }
+
+    // oracle: `else if !(← read).explicit then if (← hasOptAutoParams
+    // (← getFType)) then addEtaArg` (`App.lean:870-873`) — a LATER
+    // parameter in the remaining telescope carries a default, so the
+    // application is eta-expanded up to it rather than left partial.
+    // (The current parameter cannot be the one carrying it: that case
+    // returned above.)
+    if !app.ctx.explicit {
+        let f_type = app.get_f_type()?;
+        if has_opt_auto_params(app, f_type)? {
+            add_eta_arg(app, binder_name)?;
+            return Ok(true);
+        }
+    }
+
+    // oracle: `finalize` (`App.lean:875`/`877`).
     Ok(false)
 }
 
-/// oracle: `hasOptAutoParams` (`App.lean:121-127`) over the WHOLE
-/// remaining telescope, as `App.lean:873`'s `hasOptAutoParams
-/// (← getFType)` demands — `getFType` is the entire remaining function
-/// type, not the current parameter's.
+/// oracle: `hasOptAutoParams` (`App.lean:121-127`) — does ANY parameter
+/// of the WHOLE remaining telescope carry an `optParam`/`autoParam`
+/// wrapper? `App.lean:873`'s call site passes `(← getFType)`, the entire
+/// remaining function type, not the current parameter's.
 ///
-/// The narrower current-parameter-only test the plan originally
-/// specified here is a named-seam hole, not just an imprecision: for
+/// Task 4 first wrote this as a current-parameter-only test, which is a
+/// named-seam hole rather than just an imprecision: for
 /// `f : (a : Nat) → (b : Nat := 0) → Nat` applied with no positional
 /// arguments, the oracle takes `addEtaArg` and builds `fun a => f a 0`,
-/// while a test that finds no wrapper on `a` would return `false` and
-/// let `main` finalize the bare partial application `f` — a DIFFERENT
-/// term, silently, with no error and no seam. Over-detection is the
-/// safe direction: it can only turn a would-be-wrong term into a named
-/// `UnsupportedSyntax`.
-///
-/// Task 7 replaces this with the oracle's full
-/// `forallTelescopeReducing` form (which WHNFs each body as it goes,
-/// and which the eta decision needs anyway); this walks the already-
-/// instantiated spine without reducing, which is strictly more
-/// conservative — a telescope that only reveals a wrapper after
-/// reduction is missed here, and Task 7 closes that.
+/// while a test that finds no wrapper on `a` returns `false` and lets
+/// `main` finalize the bare partial application `f` — a DIFFERENT term,
+/// silently. Task 4 widened it to the whole telescope; Task 7 finishes
+/// the job with the oracle's `forallTelescopeReducing`, so a telescope
+/// that only reveals a further binder AFTER reduction is seen too. The
+/// oracle's `xType ← inferType x` is `TelescopeBinder::ty` — the decl's
+/// declared type — and `isOptParam || isAutoParam` is the "stripping the
+/// annotations changed the term" test `consume_type_annotations` already
+/// backs (see `propagate::is_opt_or_auto_param`'s own note).
 ///
 /// Takes the type to walk as a parameter (Task 6): `App.lean:873`'s call
 /// site passes `(← getFType)`, but `getResultingTypeCore?`'s own call
 /// (`App.lean:484`) passes the SIMULATED remaining type `fType'`, which
 /// is not `s.fType`. One function, two call sites, exactly as the oracle
 /// has it.
-pub(crate) fn has_opt_or_auto_param(app: &mut AppElab, mut cur: ExprId) -> Result<bool, ElabError> {
-    // Walking into `body` carries LOOSE BVARS (a deeper binder's domain
-    // may reference an earlier binder of this same telescope). That is
-    // fine: `consume_type_annotations` only walks the application spine
-    // and reads the head's `Const` name — it never instantiates, infers,
-    // or reduces — so a loose bvar is just a non-`Const` head it falls
-    // through on. See that method's own doc comment.
-    while let Node::Forall {
-        binder_type, body, ..
-    } = app.node(cur)
-    {
-        if app.consume_type_annotations(binder_type)? != binder_type {
-            return Ok(true);
+pub(crate) fn has_opt_auto_params(app: &mut AppElab, ty: ExprId) -> Result<bool, ElabError> {
+    app.forall_telescope_reducing(ty, |app, xs| {
+        for b in xs {
+            if app.consume_type_annotations(b.ty)? != b.ty {
+                return Ok(true);
+            }
         }
-        cur = body;
-    }
-    Ok(false)
+        Ok(false)
+    })
 }
 
 /// oracle: `addImplicitArg` (`App.lean:747-760`). Creates a fresh mvar

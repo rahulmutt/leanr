@@ -43,6 +43,12 @@ pub struct TermElabM<'e> {
     /// (`_leanr_elab_expr_fresh`, below) so an expr-mvar name can never
     /// collide with a level-mvar name even at the same counter value.
     expr_mvar_gen: u64,
+    /// Monotone counter backing `mk_fresh_binder_name` (M4b-3 P1 task
+    /// 7) — the same "fixed prefix + counter" idiom as the two counters
+    /// above, with its own counter and its own DISTINCT prefix
+    /// (`_leanr_elab_binder_fresh`, below) so a fresh binder name can
+    /// never collide with either mvar-name family.
+    binder_name_gen: u64,
 }
 
 impl<'e> TermElabM<'e> {
@@ -53,7 +59,51 @@ impl<'e> TermElabM<'e> {
             level_names: Vec::new(),
             level_mvar_gen: 0,
             expr_mvar_gen: 0,
+            binder_name_gen: 0,
         }
+    }
+
+    /// oracle: `Core.mkFreshUserName` (`Lean/CoreM.lean`) — a name the
+    /// user could not have written, used where a binder must be
+    /// introduced without letting later syntax capture it. The oracle
+    /// builds it by appending a macro scope to a hint; leanr's names
+    /// carry no macro scopes, so this uses the crate's own fresh-name
+    /// idiom instead — the very "fixed prefix + counter" generator
+    /// `mk_fresh_level_mvar`/`mk_fresh_expr_mvar` above already use,
+    /// with a third distinct prefix.
+    ///
+    /// The hint the oracle takes (`Core.mkFreshUserName argName`) is
+    /// deliberately NOT a parameter: the hint exists only to make the
+    /// generated name legible in traces, and every leanr caller
+    /// (`app::args::add_eta_arg`) restores the user-facing name on the
+    /// emitted binder anyway (`finalize`'s `update_binder_names`,
+    /// oracle `Expr.updateBinderNames`, `App.lean:623`).
+    ///
+    /// `base = Some(self.view.store)`, matching `mk_fresh_level_mvar`:
+    /// the minted `NameId` is handed straight to
+    /// `MetaCtx::push_local_decl`, which itself builds the decl's fvar
+    /// with `Some(view.store)` (`metactx.rs:464-471`), and lands in
+    /// `Expr.lam` rows this crate builds with the same base — so every
+    /// id involved must come from the same persistent-backed intern
+    /// space.
+    pub fn mk_fresh_binder_name(&mut self) -> Result<NameId, ElabError> {
+        let idx = self.binder_name_gen;
+        self.binder_name_gen += 1;
+        let base = self.view.store;
+        let store = self.mctx.store_mut();
+        let prefix_str = store
+            .intern_str(Some(base), "_leanr_elab_binder_fresh")
+            .map_err(leanr_meta::MetaError::from)?;
+        let prefix = store
+            .name_str(Some(base), None, prefix_str)
+            .map_err(leanr_meta::MetaError::from)?;
+        let idx_id = store
+            .intern_nat(Some(base), &Nat::from(idx))
+            .map_err(leanr_meta::MetaError::from)?;
+        let name = store
+            .name_num(Some(base), Some(prefix), idx_id)
+            .map_err(leanr_meta::MetaError::from)?;
+        Ok(name)
     }
 
     /// oracle: `mkFreshLevelMVar` (`Lean/Meta/Basic.lean:861-863`) —

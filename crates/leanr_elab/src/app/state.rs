@@ -47,7 +47,8 @@ pub struct State {
     pub named_args: Vec<NamedArg>,
     pub expected_type: Option<ExprId>,
     /// oracle: `State.etaArgs` — `(binder name, fvar)` per eta-expanded
-    /// parameter. Driven by Task 7.
+    /// parameter. Written by `args::add_eta_arg`, consumed by
+    /// `finalize`'s `mkLambdaFVars` + `updateBinderNames` step (Task 7).
     pub eta_args: Vec<(Option<NameId>, ExprId)>,
     /// oracle: `State.toSetErrorCtx`. Driven by Task 5.
     pub to_set_error_ctx: Vec<MVarId>,
@@ -60,7 +61,9 @@ pub struct State {
     pub result_type_out_param: Option<MVarId>,
     /// oracle: `State.foundNamedArgs` — valid named-argument names seen
     /// while walking the function's type; feeds the oracle's "invalid
-    /// argument name" diagnostic. Driven by Task 7.
+    /// argument name" diagnostic (`App.lean:401`), which leanr does not
+    /// emit yet. Written by `args::push_found_named_arg` (Task 7); never
+    /// part of the emitted `Expr`.
     pub found_named_args: Vec<String>,
 }
 
@@ -207,14 +210,20 @@ impl<'a, 'e> AppElab<'a, 'e> {
     /// oracle: `Expr.consumeTypeAnnotations` — strip `optParam _ _` and
     /// `autoParam _ _` wrappers from the head.
     ///
-    /// `pub(crate)` for `app::args::has_opt_or_auto_param`, which applies
-    /// it to EVERY binder type in the remaining telescope, not just the
-    /// current parameter's (`App.lean:873`'s `hasOptAutoParams
-    /// (← getFType)`). Safe on a binder type carrying LOOSE BVARS (a
-    /// deeper binder's domain may reference an earlier binder): this only
-    /// walks the application spine and reads the head's `Const` name,
-    /// never instantiating or inferring, so an un-instantiated bvar is
-    /// simply a spine node that is not a `Const` and falls through the
+    /// `pub(crate)` for the three sites that apply it to a binder type
+    /// that is not the current parameter's: `app::args::has_opt_auto_params`
+    /// (every binder of the remaining telescope, `App.lean:873`'s
+    /// `hasOptAutoParams (← getFType)`),
+    /// `app::args::find_named_arg_depends_on` (the `cleanupAnnotations`
+    /// in `App.lean:331`), and `app::propagate::is_opt_or_auto_param`
+    /// (`App.lean:472`'s `paramType.isAutoParam || paramType.isOptParam`).
+    ///
+    /// Safe on a binder type carrying LOOSE BVARS — which the
+    /// `propagate.rs` caller genuinely passes, since `main'` recurses
+    /// into the binding body without instantiating: this only walks the
+    /// application spine and reads the head's `Const` name, never
+    /// instantiating or inferring, so an un-instantiated bvar is simply a
+    /// spine node that is not a `Const` and falls through the
     /// `_ => return Ok(t)` arm.
     pub(crate) fn consume_type_annotations(&mut self, mut t: ExprId) -> Result<ExprId, ElabError> {
         loop {
@@ -257,4 +266,137 @@ impl<'a, 'e> AppElab<'a, 'e> {
     pub fn has_args_to_process(&self) -> bool {
         !self.st.args.is_empty() || !self.st.named_args.is_empty()
     }
+
+    /// `Expr.hasLooseBVars` — read straight off the packed per-node
+    /// metadata (`ExprData::loose_bvar_range`,
+    /// `leanr_kernel/src/expr.rs:246`), which `Store::expr_data` already
+    /// exposes publicly. The saturation sentinel documented on
+    /// `loose_bvar_range_exact` does not affect this test: a packed range
+    /// of `0` is `min(actual, SAT)`, so it is exact, and any nonzero
+    /// packed value (saturated or not) proves `actual > 0`.
+    pub(crate) fn has_loose_bvars(&self, e: ExprId) -> bool {
+        let base = self.elab.view.store;
+        self.elab
+            .mctx
+            .store()
+            .expr_data(Some(base), e)
+            .loose_bvar_range()
+            > 0
+    }
+
+    /// oracle: `Expr.isArrow` (`Lean/Expr.lean:1319-1322`) — a
+    /// NON-DEPENDENT function type, i.e. a `forallE` whose body does not
+    /// mention the binder. Anything else (including a non-forall) is
+    /// `false`.
+    pub(crate) fn is_arrow(&self, e: ExprId) -> bool {
+        match self.node(e) {
+            Node::Forall { body, .. } => !self.has_loose_bvars(body),
+            _ => false,
+        }
+    }
+
+    /// `NameId` -> the rendered dotted name a `NamedArg` carries as a
+    /// `String` (`expand::NamedArg`'s own doc explains why named-argument
+    /// names stay source text rather than becoming `NameId`s). One
+    /// allocation per call, so callers render once and reuse.
+    pub(crate) fn render_name(&self, n: NameId) -> String {
+        let base = self.elab.view.store;
+        self.elab
+            .mctx
+            .store()
+            .to_name(Some(base), Some(n))
+            .to_string()
+    }
+
+    /// oracle: `forallTelescopeReducing` (`Lean/Meta/Basic.lean:1592`,
+    /// worker `forallTelescopeReducingAuxAux` at `:1453-1487`,
+    /// `maxFVars? := none`, `cleanupAnnotations := false`) — WHNF `ty`,
+    /// and for as long as the result is a `forall`, mint an fvar for the
+    /// binder and continue on the body instantiated with it; then run
+    /// `k` under the resulting local context.
+    ///
+    /// Two P1 callers, both matching the oracle's own
+    /// (`args::has_opt_auto_params`, `args::find_named_arg_depends_on`),
+    /// and neither uses the telescope's final body type — so `k` takes
+    /// only the binder list, unlike the oracle's `Array Expr → Expr → _`.
+    ///
+    /// The oracle's `process` defers domain instantiation
+    /// (`d.instantiateRevRange j fvars.size fvars`, re-based at each
+    /// reduction point); instantiating the body eagerly at every step,
+    /// as below, is the same substitution performed earlier — every
+    /// `TelescopeBinder::ty` handed to `k` is closed with respect to the
+    /// telescope, exactly as the oracle's `xDecl.type` is.
+    ///
+    /// `ty` itself must be closed (no loose bvars from an enclosing
+    /// context); both call sites pass an already-instantiated `getFType`.
+    ///
+    /// The ambient `lctx` is restored on EVERY exit path (`Ok` or `Err`)
+    /// — `builtin/binder.rs:217,226`'s checkpoint/restore idiom — so the
+    /// telescope's fvars never outlive `k`.
+    pub(crate) fn forall_telescope_reducing<R>(
+        &mut self,
+        ty: ExprId,
+        k: impl FnOnce(&mut Self, &[TelescopeBinder]) -> Result<R, ElabError>,
+    ) -> Result<R, ElabError> {
+        let checkpoint = self.elab.mctx.lctx_checkpoint();
+        let result = (|| {
+            let mut binders: Vec<TelescopeBinder> = Vec::new();
+            let mut cur = ty;
+            loop {
+                // oracle: `process` recurses straight into `b` while the
+                // type is already a `forall` (`Basic.lean:1460-1468`) and
+                // reaches `whnf` only on the `_` arm (`:1474-1481`).
+                // Reducing an already-`forall` type is a no-op, so this
+                // guard is a cost decision, not a semantic one — but it
+                // keeps the walk shaped like the oracle's.
+                let reduced = if matches!(self.node(cur), Node::Forall { .. }) {
+                    cur
+                } else {
+                    self.whnf_forall(cur)?
+                };
+                let Node::Forall {
+                    binder_name,
+                    binder_type,
+                    body,
+                    binder_info,
+                } = self.node(reduced)
+                else {
+                    break;
+                };
+                let fvar = self
+                    .elab
+                    .mctx
+                    .push_local_decl(binder_name, binder_type, binder_info)
+                    .map_err(ElabError::from)?;
+                cur = self
+                    .elab
+                    .mctx
+                    .instantiate_beta_rev_range(body, std::slice::from_ref(&fvar))?;
+                binders.push(TelescopeBinder {
+                    name: binder_name,
+                    fvar,
+                    ty: binder_type,
+                });
+            }
+            k(self, &binders)
+        })();
+        self.elab.mctx.lctx_restore(checkpoint);
+        result
+    }
+}
+
+/// One binder of a `AppElab::forall_telescope_reducing` walk: the
+/// oracle's `xs[i]` together with the two fields its callers read off
+/// `xs[i].fvarId!.getDecl` (`userName` and `type`). Carried here rather
+/// than looked up afterwards because `leanr_meta` exposes no public
+/// local-decl accessor — and because both are already in hand at the
+/// moment the decl is pushed.
+pub(crate) struct TelescopeBinder {
+    /// oracle: `xDecl.userName` (`.anonymous` -> `None`).
+    pub name: Option<NameId>,
+    /// oracle: `xs[i]`, the `Expr.fvar` itself.
+    pub fvar: ExprId,
+    /// oracle: `xDecl.type` == `inferType xs[i]`, closed with respect to
+    /// the telescope.
+    pub ty: ExprId,
 }
