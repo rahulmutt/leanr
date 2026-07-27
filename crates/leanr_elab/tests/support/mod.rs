@@ -112,3 +112,18 @@ pub fn with_app_harness<R>(
     };
     k(&mut app)
 }
+
+/// A syntax reference for tests that need one but do not care which.
+/// `SynElem` is an owned rowan handle, so the parse tree it points into
+/// stays alive through the returned value.
+pub fn any_syn_elem() -> leanr_elab::dispatch::SynElem {
+    use leanr_syntax::{builtin, parse_term};
+    let snap = builtin::snapshot();
+    let parsed = parse_term("Nat.zero", &snap);
+    assert!(parsed.errors.is_empty());
+    parsed
+        .tree
+        .root()
+        .first_child_or_token()
+        .expect("term child")
+}

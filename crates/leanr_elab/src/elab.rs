@@ -3,6 +3,8 @@
 //! `KindInterner` is passed to `elab_term`, never stored, so one
 //! `TermElabM` can elaborate nodes drawn from different snapshots.
 
+use std::collections::HashMap;
+
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, LevelId, NameId};
 use leanr_kernel::{BinderInfo, EnvView, LocalContext, Nat};
@@ -50,6 +52,21 @@ pub struct TermElabM<'e> {
     /// (`_leanr_elab_binder_fresh`, below) so a fresh binder name can
     /// never collide with either mvar-name family.
     binder_name_gen: u64,
+    /// oracle: `Term.State.pendingMVars` (`TermElabM.lean:180`). **Head
+    /// is the most recent** — the oracle conses. Every ordering in
+    /// `synthetic.rs` depends on that invariant.
+    pub pending_mvars: Vec<MVarId>,
+    /// oracle: `Term.State.syntheticMVars` (`TermElabM.lean:183`).
+    pub synthetic_mvars: HashMap<MVarId, crate::synthetic::SyntheticMVarDecl>,
+    /// oracle: `Term.State.mvarErrorInfos` (`TermElabM.lean:185`).
+    /// Registered by P2a, rendered by whichever slice grows a
+    /// diagnostics layer (design spec § Amendment, item 2).
+    pub mvar_error_infos: Vec<crate::synthetic::MVarErrorInfo>,
+    /// oracle: `Term.Context.mayPostpone` — a READER field there, a
+    /// plain field here, saved/restored by `without_postponing` and
+    /// `with_saved_context`. Defaults to `true`, matching `elabTerm`'s
+    /// own `catchExPostpone := true` default (`TermElabM.lean:1879`).
+    pub may_postpone: bool,
 }
 
 impl<'e> TermElabM<'e> {
@@ -61,6 +78,10 @@ impl<'e> TermElabM<'e> {
             level_mvar_gen: 0,
             expr_mvar_gen: 0,
             binder_name_gen: 0,
+            pending_mvars: Vec::new(),
+            synthetic_mvars: HashMap::new(),
+            mvar_error_infos: Vec::new(),
+            may_postpone: true,
         }
     }
 
@@ -178,6 +199,16 @@ impl<'e> TermElabM<'e> {
         Ok(level_id)
     }
 
+    /// oracle: `mkFreshExprMVar ty (kind := .natural)` — the `Natural` +
+    /// `ExprId`-only path P1's ten call sites use. Delegates to
+    /// `mk_fresh_expr_mvar_of_kind` (below), which carries the actual
+    /// minting mechanics, discarding the `MVarId` it also returns: P1's
+    /// callers never needed it.
+    pub fn mk_fresh_expr_mvar(&mut self, ty: ExprId) -> Result<ExprId, ElabError> {
+        self.mk_fresh_expr_mvar_of_kind(ty, MVarKind::Natural)
+            .map(|(e, _)| e)
+    }
+
     /// oracle: `mkFreshExprMVarCore`/`mkFreshMVarId`
     /// (`Lean/Meta/Basic.lean:864-877`) — mints a globally-fresh
     /// `MVarId` (own `expr_mvar_gen` counter, mirroring
@@ -185,10 +216,11 @@ impl<'e> TermElabM<'e> {
     /// in `mctx` with an EMPTY `LocalContext` — slice 1 elaborates no
     /// binder/lambda/pi, so no leaf elaborator ever runs under a
     /// nonempty local context; `LocalContext::default()` is the correct
-    /// context here, not a placeholder — and `MVarKind::Natural` (see
-    /// `builtin::hole`'s own doc for why every hole is minted `Natural`
-    /// rather than replicating `elabHole`'s `Natural`/`SyntheticOpaque`
-    /// branch), and returns the `ExprId` of `Expr.mvar` referencing it.
+    /// context here, not a placeholder — and the caller-chosen
+    /// `MVarKind` (see `builtin::hole`'s own doc for why every hole is
+    /// minted `Natural` rather than replicating `elabHole`'s
+    /// `Natural`/`SyntheticOpaque` branch), and returns the `ExprId` of
+    /// `Expr.mvar` referencing it alongside the `MVarId` itself.
     /// `base = None` throughout — unlike `mk_fresh_level_mvar` (M4b-2
     /// task 2 fix, see its own doc comment for why THAT one now needs
     /// `base = Some(view.store)`): every id minted here (prefix string,
@@ -202,7 +234,17 @@ impl<'e> TermElabM<'e> {
     /// (the caller-supplied type, possibly persistent-region) is stored
     /// VERBATIM in `MVarDecl::ty`, never re-interned, so it needs no
     /// `base` here either.
-    pub fn mk_fresh_expr_mvar(&mut self, ty: ExprId) -> Result<ExprId, ElabError> {
+    ///
+    /// P2a needs both the `MVarId` and the caller-chosen `MVarKind`: an
+    /// instance-implicit argument is minted `MetavarKind.synthetic`
+    /// (`App.lean:919`, so `isDefEq` may assign it — unlike
+    /// `syntheticOpaque`), and the caller must keep its `MVarId` to push
+    /// onto `instMVars`.
+    pub fn mk_fresh_expr_mvar_of_kind(
+        &mut self,
+        ty: ExprId,
+        kind: MVarKind,
+    ) -> Result<(ExprId, MVarId), ElabError> {
         let idx = self.expr_mvar_gen;
         self.expr_mvar_gen += 1;
         let store = self.mctx.store_mut();
@@ -225,7 +267,7 @@ impl<'e> TermElabM<'e> {
                 user_name: None,
                 ty,
                 lctx: LocalContext::default(),
-                kind: MVarKind::Natural,
+                kind,
             },
         );
         let mvar_id = self
@@ -233,7 +275,7 @@ impl<'e> TermElabM<'e> {
             .store_mut()
             .expr_mvar(None, Some(name))
             .map_err(leanr_meta::MetaError::from)?;
-        Ok(mvar_id)
+        Ok((mvar_id, id))
     }
 
     pub fn elab_term(

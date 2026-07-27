@@ -74,6 +74,7 @@ pub mod dispatch;
 pub mod elab;
 pub mod error;
 pub mod resolve; // Task 5
+pub mod synthetic; // M4b-3 P2a
 
 pub use elab::TermElabM;
 pub use error::ElabError;
