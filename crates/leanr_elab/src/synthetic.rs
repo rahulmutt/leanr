@@ -37,17 +37,28 @@ pub enum PostponeBehavior {
 
 /// oracle: `structure SavedContext` (`TermElabM.lean:45-53`).
 ///
-/// The oracle saves seven fields; leanr models the two that exist here.
-/// `declName?`, `options`, `openDecls`, `macroStack` and
-/// `fixedTermElabs` have no leanr counterpart yet — there is no command
+/// The oracle saves exactly seven fields: `declName?`, `options`,
+/// `openDecls`, `macroStack`, `errToSorry`, `levelNames`,
+/// `fixedTermElabs`. leanr models `levelNames` alone — `declName?`,
+/// `options`, `openDecls`, `macroStack`, `errToSorry` and
+/// `fixedTermElabs` have no leanr counterpart yet: there is no command
 /// layer, no options plumbing, no `open` resolution (`resolve.rs`'s own
-/// deferral) and no macro stack (`dispatch.rs` never expands a macro).
-/// Each arrives with the slice that adds the concept; adding empty
-/// placeholders now would be speculative surface.
+/// deferral), no macro stack (`dispatch.rs` never expands a macro), and
+/// no `errToSorry` recovery or fixed-elabs registry. Each arrives with
+/// the slice that adds the concept; adding empty placeholders now would
+/// be speculative surface.
+///
+/// `mayPostpone` is NOT one of the seven — it is a `Context` reader
+/// field (`Context.mayPostpone : Bool := true`, `TermElabM.lean:303`)
+/// scoped only by `withoutPostponing` (`:1049-1050`), and
+/// `withSavedContext` (`:1434-1442`) never touches it. Modeling it here
+/// too would make `with_saved_context` clobber whatever
+/// `without_postponing` (or the ladder's own postponement scoping) had
+/// in effect — leanr's `may_postpone` field is scoped exclusively by
+/// `TermElabM::without_postponing`.
 #[derive(Debug, Clone)]
 pub struct SavedContext {
     pub level_names: Vec<NameId>,
-    pub may_postpone: bool,
 }
 
 /// oracle: `inductive SyntheticMVarKind` (`TermElabM.lean:65-92`).
@@ -160,27 +171,29 @@ impl<'e> TermElabM<'e> {
     }
 
     /// oracle: `saveContext` (`TermElabM.lean:1420-1428`), restricted to
-    /// the fields leanr has (see `SavedContext`).
+    /// the field leanr has (see `SavedContext`).
     pub fn save_context(&self) -> SavedContext {
         SavedContext {
             level_names: self.level_names.clone(),
-            may_postpone: self.may_postpone,
         }
     }
 
     /// oracle: `withSavedContext` (`TermElabM.lean:1434-1442`).
     /// Restores on BOTH paths — the oracle gets that from `withReader`'s
     /// scoping; leanr's is a field, so the restore is explicit.
+    ///
+    /// Does NOT touch `may_postpone`: the oracle's `withSavedContext`
+    /// never does either (`mayPostpone` is not one of `SavedContext`'s
+    /// seven fields — see that struct's own doc). `may_postpone` is
+    /// scoped exclusively by `without_postponing`.
     pub fn with_saved_context<R>(
         &mut self,
         saved: &SavedContext,
         k: impl FnOnce(&mut Self) -> Result<R, ElabError>,
     ) -> Result<R, ElabError> {
         let prev_levels = std::mem::replace(&mut self.level_names, saved.level_names.clone());
-        let prev_postpone = std::mem::replace(&mut self.may_postpone, saved.may_postpone);
         let out = k(self);
         self.level_names = prev_levels;
-        self.may_postpone = prev_postpone;
         out
     }
 
