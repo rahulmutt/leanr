@@ -91,8 +91,9 @@ impl<'a, 'e> AppElab<'a, 'e> {
 
     /// oracle: `State.getFType` (`App.lean:232-237`) — `fType` with
     /// loose bvars instantiated by the arguments consumed so far.
-    /// `f_args` is passed innermost-first, matching
-    /// `instantiate_beta_rev_range`'s documented convention.
+    /// `f_args` is passed OUTERMOST-first (binder order, i.e. application
+    /// order), matching `instantiate_beta_rev_range`'s documented
+    /// convention that the LAST element replaces `#0`.
     pub fn get_f_type(&mut self) -> Result<ExprId, ElabError> {
         let f_type = self.st.f_type;
         let args = self.st.f_args.clone();
@@ -112,11 +113,14 @@ impl<'a, 'e> AppElab<'a, 'e> {
             binder_info,
         } = self.node(self.st.f_type)
         {
-            // oracle: instantiate the domain so `getParamType` is valid.
-            // `has_loose_bvars` is not exposed; re-interning an
-            // already-closed domain is a no-op on the hash-consed bank,
-            // so instantiate unconditionally rather than adding an
-            // accessor for the predicate.
+            // oracle: `if d.hasLooseBVars then ..` (`App.lean:242-244`) —
+            // instantiate the domain so `getParamType` is valid, and ONLY
+            // then. `has_loose_bvars` below is `Expr.hasLooseBVars` read
+            // off the packed per-node metadata, so this is the oracle's
+            // own guard rather than a paraphrase of it.
+            if !self.has_loose_bvars(binder_type) {
+                return Ok(true);
+            }
             let args = self.st.f_args.clone();
             let d = self
                 .elab
@@ -196,70 +200,145 @@ impl<'a, 'e> AppElab<'a, 'e> {
 
     /// oracle: `getArgExpectedType` (`App.lean:269-273`) —
     /// `getParamType` with `consumeTypeAnnotations` applied, i.e. the
-    /// `optParam`/`autoParam` wrapper stripped. P1 has no
-    /// optParam/autoParam ARM (P5), but stripping here is not the arm:
-    /// it is what makes the argument's expected type correct whenever a
-    /// wrapper is present and the caller supplied the argument
-    /// explicitly. Omitting it would silently elaborate the argument
-    /// against `optParam α d` instead of `α`.
+    /// `optParam`/`autoParam`/`outParam`/`semiOutParam` wrapper stripped.
+    /// P1 has no optParam/autoParam ARM (P5) and no classes (so no
+    /// `outParam`), but stripping here is not the arm: it is what makes
+    /// the argument's expected type correct whenever a wrapper is present
+    /// and the caller supplied the argument explicitly. Omitting it would
+    /// silently elaborate the argument against `optParam α d` instead of
+    /// `α`.
     pub fn get_arg_expected_type(&mut self) -> Result<ExprId, ElabError> {
         let t = self.get_param_type()?;
         self.consume_type_annotations(t)
     }
 
-    /// oracle: `Expr.consumeTypeAnnotations` — strip `optParam _ _` and
-    /// `autoParam _ _` wrappers from the head.
+    /// oracle: `Expr.consumeTypeAnnotations` (`Lean/Expr.lean:1739-1745`)
+    /// — strip ALL FOUR type-annotation gadgets from the head:
     ///
-    /// `pub(crate)` for the three sites that apply it to a binder type
-    /// that is not the current parameter's: `app::args::has_opt_auto_params`
-    /// (every binder of the remaining telescope, `App.lean:873`'s
-    /// `hasOptAutoParams (← getFType)`),
+    /// ```lean
+    /// partial def consumeTypeAnnotations (e : Expr) : Expr :=
+    ///   if e.isOptParam || e.isAutoParam then
+    ///     consumeTypeAnnotations e.appFn!.appArg!
+    ///   else if e.isOutParam || e.isSemiOutParam then
+    ///     consumeTypeAnnotations e.appArg!
+    ///   else e
+    /// ```
+    ///
+    /// i.e. `optParam α d` / `autoParam α tac` (arity 2, keep the FIRST
+    /// argument — the annotated type) and `outParam α` / `semiOutParam α`
+    /// (arity 1, keep their only argument). The arity tests are the
+    /// oracle's own (`isAppOfArity`, `Expr.lean:1709-1722`): a
+    /// partially-applied `optParam α` is NOT `isOptParam`, and stripping
+    /// it would return `α` where the oracle keeps the whole term.
+    ///
+    /// The two `outParam` gadgets are INERT under P1's hermetic fixture
+    /// environment — `Elab0.lean` declares no class, so no parameter type
+    /// can carry one — but they are part of THIS function and go live the
+    /// moment P2 brings classes. Omitting them would be a silent
+    /// divergence rather than a named seam, which is why they are here
+    /// now.
+    ///
+    /// Two callers, matching the oracle's own: `get_arg_expected_type`
+    /// (`App.lean:273`'s `(← getParamType).consumeTypeAnnotations`) and
     /// `app::args::find_named_arg_depends_on` (the `cleanupAnnotations`
-    /// in `App.lean:331`), and `app::propagate::is_opt_or_auto_param`
-    /// (`App.lean:472`'s `paramType.isAutoParam || paramType.isOptParam`).
+    /// in `App.lean:331`, whose `consumeMData` half is still unmodelled —
+    /// see that call site's own note).
+    ///
+    /// The `isOptParam || isAutoParam` test that
+    /// `app::args::has_opt_auto_params` and
+    /// `app::propagate::is_opt_or_auto_param` need is a DIFFERENT
+    /// predicate with its own helper, `consume_opt_auto_param` below —
+    /// widening those two to see `outParam` would make them answer a
+    /// question the oracle does not ask there.
+    pub(crate) fn consume_type_annotations(&mut self, mut t: ExprId) -> Result<ExprId, ElabError> {
+        loop {
+            match self.type_annotation_at_head(t) {
+                Some(stripped) => t = stripped,
+                None => return Ok(t),
+            }
+        }
+    }
+
+    /// The `optParam`/`autoParam` HALF of `consume_type_annotations`, and
+    /// only that half. `consume_opt_auto_param(x) != x` is exactly the
+    /// oracle's `x.isOptParam || x.isAutoParam`, which is what all three
+    /// of its call sites test for: `hasOptAutoParams`
+    /// (`App.lean:121-127`, via `app::args::has_opt_auto_params`), the
+    /// propagation guard at `App.lean:472` (via
+    /// `app::propagate::is_opt_or_auto_param`), and the default-filling
+    /// arms at `App.lean:827-854` (via `app::args`'s own seam check).
+    /// Every one of those asks "does this parameter carry a DEFAULT
+    /// VALUE" — which `outParam`/`semiOutParam` do not.
     ///
     /// Safe on a binder type carrying LOOSE BVARS — which the
     /// `propagate.rs` caller genuinely passes, since `main'` recurses
     /// into the binding body without instantiating: this only walks the
     /// application spine and reads the head's `Const` name, never
     /// instantiating or inferring, so an un-instantiated bvar is simply a
-    /// spine node that is not a `Const` and falls through the
-    /// `_ => return Ok(t)` arm.
-    pub(crate) fn consume_type_annotations(&mut self, mut t: ExprId) -> Result<ExprId, ElabError> {
-        loop {
-            let (f, arg0) = match self.app_fn_and_first_arg(t) {
-                Some(pair) => pair,
-                None => return Ok(t),
-            };
-            match self.node(f) {
-                Node::Const { name: Some(n), .. } => {
-                    let base = self.elab.view.store;
-                    let rendered = self
-                        .elab
-                        .mctx
-                        .store()
-                        .to_name(Some(base), Some(n))
-                        .to_string();
-                    if rendered == "optParam" || rendered == "autoParam" {
-                        t = arg0;
-                        continue;
-                    }
-                    return Ok(t);
-                }
-                _ => return Ok(t),
+    /// spine node that is not a `Const` and falls through. The same is
+    /// true of `consume_type_annotations` above.
+    pub(crate) fn consume_opt_auto_param(&mut self, mut t: ExprId) -> Result<ExprId, ElabError> {
+        while self.head_is_opt_or_auto_param(t) {
+            match self.type_annotation_at_head(t) {
+                Some(inner) => t = inner,
+                None => break,
             }
+        }
+        Ok(t)
+    }
+
+    /// `true` when `t` is `optParam _ _` or `autoParam _ _` at the head,
+    /// arity included. oracle: `Expr.isOptParam || Expr.isAutoParam`.
+    fn head_is_opt_or_auto_param(&self, t: ExprId) -> bool {
+        match self.type_annotation_head(t) {
+            Some((name, arity)) => (name == "optParam" || name == "autoParam") && arity == 2,
+            None => false,
         }
     }
 
-    /// The head and FIRST argument of an application spine, if any.
-    fn app_fn_and_first_arg(&self, e: ExprId) -> Option<(ExprId, ExprId)> {
-        let mut spine = Vec::new();
+    /// One step of `consumeTypeAnnotations`: `Some(inner)` if `t` is a
+    /// well-formed application of one of the four gadgets, where `inner`
+    /// is the annotated type the oracle keeps; `None` otherwise.
+    fn type_annotation_at_head(&self, t: ExprId) -> Option<ExprId> {
+        let (name, arity) = self.type_annotation_head(t)?;
+        let args = self.app_args(t);
+        match name.as_str() {
+            // `e.appFn!.appArg!` — the first of two arguments.
+            "optParam" | "autoParam" if arity == 2 => Some(args[0]),
+            // `e.appArg!` — the only argument.
+            "outParam" | "semiOutParam" if arity == 1 => Some(args[0]),
+            _ => None,
+        }
+    }
+
+    /// The rendered name of an application spine's head `Const` and the
+    /// spine's arity, if the head is a `Const` and the spine non-empty.
+    fn type_annotation_head(&self, e: ExprId) -> Option<(String, usize)> {
+        let mut arity = 0usize;
         let mut cur = e;
-        while let Node::App { f, arg } = self.node(cur) {
-            spine.push(arg);
+        while let Node::App { f, .. } = self.node(cur) {
+            arity += 1;
             cur = f;
         }
-        spine.pop().map(|first| (cur, first))
+        if arity == 0 {
+            return None;
+        }
+        match self.node(cur) {
+            Node::Const { name: Some(n), .. } => Some((self.render_name(n), arity)),
+            _ => None,
+        }
+    }
+
+    /// An application spine's arguments, in APPLICATION order.
+    fn app_args(&self, e: ExprId) -> Vec<ExprId> {
+        let mut args = Vec::new();
+        let mut cur = e;
+        while let Node::App { f, arg } = self.node(cur) {
+            args.push(arg);
+            cur = f;
+        }
+        args.reverse();
+        args
     }
 
     /// oracle: `hasArgsToProcess` (`App.lean:290-293`).

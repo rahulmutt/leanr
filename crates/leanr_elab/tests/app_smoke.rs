@@ -825,19 +825,27 @@ fn implicit_lambda_guard_fires_only_for_implicit_and_inst_implicit() {
 /// positively, one disjunct at a time.
 #[test]
 fn block_implicit_lambda_covers_the_oracles_exclusion_list() {
-    for src in [
+    // `None` = must elaborate; `Some(needle)` = the guard is suppressed
+    // but a DIFFERENT named seam is reached, identified by its message.
+    for (src, seam) in [
         // isExplicit — `@f`
-        "@Nat.succ",
+        ("@Nat.succ", None),
         // isExplicitApp — `@f a`
-        "@id Nat Nat.zero",
+        ("@id Nat Nat.zero", None),
         // isHole — `_`
-        "_",
+        ("_", None),
         // isTypeAscription — `(e : T)`
-        "(Nat.zero : Nat)",
-        // isLambdaWithImplicit — `fun {α} => ..`
-        "fun {a : Nat} => Nat.zero",
+        ("(Nat.zero : Nat)", None),
+        // isLambdaWithImplicit — `fun {α} => ..`. `fun`'s own
+        // implicit-binder arm is a separate, unrelated P-seam
+        // (`builtin::binder`), so this source cannot reach `Ok` — but it
+        // must reach THAT seam, never the implicit-lambda one.
+        (
+            "fun {a : Nat} => Nat.zero",
+            Some("unsupported binder kind Lean.Parser.Term.implicitBinder"),
+        ),
         // dropParens: the disjuncts see through leading `(..)`
-        "(@Nat.succ)",
+        ("(@Nat.succ)", None),
     ] {
         support::with_app_harness("Nat.zero", |app| {
             let nat = app.elab.mctx.infer_type(app.st.f).unwrap();
@@ -862,11 +870,34 @@ fn block_implicit_lambda_covers_the_oracles_exclusion_list() {
             let got = app
                 .elab
                 .elab_term(&elem, &parsed.tree.kinds, Some(expected));
-            if let Err(leanr_elab::ElabError::UnsupportedSyntax(m)) = &got {
-                assert!(
-                    !m.contains("implicit lambda insertion"),
-                    "{src}: blockImplicitLambda must suppress the guard, got {m:?}"
-                );
+            match seam {
+                // The guard was suppressed and elaboration ran to
+                // completion. Asserted POSITIVELY: an `is_ok()` test
+                // cannot pass on a `TypeMismatch`, on an unrelated
+                // `UnsupportedSyntax`, or on a re-introduced implicit
+                // lambda error, which is exactly what the earlier
+                // `if let Err(UnsupportedSyntax(m)) = &got` shape did.
+                None => assert!(
+                    got.is_ok(),
+                    "{src}: blockImplicitLambda must suppress the guard, got {got:?}"
+                ),
+                // The guard was suppressed, but elaboration then hit a
+                // DIFFERENT, named seam. Pinned by its own message, so
+                // this arm is equally unable to pass on `Ok` or on the
+                // implicit-lambda error.
+                Some(needle) => match &got {
+                    Err(leanr_elab::ElabError::UnsupportedSyntax(m)) => {
+                        assert!(
+                            m.contains(needle),
+                            "{src}: expected the {needle:?} seam, got {m:?}"
+                        );
+                        assert!(
+                            !m.contains("implicit lambda insertion"),
+                            "{src}: blockImplicitLambda must suppress the guard, got {m:?}"
+                        );
+                    }
+                    other => panic!("{src}: expected the {needle:?} seam, got {other:?}"),
+                },
             }
         });
     }
@@ -1128,5 +1159,157 @@ fn explicit_mode_skips_the_optparam_eta_escape() {
                 );
             }
         });
+    }
+}
+
+// =======================================================================
+// `app::propagate`'s two PURE functions. Oracle: `Expr.isProp`
+// (`Lean/Expr.lean:837-839`) and `shouldPropagateExpectedTypeFor`
+// (`App.lean:516-523`). Both decide, syntactically, whether expected-type
+// propagation runs at all, and both were transcribed wrong at least once
+// while this plan was written — hence direct tests rather than relying on
+// the corpus, which reaches neither predicate's interesting inputs.
+// =======================================================================
+
+/// oracle: `Expr.isProp` — `| sort .zero => true | _ => false`.
+///
+/// Five cases, each of which kills a specific plausible wrong
+/// implementation (measured; see the plan's fix report):
+///   - `Sort 0` true kills the SEMANTIC `Lean.Meta.isProp` ("does `e`
+///     have type `Sort 0`"), for which `Sort 0 : Sort 1` is false.
+///   - `Sort 1` false and `Sort ?u` false kill `Node::Sort { .. } => true`.
+///   - a non-`Sort` node false kills "anything at all is Prop".
+///   - `Sort (max 0 0)` false kills a level-NORMALIZING check. leanr's
+///     `LevelRow` is non-normalizing and so is `Expr.isProp`: the oracle
+///     matches the `Level` constructor, and `.max .zero .zero` is not
+///     `.zero`. This is the case a `whnf`-flavoured or `Level.normalize`-
+///     flavoured reading would get wrong.
+#[test]
+fn is_prop_is_the_syntactic_sort_zero_test() {
+    support::with_app_harness("Nat.zero", |app| {
+        let base = app.elab.view.store;
+
+        let zero = app.elab.mctx.store_mut().level_zero(Some(base)).unwrap();
+        let one = app
+            .elab
+            .mctx
+            .store_mut()
+            .level_succ(Some(base), zero)
+            .unwrap();
+        let max00 = app
+            .elab
+            .mctx
+            .store_mut()
+            .level_max(Some(base), zero, zero)
+            .unwrap();
+        let umvar = app.elab.mk_fresh_level_mvar().unwrap();
+
+        let mk_sort = |app: &mut leanr_elab::app::state::AppElab, l| {
+            app.elab.mctx.store_mut().expr_sort(Some(base), l).unwrap()
+        };
+        let sort0 = mk_sort(app, zero);
+        let sort1 = mk_sort(app, one);
+        let sort_max00 = mk_sort(app, max00);
+        let sort_mvar = mk_sort(app, umvar);
+
+        // `Sort 0` is `Prop`, the ONLY true case.
+        assert!(
+            leanr_elab::app::propagate::is_prop(app, sort0),
+            "Sort 0 is Prop"
+        );
+        // `Sort 1` is `Type`.
+        assert!(
+            !leanr_elab::app::propagate::is_prop(app, sort1),
+            "Sort 1 is Type, not Prop"
+        );
+        // A `Sort` over an unassigned level mvar is not syntactically
+        // `Sort .zero`, whatever it may later be assigned.
+        assert!(
+            !leanr_elab::app::propagate::is_prop(app, sort_mvar),
+            "Sort ?u is not syntactically Sort 0"
+        );
+        // `Sort (max 0 0)` is `Prop` up to level normalization, and the
+        // oracle still says false.
+        assert!(
+            !leanr_elab::app::propagate::is_prop(app, sort_max00),
+            "Expr.isProp matches the Level CONSTRUCTOR; max 0 0 is not .zero"
+        );
+        // A non-`Sort` node. `app.st.f` is the elaborated head `Nat.zero`
+        // — a `Const`, and the closest thing the fixture env has to the
+        // "expected type is a proposition-valued application" shape whose
+        // syntactic/semantic disagreement `is_prop`'s doc calls out.
+        let head = app.st.f;
+        assert!(
+            !leanr_elab::app::propagate::is_prop(app, head),
+            "a Const is not Sort 0"
+        );
+    });
+}
+
+/// oracle: `shouldPropagateExpectedTypeFor` (`App.lean:516-523`) —
+/// `false` for an already-elaborated `Arg.expr`, and for the three
+/// syntax kinds whose elaboration is DEFERRED; `true` otherwise.
+///
+/// Discrimination (measured): dropping any ONE of the three excluded
+/// kinds flips that kind's case, and returning `true` for `Arg::Expr`
+/// flips the first case — so this test cannot pass on a partial
+/// exclusion list, which is exactly how the plan first wrote it.
+#[test]
+fn should_propagate_expected_type_for_excludes_deferred_kinds() {
+    use leanr_elab::app::propagate::should_propagate_expected_type_for;
+
+    let snap = builtin::snapshot();
+
+    // `Arg.expr` — already elaborated, nothing left to inform. Needs a
+    // genuine `ExprId` (the id newtype has no public constructor), so it
+    // borrows the harness's elaborated head.
+    support::with_app_harness("Nat.zero", |app| {
+        let parsed = parse_term("Nat.zero", &snap);
+        let arg = Arg::Expr(app.st.f);
+        assert!(
+            !should_propagate_expected_type_for(&arg, &parsed.tree.kinds),
+            "Arg::Expr is already elaborated"
+        );
+    });
+
+    for (src, expected) in [
+        // `_` — becomes an mvar.
+        ("_", false),
+        // `?x` — becomes a synthetic-opaque mvar.
+        ("?x", false),
+        // `by ..` — becomes a tactic mvar.
+        ("by skip", false),
+        // Everything else propagates.
+        ("Nat.zero", true),
+        ("(Nat.zero)", true),
+        ("fun x => x", true),
+        ("Nat.succ Nat.zero", true),
+    ] {
+        let parsed = parse_term(src, &snap);
+        // `by skip` deliberately carries a parse error (`Elab0` registers
+        // no tactics); only the KIND matters to this predicate, and the
+        // kind is asserted below so a parser change cannot silently turn
+        // this case vacuous.
+        let elem = parsed
+            .tree
+            .root()
+            .first_child_or_token()
+            .unwrap_or_else(|| panic!("{src}: no term element"));
+        let kind = parsed.tree.kinds.name(elem.kind()).to_string();
+        let want_kind = match src {
+            "_" => "Lean.Parser.Term.hole",
+            "?x" => "Lean.Parser.Term.syntheticHole",
+            "by skip" => "Lean.Parser.Term.byTactic",
+            "Nat.zero" => "<ident>",
+            "(Nat.zero)" => "Lean.Parser.Term.paren",
+            "fun x => x" => "Lean.Parser.Term.fun",
+            _ => "Lean.Parser.Term.app",
+        };
+        assert_eq!(kind, want_kind, "{src}: unexpected syntax kind");
+        assert_eq!(
+            should_propagate_expected_type_for(&Arg::Stx(elem), &parsed.tree.kinds),
+            expected,
+            "{src} (kind {kind})"
+        );
     }
 }

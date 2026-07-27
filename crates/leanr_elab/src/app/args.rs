@@ -219,13 +219,16 @@ pub(crate) fn find_named_arg_depends_on(
             }
             // oracle Remark (`App.lean:330`): "a default value at
             // `optParam` does not count as a dependency" — hence
-            // `xDecl.type.cleanupAnnotations`. `consume_type_annotations`
-            // is the optParam/autoParam half of `cleanupAnnotations`;
-            // the `consumeMData` half is not modelled, so an `MData`-
-            // wrapped `optParam` would keep its wrapper here and its
-            // default value would count as a dependency. No fixture
-            // parameter type carries either wrapper, let alone under
-            // `MData`.
+            // `xDecl.type.cleanupAnnotations`. `cleanupAnnotations`
+            // (`Expr.lean:1754-1756`) is `consumeMData` composed with
+            // `consumeTypeAnnotations`, iterated to a fixed point;
+            // `consume_type_annotations` is the FULL
+            // `consumeTypeAnnotations` half (all four gadgets, since
+            // I2), but the `consumeMData` half is still not modelled, so
+            // an `MData`-wrapped `optParam` would keep its wrapper here
+            // and its default value would count as a dependency. No
+            // fixture parameter type carries either wrapper, let alone
+            // under `MData`.
             let ty = app.consume_type_annotations(b.ty)?;
             if expr_depends_on(app, ty, curr) {
                 return Ok(Some(rendered));
@@ -384,7 +387,7 @@ fn process_explicit_arg(
     // falling through to the eta chain and building a different term.
     if !app.ctx.explicit {
         let param_type = app.get_param_type()?;
-        if app.consume_type_annotations(param_type)? != param_type {
+        if app.consume_opt_auto_param(param_type)? != param_type {
             return Err(ElabError::UnsupportedSyntax(
                 "optParam default / autoParam tactic argument — M4b-3 P5".to_string(),
             ));
@@ -449,8 +452,11 @@ fn process_explicit_arg(
 /// that only reveals a further binder AFTER reduction is seen too. The
 /// oracle's `xType ← inferType x` is `TelescopeBinder::ty` — the decl's
 /// declared type — and `isOptParam || isAutoParam` is the "stripping the
-/// annotations changed the term" test `consume_type_annotations` already
-/// backs (see `propagate::is_opt_or_auto_param`'s own note).
+/// annotations changed the term" test `consume_opt_auto_param` backs
+/// (NOT the full `consume_type_annotations`, which also strips
+/// `outParam`/`semiOutParam`: those carry no default value, so seeing
+/// them here would answer a different question — see
+/// `propagate::is_opt_or_auto_param`'s own note).
 ///
 /// Takes the type to walk as a parameter (Task 6): `App.lean:873`'s call
 /// site passes `(← getFType)`, but `getResultingTypeCore?`'s own call
@@ -460,7 +466,7 @@ fn process_explicit_arg(
 pub(crate) fn has_opt_auto_params(app: &mut AppElab, ty: ExprId) -> Result<bool, ElabError> {
     app.forall_telescope_reducing(ty, |app, xs| {
         for b in xs {
-            if app.consume_type_annotations(b.ty)? != b.ty {
+            if app.consume_opt_auto_param(b.ty)? != b.ty {
                 return Ok(true);
             }
         }

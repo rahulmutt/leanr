@@ -36,9 +36,9 @@ pub fn finalize(app: &mut AppElab) -> Result<ExprId, ElabError> {
         e = update_binder_names(app, e, &names)?;
     }
 
-    // oracle: `let eType ← inferType e` (`App.lean:633`), computed here
+    // oracle: `let eType ← inferType e` (`App.lean:629`), computed here
     // — BEFORE the `resultTypeOutParam?` branch — and guarded by the
-    // oracle's own Remark (`App.lean:629-632`): do NOT reuse `s.fType`
+    // oracle's own Remark (`App.lean:625-628`): do NOT reuse `s.fType`
     // as `eType` even when `etaArgs` is empty, because it may have been
     // unfolded (`get_f_type`/`whnf_forall` both rewrite it in place).
     let e_type = app.elab.mctx.infer_type(e)?;
@@ -54,14 +54,24 @@ pub fn finalize(app: &mut AppElab) -> Result<ExprId, ElabError> {
 
     // oracle: `if let some expectedType := s.expectedType? then
     // trySynthesizeAppInstMVars; discard <| isDefEq expectedType eType`
-    // (`App.lean:650-655`).
+    // (`App.lean:647-655`).
     if let Some(expected) = app.st.expected_type {
-        // `trySynthesizeAppInstMVars` runs first in the oracle; the
-        // `inst_mvars` guard below is P1's stand-in for it and rejects
-        // the only state in which it would do anything.
-        //
+        // oracle: `trySynthesizeAppInstMVars` (`App.lean:648`) runs
+        // BEFORE the unification, so instance arguments are solved with
+        // the information available at this point and `isDefEq` sees the
+        // resulting assignments. This guard is P1's stand-in — it rejects
+        // the only state in which that call would do anything — and it
+        // sits where the oracle's call sits, matching
+        // `propagate::propagate_expected_type`'s own transcription of
+        // the same line (`App.lean:601`).
+        if !app.st.inst_mvars.is_empty() {
+            return Err(ElabError::UnsupportedSyntax(
+                "pending instance-implicit mvars require typeclass synthesis — M4b-3 P2"
+                    .to_string(),
+            ));
+        }
         // `discard <|`: a FAILED unification is DELIBERATELY ignored
-        // here — "caller must handle it" (`App.lean:652`). `ensureHasType`
+        // here — "caller must handle it" (`App.lean:649`). `ensureHasType`
         // reports the mismatch with the full application in hand, which
         // is a strictly better message than anything this site could
         // produce. A genuine `MetaError` (not a `false` verdict) still
@@ -69,7 +79,9 @@ pub fn finalize(app: &mut AppElab) -> Result<ExprId, ElabError> {
         let _ = app.elab.mctx.is_def_eq(expected, e_type)?;
     }
 
-    // oracle: `synthesizeAppInstMVars` (`App.lean:349-370`).
+    // oracle: the trailing `synthesizeAppInstMVars` (`App.lean:656`,
+    // defined at `App.lean:349-370`) — the pass that runs on EVERY exit
+    // path, expected type or not.
     if !app.st.inst_mvars.is_empty() {
         return Err(ElabError::UnsupportedSyntax(
             "pending instance-implicit mvars require typeclass synthesis — M4b-3 P2".to_string(),

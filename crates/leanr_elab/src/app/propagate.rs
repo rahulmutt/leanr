@@ -115,7 +115,10 @@ pub fn propagate_expected_type(
 /// disable propagation for every application elaborated against a
 /// proposition. The oracle's own doc comment confirms the intent —
 /// "we just don't propagate the expected type when it IS `Prop`".
-fn is_prop(app: &AppElab, e: ExprId) -> bool {
+///
+/// `pub` only so `tests/app_smoke.rs` can pin the syntactic-vs-semantic
+/// distinction directly; it has no caller outside this module.
+pub fn is_prop(app: &AppElab, e: ExprId) -> bool {
     match app.node(e) {
         Node::Sort { level } => {
             let base = app.elab.view.store;
@@ -306,10 +309,12 @@ fn finalize_resulting(app: &AppElab, f_type: ExprId) -> Option<ExprId> {
     }
 }
 
-/// oracle: `Expr.isOptParam || Expr.isAutoParam` for ONE parameter type.
-/// `consume_type_annotations` strips exactly those two wrappers, so
-/// "stripping changed the term" is the same predicate — the equivalence
-/// `app::args::has_opt_auto_params` already relies on.
+/// oracle: `Expr.isOptParam || Expr.isAutoParam` for ONE parameter type
+/// (`App.lean:472`). `consume_opt_auto_param` strips exactly those two
+/// wrappers — and, deliberately, NOT the `outParam`/`semiOutParam` that
+/// the full `consume_type_annotations` also strips — so "stripping
+/// changed the term" is the same predicate. This is the equivalence
+/// `app::args::has_opt_auto_params` relies on too.
 fn is_opt_or_auto_param(app: &mut AppElab, param_type: ExprId) -> Result<bool, ElabError> {
-    Ok(app.consume_type_annotations(param_type)? != param_type)
+    Ok(app.consume_opt_auto_param(param_type)? != param_type)
 }

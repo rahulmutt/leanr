@@ -110,7 +110,8 @@ impl<'e> TermElabM<'e> {
     /// oracle: `mkFreshLevelMVar` (`Lean/Meta/Basic.lean:861-863`) —
     /// mints a globally-fresh `LMVarId`, declares it in the `mctx`, and
     /// returns the `LevelId` of `Level.mvar` referencing it. One fresh
-    /// mvar per universe parameter is exactly what `elab_ident` needs
+    /// mvar per universe parameter is exactly what
+    /// `app::head::elab_ident_head` needs
     /// for `mkConst` (design spec's "Universe metavariables in the
     /// output"). Reachable capability surface is entirely public
     /// (`MetaCtx::store_mut`/`mctx_mut`, `MetavarContext::declare_level`,

@@ -135,9 +135,9 @@ pub(crate) fn extract_binder_group(
     // `base = Some(elab.view.store)`, NOT the brief's literal `None`
     // (Task 3 reconciliation): a binder name must intern to the exact
     // same `NameId` a later bare-identifier occurrence of the same text
-    // resolves to (`ident.rs::intern_dotted`'s own convention, which
-    // this mirrors) — the local-scope lookup `elab_ident` performs
-    // (Task 3 addition, `elab.rs`) is a plain `NameId` equality check,
+    // resolves to (`app::head::intern_dotted`'s own convention, which
+    // this mirrors) — the local-scope lookup `app::head::elab_ident_head`
+    // performs (Task 3 addition, `elab.rs`) is a plain `NameId` equality check,
     // so a base mismatch here would silently make `(a : Type), a` fail
     // to find its own binder whenever `a`'s string already happens to
     // be interned in the persistent store under a different base path.
@@ -213,7 +213,8 @@ pub(crate) fn elab_binders_and_forall(
     // `leanr_meta`'s own `local_names` field doc) also truncates the
     // by-user-name index in lockstep, so this single checkpoint now
     // covers both id-based (`lctx`) and name-based (`lctx_lookup_by_name`,
-    // consulted by `elab_ident`) lookups — no second checkpoint needed.
+    // consulted by `app::head::elab_ident_head`) lookups — no second
+    // checkpoint needed.
     let checkpoint = elab.mctx.lctx_checkpoint();
     let result = (|| {
         let mut fvars: Vec<ExprId> = Vec::new();
