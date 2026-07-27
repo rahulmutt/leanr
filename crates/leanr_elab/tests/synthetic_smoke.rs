@@ -299,3 +299,93 @@ fn step_reports_progress_by_snapshot_count() {
         assert!(!progress, "nothing solved -> no progress");
     });
 }
+
+/// The ladder terminates and reports a stuck typeclass problem.
+///
+/// Measured against the pinned oracle (plan § Measured facts, item 2):
+/// `useWrap` with no expected type leaves `Wrap ?m` stuck, and the
+/// oracle's own `synthesizeSyntheticMVarsNoPostponing` throws
+/// "typeclass instance problem is stuck". leanr must do the same rather
+/// than emitting a term with a dangling mvar.
+#[test]
+#[ignore = "needs the Elab0 class scaffold (Task 7)"]
+fn bare_typeclass_application_is_reported_stuck() {
+    let err = support::elab_and_synthesize("useWrap").expect_err("stuck");
+    assert!(matches!(
+        err,
+        leanr_elab::ElabError::StuckSyntheticMVar { .. }
+    ));
+}
+
+/// `postpone == .yes` does NOT report stuck — it leaves the mvar
+/// pending for an outer scheduler.
+///
+/// oracle: rungs 2-5 and the stuck report are all under
+/// `else if postpone != .yes` / `else if postpone == .no`
+/// (`SyntheticMVars.lean:617,642`).
+#[test]
+#[ignore = "needs the Elab0 class scaffold (Task 7)"]
+fn postpone_yes_leaves_the_mvar_pending() {
+    support::with_app_harness("Nat.zero", |app| {
+        let goal = support::wrap_of_fresh_mvar(app);
+        let (_e, id) = app
+            .elab
+            .mk_fresh_expr_mvar_of_kind(goal, leanr_meta::MVarKind::Synthetic)
+            .expect("fresh mvar");
+        app.elab.register_synthetic_mvar(
+            support::any_syn_elem(),
+            id,
+            leanr_elab::synthetic::SyntheticMVarKind::TypeClass,
+        );
+        let kinds = support::any_kinds();
+        app.elab
+            .synthesize_synthetic_mvars(leanr_elab::synthetic::PostponeBehavior::Yes, &kinds)
+            .expect("postpone := .yes never reports stuck");
+        assert_eq!(app.elab.pending_mvars, vec![id], "still pending");
+    });
+}
+
+/// The default-instance seam fires only when default instances could
+/// actually apply.
+///
+/// Rung 3 is P3's `synthesizeUsingDefault`. P2a supplies a SHAPE-GUARDED
+/// stand-in: it errors when a pending `TypeClass` mvar's class has
+/// default instances registered — the state in which the real rung would
+/// have done something — and reports no progress otherwise. A blanket
+/// `false` would silently skip a rung the oracle runs.
+#[test]
+fn synthesize_using_default_is_a_shape_guarded_seam() {
+    support::with_app_harness("Nat.zero", |app| {
+        // No pending mvars at all: no-op, no progress, no error.
+        assert!(!app
+            .elab
+            .synthesize_using_default()
+            .expect("no pending mvars -> no-op"));
+    });
+}
+
+/// The stuck report drains `pending_mvars` before reporting.
+///
+/// oracle: `let pendingMVars ← modifyGet fun s => (s.pendingMVars,
+/// { s with pendingMVars := [] })` (`SyntheticMVars.lean:323`).
+#[test]
+#[ignore = "needs the Elab0 class scaffold (Task 7)"]
+fn stuck_report_drains_the_pending_list() {
+    support::with_app_harness("Nat.zero", |app| {
+        let goal = support::wrap_of_fresh_mvar(app);
+        let (_e, id) = app
+            .elab
+            .mk_fresh_expr_mvar_of_kind(goal, leanr_meta::MVarKind::Synthetic)
+            .expect("fresh mvar");
+        app.elab.register_synthetic_mvar(
+            support::any_syn_elem(),
+            id,
+            leanr_elab::synthetic::SyntheticMVarKind::TypeClass,
+        );
+        let _ = app.elab.report_stuck_synthetic_mvars();
+        assert!(
+            app.elab.pending_mvars.is_empty(),
+            "drained before reporting"
+        );
+    });
+}

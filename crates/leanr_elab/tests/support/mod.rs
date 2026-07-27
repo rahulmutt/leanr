@@ -128,6 +128,20 @@ pub fn any_syn_elem() -> leanr_elab::dispatch::SynElem {
         .expect("term child")
 }
 
+/// A `KindInterner` for tests that need one but do not care which
+/// `GrammarSnapshot` backed it. Every snapshot's interner carries the
+/// same builtin-grammar kinds, so any parse's own interner (cloned —
+/// `KindInterner::Clone` is cheap, an `Arc<str>` per name) works as a
+/// stand-in wherever a caller just needs `&KindInterner` and not a
+/// specific tree's own.
+pub fn any_kinds() -> leanr_syntax::kind::KindInterner {
+    use leanr_syntax::{builtin, parse_term};
+    let snap = builtin::snapshot();
+    let parsed = parse_term("Nat.zero", &snap);
+    assert!(parsed.errors.is_empty());
+    (*parsed.tree.kinds).clone()
+}
+
 /// Register `n` `TypeClass` synthetic mvars, oldest first, returning
 /// their ids in creation order.
 pub fn register_n_typeclass_mvars(
@@ -249,4 +263,16 @@ pub fn wrap_of_fresh_mvar(
 /// synthesis-failure (`.none`) arm. See the module section doc above.
 pub fn no_inst_of_nat(_app: &mut leanr_elab::app::state::AppElab) -> leanr_kernel::bank::ExprId {
     unimplemented!("NoInst Nat needs the Elab0 class scaffold — M4b-3 P2a Task 7")
+}
+
+/// Elaborate `src` (e.g. `"useWrap"`) end-to-end and run
+/// `synthesize_synthetic_mvars_no_postponing` over the result — the
+/// shape `bare_typeclass_application_is_reported_stuck` (Task 5) needs
+/// to reach a real stuck-typeclass report. `useWrap`/`Wrap` do not exist
+/// until the Elab0 class scaffold lands (Task 7); same placeholder
+/// style as `wrap_of_nat` and friends above, for the same reason.
+pub fn elab_and_synthesize(
+    _src: &str,
+) -> Result<leanr_kernel::bank::ExprId, leanr_elab::ElabError> {
+    unimplemented!("useWrap needs the Elab0 class scaffold — M4b-3 P2a Task 7")
 }

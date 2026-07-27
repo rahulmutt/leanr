@@ -451,11 +451,80 @@ impl<'e> TermElabM<'e> {
         }
     }
 
-    /// Task 5: resuming a postponed elaboration. Stub returns `false`
-    /// ("not ready yet") so the ladder never mistakes an unimplemented
-    /// rung for success.
-    // Task 5
-    pub fn resume_postponed(
+    /// oracle: `synthesizeSyntheticMVars` (`SyntheticMVars.lean:611-646`).
+    ///
+    /// Transliterated structurally, including two things easy to get
+    /// subtly wrong: the stuck report is the LAST `else if` INSIDE the
+    /// loop body (not a step after it), and only
+    /// `processPostponedUniverseConstraints` runs after the loop.
+    ///
+    /// leanr drops the oracle's `ignoreStuckTC` parameter: its only
+    /// caller is `simp` argument elaboration, which no leanr slice has.
+    pub fn synthesize_synthetic_mvars(
+        &mut self,
+        postpone: PostponeBehavior,
+        kinds: &KindInterner,
+    ) -> Result<(), ElabError> {
+        loop {
+            if self.pending_mvars.is_empty() {
+                break;
+            }
+            if self.synthesize_synthetic_mvars_step(false, false, kinds)? {
+                continue;
+            }
+            if postpone == PostponeBehavior::Yes {
+                break;
+            }
+            // Rung 2: postponement disabled, elaboration errors
+            // postponed. The oracle's own worked example
+            // (:618-635) is why `postponeOnError` and `mayPostpone` are
+            // separate knobs.
+            if self.without_postponing(|e| e.synthesize_synthetic_mvars_step(true, false, kinds))? {
+                continue;
+            }
+            // Rung 3: default instances (P3; shape-guarded seam here).
+            if self.synthesize_using_default()? {
+                continue;
+            }
+            // Rung 4: postponement disabled, errors NOT postponed —
+            // force a commitment.
+            if self
+                .without_postponing(|e| e.synthesize_synthetic_mvars_step(false, false, kinds))?
+            {
+                continue;
+            }
+            // Rung 5: run tactics.
+            if self.synthesize_synthetic_mvars_step(false, true, kinds)? {
+                continue;
+            }
+            if postpone == PostponeBehavior::No {
+                self.report_stuck_synthetic_mvars()?;
+            }
+            break;
+        }
+        if postpone == PostponeBehavior::No {
+            self.process_postponed_universe_constraints()?;
+        }
+        Ok(())
+    }
+
+    /// oracle: `synthesizeSyntheticMVarsNoPostponing`
+    /// (`SyntheticMVars.lean:649-650`).
+    pub fn synthesize_synthetic_mvars_no_postponing(
+        &mut self,
+        kinds: &KindInterner,
+    ) -> Result<(), ElabError> {
+        self.synthesize_synthetic_mvars(PostponeBehavior::No, kinds)
+    }
+
+    /// oracle: `resumePostponed` (`SyntheticMVars.lean:32-74`) —
+    /// re-elaborate the postponed syntax under its saved context, ensure
+    /// it has the mvar's type, and assign.
+    ///
+    /// The oracle's `occursCheck` guard before assigning is preserved:
+    /// a resumed result may mention `mvarId` itself when it contains
+    /// synthetic `sorry`s.
+    fn resume_postponed(
         &mut self,
         ctx: &SavedContext,
         stx: &SynElem,
@@ -463,7 +532,160 @@ impl<'e> TermElabM<'e> {
         postpone_on_error: bool,
         kinds: &KindInterner,
     ) -> Result<bool, ElabError> {
-        let _ = (ctx, stx, mvar_id, postpone_on_error, kinds);
+        let expected = self
+            .mctx
+            .mctx()
+            .decl(mvar_id)
+            .expect("postponed mvar is declared")
+            .ty;
+        let expected = self.mctx.instantiate_mvars(expected)?;
+        let stx = stx.clone();
+        let result = self.with_saved_context(ctx, |elab| {
+            elab.elab_term_ensuring_type(&stx, kinds, Some(expected))
+        });
+        match result {
+            Ok(e) => {
+                self.mctx.mctx_mut().assign(mvar_id, e)?;
+                Ok(true)
+            }
+            // oracle: :68-74 — on an ERROR, `postponeOnError` decides
+            // between "restore and try again later" (`false`) and "log
+            // it and consider the mvar done" (`true`). leanr has no
+            // message log, so the `true` branch propagates.
+            Err(e) if postpone_on_error => {
+                let _ = e;
+                Ok(false)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Rung 3's stand-in. P3 replaces the body with
+    /// `synthesizeUsingDefault` / `synthesizeSomeUsingDefaultPrio` /
+    /// `synthesizeUsingDefaultPrio` (`SyntheticMVars.lean:215-221`,
+    /// `:193-210`, `:113-190`).
+    ///
+    /// Shape-guarded rather than a blanket `false`: it errors when a
+    /// pending `TypeClass` mvar's class has default instances
+    /// registered — the exact state in which the real rung would have
+    /// done something — and reports "no progress" otherwise. That keeps
+    /// the seam from silently skipping a rung the oracle runs, without
+    /// building P3's reverse-creation-order walk here.
+    pub fn synthesize_using_default(&mut self) -> Result<bool, ElabError> {
+        for mvar_id in self.pending_mvars.clone() {
+            if !matches!(
+                self.synthetic_mvar_decl(mvar_id).map(|d| &d.kind),
+                Some(SyntheticMVarKind::TypeClass)
+            ) {
+                continue;
+            }
+            let Some(class) = self.pending_class_name(mvar_id)? else {
+                continue;
+            };
+            if !self.mctx.default_instances_of(class).is_empty() {
+                return Err(ElabError::UnsupportedSyntax(
+                    "default instances for a pending typeclass mvar require \
+                     synthesizeUsingDefault — M4b-3 P3"
+                        .to_string(),
+                ));
+            }
+        }
         Ok(false)
+    }
+
+    /// The head constant of a pending typeclass goal, if it has one.
+    /// `Wrap ?m` -> `Wrap`; a goal whose head is not a constant has no
+    /// class name and cannot have default instances.
+    fn pending_class_name(&mut self, mvar_id: MVarId) -> Result<Option<NameId>, ElabError> {
+        let ty = self
+            .mctx
+            .mctx()
+            .decl(mvar_id)
+            .expect("pending mvar is declared")
+            .ty;
+        let ty = self.mctx.instantiate_mvars(ty)?;
+        let base = self.view.store;
+        let mut cur = ty;
+        loop {
+            match self.mctx.store().expr_node(Some(base), cur) {
+                Node::App { f, .. } => cur = f,
+                Node::Const { name, .. } => return Ok(name),
+                _ => return Ok(None),
+            }
+        }
+    }
+
+    /// oracle: `reportStuckSyntheticMVars` (`SyntheticMVars.lean:322-362`)
+    /// and `reportStuckSyntheticMVar` (`:292-316`).
+    ///
+    /// Drains `pending_mvars`, sorts by the oracle's priority order, and
+    /// raises on the first entry. The sort is ported (it picks the
+    /// reported mvar deterministically); the note/hint prose is not
+    /// (design spec § Amendment, item 2).
+    pub fn report_stuck_synthetic_mvars(&mut self) -> Result<(), ElabError> {
+        let pending = std::mem::take(&mut self.pending_mvars);
+        let mut problems: Vec<(MVarId, SyntheticMVarDecl)> = pending
+            .into_iter()
+            .filter_map(|id| self.synthetic_mvar_decl(id).cloned().map(|d| (id, d)))
+            .collect();
+        // oracle: :347-360 — non-typeclass problems come FIRST; among
+        // typeclass problems, the SMALLER syntactic range wins (an inner
+        // `LT ?m` is more informative than the enclosing
+        // `Decidable (x < x)`), ties broken by start offset.
+        problems.sort_by(|(_, a), (_, b)| {
+            use std::cmp::Ordering;
+            let tc = |d: &SyntheticMVarDecl| matches!(d.kind, SyntheticMVarKind::TypeClass);
+            match (tc(a), tc(b)) {
+                (true, true) => {
+                    let ra = a.stx.text_range();
+                    let rb = b.stx.text_range();
+                    if ra.len() != rb.len() {
+                        ra.len().cmp(&rb.len())
+                    } else {
+                        ra.start().cmp(&rb.start())
+                    }
+                }
+                (true, false) => Ordering::Greater,
+                (false, true) => Ordering::Less,
+                (false, false) => Ordering::Equal,
+            }
+        });
+        let Some((mvar_id, decl)) = problems.into_iter().next() else {
+            return Ok(());
+        };
+        match decl.kind {
+            SyntheticMVarKind::TypeClass => {
+                let goal = self.mctx.mctx().decl(mvar_id).expect("declared").ty;
+                let goal = self.mctx.instantiate_mvars(goal)?;
+                Err(ElabError::StuckSyntheticMVar { goal })
+            }
+            SyntheticMVarKind::Coe { .. } => Err(ElabError::UnsupportedSyntax(
+                "stuck coercion reporting requires coercion insertion — M4b-3 P4".to_string(),
+            )),
+            SyntheticMVarKind::Tactic => Err(ElabError::UnsupportedSyntax(
+                "stuck tactic reporting requires the `by` elaborator — later M4".to_string(),
+            )),
+            // oracle: `| _ => unreachable!` (:316) — `.postponed` never
+            // reaches the reporter, because a postponed mvar that could
+            // not be resumed has already raised from `resume_postponed`.
+            SyntheticMVarKind::Postponed { .. } => Err(ElabError::UnsupportedSyntax(
+                "a postponed mvar reached the stuck reporter — M4b-3 P2a invariant".to_string(),
+            )),
+        }
+    }
+
+    /// oracle: `processPostponedUniverseConstraints`
+    /// (`SyntheticMVars.lean:409-411`).
+    fn process_postponed_universe_constraints(&mut self) -> Result<(), ElabError> {
+        if self.mctx.process_postponed_levels()? {
+            return Ok(());
+        }
+        // oracle: `throwStuckAtUniverseCnstr` (:374-389) renders the
+        // unique constraint pairs. leanr reports the count; the prose is
+        // deferred with the rest (design spec § Amendment, item 2).
+        Err(ElabError::UnsupportedSyntax(format!(
+            "stuck universe constraints ({} postponed) — diagnostics layer not built",
+            self.mctx.postponed_len()
+        )))
     }
 }
