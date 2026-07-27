@@ -357,6 +357,15 @@ impl<'e> TermElabM<'e> {
                 if self.contains_pending_mvar(old_val)? || self.contains_pending_mvar(val)? {
                     return Ok(false);
                 }
+                // oracle: :1263-1269 — the oracle infers BOTH `old_val`
+                // and `val`'s types here and runs a second `isDefEq` on
+                // them, but only to pick which of two error MESSAGES to
+                // throw ("type not defeq" vs. "instance not defeq");
+                // both still throw. Since leanr's prose layer is
+                // deferred plan-wide (design spec § Amendment, item 2),
+                // there is nothing for that second check to select
+                // between — it throws on the same condition either way,
+                // so it is not reproduced here.
                 let inferred = self.mctx.infer_type(old_val)?;
                 return Err(ElabError::InstanceMismatch {
                     synthesized: val,

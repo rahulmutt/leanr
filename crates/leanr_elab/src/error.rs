@@ -51,7 +51,12 @@ pub enum ElabError {
     },
     /// oracle: `synthesizeInstMVarCore`'s assignment-mismatch throws
     /// (`TermElabM.lean:1265-1272`) — the synthesized instance is not
-    /// defeq to the one typing already inferred.
+    /// defeq to the one typing already inferred. Two distinct call
+    /// sites collapse into this one variant: the "already assigned, not
+    /// defeq" throw (`inferred` is `infer_type(old_val)`, the
+    /// pre-existing assignment's type) and the "not yet assigned,
+    /// assignment failed" throw (`inferred` is the mvar's own declared
+    /// type — there is no `old_val` to infer from).
     InstanceMismatch {
         synthesized: ExprId,
         inferred: ExprId,

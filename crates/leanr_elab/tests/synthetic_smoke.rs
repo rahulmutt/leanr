@@ -195,6 +195,91 @@ fn unsolvable_instance_is_a_synthesis_failure() {
     });
 }
 
+/// A pre-existing assignment that IS defeq to the synthesized instance is
+/// RECONCILED, not overwritten: `synthesizeInstMVarCore` confirms it and
+/// leaves it in place.
+///
+/// oracle: `synthesizeInstMVarCore`'s `isAssigned` branch, defeq path
+/// (`TermElabM.lean:1240-1242`). This is the "already assigned" half of
+/// the trichotomy's downstream handling, exercised by nothing else in
+/// this file: the other three tests all synthesize into a still-
+/// unassigned mvar, so only this test (and the mismatch test below) ever
+/// take the `is_assigned(inst_mvar)` branch at all — including its
+/// `contains_pending_mvar` retry-later escape hatch, which the design
+/// spec's Global Constraints single out as "not optional".
+#[test]
+#[ignore = "needs the Elab0 class scaffold (Task 7)"]
+fn already_assigned_and_defeq_is_reconciled_not_overwritten() {
+    support::with_app_harness("Nat.zero", |app| {
+        let goal = support::wrap_of_nat(app);
+        let (_e, id) = app
+            .elab
+            .mk_fresh_expr_mvar_of_kind(goal, leanr_meta::MVarKind::Synthetic)
+            .expect("fresh mvar");
+        // Pre-assign to exactly the value real synthesis will produce, so
+        // the reconciliation's `is_def_eq` succeeds.
+        let val = app
+            .elab
+            .mctx
+            .synth_instance(goal)
+            .expect("synth_instance succeeds")
+            .expect("Wrap Nat is solvable");
+        app.elab
+            .mctx
+            .mctx_mut()
+            .assign(id, val)
+            .expect("assign a freshly-declared, unassigned mvar");
+
+        assert!(
+            app.elab
+                .synthesize_inst_mvar_core(id)
+                .expect("a defeq pre-existing assignment reconciles, it does not error"),
+            "already-assigned + defeq -> Ok(true)"
+        );
+        assert_eq!(
+            app.elab.mctx.mctx().assignment(id),
+            Some(val),
+            "reconciliation must not overwrite the pre-existing assignment"
+        );
+    });
+}
+
+/// A pre-existing assignment that is NOT defeq to the synthesized
+/// instance is a real mismatch, not a silent overwrite and not a
+/// postponement.
+///
+/// oracle: `synthesizeInstMVarCore`'s two assignment-mismatch throws
+/// (`TermElabM.lean:1265-1272`). Neither side of this test's comparison
+/// mentions a pending mvar, so this exercises the throwing path, not the
+/// `contains_pending_mvar` retry-later escape hatch (see
+/// `already_assigned_and_defeq_is_reconciled_not_overwritten`'s doc for
+/// why that branch otherwise goes untested).
+#[test]
+#[ignore = "needs the Elab0 class scaffold (Task 7)"]
+fn already_assigned_and_not_defeq_is_a_mismatch() {
+    support::with_app_harness("Nat.zero", |app| {
+        let goal = support::wrap_of_nat(app);
+        let (_e, id) = app
+            .elab
+            .mk_fresh_expr_mvar_of_kind(goal, leanr_meta::MVarKind::Synthetic)
+            .expect("fresh mvar");
+        // Pre-assign to something that cannot be the synthesized `Wrap
+        // Nat` instance: the harness's own elaborated `Nat.zero` head,
+        // whose head symbol no `Wrap` instance term shares.
+        let wrong = app.st.f;
+        app.elab
+            .mctx
+            .mctx_mut()
+            .assign(id, wrong)
+            .expect("assign a freshly-declared, unassigned mvar");
+
+        assert!(matches!(
+            app.elab.synthesize_inst_mvar_core(id),
+            Err(leanr_elab::ElabError::InstanceMismatch { .. })
+        ));
+    });
+}
+
 /// Progress is a COUNT comparison, not "any succeeded".
 ///
 /// oracle: `return numSyntheticMVars != remainingPendingMVars.length`
