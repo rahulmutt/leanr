@@ -28,9 +28,9 @@ use crate::error::ElabError;
 /// candidate; see the module doc.
 ///
 /// `display` is the identifier's raw SOURCE TEXT (what the user actually
-/// wrote — `elab_ident`'s own `tok.text()`), used verbatim in either
+/// wrote — `app::head::elab_ident_head`'s own `raw`), used verbatim in either
 /// error's message. This is deliberate, not a shortcut: `name` may be a
-/// SCRATCH-region `NameId` (`elab_ident`'s `intern_dotted` mints one for
+/// SCRATCH-region `NameId` (`app::head::elab_ident_head`'s `intern_dotted` mints one for
 /// any identifier not already interned in the persistent store — i.e.
 /// every unknown identifier, the exact case that lands here) with no
 /// meaning against `view.store` (the PERSISTENT store) alone —
@@ -107,8 +107,8 @@ mod tests {
 
     /// Unit-level check that an unresolved name (interned directly in
     /// the PERSISTENT store here — the scratch-region pipeline
-    /// `elab_ident` actually drives is covered separately, by
-    /// `builtin::ident::tests::unknown_ident_via_real_scratch_pipeline`,
+    /// `app::head::elab_ident_head` actually drives is covered separately, by
+    /// `app::head::tests::unknown_ident_via_real_scratch_pipeline`,
     /// since `resolve_global` alone can no longer reproduce that
     /// region-routing bug: it takes `display` verbatim from the caller
     /// instead of re-deriving it from `name` through any store) still

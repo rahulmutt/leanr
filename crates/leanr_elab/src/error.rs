@@ -20,6 +20,21 @@ pub enum ElabError {
         got: ExprId,
     },
     Meta(MetaError),
+    /// oracle: `addNamedArg`'s "Argument `x` was already set"
+    /// (`Arg.lean:55-59`).
+    DuplicateNamedArg(String),
+    /// oracle: `mkConst`'s "too many explicit universe levels for
+    /// '{constName}'" (`Lean/Elab/Term/TermElabM.lean:2117-2126`).
+    /// Carries the head identifier's raw source text. Reachable only
+    /// once `.{u, v}` explicit-universe syntax has a producer (M4b-3 P1
+    /// task 8); the check itself lives in `app::head::elab_ident_head`
+    /// from task 4 on, so the arm can never be silently skipped.
+    TooManyUniverseLevels(String),
+    /// A syntax node whose shape contradicts the grammar (missing child,
+    /// wrong node/token variant, a non-trailing `..`). Distinct from
+    /// `UnsupportedSyntax`, which means "this construct's slice has not
+    /// landed"; this means "this tree cannot be what it claims to be".
+    IllFormedSyntax(String),
 }
 
 impl From<MetaError> for ElabError {

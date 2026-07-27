@@ -1182,41 +1182,79 @@ fn register_arrow_app_proj(b: &mut SnapshotBuilder) {
     // app := trailing_parser:leadPrec:maxPrec many1 argument. `argument
     // := checkWsBefore .. >> checkColGt .. >> (namedArgument <|>
     // ellipsis <|> termParser argPrec)`.
-    b.trailing2(
-        "term",
-        "Lean.Parser.Term.app",
-        LEAD_PREC,
-        MAX_PREC,
-        many1(argument()),
-    );
+    let args = many1(argument(b));
+    b.trailing2("term", "Lean.Parser.Term.app", LEAD_PREC, MAX_PREC, args);
 }
 /// `namedArgument := leading_parser atomic ("(" >> ident >> " := ") >>
-/// termParser >> ")"`.
-fn named_argument() -> Prim {
-    seq([
-        atomic(seq([sym("("), Prim::Ident, sym(":=")])),
-        cat("term", 0),
-        sym(")"),
-    ])
+/// termParser >> ")"`. `leading_parser` (no explicit `:prec`) genuinely
+/// DOES node-wrap in real Lean, same as every other `leading_parser`
+/// definition in this file — M4b-3 Task 2's review caught that an
+/// earlier version of this port left it a bare `seq(...)`, so leanr's
+/// tree flattened a named argument's `(`/ident/`:=`/value/`)` straight
+/// into the enclosing `app` argument list instead of collecting them
+/// under their own node the way the oracle does. Fixed via `nd` (the
+/// same `prec: None` node-wrap `hygienic_lparen`/`term_hole` above use
+/// for a sub-parser that isn't itself registered into a category's own
+/// leading-parser table — `prec: None` avoids gating on whatever `self.
+/// prec` happens to be at the `argument()` call site, since
+/// `namedArgument` has no category-level precedence of its own to
+/// enforce).
+///
+/// ORACLE source (`Term.lean:885-886`, re-read for THIS fix, not just
+/// transcribed from an earlier task's summary): `leading_parser
+/// (withAnonymousAntiquot := false) atomic ("(" >> ident >> " := ") >>
+/// withoutPosition termParser >> ")"` — `withoutPosition` is a parsing
+/// no-op (established convention, see `register_paren_family`'s doc
+/// comment). The `withAnonymousAntiquot := false` matters: without it,
+/// wrapping in `nd` alone regressed `category_cache_is_quot_depth_keyed`
+/// (a bare `$x` inside `` `($x $x)` `` got swallowed as THIS node's own
+/// anonymous antiquot before `termParser`'s category-level antiquot
+/// handling ever saw it — confirmed against a fresh oracle dump of
+/// `` `($x $x)` ``, which emits `term.pseudo.antiquot` for BOTH
+/// occurrences, not one). `without_anonymous_antiquot` (`Prim::
+/// WithoutAnonymousAntiquot`, plumbed since M3b2b Task 3 but never
+/// produced until now) reproduces exactly that gate: it only disables
+/// THIS node's own antiquot check (the sole read site of `Ps::
+/// anon_antiquot_ok`, `parse.rs`), not the nested `cat("term", 0)`
+/// call's own independent (category-level) antiquot mechanism.
+fn named_argument(b: &mut SnapshotBuilder) -> Prim {
+    let k = b.kind("Lean.Parser.Term.namedArgument");
+    without_anonymous_antiquot(nd(
+        k,
+        seq([
+            atomic(seq([sym("("), Prim::Ident, sym(":=")])),
+            cat("term", 0),
+            sym(")"),
+        ]),
+    ))
 }
-/// `ellipsis := leading_parser ".." >> notFollowedBy (checkNoWsBefore
-/// >> ".") ".`. immediately after `..`"`.
-fn ellipsis_arg() -> Prim {
-    seq([
-        sym(".."),
-        Prim::NotFollowedBy(Arc::new(seq([Prim::CheckNoWsBefore, sym(".")]))),
-    ])
+/// `ellipsis := leading_parser (withAnonymousAntiquot := false) ".." >>
+/// notFollowedBy (checkNoWsBefore >> ".") ".`. immediately after
+/// `..`"`. Same node-wrap fix and same `withAnonymousAntiquot := false`
+/// reasoning as `named_argument` above.
+fn ellipsis_arg(b: &mut SnapshotBuilder) -> Prim {
+    let k = b.kind("Lean.Parser.Term.ellipsis");
+    without_anonymous_antiquot(nd(
+        k,
+        seq([
+            sym(".."),
+            Prim::NotFollowedBy(Arc::new(seq([Prim::CheckNoWsBefore, sym(".")]))),
+        ]),
+    ))
 }
 /// `argument := checkWsBefore .. >> checkColGt .. >> (namedArgument <|>
 /// ellipsis <|> termParser argPrec)` (Term.lean:900-904) — hoisted from
 /// a `register_arrow_app_proj`-local closure (Task 8 wave 1) to a
 /// module fn so `term_app`'s `pipeProj` (`many argument`, Term.lean:958)
-/// can share it verbatim instead of drifting a second copy.
-pub(super) fn argument() -> Prim {
+/// can share it verbatim instead of drifting a second copy. Takes `b`
+/// (M4b-3 Task 2 review) so `named_argument`/`ellipsis_arg` can intern
+/// their own node kind — both call sites already have a `&mut
+/// SnapshotBuilder` in scope.
+pub(super) fn argument(b: &mut SnapshotBuilder) -> Prim {
     seq([
         Prim::CheckWsBefore,
         Prim::CheckColGt,
-        or_else([named_argument(), ellipsis_arg(), cat("term", ARG_PREC)]),
+        or_else([named_argument(b), ellipsis_arg(b), cat("term", ARG_PREC)]),
     ])
 }
 /// `explicitUnivSuffix := checkNoWsBefore >> ".{" >> sepBy1 levelParser

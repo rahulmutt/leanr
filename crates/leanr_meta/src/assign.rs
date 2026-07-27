@@ -1158,10 +1158,11 @@ impl<'e> MetaCtx<'e> {
     // instantiateMVars — the shared read-back primitive.
     // ===================================================================
 
-    /// oracle: `instantiateMVars`/`instantiateMVarsImp`
-    /// (`MetavarContext.lean`, `@[extern]` opaque — no Lean source to
-    /// transcribe line-by-line, same posture as `level.rs`'s
-    /// `instantiate_level_mvars`). Recursively replaces every ASSIGNED
+    /// oracle: `instantiateMVars` (`MetavarContext.lean:620`), whose worker
+    /// is `instantiateExprMVars` (`:580`) over the `@[extern]` opaque
+    /// `instantiateExprMVarsImp` (`:577`) — no Lean source to transcribe
+    /// line-by-line, same posture as `level.rs`'s
+    /// `instantiate_level_mvars`. Recursively replaces every ASSIGNED
     /// `MVar` node with its (recursively instantiated) assignment;
     /// everything else rebuilt only if a child actually changed. `pub`,
     /// not `pub(crate)`: `process_assignment`'s own "enforce A4" step
@@ -1172,7 +1173,15 @@ impl<'e> MetaCtx<'e> {
     /// instead of duplicated.
     pub fn instantiate_mvars(&mut self, e: ExprId) -> Result<ExprId, MetaError> {
         self.step()?;
-        if !self.data(e).has_expr_mvar() {
+        // M4b-3 P1 task 5 fix: a term carrying ONLY a level mvar (no
+        // expr mvar anywhere — e.g. a bare `Sort ?u` or a
+        // universe-polymorphic `Const .{?u}` whose OWN args, if any,
+        // are already mvar-free) must still be walked. The original
+        // `has_expr_mvar()`-only guard skipped it outright, so an
+        // assigned level mvar (`is_level_assigned` genuinely `true` —
+        // confirmed empirically by task 5's own diagnostic, `M4b-3 P1
+        // task 5 report`) was never read back into the term at all.
+        if !self.data(e).has_expr_mvar() && !self.data(e).has_level_mvar() {
             return Ok(e);
         }
         self.guarded(|ctx| ctx.instantiate_mvars_body(e))
@@ -1184,6 +1193,46 @@ impl<'e> MetaCtx<'e> {
                 Some(v) => self.instantiate_mvars(v),
                 None => Ok(e),
             },
+            // oracle: `instantiateMVars` also descends into level lists
+            // (MetavarContext.lean's own `instantiateExprMVars`/
+            // `instantiateExprMVarsImp`, `:577-583`, resolves BOTH expr
+            // and level mvars in one pass) — `Sort`/`Const`
+            // are the only two node shapes that carry a `LevelId`/
+            // `LevelsId` directly. Delegates to `level.rs`'s existing
+            // `instantiate_level_mvars` (now `pub(crate)`) per level,
+            // rather than reimplementing `Succ`/`Max`/`IMax`
+            // substitution here.
+            Node::Sort { level } => {
+                let level2 = self.instantiate_level_mvars(level)?;
+                if level2 == level {
+                    Ok(e)
+                } else {
+                    Ok(self.scratch.expr_sort(Some(self.view.store), level2)?)
+                }
+            }
+            Node::Const { name, levels } => {
+                let list = self
+                    .scratch
+                    .level_list_at(Some(self.view.store), levels)
+                    .to_vec();
+                let mut changed = false;
+                let mut new_list = Vec::with_capacity(list.len());
+                for l in list {
+                    let l2 = self.instantiate_level_mvars(l)?;
+                    changed |= l2 != l;
+                    new_list.push(l2);
+                }
+                if !changed {
+                    Ok(e)
+                } else {
+                    let levels2 = self
+                        .scratch
+                        .intern_level_list(Some(self.view.store), &new_list)?;
+                    Ok(self
+                        .scratch
+                        .expr_const(Some(self.view.store), name, levels2)?)
+                }
+            }
             Node::App { f, arg } => {
                 let f2 = self.instantiate_mvars(f)?;
                 let a2 = self.instantiate_mvars(arg)?;
@@ -1296,9 +1345,11 @@ impl<'e> MetaCtx<'e> {
                         .expr_proj(Some(self.view.store), type_name, &idxn, s2)?)
                 }
             }
-            // BVar/BVarBig/FVar/Sort/Const/LitNat/LitStr/anonymous MVar:
-            // none carry an expr mvar that could be assigned differently
-            // from `e` itself.
+            // BVar/BVarBig/FVar/LitNat/LitStr/anonymous MVar: none carry
+            // an expr OR level mvar that could be assigned differently
+            // from `e` itself. (`Sort`/`Const` used to be listed here
+            // too — M4b-3 P1 task 5 fix gave them their own arms above,
+            // since both DO carry a `LevelId`/`LevelsId`.)
             _ => Ok(e),
         }
     }
@@ -1560,6 +1611,103 @@ mod tests {
             let succ_m = mk_app(ctx, succ, m_expr);
             assert!(!ctx.is_def_eq(m_expr, succ_m).unwrap());
             assert!(!ctx.mctx.is_assigned(m_id));
+        });
+    }
+
+    // =======================================================================
+    // instantiate_mvars must also substitute ASSIGNED LEVEL mvars
+    // (M4b-3 P1 task 5 finding).
+    // =======================================================================
+
+    /// `instantiate_mvars` on a `Sort ?u` must read back an ASSIGNED
+    /// level mvar `?u`, not just an assigned EXPR mvar. Found by M4b-3
+    /// P1 task 5 (`app/implicitId` etc.: `id Nat.zero` unified `id`'s own
+    /// fresh universe mvar down to a concrete level via
+    /// `check_types_and_assign`'s nested `Sort`/`Sort` comparison, but
+    /// the final term still carried the unresolved `lmvar` because
+    /// `instantiate_mvars_body`'s old catch-all treated `Sort`/`Const`
+    /// as carrying nothing substitutable). This test pins the bug
+    /// directly against `leanr_meta`, independent of the elaborator: a
+    /// term carrying ONLY a level mvar (no expr mvar at all) must still
+    /// be walked and rewritten.
+    #[test]
+    fn instantiate_mvars_substitutes_assigned_level_mvar_in_sort() {
+        with_n_ctx(|ctx| {
+            let (lmid, u) = ctx.fresh_level_mvar().expect("fresh level mvar");
+            let base = Some(ctx.view.store);
+            let sort_u = ctx.scratch.expr_sort(base, u).expect("sort ?u");
+
+            let zero = ctx.scratch.level_zero(base).expect("level zero");
+            let one = ctx.scratch.level_succ(base, zero).expect("level one");
+            ctx.mctx.assign_level(lmid, one).expect("assign ?u := 1");
+
+            let got = ctx.instantiate_mvars(sort_u).expect("instantiate_mvars");
+            let expected = ctx.scratch.expr_sort(base, one).expect("sort 1");
+            assert_eq!(
+                got, expected,
+                "instantiate_mvars must rewrite Sort {{?u}} to Sort {{1}} once ?u is assigned"
+            );
+        });
+    }
+
+    /// Same bug, `Const` shape: a universe-polymorphic constant's level
+    /// LIST must have each assigned level mvar substituted too — this is
+    /// the exact shape `id.{?u}` takes in the M4b-3 elaborator corpus.
+    #[test]
+    fn instantiate_mvars_substitutes_assigned_level_mvar_in_const() {
+        with_n_ctx(|ctx| {
+            let (lmid, u) = ctx.fresh_level_mvar().expect("fresh level mvar");
+            let base = Some(ctx.view.store);
+            let levels = ctx.scratch.intern_level_list(base, &[u]).expect("levels");
+            let name = {
+                let sid = ctx.scratch.intern_str(base, "N.zero").expect("intern");
+                ctx.scratch.name_str(base, None, sid).expect("name")
+            };
+            let poly_const = ctx
+                .scratch
+                .expr_const(base, Some(name), levels)
+                .expect("const");
+
+            let zero = ctx.scratch.level_zero(base).expect("level zero");
+            let one = ctx.scratch.level_succ(base, zero).expect("level one");
+            ctx.mctx.assign_level(lmid, one).expect("assign ?u := 1");
+
+            let got = ctx
+                .instantiate_mvars(poly_const)
+                .expect("instantiate_mvars");
+            let expected_levels = ctx.scratch.intern_level_list(base, &[one]).expect("levels");
+            let expected = ctx
+                .scratch
+                .expr_const(base, Some(name), expected_levels)
+                .expect("const");
+            assert_eq!(
+                got, expected,
+                "instantiate_mvars must rewrite the Const's level LIST too"
+            );
+        });
+    }
+
+    /// A term whose ONLY mvar is a LEVEL mvar (no expr mvar anywhere)
+    /// must not early-exit `instantiate_mvars` unchanged — pins the
+    /// `has_expr_mvar()`-only early-return bug specifically (as opposed
+    /// to the walk itself, which the two tests above already cover).
+    #[test]
+    fn instantiate_mvars_does_not_skip_a_level_mvar_only_term() {
+        with_n_ctx(|ctx| {
+            let (lmid, u) = ctx.fresh_level_mvar().expect("fresh level mvar");
+            let base = Some(ctx.view.store);
+            let sort_u = ctx.scratch.expr_sort(base, u).expect("sort ?u");
+
+            let zero = ctx.scratch.level_zero(base).expect("level zero");
+            ctx.mctx.assign_level(lmid, zero).expect("assign ?u := 0");
+
+            let got = ctx.instantiate_mvars(sort_u).expect("instantiate_mvars");
+            let expected = ctx.scratch.expr_sort(base, zero).expect("sort 0");
+            assert_eq!(
+                got, expected,
+                "a level-mvar-only term must still be walked, not skipped by the \
+                 has_expr_mvar()-only early-return"
+            );
         });
     }
 }

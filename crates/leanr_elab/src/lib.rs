@@ -1,46 +1,74 @@
-//! M4b-1: the leaf term elaborator. `TermElabM` over `leanr_meta`'s
-//! MetaM core; elaborates string literals, sorts, global-constant
-//! identifiers, ascription, and holes. See
-//! docs/superpowers/specs/2026-07-23-m4b1-leaf-term-elaborator-design.md.
+//! The term elaborator. `TermElabM` over `leanr_meta`'s MetaM core.
+//! Built in slices, each with its own design spec:
 //!
-//! ## What this slice does NOT build
+//! - **M4b-1** — leaf forms: string literals, sorts, ascription, holes
+//!   (docs/superpowers/specs/2026-07-23-m4b1-leaf-term-elaborator-design.md).
+//! - **M4b-2** — binders and the let/have family: `fun`, `forall`,
+//!   `arrow`, `depArrow`, `let`, `have`
+//!   (docs/superpowers/specs/2026-07-24-m4b2-binders-postponement-design.md).
+//! - **M4b-3 P1** — the application machinery, in `app/`: `elabApp` /
+//!   `elabAtom` / `elabAppFn`'s ident case / `ElabAppArgs.main`,
+//!   including implicit and strict-implicit insertion,
+//!   `propagateExpectedType`, named arguments, eta-expansion, the `..`
+//!   ellipsis, `@` explicit mode, and `.{u}` explicit universes
+//!   (docs/superpowers/specs/2026-07-25-m4b3-application-elaborator-design.md).
+//!   Identifiers moved here too: `elabIdent := elabAtom`
+//!   (`App.lean:2246`), so a bare identifier is a zero-argument
+//!   application, and M4b-1's leaf `builtin/ident.rs` is gone.
 //!
-//! Per the design spec's own *Scope* / *Out of scope* sections: this is
-//! **leaf forms only** — a term whose elaboration emits an `Expr` with
-//! no binder, no application, and no instance search. Everything else a
-//! real term elaborator eventually handles is a *named* deferral —
-//! `dispatch::dispatch` routes every unregistered syntax kind to
-//! `ElabError::UnsupportedSyntax(kind)`, never a silent no-op or a
-//! panic — not a gap discovered later:
+//! ## What is NOT built yet
 //!
-//! - **binders** (`fun`/`forall`/`let`/`have`/`show`) and the
-//!   postponement / synthetic-mvar scheduling ladder they need — M4b-2.
-//! - **application**, `@`, named/optional arguments (`elabApp`'s
-//!   implicit/instance-implicit insertion) — M4b-3.
-//! - **`num`/`char` literals** — deliberately *not* leaves (spec
-//!   correction): both elaborate through an application
+//! Every remaining construct is a *named* deferral, never a gap
+//! discovered later: `dispatch::dispatch` routes every unregistered
+//! syntax kind to `ElabError::UnsupportedSyntax(kind)`, and every seam
+//! inside `app/` carries its owning slice in the message. Never a
+//! silent no-op, never a panic, never a wrong `ExprId`.
+//!
+//! - **instance-implicit arguments and the synthetic-mvar fixpoint**
+//!   (`processInstImplicitArg`, `synthesizeAppInstMVars`) — M4b-3 P2,
+//!   which also brings the `classExtension` decode the outParam guards
+//!   need.
+//! - **`num`/`char` literals** — deliberately *not* leaves (an M4b-1
+//!   spec correction): both elaborate through an application
 //!   (`OfNat.ofNat`/`Char.ofNat`) requiring instance synthesis and
-//!   default instances, so they land in M4b-3 alongside application,
-//!   not here. Only the string literal is a direct `Expr.lit` and stays
-//!   a leaf.
-//! - **coercions** (`mkCoe`) — `ensure_has_type`/`elab_term_ensuring_type`
-//!   ERROR on a defeq mismatch in this slice rather than inserting a
-//!   coercion; coercion insertion is M4b-3.
-//! - **`elabAsElim`, dot notation, `binop%`, anonymous constructor
-//!   `⟨⟩`** — M4b-4.
+//!   default instances — M4b-3 P3.
+//! - **coercions** (`mkCoe`, `CoeT`/`CoeFun`/`CoeSort`) —
+//!   `ensure_has_type`/`elab_term_ensuring_type` and `app`'s own
+//!   `ensureArgType` ERROR on a defeq mismatch rather than inserting a
+//!   coercion — M4b-3 P4.
+//! - **optParam/autoParam default filling and implicit-lambda
+//!   insertion** — M4b-3 P5. (The implicit-lambda *guard* is P1's, in
+//!   `elab.rs`; only the insertion is deferred.)
+//! - **overload resolution** (more than one candidate from
+//!   `elabAppFn`) — the slice that grows `resolve_global`, since it is
+//!   unreachable while only exact names resolve.
+//! - **`elabAsElim`** — M4b-4, and the one deferral whose seam is
+//!   PARTIAL. `shouldElabAsElim` (`App.lean:1322-1328`) has five
+//!   disjuncts; `app::head` can decide only `isRec`
+//!   (`ConstantInfo::Rec`), so a genuine recursor head is seamed while
+//!   an aux-recursor head (`Nat.casesOn`, `Nat.recOn`, `Nat.brecOn`) or
+//!   an `@[elab_as_elim]` head is not — the other four read the
+//!   `auxRecExt`/`elabAsElim` tag extensions, which leanr does not
+//!   decode. Those cases still emit a term the oracle does not, with no
+//!   seam; `tests/seam_audit.rs`'s fixture-source gate is the backstop
+//!   until M4b-4 lands the decodes and `ElabElim`.
+//! - **dot notation / LVal machinery (`Term.proj`, `pipeProj`,
+//!   `dotIdent`, `namedPattern`, `choice`), `binop%`, anonymous
+//!   constructor `⟨⟩`** — M4b-4.
 //! - **macro expansion** — `dispatch` never expands a macro form; the
 //!   dispatch table only ever matches a syntax kind directly against a
-//!   registered leaf elaborator. Deferred to the slice that first needs
-//!   a macro form.
+//!   registered elaborator. Deferred to the slice that first needs a
+//!   macro form.
 //! - **`open`/alias/`export`/`_root_` resolution** — `resolve.rs`'s
 //!   `resolve_global` only resolves a global constant declared under
 //!   the name exactly as written; namespace-prefix search, exported
-//!   aliases, and root-qualification are a later slice (M4b-3/M4b-4
-//!   own the pieces that first need them).
+//!   aliases, and root-qualification are a later slice.
 //!
-//! See `dispatch.rs`'s own doc comment for the exact deferral list and
-//! the named-seam audit (Task 7) confirming nothing above is silently
-//! skipped.
+//! See `dispatch.rs`'s doc comment for the kind-by-kind deferral table,
+//! `app/mod.rs`'s for the site-by-site seam index inside the
+//! application elaborator, and `tests/seam_audit.rs` for the gate that
+//! holds all three lists to the code.
+pub mod app; // M4b-3 P1
 pub mod builtin; // Tasks 4-6
 pub mod dispatch;
 pub mod elab;

@@ -140,7 +140,12 @@ fn elab_opt_level(
 /// oracle: `Lean.Elab.Level.elabLevel`. See this module's own doc for
 /// the exact scope cut (`num`/`<ident>`/`Level.hole` implemented;
 /// `max`/`imax`/`paren`/`addLit` named seams).
-fn elab_level(
+///
+/// `pub(crate)` for `app::head::elab_explicit_univs` (M4b-3 P1 task 8):
+/// the oracle's `elabExplicitUnivs` (`App.lean:1899-1900`) is a `foldrM`
+/// over this SAME `elabLevel`, so `.{u, v}` reuses it verbatim rather
+/// than growing a second level elaborator that could drift.
+pub(crate) fn elab_level(
     elab: &mut TermElabM,
     elem: &SynElem,
     kinds: &KindInterner,

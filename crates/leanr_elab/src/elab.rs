@@ -3,8 +3,9 @@
 //! `KindInterner` is passed to `elab_term`, never stored, so one
 //! `TermElabM` can elaborate nodes drawn from different snapshots.
 
+use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, LevelId, NameId};
-use leanr_kernel::{EnvView, LocalContext, Nat};
+use leanr_kernel::{BinderInfo, EnvView, LocalContext, Nat};
 use leanr_meta::{LMVarId, MVarDecl, MVarId, MVarKind, MetaCtx};
 use leanr_syntax::kind::KindInterner;
 
@@ -43,6 +44,12 @@ pub struct TermElabM<'e> {
     /// (`_leanr_elab_expr_fresh`, below) so an expr-mvar name can never
     /// collide with a level-mvar name even at the same counter value.
     expr_mvar_gen: u64,
+    /// Monotone counter backing `mk_fresh_binder_name` (M4b-3 P1 task
+    /// 7) — the same "fixed prefix + counter" idiom as the two counters
+    /// above, with its own counter and its own DISTINCT prefix
+    /// (`_leanr_elab_binder_fresh`, below) so a fresh binder name can
+    /// never collide with either mvar-name family.
+    binder_name_gen: u64,
 }
 
 impl<'e> TermElabM<'e> {
@@ -53,13 +60,58 @@ impl<'e> TermElabM<'e> {
             level_names: Vec::new(),
             level_mvar_gen: 0,
             expr_mvar_gen: 0,
+            binder_name_gen: 0,
         }
+    }
+
+    /// oracle: `Core.mkFreshUserName` (`Lean/CoreM.lean`) — a name the
+    /// user could not have written, used where a binder must be
+    /// introduced without letting later syntax capture it. The oracle
+    /// builds it by appending a macro scope to a hint; leanr's names
+    /// carry no macro scopes, so this uses the crate's own fresh-name
+    /// idiom instead — the very "fixed prefix + counter" generator
+    /// `mk_fresh_level_mvar`/`mk_fresh_expr_mvar` above already use,
+    /// with a third distinct prefix.
+    ///
+    /// The hint the oracle takes (`Core.mkFreshUserName argName`) is
+    /// deliberately NOT a parameter: the hint exists only to make the
+    /// generated name legible in traces, and every leanr caller
+    /// (`app::args::add_eta_arg`) restores the user-facing name on the
+    /// emitted binder anyway (`finalize`'s `update_binder_names`,
+    /// oracle `Expr.updateBinderNames`, `App.lean:623`).
+    ///
+    /// `base = Some(self.view.store)`, matching `mk_fresh_level_mvar`:
+    /// the minted `NameId` is handed straight to
+    /// `MetaCtx::push_local_decl`, which itself builds the decl's fvar
+    /// with `Some(view.store)` (`metactx.rs:464-471`), and lands in
+    /// `Expr.lam` rows this crate builds with the same base — so every
+    /// id involved must come from the same persistent-backed intern
+    /// space.
+    pub fn mk_fresh_binder_name(&mut self) -> Result<NameId, ElabError> {
+        let idx = self.binder_name_gen;
+        self.binder_name_gen += 1;
+        let base = self.view.store;
+        let store = self.mctx.store_mut();
+        let prefix_str = store
+            .intern_str(Some(base), "_leanr_elab_binder_fresh")
+            .map_err(leanr_meta::MetaError::from)?;
+        let prefix = store
+            .name_str(Some(base), None, prefix_str)
+            .map_err(leanr_meta::MetaError::from)?;
+        let idx_id = store
+            .intern_nat(Some(base), &Nat::from(idx))
+            .map_err(leanr_meta::MetaError::from)?;
+        let name = store
+            .name_num(Some(base), Some(prefix), idx_id)
+            .map_err(leanr_meta::MetaError::from)?;
+        Ok(name)
     }
 
     /// oracle: `mkFreshLevelMVar` (`Lean/Meta/Basic.lean:861-863`) —
     /// mints a globally-fresh `LMVarId`, declares it in the `mctx`, and
     /// returns the `LevelId` of `Level.mvar` referencing it. One fresh
-    /// mvar per universe parameter is exactly what `elab_ident` needs
+    /// mvar per universe parameter is exactly what
+    /// `app::head::elab_ident_head` needs
     /// for `mkConst` (design spec's "Universe metavariables in the
     /// output"). Reachable capability surface is entirely public
     /// (`MetaCtx::store_mut`/`mctx_mut`, `MetavarContext::declare_level`,
@@ -190,6 +242,7 @@ impl<'e> TermElabM<'e> {
         kinds: &KindInterner,
         expected: Option<ExprId>,
     ) -> Result<ExprId, ElabError> {
+        check_implicit_lambda(self, elem, kinds, expected)?;
         dispatch::dispatch(self, elem, kinds, expected)
     }
 
@@ -211,4 +264,179 @@ impl<'e> TermElabM<'e> {
         }
         Ok(e)
     }
+}
+
+/// oracle: `useImplicitLambda` (`TermElabM.lean:1737-1779`), consulted by
+/// `elabTermAux` at `TermElabM.lean:1839` — BEFORE `elabUsingElabFns`,
+/// i.e. before any leaf/app elaborator runs. That is why this lives in
+/// `elab_term` rather than inside a leaf: the oracle wraps the WHOLE
+/// term in implicit lambdas and never dispatches on its kind at all
+/// when the feature fires.
+///
+/// M4b-3 P5 owns the wrapping itself (`elabImplicitLambda`,
+/// `TermElabM.lean:1806-1820`). This is the named seam that keeps the
+/// path from being silently skipped now that Task 6's source ascription
+/// can supply an expected type: without it, `(f : {α : Type} → α → α)`-
+/// shaped input would elaborate `f` with NO lambda wrap and emit a
+/// different term than the oracle's, with no error.
+///
+/// Transliterated from the pinned source, not the plan's paraphrase —
+/// two places where they differ:
+///   * the binder-info test is `c.isImplicit || c.isInstImplicit`
+///     (`:1751`), NOT strict-implicit. `useImplicitLambda`'s own doc
+///     comment says so in as many words: "implicit lambdas are not
+///     triggered by the strict implicit binder annotation
+///     `{{a : α}} → β`".
+///   * `blockImplicitLambda` (`:1716-1720`) runs FIRST, before the
+///     expected type is even looked at, and its exclusion list is what
+///     keeps this from firing on the ascribed corpus records.
+///
+/// `useImplicitLambda`'s third result, `.postpone` (`:1753-1778`, a
+/// local identifier whose type is still an mvar application), is not
+/// modelled: it is only reachable AFTER the implicit-forall test above
+/// has already succeeded, and both of its continuations —
+/// `postponeElabTerm` when `mayPostpone`, `elabUsingElabFns` otherwise —
+/// need the postponement ladder P1 deliberately does not have
+/// (`elab.rs`'s own module doc). Distinguishing it here would only
+/// change which unimplemented path is named.
+///
+/// `hasNoImplicitLambdaAnnotation` (`:1706-1707`, an `annotation?
+/// \`noImplicitLambda` on the expected type) is likewise not modelled:
+/// the annotation is minted only by `mkNoImplicitLambdaAnnotation`, and
+/// nothing in leanr builds one — no `MData` node this crate emits
+/// carries that key — so the test is vacuously false here.
+fn check_implicit_lambda(
+    elab: &mut TermElabM,
+    elem: &SynElem,
+    kinds: &KindInterner,
+    expected: Option<ExprId>,
+) -> Result<(), ElabError> {
+    if block_implicit_lambda(elem, kinds) {
+        return Ok(());
+    }
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    // oracle: `whnfForall expectedType` then `let .forallE _ _ _ c :=
+    // expectedType | return .no`. `whnfForall` keeps the ORIGINAL term
+    // when the reduct is not a forall; only the `forallE` test below
+    // reads it, so reducing into a local is enough.
+    let reduced = elab.mctx.whnf(expected)?;
+    let base = elab.view.store;
+    let Node::Forall { binder_info, .. } = elab.mctx.store().expr_node(Some(base), reduced) else {
+        return Ok(());
+    };
+    // oracle: `unless c.isImplicit || c.isInstImplicit do return .no`.
+    if !matches!(binder_info, BinderInfo::Implicit | BinderInfo::InstImplicit) {
+        return Ok(());
+    }
+    Err(ElabError::UnsupportedSyntax(
+        "implicit lambda insertion — M4b-3 P5".to_string(),
+    ))
+}
+
+/// oracle: `blockImplicitLambda` (`TermElabM.lean:1715-1720`) —
+/// "Block usage of implicit lambdas if `stx` is `@f` or `@f arg1 ...`
+/// or `fun` with an implicit binder annotation":
+///
+/// ```text
+/// let stx := Parser.Term.dropParens stx
+/// isExplicit stx || isExplicitApp stx || isLambdaWithImplicit stx || isHole stx
+///   || isTacticBlock stx || isNoImplicitLambda stx || isTypeAscription stx
+/// ```
+///
+/// `isNoImplicitLambda` (`no_implicit_lambda% e`, `:1698-1701`) is the
+/// one member with no leanr counterpart: that syntax is not registered
+/// in `leanr_syntax`'s grammar at all, so no tree can carry it and the
+/// disjunct is vacuously false. Every other member is transcribed.
+fn block_implicit_lambda(elem: &SynElem, kinds: &KindInterner) -> bool {
+    // oracle: `Parser.Term.dropParens` (`Lean/Parser/Term.lean:205-208`)
+    // — strip LEADING `paren` wrappers (`(e)`), recursively. Note it
+    // does NOT strip `typeAscription`, which is a distinct node kind in
+    // both the oracle's grammar and leanr's, and is its own disjunct
+    // below anyway.
+    let mut cur = elem.clone();
+    while kinds.name(cur.kind()) == "Lean.Parser.Term.paren" {
+        // `paren`'s inner term is non-trivia child 1
+        // (`builtin::ascription::elab_paren`'s own navigation).
+        let Some(inner) = cur
+            .as_node()
+            .and_then(|n| dispatch::non_trivia_children(n).into_iter().nth(1))
+        else {
+            break;
+        };
+        cur = inner;
+    }
+    match kinds.name(cur.kind()) {
+        // oracle: `isExplicit` (`:1674-1677`) — `` `(@$_) ``.
+        "Lean.Parser.Term.explicit" => true,
+        // oracle: `isHole` (`:1690-1691`).
+        "Lean.Parser.Term.hole" | "Lean.Parser.Term.syntheticHole" => true,
+        // oracle: `isTacticBlock` (`:1693-1696`) — `` `(by $_:tacticSeq) ``,
+        // which is the `byTactic` kind. `byTactic'` (`show .. by ..`'s own
+        // RHS parser) is a DIFFERENT kind and the oracle's quotation
+        // pattern does not match it either.
+        "Lean.Parser.Term.byTactic" => true,
+        // oracle: `isTypeAscription` (`:1703-1704`).
+        "Lean.Parser.Term.typeAscription" => true,
+        // oracle: `isExplicitApp` (`:1679-1680`) — an application whose
+        // FUNCTION (`stx[0]`) is itself `@..`.
+        "Lean.Parser.Term.app" => cur
+            .as_node()
+            .and_then(|n| dispatch::non_trivia_children(n).into_iter().next())
+            .is_some_and(|f| kinds.name(f.kind()) == "Lean.Parser.Term.explicit"),
+        // oracle: `isLambdaWithImplicit` (`:1682-1688`).
+        "Lean.Parser.Term.fun" => is_lambda_with_implicit(&cur, kinds),
+        _ => false,
+    }
+}
+
+/// oracle: `isLambdaWithImplicit` (`TermElabM.lean:1682-1688`) — "Return
+/// true if `stx` is a lambda abstraction containing a `{}` or `[]`
+/// binder annotation":
+///
+/// ```text
+/// | `(fun $binders* => $_) =>
+///     binders.raw.any fun b => b.isOfKind ``Lean.Parser.Term.implicitBinder
+///                          || b.isOfKind `Lean.Parser.Term.instBinder
+/// | _ => false
+/// ```
+///
+/// `strictImplicitBinder` is deliberately absent from the oracle's list
+/// (same remark as `useImplicitLambda`'s: strict-implicit never triggers
+/// implicit lambdas), so it is absent here.
+///
+/// The `` `(fun $binders* => $_) `` quotation only matches the
+/// `basicFun` shape, not `matchAlts` (`fun | .. => ..`), so a
+/// non-`basicFun` body is `false` — not an error: this predicate runs
+/// before dispatch and must never fail on syntax a later arm will name.
+fn is_lambda_with_implicit(elem: &SynElem, kinds: &KindInterner) -> bool {
+    let Some(node) = elem.as_node() else {
+        return false;
+    };
+    // `fun`'s non-trivia child 1 is `basicFun` (or `matchAlts`);
+    // `basicFun`'s child 0 is the binder-list wrapper
+    // (`builtin::binder::elab_fun`'s own navigation).
+    let Some(basic) = dispatch::non_trivia_children(node).into_iter().nth(1) else {
+        return false;
+    };
+    let Some(basic) = basic.as_node() else {
+        return false;
+    };
+    if kinds.name(basic.kind()) != "Lean.Parser.Term.basicFun" {
+        return false;
+    }
+    let Some(binders) = dispatch::non_trivia_children(basic)
+        .into_iter()
+        .next()
+        .and_then(|el| el.as_node().cloned())
+    else {
+        return false;
+    };
+    dispatch::non_trivia_children(&binders).iter().any(|b| {
+        matches!(
+            kinds.name(b.kind()),
+            "Lean.Parser.Term.implicitBinder" | "Lean.Parser.Term.instBinder"
+        )
+    })
 }

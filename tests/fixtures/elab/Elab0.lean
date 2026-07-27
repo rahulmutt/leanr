@@ -121,3 +121,35 @@ set_option genCtorIdx false in
 inductive List (α : Type u) where
   | nil : List α
   | cons : α → List α → List α
+
+-- === M4b-3 P1 task 7 corpus: named arguments and eta-expansion ===
+--
+-- `pick` is the minimal shape that makes eta-expansion observable: TWO
+-- explicit parameters, so `pick (y := Nat.zero)` leaves `x` missing and
+-- the oracle emits `fun x => pick x Nat.zero` (App.lean:206's own
+-- worked example) rather than an application. `dep` makes a named
+-- argument's DEPENDENCY on an earlier parameter reachable
+-- (`findNamedArgDependsOnCurrent?`, App.lean:340), which turns the
+-- missing parameter implicit instead of eta.
+def pick (x : Nat) (y : Nat) : Nat := x
+def dep (a : Type) (z : a) : a := z
+
+-- `dpick` exists for ONE record, `app/namedDepPropagate2`, and only that
+-- shape makes `getResultingTypeCore?`'s `findNamedArgDependsOn?` ESCAPE
+-- (App.lean:477-479) observable. Every part of the signature is
+-- load-bearing:
+--   * `{a : Type}` is the RESULT type, so propagating the expected type
+--     assigns it — a resulting type with no metavariable makes the
+--     escape emit the same term either way;
+--   * `(w : a)` is an explicit argument elaborated BEFORE the escape's
+--     parameter, and `PUnit.unit`'s own type is what assigns `a` when
+--     propagation is postponed instead;
+--   * `(x : Type) (z : x)` is the dependency itself — `z`'s type
+--     mentions `x`, so `findNamedArgDependsOn?` returns `some` for the
+--     missing `x` and the walk continues to the result type instead of
+--     postponing.
+-- The discrimination is the same `Unit`-is-a-reducible-abbrev-of-PUnit
+-- mechanism `app/propagateAbbrev` documents: escaping assigns
+-- `?a := Unit` first, postponing lets `PUnit.unit` assign
+-- `?a := PUnit.{1}`. Measured, not assumed — see the task-7 fix report.
+def dpick {a : Type} (w : a) (x : Type) (z : x) : a := w

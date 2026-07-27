@@ -280,6 +280,110 @@ def haveQueries : List (String × String) := [
   ("have/ascribed", "(have h : Nat := Nat.zero; h : Nat)")
 ]
 
+/-- M4b-3 P1 task 4: EXPLICIT-argument applications only. `Nat.succ`
+takes one explicit `Nat` and no implicit/instance parameters, so these
+exercise `ElabAppArgs.main`'s `processExplicitArg` arm, `addNewArg`, and
+`finalize` with an empty `etaArgs`/`instMVars` — no implicit insertion
+(task 5), no expected-type propagation (task 6), no instance synthesis
+(P2). `app/nested` checks that the inner application elaborates through
+the same path as an argument. -/
+def appExplicitQueries : List (String × String) :=
+  [ ("app/succZero",  "Nat.succ Nat.zero")
+  , ("app/nested",    "Nat.succ (Nat.succ Nat.zero)")
+  , ("app/ascribed",  "(Nat.succ Nat.zero : Nat)")
+  ]
+
+/-- M4b-3 P1 task 5: IMPLICIT argument insertion. `id {α : Sort u} (a :
+α) : α` (Elab0's own `id`) is the minimal shape: elaborating `id
+Nat.zero` inserts a fresh mvar for `α`, which the explicit argument's
+`ensureArgType` then assigns — so the emitted term is `@id Nat
+Nat.zero`, NOT `id Nat.zero`. `app/implicitBareIdent` is the case the
+retired leaf `ident` elaborator got wrong by construction: a bare
+polymorphic constant against an expected type gets its implicit
+arguments inserted too. -/
+def appImplicitQueries : List (String × String) :=
+  [ ("app/implicitId",        "id Nat.zero")
+  , ("app/implicitIdAscribed", "(id Nat.zero : Nat)")
+  , ("app/implicitBareIdent", "(List.nil : List Nat)")
+  ]
+
+/-- M4b-3 P1 task 6: expected-type propagation
+(`propagateExpectedType`, App.lean:563-609). The expected type reaches
+the state machine through SOURCE ASCRIPTION — `(e : T)` — which is the
+only way this dumper's pinned `expectedType? := none` entry point can
+supply one (design spec § Verification). `app/propagatePi` is the shape
+the heuristic exists for: the expected type determines an implicit
+argument BEFORE the explicit argument is elaborated, so a divergence
+here shows up as a different mvar assignment, not an error.
+
+The plan's third query (`app/propagateId`, `"(id Nat.zero : Nat)"`) is
+NOT here: it has the same `src` as task 5's committed
+`app/implicitIdAscribed`, and two records with the same source under
+different ids are noise, not coverage.
+
+`app/propagateAbbrev` is the one query in this corpus that OBSERVABLY
+distinguishes propagation-on from propagation-off, and it is here
+because `app/propagateCons`/`app/propagatePi` — measured, not assumed —
+do not: in a coercion-free environment every mvar the early unification
+would assign is assigned anyway by `ensureArgType`/`finalize`, so both
+orders converge on the same instantiated term. `Unit` is a REDUCIBLE
+abbreviation of `PUnit`, which breaks that convergence:
+  - propagating: `?α := Unit` first, so the emitted implicit argument is
+    `Unit` and `PUnit.unit`'s own type is unified against it afterwards;
+  - not propagating: `PUnit.unit` is elaborated first and assigns
+    `?α := PUnit.{1}`, and `finalize`'s later `Unit =?= PUnit.{1}`
+    succeeds by unfolding without ever rewriting the assignment.
+Both terms are definitionally equal; only the first is the oracle's.
+Without this record the whole `propagateExpectedType` implementation
+could be deleted and this gate would stay green. -/
+def appPropagateQueries : List (String × String) :=
+  [ ("app/propagateCons",   "(List.cons Nat.zero List.nil : List Nat)")
+  , ("app/propagatePi",     "(id id : Nat -> Nat)")
+  , ("app/propagateAbbrev", "(id PUnit.unit : Unit)")
+  ]
+
+/-- M4b-3 P1 task 7: named arguments and eta-expansion. `app/namedBoth`
+supplies both parameters by name (no eta). `app/namedEta` supplies only
+the LATER one, so the earlier missing parameter becomes an eta argument
+and the result is a LAMBDA (App.lean:191-205). `app/namedDep` supplies
+a named argument that depends on the missing parameter, which becomes
+IMPLICIT instead of eta (findNamedArgDependsOnCurrent?,
+App.lean:340-348) — the two paths emit structurally different terms, so
+both are corpus entries, not one.
+
+`app/namedDepPropagate2` covers the SAME dependency test in its OTHER
+oracle call site: `getResultingTypeCore?`'s `if (← findNamedArgDependsOn?
+fType' namedArgs).isSome then processImplicit'` escape (App.lean:477-479),
+which lets expected-type propagation continue past a missing parameter a
+named argument determines, instead of postponing. It needs an ascription
+(propagation's only P1 source), an explicit argument elaborated before the
+escape point, and a result type that is itself a metavariable — see
+`Elab0.lean`'s own comment on `dpick` for why each piece is required, and
+the task-7 fix report for the measured before/after. The plan's simpler
+`(dep2 Nat.zero (z := Nat.zero) : Nat)` was tried first and REJECTED: it
+reaches the escape, but its resulting type is the closed `Nat`, so
+propagating early and propagating one parameter later converge on the
+same term and the record cannot tell the escape from the postponement. -/
+def appNamedQueries : List (String × String) :=
+  [ ("app/namedBoth",  "pick (x := Nat.zero) (y := Nat.zero)")
+  , ("app/namedFirst", "pick (x := Nat.zero) Nat.zero")
+  , ("app/namedEta",   "pick (y := Nat.zero)")
+  , ("app/namedDep",   "dep (z := Nat.zero)")
+  , ("app/namedDepPropagate2", "(dpick PUnit.unit (z := Nat.zero) : Unit)")
+  ]
+
+/-- M4b-3 P1 task 8: `@` and `.{u}`. Under `@`, implicit parameters are
+supplied positionally (`processImplicitArg` delegates to
+`processExplicitArg`, App.lean:879-885) and `resultIsOutParamSupport`
+is forced off (App.lean:1355). `.{u}` supplies explicit universe levels
+so `mkConst` mints FEWER fresh level mvars (TermElabM.lean:2117-2126) —
+`app/univList` should carry a concrete `zero`, not an `lmvar`. -/
+def appExplicitModeQueries : List (String × String) :=
+  [ ("app/atId",     "@id Nat Nat.zero")
+  , ("app/atBare",   "@Nat.succ")
+  , ("app/univList", "List.{0}")
+  ]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -293,7 +397,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>

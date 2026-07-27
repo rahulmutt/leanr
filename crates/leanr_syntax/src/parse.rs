@@ -4598,6 +4598,34 @@ mod tests {
         }
     }
 
+    /// M4b-3 Task 2 review fix: `named_argument`/`ellipsis_arg`
+    /// (`builtin/term.rs`) used to be bare `seq(...)`s whose tokens
+    /// flattened into the enclosing `app` argument list with no node
+    /// kind of their own — a real gap against the oracle, whose
+    /// `namedArgument`/`ellipsis` are genuine `leading_parser`s. Now
+    /// node-wrapped in their own oracle-named kinds; this pins that both
+    /// actually appear in the tree (same idiom as
+    /// `declare_syntax_cat_creates_a_quotable_category` above:
+    /// `canon::canon_jsonl(..).contains(..)`).
+    #[test]
+    fn named_argument_and_ellipsis_open_their_own_oracle_named_node() {
+        let snap = crate::builtin::snapshot();
+
+        let named = super::parse_term("f (n := e)", &snap);
+        assert!(named.errors.is_empty(), "{:?}", named.errors);
+        assert!(
+            crate::canon::canon_jsonl(&named.tree).contains("Lean.Parser.Term.namedArgument"),
+            "a named argument must open its own node, not flatten into `app`'s argument list"
+        );
+
+        let ellipsis = super::parse_term("f ..", &snap);
+        assert!(ellipsis.errors.is_empty(), "{:?}", ellipsis.errors);
+        assert!(
+            crate::canon::canon_jsonl(&ellipsis.tree).contains("Lean.Parser.Term.ellipsis"),
+            "a trailing `..` must open its own node, not flatten into `app`'s argument list"
+        );
+    }
+
     /// Run `p` against `src` with tokens from `toks`; return
     /// (canon-ish sexpr of the tree, errors) for terse assertions. A
     /// failed top-level `run` is recorded as exactly one E0301 (mirrors

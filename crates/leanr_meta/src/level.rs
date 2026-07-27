@@ -607,7 +607,14 @@ impl<'e> MetaCtx<'e> {
     /// — matching that `isLevelDefEqAuxImpl` always follows this call
     /// with a SEPARATE `.normalize` (:154-157), so whether this helper
     /// simplifies eagerly cannot change the net result either way.
-    fn instantiate_level_mvars(&mut self, l: LevelId) -> Result<LevelId, MetaError> {
+    ///
+    /// `pub(crate)`, not private (M4b-3 P1 task 5 leanr_meta fix):
+    /// `assign.rs::instantiate_mvars_body`'s new `Sort`/`Const` arms call
+    /// this directly, per-level, rather than reimplementing
+    /// `Succ`/`Max`/`IMax` substitution a second time — the whole reason
+    /// that fix belongs here instead of being grafted onto `leanr_elab`
+    /// from the outside using only public API surface.
+    pub(crate) fn instantiate_level_mvars(&mut self, l: LevelId) -> Result<LevelId, MetaError> {
         match *self.scratch.level_row(Some(self.view.store), l) {
             LevelRow::Zero | LevelRow::Param(_) => Ok(l),
             LevelRow::MVar(name) => {

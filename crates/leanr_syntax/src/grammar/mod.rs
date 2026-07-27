@@ -317,20 +317,31 @@ pub enum Prim {
     /// wrapped parser's own antiquot alternative(s), if any, may not
     /// accept a BARE `$x` (no `:name` suffix) — only a typed `$x:name`.
     /// Threaded through `parse.rs`'s `Ps::anon_antiquot_ok` flag (M3b2b
-    /// Task 3). No builtin production constructs this yet — the pinned
-    /// toolchain's `leading_parser (withAnonymousAntiquot := false)`
-    /// macro sugar sets a PLAIN `Bool` field on the `leadingNode`/
-    /// `nodeWithAntiquot` call it expands to, rather than wrapping an
-    /// arbitrary sub-parser the way this primitive does; that shape
-    /// isn't reachable from any M3b2b Task 1-3 builtin fixture. Plumbed
-    /// now (exhaustive match arms below, plus `encode`/`walk_symbols`)
-    /// per the Task 3 brief's interface contract, but currently
-    /// UNPRODUCED: Task 4's imported-`ParserDescr.nodeWithAntiquot`
-    /// mapping (`leanr_grammar::descr`) concluded the toolchain's
-    /// `compileParserDescr` hardcodes `anonymous := true`
-    /// unconditionally for that constructor — no decoded OLean entry
-    /// ever builds this wrap (`descr.rs`'s own doc comment on that arm;
-    /// pinned by `wrap_bracket_notation_stays_an_unwrapped_node`).
+    /// Task 3). Plumbed then (exhaustive match arms below, plus
+    /// `encode`/`walk_symbols`) per the Task 3 brief's interface
+    /// contract but left unproduced at the time — every builtin
+    /// `leading_parser` registered through this crate's own combinators
+    /// (`b.leading2`/`nd`/etc.) omitted the flag, and no decoded OLean
+    /// entry can ever build this wrap either: Task 4's imported-
+    /// `ParserDescr.nodeWithAntiquot` mapping (`leanr_grammar::descr`)
+    /// found that the toolchain's `compileParserDescr` hardcodes
+    /// `anonymous := true` unconditionally for that constructor
+    /// (`descr.rs`'s own doc comment on that arm; pinned by
+    /// `wrap_bracket_notation_stays_an_unwrapped_node`) — that half of
+    /// the claim still holds.
+    ///
+    /// FIRST PRODUCERS (M4b-3 Task 2 review fix round 1):
+    /// `named_argument`/`ellipsis_arg` (`builtin/term.rs`) — the pinned
+    /// toolchain's own `namedArgument`/`ellipsis` definitions
+    /// (`Term.lean:885-889`) carry exactly this flag, and reproducing it
+    /// is load-bearing, not cosmetic: without it, a bare `$x` at an
+    /// `app` argument position gets swallowed by `namedArgument`'s own
+    /// (now node-wrapped) anonymous-antiquot check before `termParser`'s
+    /// category-level antiquot handling ever sees it — confirmed
+    /// against both the pinned oracle (`` `($x $x)` `` dumps
+    /// `term.pseudo.antiquot` for BOTH occurrences) and the
+    /// `category_cache_is_quot_depth_keyed` pin (`parse.rs`), which
+    /// regressed without this wrap and passes with it.
     WithoutAnonymousAntiquot(Arc<Prim>),
 }
 
@@ -435,6 +446,13 @@ pub fn with_forbidden(tok: &str, p: Prim) -> Prim {
 }
 pub fn without_forbidden(p: Prim) -> Prim {
     Prim::WithoutForbidden(Arc::new(p))
+}
+/// ORACLE `leading_parser (withAnonymousAntiquot := false) ..` — see
+/// `Prim::WithoutAnonymousAntiquot`'s doc comment. First real producer:
+/// `named_argument`/`ellipsis_arg` (`builtin/term.rs`, M4b-3 Task 2
+/// review fix), whose own oracle definitions carry exactly this flag.
+pub fn without_anonymous_antiquot(p: Prim) -> Prim {
+    Prim::WithoutAnonymousAntiquot(Arc::new(p))
 }
 pub fn raw_char(c: char) -> Prim {
     Prim::RawChar(c)
