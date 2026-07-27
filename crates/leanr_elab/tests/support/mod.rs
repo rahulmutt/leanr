@@ -127,3 +127,84 @@ pub fn any_syn_elem() -> leanr_elab::dispatch::SynElem {
         .first_child_or_token()
         .expect("term child")
 }
+
+/// Register `n` `TypeClass` synthetic mvars, oldest first, returning
+/// their ids in creation order.
+pub fn register_n_typeclass_mvars(
+    app: &mut leanr_elab::app::state::AppElab,
+    n: usize,
+) -> Vec<leanr_meta::MVarId> {
+    use leanr_elab::synthetic::SyntheticMVarKind;
+    let ty = app.st.f_type;
+    let mut ids = Vec::new();
+    for _ in 0..n {
+        let (_e, id) = app
+            .elab
+            .mk_fresh_expr_mvar_of_kind(ty, leanr_meta::MVarKind::Synthetic)
+            .expect("fresh mvar");
+        app.elab
+            .register_synthetic_mvar(any_syn_elem(), id, SyntheticMVarKind::TypeClass);
+        ids.push(id);
+    }
+    ids
+}
+
+/// Drive `step_with` recording the order in which mvars are visited,
+/// resolving none of them. Used to test the creation-order walk in
+/// isolation from any real synthesis.
+pub fn step_recording_visit_order(
+    app: &mut leanr_elab::app::state::AppElab,
+) -> Vec<leanr_meta::MVarId> {
+    let mut seen = Vec::new();
+    app.elab
+        .step_with(|_elab, mvar_id| {
+            seen.push(mvar_id);
+            Ok(false)
+        })
+        .expect("step_with: stub outcome is infallible");
+    seen
+}
+
+/// Drive `step_with` registering one fresh `TypeClass` mvar mid-walk
+/// (as real synthesis can) and resolving none of the pre-existing
+/// pending mvars. Returns the id of the mvar created during the step.
+pub fn step_creating_one_mvar_solving_none(
+    app: &mut leanr_elab::app::state::AppElab,
+) -> leanr_meta::MVarId {
+    use leanr_elab::synthetic::SyntheticMVarKind;
+    let ty = app.st.f_type;
+    let mut fresh_id = None;
+    app.elab
+        .step_with(|elab, _mvar_id| {
+            if fresh_id.is_none() {
+                let (_e, id) = elab
+                    .mk_fresh_expr_mvar_of_kind(ty, leanr_meta::MVarKind::Synthetic)
+                    .expect("fresh mvar");
+                elab.register_synthetic_mvar(any_syn_elem(), id, SyntheticMVarKind::TypeClass);
+                fresh_id = Some(id);
+            }
+            Ok(false)
+        })
+        .expect("step_with: stub outcome is infallible");
+    fresh_id.expect("step visited at least one pending mvar")
+}
+
+/// Drive `step_with` resolving exactly the first-visited (oldest)
+/// pending mvar and none of the rest.
+pub fn step_solving_exactly_one(app: &mut leanr_elab::app::state::AppElab) -> bool {
+    let mut first = true;
+    app.elab
+        .step_with(|_elab, _mvar_id| {
+            let succeeded = first;
+            first = false;
+            Ok(succeeded)
+        })
+        .expect("step_with: stub outcome is infallible")
+}
+
+/// Drive `step_with` resolving none of the pending mvars.
+pub fn step_solving_none(app: &mut leanr_elab::app::state::AppElab) -> bool {
+    app.elab
+        .step_with(|_elab, _mvar_id| Ok(false))
+        .expect("step_with: stub outcome is infallible")
+}

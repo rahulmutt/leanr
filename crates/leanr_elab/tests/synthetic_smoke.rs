@@ -71,3 +71,69 @@ fn postpone_behavior_is_three_valued() {
     assert_ne!(PostponeBehavior::Partial, PostponeBehavior::Yes);
     assert_ne!(PostponeBehavior::Partial, PostponeBehavior::No);
 }
+
+/// The step visits pending mvars in CREATION order, not list order.
+///
+/// `pending_mvars` is head-is-most-recent, and the oracle walks it with
+/// `filterRevM` (`SyntheticMVars.lean:584`), which visits right-to-left
+/// — oldest first. `filterM` would visit newest first and still
+/// terminate, which is why this needs a direct test.
+#[test]
+fn step_processes_pending_mvars_in_creation_order() {
+    support::with_app_harness("Nat.zero", |app| {
+        let ids = support::register_n_typeclass_mvars(app, 3);
+        // Registered oldest..newest, so the list is newest..oldest.
+        assert_eq!(
+            app.elab.pending_mvars,
+            vec![ids[2], ids[1], ids[0]],
+            "head is most recent"
+        );
+
+        let seen = support::step_recording_visit_order(app);
+        assert_eq!(
+            seen,
+            vec![ids[0], ids[1], ids[2]],
+            "visited oldest-first (creation order)"
+        );
+    });
+}
+
+/// Survivors keep their ORIGINAL order (head still most recent), and
+/// mvars created DURING the step land BEFORE them.
+///
+/// oracle: `pendingMVars := s.pendingMVars ++ remainingPendingMVars`
+/// (`SyntheticMVars.lean:593`). Reversing that merge still terminates
+/// and still looks green on simple terms, then diverges on nested
+/// applications.
+#[test]
+fn step_merges_new_pending_before_still_unsolved() {
+    support::with_app_harness("Nat.zero", |app| {
+        let old = support::register_n_typeclass_mvars(app, 2);
+        let fresh = support::step_creating_one_mvar_solving_none(app);
+        assert_eq!(
+            app.elab.pending_mvars,
+            vec![fresh, old[1], old[0]],
+            "new pending first, then still-unsolved in original order"
+        );
+    });
+}
+
+/// Progress is a COUNT comparison, not "any succeeded".
+///
+/// oracle: `return numSyntheticMVars != remainingPendingMVars.length`
+/// (`SyntheticMVars.lean:594`). The comparison is SNAPSHOT length vs
+/// SURVIVOR count — never the post-merge list — so mvars created during
+/// the step can never mask progress. Two pending with one solved is
+/// `2 != 1`, progress, however many new ones the step created.
+#[test]
+fn step_reports_progress_by_snapshot_count() {
+    support::with_app_harness("Nat.zero", |app| {
+        support::register_n_typeclass_mvars(app, 2);
+        let progress = support::step_solving_exactly_one(app);
+        assert!(progress, "2 pending, 1 solved -> progress");
+
+        support::register_n_typeclass_mvars(app, 1);
+        let progress = support::step_solving_none(app);
+        assert!(!progress, "nothing solved -> no progress");
+    });
+}

@@ -16,6 +16,7 @@
 
 use leanr_kernel::bank::{ExprId, NameId};
 use leanr_meta::MVarId;
+use leanr_syntax::kind::KindInterner;
 
 use crate::dispatch::SynElem;
 use crate::elab::TermElabM;
@@ -206,5 +207,136 @@ impl<'e> TermElabM<'e> {
         let out = k(self);
         self.may_postpone = prev;
         out
+    }
+
+    /// The ordering core of `synthesizeSyntheticMVarsStep`
+    /// (`SyntheticMVars.lean:573-594`), with the per-mvar outcome
+    /// supplied by the caller.
+    ///
+    /// Split out so the two fidelity-critical orderings can be tested
+    /// without a class fixture (see `tests/synthetic_smoke.rs`): the real
+    /// step passes `synthesize_synthetic_mvar`, tests pass a stub.
+    pub fn step_with(
+        &mut self,
+        mut f: impl FnMut(&mut Self, MVarId) -> Result<bool, ElabError>,
+    ) -> Result<bool, ElabError> {
+        // oracle: `let pendingMVars := (← get).pendingMVars` then
+        // `modify fun s => { s with pendingMVars := [] }` (:577-580) —
+        // snapshot AND clear, so mvars created during the walk
+        // accumulate in a fresh list.
+        let pending = std::mem::take(&mut self.pending_mvars);
+        let num_synthetic = pending.len();
+
+        // oracle: `pendingMVars.filterRevM ..` (:584). `filterRevM` is
+        // `filterAuxM p as.reverse []`
+        // (`Init/Data/List/Control.lean:180-181`): it visits
+        // RIGHT-TO-LEFT and, because `filterAuxM` prepends, returns the
+        // survivors in the ORIGINAL list order. `pending_mvars` is
+        // head-is-most-recent, so right-to-left is OLDEST-FIRST, i.e.
+        // creation order — the oracle's own stated reason for using
+        // `filterRevM` rather than `filterM`.
+        let mut remaining = Vec::new();
+        for mvar_id in pending.iter().rev().copied() {
+            let succeeded = f(self, mvar_id)?;
+            if succeeded {
+                self.mark_as_resolved(mvar_id);
+            } else {
+                remaining.push(mvar_id);
+            }
+        }
+        // Collected oldest-first; restore head-is-most-recent.
+        remaining.reverse();
+
+        // oracle: `pendingMVars := s.pendingMVars ++ remainingPendingMVars`
+        // (:593) — `s.pendingMVars` here is what the walk CREATED, so
+        // new-pending comes FIRST and still-unsolved after.
+        let mut merged = std::mem::take(&mut self.pending_mvars);
+        merged.extend(remaining.iter().copied());
+        self.pending_mvars = merged;
+
+        // oracle: `return numSyntheticMVars != remainingPendingMVars.length`
+        // (:594) — against the SNAPSHOT length, not the merged list, so
+        // newly created mvars can never mask progress.
+        Ok(num_synthetic != remaining.len())
+    }
+
+    /// oracle: `synthesizeSyntheticMVarsStep` (`SyntheticMVars.lean:573-594`).
+    pub fn synthesize_synthetic_mvars_step(
+        &mut self,
+        postpone_on_error: bool,
+        run_tactics: bool,
+        kinds: &KindInterner,
+    ) -> Result<bool, ElabError> {
+        self.step_with(|elab, mvar_id| {
+            elab.synthesize_synthetic_mvar(mvar_id, postpone_on_error, run_tactics, kinds)
+        })
+    }
+
+    /// oracle: `synthesizeSyntheticMVar` (`SyntheticMVars.lean:539-569`).
+    ///
+    /// Returns `true` when the mvar was synthesized, `false` for "not
+    /// ready yet". An mvar with no decl returns `true` — the oracle's
+    /// `| return true -- The metavariable has already been synthesized`.
+    pub fn synthesize_synthetic_mvar(
+        &mut self,
+        mvar_id: MVarId,
+        postpone_on_error: bool,
+        run_tactics: bool,
+        kinds: &KindInterner,
+    ) -> Result<bool, ElabError> {
+        let Some(decl) = self.synthetic_mvar_decl(mvar_id).cloned() else {
+            return Ok(true);
+        };
+        match decl.kind {
+            SyntheticMVarKind::TypeClass => self.synthesize_pending_inst_mvar(mvar_id),
+            SyntheticMVarKind::Postponed { ref ctx } => {
+                self.resume_postponed(ctx, &decl.stx, mvar_id, postpone_on_error, kinds)
+            }
+            SyntheticMVarKind::Coe { .. } => Err(ElabError::UnsupportedSyntax(
+                "coercion synthetic mvars require coercion insertion — M4b-3 P4".to_string(),
+            )),
+            SyntheticMVarKind::Tactic => {
+                // oracle: the `.tactic` arm runs the tactic only when
+                // `runTactics` (`SyntheticMVars.lean:563-569`), and
+                // returns `false` otherwise. Rung 5 is the only caller
+                // that passes `run_tactics: true`, so this seam is
+                // reachable ONLY there — a silent `false` here would make
+                // the ladder report "stuck" for a reason the user cannot
+                // see.
+                if run_tactics {
+                    Err(ElabError::UnsupportedSyntax(
+                        "autoParam tactic execution requires the `by` elaborator — later M4"
+                            .to_string(),
+                    ))
+                } else {
+                    Ok(false)
+                }
+            }
+        }
+    }
+
+    /// Task 4: real typeclass instance synthesis. Stub returns `false`
+    /// ("not ready yet") so the ladder never mistakes an unimplemented
+    /// rung for success.
+    // Task 4
+    pub fn synthesize_pending_inst_mvar(&mut self, mvar_id: MVarId) -> Result<bool, ElabError> {
+        let _ = mvar_id;
+        Ok(false)
+    }
+
+    /// Task 5: resuming a postponed elaboration. Stub returns `false`
+    /// ("not ready yet") so the ladder never mistakes an unimplemented
+    /// rung for success.
+    // Task 5
+    pub fn resume_postponed(
+        &mut self,
+        ctx: &SavedContext,
+        stx: &SynElem,
+        mvar_id: MVarId,
+        postpone_on_error: bool,
+        kinds: &KindInterner,
+    ) -> Result<bool, ElabError> {
+        let _ = (ctx, stx, mvar_id, postpone_on_error, kinds);
+        Ok(false)
     }
 }
