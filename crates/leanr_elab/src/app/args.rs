@@ -88,11 +88,15 @@ fn process_explicit_arg(
             "numImplicitParams override (structure projection) — M4b-4".to_string(),
         ));
     }
-    if !app.st.args.is_empty() {
-        let arg = app.st.args.remove(0);
-        // Task 6 inserts `propagate_expected_type(app, &arg)?` HERE —
-        // the oracle propagates BEFORE elaborating the argument
-        // (`App.lean:803-806`).
+    if let Some(arg) = app.st.args.first().cloned() {
+        // oracle: `App.lean:803-806` — `propagateExpectedType arg` runs
+        // BEFORE `modify fun s => { s with args }`, i.e. while the
+        // argument about to be elaborated is still counted in
+        // `s.args.length`. `get_resulting_type` walks that count, so
+        // popping first would simulate one parameter too few. Hence the
+        // clone-then-remove rather than `remove(0)` up front.
+        crate::app::propagate::propagate_expected_type(app, kinds, &arg)?;
+        app.st.args.remove(0);
         elab_and_add_new_arg(app, kinds, binder_name, arg)?;
         return Ok(true);
     }
@@ -117,7 +121,8 @@ fn process_explicit_arg(
     // a wrapped parameter is handled above; only the DEFAULT path is
     // deferred. Detect it rather than finalizing a shorter application
     // than the oracle would build.
-    if has_opt_or_auto_param(app)? {
+    let f_type = app.get_f_type()?;
+    if has_opt_or_auto_param(app, f_type)? {
         return Err(ElabError::UnsupportedSyntax(
             "optParam default / autoParam tactic argument — M4b-3 P5".to_string(),
         ));
@@ -146,10 +151,13 @@ fn process_explicit_arg(
 /// instantiated spine without reducing, which is strictly more
 /// conservative — a telescope that only reveals a wrapper after
 /// reduction is missed here, and Task 7 closes that.
-fn has_opt_or_auto_param(app: &mut AppElab) -> Result<bool, ElabError> {
-    // oracle: `(← getFType)` — the remaining type with every argument
-    // consumed so far instantiated into it.
-    let mut cur = app.get_f_type()?;
+///
+/// Takes the type to walk as a parameter (Task 6): `App.lean:873`'s call
+/// site passes `(← getFType)`, but `getResultingTypeCore?`'s own call
+/// (`App.lean:484`) passes the SIMULATED remaining type `fType'`, which
+/// is not `s.fType`. One function, two call sites, exactly as the oracle
+/// has it.
+pub(crate) fn has_opt_or_auto_param(app: &mut AppElab, mut cur: ExprId) -> Result<bool, ElabError> {
     // Walking into `body` carries LOOSE BVARS (a deeper binder's domain
     // may reference an earlier binder of this same telescope). That is
     // fine: `consume_type_annotations` only walks the application spine

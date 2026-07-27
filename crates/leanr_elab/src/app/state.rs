@@ -149,7 +149,11 @@ impl<'a, 'e> AppElab<'a, 'e> {
     /// oracle: `whnfForall` (`Lean/Meta/Basic.lean`) — WHNF, but keep the
     /// ORIGINAL term if the reduct is not a forall. Composed from the
     /// public `MetaCtx::whnf`; no accessor needed.
-    fn whnf_forall(&mut self, e: ExprId) -> Result<ExprId, ElabError> {
+    ///
+    /// `pub(crate)` for `app::propagate::get_resulting_type`, whose
+    /// `main'` walk needs the SAME `whnfForall` the oracle calls at
+    /// `App.lean:458`.
+    pub(crate) fn whnf_forall(&mut self, e: ExprId) -> Result<ExprId, ElabError> {
         let r = self.elab.mctx.whnf(e)?;
         if matches!(self.node(r), Node::Forall { .. }) {
             Ok(r)

@@ -307,6 +307,41 @@ def appImplicitQueries : List (String × String) :=
   , ("app/implicitBareIdent", "(List.nil : List Nat)")
   ]
 
+/-- M4b-3 P1 task 6: expected-type propagation
+(`propagateExpectedType`, App.lean:563-609). The expected type reaches
+the state machine through SOURCE ASCRIPTION — `(e : T)` — which is the
+only way this dumper's pinned `expectedType? := none` entry point can
+supply one (design spec § Verification). `app/propagatePi` is the shape
+the heuristic exists for: the expected type determines an implicit
+argument BEFORE the explicit argument is elaborated, so a divergence
+here shows up as a different mvar assignment, not an error.
+
+The plan's third query (`app/propagateId`, `"(id Nat.zero : Nat)"`) is
+NOT here: it has the same `src` as task 5's committed
+`app/implicitIdAscribed`, and two records with the same source under
+different ids are noise, not coverage.
+
+`app/propagateAbbrev` is the one query in this corpus that OBSERVABLY
+distinguishes propagation-on from propagation-off, and it is here
+because `app/propagateCons`/`app/propagatePi` — measured, not assumed —
+do not: in a coercion-free environment every mvar the early unification
+would assign is assigned anyway by `ensureArgType`/`finalize`, so both
+orders converge on the same instantiated term. `Unit` is a REDUCIBLE
+abbreviation of `PUnit`, which breaks that convergence:
+  - propagating: `?α := Unit` first, so the emitted implicit argument is
+    `Unit` and `PUnit.unit`'s own type is unified against it afterwards;
+  - not propagating: `PUnit.unit` is elaborated first and assigns
+    `?α := PUnit.{1}`, and `finalize`'s later `Unit =?= PUnit.{1}`
+    succeeds by unfolding without ever rewriting the assignment.
+Both terms are definitionally equal; only the first is the oracle's.
+Without this record the whole `propagateExpectedType` implementation
+could be deleted and this gate would stay green. -/
+def appPropagateQueries : List (String × String) :=
+  [ ("app/propagateCons",   "(List.cons Nat.zero List.nil : List Nat)")
+  , ("app/propagatePi",     "(id id : Nat -> Nat)")
+  , ("app/propagateAbbrev", "(id PUnit.unit : Unit)")
+  ]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -320,7 +355,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>

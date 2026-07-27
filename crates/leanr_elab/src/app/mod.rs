@@ -17,6 +17,7 @@ pub mod expand;
 pub mod finalize;
 pub mod head;
 pub mod overload;
+pub mod propagate;
 pub mod state;
 
 use leanr_kernel::bank::ExprId;
