@@ -55,3 +55,6 @@
 {"exp":{"a":{"k":"const","n":"Nat.zero","us":[]},"f":{"k":"const","n":"Nat.succ","us":[]},"k":"app"},"id":"app/succZero","src":"Nat.succ Nat.zero"}
 {"exp":{"a":{"a":{"k":"const","n":"Nat.zero","us":[]},"f":{"k":"const","n":"Nat.succ","us":[]},"k":"app"},"f":{"k":"const","n":"Nat.succ","us":[]},"k":"app"},"id":"app/nested","src":"Nat.succ (Nat.succ Nat.zero)"}
 {"exp":{"a":{"k":"const","n":"Nat.zero","us":[]},"f":{"k":"const","n":"Nat.succ","us":[]},"k":"app"},"id":"app/ascribed","src":"(Nat.succ Nat.zero : Nat)"}
+{"exp":{"a":{"k":"const","n":"Nat.zero","us":[]},"f":{"a":{"k":"const","n":"Nat","us":[]},"f":{"k":"const","n":"id","us":[{"k":"succ","u":{"k":"zero"}}]},"k":"app"},"k":"app"},"id":"app/implicitId","src":"id Nat.zero"}
+{"exp":{"a":{"k":"const","n":"Nat.zero","us":[]},"f":{"a":{"k":"const","n":"Nat","us":[]},"f":{"k":"const","n":"id","us":[{"k":"succ","u":{"k":"zero"}}]},"k":"app"},"k":"app"},"id":"app/implicitIdAscribed","src":"(id Nat.zero : Nat)"}
+{"exp":{"a":{"k":"const","n":"Nat","us":[]},"f":{"k":"const","n":"List.nil","us":[{"k":"zero"}]},"k":"app"},"id":"app/implicitBareIdent","src":"(List.nil : List Nat)"}

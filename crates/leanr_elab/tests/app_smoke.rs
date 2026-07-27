@@ -248,3 +248,72 @@ fn f_type_is_forall_whnfs_non_forall_into_forall() {
         );
     });
 }
+
+/// A strict-implicit parameter with NO remaining arguments finalizes
+/// instead of inserting an mvar (oracle: `processStrictImplicitArg`,
+/// `App.lean:887-895`). The corpus cannot show this: Elab0 declares no
+/// strict-implicit constant, and the difference from `processImplicitArg`
+/// (which inserts UNCONDITIONALLY) only appears at the end of the
+/// argument list — task 5's own module doc on `process_strict_implicit_arg`
+/// makes the same point.
+#[test]
+fn strict_implicit_without_args_finalizes() {
+    support::with_app_harness("id", |app| {
+        // `with_app_harness("id", ..)` already ran bare "id" through
+        // `main` once (a bare identifier is a zero-argument application,
+        // `head.rs`'s own module doc): `id`'s own single parameter (`α`)
+        // is plain `Implicit`, which `process_implicit_arg` inserts
+        // UNCONDITIONALLY, so `app.st.f` arrives here already applied —
+        // `id ?m`, not the bare constant. Peel the application back
+        // apart to recover the underlying `id` constant this test wants
+        // as `f`; it is the exact same universe-mvar-carrying `Const`
+        // either way, so nothing is lost.
+        let id_const = match app.node(app.st.f) {
+            leanr_kernel::bank::terms::Node::App { f, .. } => f,
+            _ => app.st.f,
+        };
+
+        // Force `f_type` to a SYNTHETIC strict-implicit forall — the
+        // same "construct `State` directly" technique
+        // `f_type_is_forall_reconstructs_dependent_domain_with_correct_base`
+        // uses above, `Some(base)` throughout (that test's own doc
+        // comment has the full store-routing citation). Domain/body are
+        // two concrete, non-dependent `Sort 0`s: their identity doesn't
+        // matter to this test, only that the Forall's `binder_info` is
+        // `StrictImplicit`.
+        let base = app.elab.view.store;
+        let zero = app.elab.mctx.store_mut().level_zero(None).unwrap();
+        let sort0 = app.elab.mctx.store_mut().expr_sort(None, zero).unwrap();
+        let strict_forall = app
+            .elab
+            .mctx
+            .store_mut()
+            .expr_forall(
+                Some(base),
+                None,
+                sort0,
+                sort0,
+                leanr_kernel::BinderInfo::StrictImplicit,
+            )
+            .unwrap();
+
+        app.st.f = id_const;
+        app.st.f_type = strict_forall;
+        app.st.f_args = Vec::new();
+        app.st.args = Vec::new();
+
+        let f_before = app.st.f;
+        let snap = leanr_syntax::builtin::snapshot();
+        let kinds = snap.kinds();
+        let got = leanr_elab::app::args::main(app, &kinds).unwrap();
+        assert_eq!(
+            got, f_before,
+            "a strict-implicit parameter with no remaining arguments must \
+             finalize `f` unchanged, not insert a fresh mvar"
+        );
+        assert!(
+            app.st.f_args.is_empty(),
+            "finalize must not have consumed/added any argument"
+        );
+    });
+}

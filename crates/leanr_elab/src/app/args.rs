@@ -12,6 +12,7 @@
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, NameId};
 use leanr_kernel::BinderInfo;
+use leanr_meta::MVarId;
 use leanr_syntax::kind::KindInterner;
 
 use crate::app::expand::Arg;
@@ -32,11 +33,15 @@ pub fn main(app: &mut AppElab, kinds: &KindInterner) -> Result<ExprId, ElabError
                         return crate::app::finalize::finalize(app);
                     }
                 }
-                bi @ (BinderInfo::Implicit | BinderInfo::StrictImplicit) => {
-                    // Task 5.
-                    return Err(ElabError::UnsupportedSyntax(format!(
-                        "implicit argument insertion ({bi:?}) — M4b-3 P1 task 5"
-                    )));
+                BinderInfo::Implicit => {
+                    if !process_implicit_arg(app, kinds, binder_name)? {
+                        return crate::app::finalize::finalize(app);
+                    }
+                }
+                BinderInfo::StrictImplicit => {
+                    if !process_strict_implicit_arg(app, kinds, binder_name)? {
+                        return crate::app::finalize::finalize(app);
+                    }
                 }
                 BinderInfo::InstImplicit => {
                     // oracle: `processInstImplicitArg` (`App.lean:900+`)
@@ -161,6 +166,75 @@ fn has_opt_or_auto_param(app: &mut AppElab) -> Result<bool, ElabError> {
         cur = body;
     }
     Ok(false)
+}
+
+/// oracle: `addImplicitArg` (`App.lean:747-760`). Creates a fresh mvar
+/// for the parameter, records it in `toSetErrorCtx` for error
+/// attribution, and continues the loop.
+///
+/// No `kinds` parameter: unlike `process_explicit_arg`'s eventual
+/// `elab_and_add_new_arg` call, nothing here parses or elaborates
+/// surface syntax — the argument is a freshly minted mvar, not a
+/// `Arg::Stx` — so there is no `KindInterner` use to thread. The
+/// brief's own signature carried it only for symmetry with the other
+/// two arms and ended in `let _ = kinds;`; dropping the unused
+/// parameter here rather than shipping a discard.
+fn add_implicit_arg(app: &mut AppElab) -> Result<(), ElabError> {
+    let arg_type = app.get_arg_expected_type()?;
+    // oracle: the `isNextOutParamOfLocalInstanceAndResult` branch
+    // (`App.lean:749-757`) sets `resultTypeOutParam?` and disables
+    // propagation. It needs class outParam positions from the
+    // `classExtension`, which leanr does not decode until P2; the
+    // guarding flag (`result_is_out_param_support`) is false in the
+    // fixture env, so the branch is inert here rather than skipped
+    // silently. `finalize` re-checks `result_type_out_param` (task 4).
+    if app.ctx.result_is_out_param_support {
+        return Err(ElabError::UnsupportedSyntax(
+            "local-instance outParam result type requires classExtension decode — M4b-3 P2"
+                .to_string(),
+        ));
+    }
+    let arg = app.elab.mk_fresh_expr_mvar(arg_type)?;
+    if let Node::MVar { id: Some(n) } = app.node(arg) {
+        app.st.to_set_error_ctx.push(MVarId(n));
+    }
+    add_new_arg(app, arg)
+}
+
+/// oracle: `processImplicitArg` (`App.lean:879-885`) — under `@`, an
+/// implicit parameter is filled from the positional arguments exactly
+/// like an explicit one.
+fn process_implicit_arg(
+    app: &mut AppElab,
+    kinds: &KindInterner,
+    binder_name: Option<NameId>,
+) -> Result<bool, ElabError> {
+    if app.ctx.explicit {
+        process_explicit_arg(app, kinds, binder_name)
+    } else {
+        add_implicit_arg(app)?;
+        Ok(true)
+    }
+}
+
+/// oracle: `processStrictImplicitArg` (`App.lean:887-895`) — a strict
+/// implicit is inserted ONLY when there is still an argument to
+/// process; otherwise the application finalizes here. This is the one
+/// arm whose difference from `processImplicitArg` is invisible on
+/// single-argument corpus terms, so `app_smoke.rs` gets a direct test.
+fn process_strict_implicit_arg(
+    app: &mut AppElab,
+    kinds: &KindInterner,
+    binder_name: Option<NameId>,
+) -> Result<bool, ElabError> {
+    if app.ctx.explicit {
+        process_explicit_arg(app, kinds, binder_name)
+    } else if app.has_args_to_process() {
+        add_implicit_arg(app)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
 
 /// oracle: `addNewArg` (`App.lean:418-429`) — `f := f arg`, push onto

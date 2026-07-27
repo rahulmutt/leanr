@@ -293,6 +293,20 @@ def appExplicitQueries : List (String × String) :=
   , ("app/ascribed",  "(Nat.succ Nat.zero : Nat)")
   ]
 
+/-- M4b-3 P1 task 5: IMPLICIT argument insertion. `id {α : Sort u} (a :
+α) : α` (Elab0's own `id`) is the minimal shape: elaborating `id
+Nat.zero` inserts a fresh mvar for `α`, which the explicit argument's
+`ensureArgType` then assigns — so the emitted term is `@id Nat
+Nat.zero`, NOT `id Nat.zero`. `app/implicitBareIdent` is the case the
+retired leaf `ident` elaborator got wrong by construction: a bare
+polymorphic constant against an expected type gets its implicit
+arguments inserted too. -/
+def appImplicitQueries : List (String × String) :=
+  [ ("app/implicitId",        "id Nat.zero")
+  , ("app/implicitIdAscribed", "(id Nat.zero : Nat)")
+  , ("app/implicitBareIdent", "(List.nil : List Nat)")
+  ]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -306,7 +320,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>
