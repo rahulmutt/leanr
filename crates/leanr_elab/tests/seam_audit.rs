@@ -109,6 +109,24 @@ fn deferred_constructs_are_named_seams() {
         ("(Nat.succ) Nat.zero", "M4b-4"),
         ("(fun (x : Nat) => x) Nat.zero", "M4b-4"),
         ("(Nat.succ : Nat -> Nat) Nat.zero Nat.zero", "M4b-4"),
+        // `elab_ident_head`'s PARTIAL `shouldElabAsElim` guard (fix
+        // round 1). A genuine recursor — `ConstantInfo::Rec`, the one
+        // disjunct of `App.lean:1322-1328` that leanr's environment can
+        // decide — is seamed rather than elaborated the ordinary way.
+        // Measured before and after: the pinned oracle emits a bare `?m`
+        // for both of these (the `elabAsElim` branch postpones on the
+        // missing expected type), where leanr used to emit
+        // `const Nat.rec [?u]`.
+        //
+        // NOT covered, and deliberately not claimed to be: `Nat.recOn`,
+        // `Nat.casesOn`, `Nat.brecOn` and `@[elab_as_elim]` still take
+        // the ordinary path and still emit a different term than the
+        // oracle, with no seam — their four disjuncts read `auxRecExt` /
+        // the `elabAsElim` tag, extensions leanr does not decode.
+        // `fixture_declares_no_undecoded_elab_attributes` below is the
+        // backstop for those; M4b-4 owns the real fix.
+        ("Nat.rec", "M4b-4"),
+        ("List.rec", "M4b-4"),
     ];
     for (src, marker) in cases {
         match elab_src(src) {
@@ -118,6 +136,33 @@ fn deferred_constructs_are_named_seams() {
             ),
             other => panic!("{src}: expected a named UnsupportedSyntax seam, got {other:?}"),
         }
+    }
+}
+
+/// The `shouldElabAsElim` guard must NOT fire under `@` or `..`.
+/// `elabAsElim?` (`App.lean:1398-1399`) returns `none` before it ever
+/// consults `shouldElabAsElim` when either is set, so the oracle takes
+/// the ORDINARY path for `@Nat.rec` and `Nat.rec ..` — seaming them
+/// would be a fresh divergence in the opposite direction, erroring where
+/// the oracle succeeds.
+///
+/// Measured against the pinned oracle rather than reasoned about, since
+/// this is the whole justification for threading `heed_elab_as_elim`
+/// instead of testing the constant kind unconditionally:
+/// ```text
+/// @Nat.rec    -> {"k":"const","n":"Nat.rec","us":[{"k":"lmvar","i":0}]}
+/// Nat.rec ..  -> Nat.rec ?m ?m ?m ?m
+/// ```
+/// Both are ordinary applications there, and both must therefore be
+/// `Ok` here.
+#[test]
+fn elab_as_elim_guard_honours_the_explicit_and_ellipsis_early_out() {
+    for src in ["@Nat.rec", "Nat.rec .."] {
+        assert!(
+            elab_src(src).is_ok(),
+            "{src}: `explicit || ellipsis` disables the elabAsElim branch in the \
+             oracle (App.lean:1399), so leanr must take the ordinary path too"
+        );
     }
 }
 
@@ -160,11 +205,10 @@ fn unregistered_kinds_are_named_by_kind() {
 
 /// The `@[elab_as_elim]` and `@[elab_without_expected_type]` attributes
 /// change `elabAppArgs`'s control flow (`App.lean:1373`, `:1330-1333`),
-/// and leanr decodes NEITHER extension — so their guards cannot be
-/// runtime checks. This test is the fixture-source gate that keeps them
-/// inert, and it fails the moment someone reaches for one, which is
-/// exactly when a real guard (and an extension decode) becomes
-/// necessary.
+/// and leanr decodes NEITHER extension — so neither can be a runtime
+/// check. This test is the fixture-source gate that keeps them inert,
+/// and it fails the moment someone reaches for one, which is exactly
+/// when a real guard (and an extension decode) becomes necessary.
 ///
 /// It gates TWO things, because the plan's premise — "inert only
 /// because no declaration in the hermetic fixture carries the
@@ -180,13 +224,28 @@ fn unregistered_kinds_are_named_by_kind() {
 ///     the fixture environment already contains `Nat.rec`, `Nat.recOn`,
 ///     `Nat.casesOn`, `List.rec`, ... for which that predicate is TRUE
 ///     without any attribute. Measured against the pinned oracle through
-///     `dump_elab.lean`'s own entry point, `Nat.rec` elaborates to a
+///     `dump_elab.lean`'s own entry point, `Nat.rec` elaborated to a
 ///     bare `?m` there (the branch postpones on the missing expected
-///     type) while leanr emits `const Nat.rec [?u]` — a live, silent
-///     divergence, not a hypothetical one. No committed record carries
-///     an eliminator head today; the second half of this gate is what
-///     keeps it that way until M4b-4 decodes `auxRecExt` and builds
-///     `ElabElim`.
+///     type) while leanr emitted `const Nat.rec [?u]` — a live, silent
+///     divergence, not a hypothetical one.
+///
+/// `head::elab_ident_head` now seams the ONE disjunct leanr's
+/// environment can decide (`isRec`, i.e. `ConstantInfo::Rec`) — see
+/// `deferred_constructs_are_named_seams`'s `Nat.rec` case. That guard is
+/// partial by construction, so what is left open, and what this gate
+/// exists to backstop, is precisely:
+///
+///   * **aux recursors** — `Nat.casesOn`, `Nat.recOn`, `Nat.brecOn` and
+///     friends. `isAuxRecursorWithSuffix` (`AuxRecursor.lean:39-51`)
+///     reads the `auxRecExt` tag extension, which leanr does not decode,
+///     so these still take the ordinary path and still emit a different
+///     term than the oracle, with NO seam;
+///   * **`@[elab_as_elim]` declarations** — same, via the `elabAsElim`
+///     tag extension.
+///
+/// Neither is detectable at runtime today, so both are kept out of the
+/// committed corpus by source text instead. M4b-4 decodes `auxRecExt`
+/// and builds `ElabElim`; until then this gate is the whole defence.
 ///
 /// Both halves are TEXT gates over committed fixture files, deliberately
 /// so: they must fail on the SOURCE a contributor writes, before the

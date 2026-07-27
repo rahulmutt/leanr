@@ -22,16 +22,30 @@ use crate::elab::TermElabM;
 use crate::error::ElabError;
 use crate::resolve::resolve_global;
 
+/// `heed_elab_as_elim` is the oracle's own two-line gate at the top of
+/// `elabAsElim?` (`App.lean:1398-1399`): `unless (← read).heedElabAsElim
+/// do return none` followed by `if explicit || ellipsis then return
+/// none`. leanr never turns the reader field off (`withoutElabAsElim`,
+/// `TermElabM.lean:733`, has no leanr counterpart — nothing in this
+/// crate suppresses the branch), so the caller computes this as
+/// `!explicit && !ellipsis`, which is exactly the second line. Threaded
+/// rather than read off `AppElab` because `elab_app_fn` runs BEFORE the
+/// `Context`/`State` exist — `elab_app_aux` needs the head's type to
+/// build them.
 pub fn elab_app_fn(
     elab: &mut TermElabM,
     elem: &SynElem,
     kinds: &KindInterner,
     explicit_levels: &[LevelId],
+    heed_elab_as_elim: bool,
 ) -> Result<Vec<ExprId>, ElabError> {
     match (kinds.name(elem.kind()), elem) {
-        ("<ident>", leanr_syntax::tree::NodeOrToken::Token(tok)) => {
-            Ok(vec![elab_ident_head(elab, tok.text(), explicit_levels)?])
-        }
+        ("<ident>", leanr_syntax::tree::NodeOrToken::Token(tok)) => Ok(vec![elab_ident_head(
+            elab,
+            tok.text(),
+            explicit_levels,
+            heed_elab_as_elim,
+        )?]),
         // Task 9's seam audit split this from the catch-all below: the
         // two are DIFFERENT oracle arms with different owners, and one
         // message for both named the wrong one. `(f) a`, `(fun x => x) a`
@@ -115,6 +129,7 @@ fn elab_ident_head(
     elab: &mut TermElabM,
     raw: &str,
     explicit_levels: &[LevelId],
+    heed_elab_as_elim: bool,
 ) -> Result<ExprId, ElabError> {
     let name = intern_dotted(elab, raw)?;
     // M4b-2 (binders): a local variable shadows a same-named global
@@ -142,6 +157,54 @@ fn elab_ident_head(
         .view
         .get(cname)
         .expect("resolve_global only returns names EnvView::get resolves");
+
+    // oracle: `shouldElabAsElim` (`App.lean:1322-1328`) is
+    //   `isRec declName || isCasesOnRecursor env declName
+    //    || isBRecOnRecursor env declName || isRecOnRecursor env declName
+    //    || elabAsElim.hasTag env declName`
+    // and when it holds, `elabAppArgs` (`App.lean:1373`) diverts the
+    // WHOLE application to `ElabElim.main` instead of `ElabAppArgs.main`
+    // — a different elaborator producing a different term.
+    //
+    // P1 can decide only the FIRST of those five disjuncts. `isRec` is
+    // `isRecCore` (`MonadEnv.lean:35-36`), a plain constant-kind test,
+    // and leanr's environment carries `ConstantInfo::Rec(RecursorVal)`
+    // already. The three `is*Recursor` predicates are
+    // `isAuxRecursorWithSuffix` (`AuxRecursor.lean:39-51`), which reads
+    // the `auxRecExt` tag extension, and the last is the `elabAsElim`
+    // tag extension — neither is decoded anywhere in leanr. So this
+    // guard is PARTIAL BY CONSTRUCTION, and deliberately so: seaming
+    // what P1 can detect is strictly better than emitting a knowingly
+    // different term for all five cases.
+    //
+    // STILL DIVERGENT, with no seam: `Nat.casesOn`, `Nat.recOn`,
+    // `Nat.brecOn` (and every other aux recursor), plus anything
+    // carrying `@[elab_as_elim]`. Those take the ordinary path here and
+    // emit a term the oracle does not. `tests/seam_audit.rs`'s
+    // `fixture_declares_no_undecoded_elab_attributes` is the backstop
+    // that keeps such a query out of the committed corpus; M4b-4 owns
+    // the `auxRecExt` decode and `ElabElim` itself.
+    //
+    // Measured, not assumed (Task 9, pinned oracle via `dump_elab.lean`'s
+    // own entry point): `Nat.rec` elaborates to a bare `?m` there — the
+    // branch postpones on the missing expected type — where leanr
+    // emitted `const Nat.rec [?u]`.
+    //
+    // This guard is also an OVER-approximation in one direction the
+    // oracle is finer about: `elabAsElim?` (`App.lean:1402-1420`) falls
+    // back to the standard elaborator when the motive has ALREADY been
+    // supplied, which needs `getElabElimInfo`'s `motivePos` — M4b-4
+    // machinery. So `Nat.rec (motive := ..) ..` is seamed here where the
+    // oracle would elaborate it normally. A named error is the safe
+    // direction of that trade; a wrong `Expr` is not.
+    if heed_elab_as_elim && matches!(info, leanr_kernel::ConstantInfo::Rec(_)) {
+        return Err(ElabError::UnsupportedSyntax(format!(
+            "`{raw}` is a recursor — the oracle elaborates eliminator-headed \
+             applications with `ElabElim.main` (`shouldElabAsElim`, App.lean:1322-1328; \
+             diverted at :1373), which needs `motivePos` — M4b-4"
+        )));
+    }
+
     let n_params = info.constant_val().level_params.len();
     // oracle: `mkConst` errors when the user wrote MORE explicit levels
     // than the constant has parameters, rather than truncating.
@@ -318,7 +381,7 @@ mod tests {
             other => panic!("expected a bare ident token, got {other:?}"),
         };
 
-        match super::elab_ident_head(&mut elab, tok.text(), &[]) {
+        match super::elab_ident_head(&mut elab, tok.text(), &[], true) {
             Err(crate::ElabError::UnknownIdent(s)) => assert_eq!(s, "Bar"),
             other => panic!("expected UnknownIdent(\"Bar\"), got {other:?}"),
         }

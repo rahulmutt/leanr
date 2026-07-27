@@ -24,9 +24,24 @@
 //!   optParam defaults / autoParam .................... P5  args.rs
 //!   implicit-lambda insertion ........................ P5  elab.rs, and `@t`/`@(t)` here
 //!   overload resolution (candidates > 1) ............. resolve_global slice  overload.rs
-//!   elabAsElim, dot notation, LVal machinery ......... M4b-4 head.rs, here, dispatch.rs
+//!   elabAsElim, RECURSOR heads only (partial!) ....... M4b-4 head.rs
+//!   dot notation, LVal machinery ..................... M4b-4 head.rs, here, dispatch.rs
 //!   numImplicitParams (structure projection) ......... M4b-4 args.rs
 //! ```
+//!
+//! **The `elabAsElim` row is a PARTIAL seam, and the only row in this
+//! table that does not cover its own construct.** `shouldElabAsElim`
+//! (`App.lean:1322-1328`) has five disjuncts; `head::elab_ident_head`
+//! can decide exactly one of them (`isRec`, i.e. `ConstantInfo::Rec`),
+//! because the other four read the `auxRecExt` / `elabAsElim` tag
+//! extensions, which leanr does not decode. So a genuine recursor head
+//! (`Nat.rec`, `List.rec`) is seamed, and an AUX recursor head
+//! (`Nat.casesOn`, `Nat.recOn`, `Nat.brecOn`) or an
+//! `@[elab_as_elim]`-tagged head is NOT — it still takes the ordinary
+//! path and still emits a term the oracle does not, with no seam. That
+//! is a known open divergence M4b-4 owns; `tests/seam_audit.rs`'s
+//! `fixture_declares_no_undecoded_elab_attributes` is the source-text
+//! backstop keeping it out of the committed corpus in the meantime.
 //!
 //! Three of those are not reachable from any source term the hermetic
 //! `Elab0` fixture can express, and `tests/seam_audit.rs` records why
@@ -264,7 +279,12 @@ fn elab_app_aux(
     expected: Option<ExprId>,
 ) -> Result<ExprId, ElabError> {
     let (head, explicit, explicit_levels) = peel_head(elab, head, kinds)?;
-    let candidates = head::elab_app_fn(elab, &head, kinds, &explicit_levels)?;
+    // `heed_elab_as_elim = !explicit && !ellipsis` — the oracle's own
+    // early-out at `App.lean:1399` (`if explicit || ellipsis then return
+    // none`), so `@Nat.rec` and `Nat.rec ..` take the ordinary path on
+    // BOTH sides. See `head::elab_app_fn`'s own doc comment.
+    let candidates =
+        head::elab_app_fn(elab, &head, kinds, &explicit_levels, !explicit && !ellipsis)?;
     let f = overload::expect_single(candidates)?;
 
     // oracle: `elabAppArgs`'s first two lines — `let fType ← inferType f;
@@ -274,7 +294,8 @@ fn elab_app_aux(
 
     // oracle: `App.lean:1373`'s `if let some elimInfo ← elabAsElim? then
     // .. ElabElim.main ..` branch, which diverts the WHOLE application
-    // to the eliminator elaborator. leanr never takes it.
+    // to the eliminator elaborator. leanr never takes it — it elaborates
+    // the ordinary way or raises a seam.
     //
     // Task 9 correction — the branch is NOT attribute-only, and the plan
     // said it was. `elabAsElim?` (`App.lean:1397-1401`) calls
@@ -283,21 +304,33 @@ fn elab_app_aux(
     //    || isBRecOnRecursor env declName || isRecOnRecursor env declName
     //    || elabAsElim.hasTag env declName`
     // — the `@[elab_as_elim]` tag is only the LAST of five triggers.
-    // `isRec` is a plain `ConstantInfo` kind test leanr could decide;
-    // the three `is*Recursor`s read `auxRecExt` and the tag reads
-    // `elabAsElim`, two more extensions leanr does not decode.
-    //
     // This is live in the hermetic fixture, not hypothetical: measured
     // against the pinned oracle through `dump_elab.lean`'s own entry
     // point, `Nat.rec`, `Nat.recOn` and `Nat.casesOn` each elaborate to
-    // a bare `?m` (the branch postpones on the missing expected type),
-    // where leanr emits `const Nat.rec [?u]`. No committed record covers
-    // an eliminator-headed query, and `seam_audit.rs`'s
-    // `fixture_declares_no_undecoded_elab_attributes` gates BOTH halves
-    // — the attribute in `Elab0.lean` and an eliminator head in
-    // `elab-queries.jsonl` — so the divergence cannot be committed
-    // without the gate failing first. The real guard needs the
-    // extension decodes and `ElabElim` itself: M4b-4 owns it.
+    // a bare `?m` there (the branch postpones on the missing expected
+    // type), where leanr emitted `const Nat.rec [?u]`.
+    //
+    // Fix round 1 splits that finding by what leanr can DECIDE:
+    //   * `isRec` is a plain constant-kind test and leanr's environment
+    //     carries `ConstantInfo::Rec`, so `head::elab_ident_head` now
+    //     raises a named M4b-4 seam for a genuine recursor head. The
+    //     `explicit || ellipsis` early-out (`App.lean:1399`) is honoured
+    //     — `heed_elab_as_elim` below — so `@Nat.rec` and `Nat.rec ..`
+    //     still take the ordinary path, exactly as the oracle does;
+    //   * the three `is*Recursor`s read `auxRecExt` and the tag reads
+    //     `elabAsElim`, two extensions leanr does not decode. Those four
+    //     disjuncts are STILL UNGUARDED: an aux-recursor head
+    //     (`Nat.casesOn`, `Nat.recOn`, `Nat.brecOn`) or an
+    //     `@[elab_as_elim]` head takes the ordinary path here and emits
+    //     a term the oracle does not, with no seam.
+    //
+    // No committed record covers an eliminator-headed query, and
+    // `seam_audit.rs`'s `fixture_declares_no_undecoded_elab_attributes`
+    // gates BOTH remaining halves — the attribute in `Elab0.lean` and an
+    // eliminator-shaped name in `elab-queries.jsonl` — so the residual
+    // divergence cannot be committed without the gate failing first.
+    // The complete guard needs the extension decodes and `ElabElim`
+    // itself: M4b-4 owns it.
     let ctx = Context {
         ellipsis,
         explicit,

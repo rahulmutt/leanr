@@ -129,7 +129,9 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 ///   implicit-lambda insertion .................. M4b-3 P5
 ///   Term.proj / pipeProj / dotIdent ............ M4b-4 (LVal machinery)
 ///   Term.namedPattern / choice ................. M4b-4 (same elabAppFn arms)
-///   elabAsElim, binop%, anonymous ctor ⟨⟩ ...... M4b-4
+///   elabAsElim (recursor heads seamed; aux
+///     recursors + @[elab_as_elim] still open) .. M4b-4
+///   binop%, anonymous constructor ⟨⟩ ........... M4b-4
 ///   macro expansion in dispatch ................ first macro-form slice
 ///   open / alias / export / _root_ resolution .. later slice
 /// ```

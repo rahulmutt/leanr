@@ -42,9 +42,19 @@
 //! - **overload resolution** (more than one candidate from
 //!   `elabAppFn`) — the slice that grows `resolve_global`, since it is
 //!   unreachable while only exact names resolve.
-//! - **`elabAsElim`, dot notation / LVal machinery (`Term.proj`,
-//!   `pipeProj`, `dotIdent`, `namedPattern`, `choice`), `binop%`,
-//!   anonymous constructor `⟨⟩`** — M4b-4.
+//! - **`elabAsElim`** — M4b-4, and the one deferral whose seam is
+//!   PARTIAL. `shouldElabAsElim` (`App.lean:1322-1328`) has five
+//!   disjuncts; `app::head` can decide only `isRec`
+//!   (`ConstantInfo::Rec`), so a genuine recursor head is seamed while
+//!   an aux-recursor head (`Nat.casesOn`, `Nat.recOn`, `Nat.brecOn`) or
+//!   an `@[elab_as_elim]` head is not — the other four read the
+//!   `auxRecExt`/`elabAsElim` tag extensions, which leanr does not
+//!   decode. Those cases still emit a term the oracle does not, with no
+//!   seam; `tests/seam_audit.rs`'s fixture-source gate is the backstop
+//!   until M4b-4 lands the decodes and `ElabElim`.
+//! - **dot notation / LVal machinery (`Term.proj`, `pipeProj`,
+//!   `dotIdent`, `namedPattern`, `choice`), `binop%`, anonymous
+//!   constructor `⟨⟩`** — M4b-4.
 //! - **macro expansion** — `dispatch` never expands a macro form; the
 //!   dispatch table only ever matches a syntax kind directly against a
 //!   registered elaborator. Deferred to the slice that first needs a
