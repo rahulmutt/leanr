@@ -1158,10 +1158,11 @@ impl<'e> MetaCtx<'e> {
     // instantiateMVars — the shared read-back primitive.
     // ===================================================================
 
-    /// oracle: `instantiateMVars`/`instantiateMVarsImp`
-    /// (`MetavarContext.lean`, `@[extern]` opaque — no Lean source to
-    /// transcribe line-by-line, same posture as `level.rs`'s
-    /// `instantiate_level_mvars`). Recursively replaces every ASSIGNED
+    /// oracle: `instantiateMVars` (`MetavarContext.lean:620`), whose worker
+    /// is `instantiateExprMVars` (`:580`) over the `@[extern]` opaque
+    /// `instantiateExprMVarsImp` (`:577`) — no Lean source to transcribe
+    /// line-by-line, same posture as `level.rs`'s
+    /// `instantiate_level_mvars`. Recursively replaces every ASSIGNED
     /// `MVar` node with its (recursively instantiated) assignment;
     /// everything else rebuilt only if a child actually changed. `pub`,
     /// not `pub(crate)`: `process_assignment`'s own "enforce A4" step
@@ -1193,8 +1194,9 @@ impl<'e> MetaCtx<'e> {
                 None => Ok(e),
             },
             // oracle: `instantiateMVars` also descends into level lists
-            // (MetavarContext.lean's own `instantiateMVarsImp` resolves
-            // BOTH expr and level mvars in one pass) — `Sort`/`Const`
+            // (MetavarContext.lean's own `instantiateExprMVars`/
+            // `instantiateExprMVarsImp`, `:577-583`, resolves BOTH expr
+            // and level mvars in one pass) — `Sort`/`Const`
             // are the only two node shapes that carry a `LevelId`/
             // `LevelsId` directly. Delegates to `level.rs`'s existing
             // `instantiate_level_mvars` (now `pub(crate)`) per level,

@@ -123,23 +123,37 @@
 //!
 //! `mkTableKey`'s own doc (:195) states it "assumes `e` does not contain
 //! assigned metavariables" -- callers (`mkTableKeyFor`, :262-266) run
-//! `instantiateMVars` first. `instantiate_mvars` (this crate's own
-//! transcription, `assign.rs:1173-1179`) resolves every ASSIGNED EXPR
-//! mvar recursively but -- see its own doc comment's arm list -- never
-//! descends into a `Sort`/`Const` node's LEVEL at all, so an assigned
-//! LEVEL mvar embedded there is left untouched by that pass. Rather than
-//! bolt on a second, separate level-mvar-instantiation pre-pass (which
-//! would just be `level.rs::instantiate_level_mvars` inlined a second
-//! time, and that helper is private to `level.rs` besides),
-//! `normalize_goal_key` below still calls `instantiate_mvars` once (to
-//! satisfy `mkTableKey`'s stated precondition for the EXPR side), and
-//! folds the LEVEL side's "resolve-assigned-then-rename-unassigned"
-//! into `KeyNormalizer::norm_level` itself: an assigned level mvar is
-//! resolved to its (recursively normalized) assignment FIRST, and only
-//! an mvar confirmed unassigned after that is ever canonically renamed --
-//! net effect identical to the oracle's own composed
-//! `instantiateMVars ∘ mkTableKey` pipeline, just recomposed to work
-//! around where this crate's own `instantiate_mvars` stops short.
+//! `instantiateMVars` first, and `normalize_goal_key` below does the
+//! same. `instantiate_mvars` (this crate's own transcription,
+//! `assign.rs`) resolves assigned EXPR mvars and -- since commit
+//! `ae2dee2` -- assigned LEVEL mvars in a `Sort`/`Const` node's level
+//! list too, via the now-`pub(crate)` `level.rs::instantiate_level_mvars`.
+//! (An earlier revision of this comment said that pass "never descends
+//! into a `Sort`/`Const` node's LEVEL at all" and that
+//! `instantiate_level_mvars` was private to `level.rs`; `ae2dee2` made
+//! both statements false. Neither was ever the load-bearing reason for
+//! what `norm_level` does, so the code below is unchanged -- only this
+//! justification is.)
+//!
+//! `KeyNormalizer::norm_level` nevertheless resolves an assigned level
+//! mvar to its (recursively normalized) assignment FIRST, and only ever
+//! canonically renames an mvar confirmed unassigned after that. That is
+//! deliberate and must stay, for a reason independent of what the
+//! pre-pass covers: **the table key must be a function of the goal, not
+//! of whether some caller remembered to instantiate first.** If an
+//! assigned level mvar ever reached the renamer it would be minted a
+//! fresh `_tc.<idx>` param, so two goals identical up to that assignment
+//! would get DIFFERENT keys -- silently defeating tabling (the very
+//! termination property this module's key function exists to buy) rather
+//! than failing loudly. Resolving first makes the two routes CONFLUENT:
+//! the resulting key is the same whether the assignment was read back by
+//! the `instantiate_mvars` pre-pass or by `norm_level` itself, so
+//! `ae2dee2` widening the pre-pass could not, and did not, move a key.
+//! "`instantiate_mvars` was called" is in any case a weaker guarantee
+//! than "no assigned level mvar reaches the renamer" -- that pass
+//! early-returns on the packed `has_expr_mvar`/`has_level_mvar` metadata
+//! and rebuilds through a `_ => Ok(e)` fallthrough -- and it is the
+//! stronger property this walk needs.
 //!
 //! **The correctness property this buys**: two goals that are
 //! α-equivalent up to metavariable identity (same shape, mvars renamed)
@@ -508,11 +522,12 @@ impl<'a, 'e> KeyNormalizer<'a, 'e> {
                 // name -- so this is defensive, not a modeled seam).
                 let Some(name) = name else { return Ok(l) };
                 let lid = LMVarId(name);
-                // Resolve an ASSIGNED mvar first (folding in what this
-                // crate's own `instantiate_mvars` does not cover for
-                // levels -- see the module doc); only an mvar confirmed
-                // UNASSIGNED after that is ever renamed, matching
-                // `mkTableKey`'s stated precondition.
+                // Resolve an ASSIGNED mvar first, so this walk does not
+                // depend on the caller's `instantiate_mvars` pre-pass
+                // having covered it -- see the module doc for why that
+                // independence is what keeps the key CONFLUENT. Only an
+                // mvar confirmed UNASSIGNED after that is ever renamed,
+                // matching `mkTableKey`'s stated precondition.
                 if let Some(v) = self.ctx.mctx.level_assignment(lid) {
                     return self.norm_level(v);
                 }
@@ -752,9 +767,9 @@ impl<'e> MetaCtx<'e> {
     /// Compute `goal`'s table key. oracle: `mkTableKeyFor`
     /// (`SynthInstance.lean:262-266`) composed with `mkTableKey`
     /// (:196-199) -- see this module's own doc for the exact
-    /// correspondence (and the one place this composition had to be
-    /// re-shaped around this crate's `instantiate_mvars` not covering
-    /// levels). `goal` here is expected to already be the metavariable's
+    /// correspondence (and for why `KeyNormalizer::norm_level` resolves
+    /// assigned level mvars itself rather than trusting this pre-pass to
+    /// have done it). `goal` here is expected to already be the metavariable's
     /// TYPE (what `mkTableKeyFor` passes, having already called
     /// `inferType mvar` itself) -- this function does not call
     /// `infer_type` or telescope anything on its own.
@@ -1465,10 +1480,12 @@ impl<'e> MetaCtx<'e> {
     /// replaced its level mvars, the expr mvars that were abstracted,
     /// and `fun (m_1 : A_1) .. (m_k : A_k) => e'`.
     pub(crate) fn abstract_mvars(&mut self, e: ExprId) -> Result<AbstractMVarsResult, MetaError> {
-        // oracle: `let e ← instantiateMVars e` (:128). See
-        // `normalize_goal_key`'s own doc for why this crate's
-        // `instantiate_mvars` covers the EXPR side only, and why the
-        // LEVEL side is folded into the walk's own mvar arm instead.
+        // oracle: `let e ← instantiateMVars e` (:128). `MVarAbstractor`'s
+        // own level arm resolves an assigned level mvar before it can be
+        // abstracted into a fresh param, for the same reason
+        // `KeyNormalizer::norm_level` does -- see this module's doc: the
+        // result must not depend on how much this pre-pass happened to
+        // cover, so the two paths stay confluent.
         let e = self.instantiate_mvars(e)?;
         let mut a = MVarAbstractor::new(self)?;
         let body = a.expr(e)?;

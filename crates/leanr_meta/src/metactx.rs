@@ -668,12 +668,47 @@ impl<'e> MetaCtx<'e> {
         Ok(e)
     }
 
-    /// oracle: `Expr.instantiateBetaRevRange 0 args.size args`, as used by
+    /// oracle: `Expr.instantiateBetaRevRange 0 args.size args`
+    /// (`Lean/Meta/InferType.lean:37-45`), as used by
     /// `ElabAppArgs.State.getFType` (`Lean/Elab/App.lean:232-237`) to
     /// instantiate a partially-applied function type's loose bvars with the
-    /// arguments consumed so far. `args` is innermost-first — the same
-    /// convention `leanr_kernel::instantiate_rev` documents
-    /// (`subst[len-1]` replaces `#0`).
+    /// arguments consumed so far. `args` is OUTERMOST-first, i.e. binder
+    /// order — the same convention `leanr_kernel::instantiate_rev`
+    /// documents (`subst[len-1]` replaces `#0`, so the LAST element is the
+    /// innermost binder's argument).
+    ///
+    /// The oracle's shape, which this mirrors arm for arm:
+    /// ```lean
+    /// if e.hasLooseBVars && stop > start then
+    ///   if args.any (·.consumeMData.isLambda) start stop then visit e 0 |>.run
+    ///   else instantiateRevRange e start stop args
+    /// else e
+    /// ```
+    /// Both short-circuits matter and both are implemented below: a term
+    /// with NO loose bvars is returned untouched (no substitution, and in
+    /// particular no beta), and when none of `args` is a lambda the
+    /// substitution alone is the whole answer — there is no redex a beta
+    /// step could fire on. This is not a cost optimization: this function
+    /// computes the expected type an argument is elaborated against
+    /// (`getParamType` / `getArgExpectedType`), and beta-reducing a term
+    /// the oracle leaves alone hands the argument elaborator a DIFFERENT
+    /// term.
+    ///
+    /// **Named limitation — nested redexes are not reduced.** The oracle's
+    /// `visit` walks the whole tree and betas any bvar-headed application
+    /// it finds; this uses `head_beta`, which fires only at the term's own
+    /// head. So for a lambda-carrying `args`, leanr reduces the head redex
+    /// the oracle's docstring names (`motive n` with
+    /// `motive := fun x => f m = f x` becomes `f m = f n`) but leaves a
+    /// redex sitting under a constructor — e.g. `Foo (motive n)` — as
+    /// `Foo ((fun x => ..) n)` where the oracle would produce
+    /// `Foo (f m = f n)`. The two terms are defeq, so no unification
+    /// verdict changes; what can differ is the SHAPE of a type reported in
+    /// a message, and any future syntactic test run on the result. This is
+    /// the only remaining divergence from the oracle here, it can only ever
+    /// UNDER-reduce (never emit a term the oracle would not), and closing
+    /// it means porting `visit`'s traversal — which needs a bvar-offset
+    /// walk this crate has no other caller for.
     ///
     /// Additive + behavior-neutral, and the reason it lives HERE rather than
     /// in `leanr_elab`: the substitution half (`instantiate_rev`) is public
@@ -685,9 +720,18 @@ impl<'e> MetaCtx<'e> {
         e: ExprId,
         args: &[ExprId],
     ) -> Result<ExprId, MetaError> {
+        // oracle: `stop > start` — with `start = 0, stop = args.size`,
+        // exactly "`args` is non-empty".
         if args.is_empty() {
             return Ok(e);
         }
+        // oracle: `e.hasLooseBVars`. Nothing to substitute AND nothing to
+        // beta — the oracle returns `e` itself from the `else` arm.
+        if self.data(e).loose_bvar_range() == 0 {
+            return Ok(e);
+        }
+        // oracle: `args.any (·.consumeMData.isLambda) start stop`.
+        let any_lambda = args.iter().any(|&a| self.consume_mdata_is_lambda(a));
         let inst = leanr_kernel::instantiate_rev(
             self.scratch,
             Some(self.view.store),
@@ -695,7 +739,26 @@ impl<'e> MetaCtx<'e> {
             args,
             &mut self.guard,
         )?;
-        self.head_beta(inst)
+        if any_lambda {
+            self.head_beta(inst)
+        } else {
+            // oracle's own comment: "If there are no lambdas, then
+            // `instantiateRevRange` suffices."
+            Ok(inst)
+        }
+    }
+
+    /// oracle: `Expr.consumeMData` followed by `Expr.isLambda` — the test
+    /// `instantiateBetaRevRange` runs on each substituted argument.
+    fn consume_mdata_is_lambda(&self, e: ExprId) -> bool {
+        let mut cur = e;
+        loop {
+            match self.node(cur) {
+                Node::MData { expr, .. } => cur = expr,
+                Node::Lam { .. } => return true,
+                _ => return false,
+            }
+        }
     }
 
     pub fn status_of(&self, n: NameId) -> ReducibilityStatus {
@@ -983,6 +1046,113 @@ mod tests {
             let err = ctx.mk_forall(std::slice::from_ref(&fvar), fvar);
             ctx.lctx_restore(checkpoint);
             assert!(err.is_err(), "expected Err for an ldecl fvar, got {err:?}");
+        });
+    }
+
+    /// oracle: `Expr.instantiateBetaRevRange`'s FIRST short-circuit,
+    /// `if e.hasLooseBVars && ..` (`Lean/Meta/InferType.lean:37`). A term
+    /// with no loose bvars is returned as-is — even when it is itself a
+    /// beta redex and even when `args` contains a lambda (which is what
+    /// isolates this guard from the `args.any isLambda` one below).
+    ///
+    /// Pins the whole-branch-review finding: the previous implementation
+    /// substituted and then `head_beta`'d unconditionally, so this exact
+    /// input came back as `Nat` instead of `(fun _ => #0) Nat`. Because
+    /// `getParamType`/`getArgExpectedType` read the result, that is the
+    /// expected type an argument gets elaborated against.
+    #[test]
+    fn instantiate_beta_rev_range_leaves_a_closed_term_alone() {
+        with_prelude0_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let nat = const_named(ctx, "Nat");
+            let bvar0 = ctx
+                .scratch
+                .expr_bvar(base, &leanr_kernel::Nat::from(0u64))
+                .expect("bvar");
+            // `fun (_ : Nat) => #0` — the identity, closed.
+            let id_lam = ctx
+                .scratch
+                .expr_lam(base, None, nat, bvar0, BinderInfo::Default)
+                .expect("lam");
+            // `(fun (_ : Nat) => #0) Nat` — a redex, but CLOSED.
+            let redex = ctx.scratch.expr_app(base, id_lam, nat).expect("app");
+            let out = ctx
+                .instantiate_beta_rev_range(redex, &[id_lam])
+                .expect("instantiate_beta_rev_range");
+            assert_eq!(
+                out, redex,
+                "hasLooseBVars is false, so the oracle returns `e` untouched"
+            );
+        });
+    }
+
+    /// oracle: the SECOND short-circuit — `else instantiateRevRange e
+    /// start stop args`, taken when `args.any (·.consumeMData.isLambda)`
+    /// is false (`InferType.lean:39-43`, with the oracle's own comment
+    /// "If there are no lambdas, then `instantiateRevRange` suffices").
+    ///
+    /// The term here has a loose bvar (so the first guard does not fire)
+    /// and an existing head redex, and the substituted argument is a
+    /// constant, not a lambda. The oracle substitutes and stops; the
+    /// previous implementation went on to `head_beta` and collapsed the
+    /// redex.
+    #[test]
+    fn instantiate_beta_rev_range_skips_beta_when_no_arg_is_a_lambda() {
+        with_prelude0_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let nat = const_named(ctx, "Nat");
+            let bvar0 = ctx
+                .scratch
+                .expr_bvar(base, &leanr_kernel::Nat::from(0u64))
+                .expect("bvar");
+            let id_lam = ctx
+                .scratch
+                .expr_lam(base, None, nat, bvar0, BinderInfo::Default)
+                .expect("lam");
+            // `(fun (_ : Nat) => #0) #0` — the OUTER `#0` is loose.
+            let e = ctx.scratch.expr_app(base, id_lam, bvar0).expect("app");
+            let out = ctx
+                .instantiate_beta_rev_range(e, &[nat])
+                .expect("instantiate_beta_rev_range");
+            match ctx.node(out) {
+                Node::App { f, arg } => {
+                    assert!(
+                        matches!(ctx.node(f), Node::Lam { .. }),
+                        "no lambda in `args`, so no beta step: the head stays a Lam"
+                    );
+                    assert_eq!(arg, nat, "the loose bvar is still substituted");
+                }
+                other => panic!("expected the redex to survive un-reduced, got {other:?}"),
+            }
+        });
+    }
+
+    /// The case the oracle's `visit` arm exists for, and the reason this
+    /// function is not just `instantiateRevRange`: a loose bvar in HEAD
+    /// position substituted by a lambda argument produces a redex that
+    /// must be reduced (`InferType.lean`'s own docstring example, `motive
+    /// n` with `motive := fun x => ..`). `head_beta` covers exactly this
+    /// head-position case — see `instantiate_beta_rev_range`'s named
+    /// limitation for the nested-redex case it does not.
+    #[test]
+    fn instantiate_beta_rev_range_betas_a_lambda_substituted_at_the_head() {
+        with_prelude0_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let nat = const_named(ctx, "Nat");
+            let bvar0 = ctx
+                .scratch
+                .expr_bvar(base, &leanr_kernel::Nat::from(0u64))
+                .expect("bvar");
+            let id_lam = ctx
+                .scratch
+                .expr_lam(base, None, nat, bvar0, BinderInfo::Default)
+                .expect("lam");
+            // `#0 Nat` — head is a loose bvar.
+            let e = ctx.scratch.expr_app(base, bvar0, nat).expect("app");
+            let out = ctx
+                .instantiate_beta_rev_range(e, &[id_lam])
+                .expect("instantiate_beta_rev_range");
+            assert_eq!(out, nat, "`(fun _ => #0) Nat` must beta-reduce to `Nat`");
         });
     }
 
