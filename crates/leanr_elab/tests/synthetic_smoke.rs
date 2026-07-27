@@ -105,15 +105,27 @@ fn step_processes_pending_mvars_in_creation_order() {
 /// (`SyntheticMVars.lean:593`). Reversing that merge still terminates
 /// and still looks green on simple terms, then diverges on nested
 /// applications.
+///
+/// Also asserts progress here (not just merge order): 2 pre-existing
+/// pending mvars, 0 solved, 1 created mid-step must still report NO
+/// progress. If progress were computed off the post-merge list length
+/// (3) instead of the snapshot (2) vs. survivor count (2), this would
+/// wrongly report progress — see `step_reports_progress_by_snapshot_count`
+/// for the case that comparison alone cannot distinguish.
 #[test]
 fn step_merges_new_pending_before_still_unsolved() {
     support::with_app_harness("Nat.zero", |app| {
         let old = support::register_n_typeclass_mvars(app, 2);
-        let fresh = support::step_creating_one_mvar_solving_none(app);
+        let (fresh, progress) = support::step_creating_one_mvar_solving_none(app);
         assert_eq!(
             app.elab.pending_mvars,
             vec![fresh, old[1], old[0]],
             "new pending first, then still-unsolved in original order"
+        );
+        assert!(
+            !progress,
+            "2 snapshot vs 2 survivors (mid-step creation must not count \
+             as merged-list growth) -> no progress"
         );
     });
 }

@@ -167,14 +167,19 @@ pub fn step_recording_visit_order(
 
 /// Drive `step_with` registering one fresh `TypeClass` mvar mid-walk
 /// (as real synthesis can) and resolving none of the pre-existing
-/// pending mvars. Returns the id of the mvar created during the step.
+/// pending mvars. Returns the id of the mvar created during the step
+/// AND the step's progress bool, so callers can assert both the merge
+/// order and that the mid-step-created mvar does not get counted into
+/// the progress comparison (progress is snapshot length vs. survivor
+/// count, never the post-merge list length).
 pub fn step_creating_one_mvar_solving_none(
     app: &mut leanr_elab::app::state::AppElab,
-) -> leanr_meta::MVarId {
+) -> (leanr_meta::MVarId, bool) {
     use leanr_elab::synthetic::SyntheticMVarKind;
     let ty = app.st.f_type;
     let mut fresh_id = None;
-    app.elab
+    let progress = app
+        .elab
         .step_with(|elab, _mvar_id| {
             if fresh_id.is_none() {
                 let (_e, id) = elab
@@ -186,7 +191,10 @@ pub fn step_creating_one_mvar_solving_none(
             Ok(false)
         })
         .expect("step_with: stub outcome is infallible");
-    fresh_id.expect("step visited at least one pending mvar")
+    (
+        fresh_id.expect("step visited at least one pending mvar"),
+        progress,
+    )
 }
 
 /// Drive `step_with` resolving exactly the first-visited (oldest)
