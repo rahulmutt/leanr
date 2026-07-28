@@ -53,14 +53,15 @@ impl<'e> TermElabM<'e> {
     /// **Why this is not just `synth_instance` with the error mapped.**
     /// The oracle's `.undef` is a DYNAMIC signal: `synthInstanceCore?`
     /// runs the entire search under `withNewMCtxDepth`
-    /// (`SynthInstance.lean:977`) with `isDefEqStuckEx := true`
+    /// (`SynthInstance.lean:978`) with `isDefEqStuckEx := true`
     /// (`:963`), which makes every metavariable the CALLER already owned
     /// read-only for the duration. When a candidate's unification then
     /// reaches `?a =?= Nat` with `?a` read-only and `Nat` not a
     /// metavariable, neither side is assignable and
-    /// `ExprDefEq.lean:1898-1958`'s last branch throws
-    /// `isDefEqStuck`, which aborts the whole search — so the answer is
-    /// "ask me again once you have assigned `?a`", not "`instWrapNat`".
+    /// `ExprDefEq.lean:1908-1958`'s last branch throws
+    /// `isDefEqStuck` (`:1956`), which aborts the whole search — so the
+    /// answer is "ask me again once you have assigned `?a`", not
+    /// "`instWrapNat`".
     ///
     /// `leanr_meta` has no mctx-depth / read-only-mvar model and
     /// constructs `MetaError::IsDefEqStuck` nowhere (this crate's
@@ -79,8 +80,8 @@ impl<'e> TermElabM<'e> {
     ///
     /// - **Exact in the safe direction.** Every site that can throw
     ///   `isDefEqStuck` under this config — the non-assignable/
-    ///   non-assignable branch (`ExprDefEq.lean:1954`), the
-    ///   outer-depth `unstuckMVar` rescue (`:1993-2018`), and
+    ///   non-assignable branch (`ExprDefEq.lean:1956`), the
+    ///   outer-depth `unstuckMVar` rescue (`:2018`), and
     ///   `DiscrTree.getKeyArgs`'s reducible/matcher/recursor cases
     ///   (`DiscrTree/Main.lean:359-386`, all guarded by
     ///   `e.hasExprMVar`) — needs an unassigned EXPR metavariable
@@ -88,17 +89,69 @@ impl<'e> TermElabM<'e> {
     ///   `.undef`, so a ground goal still goes to the real search.
     /// - **Over-approximating in the other direction, and that is the
     ///   residual gap.** A goal that does mention an unassigned expr
-    ///   mvar is reported `.undef` here even when the oracle would have
-    ///   succeeded — the case where every candidate the search reaches
-    ///   is polymorphic in that argument (`instWrapAny : ∀ α, Wrap α`),
-    ///   so unification assigns only search-local mvars and never the
-    ///   caller's. Closing that residue needs the real depth model, not
-    ///   a finer syntactic test; until then this errs toward
-    ///   postponement, which the ladder can recover from, rather than
-    ///   toward committing to a candidate, which it cannot.
+    ///   mvar is reported `.undef` here in three cases where the oracle
+    ///   does NOT report `.undef`. They are listed below WORST FIRST,
+    ///   and they do not share an owner — do not assume the mctx-depth
+    ///   model closes them all.
+    ///
+    /// **Residue 1 — `outParam` goals (the big one; owner: P2b, NOT the
+    /// depth model).** `synthInstanceCore?` classifies the goal through
+    /// `preprocess` (`SynthInstance.lean:737-773`, called at `:968`)
+    /// into `.noMVars` / `.mvarsNoOutputParams` / `.mvarsOutputParams`
+    /// (`PreprocessKind`, `:706-716`). For `.mvarsOutputParams` the
+    /// dispatch at `:999-1002` runs `preprocessOutParam`
+    /// (`:775-817`), which REPLACES the caller's mvars sitting in
+    /// output-parameter positions with `mkFreshExprMVar`s — minted
+    /// inside the `withNewMCtxDepth` block at `:978`, hence at the NEW
+    /// depth, hence assignable — so the search never unifies against the
+    /// caller's mvar and never gets stuck on it. `applyAbstractResult?`
+    /// then runs `assignOutParams` (`:825-845`, called at `:880` and
+    /// `:936`) from `:1003`, i.e. AFTER the depth block has closed, and
+    /// that `isDefEq` assigns the caller's mvar at the outer depth. So
+    /// the standard binop shape `HAdd Nat Nat ?γ` is `.some` in the
+    /// oracle, with `?γ := Nat` assigned as a RESULT of synthesis —
+    /// while this function answers `Undef` and the ladder will
+    /// eventually raise `StuckSyntheticMVar` on a goal the oracle
+    /// answers. Unreachable today only because outParam support is
+    /// itself a named seam (`app/args.rs:497-505`'s
+    /// "local-instance outParam result type requires classExtension
+    /// decode — M4b-3 P2b" and `app/finalize.rs:60-65`'s result-type
+    /// counterpart) and no fixture class carries one. **When P2b
+    /// lands `classExtension`/outParam decode, this pre-test MUST be
+    /// taught to exempt output-parameter positions (or be deleted in
+    /// favour of the real mechanism) — porting `preprocessOutParam` /
+    /// `assignOutParams`, not the depth model, is what closes this.**
+    ///
+    /// **Residue 2 — an all-polymorphic candidate set (owner: the
+    /// mctx-depth model).** If every candidate the search reaches is
+    /// polymorphic in the mvar's argument (`instWrapAny : ∀ α, Wrap α`),
+    /// unification assigns only search-local mvars and never the
+    /// caller's, so the oracle answers `.some`. Distinguishing that from
+    /// the `Wrap Nat`/`Wrap Unit` case genuinely needs read-only mvars —
+    /// no syntactic test on the goal can do it.
+    ///
+    /// **Residue 3 — a class with ZERO candidates and an mvar goal
+    /// (owner: the mctx-depth model; both sides error either way).**
+    /// `NoInst ?a` is `.none` in the oracle, not `.undef`: with no
+    /// candidates, `mkGeneratorNode?` registers nothing and no
+    /// unification ever runs, and the DiscrTree lookup does not throw
+    /// either (its stuck cases at `DiscrTree/Main.lean:359-386` fire
+    /// only for reducible / matcher / recursor heads, and a bare mvar
+    /// argument becomes `.star` at `:392-412`). So the oracle throws
+    /// "failed to synthesize instance" where leanr now postpones and
+    /// the ladder reports `StuckSyntheticMVar`. Both sides ERROR, and
+    /// `dump_elab.lean` drops any query whose oracle side throws, so no
+    /// corpus record can cover it — recorded here rather than left to be
+    /// rediscovered. The GROUND case (`NoInst Nat`) is unaffected and
+    /// still reaches `InstanceSynthesisFailed`
+    /// (`unsolvable_instance_is_a_synthesis_failure`).
+    ///
+    /// Until those are closed this errs toward postponement, which the
+    /// ladder can recover from, rather than toward committing to a
+    /// candidate, which it cannot.
     ///
     /// LEVEL metavariables are deliberately NOT part of the test:
-    /// `withNewMCtxDepth (allowLevelAssignments := true)` (`:977`) keeps
+    /// `withNewMCtxDepth (allowLevelAssignments := true)` (`:978`) keeps
     /// outer LEVEL mvars assignable, so `LevelDefEq.lean:167-171`'s
     /// stuck throw needs a level mvar that is non-assignable for some
     /// other reason. `has_expr_mvar` alone is the right predicate.
@@ -106,10 +159,12 @@ impl<'e> TermElabM<'e> {
     /// The `MetaError::IsDefEqStuck` arm below is kept live: it is the
     /// channel this function should be reading once `leanr_meta` grows
     /// the depth model, at which point the syntactic pre-test becomes
-    /// redundant and can be deleted rather than rewritten.
+    /// redundant for residues 2 and 3 and can be deleted rather than
+    /// rewritten. Residue 1 does NOT come along for free — it needs
+    /// P2b's `preprocessOutParam`/`assignOutParams` port as well.
     ///
     /// Precondition: `ty` is already `instantiate_mvars`-ed (the oracle's
-    /// own `let type ← instantiateMVars type`, `SynthInstance.lean:969`).
+    /// own `let type ← instantiateMVars type`, `SynthInstance.lean:967`).
     /// The `has_expr_mvar` bit is recomputed per constructed node, so on
     /// an instantiated type it means exactly "mentions an UNASSIGNED expr
     /// mvar"; on a stale one it would over-report.

@@ -135,7 +135,7 @@ fn step_merges_new_pending_before_still_unsolved() {
 /// reports this stuck (verified against the pinned v4.33.0-rc1
 /// toolchain: `useWrap` alone gives "typeclass instance problem is
 /// stuck / Wrap ?m.1 / ... the type argument to `Wrap` is a
-/// metavariable"), via `SynthInstance.lean:977`'s `withNewMCtxDepth`
+/// metavariable"), via `SynthInstance.lean:978`'s `withNewMCtxDepth`
 /// making an OUTER-scope mvar read-only for the whole search.
 ///
 /// `leanr_meta` still has no MCtx-depth / read-only-mvar model — that

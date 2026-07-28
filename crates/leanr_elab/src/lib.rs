@@ -125,35 +125,60 @@
 //!   structure is correct for when producers make the other knobs
 //!   observable; recorded here so a reader does not assume five
 //!   distinct rungs run today.
-//! - **`leanr_meta` cannot report a stuck typeclass goal.**
+//! - **`leanr_meta` cannot report a stuck typeclass goal; the
+//!   elaborator approximates it.**
 //!   `leanr_meta::error::MetaError` declares `IsDefEqStuck` (`error.rs:36`)
 //!   but constructs it nowhere; `synth.rs`'s `synth_instance_main` (the
 //!   private body behind the public `synth_instance`, its own doc
 //!   comment at `synth.rs:1636-1650`) documents `isDefEqStuckEx`
 //!   (`Meta/Basic.lean` in the pinned oracle) as a named seam because
 //!   tier-1 `leanr_meta` has no mctx-depth / read-only-mvar model with
-//!   which to DECIDE stuck-vs-assignable. The consequence,
-//!   measured rather than assumed: `synth_instance(Wrap ?m)` *succeeds*
-//!   in leanr, assigning `?m := Nat` from the class's sole candidate,
-//!   where the pinned oracle refuses and reports the goal stuck. So the
-//!   ladder's `.undef` trichotomy arm (`synthetic.rs`'s
-//!   `synthesize_inst_mvar_core`) is unreachable from a typeclass goal —
-//!   `reportStuckSyntheticMVars` can never fire from one — and
-//!   `useWrap` bare (a class instance parameter left as a bare hole)
-//!   succeeds in leanr where the oracle errors. This is **not** a
-//!   record divergence: `dump_elab.lean`'s dumper drops any query whose
-//!   oracle side throws, so no corpus record covers it, which is
-//!   exactly why it is written down here instead of left to be
-//!   rediscovered. Three tests in
-//!   `tests/synthetic_smoke.rs` (`stuck_synthesis_is_not_ready_rather_than_failure`,
+//!   which to DECIDE stuck-vs-assignable. The consequence, measured
+//!   rather than assumed and UNCHANGED: `MetaCtx::synth_instance(Wrap ?m)`
+//!   called directly still *succeeds*, assigning `?m` from whichever
+//!   candidate the search reaches first, where the pinned oracle refuses
+//!   and reports the goal stuck. That tier-1 divergence is pinned by
+//!   `leanr_meta`'s own gate — `tests/oracle_synth.rs`'s
+//!   `exc_record_stuck_synth_0_pins_leanrs_current_divergent_answer`,
+//!   whose doc says in as many words that it must be updated when the
+//!   seam closes. Owner: whichever slice gives `leanr_meta` an
+//!   mctx-depth / read-only-mvar model — not scoped to any M4b-3
+//!   sub-slice today.
+//!
+//!   What CHANGED (M4b-3 P3 task 2): the ELABORATOR no longer depends on
+//!   that seam for its own decision, so the consequences this entry used
+//!   to record no longer follow. `synthetic/ladder.rs`'s
+//!   `TermElabM::try_synth_instance` reconstructs `trySynthInstance`'s
+//!   `.undef` from the goal type — a goal still mentioning an unassigned
+//!   expr mvar is "not ready" instead of being answered by a guessed
+//!   candidate. So the ladder's `.undef` trichotomy arm IS reachable
+//!   from a typeclass goal, `report_stuck_synthetic_mvars` DOES fire
+//!   from one, and bare `useWrap` now errors `StuckSyntheticMVar` as the
+//!   oracle does. The three `tests/synthetic_smoke.rs` tests that were
+//!   `#[ignore]`d on this basis
+//!   (`stuck_synthesis_is_not_ready_rather_than_failure`,
 //!   `bare_typeclass_application_is_reported_stuck`,
-//!   `postpone_yes_leaves_the_mvar_pending`) are `#[ignore]`d on this
-//!   basis, and
-//!   Task 9's entry-point test had to be reshaped around it. This
-//!   unblocks: differential coverage of the ladder's stuck-report path
-//!   from a typeclass goal, and a correct `useWrap`-bare seam. Owner:
-//!   whichever slice gives `leanr_meta` an mctx-depth / read-only-mvar
-//!   model — not scoped to any M4b-3 sub-slice today.
+//!   `postpone_yes_leaves_the_mvar_pending`) are un-ignored and green.
+//!   (P2a task 9's entry-point test was shaped around the old behaviour;
+//!   it still passes and has not been revisited.)
+//!
+//!   What is STILL OPEN on the elaborator side is the price of that
+//!   reconstruction: it is exact in the safe direction (a goal with no
+//!   unassigned expr mvar can never be `.undef`, so ground goals still
+//!   reach the real search) but over-approximates in three cases, which
+//!   do NOT share an owner. `try_synth_instance`'s own doc enumerates
+//!   them with oracle citations; in short: (1) `outParam` goals such as
+//!   `HAdd Nat Nat ?γ`, which the oracle ANSWERS via
+//!   `preprocessOutParam`/`assignOutParams` and leanr would defer —
+//!   unreachable only because outParam support is itself a P2b seam, and
+//!   closed by P2b's port, NOT by the depth model; (2) an
+//!   all-polymorphic candidate set; (3) a zero-candidate class with an
+//!   mvar goal (`NoInst ?a`), where the oracle throws "failed to
+//!   synthesize" and leanr reports stuck — both error, so neither is a
+//!   record divergence. `dump_elab.lean`'s dumper drops any query whose
+//!   oracle side throws, so no corpus record can cover (3), which is
+//!   exactly why it is written down rather than left to be
+//!   rediscovered.
 pub mod app; // M4b-3 P1
 pub mod builtin; // Tasks 4-6
 pub mod dispatch;
