@@ -23,11 +23,14 @@
 //! # A deliberate subset of the oracle's fields
 //!
 //! The oracle's `Config`/`toKey` covers 19 fields; this `Config` covers
-//! 15. That gap is intentional, not an oversight: `offset_cnstrs`,
-//! `assign_synthetic_opaque`, and `eta_struct` arrive with the features
-//! that consult them, and `ASSERT_CONFIG_SIZE` forces
+//! 16. That gap is intentional, not an oversight: `offset_cnstrs` and
+//! `eta_struct` arrive with the features that consult them, and
+//! `ASSERT_CONFIG_SIZE` forces
 //! the cache-key decision at that point rather than letting a field
-//! silently default to "unconsulted". `isDefEqStuckEx` is spec-mandated
+//! silently default to "unconsulted" (`assign_synthetic_opaque` was the
+//! third such deferred field until M4b-3 P3 task 4, which added it with
+//! `withAssignableSyntheticOpaque`, its one consumer).
+//! `isDefEqStuckEx` is spec-mandated
 //! to become a typed error variant rather than a bool field, so it is
 //! not tracked here at all.
 
@@ -87,6 +90,40 @@ pub struct Config {
     /// Basic.lean, `zetaHave : Bool := true`; consulted by whnfCore's
     /// letE arm.
     pub zeta_have: bool,
+    /// Allow `isDefEq` to assign a `syntheticOpaque` metavariable.
+    /// oracle: `Config.assignSyntheticOpaque` (Basic.lean:145), scoped by
+    /// `withAssignableSyntheticOpaque` (Basic.lean:1312-1313).
+    ///
+    /// Default `false` — the whole point of `syntheticOpaque` is that
+    /// ordinary unification must not assign it. Exactly one caller sets
+    /// it: `synthesizeUsingDefaultInstance` (`SyntheticMVars.lean:164`),
+    /// because a default instance must be able to assign an outParam
+    /// mvar that `coeAtOutParam` marked opaque. IN the cache key: it
+    /// changes which terms unify, so two queries under different values
+    /// are different questions (this module's own doc, and Lean's
+    /// #13772; the oracle keeps it in `toKey` too, Basic.lean:209).
+    ///
+    /// **NAMED SEAM — one of this crate's four `syntheticOpaque` gates
+    /// consults it.** In the oracle the flag is read inside
+    /// `MVarId.isReadOnlyOrSyntheticOpaque` itself (Basic.lean:985), so
+    /// EVERY caller of that predicate is gated by it. This crate
+    /// open-codes the predicate at four sites, and M4b-3 P3 task 4 wired
+    /// the flag into exactly the one its brief named:
+    /// `assign.rs::unassigned_mvar_id` (`isAssignable`,
+    /// ExprDefEq.lean:1731-1733) — the site
+    /// `withAssignableSyntheticOpaque`'s only oracle caller
+    /// (`synthesizeUsingDefaultInstance`'s `isDefEqGuarded`) actually
+    /// needs. The other three are NOT gated yet:
+    /// `lazy_delta.rs`'s struct-eta assignability check (also
+    /// ExprDefEq.lean:1731-1733, and reachable from inside an
+    /// `isDefEq`), `discr_path.rs`'s key builder
+    /// (DiscrTree/Main.lean:308, reached only from instance synthesis,
+    /// which the oracle never runs inside the scope), and
+    /// `whnf.rs`'s `synth_pending` guard. Because the default is `false`
+    /// and no caller in M4b-3 P3 task 4 sets it, none of the four
+    /// behaves differently today; the first task that opens the scope
+    /// around a real `isDefEq` owns closing the `lazy_delta.rs` gap.
+    pub assign_synthetic_opaque: bool,
 }
 
 /// Breaks the build when `Config` changes size — i.e. when a field is
@@ -95,7 +132,7 @@ pub struct Config {
 /// `cache_key`, then update this constant. See the module doc for the
 /// two Lean bugs this guards against.
 const ASSERT_CONFIG_SIZE: () = assert!(
-    std::mem::size_of::<Config>() == 15,
+    std::mem::size_of::<Config>() == 16,
     "Config changed size: a field was added or removed. Decide whether \
      it is semantically relevant to definitional equality and therefore \
      belongs in Config::cache_key, then update this assertion. A field \
@@ -123,6 +160,9 @@ impl Default for Config {
             iota: true,
             zeta_unused: true,
             zeta_have: true,
+            // Oracle default: Basic.lean:145,
+            // `assignSyntheticOpaque : Bool := false`.
+            assign_synthetic_opaque: false,
         }
     }
 }
@@ -159,6 +199,9 @@ mod tests {
         assert!(c.univ_approx);
         assert!(c.unification_hints);
         assert!(c.proof_irrelevance);
+        // Basic.lean:145, `assignSyntheticOpaque : Bool := false` —
+        // ordinary unification must not assign a syntheticOpaque mvar.
+        assert!(!c.assign_synthetic_opaque);
     }
 
     // Plan-2 additions match the oracle defaults (Basic.lean): iota,
@@ -278,11 +321,15 @@ mod tests {
                 proof_irrelevance: !base.proof_irrelevance,
                 ..base
             },
+            Config {
+                assign_synthetic_opaque: !base.assign_synthetic_opaque,
+                ..base
+            },
         ];
 
         // One mutation per field: if this count drifts from the field
         // count, a field is untested.
-        assert_eq!(mutations.len(), 15);
+        assert_eq!(mutations.len(), 16);
 
         for (i, m) in mutations.iter().enumerate() {
             assert_ne!(m.cache_key(), k, "mutation {i} did not change the key");

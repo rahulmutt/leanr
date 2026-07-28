@@ -158,7 +158,17 @@ impl<'e> MetaCtx<'e> {
     /// (`isProof e = isProp (inferType e)`, InferType.lean:448-451) reuses
     /// this exact primitive rather than a second copy — same
     /// `whnf_default`-sharing precedent this method's own doc cites.
-    pub(crate) fn is_prop(&mut self, e: ExprId) -> Result<bool, MetaError> {
+    ///
+    /// Widened `pub(crate)` -> `pub` by M4b-3 P3 task 4 (design spec
+    /// § Accessor ledger, P3's row), rather than adding a `pub`
+    /// forwarder: no other `fn is_prop` occupies the name on `MetaCtx`,
+    /// and a forwarder whose only reason is a name clash that does not
+    /// exist is worse than the widening. Needed by `elabNumLit`'s Prop
+    /// failure branch (`BuiltinTerm.lean:219-223`), which distinguishes
+    /// "the expected type is a proposition" from "the expected type is
+    /// universe polymorphic" — two distinct oracle errors. Additive and
+    /// behavior-neutral: a visibility widening only.
+    pub fn is_prop(&mut self, e: ExprId) -> Result<bool, MetaError> {
         let ty = self.infer_type(e)?;
         let ty = self.whnf_default(ty)?;
         match self.node(ty) {

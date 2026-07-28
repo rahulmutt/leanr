@@ -365,8 +365,10 @@ pub(crate) struct InstanceTable {
     /// See [`InstanceTable::get_by_name`] for the allow's rationale.
     #[allow(dead_code)]
     by_name: HashMap<NameId, Instance>,
-    /// See [`MetaCtx::default_instances`] for the allow's rationale.
-    #[allow(dead_code)]
+    /// Read by [`MetaCtx::default_instances`] (per-class) and, since
+    /// M4b-3 P3 task 4, by [`MetaCtx::default_instance_priorities`]
+    /// (global) — the latter is genuinely `pub`, so the field no longer
+    /// needs the `#[allow(dead_code)]` its sibling `by_name` still does.
     defaults: Vec<(NameId, NameId, usize)>,
 }
 
@@ -526,6 +528,23 @@ impl<'e> MetaCtx<'e> {
             .map(|(_, inst, prio)| (*inst, *prio))
             .collect()
     }
+
+    /// oracle: `getDefaultInstancesPriorities` (`Instances.lean:429-430`)
+    /// — the GLOBAL priority set across every class, DESCENDING and
+    /// distinct (`PrioritySet := Std.TreeSet Nat (fun x y => compare y x)`,
+    /// `Instances.lean:383`). `synthesizeUsingDefault`
+    /// (`SyntheticMVars.lean:215-222`) walks it outermost, trying every
+    /// pending mvar at one priority before dropping to the next.
+    ///
+    /// New rather than derived: `default_instances`/`default_instances_of`
+    /// are per-class, and the priority walk is not.
+    pub fn default_instance_priorities(&self) -> Vec<usize> {
+        let mut prios: Vec<usize> = self.instances.defaults.iter().map(|(_, _, p)| *p).collect();
+        prios.sort_unstable();
+        prios.dedup();
+        prios.reverse();
+        prios
+    }
 }
 
 #[cfg(test)]
@@ -595,6 +614,22 @@ mod tests {
                 names.contains(&"instOfNN".to_string()),
                 "default_instances(OfN): {names:?}"
             );
+        });
+    }
+
+    /// oracle: `getDefaultInstancesPriorities` — the GLOBAL set of
+    /// default-instance priorities, DESCENDING and distinct, across
+    /// every class. `default_instances` is per-class and cannot produce
+    /// it, which is why this is a new accessor rather than a forwarder.
+    #[test]
+    fn default_instance_priorities_are_descending_and_distinct() {
+        with_instances_ctx(|ctx| {
+            let prios = ctx.default_instance_priorities();
+            let mut sorted = prios.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            sorted.reverse();
+            assert_eq!(prios, sorted, "descending and distinct");
         });
     }
 

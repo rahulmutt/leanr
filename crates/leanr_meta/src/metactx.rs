@@ -934,7 +934,14 @@ impl<'e> MetaCtx<'e> {
         self.step_budget = n;
     }
 
-    pub(crate) fn checkpoint(&self) -> MetaSnapshot {
+    /// `pub` since M4b-3 P3 task 4 (design spec § Accessor ledger, P3's
+    /// row): the elaborator's `commitWhen`
+    /// (`Lean/Util/MonadBacktrack.lean:50-56`) is a
+    /// save / run / restore-unless-it-returned-true bracket over exactly
+    /// this state, and `synthesizeUsingDefaultInstance`
+    /// (`SyntheticMVars.lean:155-156`) runs inside one. Additive and
+    /// behavior-neutral — a visibility widening only.
+    pub fn checkpoint(&self) -> MetaSnapshot {
         let (expr_assignments, level_assignments) = self.mctx.snapshot_assignments();
         MetaSnapshot {
             expr_assignments,
@@ -943,10 +950,29 @@ impl<'e> MetaCtx<'e> {
         }
     }
 
-    pub(crate) fn rollback(&mut self, snap: MetaSnapshot) {
+    /// `pub` since M4b-3 P3 task 4 — see [`MetaCtx::checkpoint`].
+    pub fn rollback(&mut self, snap: MetaSnapshot) {
         self.mctx
             .restore_assignments(snap.expr_assignments, snap.level_assignments);
         self.postponed = snap.postponed;
+    }
+
+    /// oracle: `withAssignableSyntheticOpaque` (`Lean/Meta/Basic.lean:1312-1313`)
+    /// — run `f` with `Config.assignSyntheticOpaque := true`, restoring
+    /// the previous value on both the normal and the panic-free error
+    /// path (`f` returns rather than unwinding, so a plain
+    /// save/run/restore is faithful).
+    ///
+    /// The config is part of the defeq CACHE KEY (`config.rs`'s own
+    /// doc), so entries cached inside the scope cannot leak out to
+    /// queries asked with the flag off. That is why this is a config
+    /// field rather than an ambient toggle.
+    pub fn with_assignable_synthetic_opaque<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let saved = self.cfg.assign_synthetic_opaque;
+        self.cfg.assign_synthetic_opaque = true;
+        let r = f(self);
+        self.cfg.assign_synthetic_opaque = saved;
+        r
     }
 }
 
@@ -961,8 +987,14 @@ impl<'e> MetaCtx<'e> {
 /// fields, `SynthInstance.lean:49`/`:57`) and re-enters it repeatedly
 /// via a `withMCtx`-equivalent, so it must be able to restore the same
 /// snapshot more than once — `rollback` consumes its argument.
+///
+/// `pub` since M4b-3 P3 task 4: [`MetaCtx::checkpoint`]/
+/// [`MetaCtx::rollback`] are now public, so their currency has to be
+/// nameable outside the crate. The fields stay private — a snapshot is
+/// an opaque token, only ever produced by `checkpoint` and consumed by
+/// `rollback`.
 #[derive(Clone)]
-pub(crate) struct MetaSnapshot {
+pub struct MetaSnapshot {
     expr_assignments: HashMap<MVarId, ExprId>,
     level_assignments: HashMap<LMVarId, LevelId>,
     postponed: Vec<(LevelId, LevelId)>,

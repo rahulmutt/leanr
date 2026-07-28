@@ -154,7 +154,18 @@ impl<'e> MetaCtx<'e> {
                     return None;
                 }
                 match self.mctx.decl(mid) {
-                    Some(d) if d.kind == MVarKind::SyntheticOpaque => None,
+                    // oracle: `isAssignable`'s `isReadOnlyOrSyntheticOpaque`
+                    // (ExprDefEq.lean:1731-1733; the `syntheticOpaque` arm
+                    // is `Basic.lean:985`), now gated by
+                    // `Config.assignSyntheticOpaque` (M4b-3 P3 task 4):
+                    // `withAssignableSyntheticOpaque` flips it so a
+                    // default instance can assign an opaque outParam.
+                    Some(d)
+                        if d.kind == MVarKind::SyntheticOpaque
+                            && !self.cfg.assign_synthetic_opaque =>
+                    {
+                        None
+                    }
                     Some(_) => Some(mid),
                     None => None,
                 }
@@ -1365,7 +1376,7 @@ mod tests {
     };
 
     use crate::test_support::{fresh_fvar, fresh_mvar};
-    use crate::{Config, MetaCtx};
+    use crate::{Config, MVarDecl, MVarKind, MetaCtx};
 
     /// A tiny bespoke environment (NOT `test_support::with_ctx`'s
     /// totally-empty one): `N.zero`/`N.succ` are declared as `Prop`-
@@ -1708,6 +1719,54 @@ mod tests {
                 "a level-mvar-only term must still be walked, not skipped by the \
                  has_expr_mvar()-only early-return"
             );
+        });
+    }
+
+    /// `Config.assign_synthetic_opaque` actually gates
+    /// `unassigned_mvar_id`'s `isReadOnlyOrSyntheticOpaque` arm
+    /// (M4b-3 P3 task 4). Without this, the new field and
+    /// [`MetaCtx::with_assignable_synthetic_opaque`] would be wired up
+    /// only as far as the compiler can check.
+    ///
+    /// oracle: `MVarId.isReadOnlyOrSyntheticOpaque` (Basic.lean:979-986)
+    /// reads the flag itself, so `withAssignableSyntheticOpaque`
+    /// (Basic.lean:1312-1313) makes exactly this unification succeed --
+    /// which is why `synthesizeUsingDefaultInstance`
+    /// (`SyntheticMVars.lean:164`) opens the scope around its
+    /// `isDefEqGuarded`.
+    #[test]
+    fn assign_synthetic_opaque_gates_a_synthetic_opaque_assignment() {
+        with_n_ctx(|ctx| {
+            let ty = n_type(ctx);
+            let (m_expr, m_id) = fresh_mvar(ctx, ty);
+            ctx.mctx_mut().declare(
+                m_id,
+                MVarDecl {
+                    user_name: None,
+                    ty,
+                    lctx: Default::default(),
+                    kind: MVarKind::SyntheticOpaque,
+                },
+            );
+            let zero = mk_const(ctx, "N.zero");
+
+            // Default (`assign_synthetic_opaque: false`): refused, and
+            // nothing is assigned.
+            assert!(!ctx.is_def_eq(m_expr, zero).expect("is_def_eq"));
+            assert!(!ctx.mctx().is_assigned(m_id));
+
+            // Inside the scope: assigned.
+            let ok = ctx.with_assignable_synthetic_opaque(|ctx| {
+                ctx.is_def_eq(m_expr, zero).expect("is_def_eq")
+            });
+            assert!(
+                ok,
+                "withAssignableSyntheticOpaque must permit the assignment"
+            );
+            assert_eq!(ctx.mctx().assignment(m_id), Some(zero));
+
+            // The scope is restored, not leaked.
+            assert!(!ctx.cfg.assign_synthetic_opaque);
         });
     }
 }
