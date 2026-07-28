@@ -106,11 +106,12 @@
 //!   does not cover this path today.
 //! - **`leanr_meta` cannot report a stuck typeclass goal.**
 //!   `leanr_meta::error::MetaError` declares `IsDefEqStuck` (`error.rs:36`)
-//!   but constructs it nowhere; `synth.rs`'s `synthesize_inst_mvar_core`
-//!   (its own doc comment, `synth.rs:1636-1650`) documents
-//!   `isDefEqStuckEx` (`Meta/Basic.lean` in the pinned oracle) as a named
-//!   seam because tier-1 `leanr_meta` has no mctx-depth / read-only-mvar
-//!   model with which to DECIDE stuck-vs-assignable. The consequence,
+//!   but constructs it nowhere; `synth.rs`'s `synth_instance_main` (the
+//!   private body behind the public `synth_instance`, its own doc
+//!   comment at `synth.rs:1636-1650`) documents `isDefEqStuckEx`
+//!   (`Meta/Basic.lean` in the pinned oracle) as a named seam because
+//!   tier-1 `leanr_meta` has no mctx-depth / read-only-mvar model with
+//!   which to DECIDE stuck-vs-assignable. The consequence,
 //!   measured rather than assumed: `synth_instance(Wrap ?m)` *succeeds*
 //!   in leanr, assigning `?m := Nat` from the class's sole candidate,
 //!   where the pinned oracle refuses and reports the goal stuck. So the
@@ -122,8 +123,11 @@
 //!   record divergence: `dump_elab.lean`'s dumper drops any query whose
 //!   oracle side throws, so no corpus record covers it, which is
 //!   exactly why it is written down here instead of left to be
-//!   rediscovered. Three groups of tests in
-//!   `tests/synthetic_smoke.rs` are `#[ignore]`d on this basis, and
+//!   rediscovered. Three tests in
+//!   `tests/synthetic_smoke.rs` (`stuck_synthesis_is_not_ready_rather_than_failure`,
+//!   `bare_typeclass_application_is_reported_stuck`,
+//!   `postpone_yes_leaves_the_mvar_pending`) are `#[ignore]`d on this
+//!   basis, and
 //!   Task 9's entry-point test had to be reshaped around it. This
 //!   unblocks: differential coverage of the ladder's stuck-report path
 //!   from a typeclass goal, and a correct `useWrap`-bare seam. Owner:
