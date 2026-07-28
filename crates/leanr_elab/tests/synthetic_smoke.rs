@@ -427,39 +427,91 @@ fn stuck_report_drains_the_pending_list() {
 }
 
 /// `with_synthesize` restores the caller's pending list by APPENDING,
-/// on both the ok and the error path.
+/// on both the ok and the error path — not by overwriting it.
 ///
 /// oracle: `withSynthesizeImp` (`SyntheticMVars.lean:662-672`) — save,
 /// clear, run, synthesize, then `finally` restore as
 /// `s.pendingMVars ++ pendingMVarsSaved`. The `finally` is why leanr's
 /// restore must survive an early return.
+///
+/// Review finding (M4b-3 P2a task 6 review, finding 3): the first
+/// version of this test left `k`'s own pending list empty in both
+/// calls, so `self.pending_mvars.extend(saved)` onto `[]` was
+/// indistinguishable from `self.pending_mvars = saved` — an
+/// implementation that OVERWROTE instead of APPENDED would have passed
+/// unchanged. `k` here registers its own `Tactic`-kind synthetic mvar
+/// and leaves it deliberately UNRESOLVED (`synthesize_synthetic_mvar`
+/// reports `Ok(false)` for a `Tactic` decl whenever `run_tactics` is
+/// false, which is every rung `with_synthesize`'s own
+/// `synthesize_synthetic_mvars` call reaches under `postpone == Yes` —
+/// the loop breaks before ever reaching rung 5's `run_tactics: true`),
+/// so the restored list has a real, non-empty survivor to check the
+/// MERGE ORDER against, not just the presence of the caller's saved
+/// entry.
 #[test]
 fn with_synthesize_saves_clears_and_restores_pending() {
     support::with_app_harness("Nat.zero", |app| {
         let outer = support::register_n_typeclass_mvars(app, 1);
         let kinds = support::any_kinds();
-        let inner_seen = std::cell::Cell::new(usize::MAX);
-        let _ =
-            app.elab
-                .with_synthesize(leanr_elab::synthetic::PostponeBehavior::Yes, &kinds, |e| {
-                    // The caller's pending mvars are invisible inside.
-                    inner_seen.set(e.pending_mvars.len());
-                    Ok(())
-                });
-        assert_eq!(inner_seen.get(), 0, "cleared for the duration");
-        assert_eq!(app.elab.pending_mvars, outer, "restored afterwards");
+        let ty = app.st.f_type;
 
-        // Type annotation required: unlike the ok-path call above (whose
-        // closure's `Ok(())` pins `R = ()`), this closure only ever
-        // returns `Err`, leaving `R` otherwise unconstrained.
-        let _: Result<(), _> =
+        let inner_seen = std::cell::Cell::new(usize::MAX);
+        let mut inner_id = None;
+        let ok_outcome = app
+            .elab
+            .with_synthesize(PostponeBehavior::Yes, &kinds, |e| {
+                // The caller's pending mvars are invisible inside.
+                inner_seen.set(e.pending_mvars.len());
+                let (_expr, id) = e
+                    .mk_fresh_expr_mvar_of_kind(ty, leanr_meta::MVarKind::Synthetic)
+                    .expect("fresh mvar");
+                e.register_synthetic_mvar(support::any_syn_elem(), id, SyntheticMVarKind::Tactic);
+                inner_id = Some(id);
+                Ok(())
+            });
+        assert_eq!(inner_seen.get(), 0, "cleared for the duration");
+        assert!(
+            ok_outcome.is_ok(),
+            "an unresolved Tactic mvar postpones under postpone == Yes, it does not error"
+        );
+        let inner_id = inner_id.expect("k registered its own mvar");
+        assert_eq!(
+            app.elab.pending_mvars,
+            vec![inner_id, outer[0]],
+            "restored by APPENDING: k's own unresolved survivor stays first, \
+             the caller's saved mvar is appended after (oracle's \
+             `s.pendingMVars ++ pendingMVarsSaved` — `s.pendingMVars` there is \
+             what the call itself leaves behind, not the saved list)"
+        );
+
+        // Reset to the same outer-only baseline the first call started
+        // from, so the error-path call below is symmetric with it.
+        app.elab.pending_mvars = outer.clone();
+
+        let mut inner_id2 = None;
+        let err_outcome: Result<(), _> =
             app.elab
-                .with_synthesize(leanr_elab::synthetic::PostponeBehavior::Yes, &kinds, |_e| {
+                .with_synthesize(PostponeBehavior::Yes, &kinds, |e| {
+                    let (_expr, id) = e
+                        .mk_fresh_expr_mvar_of_kind(ty, leanr_meta::MVarKind::Synthetic)
+                        .expect("fresh mvar");
+                    e.register_synthetic_mvar(
+                        support::any_syn_elem(),
+                        id,
+                        SyntheticMVarKind::Tactic,
+                    );
+                    inner_id2 = Some(id);
                     Err(leanr_elab::ElabError::UnsupportedSyntax("probe".into()))
                 });
+        assert!(err_outcome.is_err());
+        let inner_id2 = inner_id2.expect("k registered its own mvar before erroring");
         assert_eq!(
-            app.elab.pending_mvars, outer,
-            "restored on the error path too"
+            app.elab.pending_mvars,
+            vec![inner_id2, outer[0]],
+            "restored on the error path too, same APPEND order: k's own mvar \
+             (never touched by `synthesize_synthetic_mvars` — the error path \
+             returns before that call) stays first, the caller's saved mvar \
+             is appended after"
         );
     });
 }

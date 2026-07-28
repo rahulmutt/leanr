@@ -710,6 +710,49 @@ impl<'e> TermElabM<'e> {
         kinds: &KindInterner,
         k: impl FnOnce(&mut Self) -> Result<R, ElabError>,
     ) -> Result<R, ElabError> {
+        // `withSynthesizeImp` runs the default loop whenever
+        // `postpone == .yes` (`SyntheticMVars.lean:668-669`) — for
+        // THIS entry point that is exactly `postpone == Yes`, since
+        // `with_synthesize` IS `withSynthesizeImp`.
+        self.with_synthesize_impl(postpone, postpone == PostponeBehavior::Yes, kinds, k)
+    }
+
+    /// oracle: `withSynthesizeLightImp` (`SyntheticMVars.lean:681-689`)
+    /// — as `with_synthesize` with `postpone := .yes` and NO default
+    /// loop (`withSynthesize`'s own doc, `:691`, says in as many words
+    /// that it "does not use `synthesizeUsingDefault`" — the oracle's
+    /// `withSynthesizeLightImp` has no default-loop branch at all,
+    /// structurally, regardless of `postpone`). No P2a caller; present
+    /// because the ladder's callers arrive in later plans and a
+    /// missing sibling reads as an oversight.
+    pub fn with_synthesize_light<R>(
+        &mut self,
+        kinds: &KindInterner,
+        k: impl FnOnce(&mut Self) -> Result<R, ElabError>,
+    ) -> Result<R, ElabError> {
+        self.with_synthesize_impl(PostponeBehavior::Yes, false, kinds, k)
+    }
+
+    /// Shared body of `with_synthesize`/`with_synthesize_light`.
+    ///
+    /// Review finding (M4b-3 P2a task 6 review, finding 1): the default
+    /// loop is a SEPARATE knob from `postpone`, not derived from it.
+    /// `withSynthesizeImp` (`SyntheticMVars.lean:662-672`) runs
+    /// `synthesizeUsingDefaultLoop` when `postpone == .yes` (`:668-669`),
+    /// but `withSynthesizeLightImp` (`:681-689`) NEVER runs it —
+    /// unconditionally, not merely when `postpone != .yes` — because it
+    /// is a different function that structurally lacks the branch.
+    /// `with_synthesize` always passes `postpone == Yes` here (it IS
+    /// `withSynthesizeImp`); only `with_synthesize_light` passes `false`
+    /// unconditionally, so calling it with `postpone == Yes` can never
+    /// accidentally run the loop the oracle's own light variant omits.
+    fn with_synthesize_impl<R>(
+        &mut self,
+        postpone: PostponeBehavior,
+        run_default_loop: bool,
+        kinds: &KindInterner,
+        k: impl FnOnce(&mut Self) -> Result<R, ElabError>,
+    ) -> Result<R, ElabError> {
         let saved = std::mem::take(&mut self.pending_mvars);
         // Every exit path below must run `self.pending_mvars.extend(saved)`
         // exactly once — that is the oracle's `finally`. Written as
@@ -724,7 +767,7 @@ impl<'e> TermElabM<'e> {
             }
         };
         let mut synth = self.synthesize_synthetic_mvars(postpone, kinds);
-        if synth.is_ok() && postpone == PostponeBehavior::Yes {
+        if synth.is_ok() && run_default_loop {
             // oracle: `synthesizeUsingDefaultLoop` (:653). P3 owns the
             // real loop; the guarded seam stands in.
             synth = self.synthesize_using_default().map(|_| ());
@@ -732,18 +775,6 @@ impl<'e> TermElabM<'e> {
         self.pending_mvars.extend(saved);
         synth?;
         Ok(out)
-    }
-
-    /// oracle: `withSynthesizeLightImp` (`SyntheticMVars.lean:681-689`)
-    /// — as `with_synthesize` with `postpone := .yes` and NO default
-    /// loop. No P2a caller; present because the ladder's callers arrive
-    /// in later plans and a missing sibling reads as an oversight.
-    pub fn with_synthesize_light<R>(
-        &mut self,
-        kinds: &KindInterner,
-        k: impl FnOnce(&mut Self) -> Result<R, ElabError>,
-    ) -> Result<R, ElabError> {
-        self.with_synthesize(PostponeBehavior::Yes, kinds, k)
     }
 
     /// oracle: `processPostponedUniverseConstraints`

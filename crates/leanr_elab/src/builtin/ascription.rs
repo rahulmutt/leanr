@@ -39,18 +39,30 @@
 //!
 //! **M4b-3 P2a supplied `withSynthesize`'s postponement scaffolding**
 //! (`TermElabM::with_synthesize`, `synthetic.rs`), and both arms below
-//! now take their real shape: the `(e : T)` arm elaborates `T` under
-//! `with_synthesize(Yes, ..)` so a `TypeClass` mvar the type creates
-//! drains before `e` is elaborated against it, and the `(e :)` arm
-//! elaborates `e` itself under `with_synthesize(No, ..)`. Only the
-//! `elab_term`/`elab_term_ensuring_type` calls move inside the
-//! closures — the surrounding logic (which arm ran, what gets checked
-//! against what) is unchanged. `ensureHasType`'s coercion-insertion
-//! path (`mkCoe`) is out of scope (M4b-3); a defeq mismatch ERRORS here
-//! instead, matching `elab_term_ensuring_type`'s own documented
-//! behavior. No fixture row exercises the second arm — the `opt(term)`
-//! type slot is genuinely optional grammar, transcribed anyway as the
-//! direct, unambiguous port.
+//! now take their real shape, matching the oracle's own STATEMENT
+//! BOUNDARIES exactly — not just "elaboration happens somewhere inside
+//! a scope". `(e : T)`: `T` elaborates under `with_synthesize(Yes,
+//! ..)` (`elabType type`, `:430`), so a `TypeClass` mvar `T` creates
+//! drains before `e` is even looked at; `e` is then elaborated against
+//! `T` and checked — `elabTerm e type` + `ensureHasType type e`
+//! (`:431-432`) — entirely OUTSIDE that scope, because the oracle's
+//! own `<|` binds `withSynthesize` to `elabType type` alone. `(e :)`:
+//! `e` elaborates ALONE, with NO expected type — matching `elabTerm e
+//! none` (`:434`) exactly, not the caller's real `expected` — under
+//! `with_synthesize(No, ..)`; only after that scope returns is the
+//! result checked against the caller's actual `expected`
+//! (`ensureHasType expectedType? e`, `:435`).
+//!
+//! Getting both boundaries exactly right matters once P4 coercion
+//! insertion lands: `ensureHasType` is where a coercion's own mvar
+//! would be created, and that mvar must be free to escape to an OUTER
+//! scheduler rather than forced to resolve inside this narrower scope.
+//! `ensureHasType`'s coercion-insertion path (`mkCoe`) is out of scope
+//! now (M4b-3); a defeq mismatch ERRORS here instead, matching
+//! `elab_term_ensuring_type`'s own documented behavior. No fixture row
+//! exercises the second arm — the `opt(term)` type slot is genuinely
+//! optional grammar, transcribed anyway as the direct, unambiguous
+//! port.
 //!
 //! **Tree shape is NOT what the M4b-1 plan guessed.** A real parse dump
 //! (this task's own throwaway probe, never committed — see the task
@@ -112,18 +124,40 @@ pub fn elab_ascription(
         .expect("the opt-type slot is always null-node-wrapped (grammar-guaranteed)");
 
     match non_trivia_children(opt_node).first() {
-        // `($e :)` — no type constraint written; `ensureHasType
-        // expectedType? e`, itself run under `with_synthesize(No, ..)`
-        // (oracle: `BuiltinNotation.lean:433-435`).
-        None => elab.with_synthesize(PostponeBehavior::No, kinds, |elab| {
-            elab.elab_term_ensuring_type(e, kinds, expected)
-        }),
+        // `($e :)` — no type constraint written. The oracle's `<|`
+        // binds `with_synthesize(No, ..)` to `elabTerm e none` ALONE
+        // (`BuiltinNotation.lean:434`) — the caller's real `expected`
+        // is deliberately withheld from the elaboration itself — and
+        // `ensureHasType expectedType? e` (`:435`) runs AFTER that
+        // scope returns, checking the result against `expected`. A
+        // Review finding (M4b-3 P2a task 6 review, finding 2): a
+        // wider scope here would force a future coercion's own mvar
+        // (P4) to resolve before this scope's own postponement
+        // returns, rather than escaping to whatever scheduler called
+        // this one.
+        None => {
+            let e_val = elab.with_synthesize(PostponeBehavior::No, kinds, |elab| {
+                elab.elab_term(e, kinds, None)
+            })?;
+            if let Some(t) = expected {
+                let inferred = elab.mctx.infer_type(e_val)?;
+                if !elab.mctx.is_def_eq(inferred, t)? {
+                    return Err(ElabError::TypeMismatch {
+                        expected: t,
+                        got: inferred,
+                    });
+                }
+            }
+            Ok(e_val)
+        }
         // `($e : $type)` — the type elaborates under
-        // `with_synthesize(Yes, ..)` (oracle: `BuiltinNotation.lean:429-430`),
-        // so a `TypeClass` mvar `$type` creates drains before `e` is
-        // checked against it. `e` itself elaborates directly (no expected
-        // type of its own), matching the oracle's un-postponed
-        // `elabTerm e type`.
+        // `with_synthesize(Yes, ..)` (oracle: `elabType type`,
+        // `BuiltinNotation.lean:430`), so a `TypeClass` mvar `$type`
+        // creates drains before `e` is even looked at. `e` then
+        // elaborates against `ty` and is checked — `elabTerm e type`
+        // + `ensureHasType type e` (`:431-432`) — entirely OUTSIDE
+        // that scope, matching the oracle's own statement boundary
+        // (its `<|` binds `withSynthesize` to `elabType type` alone).
         Some(ty_elem) => {
             let ty = elab.with_synthesize(PostponeBehavior::Yes, kinds, |elab| {
                 elab.elab_term(ty_elem, kinds, None)
