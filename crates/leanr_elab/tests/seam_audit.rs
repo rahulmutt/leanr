@@ -353,16 +353,38 @@ fn walk_rs_files(dir: &str) -> Vec<std::path::PathBuf> {
 /// P2 split into P2a (this plan) and P2b (classExtension + outParam), so
 /// an unqualified "P2" is now ambiguous. Every remaining seam must name
 /// P2b, P3, P4, P5, M4b-4, or later M4.
+///
+/// Word-boundary-style match, not two literal substrings: `M4b-3 P2` is
+/// retired whenever it is NOT immediately followed by `a` or `b` (the
+/// two live sub-slice labels), regardless of what punctuation or
+/// end-of-line follows. An earlier cut of this test checked only
+/// `line.contains("M4b-3 P2\"")` and `line.contains("M4b-3 P2 ")` — a
+/// floor, not a ceiling — and a measurement against this very tree
+/// (recorded in task 10's report) showed it missed two real stale
+/// labels that took other punctuation: `dispatch.rs`'s deferral-table
+/// row ended the line with no trailing space (`... M4b-3 P2` then a
+/// newline), and `lib.rs`'s module-doc bullet ended in a comma
+/// (`... M4b-3 P2,`). Both would have passed CI silently. This scan
+/// checks the character immediately after `P2` directly instead of
+/// enumerating suffixes, so it catches every punctuation form without
+/// needing to guess which ones a future seam label might use — while
+/// `P2a`/`P2b` (and prose that never carries the `M4b-3` prefix at all,
+/// e.g. `app/mod.rs`'s "used to carry as P2 rows") stay invisible to it,
+/// same as before.
 #[test]
 fn no_seam_points_at_the_retired_p2_label() {
     let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    let needle = "M4b-3 P2";
     let mut offenders = Vec::new();
     for entry in walk_rs_files(src_dir) {
         let text = std::fs::read_to_string(&entry).expect("read source");
         for (n, line) in text.lines().enumerate() {
-            // Match the seam label, not prose mentioning the plan.
-            if line.contains("M4b-3 P2\"") || line.contains("M4b-3 P2 ") {
-                offenders.push(format!("{}:{}", entry.display(), n + 1));
+            for (idx, _) in line.match_indices(needle) {
+                let after = line[idx + needle.len()..].chars().next();
+                if after != Some('a') && after != Some('b') {
+                    offenders.push(format!("{}:{}", entry.display(), n + 1));
+                    break;
+                }
             }
         }
     }
