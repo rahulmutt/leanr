@@ -384,6 +384,45 @@ def appExplicitModeQueries : List (String × String) :=
   , ("app/univList", "List.{0}")
   ]
 
+/-- M4b-3 P2a: instance-implicit arguments. Every term here SUCCEEDS in
+the oracle under the current entry point — instance synthesis runs
+eagerly in `synthesizeAppInstMVars` at `finalize`, not in the fixpoint
+(measured during planning) — so these records land before the
+entry-point change and stay byte-identical across it.
+
+  * `tc/useWrapNat` — the base shape: one instance-implicit parameter
+    solved from the explicit argument's type.
+  * `tc/useWrapAscribed` — the same under an induced expected type, so
+    `propagateExpectedType`'s `trySynthesizeAppInstMVars` call runs
+    before the unification rather than after.
+  * `tc/atUseWrap` — `@` with the instance supplied POSITIONALLY, the
+    `processInstImplicitArg` branch that does NOT synthesize.
+  * `tc/atUseWrapHole` — `@` with `_` in the instance position, which
+    the oracle still resolves by synthesis (`nextArgHole?`,
+    App.lean:905-911). The two `@` records together are the only
+    coverage of that arm's split.
+  * `tc/atWrapImplicit` — `@` with `_` in the ordinary IMPLICIT position
+    too, so the explicit-mode arm is exercised for both binder kinds.
+  * `tc/pairBoth` — a two-parameter class.
+  * `tc/wrapWrap` — nested, so an instance goal is solved while another
+    application is mid-flight.
+  * `tc/wrapUnderFun`, `tc/funWrapElided`, `tc/letWrapElided` — an
+    instance argument under each binder form M4b-2 shipped, so the
+    Task 6 rewires are exercised by real records rather than by
+    inspection. -/
+def instImplicitQueries : List (String × String) :=
+  [ ("tc/useWrapNat",      "useWrap Nat.zero")
+  , ("tc/useWrapAscribed", "(useWrap Nat.zero : Nat)")
+  , ("tc/atUseWrap",       "@useWrap Nat instWrapNat Nat.zero")
+  , ("tc/atUseWrapHole",   "@useWrap Nat _ Nat.zero")
+  , ("tc/atWrapImplicit",  "@useWrap _ instWrapNat Nat.zero")
+  , ("tc/pairBoth",        "usePair Nat.zero Nat.zero")
+  , ("tc/wrapWrap",        "useWrap (useWrap Nat.zero)")
+  , ("tc/wrapUnderFun",    "fun (n : Nat) => useWrap n")
+  , ("tc/funWrapElided",   "(fun x => useWrap x : Nat -> Nat)")
+  , ("tc/letWrapElided",   "let x := useWrap Nat.zero; x")
+  ]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -397,7 +436,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>

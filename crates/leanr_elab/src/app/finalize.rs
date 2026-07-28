@@ -59,17 +59,10 @@ pub fn finalize(app: &mut AppElab) -> Result<ExprId, ElabError> {
         // oracle: `trySynthesizeAppInstMVars` (`App.lean:648`) runs
         // BEFORE the unification, so instance arguments are solved with
         // the information available at this point and `isDefEq` sees the
-        // resulting assignments. This guard is P1's stand-in — it rejects
-        // the only state in which that call would do anything — and it
-        // sits where the oracle's call sits, matching
-        // `propagate::propagate_expected_type`'s own transcription of
-        // the same line (`App.lean:601`).
-        if !app.st.inst_mvars.is_empty() {
-            return Err(ElabError::UnsupportedSyntax(
-                "pending instance-implicit mvars require typeclass synthesis — M4b-3 P2"
-                    .to_string(),
-            ));
-        }
+        // resulting assignments — it sits where the oracle's call sits,
+        // matching `propagate::propagate_expected_type`'s own
+        // transcription of the same line (`App.lean:601`).
+        app.try_synthesize_app_inst_mvars()?;
         // `discard <|`: a FAILED unification is DELIBERATELY ignored
         // here — "caller must handle it" (`App.lean:649`). `ensureHasType`
         // reports the mismatch with the full application in hand, which
@@ -80,13 +73,12 @@ pub fn finalize(app: &mut AppElab) -> Result<ExprId, ElabError> {
     }
 
     // oracle: the trailing `synthesizeAppInstMVars` (`App.lean:656`,
-    // defined at `App.lean:349-370`) — the pass that runs on EVERY exit
-    // path, expected type or not.
-    if !app.st.inst_mvars.is_empty() {
-        return Err(ElabError::UnsupportedSyntax(
-            "pending instance-implicit mvars require typeclass synthesis — M4b-3 P2".to_string(),
-        ));
-    }
+    // defined at `App.lean:349-370`) — the COMMITTING pass that runs on
+    // EVERY exit path, expected type or not. `Context::stx`'s own doc
+    // explains why this needs a clone rather than a borrow of
+    // `app.ctx.stx` directly: the method takes `&mut self`.
+    let stx = app.ctx.stx.clone();
+    app.synthesize_app_inst_mvars(&stx)?;
     Ok(e)
 }
 

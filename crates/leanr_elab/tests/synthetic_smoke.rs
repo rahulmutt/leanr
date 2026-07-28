@@ -137,8 +137,27 @@ fn step_merges_new_pending_before_still_unsolved() {
 /// postponement scheme rests on: `Ok(None)` is a real failure that
 /// throws, `Err(IsDefEqStuck)` is "not ready yet" that survives to the
 /// next rung.
+///
+/// STILL IGNORED after Task 7, for a reason the Elab0 fixture cannot
+/// fix: `MetaError::IsDefEqStuck` (`leanr_meta::error`) is never
+/// constructed anywhere in `leanr_meta/src` today — confirmed by
+/// grep and by a direct probe (`app.elab.mctx.synth_instance(Wrap ?m)`
+/// returns `Ok(Some(instWrapNat))`, not `Err(IsDefEqStuck)`). The real
+/// oracle DOES report this stuck (verified against the pinned
+/// v4.33.0-rc1 toolchain: `useWrap` alone elaborates to "typeclass
+/// instance problem is stuck / Wrap ?m.1 / ... the type argument to
+/// `Wrap` is a metavariable"), via `SynthInstance.lean`'s
+/// `withNewMCtxDepth` around the whole search (`:978`) making an
+/// OUTER-scope mvar read-only mid-search — a general MCtx-depth /
+/// read-only-mvar model `leanr_meta` does not have yet, by its own
+/// documented design (`synth.rs`, `whnf.rs`, `level.rs`'s "Depth /
+/// read-only seam" — explicitly deferred to a later `leanr_meta` plan,
+/// out of scope for `leanr_meta/src unchanged by this task`). Fixing
+/// this needs that model, not a different fixture shape.
 #[test]
-#[ignore = "needs the Elab0 class scaffold (Task 7)"]
+#[ignore = "needs leanr_meta MCtx-depth / read-only-mvar support so \
+            synth_instance can ever produce IsDefEqStuck — leanr_meta/src \
+            is out of scope for M4b-3 P2a"]
 fn stuck_synthesis_is_not_ready_rather_than_failure() {
     support::with_app_harness("Nat.zero", |app| {
         // `Wrap ?m` — a class goal whose type argument is an unassigned
@@ -162,7 +181,6 @@ fn stuck_synthesis_is_not_ready_rather_than_failure() {
 
 /// A solvable goal is synthesized and ASSIGNED.
 #[test]
-#[ignore = "needs the Elab0 class scaffold (Task 7)"]
 fn solvable_instance_is_synthesized_and_assigned() {
     support::with_app_harness("Nat.zero", |app| {
         let goal = support::wrap_of_nat(app);
@@ -180,7 +198,6 @@ fn solvable_instance_is_synthesized_and_assigned() {
 /// oracle: `trySynthInstance`'s `.none` arm throws
 /// (`TermElabM.lean:1275+`).
 #[test]
-#[ignore = "needs the Elab0 class scaffold (Task 7)"]
 fn unsolvable_instance_is_a_synthesis_failure() {
     support::with_app_harness("Nat.zero", |app| {
         let goal = support::no_inst_of_nat(app);
@@ -208,7 +225,6 @@ fn unsolvable_instance_is_a_synthesis_failure() {
 /// `contains_pending_mvar` retry-later escape hatch, which the design
 /// spec's Global Constraints single out as "not optional".
 #[test]
-#[ignore = "needs the Elab0 class scaffold (Task 7)"]
 fn already_assigned_and_defeq_is_reconciled_not_overwritten() {
     support::with_app_harness("Nat.zero", |app| {
         let goal = support::wrap_of_nat(app);
@@ -255,7 +271,6 @@ fn already_assigned_and_defeq_is_reconciled_not_overwritten() {
 /// `already_assigned_and_defeq_is_reconciled_not_overwritten`'s doc for
 /// why that branch otherwise goes untested).
 #[test]
-#[ignore = "needs the Elab0 class scaffold (Task 7)"]
 fn already_assigned_and_not_defeq_is_a_mismatch() {
     support::with_app_harness("Nat.zero", |app| {
         let goal = support::wrap_of_nat(app);
@@ -307,8 +322,23 @@ fn step_reports_progress_by_snapshot_count() {
 /// oracle's own `synthesizeSyntheticMVarsNoPostponing` throws
 /// "typeclass instance problem is stuck". leanr must do the same rather
 /// than emitting a term with a dangling mvar.
+///
+/// STILL IGNORED after Task 7 — same `leanr_meta` MCtx-depth gap as
+/// `stuck_synthesis_is_not_ready_rather_than_failure` (see that test's
+/// own doc for the full finding). Measured directly against this exact
+/// query: `elab_and_synthesize("useWrap")` currently returns
+/// `Ok(@useWrap Nat instWrapNat)` — leanr's `synth_instance` resolves
+/// `Wrap ?a` via the sole candidate instead of reporting it stuck, so
+/// the fixpoint never reaches `report_stuck_synthetic_mvars` at all.
+/// The pinned oracle genuinely does throw "typeclass instance problem
+/// is stuck" for this exact source text (re-confirmed against
+/// v4.33.0-rc1 while investigating this gap) — the fixture and the
+/// assertion are both right; `leanr_meta` cannot yet reproduce the
+/// oracle's refusal.
 #[test]
-#[ignore = "needs the Elab0 class scaffold (Task 7)"]
+#[ignore = "needs leanr_meta MCtx-depth / read-only-mvar support (see \
+            stuck_synthesis_is_not_ready_rather_than_failure's doc) — \
+            leanr_meta/src is out of scope for M4b-3 P2a"]
 fn bare_typeclass_application_is_reported_stuck() {
     let err = support::elab_and_synthesize("useWrap").expect_err("stuck");
     assert!(matches!(
@@ -323,8 +353,17 @@ fn bare_typeclass_application_is_reported_stuck() {
 /// oracle: rungs 2-5 and the stuck report are all under
 /// `else if postpone != .yes` / `else if postpone == .no`
 /// (`SyntheticMVars.lean:617,642`).
+///
+/// STILL IGNORED after Task 7 — same `leanr_meta` MCtx-depth gap as
+/// `stuck_synthesis_is_not_ready_rather_than_failure`'s own doc:
+/// `wrap_of_fresh_mvar`'s goal is genuinely solved by
+/// `synthesize_inst_mvar_core` (not left pending), so this test's own
+/// "still pending" assertion fails on the FIRST call, before
+/// `postpone == .yes` is even exercised.
 #[test]
-#[ignore = "needs the Elab0 class scaffold (Task 7)"]
+#[ignore = "needs leanr_meta MCtx-depth / read-only-mvar support (see \
+            stuck_synthesis_is_not_ready_rather_than_failure's doc) — \
+            leanr_meta/src is out of scope for M4b-3 P2a"]
 fn postpone_yes_leaves_the_mvar_pending() {
     support::with_app_harness("Nat.zero", |app| {
         let goal = support::wrap_of_fresh_mvar(app);
@@ -377,7 +416,6 @@ fn synthesize_using_default_is_a_shape_guarded_seam() {
 /// keep separate from `Wrap`/`Pair`/`NoInst` — see `support::dflt_of_nat`'s
 /// own doc for why.
 #[test]
-#[ignore = "needs the Elab0 default-instance fixture (Task 7)"]
 fn synthesize_using_default_errors_when_a_default_instance_is_registered() {
     support::with_app_harness("Nat.zero", |app| {
         let goal = support::dflt_of_nat(app);
@@ -405,7 +443,6 @@ fn synthesize_using_default_errors_when_a_default_instance_is_registered() {
 /// oracle: `let pendingMVars ← modifyGet fun s => (s.pendingMVars,
 /// { s with pendingMVars := [] })` (`SyntheticMVars.lean:323`).
 #[test]
-#[ignore = "needs the Elab0 class scaffold (Task 7)"]
 fn stuck_report_drains_the_pending_list() {
     support::with_app_harness("Nat.zero", |app| {
         let goal = support::wrap_of_fresh_mvar(app);

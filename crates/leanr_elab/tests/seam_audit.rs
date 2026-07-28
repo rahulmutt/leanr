@@ -4,7 +4,7 @@
 //!
 //! Scope, stated up front because a seam audit that quietly omits a seam
 //! is worse than one that names its own gaps. `app/mod.rs`'s module doc
-//! is the full site-by-site index; of the seams listed there, three are
+//! is the full site-by-site index; of the seams listed there, two are
 //! not reachable from any source term the hermetic `Elab0` fixture can
 //! express, and this file does not pretend otherwise:
 //!
@@ -12,16 +12,19 @@
 //!     either wrapper, so `app_smoke.rs`'s
 //!     `explicit_mode_skips_the_optparam_default` asserts it white-box
 //!     against a synthetic `f_type` instead;
-//!   * the **P2 instance-implicit** seams (the `InstImplicit` arm and
-//!     the three pending-`inst_mvars` guards) — `Elab0.lean` declares no
-//!     `class` and no `instance`, so nothing can produce an
-//!     `instImplicit` binder or push onto `inst_mvars`. P2 brings the
-//!     fixture classes and the tests with them;
 //!   * the **P4 coercion** seam, which is an `ElabError::TypeMismatch`
 //!     from `ensureArgType` rather than an `UnsupportedSyntax` — that IS
 //!     M4b-1's documented behavior (error on a defeq mismatch instead of
 //!     inserting a coercion), so it is a deliberately wrong-*shaped*
 //!     seam, not a missing one.
+//!
+//! The **P2 instance-implicit** seams (the `InstImplicit` arm and the
+//! three pending-`inst_mvars` guards) used to be a third unreachable
+//! row here — `Elab0.lean` declared no `class` and no `instance`. As of
+//! M4b-3 P2a task 7 it declares `Wrap`/`Pair`/`NoInst`/`Dflt`, both
+//! seams are real code, and their behavior is exercised by
+//! `tests/oracle_elab.rs`'s `tc/*` records and
+//! `tests/synthetic_smoke.rs` rather than by this file.
 //!
 //! Everything else is asserted below, end-to-end from source text.
 

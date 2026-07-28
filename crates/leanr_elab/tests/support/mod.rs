@@ -90,6 +90,7 @@ pub fn with_app_harness<R>(
         explicit: false,
         result_is_out_param_support: false,
         num_implicit_params: 0,
+        stx: term_elem.clone(),
     };
     let st = State {
         f,
@@ -231,84 +232,160 @@ pub fn step_solving_none(app: &mut leanr_elab::app::state::AppElab) -> bool {
         .expect("step_with: stub outcome is infallible")
 }
 
-// === Task 4's `synthesize_inst_mvar_core` fixtures (placeholders until
-// Task 7) ===
+// === Task 4's `synthesize_inst_mvar_core` fixtures (real, Task 7) ===
 //
 // `synthetic_smoke.rs`'s trichotomy tests need real class goals — `Wrap`,
-// solvable only for `Nat`, and `NoInst`, solvable for nothing — neither of
-// which exists in `Elab0.lean` yet (M4b-3 P2a Task 7 adds that scaffold and
-// regenerates `Elab0.olean`; growing the fixture is that task's own scope,
-// not this one's). The three helpers below exist purely so those tests
-// compile NOW under `#[ignore]`: each panics if actually called, since
-// there is no `Wrap`/`NoInst` constant to resolve yet. Task 7 replaces
-// these bodies with real term construction and removes the callers'
-// `#[ignore]` in the same step.
+// solvable only for `Nat`, and `NoInst`, solvable for nothing. Both (plus
+// `Pair` and `Dflt`) live in `Elab0.lean` as of M4b-3 P2a Task 7 (see that
+// file's own "M4b-3 P2a corpus" section).
 
-/// `Wrap Nat` — a solvable instance goal, once `Wrap`/`Wrap.instWrapNat`
-/// exist. See the module section doc above.
-pub fn wrap_of_nat(_app: &mut leanr_elab::app::state::AppElab) -> leanr_kernel::bank::ExprId {
-    unimplemented!("Wrap Nat needs the Elab0 class scaffold — M4b-3 P2a Task 7")
+/// Parse `src` and elaborate it through `app`'s own `elab` — the SAME
+/// committed `Elab0.olean` environment `app` was itself built over
+/// (`with_app_harness`'s own construction). Used by `wrap_of_nat`,
+/// `no_inst_of_nat` and `dflt_of_nat`: each of those goals (`Wrap Nat`,
+/// `NoInst Nat`, `Dflt Nat`) is a CLOSED term with no mvar, so the
+/// ordinary end-to-end entry point (parse -> `elab_term`) builds it
+/// directly, through the very `app::elab_app` path this task adds
+/// instance-implicit support to — `Wrap`/`NoInst`/`Dflt` are each
+/// `Type -> Type` classes with no instance-implicit parameter of their
+/// OWN, so applying one to `Nat` is a plain explicit application, not a
+/// typeclass goal itself.
+fn elab_type_expr(
+    app: &mut leanr_elab::app::state::AppElab,
+    src: &str,
+) -> leanr_kernel::bank::ExprId {
+    use leanr_syntax::{builtin, parse_term};
+    let snap = builtin::snapshot();
+    let parsed = parse_term(src, &snap);
+    assert!(
+        parsed.errors.is_empty(),
+        "elab_type_expr: leanr parse errors for {src:?}: {:?}",
+        parsed.errors
+    );
+    let term_elem: leanr_elab::dispatch::SynElem = parsed
+        .tree
+        .root()
+        .first_child_or_token()
+        .unwrap_or_else(|| panic!("elab_type_expr: no term child for {src:?}"));
+    app.elab
+        .elab_term(&term_elem, &parsed.tree.kinds, None)
+        .unwrap_or_else(|e| panic!("elab_type_expr: elab_term failed for {src:?}: {e:?}"))
+}
+
+/// `Wrap Nat` — a solvable instance goal.
+pub fn wrap_of_nat(app: &mut leanr_elab::app::state::AppElab) -> leanr_kernel::bank::ExprId {
+    elab_type_expr(app, "Wrap Nat")
 }
 
 /// `Wrap ?m` — the same class goal as `wrap_of_nat`, but applied to a
 /// freshly-minted unassigned mvar so `synth_instance` reports the goal
-/// stuck rather than solved or failed. See the module section doc above.
-pub fn wrap_of_fresh_mvar(
-    _app: &mut leanr_elab::app::state::AppElab,
-) -> leanr_kernel::bank::ExprId {
-    unimplemented!("Wrap ?m needs the Elab0 class scaffold — M4b-3 P2a Task 7")
+/// stuck rather than solved or failed.
+///
+/// Built by hand rather than parsed: no surface syntax can write an
+/// unassigned mvar. `elab_type_expr(app, "Wrap")` elaborates the bare
+/// class constant unapplied (zero args, so `main` finalizes with the
+/// still-unconsumed `Type -> Type` forall in place — the same "no
+/// positional argument, not explicit, no opt/auto param, no ellipsis,
+/// no named args, no further opt/auto param in the remaining telescope"
+/// path `process_explicit_arg` takes for any bare polymorphic head);
+/// the domain of ITS OWN inferred type is the exact type a fresh mvar
+/// for `Wrap`'s parameter must carry, so it is read off that type
+/// rather than re-elaborating a separate `"Type"` term.
+pub fn wrap_of_fresh_mvar(app: &mut leanr_elab::app::state::AppElab) -> leanr_kernel::bank::ExprId {
+    use leanr_kernel::bank::terms::Node;
+    let wrap = elab_type_expr(app, "Wrap");
+    let wrap_ty = app
+        .elab
+        .mctx
+        .infer_type(wrap)
+        .expect("Wrap's own type infers");
+    let Node::Forall { binder_type, .. } = app.node(wrap_ty) else {
+        panic!("wrap_of_fresh_mvar: Wrap's type is not a forall: {wrap_ty:?}");
+    };
+    let (mvar, _id) = app
+        .elab
+        .mk_fresh_expr_mvar_of_kind(binder_type, leanr_meta::MVarKind::Natural)
+        .expect("fresh mvar");
+    let base = app.elab.view.store;
+    app.elab
+        .mctx
+        .store_mut()
+        .expr_app(Some(base), wrap, mvar)
+        .expect("Wrap ?m applies")
 }
 
 /// `NoInst Nat` — a class goal with no instance, exercising the real
-/// synthesis-failure (`.none`) arm. See the module section doc above.
-pub fn no_inst_of_nat(_app: &mut leanr_elab::app::state::AppElab) -> leanr_kernel::bank::ExprId {
-    unimplemented!("NoInst Nat needs the Elab0 class scaffold — M4b-3 P2a Task 7")
+/// synthesis-failure (`.none`) arm.
+pub fn no_inst_of_nat(app: &mut leanr_elab::app::state::AppElab) -> leanr_kernel::bank::ExprId {
+    elab_type_expr(app, "NoInst Nat")
 }
 
 /// `Dflt Nat` — a class goal whose class HAS a registered
-/// `@[default_instance]`, exercising `synthesize_using_default`'s SHAPE
-/// GUARD positive case
+/// `@[default_instance]` (`Elab0.lean`'s `instDfltNat`), exercising
+/// `synthesize_using_default`'s SHAPE GUARD positive case
 /// (`synthesize_using_default_errors_when_a_default_instance_is_registered`,
-/// Task 5's review fix; currently `#[ignore]` pending this fixture).
-/// See the module section doc above for the placeholder pattern this
-/// follows.
-///
-/// Task 7's `Elab0.lean` must add a class DISTINCT from
-/// `Wrap`/`Pair`/`NoInst` — those three (`Wrap` already named above;
-/// `Pair`/`NoInst` are this same section's siblings) must never
-/// themselves gain a `@[default_instance]` instance, or the stuck-path
-/// tests (`bare_typeclass_application_is_reported_stuck`,
-/// `stuck_report_drains_the_pending_list`, Task 9's entry-point test)
-/// and any corpus record depending on `Wrap ?m`/`NoInst Nat` staying
-/// stuck or failing would instead succeed at rung 3 instead. A minimal
-/// shape:
-///
-/// ```lean
-/// class Dflt (α : Type) where
-///   val : α
-///
-/// @[default_instance]
-/// instance instDfltNat : Dflt Nat where
-///   val := Nat.zero
-/// ```
-///
-/// `dflt_of_nat` should return the `ExprId` for `Dflt Nat` — fully
-/// applied to a concrete type, no fresh mvar needed: the shape guard
-/// only inspects the pending goal's head constant name and whether
-/// `MetaCtx::default_instances_of` is non-empty for it, never whether
-/// the goal is actually solvable.
-pub fn dflt_of_nat(_app: &mut leanr_elab::app::state::AppElab) -> leanr_kernel::bank::ExprId {
-    unimplemented!("Dflt Nat needs the Elab0 default-instance fixture — M4b-3 P2a Task 7")
+/// Task 5's review fix). `Wrap`/`Pair`/`NoInst` never gain a default
+/// instance — see `Elab0.lean`'s own doc comment on why that would
+/// break the stuck-path tests.
+pub fn dflt_of_nat(app: &mut leanr_elab::app::state::AppElab) -> leanr_kernel::bank::ExprId {
+    elab_type_expr(app, "Dflt Nat")
 }
 
 /// Elaborate `src` (e.g. `"useWrap"`) end-to-end and run
-/// `synthesize_synthetic_mvars_no_postponing` over the result — the
-/// shape `bare_typeclass_application_is_reported_stuck` (Task 5) needs
-/// to reach a real stuck-typeclass report. `useWrap`/`Wrap` do not exist
-/// until the Elab0 class scaffold lands (Task 7); same placeholder
-/// style as `wrap_of_nat` and friends above, for the same reason.
-pub fn elab_and_synthesize(
-    _src: &str,
-) -> Result<leanr_kernel::bank::ExprId, leanr_elab::ElabError> {
-    unimplemented!("useWrap needs the Elab0 class scaffold — M4b-3 P2a Task 7")
+/// `synthesize_synthetic_mvars_no_postponing` over the result, then
+/// instantiate — the shape `bare_typeclass_application_is_reported_stuck`
+/// needs to reach a real stuck-typeclass report.
+///
+/// This stands in for Task 9's real `TermElabM::elab_term_and_synthesize`
+/// entry point, assembled here from the pieces that already exist today:
+/// `elab_term_ensuring_type`, then `synthesize_synthetic_mvars_no_postponing`,
+/// then `instantiate_mvars`. Task 9 re-points this helper at that method
+/// once it lands, but the test using it needs the same end-to-end
+/// behavior now. Construction otherwise mirrors
+/// `with_app_harness`/`oracle_elab.rs`'s own replay.
+pub fn elab_and_synthesize(src: &str) -> Result<leanr_kernel::bank::ExprId, leanr_elab::ElabError> {
+    use leanr_elab::TermElabM;
+    use leanr_kernel::bank::Store;
+    use leanr_kernel::EnvView;
+    use leanr_meta::{Config, MetaCtx};
+    use leanr_syntax::{builtin, parse_term};
+
+    let Replayed {
+        env,
+        reducibility,
+        matchers,
+        instances,
+        default_instances,
+        projection_fns,
+    } = replay_fixture_in("elab", "Elab0.olean");
+    let snap = builtin::snapshot();
+    let view: EnvView = env.view();
+
+    let parsed = parse_term(src, &snap);
+    assert!(
+        parsed.errors.is_empty(),
+        "elab_and_synthesize: leanr parse errors for {src:?}: {:?}",
+        parsed.errors
+    );
+    let term_elem: leanr_elab::dispatch::SynElem = parsed
+        .tree
+        .root()
+        .first_child_or_token()
+        .unwrap_or_else(|| panic!("elab_and_synthesize: no term child for {src:?}"));
+
+    let mut scratch = Store::scratch();
+    let mctx = MetaCtx::new(
+        view,
+        &mut scratch,
+        Config::default(),
+        &reducibility,
+        &matchers,
+        &instances,
+        &default_instances,
+        &projection_fns,
+    );
+    let mut elab = TermElabM::new(mctx, view);
+    let e = elab.elab_term_ensuring_type(&term_elem, &parsed.tree.kinds, None)?;
+    elab.synthesize_synthetic_mvars_no_postponing(&parsed.tree.kinds)?;
+    Ok(elab.mctx.instantiate_mvars(e)?)
 }

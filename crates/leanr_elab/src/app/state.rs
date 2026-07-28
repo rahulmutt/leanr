@@ -13,8 +13,10 @@ use leanr_kernel::BinderInfo;
 use leanr_meta::MVarId;
 
 use crate::app::expand::{Arg, NamedArg};
+use crate::dispatch::SynElem;
 use crate::elab::TermElabM;
 use crate::error::ElabError;
+use crate::synthetic::SyntheticMVarKind;
 
 /// oracle: `structure Context` (`App.lean:132-175`).
 pub struct Context {
@@ -34,6 +36,18 @@ pub struct Context {
     /// oracle: `Context.numImplicitParams` — cached max over
     /// `namedArgs`; only nonzero for structure projections (M4b-4).
     pub num_implicit_params: usize,
+    /// The application's own syntax — the oracle's ambient `getRef`
+    /// throughout `elabAppArgs` (every `TermElab` handler runs under
+    /// `withRef` bound to the whole term it was dispatched for, and
+    /// nothing inside the `ElabAppArgs.M` state machine narrows it
+    /// further before `finalize`). leanr has no ambient ref, so this
+    /// field is its stand-in: set once in `elab_app_aux` from the SAME
+    /// `SynElem` `elab_app`/`elab_atom` were handed (the whole
+    /// application, before `peel_head` strips any `@`/`.{u}` wrapper),
+    /// and read by `AppElab::synthesize_app_inst_mvars` for
+    /// `registerSyntheticMVarWithCurrRef`/`registerMVarErrorImplicitArgInfo`
+    /// (`App.lean:75-79`).
+    pub stx: SynElem,
 }
 
 /// oracle: `structure State` (`App.lean:178-227`). Every field the
@@ -344,6 +358,69 @@ impl<'a, 'e> AppElab<'a, 'e> {
     /// oracle: `hasArgsToProcess` (`App.lean:290-293`).
     pub fn has_args_to_process(&self) -> bool {
         !self.st.args.is_empty() || !self.st.named_args.is_empty()
+    }
+
+    /// oracle: `trySynthesizeAppInstMVars` (`App.lean:355-362`) — try
+    /// each pending instance mvar, KEEP the ones that are not ready.
+    /// Runs before expected-type propagation and before the final
+    /// unification, so those see whatever assignments succeeded.
+    ///
+    /// The oracle guards each attempt with
+    /// `unless (← instantiateMVars (← inferType (.mvar instMVar))).isMVar`
+    /// — do not synthesize when the goal's own type is still an mvar.
+    /// `inferType (.mvar instMVar)` is exactly `instMVar`'s OWN DECLARED
+    /// TYPE (inferring a metavariable's type is definitionally that,
+    /// no computation involved), so the port below is
+    /// `decl(mvar_id).ty` -> `instantiate_mvars` -> is-mvar check, with
+    /// NO extra `infer_type` call — a human ruling on this task's own
+    /// review corrected an earlier draft that inserted one, which would
+    /// have tested `infer_type(mvar_expr)`'s type (a `Sort`), never the
+    /// mvar's own goal, so the guard would never fire.
+    ///
+    /// The oracle also swallows errors (`try .. catch _ => pure ()`),
+    /// because this is the opportunistic pass; the committing pass is
+    /// `synthesize_app_inst_mvars`.
+    pub fn try_synthesize_app_inst_mvars(&mut self) -> Result<(), ElabError> {
+        let mut kept = Vec::new();
+        for mvar_id in std::mem::take(&mut self.st.inst_mvars) {
+            let ty = self.elab.mctx.mctx().decl(mvar_id).expect("declared").ty;
+            let ty = self.elab.mctx.instantiate_mvars(ty)?;
+            let goal_is_mvar = matches!(self.node(ty), Node::MVar { .. });
+            // oracle: `try if (← synthesizeInstMVarCore instMVar) then
+            // return false catch _ => pure ()` — swallow both the
+            // "not ready" `Ok(false)` and any thrown error; only a
+            // genuine `Ok(true)` removes the mvar from the list.
+            if !goal_is_mvar {
+                if let Ok(true) = self.elab.synthesize_inst_mvar_core(mvar_id) {
+                    continue;
+                }
+            }
+            kept.push(mvar_id);
+        }
+        self.st.inst_mvars = kept;
+        Ok(())
+    }
+
+    /// oracle: `synthesizeAppInstMVars` (`App.lean:368-370`, delegating
+    /// to `Term.synthesizeAppInstMVars`, `:75-79`) — the COMMITTING pass
+    /// on every exit path. Each mvar that is still not ready is
+    /// registered as a pending `.typeClass` synthetic mvar for the
+    /// fixpoint, with an `MVarErrorInfo` attributing it to this
+    /// application. Unlike `try_synthesize_app_inst_mvars`, a genuine
+    /// synthesis error PROPAGATES here — the oracle's `unless (←
+    /// synthesizeInstMVarCore mvarId)` has no surrounding `try`.
+    pub fn synthesize_app_inst_mvars(&mut self, stx: &SynElem) -> Result<(), ElabError> {
+        let app_expr = self.st.f;
+        for mvar_id in std::mem::take(&mut self.st.inst_mvars) {
+            if self.elab.synthesize_inst_mvar_core(mvar_id)? {
+                continue;
+            }
+            self.elab
+                .register_synthetic_mvar(stx.clone(), mvar_id, SyntheticMVarKind::TypeClass);
+            self.elab
+                .register_mvar_error_implicit_arg_info(mvar_id, stx.clone(), app_expr);
+        }
+        Ok(())
     }
 
     /// `Expr.hasLooseBVars` — read straight off the packed per-node

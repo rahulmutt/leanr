@@ -8,15 +8,19 @@
 //! strict-implicit insertion, `propagateExpectedType`, named arguments,
 //! eta-expansion, the `..` ellipsis (task 7 — `args.rs`'s
 //! `if app.ctx.ellipsis { add_implicit_arg }`, oracle `App.lean:856-857`),
-//! `@` explicit mode, and `.{u}` explicit universes.
+//! `@` explicit mode, and `.{u}` explicit universes. **Also no longer a
+//! seam, as of M4b-3 P2a task 7**: instance-implicit arguments
+//! (`args.rs`'s `process_inst_implicit_arg`/`mk_inst_mvar`) and the
+//! three pending-`inst_mvars` guards (`AppElab::try_synthesize_app_inst_mvars`
+//! / `synthesize_app_inst_mvars`, called from `propagate.rs` and
+//! `finalize.rs` at exactly the oracle's own call sites) — both rows
+//! this doc used to carry in the seam table below.
 //!
 //! NOT in this plan, each a named seam (never a silent fall-through).
 //! `Where` is the site that raises it; every message below carries its
 //! owning slice, and `tests/seam_audit.rs` asserts that:
 //!
 //! ```text
-//!   instance-implicit args + synthetic-mvar fixpoint . P2  args.rs (InstImplicit arm)
-//!   pending instance mvars (3 guards) ................ P2  propagate.rs, finalize.rs
 //!   local-instance outParam result type .............. P2  args.rs, finalize.rs
 //!   normalizing a non-forall fType (too many args) ... P2+P4 args.rs (`main`)
 //!   num/char/scientific literals ..................... P3  dispatch.rs (not routed)
@@ -43,16 +47,17 @@
 //! `fixture_declares_no_undecoded_elab_attributes` is the source-text
 //! backstop keeping it out of the committed corpus in the meantime.
 //!
-//! Three of those are not reachable from any source term the hermetic
+//! Two of those are not reachable from any source term the hermetic
 //! `Elab0` fixture can express, and `tests/seam_audit.rs` records why
-//! rather than pretending otherwise:
+//! rather than pretending otherwise (a THIRD, the P2 instance-implicit
+//! seams, no longer belongs on this list as of M4b-3 P2a task 7:
+//! `Elab0.lean` now declares `Wrap`/`Pair`/`NoInst`/`Dflt`, and
+//! `args.rs`'s `InstImplicit` arm and the three `inst_mvars` guards are
+//! real code, exercised by `tests/oracle_elab.rs`'s `tc/*` records and
+//! `tests/synthetic_smoke.rs`):
 //!   * the P5 optParam/autoParam seam — no fixture parameter carries
 //!     either wrapper, so it is asserted white-box instead
 //!     (`app_smoke.rs`'s `explicit_mode_skips_the_optparam_default`);
-//!   * the P2 instance-implicit seams — `Elab0.lean` declares no `class`
-//!     and no `instance`, so no fixture constant has an `instImplicit`
-//!     binder and nothing can push onto `inst_mvars`. P2 brings the
-//!     fixture classes and the tests with them;
 //!   * the P4 coercion seam, which is an `ElabError::TypeMismatch` from
 //!     `elab_and_add_new_arg`'s `ensureArgType` rather than an
 //!     `UnsupportedSyntax` — that IS M4b-1's documented behavior (error
@@ -87,7 +92,14 @@ pub fn elab_app(
     expected: Option<ExprId>,
 ) -> Result<ExprId, ElabError> {
     let (head, named_args, args, ellipsis) = expand::expand_app(node, kinds)?;
-    elab_app_aux(elab, &head, kinds, named_args, args, ellipsis, expected)
+    // The WHOLE application syntax — the oracle's ambient `getRef` for
+    // everything `elab_app_aux` runs (`Context::stx`'s own doc). Taken
+    // from `node` itself, before `expand_app`'s `head` narrows to just
+    // the function part.
+    let stx = SynElem::Node(node.clone());
+    elab_app_aux(
+        elab, &head, kinds, named_args, args, ellipsis, expected, stx,
+    )
 }
 
 /// oracle: `elabAtom` (`App.lean:2243-2244`) — a zero-argument
@@ -99,7 +111,19 @@ pub fn elab_atom(
     kinds: &KindInterner,
     expected: Option<ExprId>,
 ) -> Result<ExprId, ElabError> {
-    elab_app_aux(elab, elem, kinds, Vec::new(), Vec::new(), false, expected)
+    // Zero arguments: the whole application IS `elem` itself, so it is
+    // also the `Context::stx` the oracle's ambient `getRef` would see.
+    let stx = elem.clone();
+    elab_app_aux(
+        elab,
+        elem,
+        kinds,
+        Vec::new(),
+        Vec::new(),
+        false,
+        expected,
+        stx,
+    )
 }
 
 /// oracle: `elabExplicit` (`App.lean:2260-2271`), the `@`-in-TERM-
@@ -269,6 +293,16 @@ fn peel_head(
 /// collecting the explicit level list) before `elab_app_fn` keeps
 /// `head.rs` about NAMES only. `elab_app_fn` still names any remaining
 /// non-`ident` head as an M4b-4 seam rather than mis-elaborating it.
+///
+/// Task 7 adds the 8th parameter (`stx`, `Context::stx`'s own doc),
+/// crossing clippy's default `too_many_arguments` threshold (7). Same
+/// judgment call as `MetaCtx::new`'s own precedent
+/// (`leanr_meta/src/metactx.rs`): this constructor-shaped private
+/// helper has exactly one call style (both call sites — `elab_app`,
+/// `elab_atom` — pass every parameter positionally), so a
+/// builder/params-struct layer here would be a bigger refactor than
+/// this task's own scope for no real call-site simplification.
+#[allow(clippy::too_many_arguments)]
 fn elab_app_aux(
     elab: &mut TermElabM,
     head: &SynElem,
@@ -277,6 +311,7 @@ fn elab_app_aux(
     args: Vec<Arg>,
     ellipsis: bool,
     expected: Option<ExprId>,
+    stx: SynElem,
 ) -> Result<ExprId, ElabError> {
     let (head, explicit, explicit_levels) = peel_head(elab, head, kinds)?;
     // `heed_elab_as_elim = !explicit && !ellipsis` — the oracle's own
@@ -347,6 +382,7 @@ fn elab_app_aux(
             .map(|n| n.num_implicit_params)
             .max()
             .unwrap_or(0),
+        stx,
     };
     let st = State {
         f,
