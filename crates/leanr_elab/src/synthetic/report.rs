@@ -1,0 +1,111 @@
+//! The scheduler's stuck REPORT: the pending-typeclass class-name lookup
+//! rung 3 uses, and the final priority-sorted stuck report. Oracle:
+//! `Lean/Elab/SyntheticMVars.lean`'s `reportStuckSyntheticMVars` /
+//! `reportStuckSyntheticMVar`.
+
+use leanr_kernel::bank::terms::Node;
+use leanr_kernel::bank::NameId;
+use leanr_meta::MVarId;
+
+use crate::elab::TermElabM;
+use crate::error::ElabError;
+
+use super::state::{SyntheticMVarDecl, SyntheticMVarKind};
+
+impl<'e> TermElabM<'e> {
+    /// The head constant of a pending typeclass goal, if it has one.
+    /// `Wrap ?m` -> `Wrap`; a goal whose head is not a constant has no
+    /// class name and cannot have default instances.
+    ///
+    /// `pub(crate)` rather than private since M4b-3 P3 task 1: the split
+    /// put its two callers (`ladder.rs`'s rung 3, and `default_inst.rs`
+    /// from task 5 on) in sibling modules. The body is unchanged.
+    pub(crate) fn pending_class_name(
+        &mut self,
+        mvar_id: MVarId,
+    ) -> Result<Option<NameId>, ElabError> {
+        let ty = self
+            .mctx
+            .mctx()
+            .decl(mvar_id)
+            .expect("pending mvar is declared")
+            .ty;
+        let ty = self.mctx.instantiate_mvars(ty)?;
+        let base = self.view.store;
+        let mut cur = ty;
+        loop {
+            match self.mctx.store().expr_node(Some(base), cur) {
+                Node::App { f, .. } => cur = f,
+                // Unwrap the same transparent-to-the-head-search nodes
+                // `contains_pending_mvar` (above) does: metadata and
+                // projections carry no head of their own, so peeling
+                // them off before giving up keeps this consistent with
+                // that sibling walk rather than under-firing on a
+                // metadata-wrapped or projected goal.
+                Node::MData { expr, .. } => cur = expr,
+                Node::Proj { structure, .. } | Node::ProjBig { structure, .. } => cur = structure,
+                Node::Const { name, .. } => return Ok(name),
+                _ => return Ok(None),
+            }
+        }
+    }
+
+    /// oracle: `reportStuckSyntheticMVars` (`SyntheticMVars.lean:322-362`)
+    /// and `reportStuckSyntheticMVar` (`:292-316`).
+    ///
+    /// Drains `pending_mvars`, sorts by the oracle's priority order, and
+    /// raises on the first entry. The sort is ported (it picks the
+    /// reported mvar deterministically); the note/hint prose is not
+    /// (design spec § Amendment, item 2).
+    pub fn report_stuck_synthetic_mvars(&mut self) -> Result<(), ElabError> {
+        let pending = std::mem::take(&mut self.pending_mvars);
+        let mut problems: Vec<(MVarId, SyntheticMVarDecl)> = pending
+            .into_iter()
+            .filter_map(|id| self.synthetic_mvar_decl(id).cloned().map(|d| (id, d)))
+            .collect();
+        // oracle: :347-360 — non-typeclass problems come FIRST; among
+        // typeclass problems, the SMALLER syntactic range wins (an inner
+        // `LT ?m` is more informative than the enclosing
+        // `Decidable (x < x)`), ties broken by start offset.
+        problems.sort_by(|(_, a), (_, b)| {
+            use std::cmp::Ordering;
+            let tc = |d: &SyntheticMVarDecl| matches!(d.kind, SyntheticMVarKind::TypeClass);
+            match (tc(a), tc(b)) {
+                (true, true) => {
+                    let ra = a.stx.text_range();
+                    let rb = b.stx.text_range();
+                    if ra.len() != rb.len() {
+                        ra.len().cmp(&rb.len())
+                    } else {
+                        ra.start().cmp(&rb.start())
+                    }
+                }
+                (true, false) => Ordering::Greater,
+                (false, true) => Ordering::Less,
+                (false, false) => Ordering::Equal,
+            }
+        });
+        let Some((mvar_id, decl)) = problems.into_iter().next() else {
+            return Ok(());
+        };
+        match decl.kind {
+            SyntheticMVarKind::TypeClass => {
+                let goal = self.mctx.mctx().decl(mvar_id).expect("declared").ty;
+                let goal = self.mctx.instantiate_mvars(goal)?;
+                Err(ElabError::StuckSyntheticMVar { goal })
+            }
+            SyntheticMVarKind::Coe { .. } => Err(ElabError::UnsupportedSyntax(
+                "stuck coercion reporting requires coercion insertion — M4b-3 P4".to_string(),
+            )),
+            SyntheticMVarKind::Tactic => Err(ElabError::UnsupportedSyntax(
+                "stuck tactic reporting requires the `by` elaborator — later M4".to_string(),
+            )),
+            // oracle: `| _ => unreachable!` (:316) — `.postponed` never
+            // reaches the reporter, because a postponed mvar that could
+            // not be resumed has already raised from `resume_postponed`.
+            SyntheticMVarKind::Postponed { .. } => Err(ElabError::UnsupportedSyntax(
+                "a postponed mvar reached the stuck reporter — M4b-3 P2a invariant".to_string(),
+            )),
+        }
+    }
+}
