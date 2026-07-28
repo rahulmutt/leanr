@@ -495,13 +495,13 @@ fn add_implicit_arg(app: &mut AppElab) -> Result<(), ElabError> {
     // oracle: the `isNextOutParamOfLocalInstanceAndResult` branch
     // (`App.lean:749-757`) sets `resultTypeOutParam?` and disables
     // propagation. It needs class outParam positions from the
-    // `classExtension`, which leanr does not decode until P2; the
+    // `classExtension`, which leanr does not decode until P2b; the
     // guarding flag (`result_is_out_param_support`) is false in the
     // fixture env, so the branch is inert here rather than skipped
     // silently. `finalize` re-checks `result_type_out_param` (task 4).
     if app.ctx.result_is_out_param_support {
         return Err(ElabError::UnsupportedSyntax(
-            "local-instance outParam result type requires classExtension decode — M4b-3 P2"
+            "local-instance outParam result type requires classExtension decode — M4b-3 P2b"
                 .to_string(),
         ));
     }

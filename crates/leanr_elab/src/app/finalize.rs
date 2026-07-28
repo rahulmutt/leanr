@@ -7,10 +7,23 @@ use crate::app::state::AppElab;
 use crate::error::ElabError;
 
 pub fn finalize(app: &mut AppElab) -> Result<ExprId, ElabError> {
-    // oracle: `for mvarId in s.toSetErrorCtx do
-    // registerMVarErrorImplicitArgInfo ..` — error CONTEXT only, never
-    // part of the emitted `Expr`. The ladder field it writes into
-    // arrives in P2; until then the collected ids are simply unused.
+    // oracle: `let ref ← getRef; for mvarId in s.toSetErrorCtx do
+    // registerMVarErrorImplicitArgInfo mvarId ref e` (`App.lean:616-620`)
+    // — error CONTEXT only, never part of the emitted `Expr`. `e` here is
+    // still `s.f` UNMODIFIED, since this runs before the eta-lambda
+    // wrapping below — same ordering as the oracle's own `let mut e :=
+    // s.f` immediately above its loop. `ref` is the oracle's ambient
+    // `getRef`; `Context::stx` is its stand-in (this module's own doc).
+    // P2a implemented this: `register_mvar_error_implicit_arg_info`
+    // (`synthetic.rs`) is the ladder field this loop writes into, and
+    // `AppElab::synthesize_app_inst_mvars` below already calls it for a
+    // different producer (unsolved instance mvars) — this is the OTHER
+    // caller, transliterated straight from the oracle rather than left
+    // as a comment claiming its target does not exist yet.
+    for mvar_id in std::mem::take(&mut app.st.to_set_error_ctx) {
+        app.elab
+            .register_mvar_error_implicit_arg_info(mvar_id, app.ctx.stx.clone(), app.st.f);
+    }
     let mut e = app.st.f;
 
     // oracle: `unless s.etaArgs.isEmpty do
@@ -48,7 +61,7 @@ pub fn finalize(app: &mut AppElab) -> Result<ExprId, ElabError> {
     // `Lean.Internal.coeM`), so there is no P1 producer; guard anyway.
     if app.st.result_type_out_param.is_some() {
         return Err(ElabError::UnsupportedSyntax(
-            "result-type outParam support requires default instances — M4b-3 P2".to_string(),
+            "result-type outParam support requires default instances — M4b-3 P2b".to_string(),
         ));
     }
 

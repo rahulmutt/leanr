@@ -330,3 +330,44 @@ fn fixture_declares_no_undecoded_elab_attributes() {
         }
     }
 }
+
+/// Recursively collect every `.rs` file under `dir`.
+fn walk_rs_files(dir: &str) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![std::path::PathBuf::from(dir)];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d).expect("read_dir") {
+            let entry = entry.expect("dir entry").path();
+            if entry.is_dir() {
+                stack.push(entry);
+            } else if entry.extension().is_some_and(|e| e == "rs") {
+                out.push(entry);
+            }
+        }
+    }
+    out
+}
+
+/// No seam message in `leanr_elab` still points at "M4b-3 P2".
+///
+/// P2 split into P2a (this plan) and P2b (classExtension + outParam), so
+/// an unqualified "P2" is now ambiguous. Every remaining seam must name
+/// P2b, P3, P4, P5, M4b-4, or later M4.
+#[test]
+fn no_seam_points_at_the_retired_p2_label() {
+    let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    let mut offenders = Vec::new();
+    for entry in walk_rs_files(src_dir) {
+        let text = std::fs::read_to_string(&entry).expect("read source");
+        for (n, line) in text.lines().enumerate() {
+            // Match the seam label, not prose mentioning the plan.
+            if line.contains("M4b-3 P2\"") || line.contains("M4b-3 P2 ") {
+                offenders.push(format!("{}:{}", entry.display(), n + 1));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "seams still labelled with the retired `M4b-3 P2`: {offenders:?}"
+    );
+}

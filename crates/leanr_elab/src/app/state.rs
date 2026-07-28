@@ -31,7 +31,8 @@ pub struct Context {
     /// the feature to make sense. P1 computes it the SAME way, which
     /// makes it `false` throughout the hermetic fixture env (prelude-mode
     /// `Elab0` declares no `Lean.Internal.coeM`) with no special-casing.
-    /// The consuming logic lands in P2 with the fixpoint.
+    /// The consuming logic (`finalize`'s outParam branch) is P2b's — see
+    /// `lib.rs`'s "local-instance outParam result types" bullet.
     pub result_is_out_param_support: bool,
     /// oracle: `Context.numImplicitParams` — cached max over
     /// `namedArgs`; only nonzero for structure projections (M4b-4).
@@ -67,11 +68,15 @@ pub struct State {
     /// oracle: `State.toSetErrorCtx`. Driven by Task 5.
     pub to_set_error_ctx: Vec<MVarId>,
     /// oracle: `State.instMVars` — instance-implicit argument mvars
-    /// awaiting synthesis. NO P1 producer: `process_inst_implicit_arg`
-    /// is P2's seam. `finalize` asserts it is empty (Task 4).
+    /// awaiting synthesis. NO P1 producer; `args.rs`'s
+    /// `process_inst_implicit_arg`/`mk_inst_mvar` (P2a, task 7) is the
+    /// producer, and `finalize`/`propagate` drain it via
+    /// `try_synthesize_app_inst_mvars`/`synthesize_app_inst_mvars`.
     pub inst_mvars: Vec<MVarId>,
     pub propagate_expected: bool,
-    /// oracle: `State.resultTypeOutParam?`. No P1 producer (P2).
+    /// oracle: `State.resultTypeOutParam?`. No P1 producer, and P2a adds
+    /// none either — the producer needs the `classExtension` decode,
+    /// which is P2b's (`args.rs`'s `add_implicit_arg` names the seam).
     pub result_type_out_param: Option<MVarId>,
     /// oracle: `State.foundNamedArgs` — valid named-argument names seen
     /// while walking the function's type; feeds the oracle's "invalid
@@ -258,12 +263,13 @@ impl<'a, 'e> AppElab<'a, 'e> {
     /// partially-applied `optParam α` is NOT `isOptParam`, and stripping
     /// it would return `α` where the oracle keeps the whole term.
     ///
-    /// The two `outParam` gadgets are INERT under P1's hermetic fixture
-    /// environment — `Elab0.lean` declares no class, so no parameter type
-    /// can carry one — but they are part of THIS function and go live the
-    /// moment P2 brings classes. Omitting them would be a silent
-    /// divergence rather than a named seam, which is why they are here
-    /// now.
+    /// The two `outParam` gadgets are still INERT after P2a: `Elab0.lean`
+    /// now declares classes (`Wrap`/`Pair`/`NoInst`/`Dflt`, task 7), but
+    /// none of their parameter types carries `outParam`/`semiOutParam` —
+    /// that needs a real `getElem`-shaped class, which is P2b's own
+    /// corpus addition. They are part of THIS function regardless.
+    /// Omitting them would be a silent divergence rather than a named
+    /// seam, which is why they are here now.
     ///
     /// Two callers, matching the oracle's own: `get_arg_expected_type`
     /// (`App.lean:273`'s `(← getParamType).consumeTypeAnnotations`) and

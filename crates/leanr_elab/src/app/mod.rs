@@ -18,11 +18,21 @@
 //!
 //! NOT in this plan, each a named seam (never a silent fall-through).
 //! `Where` is the site that raises it; every message below carries its
-//! owning slice, and `tests/seam_audit.rs` asserts that:
+//! owning slice, and `tests/seam_audit.rs` asserts that. Reconciled by
+//! M4b-3 P2a task 10 against what P2a actually shipped: the
+//! instance-implicit arm and the three `inst_mvars` guards this table
+//! used to carry as P2 rows are gone (real code — see above), and the
+//! "too many args" row closed its P2 half and now splits P4/P5:
 //!
 //! ```text
-//!   local-instance outParam result type .............. P2  args.rs, finalize.rs
-//!   normalizing a non-forall fType (too many args) ... P2+P4 args.rs (`main`)
+//!   local-instance outParam result type .............. P2b args.rs, finalize.rs
+//!   fType still an unassigned mvar after synthesis ... P4/P5 args.rs (`main`'s
+//!     synthesize_pending_and_normalize_fun_type) — CoeFun (P4) or
+//!     expected-type propagation into `fun` binder domains (P5). A
+//!     genuinely non-function fType at the same site is NOT a seam: it
+//!     reports `ElabError::FunctionExpected`, matching the oracle's own
+//!     diagnostic (`over_application_reports_function_expected`,
+//!     `tests/seam_audit.rs`).
 //!   num/char/scientific literals ..................... P3  dispatch.rs (not routed)
 //!   coercions (CoeT/CoeFun/CoeSort, mkCoe) ........... P4  args.rs (ensureArgType)
 //!   optParam defaults / autoParam .................... P5  args.rs
@@ -83,8 +93,14 @@ use crate::elab::TermElabM;
 use crate::error::ElabError;
 
 /// oracle: `elabApp` (`App.lean:2238-2241`) — `universeConstraintsCheckpoint`
-/// wraps the whole thing; that checkpoint maps onto leanr_meta's postponed
-/// level-constraint queue and lands in P2 with `process_postponed`.
+/// wraps the whole thing, running `processPostponed` (leanr_meta's
+/// postponed level-constraint queue) after every single `elabApp` call.
+/// leanr does not checkpoint per call here: P2a's
+/// `process_postponed_universe_constraints` (`synthetic.rs`) drains the
+/// same queue, but only once, at the end of the whole fixpoint
+/// (`TermElabM::elab_term_and_synthesize`, `elab.rs`) — a coarser grain
+/// than the oracle's own per-application checkpoint. No corpus record
+/// distinguishes the two today.
 pub fn elab_app(
     elab: &mut TermElabM,
     node: &SyntaxNode,
