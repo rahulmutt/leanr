@@ -331,6 +331,51 @@ pub fn dflt_of_nat(app: &mut leanr_elab::app::state::AppElab) -> leanr_kernel::b
     elab_type_expr(app, "Dflt Nat")
 }
 
+/// The `ExprId` of a fixture constant with no universe arguments,
+/// resolved by dotted source name exactly as `app::head::elab_ident_head`
+/// does. Panics if the fixture does not declare it — a test helper's
+/// contract, not elaborator code.
+pub fn fixture_const(
+    app: &mut leanr_elab::app::state::AppElab,
+    name: &str,
+) -> leanr_kernel::bank::ExprId {
+    let base = app.elab.view.store;
+    let mut id: Option<leanr_kernel::bank::NameId> = None;
+    for part in name.split('.') {
+        let store = app.elab.mctx.store_mut();
+        let s = store.intern_str(Some(base), part).expect("intern");
+        id = Some(store.name_str(Some(base), id, s).expect("name"));
+    }
+    let cname = id.expect("non-empty name");
+    assert!(
+        app.elab.view.get(cname).is_some(),
+        "fixture must declare {name}"
+    );
+    let levels = app
+        .elab
+        .mctx
+        .store_mut()
+        .intern_level_list(None, &[])
+        .expect("empty level list");
+    app.elab
+        .mctx
+        .store_mut()
+        .expr_const(Some(base), Some(cname), levels)
+        .expect("const")
+}
+
+/// Whether the fixture env declares `name` (dotted source form).
+pub fn fixture_declares(app: &mut leanr_elab::app::state::AppElab, name: &str) -> bool {
+    let base = app.elab.view.store;
+    let mut id: Option<leanr_kernel::bank::NameId> = None;
+    for part in name.split('.') {
+        let store = app.elab.mctx.store_mut();
+        let s = store.intern_str(Some(base), part).expect("intern");
+        id = Some(store.name_str(Some(base), id, s).expect("name"));
+    }
+    app.elab.view.get(id.expect("non-empty name")).is_some()
+}
+
 /// Shared plumbing for `elab_only`/`elab_and_synthesize` below: replay
 /// the committed `Elab0.olean` fixture, parse `src` through leanr's own
 /// parser, and hand the caller a fresh `TermElabM` plus the parsed term

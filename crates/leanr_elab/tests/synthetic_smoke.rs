@@ -536,6 +536,66 @@ fn with_synthesize_saves_clears_and_restores_pending() {
     });
 }
 
+/// M4b-3 P3 task 3: the literal scaffold is reachable in the fixture
+/// env. Every constant the three literal elaborators mint by NAME must
+/// resolve — an unresolvable name would surface as `UnknownIdent` deep
+/// inside `elab_num` in task 6, far from its cause.
+///
+/// `Char`/`Char.ofNat` are opaque carriers (`axiom`), not the real
+/// definitions: `elabCharLit` (`BuiltinTerm.lean:248-252`) never reads
+/// `Char`'s shape, and the real `Char.ofNat` is `dite` over
+/// `BitVec.ofNatLT`/`UInt32` (`Init/Prelude.lean:2886-2890`), which a
+/// prelude-mode fixture cannot reach. The emitted `Expr` is identical
+/// either way (plan § Measured facts, item 8).
+#[test]
+fn literal_scaffold_constants_resolve_in_the_fixture_env() {
+    support::with_app_harness("Nat.zero", |app| {
+        for name in [
+            "Bool",
+            "OfNat",
+            "OfNat.ofNat",
+            "instOfNatNat",
+            "OfScientific",
+            "OfScientific.ofScientific",
+            "instOfScientificTag",
+            "Char",
+            "Char.ofNat",
+            "Tag",
+            "instOfNatTag",
+        ] {
+            assert!(
+                support::fixture_declares(app, name),
+                "Elab0 must declare {name} for M4b-3 P3"
+            );
+        }
+    });
+}
+
+/// The `natVal` literal is viable against the fixture's own `Nat`.
+///
+/// Lean's kernel special-cases literals by the NAME `Nat` with
+/// `Nat.zero`/`Nat.succ` constructors, which `Elab0.lean:113-116`
+/// matches — but this is the first literal the elab fixture mints, so
+/// it is MEASURED here rather than assumed (design spec § P3).
+#[test]
+fn a_nat_literal_infers_as_the_fixture_nat() {
+    support::with_app_harness("Nat.zero", |app| {
+        let base = app.elab.view.store;
+        let lit = app
+            .elab
+            .mctx
+            .store_mut()
+            .expr_lit_nat(Some(base), &leanr_kernel::Nat::from(42u64))
+            .expect("nat literal interns");
+        let ty = app.elab.mctx.infer_type(lit).expect("literal has a type");
+        let nat = support::fixture_const(app, "Nat");
+        assert!(
+            app.elab.mctx.is_def_eq(ty, nat).expect("defeq runs"),
+            "Expr.lit (.natVal 42) must infer as the fixture's own Nat"
+        );
+    });
+}
+
 /// M4b-3 P2a task 9: the top-level entry point,
 /// `TermElabM::elab_term_and_synthesize`, runs `elab_term`, then the
 /// fixpoint, then `instantiate_mvars` (oracle: `elabTermAndSynthesize`,
