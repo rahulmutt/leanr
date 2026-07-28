@@ -184,10 +184,31 @@ class Wrap (a : Type) where
 instance instWrapNat : Wrap Nat where
   wrap := fun n => n
 
+-- M4b-3 P3 task 2: a SECOND candidate instance per class. With exactly
+-- one candidate, `tc/useWrapAscribed` and `tc/pairBoth` could reach the
+-- oracle's answer by a different route than the oracle takes — leanr
+-- resolving eagerly from the sole candidate where the oracle keeps the
+-- goal stuck and lets the argument fix the type parameter. A second
+-- candidate separates "right answer" from "right reason".
+--
+-- `Unit` (not `String`): `String` is an `axiom` here with no
+-- constructor, so `Dflt String` has no inhabitant to give `val`.
+-- `Unit`/`Unit.unit` are real and already in the scaffold.
+--
+-- `NoInst` deliberately keeps ZERO instances — `synthetic_smoke.rs`'s
+-- `unsolvable_instance_is_a_synthesis_failure` asserts its `.none` arm.
+-- None of the three gains a `@[default_instance]`: line 158-163 above
+-- records why that would break the stuck-path tests.
+instance instWrapUnit : Wrap Unit where
+  wrap := fun u => u
+
 class Pair (a : Type) (b : Type) where
   mk2 : a -> b -> a
 
 instance instPairNatNat : Pair Nat Nat where
+  mk2 := fun x _ => x
+
+instance instPairNatUnit : Pair Nat Unit where
   mk2 := fun x _ => x
 
 class NoInst (a : Type) where
@@ -199,6 +220,9 @@ class Dflt (a : Type) where
 @[default_instance]
 instance instDfltNat : Dflt Nat where
   val := Nat.zero
+
+instance instDfltUnit : Dflt Unit where
+  val := Unit.unit
 
 def useWrap {a : Type} [Wrap a] (x : a) : a := Wrap.wrap x
 def usePair {a : Type} {b : Type} [Pair a b] (x : a) (y : b) : a := Pair.mk2 x y
