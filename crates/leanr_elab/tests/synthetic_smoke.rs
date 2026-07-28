@@ -552,3 +552,80 @@ fn with_synthesize_saves_clears_and_restores_pending() {
         );
     });
 }
+
+/// M4b-3 P2a task 9: the top-level entry point,
+/// `TermElabM::elab_term_and_synthesize`, runs `elab_term`, then the
+/// fixpoint, then `instantiate_mvars` (oracle: `elabTermAndSynthesize`,
+/// `SyntheticMVars.lean:696-698`).
+///
+/// **This is NOT the brief's original test.** The brief's own
+/// `entry_point_runs_the_fixpoint` asserted that `useWrap` (bare)
+/// elaborates fine under `elab_term` alone but is reported
+/// `StuckSyntheticMVar` under the real entry point — exactly the
+/// oracle's own behavior for that source text (re-confirmed against
+/// v4.33.0-rc1 during Task 7's investigation). It cannot pass today:
+/// `leanr_meta` declares `MetaError::IsDefEqStuck` but constructs it
+/// NOWHERE (`synth.rs:1636-1650` names the missing mctx-depth /
+/// read-only-mvar model as a later `leanr_meta` plan's own scope, out
+/// of reach here), so `synth_instance(Wrap ?m)` solves eagerly from the
+/// sole candidate instead of refusing — the ladder's stuck report is
+/// unreachable from any typeclass goal today. That exact scenario is
+/// already recorded, `#[ignore]`d with this same evidenced reason, as
+/// `bare_typeclass_application_is_reported_stuck` above — and since
+/// `elab_and_synthesize` (this file's own support helper) is re-pointed
+/// at the real `elab_term_and_synthesize` by this task rather than the
+/// hand-chained stand-in it used to be, that ignored test now already
+/// exercises the REAL entry point. It needs no changes here to go green
+/// the day the `leanr_meta` gap above closes — writing a second,
+/// differently-shaped ignored test for the identical scenario would
+/// only be duplicate bookkeeping.
+///
+/// So this test instead pins the piece of `elab_term_and_synthesize`
+/// that IS observable on today's grammar: an ordinary application with
+/// an implicit argument, `id Nat.zero`. Two things are asserted, each
+/// standing in for one half of the pipeline:
+///
+/// - **Instantiation matters.** `elab_term` alone elaborates `id
+///   Nat.zero` to `@id ?α Nat.zero` with `?α := Nat` ASSIGNED (by
+///   `finalize`'s own unification) but never SUBSTITUTED — the raw
+///   term still carries a bare `Expr.mvar` reference, which
+///   `elab_only`'s canonical encoding below still shows as a `"mvar"`
+///   node. `elab_term_and_synthesize`'s own `instantiate_mvars` call is
+///   what erases it. A version of the entry point that dropped that
+///   call would make the two encodings AGREE, so this comparison would
+///   catch it.
+/// - **The fixpoint's call is exercised, even though it cannot yet be
+///   shown to have any effect.** Every term in today's reachable
+///   grammar resolves its instance goals eagerly inside `finalize`'s
+///   own `synthesize_app_inst_mvars` (`app/state.rs`), so
+///   `pending_mvars` is already empty by the time
+///   `elab_term_and_synthesize` reaches
+///   `synthesize_synthetic_mvars_no_postponing` — the call runs (it is
+///   real code on the path, not skipped), but it is a measured no-op
+///   on `id Nat.zero` and on every other term this corpus can produce.
+///   Once the `leanr_meta` gap above closes, the case that WOULD tell
+///   "the fixpoint ran" apart from "the fixpoint was skipped" is
+///   `bare_typeclass_application_is_reported_stuck`'s own `useWrap`.
+#[test]
+fn entry_point_runs_the_fixpoint() {
+    let raw =
+        support::elab_only("id Nat.zero").expect("elab_term alone succeeds on today's grammar");
+    let full = support::elab_and_synthesize("id Nat.zero")
+        .expect("the entry point succeeds on the same, ordinary application");
+
+    assert_ne!(
+        raw, full,
+        "elab_term alone (uninstantiated) and the entry point (instantiated) \
+         must differ on a term with an implicit argument — if they agree, \
+         `elab_term_and_synthesize` dropped its `instantiate_mvars` call"
+    );
+    assert!(
+        raw.to_string().contains("\"mvar\""),
+        "elab_term alone: expected an uninstantiated `?α` mvar node, got {raw}"
+    );
+    assert!(
+        !full.to_string().contains("\"mvar\""),
+        "the entry point: expected a fully-instantiated term with no \
+         surviving mvar node, got {full}"
+    );
+}

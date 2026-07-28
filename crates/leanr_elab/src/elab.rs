@@ -306,6 +306,40 @@ impl<'e> TermElabM<'e> {
         }
         Ok(e)
     }
+
+    /// oracle: `elabTermAndSynthesize` (`SyntheticMVars.lean:696-698`) —
+    /// `withRef stx do instantiateMVars (← withSynthesize <| elabTerm
+    /// stx expectedType?)`, where `withSynthesize`'s default `postpone`
+    /// is `.no` (`:678`, `PostponeBehavior.no` — confirmed against the
+    /// pinned source; the brief's own citation of `:694-696` pointed at
+    /// the doc comment one line high, corrected here to the `def`
+    /// itself plus its two-line body).
+    ///
+    /// `withSynthesizeImp` (`:662-672`) saves `pendingMVars`, clears it,
+    /// runs `k`, synthesizes, then restores by APPENDING the saved list
+    /// back onto whatever `k`'s own synthesis left behind. At the
+    /// OUTERMOST call — this one — nothing is pending before `elab_term`
+    /// runs, so the saved list is always empty and that save/restore
+    /// dance is a no-op: this method is exactly `elab_term` ->
+    /// `synthesize_synthetic_mvars(.no)` -> `instantiate_mvars`, the
+    /// pipeline the design spec pins (§ The entry-point pipeline).
+    ///
+    /// `elab_term_ensuring_type` (above) is UNCHANGED and remains the
+    /// INNER entry point every elaborator uses (ascription, `let`,
+    /// `have`, application argument elaboration); this is the
+    /// OUTERMOST one, called once per top-level term the way
+    /// `dump_elab.lean`'s dumper and any future top-level driver call
+    /// it — never from inside another elaborator.
+    pub fn elab_term_and_synthesize(
+        &mut self,
+        elem: &SynElem,
+        kinds: &KindInterner,
+        expected: Option<ExprId>,
+    ) -> Result<ExprId, ElabError> {
+        let e = self.elab_term(elem, kinds, expected)?;
+        self.synthesize_synthetic_mvars_no_postponing(kinds)?;
+        self.mctx.instantiate_mvars(e).map_err(ElabError::from)
+    }
 }
 
 /// oracle: `useImplicitLambda` (`TermElabM.lean:1737-1779`), consulted by

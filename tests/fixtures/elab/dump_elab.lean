@@ -13,16 +13,27 @@ elaborates it. leanr parses the SAME source text through its own
 crate's own oracle gate (`oracle_golden.rs`) upstream of this one —
 this dumper's job is to isolate the ELABORATOR.
 
-**Slice 1 does NO postponement**: this dumper calls exactly `elabTerm`
-then `instantiateMVars` — no `synthesizeSyntheticMVarsNoPostponing`, no
-other scheduling pass. This is a DELIBERATE, pinned choice (design
-spec's "Universe defaulting divergence" risk note): the entry point
-must match what `crates/leanr_elab`'s `elab_term_ensuring_type` models
-(`elab_term` then `instantiate_mvars`, nothing else), or a universe-
-defaulting or postponement-related pass on the oracle side would appear
-as a spurious regression instead of an intentional non-goal. Later
-slices (M4b-2's postponement/synthetic-mvar ladder) will need a richer
-entry point here; that is out of scope for this dumper today.
+**M4b-3 P2a: the entry point now runs the fixpoint.** This dumper's
+elaboration step matches `crates/leanr_elab`'s
+`TermElabM::elab_term_and_synthesize` (`elab.rs`) exactly: `elabTerm`,
+then `synthesizeSyntheticMVarsNoPostponing`, then `instantiateMVars` —
+the oracle's own `elabTermAndSynthesize` (`SyntheticMVars.lean:696-698`)
+at the top level, where `withSynthesize`'s saved/restored pending list
+is always empty. The fixpoint is what forces a stuck typeclass problem
+(an instance goal no candidate solves, or whose own type is still a
+metavariable) to be REPORTED rather than silently emitted as a term
+with a dangling instance mvar in it.
+
+Measured empty-diff over the whole corpus (M4b-3 P2a task 9): every
+one of the 81 committed records is byte-identical under the new
+pipeline, including `hole/bare`'s `{"k":"mvar","i":0}` — that mvar is a
+bare `_`'s NATURAL hole, not a synthetic one, so `reportStuckSyntheticMVars`
+never looks at it and it survives instantiation untouched exactly as
+before. This does NOT mean the fixpoint is a no-op in general: `useWrap`
+(a bare instance goal with no expected type) and `fun f => f Nat.zero`
+(an application whose function type is never pinned down) both go from
+elaborating to a term, under the OLD entry point, to reporting an error
+under this one — which is exactly why neither is a corpus record here.
 
 Canonical expr scheme: IDENTICAL to `dump_defeq.lean`'s (documented
 there), extended with the `lmvar` node (M4b-1 Task 2 / this design
@@ -441,10 +452,15 @@ unsafe def main : IO Unit := do
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>
         try
-          -- Slice 1's pinned entry point (module doc above): elabTerm,
-          -- then instantiateMVars, nothing else.
-          let e ← (Lean.Elab.Term.elabTerm stx none).run'
-          let e ← instantiateMVars e
+          -- M4b-3 P2a: the entry point now matches
+          -- `crates/leanr_elab`'s `elab_term_and_synthesize` —
+          -- elabTerm, then the fixpoint, then instantiateMVars. The
+          -- fixpoint is what forces stuck typeclass problems to be
+          -- reported rather than emitted as dangling mvars.
+          let e ← (do
+            let e ← Lean.Elab.Term.elabTerm stx none
+            Lean.Elab.Term.synthesizeSyntheticMVarsNoPostponing
+            instantiateMVars e).run'
           let expJ := (encExpr e).run' {}
           emit id src expJ
         catch ex =>

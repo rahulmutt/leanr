@@ -331,19 +331,26 @@ pub fn dflt_of_nat(app: &mut leanr_elab::app::state::AppElab) -> leanr_kernel::b
     elab_type_expr(app, "Dflt Nat")
 }
 
-/// Elaborate `src` (e.g. `"useWrap"`) end-to-end and run
-/// `synthesize_synthetic_mvars_no_postponing` over the result, then
-/// instantiate — the shape `bare_typeclass_application_is_reported_stuck`
-/// needs to reach a real stuck-typeclass report.
+/// Shared plumbing for `elab_only`/`elab_and_synthesize` below: replay
+/// the committed `Elab0.olean` fixture, parse `src` through leanr's own
+/// parser, and hand the caller a fresh `TermElabM` plus the parsed term
+/// and its `KindInterner` to elaborate however it needs. Mirrors
+/// `with_app_harness`/`oracle_elab.rs`'s own replay construction.
 ///
-/// This stands in for Task 9's real `TermElabM::elab_term_and_synthesize`
-/// entry point, assembled here from the pieces that already exist today:
-/// `elab_term_ensuring_type`, then `synthesize_synthetic_mvars_no_postponing`,
-/// then `instantiate_mvars`. Task 9 re-points this helper at that method
-/// once it lands, but the test using it needs the same end-to-end
-/// behavior now. Construction otherwise mirrors
-/// `with_app_harness`/`oracle_elab.rs`'s own replay.
-pub fn elab_and_synthesize(src: &str) -> Result<leanr_kernel::bank::ExprId, leanr_elab::ElabError> {
+/// A closure-taking helper, not a struct-returning one, for the same
+/// reason `with_app_harness` is one: the `Store`/`EnvView`/`MetaCtx`
+/// borrow chain does not outlive this function, so the result must be
+/// fully computed (encoded to a self-contained JSON value, for both
+/// callers below) before it returns.
+fn with_elab_harness<R>(
+    caller: &str,
+    src: &str,
+    k: impl FnOnce(
+        &mut leanr_elab::TermElabM,
+        &leanr_elab::dispatch::SynElem,
+        &leanr_syntax::kind::KindInterner,
+    ) -> R,
+) -> R {
     use leanr_elab::TermElabM;
     use leanr_kernel::bank::Store;
     use leanr_kernel::EnvView;
@@ -364,14 +371,14 @@ pub fn elab_and_synthesize(src: &str) -> Result<leanr_kernel::bank::ExprId, lean
     let parsed = parse_term(src, &snap);
     assert!(
         parsed.errors.is_empty(),
-        "elab_and_synthesize: leanr parse errors for {src:?}: {:?}",
+        "{caller}: leanr parse errors for {src:?}: {:?}",
         parsed.errors
     );
     let term_elem: leanr_elab::dispatch::SynElem = parsed
         .tree
         .root()
         .first_child_or_token()
-        .unwrap_or_else(|| panic!("elab_and_synthesize: no term child for {src:?}"));
+        .unwrap_or_else(|| panic!("{caller}: no term child for {src:?}"));
 
     let mut scratch = Store::scratch();
     let mctx = MetaCtx::new(
@@ -385,7 +392,39 @@ pub fn elab_and_synthesize(src: &str) -> Result<leanr_kernel::bank::ExprId, lean
         &projection_fns,
     );
     let mut elab = TermElabM::new(mctx, view);
-    let e = elab.elab_term_ensuring_type(&term_elem, &parsed.tree.kinds, None)?;
-    elab.synthesize_synthetic_mvars_no_postponing(&parsed.tree.kinds)?;
-    Ok(elab.mctx.instantiate_mvars(e)?)
+    k(&mut elab, &term_elem, &parsed.tree.kinds)
+}
+
+/// Elaborate `src` through `elab_term` ALONE — no fixpoint, no
+/// instantiation — and return its canonical encoding (the same
+/// `encode_expr`/`EncSt` scheme `oracle_elab.rs`'s own gate uses). The
+/// `Store` this mints into does not outlive the call, so the result is
+/// encoded to a self-contained JSON value rather than an `ExprId`,
+/// which lets a caller compare this against `elab_and_synthesize`'s
+/// output even though the two calls build entirely separate stores.
+pub fn elab_only(src: &str) -> Result<serde_json::Value, leanr_elab::ElabError> {
+    with_elab_harness("elab_only", src, |elab, term_elem, kinds| {
+        let e = elab.elab_term(term_elem, kinds, None)?;
+        let base = elab.view.store;
+        let mut st = EncSt::default();
+        Ok(encode_expr(elab.mctx.store(), Some(base), e, &mut st))
+    })
+}
+
+/// Elaborate `src` through the real top-level entry point,
+/// `TermElabM::elab_term_and_synthesize` (Task 9) — `elab_term`, the
+/// fixpoint, then `instantiate_mvars` — and return its canonical
+/// encoding, same scheme as `elab_only` above.
+///
+/// Before Task 9 this helper stood in for the entry point by chaining
+/// `elab_term_ensuring_type` / `synthesize_synthetic_mvars_no_postponing`
+/// / `instantiate_mvars` by hand; it now calls the real method, so
+/// there is one implementation of the entry point, not two.
+pub fn elab_and_synthesize(src: &str) -> Result<serde_json::Value, leanr_elab::ElabError> {
+    with_elab_harness("elab_and_synthesize", src, |elab, term_elem, kinds| {
+        let e = elab.elab_term_and_synthesize(term_elem, kinds, None)?;
+        let base = elab.view.store;
+        let mut st = EncSt::default();
+        Ok(encode_expr(elab.mctx.store(), Some(base), e, &mut st))
+    })
 }
