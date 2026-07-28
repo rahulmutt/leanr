@@ -61,17 +61,6 @@ fn without_postponing_restores_the_flag_on_both_paths() {
     });
 }
 
-#[test]
-fn postpone_behavior_is_three_valued() {
-    // oracle: `inductive PostponeBehavior` (`SyntheticMVars.lean:423-441`)
-    // — `yes` / `no` / `partial`. The third value is not decorative:
-    // `let`'s type elaboration uses it (`Binders.lean:775`), and the
-    // ladder's rungs 2-5 are gated on `postpone != .yes`, which is a
-    // DIFFERENT test from `postpone == .no`.
-    assert_ne!(PostponeBehavior::Partial, PostponeBehavior::Yes);
-    assert_ne!(PostponeBehavior::Partial, PostponeBehavior::No);
-}
-
 /// The step visits pending mvars in CREATION order, not list order.
 ///
 /// `pending_mvars` is head-is-most-recent, and the oracle walks it with

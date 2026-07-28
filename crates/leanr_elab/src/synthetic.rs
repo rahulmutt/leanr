@@ -23,7 +23,7 @@ use crate::dispatch::SynElem;
 use crate::elab::TermElabM;
 use crate::error::ElabError;
 
-/// oracle: `inductive PostponeBehavior` (`SyntheticMVars.lean:423-441`).
+/// oracle: `inductive PostponeBehavior` (`SyntheticMVars.lean:424-440`).
 ///
 /// Three-valued, not a `bool`: `Partial` means "typeclass problems may
 /// be postponed, everything else may not" and is what `let`'s type
@@ -37,7 +37,7 @@ pub enum PostponeBehavior {
     Partial,
 }
 
-/// oracle: `structure SavedContext` (`TermElabM.lean:45-53`).
+/// oracle: `structure SavedContext` (`TermElabM.lean:46-53`).
 ///
 /// The oracle saves exactly seven fields: `declName?`, `options`,
 /// `openDecls`, `macroStack`, `errToSorry`, `levelNames`,
@@ -84,7 +84,7 @@ pub enum SyntheticMVarKind {
     Postponed { ctx: SavedContext },
 }
 
-/// oracle: `structure SyntheticMVarDecl` (`TermElabM.lean:105-108`).
+/// oracle: `structure SyntheticMVarDecl` (`TermElabM.lean:107`).
 ///
 /// `stx` is a `SynElem` — an OWNED rowan handle (`rowan::SyntaxNode` is
 /// Rc-backed), so the table needs no lifetime parameter. The matching
@@ -273,7 +273,7 @@ impl<'e> TermElabM<'e> {
         })
     }
 
-    /// oracle: `synthesizeSyntheticMVar` (`SyntheticMVars.lean:539-569`).
+    /// oracle: `synthesizeSyntheticMVar` (`SyntheticMVars.lean:540-569`).
     ///
     /// Returns `true` when the mvar was synthesized, `false` for "not
     /// ready yet". An mvar with no decl returns `true` — the oracle's
@@ -298,8 +298,18 @@ impl<'e> TermElabM<'e> {
             )),
             SyntheticMVarKind::Tactic => {
                 // oracle: the `.tactic` arm runs the tactic only when
-                // `runTactics` (`SyntheticMVars.lean:563-569`), and
-                // returns `false` otherwise. Rung 5 is the only caller
+                // `runTactics && !(delayOnMVars && (← mvarId.getType >>=
+                // instantiateExprMVars).hasExprMVar)`
+                // (`SyntheticMVars.lean:563-569`), and returns `false`
+                // otherwise. leanr's `Tactic` variant carries no
+                // `delayOnMVars` field (this crate's own doc on the
+                // `SyntheticMVarKind` enum) — that sub-condition is
+                // UNMODELLED here, so this arm's gate is `run_tactics`
+                // alone, not the oracle's full conjunction; the seam
+                // below covers less than "every `.tactic` arm run under
+                // `run_tactics`", only "every one the oracle would also
+                // run given a type with no remaining expr mvar, or
+                // `delayOnMVars == false`". Rung 5 is the only caller
                 // that passes `run_tactics: true`, so this seam is
                 // reachable ONLY there — a silent `false` here would make
                 // the ladder report "stuck" for a reason the user cannot

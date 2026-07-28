@@ -553,7 +553,7 @@ Additive, TCB-neutral, behavior-neutral public accessors, by plan:
 | Plan | Additions |
 |---|---|
 | P1 | `instantiate_beta_rev_range` — and only this one. `Expr` destructuring (`fTypeIsForall`, `bindingDomain!`, `getAppFn`) uses the already-public `Store::expr_node` (`leanr_kernel/src/bank/terms.rs:615`) via `mctx.store()` + `view.store`, and `whnfForall` composes from the public `MetaCtx::whnf`, so neither needs an accessor. `instantiate_beta_rev_range` does: its beta step needs `whnf.rs`'s `beta_rev`/`head_beta`, which are `pub(crate)`. |
-| P2a | `process_postponed_levels` + `postponed_len`, `default_instances_of` (forwarding the `pub(crate)` `instances.rs:520` — needed by rung 3's guarded seam) |
+| P2a | `process_postponed_levels` + `postponed_len`, `default_instances_of` (forwarding the `pub(crate)` `instances.rs:520` — needed by rung 3's guarded seam), `check_occurs` (`metactx.rs:837` — a `pub` forwarder to the existing `pub(crate)` `occurs_check`, `assign.rs:1117`, needed to port `resumePostponed`'s occurs-check assignment guard) |
 | P2b | none expected — `classExtension` is a `leanr_olean` decode, not a `leanr_meta` accessor |
 | P3 | `get_dec_level`, `mk_raw_nat_lit`, `with_assignable_synthetic_opaque` (used only by `synthesizeUsingDefaultPrio`, `SyntheticMVars.lean:164` — moved here from P2a, whose ladder never reaches it) |
 | P4 | `unfold_definition`, `get_level`, `whnf_r`, `mk_arrow`, and the **new modules** `coe.rs` + `transform.rs` (§ Global constraints — the one deliberate widening) |

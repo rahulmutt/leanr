@@ -97,10 +97,14 @@ use crate::error::ElabError;
 /// postponed level-constraint queue) after every single `elabApp` call.
 /// leanr does not checkpoint per call here: P2a's
 /// `process_postponed_universe_constraints` (`synthetic.rs`) drains the
-/// same queue, but only once, at the end of the whole fixpoint
-/// (`TermElabM::elab_term_and_synthesize`, `elab.rs`) — a coarser grain
-/// than the oracle's own per-application checkpoint. No corpus record
-/// distinguishes the two today.
+/// same queue at the end of `synthesize_synthetic_mvars_no_postponing`'s
+/// fixpoint — and that fixpoint itself runs more than once per term
+/// under the gate as wired (`TermElabM::elab_term_and_synthesize`,
+/// `elab.rs`, calls it once at the top level, but ascription's `(e :)`
+/// arm calls `with_synthesize(No, ..)` internally too, which drains the
+/// queue again) — a coarser grain than the oracle's own per-application
+/// checkpoint, and not a single drain. No corpus record distinguishes
+/// the two today.
 pub fn elab_app(
     elab: &mut TermElabM,
     node: &SyntaxNode,

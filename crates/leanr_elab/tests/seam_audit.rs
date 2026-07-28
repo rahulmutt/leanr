@@ -371,6 +371,21 @@ fn walk_rs_files(dir: &str) -> Vec<std::path::PathBuf> {
 /// `P2a`/`P2b` (and prose that never carries the `M4b-3` prefix at all,
 /// e.g. `app/mod.rs`'s "used to carry as P2 rows") stay invisible to it,
 /// same as before.
+///
+/// **Precondition this test relies on:** `needle` is the literal
+/// substring `"M4b-3 P2"`. This is a textual scan, not a semantic one —
+/// it has no notion of "a citation of the retired P2 label" beyond that
+/// exact prefix appearing in the line. Any prose phrased WITHOUT that
+/// literal prefix (a rewritten `app/mod.rs` passage that comes to
+/// mention a bare "P2" some other way, a citation that abbreviates or
+/// respells `M4b-3`, etc.) passes silently — not because it was checked
+/// and found to be fine, but because the gate never looked. A future
+/// edit that reintroduces the literal `M4b-3 P2` prefix (unqualified)
+/// back into such prose IS caught; only the prefix-less phrasing is the
+/// blind spot, and it is a blind spot BY that construction, not an
+/// oversight — recorded here so a future prose edit near this needle
+/// cannot silently rely on being invisible to it without a reader
+/// noticing the precondition changed.
 #[test]
 fn no_seam_points_at_the_retired_p2_label() {
     let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");

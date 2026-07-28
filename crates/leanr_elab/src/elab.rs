@@ -52,20 +52,22 @@ pub struct TermElabM<'e> {
     /// (`_leanr_elab_binder_fresh`, below) so a fresh binder name can
     /// never collide with either mvar-name family.
     binder_name_gen: u64,
-    /// oracle: `Term.State.pendingMVars` (`TermElabM.lean:180`). **Head
+    /// oracle: `Term.State.pendingMVars` (`TermElabM.lean:183`). **Head
     /// is the most recent** — the oracle conses. Every ordering in
     /// `synthetic.rs` depends on that invariant.
     pub pending_mvars: Vec<MVarId>,
-    /// oracle: `Term.State.syntheticMVars` (`TermElabM.lean:183`).
+    /// oracle: `Term.State.syntheticMVars` (`TermElabM.lean:182`).
     pub synthetic_mvars: HashMap<MVarId, crate::synthetic::SyntheticMVarDecl>,
     /// oracle: `Term.State.mvarErrorInfos` (`TermElabM.lean:185`).
     /// Registered by P2a, rendered by whichever slice grows a
     /// diagnostics layer (design spec § Amendment, item 2).
     pub mvar_error_infos: Vec<crate::synthetic::MVarErrorInfo>,
     /// oracle: `Term.Context.mayPostpone` — a READER field there, a
-    /// plain field here, saved/restored by `without_postponing` and
-    /// `with_saved_context`. Defaults to `true`, matching `elabTerm`'s
-    /// own `catchExPostpone := true` default (`TermElabM.lean:1879`).
+    /// plain field here, saved/restored by `without_postponing` only:
+    /// `with_saved_context` deliberately does NOT touch it (that
+    /// field's own doc, `synthetic.rs`, and Task 2's fix round). Defaults
+    /// to `true`, matching `Context.mayPostpone : Bool := true`'s own
+    /// default (`TermElabM.lean:303`).
     pub may_postpone: bool,
 }
 

@@ -21,8 +21,13 @@
 //! dependent answer. So `mk_fresh_expr_mvar` mints every hole
 //! `MVarKind::Natural` uniformly (this task's own stated interface) —
 //! not an approximation with an observable difference, just an unmade
-//! distinction. `registerMVarErrorHoleInfo` (diagnostic bookkeeping
-//! only, no `Expr` effect) has no analog in this crate.
+//! distinction. `registerMVarErrorHoleInfo` (confirmed against the
+//! pinned source, `TermElabM.lean:873-874`, to be diagnostic
+//! bookkeeping only — it pushes an `MVarErrorInfo` onto `state`'s list
+//! and has no `Expr` effect) is wired up below: `elab_hole` calls
+//! `TermElabM::register_mvar_error_hole_info` (`synthetic.rs`) with the
+//! hole's own syntax as `ref`, exactly as the oracle's `elabHole` does
+//! with `stx`.
 //!
 //! `expectedType?` reaching `none` (this crate's `expected: None`)
 //! routes through `mkFreshExprMVarImpl`'s own `none` arm
@@ -35,15 +40,17 @@
 //! mint the actual hole AT that type mvar.
 
 use leanr_kernel::bank::ExprId;
+use leanr_meta::MVarKind;
 use leanr_syntax::kind::KindInterner;
 use leanr_syntax::tree::SyntaxNode;
 
+use crate::dispatch::SynElem;
 use crate::elab::TermElabM;
 use crate::error::ElabError;
 
 pub fn elab_hole(
     elab: &mut TermElabM,
-    _node: &SyntaxNode,
+    node: &SyntaxNode,
     _kinds: &KindInterner,
     expected: Option<ExprId>,
 ) -> Result<ExprId, ElabError> {
@@ -61,5 +68,10 @@ pub fn elab_hole(
             elab.mk_fresh_expr_mvar(sort)?
         }
     };
-    elab.mk_fresh_expr_mvar(ty)
+    let (mvar, mvar_id) = elab.mk_fresh_expr_mvar_of_kind(ty, MVarKind::Natural)?;
+    // oracle: `elabHole`'s `registerMVarErrorHoleInfo mvar.mvarId! stx`
+    // (`BuiltinTerm.lean:67`) — `stx` there is `elabHole`'s own `stx`
+    // parameter, i.e. THIS hole's syntax, not some ambient ref.
+    elab.register_mvar_error_hole_info(mvar_id, SynElem::Node(node.clone()));
+    Ok(mvar)
 }

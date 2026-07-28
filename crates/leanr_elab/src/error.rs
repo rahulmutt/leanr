@@ -38,7 +38,15 @@ pub enum ElabError {
     /// oracle: `synthesizeInstMVarCore`'s `.none` arm — "failed to
     /// synthesize" (`TermElabM.lean:1275-1288`). Carries the goal type;
     /// the oracle's `extraErrorMsg?` prose is deferred (design spec
-    /// § Amendment, item 2).
+    /// § Amendment, item 2). Unmodelled: the `.none` arm's own
+    /// `ignoreTCFailures` reader-context escape (`if (← read
+    /// ).ignoreTCFailures then return false`, `TermElabM.lean:1276-1277`)
+    /// — a caller can ask to treat "no instance found" as "not ready
+    /// yet" rather than a hard failure; leanr has no reader context
+    /// carrying that flag, so this variant always fires as a hard
+    /// error, which is the one unmodelled branch of
+    /// `synthesizeInstMVarCore` with no note anywhere else in this
+    /// crate.
     InstanceSynthesisFailed {
         goal: ExprId,
     },

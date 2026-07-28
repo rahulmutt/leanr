@@ -90,20 +90,41 @@
 //!
 //! ## Recorded coverage gaps
 //!
-//! Two things below ARE built — neither is a named seam — but each has
+//! Three things below ARE built — none is a named seam — but each has
 //! a known hole in what the corpus can currently prove about it.
 //! Recording the hole here is the alternative to either leaving it to
 //! be rediscovered or quietly asserting more coverage than exists.
 //!
-//! - **`resumePostponed`'s success path has no differential coverage
-//!   yet.** P2a builds the whole ladder, and its stuck paths are
-//!   asserted in `tests/synthetic_smoke.rs` — but every term in P2a's
-//!   grammar that postpones also ends stuck (the only producer is
-//!   `App.lean:1367`'s `tryPostponeIfMVar fType`; every other
-//!   `tryPostpone*` site belongs to M4b-4, P3, P5 or later M4). The
-//!   first term that postpones and then RESUMES into a term arrives
-//!   with P3's numerals. Recorded rather than papered over: the corpus
-//!   does not cover this path today.
+//! - **`SyntheticMVarKind::Postponed` has no producer anywhere in this
+//!   branch** (verified by grep over `src/` and `tests/`: every
+//!   occurrence of the variant is a match arm — `synthetic.rs:293` and
+//!   `:690` — never a construction site). So this is stronger than "no
+//!   differential coverage yet": `SavedContext`, `save_context` (zero
+//!   callers), `with_saved_context`, `resume_postponed`, and the
+//!   `check_occurs` accessor it uses for its assignment guard are
+//!   UNREACHABLE from every code path in this branch, not merely
+//!   undiffable. The first producer arrives with P3's `elabNum`
+//!   (the oracle's numeral elaborator, one of the `tryPostpone*` call
+//!   sites) and M4b-4's `resolveLValLoop` (field/dot-notation
+//!   resolution); until one of those lands and constructs a
+//!   `Postponed` decl, this whole path is dead code kept correct for
+//!   when its producer arrives.
+//! - **`may_postpone` is written but never read in production code.**
+//!   Verified by grep: `elab.rs:86` (`TermElabM::new`) and
+//!   `synthetic.rs:207`/`:209` (`without_postponing`, saving and
+//!   restoring the flag) are its only writers in `src/`; nothing in
+//!   `src/` ever reads it back (the only reads are
+//!   `tests/synthetic_smoke.rs`'s own assertions on the field).
+//!   Combined with `postpone_on_error` being consumed only inside the
+//!   dead `resume_postponed` above, the ladder's rungs 2 (postponement
+//!   suppressed, errors postponed) and 4 (postponement suppressed,
+//!   errors not postponed) are today BEHAVIORALLY IDENTICAL to rung 1
+//!   — nothing downstream branches on `may_postpone` or
+//!   `postpone_on_error` yet, so the effective ladder that actually
+//!   runs is rung 1 → rung 3's guard → stuck report. The five-rung
+//!   structure is correct for when producers make the other knobs
+//!   observable; recorded here so a reader does not assume five
+//!   distinct rungs run today.
 //! - **`leanr_meta` cannot report a stuck typeclass goal.**
 //!   `leanr_meta::error::MetaError` declares `IsDefEqStuck` (`error.rs:36`)
 //!   but constructs it nowhere; `synth.rs`'s `synth_instance_main` (the

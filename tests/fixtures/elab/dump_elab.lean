@@ -19,10 +19,15 @@ elaboration step matches `crates/leanr_elab`'s
 then `synthesizeSyntheticMVarsNoPostponing`, then `instantiateMVars` —
 the oracle's own `elabTermAndSynthesize` (`SyntheticMVars.lean:696-698`)
 at the top level, where `withSynthesize`'s saved/restored pending list
-is always empty. The fixpoint is what forces a stuck typeclass problem
-(an instance goal no candidate solves, or whose own type is still a
-metavariable) to be REPORTED rather than silently emitted as a term
-with a dangling instance mvar in it.
+is always empty. `crates/leanr_elab/tests/oracle_elab.rs`'s
+`oracle_elab_gate` is what now enforces this alignment: it calls
+`elab_term_and_synthesize` directly (M4b-3 P2a final-review fix), so a
+future edit to either this dumper's pipeline or that method's body
+that de-synchronizes the two will show up as a corpus diff there,
+rather than as a doc claim nothing checks. The fixpoint is what forces
+a stuck typeclass problem (an instance goal no candidate solves, or
+whose own type is still a metavariable) to be REPORTED rather than
+silently emitted as a term with a dangling instance mvar in it.
 
 Measured empty-diff over the whole corpus (M4b-3 P2a task 9): every
 one of the 81 committed records is byte-identical under the new
