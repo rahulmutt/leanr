@@ -29,7 +29,103 @@ pub enum PostponeBehavior {
     Partial,
 }
 
+/// oracle: `Lean.LOption` as `trySynthInstance` returns it
+/// (`SynthInstance.lean:1010-1017`) — `.some` is an answer, `.none` a
+/// completed search with no answer, and `.undef` "instance cannot be
+/// synthesized right now because `type` contains metavariables".
+///
+/// Three-valued, not `Option`: reporting `.undef` as `.none` turns every
+/// postponable typeclass goal into a hard synthesis failure, and
+/// reporting it as `.some` — which is what happens when nothing detects
+/// the stuck condition at all — answers the goal by guessing a candidate
+/// on the caller's behalf. See `TermElabM::try_synth_instance`.
+enum LOptionExpr {
+    Some(ExprId),
+    Undef,
+    None,
+}
+
 impl<'e> TermElabM<'e> {
+    /// oracle: `Lean.Meta.trySynthInstance` (`SynthInstance.lean:
+    /// 1010-1017`) — `synthInstance?` with `isDefEqStuckExceptionId`
+    /// caught and reported as `.undef`.
+    ///
+    /// **Why this is not just `synth_instance` with the error mapped.**
+    /// The oracle's `.undef` is a DYNAMIC signal: `synthInstanceCore?`
+    /// runs the entire search under `withNewMCtxDepth`
+    /// (`SynthInstance.lean:977`) with `isDefEqStuckEx := true`
+    /// (`:963`), which makes every metavariable the CALLER already owned
+    /// read-only for the duration. When a candidate's unification then
+    /// reaches `?a =?= Nat` with `?a` read-only and `Nat` not a
+    /// metavariable, neither side is assignable and
+    /// `ExprDefEq.lean:1898-1958`'s last branch throws
+    /// `isDefEqStuck`, which aborts the whole search — so the answer is
+    /// "ask me again once you have assigned `?a`", not "`instWrapNat`".
+    ///
+    /// `leanr_meta` has no mctx-depth / read-only-mvar model and
+    /// constructs `MetaError::IsDefEqStuck` nowhere (this crate's
+    /// deferral ledger in `lib.rs` records that gap, whose owner is a
+    /// later `leanr_meta` slice; `leanr_meta/src` is behavior-frozen for
+    /// M4b-3 P3). Its `synth_instance` therefore treats the caller's
+    /// `?a` as an ordinary assignable mvar and answers `Wrap ?a` with
+    /// whichever candidate it reaches first — silently choosing the
+    /// class's type parameter for the caller. That is a WRONG ANSWER,
+    /// not merely a missing postponement: with `Wrap Nat`/`Wrap Unit`
+    /// both in scope it picks `instWrapUnit` and then `(useWrap
+    /// Nat.zero : Nat)` fails to typecheck its own explicit argument.
+    ///
+    /// So the stuck condition is reconstructed here, from the goal type,
+    /// on the elaborator side of the seam:
+    ///
+    /// - **Exact in the safe direction.** Every site that can throw
+    ///   `isDefEqStuck` under this config — the non-assignable/
+    ///   non-assignable branch (`ExprDefEq.lean:1954`), the
+    ///   outer-depth `unstuckMVar` rescue (`:1993-2018`), and
+    ///   `DiscrTree.getKeyArgs`'s reducible/matcher/recursor cases
+    ///   (`DiscrTree/Main.lean:359-386`, all guarded by
+    ///   `e.hasExprMVar`) — needs an unassigned EXPR metavariable
+    ///   reachable from the goal. A goal with none can never be
+    ///   `.undef`, so a ground goal still goes to the real search.
+    /// - **Over-approximating in the other direction, and that is the
+    ///   residual gap.** A goal that does mention an unassigned expr
+    ///   mvar is reported `.undef` here even when the oracle would have
+    ///   succeeded — the case where every candidate the search reaches
+    ///   is polymorphic in that argument (`instWrapAny : ∀ α, Wrap α`),
+    ///   so unification assigns only search-local mvars and never the
+    ///   caller's. Closing that residue needs the real depth model, not
+    ///   a finer syntactic test; until then this errs toward
+    ///   postponement, which the ladder can recover from, rather than
+    ///   toward committing to a candidate, which it cannot.
+    ///
+    /// LEVEL metavariables are deliberately NOT part of the test:
+    /// `withNewMCtxDepth (allowLevelAssignments := true)` (`:977`) keeps
+    /// outer LEVEL mvars assignable, so `LevelDefEq.lean:167-171`'s
+    /// stuck throw needs a level mvar that is non-assignable for some
+    /// other reason. `has_expr_mvar` alone is the right predicate.
+    ///
+    /// The `MetaError::IsDefEqStuck` arm below is kept live: it is the
+    /// channel this function should be reading once `leanr_meta` grows
+    /// the depth model, at which point the syntactic pre-test becomes
+    /// redundant and can be deleted rather than rewritten.
+    ///
+    /// Precondition: `ty` is already `instantiate_mvars`-ed (the oracle's
+    /// own `let type ← instantiateMVars type`, `SynthInstance.lean:969`).
+    /// The `has_expr_mvar` bit is recomputed per constructed node, so on
+    /// an instantiated type it means exactly "mentions an UNASSIGNED expr
+    /// mvar"; on a stale one it would over-report.
+    fn try_synth_instance(&mut self, ty: ExprId) -> Result<LOptionExpr, ElabError> {
+        let base = self.view.store;
+        if self.mctx.store().expr_data(Some(base), ty).has_expr_mvar() {
+            return Ok(LOptionExpr::Undef);
+        }
+        match self.mctx.synth_instance(ty) {
+            Ok(Some(val)) => Ok(LOptionExpr::Some(val)),
+            Ok(None) => Ok(LOptionExpr::None),
+            Err(leanr_meta::MetaError::IsDefEqStuck(_)) => Ok(LOptionExpr::Undef),
+            Err(e) => Err(ElabError::from(e)),
+        }
+    }
+
     /// The ordering core of `synthesizeSyntheticMVarsStep`
     /// (`SyntheticMVars.lean:573-594`), with the per-mvar outcome
     /// supplied by the caller.
@@ -159,15 +255,12 @@ impl<'e> TermElabM<'e> {
             .expect("instance mvar is declared")
             .ty;
         let ty = self.mctx.instantiate_mvars(ty)?;
-        // The trichotomy: `Ok(Some)` = `.some`, `Err(IsDefEqStuck)` =
-        // `.undef`, `Ok(None)` = `.none`. Preserving `undef` as "not
-        // ready yet" rather than failure is the whole reason
-        // postponement works.
-        let val = match self.mctx.synth_instance(ty) {
-            Ok(Some(val)) => val,
-            Ok(None) => return Err(ElabError::InstanceSynthesisFailed { goal: ty }),
-            Err(leanr_meta::MetaError::IsDefEqStuck(_)) => return Ok(false),
-            Err(e) => return Err(ElabError::from(e)),
+        // The trichotomy. Preserving `.undef` as "not ready yet" rather
+        // than failure is the whole reason postponement works.
+        let val = match self.try_synth_instance(ty)? {
+            LOptionExpr::Some(val) => val,
+            LOptionExpr::Undef => return Ok(false),
+            LOptionExpr::None => return Err(ElabError::InstanceSynthesisFailed { goal: ty }),
         };
         if self.mctx.mctx().is_assigned(inst_mvar) {
             // oracle: :1240-1272 — the mvar may already carry a value

@@ -127,26 +127,26 @@ fn step_merges_new_pending_before_still_unsolved() {
 /// throws, `Err(IsDefEqStuck)` is "not ready yet" that survives to the
 /// next rung.
 ///
-/// STILL IGNORED after Task 7, for a reason the Elab0 fixture cannot
-/// fix: `MetaError::IsDefEqStuck` (`leanr_meta::error`) is never
-/// constructed anywhere in `leanr_meta/src` today — confirmed by
-/// grep and by a direct probe (`app.elab.mctx.synth_instance(Wrap ?m)`
-/// returns `Ok(Some(instWrapNat))`, not `Err(IsDefEqStuck)`). The real
-/// oracle DOES report this stuck (verified against the pinned
-/// v4.33.0-rc1 toolchain: `useWrap` alone elaborates to "typeclass
-/// instance problem is stuck / Wrap ?m.1 / ... the type argument to
-/// `Wrap` is a metavariable"), via `SynthInstance.lean`'s
-/// `withNewMCtxDepth` around the whole search (`:978`) making an
-/// OUTER-scope mvar read-only mid-search — a general MCtx-depth /
-/// read-only-mvar model `leanr_meta` does not have yet, by its own
-/// documented design (`synth.rs`, `whnf.rs`, `level.rs`'s "Depth /
-/// read-only seam" — explicitly deferred to a later `leanr_meta` plan,
-/// out of scope for `leanr_meta/src unchanged by this task`). Fixing
-/// this needs that model, not a different fixture shape.
+/// UN-IGNORED by M4b-3 P3 task 2. It was ignored through P2a because
+/// `MetaError::IsDefEqStuck` is constructed nowhere in `leanr_meta/src`
+/// (still true) and `synth_instance(Wrap ?m)` therefore answered
+/// `Ok(Some(..))` — it treated the CALLER's `?m` as assignable and chose
+/// the class's type parameter on the caller's behalf. The real oracle
+/// reports this stuck (verified against the pinned v4.33.0-rc1
+/// toolchain: `useWrap` alone gives "typeclass instance problem is
+/// stuck / Wrap ?m.1 / ... the type argument to `Wrap` is a
+/// metavariable"), via `SynthInstance.lean:977`'s `withNewMCtxDepth`
+/// making an OUTER-scope mvar read-only for the whole search.
+///
+/// `leanr_meta` still has no MCtx-depth / read-only-mvar model — that
+/// gap and its owner are unchanged. What changed is that the
+/// ELABORATOR no longer depends on it for this decision:
+/// `TermElabM::try_synth_instance` (`synthetic/ladder.rs`) reconstructs
+/// `trySynthInstance`'s `.undef` from the goal type, so a goal that
+/// still mentions an unassigned expr mvar is "not ready" instead of
+/// being answered by a guessed candidate. See that function's doc for
+/// exactly how much of the oracle's dynamic condition this covers.
 #[test]
-#[ignore = "needs leanr_meta MCtx-depth / read-only-mvar support so \
-            synth_instance can ever produce IsDefEqStuck — leanr_meta/src \
-            is out of scope for M4b-3 P2a"]
 fn stuck_synthesis_is_not_ready_rather_than_failure() {
     support::with_app_harness("Nat.zero", |app| {
         // `Wrap ?m` — a class goal whose type argument is an unassigned
@@ -312,22 +312,16 @@ fn step_reports_progress_by_snapshot_count() {
 /// "typeclass instance problem is stuck". leanr must do the same rather
 /// than emitting a term with a dangling mvar.
 ///
-/// STILL IGNORED after Task 7 — same `leanr_meta` MCtx-depth gap as
+/// UN-IGNORED by M4b-3 P3 task 2, together with
 /// `stuck_synthesis_is_not_ready_rather_than_failure` (see that test's
-/// own doc for the full finding). Measured directly against this exact
-/// query: `elab_and_synthesize("useWrap")` currently returns
-/// `Ok(@useWrap Nat instWrapNat)` — leanr's `synth_instance` resolves
-/// `Wrap ?a` via the sole candidate instead of reporting it stuck, so
-/// the fixpoint never reaches `report_stuck_synthetic_mvars` at all.
-/// The pinned oracle genuinely does throw "typeclass instance problem
-/// is stuck" for this exact source text (re-confirmed against
-/// v4.33.0-rc1 while investigating this gap) — the fixture and the
-/// assertion are both right; `leanr_meta` cannot yet reproduce the
-/// oracle's refusal.
+/// doc for the finding). Through P2a this returned
+/// `Ok(@useWrap Nat instWrapNat)` — `Wrap ?a` was resolved from the
+/// then-sole candidate instead of being reported stuck, so the fixpoint
+/// never reached `report_stuck_synthetic_mvars` at all. It is the
+/// END-TO-END counterpart of that test: it proves the `.undef` reaches
+/// the ladder's stuck report through the whole fixpoint, not just that
+/// `synthesize_inst_mvar_core` returns `false`.
 #[test]
-#[ignore = "needs leanr_meta MCtx-depth / read-only-mvar support (see \
-            stuck_synthesis_is_not_ready_rather_than_failure's doc) — \
-            leanr_meta/src is out of scope for M4b-3 P2a"]
 fn bare_typeclass_application_is_reported_stuck() {
     let err = support::elab_and_synthesize("useWrap").expect_err("stuck");
     assert!(matches!(
@@ -343,16 +337,16 @@ fn bare_typeclass_application_is_reported_stuck() {
 /// `else if postpone != .yes` / `else if postpone == .no`
 /// (`SyntheticMVars.lean:617,642`).
 ///
-/// STILL IGNORED after Task 7 — same `leanr_meta` MCtx-depth gap as
-/// `stuck_synthesis_is_not_ready_rather_than_failure`'s own doc:
-/// `wrap_of_fresh_mvar`'s goal is genuinely solved by
-/// `synthesize_inst_mvar_core` (not left pending), so this test's own
-/// "still pending" assertion fails on the FIRST call, before
-/// `postpone == .yes` is even exercised.
+/// UN-IGNORED by M4b-3 P3 task 2 (see
+/// `stuck_synthesis_is_not_ready_rather_than_failure`'s doc). Through
+/// P2a `wrap_of_fresh_mvar`'s goal was genuinely SOLVED by
+/// `synthesize_inst_mvar_core` rather than left pending, so the "still
+/// pending" assertion failed on the first call, before
+/// `postpone == .yes` was exercised at all. This is the only test in
+/// this file that distinguishes rung-gating by `postpone` from the
+/// stuck report, and it needs a genuinely unsolvable-for-now goal to do
+/// it.
 #[test]
-#[ignore = "needs leanr_meta MCtx-depth / read-only-mvar support (see \
-            stuck_synthesis_is_not_ready_rather_than_failure's doc) — \
-            leanr_meta/src is out of scope for M4b-3 P2a"]
 fn postpone_yes_leaves_the_mvar_pending() {
     support::with_app_harness("Nat.zero", |app| {
         let goal = support::wrap_of_fresh_mvar(app);
