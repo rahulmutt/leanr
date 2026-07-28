@@ -748,17 +748,16 @@ fn explicit_mode_consumes_implicit_params_positionally() {
         elab_src("@id Nat Nat.zero").is_ok(),
         "`@id Nat Nat.zero` must fill the implicit `α` positionally"
     );
-    // Without `@`, `α` is inserted as an mvar and `Nat`/`Nat.zero` are
-    // two arguments for the single explicit parameter `a` — one too
-    // many, which is `main`'s own "too many arguments" seam.
+    // Without `@`, `α` is inserted as an mvar, `Nat` fills the single
+    // explicit parameter `a` (assigning `α := Nat` along the way), and
+    // `Nat.zero` is left over with no parameter to fill: `id`'s result
+    // type is `α`, which instantiates to the now-concrete `Nat` — a
+    // genuinely non-function type, so `main`'s
+    // `synthesize_pending_and_normalize_fun_type` reports
+    // `FunctionExpected` rather than a seam (M4b-3 P2a task 8).
     match elab_src("id Nat Nat.zero") {
-        Err(leanr_elab::ElabError::UnsupportedSyntax(m)) => {
-            assert!(
-                m.contains("too many arguments"),
-                "without `@` the second positional argument has no parameter, got {m:?}"
-            );
-        }
-        other => panic!("expected the too-many-arguments seam without `@`, got {other:?}"),
+        Err(leanr_elab::ElabError::FunctionExpected { .. }) => {}
+        other => panic!("expected FunctionExpected without `@`, got {other:?}"),
     }
 }
 
@@ -907,10 +906,15 @@ fn block_implicit_lambda_covers_the_oracles_exclusion_list() {
 /// it delegates to `processExplicitArg`, so a strict-implicit parameter
 /// is filled from the POSITIONAL arguments; without `@` (and with
 /// arguments left) it inserts an mvar instead and the positional
-/// argument survives to become a "too many arguments" error.
+/// argument survives with no parameter to fill. The synthetic `fType`
+/// here is `∀ {{_ : Nat}}, Nat` — non-dependent, so once the mvar is
+/// inserted the result type is the concrete `Nat`, a genuinely
+/// non-function type: `synthesize_pending_and_normalize_fun_type`
+/// reports `FunctionExpected` (M4b-3 P2a task 8), not a seam.
 ///
-/// Newly live in Task 8: `ctx.explicit` was permanently `false` when
-/// this arm was written, so its `explicit` half had never executed.
+/// Newly live in P1 task 8 (a different task 8 from the P2a one cited
+/// above): `ctx.explicit` was permanently `false` when this arm was
+/// written, so its `explicit` half had never executed.
 /// The corpus still cannot reach it (Elab0 declares no strict-implicit
 /// constant), hence the synthetic `fType` — the same technique
 /// `strict_implicit_without_args_finalizes` above uses, `Some(base)`
@@ -959,12 +963,12 @@ fn explicit_mode_fills_a_strict_implicit_from_positional_args() {
                 );
             } else {
                 match got {
-                    Err(leanr_elab::ElabError::UnsupportedSyntax(m)) => assert!(
-                        m.contains("too many arguments"),
-                        "without `@` the strict implicit takes an mvar and the \
-                         positional argument is left over, got {m:?}"
+                    Err(leanr_elab::ElabError::FunctionExpected { .. }) => {}
+                    other => panic!(
+                        "without `@` the strict implicit takes an mvar, the result type \
+                         `Nat` is concrete, and the leftover positional argument should \
+                         report FunctionExpected, got {other:?}"
                     ),
-                    other => panic!("expected the leftover-argument seam, got {other:?}"),
                 }
             }
         });

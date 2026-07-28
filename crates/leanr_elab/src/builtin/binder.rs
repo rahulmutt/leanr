@@ -15,6 +15,7 @@ use leanr_syntax::tree::SyntaxNode;
 use crate::dispatch::{non_trivia_children, SynElem};
 use crate::elab::TermElabM;
 use crate::error::ElabError;
+use crate::synthetic::PostponeBehavior;
 
 /// oracle: `elabType t` = `elabTerm t (mkSort (mkLevelMVar u))` then
 /// ensure-is-type. Here: a fresh level mvar `?u`, a `Sort ?u` expected
@@ -681,10 +682,29 @@ pub fn elab_let_like(
     let built = (|| {
         let fvars = push_let_binders(elab, &binder_items, kinds)?;
         let ty = match &ty_syntax {
-            Some(t) => elab_type(elab, t, kinds)?,
+            // oracle: `withSynthesize (postpone := .partial) <|
+            // elabType typeStx` (`Binders.lean:775`) — `.partial` lets
+            // a typeclass-resolution mvar the type creates be
+            // postponed (nothing else may be), and the ladder drains
+            // it before the value below is checked against the type.
+            // Only the type is wrapped: `config.postponeValue` is
+            // false for every form leanr parses, so the value and body
+            // keep their direct, un-postponed shape below, matching
+            // the oracle's own `postponeValue`-false branch
+            // (`Binders.lean:779-798`). The oracle's own rationale
+            // (issue #4051, cited at `Binders.lean:754-773`): without
+            // this, unresolved synthetic-opaque mvars left in `type`
+            // make the value's defeq check waste enormous time
+            // unfolding declarations before failing, then insert a
+            // postponed coercion.
+            Some(t) => elab.with_synthesize(PostponeBehavior::Partial, kinds, |elab| {
+                elab_type(elab, t, kinds)
+            })?,
             // Elided type: a fresh mvar, the observable twin of the
             // oracle's `expandOptType`-to-`_` hole; the value's
-            // `elab_term_ensuring_type` assigns it.
+            // `elab_term_ensuring_type` assigns it. No type syntax is
+            // elaborated here, so there is nothing for
+            // `with_synthesize` to scope.
             None => fresh_type_mvar(elab)?,
         };
         let value = elab.elab_term_ensuring_type(&value_elem, kinds, Some(ty))?;

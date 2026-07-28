@@ -774,6 +774,70 @@ impl<'e> MetaCtx<'e> {
         self.matchers.get(&n)
     }
 
+    /// oracle: `processPostponed (mayPostpone := false)`
+    /// (`Lean/Meta/LevelDefEq.lean`), reached from
+    /// `Lean.Elab.Term.processPostponedUniverseConstraints`
+    /// (`SyntheticMVars.lean:409-411`) — the ladder's final step when
+    /// `postpone == .no`.
+    ///
+    /// Additive and behavior-neutral: a thin `pub` forwarder to the
+    /// existing `pub(crate)` `level::process_postponed`
+    /// (`level.rs:741`), which `defeq.rs:102` already calls on the same
+    /// queue. No new logic, no TCB surface — `leanr_elab` simply cannot
+    /// reach a `pub(crate)` item from another crate.
+    ///
+    /// Returns `true` when every postponed constraint was solved.
+    /// leanr does NOT model the oracle's `exceptionOnFailure` parameter:
+    /// that flag exists to guarantee `throwStuckAtUniverseCnstr`'s
+    /// "entries is not empty" precondition, and leanr's caller reports
+    /// stuck constraints from the `false` verdict instead of from a
+    /// thrown exception (`synthetic.rs`'s
+    /// `process_postponed_universe_constraints`).
+    pub fn process_postponed_levels(&mut self) -> Result<bool, MetaError> {
+        self.process_postponed()
+    }
+
+    /// The number of postponed level constraints. The oracle's
+    /// `getNumPostponed` (`Lean/Meta/Basic.lean`), used by
+    /// `defeq.rs:173`'s own postponed-count guard and, from P2a on, by
+    /// the ladder's checkpoint bookkeeping.
+    pub fn postponed_len(&self) -> usize {
+        self.postponed.len()
+    }
+
+    /// oracle: `getDefaultInstances` (`Lean/Meta/Instances.lean`),
+    /// consumed by `synthesizeSomeUsingDefaultPrio`
+    /// (`SyntheticMVars.lean:213-221`).
+    ///
+    /// Additive: a `pub` forwarder to the existing `pub(crate)`
+    /// `MetaCtx::default_instances` (`instances.rs:520`). P2a uses it
+    /// only to shape-guard the `synthesize_using_default` seam — "are
+    /// there default instances that WOULD apply here?" — so that P3 can
+    /// replace the seam body without the guard having lied in the
+    /// meantime. Each entry is `(instance name, priority)`.
+    pub fn default_instances_of(&self, class: NameId) -> Vec<(NameId, usize)> {
+        self.default_instances(class)
+    }
+
+    /// oracle: `Lean.occursCheck` (`Lean/Util/OccursCheck.lean:18-53`),
+    /// consumed by `resumePostponed`'s assignment guard
+    /// (`SyntheticMVars.lean:56-58`): `if (← occursCheck mvarId result)
+    /// then mvarId.assign result; return true else return false`. `true`
+    /// means `mvar_id` is safe to assign `e` to — it does NOT occur in
+    /// `e` (following assigned mvars, same as the oracle).
+    ///
+    /// Additive: a `pub` forwarder to the existing `pub(crate)`
+    /// `MetaCtx::occurs_check` (`assign.rs:1117`), which `assign.rs`'s
+    /// own assignment path already calls on the same traversal. Named
+    /// `check_occurs` rather than reusing `occurs_check` verbatim: Rust
+    /// merges inherent `impl` blocks for one type across files, so a
+    /// second same-named method on `MetaCtx` would not compile. No new
+    /// logic, no new fields, no TCB surface — `leanr_elab` simply
+    /// cannot reach a `pub(crate)` item from another crate.
+    pub fn check_occurs(&mut self, mvar_id: MVarId, e: ExprId) -> Result<bool, MetaError> {
+        self.occurs_check(mvar_id, e)
+    }
+
     /// One deterministic step. Every whnf_core / whnf / infer entry
     /// calls this once; exhaustion is a distinct error, never a
     /// verdict (spec § Error handling).
@@ -907,7 +971,9 @@ pub(crate) struct MetaSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{const_named, with_ctx, with_prelude0_ctx};
+    use crate::test_support::{
+        const_named, fresh_mvar, render_name, with_ctx, with_instances_ctx, with_prelude0_ctx,
+    };
     use crate::MetaError;
 
     /// TDD RED for the checkpoint/push/restore + `mk_forall` accessors
@@ -1244,6 +1310,74 @@ mod tests {
         with_prelude0_ctx(|ctx| {
             let nat = const_named(ctx, "Nat");
             assert_eq!(ctx.instantiate_beta_rev_range(nat, &[]).unwrap(), nat);
+        });
+    }
+
+    #[test]
+    fn process_postponed_levels_drains_an_empty_queue() {
+        with_ctx(|ctx| {
+            assert_eq!(ctx.postponed_len(), 0);
+            // An empty queue is vacuously solvable: the oracle's
+            // `processPostponed` returns `true` when there is nothing
+            // left to solve (`level.rs::process_postponed`'s own
+            // contract), which is what makes the ladder's final
+            // `process_postponed_universe_constraints` a no-op on every
+            // term that never postponed a level constraint.
+            assert!(ctx.process_postponed_levels().expect("no error"));
+            assert_eq!(ctx.postponed_len(), 0);
+        });
+    }
+
+    /// Mirrors `default_instances_finds_the_default_instance`
+    /// (instances.rs) through the new public accessor: the same
+    /// fixture (`with_instances_ctx` — the task brief's sketched
+    /// `with_default_instance_ctx` does not exist; `instances.rs`'s own
+    /// test builds its context inline the same way), the same class,
+    /// the same expected entry — proving the accessor forwards rather
+    /// than reimplementing.
+    #[test]
+    fn default_instances_of_reads_the_default_instance_table() {
+        with_instances_ctx(|ctx| {
+            let of_n = const_named(ctx, "OfN");
+            let of_n_name = if let Node::Const { name: Some(n), .. } = ctx.node(of_n) {
+                n
+            } else {
+                panic!("OfN is not a bare const")
+            };
+            let found = ctx.default_instances_of(of_n_name);
+            let names: Vec<String> = found.iter().map(|(n, _)| render_name(ctx, *n)).collect();
+            assert!(
+                names.contains(&"instOfNN".to_string()),
+                "default_instances_of(OfN): {names:?}"
+            );
+        });
+    }
+
+    /// `check_occurs` forwards to the crate-private `occurs_check`
+    /// exactly: `false` when `mvar_id` occurs inside `e` (here, `?m`
+    /// inside the application `Nat ?m`), `true` when it does not. This
+    /// is the accessor `leanr_elab::synthetic::resume_postponed`'s
+    /// assignment guard needs — it may not assign a resumed result that
+    /// mentions the very mvar it is resolving (M4b-3 P2a task 5 review
+    /// finding 1).
+    #[test]
+    fn check_occurs_forwards_to_the_crate_private_occurs_check() {
+        with_prelude0_ctx(|ctx| {
+            let nat = const_named(ctx, "Nat");
+            let (m_expr, m_id) = fresh_mvar(ctx, nat);
+            let base = Some(ctx.view.store);
+            let app = ctx
+                .scratch
+                .expr_app(base, nat, m_expr)
+                .expect("app: Nat ?m");
+            assert!(
+                !ctx.check_occurs(m_id, app).expect("no error"),
+                "?m occurs inside `Nat ?m` -> not safe to assign"
+            );
+            assert!(
+                ctx.check_occurs(m_id, nat).expect("no error"),
+                "?m does not occur in `Nat` -> safe to assign"
+            );
         });
     }
 }

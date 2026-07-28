@@ -12,12 +12,13 @@
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, NameId};
 use leanr_kernel::BinderInfo;
-use leanr_meta::MVarId;
+use leanr_meta::{MVarId, MVarKind};
 use leanr_syntax::kind::KindInterner;
 
 use crate::app::expand::{Arg, NamedArg};
 use crate::app::state::AppElab;
 use crate::error::ElabError;
+use crate::synthetic::PostponeBehavior;
 
 /// oracle: `main` (`App.lean:926-951`).
 pub fn main(app: &mut AppElab, kinds: &KindInterner) -> Result<ExprId, ElabError> {
@@ -87,49 +88,53 @@ pub fn main(app: &mut AppElab, kinds: &KindInterner) -> Result<ExprId, ElabError
                     }
                 }
                 BinderInfo::InstImplicit => {
-                    // oracle: `processInstImplicitArg` (`App.lean:903-923`)
-                    // creates an instance mvar and pushes it onto
-                    // `instMVars` for `synthesizeAppInstMVars`. Both need
-                    // the synthesis client and the fixpoint.
-                    //
-                    // SEAM ATTRIBUTION (Task 9): this is the one place in
-                    // `app/` where the oracle reads `explicit` and leanr
-                    // does not. `processInstImplicitArg` is
-                    // `if (← read).explicit then <hole?-or-processExplicitArg>
-                    // else discard <| mkInstMVar ..` (`App.lean:904-917`),
-                    // so under `@` an instance-implicit parameter is filled
-                    // POSITIONALLY (or, for a literal `_`, still synthesized)
-                    // and only the `else` half is P2's. Returning the P2 seam
-                    // unconditionally therefore over-attributes the `@` slice
-                    // to P2 — which is harmless today because it is
-                    // UNREACHABLE: `Elab0.lean` declares no `class` and no
-                    // `instance`, so no fixture constant has an
-                    // `instImplicit` binder for either branch to reach.
-                    // Splitting the arm would mean writing the explicit half
-                    // with no way to test it; P2, which brings the fixture
-                    // classes, owns both halves.
-                    return Err(ElabError::UnsupportedSyntax(
-                        "instance-implicit arguments require typeclass synthesis \
-                         and the synthetic-mvar fixpoint — M4b-3 P2"
-                            .to_string(),
-                    ));
+                    if !process_inst_implicit_arg(app, kinds, binder_name)? {
+                        return crate::app::finalize::finalize(app);
+                    }
                 }
             }
         } else if app.has_args_to_process() {
-            // oracle: `synthesizePendingAndNormalizeFunType`
-            // (`App.lean:372-404`) — synthesize pending instance mvars,
-            // then re-WHNF; if `fType` is STILL not a forall it tries
-            // `coerceToFunction?` and otherwise reports "function
-            // expected". Both halves are later plans.
-            return Err(ElabError::UnsupportedSyntax(
-                "too many arguments: normalizing the function type needs pending-instance \
-                 synthesis (M4b-3 P2) and CoeFun (M4b-3 P4)"
-                    .to_string(),
-            ));
+            synthesize_pending_and_normalize_fun_type(app, kinds)?;
         } else {
             return crate::app::finalize::finalize(app);
         }
     }
+}
+
+/// oracle: `synthesizePendingAndNormalizeFunType` (`App.lean:372-411`).
+/// "fType may become a forallE after we synthesize pending metavariables."
+fn synthesize_pending_and_normalize_fun_type(
+    app: &mut AppElab,
+    kinds: &KindInterner,
+) -> Result<(), ElabError> {
+    app.try_synthesize_app_inst_mvars()?;
+    // oracle: `synthesizeSyntheticMVars` with its DEFAULT
+    // `postpone := .yes` (:375) — this is a normalization attempt, not a
+    // commitment point, so a still-stuck mvar must stay pending rather
+    // than be reported.
+    app.elab
+        .synthesize_synthetic_mvars(PostponeBehavior::Yes, kinds)?;
+    if app.f_type_is_forall()? {
+        return Ok(());
+    }
+    // oracle: `coerceToFunction? s.f` (:378) — M4b-3 P4.
+    // The oracle's remaining arms are diagnostics: a deprecated-argument
+    // linter, `throwInvalidNamedArg` (which needs `foundNamedArgs`
+    // rendering leanr does not do), and the "Function expected" error.
+    // Only the last changes control flow, so only it is ported.
+    let f_type = app.st.f_type;
+    if app.f_type_is_mvar_after_instantiation()? {
+        return Err(ElabError::UnsupportedSyntax(
+            "function type is still an unassigned metavariable after synthesis: needs \
+             CoeFun (M4b-3 P4), or expected-type propagation into `fun` binder domains \
+             (M4b-3 P5) for the M4b-2 `fun` shape"
+                .to_string(),
+        ));
+    }
+    Err(ElabError::FunctionExpected {
+        f: app.st.f,
+        f_type,
+    })
 }
 
 /// oracle: `Term.findNamedArg?` (`App.lean:81-83`) — the entry for
@@ -490,13 +495,13 @@ fn add_implicit_arg(app: &mut AppElab) -> Result<(), ElabError> {
     // oracle: the `isNextOutParamOfLocalInstanceAndResult` branch
     // (`App.lean:749-757`) sets `resultTypeOutParam?` and disables
     // propagation. It needs class outParam positions from the
-    // `classExtension`, which leanr does not decode until P2; the
+    // `classExtension`, which leanr does not decode until P2b; the
     // guarding flag (`result_is_out_param_support`) is false in the
     // fixture env, so the branch is inert here rather than skipped
     // silently. `finalize` re-checks `result_type_out_param` (task 4).
     if app.ctx.result_is_out_param_support {
         return Err(ElabError::UnsupportedSyntax(
-            "local-instance outParam result type requires classExtension decode — M4b-3 P2"
+            "local-instance outParam result type requires classExtension decode — M4b-3 P2b"
                 .to_string(),
         ));
     }
@@ -541,6 +546,87 @@ fn process_strict_implicit_arg(
     } else {
         Ok(false)
     }
+}
+
+/// oracle: `processInstImplicitArg` (`App.lean:903-923`, confirmed
+/// against the pinned source: `processInstImplicitArg` itself is
+/// `903-917`, its `where mkInstMVar` clause `919-923` — the brief's
+/// combined `903-923` citation is accurate).
+///
+/// Both halves, per the seam attribution P1 left here: under `@` an
+/// instance-implicit parameter is filled POSITIONALLY, except that a
+/// literal `_` is STILL synthesized (`nextArgHole?`, :905-911) — the
+/// oracle's own comment: "We still use typeclass resolution for `_`
+/// arguments."
+fn process_inst_implicit_arg(
+    app: &mut AppElab,
+    kinds: &KindInterner,
+    binder_name: Option<NameId>,
+) -> Result<bool, ElabError> {
+    if app.ctx.explicit {
+        if next_arg_hole(app, kinds).is_some() {
+            let ty = app.get_arg_expected_type()?;
+            mk_inst_mvar(app, ty, binder_name)?;
+            // oracle: `modify fun s => { s with args := s.args.tail! }`
+            // (`App.lean:912`) — the hole is CONSUMED even though it was
+            // not elaborated. `next_arg_hole` only PEEKED (see its own
+            // doc); this is the oracle's own separate consume step, done
+            // here rather than inside the peek.
+            app.st.args.remove(0);
+            return Ok(true);
+        }
+        return process_explicit_arg(app, kinds, binder_name);
+    }
+    let ty = app.get_arg_expected_type()?;
+    mk_inst_mvar(app, ty, binder_name)?;
+    Ok(true)
+}
+
+/// oracle: `nextArgHole?` (`App.lean:300-303`) — a PURE PEEK: `match
+/// (← get).args with Arg.stx stx@(hole) :: _ => pure stx | _ => none`,
+/// no `modify` anywhere in its body. The oracle's own consume step
+/// (`s.args.tail!`) is a SEPARATE line inside `processInstImplicitArg`
+/// (`App.lean:912`), run only on the branch that actually took the
+/// hole — which is exactly why `process_inst_implicit_arg` above does
+/// its own `app.st.args.remove(0)` rather than this function doing it:
+/// consuming here would double-consume on that branch and wrongly
+/// consume on the `else` branch (`processExplicitArg`), which must see
+/// the argument still present.
+fn next_arg_hole(app: &AppElab, kinds: &KindInterner) -> Option<()> {
+    let Some(Arg::Stx(elem)) = app.st.args.first() else {
+        return None;
+    };
+    (kinds.name(elem.kind()) == "Lean.Parser.Term.hole").then_some(())
+}
+
+/// oracle: `mkInstMVar` (`App.lean:919-923`).
+///
+/// `MVarKind::Synthetic`, NOT `SyntheticOpaque`: an instance mvar must
+/// remain assignable by `isDefEq` (that is precisely what
+/// `PostponeBehavior::Partial` relies on — "this kind of metavariable
+/// are not synthetic opaque", `SyntheticMVars.lean:436-437`).
+///
+/// The oracle's `mkInstMVar` also calls `registerMVarArgName
+/// arg.mvarId! argName` via `addNewArg` (`App.lean:428`) — pure
+/// diagnostics (`TermElabM.lean:887`, the `mvarErrorInfos`-adjacent
+/// "which parameter name does this mvar belong to" table this crate's
+/// deferred prose layer would need, design spec § Amendment, item 2).
+/// `add_new_arg` here, like `elab_and_add_new_arg`'s own
+/// `_binder_name` before it, takes no name parameter at all — the same
+/// established P1 precedent, not a new gap this task introduces — so
+/// `binder_name` is discarded rather than threaded to nowhere.
+fn mk_inst_mvar(
+    app: &mut AppElab,
+    ty: ExprId,
+    binder_name: Option<NameId>,
+) -> Result<ExprId, ElabError> {
+    let (arg, mvar_id) = app
+        .elab
+        .mk_fresh_expr_mvar_of_kind(ty, MVarKind::Synthetic)?;
+    app.st.inst_mvars.push(mvar_id);
+    let _ = binder_name;
+    add_new_arg(app, arg)?;
+    Ok(arg)
 }
 
 /// oracle: `addNewArg` (`App.lean:418-429`) — `f := f arg`, push onto

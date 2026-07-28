@@ -153,3 +153,53 @@ def dep (a : Type) (z : a) : a := z
 -- `?a := Unit` first, postponing lets `PUnit.unit` assign
 -- `?a := PUnit.{1}`. Measured, not assumed — see the task-7 fix report.
 def dpick {a : Type} (w : a) (x : Type) (z : x) : a := w
+
+-- === M4b-3 P2a corpus: classes, instances, instance-implicit args ===
+--
+-- Modelled on tests/fixtures/meta/Synth0.lean:86-136 (leanr_meta's own
+-- synthesis corpus) but deliberately NOT a copy: only the shapes P2a's
+-- records discriminate.
+--
+--   * `Wrap` — one parameter, one concrete instance. The minimal shape
+--     that makes `processInstImplicitArg` observable.
+--   * `Pair` — TWO parameters, so an instance goal with more than one
+--     argument exercises `getArgExpectedType` past the first.
+--   * `NoInst` — a class with NO instance, so `synthesizeInstMVarCore`'s
+--     `.none` (real failure) arm is reachable and distinguishable from
+--     its `.undef` (stuck) arm, which `useWrap` with no expected type
+--     reaches instead. Both are error paths, so neither appears in the
+--     JSONL: the dumper drops a throwing query. They are asserted in
+--     crates/leanr_elab/tests/synthetic_smoke.rs.
+--   * `Dflt` — DISTINCT from `Wrap`/`Pair`/`NoInst`, carrying a
+--     `@[default_instance]`, so rung 3's shape guard
+--     (`synthesize_using_default`) has a positive test
+--     (`synthesize_using_default_errors_when_a_default_instance_is_registered`,
+--     Task 5's review fix). `Wrap`/`Pair`/`NoInst` must NEVER gain a
+--     default instance: one on `Wrap` would make rung 3 fire for the
+--     stuck `useWrap` goal and break the stuck-path tests (Task 5,
+--     Task 9).
+class Wrap (a : Type) where
+  wrap : a -> a
+
+instance instWrapNat : Wrap Nat where
+  wrap := fun n => n
+
+class Pair (a : Type) (b : Type) where
+  mk2 : a -> b -> a
+
+instance instPairNatNat : Pair Nat Nat where
+  mk2 := fun x _ => x
+
+class NoInst (a : Type) where
+  nope : a
+
+class Dflt (a : Type) where
+  val : a
+
+@[default_instance]
+instance instDfltNat : Dflt Nat where
+  val := Nat.zero
+
+def useWrap {a : Type} [Wrap a] (x : a) : a := Wrap.wrap x
+def usePair {a : Type} {b : Type} [Pair a b] (x : a) (y : b) : a := Pair.mk2 x y
+def useNoInst {a : Type} [NoInst a] (x : a) : a := x

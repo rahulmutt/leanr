@@ -35,6 +35,48 @@ pub enum ElabError {
     /// `UnsupportedSyntax`, which means "this construct's slice has not
     /// landed"; this means "this tree cannot be what it claims to be".
     IllFormedSyntax(String),
+    /// oracle: `synthesizeInstMVarCore`'s `.none` arm — "failed to
+    /// synthesize" (`TermElabM.lean:1275-1288`). Carries the goal type;
+    /// the oracle's `extraErrorMsg?` prose is deferred (design spec
+    /// § Amendment, item 2). Unmodelled: the `.none` arm's own
+    /// `ignoreTCFailures` reader-context escape (`if (← read
+    /// ).ignoreTCFailures then return false`, `TermElabM.lean:1276-1277`)
+    /// — a caller can ask to treat "no instance found" as "not ready
+    /// yet" rather than a hard failure; leanr has no reader context
+    /// carrying that flag, so this variant always fires as a hard
+    /// error, which is the one unmodelled branch of
+    /// `synthesizeInstMVarCore` with no note anywhere else in this
+    /// crate.
+    InstanceSynthesisFailed {
+        goal: ExprId,
+    },
+    /// oracle: `reportStuckSyntheticMVar`'s `.typeClass` arm —
+    /// "typeclass instance problem is stuck"
+    /// (`SyntheticMVars.lean:295-303`). Carries the goal type; the note
+    /// and hint prose are deferred.
+    StuckSyntheticMVar {
+        goal: ExprId,
+    },
+    /// oracle: `synthesizeInstMVarCore`'s assignment-mismatch throws
+    /// (`TermElabM.lean:1265-1272`) — the synthesized instance is not
+    /// defeq to the one typing already inferred. Two distinct call
+    /// sites collapse into this one variant: the "already assigned, not
+    /// defeq" throw (`inferred` is `infer_type(old_val)`, the
+    /// pre-existing assignment's type) and the "not yet assigned,
+    /// assignment failed" throw (`inferred` is the mvar's own declared
+    /// type — there is no `old_val` to infer from).
+    InstanceMismatch {
+        synthesized: ExprId,
+        inferred: ExprId,
+    },
+    /// oracle: `"Function expected at .. but this term has type .."`
+    /// (`App.lean:409-411`). Carries the head and its type; the oracle's
+    /// `.note` hint about indentation mishaps (`App.lean:404-408`) is
+    /// prose (deferred).
+    FunctionExpected {
+        f: ExprId,
+        f_type: ExprId,
+    },
 }
 
 impl From<MetaError> for ElabError {

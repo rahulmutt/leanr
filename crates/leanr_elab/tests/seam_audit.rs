@@ -4,7 +4,7 @@
 //!
 //! Scope, stated up front because a seam audit that quietly omits a seam
 //! is worse than one that names its own gaps. `app/mod.rs`'s module doc
-//! is the full site-by-site index; of the seams listed there, three are
+//! is the full site-by-site index; of the seams listed there, two are
 //! not reachable from any source term the hermetic `Elab0` fixture can
 //! express, and this file does not pretend otherwise:
 //!
@@ -12,16 +12,19 @@
 //!     either wrapper, so `app_smoke.rs`'s
 //!     `explicit_mode_skips_the_optparam_default` asserts it white-box
 //!     against a synthetic `f_type` instead;
-//!   * the **P2 instance-implicit** seams (the `InstImplicit` arm and
-//!     the three pending-`inst_mvars` guards) — `Elab0.lean` declares no
-//!     `class` and no `instance`, so nothing can produce an
-//!     `instImplicit` binder or push onto `inst_mvars`. P2 brings the
-//!     fixture classes and the tests with them;
 //!   * the **P4 coercion** seam, which is an `ElabError::TypeMismatch`
 //!     from `ensureArgType` rather than an `UnsupportedSyntax` — that IS
 //!     M4b-1's documented behavior (error on a defeq mismatch instead of
 //!     inserting a coercion), so it is a deliberately wrong-*shaped*
 //!     seam, not a missing one.
+//!
+//! The **P2 instance-implicit** seams (the `InstImplicit` arm and the
+//! three pending-`inst_mvars` guards) used to be a third unreachable
+//! row here — `Elab0.lean` declared no `class` and no `instance`. As of
+//! M4b-3 P2a task 7 it declares `Wrap`/`Pair`/`NoInst`/`Dflt`, both
+//! seams are real code, and their behavior is exercised by
+//! `tests/oracle_elab.rs`'s `tc/*` records and
+//! `tests/synthetic_smoke.rs` rather than by this file.
 //!
 //! Everything else is asserted below, end-to-end from source text.
 
@@ -76,18 +79,19 @@ fn elab_src(src: &str) -> Result<leanr_kernel::bank::ExprId, leanr_elab::ElabErr
 ///     Split into the two cases that really do reach each seam: a bare
 ///     over-application for the P2/P4 one, and the ascribed head for the
 ///     head seam.
+///   * `("Nat.succ Nat.zero Nat.zero", "M4b-3 P2"/"M4b-3 P4")` — task 8
+///     closed this seam: `main`'s "fType is not a forall but arguments
+///     remain" arm now calls `synthesize_pending_and_normalize_fun_type`,
+///     which reports the genuinely-non-function case as
+///     `ElabError::FunctionExpected`, not a named `UnsupportedSyntax`
+///     seam. Moved to `over_application_reports_function_expected` and
+///     `mvar_function_type_is_a_named_seam` below, which assert the two
+///     split failure modes directly.
 #[test]
 fn deferred_constructs_are_named_seams() {
     let cases: &[(&str, &str)] = &[
         // (source, expected slice marker in the message)
         //
-        // `main`'s "fType is not a forall but arguments remain" arm:
-        // the oracle's `synthesizePendingAndNormalizeFunType`
-        // (`App.lean:372-404`) synthesizes pending instances, re-WHNFs,
-        // and falls back to `coerceToFunction?`. Both halves are later
-        // plans, so the message names both.
-        ("Nat.succ Nat.zero Nat.zero", "M4b-3 P2"),
-        ("Nat.succ Nat.zero Nat.zero", "M4b-3 P4"),
         // `elabExplicit`'s `` `(@($t)) `` arm (`App.lean:2269`): `@` on
         // a non-atom does NOT enter explicit mode, it disables
         // implicit-lambda insertion — P5's.
@@ -137,6 +141,37 @@ fn deferred_constructs_are_named_seams() {
             other => panic!("{src}: expected a named UnsupportedSyntax seam, got {other:?}"),
         }
     }
+}
+
+/// An over-applied function reaches `synthesizePendingAndNormalizeFunType`
+/// and, when the type is genuinely not a function, reports it as such
+/// rather than as a pending-synthesis seam.
+#[test]
+fn over_application_reports_function_expected() {
+    let err = elab_src("Nat.zero Nat.zero").expect_err("Nat is not a function");
+    assert!(
+        matches!(err, leanr_elab::ElabError::FunctionExpected { .. }),
+        "got {err:?}"
+    );
+}
+
+/// A function type that is still an unassigned mvar after the fixpoint
+/// is a named P4/P5 seam, NOT a wrong term.
+///
+/// This shape diverges from the oracle today and will keep diverging
+/// until expected types propagate into `fun` binder domains (plan
+/// § Measured facts, item 4). The assertion pins that it stays an
+/// ERROR naming its owner — the failure mode this discipline exists to
+/// prevent is emitting a different term silently.
+#[test]
+fn mvar_function_type_is_a_named_seam() {
+    let err = elab_src("(fun f => f Nat.zero : (Nat -> Nat) -> Nat)")
+        .expect_err("leanr cannot elaborate this yet");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("M4b-3 P4") || msg.contains("M4b-3 P5"),
+        "seam must name its owner, got {msg}"
+    );
 }
 
 /// The `shouldElabAsElim` guard must NOT fire under `@` or `..`.
@@ -294,4 +329,82 @@ fn fixture_declares_no_undecoded_elab_attributes() {
             );
         }
     }
+}
+
+/// Recursively collect every `.rs` file under `dir`.
+fn walk_rs_files(dir: &str) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![std::path::PathBuf::from(dir)];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d).expect("read_dir") {
+            let entry = entry.expect("dir entry").path();
+            if entry.is_dir() {
+                stack.push(entry);
+            } else if entry.extension().is_some_and(|e| e == "rs") {
+                out.push(entry);
+            }
+        }
+    }
+    out
+}
+
+/// No seam message in `leanr_elab` still points at "M4b-3 P2".
+///
+/// P2 split into P2a (this plan) and P2b (classExtension + outParam), so
+/// an unqualified "P2" is now ambiguous. Every remaining seam must name
+/// P2b, P3, P4, P5, M4b-4, or later M4.
+///
+/// Word-boundary-style match, not two literal substrings: `M4b-3 P2` is
+/// retired whenever it is NOT immediately followed by `a` or `b` (the
+/// two live sub-slice labels), regardless of what punctuation or
+/// end-of-line follows. An earlier cut of this test checked only
+/// `line.contains("M4b-3 P2\"")` and `line.contains("M4b-3 P2 ")` — a
+/// floor, not a ceiling — and a measurement against this very tree
+/// (recorded in task 10's report) showed it missed two real stale
+/// labels that took other punctuation: `dispatch.rs`'s deferral-table
+/// row ended the line with no trailing space (`... M4b-3 P2` then a
+/// newline), and `lib.rs`'s module-doc bullet ended in a comma
+/// (`... M4b-3 P2,`). Both would have passed CI silently. This scan
+/// checks the character immediately after `P2` directly instead of
+/// enumerating suffixes, so it catches every punctuation form without
+/// needing to guess which ones a future seam label might use — while
+/// `P2a`/`P2b` (and prose that never carries the `M4b-3` prefix at all,
+/// e.g. `app/mod.rs`'s "used to carry as P2 rows") stay invisible to it,
+/// same as before.
+///
+/// **Precondition this test relies on:** `needle` is the literal
+/// substring `"M4b-3 P2"`. This is a textual scan, not a semantic one —
+/// it has no notion of "a citation of the retired P2 label" beyond that
+/// exact prefix appearing in the line. Any prose phrased WITHOUT that
+/// literal prefix (a rewritten `app/mod.rs` passage that comes to
+/// mention a bare "P2" some other way, a citation that abbreviates or
+/// respells `M4b-3`, etc.) passes silently — not because it was checked
+/// and found to be fine, but because the gate never looked. A future
+/// edit that reintroduces the literal `M4b-3 P2` prefix (unqualified)
+/// back into such prose IS caught; only the prefix-less phrasing is the
+/// blind spot, and it is a blind spot BY that construction, not an
+/// oversight — recorded here so a future prose edit near this needle
+/// cannot silently rely on being invisible to it without a reader
+/// noticing the precondition changed.
+#[test]
+fn no_seam_points_at_the_retired_p2_label() {
+    let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    let needle = "M4b-3 P2";
+    let mut offenders = Vec::new();
+    for entry in walk_rs_files(src_dir) {
+        let text = std::fs::read_to_string(&entry).expect("read source");
+        for (n, line) in text.lines().enumerate() {
+            for (idx, _) in line.match_indices(needle) {
+                let after = line[idx + needle.len()..].chars().next();
+                if after != Some('a') && after != Some('b') {
+                    offenders.push(format!("{}:{}", entry.display(), n + 1));
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "seams still labelled with the retired `M4b-3 P2`: {offenders:?}"
+    );
 }

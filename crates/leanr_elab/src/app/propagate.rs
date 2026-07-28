@@ -81,15 +81,10 @@ pub fn propagate_expected_type(
         // later parameter can try again.
         return Ok(());
     };
-    // oracle: `trySynthesizeAppInstMVars` (`App.lean:601`). `instMVars`
-    // has no P1 producer — `main`'s `BinderInfo::InstImplicit` arm is
-    // itself a named P2 seam, so nothing can push onto it — but guard
-    // rather than silently skipping a synthesis pass the oracle runs.
-    if !app.st.inst_mvars.is_empty() {
-        return Err(ElabError::UnsupportedSyntax(
-            "pending instance-implicit mvars require typeclass synthesis — M4b-3 P2".to_string(),
-        ));
-    }
+    // oracle: `trySynthesizeAppInstMVars` (`App.lean:601`) — try each
+    // pending instance mvar before the unification below, exactly as
+    // `finalize`'s own call at the same oracle line does.
+    app.try_synthesize_app_inst_mvars()?;
     if app.elab.mctx.is_def_eq(expected, resulting)? {
         // oracle's own emphasised note (`App.lean:602-604`): "we only set
         // `propagateExpected := false` when propagation has SUCCEEDED".

@@ -91,22 +91,16 @@ fn oracle_elab_gate() {
             &projection_fns,
         );
         let mut elab = TermElabM::new(mctx, view);
-        // Slice 1's pinned entry point, matching `dump_elab.lean`'s own
-        // module doc: `elab_term` (dispatch to the leaf elaborator)
-        // then `instantiate_mvars` — no postponement/synthesis pass
-        // exists yet (M4b-2). `expected := None`: the committed corpus
-        // carries no expected-type field, so `elab_term_ensuring_type`
-        // degenerates to `elab_term` here (its `is_def_eq` branch never
-        // runs) — kept as the real entry point rather than
-        // `elab_term` directly so this gate exercises the SAME method
-        // a future ascription-bearing query (Task 6) will.
-        let got = elab
-            .elab_term_ensuring_type(&term_elem, &parsed.tree.kinds, None)
-            .and_then(|e| {
-                elab.mctx
-                    .instantiate_mvars(e)
-                    .map_err(leanr_elab::ElabError::from)
-            });
+        // The pinned entry point, matching `dump_elab.lean`'s own module
+        // doc (M4b-3 P2a task 9): `TermElabM::elab_term_and_synthesize`
+        // (`elab.rs`) — `elab_term`, then
+        // `synthesize_synthetic_mvars_no_postponing`, then
+        // `instantiate_mvars` internally — mirroring the oracle's own
+        // `elabTermAndSynthesize` (`SyntheticMVars.lean:696-698`).
+        // `expected := None`: the committed corpus carries no
+        // expected-type field, so the inner `elab_term`'s `is_def_eq`
+        // branch never runs.
+        let got = elab.elab_term_and_synthesize(&term_elem, &parsed.tree.kinds, None);
 
         match got {
             Ok(g) => {
