@@ -265,6 +265,42 @@ pub fn no_inst_of_nat(_app: &mut leanr_elab::app::state::AppElab) -> leanr_kerne
     unimplemented!("NoInst Nat needs the Elab0 class scaffold — M4b-3 P2a Task 7")
 }
 
+/// `Dflt Nat` — a class goal whose class HAS a registered
+/// `@[default_instance]`, exercising `synthesize_using_default`'s SHAPE
+/// GUARD positive case
+/// (`synthesize_using_default_errors_when_a_default_instance_is_registered`,
+/// Task 5's review fix; currently `#[ignore]` pending this fixture).
+/// See the module section doc above for the placeholder pattern this
+/// follows.
+///
+/// Task 7's `Elab0.lean` must add a class DISTINCT from
+/// `Wrap`/`Pair`/`NoInst` — those three (`Wrap` already named above;
+/// `Pair`/`NoInst` are this same section's siblings) must never
+/// themselves gain a `@[default_instance]` instance, or the stuck-path
+/// tests (`bare_typeclass_application_is_reported_stuck`,
+/// `stuck_report_drains_the_pending_list`, Task 9's entry-point test)
+/// and any corpus record depending on `Wrap ?m`/`NoInst Nat` staying
+/// stuck or failing would instead succeed at rung 3 instead. A minimal
+/// shape:
+///
+/// ```lean
+/// class Dflt (α : Type) where
+///   val : α
+///
+/// @[default_instance]
+/// instance instDfltNat : Dflt Nat where
+///   val := Nat.zero
+/// ```
+///
+/// `dflt_of_nat` should return the `ExprId` for `Dflt Nat` — fully
+/// applied to a concrete type, no fresh mvar needed: the shape guard
+/// only inspects the pending goal's head constant name and whether
+/// `MetaCtx::default_instances_of` is non-empty for it, never whether
+/// the goal is actually solvable.
+pub fn dflt_of_nat(_app: &mut leanr_elab::app::state::AppElab) -> leanr_kernel::bank::ExprId {
+    unimplemented!("Dflt Nat needs the Elab0 default-instance fixture — M4b-3 P2a Task 7")
+}
+
 /// Elaborate `src` (e.g. `"useWrap"`) end-to-end and run
 /// `synthesize_synthetic_mvars_no_postponing` over the result — the
 /// shape `bare_typeclass_application_is_reported_stuck` (Task 5) needs

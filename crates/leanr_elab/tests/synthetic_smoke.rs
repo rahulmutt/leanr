@@ -364,6 +364,42 @@ fn synthesize_using_default_is_a_shape_guarded_seam() {
     });
 }
 
+/// The positive case the shape guard exists FOR: a pending `TypeClass`
+/// mvar whose class HAS a registered `@[default_instance]` must error
+/// naming the P3 seam, not silently return `Ok(false)`.
+///
+/// Review finding (M4b-3 P2a task 5 review, finding 2):
+/// `synthesize_using_default_is_a_shape_guarded_seam` above only ever
+/// exercised the vacuous "no pending mvars" path — the guard's own
+/// reason for existing (erroring rather than silently skipping rung 3
+/// when a default instance really is registered) was untested. This
+/// test drives that branch directly, against a class the fixture must
+/// keep separate from `Wrap`/`Pair`/`NoInst` — see `support::dflt_of_nat`'s
+/// own doc for why.
+#[test]
+#[ignore = "needs the Elab0 default-instance fixture (Task 7)"]
+fn synthesize_using_default_errors_when_a_default_instance_is_registered() {
+    support::with_app_harness("Nat.zero", |app| {
+        let goal = support::dflt_of_nat(app);
+        let (_e, id) = app
+            .elab
+            .mk_fresh_expr_mvar_of_kind(goal, leanr_meta::MVarKind::Synthetic)
+            .expect("fresh mvar");
+        app.elab.register_synthetic_mvar(
+            support::any_syn_elem(),
+            id,
+            leanr_elab::synthetic::SyntheticMVarKind::TypeClass,
+        );
+        assert!(
+            matches!(
+                app.elab.synthesize_using_default(),
+                Err(leanr_elab::ElabError::UnsupportedSyntax(_))
+            ),
+            "a registered default instance must fire the P3 seam, not silently no-op"
+        );
+    });
+}
+
 /// The stuck report drains `pending_mvars` before reporting.
 ///
 /// oracle: `let pendingMVars ← modifyGet fun s => (s.pendingMVars,

@@ -819,6 +819,25 @@ impl<'e> MetaCtx<'e> {
         self.default_instances(class)
     }
 
+    /// oracle: `Lean.occursCheck` (`Lean/Util/OccursCheck.lean:18-53`),
+    /// consumed by `resumePostponed`'s assignment guard
+    /// (`SyntheticMVars.lean:56-58`): `if (← occursCheck mvarId result)
+    /// then mvarId.assign result; return true else return false`. `true`
+    /// means `mvar_id` is safe to assign `e` to — it does NOT occur in
+    /// `e` (following assigned mvars, same as the oracle).
+    ///
+    /// Additive: a `pub` forwarder to the existing `pub(crate)`
+    /// `MetaCtx::occurs_check` (`assign.rs:1117`), which `assign.rs`'s
+    /// own assignment path already calls on the same traversal. Named
+    /// `check_occurs` rather than reusing `occurs_check` verbatim: Rust
+    /// merges inherent `impl` blocks for one type across files, so a
+    /// second same-named method on `MetaCtx` would not compile. No new
+    /// logic, no new fields, no TCB surface — `leanr_elab` simply
+    /// cannot reach a `pub(crate)` item from another crate.
+    pub fn check_occurs(&mut self, mvar_id: MVarId, e: ExprId) -> Result<bool, MetaError> {
+        self.occurs_check(mvar_id, e)
+    }
+
     /// One deterministic step. Every whnf_core / whnf / infer entry
     /// calls this once; exhaustion is a distinct error, never a
     /// verdict (spec § Error handling).
@@ -953,7 +972,7 @@ pub(crate) struct MetaSnapshot {
 mod tests {
     use super::*;
     use crate::test_support::{
-        const_named, render_name, with_ctx, with_instances_ctx, with_prelude0_ctx,
+        const_named, fresh_mvar, render_name, with_ctx, with_instances_ctx, with_prelude0_ctx,
     };
     use crate::MetaError;
 
@@ -1330,6 +1349,34 @@ mod tests {
             assert!(
                 names.contains(&"instOfNN".to_string()),
                 "default_instances_of(OfN): {names:?}"
+            );
+        });
+    }
+
+    /// `check_occurs` forwards to the crate-private `occurs_check`
+    /// exactly: `false` when `mvar_id` occurs inside `e` (here, `?m`
+    /// inside the application `Nat ?m`), `true` when it does not. This
+    /// is the accessor `leanr_elab::synthetic::resume_postponed`'s
+    /// assignment guard needs — it may not assign a resumed result that
+    /// mentions the very mvar it is resolving (M4b-3 P2a task 5 review
+    /// finding 1).
+    #[test]
+    fn check_occurs_forwards_to_the_crate_private_occurs_check() {
+        with_prelude0_ctx(|ctx| {
+            let nat = const_named(ctx, "Nat");
+            let (m_expr, m_id) = fresh_mvar(ctx, nat);
+            let base = Some(ctx.view.store);
+            let app = ctx
+                .scratch
+                .expr_app(base, nat, m_expr)
+                .expect("app: Nat ?m");
+            assert!(
+                !ctx.check_occurs(m_id, app).expect("no error"),
+                "?m occurs inside `Nat ?m` -> not safe to assign"
+            );
+            assert!(
+                ctx.check_occurs(m_id, nat).expect("no error"),
+                "?m does not occur in `Nat` -> safe to assign"
             );
         });
     }

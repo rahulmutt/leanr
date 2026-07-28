@@ -545,8 +545,19 @@ impl<'e> TermElabM<'e> {
         });
         match result {
             Ok(e) => {
-                self.mctx.mctx_mut().assign(mvar_id, e)?;
-                Ok(true)
+                // oracle: :56-58 — `occursCheck` guards the assignment:
+                // a resumed result may mention `mvarId` itself when it
+                // contains synthetic `sorry`s, and assigning through
+                // that would build a cyclic `ExprId`. `false` here is
+                // "not ready" (`Ok(false)`), matching
+                // `synthesizeSyntheticMVar`'s "try again later" contract
+                // — NOT an error.
+                if self.mctx.check_occurs(mvar_id, e)? {
+                    self.mctx.mctx_mut().assign(mvar_id, e)?;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
             }
             // oracle: :68-74 — on an ERROR, `postponeOnError` decides
             // between "restore and try again later" (`false`) and "log
@@ -609,6 +620,14 @@ impl<'e> TermElabM<'e> {
         loop {
             match self.mctx.store().expr_node(Some(base), cur) {
                 Node::App { f, .. } => cur = f,
+                // Unwrap the same transparent-to-the-head-search nodes
+                // `contains_pending_mvar` (above) does: metadata and
+                // projections carry no head of their own, so peeling
+                // them off before giving up keeps this consistent with
+                // that sibling walk rather than under-firing on a
+                // metadata-wrapped or projected goal.
+                Node::MData { expr, .. } => cur = expr,
+                Node::Proj { structure, .. } | Node::ProjBig { structure, .. } => cur = structure,
                 Node::Const { name, .. } => return Ok(name),
                 _ => return Ok(None),
             }
