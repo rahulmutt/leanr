@@ -61,6 +61,14 @@ pub enum ElabError {
         synthesized: ExprId,
         inferred: ExprId,
     },
+    /// oracle: `"Function expected at .. but this term has type .."`
+    /// (`App.lean:409-411`). Carries the head and its type; the oracle's
+    /// `.note` hint about indentation mishaps (`App.lean:404-408`) is
+    /// prose (deferred).
+    FunctionExpected {
+        f: ExprId,
+        f_type: ExprId,
+    },
 }
 
 impl From<MetaError> for ElabError {

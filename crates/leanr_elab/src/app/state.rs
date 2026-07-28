@@ -167,6 +167,19 @@ impl<'a, 'e> AppElab<'a, 'e> {
         Ok(matches!(self.node(reduced), Node::Forall { .. }))
     }
 
+    /// Is `fType` still an unassigned metavariable after
+    /// `synthesize_pending_and_normalize_fun_type`'s fixpoint attempt?
+    /// Distinguishes the P4/P5 seam (a function type that has not been
+    /// PINNED DOWN yet) from a genuinely non-function type, which is
+    /// `ElabError::FunctionExpected` — the oracle does not need this
+    /// split because `coerceToFunction?` (P4, not yet ported) handles
+    /// both uniformly, but leanr must not conflate a later-slice bug
+    /// with a real user error.
+    pub(crate) fn f_type_is_mvar_after_instantiation(&mut self) -> Result<bool, ElabError> {
+        let f_type = self.elab.mctx.instantiate_mvars(self.st.f_type)?;
+        Ok(matches!(self.node(f_type), Node::MVar { .. }))
+    }
+
     /// oracle: `whnfForall` (`Lean/Meta/Basic.lean`) — WHNF, but keep the
     /// ORIGINAL term if the reduct is not a forall. Composed from the
     /// public `MetaCtx::whnf`; no accessor needed.

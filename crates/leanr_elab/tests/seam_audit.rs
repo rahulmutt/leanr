@@ -79,18 +79,19 @@ fn elab_src(src: &str) -> Result<leanr_kernel::bank::ExprId, leanr_elab::ElabErr
 ///     Split into the two cases that really do reach each seam: a bare
 ///     over-application for the P2/P4 one, and the ascribed head for the
 ///     head seam.
+///   * `("Nat.succ Nat.zero Nat.zero", "M4b-3 P2"/"M4b-3 P4")` — task 8
+///     closed this seam: `main`'s "fType is not a forall but arguments
+///     remain" arm now calls `synthesize_pending_and_normalize_fun_type`,
+///     which reports the genuinely-non-function case as
+///     `ElabError::FunctionExpected`, not a named `UnsupportedSyntax`
+///     seam. Moved to `over_application_reports_function_expected` and
+///     `mvar_function_type_is_a_named_seam` below, which assert the two
+///     split failure modes directly.
 #[test]
 fn deferred_constructs_are_named_seams() {
     let cases: &[(&str, &str)] = &[
         // (source, expected slice marker in the message)
         //
-        // `main`'s "fType is not a forall but arguments remain" arm:
-        // the oracle's `synthesizePendingAndNormalizeFunType`
-        // (`App.lean:372-404`) synthesizes pending instances, re-WHNFs,
-        // and falls back to `coerceToFunction?`. Both halves are later
-        // plans, so the message names both.
-        ("Nat.succ Nat.zero Nat.zero", "M4b-3 P2"),
-        ("Nat.succ Nat.zero Nat.zero", "M4b-3 P4"),
         // `elabExplicit`'s `` `(@($t)) `` arm (`App.lean:2269`): `@` on
         // a non-atom does NOT enter explicit mode, it disables
         // implicit-lambda insertion — P5's.
@@ -140,6 +141,37 @@ fn deferred_constructs_are_named_seams() {
             other => panic!("{src}: expected a named UnsupportedSyntax seam, got {other:?}"),
         }
     }
+}
+
+/// An over-applied function reaches `synthesizePendingAndNormalizeFunType`
+/// and, when the type is genuinely not a function, reports it as such
+/// rather than as a pending-synthesis seam.
+#[test]
+fn over_application_reports_function_expected() {
+    let err = elab_src("Nat.zero Nat.zero").expect_err("Nat is not a function");
+    assert!(
+        matches!(err, leanr_elab::ElabError::FunctionExpected { .. }),
+        "got {err:?}"
+    );
+}
+
+/// A function type that is still an unassigned mvar after the fixpoint
+/// is a named P4/P5 seam, NOT a wrong term.
+///
+/// This shape diverges from the oracle today and will keep diverging
+/// until expected types propagate into `fun` binder domains (plan
+/// § Measured facts, item 4). The assertion pins that it stays an
+/// ERROR naming its owner — the failure mode this discipline exists to
+/// prevent is emitting a different term silently.
+#[test]
+fn mvar_function_type_is_a_named_seam() {
+    let err = elab_src("(fun f => f Nat.zero : (Nat -> Nat) -> Nat)")
+        .expect_err("leanr cannot elaborate this yet");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("M4b-3 P4") || msg.contains("M4b-3 P5"),
+        "seam must name its owner, got {msg}"
+    );
 }
 
 /// The `shouldElabAsElim` guard must NOT fire under `@` or `..`.

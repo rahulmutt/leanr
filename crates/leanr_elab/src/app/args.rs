@@ -18,6 +18,7 @@ use leanr_syntax::kind::KindInterner;
 use crate::app::expand::{Arg, NamedArg};
 use crate::app::state::AppElab;
 use crate::error::ElabError;
+use crate::synthetic::PostponeBehavior;
 
 /// oracle: `main` (`App.lean:926-951`).
 pub fn main(app: &mut AppElab, kinds: &KindInterner) -> Result<ExprId, ElabError> {
@@ -93,20 +94,47 @@ pub fn main(app: &mut AppElab, kinds: &KindInterner) -> Result<ExprId, ElabError
                 }
             }
         } else if app.has_args_to_process() {
-            // oracle: `synthesizePendingAndNormalizeFunType`
-            // (`App.lean:372-404`) — synthesize pending instance mvars,
-            // then re-WHNF; if `fType` is STILL not a forall it tries
-            // `coerceToFunction?` and otherwise reports "function
-            // expected". Both halves are later plans.
-            return Err(ElabError::UnsupportedSyntax(
-                "too many arguments: normalizing the function type needs pending-instance \
-                 synthesis (M4b-3 P2) and CoeFun (M4b-3 P4)"
-                    .to_string(),
-            ));
+            synthesize_pending_and_normalize_fun_type(app, kinds)?;
         } else {
             return crate::app::finalize::finalize(app);
         }
     }
+}
+
+/// oracle: `synthesizePendingAndNormalizeFunType` (`App.lean:372-411`).
+/// "fType may become a forallE after we synthesize pending metavariables."
+fn synthesize_pending_and_normalize_fun_type(
+    app: &mut AppElab,
+    kinds: &KindInterner,
+) -> Result<(), ElabError> {
+    app.try_synthesize_app_inst_mvars()?;
+    // oracle: `synthesizeSyntheticMVars` with its DEFAULT
+    // `postpone := .yes` (:375) — this is a normalization attempt, not a
+    // commitment point, so a still-stuck mvar must stay pending rather
+    // than be reported.
+    app.elab
+        .synthesize_synthetic_mvars(PostponeBehavior::Yes, kinds)?;
+    if app.f_type_is_forall()? {
+        return Ok(());
+    }
+    // oracle: `coerceToFunction? s.f` (:378) — M4b-3 P4.
+    // The oracle's remaining arms are diagnostics: a deprecated-argument
+    // linter, `throwInvalidNamedArg` (which needs `foundNamedArgs`
+    // rendering leanr does not do), and the "Function expected" error.
+    // Only the last changes control flow, so only it is ported.
+    let f_type = app.st.f_type;
+    if app.f_type_is_mvar_after_instantiation()? {
+        return Err(ElabError::UnsupportedSyntax(
+            "function type is still an unassigned metavariable after synthesis: needs \
+             CoeFun (M4b-3 P4), or expected-type propagation into `fun` binder domains \
+             (M4b-3 P5) for the M4b-2 `fun` shape"
+                .to_string(),
+        ));
+    }
+    Err(ElabError::FunctionExpected {
+        f: app.st.f,
+        f_type,
+    })
 }
 
 /// oracle: `Term.findNamedArg?` (`App.lean:81-83`) — the entry for
