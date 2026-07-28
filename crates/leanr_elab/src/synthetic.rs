@@ -693,6 +693,59 @@ impl<'e> TermElabM<'e> {
         }
     }
 
+    /// oracle: `withSynthesizeImp` (`SyntheticMVars.lean:662-672`).
+    ///
+    /// Save the caller's pending mvars, clear, run `k`, synthesize what
+    /// `k` created, then restore by APPENDING the saved list after
+    /// whatever is left. The oracle's `finally` means the restore
+    /// happens on the error path too.
+    ///
+    /// The oracle also runs `synthesizeUsingDefaultLoop` when
+    /// `postpone == .yes`; that loop is P3's, and P2a's guarded
+    /// `synthesize_using_default` stands in for it (design spec
+    /// § Amendment, item 3).
+    pub fn with_synthesize<R>(
+        &mut self,
+        postpone: PostponeBehavior,
+        kinds: &KindInterner,
+        k: impl FnOnce(&mut Self) -> Result<R, ElabError>,
+    ) -> Result<R, ElabError> {
+        let saved = std::mem::take(&mut self.pending_mvars);
+        // Every exit path below must run `self.pending_mvars.extend(saved)`
+        // exactly once — that is the oracle's `finally`. Written as
+        // straight-line code with one `saved` consumer per branch rather
+        // than a closure, because a closure taking `saved` by value
+        // cannot be called on two paths.
+        let out = match k(self) {
+            Ok(v) => v,
+            Err(e) => {
+                self.pending_mvars.extend(saved);
+                return Err(e);
+            }
+        };
+        let mut synth = self.synthesize_synthetic_mvars(postpone, kinds);
+        if synth.is_ok() && postpone == PostponeBehavior::Yes {
+            // oracle: `synthesizeUsingDefaultLoop` (:653). P3 owns the
+            // real loop; the guarded seam stands in.
+            synth = self.synthesize_using_default().map(|_| ());
+        }
+        self.pending_mvars.extend(saved);
+        synth?;
+        Ok(out)
+    }
+
+    /// oracle: `withSynthesizeLightImp` (`SyntheticMVars.lean:681-689`)
+    /// — as `with_synthesize` with `postpone := .yes` and NO default
+    /// loop. No P2a caller; present because the ladder's callers arrive
+    /// in later plans and a missing sibling reads as an oversight.
+    pub fn with_synthesize_light<R>(
+        &mut self,
+        kinds: &KindInterner,
+        k: impl FnOnce(&mut Self) -> Result<R, ElabError>,
+    ) -> Result<R, ElabError> {
+        self.with_synthesize(PostponeBehavior::Yes, kinds, k)
+    }
+
     /// oracle: `processPostponedUniverseConstraints`
     /// (`SyntheticMVars.lean:409-411`).
     fn process_postponed_universe_constraints(&mut self) -> Result<(), ElabError> {

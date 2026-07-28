@@ -19,11 +19,12 @@
 //! this crate's own grammar, not an approximation of it.
 //!
 //! **`typeAscription` genuinely IS its own term elaborator**
-//! (`@[builtin_term_elab typeAscription] elabTypeAscription`) — its
-//! sibling macro (`expandTypeAscription`) only fires when the body
-//! contains a `·` (`Macro.throwUnsupported` otherwise, falling through
-//! to the real elaborator), so for every non-cdot input — this crate's
-//! entire scope — `elabTypeAscription` runs unconditionally:
+//! (`@[builtin_term_elab typeAscription] elabTypeAscription`,
+//! `BuiltinNotation.lean:428-436`) — its sibling macro
+//! (`expandTypeAscription`) only fires when the body contains a `·`
+//! (`Macro.throwUnsupported` otherwise, falling through to the real
+//! elaborator), so for every non-cdot input — this crate's entire
+//! scope — `elabTypeAscription` runs unconditionally:
 //!
 //! ```text
 //! elabTypeAscription
@@ -36,18 +37,20 @@
 //!       ensureHasType expectedType? e
 //! ```
 //!
-//! `withSynthesize`'s postponement scaffolding does not exist in this
-//! slice (no scheduling ladder — `elab.rs`'s own doc, design spec's
-//! "Fields the slice-2 scheduling ladder will need... deliberately not
-//! added yet"), so both arms degenerate to their direct, unpostponed
-//! shape: `elab_term(type, None)` then `elab_term_ensuring_type(e,
-//! Some(type'))` for the first; `elab_term_ensuring_type(e, expected)`
-//! for the second (no fixture row exercises the second arm — the
-//! `opt(term)` type slot is genuinely optional grammar, transcribed
-//! anyway as the direct, unambiguous port). `ensureHasType`'s coercion-
-//! insertion path (`mkCoe`) is out of scope (M4b-3); a defeq mismatch
-//! ERRORS here instead, matching `elab_term_ensuring_type`'s own
-//! documented behavior.
+//! **M4b-3 P2a supplied `withSynthesize`'s postponement scaffolding**
+//! (`TermElabM::with_synthesize`, `synthetic.rs`), and both arms below
+//! now take their real shape: the `(e : T)` arm elaborates `T` under
+//! `with_synthesize(Yes, ..)` so a `TypeClass` mvar the type creates
+//! drains before `e` is elaborated against it, and the `(e :)` arm
+//! elaborates `e` itself under `with_synthesize(No, ..)`. Only the
+//! `elab_term`/`elab_term_ensuring_type` calls move inside the
+//! closures — the surrounding logic (which arm ran, what gets checked
+//! against what) is unchanged. `ensureHasType`'s coercion-insertion
+//! path (`mkCoe`) is out of scope (M4b-3); a defeq mismatch ERRORS here
+//! instead, matching `elab_term_ensuring_type`'s own documented
+//! behavior. No fixture row exercises the second arm — the `opt(term)`
+//! type slot is genuinely optional grammar, transcribed anyway as the
+//! direct, unambiguous port.
 //!
 //! **Tree shape is NOT what the M4b-1 plan guessed.** A real parse dump
 //! (this task's own throwaway probe, never committed — see the task
@@ -70,6 +73,7 @@ use leanr_syntax::tree::SyntaxNode;
 use crate::dispatch::{non_trivia_children, SynElem};
 use crate::elab::TermElabM;
 use crate::error::ElabError;
+use crate::synthetic::PostponeBehavior;
 
 /// oracle: `expandParen`'s no-cdot branch — `(e)` elaborates exactly
 /// like `e`. Real non-trivia children: `[hygienicLParen, e, ")"]`.
@@ -109,12 +113,21 @@ pub fn elab_ascription(
 
     match non_trivia_children(opt_node).first() {
         // `($e :)` — no type constraint written; `ensureHasType
-        // expectedType? e`.
-        None => elab.elab_term_ensuring_type(e, kinds, expected),
-        // `($e : $type)` — elaborate the type child as a term (no
-        // expected type of its own), then check `e` against it.
+        // expectedType? e`, itself run under `with_synthesize(No, ..)`
+        // (oracle: `BuiltinNotation.lean:433-435`).
+        None => elab.with_synthesize(PostponeBehavior::No, kinds, |elab| {
+            elab.elab_term_ensuring_type(e, kinds, expected)
+        }),
+        // `($e : $type)` — the type elaborates under
+        // `with_synthesize(Yes, ..)` (oracle: `BuiltinNotation.lean:429-430`),
+        // so a `TypeClass` mvar `$type` creates drains before `e` is
+        // checked against it. `e` itself elaborates directly (no expected
+        // type of its own), matching the oracle's un-postponed
+        // `elabTerm e type`.
         Some(ty_elem) => {
-            let ty = elab.elab_term(ty_elem, kinds, None)?;
+            let ty = elab.with_synthesize(PostponeBehavior::Yes, kinds, |elab| {
+                elab.elab_term(ty_elem, kinds, None)
+            })?;
             elab.elab_term_ensuring_type(e, kinds, Some(ty))
         }
     }

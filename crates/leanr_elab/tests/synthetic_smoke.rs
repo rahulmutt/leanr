@@ -425,3 +425,41 @@ fn stuck_report_drains_the_pending_list() {
         );
     });
 }
+
+/// `with_synthesize` restores the caller's pending list by APPENDING,
+/// on both the ok and the error path.
+///
+/// oracle: `withSynthesizeImp` (`SyntheticMVars.lean:662-672`) — save,
+/// clear, run, synthesize, then `finally` restore as
+/// `s.pendingMVars ++ pendingMVarsSaved`. The `finally` is why leanr's
+/// restore must survive an early return.
+#[test]
+fn with_synthesize_saves_clears_and_restores_pending() {
+    support::with_app_harness("Nat.zero", |app| {
+        let outer = support::register_n_typeclass_mvars(app, 1);
+        let kinds = support::any_kinds();
+        let inner_seen = std::cell::Cell::new(usize::MAX);
+        let _ =
+            app.elab
+                .with_synthesize(leanr_elab::synthetic::PostponeBehavior::Yes, &kinds, |e| {
+                    // The caller's pending mvars are invisible inside.
+                    inner_seen.set(e.pending_mvars.len());
+                    Ok(())
+                });
+        assert_eq!(inner_seen.get(), 0, "cleared for the duration");
+        assert_eq!(app.elab.pending_mvars, outer, "restored afterwards");
+
+        // Type annotation required: unlike the ok-path call above (whose
+        // closure's `Ok(())` pins `R = ()`), this closure only ever
+        // returns `Err`, leaving `R` otherwise unconstrained.
+        let _: Result<(), _> =
+            app.elab
+                .with_synthesize(leanr_elab::synthetic::PostponeBehavior::Yes, &kinds, |_e| {
+                    Err(leanr_elab::ElabError::UnsupportedSyntax("probe".into()))
+                });
+        assert_eq!(
+            app.elab.pending_mvars, outer,
+            "restored on the error path too"
+        );
+    });
+}
