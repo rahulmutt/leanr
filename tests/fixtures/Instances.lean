@@ -86,3 +86,55 @@ instance instAddProd {a b : Type u} [Add a] [Add b] : Add (Prod a b) where
 -- a default instance
 class OfN (n : N) (a : Type u) where ofN : a
 @[default_instance] instance instOfNN (n : N) : OfN n N where ofN := n
+
+-- === M4b-3 P2b-i: outParam classes (design spec § P2b-i) ===
+--
+-- The FIRST classes in any leanr fixture carrying an `outParam`. Until
+-- this block, `getOutParamPositions?` was empty everywhere and the
+-- oracle's `preprocessOutParam`/`assignOutParams` were unreachable, so
+-- leanr's not having them was invisible (design spec § Amendment 3,
+-- item 2).
+--
+-- `outParam` must be declared here, at the ROOT namespace, because these
+-- fixtures are `prelude`-mode and import no `Init`. The oracle's `class`
+-- command decides output-parameter positions with
+-- `Lean.Expr.isOutParam` (`Expr.lean:1708-1710`), which is
+-- `isAppOfArity ``outParam 1` against the ROOT name `outParam` — so this
+-- declaration is the real thing, not a look-alike. Copied verbatim from
+-- `Init/Prelude.lean:702` of the pin.
+@[reducible] def outParam (α : Sort u) : Sort u := α
+
+-- `Op` — the binop shape. Two ordinary parameters and one `outParam`,
+-- i.e. `ClassEntry.outParams == #[2]` and `outLevelParams == #[]` (all
+-- three parameters share the universe `u`). This is the shape
+-- `crates/leanr_elab/src/synthetic/ladder.rs:105-115` cites as a live
+-- divergence — the oracle answers `Op N N ?γ` with `?γ := N` assigned,
+-- leanr (before this plan) answers `Undef`.
+class Op (a : Type u) (b : Type u) (c : outParam (Type u)) where
+  op : a → b → c
+
+instance instOpN : Op N N N where
+  op := fun _ b => b
+
+-- `Lvl` — a universe that appears ONLY in an output parameter, i.e.
+-- `outParams == #[1]` AND `outLevelParams == #[1]` (the universe `v`
+-- occurs only in `b`'s type). It is what gives `ClassEntry`'s third
+-- field a non-empty producer, and it is the class
+-- `preprocessOutParam`'s `preprocessLevels` branch
+-- (`SynthInstance.lean:786-795`) runs on.
+class Lvl (a : Type u) (b : outParam (Type v)) where
+  lvl : a → b
+
+instance instLvlN : Lvl N N where
+  lvl := fun a => a
+
+-- `Get` — the `GetElem` shape from the oracle's own worked example
+-- (`App.lean:143-146`): two ordinary parameters, one `outParam`, and a
+-- method taking both ordinary parameters. M4b-3 P2b-ii needs exactly
+-- this shape in `Elab0.lean`; proving it out at the synthesis tier first
+-- is why it is here.
+class Get (cont : Type u) (idx : Type v) (elem : outParam (Type w)) where
+  get : cont → idx → elem
+
+instance instGetN : Get N N N where
+  get := fun c _ => c
