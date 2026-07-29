@@ -1596,11 +1596,21 @@ impl<'e> MetaCtx<'e> {
     /// [`MetaError::IsDefEqStuck`] propagated out of a subgoal
     /// unification, which is NEVER collapsed to "this candidate failed".
     ///
-    /// The whole trial runs under ONE `checkpoint`/`rollback` pair, so a
-    /// failed -- or successful -- synthesis leaves the caller's `mctx`
-    /// exactly as it found it; the returned term is already fully
+    /// The SEARCH runs under ONE `checkpoint`/`rollback` pair -- this
+    /// crate's stand-in for the oracle's `withNewMCtxDepth`
+    /// (`SynthInstance.lean:978-1002`) -- so nothing the search assigned
+    /// is left on the caller's `mctx`; the answer is already fully
     /// instantiated and metavariable-free on the expr side (`mk_answer`
     /// -> `abstract_mvars`), so it survives that rollback.
+    ///
+    /// It does NOT follow that this call leaves the caller's `mctx`
+    /// untouched (task 7). `assign_out_params` runs AFTER the rollback,
+    /// in the caller's own frame (`apply_abstract_result`, oracle
+    /// `applyAbstractResult?` at `:1003`), and a successful synthesis of
+    /// a class with output parameters DELIBERATELY assigns the caller's
+    /// metavariables in those positions -- that assignment is a RESULT
+    /// of synthesis, and putting it inside the pair would discard it.
+    /// A failed synthesis still leaves the `mctx` as it found it.
     // Narrowed from this module's former blanket `#![allow(dead_code)]`
     // (removed by this task): `synth_instance` is the crate's typeclass-
     // synthesis ENTRY POINT, and every other item in this module and in
@@ -1830,6 +1840,87 @@ impl<'e> MetaCtx<'e> {
         self.mk_app_spine(head, &args)
     }
 
+    /// oracle: `assignOutParams` (`SynthInstance.lean:825-845` --
+    /// corrected from the brief's `:847-861`, which is
+    /// `checkMayHaveSideEffects`' doc comment and body; `assignOutParams`
+    /// itself runs from its `private def` at `:825` to its `return defEq`
+    /// at `:845`).
+    ///
+    /// Reconciles the caller's goal with the answer's actual type, and
+    /// this is where the caller's output-parameter metavariables get
+    /// assigned -- [`MetaCtx::preprocess_out_param`] having kept them out
+    /// of the search entirely. It runs OUTSIDE the search's
+    /// `checkpoint`/`rollback` pair, which is this crate's stand-in for
+    /// the oracle's `withNewMCtxDepth`; inside it, the assignment would
+    /// be rolled back with everything else.
+    ///
+    /// Two config overrides, both load-bearing and both taken verbatim
+    /// from the oracle:
+    ///
+    /// - `withDefault` (`:842` -- corrected from the brief's `:851`,
+    ///   which falls inside `checkMayHaveSideEffects`' doc comment;
+    ///   `:842` is the `let defEq <- withDefault <|
+    ///   withAssignableSyntheticOpaque <| isDefEq type resultType` line
+    ///   itself): the reconciling `isDefEq` runs at DEFAULT transparency,
+    ///   not the `.instances` transparency the search itself uses, so a
+    ///   semireducible definition standing between the goal and the
+    ///   answer still unfolds. The oracle's own note (`:832-840`) records
+    ///   that removing it broke thousands of `OrderDual` sites in
+    ///   Mathlib.
+    /// - `withAssignableSyntheticOpaque` (same line, `:842`; the reason
+    ///   is the oracle's comment at `:828-829`): output parameters of
+    ///   local instances may be marked `syntheticOpaque` by the
+    ///   application elaborator (M4b-3 P2b-ii), and this `isDefEq` must
+    ///   be allowed to assign them anyway.
+    ///
+    /// The transparency save/restore is unconditional -- `r` is bound
+    /// BEFORE the restore and returned after it, so the error path
+    /// restores too (the same posture `synth_instance_main`'s whole-
+    /// `Config` save/restore takes).
+    fn assign_out_params(&mut self, ty: ExprId, result: ExprId) -> Result<bool, MetaError> {
+        let result_type = self.infer_type(result)?;
+        let saved = self.cfg.transparency;
+        self.cfg.transparency = TransparencyMode::Default;
+        let r = self.with_assignable_synthetic_opaque(|ctx| ctx.is_def_eq(ty, result_type));
+        self.cfg.transparency = saved;
+        r
+    }
+
+    /// oracle: `applyAbstractResult?` (`SynthInstance.lean:874-922` --
+    /// corrected from the brief's `:877-925`, which starts at the `private
+    /// def` (missing the doc comment at `:874-876`) and runs three lines
+    /// past the function's last line, `return some result` at `:922`, into
+    /// `applyCachedAbstractResult?`'s own doc comment).
+    ///
+    /// **Its tail is a NAMED SEAM.** After `assignOutParams` the oracle
+    /// runs `checkMayHaveSideEffects` and, if it says yes, `check
+    /// result` -- a full type check whose purpose is to propagate
+    /// universe constraints the search derived but `withNewMCtxDepth`
+    /// discarded (issue #796, `:884-921` -- corrected from the brief's
+    /// `:891-923`, which starts mid-way through the explanatory comment
+    /// (it opens at `:884`) and runs past `check result` at `:921`).
+    /// This crate has no `Lean.Meta.check`, and `leanr_check` sits ABOVE
+    /// it, so the pair cannot be ported here. Owner: the slice that
+    /// grows a Meta-layer `check` (design spec § Seams). The consequence
+    /// is incompleteness on universe-polymorphic answers whose universe
+    /// is determined only by the search, never a wrong assignment.
+    ///
+    /// A `false` from [`MetaCtx::assign_out_params`] is `Ok(None)` --
+    /// "no instance", the oracle's own `unless (<- assignOutParams type
+    /// result) do return none` (`:880`) -- never an `Err`.
+    fn apply_abstract_result(
+        &mut self,
+        ty: ExprId,
+        r: Option<AbstractMVarsResult>,
+    ) -> Result<Option<ExprId>, MetaError> {
+        let Some(abst) = r else { return Ok(None) };
+        let result = self.open_abstract_mvars_result(&abst)?;
+        if !self.assign_out_params(ty, result)? {
+            return Ok(None);
+        }
+        Ok(Some(self.instantiate_mvars(result)?))
+    }
+
     fn synth_instance_main(&mut self, ty: ExprId) -> Result<Option<ExprId>, MetaError> {
         // oracle: `main` wraps the ENTIRE search in `withConfig`
         // (`SynthInstance.lean:963-964`):
@@ -1924,12 +2015,37 @@ impl<'e> MetaCtx<'e> {
                 self.preprocess_out_param(ty)
             }
         };
-        let r = searched.and_then(|t| self.synth_instance_body(t));
+        let abst = searched.and_then(|t| self.synth_instance_body(t));
+        // The rollback is this crate's `withNewMCtxDepth` boundary
+        // (`:978-1002`): the answer survives it because `mk_answer`
+        // already abstracted it (`abstract_mvars`), and everything below
+        // runs OUTSIDE it so `assign_out_params` can assign the caller's
+        // mvars for real (oracle: `applyAbstractResult?` at `:1003`, one
+        // line past the `withNewMCtxDepth` block's end).
+        //
+        // Ordering is load-bearing: `rollback` runs on the ERROR path
+        // too, so `abst?` is unwrapped only after it -- propagating the
+        // error first would leave the search's assignments on the
+        // caller's `mctx`.
         self.rollback(snap);
-        r
+        self.apply_abstract_result(ty, abst?)
     }
 
-    fn synth_instance_body(&mut self, ty: ExprId) -> Result<Option<ExprId>, MetaError> {
+    /// Returns the search's answer still ABSTRACTED (`mk_answer` ->
+    /// `abstract_mvars`), not opened. Task 7: the
+    /// `open_abstract_mvars_result` call that used to sit on the last
+    /// line moved to [`MetaCtx::apply_abstract_result`], which runs
+    /// AFTER `synth_instance_preprocessed`'s `rollback` -- opening it
+    /// here would mint mvars the rollback then discards, and the
+    /// `assign_out_params` that consumes them would assign into a frame
+    /// about to be thrown away. The abstracted form is exactly what
+    /// survives the rollback, which is why it is what crosses this
+    /// boundary (oracle: `withNewMCtxDepth` returns an
+    /// `Option AbstractMVarsResult`, `SynthInstance.lean:978-1002`).
+    fn synth_instance_body(
+        &mut self,
+        ty: ExprId,
+    ) -> Result<Option<AbstractMVarsResult>, MetaError> {
         // oracle: `main` (:676-690) -- `mkFreshExprMVar type`,
         // `mkTableKey type`, `newSubgoal .. Waiter.root`, then `synth`.
         let ty = self.instantiate_mvars(ty)?;
@@ -1945,10 +2061,7 @@ impl<'e> MetaCtx<'e> {
                 break;
             }
         }
-        match st.result.take() {
-            None => Ok(None),
-            Some(result) => Ok(Some(self.open_abstract_mvars_result(&result)?)),
-        }
+        Ok(st.result.take())
     }
 
     /// oracle: `step` (`SynthInstance.lean:660-667`) -- resume before
@@ -2558,9 +2671,10 @@ mod tests {
 
     use super::*;
     use crate::test_support::{
-        const_named, fresh_mvar, parse_goal, render_expr, render_name, with_cyclic_instances_ctx,
-        with_instances_ctx,
+        const_named, fresh_mvar, fresh_mvar_of_kind, parse_goal, render_expr, render_name,
+        with_cyclic_instances_ctx, with_instances_ctx,
     };
+    use crate::MVarKind;
     use leanr_kernel::bank::ExprId;
 
     /// Build `Type` (`Sort (succ Level.zero)`) as an mvar's type -- the
@@ -3354,6 +3468,110 @@ mod tests {
                 ctx.is_level_mvar(us[1]),
                 "universe 1 is out-only: refreshed"
             );
+        });
+    }
+
+    /// THE headline behavior of M4b-3 P2b-i. oracle: `assignOutParams`
+    /// (`SynthInstance.lean:825-845` -- corrected from the brief's
+    /// `:847-861`, which is `checkMayHaveSideEffects`' doc comment and
+    /// body, not `assignOutParams` at all), called from
+    /// `applyAbstractResult?` (`:880`) AFTER `withNewMCtxDepth` has
+    /// closed (`:1002-1003` -- corrected from the brief's `:1003-1004`:
+    /// the `withNewMCtxDepth` block's last line is `:1002` and the
+    /// `applyAbstractResult?` call is `:1003`; `:1004` is only the
+    /// trace). The caller's `?c` is assigned as a RESULT of synthesis.
+    /// Before this task the search's assignments were discarded
+    /// wholesale by the rollback, so `?c` came back unassigned even
+    /// though the answer was right.
+    #[test]
+    fn synth_instance_assigns_the_callers_out_param() {
+        with_instances_ctx(|ctx| {
+            let ty = type_sort(ctx);
+            let (c, cid) = fresh_mvar(ctx, ty);
+            let n = const_named(ctx, "N");
+            let op = const_named(ctx, "Op");
+            let goal = ctx.mk_app_spine(op, &[n, n, c]).expect("app");
+
+            let got = ctx
+                .synth_instance(goal)
+                .expect("synth")
+                .expect("an instance");
+            // The brief spells both assertions as `render_expr(ctx, e) ==
+            // "instOpN"` / `== "N"`. `render_expr` is a `Debug` DUMP
+            // (`test_support.rs`'s own doc: for comparing two rendered
+            // terms to each other, never against a source-level literal
+            // -- it prints `Expr { data: ExprData(..), node: ExprNode::
+            // Const { .. } }`), so the head-constant assertion uses
+            // `synthesizes_via_subgoal_chaining`'s established `get_app_fn`
+            // + `render_name` idiom and the `?c` assertion compares
+            // `render_expr` against the INDEPENDENTLY built `N` (`n`
+            // above) rather than a literal. Both are at least as strong
+            // as what the brief asked for.
+            let head = ctx.get_app_fn(got);
+            let Node::Const { name: Some(hn), .. } = ctx.node(head) else {
+                panic!("synthesized term is not a constant application")
+            };
+            assert_eq!(render_name(ctx, hn), "instOpN");
+
+            let assigned = ctx.instantiate_mvars(c).expect("instantiate");
+            let got_c = render_expr(ctx, assigned);
+            let want_c = render_expr(ctx, n);
+            assert_eq!(
+                got_c, want_c,
+                "?c must be assigned by assignOutParams (to `N`), not left over from the search"
+            );
+            let _ = cid;
+        });
+    }
+
+    /// `assignOutParams` returning FALSE rejects the answer. `Prod N N`
+    /// is not `N`, so the reconciling `isDefEq` fails and the whole
+    /// synthesis answers `none` even though the search found `instOpN`
+    /// against the preprocessed goal. A constant-`true`
+    /// `assign_out_params` passes every other test in this plan and
+    /// fails this one.
+    #[test]
+    fn synth_instance_rejects_a_result_whose_out_param_does_not_match() {
+        with_instances_ctx(|ctx| {
+            // `Prod N N`, not `NoBase`: `NoBase` exists only in
+            // `Synth0.lean` (where the corpus twin of this test,
+            // `outParamReject/synth/0`, uses it), while this unit test
+            // runs against `Instances.olean`. `Prod` is in the scaffold
+            // both fixtures share (`Instances.lean:62-64`, copied
+            // verbatim into `Synth0.lean`), and `Prod N N` is no more
+            // `N` than `NoBase` is.
+            let goal = parse_goal(ctx, "Op N N (Prod N N)");
+            assert!(ctx.synth_instance(goal).expect("synth").is_none());
+        });
+    }
+
+    /// oracle: `assignOutParams`' `withAssignableSyntheticOpaque`
+    /// (`:842` -- corrected from the brief's `:851`, which falls inside
+    /// `checkMayHaveSideEffects`' doc comment; `:842` is the `let defEq
+    /// <- withDefault <| withAssignableSyntheticOpaque <| isDefEq ...`
+    /// line itself) -- "output parameters of local instances may be
+    /// marked as `syntheticOpaque` by the application-elaborator".
+    /// M4b-3 P2b-ii is what produces such a goal from source; this pins
+    /// the mechanism now, at the layer that owns it.
+    #[test]
+    fn synth_instance_assigns_a_synthetic_opaque_out_param() {
+        with_instances_ctx(|ctx| {
+            let ty = type_sort(ctx);
+            let (c, _) = fresh_mvar_of_kind(ctx, ty, MVarKind::SyntheticOpaque);
+            let n = const_named(ctx, "N");
+            let op = const_named(ctx, "Op");
+            let goal = ctx.mk_app_spine(op, &[n, n, c]).expect("app");
+
+            assert!(ctx.synth_instance(goal).expect("synth").is_some());
+            // The brief spells this as one nested expression; split into
+            // `let`s because `render_expr(ctx, ctx.instantiate_mvars(c)
+            // ..)` is two overlapping `&mut ctx` borrows (E0499), and
+            // compares against the independently built `N` for the same
+            // reason as the test two above.
+            let assigned = ctx.instantiate_mvars(c).expect("inst");
+            let got_c = render_expr(ctx, assigned);
+            let want_c = render_expr(ctx, n);
+            assert_eq!(got_c, want_c);
         });
     }
 }

@@ -63,6 +63,21 @@ pub(crate) fn with_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
 /// either way — the counter is just cheap insurance against two calls
 /// within the SAME test/`Store` colliding.
 pub(crate) fn fresh_mvar(ctx: &mut MetaCtx, ty: ExprId) -> (ExprId, MVarId) {
+    fresh_mvar_of_kind(ctx, ty, MVarKind::Natural)
+}
+
+/// [`fresh_mvar`] with an explicit [`MVarKind`] (M4b-3 P2b-i task 7):
+/// `assignOutParams`' `withAssignableSyntheticOpaque`
+/// (`SynthInstance.lean:842`) only has observable behavior on a
+/// `syntheticOpaque` metavariable, so the test that pins it needs to
+/// mint one. Otherwise identical to [`fresh_mvar`] — same shared
+/// process-wide counter, so the two cannot collide with each other
+/// either.
+pub(crate) fn fresh_mvar_of_kind(
+    ctx: &mut MetaCtx,
+    ty: ExprId,
+    kind: MVarKind,
+) -> (ExprId, MVarId) {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let idx = COUNTER.fetch_add(1, Ordering::Relaxed);
     let base = Some(ctx.view.store);
@@ -89,7 +104,7 @@ pub(crate) fn fresh_mvar(ctx: &mut MetaCtx, ty: ExprId) -> (ExprId, MVarId) {
             user_name: None,
             ty,
             lctx: Default::default(),
-            kind: MVarKind::Natural,
+            kind,
         },
     );
     let expr = ctx
