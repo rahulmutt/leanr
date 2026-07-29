@@ -168,6 +168,146 @@ intent of folding them into the next plan, and P3 is it.
   three gains a *default* instance — `Elab0.lean:158-163` records why
   that would break the stuck-path tests.
 
+## Amendment 3 (2026-07-29, post-P3): P2b splits into P2b-i and P2b-ii
+
+Reality-checking § P2b against the merged P3 code (#33, `d478d71`)
+found that P2b as scoped cannot be built inside `leanr_elab` and
+`leanr_olean` alone: the mechanism its `finalize` branch depends on does
+not exist anywhere in leanr, and it lives one layer down, in
+`leanr_meta`'s synthesis engine. P2b therefore splits — **P2b-i**
+(outParam support inside synthesis) then **P2b-ii** (the elaborator
+branch) — on the same reasoning that split § P2, and the sections below
+are updated in place.
+
+**1. P3's own follow-up already made this a requirement.** § Follow-ups
+item 3 records it as a hard requirement on P2b's plan rather than a
+deferral: `try_synth_instance`'s stuck pre-test
+(`crates/leanr_elab/src/synthetic/ladder.rs:97-123`) answers `Undef` on
+goals the oracle answers `.some` — the standard binop shape
+`HAdd Nat Nat ?γ` — and closing it means porting `preprocessOutParam`
+(`SynthInstance.lean:775-817`) and `assignOutParams` (`:825-845`).
+Neither exists in leanr: `crates/leanr_meta/src/synth.rs:1651-1659`
+names both a seam, together with `preprocess` itself, and assigns them
+to "M4b". This is that slice.
+
+**2. The port is not avoidable by choosing a gentler fixture class.**
+`synthInstanceCore?` routes the `.noMVars` arm through
+`preprocessOutParam` too (`:983-1002`, the `OrderDual` note), so the
+first fixture class carrying an `outParam` sends *every* goal against it
+— ground goals included — through machinery leanr does not have. There
+is no outParam class that is safe to introduce without the port.
+
+**3. Where the mechanism lives decides which crate the plan touches.**
+The whole of it sits at synthesis's *entry* boundary, not inside the
+tabled search: nested subgoals go through `newSubgoal` / `getInstances`
+and never see `preprocess`. In the oracle that boundary is
+`synthInstanceCore?` (`:960-1010`); in leanr it is
+`MetaCtx::synth_instance_main` (`crates/leanr_meta/src/synth.rs:1599`).
+Preprocessing the goal in `leanr_elab` instead was rejected: it would
+put Meta-level machinery in the elaborator, leave `whnf.rs`'s
+`synth_pending` and `leanr_meta`'s own differential tier wrong, and keep
+the Mathlib synthesis nightly dark on outParam classes — which is most
+of Mathlib (`tests/fixtures/meta/synth-passlist.txt` is currently empty).
+
+**4. `leanr_meta/src` widens a second time, and this one is not
+additive.** § Global constraints allowed P1–P3 purely additive
+accessors and widened once for P4's *new* modules. P2b-i changes
+behavior in an *existing* file, `synth.rs`, which no prior widening
+covers. It is recorded here rather than taken silently, and it is
+bounded: one function's control flow (`synth_instance_main`) plus new
+private helpers, no kernel change, no other `leanr_meta` path altered,
+and gated on `leanr_meta`'s and `leanr_elab`'s committed corpora staying
+byte-identical.
+
+The structural change is *where the snapshot sits*. The oracle's
+`withConfig` wraps everything (`:963-964`) while `withNewMCtxDepth`
+wraps only `main` (`:978`); leanr today wraps the whole function in one
+`checkpoint`/`rollback` pair, which is its stand-in for the depth block
+(`synth.rs:1600,1667`). That pair narrows to the search alone:
+
+```
+set cfg                                 // withConfig (:963-964), unchanged
+  preprocess(ty) -> {type, kind}        // :737-773 — inside cfg, OUTSIDE the snapshot
+  checkpoint
+    main(preprocessOutParam(type))      // :983-1002, all three kinds
+  rollback                              // leanr's withNewMCtxDepth stand-in
+  applyAbstractResult(type, abst)       // :877-925 — open, then assignOutParams
+restore cfg
+```
+
+`assignOutParams` running *after* the rollback is the entire feature: it
+is what lets its `isDefEq type resultType` assign the caller's `?γ` at
+the outer depth, which is how `?γ := Nat` becomes a *result* of
+synthesis. It requires moving `open_abstract_mvars_result` out of
+`synth_instance_body` (`synth.rs:1688`) into a new
+`apply_abstract_result`.
+
+**5. Three corrections to § P2b as written.**
+
+- **`ClassEntry` has three fields, not two.** `Class.lean:14-31` in the
+  pin: `name`, `outParams`, and `outLevelParams` (positions of universe
+  parameters appearing only in output-parameter types). All three
+  decode; `outLevelParams` has a consumer in `preprocessOutParam`'s
+  `preprocessLevels` (`:786-795`) but *not* in `preprocess`'s
+  `cacheKeyType`, because leanr has no top-level `synthInstance` cache
+  at all — that half is a named seam.
+- **outParam-aware discr-tree keys and `computeSynthOrder` are free.**
+  The oracle serializes both into the `.olean` at instance registration
+  and leanr reads them rather than recomputing (`instances.rs:46-60`),
+  so `Instances.lean:159`'s `getOutParamPositions?` use needs no port.
+- **`applyAbstractResult?`'s tail is not portable.**
+  `checkMayHaveSideEffects` + `check result` (`:876-923`, the issue-#796
+  universe-constraint propagation) needs `Lean.Meta.check`, which
+  `leanr_meta` does not have and cannot get from `leanr_check` (that
+  crate sits above it). Named seam on `apply_abstract_result`.
+
+**6. P2b-i's headline behavior is invisible to the synth record shape,
+so the shape changes first.** This is § Amendment 2's finding one layer
+down. For `Op N N ?γ` the committed record carries `goal`, `mvars`,
+`ok`, `val` — and leanr today answers `ok:true`, `val:instOpN`, leaving
+`?γ` unassigned, while the oracle answers identically *and* assigns
+`?γ := N`. Same record, different state. So `dump_synth.lean` and
+`oracle_synth.rs` gain a post-synthesis **assignment** field
+(`"assigns":[{"i":<N>,"e":<E>}]`, encoded in the same `EncSt` as
+`goal`/`val`, absence meaning unassigned) before any of the port is
+differentially verifiable. It is also what makes the placement in item 4
+mutation-detectable: run `assignOutParams` before the rollback instead
+of after and the assignment is discarded, so `assigns` comes back empty
+and the record goes red.
+
+**7. P2b-i changes every synthesis goal, not only outParam ones.**
+`preprocess` normalizes unconditionally — `forallTelescopeReducing`,
+`whnf` on the body, `mkForallFVars` (`:740-742`) — and leanr skips that
+step entirely today, handing `synth_instance_body` the goal with only
+`instantiate_mvars` applied. So the port's regression gate is wider than
+its new records: the 15 committed synth records and the 101 committed
+elab records (which reach synthesis through P2a's instance arguments and
+P3's default instances) must stay byte-identical. One that moves means
+the port is wrong, not that the baseline was stale.
+
+**8. P3's carried follow-ups 1 and 2 land in P2b-ii.** § Follow-ups
+records that one fixture addition closes both — a universe-polymorphic
+`@[default_instance]` carrying an `instImplicit` binder, at a fourth
+priority — and prices it at re-deriving `synthetic_smoke.rs`'s
+rung-counting assertions plus an `Elab0.olean` rebuild and a corpus
+regen. P2b-ii pays the rebuild and the regen anyway (item 9), so the
+marginal cost is the smoke assertions alone. Item 3 of that section
+splits with the plan: the `preprocessOutParam` / `assignOutParams` port
+is P2b-i's, and teaching `ladder.rs`'s pre-test to exempt
+output-parameter positions is P2b-ii's, because the pre-test is
+`leanr_elab` code that becomes reachable exactly when `Elab0.lean` gains
+its first outParam class.
+
+**9. One ordering trap inside P2b-ii, recorded now.**
+`app/args.rs:497-505`'s guard fires on `result_is_out_param_support`
+alone, with no shape test. Declaring `Lean.Internal.coeM` in
+`Elab0.lean` flips that flag true for every non-`@` application, so the
+real `isNextOutParamOfLocalInstanceAndResult` (`App.lean:698-728`, with
+`isResultType` / `hasLocalInstanceWithOutParams` /
+`isOutParamOfLocalInstance` / `isOutParamOf`) must land in the same
+commit as the fixture declaration. Split across two commits, the corpus
+is uniformly red in between.
+
 ## What M4b-3 ships — and the stated non-shipping
 
 Like all of M4a and M4b so far, **M4b-3 does not ship independently
@@ -210,15 +350,24 @@ spec correction; `char` is a two-line arm, not a synthesis client.
   the existing `leanr_kernel::subst::instantiate_rev` at the
   `leanr_meta` layer, not added to the kernel.
 - **`leanr_olean` gains two additive env-extension decoders**, not a
-  behavior change: `classExtension` (P2b) and the `coe_decl` tag
-  attribute (P4). Precedent: M4a plan 4 PR-A, which decoded the
+  behavior change: `classExtension` (P2b-i; `ClassEntry` is
+  name + `outParams` + `outLevelParams`, § Amendment 3 item 5) and the
+  `coe_decl` tag attribute (P4). Precedent: M4a plan 4 PR-A, which decoded the
   instance / default-instance / projection-fn extensions the same way.
   Both are untrusted-input parsers and must never panic on arbitrary
   bytes (`docs/THREAT_MODEL.md`); no existing decode path changes.
-- **`leanr_meta/src` constraint — widened once, deliberately.** M4b-1
+- **`leanr_meta/src` constraint — widened twice, deliberately.** M4b-1
   and M4b-2 allowed only purely additive, TCB-neutral, behavior-neutral
   public *accessors* on `leanr_meta`. Plans P1–P3 stay inside that rule
-  (see § Accessor ledger). **P4 widens it**: coercion is Meta-level
+  (see § Accessor ledger). **P2b-i widens it first, and its widening is
+  the one that is not additive**: the outParam mechanism lives at
+  synthesis's entry boundary, so it changes the control flow of an
+  existing function, `MetaCtx::synth_instance_main`
+  (`crates/leanr_meta/src/synth.rs:1599`), and adds a `ClassTable` to
+  `MetaCtx::new`. Bounded and recorded in § Amendment 3 item 4: no
+  kernel change, no other `leanr_meta` path altered, and gated on both
+  crates' committed corpora staying byte-identical. **P4 widens it
+  again**: coercion is Meta-level
   machinery in the oracle (`Lean/Meta/Coe.lean`), and P4 adds it as new
   modules `leanr_meta/src/coe.rs` and `leanr_meta/src/transform.rs`.
   These are new files: no existing `leanr_meta` path changes behavior,
@@ -269,17 +418,20 @@ change, that is a finding to run down — not a fixture to update.
 
 ### Plan decomposition
 
-Six plans (P2 split per § Amendment; P3 before P2b per § Amendment 2),
-each a single PR with its own hermetic oracle tier extending
-`oracle_elab.rs` + `elab-queries.jsonl`. The table is in **execution
-order**.
+Seven plans (P2 split per § Amendment; P3 before P2b per § Amendment 2;
+P2b split per § Amendment 3), each a single PR with its own hermetic
+oracle tier. That tier is `oracle_elab.rs` + `elab-queries.jsonl` for
+every plan except **P2b-i**, which touches no `leanr_elab` code and is
+verified one layer down, at `oracle_synth.rs` + `synth-queries.jsonl`
+(§ Verification). The table is in **execution order**.
 
 | Plan | Content | First oracle-verifiable thing |
 |---|---|---|
 | **P1** application foundation | `expandApp`, `Arg`/`NamedArg`, the `ElabAppArgs` state machine (explicit / implicit / strictImplicit arms, `addNewArg`, `fType` normalization), `propagateExpectedType`, `etaArgs`, `finalize` (no coercion), overload single-candidate guard, implicit-lambda guard; rewire `ident` / `@` / `.{u}` through `elabAtom` | polymorphic applications without instance args; eta cases via named args |
 | **P2a** instance args + the fixpoint | `instMVars`, `trySynthesizeAppInstMVars` / `synthesizeAppInstMVars`, `synthesizeInstMVarCore`, `.typeClass` registration, the escalation ladder, `mayPostpone` / `withoutPostponing`, `withSynthesize` + the ascription rewire, `mvarErrorInfos`, `reportStuckSyntheticMVars`, the entry-point pipeline change; M4b-2's `fun` postponement seam goes live | typeclass applications; postponed-then-resumed terms |
 | **P3** literals + defaults | the `synthetic.rs` split and the fixture second-instances (§ Amendment 2 item 3), `Term.mkInstMVar`, `num` (`OfNat`), `char` (`Char.ofNat`), `scientific` (`OfScientific`), `synthesizeUsingDefault` / `synthesizeSomeUsingDefaultPrio` | `42`, `(42 : Tag)`, `'a'`, `(1.5 : Tag)`, and a numeral inside an application |
-| **P2b** outParam support | `classExtension` decode (`ClassEntry` = name + outParam positions), `Context.resultIsOutParamSupport`, `State.resultTypeOutParam?`, the `finalize` outParam branch | `getElem`-shaped applications whose result type is a local instance's outParam |
+| **P2b-i** outParam synthesis | `classExtension` decode (`ClassEntry` = name + `outParams` + `outLevelParams`), `ClassTable` in `MetaCtx`, `preprocess` / `preprocessOutParam` / `assignOutParams` in `synth.rs` with the snapshot narrowed to the search, the synth record's new `assigns` field | `Op N N ?γ` — the outParam assigned as a *result* of synthesis, at the meta tier |
+| **P2b-ii** the outParam branch | `Context.resultIsOutParamSupport` producer, `isNextOutParamOfLocalInstanceAndResult`, `State.resultTypeOutParam?`, the `finalize` outParam branch, `ladder.rs`'s stuck pre-test exemption, P3's carried follow-ups 1–2 | `getElem`-shaped applications whose result type is a local instance's outParam |
 | **P4** coercions | `coe_decl` tag-extension decode, `expandCoe`, `coerceSimple?` / `coerceToFunction?` / `coerceToSort?` in new `leanr_meta/src/coe.rs`, `mkCoe` + `.coe` mvar case + `ensure_has_type` rewire, monad-lift shape guard | `(n : Int)` where `n : Nat`; a `CoeFun` application |
 | **P5** binder + argument breadth | implicit / strictImplicit / instImplicit binders for `fun`/`let`/`have`, `fun`'s `optType`, `optParam` defaults, the `autoParam` arm, `..` ellipsis, real implicit-lambda insertion replacing P1's guard | `fun {α} => …`; signatures with `optParam`; `f ..` |
 
@@ -293,8 +445,12 @@ fixpoint rung — and it is the slice that replaces P2a's guarded
 the outParam branch's body calls `synthesizeAppInstMVars` *and*
 `synthesizeSyntheticMVarsUsingDefault` (`App.lean:639-647`), and only
 the first of those is P2a's — the second is the seam P3 retires, and
-the branch's own trigger needs a numeral (§ Amendment 2 item 1). P4
-after P2a because a stuck coercion registers a `.coe` synthetic mvar.
+the branch's own trigger needs a numeral (§ Amendment 2 item 1). P2b-i
+before P2b-ii because P2b-ii's first fixture outParam class routes every
+goal against it — ground goals included — through `preprocessOutParam`,
+which P2b-i is what builds (§ Amendment 3 items 2 and 3); the reverse
+order would put a known-divergent synthesis path under a live corpus.
+P4 after P2a because a stuck coercion registers a `.coe` synthetic mvar.
 P5 last because it is breadth over a verified core, so it can absorb
 schedule pressure without leaving a divergent path on main.
 
@@ -460,7 +616,7 @@ guards:
   `registerMVarErrorImplicitArgInfo`, then clears; the `finalize` tail
   (`app/finalize.rs:85`)
 - the `resultTypeOutParam?` branch (`App.lean:639-647`) — **stays a
-  named seam**, retargeted to P2b (`app/finalize.rs:51`)
+  named seam**, retargeted to P2b-ii (`app/finalize.rs:51`)
 
 **`withSynthesize` and the ascription rewire** (§ Amendment, item 3).
 `withSynthesize` / `withSynthesizeLight` (`SyntheticMVars.lean:662-693`)
@@ -484,44 +640,76 @@ instance for the postponement case, and a class with no instance for the
 stuck path. Only the shapes P2a's records discriminate — not a copy of
 Synth0.
 
-### P2b — outParam support
+### P2b — outParam support (P2b-i, then P2b-ii)
 
-*Executes after § P3, per § Amendment 2. It keeps its position in this
-document so the two halves of the P2 split read together.*
+*Executes after § P3, per § Amendment 2, and splits in two per
+§ Amendment 3. It keeps its position in this document so the two halves
+of the P2 split read together.*
+
+#### P2b-i — outParam support inside synthesis
+
+Everything the `finalize` branch below depends on, one layer down.
+`preprocess` / `preprocessOutParam` / `assignOutParams`
+(`SynthInstance.lean:737-845`) are today a named seam in
+`crates/leanr_meta/src/synth.rs:1651-1659`; P2b-i ports them into
+`MetaCtx::synth_instance_main`, narrowing that function's
+`checkpoint`/`rollback` pair to the search alone so `assignOutParams`
+runs after it and can assign the caller's mvar. Detecting the shape
+needs class outParam positions, so P2b-i also adds the
+**`classExtension` decode** (`ClassEntry` = name + `outParams` +
+`outLevelParams`) to `leanr_olean` — the same shape as M4a plan 4
+PR-A's instance decode, and small — and a `ClassTable` built once in
+`MetaCtx::new` beside `InstanceTable::build`. It is an untrusted-input
+parser: it must never panic on arbitrary bytes
+(`docs/THREAT_MODEL.md`), and no existing decode path changes.
+
+`applyAbstractResult?`'s `checkMayHaveSideEffects` + `check` tail and
+`preprocess`'s `cacheKeyType` are named seams, not ports — the first
+needs a `Meta.check` this crate cannot have, the second a synthesis
+cache it does not have (§ Amendment 3 item 5). The full rationale,
+the structural diagram and the corrections to this section as
+originally written are in § Amendment 3; verification is in
+§ Verification tier 4.
+
+#### P2b-ii — the elaborator branch
 
 `Context.resultIsOutParamSupport` and `State.resultTypeOutParam?`
-(`App.lean:141-175`, `610-700`) — the fields exist from P1; P2b supplies
+(`App.lean:141-175`, `610-700`) — the fields exist from P1; P2b-ii
+supplies
 their producers and the `finalize` branch. When an application's result
 type is the `outParam` of a *local* instance, `finalize` calls
 `synthesizeAppInstMVars` and then, if the parameter is still unassigned
 and the result type *is* that mvar, `synthesizeSyntheticMVarsUsingDefault`
 — eagerly applying default instances and changing the emitted term for
 `getElem`-shaped code. The first callee is P2a's and the second is P3's,
-which is why P2b follows both.
+which is why P2b-ii follows both.
 
-Two things about the corpus follow from that, and are what make P2b
+Two things about the corpus follow from that, and are what make P2b-ii
 worth running only here. The env gate
 (`env.contains ``Lean.Internal.coeM`, `App.lean:1355`) is false
-throughout `Elab0.lean` today, so P2b's fixture task declares
+throughout `Elab0.lean` today, so P2b-ii's fixture task declares
 `Lean.Internal.coeM` and a `getElem`-shaped class carrying an
 `outParam`; and the branch's *interesting* arm needs the outParam mvar
 to survive `synthesizeAppInstMVars` unassigned, which in the oracle's
 own worked example is the numeral in `getElem xs 0`. P3 is what makes
 that term elaborate at all (§ Amendment 2 item 1).
 
-Detecting the shape needs class outParam positions, so P2b adds a
-**`classExtension` decode** (`ClassEntry` = name + outParam positions) to
-`leanr_olean` — the same shape as M4a plan 4 PR-A's instance decode, and
-small. It is an untrusted-input parser: it must never panic on arbitrary
-bytes (`docs/THREAT_MODEL.md`), and no existing decode path changes.
+That declaration is also P2b-ii's one ordering trap:
+`app/args.rs:497-505`'s guard fires on `result_is_out_param_support`
+alone, so `isNextOutParamOfLocalInstanceAndResult` (`App.lean:698-728`)
+must land in the same commit as the fixture change or the whole corpus
+is red in between (§ Amendment 3 item 9). P2b-ii also carries
+`ladder.rs`'s pre-test exemption and P3's carried follow-ups 1–2
+(§ Amendment 3 item 8).
 
 A conservative over-approximation (treat every application as outParam
 support) was rejected: it would reject most ordinary typeclass
 applications and gut P2a's own corpus. Leaving
 `result_is_out_param_support = false` permanently was likewise rejected —
-but as a *temporary* state across the two PR boundaries it now spans
-(P2a, then P3) it is sound, because P1 already shipped it as a named,
-shape-guarded seam rather than a silent divergence (§ Amendment, item 1).
+but as a *temporary* state across the three PR boundaries it now spans
+(P2a, P3, then P2b-i) it is sound, because P1 already shipped it as a
+named, shape-guarded seam rather than a silent divergence
+(§ Amendment, item 1).
 
 ### P3 — literals and default instances
 
@@ -727,14 +915,15 @@ Three supporting pieces:
 
 Additive, TCB-neutral, behavior-neutral public accessors, by plan.
 Rows are in this document's order, not execution order (P3 runs before
-P2b, § Amendment 2). P3's row is the one entry that is not purely
+P2b, § Amendment 2, and P2b is split in two, § Amendment 3). P3's row is the one entry that is not purely
 additive; it says so.
 
 | Plan | Additions |
 |---|---|
 | P1 | `instantiate_beta_rev_range` — and only this one. `Expr` destructuring (`fTypeIsForall`, `bindingDomain!`, `getAppFn`) uses the already-public `Store::expr_node` (`leanr_kernel/src/bank/terms.rs:615`) via `mctx.store()` + `view.store`, and `whnfForall` composes from the public `MetaCtx::whnf`, so neither needs an accessor. `instantiate_beta_rev_range` does: its beta step needs `whnf.rs`'s `beta_rev`/`head_beta`, which are `pub(crate)`. |
 | P2a | `process_postponed_levels` + `postponed_len`, `default_instances_of` (forwarding the `pub(crate)` `instances.rs:520` — needed by rung 3's guarded seam), `check_occurs` (`metactx.rs:837` — a `pub` forwarder to the existing `pub(crate)` `occurs_check`, `assign.rs:1117`, needed to port `resumePostponed`'s occurs-check assignment guard) |
-| P2b | none expected — `classExtension` is a `leanr_olean` decode, not a `leanr_meta` accessor |
+| P2b-i | **Does not belong in this ledger, and that is the point.** P2b-i is not an accessor addition: it changes `MetaCtx::synth_instance_main`'s control flow, adds private `preprocess` / `preprocess_out_param` / `assign_out_params` / `apply_abstract_result` helpers to `synth.rs`, and adds a `ClassTable` argument to `MetaCtx::new` (a signature change across 25 call sites; P4 adds a further extension, so the six entry slices should become one `EnvExtensions` struct in the same task rather than paying that churn twice). The widening is recorded in § Global constraints and § Amendment 3 item 4. The only genuinely additive part is the `pub` reader pair `get_out_param_positions` / `get_out_level_param_positions` (oracle: `Class.lean:76-88`), which P2b-ii consumes. |
+| P2b-ii | none expected — it reads P2b-i's class accessors and otherwise stays in `leanr_elab` |
 | P3 | Audited against the merged P2a code; larger than this spec's original three. **Additive forwarders:** `get_dec_level` (composes the private `get_level`, `infer.rs:754`, `level_normalize`, and `dec_level_top`, `level.rs`); `is_prop` (widening the `pub(crate)` `lazy_delta.rs:171` to `pub` — needed by `num`'s Prop failure branch; no name clash exists, so no forwarder was added); `checkpoint`/`rollback` (widening the `pub(crate)` `metactx.rs:944`/`:954` to `pub`, plus a `pub` `MetaSnapshot` re-export — needed for `commitWhen`, `Lean/Util/MonadBacktrack.lean:50-60`; both line numbers corrected in the P3 fix wave — `:952` was blank, and `:56` truncated the citation before the `catch ex => restoreState s; throw ex` arm that is the whole reason `rollback` is needed on the error path); `with_assignable_synthetic_opaque` (needed by this plan only for `synthesizeUsingDefaultInstance`, `SyntheticMVars.lean:164` — the spec's earlier attribution to `synthesizeUsingDefaultPrio` was off by one function, and "only" is scope-local: the pin turns the flag on in eleven places, enumerated in `config.rs`'s field doc; both corrected against the pinned v4.33.0-rc1 source in M4b-3 P3 task 4 — moved here from P2a, whose ladder never reaches it; `config.rs`'s module doc named `assign_synthetic_opaque` as a deferred field; task 4 added it, cutting that list from three to two). **The `Config` field's READ SITES are part of this row's contract, not an implementation detail** (added in the P3 fix wave: a config field with no consumer is dead, and a later slice reading only "added the field and the scope" would not know where the flag is consulted). `Config::assign_synthetic_opaque` (`crates/leanr_meta/src/config.rs:95-163`, whose field doc enumerates all three sites and is the authority this row mirrors) is open-coded at three `syntheticOpaque` checks, two of them **gated by the flag**: `assign.rs:157-166` (`unassigned_mvar_id`, transcribing `isAssignable`, `ExprDefEq.lean:1731-1733`) and `lazy_delta.rs:498-501` (`is_def_eq_singleton`'s `isAssignable sFn`, `ExprDefEq.lean:2156` → the same `:1731-1733`; gated in P3 task 4 fix round 1, because it is reachable from inside an `isDefEq` and an ungated copy would refuse an assignment the oracle permits). The third, `discr_path.rs`'s discrimination-key builder (`DiscrTree/Main.lean:308`), is **deliberately NOT gated** — and the reason is not "the oracle never runs it inside the scope", which is false (the flag does survive into synthesis; `synthInstanceCore?`'s `withConfig`, `SynthInstance.lean:963-964`, overrides six fields but not this one). What moots the gate there is `withNewMCtxDepth` (`SynthInstance.lean:978`): every mvar from outside the search is at a different depth, so `isReadOnlyOrSyntheticOpaque`'s FIRST arm (`Basic.lean:981-982`) returns `true` before the kind is examined. Depth is this crate's standing tier-1 seam, so wiring the flag in there without modelling depth would flip `Star`/`Other` keys the oracle keeps at `Other`. `whnf.rs`'s `synth_pending` guard is not on the list at all: `synthPendingImp` (`SynthInstance.lean:1033-1036`) matches `mvarDecl.kind` directly and never reads the config. `mk_raw_nat_lit` is NOT needed (M4b-3 P3 task 4): `Store::expr_lit_nat` (`leanr_kernel/src/bank/terms.rs:535`) and `MetaCtx::store_mut` are both already public, which is exactly how `builtin/lit.rs`'s `elab_str` reaches `expr_lit_str`. **New:** `default_instance_priorities` — the *global* descending distinct priority set (`getDefaultInstancesPriorities`); the existing `default_instances_of` is per-class and cannot produce it. **Not additive, and the one item that isn't:** `mk_const_with_fresh_mvar_levels` and `forall_meta_telescope_reducing` (returning binder infos, which `synthesizeUsingDefaultInstance` needs to pick out the `instImplicit` binders as new pending goals). Both loops existed — `refresh_instance_levels` and the telescope inside `get_subgoals` — but private, specialized to `&Instance`, and discarding binder infos. (Line references dropped: M4b-3 P3 task 4 renamed the first and moved the second, so the numbers this row carried before the commit no longer resolve. The generalized forms are `MetaCtx::mk_const_with_fresh_mvar_levels` and `MetaCtx::forall_meta_telescope_reducing`, both in `synth.rs`.) P3 **generalizes them out of `synth.rs` and has `get_subgoals` call the generalized form**, rather than duplicating a fidelity-critical telescope loop in `leanr_elab`. Behavior-neutral, gated by `synth.rs`'s existing tests plus the `leanr_meta` oracle corpus staying byte-identical. |
 | P4 | `unfold_definition`, `get_level`, `whnf_r`, `mk_arrow`, and the **new modules** `coe.rs` + `transform.rs` (§ Global constraints — the one deliberate widening) |
 | P5 | none expected |
@@ -751,19 +940,20 @@ naming the owning slice.
 `IsDefEqStuck` means *postpone*, never *fail*; and the deterministic
 `StepBudgetExhausted` / `DepthBudgetExhausted` budgets surface as
 elaboration errors rather than hangs. No path panics.
-Untrusted-input discipline is unchanged: the only new decoders are P2b's
-`classExtension` and P4's `coe_decl` name set, both following the
+Untrusted-input discipline is unchanged: the only new decoders are
+P2b-i's `classExtension` and P4's `coe_decl` name set, both following the
 existing env-extension decode pattern, which must never panic on
 arbitrary bytes (`docs/THREAT_MODEL.md`).
 
 ## Verification
 
-Three tiers, no new nightly workflow.
+Four tiers, no new nightly workflow.
 
 1. **The hermetic differential gate** remains the only correctness
    oracle: `oracle_elab.rs` replays `elab-queries.jsonl` against
    committed `.olean` fixtures and compares byte-for-byte on the
-   canonical `Expr`. Each plan extends the corpus.
+   canonical `Expr`. Each plan extends the corpus — except P2b-i, whose
+   gate is tier 4.
    **Expected types come from source ascription.** The dumper keeps its
    one-term-per-record contract; `(f x : T)` induces an expected type
    through `typeAscription`, which M4b-1 already ships. This matters
@@ -783,6 +973,30 @@ Three tiers, no new nightly workflow.
 3. **Seam audit per plan**, in M4b-1's Task-7 style: enumerate every
    unregistered kind and every guarded shape and assert each returns a
    named `UnsupportedSyntax` rather than a wrong `ExprId`.
+4. **The meta-tier synthesis gate, for P2b-i only.** P2b-i touches no
+   `leanr_elab` code, so it is verified where the code lives:
+   `crates/leanr_meta/tests/oracle_synth.rs` over
+   `tests/fixtures/meta/Synth0.lean`. Three parts, and the first is a
+   precondition for the other two (§ Amendment 3 item 6): the record
+   shape gains `assigns`, the post-synthesis state of every declared
+   goal mvar. Then `Synth0.lean` gains outParam classes chosen so that
+   each mechanism dies without one — an `HAdd`-shaped
+   `class Op (a b : Type u) (c : outParam (Type u))` whose goal
+   `Op N N ?γ` pins `?γ := N` (the shape `ladder.rs:105-115` cites as a
+   live divergence); a goal whose outParam is already concrete and
+   *wrong*, so `assignOutParams`' `isDefEq` fails and the result is
+   rejected — without which a constant-`true` `assign_out_params` keeps
+   the suite green; a ground goal against the same class, for the
+   `.noMVars` arm the oracle also routes through `preprocessOutParam`;
+   a class whose universe appears only in its outParam, giving
+   `preprocessLevels` a producer; and the `getElem`-shaped class P2b-ii
+   will need, proved out here first. Third, the regression gate is
+   wider than the new records: `preprocess` normalizes *every* goal, so
+   the 15 committed synth records and the 101 committed elab records
+   must stay byte-identical (§ Amendment 3 item 7). The Mathlib
+   synthesis nightly is expected to move `synth-passlist.txt` off zero
+   as a consequence; that is an outcome reported by the nightly, not a
+   gate in the PR, and no workflow changes.
 
 `mise run ci` — which gates `cargo fmt --check` and clippy, not only
 tests — runs before every commit and push.
@@ -796,8 +1010,11 @@ errors, rather than proceeding to emit a different term:
 |---|---|
 | overloaded application (candidate count > 1) | the slice that grows `resolve_global` |
 | implicit-lambda insertion (P1 only; P5 implements) | M4b-3 P5 |
-| local-instance outParam result type (P1 named it "P2"; retargeted) | M4b-3 P2b |
+| local-instance outParam result type (P1 named it "P2"; retargeted) | M4b-3 P2b-ii |
+| `try_synth_instance`'s stuck pre-test over output-parameter positions (P3 § Follow-ups item 3) | M4b-3 P2b-ii, over P2b-i's port |
 | `synthesize_using_default` with default instances in play (P2a) | M4b-3 P3 |
+| `applyAbstractResult?`'s `checkMayHaveSideEffects` + `check` (P2b-i) | the slice that grows a `Meta.check` |
+| `preprocess`'s `cacheKeyType` / `outLevelParams` wildcarding (P2b-i) | the slice that builds the synthesis cache |
 | `.tactic` synthetic mvar execution | later M4 (`by`) |
 | monad-lift coercion shape | the do-notation slice |
 | `proj` / `pipeProj` / `dotIdent` / `namedPattern` / `choice` | M4b-4 |
@@ -829,8 +1046,12 @@ in shipped P3 code, not deferrals of unwritten constructs — § Out of
 scope is for the latter. Each names the slice or plan that should carry
 a task for it.
 
-**1. The nested `synthesizePending` fixpoint is untested (owner: the
-slice that adds the fixture below).** `synthesize_using_default_instance`
+*Owners assigned by § Amendment 3 item 8: items 1 and 2 are P2b-ii's
+(it pays the olean rebuild and corpus regen anyway); item 3 splits
+across P2b-i and P2b-ii; item 4 is unchanged.*
+
+**1. The nested `synthesizePending` fixpoint is untested (owner:
+P2b-ii, which adds the fixture below).** `synthesize_using_default_instance`
 collects a candidate's `instImplicit` binders as new pending goals and
 recurses (`crates/leanr_elab/src/synthetic/default_inst.rs:245-254`,
 oracle `SyntheticMVars.lean:167-171`). Mutating that loop to collect
@@ -840,7 +1061,7 @@ seam audit — because no `@[default_instance]` in `Elab0.lean` has an
 instance-implicit binder (`instDfltNat` has no binders;
 `instOfNatNat`/`instOfNatTag` take one *explicit* `(n : Nat)`).
 
-**2. The candidate universe refresh is untested (same owner).**
+**2. The candidate universe refresh is untested (same owner: P2b-ii).**
 `mk_default_instance_candidate`
 (`crates/leanr_elab/src/synthetic/default_inst.rs:274-304`) builds the
 candidate with fresh level mvars. Mutating it to build at an EMPTY level
@@ -860,7 +1081,8 @@ count rungs — plus an `Elab0.olean` rebuild and a `fixtures:regen-elab`
 run, so the corpus must be re-checked record-by-record.
 
 **3. `try_synth_instance`'s `outParam` residue is P2b's, as a hard
-requirement (owner: P2b's implementation plan).** Documented at
+requirement (owner: split — the port is P2b-i's, the pre-test is
+P2b-ii's, § Amendment 3 item 8).** Documented at
 `crates/leanr_elab/src/synthetic/ladder.rs:97-123`: the standard binop
 shape `HAdd Nat Nat ?γ` is `.some` in the oracle — `preprocessOutParam`
 (`SynthInstance.lean:775-817`) replaces the caller's mvars in output-
@@ -870,10 +1092,10 @@ back after the depth block closes — while leanr's stuck pre-test answers
 `Undef` and the ladder eventually raises `StuckSyntheticMVar` on a goal
 the oracle answers. It is unreachable today only because no fixture
 class carries an `outParam`; the moment one does, this is a live
-divergence, not a missing feature. **P2b's plan must carry a task for
-it** rather than relying on a reader finding the comment — porting
-`preprocessOutParam`/`assignOutParams` is what closes it, not the
-mctx-depth model.
+divergence, not a missing feature. **P2b-i's plan must carry the port
+(`preprocessOutParam`/`assignOutParams`, not the mctx-depth model) and
+P2b-ii's must carry the pre-test exemption that consumes it**, rather
+than relying on a reader finding the comment.
 
 **4. `with_assignable_synthetic_opaque` has no drop guard (owner:
 `leanr_meta`, whenever an external caller can panic).**
@@ -891,8 +1113,9 @@ is a behaviour change to `leanr_meta`, which that wave was scoped out of.
 
 Plan 1 (application foundation) shipped in #31; P2a — the
 synthetic-mvar ladder, the fixpoint, and instance arguments — shipped in
-#32. The next implementation plan is **P3** — literals and default
-instances (§ P3, and § Amendment 2 for why it now precedes P2b and what
-it absorbs from P2a's deferrals). P2b, P4 and P5 get their own
-implementation plans as each predecessor lands, mirroring M4b-2's
-rhythm.
+#32; P3 — literals and default instances — shipped in #33. The next
+implementation plan is **P2b-i** — outParam support inside synthesis
+(§ P2b-i, and § Amendment 3 for why P2b splits, what P2b-i widens in
+`leanr_meta`, and why the synth record shape changes before anything
+else in that plan). P2b-ii, P4 and P5 get their own implementation
+plans as each predecessor lands, mirroring M4b-2's rhythm.
