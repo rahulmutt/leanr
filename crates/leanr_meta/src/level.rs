@@ -53,7 +53,7 @@
 //! directly.
 
 use leanr_kernel::bank::levels::LevelRow;
-use leanr_kernel::bank::LevelId;
+use leanr_kernel::bank::{ExprId, LevelId};
 use leanr_kernel::{Level, Nat};
 
 use crate::{LMVarId, MetaCtx, MetaError};
@@ -418,6 +418,28 @@ impl<'e> MetaCtx<'e> {
     // decLevel? / decAux?
     // ===================================================================
 
+    /// oracle: `getDecLevel` (`Lean/Meta/DecLevel.lean:73-76`) —
+    /// `getLevel`, `normalizeLevel`, then `decLevel`. Used by
+    /// `elabNumLit`/`elabScientificLit` to infer the universe argument
+    /// of `OfNat.{u}`/`OfScientific.{u}` from the expected type.
+    ///
+    /// The oracle's `decLevel` throws "invalid universe level, {u} is
+    /// not greater than 0" (`DecLevel.lean:65-68`) on `none`; that
+    /// message is a diagnostic, and the caller (`elab_num`) replaces it
+    /// with its own "numerals are data" error anyway
+    /// (`BuiltinTerm.lean:219-223`), so this returns a plain
+    /// `MetaError::Infer` carrying the same fact.
+    pub fn get_dec_level(&mut self, ty: ExprId) -> Result<LevelId, MetaError> {
+        let l = self.get_level(ty)?;
+        let l = self.level_normalize(l)?;
+        match self.dec_level_top(l)? {
+            Some(v) => Ok(v),
+            None => Err(MetaError::Infer(
+                "invalid universe level: not greater than 0".into(),
+            )),
+        }
+    }
+
     /// oracle: `decLevel?` (DecLevel.lean:57-62) — the public wrapper
     /// [`MetaCtx::solve`]'s succ-arm calls (`Meta.decLevel?`,
     /// LevelDefEq.lean:135). Snapshots mctx before attempting; on
@@ -761,7 +783,7 @@ impl<'e> MetaCtx<'e> {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_support::with_ctx;
+    use crate::test_support::{fresh_fvar, with_ctx, with_prelude0_ctx};
 
     #[test]
     fn ground_levels() {
@@ -869,6 +891,61 @@ mod tests {
             ctx.postponed.push((z, z));
             assert!(ctx.process_postponed().unwrap());
             assert!(ctx.postponed.is_empty());
+        });
+    }
+
+    /// oracle: `getDecLevel` (`Lean/Meta/DecLevel.lean:73-76`) — infer
+    /// the type's own level, normalize, then DECREMENT by one. `Type u`
+    /// is `Sort (u+1)`, so a value type at `Sort 1` (`Type`) has
+    /// dec-level `0`. This is what `elabNumLit` needs for
+    /// `OfNat.{u}`'s universe argument.
+    #[test]
+    fn get_dec_level_decrements_a_concrete_sort() {
+        with_prelude0_ctx(|ctx| {
+            // `Type` = `Sort 1`; its own type is `Sort 2`, so getLevel
+            // yields 2 and decLevel yields 1.
+            //
+            // Interned against the fixture's PERSISTENT base (the
+            // `Some(ctx.view.store)` idiom `synth.rs`'s tests use), not
+            // the task-4 brief's sketched `None`: with `None` the
+            // scratch store mints a second, scratch-local `Level.succ
+            // Level.zero` alongside the one `Prelude0` already carries,
+            // and `assert_eq!` on `LevelId`s would compare a scratch id
+            // against the base id `get_dec_level` legitimately returns.
+            let base = Some(ctx.view.store);
+            let zero = ctx.store_mut().level_zero(base).expect("zero");
+            let one = ctx.store_mut().level_succ(base, zero).expect("succ");
+            let ty = ctx.store_mut().expr_sort(base, one).expect("Sort 1");
+            let u = ctx.get_dec_level(ty).expect("Sort 1 has a dec level");
+            assert_eq!(u, one, "getDecLevel (Sort 1) = 1");
+        });
+    }
+
+    /// A `Prop`-valued type has level `0`, which cannot be decremented:
+    /// the oracle throws "invalid universe level". `elabNumLit` catches
+    /// exactly this to produce its "numerals are data" error.
+    ///
+    /// **Deviation from the task-4 brief's sketch, deliberate.** The
+    /// brief passed `Sort 0` itself here. That is not a Prop-VALUED type,
+    /// it is `Prop`, and `getDecLevel` is defined on the level of the
+    /// argument's OWN type: `inferType (Sort 0) = Sort 1`, so `getLevel`
+    /// yields `1` and `decLevel` happily yields `0` — the sketch would
+    /// have asserted an error that neither the oracle nor this port
+    /// produces. The condition the oracle's `elabNumLit` actually catches
+    /// (`BuiltinTerm.lean:219-223`) is an EXPECTED TYPE that is a
+    /// proposition, i.e. a term whose own type is `Sort 0`; a free
+    /// variable `(p : Prop)` is the smallest hermetic witness of that.
+    #[test]
+    fn get_dec_level_rejects_prop() {
+        with_prelude0_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.store_mut().level_zero(base).expect("zero");
+            let prop = ctx.store_mut().expr_sort(base, zero).expect("Sort 0");
+            let p = fresh_fvar(ctx, prop, "p");
+            assert!(
+                ctx.get_dec_level(p).is_err(),
+                "a proposition's level is 0 and cannot be decremented"
+            );
         });
     }
 }

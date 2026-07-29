@@ -220,9 +220,12 @@ fn unregistered_kinds_are_named_by_kind() {
         ("Nat.zero.1", "Lean.Parser.Term.proj"),
         ("Nat.zero |>.1", "Lean.Parser.Term.pipeProj"),
         ("x@Nat.zero", "Lean.Parser.Term.namedPattern"),
-        // M4b-3 P3, the literals that are not leaves.
-        ("0", "num"),
-        ("'a'", "char"),
+        // The literals that are not leaves used to be listed here.
+        // `num` left with task 6 and `char`/`scientific` with task 7 —
+        // all three are registered kinds now (`@OfNat.ofNat.{u}` plus
+        // the default-instance rung, `Char.ofNat`,
+        // `@OfScientific.ofScientific.{u}`), and their records live in
+        // the committed corpus instead.
     ];
     for (src, kind) in cases {
         assert!(
@@ -406,5 +409,157 @@ fn no_seam_points_at_the_retired_p2_label() {
     assert!(
         offenders.is_empty(),
         "seams still labelled with the retired `M4b-3 P2`: {offenders:?}"
+    );
+}
+
+/// P3 RETIRED the rung-3 default-instance seam rather than retargeting
+/// it. A source tree that still carries the old message is making a
+/// stale claim about what is implemented.
+///
+/// Mirrors [`no_seam_points_at_the_retired_p2_label`] above, which does
+/// the same for P1's unqualified "M4b-3 P2" labels, and inherits that
+/// test's stated precondition: this is a TEXTUAL scan, so it is a floor
+/// (the exact retired wording never comes back) and not a ceiling (a
+/// reworded revival of the same seam would pass unseen).
+///
+/// **Non-vacuity, measured rather than assumed.** The needle is the
+/// distinctive subject of P2a's retired message, which read
+/// ```text
+///     "default instances for a pending typeclass mvar require \
+///      synthesizeUsingDefault — M4b-3 P3"
+/// ```
+/// in `synthetic.rs:607-611` on `main`. It is matched per LINE, and the
+/// needle is chosen to lie entirely within the message's FIRST source
+/// line: the Rust `\`-continuation puts a newline plus indentation
+/// between `require` and `synthesizeUsingDefault`, so a whole-file
+/// `contains("require synthesizeUsingDefault")` — the shape task 8's
+/// brief proposed — could never have matched even on `main`, and would
+/// have been a gate that gates nothing. Verified by running this scan's
+/// body against `git show main:crates/leanr_elab/src/synthetic.rs`: one
+/// offender there, zero here.
+#[test]
+fn no_seam_points_at_the_retired_p3_default_instance_label() {
+    let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    let needle = "default instances for a pending typeclass mvar";
+    let mut offenders = Vec::new();
+    for path in walk_rs_files(src_dir) {
+        let text = std::fs::read_to_string(&path).expect("readable source");
+        for (n, line) in text.lines().enumerate() {
+            if line.contains(needle) {
+                offenders.push(format!("{}:{}", path.display(), n + 1));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "P3 retired the rung-3 seam (it has a real body in \
+         `synthetic/default_inst.rs`); stale label at {offenders:?}"
+    );
+}
+
+/// The four literal kinds are REGISTERED, so they must not appear in any
+/// of the crate's three deferral ledgers, and `rawNatLit` — which has no
+/// producer in leanr's own parser — must stay unregistered.
+///
+/// This is also where `seam_audit.rs` keeps its literal coverage now
+/// that the constructs are implemented. `unregistered_kinds_are_named_by_kind`
+/// used to carry a `("0", "num")` row (removed by task 6) and a `char`
+/// one (task 7); both were assertions that the kind is NOT registered,
+/// which is exactly the fact P3 falsified. The coverage did not shrink,
+/// it INVERTED: the same four kinds are asserted here from the positive
+/// side, plus the ledger text, which the removed rows never checked.
+#[test]
+fn literal_kinds_are_registered_not_deferred() {
+    for kind in ["str", "num", "char", "scientific"] {
+        assert!(
+            leanr_elab::dispatch::elaborator_name_for(kind).is_some(),
+            "{kind} must be registered after M4b-3 P3"
+        );
+    }
+    // `rawNatLit` is the one literal kind P3 deliberately does NOT
+    // register (design spec § P3): `elabRawNatLit`
+    // (`BuiltinTerm.lean:231-234`) elaborates a `rawNatLit` NODE, and
+    // leanr's parser has no production that builds one, so registering
+    // it would be dead code claiming coverage it cannot have.
+    assert!(
+        leanr_elab::dispatch::elaborator_name_for("rawNatLit").is_none(),
+        "rawNatLit has no producer in leanr's parser and must stay unregistered"
+    );
+
+    // The three ledgers, by the exact row each one carried. `dispatch.rs`
+    // shed its row in task 6 and `app/mod.rs`/`lib.rs` in task 8; all
+    // three needles are kept so a re-added deferral is caught wherever
+    // it lands.
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    for (file, needle) in [
+        ("dispatch.rs", "num / char literals"),
+        ("app/mod.rs", "num/char/scientific literals"),
+        ("lib.rs", "`num`/`char` literals"),
+    ] {
+        let text = std::fs::read_to_string(format!("{root}/{file}")).expect("readable ledger");
+        assert!(
+            !text.contains(needle),
+            "{file} still defers the literals ({needle:?}), but P3 registered all four"
+        );
+    }
+}
+
+/// Every `UnsupportedSyntax` message in the crate names a slice that
+/// still OWNS something. P3 shipped rung 3 and the three non-leaf
+/// literals, so no LIVE message may name "M4b-3 P3" any more.
+///
+/// Only non-comment lines are inspected, deliberately: a doc comment may
+/// and should cite P3 historically ("real since M4b-3 P3 task 5"), and
+/// that is a record of what happened, not a claim that work is owed. A
+/// string literal handed to `UnsupportedSyntax` is the opposite — the
+/// crate's named-seam discipline reads it as "this construct is deferred
+/// to that slice", so naming a COMPLETED slice there is a live false
+/// claim.
+///
+/// Two messages tripped this when it was written, and both were
+/// mislabelled rather than stale: `builtin::lit::inst_mvar_id` and
+/// `synthetic::default_inst::mvar_id_of` each report an unreachable
+/// internal invariant (the oracle's `mvarId!`, a partial function), not
+/// a deferral. They were reworded to say so instead of being retargeted
+/// at a later slice, which would have been a second false claim — no
+/// future slice owns "implement this invariant".
+///
+/// **KNOWN LIMITATION — this is a per-slice tripwire, and whoever
+/// completes a slice owes it a needle.** The needle is the literal
+/// `"M4b-3 P3"`, so the gate says nothing about any OTHER completed
+/// slice. A third message of exactly the shape above survived task 8's
+/// audit for precisely that reason: `synthetic::report`'s `.postponed`
+/// arm read "… — M4b-3 P2a invariant", naming a slice that is also
+/// complete, and only the whole-branch review caught it (reworded in
+/// the P3 fix wave).
+///
+/// It is deliberately NOT generalised to "any completed slice", and the
+/// reason is that no non-rotting formulation exists. Live source
+/// legitimately names INCOMPLETE slices in exactly this position — that
+/// is the named-seam discipline itself (`app/args.rs`'s "M4b-3 P2b",
+/// `elab.rs`'s "M4b-3 P5", `ladder.rs`'s "M4b-3 P4") — so telling an
+/// offender from a correct seam requires knowing which slices are done,
+/// i.e. a hand-maintained completed-slice list that rots the same way
+/// this needle does, only silently. Widening the scan by SHAPE instead
+/// (say, "a message containing the word `invariant` may not name a
+/// slice") would have caught the P2a case but is a heuristic with real
+/// false negatives — a reworded message evades it — and a gate that
+/// quietly stops catching things is worse than one that visibly needs
+/// updating. So: when a slice completes, add its label here.
+#[test]
+fn no_seam_message_names_the_completed_p3_slice() {
+    let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    let mut offenders = Vec::new();
+    for path in walk_rs_files(src_dir) {
+        let text = std::fs::read_to_string(&path).expect("readable source");
+        for (n, line) in text.lines().enumerate() {
+            if line.contains("M4b-3 P3") && !line.trim_start().starts_with("//") {
+                offenders.push(format!("{}:{}", path.display(), n + 1));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "M4b-3 P3 is complete; live (non-comment) source claiming it at {offenders:?}"
     );
 }

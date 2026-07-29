@@ -127,26 +127,26 @@ fn step_merges_new_pending_before_still_unsolved() {
 /// throws, `Err(IsDefEqStuck)` is "not ready yet" that survives to the
 /// next rung.
 ///
-/// STILL IGNORED after Task 7, for a reason the Elab0 fixture cannot
-/// fix: `MetaError::IsDefEqStuck` (`leanr_meta::error`) is never
-/// constructed anywhere in `leanr_meta/src` today — confirmed by
-/// grep and by a direct probe (`app.elab.mctx.synth_instance(Wrap ?m)`
-/// returns `Ok(Some(instWrapNat))`, not `Err(IsDefEqStuck)`). The real
-/// oracle DOES report this stuck (verified against the pinned
-/// v4.33.0-rc1 toolchain: `useWrap` alone elaborates to "typeclass
-/// instance problem is stuck / Wrap ?m.1 / ... the type argument to
-/// `Wrap` is a metavariable"), via `SynthInstance.lean`'s
-/// `withNewMCtxDepth` around the whole search (`:978`) making an
-/// OUTER-scope mvar read-only mid-search — a general MCtx-depth /
-/// read-only-mvar model `leanr_meta` does not have yet, by its own
-/// documented design (`synth.rs`, `whnf.rs`, `level.rs`'s "Depth /
-/// read-only seam" — explicitly deferred to a later `leanr_meta` plan,
-/// out of scope for `leanr_meta/src unchanged by this task`). Fixing
-/// this needs that model, not a different fixture shape.
+/// UN-IGNORED by M4b-3 P3 task 2. It was ignored through P2a because
+/// `MetaError::IsDefEqStuck` is constructed nowhere in `leanr_meta/src`
+/// (still true) and `synth_instance(Wrap ?m)` therefore answered
+/// `Ok(Some(..))` — it treated the CALLER's `?m` as assignable and chose
+/// the class's type parameter on the caller's behalf. The real oracle
+/// reports this stuck (verified against the pinned v4.33.0-rc1
+/// toolchain: `useWrap` alone gives "typeclass instance problem is
+/// stuck / Wrap ?m.1 / ... the type argument to `Wrap` is a
+/// metavariable"), via `SynthInstance.lean:978`'s `withNewMCtxDepth`
+/// making an OUTER-scope mvar read-only for the whole search.
+///
+/// `leanr_meta` still has no MCtx-depth / read-only-mvar model — that
+/// gap and its owner are unchanged. What changed is that the
+/// ELABORATOR no longer depends on it for this decision:
+/// `TermElabM::try_synth_instance` (`synthetic/ladder.rs`) reconstructs
+/// `trySynthInstance`'s `.undef` from the goal type, so a goal that
+/// still mentions an unassigned expr mvar is "not ready" instead of
+/// being answered by a guessed candidate. See that function's doc for
+/// exactly how much of the oracle's dynamic condition this covers.
 #[test]
-#[ignore = "needs leanr_meta MCtx-depth / read-only-mvar support so \
-            synth_instance can ever produce IsDefEqStuck — leanr_meta/src \
-            is out of scope for M4b-3 P2a"]
 fn stuck_synthesis_is_not_ready_rather_than_failure() {
     support::with_app_harness("Nat.zero", |app| {
         // `Wrap ?m` — a class goal whose type argument is an unassigned
@@ -312,22 +312,16 @@ fn step_reports_progress_by_snapshot_count() {
 /// "typeclass instance problem is stuck". leanr must do the same rather
 /// than emitting a term with a dangling mvar.
 ///
-/// STILL IGNORED after Task 7 — same `leanr_meta` MCtx-depth gap as
+/// UN-IGNORED by M4b-3 P3 task 2, together with
 /// `stuck_synthesis_is_not_ready_rather_than_failure` (see that test's
-/// own doc for the full finding). Measured directly against this exact
-/// query: `elab_and_synthesize("useWrap")` currently returns
-/// `Ok(@useWrap Nat instWrapNat)` — leanr's `synth_instance` resolves
-/// `Wrap ?a` via the sole candidate instead of reporting it stuck, so
-/// the fixpoint never reaches `report_stuck_synthetic_mvars` at all.
-/// The pinned oracle genuinely does throw "typeclass instance problem
-/// is stuck" for this exact source text (re-confirmed against
-/// v4.33.0-rc1 while investigating this gap) — the fixture and the
-/// assertion are both right; `leanr_meta` cannot yet reproduce the
-/// oracle's refusal.
+/// doc for the finding). Through P2a this returned
+/// `Ok(@useWrap Nat instWrapNat)` — `Wrap ?a` was resolved from the
+/// then-sole candidate instead of being reported stuck, so the fixpoint
+/// never reached `report_stuck_synthetic_mvars` at all. It is the
+/// END-TO-END counterpart of that test: it proves the `.undef` reaches
+/// the ladder's stuck report through the whole fixpoint, not just that
+/// `synthesize_inst_mvar_core` returns `false`.
 #[test]
-#[ignore = "needs leanr_meta MCtx-depth / read-only-mvar support (see \
-            stuck_synthesis_is_not_ready_rather_than_failure's doc) — \
-            leanr_meta/src is out of scope for M4b-3 P2a"]
 fn bare_typeclass_application_is_reported_stuck() {
     let err = support::elab_and_synthesize("useWrap").expect_err("stuck");
     assert!(matches!(
@@ -343,16 +337,16 @@ fn bare_typeclass_application_is_reported_stuck() {
 /// `else if postpone != .yes` / `else if postpone == .no`
 /// (`SyntheticMVars.lean:617,642`).
 ///
-/// STILL IGNORED after Task 7 — same `leanr_meta` MCtx-depth gap as
-/// `stuck_synthesis_is_not_ready_rather_than_failure`'s own doc:
-/// `wrap_of_fresh_mvar`'s goal is genuinely solved by
-/// `synthesize_inst_mvar_core` (not left pending), so this test's own
-/// "still pending" assertion fails on the FIRST call, before
-/// `postpone == .yes` is even exercised.
+/// UN-IGNORED by M4b-3 P3 task 2 (see
+/// `stuck_synthesis_is_not_ready_rather_than_failure`'s doc). Through
+/// P2a `wrap_of_fresh_mvar`'s goal was genuinely SOLVED by
+/// `synthesize_inst_mvar_core` rather than left pending, so the "still
+/// pending" assertion failed on the first call, before
+/// `postpone == .yes` was exercised at all. This is the only test in
+/// this file that distinguishes rung-gating by `postpone` from the
+/// stuck report, and it needs a genuinely unsolvable-for-now goal to do
+/// it.
 #[test]
-#[ignore = "needs leanr_meta MCtx-depth / read-only-mvar support (see \
-            stuck_synthesis_is_not_ready_rather_than_failure's doc) — \
-            leanr_meta/src is out of scope for M4b-3 P2a"]
 fn postpone_yes_leaves_the_mvar_pending() {
     support::with_app_harness("Nat.zero", |app| {
         let goal = support::wrap_of_fresh_mvar(app);
@@ -373,41 +367,31 @@ fn postpone_yes_leaves_the_mvar_pending() {
     });
 }
 
-/// The default-instance seam fires only when default instances could
-/// actually apply.
-///
-/// Rung 3 is P3's `synthesizeUsingDefault`. P2a supplies a SHAPE-GUARDED
-/// stand-in: it errors when a pending `TypeClass` mvar's class has
-/// default instances registered — the state in which the real rung would
-/// have done something — and reports no progress otherwise. A blanket
-/// `false` would silently skip a rung the oracle runs.
+/// Rung 3 with nothing pending is a no-progress no-op — unchanged
+/// behavior from P2a's seam, but now for the real reason (the priority
+/// walk finds no pending `TypeClass` mvar) rather than a shape guard.
 #[test]
-fn synthesize_using_default_is_a_shape_guarded_seam() {
+fn synthesize_using_default_is_a_no_op_with_nothing_pending() {
     support::with_app_harness("Nat.zero", |app| {
-        // No pending mvars at all: no-op, no progress, no error.
+        let kinds = support::any_kinds();
         assert!(!app
             .elab
-            .synthesize_using_default()
+            .synthesize_using_default(&kinds)
             .expect("no pending mvars -> no-op"));
     });
 }
 
-/// The positive case the shape guard exists FOR: a pending `TypeClass`
-/// mvar whose class HAS a registered `@[default_instance]` must error
-/// naming the P3 seam, not silently return `Ok(false)`.
+/// The case P2a's seam existed for, now solved rather than refused: a
+/// pending `Dflt ?a` goal is closed by applying `@[default_instance]
+/// instDfltNat`, which assigns `?a := Nat`.
 ///
-/// Review finding (M4b-3 P2a task 5 review, finding 2):
-/// `synthesize_using_default_is_a_shape_guarded_seam` above only ever
-/// exercised the vacuous "no pending mvars" path — the guard's own
-/// reason for existing (erroring rather than silently skipping rung 3
-/// when a default instance really is registered) was untested. This
-/// test drives that branch directly, against a class the fixture must
-/// keep separate from `Wrap`/`Pair`/`NoInst` — see `support::dflt_of_nat`'s
-/// own doc for why.
+/// oracle: `synthesizeUsingDefaultPrio` (`SyntheticMVars.lean:113-126`)
+/// -> `synthesizeUsingDefaultInstance` (`:155-173`).
 #[test]
-fn synthesize_using_default_errors_when_a_default_instance_is_registered() {
+fn synthesize_using_default_applies_a_default_instance() {
     support::with_app_harness("Nat.zero", |app| {
-        let goal = support::dflt_of_nat(app);
+        let kinds = support::any_kinds();
+        let goal = support::dflt_of_fresh_mvar(app);
         let (_e, id) = app
             .elab
             .mk_fresh_expr_mvar_of_kind(goal, leanr_meta::MVarKind::Synthetic)
@@ -418,11 +402,304 @@ fn synthesize_using_default_errors_when_a_default_instance_is_registered() {
             leanr_elab::synthetic::SyntheticMVarKind::TypeClass,
         );
         assert!(
-            matches!(
-                app.elab.synthesize_using_default(),
-                Err(leanr_elab::ElabError::UnsupportedSyntax(_))
-            ),
-            "a registered default instance must fire the P3 seam, not silently no-op"
+            app.elab
+                .synthesize_using_default(&kinds)
+                .expect("rung 3 runs"),
+            "a registered default instance must make progress"
+        );
+        assert!(
+            app.elab.mctx.mctx().is_assigned(id),
+            "the goal mvar is assigned by the default instance"
+        );
+    });
+}
+
+/// `commit_when` is a `Term.SavedState` bracket, not a mctx one.
+///
+/// oracle: `commitWhen` (`Lean/Util/MonadBacktrack.lean:50-60`) over the
+/// `MonadBacktrack SavedState TermElabM` instance
+/// (`TermElabM.lean:458-460`), whose `SavedState` is
+/// `Meta.SavedState × Term.State` (`:206-209`). Driven directly rather
+/// than through rung 3 because no default instance in `Elab0` assigns
+/// anything before being rejected — the fixture cannot reach the
+/// restore, so the bracket is tested at its own boundary.
+#[test]
+fn commit_when_restores_the_mctx_and_the_elaborator_tables() {
+    support::with_app_harness("Nat.zero", |app| {
+        let ty = app.st.f_type;
+        let val = app.st.f;
+        let (_e, outer) = app
+            .elab
+            .mk_fresh_expr_mvar_of_kind(ty, leanr_meta::MVarKind::Natural)
+            .expect("fresh mvar");
+
+        // A rejected attempt: every effect below is rolled back.
+        let mut inner = None;
+        let kept = app
+            .elab
+            .commit_when(|s| {
+                let (_e2, id) =
+                    s.mk_fresh_expr_mvar_of_kind(ty, leanr_meta::MVarKind::Synthetic)?;
+                inner = Some(id);
+                s.register_synthetic_mvar(
+                    support::any_syn_elem(),
+                    id,
+                    SyntheticMVarKind::TypeClass,
+                );
+                s.register_mvar_error_hole_info(id, support::any_syn_elem());
+                s.mctx
+                    .mctx_mut()
+                    .assign(outer, val)
+                    .map_err(leanr_elab::ElabError::from)?;
+                Ok(false)
+            })
+            .expect("the closure itself does not error");
+        let inner = inner.expect("the closure ran");
+        assert!(!kept);
+        assert!(
+            app.elab.pending_mvars.is_empty(),
+            "pending_mvars restored: a rejected candidate strands no subgoal"
+        );
+        assert!(
+            app.elab.synthetic_mvar_decl(inner).is_none(),
+            "synthetic_mvars restored"
+        );
+        assert!(
+            app.elab.mvar_error_infos.is_empty(),
+            "mvar_error_infos restored"
+        );
+        assert!(
+            !app.elab.mctx.mctx().is_assigned(outer),
+            "the mctx assignment is rolled back"
+        );
+
+        // The error path restores identically (the oracle's `catch ex =>
+        // restoreState s; throw ex`).
+        let err = app.elab.commit_when(|s| {
+            s.mctx
+                .mctx_mut()
+                .assign(outer, val)
+                .map_err(leanr_elab::ElabError::from)?;
+            Err(leanr_elab::ElabError::UnsupportedSyntax("probe".into()))
+        });
+        assert!(err.is_err());
+        assert!(
+            !app.elab.mctx.mctx().is_assigned(outer),
+            "restored on the error path too"
+        );
+
+        // A COMMITTING attempt keeps everything.
+        let kept = app
+            .elab
+            .commit_when(|s| {
+                s.mctx
+                    .mctx_mut()
+                    .assign(outer, val)
+                    .map_err(leanr_elab::ElabError::from)?;
+                Ok(true)
+            })
+            .expect("ok");
+        assert!(kept);
+        assert!(
+            app.elab.mctx.mctx().is_assigned(outer),
+            "a committing attempt keeps its effects"
+        );
+    });
+}
+
+/// A REJECTED default instance leaves no trace.
+///
+/// oracle: `synthesizeUsingDefaultInstance` runs inside `commitWhen`
+/// (`SyntheticMVars.lean:156`), so a candidate whose `isDefEqGuarded`
+/// fails must restore the state it unified into. `Dflt Unit` is the
+/// minimal shape: `Dflt`'s only `@[default_instance]` is
+/// `instDfltNat : Dflt Nat`, and `Dflt Unit =?= Dflt Nat` cannot hold.
+///
+/// `pending_mvars` is checked as well as the assignment, because
+/// `commit_when` restores `Term.State`'s tables and not only the mctx —
+/// see its own doc for why a mctx-only rollback would strand a rejected
+/// candidate's subgoals on the pending list forever.
+#[test]
+fn a_rejected_default_instance_is_rolled_back() {
+    support::with_app_harness("Nat.zero", |app| {
+        let kinds = support::any_kinds();
+        let goal = support::dflt_of_unit(app);
+        let (_e, id) = app
+            .elab
+            .mk_fresh_expr_mvar_of_kind(goal, leanr_meta::MVarKind::Synthetic)
+            .expect("fresh mvar");
+        app.elab.register_synthetic_mvar(
+            support::any_syn_elem(),
+            id,
+            leanr_elab::synthetic::SyntheticMVarKind::TypeClass,
+        );
+        assert!(
+            !app.elab
+                .synthesize_using_default(&kinds)
+                .expect("rung 3 runs"),
+            "instDfltNat does not apply to `Dflt Unit`"
+        );
+        assert!(
+            !app.elab.mctx.mctx().is_assigned(id),
+            "the rejected candidate must not stay assigned"
+        );
+        assert_eq!(
+            app.elab.pending_mvars,
+            vec![id],
+            "a failed priority walk leaves the pending queue untouched"
+        );
+    });
+}
+
+/// **Ordering test 1 of 2 (design spec § Verification, tier 2).**
+/// `synthesizeSomeUsingDefaultPrio` walks `pendingMVars.reverse` —
+/// REVERSE CREATION ORDER — and the oracle's own comment
+/// (`SyntheticMVars.lean:207-209`) explains why: otherwise `toString 0`
+/// fails with an `OfNat String ?_` error. `pending_mvars`' head is the
+/// MOST RECENT (P2a's invariant), so the walk must visit the OLDEST
+/// first.
+///
+/// The corpus cannot catch this: on a term with one numeral both orders
+/// agree.
+///
+/// The three goals are `OfNat ?a ?n` (oldest), `Wrap ?m`, `NoInst Nat`,
+/// and only the OLDEST has a class with default instances — so under
+/// `pending_mvars` order (newest first) the walk would reach it LAST.
+/// `OfNat` rather than `Dflt` deliberately: its default instances sit
+/// at priorities 100/50, strictly below `instDfltNat`'s bare
+/// `@[default_instance]`, so the TOP priority applies to nothing and
+/// the walk visits all three before dropping a rung. That makes the
+/// recorded order a full three-element sequence
+/// (`[oldest, middle, newest]`) instead of a single entry, and pins the
+/// descending-priority drop in the same log.
+#[test]
+fn default_instance_walk_visits_pending_mvars_in_reverse_creation_order() {
+    support::with_app_harness("Nat.zero", |app| {
+        let kinds = support::any_kinds();
+        let prios = app.elab.mctx.default_instance_priorities();
+        assert_eq!(
+            prios.len(),
+            3,
+            "Elab0's three default-instance priorities, got {prios:?}"
+        );
+        // The TOP priority must apply to none of the three goals (so the
+        // walk visits all of them before dropping a rung), and the
+        // SECOND must be where `OfNat`'s winning default sits —
+        // `instOfNatNat` at 100 since the task-6 review re-prioritised
+        // `instOfNatTag` from 500 down to 50.
+        assert!(prios[0] > 100 && prios[1] == 100, "got {prios:?}");
+        let ids = support::register_three_goals_oldest_defaultable(app);
+        let order = support::visit_order_of_default_walk(app, &kinds);
+        // Two properties ride on the single `assert_eq!` below — the
+        // within-priority order and the descending drop — so the LENGTH
+        // is checked first to say which one broke. A newest-first walk
+        // makes this 6 (both priorities exhausted); an ascending
+        // priority walk makes it 1 (the oldest solves at once at 100).
+        assert_eq!(
+            order.len(),
+            4,
+            "three visits at the top priority, then one at 100: got {order:?}"
+        );
+        assert_eq!(
+            order,
+            vec![ids[0], ids[1], ids[2], ids[0]],
+            "reverse creation order: oldest pending mvar first, at every \
+             priority, and the top priority applies to none of the three"
+        );
+        // oracle: `pendingMVars := pendingMVars.reverse ++
+        // pendingMVarsNew` (`:202`) — the successful entry leaves the
+        // queue, the rest are restored head-is-most-recent.
+        assert_eq!(
+            app.elab.pending_mvars,
+            vec![ids[2], ids[1]],
+            "the solved goal leaves the queue; the rest keep their order"
+        );
+    });
+}
+
+/// The queue rebuild's OTHER half: when the successful entry is not the
+/// first one visited, `pendingMVarsNew` (the skipped prefix, consed) is
+/// appended AFTER the reversed remainder.
+///
+/// oracle: `visit`'s `modify fun s => { s with pendingMVars :=
+/// pendingMVars.reverse ++ pendingMVarsNew }` (`:202`) — with the
+/// defaultable goal FIRST, `pendingMVarsNew` is empty and the append is
+/// invisible, so this drives the middle position.
+#[test]
+fn default_instance_walk_rebuilds_the_pending_queue_newest_first() {
+    support::with_app_harness("Nat.zero", |app| {
+        let kinds = support::any_kinds();
+        let goals = vec![
+            support::wrap_of_fresh_mvar(app),
+            support::of_nat_of_fresh_mvars(app),
+            support::no_inst_of_nat(app),
+        ];
+        let ids = support::register_typeclass_goals(app, goals);
+        assert!(app
+            .elab
+            .synthesize_using_default(&kinds)
+            .expect("rung 3 runs"));
+        assert_eq!(
+            app.elab.pending_mvars,
+            vec![ids[2], ids[0]],
+            "remainder (newest first) then the skipped prefix"
+        );
+    });
+}
+
+/// The FIXTURE PREMISE the walk test rests on, plus the accessor's
+/// storage order — NOT the walk itself.
+///
+/// `synthesizeUsingDefault` (`SyntheticMVars.lean:215-221`) relies on
+/// `getDefaultInstancesPriorities` already being descending ("Recall
+/// that `prioSet` is stored in descending order", `:217`;
+/// `PrioritySet := Std.TreeSet Nat (fun x y => compare y x)`,
+/// `Instances.lean:383`), and rung 3 iterates that order as given. This
+/// test pins the "as given" half only: that `Elab0` really carries
+/// THREE distinct default-instance priorities, that the two the fixture
+/// writes explicitly are 100 and 50, and that `instDfltNat`'s bare
+/// `@[default_instance]` outranks both.
+///
+/// **It does not test the walk, and is not meant to** (M4b-3 P3 task 5
+/// review, important 1). The descending-order `assert_eq!` below is a
+/// tautology over `MetaCtx::default_instance_priorities`, whose body IS
+/// `sort_unstable(); dedup(); reverse()` (`leanr_meta/src/instances.rs:
+/// 541-547`, unit-tested at `:644`); a rung-3 walk that iterated the
+/// priority set BACKWARDS would leave it green. What pins the walk is
+/// `default_instance_walk_visits_pending_mvars_in_reverse_creation_order`
+/// above, whose expected log (`[old, mid, new, old]`) is only reachable
+/// if the top priority is tried before 100 — and that test consumes the
+/// three premises this one establishes.
+#[test]
+fn default_instance_priorities_are_stored_in_descending_order() {
+    support::with_app_harness("Nat.zero", |app| {
+        let prios = app.elab.mctx.default_instance_priorities();
+        assert!(
+            prios.len() >= 3,
+            "Elab0 must carry three distinct default-instance priorities, got {prios:?}"
+        );
+        let mut descending = prios.clone();
+        descending.sort_unstable();
+        descending.reverse();
+        assert_eq!(prios, descending);
+        // The two priorities the fixture writes EXPLICITLY are pinned;
+        // the bare `@[default_instance]` on `instDfltNat` is only
+        // required to outrank both. Lean's own default for the bare
+        // attribute is not restated here — it is the oracle's to
+        // choose, and pinning it would make this test fail on a
+        // toolchain bump for a reason unrelated to the ordering it
+        // exists to check.
+        assert!(
+            prios.contains(&100),
+            "instOfNatNat's priority, got {prios:?}"
+        );
+        assert!(
+            prios.contains(&50),
+            "instOfNatTag's priority, got {prios:?}"
+        );
+        assert!(
+            prios[0] > 100,
+            "instDfltNat's bare @[default_instance] outranks both explicit ones, got {prios:?}"
         );
     });
 }
@@ -542,6 +819,66 @@ fn with_synthesize_saves_clears_and_restores_pending() {
     });
 }
 
+/// M4b-3 P3 task 3: the literal scaffold is reachable in the fixture
+/// env. Every constant the three literal elaborators mint by NAME must
+/// resolve — an unresolvable name would surface as `UnknownIdent` deep
+/// inside `elab_num` in task 6, far from its cause.
+///
+/// `Char`/`Char.ofNat` are opaque carriers (`axiom`), not the real
+/// definitions: `elabCharLit` (`BuiltinTerm.lean:248-252`) never reads
+/// `Char`'s shape, and the real `Char.ofNat` is `dite` over
+/// `BitVec.ofNatLT`/`UInt32` (`Init/Prelude.lean:2886-2890`), which a
+/// prelude-mode fixture cannot reach. The emitted `Expr` is identical
+/// either way (plan § Measured facts, item 8).
+#[test]
+fn literal_scaffold_constants_resolve_in_the_fixture_env() {
+    support::with_app_harness("Nat.zero", |app| {
+        for name in [
+            "Bool",
+            "OfNat",
+            "OfNat.ofNat",
+            "instOfNatNat",
+            "OfScientific",
+            "OfScientific.ofScientific",
+            "instOfScientificTag",
+            "Char",
+            "Char.ofNat",
+            "Tag",
+            "instOfNatTag",
+        ] {
+            assert!(
+                support::fixture_declares(app, name),
+                "Elab0 must declare {name} for M4b-3 P3"
+            );
+        }
+    });
+}
+
+/// The `natVal` literal is viable against the fixture's own `Nat`.
+///
+/// Lean's kernel special-cases literals by the NAME `Nat` with
+/// `Nat.zero`/`Nat.succ` constructors, which `Elab0.lean:113-116`
+/// matches — but this is the first literal the elab fixture mints, so
+/// it is MEASURED here rather than assumed (design spec § P3).
+#[test]
+fn a_nat_literal_infers_as_the_fixture_nat() {
+    support::with_app_harness("Nat.zero", |app| {
+        let base = app.elab.view.store;
+        let lit = app
+            .elab
+            .mctx
+            .store_mut()
+            .expr_lit_nat(Some(base), &leanr_kernel::Nat::from(42u64))
+            .expect("nat literal interns");
+        let ty = app.elab.mctx.infer_type(lit).expect("literal has a type");
+        let nat = support::fixture_const(app, "Nat");
+        assert!(
+            app.elab.mctx.is_def_eq(ty, nat).expect("defeq runs"),
+            "Expr.lit (.natVal 42) must infer as the fixture's own Nat"
+        );
+    });
+}
+
 /// M4b-3 P2a task 9: the top-level entry point,
 /// `TermElabM::elab_term_and_synthesize`, runs `elab_term`, then the
 /// fixpoint, then `instantiate_mvars` (oracle: `elabTermAndSynthesize`,
@@ -617,4 +954,109 @@ fn entry_point_runs_the_fixpoint() {
         "the entry point: expected a fully-instantiated term with no \
          surviving mvar node, got {full}"
     );
+}
+
+/// `42` with no expected type elaborates to
+/// `@OfNat.ofNat.{?u} ?α 42 ?inst`, with the instance goal PENDING
+/// (nothing determines `?α` yet) — and the ladder then closes it at
+/// rung 3, assigning `?α := Nat` from `instOfNatNat`.
+///
+/// oracle: `elabNumLit` (`BuiltinTerm.lean:210-229`) followed by the
+/// entry point's `synthesizeSyntheticMVarsNoPostponing`. This is the
+/// first term in leanr's grammar for which rung 3 does real work.
+///
+/// Asserting the winning instance BY NAME is what makes this a rung-3
+/// test rather than merely a "some instance was found" test: an eager
+/// `mkInstMVar` on `OfNat ?α 42` cannot pick a candidate at all (task
+/// 2's stuck predicate), so `instOfNatNat` in the output can only have
+/// come from the default-instance rung. `Elab0.lean` puts
+/// `instOfNatTag` BELOW it (50 vs 100) precisely so that a bare
+/// numeral defaults to `Nat`, as in real Lean, while three distinct
+/// priorities keep the descending walk observable. Cross-checked
+/// against the pinned oracle: corpus record `num/bare` in
+/// `tests/fixtures/elab/elab-queries.jsonl` carries exactly this term.
+#[test]
+fn a_bare_numeral_defaults_to_nat_through_rung_three() {
+    let got = support::elab_and_synthesize("42").expect("42 elaborates");
+    let rendered = got.to_string();
+    assert!(
+        rendered.contains("OfNat.ofNat"),
+        "emits an OfNat.ofNat application, got {rendered}"
+    );
+    assert!(
+        rendered.contains("instOfNatNat"),
+        "the instance goal is closed by the highest-priority applicable \
+         default instance, got {rendered}"
+    );
+    assert!(
+        !rendered.contains("mvar"),
+        "the fixpoint leaves no dangling metavariable, got {rendered}"
+    );
+}
+
+/// The contrast case: an expected type pins `?α` inside
+/// `mkFreshTypeMVarFor`'s own `isDefEq`, so the `OfNat Tag 42` goal is
+/// GROUND by the time `Term.mkInstMVar` runs and eager synthesis closes
+/// it — the default rung never fires, and `instOfNatTag` is reached even
+/// though it LOSES the priority walk (50, below `instOfNatNat`'s 100).
+///
+/// `Tag` rather than `Nat` deliberately: ascribing `Nat` would reach the
+/// same instance defaulting already picks, so the record could not tell
+/// propagation from defaulting. Corpus records `num/ascribedTag` /
+/// `num/bare` pin the same pair against the oracle; this states the
+/// mechanism the pair is evidence for.
+#[test]
+fn an_ascribed_numeral_follows_the_expected_type_not_the_priority_walk() {
+    let bare = support::elab_and_synthesize("42").expect("42 elaborates");
+    let ascribed = support::elab_and_synthesize("(42 : Tag)").expect("(42 : Tag) elaborates");
+    assert!(
+        ascribed.to_string().contains("instOfNatTag"),
+        "the propagated expected type selects instOfNatTag, got {ascribed}"
+    );
+    assert_ne!(
+        bare, ascribed,
+        "defaulting and propagation must reach DIFFERENT carriers — if they \
+         agree, the expected type is not reaching the numeral"
+    );
+}
+
+/// `elabNumLit`'s `getDecLevel` FAILURE branch, `Prop` arm — oracle
+/// `BuiltinTerm.lean:215-224`, whose `catch` splits into two DISTINCT
+/// errors: "the expected type is a proposition" (`:221`) and "…is
+/// universe polymorphic and may be a proposition" (`:223`).
+/// `ElabError::NumeralIsNotData` keeps them apart with its `is_prop`
+/// field rather than collapsing them, and the POLARITY of that field is
+/// the whole reason the field exists — so this asserts it, not merely
+/// the variant.
+///
+/// `Eq Nat.zero Nat.zero` is the fixture's reachable `Prop`:
+/// `Elab0.lean:28` declares `inductive Eq : α → α → Prop`, so the
+/// ascription makes `mkFreshTypeMVarFor` assign `?α := Eq Nat.zero
+/// Nat.zero : Prop`, `getDecLevel` cannot decrement `Sort 0`, and
+/// `is_prop` is then `true`.
+///
+/// **The `is_prop: false` arm is not asserted, because nothing in this
+/// fixture reaches it.** It needs `getDecLevel` to fail on an expected
+/// type that is NOT a `Prop`, i.e. a `Sort u` whose `u` can be neither
+/// decremented nor assigned. leanr's `dec_level` may assign its
+/// top-level argument (`canAssignMVars` is `true` there), so an
+/// unresolved level METAVARIABLE succeeds instead of failing —
+/// `(42 : PUnit)`, the fixture's only `Sort u`-polymorphic carrier,
+/// gets past `getDecLevel` and fails later at instance synthesis
+/// (measured, not assumed). Reaching the arm needs a universe
+/// PARAMETER in scope, which no `Elab0` term can put there until the
+/// declaration layer lands. Recorded rather than asserted: an
+/// unreachable arm with a fabricated test would be worse than none.
+#[test]
+fn a_numeral_ascribed_to_a_prop_is_not_data() {
+    let err = support::elab_and_synthesize("(42 : Eq Nat.zero Nat.zero)")
+        .expect_err("a numeral cannot inhabit a Prop");
+    match err {
+        leanr_elab::ElabError::NumeralIsNotData { is_prop, .. } => assert!(
+            is_prop,
+            "the expected type IS a Prop, so the oracle's `:221` branch \
+             is the one that applies — `is_prop` must be true"
+        ),
+        other => panic!("expected NumeralIsNotData, got {other:?}"),
+    }
 }

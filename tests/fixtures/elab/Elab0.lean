@@ -171,23 +171,48 @@ def dpick {a : Type} (w : a) (x : Type) (z : x) : a := w
 --     JSONL: the dumper drops a throwing query. They are asserted in
 --     crates/leanr_elab/tests/synthetic_smoke.rs.
 --   * `Dflt` — DISTINCT from `Wrap`/`Pair`/`NoInst`, carrying a
---     `@[default_instance]`, so rung 3's shape guard
---     (`synthesize_using_default`) has a positive test
---     (`synthesize_using_default_errors_when_a_default_instance_is_registered`,
---     Task 5's review fix). `Wrap`/`Pair`/`NoInst` must NEVER gain a
---     default instance: one on `Wrap` would make rung 3 fire for the
---     stuck `useWrap` goal and break the stuck-path tests (Task 5,
---     Task 9).
+--     `@[default_instance]`, so rung 3 (`synthesize_using_default`) has
+--     a positive test. It named `synthesize_using_default_errors_when_a_
+--     default_instance_is_registered` while rung 3 was P2a's shape
+--     GUARD; M4b-3 P3 task 5 replaced that guard with the real body and
+--     deleted the test. The successors are
+--     `synthesize_using_default_applies_a_default_instance` and
+--     `a_rejected_default_instance_is_rolled_back`, both in
+--     crates/leanr_elab/tests/synthetic_smoke.rs. `Wrap`/`Pair`/`NoInst`
+--     must NEVER gain a default instance: one on `Wrap` would make rung
+--     3 fire for the stuck `useWrap` goal and break the stuck-path tests
+--     (P2a tasks 5 and 9).
 class Wrap (a : Type) where
   wrap : a -> a
 
 instance instWrapNat : Wrap Nat where
   wrap := fun n => n
 
+-- M4b-3 P3 task 2: a SECOND candidate instance per class. With exactly
+-- one candidate, `tc/useWrapAscribed` and `tc/pairBoth` could reach the
+-- oracle's answer by a different route than the oracle takes — leanr
+-- resolving eagerly from the sole candidate where the oracle keeps the
+-- goal stuck and lets the argument fix the type parameter. A second
+-- candidate separates "right answer" from "right reason".
+--
+-- `Unit` (not `String`): `String` is an `axiom` here with no
+-- constructor, so `Dflt String` has no inhabitant to give `val`.
+-- `Unit`/`Unit.unit` are real and already in the scaffold.
+--
+-- `NoInst` deliberately keeps ZERO instances — `synthetic_smoke.rs`'s
+-- `unsolvable_instance_is_a_synthesis_failure` asserts its `.none` arm.
+-- None of the three gains a `@[default_instance]`: line 158-163 above
+-- records why that would break the stuck-path tests.
+instance instWrapUnit : Wrap Unit where
+  wrap := fun u => u
+
 class Pair (a : Type) (b : Type) where
   mk2 : a -> b -> a
 
 instance instPairNatNat : Pair Nat Nat where
+  mk2 := fun x _ => x
+
+instance instPairNatUnit : Pair Nat Unit where
   mk2 := fun x _ => x
 
 class NoInst (a : Type) where
@@ -200,6 +225,97 @@ class Dflt (a : Type) where
 instance instDfltNat : Dflt Nat where
   val := Nat.zero
 
+instance instDfltUnit : Dflt Unit where
+  val := Unit.unit
+
 def useWrap {a : Type} [Wrap a] (x : a) : a := Wrap.wrap x
 def usePair {a : Type} {b : Type} [Pair a b] (x : a) (y : b) : a := Pair.mk2 x y
 def useNoInst {a : Type} [NoInst a] (x : a) : a := x
+
+-- === M4b-3 P3 corpus: literals and default instances ===
+--
+-- Copied VERBATIM from `Init` where the shape is what the emitted
+-- `Expr` references (`Bool`, `OfNat`, `instOfNatNat`, `OfScientific`);
+-- opaque carriers where it is not (`Char`). See the design spec's § P3
+-- for the reasoning behind each choice.
+
+-- `Bool` is needed for `scientific`: `elabScientificLit` emits the
+-- exponent SIGN as `toExpr sign` (`BuiltinTerm.lean:243`), a `Bool`
+-- literal. Verbatim from `Init/Prelude.lean`.
+-- `genCtorIdx false`: same tripwire as `Nat`/`List` above
+-- (`Elab0.lean:93-108`) — `Bool` is a multi-constructor inductive and
+-- `Nat` is already in scope, so `mkAuxConstructions`'s purely
+-- name-based `hasNat` check fires and tries to build a
+-- `Nat`-valued lookup table using primitives this prelude-mode
+-- fixture does not have. Confirmed empirically: omitting this option
+-- fails with `unknown constant 'cond'`.
+set_option genCtorIdx false in
+inductive Bool : Type where
+  | false : Bool
+  | true : Bool
+
+-- Verbatim from `Init/Prelude.lean:1270-1279`, including the
+-- `@[default_instance 100]` priority. That priority is load-bearing:
+-- `instDfltNat` above carries a bare `@[default_instance]` (priority
+-- 1000) and `instOfNatTag` below carries 50, so the environment has
+-- THREE distinct default-instance priorities (1000 / 100 / 50) and
+-- `synthesizeUsingDefault`'s descending-priority walk is
+-- differentially observable rather than vacuous (design spec § P3).
+--
+-- `instOfNatNat` must OUTRANK `instOfNatTag`, and that is the whole
+-- point of the 100-vs-50 gap: a bare numeral with no expected type
+-- reaches its carrier only through the default-instance rung, and the
+-- answer it must reach is `Nat` — exactly as in real Lean, where
+-- `instOfNatNat` is the `OfNat` default. `tests/fixtures/elab/
+-- dump_elab.lean`'s `num/bare` record is the committed evidence.
+-- (M4b-3 P3 task 6 review: `instOfNatTag` originally sat at 500 and
+-- therefore WON the walk, so bare `42` defaulted to the fixture-only
+-- carrier `Tag` and `num/ascribedTag` was a byte-for-byte duplicate of
+-- `num/bare`. Re-prioritised to 50, which keeps three distinct
+-- priorities — the reason there were ever three — while making the
+-- bare-numeral record demonstrate the behaviour the slice is about.)
+class OfNat (α : Type u) (_ : Nat) where
+  ofNat : α
+
+@[default_instance 100]
+instance instOfNatNat (n : Nat) : OfNat Nat n where
+  ofNat := n
+
+-- `Tag`: a fixture-local SECOND numeric type, standing in for the
+-- design spec's original `(42 : Int)` corpus example. `Int` needs
+-- `Init.Data.Int`, unreachable in prelude mode; what the record
+-- actually tests is "a numeral against a non-default expected type",
+-- which any second `OfNat` carrier provides. Its instance sits at a
+-- THIRD priority so the priority walk has more than two rungs to order
+-- — and BELOW `instOfNatNat`'s 100, so `Tag` is reachable only by
+-- ASCRIPTION (`(42 : Tag)`) and never by defaulting. A `Tag` that won
+-- the walk would make the bare-numeral record test a fixture artefact
+-- instead of the real `Nat`-defaulting behaviour; see `instOfNatNat`'s
+-- comment above.
+structure Tag where
+  raw : Nat
+
+@[default_instance 50]
+instance instOfNatTag (n : Nat) : OfNat Tag n where
+  ofNat := Tag.mk n
+
+-- Verbatim from `Init/Data/OfScientific/Basic.lean:20-30`.
+class OfScientific (α : Type u) where
+  ofScientific : Nat -> Bool -> Nat -> α
+
+instance instOfScientificTag : OfScientific Tag where
+  ofScientific := fun m _ _ => Tag.mk m
+
+-- OPAQUE CARRIERS, deliberately (design spec § P3; plan § Measured
+-- facts, item 8). `elabCharLit` emits `Char.ofNat (rawNatLit c)`
+-- without ever reading `Char`'s shape, using no expected type and
+-- performing no typecheck, so the emitted `Expr` is byte-identical to
+-- what the real definition would produce. The real `Char` is a
+-- structure over `UInt32` with a validity proof and the real
+-- `Char.ofNat` is `dite` over `BitVec.ofNatLT` — `Fin`, `BitVec`,
+-- `UInt32`, `Nat.lt`, `decide` and `Or` would all have to come with
+-- them. Same "minimal opaque stand-in suffices" reasoning as
+-- `axiom String` above; grow to the real definitions in whichever
+-- later slice first needs `Char`'s actual shape.
+axiom Char : Type
+axiom Char.ofNat : Nat -> Char

@@ -131,7 +131,7 @@ the outParam branch's own body calls `synthesizeAppInstMVars` and
 half wrong: P2a built the first and seamed the second.
 
 P3 has no reciprocal dependency on P2b (its corpus is `42`, `'a'`,
-`1.5`), so the swap is free. P2b then lands with a live, non-degenerate
+`(1.5 : Tag)`), so the swap is free. P2b then lands with a live, non-degenerate
 corpus. The P2b seams stay on main one PR longer, which § Amendment
 item 1 already establishes is sound: they are named, shape-guarded
 seams, not silent divergences.
@@ -278,7 +278,7 @@ order**.
 |---|---|---|
 | **P1** application foundation | `expandApp`, `Arg`/`NamedArg`, the `ElabAppArgs` state machine (explicit / implicit / strictImplicit arms, `addNewArg`, `fType` normalization), `propagateExpectedType`, `etaArgs`, `finalize` (no coercion), overload single-candidate guard, implicit-lambda guard; rewire `ident` / `@` / `.{u}` through `elabAtom` | polymorphic applications without instance args; eta cases via named args |
 | **P2a** instance args + the fixpoint | `instMVars`, `trySynthesizeAppInstMVars` / `synthesizeAppInstMVars`, `synthesizeInstMVarCore`, `.typeClass` registration, the escalation ladder, `mayPostpone` / `withoutPostponing`, `withSynthesize` + the ascription rewire, `mvarErrorInfos`, `reportStuckSyntheticMVars`, the entry-point pipeline change; M4b-2's `fun` postponement seam goes live | typeclass applications; postponed-then-resumed terms |
-| **P3** literals + defaults | the `synthetic.rs` split and the fixture second-instances (§ Amendment 2 item 3), `Term.mkInstMVar`, `num` (`OfNat`), `char` (`Char.ofNat`), `scientific` (`OfScientific`), `synthesizeUsingDefault` / `synthesizeSomeUsingDefaultPrio` | `42`, `(42 : Tag)`, `'a'`, `1.5`, and a numeral inside an application |
+| **P3** literals + defaults | the `synthetic.rs` split and the fixture second-instances (§ Amendment 2 item 3), `Term.mkInstMVar`, `num` (`OfNat`), `char` (`Char.ofNat`), `scientific` (`OfScientific`), `synthesizeUsingDefault` / `synthesizeSomeUsingDefaultPrio` | `42`, `(42 : Tag)`, `'a'`, `(1.5 : Tag)`, and a numeral inside an application |
 | **P2b** outParam support | `classExtension` decode (`ClassEntry` = name + outParam positions), `Context.resultIsOutParamSupport`, `State.resultTypeOutParam?`, the `finalize` outParam branch | `getElem`-shaped applications whose result type is a local instance's outParam |
 | **P4** coercions | `coe_decl` tag-extension decode, `expandCoe`, `coerceSimple?` / `coerceToFunction?` / `coerceToSort?` in new `leanr_meta/src/coe.rs`, `mkCoe` + `.coe` mvar case + `ensure_has_type` rewire, monad-lift shape guard | `(n : Int)` where `n : Nat`; a `CoeFun` application |
 | **P5** binder + argument breadth | implicit / strictImplicit / instImplicit binders for `fun`/`let`/`have`, `fun`'s `optType`, `optParam` defaults, the `autoParam` arm, `..` ellipsis, real implicit-lambda insertion replacing P1's guard | `fun {α} => …`; signatures with `optParam`; `f ..` |
@@ -617,9 +617,22 @@ and P2a's `pending_class_name` already computes exactly that. Faithful
 by fusion, not a seam.
 
 **Verification.** Tier 1 corpus: `42`, `(42 : Nat)`, `(42 : Tag)`,
-`'a'`, `1.5`, plus a numeral *inside* an application and one against an
-instance goal — the application cases are what actually drive the
-ladder, since a bare `42` with no expected type is the degenerate path.
+`'a'`, `(1.5 : Tag)`, plus a numeral *inside* an application and one
+against an instance goal — the application cases are what actually
+drive the ladder, since a bare `42` with no expected type is the
+degenerate path.
+
+**A bare `1.5` is not a corpus record and cannot become one** (measured
+in P3 task 7; this spec said `1.5` unascribed until the P3 fix wave).
+`OfScientific` has no `@[default_instance]` in `Elab0.lean`, so an
+unascribed scientific literal leaves `OfScientific ?α` stuck, the
+fixpoint reports it, and `dump_elab.lean` DROPS a query whose
+elaboration throws — the record would simply be absent, with only a
+stderr line. Every `sci/*` query is therefore ascribed to `Tag`, which
+grounds `?α` inside `mkFreshTypeMVarFor` so `Term.mkInstMVar`'s eager
+synthesis closes the goal. This is not symmetric with `num`: `42` is a
+corpus record precisely *because* `instOfNatNat` is a default instance,
+which is what makes the bare numeral the rung-3 case.
 Tier 2: the reverse-creation-order walk (already assigned to P3 by
 § Verification) and the descending-priority set order, which the
 three-priority fixture makes non-vacuous. Tier 3: `rawNatLit` stays
@@ -722,7 +735,7 @@ additive; it says so.
 | P1 | `instantiate_beta_rev_range` — and only this one. `Expr` destructuring (`fTypeIsForall`, `bindingDomain!`, `getAppFn`) uses the already-public `Store::expr_node` (`leanr_kernel/src/bank/terms.rs:615`) via `mctx.store()` + `view.store`, and `whnfForall` composes from the public `MetaCtx::whnf`, so neither needs an accessor. `instantiate_beta_rev_range` does: its beta step needs `whnf.rs`'s `beta_rev`/`head_beta`, which are `pub(crate)`. |
 | P2a | `process_postponed_levels` + `postponed_len`, `default_instances_of` (forwarding the `pub(crate)` `instances.rs:520` — needed by rung 3's guarded seam), `check_occurs` (`metactx.rs:837` — a `pub` forwarder to the existing `pub(crate)` `occurs_check`, `assign.rs:1117`, needed to port `resumePostponed`'s occurs-check assignment guard) |
 | P2b | none expected — `classExtension` is a `leanr_olean` decode, not a `leanr_meta` accessor |
-| P3 | Audited against the merged P2a code; larger than this spec's original three. **Additive forwarders:** `get_dec_level` (composes the private `get_level`, `infer.rs:751`, `normalize_level`, and `dec_level`, `level.rs:448`); `mk_raw_nat_lit`; `is_prop` (forwarding the `pub(crate)` `lazy_delta.rs:161` — needed by `num`'s Prop failure branch); `checkpoint`/restore (forwarding the `pub(crate)` `metactx.rs:937`, needed for `commitWhen`); `with_assignable_synthetic_opaque` (used only by `synthesizeUsingDefaultPrio`, `SyntheticMVars.lean:164` — moved here from P2a, whose ladder never reaches it; `config.rs:27` already names `assign_synthetic_opaque` as arriving). **New:** `default_instance_priorities` — the *global* descending distinct priority set (`getDefaultInstancesPriorities`); the existing `default_instances_of` is per-class and cannot produce it. **Not additive, and the one item that isn't:** `mk_const_with_fresh_mvar_levels` and `forall_meta_telescope_reducing` (returning binder infos, which `synthesizeUsingDefaultInstance` needs to pick out the `instImplicit` binders as new pending goals). Both loops exist — `refresh_instance_levels`, `synth.rs:2006`, and `get_subgoals`, `synth.rs:1936` — but private, specialized to `&Instance`, and discarding binder infos. P3 **generalizes them out of `synth.rs` and has `get_subgoals` call the generalized form**, rather than duplicating a fidelity-critical telescope loop in `leanr_elab`. Behavior-neutral, gated by `synth.rs`'s existing tests plus the `leanr_meta` oracle corpus staying byte-identical. |
+| P3 | Audited against the merged P2a code; larger than this spec's original three. **Additive forwarders:** `get_dec_level` (composes the private `get_level`, `infer.rs:754`, `level_normalize`, and `dec_level_top`, `level.rs`); `is_prop` (widening the `pub(crate)` `lazy_delta.rs:171` to `pub` — needed by `num`'s Prop failure branch; no name clash exists, so no forwarder was added); `checkpoint`/`rollback` (widening the `pub(crate)` `metactx.rs:944`/`:954` to `pub`, plus a `pub` `MetaSnapshot` re-export — needed for `commitWhen`, `Lean/Util/MonadBacktrack.lean:50-60`; both line numbers corrected in the P3 fix wave — `:952` was blank, and `:56` truncated the citation before the `catch ex => restoreState s; throw ex` arm that is the whole reason `rollback` is needed on the error path); `with_assignable_synthetic_opaque` (needed by this plan only for `synthesizeUsingDefaultInstance`, `SyntheticMVars.lean:164` — the spec's earlier attribution to `synthesizeUsingDefaultPrio` was off by one function, and "only" is scope-local: the pin turns the flag on in eleven places, enumerated in `config.rs`'s field doc; both corrected against the pinned v4.33.0-rc1 source in M4b-3 P3 task 4 — moved here from P2a, whose ladder never reaches it; `config.rs`'s module doc named `assign_synthetic_opaque` as a deferred field; task 4 added it, cutting that list from three to two). **The `Config` field's READ SITES are part of this row's contract, not an implementation detail** (added in the P3 fix wave: a config field with no consumer is dead, and a later slice reading only "added the field and the scope" would not know where the flag is consulted). `Config::assign_synthetic_opaque` (`crates/leanr_meta/src/config.rs:95-163`, whose field doc enumerates all three sites and is the authority this row mirrors) is open-coded at three `syntheticOpaque` checks, two of them **gated by the flag**: `assign.rs:157-166` (`unassigned_mvar_id`, transcribing `isAssignable`, `ExprDefEq.lean:1731-1733`) and `lazy_delta.rs:498-501` (`is_def_eq_singleton`'s `isAssignable sFn`, `ExprDefEq.lean:2156` → the same `:1731-1733`; gated in P3 task 4 fix round 1, because it is reachable from inside an `isDefEq` and an ungated copy would refuse an assignment the oracle permits). The third, `discr_path.rs`'s discrimination-key builder (`DiscrTree/Main.lean:308`), is **deliberately NOT gated** — and the reason is not "the oracle never runs it inside the scope", which is false (the flag does survive into synthesis; `synthInstanceCore?`'s `withConfig`, `SynthInstance.lean:963-964`, overrides six fields but not this one). What moots the gate there is `withNewMCtxDepth` (`SynthInstance.lean:978`): every mvar from outside the search is at a different depth, so `isReadOnlyOrSyntheticOpaque`'s FIRST arm (`Basic.lean:981-982`) returns `true` before the kind is examined. Depth is this crate's standing tier-1 seam, so wiring the flag in there without modelling depth would flip `Star`/`Other` keys the oracle keeps at `Other`. `whnf.rs`'s `synth_pending` guard is not on the list at all: `synthPendingImp` (`SynthInstance.lean:1033-1036`) matches `mvarDecl.kind` directly and never reads the config. `mk_raw_nat_lit` is NOT needed (M4b-3 P3 task 4): `Store::expr_lit_nat` (`leanr_kernel/src/bank/terms.rs:535`) and `MetaCtx::store_mut` are both already public, which is exactly how `builtin/lit.rs`'s `elab_str` reaches `expr_lit_str`. **New:** `default_instance_priorities` — the *global* descending distinct priority set (`getDefaultInstancesPriorities`); the existing `default_instances_of` is per-class and cannot produce it. **Not additive, and the one item that isn't:** `mk_const_with_fresh_mvar_levels` and `forall_meta_telescope_reducing` (returning binder infos, which `synthesizeUsingDefaultInstance` needs to pick out the `instImplicit` binders as new pending goals). Both loops existed — `refresh_instance_levels` and the telescope inside `get_subgoals` — but private, specialized to `&Instance`, and discarding binder infos. (Line references dropped: M4b-3 P3 task 4 renamed the first and moved the second, so the numbers this row carried before the commit no longer resolve. The generalized forms are `MetaCtx::mk_const_with_fresh_mvar_levels` and `MetaCtx::forall_meta_telescope_reducing`, both in `synth.rs`.) P3 **generalizes them out of `synth.rs` and has `get_subgoals` call the generalized form**, rather than duplicating a fidelity-critical telescope loop in `leanr_elab`. Behavior-neutral, gated by `synth.rs`'s existing tests plus the `leanr_meta` oracle corpus staying byte-identical. |
 | P4 | `unfold_definition`, `get_level`, `whnf_r`, `mk_arrow`, and the **new modules** `coe.rs` + `transform.rs` (§ Global constraints — the one deliberate widening) |
 | P5 | none expected |
 
@@ -808,6 +821,71 @@ errors, rather than proceeding to emit a different term:
 - a Mathlib-scale elaboration discovery sweep — needs the
   declaration/command layer, so no nightly workflow changes here
 - `lean-toolchain` pin bump — milestone boundaries only
+
+## Follow-ups carried out of P3 (for the next plan author)
+
+Recorded in the P3 whole-branch-review fix wave. These are *known* gaps
+in shipped P3 code, not deferrals of unwritten constructs — § Out of
+scope is for the latter. Each names the slice or plan that should carry
+a task for it.
+
+**1. The nested `synthesizePending` fixpoint is untested (owner: the
+slice that adds the fixture below).** `synthesize_using_default_instance`
+collects a candidate's `instImplicit` binders as new pending goals and
+recurses (`crates/leanr_elab/src/synthetic/default_inst.rs:245-254`,
+oracle `SyntheticMVars.lean:167-171`). Mutating that loop to collect
+*nothing*, and separately stubbing `synthesize_pending` to
+`return Ok(true)`, each pass the ENTIRE suite — corpus, smoke tests and
+seam audit — because no `@[default_instance]` in `Elab0.lean` has an
+instance-implicit binder (`instDfltNat` has no binders;
+`instOfNatNat`/`instOfNatTag` take one *explicit* `(n : Nat)`).
+
+**2. The candidate universe refresh is untested (same owner).**
+`mk_default_instance_candidate`
+(`crates/leanr_elab/src/synthetic/default_inst.rs:274-304`) builds the
+candidate with fresh level mvars. Mutating it to build at an EMPTY level
+list — reintroducing precisely the plan defect caught during P3
+implementation — also passes the whole suite, because no fixture default
+instance is universe-polymorphic (`Dflt`'s parameter is `Type`, and both
+`OfNat` instances land on `Nat`/`Tag`, so each instance constant has an
+empty universe-parameter list).
+
+**One fixture addition closes both 1 and 2**: a universe-polymorphic
+default instance that also carries an `instImplicit` binder, registered
+at a FOURTH priority. Cost to be paid with it: adding a priority
+re-derives `default_instance_walk_visits_pending_mvars_in_reverse_creation_order`
+(`crates/leanr_elab/tests/synthetic_smoke.rs`), whose `prios.len() == 3`,
+`prios[0] > 100 && prios[1] == 100` and `order.len() == 4` assertions all
+count rungs — plus an `Elab0.olean` rebuild and a `fixtures:regen-elab`
+run, so the corpus must be re-checked record-by-record.
+
+**3. `try_synth_instance`'s `outParam` residue is P2b's, as a hard
+requirement (owner: P2b's implementation plan).** Documented at
+`crates/leanr_elab/src/synthetic/ladder.rs:97-123`: the standard binop
+shape `HAdd Nat Nat ?γ` is `.some` in the oracle — `preprocessOutParam`
+(`SynthInstance.lean:775-817`) replaces the caller's mvars in output-
+parameter positions with ones minted inside `withNewMCtxDepth`
+(`:978`), and `assignOutParams` (`:825-845`) assigns the caller's mvar
+back after the depth block closes — while leanr's stuck pre-test answers
+`Undef` and the ladder eventually raises `StuckSyntheticMVar` on a goal
+the oracle answers. It is unreachable today only because no fixture
+class carries an `outParam`; the moment one does, this is a live
+divergence, not a missing feature. **P2b's plan must carry a task for
+it** rather than relying on a reader finding the comment — porting
+`preprocessOutParam`/`assignOutParams` is what closes it, not the
+mctx-depth model.
+
+**4. `with_assignable_synthetic_opaque` has no drop guard (owner:
+`leanr_meta`, whenever an external caller can panic).**
+`crates/leanr_meta/src/metactx.rs` restores `Config::assignSyntheticOpaque`
+by plain save/run/restore. P3 task 4 widened the function from
+`pub(crate)` to `pub`, so an external caller that panics inside the
+scope and catches the unwind would leave the flag `true` on that
+`MetaCtx`. No in-tree path reaches it (the sole production caller is
+`leanr_elab`'s `synthesize_using_default_instance`, which is
+`Result`-based and catches nothing), so the P3 fix wave recorded the
+risk in the function's doc rather than adding the guard — a drop guard
+is a behaviour change to `leanr_meta`, which that wave was scoped out of.
 
 ## Next step
 

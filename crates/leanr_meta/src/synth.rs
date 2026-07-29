@@ -9,7 +9,9 @@
 //! such passage now carries a note recording how B5 answered it, and
 //! the two structural HARD REQUIREMENTS (universe-level refresh and the
 //! append-only consumer arena) are answered at
-//! [`MetaCtx::refresh_instance_levels`] and [`ConsumerNode`]'s own doc
+//! [`MetaCtx::mk_const_with_fresh_mvar_levels`] (named
+//! `refresh_instance_levels` until M4b-3 P3 task 4 generalized it) and
+//! [`ConsumerNode`]'s own doc
 //! respectively. B4's original framing is kept rather than rewritten,
 //! because the reasoning it records is what makes those answers
 //! checkable.
@@ -100,7 +102,7 @@
 //! `normLevel`'s inline check (`getLevelDepth mvarId != mctx.depth`,
 //! :119) and `normExpr`'s call to the PUBLIC `MVarId.isAssignable`
 //! (`MetavarContext.lean:483-486`: `decl.depth == mctx.depth`) are both
-//! DEPTH-ONLY. Neither is `ExprDefEq.lean:1731-1734`'s PRIVATE
+//! DEPTH-ONLY. Neither is `ExprDefEq.lean:1731-1733`'s PRIVATE
 //! `isAssignable` (`isReadOnlyOrSyntheticOpaque`) -- the different
 //! function `assign.rs::unassigned_mvar_id` correctly transcribes, for a
 //! DIFFERENT purpose (occurs-check-time assignment safety during
@@ -380,7 +382,7 @@ use leanr_kernel::bank::levels::LevelRow;
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, LevelId, LevelsId, NameId};
 use leanr_kernel::{abstract_fvars, instantiate, instantiate_level_params, instantiate_rev};
-use leanr_kernel::{Nat, MAX_REC_DEPTH};
+use leanr_kernel::{BinderInfo, Nat, MAX_REC_DEPTH};
 
 use crate::instances::Instance;
 use crate::metactx::MetaSnapshot;
@@ -1942,6 +1944,13 @@ impl<'e> MetaCtx<'e> {
     /// hide behind a definition.
     ///
     /// Returns `(all binder mvars in order, instVal, instTypeBody)`.
+    ///
+    /// Since M4b-3 P3 task 4 this is a CALLER of
+    /// [`MetaCtx::mk_const_with_fresh_mvar_levels`] and
+    /// [`MetaCtx::forall_meta_telescope_reducing`] rather than carrying
+    /// its own copies of both -- see those two for why they were
+    /// generalized out (the design spec's § Accessor ledger, P3's row,
+    /// the one non-additive item in the plan).
     #[allow(clippy::type_complexity)]
     fn get_subgoals(
         &mut self,
@@ -1956,36 +1965,84 @@ impl<'e> MetaCtx<'e> {
         // `instances.rs` is `mkConstWithLevelParams`, i.e. still the
         // declaration's own RIGID `Level.param`s, so the refresh has to
         // happen HERE, before anything unifies against it.
-        let mut inst_val = self.refresh_instance_levels(inst.val)?;
-        let mut inst_type = self.infer_type(inst_val)?;
+        let inst_val = self.mk_const_with_fresh_mvar_levels(inst.val)?;
+        let inst_type = self.infer_type(inst_val)?;
+        let (mvars, _bis, inst_type_body) = self.forall_meta_telescope_reducing(inst_type)?;
+        // oracle: `mkAppN candidate mvars` (:327 builds `instVal` as
+        // `mkApp instVal (mkAppN mvar xs)` per binder, and `xs = #[]`
+        // here). Applying after the telescope rather than inside it is
+        // the oracle's own shape (`getSubgoals` :317-339 vs.
+        // `synthesizeUsingDefaultInstance`'s
+        // `mkAppN candidate mvars`, `SyntheticMVars.lean:159`), and is
+        // BEHAVIOR-NEUTRAL here: every argument applied is a bare mvar
+        // reference and `inst_val` starts as an `Expr.const`, so the
+        // spine never contains a loose bvar and the per-iteration
+        // `instantiateRev` the old inlined loop ran over it was a
+        // no-op.
+        let mut applied = inst_val;
+        for m in &mvars {
+            applied = self.scratch.expr_app(base, applied, *m)?;
+        }
+        Ok((mvars, applied, inst_type_body))
+    }
+
+    /// oracle: `forallMetaTelescopeReducing` (`Lean/Meta/Basic.lean:1757`,
+    /// via `forallMetaTelescopeReducingAux` :1717) -- peel every
+    /// `forallE` binder off `ty`, minting one fresh mvar per binder at
+    /// that binder's (substituted) domain, `whnf`-ing whenever the type
+    /// stops being a syntactic forall to see whether more binders hide
+    /// behind a definition. Returns
+    /// `(mvars in binder order, their binder infos, the peeled body)` --
+    /// the oracle's own `Array Expr × Array BinderInfo × Expr`.
+    ///
+    /// Generalized out of `get_subgoals` by M4b-3 P3 task 4 (design spec
+    /// § Accessor ledger, the one non-additive item): the loop is
+    /// fidelity-critical and duplicating it in `leanr_elab` for
+    /// `synthesizeUsingDefaultInstance` would be worse than sharing it.
+    /// `get_subgoals` is now a caller; the binder infos are new -- it
+    /// discards them, `synthesizeUsingDefaultInstance` picks the
+    /// `InstImplicit` ones out as new pending goals
+    /// (`SyntheticMVars.lean:167-171`).
+    ///
+    /// Same `xs = #[]` specialization `get_subgoals` already documented:
+    /// `mkForallFVars xs d` is `d` and `mkAppN mvar xs` is `mvar`, so
+    /// the mvar is minted directly at the substituted domain.
+    #[allow(clippy::type_complexity)]
+    pub fn forall_meta_telescope_reducing(
+        &mut self,
+        ty: ExprId,
+    ) -> Result<(Vec<ExprId>, Vec<BinderInfo>, ExprId), MetaError> {
+        let base = Some(self.view.store);
+        let mut cur = ty;
         let mut mvars: Vec<ExprId> = Vec::new();
+        let mut bis: Vec<BinderInfo> = Vec::new();
         let mut subst: Vec<ExprId> = Vec::new();
         loop {
             self.step()?;
             if let Node::Forall {
-                binder_type, body, ..
-            } = self.node(inst_type)
+                binder_type,
+                body,
+                binder_info,
+                ..
+            } = self.node(cur)
             {
                 let d = instantiate_rev(self.scratch, base, binder_type, &subst, &mut self.guard)?;
                 let (m, _) = self.mk_aux_mvar(d)?;
                 subst.push(m);
-                inst_val = self.scratch.expr_app(base, inst_val, m)?;
-                inst_type = body;
                 mvars.push(m);
+                bis.push(binder_info);
+                cur = body;
             } else {
-                let t = instantiate_rev(self.scratch, base, inst_type, &subst, &mut self.guard)?;
-                inst_type = self.whnf(t)?;
-                inst_val = instantiate_rev(self.scratch, base, inst_val, &subst, &mut self.guard)?;
+                let t = instantiate_rev(self.scratch, base, cur, &subst, &mut self.guard)?;
+                cur = self.whnf(t)?;
                 subst.clear();
-                if !matches!(self.node(inst_type), Node::Forall { .. }) {
+                if !matches!(self.node(cur), Node::Forall { .. }) {
                     break;
                 }
             }
         }
-        let inst_val = instantiate_rev(self.scratch, base, inst_val, &subst, &mut self.guard)?;
-        let inst_type_body =
-            instantiate_rev(self.scratch, base, inst_type, &subst, &mut self.guard)?;
-        Ok((mvars, inst_val, inst_type_body))
+        let body = instantiate_rev(self.scratch, base, cur, &subst, &mut self.guard)?;
+        Ok((mvars, bis, body))
     }
 
     /// **HARD REQUIREMENT 1 (universe-level refresh).** oracle:
@@ -2003,7 +2060,21 @@ impl<'e> MetaCtx<'e> {
     /// there ("global instance is not a constant", :227), and
     /// `InstanceTable::build` only ever stores the `val` of a decoded
     /// `InstanceEntry`, which `addInstance` always builds as a `Const`.
-    fn refresh_instance_levels(&mut self, val: ExprId) -> Result<ExprId, MetaError> {
+    ///
+    /// `pub` and renamed to the oracle's own name (`mkConstWithFreshMVarLevels`,
+    /// `Lean/Meta/Basic.lean:910`) since M4b-3 P3 task 4:
+    /// `synthesizeUsingDefaultInstance` (`SyntheticMVars.lean:157`)
+    /// needs the same "replace every universe argument with a fresh
+    /// level mvar" step for a default-instance CONSTANT, not only for a
+    /// tabled `Instance`. The body is unchanged.
+    ///
+    /// One difference from the oracle's signature, deliberate: the
+    /// oracle takes a `Name` and looks the declaration's `levelParams`
+    /// up in the environment; this takes the already-built
+    /// `Expr.const` (which is what both call sites have -- `Instance::
+    /// val`, and `mkConstWithLevelParams` on a default instance's name)
+    /// and refreshes the levels it already carries.
+    pub fn mk_const_with_fresh_mvar_levels(&mut self, val: ExprId) -> Result<ExprId, MetaError> {
         let base = Some(self.view.store);
         let Node::Const { name, levels } = self.node(val) else {
             return Ok(val);
@@ -2730,5 +2801,80 @@ mod tests {
         let second = st.add_answer(&key, Answer::for_test());
         assert_eq!(second, Vec::<Waiter>::new());
         assert_eq!(st.answers.get(&key).unwrap().answers.len(), 1);
+    }
+
+    /// `∀ {α : Type}, [Add α] → α → α` against `with_instances_ctx`'s
+    /// environment: three binders, the middle one instance-implicit. The
+    /// brief's own shape, with the fixture's `Add` standing in for its
+    /// sketched `Wrap` (`Instances.lean` declares `Add`, not `Wrap`).
+    /// `const_named` builds `Add.{0} : Type → Type`, so `Sort 1` is the
+    /// right domain for `α` and the application is well-typed.
+    fn three_binder_test_type(ctx: &mut MetaCtx) -> ExprId {
+        let base = Some(ctx.view.store);
+        let z = ctx.scratch.level_zero(base).expect("zero");
+        let one = ctx.scratch.level_succ(base, z).expect("succ");
+        // `{α : Type}` -- `Type` is `Sort 1`.
+        let type_sort = ctx.scratch.expr_sort(base, one).expect("Sort 1");
+        // `[Add α]`, under one binder: `α` is `#0`.
+        let add = const_named(ctx, "Add");
+        let b0 = ctx.scratch.expr_bvar(base, &Nat::from(0u64)).expect("#0");
+        let add_a = ctx.scratch.expr_app(base, add, b0).expect("Add α");
+        // `α → α`, under two binders (`α`, the instance): `α` is `#1` in
+        // the domain and `#2` in the body.
+        let b1 = ctx.scratch.expr_bvar(base, &Nat::from(1u64)).expect("#1");
+        let b2 = ctx.scratch.expr_bvar(base, &Nat::from(2u64)).expect("#2");
+        let inner = ctx
+            .scratch
+            .expr_forall(base, None, b1, b2, BinderInfo::Default)
+            .expect("α → α");
+        let mid = ctx
+            .scratch
+            .expr_forall(base, None, add_a, inner, BinderInfo::InstImplicit)
+            .expect("[Add α] → ..");
+        ctx.scratch
+            .expr_forall(base, None, type_sort, mid, BinderInfo::Implicit)
+            .expect("{α : Type} → ..")
+    }
+
+    /// `forall_meta_telescope_reducing` peels every `forallE` binder off
+    /// a type, minting one fresh mvar per binder, and returns the
+    /// binder infos alongside — which is what
+    /// `synthesizeUsingDefaultInstance` needs to pick the
+    /// `instImplicit` binders out as new pending goals.
+    ///
+    /// oracle: `forallMetaTelescopeReducing` (`Lean/Meta/Basic.lean:1757`),
+    /// the loop `get_subgoals` already ran privately before M4b-3 P3
+    /// task 4 generalized it out.
+    #[test]
+    fn forall_meta_telescope_reducing_returns_one_mvar_and_info_per_binder() {
+        with_instances_ctx(|ctx| {
+            // `{α : Type} -> [Add α] -> α -> α`-shaped: three binders,
+            // the middle one instance-implicit.
+            let ty = three_binder_test_type(ctx);
+            let (mvars, bis, body) = ctx
+                .forall_meta_telescope_reducing(ty)
+                .expect("telescope runs");
+            assert_eq!(mvars.len(), 3, "one mvar per binder");
+            // The EXACT vector, not just the instImplicit count (fix
+            // round 1, review Minor 2): a count of one is also satisfied
+            // by `[InstImplicit, Default, Implicit]`, i.e. by binder
+            // infos returned in the wrong ORDER — which is precisely
+            // what `synthesizeUsingDefaultInstance` indexes `mvars` by
+            // (`SyntheticMVars.lean:168-170` pairs `bis[i]` with
+            // `mvars[i]!`), so order is the property that matters.
+            assert_eq!(
+                bis,
+                vec![
+                    BinderInfo::Implicit,
+                    BinderInfo::InstImplicit,
+                    BinderInfo::Default
+                ],
+                "binder infos in binder order, the middle one instance-implicit"
+            );
+            assert!(
+                !matches!(ctx.node(body), Node::Forall { .. }),
+                "the body is fully peeled"
+            );
+        });
     }
 }

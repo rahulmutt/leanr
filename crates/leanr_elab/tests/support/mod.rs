@@ -320,15 +320,195 @@ pub fn no_inst_of_nat(app: &mut leanr_elab::app::state::AppElab) -> leanr_kernel
     elab_type_expr(app, "NoInst Nat")
 }
 
-/// `Dflt Nat` — a class goal whose class HAS a registered
-/// `@[default_instance]` (`Elab0.lean`'s `instDfltNat`), exercising
-/// `synthesize_using_default`'s SHAPE GUARD positive case
-/// (`synthesize_using_default_errors_when_a_default_instance_is_registered`,
-/// Task 5's review fix). `Wrap`/`Pair`/`NoInst` never gain a default
-/// instance — see `Elab0.lean`'s own doc comment on why that would
-/// break the stuck-path tests.
+/// `Dflt Nat` — a GROUND class goal whose class HAS a registered
+/// `@[default_instance]` (`Elab0.lean`'s `instDfltNat`).
+///
+/// Ordinary instance synthesis already closes this one at rung 1, so it
+/// is NOT what rung 3 acts on; `dflt_of_fresh_mvar` below is. Kept as
+/// the ground half of that contrast — `Wrap`/`Pair`/`NoInst` never gain
+/// a default instance, see `Elab0.lean`'s own doc comment on why that
+/// would break the stuck-path tests.
 pub fn dflt_of_nat(app: &mut leanr_elab::app::state::AppElab) -> leanr_kernel::bank::ExprId {
     elab_type_expr(app, "Dflt Nat")
+}
+
+/// `Dflt Unit` — a goal whose class HAS a default instance
+/// (`instDfltNat`) that does NOT apply to it: `Dflt Unit =?= Dflt Nat`
+/// fails, so `synthesizeUsingDefaultInstance`'s `commitWhen` must roll
+/// the attempt back. `Dflt`'s other instance (`instDfltUnit`) carries no
+/// `@[default_instance]`, so rung 3 has nothing else to try.
+pub fn dflt_of_unit(app: &mut leanr_elab::app::state::AppElab) -> leanr_kernel::bank::ExprId {
+    elab_type_expr(app, "Dflt Unit")
+}
+
+/// `Dflt ?a` with a FRESH type mvar — the shape rung 3 actually closes,
+/// unlike `dflt_of_nat`'s ground `Dflt Nat` (which ordinary synthesis
+/// already solves at rung 1).
+pub fn dflt_of_fresh_mvar(app: &mut leanr_elab::app::state::AppElab) -> leanr_kernel::bank::ExprId {
+    let base = app.elab.view.store;
+    let dflt = fixture_const(app, "Dflt");
+    // `Dflt (a : Type)`, and `Type` is `Sort 1` — a SORT, not a
+    // declared constant, so it is built rather than resolved.
+    let ty = {
+        let store = app.elab.mctx.store_mut();
+        let zero = store.level_zero(None).expect("zero");
+        let one = store.level_succ(None, zero).expect("succ");
+        store.expr_sort(None, one).expect("Sort 1")
+    };
+    let (a, _) = app
+        .elab
+        .mk_fresh_expr_mvar_of_kind(ty, leanr_meta::MVarKind::Natural)
+        .expect("fresh type mvar");
+    app.elab
+        .mctx
+        .store_mut()
+        .expr_app(Some(base), dflt, a)
+        .expect("Dflt ?a")
+}
+
+/// `OfNat ?a ?n` — a class goal whose class has default instances at
+/// TWO priorities (`instOfNatNat` at 100, `instOfNatTag` at 50), both
+/// strictly below the bare `@[default_instance]` on `instDfltNat`.
+///
+/// That is what makes the reverse-creation-order walk observable across
+/// a whole priority: at the highest priority NOTHING applies, so the
+/// walk visits every pending mvar before dropping a rung — and the log
+/// records the full three-element order rather than stopping at the
+/// first entry, which is what a `Dflt ?a` goal (whose default instance
+/// sits at the TOP priority) would do.
+///
+/// Built by peeling `OfNat`'s own inferred telescope, the same way
+/// `wrap_of_fresh_mvar` reads `Wrap`'s domain off its type rather than
+/// re-elaborating a separate `"Type"` term: `OfNat` is universe
+/// polymorphic (`OfNat (α : Type u) (_ : Nat)`), so the domain of its
+/// first binder is `Type ?u` for the fresh level mvar `elab_type_expr`
+/// already minted, not a hand-built `Sort 1`.
+pub fn of_nat_of_fresh_mvars(
+    app: &mut leanr_elab::app::state::AppElab,
+) -> leanr_kernel::bank::ExprId {
+    use leanr_kernel::bank::terms::Node;
+    let mut cur = elab_type_expr(app, "OfNat");
+    for _ in 0..2 {
+        let ty = app
+            .elab
+            .mctx
+            .infer_type(cur)
+            .expect("OfNat's partial application infers");
+        let Node::Forall { binder_type, .. } = app.node(ty) else {
+            panic!("of_nat_of_fresh_mvars: OfNat's type is not a forall: {ty:?}");
+        };
+        let (m, _) = app
+            .elab
+            .mk_fresh_expr_mvar_of_kind(binder_type, leanr_meta::MVarKind::Natural)
+            .expect("fresh mvar");
+        let base = app.elab.view.store;
+        cur = app
+            .elab
+            .mctx
+            .store_mut()
+            .expr_app(Some(base), cur, m)
+            .expect("OfNat applies");
+    }
+    cur
+}
+
+/// Register each of `goals` as a pending `TypeClass` synthetic mvar, in
+/// the order given — so index 0 is the OLDEST — and return their ids in
+/// that same CREATION order.
+///
+/// `pending_mvars` itself is head-is-most-recent, so the returned vector
+/// is the REVERSE of the pending list. Ordering tests compare against
+/// this vector precisely because the two disagree.
+pub fn register_typeclass_goals(
+    app: &mut leanr_elab::app::state::AppElab,
+    goals: Vec<leanr_kernel::bank::ExprId>,
+) -> Vec<leanr_meta::MVarId> {
+    let mut ids = Vec::new();
+    for g in goals {
+        let (_e, id) = app
+            .elab
+            .mk_fresh_expr_mvar_of_kind(g, leanr_meta::MVarKind::Synthetic)
+            .expect("fresh mvar");
+        app.elab.register_synthetic_mvar(
+            any_syn_elem(),
+            id,
+            leanr_elab::synthetic::SyntheticMVarKind::TypeClass,
+        );
+        ids.push(id);
+    }
+    ids
+}
+
+/// Three pending `TypeClass` goals registered oldest-first, where only
+/// the OLDEST has a class carrying default instances. Returns their ids
+/// in CREATION order.
+pub fn register_three_goals_oldest_defaultable(
+    app: &mut leanr_elab::app::state::AppElab,
+) -> Vec<leanr_meta::MVarId> {
+    let goals = vec![
+        of_nat_of_fresh_mvars(app),
+        wrap_of_fresh_mvar(app),
+        no_inst_of_nat(app),
+    ];
+    register_typeclass_goals(app, goals)
+}
+
+/// The order in which the default-instance walk CONSIDERS pending
+/// mvars. Drives the real `synthesize_using_default` and reads the
+/// visit log the implementation records; see
+/// `synthetic/default_inst.rs`'s `walk_log`.
+pub fn visit_order_of_default_walk(
+    app: &mut leanr_elab::app::state::AppElab,
+    kinds: &leanr_syntax::kind::KindInterner,
+) -> Vec<leanr_meta::MVarId> {
+    leanr_elab::synthetic::default_walk_log_reset();
+    let _ = app.elab.synthesize_using_default(kinds);
+    leanr_elab::synthetic::default_walk_log_take()
+}
+
+/// The `ExprId` of a fixture constant with no universe arguments,
+/// resolved by dotted source name exactly as `app::head::elab_ident_head`
+/// does. Panics if the fixture does not declare it — a test helper's
+/// contract, not elaborator code.
+pub fn fixture_const(
+    app: &mut leanr_elab::app::state::AppElab,
+    name: &str,
+) -> leanr_kernel::bank::ExprId {
+    let base = app.elab.view.store;
+    let mut id: Option<leanr_kernel::bank::NameId> = None;
+    for part in name.split('.') {
+        let store = app.elab.mctx.store_mut();
+        let s = store.intern_str(Some(base), part).expect("intern");
+        id = Some(store.name_str(Some(base), id, s).expect("name"));
+    }
+    let cname = id.expect("non-empty name");
+    assert!(
+        app.elab.view.get(cname).is_some(),
+        "fixture must declare {name}"
+    );
+    let levels = app
+        .elab
+        .mctx
+        .store_mut()
+        .intern_level_list(None, &[])
+        .expect("empty level list");
+    app.elab
+        .mctx
+        .store_mut()
+        .expr_const(Some(base), Some(cname), levels)
+        .expect("const")
+}
+
+/// Whether the fixture env declares `name` (dotted source form).
+pub fn fixture_declares(app: &mut leanr_elab::app::state::AppElab, name: &str) -> bool {
+    let base = app.elab.view.store;
+    let mut id: Option<leanr_kernel::bank::NameId> = None;
+    for part in name.split('.') {
+        let store = app.elab.mctx.store_mut();
+        let s = store.intern_str(Some(base), part).expect("intern");
+        id = Some(store.name_str(Some(base), id, s).expect("name"));
+    }
+    app.elab.view.get(id.expect("non-empty name")).is_some()
 }
 
 /// Shared plumbing for `elab_only`/`elab_and_synthesize` below: replay

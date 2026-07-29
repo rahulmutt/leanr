@@ -278,7 +278,7 @@ fn elab_ident_head(
 /// with `base = None` — is `EnvView::get_with`'s own documented
 /// misrouting hazard, which is how the divergence surfaced as an
 /// unrelated existing name (`Nat.brecOn.go`) rather than a clean miss).
-pub(super) fn intern_dotted(elab: &mut TermElabM, raw: &str) -> Result<NameId, ElabError> {
+pub(crate) fn intern_dotted(elab: &mut TermElabM, raw: &str) -> Result<NameId, ElabError> {
     let base = elab.view.store;
     let mut id: Option<NameId> = None;
     for part in raw.split('.') {

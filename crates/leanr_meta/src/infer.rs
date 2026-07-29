@@ -748,7 +748,10 @@ impl<'e> MetaCtx<'e> {
     /// meta-level level-mvar allocator yet, so a type whose whnf is not
     /// syntactically a `Sort` is simply `Infer`, matching the oracle's
     /// final `throwTypeExpected` fallback (:176).
-    fn get_level(&mut self, ty: ExprId) -> Result<LevelId, MetaError> {
+    ///
+    /// `pub(crate)` since M4b-3 P3 task 4: `level.rs`'s `get_dec_level`
+    /// composes it, and inherent methods are module-private by default.
+    pub(crate) fn get_level(&mut self, ty: ExprId) -> Result<LevelId, MetaError> {
         let tty = self.infer_type(ty)?;
         let w = self.whnf(tty)?;
         match self.node(w) {

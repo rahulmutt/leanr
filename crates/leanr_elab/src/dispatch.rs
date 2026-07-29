@@ -1,7 +1,14 @@
 //! The dispatch table: syntax-kind name -> leaf elaborator.
 //!
 //! `elaborator_name_for` is the single source of truth for "is this a
-//! leaf we elaborate" — Tasks 4-6 grow it one arm per leaf kind.
+//! term-syntax kind we elaborate". M4b-1's tasks 4-6 grew it one arm per
+//! LEAF kind, which is the framing the rest of this doc still uses;
+//! every slice since has added non-leaf kinds to the same table
+//! (M4b-2's binders and `let`/`have`, M4b-3 P1's `app`/`explicit`/
+//! `explicitUniv`, M4b-3 P3's `num`/`char`/`scientific`), so "registered"
+//! and "leaf" have not been synonyms since M4b-2 — `str` is the one
+//! literal that really is a leaf, and `builtin::lit`'s own module doc
+//! says so.
 //! `dispatch` is the actual entry point `TermElabM::elab_term` calls;
 //! an unregistered kind is `ElabError::UnsupportedSyntax`, never a
 //! panic and never a wrong `ExprId` (named-seam discipline).
@@ -55,9 +62,13 @@ pub(crate) fn non_trivia_children(node: &SyntaxNode) -> Vec<SynElem> {
         .collect()
 }
 
-/// The registered leaf kinds. Returns a stable label for a registered
-/// kind, `None` otherwise. Grown by Tasks 4-6, now complete for M4b-1
-/// slice 1. Keyed on the kind's INTERNED name — `"<ident>"` for a bare
+/// The registered term-syntax kinds. Returns a stable label for a
+/// registered kind, `None` otherwise. Grown by M4b-1's tasks 4-6 (which
+/// completed M4b-1 slice 1) and by every slice since; see this module's
+/// doc for why "registered" stopped meaning "leaf" at M4b-2, and
+/// `tests/seam_audit.rs`'s `literal_kinds_are_registered_not_deferred`
+/// for the gate on the four literal kinds.
+/// Keyed on the kind's INTERNED name — `"<ident>"` for a bare
 /// identifier (`KindInterner`'s fixed-slot name, not the string
 /// `"ident"` a dynamically-interned node kind would have; see this
 /// module's doc comment), `"str"` for a string literal (a real
@@ -68,6 +79,9 @@ pub(crate) fn non_trivia_children(node: &SyntaxNode) -> Vec<SynElem> {
 pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
     match kind {
         "str" => Some("str"),
+        "num" => Some("num"),
+        "char" => Some("char"),
+        "scientific" => Some("scientific"),
         "<ident>" => Some("ident"),
         "Lean.Parser.Term.prop" => Some("prop"),
         "Lean.Parser.Term.type" => Some("type"),
@@ -127,7 +141,6 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 /// ```text
 ///   letI / haveI / let_fun / let_delayed / let_tmp / letrec  later slice (own oracle tier each)
 ///   local-instance outParam result type ........ M4b-3 P2b (classExtension decode)
-///   num / char literals (OfNat / Char.ofNat) ... M4b-3 P3
 ///   coercions (CoeT / CoeFun / CoeSort, mkCoe) . M4b-3 P4
 ///   optParam defaults / autoParam .............. M4b-3 P5
 ///   implicit-lambda insertion .................. M4b-3 P5
@@ -160,10 +173,12 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 /// As whole terms they land on this table's catch-all instead, named by
 /// their kind.
 ///
-/// `num`/`char` are the M4b-3 P3 seam and likewise land on the
-/// catch-all, named by kind: both elaborate through an application
-/// (`OfNat.ofNat` / `Char.ofNat`) needing instance synthesis and default
-/// instances, so neither is a leaf (`builtin::lit`'s own module doc).
+/// `num`/`char`/`scientific` are all registered above as of tasks 6-7,
+/// and none of them is a LEAF: each elaborates through an application
+/// (`@OfNat.ofNat.{u}` plus the default-instance rung,
+/// `Char.ofNat`, `@OfScientific.ofScientific.{u}`) rather than straight
+/// to an `Expr` node — `str` is the one literal that does.
+/// See `builtin::lit`'s own module doc for the three shapes.
 /// (`Lean.Parser.Level.max`/`.imax`/`.paren`/`.addLit`, the level-scope
 /// analogue of the above, are named seams inside `elab_level` itself —
 /// see `builtin::sort`'s own module doc — rather than this table, since
@@ -177,6 +192,26 @@ pub fn dispatch(
     let name = kinds.name(elem.kind());
     match (name, elem) {
         ("str", NodeOrToken::Node(node)) => crate::builtin::lit::elab_str(elab, node, kinds),
+        // oracle: `@[builtin_term_elab num] elabNumLit`
+        // (`BuiltinTerm.lean:210-229`) — NOT a leaf: it emits
+        // `@OfNat.ofNat.{u} ?α (rawNatLit v) ?inst` and leaves the
+        // instance goal to the synthetic-mvar ladder.
+        ("num", NodeOrToken::Node(node)) => {
+            crate::builtin::lit::elab_num(elab, node, kinds, expected)
+        }
+        // oracle: `@[builtin_term_elab char] elabCharLit`
+        // (`BuiltinTerm.lean:248-251`) — an application, not a leaf, but
+        // a monomorphic one: `Char.ofNat (rawNatLit c)`, no instance and
+        // no universe level.
+        ("char", NodeOrToken::Node(node)) => {
+            crate::builtin::lit::elab_char(elab, node, kinds, expected)
+        }
+        // oracle: `@[builtin_term_elab scientific] elabScientificLit`
+        // (`BuiltinTerm.lean:236-246`) — `num`'s shape through
+        // `OfScientific`, with the instance argument SECOND.
+        ("scientific", NodeOrToken::Node(node)) => {
+            crate::builtin::lit::elab_scientific(elab, node, kinds, expected)
+        }
         // A bare identifier is a ZERO-ARGUMENT APPLICATION, not a leaf:
         // `elabIdent := elabAtom` (`App.lean:2246`). M4b-1's
         // `builtin/ident.rs` was a simplification of exactly this path

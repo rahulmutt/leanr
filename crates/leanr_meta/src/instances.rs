@@ -365,8 +365,10 @@ pub(crate) struct InstanceTable {
     /// See [`InstanceTable::get_by_name`] for the allow's rationale.
     #[allow(dead_code)]
     by_name: HashMap<NameId, Instance>,
-    /// See [`MetaCtx::default_instances`] for the allow's rationale.
-    #[allow(dead_code)]
+    /// Read by [`MetaCtx::default_instances`] (per-class) and, since
+    /// M4b-3 P3 task 4, by [`MetaCtx::default_instance_priorities`]
+    /// (global) — the latter is genuinely `pub`, so the field no longer
+    /// needs the `#[allow(dead_code)]` its sibling `by_name` still does.
     defaults: Vec<(NameId, NameId, usize)>,
 }
 
@@ -526,6 +528,23 @@ impl<'e> MetaCtx<'e> {
             .map(|(_, inst, prio)| (*inst, *prio))
             .collect()
     }
+
+    /// oracle: `getDefaultInstancesPriorities` (`Instances.lean:429-430`)
+    /// — the GLOBAL priority set across every class, DESCENDING and
+    /// distinct (`PrioritySet := Std.TreeSet Nat (fun x y => compare y x)`,
+    /// `Instances.lean:383`). `synthesizeUsingDefault`
+    /// (`SyntheticMVars.lean:215-221`) walks it outermost, trying every
+    /// pending mvar at one priority before dropping to the next.
+    ///
+    /// New rather than derived: `default_instances`/`default_instances_of`
+    /// are per-class, and the priority walk is not.
+    pub fn default_instance_priorities(&self) -> Vec<usize> {
+        let mut prios: Vec<usize> = self.instances.defaults.iter().map(|(_, _, p)| *p).collect();
+        prios.sort_unstable();
+        prios.dedup();
+        prios.reverse();
+        prios
+    }
 }
 
 #[cfg(test)]
@@ -594,6 +613,62 @@ mod tests {
             assert!(
                 names.contains(&"instOfNN".to_string()),
                 "default_instances(OfN): {names:?}"
+            );
+        });
+    }
+
+    /// oracle: `getDefaultInstancesPriorities` (`Instances.lean:429-430`)
+    /// — the GLOBAL set of default-instance priorities, DESCENDING and
+    /// distinct, across every class (`PrioritySet := Std.TreeSet Nat
+    /// (fun x y => compare y x)`, `Instances.lean:383`).
+    /// `default_instances` is per-class and cannot produce it, which is
+    /// why this is a new accessor rather than a forwarder.
+    ///
+    /// Builds a SYNTHETIC `defaults` table rather than reading
+    /// `Instances.olean`'s (fix round 1, review Important 1).
+    /// The FIXTURE — `tests/fixtures/Instances.lean:88`, NOT the
+    /// toolchain's `Lean/Meta/Instances.lean` that every other
+    /// `Instances.lean:NNN` citation in this file means — declares
+    /// exactly ONE `@[default_instance]` (`instOfNN`),
+    /// so the fixture yields a one-element vec, against which the task
+    /// brief's sketched assertion — re-applying the implementation's own
+    /// `sort_unstable`/`dedup`/`reverse` to a clone and comparing — was
+    /// vacuous: it passes for any implementation ending in those three
+    /// calls, and for `Vec::new()`. This instead pins the exact expected
+    /// vector over a table with two distinct priorities, a DUPLICATE
+    /// (which only `dedup` removes), an out-of-registration-order entry
+    /// (which only `sort`+`reverse` fixes), and TWO CLASSES (so a
+    /// per-class implementation cannot pass). Same "assign a synthetic
+    /// `InstanceTable` directly" idiom as
+    /// `get_instances_orders_by_priority_desc_then_reverse_of_ties`
+    /// below — this module's own `#[cfg(test)]`, so the private fields
+    /// are reachable.
+    #[test]
+    fn default_instance_priorities_are_descending_and_distinct() {
+        with_instances_ctx(|ctx| {
+            let class_a = NameId::from_index(0, false).unwrap();
+            let class_b = NameId::from_index(1, false).unwrap();
+            let inst = |idx: u32| NameId::from_index(idx, false).unwrap();
+            // (class, instance, priority), in REGISTRATION order:
+            // deliberately neither sorted nor distinct, and spread over
+            // two classes.
+            ctx.instances = InstanceTable {
+                tree: DiscrTree::default(),
+                by_name: HashMap::new(),
+                defaults: vec![
+                    (class_a, inst(10), 100),
+                    (class_b, inst(11), 1000),
+                    (class_a, inst(12), 500),
+                    // duplicate of the first priority, under the OTHER
+                    // class: distinctness is global, not per-class.
+                    (class_b, inst(13), 100),
+                ],
+            };
+
+            assert_eq!(
+                ctx.default_instance_priorities(),
+                vec![1000, 500, 100],
+                "descending and distinct, across every class"
             );
         });
     }

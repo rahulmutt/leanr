@@ -54,7 +54,7 @@ pub struct TermElabM<'e> {
     binder_name_gen: u64,
     /// oracle: `Term.State.pendingMVars` (`TermElabM.lean:183`). **Head
     /// is the most recent** — the oracle conses. Every ordering in
-    /// `synthetic.rs` depends on that invariant.
+    /// `synthetic/` depends on that invariant.
     pub pending_mvars: Vec<MVarId>,
     /// oracle: `Term.State.syntheticMVars` (`TermElabM.lean:182`).
     pub synthetic_mvars: HashMap<MVarId, crate::synthetic::SyntheticMVarDecl>,
@@ -65,7 +65,7 @@ pub struct TermElabM<'e> {
     /// oracle: `Term.Context.mayPostpone` — a READER field there, a
     /// plain field here, saved/restored by `without_postponing` only:
     /// `with_saved_context` deliberately does NOT touch it (that
-    /// field's own doc, `synthetic.rs`, and Task 2's fix round). Defaults
+    /// field's own doc, `synthetic/state.rs`, and Task 2's fix round). Defaults
     /// to `true`, matching `Context.mayPostpone : Bool := true`'s own
     /// default (`TermElabM.lean:303`).
     pub may_postpone: bool,

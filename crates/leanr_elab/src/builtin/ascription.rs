@@ -38,7 +38,7 @@
 //! ```
 //!
 //! **M4b-3 P2a supplied `withSynthesize`'s postponement scaffolding**
-//! (`TermElabM::with_synthesize`, `synthetic.rs`), and both arms below
+//! (`TermElabM::with_synthesize`, `synthetic/ladder.rs`), and both arms below
 //! now take their real shape, matching the oracle's own STATEMENT
 //! BOUNDARIES exactly — not just "elaboration happens somewhere inside
 //! a scope". `(e : T)`: `T` elaborates under `with_synthesize(Yes,
