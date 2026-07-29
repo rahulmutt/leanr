@@ -1376,7 +1376,7 @@ mod tests {
     };
 
     use crate::test_support::{fresh_fvar, fresh_mvar};
-    use crate::{Config, MVarDecl, MVarKind, MetaCtx};
+    use crate::{Config, EnvExtensions, MVarDecl, MVarKind, MetaCtx};
 
     /// A tiny bespoke environment (NOT `test_support::with_ctx`'s
     /// totally-empty one): `N.zero`/`N.succ` are declared as `Prop`-
@@ -1436,7 +1436,7 @@ mod tests {
             quot_initialized: false,
             store: &base,
         };
-        let mut ctx = MetaCtx::new(view, &mut scratch, cfg, &[], &[], &[], &[], &[]);
+        let mut ctx = MetaCtx::new(view, &mut scratch, cfg, EnvExtensions::default());
         f(&mut ctx)
     }
 

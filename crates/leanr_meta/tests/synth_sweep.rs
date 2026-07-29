@@ -42,7 +42,7 @@ use std::sync::Arc;
 
 use leanr_kernel::bank::{NameId, Store};
 use leanr_kernel::{Environment, Name};
-use leanr_meta::{Config, MetaCtx};
+use leanr_meta::{Config, EnvExtensions, MetaCtx};
 use leanr_olean::{
     load_closure, DefaultInstanceEntry, InstanceEntry, MatcherEntry, ProjectionFnInfo,
     ReducibilityEntry, SearchPath,
@@ -358,11 +358,13 @@ fn run_leanr_query(
         view,
         &mut scratch,
         Config::default(),
-        reducibility,
-        matchers,
-        instances,
-        default_instances,
-        projection_fns,
+        EnvExtensions {
+            reducibility,
+            matchers,
+            instances,
+            default_instances,
+            projection_fns,
+        },
     );
     let synthd: Result<Option<leanr_kernel::bank::ExprId>, ()> = match ctx.synth_instance(goal) {
         Ok(Some(v)) => match ctx.instantiate_mvars(v) {

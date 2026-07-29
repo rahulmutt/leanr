@@ -21,7 +21,7 @@ use support::{encode_expr, fixture_in, replay_fixture_in, EncSt};
 use leanr_elab::TermElabM;
 use leanr_kernel::bank::Store;
 use leanr_kernel::EnvView;
-use leanr_meta::{Config, MetaCtx};
+use leanr_meta::{Config, EnvExtensions, MetaCtx};
 use leanr_syntax::{builtin, parse_term};
 
 #[test]
@@ -86,11 +86,13 @@ fn oracle_elab_gate() {
             view,
             &mut scratch,
             Config::default(),
-            &reducibility,
-            &matchers,
-            &instances,
-            &default_instances,
-            &projection_fns,
+            EnvExtensions {
+                reducibility: &reducibility,
+                matchers: &matchers,
+                instances: &instances,
+                default_instances: &default_instances,
+                projection_fns: &projection_fns,
+            },
         );
         let mut elab = TermElabM::new(mctx, view);
         // The pinned entry point, matching `dump_elab.lean`'s own module

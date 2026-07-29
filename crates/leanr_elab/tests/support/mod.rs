@@ -40,7 +40,7 @@ pub fn with_app_harness<R>(
     use leanr_elab::TermElabM;
     use leanr_kernel::bank::Store;
     use leanr_kernel::EnvView;
-    use leanr_meta::{Config, MetaCtx};
+    use leanr_meta::{Config, EnvExtensions, MetaCtx};
     use leanr_syntax::{builtin, parse_term};
 
     let Replayed {
@@ -70,11 +70,13 @@ pub fn with_app_harness<R>(
         view,
         &mut scratch,
         Config::default(),
-        &reducibility,
-        &matchers,
-        &instances,
-        &default_instances,
-        &projection_fns,
+        EnvExtensions {
+            reducibility: &reducibility,
+            matchers: &matchers,
+            instances: &instances,
+            default_instances: &default_instances,
+            projection_fns: &projection_fns,
+        },
     );
     let mut elab = TermElabM::new(mctx, view);
     let f = elab
@@ -534,7 +536,7 @@ fn with_elab_harness<R>(
     use leanr_elab::TermElabM;
     use leanr_kernel::bank::Store;
     use leanr_kernel::EnvView;
-    use leanr_meta::{Config, MetaCtx};
+    use leanr_meta::{Config, EnvExtensions, MetaCtx};
     use leanr_syntax::{builtin, parse_term};
 
     let Replayed {
@@ -565,11 +567,13 @@ fn with_elab_harness<R>(
         view,
         &mut scratch,
         Config::default(),
-        &reducibility,
-        &matchers,
-        &instances,
-        &default_instances,
-        &projection_fns,
+        EnvExtensions {
+            reducibility: &reducibility,
+            matchers: &matchers,
+            instances: &instances,
+            default_instances: &default_instances,
+            projection_fns: &projection_fns,
+        },
     );
     let mut elab = TermElabM::new(mctx, view);
     k(&mut elab, &term_elem, &parsed.tree.kinds)

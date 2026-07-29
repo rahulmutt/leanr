@@ -2828,7 +2828,7 @@ mod tests {
     use leanr_olean::{EntryScope, ReducibilityEntry, ReducibilityStatus};
 
     use crate::test_support::{with_matcher_ctx, with_prelude0_ctx};
-    use crate::{MVarDecl, MVarKind};
+    use crate::{EnvExtensions, MVarDecl, MVarKind};
 
     fn dump(ctx: &mut MetaCtx, e: ExprId) -> String {
         match ctx.node(e) {
@@ -3060,11 +3060,10 @@ mod tests {
             view,
             &mut scratch,
             crate::Config::default(),
-            &reducibility,
-            &[],
-            &[],
-            &[],
-            &[],
+            EnvExtensions {
+                reducibility: &reducibility,
+                ..Default::default()
+            },
         );
 
         ctx.set_transparency(TransparencyMode::Reducible);
@@ -3446,11 +3445,7 @@ mod tests {
             view,
             &mut scratch,
             crate::Config::default(),
-            &[],
-            &[],
-            &[],
-            &[],
-            &[],
+            EnvExtensions::default(),
         );
 
         let result = ctx.whnf(e).expect("whnf");
@@ -3567,7 +3562,15 @@ mod tests {
             transparency: TransparencyMode::Default, // above .instances
             ..crate::Config::default()
         };
-        let mut ctx = MetaCtx::new(view, &mut scratch, cfg, &reducibility, &[], &[], &[], &[]);
+        let mut ctx = MetaCtx::new(
+            view,
+            &mut scratch,
+            cfg,
+            EnvExtensions {
+                reducibility: &reducibility,
+                ..Default::default()
+            },
+        );
 
         let saved = ctx.cfg.transparency;
 

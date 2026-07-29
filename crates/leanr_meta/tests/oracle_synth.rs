@@ -20,7 +20,7 @@ use std::collections::HashMap;
 
 use leanr_kernel::bank::{ExprId, NameId, Store};
 use leanr_kernel::EnvView;
-use leanr_meta::{Config, MVarDecl, MVarId, MVarKind, MetaCtx};
+use leanr_meta::{Config, EnvExtensions, MVarDecl, MVarId, MVarKind, MetaCtx};
 
 mod support;
 use support::{decode_expr, encode_expr, fixture, replay_fixture, EncSt};
@@ -158,11 +158,13 @@ fn oracle_synth_gate() {
             view,
             &mut scratch,
             Config::default(),
-            &reducibility,
-            &matchers,
-            &instances,
-            &default_instances,
-            &projection_fns,
+            EnvExtensions {
+                reducibility: &reducibility,
+                matchers: &matchers,
+                instances: &instances,
+                default_instances: &default_instances,
+                projection_fns: &projection_fns,
+            },
         );
         // DECLARE every goal mvar (ledger note, task B6): `decode_expr`
         // interns an mvar node but never declares it, and an undeclared
@@ -349,11 +351,13 @@ fn seam_excluded_mvar_goal_is_incompleteness_not_an_error() {
             view,
             &mut scratch,
             Config::default(),
-            &reducibility,
-            &matchers,
-            &instances,
-            &default_instances,
-            &projection_fns,
+            EnvExtensions {
+                reducibility: &reducibility,
+                matchers: &matchers,
+                instances: &instances,
+                default_instances: &default_instances,
+                projection_fns: &projection_fns,
+            },
         );
         ctx.mctx_mut().declare(
             MVarId(nid),
@@ -438,11 +442,13 @@ fn exc_record_stuck_synth_0_pins_leanrs_current_divergent_answer() {
             view,
             &mut scratch,
             Config::default(),
-            &reducibility,
-            &matchers,
-            &instances,
-            &default_instances,
-            &projection_fns,
+            EnvExtensions {
+                reducibility: &reducibility,
+                matchers: &matchers,
+                instances: &instances,
+                default_instances: &default_instances,
+                projection_fns: &projection_fns,
+            },
         );
         ctx.mctx_mut().declare(
             MVarId(nid),

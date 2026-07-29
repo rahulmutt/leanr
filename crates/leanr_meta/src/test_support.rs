@@ -14,7 +14,7 @@ use leanr_kernel::{
 };
 use leanr_olean::ModuleData;
 
-use crate::{Config, MVarDecl, MVarId, MVarKind, MetaCtx};
+use crate::{Config, EnvExtensions, MVarDecl, MVarId, MVarKind, MetaCtx};
 
 pub(crate) fn fixture_path(name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -43,11 +43,7 @@ pub(crate) fn with_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
         view,
         &mut scratch,
         Config::default(),
-        &[],
-        &[],
-        &[],
-        &[],
-        &[],
+        EnvExtensions::default(),
     );
     f(&mut ctx)
 }
@@ -162,11 +158,13 @@ pub(crate) fn with_prelude0_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
         view,
         &mut scratch,
         Config::default(),
-        &reducibility,
-        &matchers,
-        &instances,
-        &default_instances,
-        &projection_fns,
+        EnvExtensions {
+            reducibility: &reducibility,
+            matchers: &matchers,
+            instances: &instances,
+            default_instances: &default_instances,
+            projection_fns: &projection_fns,
+        },
     );
     f(&mut ctx)
 }
@@ -206,11 +204,13 @@ pub(crate) fn with_instances_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
         view,
         &mut scratch,
         Config::default(),
-        &reducibility,
-        &matchers,
-        &instances,
-        &default_instances,
-        &projection_fns,
+        EnvExtensions {
+            reducibility: &reducibility,
+            matchers: &matchers,
+            instances: &instances,
+            default_instances: &default_instances,
+            projection_fns: &projection_fns,
+        },
     );
     f(&mut ctx)
 }
@@ -248,11 +248,13 @@ pub(crate) fn with_cyclic_instances_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) ->
         view,
         &mut scratch,
         Config::default(),
-        &reducibility,
-        &matchers,
-        &instances,
-        &default_instances,
-        &projection_fns,
+        EnvExtensions {
+            reducibility: &reducibility,
+            matchers: &matchers,
+            instances: &instances,
+            default_instances: &default_instances,
+            projection_fns: &projection_fns,
+        },
     );
     f(&mut ctx)
 }
@@ -457,11 +459,13 @@ pub(crate) fn with_matcher_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
         view,
         &mut scratch,
         Config::default(),
-        &reducibility,
-        &matchers,
-        &instances,
-        &default_instances,
-        &projection_fns,
+        EnvExtensions {
+            reducibility: &reducibility,
+            matchers: &matchers,
+            instances: &instances,
+            default_instances: &default_instances,
+            projection_fns: &projection_fns,
+        },
     );
     f(&mut ctx)
 }

@@ -618,11 +618,7 @@ mod tests {
             view,
             &mut scratch,
             crate::Config::default(),
-            &[],
-            &[],
-            &[],
-            &[],
-            &[],
+            crate::EnvExtensions::default(),
         );
         assert!(!ctx.is_def_eq(a, b).unwrap());
     }

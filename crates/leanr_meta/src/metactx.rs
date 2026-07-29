@@ -237,48 +237,55 @@ fn mk_name2(scratch: &mut Store, base: Option<&Store>, a: &str, b: &str) -> Name
         .expect("interning a tiny fixed name is infallible")
 }
 
+/// The decoded environment-extension entries `MetaCtx` reads, grouped so
+/// adding one is a field rather than a positional parameter across every
+/// call site. Introduced by M4b-3 P2b-i, whose `ClassTable` is the sixth
+/// such table and whose successor (M4b-3 P4's `coe_decl`) is the
+/// seventh; before this the constructor took five bare slices.
+///
+/// `Default` gives all-empty slices, so a caller that needs only one
+/// table writes `EnvExtensions { instances: &insts, ..Default::default() }`.
+#[derive(Default, Clone, Copy)]
+pub struct EnvExtensions<'a> {
+    pub reducibility: &'a [ReducibilityEntry],
+    pub matchers: &'a [MatcherEntry],
+    pub instances: &'a [InstanceEntry],
+    pub default_instances: &'a [DefaultInstanceEntry],
+    pub projection_fns: &'a [ProjectionFnInfo],
+}
+
 impl<'e> MetaCtx<'e> {
-    /// Task B6 adds the 8th (`projection_fn_entries`) decoded-slice
+    /// Task B6 added the 8th (`projection_fn_entries`) decoded-slice
     /// parameter, crossing clippy's default `too_many_arguments`
     /// threshold (7) — same "decoded slices in, private fields out"
     /// constructor shape B3's `instance_entries`/`default_instance_entries`
-    /// pair already established (this module's own doc, above); adding a
-    /// 9th builder/options-struct layer here would be a bigger refactor
-    /// than this task's own scope, for a constructor that already has
-    /// exactly one call style (every call site passes all eight slices
-    /// positionally, `grep`-verified, no partial-application anywhere).
+    /// pair already established (this module's own doc, above).
     ///
-    /// **Follow-up, explicitly flagged (opus review round 1): the NEXT
-    /// decoded extension makes this 9.** At that point, stop widening
-    /// this positional list and instead introduce a `DecodedExtensions`
-    /// (or similarly named) params struct bundling every
-    /// `&[XyzEntry]` slice this constructor takes, with each call site
-    /// building one from a `ModuleData` (`md.reducibility`, `md.matchers`,
-    /// ..., `md.projection_fns`, ...) — a mechanical, low-risk refactor
-    /// deferred out of THIS task's scope, not an open question about
-    /// whether it should happen.
-    #[allow(clippy::too_many_arguments)]
+    /// M4b-3 P2b-i task 3 fulfilled the follow-up flagged then (opus
+    /// review round 1): the decoded slices are grouped into the
+    /// `EnvExtensions` struct above (one field per table) instead of
+    /// widening this positional list further, so a caller now passes one
+    /// `exts: EnvExtensions` argument and a future decoded extension is a
+    /// new field there, not a new parameter here. See that struct's own
+    /// doc for the rationale.
     pub fn new(
         view: EnvView<'e>,
         scratch: &'e mut Store,
         cfg: Config,
-        reducibility: &[ReducibilityEntry],
-        matchers: &[MatcherEntry],
-        instance_entries: &[InstanceEntry],
-        default_instance_entries: &[DefaultInstanceEntry],
-        projection_fn_entries: &[ProjectionFnInfo],
+        exts: EnvExtensions<'_>,
     ) -> MetaCtx<'e> {
         // Global entries only: scoped reducibility entries require the
         // M3b3-style activation model, out of scope for the meta core
         // (they are rare and Mathlib's are decoded but unconsulted
         // here; revisit when a corpus divergence implicates one).
-        let reducibility = reducibility
+        let reducibility = exts
+            .reducibility
             .iter()
             .filter(|e| matches!(e.scope, EntryScope::Global))
             .map(|e| (e.name, e.status))
             .collect();
-        let matchers = matchers.iter().map(|m| (m.name, m.clone())).collect();
-        let instances = InstanceTable::build(view, instance_entries, default_instance_entries);
+        let matchers = exts.matchers.iter().map(|m| (m.name, m.clone())).collect();
+        let instances = InstanceTable::build(view, exts.instances, exts.default_instances);
         // oracle: `projectionFnInfoExt`'s own `NameMap` (`ProjFns.lean:30,
         // 37-59`) — the extension's own key IS `ProjectionFnInfo.projFn`
         // (see that struct's doc, `leanr_olean::ProjectionFnInfo`), so no
@@ -288,7 +295,8 @@ impl<'e> MetaCtx<'e> {
         // colliding second entry (last-write-wins) is reachable only via
         // adversarial/malformed bytes, same untrusted-input posture as
         // every other decoder in this crate (never panics either way).
-        let projection_fns = projection_fn_entries
+        let projection_fns = exts
+            .projection_fns
             .iter()
             .map(|p| (p.proj_fn, p.clone()))
             .collect();
