@@ -1,0 +1,479 @@
+//! Rung 3 of the escalation ladder: default instances. Oracle:
+//! `Lean/Elab/SyntheticMVars.lean:113-221`.
+//!
+//! P2a shipped `synthesize_using_default` as a shape-guarded seam that
+//! ERRORED when a pending typeclass mvar's class had default instances
+//! registered. This module is that seam's replacement (design spec
+//! § Amendment 2, item 2): `num` is the first construct in leanr's
+//! grammar that creates such a goal from source, so the rung and its
+//! producer land together.
+//!
+//! Two orderings are transliterated verbatim because they are
+//! fidelity-critical and invisible on simple corpus terms:
+//!
+//!   * the priority set is walked DESCENDING (`:215-221`, with the
+//!     oracle's own "Recall that `prioSet` is stored in descending
+//!     order" at `:217`);
+//!   * within a priority, `synthesizeSomeUsingDefaultPrio` walks
+//!     `pendingMVars.reverse` — REVERSE CREATION ORDER — with the
+//!     oracle's own comment explaining why (`:207-209`: otherwise
+//!     `toString 0` fails with an `OfNat String ?_` error). On success
+//!     the queue is rebuilt as `pendingMVars.reverse ++
+//!     pendingMVarsNew` (`:202`).
+//!
+//! Both have direct unit tests in `tests/synthetic_smoke.rs`; the
+//! corpus cannot be relied on to catch them.
+//!
+//! **Termination.** The two loops are well-founded: `synthesize_pending`
+//! shrinks its goal list by at least one on every iteration (its own
+//! doc), and `synthesize_using_instances` returns as soon as a pass
+//! closes nothing. The MUTUAL RECURSION through
+//! `synthesize_using_default_instance` -> `synthesize_pending` ->
+//! `synthesize_some_using_default_qm` -> `synthesize_using_default_for`
+//! -> `synthesize_using_default_prio` ->
+//! `synthesize_using_default_instance` is not: it is bounded only by the
+//! default-instance graph being well-founded, exactly as in the oracle,
+//! whose `synthesizeUsingDefaultPrio` is declared `partial` (`:113`) for
+//! this reason. A cyclic set of default instances would recurse until
+//! the Rust stack is exhausted where the oracle would loop forever;
+//! neither is a behavior leanr can produce from its fixture, and adding
+//! a depth cap the oracle does not have would be a divergence, not a
+//! fix.
+//!
+//! **Two oracle scopings have no leanr counterpart yet and are not
+//! stubbed.** `mvarId.withContext` (`:114`, `:135`) re-enters the
+//! mvar's own local context and local instances; every mvar this crate
+//! mints carries an EMPTY `LocalContext` (`mk_fresh_expr_mvar_of_kind`'s
+//! own doc), so there is nothing to re-enter. `withRef mvarDecl.stx`
+//! (`:201`) positions error messages, and leanr's error type carries no
+//! position (design spec § Amendment, item 2). Neither is a behavior
+//! difference on any term leanr can elaborate today.
+
+use leanr_kernel::bank::{ExprId, NameId};
+use leanr_kernel::BinderInfo;
+use leanr_meta::MVarId;
+use leanr_syntax::kind::KindInterner;
+
+use crate::elab::TermElabM;
+use crate::error::ElabError;
+use crate::synthetic::SyntheticMVarKind;
+
+impl<'e> TermElabM<'e> {
+    /// oracle: `synthesizeUsingDefault` (`SyntheticMVars.lean:215-221`)
+    /// — the ladder's rung 3. Walk the GLOBAL priority set in
+    /// descending order; the first priority that makes progress wins.
+    ///
+    /// `kinds` is threaded through the whole family for the ladder's own
+    /// convention (every fixpoint entry point takes the interner rather
+    /// than storing it — `SyntheticMVarDecl`'s own doc) and reaches
+    /// `synthesize_pending_inst_mvar_committed` unused: the only leaf
+    /// this family calls is `synthesize_inst_mvar_core`, which takes no
+    /// interner because an instance goal is solved by synthesis, never
+    /// by re-elaborating syntax. It is not dead weight for long — the
+    /// `.coe` and `.postponed` arms P4/P5 add below this point do
+    /// re-elaborate.
+    pub fn synthesize_using_default(&mut self, kinds: &KindInterner) -> Result<bool, ElabError> {
+        // oracle: "Recall that `prioSet` is stored in descending order".
+        // `MetaCtx::default_instance_priorities` guarantees that
+        // (M4b-3 P3 task 4); the ordering test asserts it independently
+        // rather than trusting the accessor.
+        for prio in self.mctx.default_instance_priorities() {
+            if self.synthesize_some_using_default_prio(prio, kinds)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// oracle: `synthesizeSomeUsingDefaultPrio` (`:193-210`).
+    ///
+    /// `pending_mvars`' head is the MOST RECENT (P2a's invariant), and
+    /// the oracle walks `pendingMVars.reverse` (`:210`), so this
+    /// iterates the REVERSED list — oldest first. `pending_new`
+    /// accumulates the skipped entries in the oracle's own consing order
+    /// (`visit pendingMVars (mvarId :: pendingMVarsNew)`), so the
+    /// rebuilt queue is `remainder.reverse() ++ pending_new` and stays
+    /// head-is-most-recent: every entry in the remainder is NEWER than
+    /// every skipped one, because the walk runs oldest-first.
+    fn synthesize_some_using_default_prio(
+        &mut self,
+        prio: usize,
+        kinds: &KindInterner,
+    ) -> Result<bool, ElabError> {
+        let mut walk: Vec<MVarId> = self.pending_mvars.clone();
+        walk.reverse();
+        let mut pending_new: Vec<MVarId> = Vec::new();
+        for i in 0..walk.len() {
+            let mvar_id = walk[i];
+            walk_log::push(mvar_id);
+            // oracle: `let some mvarDecl ← getSyntheticMVarDecl? mvarId
+            // | visit ..` then `match mvarDecl.kind with | .typeClass ..`
+            // (`:198-206`) — a missing decl and a non-typeclass kind take
+            // the same skip branch.
+            let is_tc = matches!(
+                self.synthetic_mvar_decl(mvar_id).map(|d| &d.kind),
+                Some(SyntheticMVarKind::TypeClass)
+            );
+            if is_tc && self.synthesize_using_default_prio(mvar_id, prio, kinds)? {
+                // oracle: `pendingMVars := pendingMVars.reverse ++
+                // pendingMVarsNew` (`:202`) — `pendingMVars` there is
+                // what is LEFT of the walk after the successful entry.
+                let mut rest: Vec<MVarId> = walk[i + 1..].to_vec();
+                rest.reverse();
+                rest.extend(pending_new);
+                self.pending_mvars = rest;
+                return Ok(true);
+            }
+            // oracle: `visit pendingMVars (mvarId :: pendingMVarsNew)`.
+            pending_new.insert(0, mvar_id);
+        }
+        Ok(false)
+    }
+
+    /// oracle: `synthesizeUsingDefaultPrio` (`:113-126`).
+    ///
+    /// The oracle's `isClass? mvarType` early-out is FUSED with the
+    /// `getDefaultInstances className` one: both `return false`, and a
+    /// head constant with a non-empty default-instance list is
+    /// necessarily a class, so `pending_class_name` plus an empty-list
+    /// test decides both (plan § Measured facts, item 3). This is a
+    /// fusion, not a seam — no oracle behavior is skipped.
+    ///
+    /// One narrowing that comes with `pending_class_name` (P2a's, not
+    /// new here): the oracle's `isClass?` whnfs the goal and telescopes
+    /// through `forallE` binders before reading its head, where
+    /// `pending_class_name` walks the SYNTACTIC application spine of the
+    /// instantiated type. Every `.typeClass` goal leanr registers is a
+    /// class applied to arguments — `mk_inst_mvar`'s and
+    /// `process_inst_implicit_arg`'s goals are both an instImplicit
+    /// binder's domain — so the two agree on everything reachable. A
+    /// goal whose head is a definition unfolding to a class, or a
+    /// `∀`-wrapped one, would be classified by the oracle and skipped
+    /// here; no leanr slice can build one yet.
+    fn synthesize_using_default_prio(
+        &mut self,
+        mvar_id: MVarId,
+        prio: usize,
+        kinds: &KindInterner,
+    ) -> Result<bool, ElabError> {
+        let Some(class) = self.pending_class_name(mvar_id)? else {
+            return Ok(false);
+        };
+        for (inst, inst_prio) in self.mctx.default_instances_of(class) {
+            if inst_prio != prio {
+                continue;
+            }
+            if self.synthesize_using_default_instance(mvar_id, inst, kinds)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// oracle: `synthesizeUsingDefaultInstance` (`:155-173`).
+    ///
+    /// Mint the default instance with fresh universe mvars, telescope
+    /// its type into argument mvars, unify the goal against the applied
+    /// candidate under `withAssignableSyntheticOpaque`, and — on
+    /// success — recursively synthesize the instance-implicit binders
+    /// the candidate introduced. That recursion is a NESTED FIXPOINT,
+    /// not a single pass.
+    ///
+    /// `withAssignableSyntheticOpaque` (`:164`) is required because
+    /// `coeAtOutParam` may mark a local instance's output parameter
+    /// `syntheticOpaque`, which ordinary unification refuses to assign.
+    /// leanr has no `coeAtOutParam` producer yet (that is P2b/P4), so
+    /// the scope is currently a no-op on every reachable term — it is
+    /// ported anyway because it is one line and its absence would be a
+    /// silent divergence the moment P2b lands.
+    fn synthesize_using_default_instance(
+        &mut self,
+        mvar_id: MVarId,
+        inst: NameId,
+        kinds: &KindInterner,
+    ) -> Result<bool, ElabError> {
+        self.commit_when(|s| {
+            let candidate = s.mk_default_instance_candidate(inst)?;
+            let cand_type = s.mctx.infer_type(candidate)?;
+            let (mvars, bis, _body) = s.mctx.forall_meta_telescope_reducing(cand_type)?;
+            // oracle: `mkAppN candidate mvars` (`:159`).
+            let base = s.view.store;
+            let mut applied = candidate;
+            for m in &mvars {
+                applied = s
+                    .mctx
+                    .store_mut()
+                    .expr_app(Some(base), applied, *m)
+                    .map_err(leanr_meta::MetaError::from)?;
+            }
+            let goal = s
+                .mctx
+                .store_mut()
+                .expr_mvar(None, Some(mvar_id.0))
+                .map_err(leanr_meta::MetaError::from)?;
+            // oracle: `isDefEqGuarded` (`:164`) — a FAILED unification is
+            // `false`, not an error. leanr's `is_def_eq` already reports
+            // failure as `Ok(false)`; the oracle's `catch` additionally
+            // swallows genuine exceptions, which leanr does NOT do here
+            // (a `MetaError` — a blown step budget, a malformed term —
+            // propagates and is caught one level up by `commit_when`'s
+            // own error path in `synthesize_pending_inst_mvar_committed`,
+            // or surfaces to the ladder). Erring toward a visible error
+            // over a silent rejection is this crate's standing choice.
+            let ok = s
+                .mctx
+                .with_assignable_synthetic_opaque(|m| m.is_def_eq(goal, applied))?;
+            if !ok {
+                return Ok(false);
+            }
+            // oracle: `:167-171` — collect the instImplicit binders as
+            // new pending goals, CONSED (so the resulting list is
+            // reverse binder order), then `synthesizePending`.
+            let mut pending: Vec<MVarId> = Vec::new();
+            for (m, bi) in mvars.iter().zip(bis.iter()) {
+                if *bi == BinderInfo::InstImplicit {
+                    if let Some(id) = s.mvar_id_of(*m) {
+                        pending.insert(0, id);
+                    }
+                }
+            }
+            s.synthesize_pending(pending, kinds)
+        })
+    }
+
+    /// oracle: `mkConstWithFreshMVarLevels defaultInstance` (`:157`).
+    ///
+    /// Two steps, because `MetaCtx::mk_const_with_fresh_mvar_levels`
+    /// takes an already-built `Expr.const` and REFRESHES the levels it
+    /// carries (that method's own doc records the deliberate signature
+    /// difference from the oracle's name-taking version): build the
+    /// constant at its declared level PARAMS first — the oracle's
+    /// `mkConstWithLevelParams` — then refresh. Building it at the empty
+    /// level list instead would silently no-op the refresh for every
+    /// universe-polymorphic default instance, leaving its levels as
+    /// rigid params that cannot unify with the goal's.
+    ///
+    /// A missing declaration yields the empty parameter list, and the
+    /// caller's `infer_type` then raises the real "unknown constant".
+    /// Unreachable by construction — every name here came out of the
+    /// environment's own default-instance table.
+    fn mk_default_instance_candidate(&mut self, inst: NameId) -> Result<ExprId, ElabError> {
+        let base = self.view.store;
+        let params: Vec<NameId> = self
+            .view
+            .get(inst)
+            .map(|info| info.constant_val().level_params.clone())
+            .unwrap_or_default();
+        let mut levels = Vec::with_capacity(params.len());
+        for p in params {
+            levels.push(
+                self.mctx
+                    .store_mut()
+                    .level_param(Some(base), Some(p))
+                    .map_err(leanr_meta::MetaError::from)?,
+            );
+        }
+        // `intern_level_list`'s `base` is dedup-only and never resolves a
+        // child id, so `None` is safe for a mixed-region list — the same
+        // reasoning `app/head.rs`'s `mk_const` records at length.
+        let levels = self
+            .mctx
+            .store_mut()
+            .intern_level_list(None, &levels)
+            .map_err(leanr_meta::MetaError::from)?;
+        let raw = self
+            .mctx
+            .store_mut()
+            .expr_const(Some(base), Some(inst), levels)
+            .map_err(leanr_meta::MetaError::from)?;
+        Ok(self.mctx.mk_const_with_fresh_mvar_levels(raw)?)
+    }
+
+    /// oracle: `synthesizePending` (`:186-190`) — the nested fixpoint:
+    /// solve what ordinary instance synthesis can, then apply ONE
+    /// default instance, then repeat. Returns `false` if any goal is
+    /// left that neither can close.
+    ///
+    /// Terminates: `synthesize_using_instances` only ever shrinks its
+    /// argument, and `synthesize_some_using_default_qm` returns either
+    /// `None` (immediate `false`) or a list exactly one shorter — so
+    /// `ids.len()` strictly decreases on every iteration.
+    fn synthesize_pending(
+        &mut self,
+        mvar_ids: Vec<MVarId>,
+        kinds: &KindInterner,
+    ) -> Result<bool, ElabError> {
+        let mut ids = self.synthesize_using_instances(mvar_ids, kinds)?;
+        loop {
+            if ids.is_empty() {
+                return Ok(true);
+            }
+            let Some(next) = self.synthesize_some_using_default_qm(ids, kinds)? else {
+                return Ok(false);
+            };
+            ids = self.synthesize_using_instances(next, kinds)?;
+        }
+    }
+
+    /// oracle: `synthesizeUsingInstances` (`:148-153`) over
+    /// `synthesizeUsingInstancesStep` (`:141-146`) — repeatedly filter
+    /// out the goals ordinary synthesis can close, until a pass closes
+    /// none.
+    fn synthesize_using_instances(
+        &mut self,
+        mvar_ids: Vec<MVarId>,
+        kinds: &KindInterner,
+    ) -> Result<Vec<MVarId>, ElabError> {
+        let mut cur = mvar_ids;
+        loop {
+            let before = cur.len();
+            let mut next = Vec::with_capacity(before);
+            for id in cur {
+                if !self.synthesize_pending_inst_mvar_committed(id, kinds)? {
+                    next.push(id);
+                }
+            }
+            // oracle: `if mvarIds'.length < mvarIds.length then recurse`
+            // — a pass that closes nothing is the fixpoint.
+            if next.len() == before {
+                return Ok(next);
+            }
+            cur = next;
+        }
+    }
+
+    /// oracle: `synthesizePendingInstMVar'` (`:134-139`) —
+    /// `commitWhen <| try synthesizeInstMVarCore catch _ => false`. A
+    /// synthesis ERROR is swallowed into `false` here, unlike the
+    /// ladder's own `synthesize_pending_inst_mvar`, because a default
+    /// instance's subgoal that cannot be solved is a reason to reject
+    /// the candidate, not to fail the elaboration.
+    fn synthesize_pending_inst_mvar_committed(
+        &mut self,
+        mvar_id: MVarId,
+        _kinds: &KindInterner,
+    ) -> Result<bool, ElabError> {
+        self.commit_when(|s| Ok(s.synthesize_inst_mvar_core(mvar_id).unwrap_or(false)))
+    }
+
+    /// oracle: `synthesizeSomeUsingDefault?` (`:175-184`) — apply a
+    /// default instance to the FIRST goal that accepts one, returning
+    /// the remaining goals with that one removed; `None` if none does.
+    ///
+    /// The oracle's recursion rebuilds the survivors as `mvarId ::
+    /// mvarIds'`, i.e. the original order minus the solved entry, which
+    /// is what removing at the index does here.
+    fn synthesize_some_using_default_qm(
+        &mut self,
+        mvar_ids: Vec<MVarId>,
+        kinds: &KindInterner,
+    ) -> Result<Option<Vec<MVarId>>, ElabError> {
+        for (i, id) in mvar_ids.iter().enumerate() {
+            if self.synthesize_using_default_for(*id, kinds)? {
+                let mut rest = mvar_ids.clone();
+                rest.remove(i);
+                return Ok(Some(rest));
+            }
+        }
+        Ok(None)
+    }
+
+    /// oracle: the inner `synthesizeUsingDefault` (`:128-132`) — the
+    /// per-MVAR priority walk, distinct from the top-level per-QUEUE
+    /// walk above. Deliberately NOT logged: `walk_log` records the
+    /// pending-queue walk's order, and mixing this recursive per-mvar
+    /// walk into the same log would make the recorded sequence depend on
+    /// how deep a candidate's subgoals go.
+    fn synthesize_using_default_for(
+        &mut self,
+        mvar_id: MVarId,
+        kinds: &KindInterner,
+    ) -> Result<bool, ElabError> {
+        for prio in self.mctx.default_instance_priorities() {
+            if self.synthesize_using_default_prio(mvar_id, prio, kinds)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// The `MVarId` an `Expr.mvar` node refers to, if it is one.
+    ///
+    /// oracle: `mvars[i]!.mvarId!` (`:170`) — a partial function that
+    /// PANICS on anything else. `None` here rather than a panic, and
+    /// unreachable either way: every element of
+    /// `forall_meta_telescope_reducing`'s first result is an
+    /// `Expr.mvar` node it just minted (`mk_aux_mvar`), so the `None`
+    /// arm cannot be entered by any caller.
+    fn mvar_id_of(&self, e: ExprId) -> Option<MVarId> {
+        let base = self.view.store;
+        match self.mctx.store().expr_node(Some(base), e) {
+            leanr_kernel::bank::terms::Node::MVar { id: Some(n) } => Some(MVarId(n)),
+            _ => None,
+        }
+    }
+}
+
+/// Visit-order instrumentation for `tests/synthetic_smoke.rs`'s
+/// reverse-creation-order test. The corpus cannot express that ordering
+/// (on a term with one numeral both orders agree), and asserting it
+/// through the public API alone would only observe the OUTCOME, not the
+/// order — so the walk records which mvars it considered.
+///
+/// Not `#[cfg(test)]`: integration tests link this crate as an external
+/// consumer, where `#[cfg(test)]` items do not exist. The log is inert
+/// unless [`default_walk_log_reset`] has armed it, so the cost in
+/// production is one thread-local flag read per visited mvar.
+///
+/// **THREAD-LOCAL, not a global `Mutex<Vec<_>>`.** `cargo test` runs the
+/// tests in one binary on a thread pool, and several tests in
+/// `synthetic_smoke.rs` drive rung 3 — so a process-wide log would
+/// collect another test's visited mvars into the middle of the ordering
+/// assertion, and a process-wide `ARMED` flag would let one test disarm
+/// another's recording. Both are order-dependent, so the failure would
+/// be an intermittent one that passes locally. The walk always runs
+/// synchronously on its caller's own thread (nothing under
+/// `synthesize_using_default` spawns or joins), so a thread-local log
+/// sees exactly the walk the arming test drove, and nothing else.
+mod walk_log {
+    use leanr_meta::MVarId;
+    use std::cell::RefCell;
+
+    thread_local! {
+        /// `None` = disarmed (the production state): `push` does nothing
+        /// and no allocation is ever made. `Some(log)` = armed by
+        /// `reset`, drained by `take`. One `Option` carries both the
+        /// flag and the buffer, so the two can never disagree.
+        static LOG: RefCell<Option<Vec<MVarId>>> = const { RefCell::new(None) };
+    }
+
+    pub fn push(id: MVarId) {
+        LOG.with(|log| {
+            if let Some(entries) = log.borrow_mut().as_mut() {
+                entries.push(id);
+            }
+        });
+    }
+
+    pub fn reset() {
+        LOG.with(|log| *log.borrow_mut() = Some(Vec::new()));
+    }
+
+    pub fn take() -> Vec<MVarId> {
+        LOG.with(|log| log.borrow_mut().take().unwrap_or_default())
+    }
+}
+
+/// Arm the default-instance walk's visit log on THIS thread and clear
+/// it. See [`walk_log`] for why the log is thread-local.
+pub fn default_walk_log_reset() {
+    walk_log::reset();
+}
+
+/// Take and disarm this thread's default-instance walk log. Returns the
+/// mvars [`TermElabM::synthesize_using_default`] considered since the
+/// matching [`default_walk_log_reset`], in visit order — empty if the
+/// log was never armed on this thread.
+pub fn default_walk_log_take() -> Vec<MVarId> {
+    walk_log::take()
+}

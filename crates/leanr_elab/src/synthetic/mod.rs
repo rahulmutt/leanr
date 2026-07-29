@@ -34,9 +34,11 @@
 //! split across sibling modules of the defining crate, so the split
 //! changes no call site and no visibility.
 
+mod default_inst;
 mod ladder;
 mod report;
 pub mod state;
 
+pub use default_inst::{default_walk_log_reset, default_walk_log_take};
 pub use ladder::PostponeBehavior;
 pub use state::{MVarErrorInfo, MVarErrorKind, SavedContext, SyntheticMVarDecl, SyntheticMVarKind};

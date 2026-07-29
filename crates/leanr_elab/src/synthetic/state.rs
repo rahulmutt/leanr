@@ -2,8 +2,10 @@
 //! table, and the registration/scoping helpers. Oracle:
 //! `Lean/Elab/Term/TermElabM.lean`. The scheduling itself is `ladder.rs`.
 
+use std::collections::HashMap;
+
 use leanr_kernel::bank::{ExprId, NameId};
-use leanr_meta::MVarId;
+use leanr_meta::{MVarId, MVarKind, MetaSnapshot};
 
 use crate::dispatch::SynElem;
 use crate::elab::TermElabM;
@@ -92,6 +94,18 @@ pub struct MVarErrorInfo {
     pub kind: MVarErrorKind,
 }
 
+/// oracle: `structure Term.SavedState` (`TermElabM.lean:206-209`) —
+/// `Meta.SavedState × Term.State`, restricted to the `Term.State` fields
+/// leanr models. Produced by [`TermElabM::save_term_state`] and consumed
+/// by [`TermElabM::restore_term_state`]; private, because
+/// [`TermElabM::commit_when`] is the only bracket that needs one.
+struct SavedTermState {
+    meta: MetaSnapshot,
+    pending_mvars: Vec<MVarId>,
+    synthetic_mvars: HashMap<MVarId, SyntheticMVarDecl>,
+    mvar_error_infos: Vec<MVarErrorInfo>,
+}
+
 impl<'e> TermElabM<'e> {
     /// oracle: `registerSyntheticMVar` (`TermElabM.lean:864-865`).
     /// `pending_mvars` is a list whose **head is the most recent** — the
@@ -169,6 +183,101 @@ impl<'e> TermElabM<'e> {
         let out = k(self);
         self.level_names = prev_levels;
         out
+    }
+
+    /// oracle: `Term.mkInstMVar` (`TermElabM.lean:1925-1930`).
+    ///
+    /// **Not** `ElabAppArgs`'s same-named `where`-binding
+    /// (`App.lean:919-923`, ported at `app/args.rs`'s
+    /// `process_inst_implicit_arg`), which mints the mvar, pushes it on
+    /// `instMVars` and DEFERS synthesis to `finalize`. This one
+    /// synthesizes EAGERLY and registers `.typeClass` only `unless` that
+    /// succeeds — the shape a literal needs, since a numeral has no
+    /// enclosing application to defer to. The two are deliberately
+    /// distinct; do not merge them.
+    ///
+    /// The oracle's `extraErrorMsg?` is prose (design spec § Amendment,
+    /// item 2) and is not carried.
+    pub fn mk_inst_mvar(&mut self, ty: ExprId, stx: SynElem) -> Result<ExprId, ElabError> {
+        let (mvar, mvar_id) = self.mk_fresh_expr_mvar_of_kind(ty, MVarKind::Synthetic)?;
+        if !self.synthesize_inst_mvar_core(mvar_id)? {
+            self.register_synthetic_mvar(stx, mvar_id, SyntheticMVarKind::TypeClass);
+        }
+        Ok(mvar)
+    }
+
+    /// oracle: `commitWhen` (`Lean/Util/MonadBacktrack.lean:50-60`) over
+    /// `Term.SavedState` (the `MonadBacktrack SavedState TermElabM`
+    /// instance, `TermElabM.lean:458-460`) — run `f`; keep its effects
+    /// if it returns `true`, roll them back if it returns `false` or
+    /// errors.
+    ///
+    /// **`MetaCtx::checkpoint`/`rollback` alone is NOT enough.**
+    /// `Term.SavedState` is `Meta.SavedState × Term.State`
+    /// (`TermElabM.lean:206-209`), and both P3 callers can register
+    /// synthetic mvars before failing: `synthesizeUsingDefaultInstance`
+    /// calls `synthesizePending`, and `synthesizePendingInstMVar'` calls
+    /// `synthesizeInstMVarCore`. Rolling back only the mctx would leave
+    /// a rejected default instance's subgoals pending forever, and the
+    /// ladder would then report them stuck. So the elaborator's three
+    /// tables are snapshotted too.
+    ///
+    /// `level_names` is NOT snapshotted: it is scoped by
+    /// `with_saved_context` alone and no path below `f` touches it.
+    /// The three fresh-name counters are likewise not restored —
+    /// rewinding them would let a rolled-back attempt's names be REUSED
+    /// by the next attempt, which is exactly the collision the counters
+    /// exist to prevent. That is the oracle's own choice, not an
+    /// approximation: `Core.SavedState.restore` (`CoreM.lean:407-410`)
+    /// writes back `env`/`messages`/`infoState`/`snapshotTasks` and
+    /// deliberately leaves `Core.State.ngen` — the generator behind
+    /// every fresh `FVarId`/`MVarId`/`LMVarId` (`CoreM.lean:192-193`) —
+    /// running forward.
+    ///
+    /// `may_postpone` is likewise not snapshotted: the oracle's
+    /// `mayPostpone` is a `Context` reader field, not part of
+    /// `Term.State` (see [`SavedContext`]'s own doc).
+    pub fn commit_when(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<bool, ElabError>,
+    ) -> Result<bool, ElabError> {
+        // Written as a saved-value struct plus a private restore method
+        // rather than a closure: a closure capturing the saved values by
+        // move cannot be called on both the `Ok(false)` and the `Err`
+        // path, and cloning them into it would double every snapshot on
+        // the (common) committing path.
+        let saved = self.save_term_state();
+        match f(self) {
+            Ok(true) => Ok(true),
+            Ok(false) => {
+                self.restore_term_state(saved);
+                Ok(false)
+            }
+            Err(e) => {
+                self.restore_term_state(saved);
+                Err(e)
+            }
+        }
+    }
+
+    /// oracle: `Term.saveState` (`TermElabM.lean:417-418`), restricted to
+    /// the `Term.State` fields leanr models. See [`TermElabM::commit_when`]
+    /// for what is deliberately left out.
+    fn save_term_state(&self) -> SavedTermState {
+        SavedTermState {
+            meta: self.mctx.checkpoint(),
+            pending_mvars: self.pending_mvars.clone(),
+            synthetic_mvars: self.synthetic_mvars.clone(),
+            mvar_error_infos: self.mvar_error_infos.clone(),
+        }
+    }
+
+    /// oracle: `Term.SavedState.restore` (`TermElabM.lean:420-427`).
+    fn restore_term_state(&mut self, saved: SavedTermState) {
+        self.mctx.rollback(saved.meta);
+        self.pending_mvars = saved.pending_mvars;
+        self.synthetic_mvars = saved.synthetic_mvars;
+        self.mvar_error_infos = saved.mvar_error_infos;
     }
 
     /// oracle: `withoutPostponing` (`TermElabM.lean:1049-1050`).

@@ -367,41 +367,31 @@ fn postpone_yes_leaves_the_mvar_pending() {
     });
 }
 
-/// The default-instance seam fires only when default instances could
-/// actually apply.
-///
-/// Rung 3 is P3's `synthesizeUsingDefault`. P2a supplies a SHAPE-GUARDED
-/// stand-in: it errors when a pending `TypeClass` mvar's class has
-/// default instances registered — the state in which the real rung would
-/// have done something — and reports no progress otherwise. A blanket
-/// `false` would silently skip a rung the oracle runs.
+/// Rung 3 with nothing pending is a no-progress no-op — unchanged
+/// behavior from P2a's seam, but now for the real reason (the priority
+/// walk finds no pending `TypeClass` mvar) rather than a shape guard.
 #[test]
-fn synthesize_using_default_is_a_shape_guarded_seam() {
+fn synthesize_using_default_is_a_no_op_with_nothing_pending() {
     support::with_app_harness("Nat.zero", |app| {
-        // No pending mvars at all: no-op, no progress, no error.
+        let kinds = support::any_kinds();
         assert!(!app
             .elab
-            .synthesize_using_default()
+            .synthesize_using_default(&kinds)
             .expect("no pending mvars -> no-op"));
     });
 }
 
-/// The positive case the shape guard exists FOR: a pending `TypeClass`
-/// mvar whose class HAS a registered `@[default_instance]` must error
-/// naming the P3 seam, not silently return `Ok(false)`.
+/// The case P2a's seam existed for, now solved rather than refused: a
+/// pending `Dflt ?a` goal is closed by applying `@[default_instance]
+/// instDfltNat`, which assigns `?a := Nat`.
 ///
-/// Review finding (M4b-3 P2a task 5 review, finding 2):
-/// `synthesize_using_default_is_a_shape_guarded_seam` above only ever
-/// exercised the vacuous "no pending mvars" path — the guard's own
-/// reason for existing (erroring rather than silently skipping rung 3
-/// when a default instance really is registered) was untested. This
-/// test drives that branch directly, against a class the fixture must
-/// keep separate from `Wrap`/`Pair`/`NoInst` — see `support::dflt_of_nat`'s
-/// own doc for why.
+/// oracle: `synthesizeUsingDefaultPrio` (`SyntheticMVars.lean:113-126`)
+/// -> `synthesizeUsingDefaultInstance` (`:155-173`).
 #[test]
-fn synthesize_using_default_errors_when_a_default_instance_is_registered() {
+fn synthesize_using_default_applies_a_default_instance() {
     support::with_app_harness("Nat.zero", |app| {
-        let goal = support::dflt_of_nat(app);
+        let kinds = support::any_kinds();
+        let goal = support::dflt_of_fresh_mvar(app);
         let (_e, id) = app
             .elab
             .mk_fresh_expr_mvar_of_kind(goal, leanr_meta::MVarKind::Synthetic)
@@ -412,11 +402,274 @@ fn synthesize_using_default_errors_when_a_default_instance_is_registered() {
             leanr_elab::synthetic::SyntheticMVarKind::TypeClass,
         );
         assert!(
-            matches!(
-                app.elab.synthesize_using_default(),
-                Err(leanr_elab::ElabError::UnsupportedSyntax(_))
-            ),
-            "a registered default instance must fire the P3 seam, not silently no-op"
+            app.elab
+                .synthesize_using_default(&kinds)
+                .expect("rung 3 runs"),
+            "a registered default instance must make progress"
+        );
+        assert!(
+            app.elab.mctx.mctx().is_assigned(id),
+            "the goal mvar is assigned by the default instance"
+        );
+    });
+}
+
+/// `commit_when` is a `Term.SavedState` bracket, not a mctx one.
+///
+/// oracle: `commitWhen` (`Lean/Util/MonadBacktrack.lean:50-60`) over the
+/// `MonadBacktrack SavedState TermElabM` instance
+/// (`TermElabM.lean:458-460`), whose `SavedState` is
+/// `Meta.SavedState × Term.State` (`:206-209`). Driven directly rather
+/// than through rung 3 because no default instance in `Elab0` assigns
+/// anything before being rejected — the fixture cannot reach the
+/// restore, so the bracket is tested at its own boundary.
+#[test]
+fn commit_when_restores_the_mctx_and_the_elaborator_tables() {
+    support::with_app_harness("Nat.zero", |app| {
+        let ty = app.st.f_type;
+        let val = app.st.f;
+        let (_e, outer) = app
+            .elab
+            .mk_fresh_expr_mvar_of_kind(ty, leanr_meta::MVarKind::Natural)
+            .expect("fresh mvar");
+
+        // A rejected attempt: every effect below is rolled back.
+        let mut inner = None;
+        let kept = app
+            .elab
+            .commit_when(|s| {
+                let (_e2, id) =
+                    s.mk_fresh_expr_mvar_of_kind(ty, leanr_meta::MVarKind::Synthetic)?;
+                inner = Some(id);
+                s.register_synthetic_mvar(
+                    support::any_syn_elem(),
+                    id,
+                    SyntheticMVarKind::TypeClass,
+                );
+                s.register_mvar_error_hole_info(id, support::any_syn_elem());
+                s.mctx
+                    .mctx_mut()
+                    .assign(outer, val)
+                    .map_err(leanr_elab::ElabError::from)?;
+                Ok(false)
+            })
+            .expect("the closure itself does not error");
+        let inner = inner.expect("the closure ran");
+        assert!(!kept);
+        assert!(
+            app.elab.pending_mvars.is_empty(),
+            "pending_mvars restored: a rejected candidate strands no subgoal"
+        );
+        assert!(
+            app.elab.synthetic_mvar_decl(inner).is_none(),
+            "synthetic_mvars restored"
+        );
+        assert!(
+            app.elab.mvar_error_infos.is_empty(),
+            "mvar_error_infos restored"
+        );
+        assert!(
+            !app.elab.mctx.mctx().is_assigned(outer),
+            "the mctx assignment is rolled back"
+        );
+
+        // The error path restores identically (the oracle's `catch ex =>
+        // restoreState s; throw ex`).
+        let err = app.elab.commit_when(|s| {
+            s.mctx
+                .mctx_mut()
+                .assign(outer, val)
+                .map_err(leanr_elab::ElabError::from)?;
+            Err(leanr_elab::ElabError::UnsupportedSyntax("probe".into()))
+        });
+        assert!(err.is_err());
+        assert!(
+            !app.elab.mctx.mctx().is_assigned(outer),
+            "restored on the error path too"
+        );
+
+        // A COMMITTING attempt keeps everything.
+        let kept = app
+            .elab
+            .commit_when(|s| {
+                s.mctx
+                    .mctx_mut()
+                    .assign(outer, val)
+                    .map_err(leanr_elab::ElabError::from)?;
+                Ok(true)
+            })
+            .expect("ok");
+        assert!(kept);
+        assert!(
+            app.elab.mctx.mctx().is_assigned(outer),
+            "a committing attempt keeps its effects"
+        );
+    });
+}
+
+/// A REJECTED default instance leaves no trace.
+///
+/// oracle: `synthesizeUsingDefaultInstance` runs inside `commitWhen`
+/// (`SyntheticMVars.lean:156`), so a candidate whose `isDefEqGuarded`
+/// fails must restore the state it unified into. `Dflt Unit` is the
+/// minimal shape: `Dflt`'s only `@[default_instance]` is
+/// `instDfltNat : Dflt Nat`, and `Dflt Unit =?= Dflt Nat` cannot hold.
+///
+/// `pending_mvars` is checked as well as the assignment, because
+/// `commit_when` restores `Term.State`'s tables and not only the mctx —
+/// see its own doc for why a mctx-only rollback would strand a rejected
+/// candidate's subgoals on the pending list forever.
+#[test]
+fn a_rejected_default_instance_is_rolled_back() {
+    support::with_app_harness("Nat.zero", |app| {
+        let kinds = support::any_kinds();
+        let goal = support::dflt_of_unit(app);
+        let (_e, id) = app
+            .elab
+            .mk_fresh_expr_mvar_of_kind(goal, leanr_meta::MVarKind::Synthetic)
+            .expect("fresh mvar");
+        app.elab.register_synthetic_mvar(
+            support::any_syn_elem(),
+            id,
+            leanr_elab::synthetic::SyntheticMVarKind::TypeClass,
+        );
+        assert!(
+            !app.elab
+                .synthesize_using_default(&kinds)
+                .expect("rung 3 runs"),
+            "instDfltNat does not apply to `Dflt Unit`"
+        );
+        assert!(
+            !app.elab.mctx.mctx().is_assigned(id),
+            "the rejected candidate must not stay assigned"
+        );
+        assert_eq!(
+            app.elab.pending_mvars,
+            vec![id],
+            "a failed priority walk leaves the pending queue untouched"
+        );
+    });
+}
+
+/// **Ordering test 1 of 2 (design spec § Verification, tier 2).**
+/// `synthesizeSomeUsingDefaultPrio` walks `pendingMVars.reverse` —
+/// REVERSE CREATION ORDER — and the oracle's own comment
+/// (`SyntheticMVars.lean:207-209`) explains why: otherwise `toString 0`
+/// fails with an `OfNat String ?_` error. `pending_mvars`' head is the
+/// MOST RECENT (P2a's invariant), so the walk must visit the OLDEST
+/// first.
+///
+/// The corpus cannot catch this: on a term with one numeral both orders
+/// agree.
+///
+/// The three goals are `OfNat ?a ?n` (oldest), `Wrap ?m`, `NoInst Nat`,
+/// and only the OLDEST has a class with default instances — so under
+/// `pending_mvars` order (newest first) the walk would reach it LAST.
+/// `OfNat` rather than `Dflt` deliberately: its default instances sit
+/// at priorities 500/100, strictly below `instDfltNat`'s bare
+/// `@[default_instance]`, so the TOP priority applies to nothing and
+/// the walk visits all three before dropping a rung. That makes the
+/// recorded order a full three-element sequence
+/// (`[oldest, middle, newest]`) instead of a single entry, and pins the
+/// descending-priority drop in the same log.
+#[test]
+fn default_instance_walk_visits_pending_mvars_in_reverse_creation_order() {
+    support::with_app_harness("Nat.zero", |app| {
+        let kinds = support::any_kinds();
+        let prios = app.elab.mctx.default_instance_priorities();
+        assert_eq!(
+            prios.len(),
+            3,
+            "Elab0's three default-instance priorities, got {prios:?}"
+        );
+        assert!(prios[0] > 500 && prios[1] == 500, "got {prios:?}");
+        let ids = support::register_three_goals_oldest_defaultable(app);
+        let order = support::visit_order_of_default_walk(app, &kinds);
+        assert_eq!(
+            order,
+            vec![ids[0], ids[1], ids[2], ids[0]],
+            "reverse creation order: oldest pending mvar first, at every \
+             priority, and the top priority applies to none of the three"
+        );
+        // oracle: `pendingMVars := pendingMVars.reverse ++
+        // pendingMVarsNew` (`:202`) — the successful entry leaves the
+        // queue, the rest are restored head-is-most-recent.
+        assert_eq!(
+            app.elab.pending_mvars,
+            vec![ids[2], ids[1]],
+            "the solved goal leaves the queue; the rest keep their order"
+        );
+    });
+}
+
+/// The queue rebuild's OTHER half: when the successful entry is not the
+/// first one visited, `pendingMVarsNew` (the skipped prefix, consed) is
+/// appended AFTER the reversed remainder.
+///
+/// oracle: `visit`'s `modify fun s => { s with pendingMVars :=
+/// pendingMVars.reverse ++ pendingMVarsNew }` (`:202`) — with the
+/// defaultable goal FIRST, `pendingMVarsNew` is empty and the append is
+/// invisible, so this drives the middle position.
+#[test]
+fn default_instance_walk_rebuilds_the_pending_queue_newest_first() {
+    support::with_app_harness("Nat.zero", |app| {
+        let kinds = support::any_kinds();
+        let goals = vec![
+            support::wrap_of_fresh_mvar(app),
+            support::of_nat_of_fresh_mvars(app),
+            support::no_inst_of_nat(app),
+        ];
+        let ids = support::register_typeclass_goals(app, goals);
+        assert!(app
+            .elab
+            .synthesize_using_default(&kinds)
+            .expect("rung 3 runs"));
+        assert_eq!(
+            app.elab.pending_mvars,
+            vec![ids[2], ids[0]],
+            "remainder (newest first) then the skipped prefix"
+        );
+    });
+}
+
+/// **Ordering test 2 of 2.** `synthesizeUsingDefault` walks the priority
+/// set in DESCENDING order (`SyntheticMVars.lean:215-221`, "Recall that
+/// `prioSet` is stored in descending order", `:217`), trying every
+/// pending mvar at one priority before dropping to the next.
+///
+/// `Elab0` carries three distinct priorities (`instDfltNat` at the bare
+/// `@[default_instance]` default, `instOfNatTag` 500, `instOfNatNat`
+/// 100), which is what makes this non-vacuous.
+#[test]
+fn default_instance_priorities_are_walked_in_descending_order() {
+    support::with_app_harness("Nat.zero", |app| {
+        let prios = app.elab.mctx.default_instance_priorities();
+        assert!(
+            prios.len() >= 3,
+            "Elab0 must carry three distinct default-instance priorities, got {prios:?}"
+        );
+        let mut descending = prios.clone();
+        descending.sort_unstable();
+        descending.reverse();
+        assert_eq!(prios, descending);
+        // The two priorities the fixture writes EXPLICITLY are pinned;
+        // the bare `@[default_instance]` on `instDfltNat` is only
+        // required to outrank both. Lean's own default for the bare
+        // attribute is not restated here — it is the oracle's to
+        // choose, and pinning it would make this test fail on a
+        // toolchain bump for a reason unrelated to the ordering it
+        // exists to check.
+        assert!(
+            prios.contains(&500),
+            "instOfNatTag's priority, got {prios:?}"
+        );
+        assert!(
+            prios.contains(&100),
+            "instOfNatNat's priority, got {prios:?}"
+        );
+        assert!(
+            prios[0] > 500,
+            "instDfltNat's bare @[default_instance] outranks both explicit ones, got {prios:?}"
         );
     });
 }

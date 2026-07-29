@@ -460,8 +460,9 @@ impl<'e> TermElabM<'e> {
             if self.without_postponing(|e| e.synthesize_synthetic_mvars_step(true, false, kinds))? {
                 continue;
             }
-            // Rung 3: default instances (P3; shape-guarded seam here).
-            if self.synthesize_using_default()? {
+            // Rung 3: default instances. Real since M4b-3 P3 task 5 —
+            // P2a's shape-guarded seam is gone, not retargeted.
+            if self.synthesize_using_default(kinds)? {
                 continue;
             }
             // Rung 4: postponement disabled, errors NOT postponed —
@@ -493,6 +494,29 @@ impl<'e> TermElabM<'e> {
         kinds: &KindInterner,
     ) -> Result<(), ElabError> {
         self.synthesize_synthetic_mvars(PostponeBehavior::No, kinds)
+    }
+
+    /// oracle: `synthesizeUsingDefaultLoop` (`SyntheticMVars.lean:
+    /// 652-656`) — "Keep invoking `synthesizeUsingDefault` until it
+    /// returns false", draining what each applied default instance
+    /// unblocked in between.
+    ///
+    /// Real since M4b-3 P3 task 5. P2a called the guarded seam ONCE from
+    /// `with_synthesize_impl`, which is all a seam that never reports
+    /// progress can do; the design spec (§ P2a, item 3) assigns the loop
+    /// itself to P3 alongside rung 3.
+    ///
+    /// The oracle's tail recursion is a `while` here. It terminates for
+    /// the same reason the oracle's `partial` one does: each `true` from
+    /// `synthesize_using_default` removes a goal from `pending_mvars`
+    /// permanently (the queue rebuild at `:202` drops it), so the loop
+    /// can only run as long as default instances keep closing goals that
+    /// the interleaved `synthesize_synthetic_mvars` re-created.
+    pub fn synthesize_using_default_loop(&mut self, kinds: &KindInterner) -> Result<(), ElabError> {
+        while self.synthesize_using_default(kinds)? {
+            self.synthesize_synthetic_mvars(PostponeBehavior::Yes, kinds)?;
+        }
+        Ok(())
     }
 
     /// oracle: `resumePostponed` (`SyntheticMVars.lean:32-74`) —
@@ -549,39 +573,6 @@ impl<'e> TermElabM<'e> {
         }
     }
 
-    /// Rung 3's stand-in. P3 replaces the body with
-    /// `synthesizeUsingDefault` / `synthesizeSomeUsingDefaultPrio` /
-    /// `synthesizeUsingDefaultPrio` (`SyntheticMVars.lean:215-221`,
-    /// `:193-210`, `:113-190`).
-    ///
-    /// Shape-guarded rather than a blanket `false`: it errors when a
-    /// pending `TypeClass` mvar's class has default instances
-    /// registered — the exact state in which the real rung would have
-    /// done something — and reports "no progress" otherwise. That keeps
-    /// the seam from silently skipping a rung the oracle runs, without
-    /// building P3's reverse-creation-order walk here.
-    pub fn synthesize_using_default(&mut self) -> Result<bool, ElabError> {
-        for mvar_id in self.pending_mvars.clone() {
-            if !matches!(
-                self.synthetic_mvar_decl(mvar_id).map(|d| &d.kind),
-                Some(SyntheticMVarKind::TypeClass)
-            ) {
-                continue;
-            }
-            let Some(class) = self.pending_class_name(mvar_id)? else {
-                continue;
-            };
-            if !self.mctx.default_instances_of(class).is_empty() {
-                return Err(ElabError::UnsupportedSyntax(
-                    "default instances for a pending typeclass mvar require \
-                     synthesizeUsingDefault — M4b-3 P3"
-                        .to_string(),
-                ));
-            }
-        }
-        Ok(false)
-    }
-
     /// oracle: `withSynthesizeImp` (`SyntheticMVars.lean:662-672`).
     ///
     /// Save the caller's pending mvars, clear, run `k`, synthesize what
@@ -590,9 +581,9 @@ impl<'e> TermElabM<'e> {
     /// happens on the error path too.
     ///
     /// The oracle also runs `synthesizeUsingDefaultLoop` when
-    /// `postpone == .yes`; that loop is P3's, and P2a's guarded
-    /// `synthesize_using_default` stands in for it (design spec
-    /// § Amendment, item 3).
+    /// `postpone == .yes` (`:668-669`) — real since M4b-3 P3 task 5,
+    /// where P2a's guarded stand-in became `default_inst.rs`'s
+    /// `synthesizeUsingDefault`.
     pub fn with_synthesize<R>(
         &mut self,
         postpone: PostponeBehavior,
@@ -657,9 +648,8 @@ impl<'e> TermElabM<'e> {
         };
         let mut synth = self.synthesize_synthetic_mvars(postpone, kinds);
         if synth.is_ok() && run_default_loop {
-            // oracle: `synthesizeUsingDefaultLoop` (:653). P3 owns the
-            // real loop; the guarded seam stands in.
-            synth = self.synthesize_using_default().map(|_| ());
+            // oracle: `synthesizeUsingDefaultLoop` (:669).
+            synth = self.synthesize_using_default_loop(kinds);
         }
         self.pending_mvars.extend(saved);
         synth?;
