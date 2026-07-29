@@ -439,6 +439,47 @@ def instImplicitQueries : List (String × String) :=
   , ("tc/letWrapElided",   "let x := useWrap Nat.zero; x")
   ]
 
+/-- M4b-3 P3 task 6: numerals. `num/bare` is the whole point — a
+numeral with NO expected type reaches the oracle's answer only through
+the default-instance rung, so it is the first corpus record for which
+`synthesizeSyntheticMVarsNoPostponing` does real work.
+
+MEASURED, and NOT what task 6's brief predicted: in THIS fixture the
+default-instance walk picks `instOfNatTag` (priority 500), not
+`instOfNatNat` (priority 100) — `Elab0.lean` deliberately gives `Tag`
+the higher priority so the descending-priority walk is observable, and
+that higher priority is exactly what wins for a bare numeral. So bare
+`42` elaborates with carrier `Tag` here, where in a real `Init`
+environment (where `instOfNatNat` is the only `OfNat` default) it would
+be `Nat`. The records below are labelled by what they actually
+discriminate:
+  * `num/ascribedNat` — an expected type whose instance LOSES the
+    priority walk (`instOfNatNat`, 100). This is the record that proves
+    a propagated expected type beats defaulting: it differs from
+    `num/bare` in both the carrier and the instance.
+  * `num/ascribedTag` — an expected type whose instance is the one the
+    walk would have chosen anyway (`instOfNatTag`, 500), so it AGREES
+    with `num/bare`. Kept as the other half of the pair: together the
+    two pin that the carrier follows the expected type when there is
+    one, rather than the priority order.
+  * `num/hex`, `num/underscores` — token decoding, same elaborated
+    shape as `num/bare` but a different `decodeNatLitVal?` path;
+  * `num/inApp` — a numeral as an APPLICATION ARGUMENT, where the
+    parameter type fixes the carrier before the fixpoint runs, so
+    eager synthesis at `mkInstMVar` closes the instance goal and the
+    default rung never fires. The contrast with `num/bare` is what
+    shows the ladder escalating only when it must;
+  * `num/zero` — the `decodeNatLitVal?` single-`0` special case. -/
+def numQueries : List (String × String) :=
+  [ ("num/bare",        "42")
+  , ("num/zero",        "0")
+  , ("num/hex",         "0x2A")
+  , ("num/underscores", "1_000_000")
+  , ("num/ascribedNat", "(42 : Nat)")
+  , ("num/ascribedTag", "(42 : Tag)")
+  , ("num/inApp",       "pick 1 2")
+  ]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -452,7 +493,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>

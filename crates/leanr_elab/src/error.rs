@@ -77,6 +77,21 @@ pub enum ElabError {
         f: ExprId,
         f_type: ExprId,
     },
+    /// oracle: `elabNumLit`'s two `getDecLevel` failure branches
+    /// (`BuiltinTerm.lean:219-223`) — "numerals are data in Lean, but
+    /// the expected type is a proposition" and "…is universe
+    /// polymorphic and may be a proposition". Two distinct oracle
+    /// errors, kept distinct by `is_prop` rather than collapsed: they
+    /// say different things about what the user must change.
+    NumeralIsNotData {
+        expected: ExprId,
+        is_prop: bool,
+    },
+    /// A literal TOKEN that leanr's lexer accepted but the oracle's own
+    /// decoder rejects, or one whose value exceeds `u64` (a named seam;
+    /// see `builtin::lit::decode::decode_nat_literal`). Distinct from
+    /// `IllFormedSyntax`, which is about tree SHAPE.
+    IllFormedLiteral(String),
 }
 
 impl From<MetaError> for ElabError {

@@ -950,3 +950,67 @@ fn entry_point_runs_the_fixpoint() {
          surviving mvar node, got {full}"
     );
 }
+
+/// `42` with no expected type elaborates to
+/// `@OfNat.ofNat.{?u} ?α 42 ?inst`, with the instance goal PENDING
+/// (nothing determines `?α` yet) — and the ladder then closes it at
+/// rung 3, assigning `?α` from the highest-priority applicable
+/// `@[default_instance]`.
+///
+/// oracle: `elabNumLit` (`BuiltinTerm.lean:210-229`) followed by the
+/// entry point's `synthesizeSyntheticMVarsNoPostponing`. This is the
+/// first term in leanr's grammar for which rung 3 does real work.
+///
+/// In THIS fixture the winner is `instOfNatTag` (priority 500), not
+/// `instOfNatNat` (priority 100): `Elab0.lean` gives `Tag` the higher
+/// priority deliberately, so the descending-priority walk is
+/// observable. Asserting the winning instance by name is what makes
+/// this a rung-3 test rather than merely an "some instance was found"
+/// test — an eager `mkInstMVar` on `OfNat ?α 42` cannot pick a
+/// candidate at all (Task 2's stuck predicate), so `instOfNatTag` in
+/// the output can only have come from the default-instance rung.
+/// Cross-checked against the pinned oracle: corpus record `num/bare`
+/// in `tests/fixtures/elab/elab-queries.jsonl` carries exactly this
+/// term.
+#[test]
+fn a_bare_numeral_is_closed_by_the_default_instance_rung() {
+    let got = support::elab_and_synthesize("42").expect("42 elaborates");
+    let rendered = got.to_string();
+    assert!(
+        rendered.contains("OfNat.ofNat"),
+        "emits an OfNat.ofNat application, got {rendered}"
+    );
+    assert!(
+        rendered.contains("instOfNatTag"),
+        "the instance goal is closed by the highest-priority default \
+         instance, got {rendered}"
+    );
+    assert!(
+        !rendered.contains("mvar"),
+        "the fixpoint leaves no dangling metavariable, got {rendered}"
+    );
+}
+
+/// The contrast case: an expected type pins `?α` inside
+/// `mkFreshTypeMVarFor`'s own `isDefEq`, so the `OfNat Nat 42` goal is
+/// GROUND by the time `Term.mkInstMVar` runs and eager synthesis closes
+/// it — the default rung never fires, and the priority-500
+/// `instOfNatTag` that wins for a bare numeral loses here.
+///
+/// Corpus records `num/ascribedNat` / `num/bare` pin the same pair
+/// against the oracle; this states the mechanism the pair is evidence
+/// for.
+#[test]
+fn an_ascribed_numeral_follows_the_expected_type_not_the_priority_walk() {
+    let bare = support::elab_and_synthesize("42").expect("42 elaborates");
+    let ascribed = support::elab_and_synthesize("(42 : Nat)").expect("(42 : Nat) elaborates");
+    assert!(
+        ascribed.to_string().contains("instOfNatNat"),
+        "the propagated expected type selects instOfNatNat, got {ascribed}"
+    );
+    assert_ne!(
+        bare, ascribed,
+        "defaulting and propagation must reach DIFFERENT carriers in this \
+         fixture — if they agree, the expected type is not reaching the numeral"
+    );
+}

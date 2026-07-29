@@ -220,8 +220,11 @@ fn unregistered_kinds_are_named_by_kind() {
         ("Nat.zero.1", "Lean.Parser.Term.proj"),
         ("Nat.zero |>.1", "Lean.Parser.Term.pipeProj"),
         ("x@Nat.zero", "Lean.Parser.Term.namedPattern"),
-        // M4b-3 P3, the literals that are not leaves.
-        ("0", "num"),
+        // M4b-3 P3 task 7, the literals that are not leaves and have
+        // not landed yet. `num` was the third member; task 6 registered
+        // it (`@OfNat.ofNat.{u}` plus the default-instance rung), so it
+        // is no longer an unregistered kind and its records live in the
+        // committed corpus instead.
         ("'a'", "char"),
     ];
     for (src, kind) in cases {

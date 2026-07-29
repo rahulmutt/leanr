@@ -1,45 +1,87 @@
-//! The one literal that is a leaf (design spec § Scope): a string
-//! literal elaborates straight to `Expr.lit (.strVal _)`, no instance
-//! search, no `OfNat`/`Char.ofNat` machinery. `num`/`char` are NOT
-//! leaves — both elaborate through an application (`OfNat.ofNat` /
-//! `Char.ofNat`) requiring instance synthesis, so they land in M4b-3
-//! and are never registered here.
+//! The literal TOKEN decoders: raw source text -> value. Oracle:
+//! `Init/Meta/Defs.lean`'s `decodeStrLit`/`decodeNatLitVal?` family.
+//!
+//! Split out of `builtin/lit.rs` by M4b-3 P3 task 6 so the elaborators
+//! (`mod.rs`) and the pure string->value decoders live apart; every
+//! function here is total on `&str` and returns `Option`/a value rather
+//! than throwing, because the elaborator side is what turns a rejection
+//! into a named `ElabError`.
 
-use leanr_kernel::bank::ExprId;
-use leanr_syntax::kind::KindInterner;
-use leanr_syntax::tree::SyntaxNode;
+/// oracle: `decodeNatLitVal?` (`Init/Meta/Defs.lean:964-979`).
+///
+/// A leading `0` is a radix prefix only when `x`/`X`, `b`/`B` or `o`/`O`
+/// follows; `007` is decimal seven, and `0` alone is zero. `_` is a
+/// digit separator in every radix. Returns `None` for anything the
+/// oracle rejects — the caller turns that into `IllFormedLiteral`
+/// rather than panicking, even though leanr's own lexer has already
+/// validated the token.
+///
+/// **NAMED SEAM (`u64` width).** The oracle's result is an
+/// arbitrary-precision `Nat`, and so is leanr's own `Nat`; this decoder
+/// nonetheless folds into a `u64` and returns `None` on overflow rather
+/// than wrapping. The value's only consumer is
+/// [`super::mk_raw_nat_lit`], which needs it just to build one
+/// `Store::expr_lit_nat` row, and a literal wider than `u64` is not
+/// reachable from the committed corpus. `elab_num` turns the `None`
+/// into `ElabError::IllFormedLiteral` naming this seam, so an overflow
+/// is an attributable error rather than a silently wrapped value; the
+/// fix, when a corpus record needs it, is to fold into `Nat` directly
+/// here.
+pub(crate) fn decode_nat_literal(s: &str) -> Option<u64> {
+    let cs: Vec<char> = s.chars().collect();
+    // Every index below is guarded: `cs[0]` only after the emptiness
+    // test, `cs[1]` only after `cs.len() == 1` returned, and `cs[2..]`
+    // only where `cs.len() >= 2` is already known (an empty digit run
+    // is `Some(0)`, matching the oracle's own `atEnd` base case).
+    if cs.is_empty() {
+        return None;
+    }
+    if cs[0] == '0' {
+        if cs.len() == 1 {
+            return Some(0);
+        }
+        return match cs[1] {
+            'x' | 'X' => digits(&cs[2..], 16),
+            'b' | 'B' => digits(&cs[2..], 2),
+            'o' | 'O' => digits(&cs[2..], 8),
+            // oracle: `else if c.isDigit then decodeDecimalLitAux s 0 0`
+            // — note the restart at index 0, NOT 1: the leading `0` is
+            // part of the decimal run, so `007` is seven.
+            c if c.is_ascii_digit() => digits(&cs, 10),
+            _ => None,
+        };
+    }
+    if cs[0].is_ascii_digit() {
+        return digits(&cs, 10);
+    }
+    None
+}
 
-use crate::elab::TermElabM;
-use crate::error::ElabError;
-
-/// oracle: `Lean.Elab.Term.elabStrLit` (`Lean/Elab/BuiltinTerm.lean`) —
-/// note the oracle itself never consults `expectedType?` for a string
-/// literal (`fun stx _ => ...`); the value comes straight from the
-/// syntax, independent of what the caller expects.
-pub fn elab_str(
-    elab: &mut TermElabM,
-    node: &SyntaxNode,
-    _kinds: &KindInterner,
-) -> Result<ExprId, ElabError> {
-    // `node` is the `str` syntax node itself (a single atom child in
-    // the oracle's own model, `Syntax.mkLit`); its `.text()` is exactly
-    // that atom's raw source text — quotes and un-decoded escapes
-    // included, no surrounding whitespace (confirmed empirically:
-    // leanr's parser discovers trailing trivia lazily, only once the
-    // Pratt loop peeks past the already-closed literal node, so it
-    // never becomes a child of the literal node itself).
-    let raw = node.text().to_string();
-    let s = decode_string_literal(&raw);
-    let id = elab
-        .mctx
-        .store_mut()
-        .expr_lit_str(None, &s)
-        .map_err(leanr_meta::MetaError::from)?;
-    Ok(id)
+/// The shared body of `decodeDecimalLitAux`/`decodeBinLitAux`/
+/// `decodeOctalLitAux`/`decodeHexLitAux` (`:923-962`): fold digits of
+/// the given radix, skipping `_`, rejecting anything else. An empty
+/// digit run is `Some(0)` — the oracle's own `atEnd -> some val` base
+/// case with `val = 0`.
+///
+/// `char::to_digit` accepts exactly the character sets the four oracle
+/// helpers do at radix 2/8/10/16 (ASCII digits, plus `a`-`f`/`A`-`F` at
+/// 16), and nothing else — in particular no non-ASCII digit, matching
+/// `Char.isDigit`. `checked_mul`/`checked_add` are the `u64` seam
+/// documented on [`decode_nat_literal`].
+fn digits(cs: &[char], radix: u32) -> Option<u64> {
+    let mut val: u64 = 0;
+    for c in cs {
+        if *c == '_' {
+            continue;
+        }
+        let d = c.to_digit(radix)?;
+        val = val.checked_mul(radix as u64)?.checked_add(d as u64)?;
+    }
+    Some(val)
 }
 
 /// Decode a Lean string-literal TOKEN (raw source text of a `str`
-/// syntax node, quotes included — exactly `elab_str`'s `raw` above) to
+/// syntax node, quotes included — exactly `elab_str`'s `raw`) to
 /// its value. Transcribes `Init.Meta.Defs.decodeStrLit` /
 /// `decodeStrLitAux` / `decodeQuotedChar` / `decodeRawStrLitAux` (read
 /// directly from the pinned toolchain source,
@@ -66,7 +108,7 @@ pub fn elab_str(
 ///   corpus's `Elab0`/`dump_elab.lean` doc comment scopes this slice
 ///   to), included because the token shape is trivial to distinguish
 ///   correctly once already walking the raw text.
-fn decode_string_literal(raw: &str) -> String {
+pub(crate) fn decode_string_literal(raw: &str) -> String {
     let chars: Vec<char> = raw.chars().collect();
     if chars.first() == Some(&'r') {
         let mut i = 1;
@@ -152,14 +194,34 @@ fn decode_string_literal(raw: &str) -> String {
     out
 }
 
-fn hex_digit(c: char) -> u32 {
+pub(crate) fn hex_digit(c: char) -> u32 {
     c.to_digit(16)
         .expect("well-formed \\x/\\u escape (parser-validated token)")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::decode_string_literal;
+    use super::{decode_nat_literal, decode_string_literal};
+
+    /// oracle: `decodeNatLitVal?` (`Init/Meta/Defs.lean:964-979`) and
+    /// its four radix helpers (`:923-962`). Underscores are separators
+    /// in every radix; a leading `0` is only a radix prefix when a
+    /// radix letter follows.
+    #[test]
+    fn nat_literal_radixes_and_separators() {
+        assert_eq!(decode_nat_literal("42"), Some(42));
+        assert_eq!(decode_nat_literal("0"), Some(0));
+        assert_eq!(decode_nat_literal("007"), Some(7));
+        assert_eq!(decode_nat_literal("1_000_000"), Some(1_000_000));
+        assert_eq!(decode_nat_literal("0x2A"), Some(42));
+        assert_eq!(decode_nat_literal("0X2a"), Some(42));
+        assert_eq!(decode_nat_literal("0b1010"), Some(10));
+        assert_eq!(decode_nat_literal("0o52"), Some(42));
+        assert_eq!(decode_nat_literal("0xff_ff"), Some(65535));
+        assert_eq!(decode_nat_literal(""), None);
+        assert_eq!(decode_nat_literal("0z1"), None);
+        assert_eq!(decode_nat_literal("12a"), None);
+    }
 
     #[test]
     fn plain() {
