@@ -1473,18 +1473,15 @@ const MAX_RESULT_SIZE: usize = 128;
 
 /// oracle: `PreprocessKind` (`SynthInstance.lean:706-716`).
 ///
-/// **The classification is behavior-neutral in this crate today, and
-/// that is deliberate rather than dead code.** The oracle branches on
-/// it twice: to decide whether to run `preprocessOutParam` (`:979-1002`
-/// — every arm but `.mvarsNoOutputParams` does) and to build the
-/// synthesis cache key (`:757-773`). For a class with no output
-/// parameters `preprocessOutParam` is the identity, so the first branch
-/// collapses here; the second has no consumer at all, because this
-/// crate has no synthesis cache (NAMED SEAM, design spec § Seams,
-/// owner: the slice that builds one). The kind is computed anyway so
-/// that the seam is one missing CONSUMER rather than a missing
-/// classification — and so that the `cacheKeyType` port, when it lands,
-/// is additive.
+/// The oracle branches on it twice: to decide whether to run
+/// `preprocessOutParam` (`:979-1002` — every arm but
+/// `.mvarsNoOutputParams` does) and to build the synthesis cache key
+/// (`:757-773`). **The first branch has a real consumer as of Task 6**
+/// (`synth_instance_preprocessed`'s own `match kind`); the second still
+/// does not, because this crate has no synthesis cache (NAMED SEAM,
+/// design spec § Seams, owner: the slice that builds one) -- so the
+/// `cacheKeyType` field `PreprocessResult` deliberately omits (see its
+/// own doc) still has nothing to feed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PreprocessKind {
     NoMVars,
@@ -1501,15 +1498,9 @@ enum PreprocessKind {
 #[derive(Debug)]
 struct PreprocessResult {
     ty: ExprId,
-    // `kind: _` at `synth_instance_preprocessed`'s only production call
-    // site (deliberately, per [`PreprocessKind`]'s own doc -- Task 6
-    // adds the branch consumer) means this field is never PROJECTED
-    // outside `#[cfg(test)]`, which `-D warnings` dead-code lint flags
-    // even though it is very much read (by every `preprocess_*` test,
-    // and by `PreprocessKind`'s own construction sites). Allowed rather
-    // than deleted, matching this module's one other such allow
-    // (`synth_instance`'s own, above).
-    #[allow(dead_code)]
+    // Projected by `synth_instance_preprocessed`'s `match kind` as of
+    // Task 6 (previously `kind: _` there, with a `#[allow(dead_code)]`
+    // on this field -- both now stale and removed).
     kind: PreprocessKind,
 }
 
@@ -1718,6 +1709,127 @@ impl<'e> MetaCtx<'e> {
         Ok(PreprocessResult { ty, kind })
     }
 
+    /// oracle: `preprocessOutParam` (`SynthInstance.lean:775-818` --
+    /// corrected from the brief's `:775-817`: the function's own final
+    /// line, `mkForallFVars xs (mkAppN c args)`, is at `:818`).
+    ///
+    /// Replaces the caller's terms in output-parameter positions with
+    /// fresh metavariables, and refreshes universes that occur only in
+    /// output-parameter types. The point is not the substitution itself
+    /// but what it buys the caller: the search then never unifies
+    /// against the caller's term in those positions, so it can neither
+    /// get stuck on it (the oracle's `isDefEqStuckEx` path) nor assign
+    /// it eagerly (this crate's, which has no read-only mvars). The
+    /// caller's term is reconciled afterwards, by
+    /// `MetaCtx::assign_out_params` (Task 7).
+    ///
+    /// The oracle's `forallTelescope` here is the NON-reducing one and
+    /// leanr's goals are binder-free by the time `preprocess` has
+    /// seamed the pi case, so there is no telescope to open.
+    fn preprocess_out_param(&mut self, ty: ExprId) -> Result<ExprId, MetaError> {
+        let head = self.get_app_fn(ty);
+        // `name: Some(name)`, matching `preprocess`'s own idiom just
+        // above (this crate's `Node::Const.name` is `Option<NameId>`):
+        // an unnamed `Const` falls through to the same "not a class"
+        // identity as a non-`Const` head.
+        let Node::Const {
+            name: Some(name),
+            levels,
+        } = self.node(head)
+        else {
+            return Ok(ty);
+        };
+        if head == ty {
+            // oracle: the `typeBody.isConst` workaround (`:778` --
+            // corrected from the brief's `:780`, which is the next
+            // line, `let .const declName us := c | return type`).
+            return Ok(ty);
+        }
+        let out_params: Vec<usize> = self.get_out_param_positions(name).unwrap_or(&[]).to_vec();
+        let out_levels: Vec<usize> = self
+            .get_out_level_param_positions(name)
+            .unwrap_or(&[])
+            .to_vec();
+        if out_params.is_empty() && out_levels.is_empty() {
+            // oracle: the empty early return (`:784`).
+            return Ok(ty);
+        }
+        // oracle: `preprocessLevels` (`:785-794` -- corrected from the
+        // brief's `:786-795`, which starts one line late and ends one
+        // line into `preprocessArgs`'s own declaration).
+        let base = Some(self.view.store);
+        let head = if out_levels.is_empty() {
+            head
+        } else {
+            let us = self.scratch.level_list_at(base, levels).to_vec();
+            let mut fresh = Vec::with_capacity(us.len());
+            for (i, u) in us.into_iter().enumerate() {
+                if out_levels.contains(&i) {
+                    fresh.push(self.fresh_level_mvar()?.1);
+                } else {
+                    fresh.push(u);
+                }
+            }
+            let base = Some(self.view.store);
+            let levels2 = self.scratch.intern_level_list(base, &fresh)?;
+            self.scratch.expr_const(base, Some(name), levels2)?
+        };
+        if out_params.is_empty() {
+            let args = self.get_app_args(ty);
+            return self.mk_app_spine(head, &args);
+        }
+        // oracle: `preprocessArgs` (`:795-811` -- corrected from the
+        // brief's `:796-812`, which starts one line late, at the
+        // `if h : i < args.size then` guard rather than the `let rec`
+        // itself, and ends one line late, on the call-site's own
+        // `let args := typeBody.getAppArgs` rather than the recursive
+        // function's `return args`) -- walk the class's own type
+        // alongside the arguments so each fresh mvar gets the
+        // PARAMETER's type, and instantiate as we go so a later
+        // parameter's type sees the earlier substitutions.
+        let mut args = self.get_app_args(ty);
+        let mut c_type = self.infer_type(head)?;
+        // `for (i, arg) in args.iter_mut().enumerate()`, not the brief's
+        // `for i in 0..args.len()` -- clippy's `needless_range_loop`
+        // (`-D warnings` under `mise run ci`) flags the range form here
+        // since the body's only use of `i` besides indexing `args` is
+        // the `out_params.contains(&i)` membership check, which
+        // `enumerate()` supplies just as well. Semantics unchanged:
+        // `arg` aliases `args[i]` for both the write (an out-param
+        // position) and the read (`instantiate`'s substitution) below.
+        for (i, arg) in args.iter_mut().enumerate() {
+            self.step()?;
+            c_type = self.whnf(c_type)?;
+            let Node::Forall {
+                binder_type, body, ..
+            } = self.node(c_type)
+            else {
+                // oracle: `:809` (the `throwError`; corrected from the
+                // brief's `:808`, which is the `| _ =>` match arm one
+                // line above it) -- the telescope ran out before the
+                // caller's argument count did. Untrusted-input
+                // discipline: an out-of-range out-param position from
+                // decoded `.olean` bytes cannot get here at all (this
+                // loop only ever indexes `0..args.len()`), but a class
+                // whose declared arity is simply shorter than the
+                // caller's application hits this arm safely, as an
+                // `Err` rather than a panic or an out-of-bounds index.
+                return Err(MetaError::Infer(
+                    "preprocess_out_param: type class resolution failed, insufficient number \
+                     of arguments (SynthInstance.lean:809)"
+                        .to_string(),
+                ));
+            };
+            if out_params.contains(&i) {
+                let (m, _) = self.mk_aux_mvar(binder_type)?;
+                *arg = m;
+            }
+            let base = Some(self.view.store);
+            c_type = instantiate(self.scratch, base, body, *arg, &mut self.guard)?;
+        }
+        self.mk_app_spine(head, &args)
+    }
+
     fn synth_instance_main(&mut self, ty: ExprId) -> Result<Option<ExprId>, MetaError> {
         // oracle: `main` wraps the ENTIRE search in `withConfig`
         // (`SynthInstance.lean:963-964`):
@@ -1796,9 +1908,23 @@ impl<'e> MetaCtx<'e> {
     /// under this crate's `withNewMCtxDepth` stand-in (the
     /// `checkpoint`/`rollback` pair), then apply the result OUTSIDE it.
     fn synth_instance_preprocessed(&mut self, ty: ExprId) -> Result<Option<ExprId>, MetaError> {
-        let PreprocessResult { ty, kind: _ } = self.preprocess(ty)?;
+        let PreprocessResult { ty, kind } = self.preprocess(ty)?;
         let snap = self.checkpoint();
-        let r = self.synth_instance_body(ty);
+        // oracle: the `withNewMCtxDepth` dispatch (`match kind`,
+        // `SynthInstance.lean:979-1002` -- corrected from the brief's
+        // `:983-1002`, matching task 5's own correction of the same
+        // citation). Only `.mvarsNoOutputParams` skips
+        // `preprocessOutParam` -- `.noMVars` runs it too, deliberately
+        // (the `OrderDual` note, `:981-999` -- corrected from the
+        // brief's `:984-999`; the note's own comment block opens at
+        // `:981`, not `:984`).
+        let searched = match kind {
+            PreprocessKind::MVarsNoOutputParams => Ok(ty),
+            PreprocessKind::NoMVars | PreprocessKind::MVarsOutputParams => {
+                self.preprocess_out_param(ty)
+            }
+        };
+        let r = searched.and_then(|t| self.synth_instance_body(t));
         self.rollback(snap);
         r
     }
@@ -3115,6 +3241,118 @@ mod tests {
             assert!(
                 !matches!(kind, PreprocessKind::NoMVars),
                 "a level-mvar-only goal must not classify as NoMVars, got {kind:?}"
+            );
+        });
+    }
+
+    // -----------------------------------------------------------------
+    // preprocess_out_param (task 6)
+    // -----------------------------------------------------------------
+
+    /// An `Expr.const` for `name` at EXPLICIT levels, one per entry of
+    /// `levels` (each entry `k` builds `Level.zero` succ'd `k` times) --
+    /// the idiom `mk_const_with_fresh_mvar_levels` uses to mint fresh
+    /// ones (`synth.rs:2077-2093`, now `intern_level_list` +
+    /// `expr_const`, immediately below this task's `preprocess_out_param`),
+    /// specialized here to CHOSEN levels rather than fresh mvars. Kept
+    /// local to this test module per the brief -- no production call
+    /// site needs it.
+    fn const_named_at_levels(ctx: &mut MetaCtx, name: &str, levels: &[u64]) -> ExprId {
+        let base = Some(ctx.view.store);
+        let s = ctx.scratch.intern_str(base, name).expect("intern");
+        let n = ctx.scratch.name_str(base, None, s).expect("name");
+        let mut us = Vec::with_capacity(levels.len());
+        for &k in levels {
+            let mut l = ctx.scratch.level_zero(base).expect("zero");
+            for _ in 0..k {
+                l = ctx.scratch.level_succ(base, l).expect("succ");
+            }
+            us.push(l);
+        }
+        let levels2 = ctx.scratch.intern_level_list(base, &us).expect("levels");
+        ctx.scratch
+            .expr_const(base, Some(n), levels2)
+            .expect("const")
+    }
+
+    /// Whether `l` is (syntactically) a level metavariable node -- the
+    /// same test as `KeyNormalizer::norm_level_body`'s own
+    /// `LevelRow::MVar` arm (`:517` above) matches against, minus the
+    /// resolve-if-assigned step that function does before returning
+    /// (this helper's only callers apply it to a FRESH, deliberately
+    /// unassigned mvar). Kept local to this test module per the brief.
+    impl<'e> MetaCtx<'e> {
+        fn is_level_mvar(&self, l: LevelId) -> bool {
+            let base = Some(self.view.store);
+            matches!(self.scratch.level_row(base, l), LevelRow::MVar(_))
+        }
+    }
+
+    /// oracle: `preprocessOutParam` (`SynthInstance.lean:775-818`).
+    /// Output-parameter arguments are replaced by FRESH metavariables so
+    /// the search never unifies against the caller's term in those
+    /// positions; every other argument is untouched.
+    #[test]
+    fn preprocess_out_param_replaces_output_arguments() {
+        with_instances_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let op = const_named(ctx, "Op");
+            let goal = ctx.mk_app_spine(op, &[n, n, n]).expect("app");
+            let pre = ctx
+                .preprocess_out_param(goal)
+                .expect("preprocess_out_param");
+            let args = ctx.get_app_args(pre);
+            assert_eq!(args.len(), 3);
+            assert_eq!(args[0], n, "ordinary parameter untouched");
+            assert_eq!(args[1], n, "ordinary parameter untouched");
+            assert!(
+                matches!(ctx.node(args[2]), Node::MVar { .. }),
+                "output parameter replaced by a fresh mvar"
+            );
+        });
+    }
+
+    /// A class with NO output parameters is returned unchanged -- the
+    /// oracle's `outParamsPos.isEmpty && outLevelParamPos.isEmpty` early
+    /// return (`:784`).
+    #[test]
+    fn preprocess_out_param_is_identity_without_out_params() {
+        with_instances_ctx(|ctx| {
+            let goal = parse_goal(ctx, "Add N");
+            assert_eq!(ctx.preprocess_out_param(goal).expect("identity"), goal);
+        });
+    }
+
+    /// oracle: `preprocessLevels` (`:785-794`) -- universes occurring
+    /// ONLY in output-parameter types are refreshed to fresh level
+    /// mvars, so a candidate at a different universe can still match.
+    /// This is a UNIT test rather than a corpus record on purpose: the
+    /// committed record scheme has no `lmvar` case at all
+    /// (`dump_synth.lean`'s `encLevel` panics on one, deliberately), so
+    /// a goal carrying a level mvar cannot be dumped.
+    #[test]
+    fn preprocess_out_param_refreshes_out_only_universes() {
+        with_instances_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            // `Lvl.{0, 0} N N` -- universe 1 is `outLevelParams == #[1]`.
+            let lvl = const_named_at_levels(ctx, "Lvl", &[0, 0]);
+            let goal = ctx.mk_app_spine(lvl, &[n, n]).expect("app");
+            let pre = ctx
+                .preprocess_out_param(goal)
+                .expect("preprocess_out_param");
+            let head = ctx.get_app_fn(pre);
+            let Node::Const { levels, .. } = ctx.node(head) else {
+                panic!("head stays a constant")
+            };
+            let base = Some(ctx.view.store);
+            let us = ctx.scratch.level_list_at(base, levels);
+            assert!(
+                !ctx.is_level_mvar(us[0]),
+                "universe 0 is not out-only: untouched"
+            );
+            assert!(
+                ctx.is_level_mvar(us[1]),
+                "universe 1 is out-only: refreshed"
             );
         });
     }
