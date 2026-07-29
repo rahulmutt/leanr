@@ -533,7 +533,7 @@ impl<'e> MetaCtx<'e> {
     /// — the GLOBAL priority set across every class, DESCENDING and
     /// distinct (`PrioritySet := Std.TreeSet Nat (fun x y => compare y x)`,
     /// `Instances.lean:383`). `synthesizeUsingDefault`
-    /// (`SyntheticMVars.lean:215-222`) walks it outermost, trying every
+    /// (`SyntheticMVars.lean:215-221`) walks it outermost, trying every
     /// pending mvar at one priority before dropping to the next.
     ///
     /// New rather than derived: `default_instances`/`default_instances_of`
@@ -626,7 +626,10 @@ mod tests {
     ///
     /// Builds a SYNTHETIC `defaults` table rather than reading
     /// `Instances.olean`'s (fix round 1, review Important 1).
-    /// `Instances.lean:88` declares exactly ONE `@[default_instance]`,
+    /// The FIXTURE — `tests/fixtures/Instances.lean:88`, NOT the
+    /// toolchain's `Lean/Meta/Instances.lean` that every other
+    /// `Instances.lean:NNN` citation in this file means — declares
+    /// exactly ONE `@[default_instance]` (`instOfNN`),
     /// so the fixture yields a one-element vec, against which the task
     /// brief's sketched assertion — re-applying the implementation's own
     /// `sort_unstable`/`dedup`/`reverse` to a clone and comparing — was

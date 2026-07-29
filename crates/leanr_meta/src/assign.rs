@@ -137,7 +137,7 @@ impl<'e> MetaCtx<'e> {
         }
     }
 
-    /// `isAssignable` (ExprDefEq.lean:1731-1734), restricted to the
+    /// `isAssignable` (ExprDefEq.lean:1731-1733), restricted to the
     /// "is this node itself an mvar" question: `mvarId.
     /// isReadOnlyOrSyntheticOpaque` collapses to `kind ==
     /// SyntheticOpaque` (the one REAL, non-seamed exclusion this crate

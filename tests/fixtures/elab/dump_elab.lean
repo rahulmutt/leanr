@@ -459,8 +459,16 @@ differentially observable.
     `?α` inside `mkFreshTypeMVarFor`, so the goal is ground, eager
     synthesis at `mkInstMVar` closes it, and the default rung never
     fires.
-  * `num/hex`, `num/underscores` — token decoding, same elaborated
-    shape as `num/bare` but a different `decodeNatLitVal?` path;
+  * `num/hex`, `num/binary`, `num/octal`, `num/underscores` — token
+    decoding, same elaborated shape as `num/bare` but a different
+    `decodeNatLitVal?` radix path each. `0b`/`0o` had decoder unit
+    tests (`builtin/lit/decode.rs`) but no differential record until
+    the P3 fix wave, unlike `0x` and `_`, which had both; the four
+    together now cover every radix prefix `decodeNatLitVal?` accepts.
+    Each value is chosen to differ from its own decimal reading
+    (`0b1010` is 10, not 1010; `0o52` is 42, not 52), so a decoder that
+    ignored the prefix would change the emitted `rawNatLit` and the
+    record would move;
   * `num/inApp` — a numeral as an APPLICATION ARGUMENT, where the
     parameter type fixes the carrier before the fixpoint runs, so
     eager synthesis at `mkInstMVar` closes the instance goal and the
@@ -471,6 +479,8 @@ def numQueries : List (String × String) :=
   [ ("num/bare",        "42")
   , ("num/zero",        "0")
   , ("num/hex",         "0x2A")
+  , ("num/binary",      "0b1010")
+  , ("num/octal",       "0o52")
   , ("num/underscores", "1_000_000")
   , ("num/ascribedNat", "(42 : Nat)")
   , ("num/ascribedTag", "(42 : Tag)")

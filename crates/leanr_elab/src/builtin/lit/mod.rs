@@ -98,6 +98,34 @@ pub(crate) fn mk_fresh_type_mvar_for(
 /// builds a constant), `None` for the level list (matching that same
 /// site: `intern_level_list`'s `base` is dedup-only and never routes a
 /// child id, so `None` merely skips the persistent-side dedup lookup).
+///
+/// **LATENT NAME-RESOLUTION TRAP — read before implementing `open`.**
+/// This helper (and its sibling [`const_no_levels`]) routes a
+/// HARD-CODED name — `"OfNat"`, `"OfNat.ofNat"`, `"OfScientific"`,
+/// `"OfScientific.ofScientific"`, `"Char.ofNat"`, `"Bool.true"`,
+/// `"Bool.false"` — through `resolve::resolve_global`, i.e. through
+/// USER-VISIBLE name resolution. The oracle does not: `elabNumLit`
+/// (`BuiltinTerm.lean:226`) writes
+///
+/// ```text
+/// mkConst ``OfNat [u]
+/// ```
+///
+/// and that double-backtick name literal is resolved and checked when
+/// `BuiltinTerm.lean` itself is compiled, so the elaborator holds an
+/// ABSOLUTE `Name` that no user syntax can redirect.
+///
+/// The two agree today only because `resolve_global` performs no
+/// namespace, `open`, alias or `_root_` search — its candidate set is
+/// `{name}` or `{}` (its own doc). When that search lands — deferred as
+/// a later slice at `lib.rs`'s deferral ledger, the
+/// "`open`/alias/`export`/`_root_` resolution" row — a user-`open`ed
+/// namespace containing its own `OfNat` could shadow the elaborator's
+/// constant and silently retarget a numeral's `OfNat` application.
+/// That slice must decide the strategy (most likely: bypass
+/// `resolve_global` here in favour of an absolute lookup, matching the
+/// oracle's compile-time-resolved name); this comment is the record
+/// that the decision is owed, not the decision.
 pub(crate) fn const_with_level(
     elab: &mut TermElabM,
     name: &str,
@@ -249,6 +277,15 @@ pub fn elab_num(
     // is universe-polymorphic and MAY be a proposition (`:223`). With no
     // expected type at all the oracle rethrows the original level error
     // (`:224`).
+    //
+    // The `is_prop == true` arm is pinned by
+    // `synthetic_smoke.rs`'s `a_numeral_ascribed_to_a_prop_is_not_data`
+    // — on the POLARITY of the field, since keeping the oracle's two
+    // errors apart is the only reason the field exists. That test's doc
+    // also records why the `is_prop == false` arm is unreachable from
+    // any `Elab0` term (it needs a universe PARAMETER in scope; a level
+    // MVAR is assigned by `dec_level` instead of failing) and so is
+    // deliberately not asserted.
     let u = match elab.mctx.get_dec_level(type_mvar) {
         Ok(u) => u,
         Err(e) => {

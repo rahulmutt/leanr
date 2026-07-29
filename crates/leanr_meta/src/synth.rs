@@ -102,7 +102,7 @@
 //! `normLevel`'s inline check (`getLevelDepth mvarId != mctx.depth`,
 //! :119) and `normExpr`'s call to the PUBLIC `MVarId.isAssignable`
 //! (`MetavarContext.lean:483-486`: `decl.depth == mctx.depth`) are both
-//! DEPTH-ONLY. Neither is `ExprDefEq.lean:1731-1734`'s PRIVATE
+//! DEPTH-ONLY. Neither is `ExprDefEq.lean:1731-1733`'s PRIVATE
 //! `isAssignable` (`isReadOnlyOrSyntheticOpaque`) -- the different
 //! function `assign.rs::unassigned_mvar_id` correctly transcribes, for a
 //! DIFFERENT purpose (occurs-check-time assignment safety during

@@ -1019,3 +1019,44 @@ fn an_ascribed_numeral_follows_the_expected_type_not_the_priority_walk() {
          agree, the expected type is not reaching the numeral"
     );
 }
+
+/// `elabNumLit`'s `getDecLevel` FAILURE branch, `Prop` arm — oracle
+/// `BuiltinTerm.lean:215-224`, whose `catch` splits into two DISTINCT
+/// errors: "the expected type is a proposition" (`:221`) and "…is
+/// universe polymorphic and may be a proposition" (`:223`).
+/// `ElabError::NumeralIsNotData` keeps them apart with its `is_prop`
+/// field rather than collapsing them, and the POLARITY of that field is
+/// the whole reason the field exists — so this asserts it, not merely
+/// the variant.
+///
+/// `Eq Nat.zero Nat.zero` is the fixture's reachable `Prop`:
+/// `Elab0.lean:28` declares `inductive Eq : α → α → Prop`, so the
+/// ascription makes `mkFreshTypeMVarFor` assign `?α := Eq Nat.zero
+/// Nat.zero : Prop`, `getDecLevel` cannot decrement `Sort 0`, and
+/// `is_prop` is then `true`.
+///
+/// **The `is_prop: false` arm is not asserted, because nothing in this
+/// fixture reaches it.** It needs `getDecLevel` to fail on an expected
+/// type that is NOT a `Prop`, i.e. a `Sort u` whose `u` can be neither
+/// decremented nor assigned. leanr's `dec_level` may assign its
+/// top-level argument (`canAssignMVars` is `true` there), so an
+/// unresolved level METAVARIABLE succeeds instead of failing —
+/// `(42 : PUnit)`, the fixture's only `Sort u`-polymorphic carrier,
+/// gets past `getDecLevel` and fails later at instance synthesis
+/// (measured, not assumed). Reaching the arm needs a universe
+/// PARAMETER in scope, which no `Elab0` term can put there until the
+/// declaration layer lands. Recorded rather than asserted: an
+/// unreachable arm with a fabricated test would be worse than none.
+#[test]
+fn a_numeral_ascribed_to_a_prop_is_not_data() {
+    let err = support::elab_and_synthesize("(42 : Eq Nat.zero Nat.zero)")
+        .expect_err("a numeral cannot inhabit a Prop");
+    match err {
+        leanr_elab::ElabError::NumeralIsNotData { is_prop, .. } => assert!(
+            is_prop,
+            "the expected type IS a Prop, so the oracle's `:221` branch \
+             is the one that applies — `is_prop` must be true"
+        ),
+        other => panic!("expected NumeralIsNotData, got {other:?}"),
+    }
+}

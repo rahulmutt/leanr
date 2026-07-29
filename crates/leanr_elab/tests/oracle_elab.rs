@@ -39,7 +39,9 @@ fn oracle_elab_gate() {
     let queries = std::fs::read_to_string(fixture_in("elab", "elab-queries.jsonl"))
         .expect("committed elab corpus");
     let mut failures = Vec::new();
+    let mut replayed = 0usize;
     for line in queries.lines().filter(|l| !l.trim().is_empty()) {
+        replayed += 1;
         let q: serde_json::Value = serde_json::from_str(line).expect("committed JSONL is valid");
         let id = q["id"].as_str().expect("id field");
         let src = q["src"].as_str().expect("src field");
@@ -128,5 +130,29 @@ fn oracle_elab_gate() {
         "{} divergences:\n{}",
         failures.len(),
         failures.join("\n")
+    );
+
+    // FLOOR on the corpus size. Everything above compares records that
+    // are present; nothing above notices records that VANISHED, and a
+    // shrinking corpus is silent by construction: `dump_elab.lean`
+    // catches a throwing query, prints to stderr and DROPS it, so a
+    // fixture declaration that stops elaborating oracle-side takes its
+    // records out of the JSONL on the next `mise run fixtures:regen-elab`
+    // and this gate still passes on the survivors. M4b-3 P3 is the first
+    // slice whose records depend on `Elab0.lean` declarations
+    // (`instOfNatNat`'s `@[default_instance]`, `Tag`, `OfScientific`)
+    // staying elaborable, so the loss mode is now real.
+    //
+    // RAISE THIS when records are added deliberately — the number is
+    // exactly `wc -l tests/fixtures/elab/elab-queries.jsonl` after the
+    // regen. `>=`, not `==`, so adding a record is a one-line bump here
+    // rather than a gate that fails before the author has looked.
+    const CORPUS_FLOOR: usize = 101;
+    assert!(
+        replayed >= CORPUS_FLOOR,
+        "corpus shrank: replayed {replayed} records, floor is {CORPUS_FLOOR}. \
+         Either a query stopped being emitted (check `dump_elab.lean`'s \
+         stderr for a dropped query) or records were removed on purpose \
+         — in which case lower this constant deliberately."
     );
 }

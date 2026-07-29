@@ -464,8 +464,13 @@ impl<'e> TermElabM<'e> {
 ///
 /// Not `#[cfg(test)]`: integration tests link this crate as an external
 /// consumer, where `#[cfg(test)]` items do not exist. The log is inert
-/// unless [`default_walk_log_reset`] has armed it, so the cost in
-/// production is one thread-local flag read per visited mvar.
+/// unless [`default_walk_log_reset`] has armed it — `push` allocates
+/// nothing and stores nothing while `LOG` is `None` — so the cost in
+/// production is, per visited mvar, one thread-local access plus one
+/// `RefCell` mutable borrow (a counter write, its check, and the
+/// matching release) and a discriminant test. Not free, but O(1) and
+/// off the defeq/synthesis hot path: `push` runs once per mvar the
+/// default-instance walk CONSIDERS, not once per unification step.
 ///
 /// **THREAD-LOCAL, not a global `Mutex<Vec<_>>`.** `cargo test` runs the
 /// tests in one binary on a thread pool, and several tests in

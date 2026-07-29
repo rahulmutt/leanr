@@ -84,7 +84,7 @@ fn digits(cs: &[char], radix: u32) -> Option<Nat> {
 /// its value. Transcribes `Init.Meta.Defs.decodeStrLit` /
 /// `decodeStrLitAux` / `decodeQuotedChar` / `decodeRawStrLitAux` (read
 /// directly from the pinned toolchain source,
-/// `src/Init/Meta/Defs.lean:1089-1164`, not guessed). The escape set
+/// `src/lean/Init/Meta/Defs.lean:1089-1164`, not guessed). The escape set
 /// itself moved to [`decode_quoted_char`] in task 7, shared verbatim
 /// with the char-literal decoder exactly as the oracle shares it:
 ///

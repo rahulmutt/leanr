@@ -936,7 +936,7 @@ impl<'e> MetaCtx<'e> {
 
     /// `pub` since M4b-3 P3 task 4 (design spec § Accessor ledger, P3's
     /// row): the elaborator's `commitWhen`
-    /// (`Lean/Util/MonadBacktrack.lean:50-56`) is a
+    /// (`Lean/Util/MonadBacktrack.lean:50-60`) is a
     /// save / run / restore-unless-it-returned-true bracket over exactly
     /// this state, and `synthesizeUsingDefaultInstance`
     /// (`SyntheticMVars.lean:155-156`) runs inside one. Additive and
@@ -959,14 +959,36 @@ impl<'e> MetaCtx<'e> {
 
     /// oracle: `withAssignableSyntheticOpaque` (`Lean/Meta/Basic.lean:1312-1313`)
     /// — run `f` with `Config.assignSyntheticOpaque := true`, restoring
-    /// the previous value on both the normal and the panic-free error
-    /// path (`f` returns rather than unwinding, so a plain
-    /// save/run/restore is faithful).
+    /// the previous value on the normal and on the `Err` path alike
+    /// (`f` RETURNS a `Result` rather than unwinding, so a plain
+    /// save/run/restore covers both).
+    ///
+    /// **Not panic-safe, and this is now `pub`.** There is no drop
+    /// guard: if `f` unwinds, the flag stays `true` in `self.cfg`. That
+    /// was defensible while the function was `pub(crate)` — every
+    /// in-crate caller is `Result`-based and a panic there is already a
+    /// bug that aborts the run — but M4b-3 P3 task 4 widened it to
+    /// `pub` (design spec § Accessor ledger, P3's row), so an external
+    /// caller can now pass an `f` that panics, catch the unwind with
+    /// `catch_unwind`, and keep using the same `MetaCtx`. The residual
+    /// risk is therefore real but narrow: it needs a caller that both
+    /// panics inside the scope AND continues on the same context. The
+    /// only production caller in-tree is `leanr_elab`'s
+    /// `synthesize_using_default_instance`, which is `Result`-based and
+    /// catches no unwind (the other two are this crate's own unit tests,
+    /// where a panicking `expect` fails the test rather than resuming),
+    /// so no path in-tree reaches it today. Fixing it
+    /// properly means a drop guard, which is a behaviour change to
+    /// `leanr_meta` and so is recorded as a follow-up in the design
+    /// spec's deferred-work section rather than made here.
     ///
     /// The config is part of the defeq CACHE KEY (`config.rs`'s own
     /// doc), so entries cached inside the scope cannot leak out to
     /// queries asked with the flag off. That is why this is a config
-    /// field rather than an ambient toggle.
+    /// field rather than an ambient toggle. Note the leak above is a
+    /// leak of the FLAG, not of cache entries: a stuck-`true` flag makes
+    /// later queries ask a different question, it does not let an
+    /// inside-the-scope answer be served outside it.
     pub fn with_assignable_synthetic_opaque<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
         let saved = self.cfg.assign_synthetic_opaque;
         self.cfg.assign_synthetic_opaque = true;

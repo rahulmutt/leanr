@@ -506,8 +506,7 @@ impl<'e> TermElabM<'e> {
     /// progress can do; the design spec (§ P2a, item 3) assigns the loop
     /// itself to P3 alongside rung 3.
     ///
-    /// The oracle's tail recursion is a `while` here. It terminates for
-    /// the same reason the oracle's `partial` one does: each `true` from
+    /// The oracle's tail recursion is a `while` here. Each `true` from
     /// `synthesize_using_default` removes a goal from `pending_mvars`
     /// permanently (the queue rebuild at `:202` drops it), so the loop
     /// can only run as long as default instances keep closing goals that

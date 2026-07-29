@@ -433,7 +433,7 @@ impl<'e> MetaCtx<'e> {
         }
     }
 
-    /// oracle: `isDefEqSingleton` (ExprDefEq.lean:2135-2162), the
+    /// oracle: `isDefEqSingleton` (ExprDefEq.lean:2126-2160), the
     /// `isDefEqProj` `where`-clause helper: solve `(?m ..).1 =?= v` (or
     /// the symmetric `v =?= (?m ..).1`) by assigning `?m` to
     /// `⟨.., v⟩` when `structName` is a single-field non-recursive
@@ -477,7 +477,7 @@ impl<'e> MetaCtx<'e> {
             _ => return Ok(false),
         };
         // oracle: `isDefEqSingleton`'s `isAssignable sFn`
-        // (ExprDefEq.lean:2156), i.e. `isAssignable` at :1731-1734,
+        // (ExprDefEq.lean:2156), i.e. `isAssignable` at :1731-1733,
         // narrowed to the one real (non-seamed) exclusion this crate
         // tracks — `assign.rs::unassigned_mvar_id`'s own doc makes the
         // identical point, including the `Config::assignSyntheticOpaque`
@@ -1099,7 +1099,7 @@ mod tests {
     /// against the OTHER of the two sites that transcribe the same
     /// oracle predicate.
     ///
-    /// oracle: `isDefEqSingleton` (ExprDefEq.lean:2135-2160) reaches
+    /// oracle: `isDefEqSingleton` (ExprDefEq.lean:2126-2160) reaches
     /// `isAssignable sFn` (:2156), which is `isAssignable` (:1731-1733)
     /// -> `isReadOnlyOrSyntheticOpaque` (Basic.lean:979-986) -> the
     /// flag. `Add` is `Instances.olean`'s single-field non-recursive

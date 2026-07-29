@@ -37,7 +37,7 @@ impl<'e> TermElabM<'e> {
             match self.mctx.store().expr_node(Some(base), cur) {
                 Node::App { f, .. } => cur = f,
                 // Unwrap the same transparent-to-the-head-search nodes
-                // `contains_pending_mvar` (above) does: metadata and
+                // `ladder.rs`'s `contains_pending_mvar` does: metadata and
                 // projections carry no head of their own, so peeling
                 // them off before giving up keeps this consistent with
                 // that sibling walk rather than under-firing on a
@@ -103,8 +103,21 @@ impl<'e> TermElabM<'e> {
             // oracle: `| _ => unreachable!` (:316) — `.postponed` never
             // reaches the reporter, because a postponed mvar that could
             // not be resumed has already raised from `resume_postponed`.
+            //
+            // The message names an INTERNAL INVARIANT, not a slice. It
+            // carried "M4b-3 P2a invariant" until this fix wave: under
+            // this crate's named-seam discipline an `UnsupportedSyntax`
+            // naming a slice reads as "that slice owes an
+            // implementation", and P2a is complete — it shipped the
+            // `resume_postponed` path that makes this arm unreachable,
+            // so it owes nothing here. Retargeting at a later slice
+            // would have been a second false claim. Same rewording, and
+            // the same reason, as `builtin::lit::inst_mvar_id` and
+            // `synthetic::default_inst::mvar_id_of` (task 8).
             SyntheticMVarKind::Postponed { .. } => Err(ElabError::UnsupportedSyntax(
-                "a postponed mvar reached the stuck reporter — M4b-3 P2a invariant".to_string(),
+                "internal invariant: a postponed mvar reached the stuck reporter \
+                 (synthetic::report — not a deferred construct)"
+                    .to_string(),
             )),
         }
     }

@@ -523,6 +523,29 @@ fn literal_kinds_are_registered_not_deferred() {
 /// a deferral. They were reworded to say so instead of being retargeted
 /// at a later slice, which would have been a second false claim — no
 /// future slice owns "implement this invariant".
+///
+/// **KNOWN LIMITATION — this is a per-slice tripwire, and whoever
+/// completes a slice owes it a needle.** The needle is the literal
+/// `"M4b-3 P3"`, so the gate says nothing about any OTHER completed
+/// slice. A third message of exactly the shape above survived task 8's
+/// audit for precisely that reason: `synthetic::report`'s `.postponed`
+/// arm read "… — M4b-3 P2a invariant", naming a slice that is also
+/// complete, and only the whole-branch review caught it (reworded in
+/// the P3 fix wave).
+///
+/// It is deliberately NOT generalised to "any completed slice", and the
+/// reason is that no non-rotting formulation exists. Live source
+/// legitimately names INCOMPLETE slices in exactly this position — that
+/// is the named-seam discipline itself (`app/args.rs`'s "M4b-3 P2b",
+/// `elab.rs`'s "M4b-3 P5", `ladder.rs`'s "M4b-3 P4") — so telling an
+/// offender from a correct seam requires knowing which slices are done,
+/// i.e. a hand-maintained completed-slice list that rots the same way
+/// this needle does, only silently. Widening the scan by SHAPE instead
+/// (say, "a message containing the word `invariant` may not name a
+/// slice") would have caught the P2a case but is a heuristic with real
+/// false negatives — a reworded message evades it — and a gate that
+/// quietly stops catching things is worse than one that visibly needs
+/// updating. So: when a slice completes, add its label here.
 #[test]
 fn no_seam_message_names_the_completed_p3_slice() {
     let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
