@@ -1661,7 +1661,20 @@ impl<'e> MetaCtx<'e> {
                     .to_string(),
             ));
         }
-        if !self.data(ty).has_expr_mvar() {
+        // AUTHORIZED DIVERGENCE from the brief's Step 3 snippet (task-5
+        // fix, spec review): the oracle's `!type.hasMVar` (`Expr.lean:
+        // 567-569`: `hasExprMVar || hasLevelMVar`, consulted at
+        // `SynthInstance.lean:743`) checks BOTH mvar kinds, not just
+        // `Expr::MVar` nodes. An expr-mvar-free, level-mvar-only goal
+        // (e.g. `ToLevel.{?u}`, the very case this function's own doc
+        // comment two paragraphs below names) must not classify as
+        // `NoMVars` -- the same `has_expr_mvar()`-only bug this crate
+        // already fixed once, in `instantiate_mvars`
+        // (`assign.rs:1701-1723`, "M4b-3 P1 task 5 fix"). `synth.rs`
+        // itself already pairs the two checks everywhere else it needs
+        // "any mvar at all" (`:583`, `:1266`, `:1905`); this is the one
+        // place in this function that did not.
+        if !self.data(ty).has_expr_mvar() && !self.data(ty).has_level_mvar() {
             return Ok(PreprocessResult {
                 ty,
                 kind: PreprocessKind::NoMVars,
@@ -3067,6 +3080,42 @@ mod tests {
                 }
                 other => panic!("expected a named seam, got {other:?}"),
             }
+        });
+    }
+
+    /// Covering test for the task-5 fix (spec review, Important): the
+    /// oracle's `!type.hasMVar` (`Expr.lean:567-569`, `hasExprMVar ||
+    /// hasLevelMVar`, consulted at `SynthInstance.lean:743`) checks BOTH
+    /// mvar kinds, not just expr mvars. `Add.{?u}` -- `Add`'s own single
+    /// declared universe param replaced with a fresh LEVEL mvar via
+    /// `mk_const_with_fresh_mvar_levels`, left UNAPPLIED so no expr mvar
+    /// enters the picture at all -- is exactly the shape `preprocess`'s
+    /// own doc names as in scope (a parameterless, universe-polymorphic
+    /// class such as `ToLevel.{u}`) and exactly the shape a
+    /// `has_expr_mvar()`-only guard misses: before the fix this goal
+    /// classified as `NoMVars` (wrong -- the oracle would run
+    /// `preprocessOutParam`/build a cache key here since it does carry a
+    /// live mvar); after the fix it must not.
+    #[test]
+    fn preprocess_treats_a_level_mvar_only_goal_as_having_mvars() {
+        with_instances_ctx(|ctx| {
+            let add = const_named(ctx, "Add");
+            let add_lvl_mvar = ctx
+                .mk_const_with_fresh_mvar_levels(add)
+                .expect("fresh mvar levels");
+            assert!(
+                !ctx.data(add_lvl_mvar).has_expr_mvar(),
+                "no expr mvar anywhere in a bare, unapplied constant"
+            );
+            assert!(
+                ctx.data(add_lvl_mvar).has_level_mvar(),
+                "the constant's own universe argument IS a fresh level mvar"
+            );
+            let kind = ctx.preprocess(add_lvl_mvar).expect("preprocess").kind;
+            assert!(
+                !matches!(kind, PreprocessKind::NoMVars),
+                "a level-mvar-only goal must not classify as NoMVars, got {kind:?}"
+            );
         });
     }
 }
