@@ -156,10 +156,16 @@
 //!   producer of a `.postponed` decl is `postponeElabTermCore`
 //!   (`Term/TermElabM.lean:1449-1453`; the construction itself is
 //!   `:1452`). It has TWO call sites, both in that file — the public
-//!   `postponeElabTerm` at `:1608-1610`, and `elabUsingElabFns`'
+//!   `postponeElabTerm` at `:1608-1610`, and `elabUsingElabFnsAux`'s
 //!   `Exception.postpone` handler at `:1651`, which restores the saved
-//!   state and re-postpones. leanr has no call site for either. So the
-//!   path
+//!   state and re-postpones. Note `elabUsingElabFnsAux` (`:1615`), NOT
+//!   its caller `elabUsingElabFns` (`:1663`), which only saves state and
+//!   delegates; the `Aux` one is the recursive walk over the registered
+//!   elaborators and is where the postpone handler lives. (The pin's own
+//!   docstring on `postponeElabTermCore`, `:1444-1448`, says the method
+//!   "is used only at `elabUsingElabFnsAux`" — it names the right
+//!   function but undercounts, since `postponeElabTerm` calls it too.)
+//!   leanr has no call site for either. So the path
 //!   stays dead code kept correct for whichever slice first postpones a
 //!   term elaboration — M4b-4's `resolveLValLoop` is still the most
 //!   likely candidate, but it is a candidate, not a schedule.
