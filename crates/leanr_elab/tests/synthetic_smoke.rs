@@ -566,7 +566,7 @@ fn a_rejected_default_instance_is_rolled_back() {
 /// and only the OLDEST has a class with default instances — so under
 /// `pending_mvars` order (newest first) the walk would reach it LAST.
 /// `OfNat` rather than `Dflt` deliberately: its default instances sit
-/// at priorities 500/100, strictly below `instDfltNat`'s bare
+/// at priorities 100/50, strictly below `instDfltNat`'s bare
 /// `@[default_instance]`, so the TOP priority applies to nothing and
 /// the walk visits all three before dropping a rung. That makes the
 /// recorded order a full three-element sequence
@@ -582,7 +582,12 @@ fn default_instance_walk_visits_pending_mvars_in_reverse_creation_order() {
             3,
             "Elab0's three default-instance priorities, got {prios:?}"
         );
-        assert!(prios[0] > 500 && prios[1] == 500, "got {prios:?}");
+        // The TOP priority must apply to none of the three goals (so the
+        // walk visits all of them before dropping a rung), and the
+        // SECOND must be where `OfNat`'s winning default sits —
+        // `instOfNatNat` at 100 since the task-6 review re-prioritised
+        // `instOfNatTag` from 500 down to 50.
+        assert!(prios[0] > 100 && prios[1] == 100, "got {prios:?}");
         let ids = support::register_three_goals_oldest_defaultable(app);
         let order = support::visit_order_of_default_walk(app, &kinds);
         // Two properties ride on the single `assert_eq!` below — the
@@ -593,7 +598,7 @@ fn default_instance_walk_visits_pending_mvars_in_reverse_creation_order() {
         assert_eq!(
             order.len(),
             4,
-            "three visits at the top priority, then one at 500: got {order:?}"
+            "three visits at the top priority, then one at 100: got {order:?}"
         );
         assert_eq!(
             order,
@@ -652,7 +657,7 @@ fn default_instance_walk_rebuilds_the_pending_queue_newest_first() {
 /// `Instances.lean:383`), and rung 3 iterates that order as given. This
 /// test pins the "as given" half only: that `Elab0` really carries
 /// THREE distinct default-instance priorities, that the two the fixture
-/// writes explicitly are 500 and 100, and that `instDfltNat`'s bare
+/// writes explicitly are 100 and 50, and that `instDfltNat`'s bare
 /// `@[default_instance]` outranks both.
 ///
 /// **It does not test the walk, and is not meant to** (M4b-3 P3 task 5
@@ -663,7 +668,7 @@ fn default_instance_walk_rebuilds_the_pending_queue_newest_first() {
 /// priority set BACKWARDS would leave it green. What pins the walk is
 /// `default_instance_walk_visits_pending_mvars_in_reverse_creation_order`
 /// above, whose expected log (`[old, mid, new, old]`) is only reachable
-/// if the top priority is tried before 500 — and that test consumes the
+/// if the top priority is tried before 100 — and that test consumes the
 /// three premises this one establishes.
 #[test]
 fn default_instance_priorities_are_stored_in_descending_order() {
@@ -685,15 +690,15 @@ fn default_instance_priorities_are_stored_in_descending_order() {
         // toolchain bump for a reason unrelated to the ordering it
         // exists to check.
         assert!(
-            prios.contains(&500),
-            "instOfNatTag's priority, got {prios:?}"
-        );
-        assert!(
             prios.contains(&100),
             "instOfNatNat's priority, got {prios:?}"
         );
         assert!(
-            prios[0] > 500,
+            prios.contains(&50),
+            "instOfNatTag's priority, got {prios:?}"
+        );
+        assert!(
+            prios[0] > 100,
             "instDfltNat's bare @[default_instance] outranks both explicit ones, got {prios:?}"
         );
     });
@@ -954,26 +959,24 @@ fn entry_point_runs_the_fixpoint() {
 /// `42` with no expected type elaborates to
 /// `@OfNat.ofNat.{?u} ?α 42 ?inst`, with the instance goal PENDING
 /// (nothing determines `?α` yet) — and the ladder then closes it at
-/// rung 3, assigning `?α` from the highest-priority applicable
-/// `@[default_instance]`.
+/// rung 3, assigning `?α := Nat` from `instOfNatNat`.
 ///
 /// oracle: `elabNumLit` (`BuiltinTerm.lean:210-229`) followed by the
 /// entry point's `synthesizeSyntheticMVarsNoPostponing`. This is the
 /// first term in leanr's grammar for which rung 3 does real work.
 ///
-/// In THIS fixture the winner is `instOfNatTag` (priority 500), not
-/// `instOfNatNat` (priority 100): `Elab0.lean` gives `Tag` the higher
-/// priority deliberately, so the descending-priority walk is
-/// observable. Asserting the winning instance by name is what makes
-/// this a rung-3 test rather than merely an "some instance was found"
-/// test — an eager `mkInstMVar` on `OfNat ?α 42` cannot pick a
-/// candidate at all (Task 2's stuck predicate), so `instOfNatTag` in
-/// the output can only have come from the default-instance rung.
-/// Cross-checked against the pinned oracle: corpus record `num/bare`
-/// in `tests/fixtures/elab/elab-queries.jsonl` carries exactly this
-/// term.
+/// Asserting the winning instance BY NAME is what makes this a rung-3
+/// test rather than merely a "some instance was found" test: an eager
+/// `mkInstMVar` on `OfNat ?α 42` cannot pick a candidate at all (task
+/// 2's stuck predicate), so `instOfNatNat` in the output can only have
+/// come from the default-instance rung. `Elab0.lean` puts
+/// `instOfNatTag` BELOW it (50 vs 100) precisely so that a bare
+/// numeral defaults to `Nat`, as in real Lean, while three distinct
+/// priorities keep the descending walk observable. Cross-checked
+/// against the pinned oracle: corpus record `num/bare` in
+/// `tests/fixtures/elab/elab-queries.jsonl` carries exactly this term.
 #[test]
-fn a_bare_numeral_is_closed_by_the_default_instance_rung() {
+fn a_bare_numeral_defaults_to_nat_through_rung_three() {
     let got = support::elab_and_synthesize("42").expect("42 elaborates");
     let rendered = got.to_string();
     assert!(
@@ -981,9 +984,9 @@ fn a_bare_numeral_is_closed_by_the_default_instance_rung() {
         "emits an OfNat.ofNat application, got {rendered}"
     );
     assert!(
-        rendered.contains("instOfNatTag"),
-        "the instance goal is closed by the highest-priority default \
-         instance, got {rendered}"
+        rendered.contains("instOfNatNat"),
+        "the instance goal is closed by the highest-priority applicable \
+         default instance, got {rendered}"
     );
     assert!(
         !rendered.contains("mvar"),
@@ -992,25 +995,27 @@ fn a_bare_numeral_is_closed_by_the_default_instance_rung() {
 }
 
 /// The contrast case: an expected type pins `?α` inside
-/// `mkFreshTypeMVarFor`'s own `isDefEq`, so the `OfNat Nat 42` goal is
+/// `mkFreshTypeMVarFor`'s own `isDefEq`, so the `OfNat Tag 42` goal is
 /// GROUND by the time `Term.mkInstMVar` runs and eager synthesis closes
-/// it — the default rung never fires, and the priority-500
-/// `instOfNatTag` that wins for a bare numeral loses here.
+/// it — the default rung never fires, and `instOfNatTag` is reached even
+/// though it LOSES the priority walk (50, below `instOfNatNat`'s 100).
 ///
-/// Corpus records `num/ascribedNat` / `num/bare` pin the same pair
-/// against the oracle; this states the mechanism the pair is evidence
-/// for.
+/// `Tag` rather than `Nat` deliberately: ascribing `Nat` would reach the
+/// same instance defaulting already picks, so the record could not tell
+/// propagation from defaulting. Corpus records `num/ascribedTag` /
+/// `num/bare` pin the same pair against the oracle; this states the
+/// mechanism the pair is evidence for.
 #[test]
 fn an_ascribed_numeral_follows_the_expected_type_not_the_priority_walk() {
     let bare = support::elab_and_synthesize("42").expect("42 elaborates");
-    let ascribed = support::elab_and_synthesize("(42 : Nat)").expect("(42 : Nat) elaborates");
+    let ascribed = support::elab_and_synthesize("(42 : Tag)").expect("(42 : Tag) elaborates");
     assert!(
-        ascribed.to_string().contains("instOfNatNat"),
-        "the propagated expected type selects instOfNatNat, got {ascribed}"
+        ascribed.to_string().contains("instOfNatTag"),
+        "the propagated expected type selects instOfNatTag, got {ascribed}"
     );
     assert_ne!(
         bare, ascribed,
-        "defaulting and propagation must reach DIFFERENT carriers in this \
-         fixture — if they agree, the expected type is not reaching the numeral"
+        "defaulting and propagation must reach DIFFERENT carriers — if they \
+         agree, the expected type is not reaching the numeral"
     );
 }

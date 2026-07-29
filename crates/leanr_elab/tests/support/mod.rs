@@ -367,7 +367,7 @@ pub fn dflt_of_fresh_mvar(app: &mut leanr_elab::app::state::AppElab) -> leanr_ke
 }
 
 /// `OfNat ?a ?n` — a class goal whose class has default instances at
-/// TWO priorities (`instOfNatTag` at 500, `instOfNatNat` at 100), both
+/// TWO priorities (`instOfNatNat` at 100, `instOfNatTag` at 50), both
 /// strictly below the bare `@[default_instance]` on `instDfltNat`.
 ///
 /// That is what makes the reverse-creation-order walk observable across

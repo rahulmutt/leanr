@@ -253,10 +253,23 @@ inductive Bool : Type where
 -- Verbatim from `Init/Prelude.lean:1270-1279`, including the
 -- `@[default_instance 100]` priority. That priority is load-bearing:
 -- `instDfltNat` above carries a bare `@[default_instance]` (priority
--- 1000) and `instOfNatTag` below carries 500, so the environment has
--- THREE distinct default-instance priorities and
+-- 1000) and `instOfNatTag` below carries 50, so the environment has
+-- THREE distinct default-instance priorities (1000 / 100 / 50) and
 -- `synthesizeUsingDefault`'s descending-priority walk is
 -- differentially observable rather than vacuous (design spec § P3).
+--
+-- `instOfNatNat` must OUTRANK `instOfNatTag`, and that is the whole
+-- point of the 100-vs-50 gap: a bare numeral with no expected type
+-- reaches its carrier only through the default-instance rung, and the
+-- answer it must reach is `Nat` — exactly as in real Lean, where
+-- `instOfNatNat` is the `OfNat` default. `tests/fixtures/elab/
+-- dump_elab.lean`'s `num/bare` record is the committed evidence.
+-- (M4b-3 P3 task 6 review: `instOfNatTag` originally sat at 500 and
+-- therefore WON the walk, so bare `42` defaulted to the fixture-only
+-- carrier `Tag` and `num/ascribedTag` was a byte-for-byte duplicate of
+-- `num/bare`. Re-prioritised to 50, which keeps three distinct
+-- priorities — the reason there were ever three — while making the
+-- bare-numeral record demonstrate the behaviour the slice is about.)
 class OfNat (α : Type u) (_ : Nat) where
   ofNat : α
 
@@ -269,11 +282,16 @@ instance instOfNatNat (n : Nat) : OfNat Nat n where
 -- `Init.Data.Int`, unreachable in prelude mode; what the record
 -- actually tests is "a numeral against a non-default expected type",
 -- which any second `OfNat` carrier provides. Its instance sits at a
--- THIRD priority so the priority walk has more than two rungs to order.
+-- THIRD priority so the priority walk has more than two rungs to order
+-- — and BELOW `instOfNatNat`'s 100, so `Tag` is reachable only by
+-- ASCRIPTION (`(42 : Tag)`) and never by defaulting. A `Tag` that won
+-- the walk would make the bare-numeral record test a fixture artefact
+-- instead of the real `Nat`-defaulting behaviour; see `instOfNatNat`'s
+-- comment above.
 structure Tag where
   raw : Nat
 
-@[default_instance 500]
+@[default_instance 50]
 instance instOfNatTag (n : Nat) : OfNat Tag n where
   ofNat := Tag.mk n
 

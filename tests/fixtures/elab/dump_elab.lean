@@ -442,33 +442,30 @@ def instImplicitQueries : List (String × String) :=
 /-- M4b-3 P3 task 6: numerals. `num/bare` is the whole point — a
 numeral with NO expected type reaches the oracle's answer only through
 the default-instance rung, so it is the first corpus record for which
-`synthesizeSyntheticMVarsNoPostponing` does real work.
+`synthesizeSyntheticMVarsNoPostponing` does real work. It defaults to
+`Nat` via `instOfNatNat` (priority 100), exactly as in real Lean;
+`Elab0.lean` deliberately puts `instOfNatTag` BELOW it at 50 so that a
+bare numeral cannot default to a fixture-only carrier while three
+distinct priorities (1000 / 100 / 50) still keep the descending walk
+differentially observable.
 
-MEASURED, and NOT what task 6's brief predicted: in THIS fixture the
-default-instance walk picks `instOfNatTag` (priority 500), not
-`instOfNatNat` (priority 100) — `Elab0.lean` deliberately gives `Tag`
-the higher priority so the descending-priority walk is observable, and
-that higher priority is exactly what wins for a bare numeral. So bare
-`42` elaborates with carrier `Tag` here, where in a real `Init`
-environment (where `instOfNatNat` is the only `OfNat` default) it would
-be `Nat`. The records below are labelled by what they actually
-discriminate:
-  * `num/ascribedNat` — an expected type whose instance LOSES the
-    priority walk (`instOfNatNat`, 100). This is the record that proves
-    a propagated expected type beats defaulting: it differs from
-    `num/bare` in both the carrier and the instance.
-  * `num/ascribedTag` — an expected type whose instance is the one the
-    walk would have chosen anyway (`instOfNatTag`, 500), so it AGREES
-    with `num/bare`. Kept as the other half of the pair: together the
-    two pin that the carrier follows the expected type when there is
-    one, rather than the priority order.
+  * `num/ascribedNat` — an expected type that the default rung would
+    have reached anyway, so it AGREES with `num/bare`. Kept as the
+    control half of the ascription pair: it pins that propagating an
+    expected type does not perturb the answer when the two coincide.
+  * `num/ascribedTag` — an expected type reachable ONLY by ascription
+    (`instOfNatTag` loses the priority walk). This is the record that
+    discriminates propagation from defaulting: the expected type pins
+    `?α` inside `mkFreshTypeMVarFor`, so the goal is ground, eager
+    synthesis at `mkInstMVar` closes it, and the default rung never
+    fires.
   * `num/hex`, `num/underscores` — token decoding, same elaborated
     shape as `num/bare` but a different `decodeNatLitVal?` path;
   * `num/inApp` — a numeral as an APPLICATION ARGUMENT, where the
     parameter type fixes the carrier before the fixpoint runs, so
     eager synthesis at `mkInstMVar` closes the instance goal and the
-    default rung never fires. The contrast with `num/bare` is what
-    shows the ladder escalating only when it must;
+    default rung never fires here either. The contrast with `num/bare`
+    is what shows the ladder escalating only when it must;
   * `num/zero` — the `decodeNatLitVal?` single-`0` special case. -/
 def numQueries : List (String × String) :=
   [ ("num/bare",        "42")
