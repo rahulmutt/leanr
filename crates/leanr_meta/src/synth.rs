@@ -2855,13 +2855,21 @@ mod tests {
                 .forall_meta_telescope_reducing(ty)
                 .expect("telescope runs");
             assert_eq!(mvars.len(), 3, "one mvar per binder");
-            assert_eq!(bis.len(), 3, "one binder info per binder");
+            // The EXACT vector, not just the instImplicit count (fix
+            // round 1, review Minor 2): a count of one is also satisfied
+            // by `[InstImplicit, Default, Implicit]`, i.e. by binder
+            // infos returned in the wrong ORDER — which is precisely
+            // what `synthesizeUsingDefaultInstance` indexes `mvars` by
+            // (`SyntheticMVars.lean:168-170` pairs `bis[i]` with
+            // `mvars[i]!`), so order is the property that matters.
             assert_eq!(
-                bis.iter()
-                    .filter(|b| **b == BinderInfo::InstImplicit)
-                    .count(),
-                1,
-                "exactly the middle binder is instance-implicit"
+                bis,
+                vec![
+                    BinderInfo::Implicit,
+                    BinderInfo::InstImplicit,
+                    BinderInfo::Default
+                ],
+                "binder infos in binder order, the middle one instance-implicit"
             );
             assert!(
                 !matches!(ctx.node(body), Node::Forall { .. }),

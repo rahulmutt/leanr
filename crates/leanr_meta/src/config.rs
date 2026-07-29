@@ -28,8 +28,10 @@
 //! `ASSERT_CONFIG_SIZE` forces
 //! the cache-key decision at that point rather than letting a field
 //! silently default to "unconsulted" (`assign_synthetic_opaque` was the
-//! third such deferred field until M4b-3 P3 task 4, which added it with
-//! `withAssignableSyntheticOpaque`, its one consumer).
+//! third such deferred field until M4b-3 P3 task 4, which added it
+//! together with `withAssignableSyntheticOpaque`, the scope that turns
+//! it on — see that field's own doc for which of this crate's
+//! `syntheticOpaque` checks consult it, and which deliberately do not).
 //! `isDefEqStuckEx` is spec-mandated
 //! to become a typed error variant rather than a bool field, so it is
 //! not tracked here at all.
@@ -95,34 +97,69 @@ pub struct Config {
     /// `withAssignableSyntheticOpaque` (Basic.lean:1312-1313).
     ///
     /// Default `false` — the whole point of `syntheticOpaque` is that
-    /// ordinary unification must not assign it. Exactly one caller sets
-    /// it: `synthesizeUsingDefaultInstance` (`SyntheticMVars.lean:164`),
-    /// because a default instance must be able to assign an outParam
-    /// mvar that `coeAtOutParam` marked opaque. IN the cache key: it
+    /// ordinary unification must not assign it. IN the cache key: it
     /// changes which terms unify, so two queries under different values
     /// are different questions (this module's own doc, and Lean's
     /// #13772; the oracle keeps it in `toKey` too, Basic.lean:209).
     ///
-    /// **NAMED SEAM — one of this crate's four `syntheticOpaque` gates
-    /// consults it.** In the oracle the flag is read inside
-    /// `MVarId.isReadOnlyOrSyntheticOpaque` itself (Basic.lean:985), so
-    /// EVERY caller of that predicate is gated by it. This crate
-    /// open-codes the predicate at four sites, and M4b-3 P3 task 4 wired
-    /// the flag into exactly the one its brief named:
-    /// `assign.rs::unassigned_mvar_id` (`isAssignable`,
-    /// ExprDefEq.lean:1731-1733) — the site
-    /// `withAssignableSyntheticOpaque`'s only oracle caller
-    /// (`synthesizeUsingDefaultInstance`'s `isDefEqGuarded`) actually
-    /// needs. The other three are NOT gated yet:
-    /// `lazy_delta.rs`'s struct-eta assignability check (also
-    /// ExprDefEq.lean:1731-1733, and reachable from inside an
-    /// `isDefEq`), `discr_path.rs`'s key builder
-    /// (DiscrTree/Main.lean:308, reached only from instance synthesis,
-    /// which the oracle never runs inside the scope), and
-    /// `whnf.rs`'s `synth_pending` guard. Because the default is `false`
-    /// and no caller in M4b-3 P3 task 4 sets it, none of the four
-    /// behaves differently today; the first task that opens the scope
-    /// around a real `isDefEq` owns closing the `lazy_delta.rs` gap.
+    /// The oracle turns it on in ELEVEN places, not one (fix round 1,
+    /// review Minor 1 — this crate's own earlier claim of "exactly one
+    /// caller" was carried over from the task brief unverified). Ten go
+    /// through `withAssignableSyntheticOpaque`: `assignOutParams`
+    /// (`Meta/SynthInstance.lean:842`), `synthesizeUsingDefaultInstance`
+    /// (`Elab/SyntheticMVars.lean:164` — the one this plan ports, where a
+    /// default instance must be able to assign an outParam mvar that
+    /// `coeAtOutParam` marked opaque), and eight tactic-layer sites
+    /// (`Elab/Tactic/ElabTerm.lean:58`/`:165`, `Simpa.lean:94`,
+    /// `Change.lean:43`, `BuiltinTactic.lean:304`/`:311`/`:445`,
+    /// `Induction.lean:182`). The eleventh sets the field directly:
+    /// `Delaborator/TopDownAnalyze.lean:197`. Only
+    /// `synthesizeUsingDefaultInstance` is in this milestone's scope;
+    /// `assignOutParams` lives in the subsystem `synth.rs` ports and is
+    /// not transcribed yet, so its absence is a missing feature, not a
+    /// divergence.
+    ///
+    /// **NAMED SEAM — three of this crate's `syntheticOpaque` checks,
+    /// two of which consult the flag.** In the oracle the flag is read
+    /// inside `MVarId.isReadOnlyOrSyntheticOpaque` itself
+    /// (`Basic.lean:979-986`), so every caller of THAT predicate is gated
+    /// by it. This crate open-codes the predicate at three sites (the
+    /// oracle's other two callers, `isAbstractedUnassignedMVar`
+    /// `:99-109` and `isEtaUnassignedMVar` `:233-242`, are not
+    /// transcribed here at all):
+    ///
+    /// - `assign.rs::unassigned_mvar_id` (`isAssignable`,
+    ///   `ExprDefEq.lean:1731-1733`) — **gated.**
+    /// - `lazy_delta.rs::is_def_eq_singleton`'s assignability check
+    ///   (`isDefEqSingleton`'s `isAssignable sFn`,
+    ///   `ExprDefEq.lean:2156` -> the same `isAssignable` at
+    ///   `:1731-1733`) — **gated** in fix round 1: it is reachable from
+    ///   inside an `isDefEq` (`is_def_eq_proj` -> `is_def_eq_singleton`),
+    ///   so under an open scope an ungated copy would refuse an
+    ///   assignment the oracle permits.
+    /// - `discr_path.rs`'s discrimination-key builder
+    ///   (`DiscrTree/Main.lean:308`) — **not gated,** and deliberately
+    ///   so. The flag genuinely does survive into instance synthesis
+    ///   (`isDefEqGuarded` -> `whnf` -> `synthPending` ->
+    ///   `synthInstance?`, and `synthInstanceCore?`'s `withConfig`,
+    ///   `SynthInstance.lean:963-964`, overrides six fields but not this
+    ///   one), so the earlier "the oracle never runs it inside the scope"
+    ///   claim was false. What actually makes the gate moot there is
+    ///   `withNewMCtxDepth` (`SynthInstance.lean:978`): every mvar from
+    ///   outside is at a different depth, so
+    ///   `isReadOnlyOrSyntheticOpaque`'s FIRST arm
+    ///   (`Basic.lean:981-982`) returns `true` before the kind is ever
+    ///   examined. Depth is this crate's standing tier-1 seam
+    ///   (`level.rs`'s module doc); wiring the flag in here without
+    ///   modelling depth would flip `Star`/`Other` keys the oracle keeps
+    ///   at `Other`.
+    ///
+    /// `whnf.rs`'s `synth_pending` guard is NOT on this list: the
+    /// oracle's `synthPendingImp` (`SynthInstance.lean:1033-1036`)
+    /// matches `mvarDecl.kind` DIRECTLY and never consults the config, so
+    /// that site is faithful as written and gating it would introduce a
+    /// divergence — TC synthesis running on a `syntheticOpaque` mvar the
+    /// oracle refuses.
     pub assign_synthetic_opaque: bool,
 }
 

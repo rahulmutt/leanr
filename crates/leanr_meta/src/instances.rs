@@ -617,19 +617,56 @@ mod tests {
         });
     }
 
-    /// oracle: `getDefaultInstancesPriorities` — the GLOBAL set of
-    /// default-instance priorities, DESCENDING and distinct, across
-    /// every class. `default_instances` is per-class and cannot produce
-    /// it, which is why this is a new accessor rather than a forwarder.
+    /// oracle: `getDefaultInstancesPriorities` (`Instances.lean:429-430`)
+    /// — the GLOBAL set of default-instance priorities, DESCENDING and
+    /// distinct, across every class (`PrioritySet := Std.TreeSet Nat
+    /// (fun x y => compare y x)`, `Instances.lean:383`).
+    /// `default_instances` is per-class and cannot produce it, which is
+    /// why this is a new accessor rather than a forwarder.
+    ///
+    /// Builds a SYNTHETIC `defaults` table rather than reading
+    /// `Instances.olean`'s (fix round 1, review Important 1).
+    /// `Instances.lean:88` declares exactly ONE `@[default_instance]`,
+    /// so the fixture yields a one-element vec, against which the task
+    /// brief's sketched assertion — re-applying the implementation's own
+    /// `sort_unstable`/`dedup`/`reverse` to a clone and comparing — was
+    /// vacuous: it passes for any implementation ending in those three
+    /// calls, and for `Vec::new()`. This instead pins the exact expected
+    /// vector over a table with two distinct priorities, a DUPLICATE
+    /// (which only `dedup` removes), an out-of-registration-order entry
+    /// (which only `sort`+`reverse` fixes), and TWO CLASSES (so a
+    /// per-class implementation cannot pass). Same "assign a synthetic
+    /// `InstanceTable` directly" idiom as
+    /// `get_instances_orders_by_priority_desc_then_reverse_of_ties`
+    /// below — this module's own `#[cfg(test)]`, so the private fields
+    /// are reachable.
     #[test]
     fn default_instance_priorities_are_descending_and_distinct() {
         with_instances_ctx(|ctx| {
-            let prios = ctx.default_instance_priorities();
-            let mut sorted = prios.clone();
-            sorted.sort_unstable();
-            sorted.dedup();
-            sorted.reverse();
-            assert_eq!(prios, sorted, "descending and distinct");
+            let class_a = NameId::from_index(0, false).unwrap();
+            let class_b = NameId::from_index(1, false).unwrap();
+            let inst = |idx: u32| NameId::from_index(idx, false).unwrap();
+            // (class, instance, priority), in REGISTRATION order:
+            // deliberately neither sorted nor distinct, and spread over
+            // two classes.
+            ctx.instances = InstanceTable {
+                tree: DiscrTree::default(),
+                by_name: HashMap::new(),
+                defaults: vec![
+                    (class_a, inst(10), 100),
+                    (class_b, inst(11), 1000),
+                    (class_a, inst(12), 500),
+                    // duplicate of the first priority, under the OTHER
+                    // class: distinctness is global, not per-class.
+                    (class_b, inst(13), 100),
+                ],
+            };
+
+            assert_eq!(
+                ctx.default_instance_priorities(),
+                vec![1000, 500, 100],
+                "descending and distinct, across every class"
+            );
         });
     }
 

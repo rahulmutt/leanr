@@ -476,13 +476,28 @@ impl<'e> MetaCtx<'e> {
             Node::MVar { id: Some(id) } => MVarId(id),
             _ => return Ok(false),
         };
-        // oracle: `isAssignable` (ExprDefEq.lean:1731-1734), narrowed to
-        // the one real (non-seamed) exclusion this crate tracks —
-        // `assign.rs::unassigned_mvar_id`'s own doc makes the identical
-        // point.
+        // oracle: `isDefEqSingleton`'s `isAssignable sFn`
+        // (ExprDefEq.lean:2156), i.e. `isAssignable` at :1731-1734,
+        // narrowed to the one real (non-seamed) exclusion this crate
+        // tracks — `assign.rs::unassigned_mvar_id`'s own doc makes the
+        // identical point, including the `Config::assignSyntheticOpaque`
+        // gate below.
+        //
+        // Gated by `assign_synthetic_opaque` since M4b-3 P3 task 4 fix
+        // round 1: the oracle reads that flag INSIDE
+        // `MVarId.isReadOnlyOrSyntheticOpaque` itself
+        // (`Basic.lean:979-986`), so every caller of the predicate is
+        // gated by it — and this site transcribes the SAME predicate at
+        // the SAME oracle lines as `assign.rs`'s. It is reachable from
+        // inside an `isDefEq` (`is_def_eq_proj` -> here), so leaving it
+        // ungated would make `withAssignableSyntheticOpaque` refuse a
+        // singleton-structure assignment the oracle permits — an
+        // observable wrong answer, not a missing capability. Inert at
+        // the default `false`.
         let assignable = matches!(
             self.mctx.decl(mvar_id),
             Some(d) if d.kind != MVarKind::SyntheticOpaque
+                || self.cfg.assign_synthetic_opaque
         );
         if !assignable {
             return Ok(false);
@@ -1074,5 +1089,80 @@ mod tests {
             "tryHeuristic should settle `f a =?= f b` in O(1) steps via \
              argument congruence, never unfolding `f`'s {N}-deep body"
         );
+    }
+
+    /// `Config.assign_synthetic_opaque` gates
+    /// [`MetaCtx::is_def_eq_singleton`]'s `isAssignable` check too, not
+    /// just `assign.rs`'s (fix round 1, review Important 3). Structured
+    /// exactly like
+    /// `assign::tests::assign_synthetic_opaque_gates_a_synthetic_opaque_assignment`,
+    /// against the OTHER of the two sites that transcribe the same
+    /// oracle predicate.
+    ///
+    /// oracle: `isDefEqSingleton` (ExprDefEq.lean:2135-2160) reaches
+    /// `isAssignable sFn` (:2156), which is `isAssignable` (:1731-1733)
+    /// -> `isReadOnlyOrSyntheticOpaque` (Basic.lean:979-986) -> the
+    /// flag. `Add` is `Instances.olean`'s single-field non-recursive
+    /// structure (`class Add (a : Type u) where add : a -> a -> a`), so
+    /// `(?m : Add N).0 =?= v` is exactly the singleton shape.
+    #[test]
+    fn assign_synthetic_opaque_gates_is_def_eq_singleton() {
+        use crate::test_support::{const_dotted, const_named, fresh_mvar, with_instances_ctx};
+        use crate::{MVarDecl, MVarKind};
+        use leanr_kernel::bank::terms::Node;
+
+        with_instances_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let add = const_named(ctx, "Add");
+            let add_n = ctx.mk_app_spine(add, &[n]).expect("Add N");
+            let (m_expr, m_id) = fresh_mvar(ctx, add_n);
+            ctx.mctx_mut().declare(
+                m_id,
+                MVarDecl {
+                    user_name: None,
+                    ty: add_n,
+                    lctx: Default::default(),
+                    kind: MVarKind::SyntheticOpaque,
+                },
+            );
+
+            // The structure's single field, at `N -> N -> N`. A CLOSED
+            // term (`Add.add N instAddN`), not an fvar: `fresh_mvar`
+            // declares `?m` with an EMPTY local context, and
+            // `processAssignment'`'s scope check correctly refuses an
+            // assignment mentioning an fvar the mvar cannot see — which
+            // would make this test pass for the wrong reason.
+            let add_add = const_dotted(ctx, "Add", "add");
+            let inst_add_n = const_named(ctx, "instAddN");
+            let v = ctx
+                .mk_app_spine(add_add, &[n, inst_add_n])
+                .expect("Add.add N instAddN");
+
+            // `(?m : Add N).0`
+            let add_name = match ctx.node(add) {
+                Node::Const { name: Some(nm), .. } => nm,
+                _ => panic!("Add is not a bare const"),
+            };
+            let base = Some(ctx.view.store);
+            let proj = ctx
+                .scratch
+                .expr_proj(base, Some(add_name), &Nat::from(0u64), m_expr)
+                .expect("proj");
+
+            // Default (`assign_synthetic_opaque: false`): refused.
+            assert!(!ctx.is_def_eq_proj(proj, v).expect("is_def_eq_proj"));
+            assert!(!ctx.mctx().is_assigned(m_id));
+
+            // Inside the scope: assigned to `Add.mk N v`.
+            let ok = ctx.with_assignable_synthetic_opaque(|ctx| {
+                ctx.is_def_eq_proj(proj, v).expect("is_def_eq_proj")
+            });
+            assert!(
+                ok,
+                "withAssignableSyntheticOpaque must let isDefEqSingleton assign"
+            );
+            assert!(ctx.mctx().is_assigned(m_id));
+            assert!(!ctx.cfg.assign_synthetic_opaque, "scope restored");
+        });
     }
 }
