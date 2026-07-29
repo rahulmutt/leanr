@@ -585,6 +585,16 @@ fn default_instance_walk_visits_pending_mvars_in_reverse_creation_order() {
         assert!(prios[0] > 500 && prios[1] == 500, "got {prios:?}");
         let ids = support::register_three_goals_oldest_defaultable(app);
         let order = support::visit_order_of_default_walk(app, &kinds);
+        // Two properties ride on the single `assert_eq!` below — the
+        // within-priority order and the descending drop — so the LENGTH
+        // is checked first to say which one broke. A newest-first walk
+        // makes this 6 (both priorities exhausted); an ascending
+        // priority walk makes it 1 (the oldest solves at once at 100).
+        assert_eq!(
+            order.len(),
+            4,
+            "three visits at the top priority, then one at 500: got {order:?}"
+        );
         assert_eq!(
             order,
             vec![ids[0], ids[1], ids[2], ids[0]],
@@ -632,16 +642,31 @@ fn default_instance_walk_rebuilds_the_pending_queue_newest_first() {
     });
 }
 
-/// **Ordering test 2 of 2.** `synthesizeUsingDefault` walks the priority
-/// set in DESCENDING order (`SyntheticMVars.lean:215-221`, "Recall that
-/// `prioSet` is stored in descending order", `:217`), trying every
-/// pending mvar at one priority before dropping to the next.
+/// The FIXTURE PREMISE the walk test rests on, plus the accessor's
+/// storage order — NOT the walk itself.
 ///
-/// `Elab0` carries three distinct priorities (`instDfltNat` at the bare
-/// `@[default_instance]` default, `instOfNatTag` 500, `instOfNatNat`
-/// 100), which is what makes this non-vacuous.
+/// `synthesizeUsingDefault` (`SyntheticMVars.lean:215-221`) relies on
+/// `getDefaultInstancesPriorities` already being descending ("Recall
+/// that `prioSet` is stored in descending order", `:217`;
+/// `PrioritySet := Std.TreeSet Nat (fun x y => compare y x)`,
+/// `Instances.lean:383`), and rung 3 iterates that order as given. This
+/// test pins the "as given" half only: that `Elab0` really carries
+/// THREE distinct default-instance priorities, that the two the fixture
+/// writes explicitly are 500 and 100, and that `instDfltNat`'s bare
+/// `@[default_instance]` outranks both.
+///
+/// **It does not test the walk, and is not meant to** (M4b-3 P3 task 5
+/// review, important 1). The descending-order `assert_eq!` below is a
+/// tautology over `MetaCtx::default_instance_priorities`, whose body IS
+/// `sort_unstable(); dedup(); reverse()` (`leanr_meta/src/instances.rs:
+/// 541-547`, unit-tested at `:644`); a rung-3 walk that iterated the
+/// priority set BACKWARDS would leave it green. What pins the walk is
+/// `default_instance_walk_visits_pending_mvars_in_reverse_creation_order`
+/// above, whose expected log (`[old, mid, new, old]`) is only reachable
+/// if the top priority is tried before 500 — and that test consumes the
+/// three premises this one establishes.
 #[test]
-fn default_instance_priorities_are_walked_in_descending_order() {
+fn default_instance_priorities_are_stored_in_descending_order() {
     support::with_app_harness("Nat.zero", |app| {
         let prios = app.elab.mctx.default_instance_priorities();
         assert!(

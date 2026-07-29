@@ -237,6 +237,24 @@ impl<'e> TermElabM<'e> {
     /// `may_postpone` is likewise not snapshotted: the oracle's
     /// `mayPostpone` is a `Context` reader field, not part of
     /// `Term.State` (see [`SavedContext`]'s own doc).
+    ///
+    /// The mvar DECLARATION table is not rewound either, and this one is
+    /// a genuine narrowing rather than a modelling difference: the
+    /// oracle's `Meta.SavedState.restore` (`Meta/Basic.lean:594-596`)
+    /// writes back the whole `mctx`, declarations included, while
+    /// `MetaSnapshot` carries only the expr/level ASSIGNMENT maps and
+    /// the postponed queue (its own doc: "NOT declarations — an mvar
+    /// stays declared"). So a rejected attempt leaves its freshly
+    /// declared mvars behind as orphans. Safe, on two counts, and
+    /// recorded rather than fixed because widening `MetaSnapshot` is a
+    /// `leanr_meta` behaviour change and this plan freezes that crate:
+    /// nothing in `leanr_elab` or `leanr_meta` iterates the declaration
+    /// table wholesale (every read is `decl(mvar_id)` for an id the
+    /// caller already holds), so an unreferenced declaration is
+    /// invisible; and because the fresh-name counters above are
+    /// deliberately NOT rewound, a later attempt can never mint a name
+    /// that aliases one of those orphans. The cost is memory in a
+    /// scratch store that is dropped at the end of the elaboration.
     pub fn commit_when(
         &mut self,
         f: impl FnOnce(&mut Self) -> Result<bool, ElabError>,

@@ -232,9 +232,7 @@ impl<'e> TermElabM<'e> {
             let mut pending: Vec<MVarId> = Vec::new();
             for (m, bi) in mvars.iter().zip(bis.iter()) {
                 if *bi == BinderInfo::InstImplicit {
-                    if let Some(id) = s.mvar_id_of(*m) {
-                        pending.insert(0, id);
-                    }
+                    pending.insert(0, s.mvar_id_of(*m)?);
                 }
             }
             s.synthesize_pending(pending, kinds)
@@ -397,20 +395,39 @@ impl<'e> TermElabM<'e> {
         Ok(false)
     }
 
-    /// The `MVarId` an `Expr.mvar` node refers to, if it is one.
+    /// The `MVarId` an `Expr.mvar` node refers to.
     ///
     /// oracle: `mvars[i]!.mvarId!` (`:170`) — a partial function that
-    /// PANICS on anything else. `None` here rather than a panic, and
-    /// unreachable either way: every element of
-    /// `forall_meta_telescope_reducing`'s first result is an
-    /// `Expr.mvar` node it just minted (`mk_aux_mvar`), so the `None`
-    /// arm cannot be entered by any caller.
-    fn mvar_id_of(&self, e: ExprId) -> Option<MVarId> {
+    /// PANICS on anything else. Unreachable by contract here too: every
+    /// element of `forall_meta_telescope_reducing`'s first result is an
+    /// `Expr.mvar` node it just minted (`mk_aux_mvar`).
+    ///
+    /// LOUD rather than silent all the same (M4b-3 P3 task 5 review,
+    /// minor 2). This started life returning `Option` and SKIPPING a
+    /// binder it could not read, which is the one failure mode
+    /// named-seam discipline forbids: skipping an `instImplicit` binder
+    /// drops it from `synthesizePending`'s goal list, so the candidate
+    /// would be ACCEPTED with an unsynthesized instance argument left
+    /// in the emitted term — a wrong `Expr`, not an error. A
+    /// `debug_assert!` catches it in the dev loop and the error arm
+    /// catches it in release; the message names the invariant, the same
+    /// shape `report_stuck_synthetic_mvars` uses for the oracle's
+    /// `| _ => unreachable!`.
+    fn mvar_id_of(&self, e: ExprId) -> Result<MVarId, ElabError> {
         let base = self.view.store;
-        match self.mctx.store().expr_node(Some(base), e) {
-            leanr_kernel::bank::terms::Node::MVar { id: Some(n) } => Some(MVarId(n)),
-            _ => None,
+        let node = self.mctx.store().expr_node(Some(base), e);
+        if let leanr_kernel::bank::terms::Node::MVar { id: Some(n) } = node {
+            return Ok(MVarId(n));
         }
+        debug_assert!(
+            false,
+            "forallMetaTelescopeReducing yielded a non-metavariable telescope entry: {node:?}"
+        );
+        Err(ElabError::UnsupportedSyntax(
+            "forallMetaTelescopeReducing yielded a non-metavariable telescope entry \
+             — M4b-3 P3 invariant"
+                .to_string(),
+        ))
     }
 }
 
