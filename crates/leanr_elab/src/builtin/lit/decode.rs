@@ -271,7 +271,7 @@ pub(crate) fn decode_char_literal(raw: &str) -> Option<char> {
     }
 }
 
-/// oracle: `decodeScientificLitVal?` (`Init/Meta/Defs.lean:1008-1071`),
+/// oracle: `decodeScientificLitVal?` (`Init/Meta/Defs.lean:1008-1072`),
 /// transcribed as a single pass over the token rather than the oracle's
 /// four mutually-recursive `where` bindings. The states correspond
 /// one-to-one: `decode` (the integer part, `:1058-1072`),
@@ -569,7 +569,7 @@ mod tests {
         assert_eq!(decode_string_literal("r#\"\"#"), "");
     }
 
-    /// oracle: `decodeScientificLitVal?` (`Init/Meta/Defs.lean:1008-1071`).
+    /// oracle: `decodeScientificLitVal?` (`Init/Meta/Defs.lean:1008-1072`).
     /// Returns `(mantissa, negativeExponent, exponent)`:
     ///   `1.5`     -> (15, true, 1)     -- one digit after the dot
     ///   `1.25`    -> (125, true, 2)
@@ -589,7 +589,8 @@ mod tests {
         assert_eq!(decode_scientific_literal("42"), None);
     }
 
-    /// The THIRD arm of the exponent combination (`:1021-1024`): a
+    /// The THIRD arm of the exponent combination (`:1023-1024`; the
+    /// `exp >= e` test it hangs off is `:1021`): a
     /// positive written exponent SMALLER than the number of dot digits
     /// flips the sign back to negative. Neither the brief's examples nor
     /// any corpus record reaches it, so it gets its own test.

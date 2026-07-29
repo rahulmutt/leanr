@@ -511,7 +511,8 @@ def scientificQueries : List (String × String) :=
   , ("sci/dotExpPos", "(1.5e2 : Tag)")
   , ("sci/dotExpNeg", "(1.5e-2 : Tag)")
     -- The THIRD arm of `decodeScientificLitVal?`'s exponent combination
-    -- (`Init/Meta/Defs.lean:1021-1024`): a positive written exponent
+    -- (`Init/Meta/Defs.lean:1023-1024`, the `else` of the `exp >= e`
+    -- test at `:1021`): a positive written exponent
     -- SMALLER than the number of digits after the dot, which flips the
     -- sign back to negative — `1.25e1 -> (125, true, 1)`. The other two
     -- arms are covered by `sci/dotExpPos` (`exp >= e`) and

@@ -138,7 +138,8 @@
 //!
 //! - **`SyntheticMVarKind::Postponed` has no producer anywhere in this
 //!   branch** (re-verified by grep over `src/` and `tests/` at the end
-//!   of P3: every occurrence of the variant is a match arm —
+//!   of P3: outside its own declaration at `synthetic/state.rs:58`,
+//!   every CODE occurrence of the variant is a match arm —
 //!   `synthetic/ladder.rs:264` and `synthetic/report.rs:106` — never a
 //!   construction site). So this is stronger than "no differential
 //!   coverage yet": `SavedContext`, `save_context` (zero callers),
@@ -153,8 +154,12 @@
 //!   `tryPostpone*` call at all; the only thing it registers is a
 //!   `.typeClass` decl, through `mkInstMVar`. In the oracle the SOLE
 //!   producer of a `.postponed` decl is `postponeElabTermCore`
-//!   (`Term/TermElabM.lean:1449-1453`, reached via `postponeElabTerm`
-//!   at `:1608-1610`), which leanr has no call site for. So the path
+//!   (`Term/TermElabM.lean:1449-1453`; the construction itself is
+//!   `:1452`). It has TWO call sites, both in that file — the public
+//!   `postponeElabTerm` at `:1608-1610`, and `elabUsingElabFns`'
+//!   `Exception.postpone` handler at `:1651`, which restores the saved
+//!   state and re-postpones. leanr has no call site for either. So the
+//!   path
 //!   stays dead code kept correct for whichever slice first postpones a
 //!   term elaboration — M4b-4's `resolveLValLoop` is still the most
 //!   likely candidate, but it is a candidate, not a schedule.
@@ -184,8 +189,10 @@
 //!   elaborator approximates it.**
 //!   `leanr_meta::error::MetaError` declares `IsDefEqStuck` (`error.rs:36`)
 //!   but constructs it nowhere (re-verified at the end of P3 — the only
-//!   occurrences are the declaration and `synthetic/ladder.rs:179`'s
-//!   match arm); `synth.rs`'s `synth_instance_main` (the private body
+//!   CODE occurrences are the declaration and `synthetic/ladder.rs:179`'s
+//!   match arm; several files, this one included, also name it in prose,
+//!   which a raw grep will show and which is not a construction site);
+//!   `synth.rs`'s `synth_instance_main` (the private body
 //!   behind the public `synth_instance`) documents `isDefEqStuckEx`
 //!   (`Meta/Basic.lean` in the pinned oracle) as a named seam in its
 //!   inline `Config`-divergence list at `synth.rs:1638-1650` — cited as
