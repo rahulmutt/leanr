@@ -7,6 +7,8 @@
 //! than throwing, because the elaborator side is what turns a rejection
 //! into a named `ElabError`.
 
+use leanr_kernel::Nat;
+
 /// oracle: `decodeNatLitVal?` (`Init/Meta/Defs.lean:964-979`).
 ///
 /// A leading `0` is a radix prefix only when `x`/`X`, `b`/`B` or `o`/`O`
@@ -16,18 +18,14 @@
 /// rather than panicking, even though leanr's own lexer has already
 /// validated the token.
 ///
-/// **NAMED SEAM (`u64` width).** The oracle's result is an
-/// arbitrary-precision `Nat`, and so is leanr's own `Nat`; this decoder
-/// nonetheless folds into a `u64` and returns `None` on overflow rather
-/// than wrapping. The value's only consumer is
-/// [`super::mk_raw_nat_lit`], which needs it just to build one
-/// `Store::expr_lit_nat` row, and a literal wider than `u64` is not
-/// reachable from the committed corpus. `elab_num` turns the `None`
-/// into `ElabError::IllFormedLiteral` naming this seam, so an overflow
-/// is an attributable error rather than a silently wrapped value; the
-/// fix, when a corpus record needs it, is to fold into `Nat` directly
-/// here.
-pub(crate) fn decode_nat_literal(s: &str) -> Option<u64> {
+/// ARBITRARY PRECISION, like the oracle's own `Nat`: there is no width
+/// ceiling and no overflow path, so `None` means exactly one thing —
+/// the token is not a Nat literal at all. (M4b-3 P3 task 6 review: this
+/// folded into `u64` and reported a named seam on overflow, which
+/// diverged from the oracle for any literal >= 2^64. `leanr_kernel`'s
+/// `Nat` is `pub struct Nat(pub BigUint)` with `add`/`mul` on it, so
+/// folding directly costs neither a dependency nor a seam.)
+pub(crate) fn decode_nat_literal(s: &str) -> Option<Nat> {
     let cs: Vec<char> = s.chars().collect();
     // Every index below is guarded: `cs[0]` only after the emptiness
     // test, `cs[1]` only after `cs.len() == 1` returned, and `cs[2..]`
@@ -38,7 +36,7 @@ pub(crate) fn decode_nat_literal(s: &str) -> Option<u64> {
     }
     if cs[0] == '0' {
         if cs.len() == 1 {
-            return Some(0);
+            return Some(Nat::from(0));
         }
         return match cs[1] {
             'x' | 'X' => digits(&cs[2..], 16),
@@ -66,16 +64,17 @@ pub(crate) fn decode_nat_literal(s: &str) -> Option<u64> {
 /// `char::to_digit` accepts exactly the character sets the four oracle
 /// helpers do at radix 2/8/10/16 (ASCII digits, plus `a`-`f`/`A`-`F` at
 /// 16), and nothing else — in particular no non-ASCII digit, matching
-/// `Char.isDigit`. `checked_mul`/`checked_add` are the `u64` seam
-/// documented on [`decode_nat_literal`].
-fn digits(cs: &[char], radix: u32) -> Option<u64> {
-    let mut val: u64 = 0;
+/// `Char.isDigit`. The fold is `Nat::mul`/`Nat::add`, so it is exactly
+/// the oracle's `radix*val + d` at arbitrary precision.
+fn digits(cs: &[char], radix: u32) -> Option<Nat> {
+    let base = Nat::from(radix as u64);
+    let mut val = Nat::from(0);
     for c in cs {
         if *c == '_' {
             continue;
         }
         let d = c.to_digit(radix)?;
-        val = val.checked_mul(radix as u64)?.checked_add(d as u64)?;
+        val = val.mul(&base).add(&Nat::from(d as u64));
     }
     Some(val)
 }
@@ -202,6 +201,7 @@ pub(crate) fn hex_digit(c: char) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{decode_nat_literal, decode_string_literal};
+    use leanr_kernel::Nat;
 
     /// oracle: `decodeNatLitVal?` (`Init/Meta/Defs.lean:964-979`) and
     /// its four radix helpers (`:923-962`). Underscores are separators
@@ -209,18 +209,64 @@ mod tests {
     /// radix letter follows.
     #[test]
     fn nat_literal_radixes_and_separators() {
-        assert_eq!(decode_nat_literal("42"), Some(42));
-        assert_eq!(decode_nat_literal("0"), Some(0));
-        assert_eq!(decode_nat_literal("007"), Some(7));
-        assert_eq!(decode_nat_literal("1_000_000"), Some(1_000_000));
-        assert_eq!(decode_nat_literal("0x2A"), Some(42));
-        assert_eq!(decode_nat_literal("0X2a"), Some(42));
-        assert_eq!(decode_nat_literal("0b1010"), Some(10));
-        assert_eq!(decode_nat_literal("0o52"), Some(42));
-        assert_eq!(decode_nat_literal("0xff_ff"), Some(65535));
+        let n = |v: u64| Some(Nat::from(v));
+        assert_eq!(decode_nat_literal("42"), n(42));
+        assert_eq!(decode_nat_literal("0"), n(0));
+        assert_eq!(decode_nat_literal("007"), n(7));
+        assert_eq!(decode_nat_literal("1_000_000"), n(1_000_000));
+        assert_eq!(decode_nat_literal("0x2A"), n(42));
+        assert_eq!(decode_nat_literal("0X2a"), n(42));
+        assert_eq!(decode_nat_literal("0b1010"), n(10));
+        assert_eq!(decode_nat_literal("0o52"), n(42));
+        assert_eq!(decode_nat_literal("0xff_ff"), n(65535));
         assert_eq!(decode_nat_literal(""), None);
         assert_eq!(decode_nat_literal("0z1"), None);
         assert_eq!(decode_nat_literal("12a"), None);
+    }
+
+    /// An EMPTY digit run after a radix prefix is `Some 0`, not `None`:
+    /// `decodeHexLitAux s ⟨2⟩ 0` hits `String.Internal.atEnd`
+    /// immediately and returns its accumulator (`:948-949`). leanr's
+    /// lexer really can produce this token — `number_len` takes the
+    /// maximal valid prefix, so bare `0x` lexes as `Num "0x"`
+    /// (`lex.rs`'s own documented divergence note).
+    #[test]
+    fn radix_prefix_with_no_digits_is_zero() {
+        assert_eq!(decode_nat_literal("0x"), Some(Nat::from(0)));
+        assert_eq!(decode_nat_literal("0X"), Some(Nat::from(0)));
+    }
+
+    /// A `_` immediately after a leading `0` is NOT a decimal separator:
+    /// `decodeNatLitVal?` reaches the `c.isDigit` test at index 1 with
+    /// `c = '_'`, which is false, and falls to `else none` (`:976-977`).
+    /// The separator rule only applies once a radix has been chosen.
+    #[test]
+    fn underscore_directly_after_a_leading_zero_is_rejected() {
+        assert_eq!(decode_nat_literal("0_1"), None);
+    }
+
+    /// Arbitrary precision: a literal at and beyond the old `u64`
+    /// ceiling decodes to its exact value rather than failing. `2^64` is
+    /// the first value the previous `checked_mul`/`checked_add` fold
+    /// rejected, in both the decimal and the hex path.
+    #[test]
+    fn literals_wider_than_u64_decode_exactly() {
+        let two_pow_64 = Nat::from(u64::MAX).add(&Nat::from(1));
+        assert_eq!(
+            decode_nat_literal("18446744073709551616"),
+            Some(two_pow_64.clone())
+        );
+        assert_eq!(
+            decode_nat_literal("0x1_0000_0000_0000_0000"),
+            Some(two_pow_64.clone())
+        );
+        // One well past it, to show the fold is not merely one digit
+        // wider: 2^128.
+        let two_pow_128 = two_pow_64.mul(&two_pow_64);
+        assert_eq!(
+            decode_nat_literal("340282366920938463463374607431768211456"),
+            Some(two_pow_128)
+        );
     }
 
     #[test]

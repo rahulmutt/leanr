@@ -88,9 +88,10 @@ pub enum ElabError {
         is_prop: bool,
     },
     /// A literal TOKEN that leanr's lexer accepted but the oracle's own
-    /// decoder rejects, or one whose value exceeds `u64` (a named seam;
-    /// see `builtin::lit::decode::decode_nat_literal`). Distinct from
-    /// `IllFormedSyntax`, which is about tree SHAPE.
+    /// decoder rejects (`12a`, `0z1`, `0_1`). Distinct from
+    /// `IllFormedSyntax`, which is about tree SHAPE. The decoders are
+    /// arbitrary-precision, so a literal is never too WIDE to accept —
+    /// only malformed.
     IllFormedLiteral(String),
 }
 

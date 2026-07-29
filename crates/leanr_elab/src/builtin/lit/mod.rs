@@ -115,7 +115,9 @@ pub(crate) fn const_with_level(
 }
 
 /// A raw `Nat` literal — oracle: `mkRawNatLit` (`Expr.lean`), i.e.
-/// `mkLit (.natVal v)` with no `OfNat` wrapper.
+/// `mkLit (.natVal v)` with no `OfNat` wrapper. Takes leanr's
+/// arbitrary-precision `Nat` (which is what `Store::expr_lit_nat`
+/// stores), so there is no width limit on a numeric literal.
 ///
 /// `base = Some(view.store)` — NOT `elab_str`'s `None`. A string
 /// literal is the whole term and never unifies against a
@@ -124,11 +126,11 @@ pub(crate) fn const_with_level(
 /// `instOfNatNat`'s own type from the persistent store, and every
 /// application row this crate builds around it uses `Some(base)`
 /// (`app/args.rs::add_new_arg`'s own convention and its stated reason).
-pub(crate) fn mk_raw_nat_lit(elab: &mut TermElabM, v: u64) -> Result<ExprId, ElabError> {
+pub(crate) fn mk_raw_nat_lit(elab: &mut TermElabM, v: &Nat) -> Result<ExprId, ElabError> {
     let base = elab.view.store;
     elab.mctx
         .store_mut()
-        .expr_lit_nat(Some(base), &Nat::from(v))
+        .expr_lit_nat(Some(base), v)
         .map_err(|e| ElabError::from(leanr_meta::MetaError::from(e)))
 }
 
@@ -198,12 +200,11 @@ pub fn elab_num(
     // (`elab_str`'s own measured note on trivia applies verbatim).
     let raw = node.text().to_string();
     let Some(val) = decode::decode_nat_literal(&raw) else {
-        // oracle: `throwIllFormedSyntax`. Two ways to get here: a token
-        // the oracle's own decoder rejects, or the `u64` seam
-        // `decode_nat_literal` documents.
+        // oracle: `throwIllFormedSyntax`. The decoder is
+        // arbitrary-precision, so this means exactly one thing: the
+        // token is not a Nat literal.
         return Err(ElabError::IllFormedLiteral(format!(
-            "numeric literal `{raw}` is not a Nat literal \
-             (or exceeds u64 — M4b-3 P3 seam)"
+            "numeric literal `{raw}` is not a Nat literal"
         )));
     };
     let type_mvar = mk_fresh_type_mvar_for(elab, expected)?;
@@ -228,7 +229,7 @@ pub fn elab_num(
             }
         }
     };
-    let lit = mk_raw_nat_lit(elab, val)?;
+    let lit = mk_raw_nat_lit(elab, &val)?;
     // oracle: `mkInstMVar (mkApp2 (mkConst ``OfNat [u]) typeMVar
     // (mkRawNatLit val)) extraMsg` (`:226`).
     let of_nat = const_with_level(elab, "OfNat", u)?;
