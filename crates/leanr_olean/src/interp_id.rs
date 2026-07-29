@@ -886,6 +886,34 @@ impl<'s> InterpId<'s> {
         })
     }
 
+    /// `Lean.ClassEntry` (`Class.lean:13-31`) — three pointer fields,
+    /// no scalar tail (`Name`, `Array Nat`, `Array Nat`; no nullary-enum
+    /// field like `InstanceEntry.attrKind`). See `crate::ClassEntry`'s
+    /// doc for the source confirmation that `classExtension` is a
+    /// `SimplePersistentEnvExtension` and therefore carries no
+    /// `ScopedEnvExtension.Entry` wrapper.
+    fn class_entry(&mut self, r: &Raw) -> Result<crate::ClassEntry, OleanError> {
+        // Untrusted-bignum positions: never truncate via `as usize` (the
+        // identical posture `default_instance_entry` above takes) — a
+        // value too large to fit is a shape error, not silently wrapped.
+        fn nat_positions(r: &Raw) -> Result<Vec<usize>, OleanError> {
+            array(r)?
+                .iter()
+                .map(|e| {
+                    nat(e)?
+                        .to_usize()
+                        .ok_or_else(|| bad("ClassEntry position Nat"))
+                })
+                .collect()
+        }
+        let (f, _) = ctor(r, 0, 3, "ClassEntry")?;
+        Ok(crate::ClassEntry {
+            name: self.name_req(&f[0])?,
+            out_params: nat_positions(&f[1])?,
+            out_level_params: nat_positions(&f[2])?,
+        })
+    }
+
     /// `Name × ProjectionFunctionInfo` — the `Lean.projectionFnInfoExt`
     /// map's unwrapped entry pair (see `crate::ProjectionFnInfo`'s doc
     /// for the full `MapDeclarationExtension`/`reducibilityCore`
@@ -932,6 +960,7 @@ impl<'s> InterpId<'s> {
         let mut instances = Vec::new();
         let mut default_instances = Vec::new();
         let mut projection_fns = Vec::new();
+        let mut classes = Vec::new();
         for pair in array(&f[4])? {
             let (pf, _) = ctor(pair, 0, 2, "ModuleData.entries pair")?;
             let ext_name = self.name(&pf[0])?;
@@ -1032,6 +1061,16 @@ impl<'s> InterpId<'s> {
                         });
                     }
                 }
+                // SimplePersistentEnvExtension: entries are bare
+                // ClassEntry ctors, no scoped wrapper (same posture as
+                // `defaultInstanceExtension` just above) — see
+                // `crate::ClassEntry`'s doc for the source confirmation
+                // (Class.lean:69-73).
+                "Lean.classExtension" => {
+                    for e in array(&pf[1])? {
+                        classes.push(self.class_entry(e)?);
+                    }
+                }
                 _ => continue,
             }
         }
@@ -1060,6 +1099,7 @@ impl<'s> InterpId<'s> {
             instances,
             default_instances,
             projection_fns,
+            classes,
         })
     }
 }

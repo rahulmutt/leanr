@@ -278,6 +278,40 @@ pub struct DefaultInstanceEntry {
     pub priority: usize,
 }
 
+/// One decoded `Lean.classExtension` entry: oracle `Lean.ClassEntry`
+/// (`Class.lean:13-31`, pinned toolchain v4.33.0-rc1):
+///
+/// ```text
+/// structure ClassEntry where
+///   name           : Name       -- 0
+///   outParams      : Array Nat  -- 1
+///   outLevelParams : Array Nat  -- 2
+/// ```
+///
+/// THREE fields, not the two the design spec's § P2b originally named
+/// (corrected in § Amendment 3, item 5). `outLevelParams` is the set of
+/// universe-parameter positions that occur only in output-parameter
+/// types; the oracle uses it in `preprocessOutParam`'s level refresh
+/// (`SynthInstance.lean:786-795`) and in the synthesis cache key
+/// (`:757-763`), and leanr consumes the first but not the second — it
+/// has no synthesis cache (named seam, design spec § Seams).
+///
+/// `classExtension` is a `SimplePersistentEnvExtension`
+/// (`Class.lean:69-73`), NOT a `SimpleScopedEnvExtension` like
+/// `instanceExtension` — so its entries are a bare, unwrapped array of
+/// `ClassEntry`, the same posture as `defaultInstanceExtension` above,
+/// and there is no `scope` field here.
+#[derive(Debug, Clone)]
+pub struct ClassEntry {
+    pub name: NameId,
+    /// `outParams` (field 1): positions of the class's output
+    /// parameters, as computed by the oracle's `checkOutParam`.
+    pub out_params: Vec<usize>,
+    /// `outLevelParams` (field 2): positions of universe parameters
+    /// occurring only in output-parameter types.
+    pub out_level_params: Vec<usize>,
+}
+
 /// One decoded `Lean.projectionFnInfoExt` entry: oracle
 /// `Lean.ProjectionFunctionInfo` (`ProjFns.lean:19-27`, pinned toolchain
 /// v4.33.0-rc1):
@@ -359,6 +393,9 @@ pub struct ModuleData {
     /// Typed decode of the `Lean.projectionFnInfoExt` entries (M4a plan
     /// 4). All other extension entries stay opaque.
     pub projection_fns: Vec<ProjectionFnInfo>,
+    /// Typed decode of the `Lean.classExtension` entries (M4b-3 P2b-i).
+    /// All other extension entries stay opaque.
+    pub classes: Vec<ClassEntry>,
 }
 
 impl ModuleData {
@@ -514,6 +551,7 @@ impl ModuleData {
             instances: std::mem::take(&mut base.instances),
             default_instances: std::mem::take(&mut base.default_instances),
             projection_fns: std::mem::take(&mut base.projection_fns),
+            classes: std::mem::take(&mut base.classes),
         })
     }
 }
@@ -789,6 +827,56 @@ mod tests {
                 .map(|e| render(e.instance_name))
                 .collect::<Vec<_>>()
         );
+    }
+
+    /// `Lean.classExtension` decodes. The three shapes that matter are all
+    /// present in `Instances.lean`: a class with no output parameters
+    /// (`Add`), one whose output parameter is in the LAST position
+    /// (`Op`, `outParams == #[2]`, no out-level params), and one whose
+    /// universe appears only in an output parameter (`Lvl`,
+    /// `outParams == #[1]` AND `outLevelParams == #[1]`). `Op` is what
+    /// catches a swapped-field decode: `Lvl`'s two arrays are equal, so on
+    /// its own it could not.
+    #[test]
+    fn class_extension_decodes_out_param_positions() {
+        let bytes = fixture("Instances.olean");
+        let mut env = Environment::default();
+        let md = ModuleData::parse(&bytes, env.store_mut()).expect("decode");
+        let render = |n: NameId| env.store().to_name(None, Some(n)).to_string();
+        let find = |n: &str| {
+            md.classes
+                .iter()
+                .find(|c| render(c.name) == n)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "classExtension entry for {n}; decoded: {:?}",
+                        md.classes
+                            .iter()
+                            .map(|c| render(c.name))
+                            .collect::<Vec<_>>()
+                    )
+                })
+        };
+
+        let add = find("Add");
+        assert!(
+            add.out_params.is_empty(),
+            "Add out_params: {:?}",
+            add.out_params
+        );
+        assert!(add.out_level_params.is_empty());
+
+        let op = find("Op");
+        assert_eq!(op.out_params, vec![2], "Op out_params");
+        assert!(
+            op.out_level_params.is_empty(),
+            "Op out_level_params: {:?}",
+            op.out_level_params
+        );
+
+        let lvl = find("Lvl");
+        assert_eq!(lvl.out_params, vec![1], "Lvl out_params");
+        assert_eq!(lvl.out_level_params, vec![1], "Lvl out_level_params");
     }
 
     /// `Lean.projectionFnInfoExt` decodes: `Semigroup.toMul` is a class
