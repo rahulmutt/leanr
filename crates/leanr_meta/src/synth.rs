@@ -1471,6 +1471,48 @@ impl<'a, 'e> MVarAbstractor<'a, 'e> {
 /// `Config` (`config.rs`) models `whnf`/`isDefEq` knobs only.
 const MAX_RESULT_SIZE: usize = 128;
 
+/// oracle: `PreprocessKind` (`SynthInstance.lean:706-716`).
+///
+/// **The classification is behavior-neutral in this crate today, and
+/// that is deliberate rather than dead code.** The oracle branches on
+/// it twice: to decide whether to run `preprocessOutParam` (`:979-1002`
+/// — every arm but `.mvarsNoOutputParams` does) and to build the
+/// synthesis cache key (`:757-773`). For a class with no output
+/// parameters `preprocessOutParam` is the identity, so the first branch
+/// collapses here; the second has no consumer at all, because this
+/// crate has no synthesis cache (NAMED SEAM, design spec § Seams,
+/// owner: the slice that builds one). The kind is computed anyway so
+/// that the seam is one missing CONSUMER rather than a missing
+/// classification — and so that the `cacheKeyType` port, when it lands,
+/// is additive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreprocessKind {
+    NoMVars,
+    MVarsNoOutputParams,
+    MVarsOutputParams,
+}
+
+/// oracle: `PreprocessResult` (`SynthInstance.lean:718-722`) minus
+/// `cacheKeyType`, which has no consumer here (see [`PreprocessKind`]).
+// `Debug` is required for the `preprocess_seams_a_pi_shaped_goal` test's
+// `panic!("... {other:?}")` fallback arm, which formats the whole
+// `Result<PreprocessResult, MetaError>` -- not in the brief's snippet,
+// but required to compile.
+#[derive(Debug)]
+struct PreprocessResult {
+    ty: ExprId,
+    // `kind: _` at `synth_instance_preprocessed`'s only production call
+    // site (deliberately, per [`PreprocessKind`]'s own doc -- Task 6
+    // adds the branch consumer) means this field is never PROJECTED
+    // outside `#[cfg(test)]`, which `-D warnings` dead-code lint flags
+    // even though it is very much read (by every `preprocess_*` test,
+    // and by `PreprocessKind`'s own construction sites). Allowed rather
+    // than deleted, matching this module's one other such allow
+    // (`synth_instance`'s own, above).
+    #[allow(dead_code)]
+    kind: PreprocessKind,
+}
+
 impl<'e> MetaCtx<'e> {
     // -------------------------------------------------------------------
     // abstractMVars / openAbstractMVarsResult
@@ -1596,8 +1638,74 @@ impl<'e> MetaCtx<'e> {
         self.guarded(|ctx| ctx.synth_instance_main(ty))
     }
 
+    /// oracle: `preprocess` (`SynthInstance.lean:737-773`).
+    ///
+    /// **The telescope reduces to a `whnf`.** The oracle opens
+    /// `forallTelescopeReducing type`, `whnf`s the body and rebuilds
+    /// with `mkForallFVars`. For a goal with NO leading binders -- every
+    /// goal any leanr caller produces today -- `xs` is empty and the
+    /// whole thing is exactly `whnf type`. A pi-shaped goal is a NAMED
+    /// SEAM rather than a silent identity: answering it needs an
+    /// fvar-telescope this crate does not have at the Meta layer, the
+    /// same gap `try_resolve` already seams
+    /// (`MetaError::Unsupported`'s own doc).
+    fn preprocess(&mut self, ty: ExprId) -> Result<PreprocessResult, MetaError> {
+        let ty = self.instantiate_mvars(ty)?;
+        let ty = self.whnf(ty)?;
+        if matches!(self.node(ty), Node::Forall { .. }) {
+            return Err(MetaError::Unsupported(
+                "synth_instance: pi-shaped synthesis goal needs forallTelescopeReducing + \
+                 mkForallFVars (SynthInstance.lean:740-742); no Meta-layer fvar telescope in \
+                 this crate. Owner: the slice that grows one -- same seam as `try_resolve`'s \
+                 (SynthInstance.lean:351)"
+                    .to_string(),
+            ));
+        }
+        if !self.data(ty).has_expr_mvar() {
+            return Ok(PreprocessResult {
+                ty,
+                kind: PreprocessKind::NoMVars,
+            });
+        }
+        // oracle: the `typeBody.isConst` workaround for parameterless
+        // classes such as `ToLevel.{u}` (`:744-749`), then the
+        // "head is not a constant" and "not a class" fallbacks.
+        let head = self.get_app_fn(ty);
+        // `name: Some(name)`, not the brief's bare `name` (this crate's
+        // `Node::Const.name` is `Option<NameId>`, matching the idiom
+        // every other call site in this crate already uses, e.g.
+        // `discr_path.rs`/`lazy_delta.rs`'s own `Node::Const { name:
+        // Some(n), .. }`) -- an unnamed `Const` falls through to the
+        // same "not a class" fallback as a non-`Const` head.
+        let Node::Const {
+            name: Some(name), ..
+        } = self.node(head)
+        else {
+            return Ok(PreprocessResult {
+                ty,
+                kind: PreprocessKind::MVarsNoOutputParams,
+            });
+        };
+        if head == ty {
+            return Ok(PreprocessResult {
+                ty,
+                kind: PreprocessKind::MVarsNoOutputParams,
+            });
+        }
+        let out_params = self.get_out_param_positions(name).unwrap_or(&[]).len();
+        let out_levels = self
+            .get_out_level_param_positions(name)
+            .unwrap_or(&[])
+            .len();
+        let kind = if out_params == 0 && out_levels == 0 {
+            PreprocessKind::MVarsNoOutputParams
+        } else {
+            PreprocessKind::MVarsOutputParams
+        };
+        Ok(PreprocessResult { ty, kind })
+    }
+
     fn synth_instance_main(&mut self, ty: ExprId) -> Result<Option<ExprId>, MetaError> {
-        let snap = self.checkpoint();
         // oracle: `main` wraps the ENTIRE search in `withConfig`
         // (`SynthInstance.lean:963-964`):
         //   { c with isDefEqStuckEx := true, transparency := .instances,
@@ -1655,14 +1763,29 @@ impl<'e> MetaCtx<'e> {
         //    mctx-depth model at tier 1, per `level.rs`'s own "Depth /
         //    read-only seam"). Owner M4b, citing
         //    `SynthInstance.lean:958-968`.
+        //    UPDATE (task 5): `preprocess` is now ported (see
+        //    `synth_instance_preprocessed` below) and no longer belongs
+        //    on this NAMED SEAM list; `preprocessOutParam` and the
+        //    mctx-depth model still do (Task 9 finishes this edit).
         let saved_cfg = self.cfg;
         self.cfg.transparency = TransparencyMode::Instances;
         self.cfg.fo_approx = true;
         self.cfg.ctx_approx = true;
         self.cfg.const_approx = false;
         self.cfg.univ_approx = false;
-        let r = self.synth_instance_body(ty);
+        let r = self.synth_instance_preprocessed(ty);
         self.cfg = saved_cfg;
+        r
+    }
+
+    /// The `withConfig` body of `synthInstanceCore?`
+    /// (`SynthInstance.lean:965-1006`): preprocess, then run the search
+    /// under this crate's `withNewMCtxDepth` stand-in (the
+    /// `checkpoint`/`rollback` pair), then apply the result OUTSIDE it.
+    fn synth_instance_preprocessed(&mut self, ty: ExprId) -> Result<Option<ExprId>, MetaError> {
+        let PreprocessResult { ty, kind: _ } = self.preprocess(ty)?;
+        let snap = self.checkpoint();
+        let r = self.synth_instance_body(ty);
         self.rollback(snap);
         r
     }
@@ -2875,6 +2998,75 @@ mod tests {
                 !matches!(ctx.node(body), Node::Forall { .. }),
                 "the body is fully peeled"
             );
+        });
+    }
+
+    /// Test-only pi builder for [`preprocess_seams_a_pi_shaped_goal`]:
+    /// a non-dependent arrow `dom -> body`, built with the store
+    /// directly the way `three_binder_test_type` above builds binder
+    /// shapes. Not a production `mk_arrow` -- this module's only caller
+    /// is that one test.
+    fn mk_arrow_for_test(ctx: &mut MetaCtx, dom: ExprId, body: ExprId) -> ExprId {
+        let base = Some(ctx.view.store);
+        ctx.scratch
+            .expr_forall(base, None, dom, body, BinderInfo::Default)
+            .expect("dom -> body")
+    }
+
+    /// oracle: `preprocess` (`SynthInstance.lean:737-773`). The three
+    /// kinds, one goal each. `Add N` is ground; `Wrap`-style goals do
+    /// not exist in this fixture, so the mvars-but-no-out-params case
+    /// uses `Add ?a`; `Op N N ?c` is the out-params case.
+    #[test]
+    fn preprocess_classifies_the_three_kinds() {
+        with_instances_ctx(|ctx| {
+            let ty = type_sort(ctx);
+
+            let ground = parse_goal(ctx, "Add N");
+            assert!(matches!(
+                ctx.preprocess(ground).expect("preprocess").kind,
+                PreprocessKind::NoMVars
+            ));
+
+            let (a, _) = fresh_mvar(ctx, ty);
+            let add = const_named(ctx, "Add");
+            let no_out = ctx.mk_app_spine(add, &[a]).expect("app");
+            assert!(matches!(
+                ctx.preprocess(no_out).expect("preprocess").kind,
+                PreprocessKind::MVarsNoOutputParams
+            ));
+
+            let (c, _) = fresh_mvar(ctx, ty);
+            let n = const_named(ctx, "N");
+            let op = const_named(ctx, "Op");
+            let with_out = ctx.mk_app_spine(op, &[n, n, c]).expect("app");
+            assert!(matches!(
+                ctx.preprocess(with_out).expect("preprocess").kind,
+                PreprocessKind::MVarsOutputParams
+            ));
+        });
+    }
+
+    /// A pi-shaped synthesis goal (`∀ x, C x`) needs
+    /// `forallTelescopeReducing` + `mkForallFVars`, which this crate has
+    /// no fvar-telescope for at the Meta layer. NAMED SEAM, not a wrong
+    /// answer -- the same posture `try_resolve`'s forall-shaped-goal seam
+    /// already takes (`MetaError::Unsupported`'s own doc cites it).
+    #[test]
+    fn preprocess_seams_a_pi_shaped_goal() {
+        with_instances_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let add_n = parse_goal(ctx, "Add N");
+            let pi = mk_arrow_for_test(ctx, n, add_n);
+            match ctx.preprocess(pi) {
+                Err(MetaError::Unsupported(msg)) => {
+                    assert!(
+                        msg.contains("forallTelescope"),
+                        "seam names the mechanism: {msg}"
+                    );
+                }
+                other => panic!("expected a named seam, got {other:?}"),
+            }
         });
     }
 }
