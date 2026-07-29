@@ -9,11 +9,14 @@
 //! synthetic-mvar ladder when nothing else determines it. M4b-3 P3
 //! task 6 lands it here alongside `elab_str`.
 //!
-//! `char` (`Char.ofNat (rawNatLit c)`) and `scientific`
-//! (`OfScientific.ofScientific`) are M4b-3 P3 task 7's and are NOT
-//! registered yet — they reach `dispatch`'s catch-all, named by kind.
-//! The helpers below ([`mk_fresh_type_mvar_for`], [`const_with_level`],
-//! [`mk_raw_nat_lit`], [`app_n`]) are shared with them by design.
+//! `char` and `scientific` land here too (task 7), and neither is a leaf
+//! either: `char` emits `Char.ofNat (rawNatLit c)` — an application, but
+//! a monomorphic one with no instance, no expected type and no universe
+//! level — while `scientific` emits `@OfScientific.ofScientific.{u} ?α
+//! ?inst (rawNatLit m) sign (rawNatLit e)`, structurally `num`'s shape
+//! with the instance argument SECOND. The helpers below
+//! ([`mk_fresh_type_mvar_for`], [`const_with_level`], [`const_no_levels`],
+//! [`mk_raw_nat_lit`], [`app_n`]) are shared across all three.
 //!
 //! The token DECODERS (raw source text -> value) live in the sibling
 //! `decode` module; this one holds only the elaborators and the
@@ -107,6 +110,26 @@ pub(crate) fn const_with_level(
         .mctx
         .store_mut()
         .intern_level_list(None, &[u])
+        .map_err(leanr_meta::MetaError::from)?;
+    elab.mctx
+        .store_mut()
+        .expr_const(Some(base), Some(resolved), levels)
+        .map_err(|e| ElabError::from(leanr_meta::MetaError::from(e)))
+}
+
+/// A fixture constant with an EMPTY universe-level list: `Char.ofNat`,
+/// `Bool.true`, `Bool.false`. Oracle: a bare `Lean.mkConst ``C` with no
+/// level argument (`BuiltinTerm.lean:250`, and `toExpr` for a `Bool`).
+/// Same `base` convention as [`const_with_level`], which this is
+/// otherwise identical to.
+pub(crate) fn const_no_levels(elab: &mut TermElabM, name: &str) -> Result<ExprId, ElabError> {
+    let cname = crate::app::head::intern_dotted(elab, name)?;
+    let resolved = crate::resolve::resolve_global(&elab.view, cname, name)?;
+    let base = elab.view.store;
+    let levels = elab
+        .mctx
+        .store_mut()
+        .intern_level_list(None, &[])
         .map_err(leanr_meta::MetaError::from)?;
     elab.mctx
         .store_mut()
@@ -243,6 +266,96 @@ pub fn elab_num(
     // oracle: `registerMVarErrorImplicitArgInfo mvar.mvarId! stx r`
     // (`:228`) — attribute a later "cannot synthesize" report to this
     // literal rather than to whatever enclosing term holds it.
+    let inst_id = inst_mvar_id(elab, inst)?;
+    elab.register_mvar_error_implicit_arg_info(inst_id, SynElem::Node(node.clone()), r);
+    Ok(r)
+}
+
+/// oracle: `elabCharLit` (`BuiltinTerm.lean:248-251`) —
+/// `mkApp (mkConst ``Char.ofNat) (mkRawNatLit val.toNat)`.
+///
+/// The simplest non-leaf literal in the grammar: no instance, no
+/// expected type (`fun stx _ => ...`, like `elabStrLit`), and no
+/// universe level — `Char.ofNat` is monomorphic, so the constant carries
+/// an EMPTY level list rather than a fresh level mvar. `Char`'s own
+/// shape is never consulted, which is why the fixture may carry an
+/// opaque carrier for it (design spec § P3; plan § Measured facts,
+/// item 8) and still be byte-identical.
+pub fn elab_char(
+    elab: &mut TermElabM,
+    node: &SyntaxNode,
+    _kinds: &KindInterner,
+    _expected: Option<ExprId>,
+) -> Result<ExprId, ElabError> {
+    // oracle: `stx.isCharLit?` (`:249`) — `isLit? charLitKind` followed
+    // by `decodeCharLit`, i.e. the node's single atom child's raw text
+    // (`elab_str`'s own measured note on trivia applies verbatim).
+    let raw = node.text().to_string();
+    let Some(c) = decode::decode_char_literal(&raw) else {
+        // oracle: `throwIllFormedSyntax` (`:251`).
+        return Err(ElabError::IllFormedLiteral(format!(
+            "character literal `{raw}` is not a Char literal"
+        )));
+    };
+    // oracle: `val.toNat` — the Unicode scalar value.
+    let lit = mk_raw_nat_lit(elab, &Nat::from(u64::from(c as u32)))?;
+    let f = const_no_levels(elab, "Char.ofNat")?;
+    app_n(elab, f, &[lit])
+}
+
+/// oracle: `elabScientificLit` (`BuiltinTerm.lean:236-246`) —
+/// `@OfScientific.ofScientific.{u} ?α ?inst (rawNatLit m) sign
+/// (rawNatLit e)`.
+///
+/// Structurally `elab_num`'s shape, with two deliberate differences,
+/// both transcribed as the oracle has them rather than harmonized:
+///
+///  * the ARGUMENT ORDER — the instance comes SECOND, right after the
+///    carrier type, not last (`:244`, `mkApp5 .. typeMVar mvar
+///    (mkRawNatLit m) (toExpr sign) (mkRawNatLit e)`);
+///  * NO `getDecLevel` failure recovery — `:242` is a bare `getDecLevel`
+///    with no `try`, so the level error propagates instead of becoming
+///    the "numerals are data in Lean" pair of messages `elabNumLit`
+///    raises. `mkInstMVar` here also takes no `extraErrorMsg`.
+///
+/// There is no default instance for `OfScientific` in the fixture, so an
+/// unascribed scientific literal is a stuck typeclass goal — the corpus
+/// ascribes every record.
+pub fn elab_scientific(
+    elab: &mut TermElabM,
+    node: &SyntaxNode,
+    _kinds: &KindInterner,
+    expected: Option<ExprId>,
+) -> Result<ExprId, ElabError> {
+    // oracle: `stx.isScientificLit?` (`:238`) — `isLit?
+    // scientificLitKind` followed by `decodeScientificLitVal?`.
+    let raw = node.text().to_string();
+    let Some((m, sign, e)) = decode::decode_scientific_literal(&raw) else {
+        // oracle: `throwIllFormedSyntax` (`:239`). The decoder is
+        // arbitrary-precision, so this means exactly one thing: the
+        // token is not a scientific literal.
+        return Err(ElabError::IllFormedLiteral(format!(
+            "scientific literal `{raw}` is not a scientific literal"
+        )));
+    };
+    let type_mvar = mk_fresh_type_mvar_for(elab, expected)?;
+    // oracle: `let u ← getDecLevel typeMVar` (`:242`) — NO `try`.
+    let u = elab.mctx.get_dec_level(type_mvar)?;
+    // oracle: `mkInstMVar (mkApp (mkConst ``OfScientific [u]) typeMVar)`
+    // (`:243`) — the goal is the CLASS applied to the carrier alone; the
+    // mantissa/sign/exponent are not part of it, unlike `OfNat`'s.
+    let of_sci = const_with_level(elab, "OfScientific", u)?;
+    let goal = app_n(elab, of_sci, &[type_mvar])?;
+    let inst = elab.mk_inst_mvar(goal, SynElem::Node(node.clone()))?;
+    let m_lit = mk_raw_nat_lit(elab, &m)?;
+    let e_lit = mk_raw_nat_lit(elab, &e)?;
+    // oracle: `toExpr sign` — `Bool.true` / `Bool.false`, a
+    // zero-universe constant either way.
+    let sign_expr = const_no_levels(elab, if sign { "Bool.true" } else { "Bool.false" })?;
+    let f = const_with_level(elab, "OfScientific.ofScientific", u)?;
+    let r = app_n(elab, f, &[type_mvar, inst, m_lit, sign_expr, e_lit])?;
+    // oracle: `registerMVarErrorImplicitArgInfo mvar.mvarId! stx r`
+    // (`:245`).
     let inst_id = inst_mvar_id(elab, inst)?;
     elab.register_mvar_error_implicit_arg_info(inst_id, SynElem::Node(node.clone()), r);
     Ok(r)

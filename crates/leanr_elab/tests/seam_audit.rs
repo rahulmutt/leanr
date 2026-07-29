@@ -220,12 +220,12 @@ fn unregistered_kinds_are_named_by_kind() {
         ("Nat.zero.1", "Lean.Parser.Term.proj"),
         ("Nat.zero |>.1", "Lean.Parser.Term.pipeProj"),
         ("x@Nat.zero", "Lean.Parser.Term.namedPattern"),
-        // M4b-3 P3 task 7, the literals that are not leaves and have
-        // not landed yet. `num` was the third member; task 6 registered
-        // it (`@OfNat.ofNat.{u}` plus the default-instance rung), so it
-        // is no longer an unregistered kind and its records live in the
-        // committed corpus instead.
-        ("'a'", "char"),
+        // The literals that are not leaves used to be listed here.
+        // `num` left with task 6 and `char`/`scientific` with task 7 —
+        // all three are registered kinds now (`@OfNat.ofNat.{u}` plus
+        // the default-instance rung, `Char.ofNat`,
+        // `@OfScientific.ofScientific.{u}`), and their records live in
+        // the committed corpus instead.
     ];
     for (src, kind) in cases {
         assert!(

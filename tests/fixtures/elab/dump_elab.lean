@@ -477,6 +477,41 @@ def numQueries : List (String × String) :=
   , ("num/inApp",       "pick 1 2")
   ]
 
+/-- M4b-3 P3 task 7: `char` and `scientific`.
+
+`char/*` pins `elabCharLit`'s two decode paths (plain and escaped); the
+elaborated shape is `Char.ofNat` applied to a raw literal in every case,
+with no instance, no expected type and no universe level, so the
+discrimination is entirely in the decoded code point. `Char`/`Char.ofNat`
+are deliberate OPAQUE CARRIERS in `Elab0.lean` — `elabCharLit` never
+reads `Char`'s shape, so the emitted `Expr` is byte-identical either
+way. -/
+def charQueries : List (String × String) :=
+  [ ("char/plain",   "'a'")
+  , ("char/newline", "'\\n'")
+  , ("char/hex",     "'\\x41'")
+  , ("char/unicode", "'\\u00e9'")
+  ]
+
+/-- `sci/*` pins `decodeScientificLitVal?`'s three exponent combinations
+— dot only, positive written exponent, negative written exponent — since
+those are what decide the emitted `sign`/`exponent` pair, plus the
+mantissa/dot-digit accumulation that feeds them.
+
+Every record is ascribed to `Tag`: `OfScientific` has exactly one
+instance in the fixture and NO default instance, so an unascribed
+scientific literal is a stuck typeclass problem the fixpoint reports and
+the dumper drops. The ascription pins `?α` inside `mkFreshTypeMVarFor`,
+so the goal is ground and eager synthesis at `mkInstMVar` closes it. -/
+def scientificQueries : List (String × String) :=
+  [ ("sci/dot",       "(1.5 : Tag)")
+  , ("sci/dotTwo",    "(1.25 : Tag)")
+  , ("sci/expPos",    "(121e100 : Tag)")
+  , ("sci/expNeg",    "(1e-3 : Tag)")
+  , ("sci/dotExpPos", "(1.5e2 : Tag)")
+  , ("sci/dotExpNeg", "(1.5e-2 : Tag)")
+  ]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -490,7 +525,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>

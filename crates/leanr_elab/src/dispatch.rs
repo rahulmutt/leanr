@@ -69,6 +69,8 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
     match kind {
         "str" => Some("str"),
         "num" => Some("num"),
+        "char" => Some("char"),
+        "scientific" => Some("scientific"),
         "<ident>" => Some("ident"),
         "Lean.Parser.Term.prop" => Some("prop"),
         "Lean.Parser.Term.type" => Some("type"),
@@ -128,8 +130,6 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 /// ```text
 ///   letI / haveI / let_fun / let_delayed / let_tmp / letrec  later slice (own oracle tier each)
 ///   local-instance outParam result type ........ M4b-3 P2b (classExtension decode)
-///   char / scientific literals (Char.ofNat /
-///     OfScientific.ofScientific) ............... M4b-3 P3 task 7
 ///   coercions (CoeT / CoeFun / CoeSort, mkCoe) . M4b-3 P4
 ///   optParam defaults / autoParam .............. M4b-3 P5
 ///   implicit-lambda insertion .................. M4b-3 P5
@@ -162,14 +162,12 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 /// As whole terms they land on this table's catch-all instead, named by
 /// their kind.
 ///
-/// `char`/`scientific` are what is LEFT of the M4b-3 P3 literal seam
-/// (task 7 owns both) and land on the catch-all, named by kind: each
-/// elaborates through an application (`Char.ofNat` /
-/// `OfScientific.ofScientific`) rather than being a leaf
-/// (`builtin::lit`'s own module doc). `num` was the third member and is
-/// registered above as of task 6 — it elaborates through
-/// `@OfNat.ofNat.{u}` plus the default-instance rung of the ladder, so
-/// it is an arm here but still not a leaf.
+/// `num`/`char`/`scientific` are all registered above as of tasks 6-7,
+/// and none of them is a LEAF: each elaborates through an application
+/// (`@OfNat.ofNat.{u}` plus the default-instance rung,
+/// `Char.ofNat`, `@OfScientific.ofScientific.{u}`) rather than straight
+/// to an `Expr` node — `str` is the one literal that does.
+/// See `builtin::lit`'s own module doc for the three shapes.
 /// (`Lean.Parser.Level.max`/`.imax`/`.paren`/`.addLit`, the level-scope
 /// analogue of the above, are named seams inside `elab_level` itself —
 /// see `builtin::sort`'s own module doc — rather than this table, since
@@ -189,6 +187,19 @@ pub fn dispatch(
         // instance goal to the synthetic-mvar ladder.
         ("num", NodeOrToken::Node(node)) => {
             crate::builtin::lit::elab_num(elab, node, kinds, expected)
+        }
+        // oracle: `@[builtin_term_elab char] elabCharLit`
+        // (`BuiltinTerm.lean:248-251`) — an application, not a leaf, but
+        // a monomorphic one: `Char.ofNat (rawNatLit c)`, no instance and
+        // no universe level.
+        ("char", NodeOrToken::Node(node)) => {
+            crate::builtin::lit::elab_char(elab, node, kinds, expected)
+        }
+        // oracle: `@[builtin_term_elab scientific] elabScientificLit`
+        // (`BuiltinTerm.lean:236-246`) — `num`'s shape through
+        // `OfScientific`, with the instance argument SECOND.
+        ("scientific", NodeOrToken::Node(node)) => {
+            crate::builtin::lit::elab_scientific(elab, node, kinds, expected)
         }
         // A bare identifier is a ZERO-ARGUMENT APPLICATION, not a leaf:
         // `elabIdent := elabAtom` (`App.lean:2246`). M4b-1's
