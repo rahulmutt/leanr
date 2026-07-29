@@ -717,8 +717,10 @@ mod tests {
     /// output parameters, so it is PRESENT with an empty array — the
     /// oracle's `isClass` is exactly "present in this map"
     /// (`Class.lean:77-78`), and collapsing "absent" into "no out
-    /// params" would lose that distinction. `NotAClass` stands for a
-    /// name that is not a class at all.
+    /// params" would lose that distinction. `instAddN` (an *instance*,
+    /// not a class) stands for a name that is not a class at all: it
+    /// must read back `None`, not `Some(&[])`, or the two directions of
+    /// the `isClass` distinction are not both covered.
     #[test]
     fn class_table_reads_out_param_positions() {
         with_instances_ctx(|ctx| {
@@ -746,6 +748,15 @@ mod tests {
             } else {
                 panic!("Lvl is not a bare const")
             };
+            let inst_add_n_expr = const_named(ctx, "instAddN");
+            let inst_add_n =
+                if let leanr_kernel::bank::terms::Node::Const { name: Some(n), .. } =
+                    ctx.node(inst_add_n_expr)
+                {
+                    n
+                } else {
+                    panic!("instAddN is not a bare const")
+                };
 
             assert_eq!(ctx.get_out_param_positions(op), Some(&[2usize][..]));
             assert_eq!(ctx.get_out_level_param_positions(op), Some(&[][..]));
@@ -759,6 +770,19 @@ mod tests {
 
             assert_eq!(ctx.get_out_param_positions(lvl), Some(&[1usize][..]));
             assert_eq!(ctx.get_out_level_param_positions(lvl), Some(&[1usize][..]));
+
+            // The "absent" direction of the oracle's `isClass` distinction:
+            // `instAddN` is a real declared constant in this fixture (an
+            // *instance*, not a class), so it must read back `None` — not
+            // `Some(&[])`, which is `Add`'s own (present-but-empty) answer
+            // just above. Collapsing this to `Some(&[])` (e.g. via an
+            // `unwrap_or(&[])`-shaped bug) would silently claim every
+            // non-class name is a class with no output parameters.
+            assert_eq!(ctx.get_out_param_positions(inst_add_n), None);
+            assert!(
+                !ctx.has_out_params(inst_add_n),
+                "a non-class has no out params either, via the None arm"
+            );
         });
     }
 
