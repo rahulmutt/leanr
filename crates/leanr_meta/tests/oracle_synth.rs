@@ -179,6 +179,10 @@ fn oracle_synth_gate() {
         // `synthInstanceCore?`, which likewise ignores the ambient
         // config.
         let mut decl_failed = false;
+        // Canonical index -> `NameId`, in declaration order, so the
+        // post-synthesis `assigns` gate below can re-derive each goal
+        // mvar's `ExprId` without re-decoding `mvars` a second time.
+        let mut declared_mvars: Vec<(u64, NameId)> = Vec::new();
         for (idx, ty) in mvar_decls {
             let Some(&nid) = mv.get(&idx) else {
                 failures.push(format!(
@@ -187,6 +191,7 @@ fn oracle_synth_gate() {
                 decl_failed = true;
                 continue;
             };
+            declared_mvars.push((idx, nid));
             if ctx.mctx().decl(MVarId(nid)).is_some() {
                 continue;
             }
@@ -222,6 +227,27 @@ fn oracle_synth_gate() {
             Ok(None) => Ok(None),
             Err(e) => Err(e),
         };
+        // Post-synthesis state of every goal mvar, in the record's own
+        // index order. `assignment` is `mctx`'s existing accessor
+        // (`mvar_ctx.rs:91`); an unassigned mvar contributes nothing,
+        // matching the dumper.
+        let mut assigned: Vec<(u64, ExprId)> = Vec::new();
+        for (idx, nid) in &declared_mvars {
+            if ctx.mctx().assignment(MVarId(*nid)).is_none() {
+                continue;
+            }
+            let m = ctx
+                .store_mut()
+                .expr_mvar(base, Some(*nid))
+                .expect("intern mvar");
+            match ctx.instantiate_mvars(m) {
+                Ok(v) => assigned.push((*idx, v)),
+                Err(e) => {
+                    failures.push(format!("{id}: instantiate_mvars on goal mvar {idx}: {e:?}"));
+                }
+            }
+        }
+        assigned.sort_by_key(|(i, _)| *i);
         // End the mutable borrow of `scratch` before reading it back.
         drop(ctx);
 
@@ -264,6 +290,24 @@ fn oracle_synth_gate() {
                 let want_val = &q["val"];
                 if &got_val != want_val {
                     failures.push(format!("{id}: leanr val={got_val} oracle val={want_val}"));
+                }
+                // `assigns`: the post-synthesis state of every goal
+                // mvar. Comparing it is what makes M4b-3 P2b-i's
+                // `assignOutParams` visible at all — `ok` and `val` are
+                // identical whether or not the caller's output parameter
+                // was assigned, and so is the term the gate compares.
+                let mut got_assigns = Vec::new();
+                for (idx, val) in assigned.iter() {
+                    got_assigns.push(serde_json::json!({
+                        "i": idx,
+                        "e": encode_expr(&scratch, base, *val, &mut est),
+                    }));
+                }
+                let want_assigns = q["assigns"].as_array().cloned().unwrap_or_default();
+                if got_assigns != want_assigns {
+                    failures.push(format!(
+                        "{id}: leanr assigns={got_assigns:?} oracle assigns={want_assigns:?}"
+                    ));
                 }
             }
         }

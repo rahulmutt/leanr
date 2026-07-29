@@ -27,8 +27,17 @@ Record shape (one per curated query):
   , "mvars": [ {"i":<N>, "t":<E>} ]  -- goal mvars: canonical index + TYPE
   , "ok"   : true|false              -- oracle verdict
   , "val"  : <E>                     -- present iff ok; the instance TERM
+  , "assigns": [ {"i":<N>, "e":<E>} ]  -- post-synthesis assignments
   , "near_budget": true|false        -- see below
   }
+
+`goal` and `mvars[].t` are encoded from the query AS ASKED, before
+`synthInstance?` runs. `assigns` is the opposite: it is the ONLY field
+that carries POST-synthesis state, and therefore the ONLY place
+`assignOutParams`'s effect on a goal mvar is observable at all — `ok`
+and `val` are identical whether or not the caller's output parameter
+was assigned. An entry is present for a goal mvar iff `synthInstance?`
+actually assigned it; a still-unassigned mvar contributes nothing.
 
 `mvars` exists because the canonical expr scheme carries no mvar-type
 field, yet the replay side must DECLARE every goal metavariable before
@@ -266,51 +275,42 @@ unsafe def main : IO Unit := do
       -- Every mvar reachable from the goal, with its declared type —
       -- see this file's header for why `mvars` is emitted explicitly.
       let goalMVars := (← getMVars goal)
+      -- `goal` and `mvars[].t` are encoded BEFORE synthesis: they record
+      -- the query AS ASKED. Post-synthesis state belongs in `assigns`
+      -- below, not smuggled into `goal` — and an output parameter the
+      -- oracle assigns (`assignOutParams`, SynthInstance.lean:825-844)
+      -- would otherwise vanish from `goal` entirely and take the
+      -- `mvars[].i` numbering with it. Every record committed before
+      -- M4b-3 P2b-i is byte-identical either way: no query in the corpus
+      -- at that point could assign a goal mvar.
+      let (goalJ, st0) := (encExpr (← instantiateMVars goal)).run {}
+      let (mvarsJ, st1) ← goalMVars.foldlM (fun (acc, st) (m : MVarId) => do
+        let ty ← instantiateMVars (← m.getType)
+        let (tyJ, st') := (encExpr ty).run st
+        let idx := match st'.mvars.get? m with
+          | some i => i
+          | none => panic! s!"dump_synth: mvar {m.name} not numbered by `goal` (collected by \
+              getMVars before synthInstance? but not reachable from the pre-synthesis goal)"
+        pure (acc.push (Json.mkObj [("i", idx), ("t", tyJ)]), st'))
+        (#[], st0)
       let hb0 ← IO.getNumHeartbeats
       let r : Except String (Option Expr) ←
         try
           Except.ok <$> Meta.synthInstance? goal
         catch ex => Except.error <$> ex.toMessageData.toString
       let hb1 ← IO.getNumHeartbeats
-      -- `goal`/`mvars` encoding, shared by BOTH the `exc` and the
-      -- ordinary-record branches below (task-B7-review Important-2: the
-      -- `exc` record used to carry neither, so nothing could replay its
-      -- goal without hand-constructing it independently of the corpus).
-      -- Run AFTER the `try/catch` above so it reflects whatever the
-      -- mctx actually looks like post-attempt, exactly like the
-      -- ordinary-record branch already did — an `isDefEqStuckException`
-      -- is thrown before any assignment happens to the OUTER mvar these
-      -- queries mint, so this is not expected to ever exercise the loud
-      -- failure below for a stuck-style exc record, but it is the same
-      -- honest choice either way.
-      let encGoalAndMVars : MetaM (Json × Array Json × EncSt) := do
-        -- ONE `EncSt` per record, threaded goal -> mvar types -> val
-        -- (the canonicalization rule: numbering is per RECORD).
-        let (goalJ, st0) := (encExpr (← instantiateMVars goal)).run {}
-        let (mvarsJ, st1) ← goalMVars.foldlM
-          (fun (acc, st) (m : MVarId) => do
-            let ty ← instantiateMVars (← m.getType)
-            let (tyJ, st') := (encExpr ty).run st
-            -- `m` MUST already have been numbered while encoding `goal`
-            -- above (that is the whole point of threading one `EncSt`
-            -- from `goal` into this fold). If it was NOT — e.g. because
-            -- `m` got ASSIGNED during `synthInstance?` and
-            -- `instantiateMVars goal` therefore dropped it from the
-            -- encoding — a silent `getD 0` fallback here would point
-            -- this record's `"i":0` at a DIFFERENT mvar (or at nothing),
-            -- and the replay side would then declare the wrong type and
-            -- could pass or fail for the wrong reason. Fail loudly
-            -- instead, matching `encLevel`'s existing idiom above for an
-            -- out-of-scheme level mvar.
-            let idx := match st'.mvars.get? m with
-              | some i => i
-              | none => panic! s!"dump_synth: mvar {m.name} not numbered by `goal` (collected \
-                  by getMVars before synthInstance? but no longer reachable from goal after \
-                  instantiateMVars — likely got ASSIGNED during synthesis; a corpus record \
-                  cannot honestly report an index for it)"
-            pure (acc.push (Json.mkObj [("i", idx), ("t", tyJ)]), st'))
-          (#[], st0)
-        pure (goalJ, mvarsJ, st1)
+      -- `assigns`: the post-synthesis state of every goal mvar. This is
+      -- the ONLY place `assignOutParams`' effect is observable —
+      -- `ok`/`val` are identical whether or not the caller's output
+      -- parameter was assigned (design spec § Amendment 3, item 6). An
+      -- mvar that is still unassigned contributes no entry.
+      let (assignsJ, _) ← goalMVars.foldlM (fun (acc, st) (m : MVarId) => do
+        if !(← m.isAssigned) then pure (acc, st) else
+        let v ← instantiateMVars (.mvar m)
+        let (vJ, st') := (encExpr v).run st
+        let idx := (st'.mvars.get? m).getD 0
+        pure (acc.push (Json.mkObj [("i", idx), ("e", vJ)]), st'))
+        (#[], st1)
       match r with
       | Except.error msg =>
         -- Not a corpus record in the ordinary sense (no oracle VERDICT
@@ -319,12 +319,11 @@ unsafe def main : IO Unit := do
         -- replayed directly rather than hand-reconstructed — see this
         -- file's header and `oracle_synth.rs`'s `SEAM_EXCLUSIONS`
         -- sibling test for the `isDefEqStuckEx` seam.
-        let (goalJ, mvarsJ, _) ← encGoalAndMVars
         IO.println <| Json.compress <| Json.mkObj
-          [("id", id), ("q", "exc"), ("goal", goalJ), ("mvars", Json.arr mvarsJ), ("msg", msg)]
+          [("id", id), ("q", "exc"), ("goal", goalJ), ("mvars", Json.arr mvarsJ),
+           ("assigns", Json.arr assignsJ), ("msg", msg)]
       | Except.ok val? =>
         let val? ← val?.mapM instantiateMVars
-        let (goalJ, mvarsJ, st1) ← encGoalAndMVars
         let nearBudget := maxHb != 0 && (hb1 - hb0) * 100 > maxHb * nearBudgetPercent
         let fields :=
           [("id", Json.str id), ("q", Json.str "synth"), ("goal", goalJ),
@@ -332,6 +331,6 @@ unsafe def main : IO Unit := do
           ++ (match val? with
               | some v => [("val", (encExpr v).run' st1)]
               | none => [])
-          ++ [("near_budget", Json.bool nearBudget)]
+          ++ [("assigns", Json.arr assignsJ), ("near_budget", Json.bool nearBudget)]
         IO.println <| Json.compress <| Json.mkObj fields
   discard <| go.toIO coreCtx coreState
