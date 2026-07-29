@@ -24,6 +24,7 @@ fn elab_json(src: &str) -> serde_json::Value {
         instances,
         default_instances,
         projection_fns,
+        classes,
     } = replay_fixture_in("elab", "Elab0.olean");
     let snap = builtin::snapshot();
     let view: EnvView = env.view();
@@ -48,6 +49,7 @@ fn elab_json(src: &str) -> serde_json::Value {
             instances: &instances,
             default_instances: &default_instances,
             projection_fns: &projection_fns,
+            classes: &classes,
         },
     );
     let mut elab = TermElabM::new(mctx, view);

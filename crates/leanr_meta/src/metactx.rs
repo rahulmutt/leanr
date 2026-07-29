@@ -15,11 +15,11 @@ use leanr_kernel::{
     BinderInfo, EnvView, ExprData, FVarIdGen, LocalContext, RecGuard, MAX_REC_DEPTH,
 };
 use leanr_olean::{
-    DefaultInstanceEntry, EntryScope, InstanceEntry, MatcherEntry, ProjectionFnInfo,
+    ClassEntry, DefaultInstanceEntry, EntryScope, InstanceEntry, MatcherEntry, ProjectionFnInfo,
     ReducibilityEntry, ReducibilityStatus,
 };
 
-use crate::instances::InstanceTable;
+use crate::instances::{ClassTable, InstanceTable};
 use crate::{Config, LMVarId, MVarId, MetaError, MetavarContext, TransparencyMode};
 
 /// Stack-growth constants — the same values `tc.rs` uses (private
@@ -131,6 +131,14 @@ pub struct MetaCtx<'e> {
     /// `impl MetaCtx` idiom), which needs direct field access the way
     /// `self.cfg`/`self.mctx` already get it.
     pub(crate) instances: InstanceTable,
+    /// Decoded `Lean.classExtension` state (M4b-3 P2b-i task 4) — see
+    /// [`crate::instances::ClassTable`]'s own doc for the oracle
+    /// citation. Read by [`MetaCtx::get_out_param_positions`],
+    /// [`MetaCtx::get_out_level_param_positions`] and
+    /// [`MetaCtx::has_out_params`]; consulted by no other path in this
+    /// crate yet — B-side synthesis (M4b-3 P2b-i tasks 5-7) is the real
+    /// consumer.
+    pub(crate) classes: ClassTable,
     /// The `smartUnfolding` option (oracle default: true), consulted by
     /// `unfold_definition`'s app/const arms (task 7).
     pub(crate) smart_unfolding: bool,
@@ -252,6 +260,10 @@ pub struct EnvExtensions<'a> {
     pub instances: &'a [InstanceEntry],
     pub default_instances: &'a [DefaultInstanceEntry],
     pub projection_fns: &'a [ProjectionFnInfo],
+    /// Decoded `Lean.classExtension` entries (M4b-3 P2b-i task 4) — see
+    /// [`crate::instances::ClassTable`] for how `MetaCtx::new` consumes
+    /// this slice.
+    pub classes: &'a [ClassEntry],
 }
 
 impl<'e> MetaCtx<'e> {
@@ -286,6 +298,7 @@ impl<'e> MetaCtx<'e> {
             .collect();
         let matchers = exts.matchers.iter().map(|m| (m.name, m.clone())).collect();
         let instances = InstanceTable::build(view, exts.instances, exts.default_instances);
+        let classes = ClassTable::build(exts.classes);
         // oracle: `projectionFnInfoExt`'s own `NameMap` (`ProjFns.lean:30,
         // 37-59`) — the extension's own key IS `ProjectionFnInfo.projFn`
         // (see that struct's doc, `leanr_olean::ProjectionFnInfo`), so no
@@ -363,6 +376,7 @@ impl<'e> MetaCtx<'e> {
             reducibility,
             matchers,
             instances,
+            classes,
             smart_unfolding: true,
             can_unfold_override: false,
             nat_bin_ops,
@@ -825,6 +839,25 @@ impl<'e> MetaCtx<'e> {
     /// meantime. Each entry is `(instance name, priority)`.
     pub fn default_instances_of(&self, class: NameId) -> Vec<(NameId, usize)> {
         self.default_instances(class)
+    }
+
+    /// oracle: `getOutParamPositions?` (`Class.lean:81-82`). `Some(&[])`
+    /// means "is a class, with no output parameters"; `None` means "not
+    /// a class" — the oracle's `isClass` is precisely the `Some`/`None`
+    /// distinction (`Class.lean:77-78`), so they must not be collapsed.
+    pub fn get_out_param_positions(&self, class_name: NameId) -> Option<&[usize]> {
+        self.classes.out_params(class_name)
+    }
+
+    /// oracle: `getOutLevelParamPositions?` (`Class.lean:91-92`).
+    pub fn get_out_level_param_positions(&self, class_name: NameId) -> Option<&[usize]> {
+        self.classes.out_level_params(class_name)
+    }
+
+    /// oracle: `hasOutParams` (`Class.lean:85-88`) — a class with a
+    /// NON-EMPTY output-parameter array.
+    pub fn has_out_params(&self, class_name: NameId) -> bool {
+        matches!(self.get_out_param_positions(class_name), Some(p) if !p.is_empty())
     }
 
     /// oracle: `Lean.occursCheck` (`Lean/Util/OccursCheck.lean:18-53`),

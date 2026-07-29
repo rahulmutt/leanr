@@ -92,6 +92,7 @@ fn oracle_fast_gate() {
         instances,
         default_instances,
         projection_fns,
+        classes,
     } = replay_fixture("Meta0.olean");
 
     let queries =
@@ -148,6 +149,7 @@ fn oracle_fast_gate() {
                     instances: &instances,
                     default_instances: &default_instances,
                     projection_fns: &projection_fns,
+                    classes: &classes,
                 },
             );
             // Declare every mvar `a` introduced (unlike `whnf`/`infer`/
@@ -298,6 +300,7 @@ fn oracle_fast_gate() {
                     instances: &instances,
                     default_instances: &default_instances,
                     projection_fns: &projection_fns,
+                    classes: &classes,
                 },
             );
             match ctx.is_def_eq(a, b) {
@@ -331,6 +334,7 @@ fn oracle_fast_gate() {
                 instances: &instances,
                 default_instances: &default_instances,
                 projection_fns: &projection_fns,
+                classes: &classes,
             },
         );
         ctx.set_transparency(transparency_of(tr));

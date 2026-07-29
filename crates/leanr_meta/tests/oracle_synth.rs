@@ -68,6 +68,7 @@ fn oracle_synth_gate() {
         instances,
         default_instances,
         projection_fns,
+        classes,
     } = replay_fixture("Synth0.olean");
 
     let queries =
@@ -164,6 +165,7 @@ fn oracle_synth_gate() {
                 instances: &instances,
                 default_instances: &default_instances,
                 projection_fns: &projection_fns,
+                classes: &classes,
             },
         );
         // DECLARE every goal mvar (ledger note, task B6): `decode_expr`
@@ -324,6 +326,7 @@ fn seam_excluded_mvar_goal_is_incompleteness_not_an_error() {
         instances,
         default_instances,
         projection_fns,
+        classes,
     } = replay_fixture("Synth0.olean");
     let queries =
         std::fs::read_to_string(fixture("synth-queries.jsonl")).expect("committed queries");
@@ -357,6 +360,7 @@ fn seam_excluded_mvar_goal_is_incompleteness_not_an_error() {
                 instances: &instances,
                 default_instances: &default_instances,
                 projection_fns: &projection_fns,
+                classes: &classes,
             },
         );
         ctx.mctx_mut().declare(
@@ -414,6 +418,7 @@ fn exc_record_stuck_synth_0_pins_leanrs_current_divergent_answer() {
         instances,
         default_instances,
         projection_fns,
+        classes,
     } = replay_fixture("Synth0.olean");
     let queries =
         std::fs::read_to_string(fixture("synth-queries.jsonl")).expect("committed queries");
@@ -448,6 +453,7 @@ fn exc_record_stuck_synth_0_pins_leanrs_current_divergent_answer() {
                 instances: &instances,
                 default_instances: &default_instances,
                 projection_fns: &projection_fns,
+                classes: &classes,
             },
         );
         ctx.mctx_mut().declare(

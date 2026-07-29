@@ -33,6 +33,7 @@ fn oracle_elab_gate() {
         instances,
         default_instances,
         projection_fns,
+        classes,
     } = replay_fixture_in("elab", "Elab0.olean");
     let snap = builtin::snapshot();
 
@@ -92,6 +93,7 @@ fn oracle_elab_gate() {
                 instances: &instances,
                 default_instances: &default_instances,
                 projection_fns: &projection_fns,
+                classes: &classes,
             },
         );
         let mut elab = TermElabM::new(mctx, view);

@@ -44,7 +44,7 @@ use leanr_kernel::bank::{NameId, Store};
 use leanr_kernel::{Environment, Name};
 use leanr_meta::{Config, EnvExtensions, MetaCtx};
 use leanr_olean::{
-    load_closure, DefaultInstanceEntry, InstanceEntry, MatcherEntry, ProjectionFnInfo,
+    load_closure, ClassEntry, DefaultInstanceEntry, InstanceEntry, MatcherEntry, ProjectionFnInfo,
     ReducibilityEntry, SearchPath,
 };
 use serde_json::{json, Value};
@@ -346,6 +346,7 @@ fn run_leanr_query(
     instances: &[InstanceEntry],
     default_instances: &[DefaultInstanceEntry],
     projection_fns: &[ProjectionFnInfo],
+    classes: &[ClassEntry],
     goal_json: &Value,
 ) -> LeanrAns {
     let view = env.view();
@@ -364,6 +365,7 @@ fn run_leanr_query(
             instances,
             default_instances,
             projection_fns,
+            classes,
         },
     );
     let synthd: Result<Option<leanr_kernel::bank::ExprId>, ()> = match ctx.synth_instance(goal) {
@@ -595,6 +597,7 @@ fn synth_sweep_ratchet() {
     let mut instances: Vec<InstanceEntry> = Vec::new();
     let mut default_instances: Vec<DefaultInstanceEntry> = Vec::new();
     let mut projection_fns: Vec<ProjectionFnInfo> = Vec::new();
+    let mut classes: Vec<ClassEntry> = Vec::new();
     for (_, md) in modules {
         for ci in md.constants {
             constants.entry(ci.name()).or_insert(ci);
@@ -604,6 +607,7 @@ fn synth_sweep_ratchet() {
         instances.extend(md.instances);
         default_instances.extend(md.default_instances);
         projection_fns.extend(md.projection_fns);
+        classes.extend(md.classes);
     }
     let all_ids: Vec<NameId> = constants.keys().copied().collect();
     leanr_kernel::replay(&mut env, constants).unwrap_or_else(|e| panic!("replay failed: {e}"));
@@ -741,6 +745,7 @@ fn synth_sweep_ratchet() {
                 &instances,
                 &default_instances,
                 &projection_fns,
+                &classes,
                 &r.goal,
             );
             // Loud, per-query: a `GoalMismatch` means this query's `val`
