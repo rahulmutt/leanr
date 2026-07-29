@@ -1972,17 +1972,23 @@ impl<'e> MetaCtx<'e> {
         //    `config.rs` only). Owner M4b, citing
         //    `SynthInstance.lean:958-968` and `level.rs`'s own
         //    `isDefEqStuckEx` seam doc.
-        //  - `preprocess`/`preprocessOutParam`, and
-        //    `withNewMCtxDepth (allowLevelAssignments := true)` -- NAMED
-        //    SEAM, no field/mechanism in this crate at all (no
-        //    preprocessing pass over the goal type before search; no
-        //    mctx-depth model at tier 1, per `level.rs`'s own "Depth /
-        //    read-only seam"). Owner M4b, citing
+        //  - `withNewMCtxDepth (allowLevelAssignments := true)` -- NAMED
+        //    SEAM, no mechanism in this crate at all: there is no
+        //    mctx-depth model at tier 1 (per `level.rs`'s own "Depth /
+        //    read-only seam"), so this driver's `checkpoint`/`rollback`
+        //    pair in `synth_instance_preprocessed` stands in for the
+        //    wrapper's SCOPE without reproducing its READ-ONLY-ness:
+        //    an mvar minted by the caller stays assignable inside the
+        //    search here, where the oracle would treat it as opaque and
+        //    raise `isDefEqStuckEx`. Owner M4b, citing
         //    `SynthInstance.lean:958-968`.
-        //    UPDATE (task 5): `preprocess` is now ported (see
-        //    `synth_instance_preprocessed` below) and no longer belongs
-        //    on this NAMED SEAM list; `preprocessOutParam` and the
-        //    mctx-depth model still do (Task 9 finishes this edit).
+        //    `preprocess` and `preprocessOutParam` were on this list
+        //    until M4b-3 P2b-i and are NOT seams any more: both are
+        //    ported (`MetaCtx::preprocess`, task 5;
+        //    `MetaCtx::preprocess_out_param`, task 6), and
+        //    `synth_instance_preprocessed` below is where the classified
+        //    goal, the out-param replacement and the post-rollback
+        //    `assign_out_params` all live.
         let saved_cfg = self.cfg;
         self.cfg.transparency = TransparencyMode::Instances;
         self.cfg.fo_approx = true;
@@ -3422,6 +3428,91 @@ mod tests {
             assert!(
                 matches!(ctx.node(args[2]), Node::MVar { .. }),
                 "output parameter replaced by a fresh mvar"
+            );
+        });
+    }
+
+    /// The `preprocessArgs` loop (`SynthInstance.lean:795-811`) walks the
+    /// class telescope INSTANTIATING WITH THE REPLACEMENT, not with the
+    /// caller's original argument: `preprocessArgs (b.instantiate1 arg)`
+    /// at `:807`, where `arg` was rebound one line earlier (`:805`) to
+    /// the freshly minted mvar. Inverting that -- instantiating with
+    /// `args[i]` as the caller passed it -- is a real inversion risk and
+    /// is invisible on `Op`/`Lvl`/`Get`, whose every parameter is typed
+    /// by a bare `Type _` and so never mentions an earlier binder's
+    /// VALUE.
+    ///
+    /// `Dep` is the fixture class that makes it visible
+    /// (`Instances.lean`'s own comment records why `c` has to be an
+    /// `outParam` too -- the oracle's `class` command rejects a
+    /// non-`outParam` parameter depending on an `outParam`, which is the
+    /// same rule as the oracle's `:801-804` note on issue #1852). Its
+    /// telescope is `(a : Type) (b : outParam Type) (c : outParam (b ->
+    /// a))`, so on the goal `Dep N N (@id.{1} N)` the mvar minted for
+    /// `c` is typed `outParam (?b -> N)` under the correct loop and
+    /// `outParam (N -> N)` under the inverted one.
+    #[test]
+    fn preprocess_out_param_instantiates_with_the_replacement() {
+        with_instances_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let dep = const_named(ctx, "Dep");
+            // `@id.{1} N : N -> N` -- a well-typed inhabitant of the
+            // third parameter's type, so the goal is a real `Dep`
+            // application rather than a shape the loop only happens not
+            // to inspect.
+            let id = const_named_at_levels(ctx, "id", &[1]);
+            let id_n = ctx.mk_app_spine(id, &[n]).expect("app");
+            let goal = ctx.mk_app_spine(dep, &[n, n, id_n]).expect("app");
+
+            let pre = ctx
+                .preprocess_out_param(goal)
+                .expect("preprocess_out_param");
+            let args = ctx.get_app_args(pre);
+            assert_eq!(args.len(), 3);
+            assert_eq!(args[0], n, "ordinary parameter untouched");
+            let Node::MVar { id: Some(b_id) } = ctx.node(args[1]) else {
+                panic!("`b` is an output parameter: replaced by a fresh mvar")
+            };
+            let Node::MVar { id: Some(c_id) } = ctx.node(args[2]) else {
+                panic!("`c` is an output parameter: replaced by a fresh mvar")
+            };
+            assert_ne!(b_id, c_id, "two DISTINCT fresh mvars");
+
+            // `?c`'s declared type is the class's own `c` binder type
+            // with everything before it substituted: `outParam (?b -> N)`.
+            let c_ty = ctx.mctx.decl(MVarId(c_id)).expect("?c declared").ty;
+            let Node::App { f, arg } = ctx.node(c_ty) else {
+                panic!("?c's type is the `outParam _` application")
+            };
+            assert_eq!(
+                render_name(
+                    ctx,
+                    match ctx.node(f) {
+                        Node::Const { name: Some(nm), .. } => nm,
+                        other => panic!("expected the `outParam` constant, got {other:?}"),
+                    }
+                ),
+                "outParam"
+            );
+            let Node::Forall {
+                binder_type, body, ..
+            } = ctx.node(arg)
+            else {
+                panic!("?c's type wraps the arrow `?b -> N`")
+            };
+            assert_eq!(
+                binder_type, args[1],
+                "the arrow's DOMAIN is the fresh `?b`, not the caller's `N` -- \
+                 `preprocessArgs` instantiated with the replacement (:807), not \
+                 with the original `args[1]`"
+            );
+            assert_ne!(
+                binder_type, n,
+                "instantiating with the caller's original argument would put `N` here"
+            );
+            assert_eq!(
+                body, n,
+                "the arrow's CODOMAIN is `a`, i.e. the caller's `N`"
             );
         });
     }

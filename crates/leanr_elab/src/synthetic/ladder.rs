@@ -94,9 +94,9 @@ impl<'e> TermElabM<'e> {
     ///   and they do not share an owner — do not assume the mctx-depth
     ///   model closes them all.
     ///
-    /// **Residue 1 — `outParam` goals (the big one; owner: P2b, NOT the
-    /// depth model).** `synthInstanceCore?` classifies the goal through
-    /// `preprocess` (`SynthInstance.lean:737-773`, called at `:968`)
+    /// **Residue 1 — `outParam` goals (the big one; owner: P2b-ii, NOT
+    /// the depth model).** `synthInstanceCore?` classifies the goal
+    /// through `preprocess` (`SynthInstance.lean:737-773`, called at `:968`)
     /// into `.noMVars` / `.mvarsNoOutputParams` / `.mvarsOutputParams`
     /// (`PreprocessKind`, `:706-716`). For `.mvarsOutputParams` the
     /// dispatch at `:999-1002` runs `preprocessOutParam`
@@ -112,15 +112,28 @@ impl<'e> TermElabM<'e> {
     /// oracle, with `?γ := Nat` assigned as a RESULT of synthesis —
     /// while this function answers `Undef` and the ladder will
     /// eventually raise `StuckSyntheticMVar` on a goal the oracle
-    /// answers. Unreachable today only because outParam support is
-    /// itself a named seam (`app/args.rs:497-505`'s
-    /// "local-instance outParam result type requires classExtension
-    /// decode — M4b-3 P2b" and `app/finalize.rs:60-65`'s result-type
-    /// counterpart) and no fixture class carries one. **When P2b
-    /// lands `classExtension`/outParam decode, this pre-test MUST be
+    /// answers.
+    ///
+    /// **M4b-3 P2b-i has landed the SYNTHESIS half of the fix**, so this
+    /// entry no longer says "outParam support is itself a named seam":
+    /// `leanr_olean` decodes `classExtension`, and `leanr_meta`'s
+    /// `synth.rs` now has `preprocess` / `preprocess_out_param` /
+    /// `assign_out_params`, with `Op N N ?c` answered AND `?c := N`
+    /// assigned in the committed corpus (`outParam/synth/0` in
+    /// `tests/fixtures/meta/synth-queries.jsonl`). What is STILL OPEN
+    /// is the ELABORATOR half, **M4b-3 P2b-ii**: this pre-test must be
     /// taught to exempt output-parameter positions (or be deleted in
-    /// favour of the real mechanism) — porting `preprocessOutParam` /
-    /// `assignOutParams`, not the depth model, is what closes this.**
+    /// favour of calling the real mechanism), and `app/args.rs`'s
+    /// `add_implicit_arg` / `app/finalize.rs`'s result-type branch still
+    /// need a `resultTypeOutParam?` producer. What keeps the residue
+    /// UNREACHABLE today is narrower than before, and it is a fixture
+    /// fact rather than a missing mechanism: `Elab0.lean`
+    /// (`tests/fixtures/elab/`) still declares no class with an
+    /// `outParam`, so no corpus term reaches this arm with an output
+    /// parameter in it.
+    /// P2b-ii is the slice that adds one (the `Get`/`GetElem` shape
+    /// already proved out at the synthesis tier) and must retire this
+    /// residue in the same change.
     ///
     /// **Residue 2 — an all-polymorphic candidate set (owner: the
     /// mctx-depth model).** If every candidate the search reaches is

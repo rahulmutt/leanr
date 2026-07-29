@@ -337,8 +337,8 @@ fn oracle_synth_gate() {
     // number of records actually COMPARED, so deleting or `exc`-ing a
     // curated query fails here instead of quietly shrinking the corpus.
     assert_eq!(
-        compared, 13,
-        "expected 13 compared synthesis records (skipped `exc`: {skipped_exc:?}; \
+        compared, 18,
+        "expected 18 compared synthesis records (skipped `exc`: {skipped_exc:?}; \
          skipped near-budget: {skipped_near_budget:?}; seam-excluded: \
          {skipped_seam:?}) — if the curated list in dump_synth.lean grew or shrank \
          deliberately, update this count"

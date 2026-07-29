@@ -226,6 +226,50 @@ What each entry exercises (task B7's brief):
                   assigned `?n`), so the oracle answers cleanly and the
                   answer term still MENTIONS `?n`. This is the record
                   that exercises the `mvars` field.
+* `outParam`        — `Op N N ?c` with `?c` an UNASSIGNED mvar minted
+                      OUTSIDE the search, in the class's OUTPUT
+                      parameter position. The oracle answers `instOpN`
+                      AND assigns `?c := N` (`assignOutParams`,
+                      SynthInstance.lean:825-845). The assignment is
+                      visible only in `assigns` — `ok`/`val` are the
+                      same either way, which is why that field exists.
+                      This is the shape leanr_elab's `ladder.rs`
+                      "Residue 1" cites as a live divergence.
+* `outParamReject`  — `Op N N NoBase`: the search succeeds against the
+                      PREPROCESSED goal (`instOpN`, with the output
+                      position replaced by a fresh mvar) and the answer
+                      is then REJECTED, because `assignOutParams`'
+                      `isDefEq` cannot reconcile `NoBase` with `N`.
+                      `ok:false`. An `assignOutParams` stubbed to `true`
+                      answers `instOpN` here and fails the gate.
+* `outParamNoMVars` — `Op N N (Dual N)`: a GROUND goal against an
+                      out-param class, i.e. `preprocess`'s `.noMVars`
+                      kind, which the oracle nevertheless routes through
+                      `preprocessOutParam` (the call at :1000, under the
+                      `OrderDual` note at :981-999 explaining why the
+                      obvious optimization is NOT taken). `Dual` is
+                      semireducible, so the search cannot unfold it at
+                      `.instances` transparency and a goal taken
+                      literally would FAIL; replacing the output
+                      position with an mvar finds `instOpN`, and
+                      `assignOutParams`' `withDefault` `isDefEq` (:842)
+                      is what then reconciles `Dual N` with `N`.
+                      `ok:true`. Skip either half and the verdict flips.
+* `outParamLevel`   — `Lvl N ?b`: the class whose universe `v` occurs
+                      ONLY in its output parameter, so
+                      `ClassEntry.outLevelParams` is non-empty and
+                      `preprocessOutParam`'s `preprocessLevels` branch
+                      (:785-794) runs. The RECORD pins the answer and
+                      `?b := N`; the level refresh itself is unit-tested
+                      in `synth.rs` instead, because the canonical
+                      record scheme has no level-mvar case at all (see
+                      `encLevel`).
+* `outParamGet`     — `Get N N ?e`: the `GetElem` shape from the
+                      oracle's own worked example — the class itself is
+                      declared at App.lean:150-151, inside the
+                      `resultIsOutParamSupport` doc comment spanning
+                      :141-167 — which M4b-3 P2b-ii needs in
+                      `Elab0.lean`. Proved out here first.
 * `stuck`       — `Add ?a` with `?a` an UNASSIGNED mvar minted OUTSIDE
                   the search. `synthInstanceCore?` runs `main` under
                   `withNewMCtxDepth`, so `?a` is read-only there and
@@ -247,6 +291,17 @@ def synthQueries : List (Name × Nat × MetaM Expr) :=
   , (`cyclic,      0, pure (cls1 `CycA nTy))
   , (`mvarGoal,    0, do
       pure (mkApp (mkApp (mkConst `OfN [Level.zero]) (← mkFreshExprMVar nTy)) nTy))
+  , (`outParam,        0, do
+      pure (mkApp (mkApp (mkApp (mkConst `Op [Level.zero]) nTy) nTy) (← mkFreshExprMVar type0)))
+  , (`outParamReject,  0, pure (mkApp (mkApp (mkApp (mkConst `Op [Level.zero]) nTy) nTy)
+      (mkConst `NoBase)))
+  , (`outParamNoMVars, 0, pure (mkApp (mkApp (mkApp (mkConst `Op [Level.zero]) nTy) nTy)
+      (mkApp (mkConst `Dual) nTy)))
+  , (`outParamLevel,   0, do
+      pure (mkApp (mkApp (mkConst `Lvl [Level.zero, Level.zero]) nTy) (← mkFreshExprMVar type0)))
+  , (`outParamGet,     0, do
+      pure (mkApp (mkApp (mkApp (mkConst `Get [Level.zero, Level.zero, Level.zero]) nTy) nTy)
+        (← mkFreshExprMVar type0)))
   , (`stuck,       0, do pure (cls1 `Add (← mkFreshExprMVar type0)))
   ]
 
@@ -278,7 +333,7 @@ unsafe def main : IO Unit := do
       -- `goal` and `mvars[].t` are encoded BEFORE synthesis: they record
       -- the query AS ASKED. Post-synthesis state belongs in `assigns`
       -- below, not smuggled into `goal` — and an output parameter the
-      -- oracle assigns (`assignOutParams`, SynthInstance.lean:825-844)
+      -- oracle assigns (`assignOutParams`, SynthInstance.lean:825-845)
       -- would otherwise vanish from `goal` entirely and take the
       -- `mvars[].i` numbering with it. Every record committed before
       -- M4b-3 P2b-i is byte-identical either way: no query in the corpus

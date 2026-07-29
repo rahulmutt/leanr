@@ -173,8 +173,8 @@ instance instCycBofA {a : Type u} [CycA a] : CycB a where mkB := fun x => x
 -- `Op` — the binop shape. Two ordinary parameters and one `outParam`,
 -- i.e. `ClassEntry.outParams == #[2]` and `outLevelParams == #[]` (all
 -- three parameters share the universe `u`). This is the shape
--- `crates/leanr_elab/src/synthetic/ladder.rs:105-115` cites as a live
--- divergence — the oracle answers `Op N N ?γ` with `?γ := N` assigned,
+-- `crates/leanr_elab/src/synthetic/ladder.rs`' "Residue 1" cites as a
+-- live divergence — the oracle answers `Op N N ?γ` with `?γ := N` assigned,
 -- leanr (before this plan) answers `Undef`.
 class Op (a : Type u) (b : Type u) (c : outParam (Type u)) where
   op : a → b → c
@@ -187,7 +187,9 @@ instance instOpN : Op N N N where
 -- occurs only in `b`'s type). It is what gives `ClassEntry`'s third
 -- field a non-empty producer, and it is the class
 -- `preprocessOutParam`'s `preprocessLevels` branch
--- (`SynthInstance.lean:786-795`) runs on.
+-- (`SynthInstance.lean:785-794` — corrected from `:786-795`, which
+-- starts one line late and ends one line into `preprocessArgs`' own
+-- declaration) runs on.
 class Lvl (a : Type u) (b : outParam (Type v)) where
   lvl : a → b
 
@@ -195,10 +197,12 @@ instance instLvlN : Lvl N N where
   lvl := fun a => a
 
 -- `Get` — the `GetElem` shape from the oracle's own worked example
--- (`App.lean:143-146`): two ordinary parameters, one `outParam`, and a
--- method taking both ordinary parameters. M4b-3 P2b-ii needs exactly
--- this shape in `Elab0.lean`; proving it out at the synthesis tier first
--- is why it is here.
+-- (the class is declared at `App.lean:150-151`, inside the
+-- `resultIsOutParamSupport` doc comment spanning `:141-167` — NOT at
+-- `:143-146`, which is that comment's opening prose): two ordinary
+-- parameters, one `outParam`, and a method taking both ordinary
+-- parameters. M4b-3 P2b-ii needs exactly this shape in `Elab0.lean`;
+-- proving it out at the synthesis tier first is why it is here.
 class Get (cont : Type u) (idx : Type v) (elem : outParam (Type w)) where
   get : cont → idx → elem
 
@@ -212,9 +216,12 @@ instance instGetN : Get N N N where
 -- `TransparencyMode.instances`, which cannot unfold `Dual`, so a search
 -- against the goal as written fails; the oracle instead replaces the
 -- output parameter with a fresh mvar (`preprocessOutParam`, called even
--- on the `.noMVars` path — `SynthInstance.lean:983-1000`, the
--- `OrderDual` note), finds `instOpN`, and then reconciles with
--- `assignOutParams`' `isDefEq` under `withDefault`
--- (`SynthInstance.lean:851`), where `Dual` DOES unfold. Skip either
--- half and the answer flips from `some instOpN` to `none`.
+-- on the `.noMVars` path — the call at `SynthInstance.lean:1000`, under
+-- the `OrderDual` note at `:981-999`), finds `instOpN`, and then
+-- reconciles with `assignOutParams`' `isDefEq` under `withDefault`
+-- (`SynthInstance.lean:842` — corrected from `:851`, which falls inside
+-- `checkMayHaveSideEffects`' doc comment; `:842` is the
+-- `let defEq ← withDefault <| withAssignableSyntheticOpaque <|
+-- isDefEq type resultType` line itself), where `Dual` DOES unfold.
+-- Skip either half and the answer flips from `some instOpN` to `none`.
 def Dual (a : Type) : Type := a
