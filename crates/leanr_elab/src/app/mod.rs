@@ -22,7 +22,20 @@
 //! M4b-3 P2a task 10 against what P2a actually shipped: the
 //! instance-implicit arm and the three `inst_mvars` guards this table
 //! used to carry as P2 rows are gone (real code — see above), and the
-//! "too many args" row closed its P2 half and now splits P4/P5:
+//! "too many args" row closed its P2 half and now splits P4/P5.
+//! Reconciled AGAIN by M4b-3 P3 task 8: the row that listed the three
+//! non-leaf literal kinds as P3's, not routed by `dispatch.rs`, is gone
+//! too. (Its exact wording is deliberately NOT quoted here — the gate
+//! below is a text scan, and a doc that reproduces a retired row's text
+//! is indistinguishable from the row itself.) All three kinds ARE routed
+//! now (`dispatch.rs`'s own table, tasks 6-7) and the rung-3
+//! default-instance seam they depended on has
+//! a real body in `synthetic/default_inst.rs`, so the row was a stale
+//! claim rather than a seam — `tests/seam_audit.rs`'s
+//! `literal_kinds_are_registered_not_deferred` gates that it stays gone.
+//! P3 changed nothing else in `app/`: the `local-instance outParam
+//! result type` row below is unchanged and still P2b's, which now runs
+//! after P3 (design spec § Amendment 2).
 //!
 //! ```text
 //!   local-instance outParam result type .............. P2b args.rs, finalize.rs
@@ -33,7 +46,6 @@
 //!     reports `ElabError::FunctionExpected`, matching the oracle's own
 //!     diagnostic (`over_application_reports_function_expected`,
 //!     `tests/seam_audit.rs`).
-//!   num/char/scientific literals ..................... P3  dispatch.rs (not routed)
 //!   coercions (CoeT/CoeFun/CoeSort, mkCoe) ........... P4  args.rs (ensureArgType)
 //!   optParam defaults / autoParam .................... P5  args.rs
 //!   implicit-lambda insertion ........................ P5  elab.rs, and `@t`/`@(t)` here
@@ -96,7 +108,7 @@ use crate::error::ElabError;
 /// wraps the whole thing, running `processPostponed` (leanr_meta's
 /// postponed level-constraint queue) after every single `elabApp` call.
 /// leanr does not checkpoint per call here: P2a's
-/// `process_postponed_universe_constraints` (`synthetic.rs`) drains the
+/// `process_postponed_universe_constraints` (`synthetic/ladder.rs`) drains the
 /// same queue at the end of `synthesize_synthetic_mvars_no_postponing`'s
 /// fixpoint — and that fixpoint itself runs more than once per term
 /// under the gate as wired (`TermElabM::elab_term_and_synthesize`,

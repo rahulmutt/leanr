@@ -791,7 +791,7 @@ impl<'e> MetaCtx<'e> {
     /// that flag exists to guarantee `throwStuckAtUniverseCnstr`'s
     /// "entries is not empty" precondition, and leanr's caller reports
     /// stuck constraints from the `false` verdict instead of from a
-    /// thrown exception (`synthetic.rs`'s
+    /// thrown exception (`leanr_elab`'s `synthetic/ladder.rs`,
     /// `process_postponed_universe_constraints`).
     pub fn process_postponed_levels(&mut self) -> Result<bool, MetaError> {
         self.process_postponed()

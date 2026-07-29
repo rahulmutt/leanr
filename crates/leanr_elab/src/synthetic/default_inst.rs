@@ -63,15 +63,31 @@ impl<'e> TermElabM<'e> {
     /// — the ladder's rung 3. Walk the GLOBAL priority set in
     /// descending order; the first priority that makes progress wins.
     ///
-    /// `kinds` is threaded through the whole family for the ladder's own
-    /// convention (every fixpoint entry point takes the interner rather
-    /// than storing it — `SyntheticMVarDecl`'s own doc) and reaches
-    /// `synthesize_pending_inst_mvar_committed` unused: the only leaf
-    /// this family calls is `synthesize_inst_mvar_core`, which takes no
-    /// interner because an instance goal is solved by synthesis, never
-    /// by re-elaborating syntax. It is not dead weight for long — the
-    /// `.coe` and `.postponed` arms P4/P5 add below this point do
-    /// re-elaborate.
+    /// **`kinds` is unused by every function in this module today, not
+    /// merely by the leaf** — stated plainly here because the earlier
+    /// wording implied it was consumed somewhere along the way and was
+    /// corrected by M4b-3 P3 task 8's audit. It is threaded through all
+    /// eight helpers and read by none of them: the only leaf this family
+    /// calls is `synthesize_inst_mvar_core`, which takes no interner
+    /// because an instance goal is solved by SYNTHESIS, never by
+    /// re-elaborating syntax.
+    ///
+    /// It is kept rather than deleted, and the reason is the public
+    /// signature, not a forward bet on its own. `kinds` is part of this
+    /// method's contract (design spec § P3; `ladder.rs`'s rung 3 and
+    /// `synthesize_using_default_loop` both pass the interner they
+    /// already hold), and it is there for the ladder's convention that
+    /// every fixpoint entry point takes the interner rather than storing
+    /// it (`SyntheticMVarDecl`'s own doc, which cites `TermElabM`'s
+    /// module doc for the underlying rule). Dropping it from the private
+    /// helpers alone would leave that public parameter with NO consumer
+    /// at all — a `_kinds` on the crate's API surface, which is a louder
+    /// falsehood than a threaded-but-unread argument, and would have to
+    /// be re-threaded through this exact cycle the moment a `.coe` or
+    /// `.postponed` arm (P4/P5) lands inside
+    /// `synthesize_pending_inst_mvar_committed`, since those DO
+    /// re-elaborate syntax. Recorded as a deliberate call, so a future
+    /// reader does not have to re-derive it.
     pub fn synthesize_using_default(&mut self, kinds: &KindInterner) -> Result<bool, ElabError> {
         // oracle: "Recall that `prioSet` is stored in descending order".
         // `MetaCtx::default_instance_priorities` guarantees that
@@ -413,6 +429,15 @@ impl<'e> TermElabM<'e> {
     /// catches it in release; the message names the invariant, the same
     /// shape `report_stuck_synthetic_mvars` uses for the oracle's
     /// `| _ => unreachable!`.
+    ///
+    /// It named "M4b-3 P3 invariant" until task 8's seam audit. That
+    /// read as a DEFERRAL under this crate's named-seam discipline —
+    /// "P3 owes an implementation here" — which was false the moment
+    /// task 5 landed the body around it, so the slice label was dropped
+    /// rather than retargeted at a later slice that owes nothing either.
+    /// See `builtin::lit::inst_mvar_id`, the other message this applied
+    /// to, and `tests/seam_audit.rs`'s
+    /// `no_seam_message_names_the_completed_p3_slice`.
     fn mvar_id_of(&self, e: ExprId) -> Result<MVarId, ElabError> {
         let base = self.view.store;
         let node = self.mctx.store().expr_node(Some(base), e);
@@ -424,8 +449,8 @@ impl<'e> TermElabM<'e> {
             "forallMetaTelescopeReducing yielded a non-metavariable telescope entry: {node:?}"
         );
         Err(ElabError::UnsupportedSyntax(
-            "forallMetaTelescopeReducing yielded a non-metavariable telescope entry \
-             — M4b-3 P3 invariant"
+            "internal invariant: forallMetaTelescopeReducing yielded a non-metavariable \
+             telescope entry (synthetic::default_inst — not a deferred construct)"
                 .to_string(),
         ))
     }

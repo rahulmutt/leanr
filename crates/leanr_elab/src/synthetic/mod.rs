@@ -15,18 +15,21 @@
 //! for no structural gain (design spec § P2a).
 //!
 //! **Layout (M4b-3 P3 task 1).** P2a shipped this as one 804-line file.
-//! It splits here, BEFORE P3's `synthesizeUsingDefault*` family adds
-//! ~250 more lines to it (design spec § Amendment 2, item 3), along the
-//! oracle's own seams:
+//! It was split BEFORE P3's `synthesizeUsingDefault*` family was written
+//! (design spec § Amendment 2, item 3), along the oracle's own seams;
+//! task 5 then landed that family into the fourth file, which is now the
+//! largest of the four:
 //!
 //! ```text
 //!   state.rs ......... the decl/error tables and their registration
 //!                      (`TermElabM.lean`'s half)
 //!   ladder.rs ........ the step, the five rungs, `withSynthesize`,
-//!                      `resumePostponed` (`SyntheticMVars.lean`'s
-//!                      scheduler half)
+//!                      `synthesizeUsingDefaultLoop`, `resumePostponed`
+//!                      (`SyntheticMVars.lean`'s scheduler half)
 //!   report.rs ........ stuck reporting and its priority sort
-//!   default_inst.rs .. rung 3's real body (P3 task 5)
+//!   default_inst.rs .. rung 3's real body (P3 task 5) — the
+//!                      `synthesizeUsingDefault*` family and the nested
+//!                      `synthesizePending` fixpoint
 //! ```
 //!
 //! Every `impl<'e> TermElabM<'e>` block below is a continuation of the

@@ -171,13 +171,17 @@ def dpick {a : Type} (w : a) (x : Type) (z : x) : a := w
 --     JSONL: the dumper drops a throwing query. They are asserted in
 --     crates/leanr_elab/tests/synthetic_smoke.rs.
 --   * `Dflt` — DISTINCT from `Wrap`/`Pair`/`NoInst`, carrying a
---     `@[default_instance]`, so rung 3's shape guard
---     (`synthesize_using_default`) has a positive test
---     (`synthesize_using_default_errors_when_a_default_instance_is_registered`,
---     Task 5's review fix). `Wrap`/`Pair`/`NoInst` must NEVER gain a
---     default instance: one on `Wrap` would make rung 3 fire for the
---     stuck `useWrap` goal and break the stuck-path tests (Task 5,
---     Task 9).
+--     `@[default_instance]`, so rung 3 (`synthesize_using_default`) has
+--     a positive test. It named `synthesize_using_default_errors_when_a_
+--     default_instance_is_registered` while rung 3 was P2a's shape
+--     GUARD; M4b-3 P3 task 5 replaced that guard with the real body and
+--     deleted the test. The successors are
+--     `synthesize_using_default_applies_a_default_instance` and
+--     `a_rejected_default_instance_is_rolled_back`, both in
+--     crates/leanr_elab/tests/synthetic_smoke.rs. `Wrap`/`Pair`/`NoInst`
+--     must NEVER gain a default instance: one on `Wrap` would make rung
+--     3 fire for the stuck `useWrap` goal and break the stuck-path tests
+--     (P2a tasks 5 and 9).
 class Wrap (a : Type) where
   wrap : a -> a
 

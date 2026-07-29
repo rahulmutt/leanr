@@ -25,7 +25,7 @@
 //! pinned source, `TermElabM.lean:873-874`, to be diagnostic
 //! bookkeeping only — it pushes an `MVarErrorInfo` onto `state`'s list
 //! and has no `Expr` effect) is wired up below: `elab_hole` calls
-//! `TermElabM::register_mvar_error_hole_info` (`synthetic.rs`) with the
+//! `TermElabM::register_mvar_error_hole_info` (`synthetic/state.rs`) with the
 //! hole's own syntax as `ref`, exactly as the oracle's `elabHole` does
 //! with `stx`.
 //!

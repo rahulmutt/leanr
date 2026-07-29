@@ -510,6 +510,16 @@ def scientificQueries : List (String × String) :=
   , ("sci/expNeg",    "(1e-3 : Tag)")
   , ("sci/dotExpPos", "(1.5e2 : Tag)")
   , ("sci/dotExpNeg", "(1.5e-2 : Tag)")
+    -- The THIRD arm of `decodeScientificLitVal?`'s exponent combination
+    -- (`Init/Meta/Defs.lean:1021-1024`): a positive written exponent
+    -- SMALLER than the number of digits after the dot, which flips the
+    -- sign back to negative — `1.25e1 -> (125, true, 1)`. The other two
+    -- arms are covered by `sci/dotExpPos` (`exp >= e`) and
+    -- `sci/dotExpNeg` (a negative written exponent); this one had a unit
+    -- test in `builtin/lit/decode.rs` but no differential record, so the
+    -- arm was measured against the decoder and not against the oracle.
+    -- Added by M4b-3 P3 task 8.
+  , ("sci/dotExpBelow", "(1.25e1 : Tag)")
   ]
 
 def emit (id src : String) (expJ : Json) : IO Unit :=

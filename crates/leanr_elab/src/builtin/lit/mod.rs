@@ -183,6 +183,16 @@ pub(crate) fn app_n(elab: &mut TermElabM, f: ExprId, args: &[ExprId]) -> Result<
 /// registration silently would drop the numeral's
 /// `registerMVarErrorImplicitArgInfo`, which is a wrong (missing)
 /// side effect rather than an error.
+///
+/// The message names an INTERNAL INVARIANT, not a slice. It carried
+/// "M4b-3 P3 invariant" until task 8's seam audit: under this crate's
+/// named-seam discipline an `UnsupportedSyntax` naming a slice reads as
+/// "that slice owes an implementation", and no slice owes one here —
+/// the construct is implemented, and this arm is a broken postcondition
+/// of a function three lines up. Retargeting it at a LATER slice would
+/// have been a second false claim, so the label was dropped instead.
+/// `tests/seam_audit.rs`'s `no_seam_message_names_the_completed_p3_slice`
+/// is the gate.
 fn inst_mvar_id(elab: &TermElabM, e: ExprId) -> Result<MVarId, ElabError> {
     let base = elab.view.store;
     let node = elab.mctx.store().expr_node(Some(base), e);
@@ -191,7 +201,9 @@ fn inst_mvar_id(elab: &TermElabM, e: ExprId) -> Result<MVarId, ElabError> {
     }
     debug_assert!(false, "mkInstMVar returned a non-metavariable: {node:?}");
     Err(ElabError::UnsupportedSyntax(
-        "mkInstMVar returned a non-metavariable — M4b-3 P3 invariant".to_string(),
+        "internal invariant: mkInstMVar returned a non-metavariable \
+         (builtin::lit — not a deferred construct)"
+            .to_string(),
     ))
 }
 

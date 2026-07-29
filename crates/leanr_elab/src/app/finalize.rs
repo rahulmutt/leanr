@@ -15,7 +15,7 @@ pub fn finalize(app: &mut AppElab) -> Result<ExprId, ElabError> {
     // s.f` immediately above its loop. `ref` is the oracle's ambient
     // `getRef`; `Context::stx` is its stand-in (this module's own doc).
     // P2a implemented this: `register_mvar_error_implicit_arg_info`
-    // (`synthetic.rs`) is the ladder field this loop writes into, and
+    // (`synthetic/state.rs`) is the ladder field this loop writes into, and
     // `AppElab::synthesize_app_inst_mvars` below already calls it for a
     // different producer (unsolved instance mvars) — this is the OTHER
     // caller, transliterated straight from the oracle rather than left
@@ -61,7 +61,13 @@ pub fn finalize(app: &mut AppElab) -> Result<ExprId, ElabError> {
     // `Lean.Internal.coeM`), so there is no P1 producer; guard anyway.
     if app.st.result_type_out_param.is_some() {
         return Err(ElabError::UnsupportedSyntax(
-            "result-type outParam support requires default instances — M4b-3 P2b".to_string(),
+            // "requires default instances" until M4b-3 P3 task 8's seam
+            // audit: P3 shipped them (`synthetic/default_inst.rs`), so
+            // that was no longer what is missing. What IS missing is the
+            // `classExtension` decode that would ever SET
+            // `result_type_out_param` — the same blocker `args.rs`'s
+            // sibling seam names, and still P2b's.
+            "result-type outParam support requires classExtension decode — M4b-3 P2b".to_string(),
         ));
     }
 

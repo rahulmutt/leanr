@@ -1,7 +1,14 @@
 //! The dispatch table: syntax-kind name -> leaf elaborator.
 //!
 //! `elaborator_name_for` is the single source of truth for "is this a
-//! leaf we elaborate" — Tasks 4-6 grow it one arm per leaf kind.
+//! term-syntax kind we elaborate". M4b-1's tasks 4-6 grew it one arm per
+//! LEAF kind, which is the framing the rest of this doc still uses;
+//! every slice since has added non-leaf kinds to the same table
+//! (M4b-2's binders and `let`/`have`, M4b-3 P1's `app`/`explicit`/
+//! `explicitUniv`, M4b-3 P3's `num`/`char`/`scientific`), so "registered"
+//! and "leaf" have not been synonyms since M4b-2 — `str` is the one
+//! literal that really is a leaf, and `builtin::lit`'s own module doc
+//! says so.
 //! `dispatch` is the actual entry point `TermElabM::elab_term` calls;
 //! an unregistered kind is `ElabError::UnsupportedSyntax`, never a
 //! panic and never a wrong `ExprId` (named-seam discipline).
@@ -55,9 +62,13 @@ pub(crate) fn non_trivia_children(node: &SyntaxNode) -> Vec<SynElem> {
         .collect()
 }
 
-/// The registered leaf kinds. Returns a stable label for a registered
-/// kind, `None` otherwise. Grown by Tasks 4-6, now complete for M4b-1
-/// slice 1. Keyed on the kind's INTERNED name — `"<ident>"` for a bare
+/// The registered term-syntax kinds. Returns a stable label for a
+/// registered kind, `None` otherwise. Grown by M4b-1's tasks 4-6 (which
+/// completed M4b-1 slice 1) and by every slice since; see this module's
+/// doc for why "registered" stopped meaning "leaf" at M4b-2, and
+/// `tests/seam_audit.rs`'s `literal_kinds_are_registered_not_deferred`
+/// for the gate on the four literal kinds.
+/// Keyed on the kind's INTERNED name — `"<ident>"` for a bare
 /// identifier (`KindInterner`'s fixed-slot name, not the string
 /// `"ident"` a dynamically-interned node kind would have; see this
 /// module's doc comment), `"str"` for a string literal (a real

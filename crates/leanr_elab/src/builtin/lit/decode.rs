@@ -84,7 +84,7 @@ fn digits(cs: &[char], radix: u32) -> Option<Nat> {
 /// its value. Transcribes `Init.Meta.Defs.decodeStrLit` /
 /// `decodeStrLitAux` / `decodeQuotedChar` / `decodeRawStrLitAux` (read
 /// directly from the pinned toolchain source,
-/// `src/Init/Meta/Defs.lean:1089-1163`, not guessed). The escape set
+/// `src/Init/Meta/Defs.lean:1089-1164`, not guessed). The escape set
 /// itself moved to [`decode_quoted_char`] in task 7, shared verbatim
 /// with the char-literal decoder exactly as the oracle shares it:
 ///
@@ -111,6 +111,19 @@ fn digits(cs: &[char], radix: u32) -> Option<Nat> {
 ///   correctly once already walking the raw text.
 pub(crate) fn decode_string_literal(raw: &str) -> String {
     let chars: Vec<char> = raw.chars().collect();
+    // Totality guard for the two token shapes shorter than any
+    // well-formed literal. Both are unreachable from a lexed token, and
+    // both PANICKED before this check — the never-panic rule for these
+    // decoders is absolute (Global Constraints), so it is enforced
+    // rather than asserted in prose. `""` underflows the plain branch's
+    // `chars.len() - 1`; `"r"` alone would reach the raw branch and give
+    // it an inverted slice range, which the second guard below covers
+    // for every `#` count at once. The empty string is the right answer
+    // (it is what an empty literal denotes) and keeps this function
+    // infallible by signature, as `elab_str` requires.
+    if chars.len() < 2 {
+        return String::new();
+    }
     if chars.first() == Some(&'r') {
         let mut i = 1;
         let mut hashes = 0usize;
@@ -120,8 +133,17 @@ pub(crate) fn decode_string_literal(raw: &str) -> String {
         }
         // chars[i] is the opening '"'; the inner text runs to just
         // before the closing '"' + its matching N '#'s.
+        //
+        // `start > end` is the truncated-token case (`"r#"` gives
+        // `chars[3..0]`): an INVERTED range, not an underflow — the
+        // subtraction itself is fine, and the panic is the slice's own
+        // `start <= end` check. `saturating_sub` plus the comparison
+        // covers both at once.
         let start = i + 1;
-        let end = chars.len() - 1 - hashes;
+        let end = chars.len().saturating_sub(1 + hashes);
+        if start > end {
+            return String::new();
+        }
         return chars[start..end].iter().collect();
     }
 
@@ -172,14 +194,14 @@ pub(crate) fn decode_string_literal(raw: &str) -> String {
     out
 }
 
-/// oracle: `decodeQuotedChar` (`Init/Meta/Defs.lean:1089-1113`) —
+/// oracle: `decodeQuotedChar` (`Init/Meta/Defs.lean:1089-1109`) —
 /// decode the escape sequence starting at `i`, the character AFTER the
 /// backslash, returning the decoded character and the index just past
 /// the sequence.
 ///
 /// `None` for anything outside the escape set, exactly as the oracle
 /// returns `none`. A string GAP (`\` + whitespace) is `decodeStringGap`'s
-/// separate job (`:1117-1120`), tried second by `decodeStrLitAux`
+/// separate job (`:1117-1119`), tried second by `decodeStrLitAux`
 /// (`:1129-1132`) — it is not an arm here, and a char literal cannot
 /// contain one.
 ///
@@ -213,7 +235,8 @@ pub(crate) fn decode_quoted_char(cs: &[char], i: usize) -> Option<(char, usize)>
 }
 
 /// `n` consecutive hex digits from `at`, folded big-endian: the oracle's
-/// chain of `decodeHexDigit` binds (`:1097-1105`), whose `none`
+/// chain of `decodeHexDigit` binds — two for `\x` (`:1099-1100`) and
+/// four for `\u` (`:1103-1106`) — whose `none`
 /// short-circuits the enclosing `do` block. `None` if the buffer is too
 /// short or any character is not an ASCII hex digit — `char::to_digit(16)`
 /// accepts exactly `decodeHexDigit`'s three ranges (`:940-946`) and
@@ -251,7 +274,7 @@ pub(crate) fn decode_char_literal(raw: &str) -> Option<char> {
 /// oracle: `decodeScientificLitVal?` (`Init/Meta/Defs.lean:1008-1071`),
 /// transcribed as a single pass over the token rather than the oracle's
 /// four mutually-recursive `where` bindings. The states correspond
-/// one-to-one: `decode` (the integer part, `:1058-1071`),
+/// one-to-one: `decode` (the integer part, `:1058-1072`),
 /// `decodeAfterDot` (`:1044-1056`), `decodeExp` (`:1034-1042`),
 /// `decodeAfterExp` (`:1017-1032`).
 ///
@@ -437,7 +460,7 @@ mod tests {
 
     /// oracle: `decodeCharLit` (`Init/Meta/Defs.lean:1177-1183`) — the
     /// character at index 1; if it is `\`, `decodeQuotedChar`
-    /// (`:1089-1113`) from index 2. Exactly the escape set
+    /// (`:1089-1109`) from index 2. Exactly the escape set
     /// `decode_string_literal` already handles, which is why task 7
     /// factors `decode_quoted_char` out of it rather than writing a
     /// second copy.
@@ -508,6 +531,44 @@ mod tests {
         assert_eq!(decode_string_literal("\"\\x\""), "x");
     }
 
+    /// Totality of `decode_string_literal` itself, on the two token
+    /// shapes SHORTER than any well-formed string literal (Global
+    /// Constraints: a literal decoder must never panic on unexpected
+    /// input). Both were pre-existing panics, unreachable from a lexed
+    /// token but unproven and unenforced, and the function is
+    /// `pub(crate)` and directly unit-tested — so the invariant is
+    /// checked rather than asserted in prose:
+    ///
+    ///   * `""` — the plain-string branch computed `chars.len() - 1`,
+    ///     which underflows `usize`;
+    ///   * `"r"` and `"r#"` — the raw-string branch computed
+    ///     `start = i + 1` and `end = chars.len() - 1 - hashes`, giving
+    ///     `chars[2..0]` and `chars[3..0]`. An INVERTED slice range, not
+    ///     an underflow (`1 - 1 - 0 = 0` and `2 - 1 - 1 = 0` are both
+    ///     fine on their own); the panic is the slice's own
+    ///     `start <= end` check.
+    ///
+    /// The oracle is not a guide here: `decodeStrLit` reads through
+    /// `String.Internal.get`, which returns `'A'` past the end rather
+    /// than faulting, so it "decodes" garbage instead. leanr returns the
+    /// empty string, which is what an empty literal means and what the
+    /// caller (`elab_str`, infallible by signature) can use.
+    #[test]
+    fn string_literal_shorter_than_its_delimiters_never_panics() {
+        assert_eq!(decode_string_literal(""), "");
+        assert_eq!(decode_string_literal("r"), "");
+        assert_eq!(decode_string_literal("r#"), "");
+        // One more `#` than the token can carry, same inverted-range
+        // shape one step further out.
+        assert_eq!(decode_string_literal("r##"), "");
+        // And the shortest WELL-FORMED tokens of each shape still decode
+        // as before, so the guard cannot be satisfied by rejecting
+        // everything.
+        assert_eq!(decode_string_literal("\"\""), "");
+        assert_eq!(decode_string_literal("r\"\""), "");
+        assert_eq!(decode_string_literal("r#\"\"#"), "");
+    }
+
     /// oracle: `decodeScientificLitVal?` (`Init/Meta/Defs.lean:1008-1071`).
     /// Returns `(mantissa, negativeExponent, exponent)`:
     ///   `1.5`     -> (15, true, 1)     -- one digit after the dot
@@ -558,7 +619,7 @@ mod tests {
 
     /// The oracle's edge cases around a trailing exponent marker, which a
     /// straight-line transcription gets wrong: `decodeExp` tests
-    /// `atEnd` BEFORE reading the sign (`:1041`), so `1e` is `none`,
+    /// `atEnd` BEFORE reading the sign (`:1035`), so `1e` is `none`,
     /// while `1e-` reaches `decodeAfterExp`'s own `atEnd` and is
     /// `some (1, true, 0)`. A trailing bare `.` is `decodeAfterDot`'s
     /// `atEnd` case, `some (1, true, 0)`.
