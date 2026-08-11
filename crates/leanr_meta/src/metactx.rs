@@ -136,9 +136,8 @@ pub struct MetaCtx<'e> {
     /// citation. Read by [`MetaCtx::get_out_param_positions`],
     /// [`MetaCtx::get_out_level_param_positions`] and
     /// [`MetaCtx::has_out_params`]; consulted from `synth.rs`'s
-    /// `preprocess` (`:1709`, `:1711`) and `preprocess_out_param`
-    /// (`:1758`, `:1760`), the real consumers landed by M4b-3 P2b-i
-    /// tasks 5-7.
+    /// `preprocess` and `preprocess_out_param`, the real consumers
+    /// landed by M4b-3 P2b-i tasks 5-7.
     pub(crate) classes: ClassTable,
     /// The `smartUnfolding` option (oracle default: true), consulted by
     /// `unfold_definition`'s app/const arms (task 7).

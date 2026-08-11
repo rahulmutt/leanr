@@ -116,9 +116,9 @@ pub struct Config {
     /// `Delaborator/TopDownAnalyze.lean:197`. Both
     /// `synthesizeUsingDefaultInstance` and `assignOutParams` are in
     /// scope now: `assignOutParams` was transcribed as
-    /// `MetaCtx::assign_out_params` (M4b-3 P2b-i task 7,
-    /// `synth.rs:1880`), which is itself a live consumer of this flag
-    /// via `with_assignable_synthetic_opaque`.
+    /// `MetaCtx::assign_out_params` (M4b-3 P2b-i task 7), which is
+    /// itself a live consumer of this flag via
+    /// `with_assignable_synthetic_opaque`.
     ///
     /// **NAMED SEAM — three of this crate's `syntheticOpaque` checks,
     /// two of which consult the flag.** In the oracle the flag is read
