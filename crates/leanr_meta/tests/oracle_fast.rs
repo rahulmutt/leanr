@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use leanr_kernel::bank::{ExprId, NameId, Store};
 use leanr_kernel::EnvView;
-use leanr_meta::{Config, MVarDecl, MVarId, MVarKind, MetaCtx};
+use leanr_meta::{Config, EnvExtensions, MVarDecl, MVarId, MVarKind, MetaCtx};
 use serde_json::{json, Value};
 
 // The canonical-scheme decode/encode helpers (`decode_expr`/
@@ -92,6 +92,7 @@ fn oracle_fast_gate() {
         instances,
         default_instances,
         projection_fns,
+        classes,
     } = replay_fixture("Meta0.olean");
 
     let queries =
@@ -142,11 +143,14 @@ fn oracle_fast_gate() {
                 view,
                 &mut scratch,
                 cfg,
-                &reducibility,
-                &matchers,
-                &instances,
-                &default_instances,
-                &projection_fns,
+                EnvExtensions {
+                    reducibility: &reducibility,
+                    matchers: &matchers,
+                    instances: &instances,
+                    default_instances: &default_instances,
+                    projection_fns: &projection_fns,
+                    classes: &classes,
+                },
             );
             // Declare every mvar `a` introduced (unlike `whnf`/`infer`/
             // `defeq`, `decode_expr` alone never declares an mvar into
@@ -290,11 +294,14 @@ fn oracle_fast_gate() {
                 view,
                 &mut scratch,
                 cfg,
-                &reducibility,
-                &matchers,
-                &instances,
-                &default_instances,
-                &projection_fns,
+                EnvExtensions {
+                    reducibility: &reducibility,
+                    matchers: &matchers,
+                    instances: &instances,
+                    default_instances: &default_instances,
+                    projection_fns: &projection_fns,
+                    classes: &classes,
+                },
             );
             match ctx.is_def_eq(a, b) {
                 Ok(got) => {
@@ -321,11 +328,14 @@ fn oracle_fast_gate() {
             view,
             &mut scratch,
             Config::default(),
-            &reducibility,
-            &matchers,
-            &instances,
-            &default_instances,
-            &projection_fns,
+            EnvExtensions {
+                reducibility: &reducibility,
+                matchers: &matchers,
+                instances: &instances,
+                default_instances: &default_instances,
+                projection_fns: &projection_fns,
+                classes: &classes,
+            },
         );
         ctx.set_transparency(transparency_of(tr));
 

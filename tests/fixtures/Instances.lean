@@ -86,3 +86,81 @@ instance instAddProd {a b : Type u} [Add a] [Add b] : Add (Prod a b) where
 -- a default instance
 class OfN (n : N) (a : Type u) where ofN : a
 @[default_instance] instance instOfNN (n : N) : OfN n N where ofN := n
+
+-- === M4b-3 P2b-i: outParam classes (design spec § P2b-i) ===
+--
+-- The FIRST classes in any leanr fixture carrying an `outParam`. Until
+-- this block, `getOutParamPositions?` was empty everywhere and the
+-- oracle's `preprocessOutParam`/`assignOutParams` were unreachable, so
+-- leanr's not having them was invisible (design spec § Amendment 3,
+-- item 2).
+--
+-- `outParam` must be declared here, at the ROOT namespace, because these
+-- fixtures are `prelude`-mode and import no `Init`. The oracle's `class`
+-- command decides output-parameter positions with
+-- `Lean.Expr.isOutParam` (`Expr.lean:1708-1710`), which is
+-- `isAppOfArity ``outParam 1` against the ROOT name `outParam` — so this
+-- declaration is the real thing, not a look-alike. Copied verbatim from
+-- `Init/Prelude.lean:702` of the pin.
+@[reducible] def outParam (α : Sort u) : Sort u := α
+
+-- `Op` — the binop shape. Two ordinary parameters and one `outParam`,
+-- i.e. `ClassEntry.outParams == #[2]` and `outLevelParams == #[]` (all
+-- three parameters share the universe `u`). This is the shape
+-- `crates/leanr_elab/src/synthetic/ladder.rs`' "Residue 1" cites as a
+-- live divergence — the oracle answers `Op N N ?γ` with `?γ := N` assigned,
+-- leanr (before this plan) answers `Undef`.
+class Op (a : Type u) (b : Type u) (c : outParam (Type u)) where
+  op : a → b → c
+
+instance instOpN : Op N N N where
+  op := fun _ b => b
+
+-- `Lvl` — a universe that appears ONLY in an output parameter, i.e.
+-- `outParams == #[1]` AND `outLevelParams == #[1]` (the universe `v`
+-- occurs only in `b`'s type). It is what gives `ClassEntry`'s third
+-- field a non-empty producer, and it is the class
+-- `preprocessOutParam`'s `preprocessLevels` branch
+-- (`SynthInstance.lean:785-794` — corrected from `:786-795`, which
+-- starts one line late and ends one line into `preprocessArgs`' own
+-- declaration) runs on.
+class Lvl (a : Type u) (b : outParam (Type v)) where
+  lvl : a → b
+
+instance instLvlN : Lvl N N where
+  lvl := fun a => a
+
+-- `Get` — the `GetElem` shape from the oracle's own worked example
+-- (the class is declared at `App.lean:150-151`, inside the
+-- `resultIsOutParamSupport` doc comment spanning `:141-167` — NOT at
+-- `:143-146`, which is that comment's opening prose): two ordinary
+-- parameters, one `outParam`, and a method taking both ordinary
+-- parameters. M4b-3 P2b-ii needs exactly this shape in `Elab0.lean`;
+-- proving it out at the synthesis tier first is why it is here.
+class Get (cont : Type u) (idx : Type v) (elem : outParam (Type w)) where
+  get : cont → idx → elem
+
+instance instGetN : Get N N N where
+  get := fun c _ => c
+
+-- `Dep` — the only class here with a DEPENDENT telescope: `c`'s TYPE
+-- mentions `b`, and `b` is itself an output parameter. Every other
+-- out-param class above (`Op`/`Lvl`/`Get`) has every parameter typed by
+-- a bare `Type _`, so `preprocessOutParam`'s `preprocessArgs` loop
+-- (`SynthInstance.lean:795-811`) could instantiate the class telescope
+-- with the CALLER's original argument instead of the freshly minted
+-- replacement and no test or corpus record would notice. Here it would:
+-- the mvar minted for `c` is typed `outParam (?b → a)` only if the loop
+-- instantiated with the fresh `?b`; instantiating with the caller's
+-- `args[1]` types it `outParam (N → N)` instead. Pinned by
+-- `synth.rs::preprocess_out_param_instantiates_with_the_replacement`.
+--
+-- `c` must ITSELF be an `outParam`: the oracle's `class` command rejects
+-- `(c : b → a)` outright with "invalid class, parameter #3 depends on
+-- `outParam`, but it is not an `outParam`", so `outParams == #[1, 2]` is
+-- the only shape this dependency can take. No instance is declared and
+-- no query in `Synth0.lean`/`dump_synth.lean` mentions `Dep` — the unit
+-- test replays `Instances.olean` directly, so the synthesis corpus and
+-- its record count stay untouched.
+class Dep (a : Type) (b : outParam Type) (c : outParam (b → a)) where
+  dep : a

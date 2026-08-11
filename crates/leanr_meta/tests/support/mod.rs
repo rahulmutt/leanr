@@ -31,7 +31,7 @@ use leanr_kernel::bank::{ExprId, LevelId, NameId, Store};
 use leanr_kernel::{BinderInfo, ConstantInfo, Environment, Nat};
 use leanr_meta::TransparencyMode;
 use leanr_olean::{
-    DefaultInstanceEntry, InstanceEntry, MatcherEntry, ModuleData, ProjectionFnInfo,
+    ClassEntry, DefaultInstanceEntry, InstanceEntry, MatcherEntry, ModuleData, ProjectionFnInfo,
     ReducibilityEntry,
 };
 use serde_json::{json, Value};
@@ -51,6 +51,7 @@ pub struct Replayed {
     pub instances: Vec<InstanceEntry>,
     pub default_instances: Vec<DefaultInstanceEntry>,
     pub projection_fns: Vec<ProjectionFnInfo>,
+    pub classes: Vec<ClassEntry>,
 }
 
 /// Decode `tests/fixtures/<subdir>/<name>`, assert it is import-free
@@ -76,6 +77,7 @@ pub fn replay_fixture_in(subdir: &str, name: &str) -> Replayed {
         instances: md.instances,
         default_instances: md.default_instances,
         projection_fns: md.projection_fns,
+        classes: md.classes,
     }
 }
 

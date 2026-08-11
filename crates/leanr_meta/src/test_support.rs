@@ -14,7 +14,7 @@ use leanr_kernel::{
 };
 use leanr_olean::ModuleData;
 
-use crate::{Config, MVarDecl, MVarId, MVarKind, MetaCtx};
+use crate::{Config, EnvExtensions, MVarDecl, MVarId, MVarKind, MetaCtx};
 
 pub(crate) fn fixture_path(name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -43,11 +43,7 @@ pub(crate) fn with_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
         view,
         &mut scratch,
         Config::default(),
-        &[],
-        &[],
-        &[],
-        &[],
-        &[],
+        EnvExtensions::default(),
     );
     f(&mut ctx)
 }
@@ -67,6 +63,21 @@ pub(crate) fn with_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
 /// either way — the counter is just cheap insurance against two calls
 /// within the SAME test/`Store` colliding.
 pub(crate) fn fresh_mvar(ctx: &mut MetaCtx, ty: ExprId) -> (ExprId, MVarId) {
+    fresh_mvar_of_kind(ctx, ty, MVarKind::Natural)
+}
+
+/// [`fresh_mvar`] with an explicit [`MVarKind`] (M4b-3 P2b-i task 7):
+/// `assignOutParams`' `withAssignableSyntheticOpaque`
+/// (`SynthInstance.lean:842`) only has observable behavior on a
+/// `syntheticOpaque` metavariable, so the test that pins it needs to
+/// mint one. Otherwise identical to [`fresh_mvar`] — same shared
+/// process-wide counter, so the two cannot collide with each other
+/// either.
+pub(crate) fn fresh_mvar_of_kind(
+    ctx: &mut MetaCtx,
+    ty: ExprId,
+    kind: MVarKind,
+) -> (ExprId, MVarId) {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let idx = COUNTER.fetch_add(1, Ordering::Relaxed);
     let base = Some(ctx.view.store);
@@ -93,7 +104,7 @@ pub(crate) fn fresh_mvar(ctx: &mut MetaCtx, ty: ExprId) -> (ExprId, MVarId) {
             user_name: None,
             ty,
             lctx: Default::default(),
-            kind: MVarKind::Natural,
+            kind,
         },
     );
     let expr = ctx
@@ -152,6 +163,7 @@ pub(crate) fn with_prelude0_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
     let instances = md.instances;
     let default_instances = md.default_instances;
     let projection_fns = md.projection_fns;
+    let classes = md.classes;
     let constants: HashMap<NameId, ConstantInfo> =
         md.constants.into_iter().map(|c| (c.name(), c)).collect();
     leanr_kernel::replay(&mut env, constants).expect("Prelude0 replays");
@@ -162,11 +174,14 @@ pub(crate) fn with_prelude0_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
         view,
         &mut scratch,
         Config::default(),
-        &reducibility,
-        &matchers,
-        &instances,
-        &default_instances,
-        &projection_fns,
+        EnvExtensions {
+            reducibility: &reducibility,
+            matchers: &matchers,
+            instances: &instances,
+            default_instances: &default_instances,
+            projection_fns: &projection_fns,
+            classes: &classes,
+        },
     );
     f(&mut ctx)
 }
@@ -196,6 +211,7 @@ pub(crate) fn with_instances_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
     let instances = md.instances;
     let default_instances = md.default_instances;
     let projection_fns = md.projection_fns;
+    let classes = md.classes;
     let constants: HashMap<NameId, ConstantInfo> =
         md.constants.into_iter().map(|c| (c.name(), c)).collect();
     leanr_kernel::replay(&mut env, constants).expect("Instances.olean replays");
@@ -206,11 +222,14 @@ pub(crate) fn with_instances_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
         view,
         &mut scratch,
         Config::default(),
-        &reducibility,
-        &matchers,
-        &instances,
-        &default_instances,
-        &projection_fns,
+        EnvExtensions {
+            reducibility: &reducibility,
+            matchers: &matchers,
+            instances: &instances,
+            default_instances: &default_instances,
+            projection_fns: &projection_fns,
+            classes: &classes,
+        },
     );
     f(&mut ctx)
 }
@@ -238,6 +257,7 @@ pub(crate) fn with_cyclic_instances_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) ->
     let instances = md.instances;
     let default_instances = md.default_instances;
     let projection_fns = md.projection_fns;
+    let classes = md.classes;
     let constants: HashMap<NameId, ConstantInfo> =
         md.constants.into_iter().map(|c| (c.name(), c)).collect();
     leanr_kernel::replay(&mut env, constants).expect("InstancesCyclic.olean replays");
@@ -248,11 +268,14 @@ pub(crate) fn with_cyclic_instances_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) ->
         view,
         &mut scratch,
         Config::default(),
-        &reducibility,
-        &matchers,
-        &instances,
-        &default_instances,
-        &projection_fns,
+        EnvExtensions {
+            reducibility: &reducibility,
+            matchers: &matchers,
+            instances: &instances,
+            default_instances: &default_instances,
+            projection_fns: &projection_fns,
+            classes: &classes,
+        },
     );
     f(&mut ctx)
 }
@@ -447,6 +470,7 @@ pub(crate) fn with_matcher_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
     let instances = md.instances;
     let default_instances = md.default_instances;
     let projection_fns = md.projection_fns;
+    let classes = md.classes;
     let constants: HashMap<NameId, ConstantInfo> =
         md.constants.into_iter().map(|c| (c.name(), c)).collect();
     leanr_kernel::replay(&mut env, constants).expect("Matcher.olean replays");
@@ -457,11 +481,14 @@ pub(crate) fn with_matcher_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
         view,
         &mut scratch,
         Config::default(),
-        &reducibility,
-        &matchers,
-        &instances,
-        &default_instances,
-        &projection_fns,
+        EnvExtensions {
+            reducibility: &reducibility,
+            matchers: &matchers,
+            instances: &instances,
+            default_instances: &default_instances,
+            projection_fns: &projection_fns,
+            classes: &classes,
+        },
     );
     f(&mut ctx)
 }

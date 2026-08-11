@@ -1075,11 +1075,7 @@ mod tests {
             view,
             &mut scratch,
             crate::Config::default(),
-            &[],
-            &[],
-            &[],
-            &[],
-            &[],
+            crate::EnvExtensions::default(),
         );
         ctx.set_step_budget(300);
 

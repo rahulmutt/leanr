@@ -20,7 +20,7 @@ use std::collections::HashMap;
 
 use leanr_kernel::bank::{ExprId, NameId, Store};
 use leanr_kernel::EnvView;
-use leanr_meta::{Config, MVarDecl, MVarId, MVarKind, MetaCtx};
+use leanr_meta::{Config, EnvExtensions, MVarDecl, MVarId, MVarKind, MetaCtx};
 
 mod support;
 use support::{decode_expr, encode_expr, fixture, replay_fixture, EncSt};
@@ -68,6 +68,7 @@ fn oracle_synth_gate() {
         instances,
         default_instances,
         projection_fns,
+        classes,
     } = replay_fixture("Synth0.olean");
 
     let queries =
@@ -158,11 +159,14 @@ fn oracle_synth_gate() {
             view,
             &mut scratch,
             Config::default(),
-            &reducibility,
-            &matchers,
-            &instances,
-            &default_instances,
-            &projection_fns,
+            EnvExtensions {
+                reducibility: &reducibility,
+                matchers: &matchers,
+                instances: &instances,
+                default_instances: &default_instances,
+                projection_fns: &projection_fns,
+                classes: &classes,
+            },
         );
         // DECLARE every goal mvar (ledger note, task B6): `decode_expr`
         // interns an mvar node but never declares it, and an undeclared
@@ -175,6 +179,10 @@ fn oracle_synth_gate() {
         // `synthInstanceCore?`, which likewise ignores the ambient
         // config.
         let mut decl_failed = false;
+        // Canonical index -> `NameId`, in declaration order, so the
+        // post-synthesis `assigns` gate below can re-derive each goal
+        // mvar's `ExprId` without re-decoding `mvars` a second time.
+        let mut declared_mvars: Vec<(u64, NameId)> = Vec::new();
         for (idx, ty) in mvar_decls {
             let Some(&nid) = mv.get(&idx) else {
                 failures.push(format!(
@@ -183,6 +191,7 @@ fn oracle_synth_gate() {
                 decl_failed = true;
                 continue;
             };
+            declared_mvars.push((idx, nid));
             if ctx.mctx().decl(MVarId(nid)).is_some() {
                 continue;
             }
@@ -218,6 +227,27 @@ fn oracle_synth_gate() {
             Ok(None) => Ok(None),
             Err(e) => Err(e),
         };
+        // Post-synthesis state of every goal mvar, in the record's own
+        // index order. `assignment` is `mctx`'s existing accessor
+        // (`mvar_ctx.rs:91`); an unassigned mvar contributes nothing,
+        // matching the dumper.
+        let mut assigned: Vec<(u64, ExprId)> = Vec::new();
+        for (idx, nid) in &declared_mvars {
+            if ctx.mctx().assignment(MVarId(*nid)).is_none() {
+                continue;
+            }
+            let m = ctx
+                .store_mut()
+                .expr_mvar(base, Some(*nid))
+                .expect("intern mvar");
+            match ctx.instantiate_mvars(m) {
+                Ok(v) => assigned.push((*idx, v)),
+                Err(e) => {
+                    failures.push(format!("{id}: instantiate_mvars on goal mvar {idx}: {e:?}"));
+                }
+            }
+        }
+        assigned.sort_by_key(|(i, _)| *i);
         // End the mutable borrow of `scratch` before reading it back.
         drop(ctx);
 
@@ -238,6 +268,16 @@ fn oracle_synth_gate() {
                     ));
                     continue;
                 }
+                // `got` is `None` here exactly when `ok:false`, and this
+                // `continue` skips `assigns` entirely for such records —
+                // deliberately: the one committed `ok:false` outParam
+                // record has a ground goal with no mvars, so there is
+                // nothing for `assigns` to say, and `is_def_eq` rolls
+                // back on both its `Ok(false)` and `Err` arms, so leanr
+                // cannot have left a spurious assignment on a goal mvar
+                // for a failed synthesis anyway. If a future `ok:false`
+                // record ever DOES mention a goal mvar, this arm would
+                // need to compare `assigns` too.
                 let Some(val) = got else { continue };
                 // Same `EncSt` threading as the dumper: seed the
                 // numbering state by encoding `goal` FIRST (which also
@@ -255,6 +295,38 @@ fn oracle_synth_gate() {
                         q["goal"]
                     ));
                     continue;
+                }
+                // `assigns`: the post-synthesis state of every goal
+                // mvar. Comparing it is what makes M4b-3 P2b-i's
+                // `assignOutParams` visible at all — `ok` and `val` are
+                // identical whether or not the caller's output parameter
+                // was assigned, and so is the term the gate compares.
+                //
+                // Encoded BEFORE `val`, pinning the invariant this gate
+                // must keep against `dump_synth.lean`'s own `EncSt`
+                // threading: the dumper encodes `goal` (`st0`), folds
+                // `mvars[].t` to reach `st1`, then encodes BOTH `assigns`
+                // and `val` off that SAME `st1` as siblings (`val` via
+                // `.run' st1`, `assignsJ` via its own fold starting at
+                // `st1`) — neither one's numbering leaks into the other.
+                // Encoding `got_val` first and only then `got_assigns`
+                // off the state `got_val` already advanced would make
+                // `assigns` see numbering `val` introduced, which the
+                // dumper's side never does; every committed `assigns`
+                // value is ground today, so that ordering bug is
+                // currently invisible, not absent.
+                let mut got_assigns = Vec::new();
+                for (idx, v) in assigned.iter() {
+                    got_assigns.push(serde_json::json!({
+                        "i": idx,
+                        "e": encode_expr(&scratch, base, *v, &mut est),
+                    }));
+                }
+                let want_assigns = q["assigns"].as_array().cloned().unwrap_or_default();
+                if got_assigns != want_assigns {
+                    failures.push(format!(
+                        "{id}: leanr assigns={got_assigns:?} oracle assigns={want_assigns:?}"
+                    ));
                 }
                 let got_val = encode_expr(&scratch, base, val, &mut est);
                 let want_val = &q["val"];
@@ -289,8 +361,8 @@ fn oracle_synth_gate() {
     // number of records actually COMPARED, so deleting or `exc`-ing a
     // curated query fails here instead of quietly shrinking the corpus.
     assert_eq!(
-        compared, 13,
-        "expected 13 compared synthesis records (skipped `exc`: {skipped_exc:?}; \
+        compared, 18,
+        "expected 18 compared synthesis records (skipped `exc`: {skipped_exc:?}; \
          skipped near-budget: {skipped_near_budget:?}; seam-excluded: \
          {skipped_seam:?}) — if the curated list in dump_synth.lean grew or shrank \
          deliberately, update this count"
@@ -322,6 +394,7 @@ fn seam_excluded_mvar_goal_is_incompleteness_not_an_error() {
         instances,
         default_instances,
         projection_fns,
+        classes,
     } = replay_fixture("Synth0.olean");
     let queries =
         std::fs::read_to_string(fixture("synth-queries.jsonl")).expect("committed queries");
@@ -349,11 +422,14 @@ fn seam_excluded_mvar_goal_is_incompleteness_not_an_error() {
             view,
             &mut scratch,
             Config::default(),
-            &reducibility,
-            &matchers,
-            &instances,
-            &default_instances,
-            &projection_fns,
+            EnvExtensions {
+                reducibility: &reducibility,
+                matchers: &matchers,
+                instances: &instances,
+                default_instances: &default_instances,
+                projection_fns: &projection_fns,
+                classes: &classes,
+            },
         );
         ctx.mctx_mut().declare(
             MVarId(nid),
@@ -410,6 +486,7 @@ fn exc_record_stuck_synth_0_pins_leanrs_current_divergent_answer() {
         instances,
         default_instances,
         projection_fns,
+        classes,
     } = replay_fixture("Synth0.olean");
     let queries =
         std::fs::read_to_string(fixture("synth-queries.jsonl")).expect("committed queries");
@@ -438,11 +515,14 @@ fn exc_record_stuck_synth_0_pins_leanrs_current_divergent_answer() {
             view,
             &mut scratch,
             Config::default(),
-            &reducibility,
-            &matchers,
-            &instances,
-            &default_instances,
-            &projection_fns,
+            EnvExtensions {
+                reducibility: &reducibility,
+                matchers: &matchers,
+                instances: &instances,
+                default_instances: &default_instances,
+                projection_fns: &projection_fns,
+                classes: &classes,
+            },
         );
         ctx.mctx_mut().declare(
             MVarId(nid),

@@ -279,7 +279,7 @@ use std::collections::HashMap;
 
 use leanr_kernel::bank::{ExprId, NameId};
 use leanr_kernel::EnvView;
-use leanr_olean::{DefaultInstanceEntry, EntryScope, InstanceEntry};
+use leanr_olean::{ClassEntry, DefaultInstanceEntry, EntryScope, InstanceEntry};
 
 use crate::discr_tree::DiscrTree;
 use crate::{MetaCtx, MetaError};
@@ -547,6 +547,45 @@ impl<'e> MetaCtx<'e> {
     }
 }
 
+/// The decoded `Lean.classExtension` state. oracle: `ClassState`
+/// (`Class.lean:41-45`) — two maps keyed by class name, built once from
+/// the module's entries by `ClassState.addEntry` (`Class.lean:49-52`).
+///
+/// Built once, from `MetaCtx::new`, exactly like [`InstanceTable`] just
+/// above; never per-query. Last-write-wins on a duplicate name, matching
+/// `SMap.insert` and the same untrusted-input posture
+/// `MetaCtx::new`'s `projection_fns` map documents: a real `.olean`
+/// never registers a class twice, so a collision is reachable only via
+/// adversarial bytes and must not panic.
+#[derive(Default)]
+pub(crate) struct ClassTable {
+    out_params: HashMap<NameId, Vec<usize>>,
+    out_level_params: HashMap<NameId, Vec<usize>>,
+}
+
+impl ClassTable {
+    pub(crate) fn build(entries: &[ClassEntry]) -> ClassTable {
+        let mut out_params = HashMap::new();
+        let mut out_level_params = HashMap::new();
+        for e in entries {
+            out_params.insert(e.name, e.out_params.clone());
+            out_level_params.insert(e.name, e.out_level_params.clone());
+        }
+        ClassTable {
+            out_params,
+            out_level_params,
+        }
+    }
+
+    pub(crate) fn out_params(&self, class_name: NameId) -> Option<&[usize]> {
+        self.out_params.get(&class_name).map(|v| v.as_slice())
+    }
+
+    pub(crate) fn out_level_params(&self, class_name: NameId) -> Option<&[usize]> {
+        self.out_level_params.get(&class_name).map(|v| v.as_slice())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,6 +708,80 @@ mod tests {
                 ctx.default_instance_priorities(),
                 vec![1000, 500, 100],
                 "descending and distinct, across every class"
+            );
+        });
+    }
+
+    /// oracle: `getOutParamPositions?` / `getOutLevelParamPositions?` /
+    /// `hasOutParams` (`Class.lean:81-82,91-92,85-88`). `Add` is a class with no
+    /// output parameters, so it is PRESENT with an empty array — the
+    /// oracle's `isClass` is exactly "present in this map"
+    /// (`Class.lean:77-78`), and collapsing "absent" into "no out
+    /// params" would lose that distinction. `instAddN` (an *instance*,
+    /// not a class) stands for a name that is not a class at all: it
+    /// must read back `None`, not `Some(&[])`, or the two directions of
+    /// the `isClass` distinction are not both covered.
+    #[test]
+    fn class_table_reads_out_param_positions() {
+        with_instances_ctx(|ctx| {
+            let op_expr = const_named(ctx, "Op");
+            let op = if let leanr_kernel::bank::terms::Node::Const { name: Some(n), .. } =
+                ctx.node(op_expr)
+            {
+                n
+            } else {
+                panic!("Op is not a bare const")
+            };
+            let add_expr = const_named(ctx, "Add");
+            let add = if let leanr_kernel::bank::terms::Node::Const { name: Some(n), .. } =
+                ctx.node(add_expr)
+            {
+                n
+            } else {
+                panic!("Add is not a bare const")
+            };
+            let lvl_expr = const_named(ctx, "Lvl");
+            let lvl = if let leanr_kernel::bank::terms::Node::Const { name: Some(n), .. } =
+                ctx.node(lvl_expr)
+            {
+                n
+            } else {
+                panic!("Lvl is not a bare const")
+            };
+            let inst_add_n_expr = const_named(ctx, "instAddN");
+            let inst_add_n =
+                if let leanr_kernel::bank::terms::Node::Const { name: Some(n), .. } =
+                    ctx.node(inst_add_n_expr)
+                {
+                    n
+                } else {
+                    panic!("instAddN is not a bare const")
+                };
+
+            assert_eq!(ctx.get_out_param_positions(op), Some(&[2usize][..]));
+            assert_eq!(ctx.get_out_level_param_positions(op), Some(&[][..]));
+            assert!(ctx.has_out_params(op));
+
+            assert_eq!(ctx.get_out_param_positions(add), Some(&[][..]));
+            assert!(
+                !ctx.has_out_params(add),
+                "Add has no out params but IS a class"
+            );
+
+            assert_eq!(ctx.get_out_param_positions(lvl), Some(&[1usize][..]));
+            assert_eq!(ctx.get_out_level_param_positions(lvl), Some(&[1usize][..]));
+
+            // The "absent" direction of the oracle's `isClass` distinction:
+            // `instAddN` is a real declared constant in this fixture (an
+            // *instance*, not a class), so it must read back `None` — not
+            // `Some(&[])`, which is `Add`'s own (present-but-empty) answer
+            // just above. Collapsing this to `Some(&[])` (e.g. via an
+            // `unwrap_or(&[])`-shaped bug) would silently claim every
+            // non-class name is a class with no output parameters.
+            assert_eq!(ctx.get_out_param_positions(inst_add_n), None);
+            assert!(
+                !ctx.has_out_params(inst_add_n),
+                "a non-class has no out params either, via the None arm"
             );
         });
     }

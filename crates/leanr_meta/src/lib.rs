@@ -32,6 +32,6 @@ mod whnf;
 pub use config::{Config, ProjReduction};
 pub use discr_tree::DiscrTree;
 pub use error::MetaError;
-pub use metactx::{MetaCtx, MetaSnapshot, DEFAULT_STEP_BUDGET};
+pub use metactx::{EnvExtensions, MetaCtx, MetaSnapshot, DEFAULT_STEP_BUDGET};
 pub use mvar_ctx::{LMVarId, MVarDecl, MVarId, MVarKind, MetavarContext};
 pub use transparency::{can_unfold, TransparencyMode};

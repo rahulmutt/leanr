@@ -299,7 +299,7 @@ pub(crate) fn intern_dotted(elab: &mut TermElabM, raw: &str) -> Result<NameId, E
 mod tests {
     use leanr_kernel::bank::Store;
     use leanr_kernel::{AxiomVal, ConstantInfo, ConstantVal, Environment};
-    use leanr_meta::{Config, MetaCtx};
+    use leanr_meta::{Config, EnvExtensions, MetaCtx};
     use leanr_syntax::{builtin, parse_term, tree::NodeOrToken};
 
     use crate::elab::TermElabM;
@@ -360,11 +360,7 @@ mod tests {
             view,
             &mut scratch,
             Config::default(),
-            &[],
-            &[],
-            &[],
-            &[],
-            &[],
+            EnvExtensions::default(),
         );
         let mut elab = TermElabM::new(mctx, view);
 

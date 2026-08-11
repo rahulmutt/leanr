@@ -63,11 +63,14 @@ pub fn finalize(app: &mut AppElab) -> Result<ExprId, ElabError> {
         return Err(ElabError::UnsupportedSyntax(
             // "requires default instances" until M4b-3 P3 task 8's seam
             // audit: P3 shipped them (`synthetic/default_inst.rs`), so
-            // that was no longer what is missing. What IS missing is the
-            // `classExtension` decode that would ever SET
+            // that was no longer what is missing. `leanr_olean` now
+            // decodes `classExtension` and `MetaCtx::get_out_param_positions`
+            // is `pub` (M4b-3 P2b-i), so that is no longer missing
+            // either. What IS missing is the elaborator-side
+            // `resultTypeOutParam?` PRODUCER that would ever SET
             // `result_type_out_param` — the same blocker `args.rs`'s
-            // sibling seam names, and still P2b's.
-            "result-type outParam support requires classExtension decode — M4b-3 P2b".to_string(),
+            // sibling seam names, now M4b-3 P2b-ii's.
+            "result-type outParam support requires the elaborator-side resultTypeOutParam? producer — M4b-3 P2b-ii".to_string(),
         ));
     }
 

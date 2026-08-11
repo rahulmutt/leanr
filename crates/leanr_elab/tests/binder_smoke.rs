@@ -10,7 +10,7 @@ use support::{encode_expr, replay_fixture_in, EncSt, Replayed};
 use leanr_elab::TermElabM;
 use leanr_kernel::bank::Store;
 use leanr_kernel::EnvView;
-use leanr_meta::{Config, MetaCtx};
+use leanr_meta::{Config, EnvExtensions, MetaCtx};
 use leanr_syntax::{builtin, parse_term};
 
 /// Parse `src` through leanr's own parser, elaborate with `expected =
@@ -24,6 +24,7 @@ fn elab_json(src: &str) -> serde_json::Value {
         instances,
         default_instances,
         projection_fns,
+        classes,
     } = replay_fixture_in("elab", "Elab0.olean");
     let snap = builtin::snapshot();
     let view: EnvView = env.view();
@@ -42,11 +43,14 @@ fn elab_json(src: &str) -> serde_json::Value {
         view,
         &mut scratch,
         Config::default(),
-        &reducibility,
-        &matchers,
-        &instances,
-        &default_instances,
-        &projection_fns,
+        EnvExtensions {
+            reducibility: &reducibility,
+            matchers: &matchers,
+            instances: &instances,
+            default_instances: &default_instances,
+            projection_fns: &projection_fns,
+            classes: &classes,
+        },
     );
     let mut elab = TermElabM::new(mctx, view);
     let e = elab

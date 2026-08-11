@@ -152,3 +152,76 @@ class CycA (a : Type u) where mkA : a → a
 class CycB (a : Type u) where mkB : a → a
 instance instCycAofB {a : Type u} [CycB a] : CycA a where mkA := fun x => x
 instance instCycBofA {a : Type u} [CycA a] : CycB a where mkB := fun x => x
+
+-- === M4b-3 P2b-i: outParam classes (design spec § P2b-i) ===
+--
+-- The FIRST classes in any leanr fixture carrying an `outParam`. Until
+-- this block, `getOutParamPositions?` was empty everywhere and the
+-- oracle's `preprocessOutParam`/`assignOutParams` were unreachable, so
+-- leanr's not having them was invisible (design spec § Amendment 3,
+-- item 2).
+--
+-- `outParam` must be declared here, at the ROOT namespace, because these
+-- fixtures are `prelude`-mode and import no `Init`. The oracle's `class`
+-- command decides output-parameter positions with
+-- `Lean.Expr.isOutParam` (`Expr.lean:1708-1710`), which is
+-- `isAppOfArity ``outParam 1` against the ROOT name `outParam` — so this
+-- declaration is the real thing, not a look-alike. Copied verbatim from
+-- `Init/Prelude.lean:702` of the pin.
+@[reducible] def outParam (α : Sort u) : Sort u := α
+
+-- `Op` — the binop shape. Two ordinary parameters and one `outParam`,
+-- i.e. `ClassEntry.outParams == #[2]` and `outLevelParams == #[]` (all
+-- three parameters share the universe `u`). This is the shape
+-- `crates/leanr_elab/src/synthetic/ladder.rs`' "Residue 1" cites as a
+-- live divergence — the oracle answers `Op N N ?γ` with `?γ := N` assigned,
+-- leanr (before this plan) answers `Undef`.
+class Op (a : Type u) (b : Type u) (c : outParam (Type u)) where
+  op : a → b → c
+
+instance instOpN : Op N N N where
+  op := fun _ b => b
+
+-- `Lvl` — a universe that appears ONLY in an output parameter, i.e.
+-- `outParams == #[1]` AND `outLevelParams == #[1]` (the universe `v`
+-- occurs only in `b`'s type). It is what gives `ClassEntry`'s third
+-- field a non-empty producer, and it is the class
+-- `preprocessOutParam`'s `preprocessLevels` branch
+-- (`SynthInstance.lean:785-794` — corrected from `:786-795`, which
+-- starts one line late and ends one line into `preprocessArgs`' own
+-- declaration) runs on.
+class Lvl (a : Type u) (b : outParam (Type v)) where
+  lvl : a → b
+
+instance instLvlN : Lvl N N where
+  lvl := fun a => a
+
+-- `Get` — the `GetElem` shape from the oracle's own worked example
+-- (the class is declared at `App.lean:150-151`, inside the
+-- `resultIsOutParamSupport` doc comment spanning `:141-167` — NOT at
+-- `:143-146`, which is that comment's opening prose): two ordinary
+-- parameters, one `outParam`, and a method taking both ordinary
+-- parameters. M4b-3 P2b-ii needs exactly this shape in `Elab0.lean`;
+-- proving it out at the synthesis tier first is why it is here.
+class Get (cont : Type u) (idx : Type v) (elem : outParam (Type w)) where
+  get : cont → idx → elem
+
+instance instGetN : Get N N N where
+  get := fun c _ => c
+
+-- `Dual` — SEMIREDUCIBLE by construction (a plain `def`, no
+-- `@[reducible]`). It exists for one query, `outParamNoMVars/synth/0`
+-- (`Op N N (Dual N)`), and it is what makes that query discriminating
+-- rather than merely covering. Type class resolution runs at
+-- `TransparencyMode.instances`, which cannot unfold `Dual`, so a search
+-- against the goal as written fails; the oracle instead replaces the
+-- output parameter with a fresh mvar (`preprocessOutParam`, called even
+-- on the `.noMVars` path — the call at `SynthInstance.lean:1000`, under
+-- the `OrderDual` note at `:981-999`), finds `instOpN`, and then
+-- reconciles with `assignOutParams`' `isDefEq` under `withDefault`
+-- (`SynthInstance.lean:842` — corrected from `:851`, which falls inside
+-- `checkMayHaveSideEffects`' doc comment; `:842` is the
+-- `let defEq ← withDefault <| withAssignableSyntheticOpaque <|
+-- isDefEq type resultType` line itself), where `Dual` DOES unfold.
+-- Skip either half and the answer flips from `some instOpN` to `none`.
+def Dual (a : Type) : Type := a
