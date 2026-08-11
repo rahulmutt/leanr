@@ -268,7 +268,7 @@ What each entry exercises (task B7's brief):
                       oracle's own worked example — the class itself is
                       declared at App.lean:150-151, inside the
                       `resultIsOutParamSupport` doc comment spanning
-                      :141-167 — which M4b-3 P2b-ii needs in
+                      :141-171 — which M4b-3 P2b-ii needs in
                       `Elab0.lean`. Proved out here first.
 * `stuck`       — `Add ?a` with `?a` an UNASSIGNED mvar minted OUTSIDE
                   the search. `synthInstanceCore?` runs `main` under

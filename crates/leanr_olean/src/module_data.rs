@@ -279,7 +279,7 @@ pub struct DefaultInstanceEntry {
 }
 
 /// One decoded `Lean.classExtension` entry: oracle `Lean.ClassEntry`
-/// (`Class.lean:13-31`, pinned toolchain v4.33.0-rc1):
+/// (`Class.lean:14-32`, pinned toolchain v4.33.0-rc1):
 ///
 /// ```text
 /// structure ClassEntry where
@@ -297,7 +297,7 @@ pub struct DefaultInstanceEntry {
 /// has no synthesis cache (named seam, design spec § Seams).
 ///
 /// `classExtension` is a `SimplePersistentEnvExtension`
-/// (`Class.lean:69-73`), NOT a `SimpleScopedEnvExtension` like
+/// (`Class.lean:69-74`), NOT a `SimpleScopedEnvExtension` like
 /// `instanceExtension` — so its entries are a bare, unwrapped array of
 /// `ClassEntry`, the same posture as `defaultInstanceExtension` above,
 /// and there is no `scope` field here.

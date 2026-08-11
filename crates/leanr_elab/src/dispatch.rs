@@ -136,11 +136,12 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 /// (task 8) all landed and are no longer deferred. Reconciled AGAIN by
 /// M4b-3 P2a task 10 against what P2a shipped: instance-implicit
 /// arguments and the synthetic-mvar fixpoint landed (tasks 2-9) and are
-/// no longer deferred either — only the `classExtension`-dependent
-/// local-instance outParam feature remains, now P2b's:
+/// no longer deferred either — only the elaborator-side local-instance
+/// outParam feature remains, now P2b-ii's (the `classExtension` decode
+/// it depends on landed in M4b-3 P2b-i):
 /// ```text
 ///   letI / haveI / let_fun / let_delayed / let_tmp / letrec  later slice (own oracle tier each)
-///   local-instance outParam result type ........ M4b-3 P2b (classExtension decode)
+///   local-instance outParam result type ........ M4b-3 P2b-ii (resultTypeOutParam? producer)
 ///   coercions (CoeT / CoeFun / CoeSort, mkCoe) . M4b-3 P4
 ///   optParam defaults / autoParam .............. M4b-3 P5
 ///   implicit-lambda insertion .................. M4b-3 P5

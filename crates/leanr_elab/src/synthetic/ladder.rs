@@ -100,7 +100,7 @@ impl<'e> TermElabM<'e> {
     /// into `.noMVars` / `.mvarsNoOutputParams` / `.mvarsOutputParams`
     /// (`PreprocessKind`, `:706-716`). For `.mvarsOutputParams` the
     /// dispatch at `:999-1002` runs `preprocessOutParam`
-    /// (`:775-817`), which REPLACES the caller's mvars sitting in
+    /// (`:775-818`), which REPLACES the caller's mvars sitting in
     /// output-parameter positions with `mkFreshExprMVar`s — minted
     /// inside the `withNewMCtxDepth` block at `:978`, hence at the NEW
     /// depth, hence assignable — so the search never unifies against the
@@ -173,8 +173,10 @@ impl<'e> TermElabM<'e> {
     /// channel this function should be reading once `leanr_meta` grows
     /// the depth model, at which point the syntactic pre-test becomes
     /// redundant for residues 2 and 3 and can be deleted rather than
-    /// rewritten. Residue 1 does NOT come along for free — it needs
-    /// P2b's `preprocessOutParam`/`assignOutParams` port as well.
+    /// rewritten. Residue 1 does NOT come along for free even though
+    /// `preprocessOutParam`/`assignOutParams` have landed on the
+    /// synthesis side (M4b-3 P2b-i) — it still needs the elaborator-side
+    /// work, M4b-3 P2b-ii, described above.
     ///
     /// Precondition: `ty` is already `instantiate_mvars`-ed (the oracle's
     /// own `let type ← instantiateMVars type`, `SynthInstance.lean:967`).

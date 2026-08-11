@@ -1610,7 +1610,13 @@ impl<'e> MetaCtx<'e> {
     /// a class with output parameters DELIBERATELY assigns the caller's
     /// metavariables in those positions -- that assignment is a RESULT
     /// of synthesis, and putting it inside the pair would discard it.
-    /// A failed synthesis still leaves the `mctx` as it found it.
+    /// A failed synthesis still leaves no assignment on the caller's
+    /// mvars -- not the stronger "leaves the `mctx` as it found it": on
+    /// the `assign_out_params -> false` path, `open_abstract_mvars_result`
+    /// has already minted mvar DECLARATIONS into the caller's `mctx`
+    /// before the rollback runs (rollback restores ASSIGNMENTS only, not
+    /// declarations), and `preprocess`'s `whnf` runs outside the
+    /// checkpoint/rollback pair and can assign through `synth_pending`.
     // Narrowed from this module's former blanket `#![allow(dead_code)]`
     // (removed by this task): `synth_instance` is the crate's typeclass-
     // synthesis ENTRY POINT, and every other item in this module and in
@@ -3335,13 +3341,18 @@ mod tests {
     /// mvar kinds, not just expr mvars. `Add.{?u}` -- `Add`'s own single
     /// declared universe param replaced with a fresh LEVEL mvar via
     /// `mk_const_with_fresh_mvar_levels`, left UNAPPLIED so no expr mvar
-    /// enters the picture at all -- is exactly the shape `preprocess`'s
-    /// own doc names as in scope (a parameterless, universe-polymorphic
-    /// class such as `ToLevel.{u}`) and exactly the shape a
+    /// enters the picture at all -- is a parameterless, universe-
+    /// polymorphic goal of the kind `preprocess`'s own doc names as in
+    /// scope (a class such as `ToLevel.{u}`, cited two paragraphs below
+    /// at the `typeBody.isConst` workaround) and exactly the shape a
     /// `has_expr_mvar()`-only guard misses: before the fix this goal
-    /// classified as `NoMVars` (wrong -- the oracle would run
-    /// `preprocessOutParam`/build a cache key here since it does carry a
-    /// live mvar); after the fix it must not.
+    /// classified as `NoMVars` (wrong -- it carries a live level mvar,
+    /// so the oracle's own `!type.hasMVar` test is false and must not
+    /// short-circuit); after the fix it must not. Being unapplied, this
+    /// goal then exits at the `head == ty` identity arm right after the
+    /// mvar check, NOT at the out-param lookup further down -- this
+    /// test covers only the `!type.hasMVar` fix, not
+    /// `get_out_param_positions`.
     #[test]
     fn preprocess_treats_a_level_mvar_only_goal_as_having_mvars() {
         with_instances_ctx(|ctx| {
@@ -3446,11 +3457,15 @@ mod tests {
     /// (`Instances.lean`'s own comment records why `c` has to be an
     /// `outParam` too -- the oracle's `class` command rejects a
     /// non-`outParam` parameter depending on an `outParam`, which is the
-    /// same rule as the oracle's `:801-804` note on issue #1852). Its
-    /// telescope is `(a : Type) (b : outParam Type) (c : outParam (b ->
-    /// a))`, so on the goal `Dep N N (@id.{1} N)` the mvar minted for
-    /// `c` is typed `outParam (?b -> N)` under the correct loop and
-    /// `outParam (N -> N)` under the inverted one.
+    /// same rule as the oracle's `:801-804` note on issue #1852 -- that
+    /// note is PROSE; the enforcement is `checkOutParam`
+    /// (`Lean/Class.lean:106-124`), whose `else` at `:120-121` raises
+    /// "invalid class, parameter #N depends on `outParam`, but it is
+    /// not an `outParam`" for exactly this shape). Its telescope is
+    /// `(a : Type) (b : outParam Type) (c : outParam (b -> a))`, so on
+    /// the goal `Dep N N (@id.{1} N)` the mvar minted for `c` is typed
+    /// `outParam (?b -> N)` under the correct loop and `outParam (N ->
+    /// N)` under the inverted one.
     #[test]
     fn preprocess_out_param_instantiates_with_the_replacement() {
         with_instances_ctx(|ctx| {
@@ -3578,7 +3593,7 @@ mod tests {
     fn synth_instance_assigns_the_callers_out_param() {
         with_instances_ctx(|ctx| {
             let ty = type_sort(ctx);
-            let (c, cid) = fresh_mvar(ctx, ty);
+            let (c, _) = fresh_mvar(ctx, ty);
             let n = const_named(ctx, "N");
             let op = const_named(ctx, "Op");
             let goal = ctx.mk_app_spine(op, &[n, n, c]).expect("app");
@@ -3611,7 +3626,6 @@ mod tests {
                 got_c, want_c,
                 "?c must be assigned by assignOutParams (to `N`), not left over from the search"
             );
-            let _ = cid;
         });
     }
 

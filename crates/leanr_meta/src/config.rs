@@ -113,11 +113,12 @@ pub struct Config {
     /// (`Elab/Tactic/ElabTerm.lean:58`/`:165`, `Simpa.lean:94`,
     /// `Change.lean:43`, `BuiltinTactic.lean:304`/`:311`/`:445`,
     /// `Induction.lean:182`). The eleventh sets the field directly:
-    /// `Delaborator/TopDownAnalyze.lean:197`. Only
-    /// `synthesizeUsingDefaultInstance` is in this milestone's scope;
-    /// `assignOutParams` lives in the subsystem `synth.rs` ports and is
-    /// not transcribed yet, so its absence is a missing feature, not a
-    /// divergence.
+    /// `Delaborator/TopDownAnalyze.lean:197`. Both
+    /// `synthesizeUsingDefaultInstance` and `assignOutParams` are in
+    /// scope now: `assignOutParams` was transcribed as
+    /// `MetaCtx::assign_out_params` (M4b-3 P2b-i task 7,
+    /// `synth.rs:1880`), which is itself a live consumer of this flag
+    /// via `with_assignable_synthetic_opaque`.
     ///
     /// **NAMED SEAM — three of this crate's `syntheticOpaque` checks,
     /// two of which consult the flag.** In the oracle the flag is read

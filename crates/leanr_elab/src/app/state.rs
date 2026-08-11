@@ -75,8 +75,11 @@ pub struct State {
     pub inst_mvars: Vec<MVarId>,
     pub propagate_expected: bool,
     /// oracle: `State.resultTypeOutParam?`. No P1 producer, and P2a adds
-    /// none either — the producer needs the `classExtension` decode,
-    /// which is P2b's (`args.rs`'s `add_implicit_arg` names the seam).
+    /// none either. The producer needs the elaborator-side
+    /// `isNextOutParamOfLocalInstanceAndResult` logic, which is
+    /// M4b-3 P2b-ii's (`args.rs`'s `add_implicit_arg` names the seam);
+    /// the `classExtension` decode that logic will read already landed
+    /// in M4b-3 P2b-i.
     pub result_type_out_param: Option<MVarId>,
     /// oracle: `State.foundNamedArgs` — valid named-argument names seen
     /// while walking the function's type; feeds the oracle's "invalid

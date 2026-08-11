@@ -268,6 +268,16 @@ fn oracle_synth_gate() {
                     ));
                     continue;
                 }
+                // `got` is `None` here exactly when `ok:false`, and this
+                // `continue` skips `assigns` entirely for such records —
+                // deliberately: the one committed `ok:false` outParam
+                // record has a ground goal with no mvars, so there is
+                // nothing for `assigns` to say, and `is_def_eq` rolls
+                // back on both its `Ok(false)` and `Err` arms, so leanr
+                // cannot have left a spurious assignment on a goal mvar
+                // for a failed synthesis anyway. If a future `ok:false`
+                // record ever DOES mention a goal mvar, this arm would
+                // need to compare `assigns` too.
                 let Some(val) = got else { continue };
                 // Same `EncSt` threading as the dumper: seed the
                 // numbering state by encoding `goal` FIRST (which also
@@ -286,21 +296,30 @@ fn oracle_synth_gate() {
                     ));
                     continue;
                 }
-                let got_val = encode_expr(&scratch, base, val, &mut est);
-                let want_val = &q["val"];
-                if &got_val != want_val {
-                    failures.push(format!("{id}: leanr val={got_val} oracle val={want_val}"));
-                }
                 // `assigns`: the post-synthesis state of every goal
                 // mvar. Comparing it is what makes M4b-3 P2b-i's
                 // `assignOutParams` visible at all — `ok` and `val` are
                 // identical whether or not the caller's output parameter
                 // was assigned, and so is the term the gate compares.
+                //
+                // Encoded BEFORE `val`, pinning the invariant this gate
+                // must keep against `dump_synth.lean`'s own `EncSt`
+                // threading: the dumper encodes `goal` (`st0`), folds
+                // `mvars[].t` to reach `st1`, then encodes BOTH `assigns`
+                // and `val` off that SAME `st1` as siblings (`val` via
+                // `.run' st1`, `assignsJ` via its own fold starting at
+                // `st1`) — neither one's numbering leaks into the other.
+                // Encoding `got_val` first and only then `got_assigns`
+                // off the state `got_val` already advanced would make
+                // `assigns` see numbering `val` introduced, which the
+                // dumper's side never does; every committed `assigns`
+                // value is ground today, so that ordering bug is
+                // currently invisible, not absent.
                 let mut got_assigns = Vec::new();
-                for (idx, val) in assigned.iter() {
+                for (idx, v) in assigned.iter() {
                     got_assigns.push(serde_json::json!({
                         "i": idx,
-                        "e": encode_expr(&scratch, base, *val, &mut est),
+                        "e": encode_expr(&scratch, base, *v, &mut est),
                     }));
                 }
                 let want_assigns = q["assigns"].as_array().cloned().unwrap_or_default();
@@ -308,6 +327,11 @@ fn oracle_synth_gate() {
                     failures.push(format!(
                         "{id}: leanr assigns={got_assigns:?} oracle assigns={want_assigns:?}"
                     ));
+                }
+                let got_val = encode_expr(&scratch, base, val, &mut est);
+                let want_val = &q["val"];
+                if &got_val != want_val {
+                    failures.push(format!("{id}: leanr val={got_val} oracle val={want_val}"));
                 }
             }
         }

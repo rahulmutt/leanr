@@ -135,9 +135,10 @@ pub struct MetaCtx<'e> {
     /// [`crate::instances::ClassTable`]'s own doc for the oracle
     /// citation. Read by [`MetaCtx::get_out_param_positions`],
     /// [`MetaCtx::get_out_level_param_positions`] and
-    /// [`MetaCtx::has_out_params`]; consulted by no other path in this
-    /// crate yet — B-side synthesis (M4b-3 P2b-i tasks 5-7) is the real
-    /// consumer.
+    /// [`MetaCtx::has_out_params`]; consulted from `synth.rs`'s
+    /// `preprocess` (`:1709`, `:1711`) and `preprocess_out_param`
+    /// (`:1758`, `:1760`), the real consumers landed by M4b-3 P2b-i
+    /// tasks 5-7.
     pub(crate) classes: ClassTable,
     /// The `smartUnfolding` option (oracle default: true), consulted by
     /// `unfold_definition`'s app/const arms (task 7).
@@ -856,6 +857,10 @@ impl<'e> MetaCtx<'e> {
 
     /// oracle: `hasOutParams` (`Class.lean:85-88`) — a class with a
     /// NON-EMPTY output-parameter array.
+    ///
+    /// No production consumer yet (test-only today) — a planned M4b-3
+    /// P2b-ii accessor for the elaborator-side `resultTypeOutParam?`
+    /// producer, not dead API.
     pub fn has_out_params(&self, class_name: NameId) -> bool {
         matches!(self.get_out_param_positions(class_name), Some(p) if !p.is_empty())
     }
