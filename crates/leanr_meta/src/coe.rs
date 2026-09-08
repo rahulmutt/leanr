@@ -386,18 +386,29 @@ mod tests {
     }
 
     /// `coerce` dispatch order (`Coe.lean:259-266`): with a `forall`
-    /// expected type, `CoeFun` is tried BEFORE `CoeT` and wins when its
-    /// result's type is defeq to the expected type.
+    /// expected type, `CoeFun` is tried BEFORE `CoeT`. This needs a
+    /// DEPENDENT `γ` to be observable at all: `CoeOut`'s bridge instance
+    /// (`instance [CoeFun α fun _ => β] : CoeOut α β`) can only unify a
+    /// NON-dependent `γ` against its own `fun _ => β` pattern, so for a
+    /// carrier like `FnN` (`γ := fun _ => N → N`) the general `CoeT`
+    /// chase reaches the same `CoeFun` instance too and answers the
+    /// identical term regardless of dispatch order (§ Amendment 5 item
+    /// 10 — see `Synth0.lean`'s own doc comment on `DepFn`). `DepFn`'s
+    /// `γ := fun d => d.dom → d.dom` mentions its own binder, so that
+    /// unification fails, `CoeOut`/`CoeT`'s route answers `.none`, and
+    /// ONLY the `coerceToFunction?`-first branch in `coerce?` produces a
+    /// term — making this test a genuine discriminator of the order.
     #[test]
     fn coerce_prefers_coe_fun_under_a_forall_expected_type() {
         with_synth0_ctx(|ctx| {
+            let n = const_named(ctx, "N");
             let succ = const_dotted(ctx, "N", "succ");
-            let mk = const_dotted(ctx, "FnN", "mk");
-            let g = app(ctx, mk, &[succ]);
+            let mk = const_dotted(ctx, "DepFn", "mk");
+            let d = app(ctx, mk, &[n, succ]);
             let expected = ctx.infer_type(succ).expect("N -> N");
-            let f = const_dotted(ctx, "FnN", "f");
-            let want = app(ctx, f, &[g]);
-            match ctx.coerce(g, expected).expect("coerce") {
+            let f = const_dotted(ctx, "DepFn", "f");
+            let want = app(ctx, f, &[d]);
+            match ctx.coerce(d, expected).expect("coerce") {
                 LOption::Some(got) => assert_eq!(render_expr(ctx, got), render_expr(ctx, want)),
                 other => panic!("expected Some, got {other:?}"),
             }

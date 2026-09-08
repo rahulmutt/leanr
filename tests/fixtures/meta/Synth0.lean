@@ -339,6 +339,24 @@ structure FnN where
 
 instance instCoeFunFnN : CoeFun FnN (fun _ => N → N) := ⟨FnN.f⟩
 
+-- `DepFn` — a DEPENDENT `CoeFun` carrier (§ Amendment 5 item 10). Its γ
+-- (`fun d => d.dom → d.dom`) mentions its own binder, unlike `FnN`'s
+-- `fun _ => N → N`. This is what `coerce?`'s dispatch order
+-- (`Coe.lean:259-266`, tries `CoeFun` before `CoeT`) needs to be
+-- observable at all: `CoeOut`'s bridge instance
+-- (`instance [CoeFun α fun _ => β] : CoeOut α β`) can only unify a
+-- NON-dependent γ against its own `fun _ => β` pattern, so for `FnN`
+-- the general `CoeT` chase reaches `instCoeFunFnN` too and answers the
+-- identical term — the branch order is unobservable. For `DepFn`,
+-- `fun d => d.dom → d.dom` does not unify with `fun _ => ?β`, so the
+-- `CoeOut`/`CoeT` route answers `none` and only the `CoeFun`-first
+-- branch in `coerce?` produces a term.
+structure DepFn where
+  dom : Type
+  f : dom → dom
+
+instance instCoeFunDepFn : CoeFun DepFn (fun d => d.dom → d.dom) := ⟨DepFn.f⟩
+
 structure SortN where
   ty : Type
 
