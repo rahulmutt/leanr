@@ -44,6 +44,14 @@ pub enum MetaError {
     /// over a FORALL-shaped synthesis goal (`SynthInstance.lean:351`) —
     /// see that function's own doc comment.
     Unsupported(String),
+    /// oracle: the three `throwError`s in `Meta/Coe.lean` that fire AFTER
+    /// a coercion instance was found and expanded but the expansion has
+    /// the wrong shape — "coerced expression has wrong type" (`:86-87`),
+    /// "result is still not a function" (`:108-110`), "result is still
+    /// not a type" (`:122-124`). Hard errors in the oracle too (they are
+    /// not `.none`/`.undef`), so they are a variant, not an `LOption`
+    /// arm. `leanr_elab` surfaces it through `ElabError::Meta`.
+    CoeExpansionMismatch(String),
 }
 
 impl From<leanr_kernel::KernelError> for MetaError {

@@ -26,6 +26,7 @@ mod mvar_ctx;
 mod synth;
 #[cfg(test)]
 mod test_support;
+mod transform;
 mod transparency;
 mod whnf;
 
@@ -35,4 +36,5 @@ pub use error::MetaError;
 pub use metactx::{EnvExtensions, MetaCtx, MetaSnapshot, DEFAULT_STEP_BUDGET};
 pub use mvar_ctx::{LMVarId, MVarDecl, MVarId, MVarKind, MetavarContext};
 pub use synth::LOption;
+pub use transform::TransformStep;
 pub use transparency::{can_unfold, TransparencyMode};

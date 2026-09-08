@@ -410,6 +410,46 @@ impl<'e> MetaCtx<'e> {
         self.cfg.transparency = t;
     }
 
+    /// oracle: `withTransparency` as `withDefault` / `withReducible` /
+    /// `withReducibleAndInstances` use it (`Basic.lean:1278-1292`) —
+    /// save, set, run, restore. `pub` so `leanr_elab`'s ladder can run
+    /// the `.coe` arm's `withDefault isDefEq` (`SyntheticMVars.lean:546`).
+    ///
+    /// Plain save/run/restore with no drop guard, the same posture as
+    /// `with_assignable_synthetic_opaque` below and for the same reason
+    /// (its doc, design spec § Follow-ups item 4): every caller is
+    /// `Result`-based and catches nothing, so an unwinding caller cannot
+    /// observe the un-restored flag.
+    pub fn with_transparency<R>(
+        &mut self,
+        t: TransparencyMode,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let saved = self.cfg.transparency;
+        self.cfg.transparency = t;
+        let r = f(self);
+        self.cfg.transparency = saved;
+        r
+    }
+
+    /// oracle: `mkArrow` (`Lean/Meta/Basic.lean`, `mkForall _ .default d b`
+    /// with a fresh user name) — a NON-dependent `forallE`. The binder
+    /// name is `None`: the only consumer is the TYPE of `coerceToFunction?`'s
+    /// `?γ` (`Coe.lean:105`), which is never emitted, and the canonical
+    /// encoder erases binder names anyway.
+    ///
+    /// `#[allow(dead_code)]` (removed by task 5): `coe.rs`'s consumer
+    /// (`coerceToFunction?`) lands in the next task; this task ports the
+    /// helper on its own so `transform.rs`/`with_transparency` can be
+    /// tested in isolation first.
+    #[allow(dead_code)]
+    pub(crate) fn mk_arrow(&mut self, dom: ExprId, cod: ExprId) -> Result<ExprId, MetaError> {
+        let base = Some(self.view.store);
+        Ok(self
+            .scratch
+            .expr_forall(base, None, dom, cod, BinderInfo::Default)?)
+    }
+
     pub fn mctx(&self) -> &MetavarContext {
         &self.mctx
     }
@@ -1518,6 +1558,23 @@ mod tests {
             assert!(ctx.is_coe_decl(coe_t_coe));
             assert!(!ctx.is_coe_decl(coe_t));
             assert!(!ctx.is_coe_decl(add_add));
+        });
+    }
+
+    /// `with_transparency` restores on the normal path and nests.
+    #[test]
+    fn with_transparency_restores_the_ambient_mode() {
+        use crate::TransparencyMode as T;
+        with_prelude0_ctx(|ctx| {
+            assert_eq!(ctx.cfg().transparency, T::Default);
+            ctx.with_transparency(T::Instances, |ctx| {
+                assert_eq!(ctx.cfg().transparency, T::Instances);
+                ctx.with_transparency(T::Reducible, |ctx| {
+                    assert_eq!(ctx.cfg().transparency, T::Reducible);
+                });
+                assert_eq!(ctx.cfg().transparency, T::Instances);
+            });
+            assert_eq!(ctx.cfg().transparency, T::Default);
         });
     }
 }
