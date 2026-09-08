@@ -268,6 +268,10 @@ instance [CoeOut α β] [CoeOTC β γ] : CoeOTC α γ where coe a := CoeOTC.coe 
 instance [CoeTC α β] : CoeOTC α β where coe a := CoeTC.coe a
 instance : CoeOTC α α where coe a := a
 
+-- Note: ^^ We add reflexivity instances for CoeOTC/etc. so that we avoid going
+-- through a user-defined CoeTC/etc. instance.  (Instances like
+-- `CoeTC F (A →+ B)` apply even when the two sides are defeq.)
+
 class CoeHead (α : Sort u) (β : semiOutParam (Sort v)) where
   coe : α → β
 attribute [coe_decl] CoeHead.coe
