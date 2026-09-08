@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, LevelId, NameId};
 use leanr_kernel::{BinderInfo, EnvView, Nat};
-use leanr_meta::{LMVarId, LocalCtxSnapshot, MVarDecl, MVarId, MVarKind, MetaCtx};
+use leanr_meta::{LMVarId, MVarDecl, MVarId, MVarKind, MetaCtx};
 use leanr_syntax::kind::KindInterner;
 
 use crate::dispatch::{self, SynElem};
@@ -215,14 +215,15 @@ impl<'e> TermElabM<'e> {
     /// (`Lean/Meta/Basic.lean:864-877`) — mints a globally-fresh
     /// `MVarId` (own `expr_mvar_gen` counter, mirroring
     /// `mk_fresh_level_mvar`'s `level_mvar_gen` exactly), `declare`s it
-    /// in `mctx` with an EMPTY `LocalContext` — slice 1 elaborates no
-    /// binder/lambda/pi, so no leaf elaborator ever runs under a
-    /// nonempty local context; `LocalContext::default()` is the correct
-    /// context here, not a placeholder — and the caller-chosen
-    /// `MVarKind` (see `builtin::hole`'s own doc for why every hole is
-    /// minted `Natural` rather than replicating `elabHole`'s
-    /// `Natural`/`SyntheticOpaque` branch), and returns the `ExprId` of
-    /// `Expr.mvar` referencing it alongside the `MVarId` itself.
+    /// in `mctx` with the AMBIENT local context (oracle:
+    /// `mkFreshExprMVarCore`'s `(← getLCtx)`, `Meta/Basic.lean:866-867`),
+    /// so the metavariable may be assigned a term mentioning binders
+    /// that are in scope at the point it is created — and the
+    /// caller-chosen `MVarKind` (see `builtin::hole`'s own doc for why
+    /// every hole is minted `Natural` rather than replicating
+    /// `elabHole`'s `Natural`/`SyntheticOpaque` branch), and returns the
+    /// `ExprId` of `Expr.mvar` referencing it alongside the `MVarId`
+    /// itself.
     /// `base = None` throughout — unlike `mk_fresh_level_mvar` (M4b-2
     /// task 2 fix, see its own doc comment for why THAT one now needs
     /// `base = Some(view.store)`): every id minted here (prefix string,
@@ -249,6 +250,10 @@ impl<'e> TermElabM<'e> {
     ) -> Result<(ExprId, MVarId), ElabError> {
         let idx = self.expr_mvar_gen;
         self.expr_mvar_gen += 1;
+        // `current_lctx` takes `&mut self.mctx`, so compute it into a
+        // local before the `store_mut()` borrow below (and before the
+        // `MVarDecl` literal) rather than inline.
+        let lctx = self.mctx.current_lctx();
         let store = self.mctx.store_mut();
         let prefix_str = store
             .intern_str(None, "_leanr_elab_expr_fresh")
@@ -268,10 +273,7 @@ impl<'e> TermElabM<'e> {
             MVarDecl {
                 user_name: None,
                 ty,
-                // Task 4 replaces this with the ambient snapshot; an
-                // empty one preserves today's behaviour exactly until
-                // then.
-                lctx: LocalCtxSnapshot::empty(),
+                lctx,
                 kind,
             },
         );

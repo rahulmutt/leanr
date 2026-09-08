@@ -1197,3 +1197,108 @@ fn coe_m_gate_enables_eager_defaulting_from_source() {
         "with coeM declared, finalize's outParam branch ran rung 3 inside elab_term"
     );
 }
+
+/// A synthetic metavariable registered inside a binder is resumed by the
+/// fixpoint AFTER that binder's scope has closed, so the ladder must run
+/// each arm under the metavariable's own context — the oracle wraps
+/// every arm in `mvarId.withContext` (`SyntheticMVars.lean:32-36`, and
+/// the `.coe` arm's own at `:545`).
+///
+/// **Why a `let`, not a plain binder.** The brief's own shape (`?m : a`
+/// for a plain `a : Type`) turns out NOT to discriminate: neither
+/// `synthesize_inst_mvar_core` nor anything it calls ever needs to
+/// resolve `a`'s OWN local declaration to fail an instance search on a
+/// bare free variable — `try_synth_instance` just reports "no instance"
+/// without consulting the ambient `lctx` at all (confirmed empirically:
+/// the brief's literal test still passes with BOTH the ladder wrapper
+/// removed and `mk_fresh_expr_mvar_of_kind` reverted to
+/// `LocalCtxSnapshot::empty()`). A `let`-bound `a := Nat` makes the
+/// dependency observable instead of merely asserted: `whnf`'s `FVar`
+/// arm (`leanr_meta/src/whnf.rs`) only unfolds a let-bound fvar to its
+/// VALUE by looking it up in the AMBIENT `lctx` (`self.lctx.get(id)`),
+/// under `cfg.zeta_delta` (on by default). So `Wrap a` unifies with the
+/// registered `Wrap Nat` instance if and only if `a` is back in the
+/// ambient context when the search runs — which is exactly, and only,
+/// what resuming under the mvar's own local context provides once its
+/// binder has closed.
+///
+/// Kill 1: drop the `with_mvar_local_context` wrapper in
+/// `synthesize_synthetic_mvar` — `a` is never reinstalled, `Wrap a`
+/// stays opaque, no instance is found, `?m` is left unassigned.
+/// Kill 2: revert `mk_fresh_expr_mvar_of_kind` to
+/// `LocalCtxSnapshot::empty()` — the wrapper reinstalls a context with
+/// NO `a` in it at all, same observable failure.
+#[test]
+fn a_synthetic_mvar_resumes_under_its_own_local_context() {
+    support::with_app_harness("Nat.zero", |app| {
+        let kinds = support::any_kinds();
+        let nat = support::fixture_const(app, "Nat");
+        // `Nat : Type`, so inferring gives the sort to bind `a` at.
+        let type_sort = app.elab.mctx.infer_type(nat).expect("Type");
+        let cp = app.elab.mctx.lctx_checkpoint();
+        // `a := Nat : Type` — a let-bound local whose VALUE only comes
+        // back into view through the ambient `lctx`.
+        let a = app
+            .elab
+            .mctx
+            .push_let_decl(None, type_sort, nat)
+            .expect("let decl");
+
+        // `Wrap` — the fixture class `wrap_of_nat`/`wrap_of_fresh_mvar`
+        // already use, applied here to `a` instead of a literal `Nat`
+        // or a fresh mvar.
+        let wrap_src = {
+            use leanr_syntax::{builtin, parse_term};
+            let snap = builtin::snapshot();
+            let parsed = parse_term("Wrap", &snap);
+            assert!(
+                parsed.errors.is_empty(),
+                "parse `Wrap`: {:?}",
+                parsed.errors
+            );
+            let term_elem: leanr_elab::dispatch::SynElem = parsed
+                .tree
+                .root()
+                .first_child_or_token()
+                .expect("Wrap has a term child");
+            app.elab
+                .elab_term(&term_elem, &parsed.tree.kinds, None)
+                .expect("Wrap elaborates")
+        };
+        let base = app.elab.view.store;
+        let goal = app
+            .elab
+            .mctx
+            .store_mut()
+            .expr_app(Some(base), wrap_src, a)
+            .expect("Wrap a");
+
+        // `?m : Wrap a` — its type mentions the let-bound binder, so
+        // resolving the instance goal at all requires `a` (and its
+        // value) to be back in scope.
+        let (_mvar_expr, mvar_id) = app
+            .elab
+            .mk_fresh_expr_mvar_of_kind(goal, leanr_meta::MVarKind::Synthetic)
+            .expect("mvar");
+        app.elab.register_synthetic_mvar(
+            support::any_syn_elem(),
+            mvar_id,
+            leanr_elab::synthetic::SyntheticMVarKind::TypeClass,
+        );
+        // The `let`'s scope closes before the fixpoint runs.
+        app.elab.mctx.lctx_restore(cp);
+
+        let out = app.elab.synthesize_synthetic_mvars_no_postponing(&kinds);
+        assert!(
+            out.is_ok(),
+            "resuming `Wrap a` under its own context must succeed: {:?}",
+            out.err()
+        );
+        assert!(
+            app.elab.mctx.mctx().is_assigned(mvar_id),
+            "`Wrap a` should resolve to `instWrapNat` once `a := Nat` is back in scope \
+             under the mvar's own local context, even though `a`'s let has closed \
+             in the ambient context"
+        );
+    });
+}

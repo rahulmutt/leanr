@@ -99,6 +99,21 @@ impl<'e> TermElabM<'e> {
         })
     }
 
+    /// `MetaCtx::with_mvar_context` lifted to `TermElabM`: the arms need
+    /// `&mut TermElabM`, not `&mut MetaCtx`, so the swap runs around the
+    /// closure instead of inside it. Same primitives, same pairing —
+    /// `install_lctx` returns the snapshot it replaced, and putting that
+    /// one back is the restore.
+    fn with_mvar_local_context<R>(&mut self, mvar_id: MVarId, f: impl FnOnce(&mut Self) -> R) -> R {
+        let Some(snapshot) = self.mctx.mvar_lctx(mvar_id) else {
+            return f(self);
+        };
+        let saved = self.mctx.install_lctx(snapshot);
+        let out = f(self);
+        self.mctx.install_lctx(saved);
+        out
+    }
+
     /// oracle: `synthesizeSyntheticMVar` (`SyntheticMVars.lean:540-569`).
     ///
     /// Returns `true` when the mvar was synthesized, `false` for "not
@@ -114,10 +129,15 @@ impl<'e> TermElabM<'e> {
         let Some(decl) = self.synthetic_mvar_decl(mvar_id).cloned() else {
             return Ok(true);
         };
-        match decl.kind {
-            SyntheticMVarKind::TypeClass => self.synthesize_pending_inst_mvar(mvar_id),
+        // oracle: every arm runs under `mvarId.withContext` — the driver
+        // `resumePostponed` (`SyntheticMVars.lean:32-36`) and the `.coe`
+        // arm's own (`:545`). A synthetic metavariable is resumed after
+        // the binder it was registered under has closed, so without this
+        // its type and payload no longer resolve.
+        self.with_mvar_local_context(mvar_id, |elab| match decl.kind {
+            SyntheticMVarKind::TypeClass => elab.synthesize_pending_inst_mvar(mvar_id),
             SyntheticMVarKind::Postponed { ref ctx } => {
-                self.resume_postponed(ctx, &decl.stx, mvar_id, postpone_on_error, kinds)
+                elab.resume_postponed(ctx, &decl.stx, mvar_id, postpone_on_error, kinds)
             }
             SyntheticMVarKind::Coe { .. } => Err(ElabError::UnsupportedSyntax(
                 "coercion synthetic mvars require coercion insertion — M4b-3 P4".to_string(),
@@ -149,7 +169,7 @@ impl<'e> TermElabM<'e> {
                     Ok(false)
                 }
             }
-        }
+        })
     }
 
     /// oracle: `synthesizeInstMVarCore` (`TermElabM.lean:1232-1288`).
