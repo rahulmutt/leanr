@@ -14,7 +14,14 @@
 //! three pending-`inst_mvars` guards (`AppElab::try_synthesize_app_inst_mvars`
 //! / `synthesize_app_inst_mvars`, called from `propagate.rs` and
 //! `finalize.rs` at exactly the oracle's own call sites) — both rows
-//! this doc used to carry in the seam table below.
+//! this doc used to carry in the seam table below. **Also no longer a
+//! seam, as of M4b-3 P2b-ii**: the local-instance outParam result type —
+//! `args.rs`'s `is_next_out_param_of_local_instance_and_result` is the
+//! `resultTypeOutParam?` producer and `finalize.rs`'s branch is its
+//! consumer (`App.lean:681-727`, `:638-646`), gated by `Elab0.lean`'s
+//! `Lean.Internal.coeM` exactly as the oracle's `App.lean:1355` gates
+//! it. `tests/seam_audit.rs`'s `no_seam_points_at_the_retired_p2b_ii_label`
+//! gates that its message never comes back.
 //!
 //! NOT in this plan, each a named seam (never a silent fall-through).
 //! `Where` is the site that raises it; every message below carries its
@@ -33,12 +40,8 @@
 //! a real body in `synthetic/default_inst.rs`, so the row was a stale
 //! claim rather than a seam — `tests/seam_audit.rs`'s
 //! `literal_kinds_are_registered_not_deferred` gates that it stays gone.
-//! P3 changed nothing else in `app/`: the `local-instance outParam
-//! result type` row below is unchanged and still P2b's, which now runs
-//! after P3 (design spec § Amendment 2).
 //!
 //! ```text
-//!   local-instance outParam result type .............. P2b args.rs, finalize.rs
 //!   fType still an unassigned mvar after synthesis ... P4/P5 args.rs (`main`'s
 //!     synthesize_pending_and_normalize_fun_type) — CoeFun (P4) or
 //!     expected-type propagation into `fun` binder domains (P5). A
@@ -403,10 +406,10 @@ fn elab_app_aux(
         explicit,
         // oracle: `App.lean:1355`'s `env.contains ``Lean.Internal.coeM &&
         // resultIsOutParamSupport && !explicit`. Computed the same way,
-        // not shortcut to `false`: it happens to be false throughout the
-        // hermetic fixture env because prelude-mode `Elab0` declares no
-        // `Lean.Internal.coeM`, and that must stay an OBSERVATION about
-        // the env rather than an assumption baked into the code.
+        // not shortcut to `true`: `Lean.Internal.coeM` is declared
+        // since M4b-3 P2b-ii, so it is `true` for every non-`@`
+        // application in the fixture corpus; computing it rather than
+        // shortcutting stays the rule.
         result_is_out_param_support: env_contains_coe_m(elab)? && !explicit,
         // oracle: `Context.numImplicitParams` — the max over `namedArgs`.
         num_implicit_params: named_args

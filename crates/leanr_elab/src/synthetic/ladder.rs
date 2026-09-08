@@ -89,10 +89,11 @@ impl<'e> TermElabM<'e> {
     ///   `.undef`, so a ground goal still goes to the real search.
     /// - **Over-approximating in the other direction, and that is the
     ///   residual gap.** A goal that does mention an unassigned expr
-    ///   mvar is reported `.undef` here in three cases where the oracle
-    ///   does NOT report `.undef`. They are listed below WORST FIRST,
-    ///   and they do not share an owner — do not assume the mctx-depth
-    ///   model closes them all.
+    ///   mvar was reported `.undef` here in three cases where the
+    ///   oracle does NOT report `.undef` — three, of which residue 1 is
+    ///   closed by M4b-3 P2b-ii; two remain. They are listed below
+    ///   WORST FIRST, and the two that remain do not share an owner —
+    ///   do not assume the mctx-depth model closes them both.
     ///
     /// **Residue 1 — `outParam` goals (the big one; owner: P2b-ii, NOT
     /// the depth model).** `synthInstanceCore?` classifies the goal
@@ -114,26 +115,13 @@ impl<'e> TermElabM<'e> {
     /// eventually raise `StuckSyntheticMVar` on a goal the oracle
     /// answers.
     ///
-    /// **M4b-3 P2b-i has landed the SYNTHESIS half of the fix**, so this
-    /// entry no longer says "outParam support is itself a named seam":
-    /// `leanr_olean` decodes `classExtension`, and `leanr_meta`'s
-    /// `synth.rs` now has `preprocess` / `preprocess_out_param` /
-    /// `assign_out_params`, with `Op N N ?c` answered AND `?c := N`
-    /// assigned in the committed corpus (`outParam/synth/0` in
-    /// `tests/fixtures/meta/synth-queries.jsonl`). What is STILL OPEN
-    /// is the ELABORATOR half, **M4b-3 P2b-ii**: this pre-test must be
-    /// taught to exempt output-parameter positions (or be deleted in
-    /// favour of calling the real mechanism), and `app/args.rs`'s
-    /// `add_implicit_arg` / `app/finalize.rs`'s result-type branch still
-    /// need a `resultTypeOutParam?` producer. What keeps the residue
-    /// UNREACHABLE today is narrower than before, and it is a fixture
-    /// fact rather than a missing mechanism: `Elab0.lean`
-    /// (`tests/fixtures/elab/`) still declares no class with an
-    /// `outParam`, so no corpus term reaches this arm with an output
-    /// parameter in it.
-    /// P2b-ii is the slice that adds one (the `Get`/`GetElem` shape
-    /// already proved out at the synthesis tier) and must retire this
-    /// residue in the same change.
+    /// **Closed by M4b-3 P2b-ii.** `has_mvar_outside_out_params` below
+    /// exempts output-parameter positions, so `Op N N ?c` /
+    /// `Get Cell Nat ?e` reach the real search and P2b-i's
+    /// `assign_out_params` assigns the caller's mvar; a goal with an
+    /// mvar in a NON-output position (`Get Cell ?i ?e`) still postpones,
+    /// which the `GetElem` worked example requires. Residues 2 and 3
+    /// below are unchanged and still the depth model's.
     ///
     /// **Residue 2 — an all-polymorphic candidate set (owner: the
     /// mctx-depth model).** If every candidate the search reaches is
@@ -173,10 +161,7 @@ impl<'e> TermElabM<'e> {
     /// channel this function should be reading once `leanr_meta` grows
     /// the depth model, at which point the syntactic pre-test becomes
     /// redundant for residues 2 and 3 and can be deleted rather than
-    /// rewritten. Residue 1 does NOT come along for free even though
-    /// `preprocessOutParam`/`assignOutParams` have landed on the
-    /// synthesis side (M4b-3 P2b-i) — it still needs the elaborator-side
-    /// work, M4b-3 P2b-ii, described above.
+    /// rewritten.
     ///
     /// Precondition: `ty` is already `instantiate_mvars`-ed (the oracle's
     /// own `let type ← instantiateMVars type`, `SynthInstance.lean:967`).
@@ -184,8 +169,7 @@ impl<'e> TermElabM<'e> {
     /// an instantiated type it means exactly "mentions an UNASSIGNED expr
     /// mvar"; on a stale one it would over-report.
     fn try_synth_instance(&mut self, ty: ExprId) -> Result<LOptionExpr, ElabError> {
-        let base = self.view.store;
-        if self.mctx.store().expr_data(Some(base), ty).has_expr_mvar() {
+        if self.has_mvar_outside_out_params(ty) {
             return Ok(LOptionExpr::Undef);
         }
         match self.mctx.synth_instance(ty) {
@@ -194,6 +178,62 @@ impl<'e> TermElabM<'e> {
             Err(leanr_meta::MetaError::IsDefEqStuck(_)) => Ok(LOptionExpr::Undef),
             Err(e) => Err(ElabError::from(e)),
         }
+    }
+
+    /// The stuck pre-test, POSITIONAL since M4b-3 P2b-ii: does `ty`
+    /// mention an unassigned expr mvar OUTSIDE its head class's
+    /// output-parameter argument positions?
+    ///
+    /// Why positional (design spec § Amendment 4 item 6). An mvar in an
+    /// output-parameter position is exactly what `preprocessOutParam`
+    /// (`SynthInstance.lean:775-817`) replaces with a search-local mvar
+    /// before the search runs, and what `assignOutParams` (`:847-861`)
+    /// assigns back afterwards — both ported in P2b-i
+    /// (`leanr_meta::synth.rs`) — so the search never unifies against
+    /// the caller's mvar and cannot get stuck on it. An mvar ANYWHERE
+    /// ELSE is still one the search would unify against directly, which
+    /// is the read-only-mvar stuck condition this pre-test reconstructs
+    /// (residues 2 and 3 in `try_synth_instance`'s own doc), so it
+    /// still postpones.
+    ///
+    /// Not class-level: the oracle's `PreprocessKind` (`:706-716`) only
+    /// says whether the CLASS has outParams, and `Get Cell ?i ?e` — a
+    /// class with outParams, an mvar in a non-output position — must
+    /// keep postponing or the `GetElem` worked example breaks.
+    ///
+    /// Conservative on every shape it cannot read: a non-`Const` head, an
+    /// unnamed `Const`, or a head that is not a class (`get_out_param_positions`
+    /// answers `None`) keeps today's behaviour, `Undef` on any expr mvar.
+    /// Argument positions are counted in APPLICATION order, matching
+    /// `ClassEntry.outParams` (`Class.lean:11-31`).
+    ///
+    /// Precondition: `ty` is already `instantiate_mvars`-ed, so
+    /// `has_expr_mvar` means "mentions an UNASSIGNED expr mvar".
+    fn has_mvar_outside_out_params(&self, ty: ExprId) -> bool {
+        let base = self.view.store;
+        let store = self.mctx.store();
+        if !store.expr_data(Some(base), ty).has_expr_mvar() {
+            return false;
+        }
+        let mut args = Vec::new();
+        let mut cur = ty;
+        while let Node::App { f, arg } = store.expr_node(Some(base), cur) {
+            args.push(arg);
+            cur = f;
+        }
+        args.reverse();
+        let Node::Const {
+            name: Some(class), ..
+        } = store.expr_node(Some(base), cur)
+        else {
+            return true;
+        };
+        let Some(out_positions) = self.mctx.get_out_param_positions(class) else {
+            return true;
+        };
+        args.iter().enumerate().any(|(i, arg)| {
+            !out_positions.contains(&i) && store.expr_data(Some(base), *arg).has_expr_mvar()
+        })
     }
 
     /// The ordering core of `synthesizeSyntheticMVarsStep`
@@ -531,6 +571,27 @@ impl<'e> TermElabM<'e> {
             self.synthesize_synthetic_mvars(PostponeBehavior::Yes, kinds)?;
         }
         Ok(())
+    }
+
+    /// oracle: `synthesizeSyntheticMVarsUsingDefault`
+    /// (`SyntheticMVars.lean:658-660`) — `synthesizeSyntheticMVars
+    /// (postpone := .yes)` then `synthesizeUsingDefaultLoop`.
+    ///
+    /// Both halves existed since M4b-3 P3; the composite was left
+    /// unnamed until something called it (this crate's `lib.rs` ledger
+    /// said so in as many words). M4b-3 P2b-ii's `finalize` outParam
+    /// branch (`App.lean:643`) is that caller: when an application's
+    /// result type is the outParam of a local instance and is still an
+    /// unassigned mvar after `synthesizeAppInstMVars`, the oracle applies
+    /// default instances EAGERLY, here, rather than leaving them to the
+    /// enclosing fixpoint — so that `getElem xs 0`'s type is known to
+    /// whatever elaborates next.
+    pub fn synthesize_synthetic_mvars_using_default(
+        &mut self,
+        kinds: &KindInterner,
+    ) -> Result<(), ElabError> {
+        self.synthesize_synthetic_mvars(PostponeBehavior::Yes, kinds)?;
+        self.synthesize_using_default_loop(kinds)
     }
 
     /// oracle: `resumePostponed` (`SyntheticMVars.lean:32-74`) —

@@ -29,8 +29,8 @@
 //!   `tests/synthetic_smoke.rs` cover it end to end. **Not** included:
 //!   `classExtension` and the `resultTypeOutParam?` producer/branch —
 //!   those are P2b. `classExtension` (and the whole synthesis-side
-//!   outParam mechanism) landed in P2b-i; the producer/branch is still a
-//!   named seam below, owned by P2b-ii.
+//!   outParam mechanism) landed in P2b-i; the producer/branch shipped
+//!   in P2b-ii.
 //! - **M4b-3 P3** — default instances and the non-leaf literals. Rung 3
 //!   of the ladder is real (`synthesizeUsingDefault` /
 //!   `synthesizeSomeUsingDefaultPrio` / `synthesizeUsingDefaultPrio` /
@@ -55,6 +55,32 @@
 //!   **Not** included: `rawNatLit`, which no leanr parser
 //!   production builds, so it is deliberately unregistered rather than
 //!   implemented against a syntax kind that cannot occur.
+//! - **M4b-3 P2b-ii** — the elaborator-side local-instance outParam
+//!   branch. `app/args.rs`'s
+//!   `is_next_out_param_of_local_instance_and_result` is the
+//!   `resultTypeOutParam?` PRODUCER, and `app/finalize.rs`'s outParam
+//!   branch is the consumer, calling `synthesize_app_inst_mvars` then
+//!   the new `synthesize_synthetic_mvars_using_default` composite
+//!   (`synthetic/ladder.rs`, wrapping
+//!   `synthesize_synthetic_mvars (postpone := yes)` +
+//!   `synthesize_using_default_loop`) exactly as the oracle's
+//!   `App.lean:638-646` does. `synthetic/ladder.rs`'s
+//!   `has_mvar_outside_out_params` is the positional exemption that
+//!   lets an `outParam` goal such as `Get Cell Nat ?elem` reach the
+//!   real search instead of postponing, while a goal with an mvar in a
+//!   NON-output position still postpones. `Elab0.lean` grows the first
+//!   `outParam` class (`Get`, with `Cell`) to exercise the branch, a
+//!   fourth default-instance priority (75, `instFreshSeed` on `Fresh`)
+//!   between `instOfNatNat`'s 100 and `instOfNatTag`'s 50, and
+//!   `Lean.Internal.coeM` — the env gate `resultIsOutParamSupport`
+//!   reads. `coeM` is an EXISTENCE-ONLY axiom; its real definition
+//!   (`Init/Coe.lean:336-339`) is owed by the do-notation slice, the
+//!   only one that reaches its other consumer (design spec § Amendment
+//!   4 item 7). The corpus grows `dflt/polyInstImplicit` plus
+//!   `outParam/getFst`, `outParam/getElem`, `outParam/getElemIdxNat`,
+//!   `outParam/getElemUnderDflt` and `outParam/getElemAscribed`
+//!   (docs/superpowers/specs/2026-07-25-m4b3-application-elaborator-design.md
+//!   § Amendment 4).
 //!
 //! ## What is NOT built yet
 //!
@@ -64,43 +90,6 @@
 //! inside `app/` carries its owning slice in the message. Never a
 //! silent no-op, never a panic, never a wrong `ExprId`.
 //!
-//! - **local-instance outParam result types** — `Context.resultIsOutParamSupport`
-//!   and `State.resultTypeOutParam?` exist (P1), but nothing yet
-//!   *produces* a `resultTypeOutParam?`. The blocker used to be that
-//!   `leanr_olean` had no `classExtension` decode (`ClassEntry` = name +
-//!   outParam positions); **M4b-3 P2b-i has since landed that decode and
-//!   the whole SYNTHESIS-side mechanism** — `leanr_meta`'s `synth.rs`
-//!   now has `preprocess` / `preprocess_out_param` / `assign_out_params`
-//!   and its committed corpus pins `Op N N ?c` answered with `?c := N`
-//!   assigned. So what remains here is purely the ELABORATOR half:
-//!   `app/args.rs`'s `add_implicit_arg` and `app/finalize.rs`'s outParam
-//!   branch each still raise a named seam for the missing PRODUCER
-//!   — M4b-3 P2b-ii, which runs AFTER P3 rather than before it (design
-//!   spec § Amendment 2). The reason is not sequencing taste: P2b's own
-//!   headline behavior was UNVERIFIABLE before P3. `finalize`'s outParam
-//!   branch runs `synthesizeSyntheticMVarsUsingDefault` only when the
-//!   outParam mvar is still unassigned, and the way one stays unassigned
-//!   is the oracle's own motivating shape, `getElem xs 0`, where the `0`
-//!   is undetermined until the `OfNat` default instance fires. Without
-//!   `num` and rung 3, every corpus term reachable took the degenerate
-//!   `else` arm. P3 has no reciprocal dependency on P2b, so the swap was
-//!   free.
-//!
-//!   Both callees that branch needs now exist, which is a change from
-//!   what this entry recorded before P3. The oracle's own outParam
-//!   branch (`App.lean:638-646`) calls `synthesizeAppInstMVars` (`:639`)
-//!   and `synthesizeSyntheticMVarsUsingDefault` (`:643`); the first is
-//!   P2a's `AppElab::synthesize_app_inst_mvars`, and the second is
-//!   `synthesizeSyntheticMVars (postpone := .yes)` followed by
-//!   `synthesizeUsingDefaultLoop` (`SyntheticMVars.lean:658-660`), both
-//!   of which P3 made real — `TermElabM::synthesize_synthetic_mvars` and
-//!   `TermElabM::synthesize_using_default_loop`. leanr does not wrap
-//!   that pair under a single name because nothing calls it yet; P2b-ii
-//!   is the slice that adds both the producer and the wrapper. So what
-//!   is missing is the `resultTypeOutParam?` PRODUCER, nothing
-//!   downstream of it and — since P2b-i — nothing underneath it either:
-//!   `Elab0.lean` also still declares no class with an `outParam`, which
-//!   is what keeps this arm unreachable from the corpus today.
 //! - **coercions** (`mkCoe`, `CoeT`/`CoeFun`/`CoeSort`) —
 //!   `ensure_has_type`/`elab_term_ensuring_type` and `app`'s own
 //!   `ensureArgType` ERROR on a defeq mismatch rather than inserting a
@@ -246,16 +235,13 @@
 //!   What is STILL OPEN on the elaborator side is the price of that
 //!   reconstruction: it is exact in the safe direction (a goal with no
 //!   unassigned expr mvar can never be `.undef`, so ground goals still
-//!   reach the real search) but over-approximates in three cases, which
-//!   do NOT share an owner. `try_synth_instance`'s own doc enumerates
-//!   them with oracle citations; in short: (1) `outParam` goals such as
-//!   `HAdd Nat Nat ?γ`, which the oracle ANSWERS via
-//!   `preprocessOutParam`/`assignOutParams` and leanr would defer.
-//!   M4b-3 P2b-i ported both into `leanr_meta`, so the MECHANISM is no
-//!   longer missing; what is left is teaching this pre-test to exempt
-//!   output-parameter positions, which is P2b-ii's, and what keeps the
-//!   residue unreachable meanwhile is that `Elab0.lean` declares no
-//!   outParam class. Closed by P2b-ii, NOT by the depth model; (2) an
+//!   reach the real search) but over-approximates in three cases —
+//!   of which residue 1 is closed by M4b-3 P2b-ii; two remain, and
+//!   those two do NOT share an owner. `try_synth_instance`'s own doc
+//!   enumerates all three with oracle citations; in short: (1)
+//!   `outParam` goals — CLOSED by M4b-3 P2b-ii's positional exemption
+//!   in `try_synth_instance` (§ Amendment 4 item 6), not by the depth
+//!   model; (2) an
 //!   all-polymorphic candidate set; (3) a zero-candidate class with an
 //!   mvar goal (`NoInst ?a`), where the oracle throws "failed to
 //!   synthesize" and leanr reports stuck — both error, so neither is a

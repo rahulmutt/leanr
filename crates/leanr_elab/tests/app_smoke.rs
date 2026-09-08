@@ -1317,3 +1317,207 @@ fn should_propagate_expected_type_for_excludes_deferred_kinds() {
         );
     }
 }
+
+/// oracle: `isNextOutParamOfLocalInstanceAndResult` (`App.lean:681-727`)
+/// — the `resultTypeOutParam?` PRODUCER (M4b-3 P2b-ii). `Get.get`'s
+/// `{elem}` is the result type AND the outParam of the local instance
+/// `[self : Get cont idx elem]`, so processing it marks the mvar and
+/// disables expected-type propagation (`App.lean:747-755`).
+///
+/// Driven with the flag FORCED on: `Elab0.lean` does not declare
+/// `Lean.Internal.coeM` until task 5, so `elab_app_aux` computes it
+/// `false` end-to-end today. `main` finalizes the bare partial
+/// application (no arguments), which takes the branch's ELSE arm
+/// (`eType` is `?idx → ?elem`, not the outParam mvar itself) — so this
+/// also pins that the else arm returns without error.
+#[test]
+fn producer_marks_the_result_type_out_param_of_a_local_instance() {
+    support::with_app_args("Get.get", &[], |app, kinds| {
+        app.ctx.result_is_out_param_support = true;
+        app.st.propagate_expected = true;
+        leanr_elab::app::args::main(app, kinds).expect("bare `Get.get` finalizes");
+        let out = app
+            .st
+            .result_type_out_param
+            .expect("`elem` is the outParam of `[Get cont idx elem]` and the result type");
+        assert!(
+            !app.st.propagate_expected,
+            "marking the result type as an outParam disables propagation (App.lean:753)"
+        );
+        assert!(
+            !app.elab.mctx.mctx().is_assigned(out),
+            "nothing determines `?elem` on a bare partial application"
+        );
+    });
+}
+
+/// The producer's THREE false directions, each of which a constant-`true`
+/// mutation of one clause would flip (design spec § Amendment 4 item 7,
+/// `Elab0.lean`'s `getFst` comment):
+///
+///   * `useWrap` — `Wrap` has no outParams, so
+///     `hasLocalInstanceWithOutParams` (`:700-706`) is false;
+///   * `getFst`'s `{cont}` — the result type, but position 0 of `Get`
+///     is not an `outParam` position, so `isOutParamOf` (`:718-727`)
+///     is false;
+///   * `getFst`'s `{elem}` — an outParam of the local instance, but not
+///     the result type, so `isResultType` (`:693-697`) is false.
+///
+/// `getFst` covers the last two at once: if EITHER clause were a
+/// constant `true`, one of its two implicits would be marked.
+///
+/// Caveat, measured rather than assumed: a constant-`true` mutation of
+/// `has_local_instance_with_out_params` is NOT killed by any test in
+/// this crate (the positional clause re-checks it independently), so
+/// this test's own name overstates that one direction; only the
+/// `useWrap` row here kills that clause's `→ false` mutation.
+#[test]
+fn producer_answers_false_on_each_of_its_three_gates() {
+    for head in ["useWrap", "getFst"] {
+        support::with_app_args(head, &[], |app, kinds| {
+            app.ctx.result_is_out_param_support = true;
+            app.st.propagate_expected = true;
+            leanr_elab::app::args::main(app, kinds)
+                .unwrap_or_else(|e| panic!("bare `{head}` finalizes: {e:?}"));
+            assert!(
+                app.st.result_type_out_param.is_none(),
+                "{head}: no implicit is the outParam of a local instance AND the result type"
+            );
+            assert!(
+                app.st.propagate_expected,
+                "{head}: propagation stays enabled when the producer answers false"
+            );
+        });
+    }
+}
+
+/// `Context.resultIsOutParamSupport = false` short-circuits the producer
+/// (`App.lean:682-683`, "if `resultIsOutParamSupport` is `false`, this
+/// method returns `false`") — under `@`, and in every env without
+/// `Lean.Internal.coeM`, `Get.get` is elaborated with no special support.
+#[test]
+fn producer_is_inert_when_the_context_flag_is_off() {
+    support::with_app_args("Get.get", &[], |app, kinds| {
+        assert!(!app.ctx.result_is_out_param_support, "harness default");
+        app.st.propagate_expected = true;
+        leanr_elab::app::args::main(app, kinds).expect("bare `Get.get` finalizes");
+        assert!(app.st.result_type_out_param.is_none());
+        assert!(app.st.propagate_expected);
+    });
+}
+
+/// oracle: `finalize`'s outParam branch, INTERESTING arm
+/// (`App.lean:641-644`): the outParam mvar is still unassigned after
+/// `synthesizeAppInstMVars` and `eType` IS that mvar, so
+/// `synthesizeSyntheticMVarsUsingDefault` runs HERE, inside the
+/// application elaborator, and the `OfNat` default instance fires before
+/// any enclosing fixpoint gets a chance.
+///
+/// Observed through P3's `default_walk_log`: the walk visits mvars only
+/// when rung 3 runs, and nothing but this branch runs rung 3 inside
+/// `args::main`. The `Get Cell ?α ?elem` goal is then solved by the
+/// loop's interleaved `synthesizeSyntheticMVars`, so `?elem := Unit`
+/// is assigned by the time `main` returns — which is the entire point of
+/// the feature (`App.lean:150-166`).
+#[test]
+fn finalize_applies_default_instances_when_the_out_param_is_still_open() {
+    support::with_app_args("Get.get", &["cell", "0"], |app, kinds| {
+        app.ctx.result_is_out_param_support = true;
+        app.st.propagate_expected = true;
+        leanr_elab::synthetic::default_walk_log_reset();
+        let e = leanr_elab::app::args::main(app, kinds).expect("`Get.get cell 0` elaborates");
+        let visited = leanr_elab::synthetic::default_walk_log_take();
+        assert!(
+            !visited.is_empty(),
+            "rung 3 must run INSIDE finalize on the open-outParam shape"
+        );
+        let out = app.st.result_type_out_param.expect("producer fired");
+        assert!(
+            app.elab.mctx.mctx().is_assigned(out),
+            "`?elem` is assigned as a RESULT of the eager default (Unit, via instGetCellNat)"
+        );
+        let ty = app.elab.mctx.infer_type(e).expect("infer");
+        let ty = app.elab.mctx.instantiate_mvars(ty).expect("instantiate");
+        let base = app.elab.view.store;
+        let carrier = match app.node(ty) {
+            leanr_kernel::bank::terms::Node::Const { name: Some(n), .. } => app
+                .elab
+                .mctx
+                .store()
+                .to_name(Some(base), Some(n))
+                .to_string(),
+            other => panic!("the application's type is not a constant: {other:?}"),
+        };
+        assert_eq!(
+            carrier, "Unit",
+            "the application's type is the fixed carrier"
+        );
+        assert!(
+            app.elab.pending_mvars.is_empty(),
+            "the interleaved synthesizeSyntheticMVars closed the instance goal too"
+        );
+    });
+}
+
+/// oracle: the branch's ELSE arm (`App.lean:645-646`) — "If `eType !=
+/// mkMVar outParamMVarId`, then the function is partially applied, and
+/// we do not apply default instances." Design spec § Amendment 4 item
+/// 10: this is a smoke test, not a corpus record, because on a green
+/// term the arm's effect is invisible in the emitted `Expr` and the
+/// oracle's dumper drops a partially-applied query (its instance goal
+/// stays stuck through the fixpoint).
+///
+/// The discriminator is the walk log again: with `Get Cell ?idx ?elem`
+/// PENDING and the arm taken, rung 3 must NOT run; a mutation that
+/// always applies defaults visits that goal and the log is non-empty.
+#[test]
+fn finalize_skips_default_instances_on_a_partial_application() {
+    support::with_app_args("Get.get", &["cell"], |app, kinds| {
+        app.ctx.result_is_out_param_support = true;
+        app.st.propagate_expected = true;
+        leanr_elab::synthetic::default_walk_log_reset();
+        leanr_elab::app::args::main(app, kinds).expect("`Get.get cell` finalizes");
+        let visited = leanr_elab::synthetic::default_walk_log_take();
+        assert!(
+            visited.is_empty(),
+            "partially applied: no default-instance walk, got {visited:?}"
+        );
+        assert_eq!(
+            app.elab.pending_mvars.len(),
+            1,
+            "the stuck `Get Cell ?idx ?elem` goal is registered pending, not solved or reported"
+        );
+        let out = app.st.result_type_out_param.expect("producer fired");
+        assert!(!app.elab.mctx.mctx().is_assigned(out));
+    });
+}
+
+/// The producer disables expected-type propagation (`App.lean:753`), so
+/// with an expected type in hand `?elem` must be assigned by the DEFAULT
+/// rung, not by `propagateExpectedType`: the walk log is non-empty.
+/// Leaving propagation on assigns `?elem := Unit` at the first explicit
+/// argument, the guard's `isAssigned` then sees it, and the log stays
+/// EMPTY — which is how this test kills that mutation.
+///
+/// What it does NOT discriminate, stated so nobody claims it later: the
+/// branch's early `return e` (`App.lean:644,646`) also skips `finalize`'s
+/// own `isDefEq expectedType eType` (design spec § Amendment 4 item 5),
+/// but by the time control would reach that block the default rung has
+/// already assigned `?elem`, so falling through changes nothing a leanr
+/// term can observe. The early return is transliterated because the
+/// oracle has it, not because a test needs it.
+#[test]
+fn finalize_under_an_expected_type_still_defaults_rather_than_unifies() {
+    support::with_app_args("Get.get", &["cell", "0"], |app, kinds| {
+        app.ctx.result_is_out_param_support = true;
+        app.st.propagate_expected = true;
+        app.st.expected_type = Some(support::fixture_const(app, "Unit"));
+        leanr_elab::synthetic::default_walk_log_reset();
+        leanr_elab::app::args::main(app, kinds).expect("`(Get.get cell 0 : Unit)` elaborates");
+        let visited = leanr_elab::synthetic::default_walk_log_take();
+        assert!(
+            !visited.is_empty(),
+            "with propagation off and the finalize unification skipped, only rung 3 can fix `?elem`"
+        );
+    });
+}

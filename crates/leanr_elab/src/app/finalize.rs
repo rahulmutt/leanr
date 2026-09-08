@@ -2,11 +2,13 @@
 
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, NameId};
+use leanr_meta::MVarId;
+use leanr_syntax::kind::KindInterner;
 
 use crate::app::state::AppElab;
 use crate::error::ElabError;
 
-pub fn finalize(app: &mut AppElab) -> Result<ExprId, ElabError> {
+pub fn finalize(app: &mut AppElab, kinds: &KindInterner) -> Result<ExprId, ElabError> {
     // oracle: `let ref ← getRef; for mvarId in s.toSetErrorCtx do
     // registerMVarErrorImplicitArgInfo mvarId ref e` (`App.lean:616-620`)
     // — error CONTEXT only, never part of the emitted `Expr`. `e` here is
@@ -56,22 +58,28 @@ pub fn finalize(app: &mut AppElab) -> Result<ExprId, ElabError> {
     // unfolded (`get_f_type`/`whnf_forall` both rewrite it in place).
     let e_type = app.elab.mctx.infer_type(e)?;
 
-    // oracle: the `resultTypeOutParam?` branch (`App.lean:637-648`).
-    // `result_is_out_param_support` is false in the fixture env (no
-    // `Lean.Internal.coeM`), so there is no P1 producer; guard anyway.
-    if app.st.result_type_out_param.is_some() {
-        return Err(ElabError::UnsupportedSyntax(
-            // "requires default instances" until M4b-3 P3 task 8's seam
-            // audit: P3 shipped them (`synthetic/default_inst.rs`), so
-            // that was no longer what is missing. `leanr_olean` now
-            // decodes `classExtension` and `MetaCtx::get_out_param_positions`
-            // is `pub` (M4b-3 P2b-i), so that is no longer missing
-            // either. What IS missing is the elaborator-side
-            // `resultTypeOutParam?` PRODUCER that would ever SET
-            // `result_type_out_param` — the same blocker `args.rs`'s
-            // sibling seam names, now M4b-3 P2b-ii's.
-            "result-type outParam support requires the elaborator-side resultTypeOutParam? producer — M4b-3 P2b-ii".to_string(),
-        ));
+    // oracle: the `resultTypeOutParam?` branch (`App.lean:638-646`),
+    // M4b-3 P2b-ii. `args::add_implicit_arg` is the producer. BOTH arms
+    // `return e` early — skipping the expected-type unification below
+    // AND the trailing committing pass — which is observable (design
+    // spec § Amendment 4 item 5): with an expected type in hand, the
+    // outParam mvar is fixed by the DEFAULT rung, not by `isDefEq`.
+    if let Some(out) = app.st.result_type_out_param {
+        // oracle: `synthesizeAppInstMVars` (`:639`) — the committing pass,
+        // moved ahead of the guard so an instance goal that IS ready
+        // (index type already ground) assigns the outParam here and the
+        // else arm is taken.
+        let stx = app.ctx.stx.clone();
+        app.synthesize_app_inst_mvars(&stx)?;
+        // oracle (`:640-641`): "If `eType != mkMVar outParamMVarId`, then
+        // the function is partially applied, and we do not apply default
+        // instances."
+        let e_type_is_the_out_param =
+            matches!(app.node(e_type), Node::MVar { id: Some(n) } if MVarId(n) == out);
+        if !app.elab.mctx.mctx().is_assigned(out) && e_type_is_the_out_param {
+            app.elab.synthesize_synthetic_mvars_using_default(kinds)?;
+        }
+        return Ok(e);
     }
 
     // oracle: `if let some expectedType := s.expectedType? then

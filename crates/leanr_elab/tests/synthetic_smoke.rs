@@ -367,6 +367,78 @@ fn postpone_yes_leaves_the_mvar_pending() {
     });
 }
 
+/// **Residue 1 of `try_synth_instance`'s pre-test, retired (M4b-3
+/// P2b-ii).** A goal whose only unassigned mvar sits in an
+/// OUTPUT-PARAMETER position is answered by the oracle
+/// (`preprocessOutParam` + `assignOutParams`, `SynthInstance.lean:775-861`,
+/// ported in P2b-i) and must now reach the real search here too — with
+/// the caller's mvar ASSIGNED as a result, which is the whole feature.
+///
+/// Before this task the pre-test answered `Undef` on any expr mvar at
+/// all, and the ladder eventually raised `StuckSyntheticMVar` on a goal
+/// the oracle solves. Corpus record `outParam/getFst` pins the same fact
+/// end-to-end.
+#[test]
+fn out_param_position_mvar_reaches_the_real_search() {
+    support::with_app_harness("Nat.zero", |app| {
+        let goal = support::get_cell_nat_of_fresh_mvar(app);
+        let (_e, id) = app
+            .elab
+            .mk_fresh_expr_mvar_of_kind(goal, leanr_meta::MVarKind::Synthetic)
+            .expect("fresh mvar");
+        assert!(
+            app.elab
+                .synthesize_inst_mvar_core(id)
+                .expect("an outParam goal is not an error"),
+            "`Get Cell Nat ?e` must be SOLVED, not postponed: the only mvar is \
+             in an output-parameter position"
+        );
+        assert!(
+            app.elab.mctx.mctx().is_assigned(id),
+            "the instance mvar is assigned"
+        );
+        // The outParam mvar itself must have been assigned by
+        // `assign_out_params` — read it back off the goal.
+        let goal = app.elab.mctx.instantiate_mvars(goal).expect("instantiate");
+        let base = app.elab.view.store;
+        assert!(
+            !app.elab
+                .mctx
+                .store()
+                .expr_data(Some(base), goal)
+                .has_expr_mvar(),
+            "`?e := Unit` is assigned as a RESULT of synthesis, got {goal:?}"
+        );
+    });
+}
+
+/// The exemption is POSITIONAL, not class-level (design spec
+/// § Amendment 4 item 6): `Get Cell ?i ?e` has an unassigned mvar in a
+/// NON-output position (`idx`), so it must still postpone. This is
+/// load-bearing for the `GetElem` worked example — `?i` is fixed only
+/// when the `OfNat` default instance fires, and sending the goal to the
+/// search early would answer `.none` and fail the headline record.
+#[test]
+fn non_out_param_position_mvar_still_postpones() {
+    support::with_app_harness("Nat.zero", |app| {
+        let goal = support::get_cell_of_two_fresh_mvars(app);
+        let (_e, id) = app
+            .elab
+            .mk_fresh_expr_mvar_of_kind(goal, leanr_meta::MVarKind::Synthetic)
+            .expect("fresh mvar");
+        assert!(
+            !app.elab
+                .synthesize_inst_mvar_core(id)
+                .expect("a stuck goal is not an error"),
+            "`Get Cell ?i ?e` must be POSTPONED: `?i` is not an output parameter"
+        );
+        assert!(
+            !app.elab.mctx.mctx().is_assigned(id),
+            "nothing is committed on a postponed goal"
+        );
+    });
+}
+
 /// Rung 3 with nothing pending is a no-progress no-op — unchanged
 /// behavior from P2a's seam, but now for the real reason (the priority
 /// walk finds no pending `TypeClass` mvar) rather than a shape guard.
@@ -579,14 +651,18 @@ fn default_instance_walk_visits_pending_mvars_in_reverse_creation_order() {
         let prios = app.elab.mctx.default_instance_priorities();
         assert_eq!(
             prios.len(),
-            3,
-            "Elab0's three default-instance priorities, got {prios:?}"
+            4,
+            "Elab0's four default-instance priorities (1000 / 100 / 75 / 50), got {prios:?}"
         );
         // The TOP priority must apply to none of the three goals (so the
         // walk visits all of them before dropping a rung), and the
         // SECOND must be where `OfNat`'s winning default sits —
         // `instOfNatNat` at 100 since the task-6 review re-prioritised
-        // `instOfNatTag` from 500 down to 50.
+        // `instOfNatTag` from 500 down to 50. M4b-3 P2b-ii added a
+        // fourth priority (`instFreshSeed` at 75) BELOW 100: the walk
+        // stops at the first priority that makes progress, so the
+        // recorded order below is unchanged — three visits at the top,
+        // one at 100 — and only this count moved.
         assert!(prios[0] > 100 && prios[1] == 100, "got {prios:?}");
         let ids = support::register_three_goals_oldest_defaultable(app);
         let order = support::visit_order_of_default_walk(app, &kinds);
@@ -675,8 +751,8 @@ fn default_instance_priorities_are_stored_in_descending_order() {
     support::with_app_harness("Nat.zero", |app| {
         let prios = app.elab.mctx.default_instance_priorities();
         assert!(
-            prios.len() >= 3,
-            "Elab0 must carry three distinct default-instance priorities, got {prios:?}"
+            prios.len() >= 4,
+            "Elab0 must carry four distinct default-instance priorities, got {prios:?}"
         );
         let mut descending = prios.clone();
         descending.sort_unstable();
@@ -696,6 +772,10 @@ fn default_instance_priorities_are_stored_in_descending_order() {
         assert!(
             prios.contains(&50),
             "instOfNatTag's priority, got {prios:?}"
+        );
+        assert!(
+            prios.contains(&75),
+            "instFreshSeed's priority (M4b-3 P2b-ii), got {prios:?}"
         );
         assert!(
             prios[0] > 100,
@@ -1059,4 +1139,61 @@ fn a_numeral_ascribed_to_a_prop_is_not_data() {
         ),
         other => panic!("expected NumeralIsNotData, got {other:?}"),
     }
+}
+
+/// oracle: `synthesizeSyntheticMVarsUsingDefault`
+/// (`SyntheticMVars.lean:658-660`) — `synthesizeSyntheticMVars
+/// (postpone := .yes)` then `synthesizeUsingDefaultLoop`. The composite
+/// exists for `finalize`'s outParam branch (M4b-3 P2b-ii); this pins
+/// that it (a) applies a default instance to a stuck goal and (b) does
+/// NOT report stuck goals it cannot close — `postpone := .yes` means a
+/// goal with no applicable default stays pending rather than erroring.
+#[test]
+fn synthesize_synthetic_mvars_using_default_defaults_and_keeps_the_rest_pending() {
+    support::with_app_harness("Nat.zero", |app| {
+        let kinds = support::any_kinds();
+        // `Dflt ?a` — closable by `instDfltNat`; `Wrap ?m` — stuck with
+        // no default instance, so it must SURVIVE the call.
+        let goals = vec![
+            support::dflt_of_fresh_mvar(app),
+            support::wrap_of_fresh_mvar(app),
+        ];
+        let ids = support::register_typeclass_goals(app, goals);
+        app.elab
+            .synthesize_synthetic_mvars_using_default(&kinds)
+            .expect("postpone := .yes never reports a stuck goal");
+        assert!(
+            app.elab.mctx.mctx().is_assigned(ids[0]),
+            "`Dflt ?a` is closed by the default rung"
+        );
+        assert!(
+            !app.elab.mctx.mctx().is_assigned(ids[1]),
+            "`Wrap ?m` has no default instance and stays open"
+        );
+        assert_eq!(
+            app.elab.pending_mvars,
+            vec![ids[1]],
+            "the unclosable goal stays PENDING — not reported, not dropped"
+        );
+    });
+}
+
+/// End-to-end confirmation that `Elab0.lean`'s `Lean.Internal.coeM`
+/// turns the feature ON through `app::elab_app_aux`'s own
+/// `env_contains_coe_m` (`App.lean:1355`), with no harness override:
+/// `elab_term` ALONE — no enclosing fixpoint — on the worked example
+/// runs the default rung inside `finalize`, so the walk log is non-empty
+/// and the result is fully determined before anything else elaborates.
+/// The oracle's motivating example (`App.lean:150-166`) is exactly this
+/// property; corpus record `outParam/getElemUnderDflt` pins its
+/// consequence against the oracle.
+#[test]
+fn coe_m_gate_enables_eager_defaulting_from_source() {
+    leanr_elab::synthetic::default_walk_log_reset();
+    support::elab_only("Get.get cell 0").expect("elab_term alone succeeds");
+    let visited = leanr_elab::synthetic::default_walk_log_take();
+    assert!(
+        !visited.is_empty(),
+        "with coeM declared, finalize's outParam branch ran rung 3 inside elab_term"
+    );
 }

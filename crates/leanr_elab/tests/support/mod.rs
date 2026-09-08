@@ -118,6 +118,95 @@ pub fn with_app_harness<R>(
     k(&mut app)
 }
 
+/// `with_app_harness` plus POSITIONAL ARGUMENTS, on the RAW head: each
+/// entry of `arg_srcs` is parsed through leanr's own parser and queued
+/// as an `Arg::Stx`, so `args::main` elaborates it exactly as
+/// `elab_app_aux` would — the way `app_smoke.rs`'s ellipsis test drives
+/// `main` on `pick`, but with arguments to consume.
+///
+/// "Raw head", because `with_app_harness` has already run `head_src`
+/// through `main` once as a zero-argument application (its own doc, and
+/// `strict_implicit_without_args_finalizes`'s comment): for a head with
+/// implicit parameters, `app.st.f` arrives as `@Get.get ?c ?i ?e ?inst`
+/// with `f_type` already `?c → ?i → ?e`, and the instance goal that
+/// elaboration registered is sitting in `pending_mvars`. This helper
+/// peels the spine back to the constant (the same universe-mvar-carrying
+/// `Const` either way), re-infers its FULL type, resets the per-application
+/// state, and retires the harness's leftover pending goals — so the
+/// caller's `main` walks every binder itself, from the first implicit.
+///
+/// The `KindInterner` handed to `k` is `any_kinds()` (every
+/// builtin-snapshot parse carries the same kinds, per that helper's
+/// doc), which is what `elab_and_add_new_arg` reads.
+///
+/// `result_is_out_param_support` and `propagate_expected` are left at
+/// `with_app_harness`'s defaults (`false`), and `expected_type` is
+/// left at ITS harness default too (`None`); a caller that wants the
+/// oracle's `elabAppArgs` defaults sets any of the three itself before
+/// calling `main`. `with_app_harness`'s own `State` literal (above, in
+/// this file) is the source of truth for what a new field would need:
+/// a field added there without a matching default here would silently
+/// leave callers of `with_app_args` exercising the wrong starting
+/// state.
+pub fn with_app_args<R>(
+    head_src: &str,
+    arg_srcs: &[&str],
+    k: impl FnOnce(&mut leanr_elab::app::state::AppElab, &leanr_syntax::kind::KindInterner) -> R,
+) -> R {
+    use leanr_elab::app::expand::Arg;
+    use leanr_kernel::bank::terms::Node;
+    use leanr_syntax::{builtin, parse_term};
+    let snap = builtin::snapshot();
+    let parses: Vec<_> = arg_srcs
+        .iter()
+        .map(|src| {
+            let parsed = parse_term(src, &snap);
+            assert!(
+                parsed.errors.is_empty(),
+                "with_app_args: leanr parse errors for {src:?}: {:?}",
+                parsed.errors
+            );
+            parsed
+        })
+        .collect();
+    let args: Vec<Arg> = parses
+        .iter()
+        .map(|p| {
+            Arg::Stx(
+                p.tree
+                    .root()
+                    .first_child_or_token()
+                    .expect("with_app_args: no term child"),
+            )
+        })
+        .collect();
+    let kinds = any_kinds();
+    with_app_harness(head_src, |app| {
+        let mut f = app.st.f;
+        while let Node::App { f: inner, .. } = app.node(f) {
+            f = inner;
+        }
+        let f_type =
+            app.elab.mctx.infer_type(f).unwrap_or_else(|e| {
+                panic!("with_app_args: infer_type of the raw head failed: {e:?}")
+            });
+        app.st.f = f;
+        app.st.f_type = f_type;
+        app.st.f_args = Vec::new();
+        app.st.args = args;
+        app.st.named_args = Vec::new();
+        app.st.eta_args = Vec::new();
+        app.st.to_set_error_ctx = Vec::new();
+        app.st.inst_mvars = Vec::new();
+        app.st.result_type_out_param = None;
+        app.st.found_named_args = Vec::new();
+        for id in std::mem::take(&mut app.elab.pending_mvars) {
+            app.elab.mark_as_resolved(id);
+        }
+        k(app, &kinds)
+    })
+}
+
 /// A syntax reference for tests that need one but do not care which.
 /// `SynElem` is an owned rowan handle, so the parse tree it points into
 /// stays alive through the returned value.
@@ -316,6 +405,101 @@ pub fn wrap_of_fresh_mvar(app: &mut leanr_elab::app::state::AppElab) -> leanr_ke
         .store_mut()
         .expr_app(Some(base), wrap, mvar)
         .expect("Wrap ?m applies")
+}
+
+/// `Get Cell Nat ?e` — a class goal whose ONLY unassigned mvar sits in
+/// an OUTPUT-PARAMETER position (`Get`'s third parameter is
+/// `outParam (Type w)`). The oracle answers this goal — `preprocessOutParam`
+/// swaps `?e` for a search-local mvar and `assignOutParams` assigns the
+/// caller's `?e := Unit` afterwards (M4b-3 P2b-i ported both) — so the
+/// ladder pre-test must let it reach the real search.
+///
+/// Built like `wrap_of_fresh_mvar`: the fresh mvar's type is read off the
+/// partial application's own inferred type rather than re-elaborated.
+pub fn get_cell_nat_of_fresh_mvar(
+    app: &mut leanr_elab::app::state::AppElab,
+) -> leanr_kernel::bank::ExprId {
+    use leanr_kernel::bank::terms::Node;
+    let get_cell_nat = elab_type_expr(app, "Get Cell Nat");
+    let ty = app
+        .elab
+        .mctx
+        .infer_type(get_cell_nat)
+        .expect("Get Cell Nat's own type infers");
+    let Node::Forall { binder_type, .. } = app.node(ty) else {
+        panic!("get_cell_nat_of_fresh_mvar: `Get Cell Nat` is not a forall: {ty:?}");
+    };
+    let (mvar, _id) = app
+        .elab
+        .mk_fresh_expr_mvar_of_kind(binder_type, leanr_meta::MVarKind::Natural)
+        .expect("fresh mvar");
+    let base = app.elab.view.store;
+    app.elab
+        .mctx
+        .store_mut()
+        .expr_app(Some(base), get_cell_nat, mvar)
+        .expect("Get Cell Nat ?e applies")
+}
+
+/// `Get Cell ?i ?e` — the same class with an unassigned mvar in a
+/// NON-output position too (`idx`). This is the shape the `GetElem`
+/// worked example depends on staying POSTPONED: `?i` is fixed only when
+/// the `OfNat` default instance fires, and an exemption keyed on the
+/// class rather than the position would send this goal to a search that
+/// answers `.none` (design spec § Amendment 4 item 6).
+pub fn get_cell_of_two_fresh_mvars(
+    app: &mut leanr_elab::app::state::AppElab,
+) -> leanr_kernel::bank::ExprId {
+    use leanr_kernel::bank::terms::Node;
+    let get_cell = elab_type_expr(app, "Get Cell");
+    let ty = app
+        .elab
+        .mctx
+        .infer_type(get_cell)
+        .expect("Get Cell's own type infers");
+    let Node::Forall {
+        binder_type: idx_ty,
+        body,
+        ..
+    } = app.node(ty)
+    else {
+        panic!("get_cell_of_two_fresh_mvars: `Get Cell` is not a forall: {ty:?}");
+    };
+    let (idx, _) = app
+        .elab
+        .mk_fresh_expr_mvar_of_kind(idx_ty, leanr_meta::MVarKind::Natural)
+        .expect("fresh idx mvar");
+    // The `elem` binder's type is closed only once `idx` is substituted
+    // in (the telescope is `∀ (idx : Type v), outParam (Type w) → ...`,
+    // non-dependent here, but instantiating is the general shape).
+    let rest = app
+        .elab
+        .mctx
+        .instantiate_beta_rev_range(body, &[idx])
+        .expect("instantiate");
+    let Node::Forall {
+        binder_type: elem_ty,
+        ..
+    } = app.node(rest)
+    else {
+        panic!("get_cell_of_two_fresh_mvars: `Get Cell ?i` is not a forall: {rest:?}");
+    };
+    let (elem, _) = app
+        .elab
+        .mk_fresh_expr_mvar_of_kind(elem_ty, leanr_meta::MVarKind::Natural)
+        .expect("fresh elem mvar");
+    let base = app.elab.view.store;
+    let with_idx = app
+        .elab
+        .mctx
+        .store_mut()
+        .expr_app(Some(base), get_cell, idx)
+        .expect("Get Cell ?i applies");
+    app.elab
+        .mctx
+        .store_mut()
+        .expr_app(Some(base), with_idx, elem)
+        .expect("Get Cell ?i ?e applies")
 }
 
 /// `NoInst Nat` — a class goal with no instance, exercising the real

@@ -28,11 +28,11 @@ pub struct Context {
     /// `outParam` of a local instance (`App.lean:141-168`). The oracle
     /// computes it as `env.contains ``Lean.Internal.coeM && flag &&
     /// !explicit` (`App.lean:1355`) — coercions must be available for
-    /// the feature to make sense. P1 computes it the SAME way, which
-    /// makes it `false` throughout the hermetic fixture env (prelude-mode
-    /// `Elab0` declares no `Lean.Internal.coeM`) with no special-casing.
-    /// The consuming logic (`finalize`'s outParam branch) is P2b's — see
-    /// `lib.rs`'s "local-instance outParam result types" bullet.
+    /// the feature to make sense. Computed the same way here
+    /// (`app::elab_app_aux`), and `true` in the fixture env since M4b-3
+    /// P2b-ii declared `Lean.Internal.coeM` in `Elab0.lean`. Consumed by
+    /// `args::is_next_out_param_of_local_instance_and_result` (the
+    /// producer) and `finalize`'s outParam branch.
     pub result_is_out_param_support: bool,
     /// oracle: `Context.numImplicitParams` — cached max over
     /// `namedArgs`; only nonzero for structure projections (M4b-4).
@@ -74,12 +74,11 @@ pub struct State {
     /// `try_synthesize_app_inst_mvars`/`synthesize_app_inst_mvars`.
     pub inst_mvars: Vec<MVarId>,
     pub propagate_expected: bool,
-    /// oracle: `State.resultTypeOutParam?`. No P1 producer, and P2a adds
-    /// none either. The producer needs the elaborator-side
-    /// `isNextOutParamOfLocalInstanceAndResult` logic, which is
-    /// M4b-3 P2b-ii's (`args.rs`'s `add_implicit_arg` names the seam);
-    /// the `classExtension` decode that logic will read already landed
-    /// in M4b-3 P2b-i.
+    /// oracle: `State.resultTypeOutParam?`. Written by
+    /// `args::add_implicit_arg` when
+    /// `is_next_out_param_of_local_instance_and_result` answers true
+    /// (`App.lean:747-755`, M4b-3 P2b-ii); read by `finalize`'s
+    /// outParam branch (`App.lean:638-646`).
     pub result_type_out_param: Option<MVarId>,
     /// oracle: `State.foundNamedArgs` — valid named-argument names seen
     /// while walking the function's type; feeds the oracle's "invalid
@@ -236,12 +235,18 @@ impl<'a, 'e> AppElab<'a, 'e> {
     /// oracle: `getArgExpectedType` (`App.lean:269-273`) —
     /// `getParamType` with `consumeTypeAnnotations` applied, i.e. the
     /// `optParam`/`autoParam`/`outParam`/`semiOutParam` wrapper stripped.
-    /// P1 has no optParam/autoParam ARM (P5) and no classes (so no
-    /// `outParam`), but stripping here is not the arm: it is what makes
-    /// the argument's expected type correct whenever a wrapper is present
-    /// and the caller supplied the argument explicitly. Omitting it would
-    /// silently elaborate the argument against `optParam α d` instead of
-    /// `α`.
+    /// P1 still has no optParam/autoParam ARM (that is P5's); the
+    /// `outParam` half has been live since M4b-3 P2b-ii's `Get`
+    /// (`@Get.get`'s `{elem : outParam (Type u_3)}` is stripped on
+    /// every `Get.get` record) and is behaviour-neutral on current
+    /// shapes — measured: disabling the strip arm leaves the whole
+    /// crate suite green, because `outParam` is `@[reducible]` and the
+    /// stripped type only types an mvar. Stripping here is not the
+    /// optParam/autoParam arm either way: it is what makes the
+    /// argument's expected type correct whenever a wrapper is present
+    /// and the caller supplied the argument explicitly. Omitting it
+    /// would silently elaborate the argument against `optParam α d`
+    /// instead of `α`.
     pub fn get_arg_expected_type(&mut self) -> Result<ExprId, ElabError> {
         let t = self.get_param_type()?;
         self.consume_type_annotations(t)
@@ -266,13 +271,16 @@ impl<'a, 'e> AppElab<'a, 'e> {
     /// partially-applied `optParam α` is NOT `isOptParam`, and stripping
     /// it would return `α` where the oracle keeps the whole term.
     ///
-    /// The two `outParam` gadgets are still INERT after P2a: `Elab0.lean`
-    /// now declares classes (`Wrap`/`Pair`/`NoInst`/`Dflt`, task 7), but
-    /// none of their parameter types carries `outParam`/`semiOutParam` —
-    /// that needs a real `getElem`-shaped class, which is P2b's own
-    /// corpus addition. They are part of THIS function regardless.
-    /// Omitting them would be a silent divergence rather than a named
-    /// seam, which is why they are here now.
+    /// The two `outParam` gadgets have been live since M4b-3 P2b-ii's
+    /// `Get` (task 1): `@Get.get`'s `{elem : outParam (Type u_3)}` is
+    /// stripped on every `Get.get` record, and doing so is
+    /// behaviour-neutral on current shapes — measured: disabling the
+    /// strip arm leaves the whole crate suite green, because
+    /// `outParam` is `@[reducible]` and the stripped type only types
+    /// an mvar. They are part of THIS function regardless of whether
+    /// any committed record exercises them. Omitting them would be a
+    /// silent divergence rather than a named seam, which is why they
+    /// are here now.
     ///
     /// Two callers, matching the oracle's own: `get_arg_expected_type`
     /// (`App.lean:273`'s `(← getParamType).consumeTypeAnnotations`) and
@@ -366,7 +374,7 @@ impl<'a, 'e> AppElab<'a, 'e> {
     }
 
     /// An application spine's arguments, in APPLICATION order.
-    fn app_args(&self, e: ExprId) -> Vec<ExprId> {
+    pub(crate) fn app_args(&self, e: ExprId) -> Vec<ExprId> {
         let mut args = Vec::new();
         let mut cur = e;
         while let Node::App { f, arg } = self.node(cur) {
@@ -375,6 +383,28 @@ impl<'a, 'e> AppElab<'a, 'e> {
         }
         args.reverse();
         args
+    }
+
+    /// oracle: `Expr.getAppFn` — the head of an application spine (`e`
+    /// itself when it is not an `App`).
+    pub(crate) fn app_fn(&self, e: ExprId) -> ExprId {
+        let mut cur = e;
+        while let Node::App { f, .. } = self.node(cur) {
+            cur = f;
+        }
+        cur
+    }
+
+    /// oracle: `Expr.isOutParam` (`Expr.lean:1709-1710`) —
+    /// `isAppOfArity ``outParam 1`, and ONLY `outParam`. This is the
+    /// predicate `isOutParamOf` (`App.lean:718-727`) tests on a class
+    /// type's binder domains, and it deliberately does NOT accept
+    /// `semiOutParam`: reusing `type_annotation_at_head` here (which
+    /// strips both, as `consumeTypeAnnotations` must) would silently
+    /// widen the `resultTypeOutParam?` branch to `semiOutParam` classes
+    /// (design spec § Amendment 4 item 2).
+    pub(crate) fn is_out_param(&self, t: ExprId) -> bool {
+        matches!(self.type_annotation_head(t), Some((name, 1)) if name == "outParam")
     }
 
     /// oracle: `hasArgsToProcess` (`App.lean:290-293`).
