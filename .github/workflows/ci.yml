@@ -12,13 +12,6 @@ jobs:
         with:
           fetch-depth: 0 # gitleaks scans full history
       - uses: jdx/mise-action@v2
-        with:
-          # Pinned (2026-09-08): unpinned, mise-action installs whatever
-          # https://mise.jdx.dev/VERSION advertises; that endpoint moved to
-          # 2026.9.3 before the matching GitHub release existed, so every
-          # run 404'd in setup. 2026.9.2 is the version the dev
-          # environment runs and the last green main run used.
-          version: 2026.9.2
       # rustup lazily installs the toolchain's core components (rustc/cargo/
       # rust-std) on first cargo invocation, but does not auto-install the
       # optional rustfmt/clippy components `lint` needs. Provision both
