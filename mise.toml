@@ -1,9 +1,9 @@
 [tools]
 "cargo:cargo-fuzz" = "0.13.2"
 "github:EmbarkStudios/cargo-deny" = "0.20.2"
-"github:leanprover/elan" = "4.2.3"
+"github:leanprover/elan" = "4.2.4"
 gitleaks = "8.30.1"
-rust = { version = "1.97.1", profile = "default" }
+rust = { version = "1.98.1", profile = "default" }
 
 # leanprover/elan's GitHub release asset ships a self-installing binary named
 # `elan-init` (mise pins and verifies *that* exact binary above), not `elan`
