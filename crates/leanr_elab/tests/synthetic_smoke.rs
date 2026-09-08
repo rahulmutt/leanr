@@ -1177,3 +1177,23 @@ fn synthesize_synthetic_mvars_using_default_defaults_and_keeps_the_rest_pending(
         );
     });
 }
+
+/// End-to-end confirmation that `Elab0.lean`'s `Lean.Internal.coeM`
+/// turns the feature ON through `app::elab_app_aux`'s own
+/// `env_contains_coe_m` (`App.lean:1355`), with no harness override:
+/// `elab_term` ALONE — no enclosing fixpoint — on the worked example
+/// runs the default rung inside `finalize`, so the walk log is non-empty
+/// and the result is fully determined before anything else elaborates.
+/// The oracle's motivating example (`App.lean:150-166`) is exactly this
+/// property; corpus record `outParam/getElemUnderDflt` pins its
+/// consequence against the oracle.
+#[test]
+fn coe_m_gate_enables_eager_defaulting_from_source() {
+    leanr_elab::synthetic::default_walk_log_reset();
+    support::elab_only("Get.get cell 0").expect("elab_term alone succeeds");
+    let visited = leanr_elab::synthetic::default_walk_log_take();
+    assert!(
+        !visited.is_empty(),
+        "with coeM declared, finalize's outParam branch ran rung 3 inside elab_term"
+    );
+}

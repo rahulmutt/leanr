@@ -426,3 +426,27 @@ instance instFreshSeed [Seed PUnit.{u+1}] : Fresh PUnit.{u+1} where
   fresh := Seed.seed
 
 def useFresh {α : Type u} [Fresh α] : α := Fresh.fresh
+
+-- === M4b-3 P2b-ii: the `resultIsOutParamSupport` env gate ===
+--
+-- `elabAppArgs` computes `resultIsOutParamSupport` as
+-- `env.contains ``Lean.Internal.coeM && flag && !explicit`
+-- (App.lean:1355), and `crates/leanr_elab/src/app/mod.rs`'s
+-- `env_contains_coe_m` computes it the same way. This declaration is an
+-- EXISTENCE-ONLY gate: nothing on any path M4b-3 reaches reads its type.
+-- It is a minimal opaque stand-in on the `axiom String` / `axiom Char`
+-- precedent above, and it deliberately carries NO `@[coe_decl]` — the
+-- attribute would put a stand-in into the `coe_decl` name set M4b-3 P4
+-- decodes. The real definition (`Init/Coe.lean:336-339`, an `abbrev`
+-- over `Monad` and `CoeT`) is owed by the do-notation slice, the only
+-- one that reaches coeM's other consumer (`Meta/Coe.lean:211`,
+-- `coerceMonadLift?`). Design spec § Amendment 4 item 7.
+--
+-- Declared LAST, in the task that follows the producer: with this
+-- present and no producer, every non-`@` application in the corpus
+-- raised the `add_implicit_arg` seam (design spec § Amendment 3 item 9).
+-- Every record before this block is byte-identical with it present —
+-- no earlier `Elab0` class carries an `outParam`, so
+-- `hasLocalInstanceWithOutParams` short-circuits on all of them
+-- (§ Amendment 4 item 8).
+axiom Lean.Internal.coeM : Type

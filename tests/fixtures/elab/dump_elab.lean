@@ -569,11 +569,28 @@ DO change — `outParam/getElemUnderDflt` and `outParam/getElemAscribed`
   * `outParam/getElemIdxNat` — `Get.get cell (0 : Nat)`: the index is
     ground before `finalize`, so `synthesizeAppInstMVars` solves the
     instance goal there and the outParam is ALREADY ASSIGNED when the
-    branch's guard runs — the else arm (App.lean:645-646). -/
+    branch's guard runs — the else arm (App.lean:645-646).
+  * `outParam/getElemUnderDflt` — `dpair (Get.get cell 0)`: THE record
+    that makes the branch observable (design spec § Amendment 4 items
+    10-11). With the branch, the inner application finalizes with
+    `?elem := Unit`, so `dpair`'s `a := Unit` and `Dflt Unit` is
+    `instDfltUnit`. Without it — including on the ORACLE, whenever
+    `Lean.Internal.coeM` is absent from this fixture — `a := ?elem`
+    stays open, the entry point's fixpoint reaches `Dflt ?elem` at
+    priority 1000 FIRST and applies `instDfltNat`, and `Get Cell Nat
+    Nat` has no instance: an error, and the dumper drops the query.
+  * `outParam/getElemAscribed` — `(Get.get cell 0 : Unit)`: the
+    producer disables expected-type propagation and the branch returns
+    before `finalize`'s own unification, so `?elem` is fixed by the
+    default rung and the ascription's `ensureHasType` merely checks it.
+    The emitted term coincides with `outParam/getElem`; the MECHANISM
+    is pinned by `tests/app_smoke.rs`'s walk-log test instead. -/
 def outParamQueries : List (String × String) :=
   [ ("outParam/getFst",        "getFst cell")
   , ("outParam/getElem",       "Get.get cell 0")
   , ("outParam/getElemIdxNat", "Get.get cell (0 : Nat)")
+  , ("outParam/getElemUnderDflt", "dpair (Get.get cell 0)")
+  , ("outParam/getElemAscribed",  "(Get.get cell 0 : Unit)")
   ]
 
 def emit (id src : String) (expJ : Json) : IO Unit :=
