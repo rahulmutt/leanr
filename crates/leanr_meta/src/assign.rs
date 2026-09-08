@@ -239,11 +239,10 @@ impl<'e> MetaCtx<'e> {
         let ty = self.infer_type(mvar_app)?;
         let aux = match self.mk_aux_mvar_for(mvar_id, ty)? {
             Some((expr, _id)) => expr,
-            // SEAM: `mvar`'s own declared lctx is non-empty — see
-            // `mk_aux_mvar_for`'s own doc comment (thin ctxApprox/
-            // constApprox-rescue coverage, task 7: `LocalContext` has
-            // no `Clone`/enumeration API to port `mkAuxMVar`'s general
-            // lctx-copy faithfully without touching `leanr_kernel`).
+            // `mvar_id` is not (or is no longer) declared — see
+            // `mk_aux_mvar_for`'s own doc comment. Not reachable via
+            // `unassigned_mvar_id` above returning a genuinely declared
+            // id, but kept as a total match rather than an `expect`.
             None => return Ok(false),
         };
         self.assign_const(mvar, args1.len(), aux)
@@ -710,42 +709,47 @@ impl<'e> MetaCtx<'e> {
         Ok((expr, id))
     }
 
-    /// `mk_aux_mvar`, restricted to the ONE case this crate can port
-    /// soundly without touching `leanr_kernel`: the oracle's `mkAuxMVar`
-    /// call site this function backs (`isDefEqMVarSelf` :1800) passes
-    /// `mvarDecl.lctx` — the mvar BEING rescued's OWN declared local
-    /// context — as the new aux mvar's lctx too. `mk_aux_mvar` itself
-    /// mints at the AMBIENT context (`self.current_lctx()`, since the
-    /// metavariable-local-contexts slice), not an arbitrary passed-in
-    /// one, so the one case still reachable without a genuine "copy
-    /// `mvar_id`'s own lctx" primitive is: `mvar_id`'s own lctx is
-    /// EMPTY. Before that slice this guard (`d.lctx.save() != 0`) was
-    /// vacuously false for every mvar this crate ever declared (every
-    /// declaration carried an empty context); it is no longer vacuous
-    /// now that contexts are truthful — a metavariable minted under an
-    /// open binder has a genuinely non-empty own lctx and is correctly
-    /// refused here. Every mvar this crate's own fixtures/helpers mint
-    /// (`test_support::fresh_mvar`'s own `lctx: LocalCtxSnapshot::
-    /// empty()`) still falls in the empty case. Returns `None` (a named
-    /// SEAM, not a wrong answer) when `mvar_id`'s own lctx is non-empty
-    /// — narrower than the oracle, never unsound: acknowledged-thin
-    /// `constApprox`-rescue coverage (spec risk 3; `checkApp`'s
-    /// SEPARATE `ctxApprox` rescue does not use this helper at all any
-    /// more — see `check_assignment_scope`'s own doc comment for why it
-    /// is not implemented here).
+    /// `mk_aux_mvar`, but minted under `mvar_id`'s OWN declared local
+    /// context rather than whatever is ambient at the call site: the
+    /// oracle's `mkAuxMVar` call this function backs (`isDefEqMVarSelf`
+    /// :1800) passes `mvarDecl.lctx` — the mvar BEING rescued's OWN
+    /// context — as the new aux mvar's lctx too.
+    ///
+    /// Fix round 2 (mvar-lctx-followup, finding 1): before this,
+    /// `mk_aux_mvar` minted unconditionally at the AMBIENT context
+    /// (`self.current_lctx()`), and this function only forwarded to it
+    /// when `mvar_id`'s own lctx happened to be EMPTY — reasoning that
+    /// held only while every `MVarDecl.lctx` in the crate WAS empty
+    /// (pre-metavariable-local-contexts-slice), which made "empty own
+    /// lctx" and "`mvarDecl.lctx` is what `mk_aux_mvar` mints at" the
+    /// same fact. Once minting moved to the ambient context, that
+    /// equivalence broke: an empty own lctx no longer implies the aux
+    /// mvar gets an empty one — it gets whatever is ambient, which under
+    /// an open binder is strictly BIGGER than `mvarDecl.lctx`. That is
+    /// the dangerous direction (an over-permissive scope, admitting an
+    /// assignment the oracle would reject, with no re-check downstream),
+    /// so the old guard is gone rather than merely widened.
+    ///
+    /// `with_mvar_context` (`metactx.rs`) is now the general "install
+    /// `mvar_id`'s own lctx, run `f`, restore" primitive `LocalContext`
+    /// lacking `Clone` used to block (that gap is exactly what the
+    /// slice's own `Clone` addition closed) — so this delegates to it
+    /// directly instead of special-casing the "own lctx is empty" case.
+    /// Faithful `mkAuxMVar mvarDecl.lctx mvarDecl.localInstances type`
+    /// (`localInstances` unmodelled, same posture as
+    /// `with_mvar_context`'s own doc comment). No narrower-than-the-
+    /// oracle SEAM remains at this call site.
     fn mk_aux_mvar_for(
         &mut self,
         mvar_id: MVarId,
         ty: ExprId,
     ) -> Result<Option<(ExprId, MVarId)>, MetaError> {
-        let lctx_len = match self.mctx.decl(mvar_id) {
-            Some(d) => d.lctx.depth(),
-            None => return Ok(None),
-        };
-        if lctx_len != 0 {
+        if self.mctx.decl(mvar_id).is_none() {
             return Ok(None);
         }
-        Ok(Some(self.mk_aux_mvar(ty)?))
+        Ok(Some(
+            self.with_mvar_context(mvar_id, |s| s.mk_aux_mvar(ty))?,
+        ))
     }
 
     /// oracle: `simpAssignmentArg`/`simpAssignmentArgAux` (ExprDefEq.
@@ -1832,12 +1836,16 @@ mod tests {
         });
     }
 
-    /// Fix round 1 (code review, metavariable-local-contexts slice): a
-    /// metavariable minted via `mk_aux_mvar` while a `defeq.rs`
+    /// Fix round 2 (mvar-lctx-followup, finding 1): a metavariable
+    /// minted via `mk_aux_mvar_for` while a `defeq.rs`
     /// `is_def_eq_binding_shallow_body` telescope fvar is TRANSIENTLY
-    /// open must record that fvar in its OWN context — not a stale
-    /// pre-binder snapshot, and not trip the lockstep debug_assert.
+    /// open must record `m_id`'s OWN declared context (`mvarDecl.lctx`,
+    /// the oracle's `mkAuxMVar` argument at `isDefEqMVarSelf` :1800) —
+    /// NOT whatever is ambient under that open binder.
     ///
+    /// `m` is minted via `fresh_mvar` (own lctx `LocalCtxSnapshot::
+    /// empty()`, depth 0) BEFORE `a`/`b` and the comparison's own
+    /// telescope fvar exist, so its own context stays empty throughout.
     /// `fun (_ : Sort 0) => ?m a` vs `fun (_ : Sort 0) => ?m b`, `a ≠ b`
     /// distinct ambient fvars, `const_approx` on: `is_def_eq` walks the
     /// shared `Lam` head into `is_def_eq_binding_shallow`, which opens
@@ -1845,13 +1853,15 @@ mod tests {
     /// UNDER that open binder — reaching `isDefEqMVarSelf`'s
     /// `constApprox` fallback exactly as
     /// `const_approx_gates_is_def_eq_mvar_self_fallback` does, but now
-    /// one recursion level deeper, with a transient fvar live in `lctx`
-    /// that `local_names` must also know about for `current_lctx` (a
-    /// fresh cache in this fresh `MetaCtx`, so this is the COLD-cache
-    /// failure mode the finding names — a WARM stale cache is the same
-    /// underlying defect, already covered structurally since
-    /// `push_local_decl` invalidates the cache on every call, warm or
-    /// not).
+    /// one recursion level deeper, with a transient fvar live in `lctx`.
+    ///
+    /// Before finding 1's fix, `mk_aux_mvar_for` forwarded to
+    /// `mk_aux_mvar`'s AMBIENT mint whenever `m_id`'s own lctx was
+    /// empty, so the aux mvar here wrongly picked up the open binder —
+    /// this test used to assert `depth() == pre_binder_depth + 1`,
+    /// pinning that overstatement as if it were correct. It now asserts
+    /// `depth() == 0`, the oracle's actual answer: the aux mvar must see
+    /// exactly `m`'s own (empty) context, never the ambient one.
     #[test]
     fn aux_mvar_minted_under_an_open_binder_comparison_sees_that_binder() {
         with_n_ctx_cfg(
@@ -1867,14 +1877,6 @@ mod tests {
                 let (m_expr, m_id) = fresh_mvar(ctx, mvar_ty);
                 let a = fresh_fvar(ctx, sort1, "a");
                 let b = fresh_fvar(ctx, sort1, "b");
-                // `a`/`b` themselves are ambient fvars now (`fresh_fvar`
-                // routes through `push_local_decl` since the earlier
-                // fix in this same slice), so this is the ambient depth
-                // BEFORE the binder comparison opens its own transient
-                // fvar — the "+1" the assertion below checks for is
-                // exactly that one binder, isolated from however many
-                // ambient fvars this test happens to have minted first.
-                let pre_binder_depth = ctx.lctx_checkpoint();
                 let dom = n_type(ctx);
                 let body1 = mk_app(ctx, m_expr, a);
                 let body2 = mk_app(ctx, m_expr, b);
@@ -1911,10 +1913,10 @@ mod tests {
                 let aux_decl = ctx.mctx.decl(aux_id).expect("aux mvar declared");
                 assert_eq!(
                     aux_decl.lctx.depth(),
-                    pre_binder_depth + 1,
-                    "the aux mvar minted under the open binder comparison must record \
-                     that binder (pre_binder_depth + 1), not a stale pre-binder \
-                     (pre_binder_depth) snapshot"
+                    0,
+                    "the aux mvar must record `m_id`'s OWN (empty) context, matching the \
+                     oracle's `mkAuxMVar mvarDecl.lctx`, not the ambient context under the \
+                     open binder it happened to be minted under"
                 );
             },
         );

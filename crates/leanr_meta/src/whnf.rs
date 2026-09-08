@@ -1275,21 +1275,43 @@ impl<'e> MetaCtx<'e> {
     ///    tighter bound than `guard_depth`'s (condition 1's own doc
     ///    explains why the two must not be conflated).
     ///
-    /// `mvarId.withContext` (`SynthInstance.lean:1033`) — NAMED SEAM
-    /// (opus review round 1; not previously called out): the oracle
-    /// runs the WHOLE `synthPendingImp` body under `mvarDecl.lctx` (the
-    /// mvar's OWN local context at declaration time), not whatever local
-    /// context happens to be ambient at the call site. This method never
-    /// swaps `self.lctx` to `decl.lctx` before calling `synth_instance`
-    /// below — a silent drop, not an undecoded-oracle-feature gap:
-    /// `MVarDecl.lctx` (`mvar_ctx.rs`) carries exactly this context, and
-    /// `assign.rs:734` (`mk_aux_mvar_for`) already has precedent for
-    /// consulting it. Effect: incompleteness only (a subgoal needing a
-    /// local hypothesis visible only under the mvar's OWN context, not
-    /// the ambient one, may fail to synthesize where the oracle would
-    /// have succeeded) — never a wrong synthesis, since a term assigned
-    /// under a mismatched local context would fail the kernel's own
-    /// re-check rather than pass it silently.
+    /// `mvarId.withContext` (`SynthInstance.lean:1033`): the oracle runs
+    /// the WHOLE `synthPendingImp` body under `mvarDecl.lctx` (the mvar's
+    /// OWN local context at declaration time), not whatever local
+    /// context happens to be ambient at the call site.
+    ///
+    /// Fix round 2 (mvar-lctx-followup, finding 2): this was a NAMED
+    /// SEAM (opus review round 1) reasoned to be incompleteness-only —
+    /// "a subgoal needing a local hypothesis visible only under the
+    /// mvar's OWN context ... may fail to synthesize ... never a wrong
+    /// synthesis". That reasoning held only while every `MVarDecl.lctx`
+    /// was empty: an empty declared context made the seam vacuous in the
+    /// overstating direction, since nothing `synth_instance` could mint
+    /// or assign under an empty ambient context could ever depend on an
+    /// ambient fvar. It is live now: `synth_instance` mints its
+    /// candidate-telescope metavariables at ambient (`synth.rs:1573,
+    /// 2050, 2274, 2627`), so a candidate metavariable minted while the
+    /// CALL SITE's ambient context (not `mvar`'s own) is installed can
+    /// be assigned an ambient fvar `mvar`'s own context cannot see —
+    /// and `synth_pending_body`'s own final `self.mctx.assign(mvar,
+    /// val)` (below) is a RAW assign, bypassing `process_assignment`
+    /// and therefore `check_assignment_scope` entirely, so nothing
+    /// downstream re-checks it either.
+    ///
+    /// Fixed by installing `mvar`'s own context for the search itself
+    /// (`self.with_mvar_context(mvar, |s| s.synth_instance(ty))`,
+    /// below) — the same primitive `mk_aux_mvar_for` (`assign.rs`, this
+    /// slice's finding 1 fix) now uses for the identical class of
+    /// exposure. Every metavariable `synth_instance` mints during this
+    /// search is minted while `mvar`'s own context is ambient, so it
+    /// (and the value ultimately returned) can only depend on what
+    /// `mvar` itself could see — matching the oracle's own scoping
+    /// rather than merely bounding the damage of not having it.
+    ///
+    /// `localInstances` stays unmodelled (same posture as
+    /// `with_mvar_context`'s own doc comment): leanr has no local-
+    /// instance concept, so there is nothing to flush/reinstall on that
+    /// axis.
     ///
     /// `catchInternalId isDefEqStuckExceptionId` (:1052) is NOT
     /// replicated here — NAMED SEAM (see the module doc's "Named seams"
@@ -1367,8 +1389,13 @@ impl<'e> MetaCtx<'e> {
         // `withIncRecDepth`, around the WHOLE function (this method's
         // own outer `self.guarded` call, above), not a second one
         // around just the `synthInstance?` sub-call.
+        // `mvarId.withContext` (see this method's own doc comment,
+        // finding 2 fix): the search runs under `mvar`'s OWN local
+        // context, not whatever is ambient at this call site, so every
+        // candidate metavariable `synth_instance` mints underneath is
+        // anchored there too.
         self.synth_pending_depth += 1;
-        let val = self.synth_instance(ty);
+        let val = self.with_mvar_context(mvar, |s| s.synth_instance(ty));
         self.synth_pending_depth -= 1;
         match val? {
             None => Ok(false),
