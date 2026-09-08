@@ -46,7 +46,14 @@ pub struct LocalDecl {
 /// fvar id to `local_decl`). `decls` preserves declaration order (the
 /// order `mk_pi`/`mk_lambda`'s telescope-folding relies on, Task 3);
 /// `index` gives O(1) lookup by id.
-#[derive(Default)]
+/// `Clone` (2026-09-08, the metavariable-local-contexts slice): a
+/// metavariable's declaration stores the local context it was minted in
+/// (oracle: `MetavarDecl.lctx`, `MetavarContext.lean:305-311`), and
+/// `leanr_meta` cannot build one otherwise — `decls`/`index` are
+/// module-private and there is no enumeration API. Derive only: no
+/// logic, no function body changed, no new dependency, so the kernel's
+/// soundness surface is unchanged.
+#[derive(Default, Clone)]
 pub struct LocalContext {
     decls: Vec<LocalDecl>,
     index: HashMap<NameId, usize>,
@@ -334,5 +341,49 @@ mod tests {
         let decl = lctx.get(id.unwrap()).unwrap();
         assert_eq!(decl.value, Some(value));
         assert_eq!(decl.binder_info, BinderInfo::Default);
+    }
+
+    /// `LocalContext` is cloneable, and a clone is INDEPENDENT of its
+    /// source: pushing into one must not be visible in the other, and a
+    /// decl present at clone time must remain reachable in the clone
+    /// after the source is restored past it. This is the whole reason
+    /// the derive exists — `leanr_meta` stores a clone in every
+    /// `MVarDecl` and restores the ambient context around it (oracle:
+    /// `MetavarDecl.lctx`, `MetavarContext.lean:305-311`).
+    #[test]
+    fn local_context_clone_is_independent_of_its_source() {
+        let mut st = Store::persistent();
+        let mut gen = FVarIdGen::default();
+        let mut lctx = LocalContext::default();
+        let ty = st.expr_lit_nat(None, &Nat::from(0u64)).unwrap();
+        let name = {
+            let name_str = nm("x");
+            st.intern_name(None, &name_str).unwrap()
+        };
+        let fvar = lctx
+            .mk_local_decl(&mut st, None, &mut gen, name, ty, BinderInfo::Default)
+            .unwrap();
+        let id = match st.expr_node(None, fvar) {
+            Node::FVar { id: Some(id) } => id,
+            other => panic!("expected an fvar, got {other:?}"),
+        };
+        let snapshot = lctx.clone();
+        let before = lctx.save();
+
+        // The source grows and then shrinks past the cloned decl.
+        let _ = lctx
+            .mk_local_decl(&mut st, None, &mut gen, name, ty, BinderInfo::Default)
+            .unwrap();
+        assert_eq!(
+            snapshot.save(),
+            before,
+            "the clone did not grow with its source"
+        );
+        lctx.restore(0);
+        assert!(lctx.get(id).is_none(), "source dropped the decl");
+        assert!(
+            snapshot.get(id).is_some(),
+            "the clone still resolves a decl its source has dropped"
+        );
     }
 }
