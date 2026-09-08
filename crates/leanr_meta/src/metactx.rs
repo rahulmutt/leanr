@@ -540,6 +540,11 @@ impl<'e> MetaCtx<'e> {
         let (lctx, names) = snapshot.parts();
         self.lctx = lctx.clone();
         self.local_names = names.to_vec();
+        debug_assert_eq!(
+            self.local_names.len(),
+            self.lctx.save(),
+            "local_names/lctx lockstep invariant violated"
+        );
         self.lctx_snapshot = Some(snapshot);
         previous
     }

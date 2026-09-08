@@ -129,11 +129,15 @@ pub(crate) fn fresh_mvar_of_kind(
 /// task 2), not a bare `ctx.lctx.mk_local_decl` call as before: this
 /// keeps `local_names` and the `lctx_snapshot` cache in the SAME
 /// lockstep `push_local_decl` itself maintains, which `current_lctx`
-/// now debug-asserts on every call (`mk_aux_mvar` calls it from deep
-/// inside `is_def_eq`, so a test fvar minted before an assertion that
-/// reaches unification must be visible to both halves, not just
-/// `lctx`). Same underlying mint either way — `push_local_decl` is
-/// exactly this call wrapped with that bookkeeping.
+/// debug-asserts on a cache MISS (`metactx.rs`'s own `current_lctx`:
+/// the cached `Arc` is returned as-is on a HIT, before
+/// `LocalCtxSnapshot::new`'s lockstep assert is ever reached — so a
+/// STALE cache does not trip it either, only a fresh rebuild with the
+/// two halves out of step does). `mk_aux_mvar` calls `current_lctx`
+/// from deep inside `is_def_eq`, so a test fvar minted before an
+/// assertion that reaches unification must be visible to both halves,
+/// not just `lctx`. Same underlying mint either way — `push_local_decl`
+/// is exactly this call wrapped with that bookkeeping.
 pub(crate) fn fresh_fvar(ctx: &mut MetaCtx, ty: ExprId, name: &str) -> ExprId {
     let base = Some(ctx.view.store);
     let s = ctx

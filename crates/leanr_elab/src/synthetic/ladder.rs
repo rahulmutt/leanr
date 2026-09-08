@@ -103,7 +103,11 @@ impl<'e> TermElabM<'e> {
     /// `&mut TermElabM`, not `&mut MetaCtx`, so the swap runs around the
     /// closure instead of inside it. Same primitives, same pairing —
     /// `install_lctx` returns the snapshot it replaced, and putting that
-    /// one back is the restore.
+    /// one back is the restore. Plain save/run/restore with no drop
+    /// guard, same posture as `MetaCtx::with_mvar_context` itself: every
+    /// caller here is `Result`-based and `catch_unwind` appears nowhere
+    /// in the workspace, so an unwinding caller cannot observe the
+    /// un-restored context.
     fn with_mvar_local_context<R>(&mut self, mvar_id: MVarId, f: impl FnOnce(&mut Self) -> R) -> R {
         let Some(snapshot) = self.mctx.mvar_lctx(mvar_id) else {
             return f(self);

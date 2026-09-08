@@ -1223,11 +1223,17 @@ fn coe_m_gate_enables_eager_defaulting_from_source() {
 /// binder has closed.
 ///
 /// Kill 1: drop the `with_mvar_local_context` wrapper in
-/// `synthesize_synthetic_mvar` — `a` is never reinstalled, `Wrap a`
-/// stays opaque, no instance is found, `?m` is left unassigned.
-/// Kill 2: revert `mk_fresh_expr_mvar_of_kind` to
-/// `LocalCtxSnapshot::empty()` — the wrapper reinstalls a context with
-/// NO `a` in it at all, same observable failure.
+/// `synthesize_synthetic_mvar` — `a` is never reinstalled, so `Wrap a`'s
+/// own instance search dereferences `a` against an `lctx` that no
+/// longer declares it. Kill 2: revert `mk_fresh_expr_mvar_of_kind` to
+/// `LocalCtxSnapshot::empty()` — the wrapper then reinstalls a context
+/// with NO `a` in it at all, same underlying cause. Empirically, BOTH
+/// mutations panic at this test's own `out.is_ok()` assertion with
+/// `Err(Meta(Infer("unknown free variable")))` — `synthesize_pending_
+/// inst_mvar` (via `infer_type`/`is_def_eq` somewhere in the search)
+/// hits the missing fvar and errors out before `synth_instance` ever
+/// gets to report "no instance", so `is_assigned(mvar_id)` is never
+/// even reached, let alone left `false`.
 #[test]
 fn a_synthetic_mvar_resumes_under_its_own_local_context() {
     support::with_app_harness("Nat.zero", |app| {

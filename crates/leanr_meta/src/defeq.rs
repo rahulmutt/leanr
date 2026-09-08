@@ -749,4 +749,46 @@ mod tests {
             assert!(!ctx.is_def_eq(lhs, rhs).unwrap());
         });
     }
+
+    /// Fix round 2 (mvar-lctx-followup, finding 1): a direct probe of
+    /// `is_def_eq_binding_shallow_body`'s own telescope-fvar mint site
+    /// (this file, `push_local_decl` call above). Before this test, the
+    /// only coverage of this exact mint site was indirect —
+    /// `assign.rs`'s `aux_mvar_minted_under_an_open_binder_comparison_
+    /// sees_that_binder`, which used to assert the aux mvar minted one
+    /// level under this binder recorded `pre_binder_depth + 1`. Finding
+    /// 1's fix (`mk_aux_mvar_for` now mints under the RESCUED mvar's own
+    /// context, not the ambient one) makes that assertion `depth() == 0`
+    /// instead, so it no longer sees whether THIS site's own fvar is
+    /// visible in `local_names`/`current_lctx` at all — a raw mint here
+    /// (bypassing `push_local_decl`) would be invisible to that test now.
+    ///
+    /// Same idiom as `whnf.rs`'s `sunfold_go_let`/`sunfold_go_lam` twins:
+    /// call the private `_body` fn directly (it does not restore on its
+    /// own — the `is_def_eq_binding_shallow` wrapper does that), then
+    /// check `current_lctx().depth()` grew by exactly one while the fvar
+    /// is still open. `Sort 0 =?= Sort 0` under the fresh telescope fvar
+    /// needs no bvar occurrence in either body to succeed trivially.
+    #[test]
+    fn is_def_eq_binding_shallow_body_records_its_telescope_fvar_truthfully() {
+        with_ctx(|ctx| {
+            let z = ctx.scratch.level_zero(None).unwrap();
+            let s0 = ctx.scratch.expr_sort(None, z).unwrap();
+            let pre = ctx.lctx_checkpoint();
+            let r = ctx
+                .is_def_eq_binding_shallow_body(s0, s0, s0)
+                .expect("is_def_eq_binding_shallow_body");
+            assert!(
+                r,
+                "Sort 0 =?= Sort 0 under the fresh telescope fvar must succeed"
+            );
+            assert_eq!(
+                ctx.current_lctx().depth(),
+                pre + 1,
+                "is_def_eq_binding_shallow_body's telescope fvar must be recorded in \
+                 local_names/current_lctx while it is still open"
+            );
+            ctx.lctx_restore(pre);
+        });
+    }
 }
