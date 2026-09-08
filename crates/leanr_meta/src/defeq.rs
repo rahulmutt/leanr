@@ -358,9 +358,9 @@ impl<'e> MetaCtx<'e> {
         if !self.is_def_eq_core(d1, d2)? {
             return Ok(false);
         }
-        let checkpoint = self.lctx.save();
+        let checkpoint = self.lctx_checkpoint();
         let r = self.is_def_eq_binding_shallow_body(d1, b1, b2);
-        self.lctx.restore(checkpoint);
+        self.lctx_restore(checkpoint);
         r
     }
 
@@ -375,14 +375,20 @@ impl<'e> MetaCtx<'e> {
         // (see this function's doc comment on binder-info), so a
         // fixed `None`/`Default` is exactly as faithful as threading
         // either side's real value through.
-        let fvar = self.lctx.mk_local_decl(
-            self.scratch,
-            Some(self.view.store),
-            &mut self.fvar_gen,
-            None,
-            d1,
-            BinderInfo::Default,
-        )?;
+        //
+        // Routed through `push_local_decl` (metavariable-local-contexts
+        // slice, fix round 1), not a bare `self.lctx.mk_local_decl` as
+        // before: this is the hottest of the raw-mint sites the fix
+        // targets — `is_def_eq_core(ib1, ib2)` below can recurse
+        // arbitrarily deep, including into `isDefEqMVarSelf`'s
+        // `constApprox` fallback (`mk_aux_mvar`), which reads
+        // `current_lctx()`. A bare `mk_local_decl` here would leave
+        // `local_names` (and the cache) unaware of this fvar for the
+        // whole recursion, so any mvar minted underneath would get a
+        // context silently missing the binder it can genuinely see —
+        // exactly the defect this slice exists to fix, reintroduced one
+        // layer down.
+        let fvar = self.push_local_decl(None, d1, BinderInfo::Default)?;
         let ib1 = instantiate(
             self.scratch,
             Some(self.view.store),

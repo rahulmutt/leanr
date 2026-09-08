@@ -472,4 +472,89 @@ mod tests {
             ));
         });
     }
+
+    /// Coercing a `fun`-bound VALUE, not a constant — the shape that
+    /// blocked M4b-3 P4's elaborator tier (design spec § The finding,
+    /// measured). `CoeT α a β` takes the coerced value as a class
+    /// parameter, so the search must assign a candidate's telescope
+    /// metavariable to a local variable; before the
+    /// metavariable-local-contexts slice that assignment was rejected as
+    /// out of scope and this answered `.none`.
+    ///
+    /// The expansion is pinned, not just the verdict: a `Some` still
+    /// carrying `CoeT.coe` or a projection node would mean the search
+    /// succeeded but `expand_coe` did not run.
+    ///
+    /// NOTE on the substring check below: `render_expr`'s `Debug` is
+    /// deliberately NON-recursive (`leanr_kernel::expr::Expr`'s own doc
+    /// comment — depth-safety against adversarial terms), so it prints
+    /// child positions as a bare `..` and never surfaces a nested
+    /// `Const`'s name. A substring check against the FULL rendered
+    /// application (as the brief's literal text writes it) can never
+    /// see `"CoeT"` at all — it would silently pass even against an
+    /// unexpanded `CoeT.coe eType e expected inst` result, because that
+    /// term's outer node is `App`, not `Const`. So this test renders
+    /// the application HEAD on its own (a bare `Const` when expansion
+    /// happened, which DOES print its dotted name) instead of the whole
+    /// term. The full-term `assert_eq!` against `want` already pins the
+    /// exact expanded value (verified below to fail hard against an
+    /// identity-stubbed `expand_coe`); the head check makes the "no
+    /// `CoeT.coe`" half of the acceptance wording independently
+    /// reachable and readable in a failure message.
+    #[test]
+    fn coerce_simple_expands_a_locally_bound_value() {
+        with_synth0_ctx(|ctx| {
+            let n_ty = const_named(ctx, "N");
+            let m = const_named(ctx, "M");
+            let of_n = const_dotted(ctx, "M", "ofN");
+            let cp = ctx.lctx_checkpoint();
+            let x = ctx
+                .push_local_decl(None, n_ty, leanr_kernel::BinderInfo::Default)
+                .expect("decl");
+            let want = app(ctx, of_n, &[x]);
+            let got = ctx.coerce_simple(x, m).expect("coerce");
+            ctx.lctx_restore(cp);
+            match got {
+                LOption::Some(got) => {
+                    assert_eq!(render_expr(ctx, got), render_expr(ctx, want));
+                    let head = ctx.get_app_fn(got);
+                    let head_rendered = render_expr(ctx, head);
+                    assert!(
+                        !head_rendered.contains("CoeT"),
+                        "unexpanded: {head_rendered}"
+                    );
+                    assert_eq!(head_rendered, render_expr(ctx, of_n));
+                }
+                other => panic!("expected Some, got {other:?}"),
+            }
+        });
+    }
+
+    /// `CoeFun` and `CoeSort` coercions of a `fun`-bound value worked
+    /// BEFORE the metavariable-local-contexts slice and must keep
+    /// working: their class parameters are types only
+    /// (`CoeFun FnN ?γ`, `CoeSort SortN ?β`), so their goals never
+    /// mention the local variable and the out-of-scope rejection never
+    /// applied to them. This is the measurement that scoped the finding
+    /// to `CoeT` alone (design spec § The finding, measured), kept as a
+    /// regression guard.
+    #[test]
+    fn coerce_to_function_and_sort_still_accept_a_locally_bound_value() {
+        with_synth0_ctx(|ctx| {
+            let fnn = const_named(ctx, "FnN");
+            let sortn = const_named(ctx, "SortN");
+            let cp = ctx.lctx_checkpoint();
+            let g = ctx
+                .push_local_decl(None, fnn, leanr_kernel::BinderInfo::Default)
+                .expect("decl");
+            let s = ctx
+                .push_local_decl(None, sortn, leanr_kernel::BinderInfo::Default)
+                .expect("decl");
+            let f_case = ctx.coerce_to_function(g).expect("coerce");
+            let s_case = ctx.coerce_to_sort(s).expect("coerce");
+            ctx.lctx_restore(cp);
+            assert!(f_case.is_some(), "CoeFun on a local value");
+            assert!(s_case.is_some(), "CoeSort on a local value");
+        });
+    }
 }

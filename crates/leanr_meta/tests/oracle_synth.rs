@@ -20,7 +20,7 @@ use std::collections::HashMap;
 
 use leanr_kernel::bank::{ExprId, NameId, Store};
 use leanr_kernel::EnvView;
-use leanr_meta::{Config, EnvExtensions, MVarDecl, MVarId, MVarKind, MetaCtx};
+use leanr_meta::{Config, EnvExtensions, LocalCtxSnapshot, MVarDecl, MVarId, MVarKind, MetaCtx};
 
 mod support;
 use support::{decode_expr, encode_expr, fixture, replay_fixture, EncSt};
@@ -202,7 +202,7 @@ fn oracle_synth_gate() {
                 MVarDecl {
                     user_name: None,
                     ty,
-                    lctx: Default::default(),
+                    lctx: LocalCtxSnapshot::empty(),
                     kind: MVarKind::Natural,
                 },
             );
@@ -440,7 +440,7 @@ fn seam_excluded_mvar_goal_is_incompleteness_not_an_error() {
             MVarDecl {
                 user_name: None,
                 ty,
-                lctx: Default::default(),
+                lctx: LocalCtxSnapshot::empty(),
                 kind: MVarKind::Natural,
             },
         );
@@ -535,7 +535,7 @@ fn exc_record_stuck_synth_0_pins_leanrs_current_divergent_answer() {
             MVarDecl {
                 user_name: None,
                 ty,
-                lctx: Default::default(),
+                lctx: LocalCtxSnapshot::empty(),
                 kind: MVarKind::Natural,
             },
         );

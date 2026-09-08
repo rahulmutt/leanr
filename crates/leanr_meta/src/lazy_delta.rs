@@ -1104,7 +1104,7 @@ mod tests {
     #[test]
     fn assign_synthetic_opaque_gates_is_def_eq_singleton() {
         use crate::test_support::{const_dotted, const_named, fresh_mvar, with_instances_ctx};
-        use crate::{MVarDecl, MVarKind};
+        use crate::{LocalCtxSnapshot, MVarDecl, MVarKind};
         use leanr_kernel::bank::terms::Node;
 
         with_instances_ctx(|ctx| {
@@ -1117,7 +1117,7 @@ mod tests {
                 MVarDecl {
                     user_name: None,
                     ty: add_n,
-                    lctx: Default::default(),
+                    lctx: LocalCtxSnapshot::empty(),
                     kind: MVarKind::SyntheticOpaque,
                 },
             );

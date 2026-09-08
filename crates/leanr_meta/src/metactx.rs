@@ -7,6 +7,7 @@
 //! ids, and `Store::to_expr` is never called on a hot path.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use leanr_kernel::abstract_fvars;
 use leanr_kernel::bank::terms::Node;
@@ -20,6 +21,7 @@ use leanr_olean::{
 };
 
 use crate::instances::{ClassTable, InstanceTable};
+use crate::local_snapshot::LocalCtxSnapshot;
 use crate::{Config, LMVarId, MVarId, MetaError, MetavarContext, TransparencyMode};
 
 /// Stack-growth constants — the same values `tc.rs` uses (private
@@ -43,26 +45,45 @@ pub struct MetaCtx<'e> {
     pub(crate) lctx: LocalContext,
     /// Task 3 (M4b-2) addition, additive/TCB-neutral: a by-user-name
     /// index parallel to `lctx`'s own decl list, one entry per
-    /// `push_local_decl` call (`None` name for an anonymous binder, kept
-    /// so the two stay 1:1 in length). Exists ONLY because
-    /// `LocalContext`'s `decls`/`index` fields are private even within
-    /// `leanr_kernel` (module-private to `local_ctx.rs`) — the kernel's
-    /// own public surface is `get(fvar_id)` (by id) and `save`/`restore`
-    /// (by count), no by-name scan, and adding one to `LocalContext`
-    /// itself would touch the byte-untouched kernel TCB. Every OTHER
-    /// internal `self.lctx.mk_local_decl`/`mk_let_decl`/`save`/`restore`
-    /// call site (`infer.rs`, `whnf.rs`, `assign.rs`, `defeq.rs`) already
-    /// brackets its own additions with an unconditional restore before
-    /// returning to its caller (the same `save -> push -> restore` stack
-    /// discipline this field's own `lctx_checkpoint`/`lctx_restore`
-    /// pairing uses), so `lctx.decls.len()` net-changes, across any span
-    /// bracketed by `lctx_checkpoint`/`lctx_restore`, ONLY via
-    /// `push_local_decl` — which is this field's sole writer too. The two
-    /// therefore stay in lockstep, and `lctx_restore`'s existing
-    /// `checkpoint: usize` (already `lctx.save()`'s own return value)
-    /// doubles as this field's truncation point with no second
+    /// `push_local_decl`/`push_let_decl` call (`None` name for an
+    /// anonymous binder, kept so the two stay 1:1 in length). Exists
+    /// ONLY because `LocalContext`'s `decls`/`index` fields are private
+    /// even within `leanr_kernel` (module-private to `local_ctx.rs`) —
+    /// the kernel's own public surface is `get(fvar_id)` (by id) and
+    /// `save`/`restore` (by count), no by-name scan, and adding one to
+    /// `LocalContext` itself would touch the byte-untouched kernel TCB.
+    ///
+    /// EVERY internal telescope-opening site in this crate
+    /// (`infer.rs`'s `infer_forall_body`/`infer_lambda_body`,
+    /// `whnf.rs`'s `reduce_matcher_telescope`/`sunfold_go_let`/
+    /// `sunfold_go_lam`, `assign.rs`'s `forall_bounded_telescope`,
+    /// `defeq.rs`'s `is_def_eq_binding_shallow_body`) mints its
+    /// transient fvars via `push_local_decl`/`push_let_decl` and
+    /// brackets its OWN caller's checkpoint with `lctx_checkpoint`/
+    /// `lctx_restore` (metavariable-local-contexts slice, fix round 1
+    /// — before that, these called `self.lctx.mk_local_decl`/
+    /// `mk_let_decl` directly and bracketed with the bare
+    /// `self.lctx.save`/`restore`, which kept `lctx` itself
+    /// self-consistent but left THIS field, and the `lctx_snapshot`
+    /// cache below, silently unaware of every such fvar for as long as
+    /// it stayed open — reachable from `current_lctx()`, itself
+    /// reachable from arbitrarily deep inside `is_def_eq` via
+    /// `mk_aux_mvar`'s `constApprox` fallback). So `lctx.decls.len()`
+    /// net-changes, across any span bracketed by `lctx_checkpoint`/
+    /// `lctx_restore`, ONLY via `push_local_decl`/`push_let_decl` —
+    /// which are this field's sole writers too. The two therefore stay
+    /// in lockstep EVERYWHERE, not merely at top-level entry points, and
+    /// `lctx_restore`'s existing `checkpoint: usize` (already
+    /// `lctx.save()`'s own return value) doubles as this field's
+    /// truncation point with no second
     /// checkpoint API. See `lctx_lookup_by_name` (the reader) below.
     pub(crate) local_names: Vec<(Option<NameId>, ExprId)>,
+    /// Memoized `LocalCtxSnapshot` of the CURRENT `lctx`/`local_names`,
+    /// dropped by every writer of either. `current_lctx` rebuilds it on
+    /// demand, so N metavariables minted at one binder depth share one
+    /// copy — the difference between one clone per binder scope and one
+    /// per metavariable on instance search's hottest path.
+    lctx_snapshot: Option<Arc<LocalCtxSnapshot>>,
     pub(crate) fvar_gen: FVarIdGen,
     pub(crate) guard: RecGuard,
     guard_depth: u32,
@@ -368,6 +389,7 @@ impl<'e> MetaCtx<'e> {
             mctx: MetavarContext::new(),
             lctx: LocalContext::default(),
             local_names: Vec::new(),
+            lctx_snapshot: None,
             fvar_gen: FVarIdGen::default(),
             guard: RecGuard::new(),
             guard_depth: 0,
@@ -481,6 +503,79 @@ impl<'e> MetaCtx<'e> {
         self.scratch
     }
 
+    /// The ambient local context as a shareable value — what a freshly
+    /// minted metavariable records (oracle: `mkFreshExprMVarCore`'s
+    /// `(← getLCtx)`, `Meta/Basic.lean:866-867`).
+    pub fn current_lctx(&mut self) -> Arc<LocalCtxSnapshot> {
+        if let Some(snap) = &self.lctx_snapshot {
+            return Arc::clone(snap);
+        }
+        let snap = Arc::new(LocalCtxSnapshot::new(
+            self.lctx.clone(),
+            self.local_names.clone(),
+        ));
+        self.lctx_snapshot = Some(Arc::clone(&snap));
+        snap
+    }
+
+    /// The local context a metavariable was minted in, if it is declared.
+    pub fn mvar_lctx(&self, mvar_id: MVarId) -> Option<Arc<LocalCtxSnapshot>> {
+        self.mctx.decl(mvar_id).map(|d| Arc::clone(&d.lctx))
+    }
+
+    /// Install `snapshot` as the ambient local context, returning the one
+    /// it replaced. Both halves swap together, because `local_names` and
+    /// `lctx` are asserted to stay in lockstep at every checkpoint,
+    /// restore and push — including the ones the caller performs while
+    /// the snapshot is installed. The cache is set to the installed
+    /// snapshot so a metavariable minted while it is in force records the
+    /// installed context without a fresh copy.
+    ///
+    /// Callers must pair the two calls. `with_mvar_context` is the safe
+    /// wrapper and is what in-crate code should use; `install_lctx` is
+    /// `pub` only because `leanr_elab`'s ladder needs the closure to own
+    /// the whole elaborator, not just `MetaCtx`.
+    pub fn install_lctx(&mut self, snapshot: Arc<LocalCtxSnapshot>) -> Arc<LocalCtxSnapshot> {
+        let previous = self.current_lctx();
+        let (lctx, names) = snapshot.parts();
+        self.lctx = lctx.clone();
+        self.local_names = names.to_vec();
+        self.lctx_snapshot = Some(snapshot);
+        previous
+    }
+
+    /// oracle: `MVarId.withContext` / `withMVarContextImp`
+    /// (`Meta/Basic.lean:2043-2052`) — `withLocalContextImp mvarDecl.lctx
+    /// mvarDecl.localInstances x`. Runs `f` with the metavariable's own
+    /// local context installed as the ambient one, and restores the
+    /// caller's on the way out.
+    ///
+    /// `localInstances` is NOT modelled: leanr has no local-instance
+    /// concept — instances come from the environment extension, not a
+    /// per-scope list — so the oracle's instance-cache flush has nothing
+    /// to flush. SEAM, owner: the slice that adds local instances.
+    ///
+    /// Plain save/run/restore with no drop guard, the same posture (and
+    /// the same justification) as `with_transparency` and
+    /// `with_assignable_synthetic_opaque`: every caller is `Result`-based
+    /// and catches nothing, so an unwinding caller cannot observe the
+    /// un-restored context.
+    ///
+    /// An UNDECLARED metavariable leaves the ambient context alone and
+    /// runs `f` as-is: the oracle's `getDecl` would throw, but every
+    /// leanr caller reaches this with an id it has just read a
+    /// declaration for, and inventing an error variant for an
+    /// unreachable case is surface without a producer.
+    pub fn with_mvar_context<R>(&mut self, mvar_id: MVarId, f: impl FnOnce(&mut Self) -> R) -> R {
+        let Some(snapshot) = self.mvar_lctx(mvar_id) else {
+            return f(self);
+        };
+        let saved = self.install_lctx(snapshot);
+        let out = f(self);
+        self.install_lctx(saved);
+        out
+    }
+
     /// Record the current `lctx` depth. Pair with `lctx_restore` to bracket
     /// a telescope (the `flet<local_ctx> save_lctx` idiom, assign.rs:563).
     /// Additive + behavior-neutral.
@@ -506,6 +601,7 @@ impl<'e> MetaCtx<'e> {
         );
         self.lctx.restore(checkpoint);
         self.local_names.truncate(checkpoint);
+        self.lctx_snapshot = None;
     }
 
     /// Mint a cdecl fvar `(name : ty)` with binder-info `bi` into the ambient
@@ -538,6 +634,7 @@ impl<'e> MetaCtx<'e> {
         // see that field's own doc comment. One entry per call, matching
         // `lctx.decls`'s own growth exactly (including `None` names).
         self.local_names.push((name, fvar));
+        self.lctx_snapshot = None;
         Ok(fvar)
     }
 
@@ -572,6 +669,7 @@ impl<'e> MetaCtx<'e> {
         // occurrence of the binder name resolves via
         // `lctx_lookup_by_name`.
         self.local_names.push((name, fvar));
+        self.lctx_snapshot = None;
         Ok(fvar)
     }
 
@@ -1407,7 +1505,7 @@ mod tests {
 
     #[test]
     fn rollback_restores_assignments_and_postponed() {
-        use crate::{MVarDecl, MVarId, MVarKind};
+        use crate::{LocalCtxSnapshot, MVarDecl, MVarId, MVarKind};
         with_ctx(|ctx| {
             let z = ctx.scratch.level_zero(None).expect("level");
             let ty = ctx.scratch.expr_sort(None, z).expect("sort");
@@ -1419,7 +1517,7 @@ mod tests {
                 MVarDecl {
                     user_name: None,
                     ty,
-                    lctx: Default::default(),
+                    lctx: LocalCtxSnapshot::empty(),
                     kind: MVarKind::Natural,
                 },
             );
@@ -1570,6 +1668,53 @@ mod tests {
                 assert_eq!(ctx.cfg().transparency, T::Instances);
             });
             assert_eq!(ctx.cfg().transparency, T::Default);
+        });
+    }
+
+    /// `with_mvar_context` installs a metavariable's own local context
+    /// and restores the ambient one on the way out (oracle:
+    /// `withMVarContextImp` = `withLocalContextImp mvarDecl.lctx
+    /// mvarDecl.localInstances`, `Meta/Basic.lean:2043-2045`). The
+    /// discriminating shape is a variable whose binder scope has CLOSED:
+    /// outside the closure it does not resolve, inside it does.
+    #[test]
+    fn with_mvar_context_reinstalls_a_closed_binder_scope() {
+        use crate::test_support::with_prelude0_ctx;
+        with_prelude0_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let x = ctx
+                .push_local_decl(None, sort0, leanr_kernel::BinderInfo::Default)
+                .expect("decl");
+            let (_, mvar_id) = ctx.mk_aux_mvar(sort0).expect("mvar");
+            ctx.lctx_restore(cp);
+
+            // The binder is gone: `x` no longer types.
+            assert!(
+                ctx.infer_type(x).is_err(),
+                "the ambient context has dropped the binder"
+            );
+            // Under the metavariable's own context it does. Also take a
+            // checkpoint INSIDE the closure: this is what a caller that
+            // goes on to open a further binder there would do, and
+            // `lctx_checkpoint` asserts `local_names`/`lctx` are in
+            // lockstep — the brief's install_lctx mutation (swap `lctx`
+            // but not `local_names`) leaves them 1 vs. 0 here and is
+            // otherwise invisible to this test, since neither
+            // `infer_type` nor the restore path reads `local_names`.
+            let inside = ctx.with_mvar_context(mvar_id, |ctx| {
+                let _ = ctx.lctx_checkpoint();
+                ctx.infer_type(x).is_ok()
+            });
+            assert!(inside, "the metavariable's context still has the binder");
+            // And the ambient context is restored afterwards.
+            assert!(
+                ctx.infer_type(x).is_err(),
+                "the ambient context was restored on the way out"
+            );
         });
     }
 }

@@ -51,3 +51,6 @@ crates/leanr_olean/fuzz/corpus/module_data/
 # benchmarks against the toolchain-bundled `leanchecker` binary instead —
 # see that script for why.)
 .mathlib/
+
+# superpowers SDD scratch workspaces
+.superpowers/

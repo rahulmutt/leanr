@@ -42,12 +42,19 @@
 //!
 //! **Two oracle scopings have no leanr counterpart yet and are not
 //! stubbed.** `mvarId.withContext` (`:114`, `:135`) re-enters the
-//! mvar's own local context and local instances; every mvar this crate
-//! mints carries an EMPTY `LocalContext` (`mk_fresh_expr_mvar_of_kind`'s
-//! own doc), so there is nothing to re-enter. `withRef mvarDecl.stx`
-//! (`:201`) positions error messages, and leanr's error type carries no
-//! position (design spec § Amendment, item 2). Neither is a behavior
-//! difference on any term leanr can elaborate today.
+//! mvar's own local context and local instances. Since the
+//! metavariable-local-contexts slice (`mk_fresh_expr_mvar_of_kind`'s own
+//! doc), every mvar DOES carry the ambient context it was minted in —
+//! but this rung, unlike `synthesize_synthetic_mvar`'s own per-mvar
+//! dispatch (`ladder.rs::with_mvar_local_context`), never reinstalls
+//! it: `synthesize_using_default`'s own walk runs entirely under
+//! whatever context is ambient when RUNG 3 itself is reached, not each
+//! goal's own. SEAM, unaddressed by this task — no default-instance
+//! goal in today's corpus depends on a binder that closed before rung 3
+//! ran. `withRef mvarDecl.stx` (`:201`) positions error messages, and
+//! leanr's error type carries no position (design spec § Amendment,
+//! item 2). Neither is a behavior difference on any term leanr can
+//! elaborate today.
 
 use leanr_kernel::bank::{ExprId, NameId};
 use leanr_kernel::BinderInfo;
