@@ -52,6 +52,7 @@ pub struct Replayed {
     pub default_instances: Vec<DefaultInstanceEntry>,
     pub projection_fns: Vec<ProjectionFnInfo>,
     pub classes: Vec<ClassEntry>,
+    pub coe_decls: Vec<NameId>,
 }
 
 /// Decode `tests/fixtures/<subdir>/<name>`, assert it is import-free
@@ -78,6 +79,7 @@ pub fn replay_fixture_in(subdir: &str, name: &str) -> Replayed {
         default_instances: md.default_instances,
         projection_fns: md.projection_fns,
         classes: md.classes,
+        coe_decls: md.coe_decls,
     }
 }
 

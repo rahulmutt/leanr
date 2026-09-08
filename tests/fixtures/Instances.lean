@@ -164,3 +164,15 @@ instance instGetN : Get N N N where
 -- its record count stay untouched.
 class Dep (a : Type) (b : outParam Type) (c : outParam (b → a)) where
   dep : a
+
+-- === M4b-3 P4: the monad-lift shape guard's positive environment ===
+--
+-- `coerce`'s guard (design spec § Amendment 5 item 6) fires only when
+-- BOTH types reduce to type applications AND the environment contains
+-- `Monad` or `MonadLiftT` — the only shape on which the oracle's
+-- `coerceMonadLift?` (`Meta/Coe.lean:201-257`) can return `some`. This
+-- axiom is EXISTENCE-ONLY (nothing reads its type) so that
+-- `coe.rs`'s unit test can drive the guard over this fixture, while the
+-- two corpus fixtures (`Synth0`, `Elab0`) stay `Monad`-free and never
+-- reach it. No corpus record is dumped from this file.
+axiom Monad : (Type → Type) → Type

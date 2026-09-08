@@ -1839,6 +1839,14 @@ impl<'e> MetaCtx<'e> {
         r
     }
 
+    /// oracle: `whnfR` (`Basic.lean:2113-2114`) — `withTransparency
+    /// .reducible <| whnf e`. Composed here rather than exported: its
+    /// only consumers are in-crate (`coe.rs`'s `isTypeApp?` and
+    /// `coerceCollectingNames?`'s `whnfR expectedType`).
+    pub(crate) fn whnf_r(&mut self, e: ExprId) -> Result<ExprId, MetaError> {
+        self.with_transparency(TransparencyMode::Reducible, |ctx| ctx.whnf(e))
+    }
+
     /// oracle: `projectCore?` (WHNF.lean:564-572). `pub(crate)` (task 6):
     /// `lazy_delta.rs`'s `isDefEqProjDelta` (`tryReduceProjs`, :2126-2129)
     /// reuses this same primitive.

@@ -164,6 +164,7 @@ pub(crate) fn with_prelude0_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
     let default_instances = md.default_instances;
     let projection_fns = md.projection_fns;
     let classes = md.classes;
+    let coe_decls = md.coe_decls;
     let constants: HashMap<NameId, ConstantInfo> =
         md.constants.into_iter().map(|c| (c.name(), c)).collect();
     leanr_kernel::replay(&mut env, constants).expect("Prelude0 replays");
@@ -181,6 +182,7 @@ pub(crate) fn with_prelude0_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
             default_instances: &default_instances,
             projection_fns: &projection_fns,
             classes: &classes,
+            coe_decls: &coe_decls,
         },
     );
     f(&mut ctx)
@@ -212,6 +214,7 @@ pub(crate) fn with_instances_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
     let default_instances = md.default_instances;
     let projection_fns = md.projection_fns;
     let classes = md.classes;
+    let coe_decls = md.coe_decls;
     let constants: HashMap<NameId, ConstantInfo> =
         md.constants.into_iter().map(|c| (c.name(), c)).collect();
     leanr_kernel::replay(&mut env, constants).expect("Instances.olean replays");
@@ -229,6 +232,52 @@ pub(crate) fn with_instances_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
             default_instances: &default_instances,
             projection_fns: &projection_fns,
             classes: &classes,
+            coe_decls: &coe_decls,
+        },
+    );
+    f(&mut ctx)
+}
+
+/// Replay `meta/Synth0.olean` (task 1's verbatim `Init/Coe.lean` class
+/// chain fixture; M4b-3 P4 task 2). Same `prelude`-mode, import-free
+/// shape as [`with_instances_ctx`] just above — see `Synth0.lean`'s own
+/// module doc for the fixture's contents. Task 5's unit tests reuse
+/// this helper.
+pub(crate) fn with_synth0_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
+    let bytes = std::fs::read(fixture_path("meta/Synth0.olean")).expect("Synth0.olean fixture");
+    let mut env = Environment::default();
+    let md = ModuleData::parse(&bytes, env.store_mut()).expect("Synth0.olean decodes");
+    assert!(
+        md.imports.is_empty(),
+        "Synth0.olean must be import-free (prelude-mode fixture) — \
+         with_synth0_ctx replays it into an empty Environment with no \
+         dependency loading"
+    );
+    let reducibility = md.reducibility;
+    let matchers = md.matchers;
+    let instances = md.instances;
+    let default_instances = md.default_instances;
+    let projection_fns = md.projection_fns;
+    let classes = md.classes;
+    let coe_decls = md.coe_decls;
+    let constants: HashMap<NameId, ConstantInfo> =
+        md.constants.into_iter().map(|c| (c.name(), c)).collect();
+    leanr_kernel::replay(&mut env, constants).expect("Synth0.olean replays");
+
+    let view = env.view();
+    let mut scratch = Store::scratch();
+    let mut ctx = MetaCtx::new(
+        view,
+        &mut scratch,
+        Config::default(),
+        EnvExtensions {
+            reducibility: &reducibility,
+            matchers: &matchers,
+            instances: &instances,
+            default_instances: &default_instances,
+            projection_fns: &projection_fns,
+            classes: &classes,
+            coe_decls: &coe_decls,
         },
     );
     f(&mut ctx)
@@ -258,6 +307,7 @@ pub(crate) fn with_cyclic_instances_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) ->
     let default_instances = md.default_instances;
     let projection_fns = md.projection_fns;
     let classes = md.classes;
+    let coe_decls = md.coe_decls;
     let constants: HashMap<NameId, ConstantInfo> =
         md.constants.into_iter().map(|c| (c.name(), c)).collect();
     leanr_kernel::replay(&mut env, constants).expect("InstancesCyclic.olean replays");
@@ -275,6 +325,7 @@ pub(crate) fn with_cyclic_instances_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) ->
             default_instances: &default_instances,
             projection_fns: &projection_fns,
             classes: &classes,
+            coe_decls: &coe_decls,
         },
     );
     f(&mut ctx)
@@ -471,6 +522,7 @@ pub(crate) fn with_matcher_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
     let default_instances = md.default_instances;
     let projection_fns = md.projection_fns;
     let classes = md.classes;
+    let coe_decls = md.coe_decls;
     let constants: HashMap<NameId, ConstantInfo> =
         md.constants.into_iter().map(|c| (c.name(), c)).collect();
     leanr_kernel::replay(&mut env, constants).expect("Matcher.olean replays");
@@ -488,6 +540,7 @@ pub(crate) fn with_matcher_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
             default_instances: &default_instances,
             projection_fns: &projection_fns,
             classes: &classes,
+            coe_decls: &coe_decls,
         },
     );
     f(&mut ctx)

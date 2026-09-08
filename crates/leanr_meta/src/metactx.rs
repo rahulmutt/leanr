@@ -6,7 +6,7 @@
 //! decode one level at a time via `Store::expr_node`, caches key on
 //! ids, and `Store::to_expr` is never called on a hot path.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use leanr_kernel::abstract_fvars;
 use leanr_kernel::bank::terms::Node;
@@ -139,6 +139,9 @@ pub struct MetaCtx<'e> {
     /// `preprocess` and `preprocess_out_param`, the real consumers
     /// landed by M4b-3 P2b-i tasks 5-7.
     pub(crate) classes: ClassTable,
+    /// The `@[coe_decl]` name set (`Meta/Coe.lean:21-29`), built once
+    /// from `EnvExtensions::coe_decls`. Read by `coe.rs::expand_coe`.
+    pub(crate) coe_decls: HashSet<NameId>,
     /// The `smartUnfolding` option (oracle default: true), consulted by
     /// `unfold_definition`'s app/const arms (task 7).
     pub(crate) smart_unfolding: bool,
@@ -264,6 +267,9 @@ pub struct EnvExtensions<'a> {
     /// [`crate::instances::ClassTable`] for how `MetaCtx::new` consumes
     /// this slice.
     pub classes: &'a [ClassEntry],
+    /// Decoded `Lean.Meta.coeDeclAttr` entries (M4b-3 P4 task 2) — the
+    /// `@[coe_decl]` name set `MetaCtx::is_coe_decl` answers from.
+    pub coe_decls: &'a [NameId],
 }
 
 impl<'e> MetaCtx<'e> {
@@ -299,6 +305,7 @@ impl<'e> MetaCtx<'e> {
         let matchers = exts.matchers.iter().map(|m| (m.name, m.clone())).collect();
         let instances = InstanceTable::build(view, exts.instances, exts.default_instances);
         let classes = ClassTable::build(exts.classes);
+        let coe_decls: HashSet<NameId> = exts.coe_decls.iter().copied().collect();
         // oracle: `projectionFnInfoExt`'s own `NameMap` (`ProjFns.lean:30,
         // 37-59`) — the extension's own key IS `ProjectionFnInfo.projFn`
         // (see that struct's doc, `leanr_olean::ProjectionFnInfo`), so no
@@ -377,6 +384,7 @@ impl<'e> MetaCtx<'e> {
             matchers,
             instances,
             classes,
+            coe_decls,
             smart_unfolding: true,
             can_unfold_override: false,
             nat_bin_ops,
@@ -400,6 +408,41 @@ impl<'e> MetaCtx<'e> {
 
     pub fn set_transparency(&mut self, t: TransparencyMode) {
         self.cfg.transparency = t;
+    }
+
+    /// oracle: `withTransparency` as `withDefault` / `withReducible` /
+    /// `withReducibleAndInstances` use it (`Basic.lean:1278-1292`) —
+    /// save, set, run, restore. `pub` so `leanr_elab`'s ladder can run
+    /// the `.coe` arm's `withDefault isDefEq` (`SyntheticMVars.lean:546`).
+    ///
+    /// Plain save/run/restore with no drop guard, the same posture as
+    /// `with_assignable_synthetic_opaque` below and for the same reason
+    /// (its doc, design spec § Follow-ups item 4): every caller is
+    /// `Result`-based and catches nothing, so an unwinding caller cannot
+    /// observe the un-restored flag.
+    pub fn with_transparency<R>(
+        &mut self,
+        t: TransparencyMode,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let saved = self.cfg.transparency;
+        self.cfg.transparency = t;
+        let r = f(self);
+        self.cfg.transparency = saved;
+        r
+    }
+
+    /// oracle: `mkArrow` (`Lean/Meta/Basic.lean`, `mkForall _ .default d b`
+    /// with a fresh user name) — a NON-dependent `forallE`. The binder
+    /// name is `None`: the only consumer is the TYPE of `coerceToFunction?`'s
+    /// `?γ` (`Coe.lean:105`), which is never emitted, and the canonical
+    /// encoder erases binder names anyway.
+    ///
+    pub(crate) fn mk_arrow(&mut self, dom: ExprId, cod: ExprId) -> Result<ExprId, MetaError> {
+        let base = Some(self.view.store);
+        Ok(self
+            .scratch
+            .expr_forall(base, None, dom, cod, BinderInfo::Default)?)
     }
 
     pub fn mctx(&self) -> &MetavarContext {
@@ -862,6 +905,13 @@ impl<'e> MetaCtx<'e> {
     /// producer, not dead API.
     pub fn has_out_params(&self, class_name: NameId) -> bool {
         matches!(self.get_out_param_positions(class_name), Some(p) if !p.is_empty())
+    }
+
+    /// oracle: `isCoeDecl` (`Meta/Coe.lean:28-29`) — `coeDeclAttr.hasTag
+    /// env declName`. `pub` because `leanr_elab`'s tests assert the gate
+    /// directly; the production reader is `coe.rs::expand_coe`.
+    pub fn is_coe_decl(&self, name: NameId) -> bool {
+        self.coe_decls.contains(&name)
     }
 
     /// oracle: `Lean.occursCheck` (`Lean/Util/OccursCheck.lean:18-53`),
@@ -1477,6 +1527,49 @@ mod tests {
                 ctx.check_occurs(m_id, nat).expect("no error"),
                 "?m does not occur in `Nat` -> safe to assign"
             );
+        });
+    }
+
+    /// `is_coe_decl` reads the `Lean.Meta.coeDeclAttr` name set (M4b-3
+    /// P4 task 2), the gate `expand_coe` consults per head
+    /// (`Meta/Coe.lean:28-29`, `isCoeDecl`). Over `Synth0.olean`:
+    /// `CoeT.coe` is tagged, `CoeT` (the class) and `Add.add` are not.
+    #[test]
+    fn is_coe_decl_reads_the_tag_set() {
+        use crate::test_support::with_synth0_ctx;
+        with_synth0_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let mut name = |parts: &[&str]| {
+                let mut id = None;
+                for p in parts {
+                    let s = ctx.scratch.intern_str(base, p).expect("intern");
+                    id = Some(ctx.scratch.name_str(base, id, s).expect("name"));
+                }
+                id.expect("non-empty")
+            };
+            let coe_t_coe = name(&["CoeT", "coe"]);
+            let coe_t = name(&["CoeT"]);
+            let add_add = name(&["Add", "add"]);
+            assert!(ctx.is_coe_decl(coe_t_coe));
+            assert!(!ctx.is_coe_decl(coe_t));
+            assert!(!ctx.is_coe_decl(add_add));
+        });
+    }
+
+    /// `with_transparency` restores on the normal path and nests.
+    #[test]
+    fn with_transparency_restores_the_ambient_mode() {
+        use crate::TransparencyMode as T;
+        with_prelude0_ctx(|ctx| {
+            assert_eq!(ctx.cfg().transparency, T::Default);
+            ctx.with_transparency(T::Instances, |ctx| {
+                assert_eq!(ctx.cfg().transparency, T::Instances);
+                ctx.with_transparency(T::Reducible, |ctx| {
+                    assert_eq!(ctx.cfg().transparency, T::Reducible);
+                });
+                assert_eq!(ctx.cfg().transparency, T::Instances);
+            });
+            assert_eq!(ctx.cfg().transparency, T::Default);
         });
     }
 }
