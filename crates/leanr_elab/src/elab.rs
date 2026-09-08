@@ -7,8 +7,8 @@ use std::collections::HashMap;
 
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, LevelId, NameId};
-use leanr_kernel::{BinderInfo, EnvView, LocalContext, Nat};
-use leanr_meta::{LMVarId, MVarDecl, MVarId, MVarKind, MetaCtx};
+use leanr_kernel::{BinderInfo, EnvView, Nat};
+use leanr_meta::{LMVarId, LocalCtxSnapshot, MVarDecl, MVarId, MVarKind, MetaCtx};
 use leanr_syntax::kind::KindInterner;
 
 use crate::dispatch::{self, SynElem};
@@ -268,7 +268,10 @@ impl<'e> TermElabM<'e> {
             MVarDecl {
                 user_name: None,
                 ty,
-                lctx: LocalContext::default(),
+                // Task 4 replaces this with the ambient snapshot; an
+                // empty one preserves today's behaviour exactly until
+                // then.
+                lctx: LocalCtxSnapshot::empty(),
                 kind,
             },
         );

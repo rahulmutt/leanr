@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use leanr_kernel::bank::{ExprId, NameId, Store};
 use leanr_kernel::EnvView;
-use leanr_meta::{Config, EnvExtensions, MVarDecl, MVarId, MVarKind, MetaCtx};
+use leanr_meta::{Config, EnvExtensions, LocalCtxSnapshot, MVarDecl, MVarId, MVarKind, MetaCtx};
 use serde_json::{json, Value};
 
 // The canonical-scheme decode/encode helpers (`decode_expr`/
@@ -173,7 +173,7 @@ fn oracle_fast_gate() {
                             MVarDecl {
                                 user_name: None,
                                 ty,
-                                lctx: Default::default(),
+                                lctx: LocalCtxSnapshot::empty(),
                                 kind: MVarKind::Natural,
                             },
                         );

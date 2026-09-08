@@ -10,10 +10,11 @@
 //! stays minimal).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use leanr_kernel::bank::{ExprId, LevelId, NameId};
-use leanr_kernel::LocalContext;
 
+use crate::local_snapshot::LocalCtxSnapshot;
 use crate::MetaError;
 
 /// A metavariable's identity. Newtype over `NameId` so it cannot be
@@ -42,18 +43,19 @@ pub enum MVarKind {
     SyntheticOpaque,
 }
 
-/// oracle: `MetavarDecl`. `lctx` is the local context the mvar was
-/// created in — it is part of the declaration, not ambient state,
-/// because an mvar may only be assigned a term whose free variables it
-/// can see.
+/// oracle: `MetavarDecl` (`MetavarContext.lean:305-311`). `lctx` is the
+/// local context the mvar was created in — part of the declaration, not
+/// ambient state, because an mvar may only be assigned a term whose free
+/// variables it can see (`ExprDefEq.lean:1060`).
 ///
-/// No `Debug`/`Clone` derive: `LocalContext` (a foreign type from
-/// `leanr_kernel`) implements neither, and the orphan rule forbids
-/// adding either impl for it here.
+/// The context is shared, not owned: every mvar minted at one binder
+/// depth points at the same `LocalCtxSnapshot`.
+///
+/// No `Debug` derive: `LocalContext` has none.
 pub struct MVarDecl {
     pub user_name: Option<NameId>,
     pub ty: ExprId,
-    pub lctx: LocalContext,
+    pub lctx: Arc<LocalCtxSnapshot>,
     pub kind: MVarKind,
 }
 
@@ -177,8 +179,8 @@ impl MetavarContext {
 #[cfg(test)]
 mod tests {
     use super::{MVarDecl, MVarId, MVarKind, MetavarContext};
+    use crate::local_snapshot::LocalCtxSnapshot;
     use leanr_kernel::bank::Store;
-    use leanr_kernel::LocalContext;
 
     fn mk(store: &mut Store, n: &str) -> MVarId {
         let base = store.intern_str(None, n).expect("intern");
@@ -190,7 +192,7 @@ mod tests {
         MVarDecl {
             user_name: None,
             ty,
-            lctx: LocalContext::default(),
+            lctx: LocalCtxSnapshot::empty(),
             kind: MVarKind::Natural,
         }
     }

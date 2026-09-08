@@ -2836,7 +2836,7 @@ mod tests {
     use leanr_olean::{EntryScope, ReducibilityEntry, ReducibilityStatus};
 
     use crate::test_support::{with_matcher_ctx, with_prelude0_ctx};
-    use crate::{EnvExtensions, MVarDecl, MVarKind};
+    use crate::{EnvExtensions, LocalCtxSnapshot, MVarDecl, MVarKind};
 
     fn dump(ctx: &mut MetaCtx, e: ExprId) -> String {
         match ctx.node(e) {
@@ -2954,7 +2954,7 @@ mod tests {
                 MVarDecl {
                     user_name: None,
                     ty: sort0,
-                    lctx: leanr_kernel::LocalContext::default(),
+                    lctx: LocalCtxSnapshot::empty(),
                     kind: MVarKind::Natural,
                 },
             );
@@ -3857,7 +3857,7 @@ mod tests {
                 MVarDecl {
                     user_name: None,
                     ty: mul_n,
-                    lctx: Default::default(),
+                    lctx: LocalCtxSnapshot::empty(),
                     kind: MVarKind::SyntheticOpaque,
                 },
             );

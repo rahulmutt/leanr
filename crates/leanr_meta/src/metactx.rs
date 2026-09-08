@@ -7,6 +7,7 @@
 //! ids, and `Store::to_expr` is never called on a hot path.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use leanr_kernel::abstract_fvars;
 use leanr_kernel::bank::terms::Node;
@@ -20,6 +21,7 @@ use leanr_olean::{
 };
 
 use crate::instances::{ClassTable, InstanceTable};
+use crate::local_snapshot::LocalCtxSnapshot;
 use crate::{Config, LMVarId, MVarId, MetaError, MetavarContext, TransparencyMode};
 
 /// Stack-growth constants — the same values `tc.rs` uses (private
@@ -63,6 +65,12 @@ pub struct MetaCtx<'e> {
     /// doubles as this field's truncation point with no second
     /// checkpoint API. See `lctx_lookup_by_name` (the reader) below.
     pub(crate) local_names: Vec<(Option<NameId>, ExprId)>,
+    /// Memoized `LocalCtxSnapshot` of the CURRENT `lctx`/`local_names`,
+    /// dropped by every writer of either. `current_lctx` rebuilds it on
+    /// demand, so N metavariables minted at one binder depth share one
+    /// copy — the difference between one clone per binder scope and one
+    /// per metavariable on instance search's hottest path.
+    lctx_snapshot: Option<Arc<LocalCtxSnapshot>>,
     pub(crate) fvar_gen: FVarIdGen,
     pub(crate) guard: RecGuard,
     guard_depth: u32,
@@ -368,6 +376,7 @@ impl<'e> MetaCtx<'e> {
             mctx: MetavarContext::new(),
             lctx: LocalContext::default(),
             local_names: Vec::new(),
+            lctx_snapshot: None,
             fvar_gen: FVarIdGen::default(),
             guard: RecGuard::new(),
             guard_depth: 0,
@@ -481,6 +490,21 @@ impl<'e> MetaCtx<'e> {
         self.scratch
     }
 
+    /// The ambient local context as a shareable value — what a freshly
+    /// minted metavariable records (oracle: `mkFreshExprMVarCore`'s
+    /// `(← getLCtx)`, `Meta/Basic.lean:866-867`).
+    pub fn current_lctx(&mut self) -> Arc<LocalCtxSnapshot> {
+        if let Some(snap) = &self.lctx_snapshot {
+            return Arc::clone(snap);
+        }
+        let snap = Arc::new(LocalCtxSnapshot::new(
+            self.lctx.clone(),
+            self.local_names.clone(),
+        ));
+        self.lctx_snapshot = Some(Arc::clone(&snap));
+        snap
+    }
+
     /// Record the current `lctx` depth. Pair with `lctx_restore` to bracket
     /// a telescope (the `flet<local_ctx> save_lctx` idiom, assign.rs:563).
     /// Additive + behavior-neutral.
@@ -506,6 +530,7 @@ impl<'e> MetaCtx<'e> {
         );
         self.lctx.restore(checkpoint);
         self.local_names.truncate(checkpoint);
+        self.lctx_snapshot = None;
     }
 
     /// Mint a cdecl fvar `(name : ty)` with binder-info `bi` into the ambient
@@ -538,6 +563,7 @@ impl<'e> MetaCtx<'e> {
         // see that field's own doc comment. One entry per call, matching
         // `lctx.decls`'s own growth exactly (including `None` names).
         self.local_names.push((name, fvar));
+        self.lctx_snapshot = None;
         Ok(fvar)
     }
 
@@ -572,6 +598,7 @@ impl<'e> MetaCtx<'e> {
         // occurrence of the binder name resolves via
         // `lctx_lookup_by_name`.
         self.local_names.push((name, fvar));
+        self.lctx_snapshot = None;
         Ok(fvar)
     }
 
@@ -1407,7 +1434,7 @@ mod tests {
 
     #[test]
     fn rollback_restores_assignments_and_postponed() {
-        use crate::{MVarDecl, MVarId, MVarKind};
+        use crate::{LocalCtxSnapshot, MVarDecl, MVarId, MVarKind};
         with_ctx(|ctx| {
             let z = ctx.scratch.level_zero(None).expect("level");
             let ty = ctx.scratch.expr_sort(None, z).expect("sort");
@@ -1419,7 +1446,7 @@ mod tests {
                 MVarDecl {
                     user_name: None,
                     ty,
-                    lctx: Default::default(),
+                    lctx: LocalCtxSnapshot::empty(),
                     kind: MVarKind::Natural,
                 },
             );

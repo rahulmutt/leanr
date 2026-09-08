@@ -918,10 +918,10 @@ impl<'e> MetaCtx<'e> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leanr_kernel::{BinderInfo, LocalContext};
+    use leanr_kernel::BinderInfo;
 
     use crate::test_support::with_prelude0_ctx;
-    use crate::{MVarDecl, MVarKind};
+    use crate::{LocalCtxSnapshot, MVarDecl, MVarKind};
 
     /// `Name::Str { parent: Name::Str { parent: Anonymous, part: a },
     /// part: b }`, resolved through the persistent store (`Some(base)`)
@@ -1064,7 +1064,7 @@ mod tests {
                 MVarDecl {
                     user_name: None,
                     ty: sort0,
-                    lctx: LocalContext::default(),
+                    lctx: LocalCtxSnapshot::empty(),
                     kind: MVarKind::Natural,
                 },
             );

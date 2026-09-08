@@ -67,7 +67,7 @@
 
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::ExprId;
-use leanr_kernel::{abstract_fvars, instantiate_rev, LocalContext, Nat};
+use leanr_kernel::{abstract_fvars, instantiate_rev, Nat};
 
 use crate::{MVarDecl, MVarId, MVarKind, MetaCtx, MetaError};
 
@@ -369,7 +369,7 @@ impl<'e> MetaCtx<'e> {
                     let in_own_lctx = self
                         .mctx
                         .decl(mvar_id)
-                        .map(|d| d.lctx.get(fid).is_some())
+                        .map(|d| d.lctx.lctx().get(fid).is_some())
                         .unwrap_or(false);
                     if in_own_lctx && !self.cfg.quasi_pattern_approx {
                         // oracle :1322-1323: ctx-local fvar, quasiPatternApprox off.
@@ -408,7 +408,7 @@ impl<'e> MetaCtx<'e> {
             Node::FVar { id: Some(fid) } => self
                 .mctx
                 .decl(mvar_id)
-                .map(|d| d.lctx.get(fid).is_some())
+                .map(|d| d.lctx.lctx().get(fid).is_some())
                 .unwrap_or(false),
             _ => false,
         });
@@ -687,11 +687,13 @@ impl<'e> MetaCtx<'e> {
     /// `FVarIdGen` (an expr-mvar name must not collide with an fvar
     /// name).
     ///
-    /// Always mints with an EMPTY lctx: see `mk_aux_mvar_for`'s own doc
-    /// comment for why (this crate's only call site, `constApprox`'s
-    /// `isDefEqMVarSelf` fallback, only ever invokes this after
-    /// confirming the mvar being rescued already has an empty own
-    /// lctx).
+    /// Mints with the AMBIENT local context (`self.current_lctx()`), as
+    /// the oracle's `mkFreshExprMVarCore` does with `(← getLCtx)`
+    /// (`Meta/Basic.lean:866-867`). Before the
+    /// metavariable-local-contexts slice this minted an empty context,
+    /// which made every ambient free variable look out of scope to
+    /// `check_assignment_scope_body` and so made a metavariable
+    /// unassignable to any `fun`-bound variable.
     pub(crate) fn mk_aux_mvar(&mut self, ty: ExprId) -> Result<(ExprId, MVarId), MetaError> {
         let idx = self.expr_mvar_gen;
         self.expr_mvar_gen += 1;
@@ -701,12 +703,13 @@ impl<'e> MetaCtx<'e> {
         let idx_id = self.scratch.intern_nat(base, &Nat::from(idx))?;
         let name = self.scratch.name_num(base, Some(prefix), idx_id)?;
         let id = MVarId(name);
+        let lctx = self.current_lctx();
         self.mctx.declare(
             id,
             MVarDecl {
                 user_name: None,
                 ty,
-                lctx: LocalContext::default(),
+                lctx,
                 kind: MVarKind::Natural,
             },
         );
@@ -718,31 +721,32 @@ impl<'e> MetaCtx<'e> {
     /// soundly without touching `leanr_kernel`: the oracle's `mkAuxMVar`
     /// call site this function backs (`isDefEqMVarSelf` :1800) passes
     /// `mvarDecl.lctx` — the mvar BEING rescued's OWN declared local
-    /// context — as the new aux mvar's lctx too. `leanr_kernel::
-    /// LocalContext` has neither `Clone` nor any enumeration API
-    /// (`local_ctx.rs`: `decls`/`index` are private, `get` needs an
-    /// already-known fvar id) to copy an ARBITRARY such context, and
-    /// porting one is out of this task's reach (never modify
-    /// `leanr_kernel`, per the brief). The one case still reachable
-    /// without that: `mvar_id`'s own lctx is EMPTY, where
-    /// `LocalContext::default()` (`mk_aux_mvar`'s own hardcoded choice)
-    /// already IS that exact copy — an empty context has nothing to
-    /// lose. Every mvar this crate's own fixtures/helpers mint
-    /// (`test_support::fresh_mvar`'s own `lctx: Default::default()`)
-    /// falls in this case. Returns `None` (a named SEAM, not a wrong
-    /// answer) when `mvar_id`'s own lctx is non-empty — narrower than
-    /// the oracle, never unsound: acknowledged-thin `constApprox`-rescue
-    /// coverage (spec risk 3; `checkApp`'s SEPARATE `ctxApprox` rescue
-    /// does not use this helper at all any more — see
-    /// `check_assignment_scope`'s own doc comment for why it is not
-    /// implemented here).
+    /// context — as the new aux mvar's lctx too. `mk_aux_mvar` itself
+    /// mints at the AMBIENT context (`self.current_lctx()`, since the
+    /// metavariable-local-contexts slice), not an arbitrary passed-in
+    /// one, so the one case still reachable without a genuine "copy
+    /// `mvar_id`'s own lctx" primitive is: `mvar_id`'s own lctx is
+    /// EMPTY. Before that slice this guard (`d.lctx.save() != 0`) was
+    /// vacuously false for every mvar this crate ever declared (every
+    /// declaration carried an empty context); it is no longer vacuous
+    /// now that contexts are truthful — a metavariable minted under an
+    /// open binder has a genuinely non-empty own lctx and is correctly
+    /// refused here. Every mvar this crate's own fixtures/helpers mint
+    /// (`test_support::fresh_mvar`'s own `lctx: LocalCtxSnapshot::
+    /// empty()`) still falls in the empty case. Returns `None` (a named
+    /// SEAM, not a wrong answer) when `mvar_id`'s own lctx is non-empty
+    /// — narrower than the oracle, never unsound: acknowledged-thin
+    /// `constApprox`-rescue coverage (spec risk 3; `checkApp`'s
+    /// SEPARATE `ctxApprox` rescue does not use this helper at all any
+    /// more — see `check_assignment_scope`'s own doc comment for why it
+    /// is not implemented here).
     fn mk_aux_mvar_for(
         &mut self,
         mvar_id: MVarId,
         ty: ExprId,
     ) -> Result<Option<(ExprId, MVarId)>, MetaError> {
         let lctx_len = match self.mctx.decl(mvar_id) {
-            Some(d) => d.lctx.save(),
+            Some(d) => d.lctx.depth(),
             None => return Ok(None),
         };
         if lctx_len != 0 {
@@ -998,7 +1002,7 @@ impl<'e> MetaCtx<'e> {
                 let in_mvar_lctx = self
                     .mctx
                     .decl(mvar_id)
-                    .map(|d| d.lctx.get(fid).is_some())
+                    .map(|d| d.lctx.lctx().get(fid).is_some())
                     .unwrap_or(false);
                 if in_mvar_lctx {
                     return Ok(true);
@@ -1376,7 +1380,7 @@ mod tests {
     };
 
     use crate::test_support::{fresh_fvar, fresh_mvar};
-    use crate::{Config, EnvExtensions, MVarDecl, MVarKind, MetaCtx};
+    use crate::{Config, EnvExtensions, LocalCtxSnapshot, MVarDecl, MVarKind, MetaCtx};
 
     /// A tiny bespoke environment (NOT `test_support::with_ctx`'s
     /// totally-empty one): `N.zero`/`N.succ` are declared as `Prop`-
@@ -1744,7 +1748,7 @@ mod tests {
                 MVarDecl {
                     user_name: None,
                     ty,
-                    lctx: Default::default(),
+                    lctx: LocalCtxSnapshot::empty(),
                     kind: MVarKind::SyntheticOpaque,
                 },
             );
@@ -1767,6 +1771,69 @@ mod tests {
 
             // The scope is restored, not leaked.
             assert!(!ctx.cfg.assign_synthetic_opaque);
+        });
+    }
+
+    /// A metavariable minted while a local binder is open may be
+    /// assigned that binder's variable (oracle: `mkFreshExprMVarCore`
+    /// mints at `(← getLCtx)`, `Meta/Basic.lean:866-867`, and
+    /// `CheckAssignmentQuick.check` accepts an fvar the declaration can
+    /// see, `ExprDefEq.lean:1060`). Before this slice every declaration
+    /// carried an EMPTY context, so this answered `false` — the whole
+    /// finding (design spec § The finding, measured).
+    ///
+    /// The second half is the part that must NOT regress: a variable
+    /// that was NOT in scope when the metavariable was minted is still
+    /// rejected. The fix makes the check truthful, not permissive.
+    #[test]
+    fn a_metavariable_may_be_assigned_a_variable_its_context_can_see() {
+        with_n_ctx(|ctx| {
+            let zero = ctx.scratch.level_zero(Some(ctx.view.store)).expect("level");
+            let n_type = ctx
+                .scratch
+                .expr_sort(Some(ctx.view.store), zero)
+                .expect("Sort 0");
+
+            // Prime `current_lctx`'s cache at the pre-binder (empty)
+            // depth BEFORE the checkpoint below, so the assertion right
+            // after `push_local_decl` can only pass if that push
+            // actually drops the cache: without its own
+            // `self.lctx_snapshot = None`, the mvar below would still
+            // be handed this stale, binder-less snapshot.
+            let _ = ctx.current_lctx();
+
+            let cp = ctx.lctx_checkpoint();
+            let visible = ctx
+                .push_local_decl(None, n_type, leanr_kernel::BinderInfo::Default)
+                .expect("decl");
+            // Minted with `visible` in scope.
+            let (mv_in, _) = ctx.mk_aux_mvar(n_type).expect("mvar");
+            assert!(
+                ctx.is_def_eq(mv_in, visible).expect("defeq"),
+                "a metavariable must accept a variable its own context can see"
+            );
+
+            // A sibling scope: `later` did not exist when `mv_in` was minted.
+            ctx.lctx_restore(cp);
+            let (mv_before, _) = ctx.mk_aux_mvar(n_type).expect("mvar");
+            // `visible` itself must now look OUT of scope too: pins
+            // `lctx_restore`'s OWN invalidation, distinct from
+            // `push_local_decl`'s above. Without it, `mv_before` above
+            // would still be handed the STALE pre-restore snapshot (the
+            // one `visible` lives in, cached while minting `mv_in`),
+            // wrongly accepting a variable this restore just dropped.
+            assert!(
+                !ctx.is_def_eq(mv_before, visible).expect("defeq"),
+                "a metavariable minted after a restore must not see a variable that restore dropped"
+            );
+            let later = ctx
+                .push_local_decl(None, n_type, leanr_kernel::BinderInfo::Default)
+                .expect("decl");
+            assert!(
+                !ctx.is_def_eq(mv_before, later).expect("defeq"),
+                "a metavariable must still reject a variable minted after it"
+            );
+            ctx.lctx_restore(cp);
         });
     }
 }

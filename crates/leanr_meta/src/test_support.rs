@@ -14,7 +14,7 @@ use leanr_kernel::{
 };
 use leanr_olean::ModuleData;
 
-use crate::{Config, EnvExtensions, MVarDecl, MVarId, MVarKind, MetaCtx};
+use crate::{Config, EnvExtensions, LocalCtxSnapshot, MVarDecl, MVarId, MVarKind, MetaCtx};
 
 pub(crate) fn fixture_path(name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -103,7 +103,7 @@ pub(crate) fn fresh_mvar_of_kind(
         MVarDecl {
             user_name: None,
             ty,
-            lctx: Default::default(),
+            lctx: LocalCtxSnapshot::empty(),
             kind,
         },
     );
@@ -124,6 +124,16 @@ pub(crate) fn fresh_mvar_of_kind(
 /// mints it, so this does not bracket it in a `save`/`restore` pair).
 /// Interns `name` as the fvar's (purely cosmetic, never consulted by
 /// `is_def_eq`) `binder_name` and returns the `Expr::fvar` reference.
+///
+/// Routed through `push_local_decl` (metavariable-local-contexts slice,
+/// task 2), not a bare `ctx.lctx.mk_local_decl` call as before: this
+/// keeps `local_names` and the `lctx_snapshot` cache in the SAME
+/// lockstep `push_local_decl` itself maintains, which `current_lctx`
+/// now debug-asserts on every call (`mk_aux_mvar` calls it from deep
+/// inside `is_def_eq`, so a test fvar minted before an assertion that
+/// reaches unification must be visible to both halves, not just
+/// `lctx`). Same underlying mint either way — `push_local_decl` is
+/// exactly this call wrapped with that bookkeeping.
 pub(crate) fn fresh_fvar(ctx: &mut MetaCtx, ty: ExprId, name: &str) -> ExprId {
     let base = Some(ctx.view.store);
     let s = ctx
@@ -134,15 +144,7 @@ pub(crate) fn fresh_fvar(ctx: &mut MetaCtx, ty: ExprId, name: &str) -> ExprId {
         .scratch
         .name_str(base, None, s)
         .expect("interning a tiny fixed name is infallible");
-    ctx.lctx
-        .mk_local_decl(
-            ctx.scratch,
-            base,
-            &mut ctx.fvar_gen,
-            Some(n),
-            ty,
-            BinderInfo::Default,
-        )
+    ctx.push_local_decl(Some(n), ty, BinderInfo::Default)
         .expect("declaring a test fvar is infallible")
 }
 
