@@ -59,4 +59,14 @@ impl LocalCtxSnapshot {
     pub fn depth(&self) -> usize {
         self.local_names.len()
     }
+
+    /// Both halves at once — `MetaCtx::install_lctx`'s only caller. The
+    /// two fields swap into `self.lctx`/`self.local_names` together
+    /// because they are asserted to stay in lockstep at every checkpoint,
+    /// restore and push (this struct's own doc comment); an accessor
+    /// that returned only one half would let a caller violate that
+    /// invariant by construction.
+    pub(crate) fn parts(&self) -> (&LocalContext, &[(Option<NameId>, ExprId)]) {
+        (&self.lctx, &self.local_names)
+    }
 }
