@@ -811,6 +811,78 @@ mismatches directly (`binder_smoke.rs` / `app_smoke.rs` style), which
 the plan enumerates, and by item 11's byte-identity of every green
 record.
 
+## Amendment 6 (2026-09-08, post-P4 Meta tier): P4 splits into two tiers
+
+P4 shipped its Meta tier in #37 and stopped there. This amendment
+records why, what shipped, and what the elaborator tier now waits on.
+§ P4 above is unchanged: nothing in it was wrong, and its plan's tasks
+7–10 resume as written.
+
+**1. What shipped (#37).** Tasks 1–6 of the P4 plan: the verbatim
+`Init/Coe.lean:131-287` chain in both fixture tiers, the
+`Lean.Meta.coeDeclAttr` decode and `MetaCtx::is_coe_decl`, the
+`LOption` / `try_synth_instance` move down from the ladder,
+`transform.rs` with `with_transparency` / `whnf_r` / `mk_arrow` /
+`CoeExpansionMismatch`, and `leanr_meta::coe` — `expand_coe`,
+`coerce_simple`, `coerce_to_function`, `coerce_to_sort`, the monad-lift
+shape guard and `coerce`, 1:1 with `Lean/Meta/Coe.lean`. Six synthesis
+records (compared count 18 → 24); the 107 elaboration records and the 18
+pre-existing synthesis records byte-identical throughout. `leanr_kernel`
+byte-untouched; `leanr_meta` additive exactly as § Amendment 5 item 12
+scoped it.
+
+**2. What did not ship, and why it is not a coercion problem.** Tasks
+7–10 — `mkCoe`, `ensureHasType`, `ensureType`, the `.coe` ladder and
+reporter arms, the six `coe/*` records and the seam retirement — are
+written and preserved on `m4b3-p4-task7-wip`, and four of the six
+records cannot pass. **Every metavariable leanr mints is declared with
+an empty local context** (`assign.rs::mk_aux_mvar`,
+`elab.rs::mk_fresh_expr_mvar_of_kind`, both of which say so in their own
+doc comments), where the oracle mints at `(← getLCtx)`
+(`Meta/Basic.lean:866-867`). So `check_assignment_scope_body`'s `FVar`
+arm — a correct transcription of `CheckAssignmentQuick.check`
+(`ExprDefEq.lean:1060`) — rejects any ambient free variable as out of
+scope, and a metavariable cannot be unified with a `fun`-bound variable
+at all. Measured over `Synth0.olean`: `coerce_simple` answers `Some` for
+a constant and `None` for a local of the same type, while `infer_type`
+on that local answers `Ok`; underneath, `is_def_eq(?m, local)` is
+`false` where `is_def_eq(?m, constant)` is `true`.
+
+**3. Why P4 is where it surfaced.** `CoeT α a β` takes the coerced
+VALUE as a class parameter. It is the first goal shape in this milestone
+whose class parameters can contain a local variable — every earlier
+goal (`Add N`, `Op N N ?c`, `Get Cell ?idx ?elem`, and P4's own
+`CoeFun FnN ?γ` / `CoeSort SortN ?β`) carries types only. Measured:
+`coerce_to_function` and `coerce_to_sort` on a local variable both
+answer `Some` today. That scopes the damage precisely — of P4's six
+records, only the four that route through `CoeT` are blocked;
+`coe/funApp` and `coe/sortDomain` were never blocked.
+
+**4. The second half of the same root.** `coe/postponedThenResumed`
+fails differently: a `.coe` metavariable registered inside a binder is
+resumed by the fixpoint after that binder's scope has closed, and its
+stored payload no longer resolves. The oracle resumes every synthetic
+metavariable under `mvarId.withContext` — `resumePostponed`
+(`Elab/SyntheticMVars.lean:32-36`) and the `.coe` arm's own
+(`:545`) — which reinstalls the metavariable's declared context.
+leanr's `SavedContext` deliberately models only `level_names`, and has
+no counterpart to reinstall.
+
+**5. The prerequisite slice.** Both halves are the same missing
+mechanism, and it is infrastructure every later slice that elaborates
+under a binder needs, so it gets its own spec and plan rather than an
+amendment here:
+`docs/superpowers/specs/2026-09-08-metavariable-local-contexts-design.md`.
+It carries one kernel edit (a `Clone` derive on `LocalContext`, which
+`LocalDecl` already has), an `Arc`-shared context snapshot cached per
+binder scope, truthful minting at both sites, and
+`MetaCtx::with_mvar_context` wired into the ladder. The scope check
+itself does not change: the bug is its input, not the predicate.
+
+**6. Ordering.** The metavariable-local-context slice lands first. P4's
+elaborator tier then resumes at its existing plan's task 7 with no
+redesign, and P5 follows it as § Next step already said.
+
 ## What M4b-3 ships — and the stated non-shipping
 
 Like all of M4a and M4b so far, **M4b-3 does not ship independently
@@ -1714,10 +1786,16 @@ Plan 1 (application foundation) shipped in #31; P2a — the
 synthetic-mvar ladder, the fixpoint, and instance arguments — shipped in
 #32; P3 — literals and default instances — shipped in #33; P2b-i —
 outParam support inside synthesis — shipped in #34; P2b-ii — the
-elaborator outParam branch — shipped in #35. The next implementation
-plan is **P4** — coercions (§ P4, and § Amendment 5 for the pinned
-citations, the `Lean.Meta.coeDeclAttr` extension, the
-`try_synth_instance` move, the `transform` scope, the corrected
-monad-lift guard, the ladder arm, the six rewire sites, the two fixture
-tiers, and what P4's corpus records and smoke tests must kill). P5 gets
-its own implementation plan once P4 lands, mirroring M4b-2's rhythm.
+elaborator outParam branch — shipped in #35; P4's **Meta tier** —
+`leanr_meta::coe`, the `coeDeclAttr` decode, `transform.rs` and both
+fixture tiers — shipped in #37.
+
+P4's elaborator tier is written and blocked, not abandoned (§ Amendment
+6). The next implementation plan is
+`docs/superpowers/plans/2026-09-08-metavariable-local-contexts.md`
+(design:
+`docs/superpowers/specs/2026-09-08-metavariable-local-contexts-design.md`),
+which gives every metavariable a truthful local context — the mechanism
+four of P4's six records need. P4's own plan then resumes at its task 7
+with no redesign, and P5 gets its own implementation plan after that,
+mirroring M4b-2's rhythm.
