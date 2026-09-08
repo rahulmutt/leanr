@@ -961,6 +961,7 @@ impl<'s> InterpId<'s> {
         let mut default_instances = Vec::new();
         let mut projection_fns = Vec::new();
         let mut classes = Vec::new();
+        let mut coe_decls = Vec::new();
         for pair in array(&f[4])? {
             let (pf, _) = ctor(pair, 0, 2, "ModuleData.entries pair")?;
             let ext_name = self.name(&pf[0])?;
@@ -1071,6 +1072,21 @@ impl<'s> InterpId<'s> {
                         classes.push(self.class_entry(e)?);
                     }
                 }
+                // TagAttribute (`registerTagAttribute`,
+                // Attributes.lean:180-201): entries are a bare `Array
+                // Name`, no scoped wrapper and no ctor around each name
+                // — the same posture as `Lean.classExtension` above
+                // minus the `ClassEntry` ctor. Named after the
+                // `builtin_initialize`d constant (`ref := decl_name%`,
+                // `:181`), which is why the key is `coeDeclAttr` and
+                // not the attribute keyword `coe_decl`; confirmed by
+                // string-probing the toolchain's `Init/Coe.olean`
+                // (design spec § Amendment 5 item 2).
+                "Lean.Meta.coeDeclAttr" => {
+                    for e in array(&pf[1])? {
+                        coe_decls.push(self.name_req(e)?);
+                    }
+                }
                 _ => continue,
             }
         }
@@ -1100,6 +1116,7 @@ impl<'s> InterpId<'s> {
             default_instances,
             projection_fns,
             classes,
+            coe_decls,
         })
     }
 }

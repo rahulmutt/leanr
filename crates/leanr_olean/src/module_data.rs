@@ -396,6 +396,17 @@ pub struct ModuleData {
     /// Typed decode of the `Lean.classExtension` entries (M4b-3 P2b-i).
     /// All other extension entries stay opaque.
     pub classes: Vec<ClassEntry>,
+    /// Typed decode of the `Lean.Meta.coeDeclAttr` entries (M4b-3 P4):
+    /// the declarations tagged `@[coe_decl]`, which `expandCoe`
+    /// (`Meta/Coe.lean:44-70`) unfolds. A `registerTagAttribute`
+    /// extension (`Attributes.lean:180-201`), named after its
+    /// `builtin_initialize`d constant, exporting a bare
+    /// `Name.quickLt`-sorted `Array Name` (private declarations
+    /// filtered out at the exported level, `:192`). Empty when the
+    /// module tags nothing — an empty extension is not exported at all
+    /// (`Environment.lean:1855`). All other extension entries stay
+    /// opaque.
+    pub coe_decls: Vec<NameId>,
 }
 
 impl ModuleData {
@@ -552,6 +563,7 @@ impl ModuleData {
             default_instances: std::mem::take(&mut base.default_instances),
             projection_fns: std::mem::take(&mut base.projection_fns),
             classes: std::mem::take(&mut base.classes),
+            coe_decls: std::mem::take(&mut base.coe_decls),
         })
     }
 }
@@ -877,6 +889,50 @@ mod tests {
         let lvl = find("Lvl");
         assert_eq!(lvl.out_params, vec![1], "Lvl out_params");
         assert_eq!(lvl.out_level_params, vec![1], "Lvl out_level_params");
+    }
+
+    /// `Lean.Meta.coeDeclAttr` decodes (M4b-3 P4 task 2). The extension
+    /// is a `registerTagAttribute` (`Attributes.lean:180-201`): a bare,
+    /// `Name.quickLt`-sorted `Array Name` of the tagged declarations,
+    /// named after the `builtin_initialize`d constant (`ref :=
+    /// decl_name%`), NOT after the attribute keyword `coe_decl`.
+    /// `Synth0.lean` tags exactly the twelve `*.coe` projections of the
+    /// verbatim `Init/Coe.lean` chain (M4b-3 P4 task 1); `Sample.olean`
+    /// tags nothing, and an EMPTY extension is not exported at all
+    /// (`Environment.lean:1855`, `filterNonEmpty`), so the absent case is
+    /// asserted too rather than assumed.
+    #[test]
+    fn coe_decl_attribute_decodes_tagged_names() {
+        let bytes = fixture("meta/Synth0.olean");
+        let mut env = Environment::default();
+        let md = ModuleData::parse(&bytes, env.store_mut()).expect("decode");
+        let render = |n: NameId| env.store().to_name(None, Some(n)).to_string();
+        let mut got: Vec<String> = md.coe_decls.iter().map(|n| render(*n)).collect();
+        got.sort();
+        let mut want: Vec<String> = [
+            "Coe.coe",
+            "CoeDep.coe",
+            "CoeFun.coe",
+            "CoeHTC.coe",
+            "CoeHTCT.coe",
+            "CoeHead.coe",
+            "CoeOTC.coe",
+            "CoeOut.coe",
+            "CoeSort.coe",
+            "CoeT.coe",
+            "CoeTC.coe",
+            "CoeTail.coe",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        want.sort();
+        assert_eq!(got, want, "coeDeclAttr entries");
+
+        let bytes = fixture("Sample.olean");
+        let mut env = Environment::default();
+        let md = ModuleData::parse(&bytes, env.store_mut()).expect("decode");
+        assert!(md.coe_decls.is_empty(), "Sample.olean tags nothing");
     }
 
     /// `Lean.projectionFnInfoExt` decodes: `Semigroup.toMul` is a class
