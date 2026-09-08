@@ -438,11 +438,6 @@ impl<'e> MetaCtx<'e> {
     /// `?γ` (`Coe.lean:105`), which is never emitted, and the canonical
     /// encoder erases binder names anyway.
     ///
-    /// `#[allow(dead_code)]` (removed by task 5): `coe.rs`'s consumer
-    /// (`coerceToFunction?`) lands in the next task; this task ports the
-    /// helper on its own so `transform.rs`/`with_transparency` can be
-    /// tested in isolation first.
-    #[allow(dead_code)]
     pub(crate) fn mk_arrow(&mut self, dom: ExprId, cod: ExprId) -> Result<ExprId, MetaError> {
         let base = Some(self.view.store);
         Ok(self

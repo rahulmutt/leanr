@@ -12,6 +12,7 @@
 
 mod assign;
 mod cache;
+mod coe;
 mod config;
 mod defeq;
 mod discr_path;
