@@ -504,6 +504,313 @@ and 2 are themselves a record of.
 change in that crate and no in-tree path reaches the risk. No
 `lean-toolchain` change and no workflow change.
 
+## Amendment 5 (2026-09-08, post-P2b-ii): P4 scoped and pinned
+
+P2b-ii shipped in #35 (`df1b23b`), closing P3's carried follow-ups 1–2
+and retiring the `resultTypeOutParam?` seams. The order of the remaining
+plans is unchanged: P4 next, then P5. This amendment scopes and pins
+P4 the way § Amendment 4 did P2b-ii: § P4 above is updated in place;
+what follows is the audit against the pinned source and the merged
+code, the decisions § P4 does not carry, and the reasoning behind them.
+
+**1. Corrected and pinned oracle citations.** § P4 as originally
+written cited `Coe.lean` by function; against the pin (v4.33.0-rc1)
+the spans are: `coeDeclAttr` `:21-22`, `isCoeDecl` `:28-29`,
+`recProjTarget` `:32-38`, `expandCoe` `:44-70`,
+`coerceSimpleRecordingNames?` `:78-91`, `coerceSimple?` `:93-98`,
+`coerceToFunction?` `:100-112`, `coerceToSort?` `:114-126`,
+`isTypeApp?` `:128-132`, `isMonadApp` `:138-140`, `coerceMonadLift?`
+`:201-257`, `coerceCollectingNames?` `:259-266`, `coerce?` `:274-278`.
+On the elaborator side `mkCoe` is `TermElabM.lean:1294-1322`,
+`mkCoeWithErrorMsgs` `:1324-1327`, `ensureHasType` `:1334-1340`,
+`ensureType` `:1935-1949`, `elabType` `:1951-1954`. The ladder's
+`.coe` arm is `SyntheticMVars.lean:545-560` and the stuck reporter's
+`.coe` arm `:304-310`. `trySynthInstance` is
+`SynthInstance.lean:1014-1017`. `ensureArgType` is `App.lean:54-62`,
+called from `elabArg` `:1267-1272` and `:1315`; the
+`coerceToFunction?` call in `synthesizePendingAndNormalizeFunType` is
+`:378`. `Meta.transform` is `Transform.lean:179-187` over
+`transformWithCache` `:97-176`, with `TransformStep` at `:13-26`. The
+transparency scopes are `Basic.lean:1278` (`withDefault`), `:1282`
+(`withReducible`), `:1290` (`withReducibleAndInstances`), and `whnfR`
+is `:2113`. `isMonad?` is `AppBuilder.lean:701-709`.
+
+**2. The tag attribute's extension is `Lean.Meta.coeDeclAttr`, not
+`coe_decl`.** `registerTagAttribute` (`Attributes.lean:180-201`)
+registers its `PersistentEnvExtension` under `ref`, which defaults to
+`decl_name%` at the call site — the `builtin_initialize`d constant
+`Lean.Meta.coeDeclAttr` (`Coe.lean:21`). Confirmed by string-probing the
+toolchain's `Init/Coe.olean`: it contains `coeDeclAttr` and no
+`initFn`. The exported entries are a bare `Array Name`, sorted by
+`Name.quickLt`, with private declarations filtered out at the
+exported/server levels (`:189-193`) — no scoped wrapper, the same
+posture as `defaultInstanceExtension`. Two consequences. First,
+**empty extensions are not exported at all** (`Environment.lean:1855`,
+`filterNonEmpty`): `Elab0.olean` and `Synth0.olean` carry no
+`coeDeclAttr` entry today and will carry one only once the fixture
+tags something, so the decoder's absent-means-empty default (the
+existing `_ => continue` arm, `interp_id.rs:1074`) is the correct
+behaviour, not a gap. Second, the decode is smaller than
+`classExtension`'s: a seventh `EnvExtensions` field
+(`metactx.rs:257-268`), `coe_decls: &[NameId]`, consumed into a name
+set in `MetaCtx::new`. Untrusted input, never panics
+(`docs/THREAT_MODEL.md`), and no existing decode path changes.
+
+**3. `try_synth_instance` moves down into `leanr_meta`.** `coerceSimple?`,
+`coerceToFunction?` and `coerceToSort?` all call `trySynthInstance`,
+which is Meta-level in the oracle. leanr's only three-valued answer is
+`TermElabM::try_synth_instance` (`ladder.rs:171-180`) with the
+positional stuck pre-test `has_mvar_outside_out_params`
+(`ladder.rs:207-237`) — elaborator-tier code that `coe.rs` cannot
+call. Decided: both move to `leanr_meta` as
+`MetaCtx::try_synth_instance` returning a new `pub enum LOption<T>`
+(the oracle's `Lean.LOption`), transliterating
+`SynthInstance.lean:1014-1017` — `synth_instance` with
+`MetaError::IsDefEqStuck` mapped to `Undef` — behind the pre-test,
+which moves VERBATIM with its residue documentation (residues 2 and 3
+keep their owner, the mctx-depth model; the "delete the pre-test once
+the depth model lands" end state is unchanged and is now stated where
+that model will live). The ladder's `TypeClass` path calls the moved
+function; `LOptionExpr` (`ladder.rs:42-46`) is deleted in favour of
+the public type. This is additive: no existing `leanr_meta` path
+calls it, and the ladder's behaviour is gated by the 107 committed
+records staying byte-identical across the move.
+
+Two alternatives were rejected. *Injecting the synth call into
+`coe.rs` as a closure* keeps `leanr_meta` narrower, but the closure is
+a transliteration artifact — every `coe.rs` signature would carry a
+parameter the oracle's does not have — and it puts a Meta-level
+function's semantics in the caller's hands. *Calling the bare
+`MetaCtx::synth_instance` and mapping `IsDefEqStuck`* is the oracle's
+literal definition, but without the depth model it re-opens residue 2
+for coercion goals: `CoeT (List ?α) e (Array Nat)` against an
+`instance : Coe (List α) (Array α)` would COMMIT `?α := Nat` where the
+oracle's read-only outer mvar makes the search stuck and `mkCoe`
+registers a `.coe` mvar instead. The pre-test answers `Undef` there
+(an mvar in a non-output position of `CoeT`, which has none), which
+matches. This does not contradict § Amendment 4 item 6: that rejected
+sharing the classification with `preprocess`, whose `PreprocessKind`
+is class-level; this moves the position-level test whole.
+
+**4. `transform.rs` is scoped to what `expandCoe` uses.** `expandCoe`
+calls `Meta.transform` with `pre` only and every flag at its default
+(`usedLetOnly := false`, `skipConstInApp := false`; `transform` does
+not even expose `skipInstances`). The port is `transformWithCache`'s
+control flow with `post` fixed at `.done`: the three binder telescopes
+(`visitLambda` / `visitForall` / `visitLet`, `:117-134`) map onto the
+existing `push_local_decl` / `push_let_decl` under the
+`lctx_checkpoint` / `lctx_restore` idiom and `mk_lambda` / `mk_forall`
+/ `mk_let_expr`; `visitApp` (`:135-149`) without the `skipInstances`
+branch; the `mdata` and `proj` arms; and the `.visit` re-entry that
+runs `pre` again on the replacement. The cache (`checkCache` on
+`ExprStructEq`) is a map keyed on `ExprId`, which hash-consing makes
+structural for free. The other traversals in that file
+(`betaReduce`, `zetaReduce`, `unfoldDeclsFrom`, …) have no consumer in
+M4b-3 and are not ported.
+
+**5. `expandCoe`'s unfolding is `unfoldProjInst?`, not delta, and
+leanr already has it.** `Coe.lean:56` calls `unfoldDefinition?` on
+`CoeT.coe α a β inst` under `withReducibleAndInstances`. Class
+projections are deliberately NOT `[reducible]` (`WHNF.lean:810-811`),
+so `matchConstAux`'s gate fails at `.instances` and its `failK` runs
+`unfoldProjInstWhenInstances?` (`:814-818`) → `unfoldProjInst?`
+(`:793-806`): delta-beta the projection at default transparency, then
+`reduceProj?` the instance under `.instances`, yielding
+`CoeHTCT.coe α β inst' a`, which `.visit` feeds back to `pre`. Iterated
+down the chain this reaches `Coe.coe Nat Int instCoeNatInt n` and then
+`Int.ofNat n`. `unfold_definition_app` (`whnf.rs:2612`) already routes
+both `failK` sub-conditions to `unfold_proj_inst_when_instances`
+(`:2441`) → `unfold_proj_inst` (`:2499`, transcribed in full in M4a
+plan 4 task B6), so `expand_coe` composes from `unfold_definition` +
+`head_beta` under a scoped `Instances` transparency and needs no
+`whnf.rs` change. Three oracle side effects have no term impact and
+are dropped, recorded here so a reader does not go looking for them:
+the applied-instance name list (`StateT` over `List Name`, consumed
+only by the `CoeExpansionTrace` info leaf), `pushInfoLeaf`, and
+`recordExtraModUseFromDecl` (`recProjTarget`'s only purpose).
+
+**6. The monad-lift shape guard, corrected.** § P4 described the guard
+as "expected type an application of a monad-ish head, source coercible
+under `MonadLiftT`". Neither half is implementable without the
+constants, and neither is needed. `coerceMonadLift?` (`:201-257`)
+requires BOTH `isTypeApp?` on the expected type and on `eType`
+(`:204-205`); then either `isDefEq m n` succeeds and `isMonad? n` must
+answer `some` — which is `trySynthInstance (Monad n)` inside a
+`try … catch _ => none` (`AppBuilder.lean:701-709`), so `none` when
+`Monad` is not in the environment — or `autoLift` is on and the
+`MonadLiftT m n` synthesis inside a `try … catch _ => return none`
+(`:214-245`) must answer `.some`, impossible when `MonadLiftT` is not
+in the environment. So in any environment lacking both constants the
+function returns `none` on every input and the oracle proceeds to
+`coerceToFunction?` / `coerceSimpleRecordingNames?`. The faithful
+guard is therefore: `UnsupportedSyntax("monad-lift coercion requires
+the do-notation slice")` only when both types are `isTypeApp?` AND
+the environment contains `Monad` or `MonadLiftT`; otherwise skip, as
+the oracle does. `isTypeApp?` is `withReducible whnf` then an `App`
+match — the same two-line composition as `whnfR`. The prelude-mode
+fixtures declare neither constant, so no record can reach the guard,
+and the seam audit asserts it fires on a hand-built environment that
+does. `autoLift` itself (`register_builtin_option`, `:72-75`) needs no
+producer: it is only read inside the branch the guard covers.
+
+**7. The `.coe` ladder arm, transliterated.** § P4 item 2 summarised
+it; the arm (`SyntheticMVars.lean:545-560`) is: under `withDefault`,
+`isDefEq (← inferType e) expectedType`; if true and `occursCheck mvarId
+e` passes, `assign e` and return `true`; else `coerceCollectingNames?`
+— on `.some coerced`, if `occursCheck mvarId coerced` passes, assign
+and return `true`; else return `false`. Every primitive exists:
+`set_transparency` (`metactx.rs:401`, to be wrapped in the scoped
+`with_transparency` helper of item 12), `check_occurs` (`:882`, P2a),
+`is_def_eq`, `infer_type`. The reporter's `Coe` arm (`report.rs:97-99`)
+becomes a new `ElabError::StuckCoercion { expected, got, goal }`
+mirroring `:304-310` (`throwTypeMismatchError` with the extra
+"failed to create type class instance for" goal) — a distinct variant
+so smoke tests can tell "stuck" from "immediately impossible".
+`mkCoe`'s own failure (`.none => failure`, `:1307`, caught into
+`throwTypeMismatchError` at `:1317` / `:1322`) stays `ElabError::TypeMismatch`: the oracle uses the
+same error function for both, so the existing variant is the faithful
+one. The three post-expansion hard errors — `coerceSimpleRecordingNames?`'s
+"coerced expression has wrong type" (`:86-87`), `coerceToFunction?`'s
+"result is still not a function" (`:108-110`) and `coerceToSort?`'s
+"result is still not a type" (`:122-124`) — are `MetaM` throws and
+land as ONE new `MetaError::CoeExpansionMismatch(String)` variant,
+additive, which `leanr_elab` surfaces through `ElabError::Meta` as it
+does every other `MetaError`.
+
+**8. Six rewire sites, and `ensure_type` is new.** The M4b-1 posture
+"error on a defeq mismatch" is open-coded at five places and each
+becomes a call into `mk_coe`: `elab_term_ensuring_type`
+(`elab.rs:293-307`, the crate's `ensureHasType`); the ascription
+`($e :)` arm (`ascription.rs:141-149`) and the `($e : $type)` arm
+(which delegates to `elab_term_ensuring_type`, `:165`, and so is
+covered by the first site — recorded because a reader counting
+`TypeMismatch` sites will find only one there); `elab_and_add_new_arg`
+(`args.rs:874-881`, the crate's `ensureArgType` — `App.lean:54-62`'s
+`errToSorry` arm is prose-and-recovery leanr does not do, so the
+oracle's `try … catch` there collapses to the plain call);
+`synthesize_pending_and_normalize_fun_type` (`args.rs:120-127`, whose
+`UnsupportedSyntax` naming P4 becomes `coerce_to_function` with the
+oracle's `f, fType` state update, `App.lean:378-380`, and whose
+`FunctionExpected` fall-through stays). The sixth is not a rewrite of
+an existing check but a missing function: `builtin/binder.rs`'s
+`elab_type` (`:24-36`) documents itself as "`elabType t` … then
+ensure-is-type" and implements only the `elabTerm t (mkSort ?u)` half,
+letting `elab_term_ensuring_type`'s `isDefEq` stand in for
+`ensureType`. That is exact until a domain can be COERCED to a sort;
+P4 adds `ensure_type` (`TermElabM.lean:1935-1949`: `isType`, else
+`inferType` and `isDefEq eType (Sort ?u)`, else `coerceToSort?`, else
+"type expected") and makes `elab_type` call it after a plain
+`elab_term`. No other site calls `coerceToSort?` in M4b-3's grammar
+(`elabCoeSortNotation`, `BuiltinNotation.lean:36-40`, is item 13's).
+
+**9. Two fixture tiers, synthesis first — the P2b-i precedent.**
+`Synth0.lean` gains, in this order: `semiOutParam` verbatim from
+`Init/Prelude.lean:725` at the root namespace (the `outParam`
+reasoning at `Synth0.lean:164-171` applies unchanged — `Coe`'s first
+parameter is `semiOutParam (Sort u)`, and `semiOutParam` is inert for
+synthesis apart from being reducible); the coercion class chain
+VERBATIM from `Init/Coe.lean:131-287` — twelve classes, seventeen
+instances, twelve `attribute [coe_decl]` lines — because the diamond
+of reflexive and transitive instances (`CoeTC α α` beside
+`[Coe β γ] [CoeTC α β] : CoeTC α γ`, and likewise through `CoeOTC`,
+`CoeHTC`, `CoeHTCT`, then `CoeT`'s three instances) is exactly what
+the Mathlib synthesis nightly will hit, and a stand-in chain would
+verify the resolver against a shape no real code has; a two-step
+chain of `Coe` instances across three types — `N` plus two new opaque
+types; the requirement is the chain, not the names — and a `CoeFun`
+carrier and a `CoeSort` carrier. `attribute [coe_decl]` is a
+builtin attribute, so this stays prelude-mode and import-free, as
+`Init/Coe.lean` itself is. Its records pin the FULL instance term —
+`expandCoe` never runs at this tier, so the path the resolver took is
+observable here and nowhere else: `CoeT N n M` through the two-step
+chain, `CoeT N n N` (the reflexive instance, declared last and so
+tried first), `CoeT N n NoBase` → `.none`, `CoeFun F ?γ` with the
+outParam assigned, and `CoeSort S ?β`. `Elab0.lean` then gains the
+same `semiOutParam` + chain, a two-constructor `Int` verbatim from
+`Init/Data/Int/Basic.lean:46`, `instance instCoeNatInt : Coe Nat Int
+:= ⟨Int.ofNat⟩` — the oracle's own worked example, `Init/Coe.lean:32`
+— and the two carriers. Both `.olean`s rebuild and both corpora
+regenerate; § Amendment 4 item 9's rule applies to every declaration
+named here: it is a candidate validated against the oracle in the
+plan's first task, and the REQUIREMENTS (a full-chain instance term
+pinned at the synthesis tier; a numeral-free `Nat`-to-`Int`
+coercion; a `CoeFun` head that is not a forall; a `CoeSort` domain)
+are what a replacement must meet if a candidate does not survive.
+
+**10. Records, and the mutation each must kill (§ Amendment 4 item 11
+applies: the plan measures every one).** Closed terms only, so the
+coerced value is always a `fun` binder: `fun (n : Nat) => (n : Int)`
+dies if `expand_coe` is stubbed to identity (the term would carry
+`CoeT.coe`); a two-step-chain record dies if the resolver's candidate
+order is reversed (the synthesis-tier term moves; the elab-tier term
+is the same `Int.ofNat`-shaped function either way, which is exactly
+why item 9 pins the instance term one tier down);
+`fun (g : Fn) => g 0` dies if `coerce_to_function` is stubbed to
+`None` (`FunctionExpected`); `fun (c : Carrier) (x : c) => x` dies if
+`ensure_type` skips `coerce_to_sort` ("type expected"); an
+argument-position record `fun (n : Nat) => takesInt n` dies if the
+`args.rs` rewire is reverted (`TypeMismatch`); and a record whose
+expected type is still an mvar at the coercion site dies if the
+ladder's `Coe` arm is reverted (the seam's `UnsupportedSyntax`). The
+"already-defeq after defaulting" branch of the ladder arm (`:546-551`)
+is a smoke test in the § Amendment 4 item 10 sense — its outcome is
+`e` itself either way — pinned by asserting the mvar is assigned to
+`e` and NOT to a `CoeT.coe` expansion.
+
+**11. Regression gates.** Every one of the 107 committed elab records
+and the 20 committed synth records stays byte-identical across every
+task: the `try_synth_instance` move (item 3), the chain landing in
+both fixtures (no committed record mentions a `Coe*` class, and
+instances are indexed by class, so no existing goal gains a
+candidate), and the six rewires (no committed record has a defeq
+mismatch, because the dumper skips failed elaborations — see
+item 14). A record that moves means the mechanism is wrong, not that
+the baseline was stale.
+
+**12. The accessor ledger row, revised.** § Accessor ledger's P4 row
+listed `unfold_definition`, `get_level`, `whnf_r`, `mk_arrow` as
+accessors to widen. With `coe.rs` INSIDE `leanr_meta` their only
+consumer is in-crate, so `unfold_definition` (`whnf.rs:2594`) and
+`get_level` (`infer.rs:754`) stay `pub(crate)`, `whnf_r` is a two-line
+in-crate composition, and `mk_arrow` (a non-dependent `forallE`,
+today only `synth.rs:3274`'s test helper) becomes a crate-private
+constructor. The public surface P4 adds is: the three `coe.rs` entry
+points (`coerce`, `coerce_to_function`, `coerce_to_sort`) and
+`expand_coe`, `try_synth_instance` + `LOption` (item 3), a scoped
+`with_transparency(mode, f)` helper wrapping `set_transparency` —
+save/run/restore, with the same no-drop-guard caveat § Follow-ups
+item 4 records for `with_assignable_synthetic_opaque`, and the same
+justification: every caller is `Result`-based and catches nothing —
+and `MetaError::CoeExpansionMismatch` (item 7). Fresh level and expr
+mvars at this tier use the name-keyed idiom `level.rs:718`
+(`fresh_level_mvar`) and `synth.rs:593` already use, under a
+`coe.rs`-specific prefix; `MVarId` is a `NameId`, so distinct prefixes
+cannot collide with the elaborator's `_leanr_elab_expr_fresh` counter.
+Nothing existing changes behaviour; the widening § Global constraints
+records for P4 is exactly the two new modules plus these items.
+
+**13. Not in scope, with owners.** The `↑x` / `⇑x` / `↥x` notations
+(`elabCoe`, `elabCoeFunNotation`, `elabCoeSortNotation`,
+`BuiltinNotation.lean:21-40`) are not parsed by leanr — no
+`coeNotation` kind exists in `leanr_grammar` — so they are owned by
+the parser slice that adds them, and are added to § Out of scope.
+`coerceMonadLift?`, `Lean.Internal.coeM` / `liftCoeM` and `autoLift`
+stay the do-notation slice's (item 6 is a guard, not a port).
+§ Follow-ups item 4 stays `leanr_meta`'s. PR #35's known residual —
+the stale "does not declare `Lean.Internal.coeM` until task 5" doc
+comment at `tests/app_smoke.rs:1327` — is comment-only and is fixed by
+whichever P4 task next touches that file, rather than carried further.
+No `lean-toolchain` change and no workflow change.
+
+**14. The corpus has no error records, so § P4's "re-verify the
+existing `TypeMismatch` records" has nothing to re-verify.**
+`dump_elab.lean:626-628` catches a failed elaboration and `eprintln`s
+it; only green terms are emitted. The behaviour change to shipped
+M4b-1 code is therefore gated by the smoke tests that construct
+mismatches directly (`binder_smoke.rs` / `app_smoke.rs` style), which
+the plan enumerates, and by item 11's byte-identity of every green
+record.
+
 ## What M4b-3 ships — and the stated non-shipping
 
 Like all of M4a and M4b so far, **M4b-3 does not ship independently
@@ -548,7 +855,8 @@ spec correction; `char` is a two-line arm, not a synthesis client.
 - **`leanr_olean` gains two additive env-extension decoders**, not a
   behavior change: `classExtension` (P2b-i; `ClassEntry` is
   name + `outParams` + `outLevelParams`, § Amendment 3 item 5) and the
-  `coe_decl` tag attribute (P4). Precedent: M4a plan 4 PR-A, which decoded the
+  `Lean.Meta.coeDeclAttr` tag-attribute extension (P4; § Amendment 5
+  item 2 for why that is its name, not `coe_decl`). Precedent: M4a plan 4 PR-A, which decoded the
   instance / default-instance / projection-fn extensions the same way.
   Both are untrusted-input parsers and must never panic on arbitrary
   bytes (`docs/THREAT_MODEL.md`); no existing decode path changes.
@@ -568,7 +876,11 @@ spec correction; `char` is a two-line arm, not a synthesis client.
   modules `leanr_meta/src/coe.rs` and `leanr_meta/src/transform.rs`.
   These are new files: no existing `leanr_meta` path changes behavior,
   no kernel change, and the 1:1 file correspondence with the oracle is
-  what keeps fidelity auditing cheap. Any *non-additive* or
+  what keeps fidelity auditing cheap. § Amendment 5 item 12 enumerates
+  the additive public surface that comes with them — `try_synth_instance`
+  + `LOption` moved down from `ladder.rs`, a scoped `with_transparency`,
+  one `MetaError` variant — each gated by the same byte-identity of both
+  committed corpora. Any *non-additive* or
   behavior-changing `leanr_meta` change remains flagged and out of
   scope.
 - **Named-seam discipline.** Every unregistered kind and every guarded
@@ -628,7 +940,7 @@ verified one layer down, at `oracle_synth.rs` + `synth-queries.jsonl`
 | **P3** literals + defaults | the `synthetic.rs` split and the fixture second-instances (§ Amendment 2 item 3), `Term.mkInstMVar`, `num` (`OfNat`), `char` (`Char.ofNat`), `scientific` (`OfScientific`), `synthesizeUsingDefault` / `synthesizeSomeUsingDefaultPrio` | `42`, `(42 : Tag)`, `'a'`, `(1.5 : Tag)`, and a numeral inside an application |
 | **P2b-i** outParam synthesis | `classExtension` decode (`ClassEntry` = name + `outParams` + `outLevelParams`), `ClassTable` in `MetaCtx`, `preprocess` / `preprocessOutParam` / `assignOutParams` in `synth.rs` with the snapshot narrowed to the search, the synth record's new `assigns` field | `Op N N ?γ` — the outParam assigned as a *result* of synthesis, at the meta tier |
 | **P2b-ii** the outParam branch | `Context.resultIsOutParamSupport` producer, `isNextOutParamOfLocalInstanceAndResult`, `State.resultTypeOutParam?`, the `finalize` outParam branch, `ladder.rs`'s stuck pre-test exemption, P3's carried follow-ups 1–2 | `getElem`-shaped applications whose result type is a local instance's outParam |
-| **P4** coercions | `coe_decl` tag-extension decode, `expandCoe`, `coerceSimple?` / `coerceToFunction?` / `coerceToSort?` in new `leanr_meta/src/coe.rs`, `mkCoe` + `.coe` mvar case + `ensure_has_type` rewire, monad-lift shape guard | `(n : Int)` where `n : Nat`; a `CoeFun` application |
+| **P4** coercions | `Lean.Meta.coeDeclAttr` tag-extension decode, `try_synth_instance` + `LOption` moved into `leanr_meta`, `transform.rs`, `expand_coe` / `coerce_simple` / `coerce_to_function` / `coerce_to_sort` / `coerce` in new `leanr_meta/src/coe.rs`, `mk_coe` + the `.coe` ladder arm + the six `ensure_has_type` / `ensure_type` rewires, monad-lift shape guard; the coercion chain in both fixture tiers (§ Amendment 5) | `fun (n : Nat) => (n : Int)` at both tiers — the full instance term at the synthesis tier, `Int.ofNat n` at the elaborator tier; a `CoeFun` application; a `CoeSort` binder domain |
 | **P5** binder + argument breadth | implicit / strictImplicit / instImplicit binders for `fun`/`let`/`have`, `fun`'s `optType`, `optParam` defaults, the `autoParam` arm, `..` ellipsis, real implicit-lambda insertion replacing P1's guard | `fun {α} => …`; signatures with `optParam`; `f ..` |
 
 **Ordering rationale.** P1 before P2a because the state machine is what
@@ -1041,51 +1353,90 @@ seam; 6. `num` and both `getDecLevel` failure branches; 7. `char` and
 
 ### P4 — coercions
 
-New `leanr_meta/src/coe.rs`, mirroring `Lean/Meta/Coe.lean`:
+*Scoped and pinned by § Amendment 5, which carries the corrected
+citations, the extension name, the `try_synth_instance` move, the
+`transform` scope, the corrected monad-lift guard, the ladder arm, the
+six rewire sites, the two fixture tiers and the records' discriminators.
+This section is the shape; that amendment is the reasoning.*
 
-- **`expand_coe`** (`Coe.lean:44-70`) — a `transform` traversal under
-  `withReducibleAndInstances`, unfolding `@[coe_decl]`-tagged constants
-  via `unfoldDefinition?` then `headBeta`, recording applied `Coe.coe`
-  instance names, and recursing through projection functions
-  (`recProjTarget`). The generic traversal lands as
-  `leanr_meta/src/transform.rs`.
-- **`coerce_simple?`** (`Coe.lean:78-97`) — synthesize
+New `leanr_meta/src/coe.rs`, mirroring `Lean/Meta/Coe.lean` 1:1:
+
+- **`expand_coe`** (`Coe.lean:44-70`) — a `transform` traversal
+  (`pre` only, default flags) under `Instances` transparency,
+  unfolding `coe_decl`-tagged heads via the existing
+  `unfold_definition` — which for a class projection routes through
+  the already-transcribed `unfoldProjInst?` (§ Amendment 5 item 5) —
+  then `head_beta`, re-visiting the replacement. The generic traversal
+  lands as `leanr_meta/src/transform.rs` (`Transform.lean:97-187`,
+  scoped per § Amendment 5 item 4). The oracle's applied-instance name
+  list, info leaf and module-use recording have no term impact and
+  are dropped.
+- **`coerce_simple`** (`:78-98`) — `try_synth_instance` on
   `CoeT.{u,v} α e β`, build `CoeT.coe …`, `expand_coe`, then **verify**
   the result's inferred type is defeq to the expected type; a mismatch
-  is a hard error, not a silent pass.
-- **`coerce_to_function?`** (`CoeFun`) and **`coerce_to_sort?`**
-  (`CoeSort`). `CoeFun` is not optional-adjacent: `elabApp` itself needs
-  it when the function's type does not reduce to a `forall`.
-- **`coerce?`** preserving the dispatch order of
-  `coerceCollectingNames?` (`Coe.lean:259-265`): **monad-lift →
-  CoeFun-when-expected-is-forall → CoeT**.
+  is `MetaError::CoeExpansionMismatch`, not a silent pass.
+- **`coerce_to_function`** (`:100-112`, `CoeFun`) and
+  **`coerce_to_sort`** (`:114-126`, `CoeSort`), each with the
+  post-expansion `whnf`-is-forall / -is-sort check raising the same
+  variant. `CoeFun` is not optional-adjacent: `elabApp` itself needs
+  it when the function's type does not reduce to a `forall`
+  (`App.lean:378-380`); `CoeSort` is what `ensureType`
+  (`TermElabM.lean:1935-1949`) reaches when a binder domain is not a
+  type.
+- **`coerce`** (`:259-278`) preserving the dispatch order of
+  `coerceCollectingNames?`: **monad-lift guard → CoeFun-when-expected-
+  is-forall (`whnf_r`) → CoeT**.
+
+`try_synth_instance` — `trySynthInstance` (`SynthInstance.lean:1014-
+1017`) behind the positional stuck pre-test — moves from `ladder.rs`
+into `leanr_meta` as `MetaCtx::try_synth_instance` returning a public
+`LOption`, so `coe.rs` and the ladder share one Meta-level answer
+(§ Amendment 5 item 3).
 
 Three supporting pieces:
 
-1. **`coe_decl` decode** in `leanr_olean` — a `TagAttribute`
-   extension (a name set), smaller than M4a plan 4's instance decode.
-   Without it `expand_coe` is a no-op and every coercion emits
-   `CoeT.coe` applications where the oracle emits the unfolded
-   function: a guaranteed, silent, corpus-wide divergence. It is a P4
-   prerequisite task, not a follow-up.
-2. **`mkCoe` and the `.coe` mvar** in `leanr_elab`
-   (`TermElabM.lean:1294-1332`, `SyntheticMVars.lean:544-561`). On
+1. **`Lean.Meta.coeDeclAttr` decode** in `leanr_olean` — the
+   `registerTagAttribute` extension (`Attributes.lean:180-201`): a bare
+   sorted `Array Name`, smaller than M4a plan 4's instance decode, a
+   seventh `EnvExtensions` field. Without it `expand_coe` is a no-op
+   and every coercion emits `CoeT.coe` applications where the oracle
+   emits the unfolded function: a guaranteed, silent, corpus-wide
+   divergence. It is a P4 prerequisite task, not a follow-up.
+2. **`mk_coe`, the `.coe` mvar, and the ladder arm** in `leanr_elab`
+   (`TermElabM.lean:1294-1322`, `SyntheticMVars.lean:545-560`). On
    `.undef` — a stuck `CoeT` synthesis — create a `syntheticOpaque`
-   mvar and register `.coe`. The fixpoint's `Coe` case first re-tries
-   `isDefEq` under `withDefault` (mvar assignments and defaulting may
-   have made the types equal), then `coerce?`, with an `occursCheck`
-   before each assign. `ensure_has_type` / `elab_term_ensuring_type`
-   stop erroring on a defeq mismatch and route through `mkCoe` — a
-   behavior change to shipped M4b-1 code, so the existing
-   `TypeMismatch` records are re-verified, not assumed.
+   mvar and register `Coe`. The ladder's `Coe` arm first re-tries
+   `is_def_eq` under `Default` transparency (mvar assignments and
+   defaulting may have made the types equal), then `coerce`, with a
+   `check_occurs` before each assign. `ensure_has_type`'s five
+   open-coded mismatch sites (`elab_term_ensuring_type`, both
+   ascription arms, `elab_and_add_new_arg`,
+   `synthesize_pending_and_normalize_fun_type`) route through
+   `mk_coe` / `coerce_to_function`, and `builtin/binder.rs`'s
+   `elab_type` gains the `ensure_type` half it documents but lacks —
+   a behavior change to shipped M4b-1/M4b-2 code, gated by every
+   committed record staying byte-identical and by direct smoke tests
+   (the corpus has no error records, § Amendment 5 item 14). The
+   reporter's `Coe` arm becomes `ElabError::StuckCoercion`
+   (`:304-310`); `mk_coe`'s immediate failure stays `TypeMismatch`.
 3. **The monad-lift shape guard.** `coerceMonadLift?`
-   (`Coe.lean:201-248`) is not implemented, but it is tried *first* in
+   (`Coe.lean:201-257`) is not implemented, but it is tried *first* in
    the oracle, so silently skipping it would let a term the oracle
    coerces via `liftCoeM` fall through to `CoeT` and emit a different
-   term. The guard detects that shape — expected type an application of
-   a monad-ish head, source coercible under `MonadLiftT` — and errors
+   term. The guard detects the only shape on which the oracle's
+   function can return `some` — both types reduce to type
+   applications under `Reducible` transparency AND the environment
+   contains `Monad` or `MonadLiftT` (§ Amendment 5 item 6) — and errors
    `UnsupportedSyntax("monad-lift coercion requires the do-notation
-   slice")`.
+   slice")`; on every other shape the oracle returns `none` and so does
+   leanr.
+
+The fixture lands in two tiers, synthesis first (§ Amendment 5 item 9):
+the verbatim `Init/Coe.lean:131-287` class chain plus `semiOutParam` in
+both `Synth0.lean` and `Elab0.lean`, with the synthesis tier pinning
+the FULL instance term the resolver chooses through the diamond, and
+the elaborator tier pinning the expanded function (`Int.ofNat n`) the
+records emit.
 
 ### P5 — binder and argument breadth
 
@@ -1129,7 +1480,7 @@ additive; it says so.
 | P2b-i | **Does not belong in this ledger, and that is the point.** P2b-i is not an accessor addition: it changes `MetaCtx::synth_instance_main`'s control flow, adds private `preprocess` / `preprocess_out_param` / `assign_out_params` / `apply_abstract_result` helpers to `synth.rs`, and adds a `ClassTable` argument to `MetaCtx::new` (a signature change across 25 call sites; P4 adds a further extension, so the six entry slices should become one `EnvExtensions` struct in the same task rather than paying that churn twice). The widening is recorded in § Global constraints and § Amendment 3 item 4. The only genuinely additive part is the `pub` reader pair `get_out_param_positions` / `get_out_level_param_positions` (oracle: `Class.lean:76-88`), which P2b-ii consumes. |
 | P2b-ii | none expected — it reads P2b-i's class accessors and otherwise stays in `leanr_elab` |
 | P3 | Audited against the merged P2a code; larger than this spec's original three. **Additive forwarders:** `get_dec_level` (composes the private `get_level`, `infer.rs:754`, `level_normalize`, and `dec_level_top`, `level.rs`); `is_prop` (widening the `pub(crate)` `lazy_delta.rs:171` to `pub` — needed by `num`'s Prop failure branch; no name clash exists, so no forwarder was added); `checkpoint`/`rollback` (widening the `pub(crate)` `metactx.rs:944`/`:954` to `pub`, plus a `pub` `MetaSnapshot` re-export — needed for `commitWhen`, `Lean/Util/MonadBacktrack.lean:50-60`; both line numbers corrected in the P3 fix wave — `:952` was blank, and `:56` truncated the citation before the `catch ex => restoreState s; throw ex` arm that is the whole reason `rollback` is needed on the error path); `with_assignable_synthetic_opaque` (needed by this plan only for `synthesizeUsingDefaultInstance`, `SyntheticMVars.lean:164` — the spec's earlier attribution to `synthesizeUsingDefaultPrio` was off by one function, and "only" is scope-local: the pin turns the flag on in eleven places, enumerated in `config.rs`'s field doc; both corrected against the pinned v4.33.0-rc1 source in M4b-3 P3 task 4 — moved here from P2a, whose ladder never reaches it; `config.rs`'s module doc named `assign_synthetic_opaque` as a deferred field; task 4 added it, cutting that list from three to two). **The `Config` field's READ SITES are part of this row's contract, not an implementation detail** (added in the P3 fix wave: a config field with no consumer is dead, and a later slice reading only "added the field and the scope" would not know where the flag is consulted). `Config::assign_synthetic_opaque` (`crates/leanr_meta/src/config.rs:95-163`, whose field doc enumerates all three sites and is the authority this row mirrors) is open-coded at three `syntheticOpaque` checks, two of them **gated by the flag**: `assign.rs:157-166` (`unassigned_mvar_id`, transcribing `isAssignable`, `ExprDefEq.lean:1731-1733`) and `lazy_delta.rs:498-501` (`is_def_eq_singleton`'s `isAssignable sFn`, `ExprDefEq.lean:2156` → the same `:1731-1733`; gated in P3 task 4 fix round 1, because it is reachable from inside an `isDefEq` and an ungated copy would refuse an assignment the oracle permits). The third, `discr_path.rs`'s discrimination-key builder (`DiscrTree/Main.lean:308`), is **deliberately NOT gated** — and the reason is not "the oracle never runs it inside the scope", which is false (the flag does survive into synthesis; `synthInstanceCore?`'s `withConfig`, `SynthInstance.lean:963-964`, overrides six fields but not this one). What moots the gate there is `withNewMCtxDepth` (`SynthInstance.lean:978`): every mvar from outside the search is at a different depth, so `isReadOnlyOrSyntheticOpaque`'s FIRST arm (`Basic.lean:981-982`) returns `true` before the kind is examined. Depth is this crate's standing tier-1 seam, so wiring the flag in there without modelling depth would flip `Star`/`Other` keys the oracle keeps at `Other`. `whnf.rs`'s `synth_pending` guard is not on the list at all: `synthPendingImp` (`SynthInstance.lean:1033-1036`) matches `mvarDecl.kind` directly and never reads the config. `mk_raw_nat_lit` is NOT needed (M4b-3 P3 task 4): `Store::expr_lit_nat` (`leanr_kernel/src/bank/terms.rs:535`) and `MetaCtx::store_mut` are both already public, which is exactly how `builtin/lit.rs`'s `elab_str` reaches `expr_lit_str`. **New:** `default_instance_priorities` — the *global* descending distinct priority set (`getDefaultInstancesPriorities`); the existing `default_instances_of` is per-class and cannot produce it. **Not additive, and the one item that isn't:** `mk_const_with_fresh_mvar_levels` and `forall_meta_telescope_reducing` (returning binder infos, which `synthesizeUsingDefaultInstance` needs to pick out the `instImplicit` binders as new pending goals). Both loops existed — `refresh_instance_levels` and the telescope inside `get_subgoals` — but private, specialized to `&Instance`, and discarding binder infos. (Line references dropped: M4b-3 P3 task 4 renamed the first and moved the second, so the numbers this row carried before the commit no longer resolve. The generalized forms are `MetaCtx::mk_const_with_fresh_mvar_levels` and `MetaCtx::forall_meta_telescope_reducing`, both in `synth.rs`.) P3 **generalizes them out of `synth.rs` and has `get_subgoals` call the generalized form**, rather than duplicating a fidelity-critical telescope loop in `leanr_elab`. Behavior-neutral, gated by `synth.rs`'s existing tests plus the `leanr_meta` oracle corpus staying byte-identical. |
-| P4 | `unfold_definition`, `get_level`, `whnf_r`, `mk_arrow`, and the **new modules** `coe.rs` + `transform.rs` (§ Global constraints — the one deliberate widening) |
+| P4 | Revised by § Amendment 5 item 12. The originally listed `unfold_definition`, `get_level`, `whnf_r`, `mk_arrow` are NOT widened: `coe.rs` lives inside `leanr_meta`, so `unfold_definition` (`whnf.rs:2594`) and `get_level` (`infer.rs:754`) stay `pub(crate)`, `whnf_r` is an in-crate two-line composition, and `mk_arrow` (today only `synth.rs:3274`'s test helper) becomes a crate-private constructor. What P4 adds to the public surface: the **new modules** `coe.rs` + `transform.rs` (§ Global constraints — the deliberate widening) with entry points `coerce` / `coerce_to_function` / `coerce_to_sort` / `expand_coe`; `try_synth_instance` + `pub enum LOption` (moved from `ladder.rs`, item 3); a scoped `with_transparency(mode, f)` helper over the existing `pub set_transparency` (`metactx.rs:401`), save/run/restore with the same no-drop-guard caveat and justification as `with_assignable_synthetic_opaque` (§ Follow-ups item 4); `MetaError::CoeExpansionMismatch(String)` for the three post-expansion hard errors (item 7); and the `coe_decls` `EnvExtensions` field (item 2). All additive; no existing `leanr_meta` path changes behaviour, gated by both crates' committed corpora staying byte-identical. |
 | P5 | none expected |
 
 ## Error handling
@@ -1145,7 +1496,7 @@ naming the owning slice.
 `StepBudgetExhausted` / `DepthBudgetExhausted` budgets surface as
 elaboration errors rather than hangs. No path panics.
 Untrusted-input discipline is unchanged: the only new decoders are
-P2b-i's `classExtension` and P4's `coe_decl` name set, both following the
+P2b-i's `classExtension` and P4's `Lean.Meta.coeDeclAttr` name set, both following the
 existing env-extension decode pattern, which must never panic on
 arbitrary bytes (`docs/THREAT_MODEL.md`).
 
@@ -1167,6 +1518,17 @@ Four tiers, no new nightly workflow.
    `Lean.Internal.coeM` re-routes all 101 committed records through the
    producer, and every one of them must stay byte-identical
    (§ Amendment 4 item 8).
+   **P4's records** (§ Amendment 5 items 9-11): `fun (n : Nat) =>
+   (n : Int)` (dies if `expand_coe` is identity), a two-step-chain
+   coercion (dies at the synthesis tier if the resolver's candidate
+   order is wrong), `fun (g : Fn) => g 0` (dies without
+   `coerce_to_function`), a `CoeSort` binder domain (dies without
+   `ensure_type`), an argument-position coercion (dies if the `args.rs`
+   rewire is reverted), and a coercion under a still-mvar expected type
+   (dies if the ladder's `Coe` arm is reverted). Its regression gate:
+   all 107 committed elab records and all 20 committed synth records
+   stay byte-identical across the `try_synth_instance` move, the chain
+   landing in both fixtures, and the six rewires.
    **Expected types come from source ascription.** The dumper keeps its
    one-term-per-record contract; `(f x : T)` induces an expected type
    through `typeAscription`, which M4b-1 already ships. This matters
@@ -1188,10 +1550,16 @@ Four tiers, no new nightly workflow.
    any green record moving, and the `finalize` else-arm is invisible in
    the emitted `Expr`, so it is pinned by asserting NO default-instance
    walk via P3's `default_walk_log` (§ Amendment 4 item 10).
+   P4 adds: the ladder `Coe` arm's order (defeq-under-`Default` with
+   occurs check BEFORE `coerce`, and the already-defeq branch assigning
+   `e` itself rather than an expansion — § Amendment 5 item 10),
+   `transform`'s `.visit` re-entry and cache, and the monad-lift guard
+   firing on a hand-built environment that declares `Monad`.
 3. **Seam audit per plan**, in M4b-1's Task-7 style: enumerate every
    unregistered kind and every guarded shape and assert each returns a
    named `UnsupportedSyntax` rather than a wrong `ExprId`.
-4. **The meta-tier synthesis gate, for P2b-i only.** P2b-i touches no
+4. **The meta-tier synthesis gate, for P2b-i — and again for P4's
+   chain.** P2b-i touches no
    `leanr_elab` code, so it is verified where the code lives:
    `crates/leanr_meta/tests/oracle_synth.rs` over
    `tests/fixtures/meta/Synth0.lean`. Three parts, and the first is a
@@ -1215,6 +1583,14 @@ Four tiers, no new nightly workflow.
    synthesis nightly is expected to move `synth-passlist.txt` off zero
    as a consequence; that is an outcome reported by the nightly, not a
    gate in the PR, and no workflow changes.
+   P4 reuses this tier for the coercion class chain (§ Amendment 5
+   item 9): `Synth0.lean` gains the verbatim `Init/Coe.lean:131-287`
+   chain and records pinning the FULL instance term for `CoeT N n M`
+   through a two-step `Coe` chain, the reflexive `CoeT N n N`, a
+   `.none` goal, and `CoeFun` / `CoeSort` goals with their outParam
+   assigned — the resolver's path through the diamond is observable
+   only here, because `expand_coe` unfolds it away at the elaborator
+   tier. The 20 committed synth records stay byte-identical.
 
 `mise run ci` — which gates `cargo fmt --check` and clippy, not only
 tests — runs before every commit and push.
@@ -1252,6 +1628,10 @@ errors, rather than proceeding to emit a different term:
   `let_delayed` / `let_tmp` — **later M4**
 - monad-lift coercion (`coerceMonadLift?`, `Lean.Internal.coeM` /
   `liftCoeM`, the `autoLift` option) — the **do-notation** slice
+- the `↑x` / `⇑x` / `↥x` coercion notations (`elabCoe`,
+  `elabCoeFunNotation`, `elabCoeSortNotation`,
+  `BuiltinNotation.lean:21-40`) — not parsed by leanr, so owned by the
+  **parser slice that adds them** (§ Amendment 5 item 13)
 - `letPatDecl` / `letEqnsDecl`, `letConfig` items, and `rawNatLit` — not
   ported by leanr's parser, so no slice owns them until it does
 - a Mathlib-scale elaboration discovery sweep — needs the
@@ -1333,10 +1713,11 @@ is a behaviour change to `leanr_meta`, which that wave was scoped out of.
 Plan 1 (application foundation) shipped in #31; P2a — the
 synthetic-mvar ladder, the fixpoint, and instance arguments — shipped in
 #32; P3 — literals and default instances — shipped in #33; P2b-i —
-outParam support inside synthesis — shipped in #34. The next
-implementation plan is **P2b-ii** — the elaborator outParam branch
-(§ P2b-ii, and § Amendment 4 for the corrected oracle citations, the
-shape of the ladder pre-test exemption, the fixture additions and their
-ordering trap, and what P2b-ii's corpus records and smoke tests must
-kill). P4 and P5 get their own implementation plans as each predecessor
-lands, mirroring M4b-2's rhythm.
+outParam support inside synthesis — shipped in #34; P2b-ii — the
+elaborator outParam branch — shipped in #35. The next implementation
+plan is **P4** — coercions (§ P4, and § Amendment 5 for the pinned
+citations, the `Lean.Meta.coeDeclAttr` extension, the
+`try_synth_instance` move, the `transform` scope, the corrected
+monad-lift guard, the ladder arm, the six rewire sites, the two fixture
+tiers, and what P4's corpus records and smoke tests must kill). P5 gets
+its own implementation plan once P4 lands, mirroring M4b-2's rhythm.
