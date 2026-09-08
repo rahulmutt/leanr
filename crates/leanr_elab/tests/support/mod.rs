@@ -118,6 +118,90 @@ pub fn with_app_harness<R>(
     k(&mut app)
 }
 
+/// `with_app_harness` plus POSITIONAL ARGUMENTS, on the RAW head: each
+/// entry of `arg_srcs` is parsed through leanr's own parser and queued
+/// as an `Arg::Stx`, so `args::main` elaborates it exactly as
+/// `elab_app_aux` would — the way `app_smoke.rs`'s ellipsis test drives
+/// `main` on `pick`, but with arguments to consume.
+///
+/// "Raw head", because `with_app_harness` has already run `head_src`
+/// through `main` once as a zero-argument application (its own doc, and
+/// `strict_implicit_without_args_finalizes`'s comment): for a head with
+/// implicit parameters, `app.st.f` arrives as `@Get.get ?c ?i ?e ?inst`
+/// with `f_type` already `?c → ?i → ?e`, and the instance goal that
+/// elaboration registered is sitting in `pending_mvars`. This helper
+/// peels the spine back to the constant (the same universe-mvar-carrying
+/// `Const` either way), re-infers its FULL type, resets the per-application
+/// state, and retires the harness's leftover pending goals — so the
+/// caller's `main` walks every binder itself, from the first implicit.
+///
+/// The `KindInterner` handed to `k` is `any_kinds()` (every
+/// builtin-snapshot parse carries the same kinds, per that helper's
+/// doc), which is what `elab_and_add_new_arg` reads.
+///
+/// `result_is_out_param_support` and `propagate_expected` are left at
+/// `with_app_harness`'s defaults (`false`); a caller that wants the
+/// oracle's `elabAppArgs` defaults sets them itself before calling
+/// `main`.
+pub fn with_app_args<R>(
+    head_src: &str,
+    arg_srcs: &[&str],
+    k: impl FnOnce(&mut leanr_elab::app::state::AppElab, &leanr_syntax::kind::KindInterner) -> R,
+) -> R {
+    use leanr_elab::app::expand::Arg;
+    use leanr_kernel::bank::terms::Node;
+    use leanr_syntax::{builtin, parse_term};
+    let snap = builtin::snapshot();
+    let parses: Vec<_> = arg_srcs
+        .iter()
+        .map(|src| {
+            let parsed = parse_term(src, &snap);
+            assert!(
+                parsed.errors.is_empty(),
+                "with_app_args: leanr parse errors for {src:?}: {:?}",
+                parsed.errors
+            );
+            parsed
+        })
+        .collect();
+    let args: Vec<Arg> = parses
+        .iter()
+        .map(|p| {
+            Arg::Stx(
+                p.tree
+                    .root()
+                    .first_child_or_token()
+                    .expect("with_app_args: no term child"),
+            )
+        })
+        .collect();
+    let kinds = any_kinds();
+    with_app_harness(head_src, |app| {
+        let mut f = app.st.f;
+        while let Node::App { f: inner, .. } = app.node(f) {
+            f = inner;
+        }
+        let f_type =
+            app.elab.mctx.infer_type(f).unwrap_or_else(|e| {
+                panic!("with_app_args: infer_type of the raw head failed: {e:?}")
+            });
+        app.st.f = f;
+        app.st.f_type = f_type;
+        app.st.f_args = Vec::new();
+        app.st.args = args;
+        app.st.named_args = Vec::new();
+        app.st.eta_args = Vec::new();
+        app.st.to_set_error_ctx = Vec::new();
+        app.st.inst_mvars = Vec::new();
+        app.st.result_type_out_param = None;
+        app.st.found_named_args = Vec::new();
+        for id in std::mem::take(&mut app.elab.pending_mvars) {
+            app.elab.mark_as_resolved(id);
+        }
+        k(app, &kinds)
+    })
+}
+
 /// A syntax reference for tests that need one but do not care which.
 /// `SynElem` is an owned rowan handle, so the parse tree it points into
 /// stays alive through the returned value.

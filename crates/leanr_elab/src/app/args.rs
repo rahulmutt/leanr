@@ -74,29 +74,29 @@ pub fn main(app: &mut AppElab, kinds: &KindInterner) -> Result<ExprId, ElabError
             match app.get_param_info()? {
                 BinderInfo::Default => {
                     if !process_explicit_arg(app, kinds, binder_name)? {
-                        return crate::app::finalize::finalize(app);
+                        return crate::app::finalize::finalize(app, kinds);
                     }
                 }
                 BinderInfo::Implicit => {
                     if !process_implicit_arg(app, kinds, binder_name)? {
-                        return crate::app::finalize::finalize(app);
+                        return crate::app::finalize::finalize(app, kinds);
                     }
                 }
                 BinderInfo::StrictImplicit => {
                     if !process_strict_implicit_arg(app, kinds, binder_name)? {
-                        return crate::app::finalize::finalize(app);
+                        return crate::app::finalize::finalize(app, kinds);
                     }
                 }
                 BinderInfo::InstImplicit => {
                     if !process_inst_implicit_arg(app, kinds, binder_name)? {
-                        return crate::app::finalize::finalize(app);
+                        return crate::app::finalize::finalize(app, kinds);
                     }
                 }
             }
         } else if app.has_args_to_process() {
             synthesize_pending_and_normalize_fun_type(app, kinds)?;
         } else {
-            return crate::app::finalize::finalize(app);
+            return crate::app::finalize::finalize(app, kinds);
         }
     }
 }
@@ -479,41 +479,231 @@ pub(crate) fn has_opt_auto_params(app: &mut AppElab, ty: ExprId) -> Result<bool,
     })
 }
 
-/// oracle: `addImplicitArg` (`App.lean:747-760`). Creates a fresh mvar
-/// for the parameter, records it in `toSetErrorCtx` for error
-/// attribution, and continues the loop.
+/// oracle: `addImplicitArg` (`App.lean:745-760`). Creates a fresh mvar
+/// for the parameter — marking it as the application's
+/// `resultTypeOutParam?` and disabling expected-type propagation when
+/// `isNextOutParamOfLocalInstanceAndResult` says so (`:747-755`) —
+/// records it in `toSetErrorCtx` for error attribution, and continues
+/// the loop.
 ///
 /// No `kinds` parameter: unlike `process_explicit_arg`'s eventual
 /// `elab_and_add_new_arg` call, nothing here parses or elaborates
-/// surface syntax — the argument is a freshly minted mvar, not a
+/// surface syntax — the argument is a freshly minted mvar, not an
 /// `Arg::Stx` — so there is no `KindInterner` use to thread. The
 /// brief's own signature carried it only for symmetry with the other
 /// two arms and ended in `let _ = kinds;`; dropping the unused
 /// parameter here rather than shipping a discard.
 fn add_implicit_arg(app: &mut AppElab) -> Result<(), ElabError> {
     let arg_type = app.get_arg_expected_type()?;
-    // oracle: the `isNextOutParamOfLocalInstanceAndResult` branch
-    // (`App.lean:749-757`) sets `resultTypeOutParam?` and disables
-    // propagation. It needs class outParam positions from the
-    // `classExtension`; `leanr_olean` now decodes that (`ClassEntry` =
-    // name + outParam positions) and `MetaCtx::get_out_param_positions`
-    // is `pub` (M4b-3 P2b-i), so that data already exists. What is
-    // still missing is this branch itself — the elaborator-side
-    // `resultTypeOutParam?` PRODUCER, M4b-3 P2b-ii. The guarding flag
-    // (`result_is_out_param_support`) is false in the fixture env, so
-    // the branch is inert here rather than skipped silently. `finalize`
-    // re-checks `result_type_out_param` (task 4).
-    if app.ctx.result_is_out_param_support {
+    let arg = app.elab.mk_fresh_expr_mvar(arg_type)?;
+    let Node::MVar { id: Some(n) } = app.node(arg) else {
         return Err(ElabError::UnsupportedSyntax(
-            "local-instance outParam result type requires the elaborator-side resultTypeOutParam? producer — M4b-3 P2b-ii"
+            "internal invariant: mk_fresh_expr_mvar did not return an mvar node (app::args — \
+             not a deferred construct)"
                 .to_string(),
         ));
+    };
+    if is_next_out_param_of_local_instance_and_result(app, arg_type)? {
+        // oracle (`App.lean:749-753`): "When the result type is an
+        // output parameter, we don't want to propagate the expected
+        // type. So, we just mark `propagateExpected := false` to disable
+        // it. At `finalize`, we check whether `arg` is still unassigned,
+        // if it is, we apply default instances, and try to synthesize
+        // pending mvars."
+        app.st.result_type_out_param = Some(MVarId(n));
+        app.st.propagate_expected = false;
     }
-    let arg = app.elab.mk_fresh_expr_mvar(arg_type)?;
-    if let Node::MVar { id: Some(n) } = app.node(arg) {
-        app.st.to_set_error_ctx.push(MVarId(n));
-    }
+    app.st.to_set_error_ctx.push(MVarId(n));
     add_new_arg(app, arg)
+}
+
+/// oracle: `isNextOutParamOfLocalInstanceAndResult` (`App.lean:681-727`)
+/// — is the implicit parameter about to be inserted BOTH the result type
+/// of the remaining function type AND an `outParam` of some
+/// instance-implicit binder in it? The worked example (`App.lean:662-679`):
+/// for `fType = {Elem : Type u_3} → [self : Get Cont Idx Elem] → Cont →
+/// Idx → Elem` the answer is `true`; one binder earlier, for `Cont`, it
+/// is `false`.
+///
+/// `arg_type` is the parameter's type with annotations consumed
+/// (`get_arg_expected_type`), used only to type the probe fvar below.
+///
+/// The probe fvar (design spec § Amendment 4 item 3). The oracle mints a
+/// DANGLING `mkFVar (← mkFreshFVarId)` (`:688`) — no local declaration,
+/// purely a token to compare `d.getAppArgs` against by structural
+/// equality. `leanr_meta` has no dangling-fvar constructor, so this
+/// pushes a real `lctx` decl under the `lctx_checkpoint`/`lctx_restore`
+/// bracket `AppElab::forall_telescope_reducing` already uses, and drops
+/// it on every exit path. The two consumers cannot tell the difference:
+/// `is_out_param_of` compares `ExprId`s (hash-consed, so the substituted
+/// occurrence IS the probe), and the only `infer_type`/`whnf` in the
+/// clauses run on the class CONSTANT and its type, which never mention
+/// the probe.
+fn is_next_out_param_of_local_instance_and_result(
+    app: &mut AppElab,
+    arg_type: ExprId,
+) -> Result<bool, ElabError> {
+    // oracle: `unless (← read).resultIsOutParamSupport && (← get).resultTypeOutParam?.isNone do return false`
+    if !app.ctx.result_is_out_param_support || app.st.result_type_out_param.is_some() {
+        return Ok(false);
+    }
+    // oracle: `let type := (← get).fType.bindingBody!` — `main` only
+    // reaches this arm when `f_type_is_forall` answered true, so the
+    // node is a `Forall`; anything else is the oracle's own `!` panic
+    // domain, reported rather than unwrapped.
+    let Node::Forall { body, .. } = app.node(app.st.f_type) else {
+        return Err(ElabError::IllFormedSyntax(
+            "isNextOutParamOfLocalInstanceAndResult on a non-forall fType".to_string(),
+        ));
+    };
+    if !is_result_type(app, body, 0) {
+        return Ok(false);
+    }
+    if !has_local_instance_with_out_params(app, body) {
+        return Ok(false);
+    }
+    let checkpoint = app.elab.mctx.lctx_checkpoint();
+    let result = (|| {
+        let x = app
+            .elab
+            .mctx
+            .push_local_decl(None, arg_type, BinderInfo::Default)
+            .map_err(ElabError::from)?;
+        // oracle: `type.instantiate1 x`.
+        let body_x = app
+            .elab
+            .mctx
+            .instantiate_beta_rev_range(body, std::slice::from_ref(&x))
+            .map_err(ElabError::from)?;
+        is_out_param_of_local_instance(app, x, body_x)
+    })();
+    app.elab.mctx.lctx_restore(checkpoint);
+    result
+}
+
+/// oracle: `isResultType` (`App.lean:693-697`) — walk the remaining
+/// binders counting depth, and answer whether the final body is the
+/// bound variable `i` binders out, i.e. the parameter being inserted.
+/// Pure de Bruijn arithmetic on an UNINSTANTIATED body: no `whnf`, no
+/// telescope, exactly as the oracle has it. A `BVarBig` index can never
+/// equal a `u32` depth reachable here and falls to the `false` arm.
+fn is_result_type(app: &AppElab, ty: ExprId, i: u32) -> bool {
+    match app.node(ty) {
+        Node::Forall { body, .. } => is_result_type(app, body, i + 1),
+        Node::BVar { idx } => idx == i,
+        _ => false,
+    }
+}
+
+/// oracle: `hasLocalInstanceWithOutParams` (`App.lean:700-706`) — the
+/// QUICK FILTER: does any instance-implicit binder in `ty` have, at the
+/// head of its domain, a class with output parameters? Reads the
+/// `classExtension` through `MetaCtx::has_out_params` (`Class.lean:85-88`)
+/// and inspects nothing else; the positional test is
+/// `is_out_param_of_local_instance`'s.
+fn has_local_instance_with_out_params(app: &AppElab, mut ty: ExprId) -> bool {
+    loop {
+        let Node::Forall {
+            binder_type,
+            body,
+            binder_info,
+            ..
+        } = app.node(ty)
+        else {
+            return false;
+        };
+        if binder_info == BinderInfo::InstImplicit {
+            if let Node::Const {
+                name: Some(class), ..
+            } = app.node(app.app_fn(binder_type))
+            {
+                if app.elab.mctx.has_out_params(class) {
+                    return true;
+                }
+            }
+        }
+        ty = body;
+    }
+}
+
+/// oracle: `isOutParamOfLocalInstance` (`App.lean:708-716`) — for each
+/// instance-implicit binder `[C a₁ .. aₙ]` whose class has outParams,
+/// infer `C`'s own type and ask `is_out_param_of` whether the probe `x`
+/// sits at an `outParam` position. Later binders are walked WITHOUT
+/// instantiating (the oracle recurses on the raw `b`), so their domains
+/// may carry loose bvars — harmless, since only the spine's head
+/// constant and the argument `ExprId`s are read.
+fn is_out_param_of_local_instance(
+    app: &mut AppElab,
+    x: ExprId,
+    mut ty: ExprId,
+) -> Result<bool, ElabError> {
+    loop {
+        let Node::Forall {
+            binder_type,
+            body,
+            binder_info,
+            ..
+        } = app.node(ty)
+        else {
+            return Ok(false);
+        };
+        if binder_info == BinderInfo::InstImplicit {
+            let head = app.app_fn(binder_type);
+            if let Node::Const {
+                name: Some(class), ..
+            } = app.node(head)
+            {
+                if app.elab.mctx.has_out_params(class) {
+                    let c_type = app.elab.mctx.infer_type(head)?;
+                    let args = app.app_args(binder_type);
+                    if is_out_param_of(app, x, &args, c_type)? {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        ty = body;
+    }
+}
+
+/// oracle: `isOutParamOf` (`App.lean:718-727`) — walk the class type's
+/// binders in step with the instance's arguments; `true` at the first
+/// position where the argument IS the probe and the binder's domain is
+/// `outParam _`. The test is on the class's own TYPE, syntactically
+/// (`Expr.isOutParam`), not on `classExtension` positions — that is
+/// how the oracle does it, and it is what makes `semiOutParam` a
+/// non-match (design spec § Amendment 4 item 2).
+///
+/// The oracle `whnf`s the class type at every step. A step whose type
+/// is already a `Forall` is reduced by nothing, so — as
+/// `forall_telescope_reducing` does — reduction is skipped there; a
+/// non-`Forall` node goes through `whnf_forall`, and if it is still not
+/// a binder the walk ends `false` (`| _ => return false`).
+fn is_out_param_of(
+    app: &mut AppElab,
+    x: ExprId,
+    args: &[ExprId],
+    mut c_type: ExprId,
+) -> Result<bool, ElabError> {
+    for &arg in args {
+        let reduced = if matches!(app.node(c_type), Node::Forall { .. }) {
+            c_type
+        } else {
+            app.whnf_forall(c_type)?
+        };
+        let Node::Forall {
+            binder_type, body, ..
+        } = app.node(reduced)
+        else {
+            return Ok(false);
+        };
+        if arg == x && app.is_out_param(binder_type) {
+            return Ok(true);
+        }
+        c_type = body;
+    }
+    Ok(false)
 }
 
 /// oracle: `processImplicitArg` (`App.lean:879-885`) — under `@`, an

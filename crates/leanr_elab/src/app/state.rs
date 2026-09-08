@@ -366,7 +366,7 @@ impl<'a, 'e> AppElab<'a, 'e> {
     }
 
     /// An application spine's arguments, in APPLICATION order.
-    fn app_args(&self, e: ExprId) -> Vec<ExprId> {
+    pub(crate) fn app_args(&self, e: ExprId) -> Vec<ExprId> {
         let mut args = Vec::new();
         let mut cur = e;
         while let Node::App { f, arg } = self.node(cur) {
@@ -375,6 +375,28 @@ impl<'a, 'e> AppElab<'a, 'e> {
         }
         args.reverse();
         args
+    }
+
+    /// oracle: `Expr.getAppFn` — the head of an application spine (`e`
+    /// itself when it is not an `App`).
+    pub(crate) fn app_fn(&self, e: ExprId) -> ExprId {
+        let mut cur = e;
+        while let Node::App { f, .. } = self.node(cur) {
+            cur = f;
+        }
+        cur
+    }
+
+    /// oracle: `Expr.isOutParam` (`Expr.lean:1709-1710`) —
+    /// `isAppOfArity ``outParam 1`, and ONLY `outParam`. This is the
+    /// predicate `isOutParamOf` (`App.lean:718-727`) tests on a class
+    /// type's binder domains, and it deliberately does NOT accept
+    /// `semiOutParam`: reusing `type_annotation_at_head` here (which
+    /// strips both, as `consumeTypeAnnotations` must) would silently
+    /// widen the `resultTypeOutParam?` branch to `semiOutParam` classes
+    /// (design spec § Amendment 4 item 2).
+    pub(crate) fn is_out_param(&self, t: ExprId) -> bool {
+        matches!(self.type_annotation_head(t), Some((name, 1)) if name == "outParam")
     }
 
     /// oracle: `hasArgsToProcess` (`App.lean:290-293`).
