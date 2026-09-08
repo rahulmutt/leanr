@@ -1324,10 +1324,17 @@ fn should_propagate_expected_type_for_excludes_deferred_kinds() {
 /// `[self : Get cont idx elem]`, so processing it marks the mvar and
 /// disables expected-type propagation (`App.lean:747-755`).
 ///
-/// Driven with the flag FORCED on: `Elab0.lean` does not declare
-/// `Lean.Internal.coeM` until task 5, so `elab_app_aux` computes it
-/// `false` end-to-end today. `main` finalizes the bare partial
-/// application (no arguments), which takes the branch's ELSE arm
+/// Driven with the flag FORCED on because this test calls
+/// `app::args::main` directly rather than through `elab_app_aux`, which
+/// is the only thing that computes `result_is_out_param_support`
+/// (`app/mod.rs:413`). It is not a stand-in for an environment that
+/// cannot reach the flag: `Elab0.lean` has declared
+/// `Lean.Internal.coeM` since M4b-3 P4 task 5, so end-to-end the flag
+/// is `true` for a non-`@` application — pinned by
+/// `synthetic_smoke.rs`'s `coe_m_gate_enables_eager_defaulting_from_source`.
+///
+/// `main` finalizes the bare partial application (no arguments), which
+/// takes the branch's ELSE arm
 /// (`eType` is `?idx → ?elem`, not the outParam mvar itself) — so this
 /// also pins that the else arm returns without error.
 #[test]
@@ -1520,4 +1527,38 @@ fn finalize_under_an_expected_type_still_defaults_rather_than_unifies() {
             "with propagation off and the finalize unification skipped, only rung 3 can fix `?elem`"
         );
     });
+}
+
+/// The `($e :)` ascription arm (`ascription.rs`'s `None` branch,
+/// `BuiltinNotation.lean:434-435`) — the third of M4b-3 P4's rewire
+/// sites (design spec § Amendment 5 item 8) and the one no corpus
+/// record reaches: `($e : $type)` delegates to
+/// `elab_term_ensuring_type` instead, so only a BARE ascription
+/// exercises this arm's own `ensureHasType`.
+///
+/// `takesInt (Nat.zero :)` elaborates `Nat.zero` with NO expected type
+/// (the arm deliberately withholds the caller's), then coerces the
+/// result against the caller's `Int`. Its `($e : $type)` twin is the
+/// assertion's yardstick, and both shapes were confirmed against the
+/// oracle as `takesInt (Int.ofNat Nat.zero)` (throwaway `dump_elab`
+/// probes, per M4b-1's precedent — not landed, because the corpus
+/// floor for this task is pinned at 111).
+///
+/// Kill: revert the arm to the M4b-1 posture (infer, `isDefEq`, else
+/// `TypeMismatch`) and the bare form errors with `TypeMismatch` while
+/// the annotated one still succeeds.
+#[test]
+fn bare_ascription_coerces_against_the_callers_expected_type() {
+    let bare = support::elab_and_synthesize("takesInt (Nat.zero :)")
+        .expect("`(e :)` under an expected type coerces rather than erroring");
+    let annotated =
+        support::elab_and_synthesize("takesInt (Nat.zero : Int)").expect("its `($e : $type)` twin");
+    assert_eq!(
+        bare, annotated,
+        "both ascription arms must insert the same coercion"
+    );
+    assert!(
+        bare.to_string().contains("Int.ofNat"),
+        "the coercion is present, not merely a defeq pass: {bare}"
+    );
 }

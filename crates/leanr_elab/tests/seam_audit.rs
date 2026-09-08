@@ -574,7 +574,7 @@ fn literal_kinds_are_registered_not_deferred() {
 /// reason is that no non-rotting formulation exists. Live source
 /// legitimately names INCOMPLETE slices in exactly this position — that
 /// is the named-seam discipline itself (`app/args.rs`'s "M4b-3 P2b",
-/// `elab.rs`'s "M4b-3 P5", `ladder.rs`'s "M4b-3 P4") — so telling an
+/// `elab.rs`'s "M4b-3 P5", `app/args.rs`'s "M4b-3 P4") — so telling an
 /// offender from a correct seam requires knowing which slices are done,
 /// i.e. a hand-maintained completed-slice list that rots the same way
 /// this needle does, only silently. Widening the scan by SHAPE instead

@@ -866,19 +866,22 @@ fn elab_and_add_new_arg(
     arg: Arg,
 ) -> Result<(), ElabError> {
     let expected = app.get_arg_expected_type()?;
+    // The syntax `ensure_has_type` hands to a postponed `.coe` mvar as
+    // its reference. `Arg::Expr` is already-elaborated and carries no
+    // syntax of its own (`expand.rs`'s `Arg` doc: no P1 producer), so it
+    // falls back to the whole application's `stx` — the same ref
+    // `synthesize_app_inst_mvars` registers its mvars under.
+    let stx = match &arg {
+        Arg::Stx(elem) => elem.clone(),
+        Arg::Expr(_) => app.ctx.stx.clone(),
+    };
     let val = match arg {
         Arg::Expr(e) => e,
         Arg::Stx(elem) => app.elab.elab_term(&elem, kinds, Some(expected))?,
     };
-    // oracle: `ensureArgType` = `ensureHasType expected val`
-    // (coercion-inserting from P4 onward; here the M4b-1 behavior, which
-    // ERRORS on a defeq mismatch).
-    let inferred = app.elab.mctx.infer_type(val)?;
-    if !app.elab.mctx.is_def_eq(inferred, expected)? {
-        return Err(ElabError::TypeMismatch {
-            expected,
-            got: inferred,
-        });
-    }
+    // oracle: `ensureArgType` = `ensureHasType expectedType arg none f`
+    // (`App.lean:54-62`); its `errToSorry` recovery arm is prose leanr
+    // does not do, so the `try … catch` collapses to the plain call.
+    let val = app.elab.ensure_has_type(&stx, Some(expected), val)?;
     add_new_arg(app, val)
 }

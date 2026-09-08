@@ -138,10 +138,13 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 /// arguments and the synthetic-mvar fixpoint landed (tasks 2-9) and are
 /// no longer deferred either. Reconciled a THIRD time by M4b-3
 /// P2b-ii: the local-instance outParam feature landed (`app/args.rs`,
-/// `app/finalize.rs`) and is no longer deferred either:
+/// `app/finalize.rs`) and is no longer deferred either. Reconciled a
+/// FOURTH time by M4b-3 P4 task 7: `mkCoe`/`ensureHasType` and the
+/// `CoeT` half of coercion landed (`coe.rs`), leaving only `CoeFun`
+/// (task 8) and `CoeSort` (task 9) deferred:
 /// ```text
 ///   letI / haveI / let_fun / let_delayed / let_tmp / letrec  later slice (own oracle tier each)
-///   coercions (CoeT / CoeFun / CoeSort, mkCoe) . M4b-3 P4
+///   coercions: CoeFun / CoeSort (mkCoe landed) . M4b-3 P4
 ///   optParam defaults / autoParam .............. M4b-3 P5
 ///   implicit-lambda insertion .................. M4b-3 P5
 ///   Term.proj / pipeProj / dotIdent ............ M4b-4 (LVal machinery)

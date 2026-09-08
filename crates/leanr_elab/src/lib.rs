@@ -90,10 +90,13 @@
 //! inside `app/` carries its owning slice in the message. Never a
 //! silent no-op, never a panic, never a wrong `ExprId`.
 //!
-//! - **coercions** (`mkCoe`, `CoeT`/`CoeFun`/`CoeSort`) —
-//!   `ensure_has_type`/`elab_term_ensuring_type` and `app`'s own
-//!   `ensureArgType` ERROR on a defeq mismatch rather than inserting a
-//!   coercion — M4b-3 P4.
+//! - **coercions** — `mkCoe`/`ensureHasType` landed in M4b-3 P4 task 7
+//!   (`coe.rs`), so `elab_term_ensuring_type`, the `($e :)` ascription
+//!   arm and `app`'s own `ensureArgType` now insert a `CoeT` coercion
+//!   instead of erroring on a defeq mismatch. Still deferred:
+//!   `coerceToFunction?` on an application head (`CoeFun`, task 8) and
+//!   `ensureType`'s `coerceToSort?` on a binder domain (`CoeSort`,
+//!   task 9) — M4b-3 P4.
 //! - **optParam/autoParam default filling and implicit-lambda
 //!   insertion** — M4b-3 P5. (The implicit-lambda *guard* is P1's, in
 //!   `elab.rs`; only the insertion is deferred.)
@@ -251,6 +254,7 @@
 //!   rediscovered.
 pub mod app; // M4b-3 P1
 pub mod builtin; // Tasks 4-6
+pub mod coe; // M4b-3 P4
 pub mod dispatch;
 pub mod elab;
 pub mod error;

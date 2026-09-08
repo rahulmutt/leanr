@@ -295,6 +295,8 @@ impl<'e> TermElabM<'e> {
         dispatch::dispatch(self, elem, kinds, expected)
     }
 
+    /// oracle: `elabTermEnsuringType` = `elabTerm` then `ensureHasType`
+    /// (`TermElabM.lean`); coercion-inserting since M4b-3 P4.
     pub fn elab_term_ensuring_type(
         &mut self,
         elem: &SynElem,
@@ -302,16 +304,7 @@ impl<'e> TermElabM<'e> {
         expected: Option<ExprId>,
     ) -> Result<ExprId, ElabError> {
         let e = self.elab_term(elem, kinds, expected)?;
-        if let Some(t) = expected {
-            let inferred = self.mctx.infer_type(e)?;
-            if !self.mctx.is_def_eq(inferred, t)? {
-                return Err(ElabError::TypeMismatch {
-                    expected: t,
-                    got: inferred,
-                });
-            }
-        }
-        Ok(e)
+        self.ensure_has_type(elem, expected, e)
     }
 
     /// oracle: `elabTermAndSynthesize` (`SyntheticMVars.lean:696-698`) —

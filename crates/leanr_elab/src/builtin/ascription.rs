@@ -129,26 +129,17 @@ pub fn elab_ascription(
         // (`BuiltinNotation.lean:434`) — the caller's real `expected`
         // is deliberately withheld from the elaboration itself — and
         // `ensureHasType expectedType? e` (`:435`) runs AFTER that
-        // scope returns, checking the result against `expected`. A
-        // Review finding (M4b-3 P2a task 6 review, finding 2): a
-        // wider scope here would force a future coercion's own mvar
-        // (P4) to resolve before this scope's own postponement
-        // returns, rather than escaping to whatever scheduler called
-        // this one.
+        // scope returns, now inserting a coercion rather than merely
+        // checking the result against `expected`. A Review finding
+        // (M4b-3 P2a task 6 review, finding 2): a wider scope here
+        // would force a future coercion's own mvar (P4) to resolve
+        // before this scope's own postponement returns, rather than
+        // escaping to whatever scheduler called this one.
         None => {
             let e_val = elab.with_synthesize(PostponeBehavior::No, kinds, |elab| {
                 elab.elab_term(e, kinds, None)
             })?;
-            if let Some(t) = expected {
-                let inferred = elab.mctx.infer_type(e_val)?;
-                if !elab.mctx.is_def_eq(inferred, t)? {
-                    return Err(ElabError::TypeMismatch {
-                        expected: t,
-                        got: inferred,
-                    });
-                }
-            }
-            Ok(e_val)
+            elab.ensure_has_type(e, expected, e_val)
         }
         // `($e : $type)` — the type elaborates under
         // `with_synthesize(Yes, ..)` (oracle: `elabType type`,
