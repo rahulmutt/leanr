@@ -225,3 +225,117 @@ instance instGetN : Get N N N where
 -- isDefEq type resultType` line itself), where `Dual` DOES unfold.
 -- Skip either half and the answer flips from `some instOpN` to `none`.
 def Dual (a : Type) : Type := a
+
+-- === M4b-3 P4: the coercion class chain (design spec § P4, § Amendment 5 item 9) ===
+--
+-- `semiOutParam` at the ROOT namespace, verbatim from
+-- `Init/Prelude.lean:725`, for the same reason `outParam` above is:
+-- `Coe`'s first parameter is `semiOutParam (Sort u)`, and only the root
+-- name is the real gadget. For synthesis it is inert apart from being
+-- reducible (it is consulted only by `computeSynthOrder`, whose result
+-- is already serialized into `InstanceEntry.synthOrder` and read by
+-- `leanr_meta::instances`).
+@[reducible] def semiOutParam (α : Sort u) : Sort u := α
+
+-- The chain, VERBATIM from `Init/Coe.lean:131-287` of the pin with the
+-- doc comments dropped and nothing else changed: twelve classes,
+-- seventeen instances (anonymous, so Lean auto-names them exactly as
+-- it does in Init), twelve `attribute [coe_decl]` lines. A stand-in
+-- chain was rejected (§ Amendment 5 item 9): the diamond of reflexive
+-- (`CoeTC α α`) and transitive (`[Coe β γ] [CoeTC α β] : CoeTC α γ`)
+-- instances is exactly what the Mathlib synthesis nightly hits, and the
+-- resolver's path through it is observable ONLY at this tier — the
+-- elaborator tier unfolds the instance away (`expandCoe`).
+class Coe (α : semiOutParam (Sort u)) (β : Sort v) where
+  coe : α → β
+attribute [coe_decl] Coe.coe
+
+class CoeTC (α : Sort u) (β : Sort v) where
+  coe : α → β
+attribute [coe_decl] CoeTC.coe
+instance [Coe β γ] [CoeTC α β] : CoeTC α γ where coe a := Coe.coe (CoeTC.coe a : β)
+instance [Coe α β] : CoeTC α β where coe a := Coe.coe a
+instance : CoeTC α α where coe a := a
+
+class CoeOut (α : Sort u) (β : semiOutParam (Sort v)) where
+  coe : α → β
+attribute [coe_decl] CoeOut.coe
+
+class CoeOTC (α : Sort u) (β : Sort v) where
+  coe : α → β
+attribute [coe_decl] CoeOTC.coe
+instance [CoeOut α β] [CoeOTC β γ] : CoeOTC α γ where coe a := CoeOTC.coe (CoeOut.coe a : β)
+instance [CoeTC α β] : CoeOTC α β where coe a := CoeTC.coe a
+instance : CoeOTC α α where coe a := a
+
+class CoeHead (α : Sort u) (β : semiOutParam (Sort v)) where
+  coe : α → β
+attribute [coe_decl] CoeHead.coe
+
+class CoeHTC (α : Sort u) (β : Sort v) where
+  coe : α → β
+attribute [coe_decl] CoeHTC.coe
+instance [CoeHead α β] [CoeOTC β γ] : CoeHTC α γ where coe a := CoeOTC.coe (CoeHead.coe a : β)
+instance [CoeOTC α β] : CoeHTC α β where coe a := CoeOTC.coe a
+instance : CoeHTC α α where coe a := a
+
+class CoeTail (α : semiOutParam (Sort u)) (β : Sort v) where
+  coe : α → β
+attribute [coe_decl] CoeTail.coe
+
+class CoeHTCT (α : Sort u) (β : Sort v) where
+  coe : α → β
+attribute [coe_decl] CoeHTCT.coe
+instance [CoeTail β γ] [CoeHTC α β] : CoeHTCT α γ where coe a := CoeTail.coe (CoeHTC.coe a : β)
+instance [CoeHTC α β] : CoeHTCT α β where coe a := CoeHTC.coe a
+instance : CoeHTCT α α where coe a := a
+
+class CoeDep (α : Sort u) (_ : α) (β : Sort v) where
+  coe : β
+attribute [coe_decl] CoeDep.coe
+
+class CoeT (α : Sort u) (_ : α) (β : Sort v) where
+  coe : β
+attribute [coe_decl] CoeT.coe
+instance [CoeHTCT α β] : CoeT α a β where coe := CoeHTCT.coe a
+instance [CoeDep α a β] : CoeT α a β where coe := CoeDep.coe a
+instance : CoeT α a α where coe := a
+
+class CoeFun (α : Sort u) (γ : outParam (α → Sort v)) where
+  coe : (f : α) → γ f
+attribute [coe_decl] CoeFun.coe
+instance [CoeFun α fun _ => β] : CoeOut α β where coe a := CoeFun.coe a
+
+class CoeSort (α : Sort u) (β : outParam (Sort v)) where
+  coe : α → β
+attribute [coe_decl] CoeSort.coe
+instance [CoeSort α β] : CoeOut α β where coe a := CoeSort.coe a
+
+-- A two-step chain `N → M → Big` through two plain `Coe` instances.
+-- `CoeT N n Big` is solvable ONLY through `CoeTC`'s transitive
+-- instance (`[Coe β γ] [CoeTC α β] : CoeTC α γ`, with `β := M` found
+-- by the search), so its recorded instance term is the discriminator
+-- for the resolver's candidate order through the diamond (§ Amendment 5
+-- item 10). `M` and `Big` are new opaque carriers; the requirement is
+-- the chain, not the names.
+inductive M where
+  | ofN : N → M
+
+inductive Big where
+  | ofM : M → Big
+
+instance instCoeNM : Coe N M := ⟨M.ofN⟩
+instance instCoeMBig : Coe M Big := ⟨Big.ofM⟩
+
+-- `CoeFun` / `CoeSort` carriers, for the two outParam-bearing classes:
+-- the goal's last argument is an mvar the search ASSIGNS (P2b-i's
+-- `assignOutParams`), observable in the record's `assigns`.
+structure FnN where
+  f : N → N
+
+instance instCoeFunFnN : CoeFun FnN (fun _ => N → N) := ⟨FnN.f⟩
+
+structure SortN where
+  ty : Type
+
+instance instCoeSortSortN : CoeSort SortN Type := ⟨SortN.ty⟩

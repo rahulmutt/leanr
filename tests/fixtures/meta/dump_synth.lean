@@ -274,7 +274,24 @@ What each entry exercises (task B7's brief):
                   the search. `synthInstanceCore?` runs `main` under
                   `withNewMCtxDepth`, so `?a` is read-only there and
                   `isDefEqStuckEx := true` makes the first unification
-                  throw. See this file's header on `"exc"` records. -/
+                  throw. See this file's header on `"exc"` records.
+* `coeChain/0..3` — the `CoeT` chain (M4b-3 P4, § Amendment 5 item 9).
+                  `/0`: `CoeT N N.zero M`, one `Coe` step;
+                  `/1`: `CoeT N N.zero Big`, TWO steps — solvable only
+                  through `CoeTC`'s transitive instance, so the
+                  recorded instance term pins the resolver's path
+                  through the reflexive/transitive diamond; `/2`:
+                  `CoeT N N.zero N`, the reflexive instance (declared
+                  LAST, hence tried FIRST); `/3`: `CoeT N N.zero
+                  NoBase`, `.none` — the whole diamond is explored and
+                  the search must TERMINATE on it.
+* `coeFun/0`, `coeSort/0` — `CoeFun FnN ?γ` (`?γ : FnN → Type`) and
+                  `CoeSort SortN ?β` (`?β : Type 1` — `SortN`'s field
+                  `ty : Type` bumps `SortN` itself to `Type 1`, one
+                  universe above `FnN`, so this goal's levels are `2`
+                  where `coeFun`'s are `1`): each class's last
+                  parameter is an `outParam`, so the goal mvar is
+                  ASSIGNED by the search and shows up in `assigns`. -/
 def synthQueries : List (Name × Nat × MetaM Expr) :=
   [ (`simple,      0, pure (cls1 `Add nTy))
   , (`simple,      1, pure (cls1 `Mul nTy))
@@ -303,6 +320,23 @@ def synthQueries : List (Name × Nat × MetaM Expr) :=
       pure (mkApp (mkApp (mkApp (mkConst `Get [Level.zero, Level.zero, Level.zero]) nTy) nTy)
         (← mkFreshExprMVar type0)))
   , (`stuck,       0, do pure (cls1 `Add (← mkFreshExprMVar type0)))
+  , (`coeChain, 0, pure (mkApp3 (mkConst `CoeT [Level.one, Level.one]) nTy (mkConst `N.zero) (mkConst `M)))
+  , (`coeChain, 1, pure (mkApp3 (mkConst `CoeT [Level.one, Level.one]) nTy (mkConst `N.zero) (mkConst `Big)))
+  , (`coeChain, 2, pure (mkApp3 (mkConst `CoeT [Level.one, Level.one]) nTy (mkConst `N.zero) nTy))
+  , (`coeChain, 3, pure (mkApp3 (mkConst `CoeT [Level.one, Level.one]) nTy (mkConst `N.zero) (mkConst `NoBase)))
+  , (`coeFun,   0, do
+      let γ ← mkFreshExprMVar (mkForall `f BinderInfo.default (mkConst `FnN) (mkSort Level.one))
+      pure (mkApp2 (mkConst `CoeFun [Level.one, Level.one]) (mkConst `FnN) γ))
+  , (`coeSort,  0, do
+      -- `SortN`'s field `ty : Type` makes `SortN` itself a `Type 1`
+      -- (`Sort 2`) carrier — packaging a `Type`-classified value bumps
+      -- the enclosing structure a universe above an ordinary carrier
+      -- like `FnN` above (confirmed via `#check` against the pin:
+      -- `SortN : Type 1`, `instCoeSortSortN : CoeSort.{2, 2} SortN
+      -- Type`). Both `CoeSort` universe args and the goal mvar's sort
+      -- must match that level, not `Level.one`.
+      pure (mkApp2 (mkConst `CoeSort [Level.succ Level.one, Level.succ Level.one]) (mkConst `SortN)
+        (← mkFreshExprMVar (mkSort (Level.succ Level.one)))))
   ]
 
 /-- Anything over this fraction (in percent) of the oracle's
