@@ -406,10 +406,10 @@ fn elab_app_aux(
         explicit,
         // oracle: `App.lean:1355`'s `env.contains ``Lean.Internal.coeM &&
         // resultIsOutParamSupport && !explicit`. Computed the same way,
-        // not shortcut to `false`: it happens to be false throughout the
-        // hermetic fixture env because prelude-mode `Elab0` declares no
-        // `Lean.Internal.coeM`, and that must stay an OBSERVATION about
-        // the env rather than an assumption baked into the code.
+        // not shortcut to `true`: `Lean.Internal.coeM` is declared
+        // since M4b-3 P2b-ii, so it is `true` for every non-`@`
+        // application in the fixture corpus; computing it rather than
+        // shortcutting stays the rule.
         result_is_out_param_support: env_contains_coe_m(elab)? && !explicit,
         // oracle: `Context.numImplicitParams` — the max over `namedArgs`.
         num_implicit_params: named_args

@@ -1365,6 +1365,12 @@ fn producer_marks_the_result_type_out_param_of_a_local_instance() {
 ///
 /// `getFst` covers the last two at once: if EITHER clause were a
 /// constant `true`, one of its two implicits would be marked.
+///
+/// Caveat, measured rather than assumed: a constant-`true` mutation of
+/// `has_local_instance_with_out_params` is NOT killed by any test in
+/// this crate (the positional clause re-checks it independently), so
+/// this test's own name overstates that one direction; only the
+/// `useWrap` row here kills that clause's `→ false` mutation.
 #[test]
 fn producer_answers_false_on_each_of_its_three_gates() {
     for head in ["useWrap", "getFst"] {

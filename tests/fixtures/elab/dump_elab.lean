@@ -548,9 +548,10 @@ def defaultPolyQueries : List (String × String) :=
   [ ("dflt/polyInstImplicit", "useFresh")
   ]
 
-/-- M4b-3 P2b-ii: the elaborator outParam branch. The three records here
-land BEFORE `Lean.Internal.coeM` is declared (task 2 of the plan) and
-must stay byte-identical when it is (task 5): in a one-term dump the
+/-- M4b-3 P2b-ii: the elaborator outParam branch. The list below now
+holds five records; the first three land BEFORE `Lean.Internal.coeM`
+is declared (task 2 of the plan) and must stay byte-identical when it
+is (task 5): in a one-term dump the
 entry point's own fixpoint runs the same default instances the
 `finalize` branch runs eagerly, so on these shapes the branch changes
 WHEN `?elem` is assigned, not WHAT it is assigned. The two records that

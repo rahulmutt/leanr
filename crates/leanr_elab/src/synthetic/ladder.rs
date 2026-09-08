@@ -89,10 +89,11 @@ impl<'e> TermElabM<'e> {
     ///   `.undef`, so a ground goal still goes to the real search.
     /// - **Over-approximating in the other direction, and that is the
     ///   residual gap.** A goal that does mention an unassigned expr
-    ///   mvar is reported `.undef` here in three cases where the oracle
-    ///   does NOT report `.undef`. They are listed below WORST FIRST,
-    ///   and they do not share an owner — do not assume the mctx-depth
-    ///   model closes them all.
+    ///   mvar was reported `.undef` here in three cases where the
+    ///   oracle does NOT report `.undef` — three, of which residue 1 is
+    ///   closed by M4b-3 P2b-ii; two remain. They are listed below
+    ///   WORST FIRST, and the two that remain do not share an owner —
+    ///   do not assume the mctx-depth model closes them both.
     ///
     /// **Residue 1 — `outParam` goals (the big one; owner: P2b-ii, NOT
     /// the depth model).** `synthInstanceCore?` classifies the goal

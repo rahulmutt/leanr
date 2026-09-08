@@ -235,11 +235,13 @@
 //!   What is STILL OPEN on the elaborator side is the price of that
 //!   reconstruction: it is exact in the safe direction (a goal with no
 //!   unassigned expr mvar can never be `.undef`, so ground goals still
-//!   reach the real search) but over-approximates in three cases, which
-//!   do NOT share an owner. `try_synth_instance`'s own doc enumerates
-//!   them with oracle citations; in short: (1) `outParam` goals — CLOSED
-//!   by M4b-3 P2b-ii's positional exemption in `try_synth_instance`
-//!   (§ Amendment 4 item 6), not by the depth model; (2) an
+//!   reach the real search) but over-approximates in three cases —
+//!   of which residue 1 is closed by M4b-3 P2b-ii; two remain, and
+//!   those two do NOT share an owner. `try_synth_instance`'s own doc
+//!   enumerates all three with oracle citations; in short: (1)
+//!   `outParam` goals — CLOSED by M4b-3 P2b-ii's positional exemption
+//!   in `try_synth_instance` (§ Amendment 4 item 6), not by the depth
+//!   model; (2) an
 //!   all-polymorphic candidate set; (3) a zero-candidate class with an
 //!   mvar goal (`NoInst ?a`), where the oracle throws "failed to
 //!   synthesize" and leanr reports stuck — both error, so neither is a

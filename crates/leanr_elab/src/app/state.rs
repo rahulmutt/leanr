@@ -235,12 +235,18 @@ impl<'a, 'e> AppElab<'a, 'e> {
     /// oracle: `getArgExpectedType` (`App.lean:269-273`) —
     /// `getParamType` with `consumeTypeAnnotations` applied, i.e. the
     /// `optParam`/`autoParam`/`outParam`/`semiOutParam` wrapper stripped.
-    /// P1 has no optParam/autoParam ARM (P5) and no classes (so no
-    /// `outParam`), but stripping here is not the arm: it is what makes
-    /// the argument's expected type correct whenever a wrapper is present
-    /// and the caller supplied the argument explicitly. Omitting it would
-    /// silently elaborate the argument against `optParam α d` instead of
-    /// `α`.
+    /// P1 still has no optParam/autoParam ARM (that is P5's); the
+    /// `outParam` half has been live since M4b-3 P2b-ii's `Get`
+    /// (`@Get.get`'s `{elem : outParam (Type u_3)}` is stripped on
+    /// every `Get.get` record) and is behaviour-neutral on current
+    /// shapes — measured: disabling the strip arm leaves the whole
+    /// crate suite green, because `outParam` is `@[reducible]` and the
+    /// stripped type only types an mvar. Stripping here is not the
+    /// optParam/autoParam arm either way: it is what makes the
+    /// argument's expected type correct whenever a wrapper is present
+    /// and the caller supplied the argument explicitly. Omitting it
+    /// would silently elaborate the argument against `optParam α d`
+    /// instead of `α`.
     pub fn get_arg_expected_type(&mut self) -> Result<ExprId, ElabError> {
         let t = self.get_param_type()?;
         self.consume_type_annotations(t)
@@ -265,13 +271,16 @@ impl<'a, 'e> AppElab<'a, 'e> {
     /// partially-applied `optParam α` is NOT `isOptParam`, and stripping
     /// it would return `α` where the oracle keeps the whole term.
     ///
-    /// The two `outParam` gadgets are still INERT after P2a: `Elab0.lean`
-    /// now declares classes (`Wrap`/`Pair`/`NoInst`/`Dflt`, task 7), but
-    /// none of their parameter types carries `outParam`/`semiOutParam` —
-    /// that needs a real `getElem`-shaped class, which is P2b's own
-    /// corpus addition. They are part of THIS function regardless.
-    /// Omitting them would be a silent divergence rather than a named
-    /// seam, which is why they are here now.
+    /// The two `outParam` gadgets have been live since M4b-3 P2b-ii's
+    /// `Get` (task 1): `@Get.get`'s `{elem : outParam (Type u_3)}` is
+    /// stripped on every `Get.get` record, and doing so is
+    /// behaviour-neutral on current shapes — measured: disabling the
+    /// strip arm leaves the whole crate suite green, because
+    /// `outParam` is `@[reducible]` and the stripped type only types
+    /// an mvar. They are part of THIS function regardless of whether
+    /// any committed record exercises them. Omitting them would be a
+    /// silent divergence rather than a named seam, which is why they
+    /// are here now.
     ///
     /// Two callers, matching the oracle's own: `get_arg_expected_type`
     /// (`App.lean:273`'s `(← getParamType).consumeTypeAnnotations`) and

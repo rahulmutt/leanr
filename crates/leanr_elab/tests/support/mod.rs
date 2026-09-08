@@ -140,9 +140,14 @@ pub fn with_app_harness<R>(
 /// doc), which is what `elab_and_add_new_arg` reads.
 ///
 /// `result_is_out_param_support` and `propagate_expected` are left at
-/// `with_app_harness`'s defaults (`false`); a caller that wants the
-/// oracle's `elabAppArgs` defaults sets them itself before calling
-/// `main`.
+/// `with_app_harness`'s defaults (`false`), and `expected_type` is
+/// left at ITS harness default too (`None`); a caller that wants the
+/// oracle's `elabAppArgs` defaults sets any of the three itself before
+/// calling `main`. `with_app_harness`'s own `State` literal (above, in
+/// this file) is the source of truth for what a new field would need:
+/// a field added there without a matching default here would silently
+/// leave callers of `with_app_args` exercising the wrong starting
+/// state.
 pub fn with_app_args<R>(
     head_src: &str,
     arg_srcs: &[&str],
