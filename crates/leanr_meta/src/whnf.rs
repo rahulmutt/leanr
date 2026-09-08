@@ -576,13 +576,18 @@ impl<'e> MetaCtx<'e> {
 
         // oracle: `forallBoundedTelescope auxAppType info.numAlts fun hs
         // _ => ..` (:555) — the bounded telescope mints one fresh fvar
-        // per alternative; `LocalContext::save`/`restore` bracket every
-        // exit path (`infer.rs`'s `_body`-split idiom), never leaking a
-        // telescope fvar past this call.
-        let checkpoint = self.lctx.save();
+        // per alternative; `lctx_checkpoint`/`lctx_restore` bracket
+        // every exit path (`infer.rs`'s `_body`-split idiom), never
+        // leaking a telescope fvar past this call. Not the bare
+        // `self.lctx.save`/`restore` this used before
+        // (metavariable-local-contexts slice, fix round 1):
+        // `reduce_matcher_telescope` mints via `push_local_decl` now, so
+        // the restore must also truncate `local_names` and drop the
+        // `current_lctx` cache.
+        let checkpoint = self.lctx_checkpoint();
         let result =
             self.reduce_matcher_telescope(aux_app, aux_app_type, num_alts, prefix_sz, &args);
-        self.lctx.restore(checkpoint);
+        self.lctx_restore(checkpoint);
         result
     }
 
@@ -637,14 +642,7 @@ impl<'e> MetaCtx<'e> {
                 &hs,
                 &mut self.guard,
             )?;
-            let fvar = self.lctx.mk_local_decl(
-                self.scratch,
-                Some(self.view.store),
-                &mut self.fvar_gen,
-                binder_name,
-                d,
-                binder_info,
-            )?;
+            let fvar = self.push_local_decl(binder_name, d, binder_info)?;
             hs.push(fvar);
             cur_ty = body;
         }
@@ -1419,20 +1417,23 @@ impl<'e> MetaCtx<'e> {
                     Some(v) => v,
                     None => return Ok(None),
                 };
-                let checkpoint = self.lctx.save();
+                let checkpoint = self.lctx_checkpoint();
                 let r = self.sunfold_go_let(decl_name, ty, v2, body, non_dep);
-                self.lctx.restore(checkpoint);
+                self.lctx_restore(checkpoint);
                 r
             }
             // oracle :753: `lambdaTelescope e fun xs b => mkLambdaFVars
             // xs (← go b)` — mints one fvar per LEADING `Lam` binder
             // only (never descends through a `LetE`, unlike
-            // `infer_lambda_body`'s mixed telescope); save/restore
-            // brackets the mint (`reduce_matcher`'s own idiom, above).
+            // `infer_lambda_body`'s mixed telescope); `lctx_checkpoint`/
+            // `lctx_restore` bracket the mint (`reduce_matcher`'s own
+            // idiom, above) — not the bare `self.lctx.save`/`restore`
+            // this used before (metavariable-local-contexts slice, fix
+            // round 1): `sunfold_go_lam` mints via `push_local_decl` now.
             Node::Lam { .. } => {
-                let checkpoint = self.lctx.save();
+                let checkpoint = self.lctx_checkpoint();
                 let r = self.sunfold_go_lam(e);
-                self.lctx.restore(checkpoint);
+                self.lctx_restore(checkpoint);
                 r
             }
             Node::App { f, arg } => {
@@ -1525,14 +1526,7 @@ impl<'e> MetaCtx<'e> {
         body: ExprId,
         non_dep: bool,
     ) -> Result<Option<ExprId>, MetaError> {
-        let fvar = self.lctx.mk_let_decl(
-            self.scratch,
-            Some(self.view.store),
-            &mut self.fvar_gen,
-            decl_name,
-            ty,
-            value,
-        )?;
+        let fvar = self.push_let_decl(decl_name, ty, value)?;
         let inst_body = instantiate(
             self.scratch,
             Some(self.view.store),
@@ -1588,14 +1582,7 @@ impl<'e> MetaCtx<'e> {
                 &fvars,
                 &mut self.guard,
             )?;
-            let fvar = self.lctx.mk_local_decl(
-                self.scratch,
-                Some(self.view.store),
-                &mut self.fvar_gen,
-                binder_name,
-                d,
-                binder_info,
-            )?;
+            let fvar = self.push_local_decl(binder_name, d, binder_info)?;
             fvars.push(fvar);
             e = body;
         }
@@ -3221,16 +3208,15 @@ mod tests {
             let base = Some(ctx.view.store);
             let n_str = ctx.scratch.intern_str(base, "n").expect("intern");
             let n_name = ctx.scratch.name_str(base, None, n_str).expect("name");
+            // Routed through `push_local_decl` (fix round 1, same
+            // reasoning as `test_support::fresh_fvar`'s own fix): a
+            // bare `ctx.lctx.mk_local_decl` here leaves `local_names`/
+            // the `current_lctx` cache unaware of this fvar, tripping
+            // the lockstep debug_assert the first time anything nested
+            // under this call (e.g. `reduce_matcher`'s own `infer_type`)
+            // opens a REAL telescope of its own.
             let fvar = ctx
-                .lctx
-                .mk_local_decl(
-                    ctx.scratch,
-                    base,
-                    &mut ctx.fvar_gen,
-                    Some(n_name),
-                    n_const,
-                    leanr_kernel::BinderInfo::Default,
-                )
+                .push_local_decl(Some(n_name), n_const, leanr_kernel::BinderInfo::Default)
                 .expect("fvar");
             let app = ctx.mk_app_spine(is_zero, &[fvar]).expect("isZero n");
             let matcher_app = ctx
@@ -3325,16 +3311,11 @@ mod tests {
             let base = Some(ctx.view.store);
             let n_str = ctx.scratch.intern_str(base, "n").expect("intern");
             let n_name = ctx.scratch.name_str(base, None, n_str).expect("name");
+            // Routed through `push_local_decl` — see
+            // `matcher_stuck_on_free_discriminant`'s own comment above
+            // for why (fix round 1).
             let fvar = ctx
-                .lctx
-                .mk_local_decl(
-                    ctx.scratch,
-                    base,
-                    &mut ctx.fvar_gen,
-                    Some(n_name),
-                    n_const,
-                    leanr_kernel::BinderInfo::Default,
-                )
+                .push_local_decl(Some(n_name), n_const, leanr_kernel::BinderInfo::Default)
                 .expect("fvar");
             let app = ctx.mk_app_spine(count, &[fvar]).expect("count n");
             let result = ctx.whnf(app).expect("whnf");
@@ -3903,6 +3884,69 @@ mod tests {
                  explicit-args fallback loop, not the :350-353 \
                  major-instance-arg check"
             );
+        });
+    }
+
+    /// Fix round 1 (code review, metavariable-local-contexts slice):
+    /// `sunfold_go_let`'s transient let-fvar must be visible to
+    /// `local_names`/`current_lctx` for as long as it stays open — was
+    /// a bare `self.lctx.mk_let_decl` before, leaving both silently
+    /// unaware of it. Called directly (a private fn, same module as
+    /// this test): the wrapper (`sunfold_go_body`'s `LetE` arm) is what
+    /// restores afterward, so calling `sunfold_go_let` on its own
+    /// leaves the fvar open to inspect. A trivial `let _ : Sort 0 :=
+    /// Sort 0; Sort 0` (no bvar occurrence in the body) is enough:
+    /// `sunfold_go`'s own recursive descent on the body is not this
+    /// test's concern, only the fvar THIS call mints.
+    #[test]
+    fn sunfold_go_let_records_its_transient_fvar_truthfully() {
+        with_prelude0_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let z = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, z).expect("sort");
+            let pre = ctx.lctx_checkpoint();
+            let r = ctx
+                .sunfold_go_let(None, sort0, sort0, sort0, false)
+                .expect("sunfold_go_let");
+            assert!(r.is_some(), "sunfold_go_let must not fail on a trivial let");
+            assert_eq!(
+                ctx.current_lctx().depth(),
+                pre + 1,
+                "sunfold_go_let's transient let-fvar must be recorded in \
+                 local_names/current_lctx while it is still open"
+            );
+            ctx.lctx_restore(pre);
+        });
+    }
+
+    /// Fix round 1: `sunfold_go_lam`'s own telescope fvar, same
+    /// reasoning as `sunfold_go_let`'s test just above — was a bare
+    /// `self.lctx.mk_local_decl` before. `fun (_ : Sort 0) => Sort 0`
+    /// (no bvar occurrence in the body either) peels exactly one
+    /// binder before `sunfold_go_lam`'s own loop stops.
+    #[test]
+    fn sunfold_go_lam_records_its_telescope_fvar_truthfully() {
+        with_prelude0_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let z = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, z).expect("sort");
+            let lam = ctx
+                .scratch
+                .expr_lam(base, None, sort0, sort0, leanr_kernel::BinderInfo::Default)
+                .expect("lam");
+            let pre = ctx.lctx_checkpoint();
+            let r = ctx.sunfold_go_lam(lam).expect("sunfold_go_lam");
+            assert!(
+                r.is_some(),
+                "sunfold_go_lam must not fail on a trivial lambda"
+            );
+            assert_eq!(
+                ctx.current_lctx().depth(),
+                pre + 1,
+                "sunfold_go_lam's telescope fvar must be recorded in \
+                 local_names/current_lctx while it is still open"
+            );
+            ctx.lctx_restore(pre);
         });
     }
 }

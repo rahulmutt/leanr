@@ -59,9 +59,4 @@ impl LocalCtxSnapshot {
     pub fn depth(&self) -> usize {
         self.local_names.len()
     }
-
-    #[allow(dead_code)] // no caller yet: Task 3 (`with_mvar_context`) is the first consumer.
-    pub(crate) fn parts(&self) -> (&LocalContext, &[(Option<NameId>, ExprId)]) {
-        (&self.lctx, &self.local_names)
-    }
 }

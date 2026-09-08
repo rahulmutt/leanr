@@ -45,24 +45,37 @@ pub struct MetaCtx<'e> {
     pub(crate) lctx: LocalContext,
     /// Task 3 (M4b-2) addition, additive/TCB-neutral: a by-user-name
     /// index parallel to `lctx`'s own decl list, one entry per
-    /// `push_local_decl` call (`None` name for an anonymous binder, kept
-    /// so the two stay 1:1 in length). Exists ONLY because
-    /// `LocalContext`'s `decls`/`index` fields are private even within
-    /// `leanr_kernel` (module-private to `local_ctx.rs`) — the kernel's
-    /// own public surface is `get(fvar_id)` (by id) and `save`/`restore`
-    /// (by count), no by-name scan, and adding one to `LocalContext`
-    /// itself would touch the byte-untouched kernel TCB. Every OTHER
-    /// internal `self.lctx.mk_local_decl`/`mk_let_decl`/`save`/`restore`
-    /// call site (`infer.rs`, `whnf.rs`, `assign.rs`, `defeq.rs`) already
-    /// brackets its own additions with an unconditional restore before
-    /// returning to its caller (the same `save -> push -> restore` stack
-    /// discipline this field's own `lctx_checkpoint`/`lctx_restore`
-    /// pairing uses), so `lctx.decls.len()` net-changes, across any span
-    /// bracketed by `lctx_checkpoint`/`lctx_restore`, ONLY via
-    /// `push_local_decl` — which is this field's sole writer too. The two
-    /// therefore stay in lockstep, and `lctx_restore`'s existing
-    /// `checkpoint: usize` (already `lctx.save()`'s own return value)
-    /// doubles as this field's truncation point with no second
+    /// `push_local_decl`/`push_let_decl` call (`None` name for an
+    /// anonymous binder, kept so the two stay 1:1 in length). Exists
+    /// ONLY because `LocalContext`'s `decls`/`index` fields are private
+    /// even within `leanr_kernel` (module-private to `local_ctx.rs`) —
+    /// the kernel's own public surface is `get(fvar_id)` (by id) and
+    /// `save`/`restore` (by count), no by-name scan, and adding one to
+    /// `LocalContext` itself would touch the byte-untouched kernel TCB.
+    ///
+    /// EVERY internal telescope-opening site in this crate
+    /// (`infer.rs`'s `infer_forall_body`/`infer_lambda_body`,
+    /// `whnf.rs`'s `reduce_matcher_telescope`/`sunfold_go_let`/
+    /// `sunfold_go_lam`, `assign.rs`'s `forall_bounded_telescope`,
+    /// `defeq.rs`'s `is_def_eq_binding_shallow_body`) mints its
+    /// transient fvars via `push_local_decl`/`push_let_decl` and
+    /// brackets its OWN caller's checkpoint with `lctx_checkpoint`/
+    /// `lctx_restore` (metavariable-local-contexts slice, fix round 1
+    /// — before that, these called `self.lctx.mk_local_decl`/
+    /// `mk_let_decl` directly and bracketed with the bare
+    /// `self.lctx.save`/`restore`, which kept `lctx` itself
+    /// self-consistent but left THIS field, and the `lctx_snapshot`
+    /// cache below, silently unaware of every such fvar for as long as
+    /// it stayed open — reachable from `current_lctx()`, itself
+    /// reachable from arbitrarily deep inside `is_def_eq` via
+    /// `mk_aux_mvar`'s `constApprox` fallback). So `lctx.decls.len()`
+    /// net-changes, across any span bracketed by `lctx_checkpoint`/
+    /// `lctx_restore`, ONLY via `push_local_decl`/`push_let_decl` —
+    /// which are this field's sole writers too. The two therefore stay
+    /// in lockstep EVERYWHERE, not merely at top-level entry points, and
+    /// `lctx_restore`'s existing `checkpoint: usize` (already
+    /// `lctx.save()`'s own return value) doubles as this field's
+    /// truncation point with no second
     /// checkpoint API. See `lctx_lookup_by_name` (the reader) below.
     pub(crate) local_names: Vec<(Option<NameId>, ExprId)>,
     /// Memoized `LocalCtxSnapshot` of the CURRENT `lctx`/`local_names`,

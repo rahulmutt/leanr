@@ -571,9 +571,9 @@ impl<'e> MetaCtx<'e> {
             Some(d) => d.ty,
             None => return Ok(false),
         };
-        let checkpoint = self.lctx.save();
+        let checkpoint = self.lctx_checkpoint();
         let result = self.assign_const_body(mvar, mvar_id, mvar_ty, num_args, v);
-        self.lctx.restore(checkpoint);
+        self.lctx_restore(checkpoint);
         result
     }
 
@@ -641,14 +641,7 @@ impl<'e> MetaCtx<'e> {
                 &xs,
                 &mut self.guard,
             )?;
-            let fvar = self.lctx.mk_local_decl(
-                self.scratch,
-                Some(self.view.store),
-                &mut self.fvar_gen,
-                binder_name,
-                d,
-                binder_info,
-            )?;
+            let fvar = self.push_local_decl(binder_name, d, binder_info)?;
             xs.push(fvar);
             cur_ty = body;
         }
@@ -1379,8 +1372,10 @@ mod tests {
         AxiomVal, CheckedConstants, ConstSource, ConstantInfo, ConstantVal, EnvView,
     };
 
+    use leanr_kernel::bank::terms::Node;
+
     use crate::test_support::{fresh_fvar, fresh_mvar};
-    use crate::{Config, EnvExtensions, LocalCtxSnapshot, MVarDecl, MVarKind, MetaCtx};
+    use crate::{Config, EnvExtensions, LocalCtxSnapshot, MVarDecl, MVarId, MVarKind, MetaCtx};
 
     /// A tiny bespoke environment (NOT `test_support::with_ctx`'s
     /// totally-empty one): `N.zero`/`N.succ` are declared as `Prop`-
@@ -1835,5 +1830,93 @@ mod tests {
             );
             ctx.lctx_restore(cp);
         });
+    }
+
+    /// Fix round 1 (code review, metavariable-local-contexts slice): a
+    /// metavariable minted via `mk_aux_mvar` while a `defeq.rs`
+    /// `is_def_eq_binding_shallow_body` telescope fvar is TRANSIENTLY
+    /// open must record that fvar in its OWN context — not a stale
+    /// pre-binder snapshot, and not trip the lockstep debug_assert.
+    ///
+    /// `fun (_ : Sort 0) => ?m a` vs `fun (_ : Sort 0) => ?m b`, `a ≠ b`
+    /// distinct ambient fvars, `const_approx` on: `is_def_eq` walks the
+    /// shared `Lam` head into `is_def_eq_binding_shallow`, which opens
+    /// ONE transient fvar for the domain, then compares `?m a =?= ?m b`
+    /// UNDER that open binder — reaching `isDefEqMVarSelf`'s
+    /// `constApprox` fallback exactly as
+    /// `const_approx_gates_is_def_eq_mvar_self_fallback` does, but now
+    /// one recursion level deeper, with a transient fvar live in `lctx`
+    /// that `local_names` must also know about for `current_lctx` (a
+    /// fresh cache in this fresh `MetaCtx`, so this is the COLD-cache
+    /// failure mode the finding names — a WARM stale cache is the same
+    /// underlying defect, already covered structurally since
+    /// `push_local_decl` invalidates the cache on every call, warm or
+    /// not).
+    #[test]
+    fn aux_mvar_minted_under_an_open_binder_comparison_sees_that_binder() {
+        with_n_ctx_cfg(
+            Config {
+                const_approx: true,
+                ..Config::default()
+            },
+            |ctx| {
+                let z = ctx.scratch.level_zero(None).unwrap();
+                let one = ctx.scratch.level_succ(None, z).unwrap();
+                let sort1 = ctx.scratch.expr_sort(None, one).unwrap();
+                let mvar_ty = mk_forall(ctx, sort1, sort1);
+                let (m_expr, m_id) = fresh_mvar(ctx, mvar_ty);
+                let a = fresh_fvar(ctx, sort1, "a");
+                let b = fresh_fvar(ctx, sort1, "b");
+                // `a`/`b` themselves are ambient fvars now (`fresh_fvar`
+                // routes through `push_local_decl` since the earlier
+                // fix in this same slice), so this is the ambient depth
+                // BEFORE the binder comparison opens its own transient
+                // fvar — the "+1" the assertion below checks for is
+                // exactly that one binder, isolated from however many
+                // ambient fvars this test happens to have minted first.
+                let pre_binder_depth = ctx.lctx_checkpoint();
+                let dom = n_type(ctx);
+                let body1 = mk_app(ctx, m_expr, a);
+                let body2 = mk_app(ctx, m_expr, b);
+                let base = Some(ctx.view.store);
+                let lhs = ctx
+                    .scratch
+                    .expr_lam(base, None, dom, body1, leanr_kernel::BinderInfo::Default)
+                    .expect("lam");
+                let rhs = ctx
+                    .scratch
+                    .expr_lam(base, None, dom, body2, leanr_kernel::BinderInfo::Default)
+                    .expect("lam");
+
+                assert!(
+                    ctx.is_def_eq(lhs, rhs).expect("defeq"),
+                    "constApprox fallback must still succeed one level under an open binder"
+                );
+                assert!(ctx.mctx.is_assigned(m_id));
+
+                // Dig out the aux mvar `assign_const` wrapped `m`'s
+                // assignment around (`fun _ => aux`), and check ITS OWN
+                // recorded context directly.
+                let assigned = ctx.mctx.assignment(m_id).expect("m assigned");
+                let aux_expr = match ctx.node(assigned) {
+                    Node::Lam { body, .. } => body,
+                    other => {
+                        panic!("expected assign_const's constant-function lambda, got {other:?}")
+                    }
+                };
+                let aux_id = match ctx.node(aux_expr) {
+                    Node::MVar { id: Some(id) } => MVarId(id),
+                    other => panic!("expected the aux mvar itself, got {other:?}"),
+                };
+                let aux_decl = ctx.mctx.decl(aux_id).expect("aux mvar declared");
+                assert_eq!(
+                    aux_decl.lctx.depth(),
+                    pre_binder_depth + 1,
+                    "the aux mvar minted under the open binder comparison must record \
+                     that binder (pre_binder_depth + 1), not a stale pre-binder \
+                     (pre_binder_depth) snapshot"
+                );
+            },
+        );
     }
 }

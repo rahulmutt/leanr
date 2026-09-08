@@ -569,15 +569,22 @@ impl<'e> MetaCtx<'e> {
     /// `TypeChecker::infer_pi`/`infer_lambda` idiom, `tc.rs:1008-1013`/
     /// `1067-1072` — `LocalContext::save`/`restore` are `pub` precisely
     /// so this crate can mirror it): `infer_forall_body` mints fresh
-    /// fvars via `self.lctx.mk_local_decl`, and every exit path —
-    /// including an early `?` return from any fallible step — restores
-    /// the checkpoint before the error propagates, since the body runs
-    /// to completion (as a plain `Result`, not yet unwound) before this
-    /// wrapper ever looks at it.
+    /// fvars via `push_local_decl` (metavariable-local-contexts slice,
+    /// fix round 1 — was a bare `self.lctx.mk_local_decl`, which left
+    /// `local_names`/the `current_lctx` cache unaware of a telescope
+    /// fvar for the whole nested `get_level` call below, itself capable
+    /// of recursing into `is_def_eq`/`mk_aux_mvar`), and every exit path
+    /// — including an early `?` return from any fallible step —
+    /// restores the checkpoint before the error propagates, since the
+    /// body runs to completion (as a plain `Result`, not yet unwound)
+    /// before this wrapper ever looks at it. `lctx_checkpoint`/
+    /// `lctx_restore` (not the bare `self.lctx.save`/`restore` this used
+    /// before), so the restore also truncates `local_names` and drops
+    /// the cache.
     fn infer_forall(&mut self, e0: ExprId) -> Result<ExprId, MetaError> {
-        let checkpoint = self.lctx.save();
+        let checkpoint = self.lctx_checkpoint();
         let r = self.infer_forall_body(e0);
-        self.lctx.restore(checkpoint);
+        self.lctx_restore(checkpoint);
         r
     }
 
@@ -601,14 +608,7 @@ impl<'e> MetaCtx<'e> {
             )?;
             let lvl = self.get_level(d)?;
             us.push(lvl);
-            let fvar = self.lctx.mk_local_decl(
-                self.scratch,
-                Some(self.view.store),
-                &mut self.fvar_gen,
-                binder_name,
-                d,
-                binder_info,
-            )?;
+            let fvar = self.push_local_decl(binder_name, d, binder_info)?;
             fvars.push(fvar);
             e = body;
         }
@@ -660,11 +660,15 @@ impl<'e> MetaCtx<'e> {
     /// (which `rebuild_forall` below mirrors) needs the telescope's
     /// fvars still declared in `self.lctx` while it runs, so the
     /// checkpoint is taken before `infer_lambda_body` and restored only
-    /// after `rebuild_forall` has consumed them.
+    /// after `rebuild_forall` has consumed them. `lctx_checkpoint`/
+    /// `lctx_restore` (metavariable-local-contexts slice, fix round 1):
+    /// `infer_lambda_body` mints via `push_local_decl`/`push_let_decl`
+    /// now, so the matching restore must be the one that also truncates
+    /// `local_names` and drops the `current_lctx` cache.
     fn infer_lambda(&mut self, e0: ExprId) -> Result<ExprId, MetaError> {
-        let checkpoint = self.lctx.save();
+        let checkpoint = self.lctx_checkpoint();
         let r = self.infer_lambda_body(e0);
-        self.lctx.restore(checkpoint);
+        self.lctx_restore(checkpoint);
         r
     }
 
@@ -686,14 +690,7 @@ impl<'e> MetaCtx<'e> {
                         &fvars,
                         &mut self.guard,
                     )?;
-                    let fvar = self.lctx.mk_local_decl(
-                        self.scratch,
-                        Some(self.view.store),
-                        &mut self.fvar_gen,
-                        binder_name,
-                        d,
-                        binder_info,
-                    )?;
+                    let fvar = self.push_local_decl(binder_name, d, binder_info)?;
                     fvars.push(fvar);
                     e = body;
                 }
@@ -718,14 +715,7 @@ impl<'e> MetaCtx<'e> {
                         &fvars,
                         &mut self.guard,
                     )?;
-                    let fvar = self.lctx.mk_let_decl(
-                        self.scratch,
-                        Some(self.view.store),
-                        &mut self.fvar_gen,
-                        decl_name,
-                        t,
-                        v,
-                    )?;
+                    let fvar = self.push_let_decl(decl_name, t, v)?;
                     fvars.push(fvar);
                     e = body;
                 }
