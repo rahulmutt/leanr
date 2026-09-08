@@ -450,3 +450,146 @@ def useFresh {α : Type u} [Fresh α] : α := Fresh.fresh
 -- `hasLocalInstanceWithOutParams` short-circuits on all of them
 -- (§ Amendment 4 item 8).
 axiom Lean.Internal.coeM : Type
+
+-- === M4b-3 P4: coercions (design spec § P4, § Amendment 5 item 9) ===
+--
+-- `semiOutParam` at the ROOT namespace, verbatim from
+-- `Init/Prelude.lean:725` — the `outParam` reasoning above applies:
+-- `Coe`'s first parameter is `semiOutParam (Sort u)` and only the root
+-- name is the real gadget. Inert here beyond being reducible.
+@[reducible] def semiOutParam (α : Sort u) : Sort u := α
+
+-- The chain, VERBATIM from `Init/Coe.lean:131-287` of the pin (doc
+-- comments dropped, nothing else changed), the same block
+-- `tests/fixtures/meta/Synth0.lean` carries — proved out at the
+-- synthesis tier first (M4b-3 P4 task 1), where the resolver's path
+-- through the reflexive/transitive diamond is observable; here
+-- `expandCoe` unfolds the instance away and the records pin the
+-- resulting FUNCTION (`Int.ofNat n`).
+class Coe (α : semiOutParam (Sort u)) (β : Sort v) where
+  coe : α → β
+attribute [coe_decl] Coe.coe
+
+class CoeTC (α : Sort u) (β : Sort v) where
+  coe : α → β
+attribute [coe_decl] CoeTC.coe
+instance [Coe β γ] [CoeTC α β] : CoeTC α γ where coe a := Coe.coe (CoeTC.coe a : β)
+instance [Coe α β] : CoeTC α β where coe a := Coe.coe a
+instance : CoeTC α α where coe a := a
+
+class CoeOut (α : Sort u) (β : semiOutParam (Sort v)) where
+  coe : α → β
+attribute [coe_decl] CoeOut.coe
+
+class CoeOTC (α : Sort u) (β : Sort v) where
+  coe : α → β
+attribute [coe_decl] CoeOTC.coe
+instance [CoeOut α β] [CoeOTC β γ] : CoeOTC α γ where coe a := CoeOTC.coe (CoeOut.coe a : β)
+instance [CoeTC α β] : CoeOTC α β where coe a := CoeTC.coe a
+instance : CoeOTC α α where coe a := a
+
+-- Note: ^^ We add reflexivity instances for CoeOTC/etc. so that we avoid going
+-- through a user-defined CoeTC/etc. instance.  (Instances like
+-- `CoeTC F (A →+ B)` apply even when the two sides are defeq.)
+
+class CoeHead (α : Sort u) (β : semiOutParam (Sort v)) where
+  coe : α → β
+attribute [coe_decl] CoeHead.coe
+
+class CoeHTC (α : Sort u) (β : Sort v) where
+  coe : α → β
+attribute [coe_decl] CoeHTC.coe
+instance [CoeHead α β] [CoeOTC β γ] : CoeHTC α γ where coe a := CoeOTC.coe (CoeHead.coe a : β)
+instance [CoeOTC α β] : CoeHTC α β where coe a := CoeOTC.coe a
+instance : CoeHTC α α where coe a := a
+
+class CoeTail (α : semiOutParam (Sort u)) (β : Sort v) where
+  coe : α → β
+attribute [coe_decl] CoeTail.coe
+
+class CoeHTCT (α : Sort u) (β : Sort v) where
+  coe : α → β
+attribute [coe_decl] CoeHTCT.coe
+instance [CoeTail β γ] [CoeHTC α β] : CoeHTCT α γ where coe a := CoeTail.coe (CoeHTC.coe a : β)
+instance [CoeHTC α β] : CoeHTCT α β where coe a := CoeHTC.coe a
+instance : CoeHTCT α α where coe a := a
+
+class CoeDep (α : Sort u) (_ : α) (β : Sort v) where
+  coe : β
+attribute [coe_decl] CoeDep.coe
+
+class CoeT (α : Sort u) (_ : α) (β : Sort v) where
+  coe : β
+attribute [coe_decl] CoeT.coe
+instance [CoeHTCT α β] : CoeT α a β where coe := CoeHTCT.coe a
+instance [CoeDep α a β] : CoeT α a β where coe := CoeDep.coe a
+instance : CoeT α a α where coe := a
+
+class CoeFun (α : Sort u) (γ : outParam (α → Sort v)) where
+  coe : (f : α) → γ f
+attribute [coe_decl] CoeFun.coe
+instance [CoeFun α fun _ => β] : CoeOut α β where coe a := CoeFun.coe a
+
+class CoeSort (α : Sort u) (β : outParam (Sort v)) where
+  coe : α → β
+attribute [coe_decl] CoeSort.coe
+instance [CoeSort α β] : CoeOut α β where coe a := CoeSort.coe a
+
+-- `Int`, verbatim from `Init/Data/Int/Basic.lean:46-49` minus its
+-- `extern` attributes, and the oracle's own worked example of a
+-- coercion (`Init/Coe.lean:32`: `instance : Coe Nat Int := ⟨Int.ofNat⟩`).
+-- `Big` is a second step so `(n : Big)` needs `CoeTC`'s transitive
+-- instance. `genCtorIdx false` for the same reason `Nat`/`List`/`Bool`
+-- above carry it.
+set_option genCtorIdx false in
+inductive Int : Type where
+  | ofNat : Nat → Int
+  | negSucc : Nat → Int
+
+set_option genCtorIdx false in
+inductive Big : Type where
+  | ofInt : Int → Big
+
+instance instCoeNatInt : Coe Nat Int := ⟨Int.ofNat⟩
+instance instCoeIntBig : Coe Int Big := ⟨Big.ofInt⟩
+
+-- `takesInt` — an ARGUMENT-position coercion (`ensureArgType`,
+-- `App.lean:54-62`), distinct from the ascription site.
+def takesInt (x : Int) : Int := x
+
+-- `NatAlias` — a SEMIREDUCIBLE alias (a plain `def`), for the `.coe`
+-- ladder arm's first branch (`SyntheticMVars.lean:546-551`): `Nat` and
+-- `NatAlias` are defeq under `withDefault` but NOT at `.instances`, so
+-- the arm assigns `e` itself where a `CoeT Nat e NatAlias` search would
+-- answer `.none` (the reflexive instance cannot unfold the alias).
+-- Consumed by a smoke test only (design spec § Amendment 5 item 10).
+def NatAlias : Type := Nat
+
+-- `Wrapper`/`pairW` — the POSTPONED-then-resumed coercion. In
+-- `pairW n Nat.zero`, `n : Nat` meets expected type `Wrapper ?a` while
+-- `?a` is unassigned: `CoeT Nat n (Wrapper ?a)` is `.undef` (the search
+-- would have to assign the read-only `?a`), so `mkCoe` registers a
+-- `.coe` mvar; the second argument assigns `?a := Nat`; the fixpoint's
+-- `.coe` arm then coerces. Without the arm, the record is a seam error.
+structure Wrapper (a : Type) where
+  val : a
+
+instance instCoeNatWrapper : Coe Nat (Wrapper Nat) := ⟨Wrapper.mk⟩
+
+def pairW {a : Type} (x : Wrapper a) (y : a) : Wrapper a := x
+
+-- `Fn` — a `CoeFun` carrier for `synthesizePendingAndNormalizeFunType`'s
+-- `coerceToFunction? s.f` (`App.lean:378-380`): `g Nat.zero` with
+-- `g : Fn` is not a function application until `Fn.f g` is.
+structure Fn where
+  f : Nat → Nat
+
+instance instCoeFunFn : CoeFun Fn (fun _ => Nat → Nat) := ⟨Fn.f⟩
+
+-- `Carrier` — a `CoeSort` carrier for `ensureType`
+-- (`TermElabM.lean:1935-1949`): a binder domain `(x : c)` with
+-- `c : Carrier` is a type only after `Carrier.ty c`.
+structure Carrier where
+  ty : Type
+
+instance instCoeSortCarrier : CoeSort Carrier Type := ⟨Carrier.ty⟩
