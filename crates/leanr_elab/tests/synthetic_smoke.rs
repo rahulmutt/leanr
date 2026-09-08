@@ -367,6 +367,78 @@ fn postpone_yes_leaves_the_mvar_pending() {
     });
 }
 
+/// **Residue 1 of `try_synth_instance`'s pre-test, retired (M4b-3
+/// P2b-ii).** A goal whose only unassigned mvar sits in an
+/// OUTPUT-PARAMETER position is answered by the oracle
+/// (`preprocessOutParam` + `assignOutParams`, `SynthInstance.lean:775-861`,
+/// ported in P2b-i) and must now reach the real search here too — with
+/// the caller's mvar ASSIGNED as a result, which is the whole feature.
+///
+/// Before this task the pre-test answered `Undef` on any expr mvar at
+/// all, and the ladder eventually raised `StuckSyntheticMVar` on a goal
+/// the oracle solves. Corpus record `outParam/getFst` pins the same fact
+/// end-to-end.
+#[test]
+fn out_param_position_mvar_reaches_the_real_search() {
+    support::with_app_harness("Nat.zero", |app| {
+        let goal = support::get_cell_nat_of_fresh_mvar(app);
+        let (_e, id) = app
+            .elab
+            .mk_fresh_expr_mvar_of_kind(goal, leanr_meta::MVarKind::Synthetic)
+            .expect("fresh mvar");
+        assert!(
+            app.elab
+                .synthesize_inst_mvar_core(id)
+                .expect("an outParam goal is not an error"),
+            "`Get Cell Nat ?e` must be SOLVED, not postponed: the only mvar is \
+             in an output-parameter position"
+        );
+        assert!(
+            app.elab.mctx.mctx().is_assigned(id),
+            "the instance mvar is assigned"
+        );
+        // The outParam mvar itself must have been assigned by
+        // `assign_out_params` — read it back off the goal.
+        let goal = app.elab.mctx.instantiate_mvars(goal).expect("instantiate");
+        let base = app.elab.view.store;
+        assert!(
+            !app.elab
+                .mctx
+                .store()
+                .expr_data(Some(base), goal)
+                .has_expr_mvar(),
+            "`?e := Unit` is assigned as a RESULT of synthesis, got {goal:?}"
+        );
+    });
+}
+
+/// The exemption is POSITIONAL, not class-level (design spec
+/// § Amendment 4 item 6): `Get Cell ?i ?e` has an unassigned mvar in a
+/// NON-output position (`idx`), so it must still postpone. This is
+/// load-bearing for the `GetElem` worked example — `?i` is fixed only
+/// when the `OfNat` default instance fires, and sending the goal to the
+/// search early would answer `.none` and fail the headline record.
+#[test]
+fn non_out_param_position_mvar_still_postpones() {
+    support::with_app_harness("Nat.zero", |app| {
+        let goal = support::get_cell_of_two_fresh_mvars(app);
+        let (_e, id) = app
+            .elab
+            .mk_fresh_expr_mvar_of_kind(goal, leanr_meta::MVarKind::Synthetic)
+            .expect("fresh mvar");
+        assert!(
+            !app.elab
+                .synthesize_inst_mvar_core(id)
+                .expect("a stuck goal is not an error"),
+            "`Get Cell ?i ?e` must be POSTPONED: `?i` is not an output parameter"
+        );
+        assert!(
+            !app.elab.mctx.mctx().is_assigned(id),
+            "nothing is committed on a postponed goal"
+        );
+    });
+}
+
 /// Rung 3 with nothing pending is a no-progress no-op — unchanged
 /// behavior from P2a's seam, but now for the real reason (the priority
 /// walk finds no pending `TypeClass` mvar) rather than a shape guard.

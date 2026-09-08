@@ -318,6 +318,101 @@ pub fn wrap_of_fresh_mvar(app: &mut leanr_elab::app::state::AppElab) -> leanr_ke
         .expect("Wrap ?m applies")
 }
 
+/// `Get Cell Nat ?e` — a class goal whose ONLY unassigned mvar sits in
+/// an OUTPUT-PARAMETER position (`Get`'s third parameter is
+/// `outParam (Type w)`). The oracle answers this goal — `preprocessOutParam`
+/// swaps `?e` for a search-local mvar and `assignOutParams` assigns the
+/// caller's `?e := Unit` afterwards (M4b-3 P2b-i ported both) — so the
+/// ladder pre-test must let it reach the real search.
+///
+/// Built like `wrap_of_fresh_mvar`: the fresh mvar's type is read off the
+/// partial application's own inferred type rather than re-elaborated.
+pub fn get_cell_nat_of_fresh_mvar(
+    app: &mut leanr_elab::app::state::AppElab,
+) -> leanr_kernel::bank::ExprId {
+    use leanr_kernel::bank::terms::Node;
+    let get_cell_nat = elab_type_expr(app, "Get Cell Nat");
+    let ty = app
+        .elab
+        .mctx
+        .infer_type(get_cell_nat)
+        .expect("Get Cell Nat's own type infers");
+    let Node::Forall { binder_type, .. } = app.node(ty) else {
+        panic!("get_cell_nat_of_fresh_mvar: `Get Cell Nat` is not a forall: {ty:?}");
+    };
+    let (mvar, _id) = app
+        .elab
+        .mk_fresh_expr_mvar_of_kind(binder_type, leanr_meta::MVarKind::Natural)
+        .expect("fresh mvar");
+    let base = app.elab.view.store;
+    app.elab
+        .mctx
+        .store_mut()
+        .expr_app(Some(base), get_cell_nat, mvar)
+        .expect("Get Cell Nat ?e applies")
+}
+
+/// `Get Cell ?i ?e` — the same class with an unassigned mvar in a
+/// NON-output position too (`idx`). This is the shape the `GetElem`
+/// worked example depends on staying POSTPONED: `?i` is fixed only when
+/// the `OfNat` default instance fires, and an exemption keyed on the
+/// class rather than the position would send this goal to a search that
+/// answers `.none` (design spec § Amendment 4 item 6).
+pub fn get_cell_of_two_fresh_mvars(
+    app: &mut leanr_elab::app::state::AppElab,
+) -> leanr_kernel::bank::ExprId {
+    use leanr_kernel::bank::terms::Node;
+    let get_cell = elab_type_expr(app, "Get Cell");
+    let ty = app
+        .elab
+        .mctx
+        .infer_type(get_cell)
+        .expect("Get Cell's own type infers");
+    let Node::Forall {
+        binder_type: idx_ty,
+        body,
+        ..
+    } = app.node(ty)
+    else {
+        panic!("get_cell_of_two_fresh_mvars: `Get Cell` is not a forall: {ty:?}");
+    };
+    let (idx, _) = app
+        .elab
+        .mk_fresh_expr_mvar_of_kind(idx_ty, leanr_meta::MVarKind::Natural)
+        .expect("fresh idx mvar");
+    // The `elem` binder's type is closed only once `idx` is substituted
+    // in (the telescope is `∀ (idx : Type v), outParam (Type w) → ...`,
+    // non-dependent here, but instantiating is the general shape).
+    let rest = app
+        .elab
+        .mctx
+        .instantiate_beta_rev_range(body, &[idx])
+        .expect("instantiate");
+    let Node::Forall {
+        binder_type: elem_ty,
+        ..
+    } = app.node(rest)
+    else {
+        panic!("get_cell_of_two_fresh_mvars: `Get Cell ?i` is not a forall: {rest:?}");
+    };
+    let (elem, _) = app
+        .elab
+        .mk_fresh_expr_mvar_of_kind(elem_ty, leanr_meta::MVarKind::Natural)
+        .expect("fresh elem mvar");
+    let base = app.elab.view.store;
+    let with_idx = app
+        .elab
+        .mctx
+        .store_mut()
+        .expr_app(Some(base), get_cell, idx)
+        .expect("Get Cell ?i applies");
+    app.elab
+        .mctx
+        .store_mut()
+        .expr_app(Some(base), with_idx, elem)
+        .expect("Get Cell ?i ?e applies")
+}
+
 /// `NoInst Nat` — a class goal with no instance, exercising the real
 /// synthesis-failure (`.none`) arm.
 pub fn no_inst_of_nat(app: &mut leanr_elab::app::state::AppElab) -> leanr_kernel::bank::ExprId {

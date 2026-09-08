@@ -548,6 +548,34 @@ def defaultPolyQueries : List (String × String) :=
   [ ("dflt/polyInstImplicit", "useFresh")
   ]
 
+/-- M4b-3 P2b-ii: the elaborator outParam branch. The three records here
+land BEFORE `Lean.Internal.coeM` is declared (task 2 of the plan) and
+must stay byte-identical when it is (task 5): in a one-term dump the
+entry point's own fixpoint runs the same default instances the
+`finalize` branch runs eagerly, so on these shapes the branch changes
+WHEN `?elem` is assigned, not WHAT it is assigned. The two records that
+DO change — `outParam/getElemUnderDflt` and `outParam/getElemAscribed`
+— are appended by task 5 once the branch exists on both sides.
+
+  * `outParam/getFst` — `getFst cell`: the `Get Cell Nat ?elem` goal at
+    `finalize` has its only mvar in an OUTPUT-PARAMETER position. The
+    oracle answers it (`preprocessOutParam` / `assignOutParams`); leanr
+    needed the ladder pre-test's positional exemption. Without it the
+    goal postpones forever and the fixpoint reports it stuck.
+  * `outParam/getElem` — `Get.get cell 0`, the oracle's own worked
+    example (App.lean:150-166). `?idx` is fixed by the `OfNat` default
+    instance, then `Get Cell Nat ?elem` is solved with `?elem := Unit`
+    assigned as a RESULT of synthesis.
+  * `outParam/getElemIdxNat` — `Get.get cell (0 : Nat)`: the index is
+    ground before `finalize`, so `synthesizeAppInstMVars` solves the
+    instance goal there and the outParam is ALREADY ASSIGNED when the
+    branch's guard runs — the else arm (App.lean:645-646). -/
+def outParamQueries : List (String × String) :=
+  [ ("outParam/getFst",        "getFst cell")
+  , ("outParam/getElem",       "Get.get cell 0")
+  , ("outParam/getElemIdxNat", "Get.get cell (0 : Nat)")
+  ]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -561,7 +589,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>

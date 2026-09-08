@@ -151,7 +151,7 @@ fn oracle_elab_gate() {
     // exactly `wc -l tests/fixtures/elab/elab-queries.jsonl` after the
     // regen. `>=`, not `==`, so adding a record is a one-line bump here
     // rather than a gate that fails before the author has looked.
-    const CORPUS_FLOOR: usize = 102;
+    const CORPUS_FLOOR: usize = 105;
     assert!(
         replayed >= CORPUS_FLOOR,
         "corpus shrank: replayed {replayed} records, floor is {CORPUS_FLOOR}. \

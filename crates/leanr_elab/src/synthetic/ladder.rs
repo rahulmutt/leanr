@@ -184,8 +184,7 @@ impl<'e> TermElabM<'e> {
     /// an instantiated type it means exactly "mentions an UNASSIGNED expr
     /// mvar"; on a stale one it would over-report.
     fn try_synth_instance(&mut self, ty: ExprId) -> Result<LOptionExpr, ElabError> {
-        let base = self.view.store;
-        if self.mctx.store().expr_data(Some(base), ty).has_expr_mvar() {
+        if self.has_mvar_outside_out_params(ty) {
             return Ok(LOptionExpr::Undef);
         }
         match self.mctx.synth_instance(ty) {
@@ -194,6 +193,62 @@ impl<'e> TermElabM<'e> {
             Err(leanr_meta::MetaError::IsDefEqStuck(_)) => Ok(LOptionExpr::Undef),
             Err(e) => Err(ElabError::from(e)),
         }
+    }
+
+    /// The stuck pre-test, POSITIONAL since M4b-3 P2b-ii: does `ty`
+    /// mention an unassigned expr mvar OUTSIDE its head class's
+    /// output-parameter argument positions?
+    ///
+    /// Why positional (design spec § Amendment 4 item 6). An mvar in an
+    /// output-parameter position is exactly what `preprocessOutParam`
+    /// (`SynthInstance.lean:775-817`) replaces with a search-local mvar
+    /// before the search runs, and what `assignOutParams` (`:847-861`)
+    /// assigns back afterwards — both ported in P2b-i
+    /// (`leanr_meta::synth.rs`) — so the search never unifies against
+    /// the caller's mvar and cannot get stuck on it. An mvar ANYWHERE
+    /// ELSE is still one the search would unify against directly, which
+    /// is the read-only-mvar stuck condition this pre-test reconstructs
+    /// (residues 2 and 3 in `try_synth_instance`'s own doc), so it
+    /// still postpones.
+    ///
+    /// Not class-level: the oracle's `PreprocessKind` (`:706-716`) only
+    /// says whether the CLASS has outParams, and `Get Cell ?i ?e` — a
+    /// class with outParams, an mvar in a non-output position — must
+    /// keep postponing or the `GetElem` worked example breaks.
+    ///
+    /// Conservative on every shape it cannot read: a non-`Const` head, an
+    /// unnamed `Const`, or a head that is not a class (`get_out_param_positions`
+    /// answers `None`) keeps today's behaviour, `Undef` on any expr mvar.
+    /// Argument positions are counted in APPLICATION order, matching
+    /// `ClassEntry.outParams` (`Class.lean:11-31`).
+    ///
+    /// Precondition: `ty` is already `instantiate_mvars`-ed, so
+    /// `has_expr_mvar` means "mentions an UNASSIGNED expr mvar".
+    fn has_mvar_outside_out_params(&self, ty: ExprId) -> bool {
+        let base = self.view.store;
+        let store = self.mctx.store();
+        if !store.expr_data(Some(base), ty).has_expr_mvar() {
+            return false;
+        }
+        let mut args = Vec::new();
+        let mut cur = ty;
+        while let Node::App { f, arg } = store.expr_node(Some(base), cur) {
+            args.push(arg);
+            cur = f;
+        }
+        args.reverse();
+        let Node::Const {
+            name: Some(class), ..
+        } = store.expr_node(Some(base), cur)
+        else {
+            return true;
+        };
+        let Some(out_positions) = self.mctx.get_out_param_positions(class) else {
+            return true;
+        };
+        args.iter().enumerate().any(|(i, arg)| {
+            !out_positions.contains(&i) && store.expr_data(Some(base), *arg).has_expr_mvar()
+        })
     }
 
     /// The ordering core of `synthesizeSyntheticMVarsStep`
