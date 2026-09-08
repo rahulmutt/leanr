@@ -457,6 +457,43 @@ fn no_seam_points_at_the_retired_p3_default_instance_label() {
     );
 }
 
+/// M4b-3 P2b-ii RETIRED the `resultTypeOutParam?` producer seam — the
+/// `add_implicit_arg` and `finalize` messages that both read
+/// "... requires the elaborator-side resultTypeOutParam? producer —
+/// M4b-3 P2b-ii" — and the ladder's Residue 1. A source tree that still
+/// carries that phrase, in a message OR in a doc comment claiming the
+/// producer is missing, is making a stale claim about what is
+/// implemented.
+///
+/// Mirrors the two retired-label gates above and inherits their stated
+/// precondition: a TEXTUAL scan is a floor (the retired wording never
+/// comes back), not a ceiling. The needle is the distinctive subject of
+/// both retired messages and lies within one source line of each
+/// (verified against the task-3 commit's `args.rs` and `finalize.rs`
+/// with `git show <commit>:<path> | grep -c`: one offender in each
+/// there, zero here). Prose that names the producer as EXISTING (e.g.
+/// "`args::add_implicit_arg` is the producer") does not contain the
+/// needle and is not an offender.
+#[test]
+fn no_seam_points_at_the_retired_p2b_ii_label() {
+    let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    let needle = "resultTypeOutParam? producer";
+    let mut offenders = Vec::new();
+    for path in walk_rs_files(src_dir) {
+        let text = std::fs::read_to_string(&path).expect("readable source");
+        for (n, line) in text.lines().enumerate() {
+            if line.contains(needle) {
+                offenders.push(format!("{}:{}", path.display(), n + 1));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "P2b-ii retired the resultTypeOutParam? producer seam (it has a real body in \
+         `app/args.rs`); stale label at {offenders:?}"
+    );
+}
+
 /// The four literal kinds are REGISTERED, so they must not appear in any
 /// of the crate's three deferral ledgers, and `rawNatLit` — which has no
 /// producer in leanr's own parser — must stay unregistered.

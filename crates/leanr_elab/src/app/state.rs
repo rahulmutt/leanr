@@ -28,11 +28,11 @@ pub struct Context {
     /// `outParam` of a local instance (`App.lean:141-168`). The oracle
     /// computes it as `env.contains ``Lean.Internal.coeM && flag &&
     /// !explicit` (`App.lean:1355`) — coercions must be available for
-    /// the feature to make sense. P1 computes it the SAME way, which
-    /// makes it `false` throughout the hermetic fixture env (prelude-mode
-    /// `Elab0` declares no `Lean.Internal.coeM`) with no special-casing.
-    /// The consuming logic (`finalize`'s outParam branch) is P2b's — see
-    /// `lib.rs`'s "local-instance outParam result types" bullet.
+    /// the feature to make sense. Computed the same way here
+    /// (`app::elab_app_aux`), and `true` in the fixture env since M4b-3
+    /// P2b-ii declared `Lean.Internal.coeM` in `Elab0.lean`. Consumed by
+    /// `args::is_next_out_param_of_local_instance_and_result` (the
+    /// producer) and `finalize`'s outParam branch.
     pub result_is_out_param_support: bool,
     /// oracle: `Context.numImplicitParams` — cached max over
     /// `namedArgs`; only nonzero for structure projections (M4b-4).
@@ -74,12 +74,11 @@ pub struct State {
     /// `try_synthesize_app_inst_mvars`/`synthesize_app_inst_mvars`.
     pub inst_mvars: Vec<MVarId>,
     pub propagate_expected: bool,
-    /// oracle: `State.resultTypeOutParam?`. No P1 producer, and P2a adds
-    /// none either. The producer needs the elaborator-side
-    /// `isNextOutParamOfLocalInstanceAndResult` logic, which is
-    /// M4b-3 P2b-ii's (`args.rs`'s `add_implicit_arg` names the seam);
-    /// the `classExtension` decode that logic will read already landed
-    /// in M4b-3 P2b-i.
+    /// oracle: `State.resultTypeOutParam?`. Written by
+    /// `args::add_implicit_arg` when
+    /// `is_next_out_param_of_local_instance_and_result` answers true
+    /// (`App.lean:747-755`, M4b-3 P2b-ii); read by `finalize`'s
+    /// outParam branch (`App.lean:638-646`).
     pub result_type_out_param: Option<MVarId>,
     /// oracle: `State.foundNamedArgs` — valid named-argument names seen
     /// while walking the function's type; feeds the oracle's "invalid

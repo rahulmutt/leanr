@@ -114,26 +114,13 @@ impl<'e> TermElabM<'e> {
     /// eventually raise `StuckSyntheticMVar` on a goal the oracle
     /// answers.
     ///
-    /// **M4b-3 P2b-i has landed the SYNTHESIS half of the fix**, so this
-    /// entry no longer says "outParam support is itself a named seam":
-    /// `leanr_olean` decodes `classExtension`, and `leanr_meta`'s
-    /// `synth.rs` now has `preprocess` / `preprocess_out_param` /
-    /// `assign_out_params`, with `Op N N ?c` answered AND `?c := N`
-    /// assigned in the committed corpus (`outParam/synth/0` in
-    /// `tests/fixtures/meta/synth-queries.jsonl`). What is STILL OPEN
-    /// is the ELABORATOR half, **M4b-3 P2b-ii**: this pre-test must be
-    /// taught to exempt output-parameter positions (or be deleted in
-    /// favour of calling the real mechanism), and `app/args.rs`'s
-    /// `add_implicit_arg` / `app/finalize.rs`'s result-type branch still
-    /// need a `resultTypeOutParam?` producer. What keeps the residue
-    /// UNREACHABLE today is narrower than before, and it is a fixture
-    /// fact rather than a missing mechanism: `Elab0.lean`
-    /// (`tests/fixtures/elab/`) still declares no class with an
-    /// `outParam`, so no corpus term reaches this arm with an output
-    /// parameter in it.
-    /// P2b-ii is the slice that adds one (the `Get`/`GetElem` shape
-    /// already proved out at the synthesis tier) and must retire this
-    /// residue in the same change.
+    /// **Closed by M4b-3 P2b-ii.** `has_mvar_outside_out_params` below
+    /// exempts output-parameter positions, so `Op N N ?c` /
+    /// `Get Cell Nat ?e` reach the real search and P2b-i's
+    /// `assign_out_params` assigns the caller's mvar; a goal with an
+    /// mvar in a NON-output position (`Get Cell ?i ?e`) still postpones,
+    /// which the `GetElem` worked example requires. Residues 2 and 3
+    /// below are unchanged and still the depth model's.
     ///
     /// **Residue 2 — an all-polymorphic candidate set (owner: the
     /// mctx-depth model).** If every candidate the search reaches is
@@ -173,10 +160,7 @@ impl<'e> TermElabM<'e> {
     /// channel this function should be reading once `leanr_meta` grows
     /// the depth model, at which point the syntactic pre-test becomes
     /// redundant for residues 2 and 3 and can be deleted rather than
-    /// rewritten. Residue 1 does NOT come along for free even though
-    /// `preprocessOutParam`/`assignOutParams` have landed on the
-    /// synthesis side (M4b-3 P2b-i) — it still needs the elaborator-side
-    /// work, M4b-3 P2b-ii, described above.
+    /// rewritten.
     ///
     /// Precondition: `ty` is already `instantiate_mvars`-ed (the oracle's
     /// own `let type ← instantiateMVars type`, `SynthInstance.lean:967`).
