@@ -579,14 +579,18 @@ fn default_instance_walk_visits_pending_mvars_in_reverse_creation_order() {
         let prios = app.elab.mctx.default_instance_priorities();
         assert_eq!(
             prios.len(),
-            3,
-            "Elab0's three default-instance priorities, got {prios:?}"
+            4,
+            "Elab0's four default-instance priorities (1000 / 100 / 75 / 50), got {prios:?}"
         );
         // The TOP priority must apply to none of the three goals (so the
         // walk visits all of them before dropping a rung), and the
         // SECOND must be where `OfNat`'s winning default sits —
         // `instOfNatNat` at 100 since the task-6 review re-prioritised
-        // `instOfNatTag` from 500 down to 50.
+        // `instOfNatTag` from 500 down to 50. M4b-3 P2b-ii added a
+        // fourth priority (`instFreshSeed` at 75) BELOW 100: the walk
+        // stops at the first priority that makes progress, so the
+        // recorded order below is unchanged — three visits at the top,
+        // one at 100 — and only this count moved.
         assert!(prios[0] > 100 && prios[1] == 100, "got {prios:?}");
         let ids = support::register_three_goals_oldest_defaultable(app);
         let order = support::visit_order_of_default_walk(app, &kinds);
@@ -675,8 +679,8 @@ fn default_instance_priorities_are_stored_in_descending_order() {
     support::with_app_harness("Nat.zero", |app| {
         let prios = app.elab.mctx.default_instance_priorities();
         assert!(
-            prios.len() >= 3,
-            "Elab0 must carry three distinct default-instance priorities, got {prios:?}"
+            prios.len() >= 4,
+            "Elab0 must carry four distinct default-instance priorities, got {prios:?}"
         );
         let mut descending = prios.clone();
         descending.sort_unstable();
@@ -696,6 +700,10 @@ fn default_instance_priorities_are_stored_in_descending_order() {
         assert!(
             prios.contains(&50),
             "instOfNatTag's priority, got {prios:?}"
+        );
+        assert!(
+            prios.contains(&75),
+            "instFreshSeed's priority (M4b-3 P2b-ii), got {prios:?}"
         );
         assert!(
             prios[0] > 100,

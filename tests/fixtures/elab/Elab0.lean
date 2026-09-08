@@ -319,3 +319,110 @@ instance instOfScientificTag : OfScientific Tag where
 -- later slice first needs `Char`'s actual shape.
 axiom Char : Type
 axiom Char.ofNat : Nat -> Char
+
+-- === M4b-3 P2b-ii corpus: the elaborator outParam branch ===
+--
+-- The FIRST `outParam` class in this fixture. Until this block,
+-- `Context.resultIsOutParamSupport`'s consumer
+-- (`isNextOutParamOfLocalInstanceAndResult`, App.lean:681-727) had
+-- nothing to fire on. `Lean.Internal.coeM` — the env gate that turns the
+-- flag on (App.lean:1355) — is declared SEPARATELY, further down, by the
+-- task that lands the producer: with the gate on and no producer, every
+-- non-`@` application in the corpus errors (design spec § Amendment 3
+-- item 9, § Amendment 4 item 7).
+--
+-- `outParam` must be declared here, at the ROOT namespace, because this
+-- fixture is `prelude`-mode and imports no `Init`. The oracle's `class`
+-- command decides output-parameter positions with `Lean.Expr.isOutParam`
+-- (`Expr.lean:1709-1710`), which is `isAppOfArity ``outParam 1` against
+-- the ROOT name `outParam` — so this declaration is the real thing, not
+-- a look-alike. Copied verbatim from `Init/Prelude.lean:702` of the pin,
+-- exactly as `tests/fixtures/Instances.lean` already does.
+@[reducible] def outParam (α : Sort u) : Sort u := α
+
+-- `Get` — the `GetElem` shape from the oracle's own worked example
+-- (App.lean:150-151, inside the `resultIsOutParamSupport` doc comment):
+-- two ordinary parameters, one `outParam`, and a method taking both
+-- ordinary parameters. The SAME shape M4b-3 P2b-i proved out at the
+-- synthesis tier (`Instances.lean` / `Synth0.lean`, `outParamGet`).
+class Get (cont : Type u) (idx : Type v) (elem : outParam (Type w)) where
+  get : cont → idx → elem
+
+-- `Cell` — an opaque container (same "minimal opaque stand-in suffices"
+-- reasoning as `axiom String` above), with one inhabitant so an
+-- application can be written. Its `Get` instance is indexed by `Nat`,
+-- deliberately: the worked example's `getElem xs 0` needs the index type
+-- to be what `instOfNatNat` (the priority-100 `OfNat` default above)
+-- resolves the numeral to, so that the `Get Cell ?idx ?elem` goal is
+-- STUCK until the default rung fires and then SOLVED by it.
+axiom Cell : Type
+axiom cell : Cell
+
+instance instGetCellNat : Get Cell Nat Unit where
+  get := fun _ _ => Unit.unit
+
+-- `getFst` exists for the producer's two FALSE directions, which no
+-- `Get.get` record can reach. Its `[Get cont Nat elem]` binder is a
+-- local instance with an outParam, so `hasLocalInstanceWithOutParams`
+-- answers true for BOTH implicits — and the producer must still answer
+-- false for both:
+--   * for `{cont}`: `isResultType` is TRUE (the result IS `cont`), but
+--     `isOutParamOf` finds `cont` at position 0 of `Get`, which is not
+--     an `outParam` position (App.lean:718-727);
+--   * for `{elem}`: `elem` IS the outParam of the local instance, but
+--     `isResultType` is FALSE (App.lean:693-697) — the result is `cont`.
+-- Mutating either clause to a constant `true` marks the wrong mvar as
+-- `resultTypeOutParam?`; `tests/app_smoke.rs` asserts both directions.
+-- The corpus record `outParam/getFst` also needs P2b-ii's ladder
+-- exemption: the `Get Cell Nat ?elem` goal at `finalize` has its only
+-- mvar in an OUTPUT-PARAMETER position, which the oracle answers and
+-- the pre-test (before this plan) postponed forever.
+def getFst {cont : Type} {elem : Type} [Get cont Nat elem] (c : cont) : cont := c
+
+-- `dpair` exists for ONE record, `outParam/getElemUnderDflt`, and it is
+-- the record that makes the `finalize` branch OBSERVABLE (design spec
+-- § Amendment 4 items 10-11, and this plan's orientation note): with the
+-- branch, the inner `Get.get cell 0` finalizes with `?elem := Unit` and
+-- `Dflt Unit` finds `instDfltUnit`; without it, the entry point's own
+-- fixpoint reaches `Dflt ?elem` at priority 1000 FIRST and applies
+-- `instDfltNat`, after which `Get Cell Nat Nat` has no instance. `Dflt`
+-- is reused rather than a new class precisely because it already has a
+-- bare-priority default AND a `Unit` instance.
+def dpair {a : Type} [Dflt a] (x : a) : a := x
+
+-- === M4b-3 P2b-ii: the fourth-priority default instance ===
+--
+-- Closes design spec § Follow-ups items 1 and 2 (owner assigned by
+-- § Amendment 3 item 8; requirements R1-R4 in § Amendment 4 item 9):
+--   R1  `instFreshSeed` is universe-polymorphic (level parameter `u`),
+--       so `mk_default_instance_candidate` building at an EMPTY level
+--       list leaves a rigid `u` in the term instead of a fresh level
+--       mvar, and the record moves;
+--   R2  it carries an `instImplicit` binder `[Seed PUnit.{u+1}]` that is
+--       synthesizable only AFTER the candidate is applied, so
+--       `synthesize_using_default_instance`'s nested `synthesizePending`
+--       collecting NOTHING leaves that argument an unassigned mvar, and
+--       the record moves;
+--   R3  priority 75 — a FOURTH priority, strictly between `instOfNatNat`'s
+--       100 and `instOfNatTag`'s 50, on a class no other goal mentions,
+--       so `num/bare`'s walk (solved at 100) never reaches it and no
+--       committed record changes;
+--   R4  `useFresh` leaves a pending `Fresh ?α` goal with `?α`
+--       unconstrained, so the walk descends past 100 to it.
+-- The emitted term keeps a RESIDUAL universe metavariable (`?u` is
+-- determined by nothing) — the dumper encodes it canonically as `lmvar`,
+-- which `ident/List` already exercises.
+class Seed (α : Type u) where
+  seed : α
+
+instance instSeedPUnit : Seed PUnit.{u+1} where
+  seed := PUnit.unit
+
+class Fresh (α : Type u) where
+  fresh : α
+
+@[default_instance 75]
+instance instFreshSeed [Seed PUnit.{u+1}] : Fresh PUnit.{u+1} where
+  fresh := Seed.seed
+
+def useFresh {α : Type u} [Fresh α] : α := Fresh.fresh

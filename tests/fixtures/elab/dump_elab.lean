@@ -533,6 +533,21 @@ def scientificQueries : List (String × String) :=
   , ("sci/dotExpBelow", "(1.25e1 : Tag)")
   ]
 
+/-- M4b-3 P2b-ii task 1: the fourth-priority default instance (design
+spec § Follow-ups items 1-2, § Amendment 4 item 9). `useFresh` alone
+leaves `Fresh ?α` pending with nothing else constraining `?α`, so the
+default-instance walk descends 1000 → 100 → 75 and applies
+`instFreshSeed`, which is universe-polymorphic AND carries an
+`instImplicit` binder. The record therefore pins both the fresh-level
+refresh (a rigid `param u` here instead of `lmvar` means
+`mk_default_instance_candidate` built at the empty level list) and the
+nested `synthesizePending` fixpoint (an `mvar` in the `Seed` argument
+position means the candidate's instance-implicit binders were not
+collected). -/
+def defaultPolyQueries : List (String × String) :=
+  [ ("dflt/polyInstImplicit", "useFresh")
+  ]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -546,7 +561,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>
