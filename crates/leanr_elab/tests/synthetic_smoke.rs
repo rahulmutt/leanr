@@ -1140,3 +1140,40 @@ fn a_numeral_ascribed_to_a_prop_is_not_data() {
         other => panic!("expected NumeralIsNotData, got {other:?}"),
     }
 }
+
+/// oracle: `synthesizeSyntheticMVarsUsingDefault`
+/// (`SyntheticMVars.lean:658-660`) — `synthesizeSyntheticMVars
+/// (postpone := .yes)` then `synthesizeUsingDefaultLoop`. The composite
+/// exists for `finalize`'s outParam branch (M4b-3 P2b-ii); this pins
+/// that it (a) applies a default instance to a stuck goal and (b) does
+/// NOT report stuck goals it cannot close — `postpone := .yes` means a
+/// goal with no applicable default stays pending rather than erroring.
+#[test]
+fn synthesize_synthetic_mvars_using_default_defaults_and_keeps_the_rest_pending() {
+    support::with_app_harness("Nat.zero", |app| {
+        let kinds = support::any_kinds();
+        // `Dflt ?a` — closable by `instDfltNat`; `Wrap ?m` — stuck with
+        // no default instance, so it must SURVIVE the call.
+        let goals = vec![
+            support::dflt_of_fresh_mvar(app),
+            support::wrap_of_fresh_mvar(app),
+        ];
+        let ids = support::register_typeclass_goals(app, goals);
+        app.elab
+            .synthesize_synthetic_mvars_using_default(&kinds)
+            .expect("postpone := .yes never reports a stuck goal");
+        assert!(
+            app.elab.mctx.mctx().is_assigned(ids[0]),
+            "`Dflt ?a` is closed by the default rung"
+        );
+        assert!(
+            !app.elab.mctx.mctx().is_assigned(ids[1]),
+            "`Wrap ?m` has no default instance and stays open"
+        );
+        assert_eq!(
+            app.elab.pending_mvars,
+            vec![ids[1]],
+            "the unclosable goal stays PENDING — not reported, not dropped"
+        );
+    });
+}

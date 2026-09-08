@@ -588,6 +588,27 @@ impl<'e> TermElabM<'e> {
         Ok(())
     }
 
+    /// oracle: `synthesizeSyntheticMVarsUsingDefault`
+    /// (`SyntheticMVars.lean:658-660`) — `synthesizeSyntheticMVars
+    /// (postpone := .yes)` then `synthesizeUsingDefaultLoop`.
+    ///
+    /// Both halves existed since M4b-3 P3; the composite was left
+    /// unnamed until something called it (this crate's `lib.rs` ledger
+    /// said so in as many words). M4b-3 P2b-ii's `finalize` outParam
+    /// branch (`App.lean:643`) is that caller: when an application's
+    /// result type is the outParam of a local instance and is still an
+    /// unassigned mvar after `synthesizeAppInstMVars`, the oracle applies
+    /// default instances EAGERLY, here, rather than leaving them to the
+    /// enclosing fixpoint — so that `getElem xs 0`'s type is known to
+    /// whatever elaborates next.
+    pub fn synthesize_synthetic_mvars_using_default(
+        &mut self,
+        kinds: &KindInterner,
+    ) -> Result<(), ElabError> {
+        self.synthesize_synthetic_mvars(PostponeBehavior::Yes, kinds)?;
+        self.synthesize_using_default_loop(kinds)
+    }
+
     /// oracle: `resumePostponed` (`SyntheticMVars.lean:32-74`) —
     /// re-elaborate the postponed syntax under its saved context, ensure
     /// it has the mvar's type, and assign.
