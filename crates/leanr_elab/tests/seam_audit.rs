@@ -165,7 +165,13 @@ fn over_application_reports_function_expected() {
 }
 
 /// A function type that is still an unassigned mvar after the fixpoint
-/// is a named P4/P5 seam, NOT a wrong term.
+/// is a named P5 seam, NOT a wrong term. The `CoeFun` half of this seam
+/// (`coerceToFunction?`, `App.lean:378-380`) landed in P4 task 8 — a
+/// non-forall function type that a `CoeFun` instance can bridge is
+/// coerced and the state machine proceeds. What remains here is the
+/// case `coerceToFunction?` cannot help with either: `f`'s type is
+/// still an unassigned mvar, not a concrete non-function type, so there
+/// is nothing yet for a `CoeFun` search to run against.
 ///
 /// This shape diverges from the oracle today and will keep diverging
 /// until expected types propagate into `fun` binder domains (plan
@@ -178,7 +184,7 @@ fn mvar_function_type_is_a_named_seam() {
         .expect_err("leanr cannot elaborate this yet");
     let msg = format!("{err:?}");
     assert!(
-        msg.contains("M4b-3 P4") || msg.contains("M4b-3 P5"),
+        msg.contains("M4b-3 P5"),
         "seam must name its owner, got {msg}"
     );
 }
@@ -583,7 +589,8 @@ fn literal_kinds_are_registered_not_deferred() {
 /// reason is that no non-rotting formulation exists. Live source
 /// legitimately names INCOMPLETE slices in exactly this position — that
 /// is the named-seam discipline itself (`app/args.rs`'s "M4b-3 P2b",
-/// `elab.rs`'s "M4b-3 P5", `app/args.rs`'s "M4b-3 P4") — so telling an
+/// `elab.rs`'s "M4b-3 P5", `app/args.rs`'s own optParam/autoParam
+/// "M4b-3 P5") — so telling an
 /// offender from a correct seam requires knowing which slices are done,
 /// i.e. a hand-maintained completed-slice list that rots the same way
 /// this needle does, only silently. Widening the scan by SHAPE instead

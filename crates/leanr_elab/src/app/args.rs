@@ -117,7 +117,22 @@ fn synthesize_pending_and_normalize_fun_type(
     if app.f_type_is_forall()? {
         return Ok(());
     }
-    // oracle: `coerceToFunction? s.f` (:378) — M4b-3 P4.
+    // oracle: `if let some f ← coerceToFunction? s.f then modify fun s
+    // => { s with f, fType }` (`App.lean:378-380`) — the state machine's
+    // `main` loop re-tests `fTypeIsForall` on the new `fType` and
+    // proceeds (M4b-3 P4).
+    let f = app.st.f;
+    match app.elab.mctx.coerce_to_function(f) {
+        Ok(Some(f2)) => {
+            let f_type = app.elab.mctx.infer_type(f2)?;
+            app.st.f = f2;
+            app.st.f_type = f_type;
+            return Ok(());
+        }
+        Ok(None) => {}
+        Err(leanr_meta::MetaError::Unsupported(m)) => return Err(ElabError::UnsupportedSyntax(m)),
+        Err(e) => return Err(ElabError::from(e)),
+    }
     // The oracle's remaining arms are diagnostics: a deprecated-argument
     // linter, `throwInvalidNamedArg` (which needs `foundNamedArgs`
     // rendering leanr does not do), and the "Function expected" error.
@@ -126,8 +141,8 @@ fn synthesize_pending_and_normalize_fun_type(
     if app.f_type_is_mvar_after_instantiation()? {
         return Err(ElabError::UnsupportedSyntax(
             "function type is still an unassigned metavariable after synthesis: needs \
-             CoeFun (M4b-3 P4), or expected-type propagation into `fun` binder domains \
-             (M4b-3 P5) for the M4b-2 `fun` shape"
+             expected-type propagation into `fun` binder domains for the M4b-2 `fun` \
+             shape — M4b-3 P5"
                 .to_string(),
         ));
     }

@@ -632,6 +632,7 @@ def coeQueries : List (String × String) :=
   , ("coe/twoStep",              "fun (n : Nat) => (n : Big)")
   , ("coe/argPosition",          "fun (n : Nat) => takesInt n")
   , ("coe/postponedThenResumed", "pairW Nat.zero Nat.zero")
+  , ("coe/funApp",               "fun (g : Fn) => g Nat.zero")
   ]
 
 def emit (id src : String) (expJ : Json) : IO Unit :=

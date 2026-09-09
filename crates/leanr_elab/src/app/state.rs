@@ -176,11 +176,14 @@ impl<'a, 'e> AppElab<'a, 'e> {
 
     /// Is `fType` still an unassigned metavariable after
     /// `synthesize_pending_and_normalize_fun_type`'s fixpoint attempt?
-    /// Distinguishes the P4/P5 seam (a function type that has not been
-    /// PINNED DOWN yet) from a genuinely non-function type, which is
+    /// Distinguishes the P5 seam (a function type that has not been
+    /// PINNED DOWN yet — expected-type propagation into `fun` binder
+    /// domains, still owed) from a genuinely non-function type, which is
     /// `ElabError::FunctionExpected` — the oracle does not need this
-    /// split because `coerceToFunction?` (P4, not yet ported) handles
-    /// both uniformly, but leanr must not conflate a later-slice bug
+    /// split because `coerceToFunction?` (P4, ported task 8) is tried
+    /// FIRST and handles a concrete non-function type on its own; this
+    /// check only runs once that has already answered `none`, so leanr
+    /// must not conflate a later-slice bug (a type never pinned down)
     /// with a real user error.
     pub(crate) fn f_type_is_mvar_after_instantiation(&mut self) -> Result<bool, ElabError> {
         let f_type = self.elab.mctx.instantiate_mvars(self.st.f_type)?;

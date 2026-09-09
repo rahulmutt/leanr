@@ -93,10 +93,11 @@
 //! - **coercions** — `mkCoe`/`ensureHasType` landed in M4b-3 P4 task 7
 //!   (`coe.rs`), so `elab_term_ensuring_type`, the `($e :)` ascription
 //!   arm and `app`'s own `ensureArgType` now insert a `CoeT` coercion
-//!   instead of erroring on a defeq mismatch. Still deferred:
-//!   `coerceToFunction?` on an application head (`CoeFun`, task 8) and
-//!   `ensureType`'s `coerceToSort?` on a binder domain (`CoeSort`,
-//!   task 9) — M4b-3 P4.
+//!   instead of erroring on a defeq mismatch. `coerceToFunction?` on an
+//!   application head (`CoeFun`) landed in task 8
+//!   (`app/args.rs`'s `synthesize_pending_and_normalize_fun_type`).
+//!   Still deferred: `ensureType`'s `coerceToSort?` on a binder domain
+//!   (`CoeSort`, task 9) — M4b-3 P4.
 //! - **optParam/autoParam default filling and implicit-lambda
 //!   insertion** — M4b-3 P5. (The implicit-lambda *guard* is P1's, in
 //!   `elab.rs`; only the insertion is deferred.)
