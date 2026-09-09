@@ -1218,42 +1218,88 @@ impl<'e> MetaCtx<'e> {
     /// re-enter instance lookup against an empty table.
     ///
     /// No production caller yet — see [`MetaCtx::is_class`]'s own doc.
+    ///
+    /// **Review round 1, I3**: opened as a `loop` rather than the
+    /// straight-line recursion every other arm of the oracle port
+    /// (`self.is_class_quick(body)`) reads more naturally as. All three
+    /// of the oracle's recursive arms (`.forallE`, `.mdata`, the
+    /// assigned-`.mvar` case) are TAIL calls with nothing left to do
+    /// after the recursive result comes back, so a `loop` reproduces
+    /// them exactly with zero Rust call-stack growth — unlike every
+    /// other recursive `ExprId` traversal in this crate (35 call sites,
+    /// `occurs_check` at `assign.rs:1153-1157` the direct structural
+    /// analogue), this one is not routed through `MetaCtx::guarded`
+    /// (`:1096-1107`, `MAX_REC_DEPTH` + `stacker::maybe_grow`) because a
+    /// tail loop has no frames to grow a guard against. The `.mvar` arm
+    /// still needs an explicit bound distinct from stack depth: it
+    /// follows `MetavarContext::assignment` chains, and — same posture
+    /// `whnf_easy_cases` documents for its own `MVar`/`FVar` dereference
+    /// loop (`whnf.rs:227-234`) — `MetavarContext::assign` has no cycle
+    /// detection, so an unbounded chain here is a hang, not merely deep
+    /// recursion. Bounded with a local counter (`MAX_REC_DEPTH`, the
+    /// same budget `guarded` uses), never `self.step()`: `step()` would
+    /// move `steps()` on the ordinary (non-cyclic, non-pathological)
+    /// path too, which would falsify `is_class_rejects_a_sort_without_reducing`
+    /// and `is_class_rejects_a_real_inductive_without_reducing`'s own
+    /// "never reaches whnf" step-delta assertions — this function must
+    /// stay invisible to that counter, not merely bounded.
     #[allow(dead_code)]
-    fn is_class_quick(&mut self, ty: ExprId) -> LOption<NameId> {
-        match self.node(ty) {
-            // `:1359-1363` — outright `.none`, never the expensive path.
-            Node::BVar { .. }
-            | Node::BVarBig { .. }
-            | Node::LitNat { .. }
-            | Node::LitStr { .. }
-            | Node::FVar { .. }
-            | Node::Sort { .. }
-            | Node::Lam { .. } => LOption::None,
-            // `:1364-1365` — `.undef`: deciding needs reduction.
-            Node::LetE { .. } | Node::Proj { .. } | Node::ProjBig { .. } => LOption::Undef,
-            // `:1366` — look THROUGH the binder at the conclusion.
-            Node::Forall { body, .. } => self.is_class_quick(body),
-            Node::MData { expr, .. } => self.is_class_quick(expr),
-            Node::Const { name, .. } => self.is_class_quick_const(name),
-            // `:1369-1372` — an assigned mvar is its value; unassigned
-            // is `.none`.
-            Node::MVar { id } => match id.and_then(|n| self.mctx.assignment(MVarId(n))) {
-                Some(v) => self.is_class_quick(v),
-                None => LOption::None,
-            },
-            // `:1374-1381` — the head of the application decides.
-            Node::App { .. } => match self.node(self.get_app_fn(ty)) {
-                Node::Const { name, .. } => self.is_class_quick_const(name),
-                Node::Lam { .. } => LOption::Undef,
+    fn is_class_quick(&mut self, mut ty: ExprId) -> LOption<NameId> {
+        let mut mvar_chain_budget = MAX_REC_DEPTH;
+        loop {
+            match self.node(ty) {
+                // `:1359-1363` — outright `.none`, never the expensive path.
+                Node::BVar { .. }
+                | Node::BVarBig { .. }
+                | Node::LitNat { .. }
+                | Node::LitStr { .. }
+                | Node::FVar { .. }
+                | Node::Sort { .. }
+                | Node::Lam { .. } => return LOption::None,
+                // `:1364-1365` — `.undef`: deciding needs reduction.
+                Node::LetE { .. } | Node::Proj { .. } | Node::ProjBig { .. } => {
+                    return LOption::Undef
+                }
+                // `:1366` — look THROUGH the binder at the conclusion.
+                Node::Forall { body, .. } => ty = body,
+                Node::MData { expr, .. } => ty = expr,
+                Node::Const { name, .. } => return self.is_class_quick_const(name),
+                // `:1369-1372` — an assigned mvar is its value; unassigned
+                // is `.none`. A chain that outruns `mvar_chain_budget`
+                // (only reachable via a hypothetical assignment cycle,
+                // never real elaborator output — see the doc comment
+                // above) answers `.none`: a failure to decide is
+                // not-a-class, never a hang, same posture as
+                // `is_class`'s own exception-swallow.
                 Node::MVar { id } => match id.and_then(|n| self.mctx.assignment(MVarId(n))) {
-                    Some(v) => match self.node(self.get_app_fn(v)) {
-                        Node::Const { name, .. } => self.is_class_quick_const(name),
-                        _ => LOption::Undef,
-                    },
-                    None => LOption::None,
+                    Some(v) if mvar_chain_budget > 0 => {
+                        mvar_chain_budget -= 1;
+                        ty = v;
+                    }
+                    _ => return LOption::None,
                 },
-                _ => LOption::None,
-            },
+                // `:1374-1381` — the head of the application decides.
+                // Not a further `is_class_quick` recursion (the oracle's
+                // own `.app` arm never calls `isClassQuick?` again
+                // either — it inspects `f.getAppFn` directly), so this
+                // arm needs neither the loop nor the budget above.
+                Node::App { .. } => {
+                    return match self.node(self.get_app_fn(ty)) {
+                        Node::Const { name, .. } => self.is_class_quick_const(name),
+                        Node::Lam { .. } => LOption::Undef,
+                        Node::MVar { id } => {
+                            match id.and_then(|n| self.mctx.assignment(MVarId(n))) {
+                                Some(v) => match self.node(self.get_app_fn(v)) {
+                                    Node::Const { name, .. } => self.is_class_quick_const(name),
+                                    _ => LOption::Undef,
+                                },
+                                None => LOption::None,
+                            }
+                        }
+                        _ => LOption::None,
+                    }
+                }
+            }
         }
     }
 
@@ -1306,15 +1352,57 @@ impl<'e> MetaCtx<'e> {
     /// `withReducible`, telescope the foralls down to the conclusion
     /// (`forallTelescopeReducingAux .. (whnfType := true)`), then
     /// `isClassApp?` (`:1510-1518`): the head constant, if the
-    /// environment says it is a class. The telescope's own fvar-opening
-    /// (`instantiateRevRange`, `Basic.lean:1462`) is not reproduced
-    /// here: it exists so a DEPENDENT conclusion's later binders resolve
-    /// correctly, but `isClassApp?` only ever inspects the FINAL
-    /// non-forall type's spine HEAD, never an argument value, so an
-    /// un-substituted bound variable left dangling under a stripped
-    /// binder cannot change which `ExprId` ends up at that head position
-    /// — it is either itself the head (not a `Const` either way) or
-    /// buried in an argument `whnf` never looks at for this purpose.
+    /// environment says it is a class.
+    ///
+    /// **Plan-mandated deviation (Controller Ruling R6), not a bug**:
+    /// the oracle's telescope (`forallTelescopeReducingAuxAux.process`,
+    /// `Basic.lean:1452-1478`) peels each `Forall` by substituting a
+    /// FRESH FVAR for the bound variable (`instantiateRevRange`,
+    /// `:1462`, backed by `mkFreshFVarId`/`lctx.mkLocalDecl`) before
+    /// whnf-ing the next binder's body. This loop does not: it whnfs
+    /// `body` directly, still carrying a loose bvar for the binder just
+    /// stripped. Porting the real telescope would mean opening each
+    /// binder with `push_local_decl`, which is exactly the fvar-pushing
+    /// chokepoint Task 4 owns — R6 keeps that producer out of this task
+    /// rather than widening it past its brief.
+    ///
+    /// This is sound, not merely harmless, and the reason is a real
+    /// (verified, not assumed) fact about THIS crate's `whnf`, not a
+    /// claim about where a bare bvar can appear: `whnf_easy_cases`
+    /// (`whnf.rs:232-246`) calls `self.step()` and then, on a
+    /// `Node::BVar`/`Node::BVarBig` HEAD, returns
+    /// `Err(MetaError::Infer("loose bvar in whnf"))` — this crate's
+    /// substitute for the oracle's own `panic! "loose bvar in
+    /// expression"` at the same site (`WHNF.lean:391`; Global
+    /// Constraints forbid the panic). `whnf` is not a leaf function: the
+    /// nat/recursor/proj/smart-unfolding arms it dispatches to each
+    /// recursively `whnf` a subterm (an argument, a major premise, a
+    /// projected structure, a match discriminant), so a dangling bvar
+    /// left under a stripped binder can surface this `Err` from
+    /// anywhere inside the call, not only at the very top. That `Err`
+    /// propagates out of THIS function via `?` and is swallowed by
+    /// `is_class`'s `unwrap_or(None)` (this file, `MetaCtx::is_class`)
+    /// — exactly the oracle's own `isClass?`'s `try .. catch _ => none`
+    /// swallow, just reached via a different failure than the oracle's
+    /// (whose telescope never produces a loose bvar in the first place,
+    /// since it substitutes one before whnf ever sees it). And a
+    /// genuinely stuck-on-a-variable reduction — bvar, fvar, an
+    /// unresolved recursor/matcher, or an un-unfolded `Defn` under
+    /// `Reducible` transparency — is never itself a registered class
+    /// (`is_class_name` only ever matches an inductive/structure head),
+    /// so on every path that does NOT error, this loop's answer agrees
+    /// with the oracle's real telescope too: `isClassApp?` only ever
+    /// inspects the FINAL non-forall type's spine HEAD, never an
+    /// argument value, and a dangling bvar can only ever occupy that
+    /// head position itself (not a `Const` either way) or sit buried in
+    /// an argument `isClassApp?` never looks at. **This soundness
+    /// depends on `whnf.rs:241-246` staying an `Err` rather than
+    /// becoming a `panic!` or a silent no-op** — if a future change
+    /// makes whnf tolerate a loose bvar (e.g. by treating it as stuck
+    /// and returning it unchanged instead of erroring), this reasoning
+    /// would need re-checking, since the "errors instead of misanswering"
+    /// half of the argument is what closes the gap, not the "always
+    /// agrees" half alone.
     ///
     /// No production caller yet — see [`MetaCtx::is_class`]'s own doc.
     #[allow(dead_code)]

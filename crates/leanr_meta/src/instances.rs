@@ -954,4 +954,69 @@ mod tests {
             );
         });
     }
+
+    /// Review round 1, I2: Ruling R5's decisive discriminator. `N` here
+    /// is a REAL registered `inductive` (`Instances.lean`'s own
+    /// `inductive N where ...`, via `with_instances_ctx`'s fixture
+    /// replay) — unlike `is_class_rejects_a_non_class_head`'s `N`, which
+    /// lives in `with_class_ctx`'s minimal empty environment and so is
+    /// merely an UNKNOWN constant to `EnvView::get`, not a known
+    /// non-`defnInfo` one. That gap means the non-class-head test alone
+    /// cannot tell the brief's original (wrong) sketch —
+    /// `is_class_quick_const` answering `.undef` for EVERY non-class
+    /// constant — apart from Ruling R5's correct reading: under the
+    /// wrong sketch, `N` would still whnf-reduce to itself (an inductive
+    /// never unfolds) and still answer `None` from `is_class_expensive`,
+    /// so the `Option` result is identical either way — the exact
+    /// `is_class_rejects_a_sort_without_reducing`-shaped gap. The step
+    /// counter closes it: the oracle's `getConstTemp?` answers `some
+    /// (.inductInfo ..)` for `N`, not a `.defnInfo`, so
+    /// `isClassQuickConst?` must answer `.none` OUTRIGHT, no whnf ever
+    /// called.
+    #[test]
+    fn is_class_rejects_a_real_inductive_without_reducing() {
+        with_instances_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let steps_before = ctx.steps();
+            assert_eq!(ctx.is_class(n).expect("is_class"), None);
+            assert_eq!(
+                ctx.steps(),
+                steps_before,
+                "a known inductive must answer `.none` from \
+                 is_class_quick_const's `getConstTemp?` arm directly, \
+                 never reach the expensive whnf path"
+            );
+        });
+    }
+
+    /// Review round 1, I2's companion: the `Defn` arm's OTHER half.
+    /// `Unit` (`Instances.lean`'s `abbrev Unit : Type := PUnit`, i.e.
+    /// `@[reducible] def Unit : Type := PUnit`) is a non-class
+    /// definition that genuinely reaches `is_class_expensive` and
+    /// reduces there — `steps()` MUST move, unlike the inductive test
+    /// just above. This is `is_class_expensive`'s first exercise from
+    /// any test in this task: under the ambient `Default` transparency
+    /// `with_instances_ctx` builds, `getDefInfoTemp`'s `.default` arm is
+    /// unconditional, so `is_class_quick_const` answers `.undef` for
+    /// `Unit` regardless of its own `@[reducible]` attribute; inside
+    /// `is_class_expensive`'s own `withReducible` bump, THAT attribute
+    /// is what lets `whnf` delta-unfold `Unit` to `PUnit`. `PUnit`'s
+    /// head is not a registered class either, so the final answer is
+    /// still `None` — the discriminator here is that it got there BY
+    /// REDUCING, not by stopping short the way `N` does above.
+    #[test]
+    fn is_class_reduces_a_reducible_non_class_def() {
+        with_instances_ctx(|ctx| {
+            let unit = const_named(ctx, "Unit");
+            let steps_before = ctx.steps();
+            assert_eq!(ctx.is_class(unit).expect("is_class"), None);
+            assert!(
+                ctx.steps() > steps_before,
+                "`Unit` is `@[reducible]` and must reach is_class_expensive's \
+                 whnf and actually unfold, not stop at is_class_quick \
+                 (steps before: {steps_before}, after: {})",
+                ctx.steps()
+            );
+        });
+    }
 }
