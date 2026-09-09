@@ -1365,6 +1365,26 @@ impl<'e> MetaCtx<'e> {
             _ => Ok(e),
         }
     }
+
+    /// oracle: `getDelayedMVarRoot` (`MetavarContext.lean:436-440`) —
+    /// follow a chain of delayed assignments
+    /// `?m₁ := ?m₂; …; ?mₙ := ?root` to the metavariable that is not
+    /// itself delayed-assigned. A metavariable with no delayed
+    /// assignment is its own root.
+    ///
+    /// Written as a LOOP, not the oracle's recursion: the chain is
+    /// unbounded in principle, and this crate's recursion budget
+    /// (`guarded`) is for term traversal, not for a map walk. A cycle
+    /// would hang, which cannot arise — `elimMVar` only ever
+    /// delayed-assigns a FRESHLY minted id, so every edge points from
+    /// a newer metavariable to an older one.
+    pub fn get_delayed_mvar_root(&self, mvar_id: MVarId) -> MVarId {
+        let mut cur = mvar_id;
+        while let Some(d) = self.mctx.delayed_assignment(cur) {
+            cur = d.mvar_id_pending;
+        }
+        cur
+    }
 }
 
 #[cfg(test)]
