@@ -21,9 +21,12 @@
 //! `metactx.rs` is the crate's accessor surface and is already the
 //! second-largest file in it.
 
+use std::sync::Arc;
+
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, NameId};
 
+use crate::local_snapshot::LocalCtxSnapshot;
 use crate::{MetaCtx, MetaError};
 
 impl<'e> MetaCtx<'e> {
@@ -138,6 +141,112 @@ impl<'e> MetaCtx<'e> {
             None => Ok(false),
         }
     }
+
+    /// oracle: `getInScope` (`:1070-1077`) — the members of `xs` that
+    /// `lctx` actually declares. Anything else is a binder this
+    /// metavariable never saw, and reverting it would be reverting a
+    /// variable that is not in its context.
+    #[allow(dead_code)]
+    pub(crate) fn get_in_scope(&self, lctx: &LocalCtxSnapshot, xs: &[ExprId]) -> Vec<ExprId> {
+        xs.iter()
+            .filter(|x| {
+                self.fvar_id_of(**x)
+                    .is_some_and(|id| lctx.lctx().get(id).is_some())
+            })
+            .copied()
+            .collect()
+    }
+
+    /// oracle: `collectForwardDeps` (`:1037-1062`) — close `to_revert`
+    /// under forward dependencies, walking `lctx` in declaration order
+    /// from the earliest reverted declaration onward. A later declaration
+    /// joins when it IS one of `to_revert`, or when it depends on
+    /// something already collected.
+    ///
+    /// The oracle's `preserveOrder` branch (`:1042-1050`, which can throw
+    /// `Exception.revertFailure`) is NOT modelled: `preserveOrder` is a
+    /// tactic-framework flag and leanr has no producer for it — the only
+    /// caller here passes the `false` case. Named in the design spec's
+    /// § What this ships.
+    #[allow(dead_code)]
+    pub(crate) fn collect_forward_deps(
+        &mut self,
+        lctx: &LocalCtxSnapshot,
+        to_revert: Vec<ExprId>,
+    ) -> Result<Vec<ExprId>, MetaError> {
+        if to_revert.is_empty() {
+            return Ok(to_revert);
+        }
+        let entries: Vec<ExprId> = lctx.entries().iter().map(|(_, f)| *f).collect();
+        // oracle `getLocalDeclWithSmallestIdx` (`:1052`): start at the
+        // earliest declaration that is being reverted. Everything before it
+        // is declared earlier than anything reverted, so it cannot depend
+        // on one.
+        let start = entries
+            .iter()
+            .position(|f| to_revert.contains(f))
+            .unwrap_or(entries.len());
+
+        let mut collected: Vec<ExprId> = Vec::with_capacity(to_revert.len());
+        for fvar in entries.into_iter().skip(start) {
+            if to_revert.contains(&fvar) {
+                collected.push(fvar);
+                continue;
+            }
+            let Some(id) = self.fvar_id_of(fvar) else {
+                continue;
+            };
+            let Some(decl) = lctx.lctx().get(id) else {
+                continue;
+            };
+            let (ty, value) = (decl.ty, decl.value);
+            let pf: Vec<NameId> = collected
+                .iter()
+                .filter_map(|f| self.fvar_id_of(*f))
+                .collect();
+            if self.local_decl_depends_on(ty, value, &pf)? {
+                collected.push(fvar);
+            }
+        }
+        Ok(collected)
+    }
+
+    /// oracle: `reduceLocalContext` (`:1065-1067`) — `lctx` with every
+    /// fvar in `to_revert` erased. This is the context the auxiliary
+    /// metavariable is minted at, and erasing is the whole point: leaving
+    /// the reverted fvars in place would let the new metavariable be
+    /// assigned the very variable the abstraction is removing, which is
+    /// this slice's own bug reappearing one level down.
+    #[allow(dead_code)]
+    pub(crate) fn reduce_local_context(
+        &self,
+        lctx: &LocalCtxSnapshot,
+        to_revert: &[ExprId],
+    ) -> Result<Arc<LocalCtxSnapshot>, MetaError> {
+        let pairs: Vec<(ExprId, NameId)> = to_revert
+            .iter()
+            .filter_map(|f| self.fvar_id_of(*f).map(|id| (*f, id)))
+            .collect();
+        Ok(Arc::new(lctx.reduced(&pairs)))
+    }
+
+    /// oracle: `mkMVarApp` (`:1090-1097`) — `mvar` applied to `xs`, first
+    /// declared innermost, so that after abstraction the arguments read
+    /// `?new #(n-1) … #0`.
+    ///
+    /// The oracle's two kind branches (`:1094-1097`) differ only in
+    /// whether a LET-bound fvar is applied. Under this port's ldecl
+    /// refusal (see `mk_aux_mvar_type`) `xs` never contains one, so the
+    /// branches coincide and the `syntheticOpaque` form — apply
+    /// everything — is the one written.
+    #[allow(dead_code)]
+    pub(crate) fn mk_mvar_app(&mut self, mvar: ExprId, xs: &[ExprId]) -> Result<ExprId, MetaError> {
+        let mut e = mvar;
+        for x in xs {
+            e = self.scratch.expr_app(Some(self.view.store), e, *x)?;
+        }
+        Ok(e)
+    }
 }
 
 #[cfg(test)]
@@ -237,6 +346,124 @@ mod tests {
                 "an assigned mvar is followed to its value"
             );
             ctx.lctx_restore(cp);
+        });
+    }
+
+    /// TDD RED/GREEN for plan task 4. `get_in_scope` keeps only the
+    /// members of `xs` that the metavariable's OWN context declares —
+    /// oracle `:1070-1077`.
+    #[test]
+    fn get_in_scope_keeps_only_the_fvars_the_mvar_can_see() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            // Snapshot taken with `a` only — `b` comes later.
+            let snap = ctx.current_lctx();
+            let b = fresh_fvar(ctx, sort0, "b");
+            ctx.lctx_restore(cp);
+
+            let in_scope = ctx.get_in_scope(&snap, &[a, b]);
+            assert_eq!(
+                in_scope,
+                vec![a],
+                "only `a` is in the snapshot; keeping `b` would revert a binder \
+                 the metavariable never saw"
+            );
+        });
+    }
+
+    /// `collect_forward_deps` closes `to_revert` under forward
+    /// dependencies: `y : a` must join when `a` is reverted, or the
+    /// auxiliary metavariable is minted at a context holding a
+    /// declaration whose type mentions an erased fvar. Oracle `:1037-1062`.
+    #[test]
+    fn collect_forward_deps_pulls_in_a_dependent_later_decl() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            // `y : a` — its TYPE is the fvar `a`, so it depends on it.
+            let y = fresh_fvar(ctx, a, "y");
+            let snap = ctx.current_lctx();
+            ctx.lctx_restore(cp);
+
+            let closed = ctx
+                .collect_forward_deps(&snap, vec![a])
+                .expect("collect_forward_deps");
+            assert_eq!(
+                closed,
+                vec![a, y],
+                "y : a depends on a, so reverting a must revert y too, in \
+                 declaration order"
+            );
+        });
+    }
+
+    /// `reduce_local_context` removes exactly `to_revert`. Oracle
+    /// `:1065-1067`.
+    #[test]
+    fn reduce_local_context_removes_exactly_the_reverted_fvars() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            let b = fresh_fvar(ctx, sort0, "b");
+            let snap = ctx.current_lctx();
+            ctx.lctx_restore(cp);
+
+            let ia = fvar_id(ctx, a);
+            let ib = fvar_id(ctx, b);
+            let reduced = ctx
+                .reduce_local_context(&snap, &[a])
+                .expect("reduce_local_context");
+
+            assert!(reduced.lctx().get(ia).is_none(), "a is erased");
+            assert!(reduced.lctx().get(ib).is_some(), "b survives");
+        });
+    }
+
+    /// `mk_mvar_app` applies the auxiliary metavariable to the reverted
+    /// fvars, innermost LAST — the application order that makes
+    /// `?new #0` come out right after abstraction. Oracle `:1090-1097`.
+    #[test]
+    fn mk_mvar_app_applies_the_fvars_in_declaration_order() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            let b = fresh_fvar(ctx, sort0, "b");
+            let (m, _) = fresh_mvar(ctx, sort0);
+            ctx.lctx_restore(cp);
+
+            let app = ctx.mk_mvar_app(m, &[a, b]).expect("mk_mvar_app");
+            // Expect `((m a) b)`: the LAST-declared fvar is the OUTERMOST
+            // argument.
+            match ctx.node(app) {
+                Node::App { f, arg } => {
+                    assert_eq!(arg, b, "the last fvar is the outermost argument");
+                    match ctx.node(f) {
+                        Node::App { f: inner, arg: a2 } => {
+                            assert_eq!(a2, a);
+                            assert_eq!(inner, m);
+                        }
+                        other => panic!("expected nested App, got {other:?}"),
+                    }
+                }
+                other => panic!("expected App, got {other:?}"),
+            }
         });
     }
 }
