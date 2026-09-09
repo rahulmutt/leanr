@@ -136,4 +136,40 @@ impl<'e> TermElabM<'e> {
             Err(err) => Err(ElabError::from(err)),
         }
     }
+
+    /// oracle: `ensureType` (`TermElabM.lean:1935-1949`) — `isType e`
+    /// (`InferType.lean:502-508`: the type `whnfD`s to a `Sort`); else
+    /// `isDefEq eType (Sort ?u)` with a fresh level mvar; else
+    /// `coerceToSort?`; else "type expected". The `hasSyntheticSorry`
+    /// `throwAbortTerm` branch (`:1947`) has no producer here (leanr has
+    /// no `sorry` recovery).
+    pub fn ensure_type(&mut self, _stx: &SynElem, e: ExprId) -> Result<ExprId, ElabError> {
+        let ty = self.mctx.infer_type(e)?;
+        let w = self
+            .mctx
+            .with_transparency(TransparencyMode::Default, |m| m.whnf(ty))?;
+        let base = self.view.store;
+        if matches!(
+            self.mctx.store().expr_node(Some(base), w),
+            leanr_kernel::bank::terms::Node::Sort { .. }
+        ) {
+            return Ok(e);
+        }
+        let u = self.mk_fresh_level_mvar()?;
+        let sort_u = self
+            .mctx
+            .store_mut()
+            .expr_sort(None, u)
+            .map_err(MetaError::from)?;
+        if self.mctx.is_def_eq(ty, sort_u)? {
+            return Ok(e);
+        }
+        match self.mctx.coerce_to_sort(e) {
+            Ok(Some(coerced)) => Ok(coerced),
+            Ok(None) => Err(ElabError::TypeExpected { e, ty }),
+            Err(MetaError::CoeExpansionMismatch(_)) => Err(ElabError::TypeExpected { e, ty }),
+            Err(MetaError::Unsupported(m)) => Err(ElabError::UnsupportedSyntax(m)),
+            Err(err) => Err(ElabError::from(err)),
+        }
+    }
 }

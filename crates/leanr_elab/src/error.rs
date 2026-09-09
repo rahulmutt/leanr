@@ -94,6 +94,14 @@ pub enum ElabError {
         f: ExprId,
         f_type: ExprId,
     },
+    /// oracle: `ensureType`'s "type expected, got …"
+    /// (`TermElabM.lean:1946-1949`). Raised from `binder.rs`'s
+    /// `elab_type` since M4b-3 P4; before that a non-type domain was
+    /// (wrongly) a value-level `TypeMismatch` against `Sort ?u`.
+    TypeExpected {
+        e: ExprId,
+        ty: ExprId,
+    },
     /// oracle: `elabNumLit`'s two `getDecLevel` failure branches
     /// (`BuiltinTerm.lean:219-223`) — "numerals are data in Lean, but
     /// the expected type is a proposition" and "…is universe
