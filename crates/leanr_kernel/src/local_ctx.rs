@@ -202,6 +202,34 @@ impl LocalContext {
             self.index.remove(&decl.id);
         }
     }
+
+    /// oracle: `LocalContext.erase` (`local_ctx.h`), the primitive
+    /// `MetavarContext.lean:1065-1067`'s `reduceLocalContext` folds over
+    /// when it builds an auxiliary metavariable's restricted context.
+    ///
+    /// Removing from the middle of `decls` shifts every later decl's
+    /// position, so `index` must be repaired — the same bookkeeping
+    /// `restore` (above) does for the truncating case. Erasing an id that
+    /// is not present is a no-op, matching the oracle: `erase` on a
+    /// `PersistentHashMap` key that is absent returns the map unchanged.
+    ///
+    /// Additive and TCB-neutral: the type checker gains no caller, no
+    /// existing function body changes, and no new dependency is
+    /// introduced. `leanr_meta` cannot express a restricted context
+    /// otherwise — `decls`/`index` are module-private and
+    /// `mk_local_decl` mints a FRESH fvar id, so a filtered context
+    /// cannot be rebuilt from the public surface.
+    pub fn erase(&mut self, fvar_id: NameId) {
+        let Some(pos) = self.index.remove(&fvar_id) else {
+            return;
+        };
+        self.decls.remove(pos);
+        for i in self.index.values_mut() {
+            if *i > pos {
+                *i -= 1;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -384,6 +412,45 @@ mod tests {
         assert!(
             snapshot.get(id).is_some(),
             "the clone still resolves a decl its source has dropped"
+        );
+    }
+
+    #[test]
+    fn erase_removes_one_decl_and_keeps_the_rest_addressable() {
+        let mut st = Store::scratch();
+        let mut gen = FVarIdGen::default();
+        let mut lctx = LocalContext::default();
+        let zero = st.level_zero(None).expect("level");
+        let sort0 = st.expr_sort(None, zero).expect("Sort 0");
+
+        let a = lctx
+            .mk_local_decl(&mut st, None, &mut gen, None, sort0, BinderInfo::Default)
+            .expect("a");
+        let b = lctx
+            .mk_local_decl(&mut st, None, &mut gen, None, sort0, BinderInfo::Default)
+            .expect("b");
+        let c = lctx
+            .mk_local_decl(&mut st, None, &mut gen, None, sort0, BinderInfo::Default)
+            .expect("c");
+
+        let id_of = |st: &mut Store, e| match st.expr_node(None, e) {
+            Node::FVar { id: Some(id) } => id,
+            other => panic!("expected fvar, got {other:?}"),
+        };
+        let (ia, ib, ic) = (id_of(&mut st, a), id_of(&mut st, b), id_of(&mut st, c));
+
+        lctx.erase(ib);
+
+        assert_eq!(lctx.save(), 2, "one decl removed");
+        assert!(
+            lctx.get(ia).is_some(),
+            "the decl before the erased one survives"
+        );
+        assert!(lctx.get(ib).is_none(), "the erased decl is gone");
+        assert!(
+            lctx.get(ic).is_some(),
+            "the decl AFTER the erased one is still addressable — this is the \
+             index-shift the naive `decls.remove(pos)` without reindexing breaks"
         );
     }
 }
