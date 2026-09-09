@@ -2034,6 +2034,64 @@ mod tests {
         });
     }
 
+    /// Fix round 1 (task 6 review): pins the argument-to-fvar mapping
+    /// for `n >= 2` fvars/args, which no other test in this module
+    /// reaches — the only other two-fvar case
+    /// (`instantiate_mvars_leaves_an_unresolved_delayed_assignment_alone`'s
+    /// partial-application case) supplies fewer args than fvars and
+    /// bails at the arity guard before `beta_rev` ever runs, and the
+    /// single-fvar test (`instantiate_mvars_resolves_a_delayed_assignment`)
+    /// is degenerate for ordering: reversing a 1-element slice is a
+    /// no-op.
+    ///
+    /// `?new #[a, b] := ?m`, `?m := a` (asymmetric: mentions the FIRST
+    /// fvar, not the second), applied to two DISTINCT arguments `x`,
+    /// `y`: `?new x y`. The correct answer is `x` — `beta_rev` is
+    /// handed `[x, y]` UNREVERSED (`get_app_args`' own call order,
+    /// matching `mk_lambda`'s "innermost fvar last": `a` outermost, `b`
+    /// innermost, so `x` (first arg) substitutes `a`, `y` (second arg)
+    /// substitutes `b`, and the body `a` becomes `x`). Under the plan
+    /// brief's literal `.reverse()` step, `beta_rev` would instead see
+    /// `[y, x]`, substituting `b := x`, `a := y` — since the body is
+    /// bare `a`, that convention answers `y`, not `x`.
+    #[test]
+    fn instantiate_mvars_delayed_app_maps_multiple_args_to_fvars_in_order() {
+        use crate::test_support::{fresh_fvar, with_ctx};
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            let b = fresh_fvar(ctx, sort0, "b");
+            let x = fresh_fvar(ctx, sort0, "x");
+            let y = fresh_fvar(ctx, sort0, "y");
+            let (new_e, new_id) = ctx.mk_aux_mvar(sort0).expect("aux");
+            let (_, pending) = ctx.mk_aux_mvar(sort0).expect("pending");
+
+            ctx.mctx_mut()
+                .assign_delayed(new_id, vec![a, b], pending)
+                .expect("delayed");
+            // asymmetric: mentions `a` only, so a wrong a<->b mapping
+            // is observable in the final answer.
+            ctx.mctx_mut().assign(pending, a).expect("pending := a");
+
+            // `?new x y`
+            let app1 = ctx.scratch.expr_app(base, new_e, x).expect("app1");
+            let applied = ctx.scratch.expr_app(base, app1, y).expect("app2");
+            let got = ctx.instantiate_mvars(applied).expect("instantiate");
+
+            assert_eq!(
+                got, x,
+                "?new #[a, b] := ?m with ?m := a means `?new x y` is `x`: the \
+                 FIRST argument maps to the FIRST (outermost) fvar; a backwards \
+                 (reversed) mapping would answer `y` instead"
+            );
+            ctx.lctx_restore(cp);
+        });
+    }
+
     /// Fix round 2 (mvar-lctx-followup, finding 1): a metavariable
     /// minted via `mk_aux_mvar_for` while a `defeq.rs`
     /// `is_def_eq_binding_shallow_body` telescope fvar is TRANSIENTLY
