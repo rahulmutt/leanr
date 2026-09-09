@@ -406,6 +406,46 @@ mod tests {
         });
     }
 
+    /// `collect_forward_deps` must close TRANSITIVELY: a declaration
+    /// depending on a declaration that was itself pulled in must also
+    /// be pulled in. This test has a 3-level chain where `z : y` and `a`
+    /// is reverted, so `y` joins because it depends on `a`, and `z`
+    /// joins because `y` joined — not because `z` mentions `a` directly.
+    /// This discriminates against a non-transitive implementation that
+    /// computes dependencies against the frozen initial `to_revert`
+    /// argument instead of the accumulating `collected` list. Such a bug
+    /// would pass `collect_forward_deps_pulls_in_a_dependent_later_decl`
+    /// (one level only) and all four Step-5 mutations (none touch this
+    /// axis).
+    #[test]
+    fn collect_forward_deps_closes_transitively_through_a_chain() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            let y = fresh_fvar(ctx, a, "y");
+            // `z : y` — its TYPE is the fvar `y`, which itself was pulled
+            // in because it depends on `a`.
+            let z = fresh_fvar(ctx, y, "z");
+            let snap = ctx.current_lctx();
+            ctx.lctx_restore(cp);
+
+            let closed = ctx
+                .collect_forward_deps(&snap, vec![a])
+                .expect("collect_forward_deps");
+            assert_eq!(
+                closed,
+                vec![a, y, z],
+                "z : y depends on y, and y depends on a, so reverting a \
+                 must revert y and z. This is transitive closure: z joins \
+                 ONLY because y joined, not because z mentions a directly."
+            );
+        });
+    }
+
     /// `reduce_local_context` removes exactly `to_revert`. Oracle
     /// `:1065-1067`.
     #[test]
