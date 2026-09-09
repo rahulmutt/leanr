@@ -764,7 +764,7 @@ impl<'e> MetaCtx<'e> {
                                 .into(),
                         ));
                     }
-                    // oracle `:1132-1133` (cdecl arm): `let type :=
+                    // oracle `:1130-1131` (cdecl arm): `let type :=
                     // type.headBeta` before `abstractRangeAux`. An
                     // earlier controller ruling parked this on the
                     // (factually wrong) grounds that leanr has no
@@ -788,7 +788,7 @@ impl<'e> MetaCtx<'e> {
                     })?;
                     let user_name = decl.user_name;
                     let ty = decl.ty;
-                    // oracle `:1159-1160` (mvar arm): same `headBeta`,
+                    // oracle `:1160-1161` (mvar arm): same `headBeta`,
                     // before the abstraction below.
                     let ty = self.head_beta(ty)?;
                     (user_name, ty, leanr_kernel::BinderInfo::Implicit)
