@@ -59,6 +59,25 @@ pub struct MVarDecl {
     pub kind: MVarKind,
 }
 
+/// oracle: `DelayedMetavarAssignment` (`MetavarContext.lean:335`).
+///
+/// `?id #[x_1, …, x_n] := ?mvar_id_pending` — read as: once
+/// `mvar_id_pending` is assigned, `?id` applied to at least `n`
+/// arguments becomes that value with `fvars` abstracted and the
+/// arguments substituted in. `elimMVar` (`:1216-1228`) is this
+/// crate's only producer: a `syntheticOpaque` metavariable must never
+/// be assigned by anything but the elaborator that created it, so the
+/// AUXILIARY metavariable is delayed-assigned back to the original
+/// rather than the original being assigned outright.
+///
+/// No `Debug` derive would be a problem here — `ExprId` and `MVarId`
+/// both have one — so it derives normally.
+#[derive(Debug, Clone)]
+pub struct DelayedMVarAssignment {
+    pub fvars: Vec<ExprId>,
+    pub mvar_id_pending: MVarId,
+}
+
 /// Declarations plus assignments.
 ///
 /// No `Debug` derive: `MVarDecl` (a field's value type) has none, for
@@ -69,6 +88,7 @@ pub struct MetavarContext {
     assignments: HashMap<MVarId, ExprId>,
     level_decls: HashSet<LMVarId>,
     level_assignments: HashMap<LMVarId, LevelId>,
+    d_assignment: HashMap<MVarId, DelayedMVarAssignment>,
 }
 
 impl MetavarContext {
@@ -158,21 +178,76 @@ impl MetavarContext {
         Ok(())
     }
 
+    /// oracle: `assignDelayedMVar` (`MetavarContext.lean:543`).
+    ///
+    /// Refuses to redefine an existing delayed assignment, and refuses
+    /// an undeclared metavariable, for the same reason `assign` does:
+    /// in Lean an assignment is permanent for the lifetime of the
+    /// context, and silently overwriting one turns a bug into a wrong
+    /// answer instead of an error.
+    pub fn assign_delayed(
+        &mut self,
+        id: MVarId,
+        fvars: Vec<ExprId>,
+        mvar_id_pending: MVarId,
+    ) -> Result<(), MetaError> {
+        if !self.decls.contains_key(&id) {
+            return Err(MetaError::MVar(format!(
+                "assign_delayed: metavariable {id:?} was never declared"
+            )));
+        }
+        if self.d_assignment.contains_key(&id) {
+            return Err(MetaError::MVar(format!(
+                "assign_delayed: metavariable {id:?} is already delayed-assigned"
+            )));
+        }
+        self.d_assignment.insert(
+            id,
+            DelayedMVarAssignment {
+                fvars,
+                mvar_id_pending,
+            },
+        );
+        Ok(())
+    }
+
+    /// oracle: `getDelayedMVarAssignment?` (`:425-426`).
+    pub fn delayed_assignment(&self, id: MVarId) -> Option<&DelayedMVarAssignment> {
+        self.d_assignment.get(&id)
+    }
+
+    /// oracle: `MVarId.isDelayedAssigned` (`:449-450`).
+    pub fn is_delayed_assigned(&self, id: MVarId) -> bool {
+        self.d_assignment.contains_key(&id)
+    }
+
     /// Snapshot/restore support for `checkpointDefEq` (plan 3). Clones
-    /// the assignment maps; declarations are not snapshotted (an mvar,
-    /// once declared, stays declared even across a failed trial).
+    /// the expr, level, and delayed-assignment maps. Declarations are not
+    /// snapshotted (an mvar, once declared, stays declared even across a
+    /// failed trial — a rolled-back trial leaves the aux mvar declared but
+    /// no longer delayed-assigned).
     pub(crate) fn snapshot_assignments(
         &self,
-    ) -> (HashMap<MVarId, ExprId>, HashMap<LMVarId, LevelId>) {
-        (self.assignments.clone(), self.level_assignments.clone())
+    ) -> (
+        HashMap<MVarId, ExprId>,
+        HashMap<LMVarId, LevelId>,
+        HashMap<MVarId, DelayedMVarAssignment>,
+    ) {
+        (
+            self.assignments.clone(),
+            self.level_assignments.clone(),
+            self.d_assignment.clone(),
+        )
     }
     pub(crate) fn restore_assignments(
         &mut self,
         expr: HashMap<MVarId, ExprId>,
         level: HashMap<LMVarId, LevelId>,
+        delayed: HashMap<MVarId, DelayedMVarAssignment>,
     ) {
         self.assignments = expr;
         self.level_assignments = level;
+        self.d_assignment = delayed;
     }
 }
 
@@ -312,5 +387,100 @@ mod tests {
         let id = lmk(&mut store, "ghost");
         let mut mctx = MetavarContext::new();
         assert!(mctx.assign_level(id, zero).is_err());
+    }
+
+    #[test]
+    fn delayed_assignment_round_trips_and_refuses_a_second_one() {
+        use crate::test_support::{fresh_mvar, with_ctx};
+
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+            let (_, new_id) = fresh_mvar(ctx, sort0);
+            let (_, pending) = fresh_mvar(ctx, sort0);
+
+            assert!(!ctx.mctx().is_delayed_assigned(new_id));
+            ctx.mctx_mut()
+                .assign_delayed(new_id, vec![sort0], pending)
+                .expect("first delayed assignment");
+            assert!(ctx.mctx().is_delayed_assigned(new_id));
+
+            let d = ctx.mctx().delayed_assignment(new_id).expect("round-trips");
+            assert_eq!(d.fvars, vec![sort0]);
+            assert_eq!(d.mvar_id_pending, pending);
+
+            assert!(
+                ctx.mctx_mut()
+                    .assign_delayed(new_id, vec![], pending)
+                    .is_err(),
+                "a delayed assignment is permanent, exactly like an ordinary \
+                 one — silently overwriting turns a bug into a wrong answer"
+            );
+        });
+    }
+
+    #[test]
+    fn get_delayed_mvar_root_follows_a_chain() {
+        use crate::test_support::{fresh_mvar, with_ctx};
+
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+            let (_, a) = fresh_mvar(ctx, sort0);
+            let (_, b) = fresh_mvar(ctx, sort0);
+            let (_, c) = fresh_mvar(ctx, sort0);
+
+            ctx.mctx_mut().assign_delayed(a, vec![], b).expect("a := b");
+            ctx.mctx_mut().assign_delayed(b, vec![], c).expect("b := c");
+
+            assert_eq!(ctx.get_delayed_mvar_root(a), c);
+            assert_eq!(ctx.get_delayed_mvar_root(c), c, "a root is its own root");
+        });
+    }
+
+    #[test]
+    fn checkpoint_rollback_undoes_delayed_assignment() {
+        use crate::test_support::{fresh_mvar, with_ctx};
+
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+            let (_, a) = fresh_mvar(ctx, sort0);
+            let (_, b) = fresh_mvar(ctx, sort0);
+            let (_, pre_assigned) = fresh_mvar(ctx, sort0);
+
+            // Assign one delayed BEFORE checkpoint
+            ctx.mctx_mut()
+                .assign_delayed(pre_assigned, vec![], b)
+                .expect("pre-checkpoint assign");
+            assert!(ctx.mctx().is_delayed_assigned(pre_assigned));
+
+            // Take a checkpoint with pre_assigned already delayed-assigned
+            let snap = ctx.checkpoint();
+
+            // Inside the trial, assign a second one
+            ctx.mctx_mut()
+                .assign_delayed(a, vec![], b)
+                .expect("assign inside trial");
+            assert!(ctx.mctx().is_delayed_assigned(a));
+
+            // Rollback the trial
+            ctx.rollback(snap);
+
+            // After rollback, the pre-checkpoint assignment is PRESERVED
+            assert!(ctx.mctx().is_delayed_assigned(pre_assigned));
+
+            // But the in-trial assignment is undone
+            assert!(!ctx.mctx().is_delayed_assigned(a));
+
+            // And we can assign it now (the permanence guard is not left tripped)
+            ctx.mctx_mut()
+                .assign_delayed(a, vec![], b)
+                .expect("assign after rollback must succeed");
+            assert!(ctx.mctx().is_delayed_assigned(a));
+        });
     }
 }

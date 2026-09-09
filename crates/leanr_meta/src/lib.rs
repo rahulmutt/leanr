@@ -24,6 +24,7 @@ mod lazy_delta;
 mod level;
 mod local_snapshot;
 mod metactx;
+mod mk_binding;
 mod mvar_ctx;
 mod synth;
 #[cfg(test)]
@@ -37,7 +38,7 @@ pub use discr_tree::DiscrTree;
 pub use error::MetaError;
 pub use local_snapshot::LocalCtxSnapshot;
 pub use metactx::{EnvExtensions, MetaCtx, MetaSnapshot, DEFAULT_STEP_BUDGET};
-pub use mvar_ctx::{LMVarId, MVarDecl, MVarId, MVarKind, MetavarContext};
+pub use mvar_ctx::{DelayedMVarAssignment, LMVarId, MVarDecl, MVarId, MVarKind, MetavarContext};
 pub use synth::LOption;
 pub use transform::TransformStep;
 pub use transparency::{can_unfold, TransparencyMode};

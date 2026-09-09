@@ -474,7 +474,21 @@ differentially observable.
     eager synthesis at `mkInstMVar` closes the instance goal and the
     default rung never fires here either. The contrast with `num/bare`
     is what shows the ladder escalating only when it must;
-  * `num/zero` — the `decodeNatLitVal?` single-`0` special case. -/
+  * `num/zero` — the `decodeNatLitVal?` single-`0` special case.
+  * `num/zeroUnderBinder` (elimMVarDeps task 11 fix round 1) — `num/bare`'s
+    default-instance walk with a BINDER around it, and the record that
+    keeps rung 3's `mvarId.withContext` (`SyntheticMVars.lean:114`,
+    `synthetic/default_inst.rs`) honest. `?α` and its `OfNat ?α 0` goal
+    are minted in a context holding `n` and are still unassigned when
+    `mkLambdaFVars` runs, so `elimMVarDeps`' plain-assign branch rewrites
+    them to `?aux n`; rung 3's `isDefEq` against the default candidate
+    then has to dereference `n` AFTER its binder has closed, which it can
+    do only under the goal's own local context. Measured kill: drop the
+    scoping and this record — with `dflt/polyInstImplicitUnderBinder` and
+    nothing else — fails with `unknown free variable`. It elaborated
+    correctly before `elimMVarDeps` was wired into `mk_binding` and
+    regressed silently when it was, with no record to notice; this is
+    that regression's executable memory. -/
 def numQueries : List (String × String) :=
   [ ("num/bare",        "42")
   , ("num/zero",        "0")
@@ -485,6 +499,7 @@ def numQueries : List (String × String) :=
   , ("num/ascribedNat", "(42 : Nat)")
   , ("num/ascribedTag", "(42 : Tag)")
   , ("num/inApp",       "pick 1 2")
+  , ("num/zeroUnderBinder", "fun (n : Nat) => 0")
   ]
 
 /-- M4b-3 P3 task 7: `char` and `scientific`.
@@ -543,9 +558,20 @@ refresh (a rigid `param u` here instead of `lmvar` means
 `mk_default_instance_candidate` built at the empty level list) and the
 nested `synthesizePending` fixpoint (an `mvar` in the `Seed` argument
 position means the candidate's instance-implicit binders were not
-collected). -/
+collected).
+
+`dflt/polyInstImplicitUnderBinder` (elimMVarDeps task 11 fix round 1) is
+the same walk under a binder, and is the SECOND half of rung 3's
+`mvarId.withContext` gate — see `num/zeroUnderBinder` above for the full
+diagnosis. It is kept alongside `num/zeroUnderBinder` rather than folded
+into it because the two reach rung 3 by different routes: the numeral's
+goal is `OfNat ?α 0` with a literal argument and a THREE-priority
+descending walk behind it, while `Fresh ?α` descends to priority 75 and
+its candidate carries an `instImplicit` binder of its own, so the
+scoping has to survive the nested `synthesizePending` too. -/
 def defaultPolyQueries : List (String × String) :=
   [ ("dflt/polyInstImplicit", "useFresh")
+  , ("dflt/polyInstImplicitUnderBinder", "fun (n : Nat) => useFresh")
   ]
 
 /-- M4b-3 P2b-ii: the elaborator outParam branch. The list below now
@@ -614,19 +640,30 @@ that must be a local is written as a `fun` binder.
     three siblings: the same query under a `fun` (`fun (n : Nat) =>
     pairW n Nat.zero`) is a coercion resumed AFTER its binder closed,
     which the oracle handles inside `mkLambdaFVars` via
-    `MkBinding.elimMVarDeps` (`MetavarContext.lean`) — a mechanism
-    leanr's `mk_lambda` (`leanr_meta/src/metactx.rs`, a plain
-    `abstract_fvars`) does not model, so leanr leaks the free variable
-    where the oracle emits `bvar 0`. Unmodelled and carried, not
-    silently accepted: `mk_binding`'s own doc records the gap, and
-    `leanr_elab`'s
-    `postponed_coe_under_a_binder_leaves_an_unabstracted_fvar_pending_elim_mvar_deps`
-    (`tests/seam_audit.rs`) pins the divergent output so it trips the
-    day the gap closes. Full diagnosis in the M4b-3 P4 task-7 report.
+    `MkBinding.elimMVarDeps` (`MetavarContext.lean`). leanr's
+    `mk_lambda` did not model that for two milestones and leaked the
+    free variable where the oracle emits `bvar 0`; the elimMVarDeps
+    slice ported it (`leanr_meta/src/mk_binding.rs`, wired into
+    `MetaCtx::mk_binding`), so the under-a-binder form is now a record
+    of its own — `coe/postponedThenResumedUnderBinder` below — instead
+    of a carried gap. Full diagnosis in the M4b-3 P4 task-7 report.
   * `coe/funApp` (task 8) — `g Nat.zero` with `g : Fn`:
     `coerceToFunction?` in `synthesizePendingAndNormalizeFunType`.
   * `coe/sortDomain` (task 9) — `fun (c : Carrier) (x : c) => x`:
-    `ensureType` → `coerceToSort?` on the binder domain. -/
+    `ensureType` → `coerceToSort?` on the binder domain.
+  * `coe/postponedThenResumedUnderBinder` (elimMVarDeps task 11) — the
+    same postpone-then-resume as `coe/postponedThenResumed`, but UNDER a
+    binder: `CoeT Nat n (Wrapper ?a)` is `.undef` while `?a` is
+    unassigned, so `mkCoe` registers a `.coe` mvar in a local context
+    that contains `n`; `mkLambdaFVars` closes the binder BEFORE the
+    fixpoint resumes the coercion. The oracle absorbs that inside
+    `MkBinding.elimMVarDeps`, whose DELAYED branch (`:1216-1228`) is the
+    only reason `n` comes back as `bvar 0` rather than a leaked `fvar`.
+    Measured kill: make `elimMVar` take the plain-assign branch for
+    `syntheticOpaque` too and this record is the one that moves. For two
+    milestones leanr answered this shape wrongly and it could not be a
+    record at all — `leanr_elab`'s `seam_audit.rs` carried the oracle's
+    answer inline instead. -/
 def coeQueries : List (String × String) :=
   [ ("coe/natToInt",             "fun (n : Nat) => (n : Int)")
   , ("coe/twoStep",              "fun (n : Nat) => (n : Big)")
@@ -634,6 +671,57 @@ def coeQueries : List (String × String) :=
   , ("coe/postponedThenResumed", "pairW Nat.zero Nat.zero")
   , ("coe/funApp",               "fun (g : Fn) => g Nat.zero")
   , ("coe/sortDomain",           "fun (c : Carrier) (x : c) => x")
+  , ("coe/postponedThenResumedUnderBinder", "fun (n : Nat) => pairW n Nat.zero")
+  ]
+
+/-- elimMVarDeps task 11: the differential record for the
+`MkBinding.elimMVarDeps` mechanism that
+`coe/postponedThenResumedUnderBinder` does NOT reach.
+
+  * `elimMVarDeps/pendingInstanceUnderBinder` — the PLAIN-ASSIGN branch
+    (`elimMVar`, `:1214-1215`). A two-binder telescope closed by ONE
+    `mkLambdaFVars` call, with `x`'s domain ELIDED: `Wrap ?t` is
+    therefore still `.undef` at `elabAppArgs`' finalization, and the
+    instance argument survives to `mkLambdaFVars` as an unassigned
+    NON-opaque (`MetavarKind.synthetic`) metavariable whose context
+    holds both binders. `elimMVar` assigns it outright,
+    `?inst := ?new n x`; the ascription then pins `?t := Nat` and the
+    fixpoint solves `Wrap Nat` through that assignment. Measured kill:
+    take the DELAYED branch for every kind and this record — and only
+    this record — moves, because a `syntheticOpaque` delayed assignment
+    is never resolved here: the elaborator that created `?inst` assigns
+    `?inst` itself.
+
+Two mechanisms named in the task-11 brief got NO record, deliberately,
+because no source term can make them observable at this tier (both
+measured; both keep the `crates/leanr_meta/src/mk_binding.rs` unit
+tests that DO kill their mutations):
+
+  * `getInScope`'s filter (`:1070-1077`) is subsumed by
+    `collectForwardDeps` (`:1037-1062`), which iterates the
+    METAVARIABLE's own local context and so re-drops anything
+    `getInScope` would have dropped. Replacing `getInScope` with `xs`
+    unfiltered leaves all 117 records byte-identical — re-measured at
+    the shipped corpus size, including the two under-a-binder
+    default-instance records, which are among the several that reach
+    `elimMVar` with an EMPTY `getInScope` result, the one path where the
+    two filters could differ. The only tests that fail workspace-wide
+    are `get_in_scope_keeps_only_the_fvars_the_mvar_can_see` and
+    `elim_mvar_deps_leaves_an_out_of_scope_metavariable_alone`.
+  * `collectForwardDeps`' closure never adds anything here. leanr's
+    elaborator only ever abstracts a CONTIGUOUS, most-recently-pushed
+    telescope, so `to_revert` is always a suffix of the metavariable's
+    own context and there is no later, unreverted declaration to pull
+    in. A non-suffix reversion is the tactic framework's `revert`,
+    which leanr has no producer for — the same reason
+    `collect_forward_deps` does not model `preserveOrder`. Making it
+    the identity leaves all 117 records byte-identical — re-measured at
+    the shipped corpus size. The only tests that fail workspace-wide
+    are `collect_forward_deps_pulls_in_a_dependent_later_decl` and
+    `collect_forward_deps_closes_transitively_through_a_chain`. -/
+def elimMVarDepsQueries : List (String × String) :=
+  [ ("elimMVarDeps/pendingInstanceUnderBinder",
+      "(fun (n : Nat) x => useWrap x : Nat -> Nat -> Nat)")
   ]
 
 def emit (id src : String) (expJ : Json) : IO Unit :=
@@ -649,7 +737,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>

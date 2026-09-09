@@ -40,21 +40,42 @@
 //! a depth cap the oracle does not have would be a divergence, not a
 //! fix.
 //!
-//! **Two oracle scopings have no leanr counterpart yet and are not
-//! stubbed.** `mvarId.withContext` (`:114`, `:135`) re-enters the
-//! mvar's own local context and local instances. Since the
-//! metavariable-local-contexts slice (`mk_fresh_expr_mvar_of_kind`'s own
-//! doc), every mvar DOES carry the ambient context it was minted in —
-//! but this rung, unlike `synthesize_synthetic_mvar`'s own per-mvar
-//! dispatch (`ladder.rs::with_mvar_local_context`), never reinstalls
-//! it: `synthesize_using_default`'s own walk runs entirely under
-//! whatever context is ambient when RUNG 3 itself is reached, not each
-//! goal's own. SEAM, unaddressed by this task — no default-instance
-//! goal in today's corpus depends on a binder that closed before rung 3
-//! ran. `withRef mvarDecl.stx` (`:201`) positions error messages, and
+//! **`mvarId.withContext` (`:114`, `:135`) is ported; it was a seam
+//! until the elimMVarDeps slice, and it went live the day that slice
+//! landed.** The scoping re-enters the goal's OWN local context, which
+//! every mvar carries since the metavariable-local-contexts slice
+//! (`mk_fresh_expr_mvar_of_kind`'s own doc). Both sites are wrapped in
+//! `ladder.rs::with_mvar_local_context` below: the whole of
+//! `synthesize_using_default_prio` (oracle `:114`, so
+//! `synthesize_using_default_instance` inherits the scope rather than
+//! opening its own), and the inside of
+//! `synthesize_pending_inst_mvar_committed`'s `commit_when` (oracle
+//! `:135`, whose `commitWhen <| mvarId.withContext do` has the same
+//! nesting).
+//!
+//! **The history, because a reader will otherwise wonder why rung 3 got
+//! this and rung 1 always had it.** This rung shipped without the
+//! scoping, documented here as a seam on the argument that "no
+//! default-instance goal in today's corpus depends on a binder that
+//! closed before rung 3 ran". That stopped being true when
+//! `elimMVarDeps` (`leanr_meta/src/mk_binding.rs`) was wired into
+//! `MetaCtx::mk_binding`: its PLAIN-ASSIGN branch rewrites an
+//! unassigned non-opaque mvar whose context holds the abstracted
+//! binders into `?a := ?aux n`, so rung 3's `is_def_eq` against a
+//! default-instance candidate then dereferences `n` — a binder that
+//! closed before the fixpoint ran — against whatever context happened
+//! to be ambient. Measured: `fun (n : Nat) => 0` and
+//! `fun (n : Nat) => useFresh` elaborated to the oracle's answer before
+//! that wiring and failed with `unknown free variable` after, with no
+//! corpus record to notice. Both are corpus records now
+//! (`num/zeroUnderBinder`, `dflt/polyInstImplicitUnderBinder`) and are
+//! this fix's measured kill. Rungs 1-2 were never affected: their
+//! dispatch has gone through `with_mvar_local_context` since M4b-3 P2a.
+//!
+//! `withRef mvarDecl.stx` (`:201`) positions error messages, and
 //! leanr's error type carries no position (design spec § Amendment,
-//! item 2). Neither is a behavior difference on any term leanr can
-//! elaborate today.
+//! item 2). That one IS still unaddressed, and is not a behavior
+//! difference on any term leanr can elaborate.
 
 use leanr_kernel::bank::{ExprId, NameId};
 use leanr_kernel::BinderInfo;
@@ -183,18 +204,26 @@ impl<'e> TermElabM<'e> {
         prio: usize,
         kinds: &KindInterner,
     ) -> Result<bool, ElabError> {
-        let Some(class) = self.pending_class_name(mvar_id)? else {
-            return Ok(false);
-        };
-        for (inst, inst_prio) in self.mctx.default_instances_of(class) {
-            if inst_prio != prio {
-                continue;
+        // oracle: `mvarId.withContext do` wraps the WHOLE body (`:114`),
+        // so `synthesizeUsingDefaultInstance` below inherits the scope
+        // rather than opening its own. See this module's doc for why
+        // this is not optional. `with_mvar_local_context` is the ladder's
+        // existing helper, the same one `synthesize_synthetic_mvar`
+        // (`ladder.rs:149`) and the stuck reporter (`report.rs:105`) use.
+        self.with_mvar_local_context(mvar_id, |elab| {
+            let Some(class) = elab.pending_class_name(mvar_id)? else {
+                return Ok(false);
+            };
+            for (inst, inst_prio) in elab.mctx.default_instances_of(class) {
+                if inst_prio != prio {
+                    continue;
+                }
+                if elab.synthesize_using_default_instance(mvar_id, inst, kinds)? {
+                    return Ok(true);
+                }
             }
-            if self.synthesize_using_default_instance(mvar_id, inst, kinds)? {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+            Ok(false)
+        })
     }
 
     /// oracle: `synthesizeUsingDefaultInstance` (`:155-173`).
@@ -385,7 +414,15 @@ impl<'e> TermElabM<'e> {
         mvar_id: MVarId,
         _kinds: &KindInterner,
     ) -> Result<bool, ElabError> {
-        self.commit_when(|s| Ok(s.synthesize_inst_mvar_core(mvar_id).unwrap_or(false)))
+        // oracle: `commitWhen <| mvarId.withContext do …` (`:135`) —
+        // the context swap is INSIDE the `commitWhen`, matching the
+        // oracle's own nesting.
+        self.commit_when(|s| {
+            Ok(
+                s.with_mvar_local_context(mvar_id, |elab| elab.synthesize_inst_mvar_core(mvar_id))
+                    .unwrap_or(false),
+            )
+        })
     }
 
     /// oracle: `synthesizeSomeUsingDefault?` (`:175-184`) — apply a

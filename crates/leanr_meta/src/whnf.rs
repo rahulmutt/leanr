@@ -56,10 +56,10 @@
 //!   (`casesOn`/`brecOn`-shaped) unfolding inside `whnf_core` itself
 //!   (:696-701); lands with the extension that identifies
 //!   `isAuxRecursor`-equivalent definitions.
-//! - [`MetaCtx::whnf_delayed_assigned`] — delayed-mvar-assignment
-//!   expansion (:587-606); this plan's `MetavarContext` has no
-//!   delayed-assignment channel at all (`assign.rs`'s own citation) —
-//!   lands with plan 4 / M4b.
+//! - [`MetaCtx::whnf_delayed_assigned`] — LANDED (elimMVarDeps task 6):
+//!   delayed-mvar-assignment expansion (:587-606), delegating to
+//!   `assign.rs`'s `instantiate_delayed_app` now that the delayed
+//!   channel (`assign.rs`'s own citation) exists.
 //! - [`MetaCtx::to_ctor_when_k`] — compares structurally (`ExprId`
 //!   equality after `whnf`) instead of via `isDefEq`. `defeq.rs::
 //!   is_def_eq` (this plan's own unifier) now exists, but this call
@@ -472,18 +472,54 @@ impl<'e> MetaCtx<'e> {
         }
     }
 
-    /// SEAM: oracle `whnfDelayedAssigned?` (WHNF.lean:587-606). The
-    /// delayed-mvar-assignment channel (`getDelayedMVarAssignment?`)
-    /// does not exist on this plan's `MetavarContext` at all — a later
-    /// plan (plan 4 / M4b), not this one (`assign.rs`'s own citation
-    /// on why this crate has no delayed-assignment concept yet). Always
-    /// `None`.
+    /// oracle: `whnfDelayedAssigned?` (`Meta/WHNF.lean:587-606`).
+    ///
+    /// The same rule `instantiate_delayed_app` implements, on the whnf
+    /// hot path: a delayed-assigned metavariable head applied to at
+    /// least as many arguments as it abstracts, whose pending
+    /// metavariable is assigned to a metavariable-free value, reduces
+    /// to that value with the abstracted fvars substituted.
+    ///
+    /// Delegates rather than duplicating: this is `whnf_core_app`'s
+    /// single call site (`:426`), the rule is one rule, and two
+    /// transcriptions of it would be two things to keep in step.
     fn whnf_delayed_assigned(
         &mut self,
-        _f_prime: ExprId,
-        _e: ExprId,
+        f_prime: ExprId,
+        e: ExprId,
     ) -> Result<Option<ExprId>, MetaError> {
-        Ok(None)
+        if !matches!(self.node(f_prime), Node::MVar { .. }) {
+            return Ok(None);
+        }
+        // The oracle reduces on `f'.mvarId!` directly
+        // (`Meta/WHNF.lean:588-590`); `instantiate_delayed_app`
+        // re-derives its own head from `e` (`get_app_fn(e)`) instead of
+        // taking `f_prime` as a parameter. The two derivations can differ
+        // in principle if `whnf_core` rewrote the applied head from one
+        // metavariable to another before reaching here — e.g. `?m := ?n`
+        // where `?n` is itself delayed-assigned, so `f_prime` names `?n`
+        // while `e`'s literal head expression still reads `?m`.
+        //
+        // That mismatch shape is producible today — just not via a
+        // delayed assignment. `whnf_easy_cases` follows a REGULAR mvar
+        // assignment in a loop (`:288-291`), so `?m := ?n` with `?n`
+        // still unassigned already makes `f = ?m`, `f_prime = ?n`
+        // diverge on every ordinary `whnf` of an application headed by
+        // `?m` — `is_def_eq_mvar_mvar` assigns exactly that shape
+        // (`assign.rs:187`, `:347`). A `debug_assert_eq!` here would
+        // panic on that case, which is pure incompleteness, never
+        // unsoundness, and this file's own policy (`:241-243`) forbids a
+        // panic for that. Guard explicitly instead: whenever the two
+        // derivations disagree, `f` was assigned REGULARLY (the only way
+        // `whnf_easy_cases` rewrites it), so it cannot ALSO carry a
+        // delayed assignment, and `instantiate_delayed_app(e)` already
+        // answers `None` on that path — so this guard is
+        // behavior-identical in every reachable case, not a new
+        // refusal.
+        if self.get_app_fn(e) != f_prime {
+            return Ok(None);
+        }
+        self.instantiate_delayed_app(e)
     }
 
     /// oracle: `reduceMatcher?` (WHNF.lean:536-575). `numAlts` is
@@ -2977,6 +3013,49 @@ mod tests {
                 .expect("assign ?m := N.zero");
             let mexpr = ctx.scratch.expr_mvar(base, Some(m_name)).expect("mvar");
             assert_eq!(ctx.whnf_core(mexpr).expect("whnf_core"), zero);
+        });
+    }
+
+    /// Coordinator correction to `whnf_delayed_assigned`'s guard
+    /// (`:505-511`): `?m := ?n` with `?n` left UNASSIGNED is a REGULAR
+    /// assignment (exactly what `is_def_eq_mvar_mvar`,
+    /// `assign.rs:187`/`:347`, produces for two bare assignable mvars),
+    /// and it alone makes `whnf_core_app` reach `whnf_delayed_assigned`
+    /// with `f_prime = ?n` (the assignment chain `whnf_core(f)` follows,
+    /// `:288-291`) while `e`'s own literal head is still `?m` — the
+    /// exact head mismatch the guard exists for, with NO delayed
+    /// assignment anywhere in sight. This must not panic: it is pure
+    /// incompleteness (nothing more to reduce past `?n`), never
+    /// unsoundness, and this file's own policy (`:241-243`) forbids a
+    /// panic for that. The commit message for this fix measures a
+    /// `debug_assert_eq!` in this exact guard's place panicking on
+    /// this precise shape; this test pins the guard's actual behavior:
+    /// no panic, and the ordinary (non-delayed) path takes over and
+    /// follows the assignment through to `?n`.
+    #[test]
+    fn whnf_core_app_survives_a_regular_mvar_to_mvar_assignment_at_the_head() {
+        use crate::test_support::fresh_mvar;
+        with_prelude0_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let z = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, z).expect("sort");
+
+            let (n, _nid) = fresh_mvar(ctx, sort0);
+            let (m, mid) = fresh_mvar(ctx, sort0);
+            // A REGULAR assignment: `?n` stays unassigned.
+            ctx.mctx_mut().assign(mid, n).expect("?m := ?n");
+
+            let app = ctx.scratch.expr_app(base, m, sort0).expect("?m Sort 0");
+            let out = ctx
+                .whnf_core(app)
+                .expect("whnf_core must not panic on this shape");
+            match ctx.node(out) {
+                Node::App { f, .. } => assert_eq!(
+                    f, n,
+                    "whnf follows the regular ?m := ?n assignment through to ?n"
+                ),
+                other => panic!("expected an App with head ?n, got {other:?}"),
+            }
         });
     }
 

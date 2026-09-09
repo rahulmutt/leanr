@@ -42,7 +42,8 @@ fn oracle_elab_gate() {
         .expect("committed elab corpus");
     let mut failures = Vec::new();
     // Fix 2 of the M4b-3 P4 whole-branch fix wave: the WHOLE-CLASS
-    // detector for the `elimMVarDeps` gap. See the assertion below.
+    // detector for an unabstracted `fvar` leaking into a closed-term
+    // answer. See the assertion below.
     let mut leaked_fvars = Vec::new();
     let mut replayed = 0usize;
     for line in queries.lines().filter(|l| !l.trim().is_empty()) {
@@ -139,33 +140,38 @@ fn oracle_elab_gate() {
                 // heuristic.
                 //
                 // WHY THIS GUARDS A REAL CLASS, not a hypothetical.
-                // `MetaCtx::mk_binding` (`leanr_meta/src/metactx.rs`,
-                // under its own `# UNMODELLED: MkBinding.elimMVarDeps`
-                // heading) is a plain `abstract_fvars`: it does not run
-                // the oracle's `elimMVarDeps` (`MetavarContext.lean`),
-                // which rewrites an unassigned mvar whose local context
-                // holds the fvars being abstracted into a
-                // delayed-assigned mvar APPLIED to them. So any
-                // postponed synthetic mvar registered under a binder and
-                // resumed by the fixpoint AFTER that binder closed has
-                // its value spliced in unabstracted: leanr emits an
-                // `fvar` where the oracle emits a `bvar`. That is a
-                // WRONG `ExprId` emitted with NO error — silent
-                // divergence, which this repo's cardinal rule forbids —
-                // and until this wave it was pinned by exactly one
-                // hand-written shape
-                // (`seam_audit.rs`'s
-                // `postponed_coe_under_a_binder_leaves_an_unabstracted_fvar_pending_elim_mvar_deps`).
-                // This turns the whole class loud: every future instance
-                // fails HERE, named, instead of quietly shifting bytes.
+                // Every corpus query is a CLOSED term (no ambient
+                // `lctx` — see above), so an `fvar` in a finished answer
+                // is a bug, full stop: it means some subterm's free
+                // variable never got abstracted before its binder
+                // closed. `MetaCtx::mk_binding`
+                // (`leanr_meta/src/metactx.rs`) runs the oracle's
+                // `elimMVarDeps` (`MetavarContext.lean`,
+                // `leanr_meta/src/mk_binding.rs`'s port) over the body
+                // and over each binder type before abstracting, at the
+                // oracle's own two insertion points — an unassigned
+                // metavariable whose own local context holds the fvars
+                // being abstracted is rewritten to a fresh metavariable
+                // APPLIED to them, so it abstracts like any other
+                // argument instead of leaking. Before that port landed
+                // (the `elimMVarDeps` slice), a postponed synthetic mvar
+                // registered under a binder and resumed by the fixpoint
+                // AFTER that binder closed had its value spliced in
+                // unabstracted: leanr emitted an `fvar` where the oracle
+                // emits a `bvar`, a WRONG `ExprId` with NO error — silent
+                // divergence, which this repo's cardinal rule forbids.
+                // `seam_audit.rs`'s
+                // `postponed_coe_under_a_binder_abstracts_via_elim_mvar_deps`
+                // pins that one shape by hand; this assertion turns the
+                // whole class loud across the corpus: any future
+                // regression fails HERE, named, instead of quietly
+                // shifting bytes.
                 //
                 // PLACEMENT: deliberately here, in the record replay,
                 // and NOT in `tests/support`'s shared `elab_and_synthesize`
-                // helper — that helper is the path the known-gap pin
-                // above goes through, and the pin's whole job is to
-                // PRODUCE an `fvar`. Guarding the corpus rather than the
-                // shared path keeps the predicate at full strength and
-                // needs no exemption for the pin.
+                // helper — a corpus regression should fail loudly at the
+                // corpus, not inside a shared helper other tests also
+                // call for unrelated shapes.
                 if !st.fvars.is_empty() {
                     leaked_fvars.push(format!("{id}: {got_json}"));
                 }
@@ -182,15 +188,16 @@ fn oracle_elab_gate() {
     assert!(
         leaked_fvars.is_empty(),
         "{} record(s) finished with an UNABSTRACTED `fvar` in the term. Every \
-         corpus query is a closed term, so this is the `MkBinding.elimMVarDeps` \
-         gap documented on `MetaCtx::mk_binding` (`leanr_meta/src/metactx.rs`) \
-         and pinned by `seam_audit.rs`'s \
-         `postponed_coe_under_a_binder_leaves_an_unabstracted_fvar_pending_elim_mvar_deps`: \
-         a synthetic mvar postponed under a binder was resumed after the binder \
-         closed, so its value was spliced in without abstraction. Do NOT relax \
-         this assertion and do NOT edit the corpus — either close the gap (port \
-         `elimMVarDeps`) or, if the record is new, it is exercising the known \
-         gap and does not belong in the corpus yet. Offenders:\n{}",
+         corpus query is a closed term, so an `fvar` in an answer is a bug: \
+         `MetaCtx::mk_binding` (`leanr_meta/src/metactx.rs`) runs \
+         `elim_mvar_deps` (`leanr_meta/src/mk_binding.rs`, the oracle's \
+         `MkBinding.elimMVarDeps`) over the body and over each binder type \
+         before abstracting, and `seam_audit.rs`'s \
+         `postponed_coe_under_a_binder_abstracts_via_elim_mvar_deps` pins the \
+         shape that used to leak. Do NOT relax this assertion and do NOT edit \
+         the corpus — track down why a metavariable's value is reaching this \
+         point unabstracted; a new record that trips this is a real \
+         regression, not a known gap. Offenders:\n{}",
         leaked_fvars.len(),
         leaked_fvars.join("\n")
     );
@@ -216,7 +223,11 @@ fn oracle_elab_gate() {
     // exactly `wc -l tests/fixtures/elab/elab-queries.jsonl` after the
     // regen. `>=`, not `==`, so adding a record is a one-line bump here
     // rather than a gate that fails before the author has looked.
-    const CORPUS_FLOOR: usize = 113;
+    //
+    // 113 -> 117 (elimMVarDeps task 11): `coe/postponedThenResumedUnderBinder`,
+    // `elimMVarDeps/pendingInstanceUnderBinder`, `num/zeroUnderBinder`,
+    // `dflt/polyInstImplicitUnderBinder`.
+    const CORPUS_FLOOR: usize = 117;
     assert!(
         replayed >= CORPUS_FLOOR,
         "corpus shrank: replayed {replayed} records, floor is {CORPUS_FLOOR}. \

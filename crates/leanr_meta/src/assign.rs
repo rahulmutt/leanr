@@ -685,8 +685,33 @@ impl<'e> MetaCtx<'e> {
     /// metavariable-local-contexts slice this minted an empty context,
     /// which made every ambient free variable look out of scope to
     /// `check_assignment_scope_body` and so made a metavariable
-    /// unassignable to any `fun`-bound variable.
+    /// unassignable to any `fun`-bound variable. This is now the
+    /// ambient/`Natural` specialization; see `mk_aux_mvar_at` for the
+    /// general form.
     pub(crate) fn mk_aux_mvar(&mut self, ty: ExprId) -> Result<(ExprId, MVarId), MetaError> {
+        let lctx = self.current_lctx();
+        self.mk_aux_mvar_at(lctx, ty, MVarKind::Natural)
+    }
+
+    /// `mk_aux_mvar` with the local context and kind chosen by the
+    /// caller — the form `elim_mvar` (`mk_binding.rs`) needs, which
+    /// mints at an explicitly constructed REDUCED context that is
+    /// neither the ambient one nor any existing metavariable's, and
+    /// which must carry the kind `elimMVar` computes
+    /// (`MetavarContext.lean:1195`) rather than always `Natural`.
+    ///
+    /// A generalization, not an addition: duplicating the
+    /// declare-and-intern sequence into a second minting function
+    /// would be two places to keep in step for one behavior. Flagged
+    /// per the M4b accessor precedent; behavior-neutral for
+    /// `mk_aux_mvar`, whose two tests above pin the ambient/`Natural`
+    /// pair it had before.
+    pub(crate) fn mk_aux_mvar_at(
+        &mut self,
+        lctx: std::sync::Arc<crate::LocalCtxSnapshot>,
+        ty: ExprId,
+        kind: MVarKind,
+    ) -> Result<(ExprId, MVarId), MetaError> {
         let idx = self.expr_mvar_gen;
         self.expr_mvar_gen += 1;
         let base = Some(self.view.store);
@@ -695,14 +720,13 @@ impl<'e> MetaCtx<'e> {
         let idx_id = self.scratch.intern_nat(base, &Nat::from(idx))?;
         let name = self.scratch.name_num(base, Some(prefix), idx_id)?;
         let id = MVarId(name);
-        let lctx = self.current_lctx();
         self.mctx.declare(
             id,
             MVarDecl {
                 user_name: None,
                 ty,
                 lctx,
-                kind: MVarKind::Natural,
+                kind,
             },
         );
         let expr = self.scratch.expr_mvar(base, Some(name))?;
@@ -1199,6 +1223,100 @@ impl<'e> MetaCtx<'e> {
         self.guarded(|ctx| ctx.instantiate_mvars_body(e))
     }
 
+    /// oracle: the delayed-assignment case of `instantiateExprMVars`
+    /// (`instantiateExprMVarsImp`, `MetavarContext.lean:577-583`; the
+    /// body is C++, and `whnfDelayedAssigned?`,
+    /// `Meta/WHNF.lean:587-606`, is the readable statement of the same
+    /// rule).
+    ///
+    /// `?new #[y_1 … y_n] := ?m` applied to at least `n` arguments,
+    /// with `?m` assigned to `v`: the result is `v` with the `y`s
+    /// abstracted, applied to those arguments — which reduces to `v`
+    /// with each `y_i` replaced by the matching argument. The oracle
+    /// spells that as `newVal.abstract fvars` followed by
+    /// `instantiateRevRange 0 fvars.size args` and `mkAppRange`
+    /// (`WHNF.lean:602-604`), and this transcribes it step for step.
+    ///
+    /// **The abstraction is RAW (`abstract_fvars`), not `mk_lambda`,
+    /// and that is load-bearing.** `mk_lambda` needs each fvar's binder
+    /// TYPE, so it looks the fvar up in the ambient `lctx` — but the
+    /// only situation a delayed assignment is ever resolved in is one
+    /// where the binder has already closed and the fvars are out of
+    /// scope, so that lookup fails with "mk_binding: telescope fvar not
+    /// declared". The oracle's `Expr.abstract` needs no binder types
+    /// and no local context at all, which is precisely why it is the
+    /// operation used here. Pinned by
+    /// `instantiate_mvars_resolves_a_delayed_assignment_whose_fvars_left_scope`.
+    ///
+    /// `None` (leave the term alone) in three cases, each matching the
+    /// oracle's own guard: the head is not a delayed-assigned
+    /// metavariable; there are fewer arguments than abstracted fvars
+    /// (`WHNF.lean:593-595`); or the pending value still carries a
+    /// metavariable (`:598-600`), so the answer is not settled yet.
+    pub(crate) fn instantiate_delayed_app(
+        &mut self,
+        e: ExprId,
+    ) -> Result<Option<ExprId>, MetaError> {
+        let f = self.get_app_fn(e);
+        let Node::MVar { id: Some(name) } = self.node(f) else {
+            return Ok(None);
+        };
+        let head = MVarId(name);
+        let Some(d) = self.mctx.delayed_assignment(head) else {
+            return Ok(None);
+        };
+        let (fvars, pending) = (d.fvars.clone(), d.mvar_id_pending);
+        let args = self.get_app_args(e);
+        if fvars.len() > args.len() {
+            return Ok(None);
+        }
+        let Some(val) = self.mctx.assignment(pending) else {
+            return Ok(None);
+        };
+        let val = self.instantiate_mvars(val)?;
+        if self.data(val).has_expr_mvar() {
+            return Ok(None);
+        }
+        // oracle `:602`: `newVal.abstract fvars` — a raw abstraction,
+        // leaving loose bvars, NOT a `mkLambdaFVars`. See this fn's doc
+        // for why that difference decides whether this works at all.
+        let abstracted = abstract_fvars(
+            self.scratch,
+            Some(self.view.store),
+            val,
+            &fvars,
+            &mut self.guard,
+        )?;
+        // oracle `:603`: `instantiateRevRange 0 fvars.size args`.
+        //
+        // `instantiate_rev`, NOT `beta_rev`. `beta_rev` wants a `Lam`
+        // to peel and falls through to `mk_app_spine` when handed
+        // anything else (`whnf.rs:1767`) — and `abstract_fvars` returns
+        // a body with loose bvars, never a `Lam`. Pairing the two
+        // silently APPENDS the arguments instead of substituting them:
+        // measured, it turned `Wrapper.mk Nat (bvar 0)` into
+        // `Wrapper.mk Nat (bvar 0) (bvar 0)`. A raw abstraction is
+        // undone by a raw instantiation.
+        //
+        // `get_app_args` returns arguments in call/left-to-right order
+        // (`args[0]` is the FIRST argument applied), matching
+        // `abstract_fvars`' own convention that `fvars`' LAST entry
+        // becomes `bvar 0` — so `instantiate_rev` pairs them up
+        // correctly. No `.reverse()` here: that would swap which fvar
+        // each argument substitutes for.
+        let applied = instantiate_rev(
+            self.scratch,
+            Some(self.view.store),
+            abstracted,
+            &args[..fvars.len()],
+            &mut self.guard,
+        )?;
+        if args.len() == fvars.len() {
+            return Ok(Some(applied));
+        }
+        Ok(Some(self.mk_app_spine(applied, &args[fvars.len()..])?))
+    }
+
     fn instantiate_mvars_body(&mut self, e: ExprId) -> Result<ExprId, MetaError> {
         match self.node(e) {
             Node::MVar { id: Some(id) } => match self.mctx.assignment(MVarId(id)) {
@@ -1246,6 +1364,59 @@ impl<'e> MetaCtx<'e> {
                 }
             }
             Node::App { f, arg } => {
+                // oracle: `instantiateExprMVars`' delayed-assignment
+                // case. A delayed assignment `?new #[y…] := ?m` is
+                // resolvable only once `?m` is assigned; until then the
+                // application stands, and collapsing it early would
+                // lose the "not yet".
+                if let Some(resolved) = self.instantiate_delayed_app(e)? {
+                    return self.instantiate_mvars(resolved);
+                }
+                // A spine whose HEAD was a metavariable, and whose
+                // assignment turns out to be a lambda, reduces — it is
+                // not left standing as a redex.
+                //
+                // NOT transcribed from Lean source: `instantiateMVars`
+                // (`MetavarContext.lean:620`) delegates to
+                // `instantiateExprMVars` (`:580-583`), whose body is the
+                // `@[extern]` opaque `instantiateExprMVarsImp` (`:577`)
+                // — C++, absent from the pinned toolchain's Lean
+                // sources. The rule is pinned three other ways instead:
+                //
+                // 1. The pinned oracle's own committed answer. Corpus
+                //    record `tc/funWrapElided` is
+                //    `fun x => useWrap Nat instWrapNat x`, beta-reduced.
+                //    Without this arm leanr emits
+                //    `fun x => useWrap Nat ((fun _ => instWrapNat) x) x`.
+                //    Per AGENTS.md, agreement with the pinned toolchain
+                //    IS this repo's definition of correctness, and that
+                //    fixture is the citable statement of it.
+                // 2. `whnfDelayedAssigned?` (`Meta/WHNF.lean:587-606`)
+                //    is the readable statement of the same underlying
+                //    rule for the delayed case — an mvar head applied to
+                //    arguments reduces rather than standing.
+                // 3. Measured: with this arm, all 113 elaboration-corpus
+                //    records are byte-identical to the oracle; without
+                //    it, exactly one is not.
+                //
+                // DELIBERATELY NARROW: it fires only when the spine head
+                // was an `MVar` BEFORE instantiation and instantiates to
+                // a `Lam`. It is not a general beta-reduction pass —
+                // reducing redexes the oracle leaves alone would be its
+                // own divergence, in the opposite direction.
+                let head = self.get_app_fn(e);
+                if matches!(self.node(head), Node::MVar { id: Some(_) }) {
+                    let head2 = self.instantiate_mvars(head)?;
+                    if matches!(self.node(head2), Node::Lam { .. }) {
+                        let args = self.get_app_args(e);
+                        let mut args2 = Vec::with_capacity(args.len());
+                        for a in &args {
+                            args2.push(self.instantiate_mvars(*a)?);
+                        }
+                        let applied = self.beta_rev(head2, &args2)?;
+                        return self.instantiate_mvars(applied);
+                    }
+                }
                 let f2 = self.instantiate_mvars(f)?;
                 let a2 = self.instantiate_mvars(arg)?;
                 if f2 == f && a2 == arg {
@@ -1364,6 +1535,26 @@ impl<'e> MetaCtx<'e> {
             // since both DO carry a `LevelId`/`LevelsId`.)
             _ => Ok(e),
         }
+    }
+
+    /// oracle: `getDelayedMVarRoot` (`MetavarContext.lean:436-440`) —
+    /// follow a chain of delayed assignments
+    /// `?m₁ := ?m₂; …; ?mₙ := ?root` to the metavariable that is not
+    /// itself delayed-assigned. A metavariable with no delayed
+    /// assignment is its own root.
+    ///
+    /// Written as a LOOP, not the oracle's recursion: the chain is
+    /// unbounded in principle, and this crate's recursion budget
+    /// (`guarded`) is for term traversal, not for a map walk. A cycle
+    /// would hang, which cannot arise — `elimMVar` only ever
+    /// delayed-assigns a FRESHLY minted id, so every edge points from
+    /// a newer metavariable to an older one.
+    pub fn get_delayed_mvar_root(&self, mvar_id: MVarId) -> MVarId {
+        let mut cur = mvar_id;
+        while let Some(d) = self.mctx.delayed_assignment(cur) {
+            cur = d.mvar_id_pending;
+        }
+        cur
     }
 }
 
@@ -1836,6 +2027,375 @@ mod tests {
         });
     }
 
+    /// TDD RED/GREEN for plan task 6. `?new #[a] := ?m` with `?m := a`
+    /// means `?new a` instantiates to `a`: abstract `a` out of the pending
+    /// value, then apply it back.
+    #[test]
+    fn instantiate_mvars_resolves_a_delayed_assignment() {
+        use crate::test_support::{fresh_fvar, with_ctx};
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            let (new_e, new_id) = ctx.mk_aux_mvar(sort0).expect("aux");
+            let (_, pending) = ctx.mk_aux_mvar(sort0).expect("pending");
+
+            ctx.mctx_mut()
+                .assign_delayed(new_id, vec![a], pending)
+                .expect("delayed");
+            ctx.mctx_mut().assign(pending, a).expect("pending := a");
+
+            // `?new a`
+            let applied = ctx.scratch.expr_app(base, new_e, a).expect("app");
+            let got = ctx.instantiate_mvars(applied).expect("instantiate");
+
+            assert_eq!(
+                got, a,
+                "?new #[a] := ?m with ?m := a means `?new a` is `a`: \
+                 (fun a => a) a, beta-reduced"
+            );
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// TDD RED/GREEN for task 10's Finding A.
+    ///
+    /// An application whose HEAD is a metavariable assigned a lambda
+    /// must come back beta-reduced, not as a standing redex. This is the
+    /// shape `elim_mvar`'s plain-assign branch creates: it leaves
+    /// `?m := ?new ys`, the elaborator later solves `?new` to a lambda,
+    /// and the read-back has to finish the job.
+    ///
+    /// Measured against the pinned oracle: without the head-mvar arm in
+    /// `instantiate_mvars_body`, corpus record `tc/funWrapElided` comes
+    /// out as `fun x => useWrap Nat ((fun _ => instWrapNat) x) x` where
+    /// the oracle says `fun x => useWrap Nat instWrapNat x`. This is
+    /// that divergence in miniature, so the corpus is not the only thing
+    /// standing between the arm and a silent regression.
+    ///
+    /// The second half pins the NARROWNESS, which matters as much as the
+    /// rule: a redex whose head is a plain lambda — no metavariable
+    /// anywhere in head position — must be left exactly as it is. The
+    /// oracle does not beta-reduce those during instantiation, and an
+    /// over-eager arm would diverge in the opposite direction.
+    ///
+    /// **The narrowness half must reach the App arm to mean anything,
+    /// and getting there takes care.** `instantiate_mvars` early-returns
+    /// the term untouched when it carries neither an expr mvar nor a
+    /// level mvar (`:1220`), so the obvious literal redex — `(fun (_ :
+    /// Sort 0) => a) a` — never enters `instantiate_mvars_body` at all,
+    /// and asserting it comes back unchanged asserts only that the
+    /// early-out works. (It was written that way first; a review caught
+    /// it.) The binder type here is `Sort ?u` for exactly that reason:
+    /// an unassigned LEVEL mvar makes `has_level_mvar()` true, so the
+    /// walk descends and the App arm genuinely runs, while leaving no
+    /// EXPR mvar anywhere in head position — which is the condition
+    /// under test. Both halves are measured by mutation; see the
+    /// task-10 report.
+    #[test]
+    fn instantiate_mvars_betas_a_spine_whose_head_mvar_became_a_lambda() {
+        use crate::test_support::{fresh_fvar, with_ctx};
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            let (m_e, m_id) = ctx.mk_aux_mvar(sort0).expect("aux");
+
+            // `?m := fun (_ : Sort 0) => a`, a constant function, so the
+            // beta-reduced answer (`a`) differs from the argument and
+            // the assertion cannot pass by accident.
+            let s = ctx.scratch.intern_str(base, "u").expect("str");
+            let name = ctx.scratch.name_str(base, None, s).expect("name");
+            let lam = ctx
+                .scratch
+                .expr_lam(
+                    base,
+                    Some(name),
+                    sort0,
+                    a,
+                    leanr_kernel::BinderInfo::Default,
+                )
+                .expect("lam");
+            ctx.mctx_mut().assign(m_id, lam).expect("?m := lam");
+
+            // `?m a`
+            let applied = ctx.scratch.expr_app(base, m_e, a).expect("app");
+            let got = ctx.instantiate_mvars(applied).expect("instantiate");
+
+            assert_eq!(
+                got, a,
+                "`?m a` with `?m := fun _ => a` must instantiate to `a`. Leaving \
+                 `(fun _ => a) a` standing is exactly the tc/funWrapElided divergence"
+            );
+
+            // NARROWNESS: the same shape with a literal lambda head —
+            // never a metavariable — must survive untouched.
+            //
+            // `Sort ?u` as the binder type, NOT `Sort 0`: it carries an
+            // unassigned level mvar, so `instantiate_mvars`' early-out
+            // at `:1220` does not fire and the walker actually reaches
+            // the App arm. With `Sort 0` this assertion is vacuous —
+            // the term never enters `instantiate_mvars_body`.
+            let (_lmid, u) = ctx.fresh_level_mvar().expect("fresh level mvar");
+            let sort_u = ctx.scratch.expr_sort(base, u).expect("Sort ?u");
+            let lam_u = ctx
+                .scratch
+                .expr_lam(
+                    base,
+                    Some(name),
+                    sort_u,
+                    a,
+                    leanr_kernel::BinderInfo::Default,
+                )
+                .expect("lam");
+            let literal_redex = ctx.scratch.expr_app(base, lam_u, a).expect("app");
+            assert!(
+                ctx.data(literal_redex).has_level_mvar(),
+                "the narrowness term must carry a level mvar, or `instantiate_mvars` \
+                 early-returns and the App arm under test is never reached"
+            );
+            assert!(
+                !ctx.data(literal_redex).has_expr_mvar(),
+                "and it must carry no EXPR mvar — a literal lambda head is the \
+                 condition being tested"
+            );
+
+            let untouched = ctx.instantiate_mvars(literal_redex).expect("instantiate");
+            assert_eq!(
+                untouched, literal_redex,
+                "a redex with a plain lambda head is NOT beta-reduced by \
+                 instantiation — the arm fires only when the head WAS a metavariable"
+            );
+
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// TDD RED/GREEN for task 10's Finding B, and the case task 6 never
+    /// covered.
+    ///
+    /// Every other delayed-assignment test here resolves while the
+    /// abstracted fvars are STILL in the ambient local context (each one
+    /// calls `lctx_restore` only after `instantiate_mvars` has already
+    /// run). That is not how a delayed assignment is ever resolved in
+    /// production: `elim_mvar` mints one precisely so a metavariable can
+    /// outlive the binder it was created under, so by the time anything
+    /// instantiates it, the fvars are gone.
+    ///
+    /// This test restores the checkpoint FIRST. It discriminates: with
+    /// `mk_lambda` doing the abstraction — which needs each fvar's
+    /// binder type and so looks it up in the ambient `lctx` — it fails
+    /// with `mk_binding: telescope fvar not declared`. Measured: that is
+    /// exactly how the whole elaboration corpus's coercion path failed
+    /// the moment `elim_mvar_deps` was wired into `mk_binding`. The
+    /// oracle's raw `Expr.abstract` (`WHNF.lean:602`) needs no binder
+    /// types and so has no such failure mode.
+    ///
+    /// The argument is a DIFFERENT fvar from the one abstracted, so the
+    /// assertion also discriminates against simply returning the pending
+    /// value unsubstituted: `?new #[a] := ?m`, `?m := a`, applied to `b`
+    /// is `b`, not `a`.
+    #[test]
+    fn instantiate_mvars_resolves_a_delayed_assignment_whose_fvars_left_scope() {
+        use crate::test_support::{fresh_fvar, with_ctx};
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            let b = fresh_fvar(ctx, sort0, "b");
+            let (new_e, new_id) = ctx.mk_aux_mvar(sort0).expect("aux");
+            let (_, pending) = ctx.mk_aux_mvar(sort0).expect("pending");
+
+            ctx.mctx_mut()
+                .assign_delayed(new_id, vec![a], pending)
+                .expect("delayed");
+            ctx.mctx_mut().assign(pending, a).expect("pending := a");
+
+            // `?new b`, built while the binder is still open.
+            let applied = ctx.scratch.expr_app(base, new_e, b).expect("app");
+
+            // The binder closes. `a` and `b` are no longer declared
+            // anywhere — which is the normal state of affairs when a
+            // delayed assignment finally becomes resolvable.
+            ctx.lctx_restore(cp);
+
+            let got = ctx
+                .instantiate_mvars(applied)
+                .expect("a delayed assignment must resolve after its binder has closed");
+
+            assert_eq!(
+                got, b,
+                "?new #[a] := ?m with ?m := a, applied to b, is b — the abstraction \
+                 must be the oracle's raw `Expr.abstract`, which needs no binder \
+                 types and so no ambient lctx entry for `a`"
+            );
+        });
+    }
+
+    /// The delayed assignment must NOT fire while the pending
+    /// metavariable is still unassigned — the term is not resolvable yet,
+    /// and collapsing it early loses the "not yet".
+    #[test]
+    fn instantiate_mvars_leaves_an_unresolved_delayed_assignment_alone() {
+        use crate::test_support::{fresh_fvar, with_ctx};
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            let (new_e, new_id) = ctx.mk_aux_mvar(sort0).expect("aux");
+            let (_, pending) = ctx.mk_aux_mvar(sort0).expect("pending");
+            ctx.mctx_mut()
+                .assign_delayed(new_id, vec![a], pending)
+                .expect("delayed");
+
+            let applied = ctx.scratch.expr_app(base, new_e, a).expect("app");
+            let got = ctx.instantiate_mvars(applied).expect("instantiate");
+
+            assert_eq!(got, applied, "unresolved: the term is returned unchanged");
+
+            // Partial application: `?new2 #[a, b] := ?m2` applied to
+            // only ONE of its two abstracted fvars must also stand
+            // unchanged — fewer arguments than abstracted fvars means
+            // the rule does not apply yet (oracle `WHNF.lean:593-595`),
+            // even with the pending mvar assigned.
+            let b = fresh_fvar(ctx, sort0, "b");
+            let (new2_e, new2_id) = ctx.mk_aux_mvar(sort0).expect("aux2");
+            let (_, pending2) = ctx.mk_aux_mvar(sort0).expect("pending2");
+            ctx.mctx_mut()
+                .assign_delayed(new2_id, vec![a, b], pending2)
+                .expect("delayed2");
+            ctx.mctx_mut().assign(pending2, a).expect("pending2 := a");
+
+            let partial = ctx.scratch.expr_app(base, new2_e, a).expect("app");
+            let got2 = ctx.instantiate_mvars(partial).expect("instantiate");
+            assert_eq!(
+                got2, partial,
+                "partial application (1 arg for a 2-fvar delayed assignment): \
+                 fewer arguments than abstracted fvars means the rule does not \
+                 fire yet"
+            );
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// The pending value still carrying a metavariable means the answer
+    /// is not settled: firing anyway bakes an unresolved metavariable
+    /// into the abstraction. Oracle `WHNF.lean:598-600`.
+    #[test]
+    fn instantiate_mvars_waits_when_the_pending_value_is_not_settled() {
+        use crate::test_support::{fresh_fvar, with_ctx};
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            let (new_e, new_id) = ctx.mk_aux_mvar(sort0).expect("aux");
+            let (_, pending) = ctx.mk_aux_mvar(sort0).expect("pending");
+            let (open_e, _) = ctx.mk_aux_mvar(sort0).expect("still open");
+
+            ctx.mctx_mut()
+                .assign_delayed(new_id, vec![a], pending)
+                .expect("delayed");
+            // pending := an application that still mentions an unassigned mvar
+            let v = ctx.scratch.expr_app(base, open_e, a).expect("app");
+            ctx.mctx_mut().assign(pending, v).expect("pending := v");
+
+            let applied = ctx.scratch.expr_app(base, new_e, a).expect("app");
+            let got = ctx.instantiate_mvars(applied).expect("instantiate");
+            assert_eq!(got, applied, "not settled: leave it alone");
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// Fix round 1 (task 6 review): pins the argument-to-fvar mapping
+    /// for `n >= 2` fvars/args, which no other test in this module
+    /// reaches — the only other two-fvar case
+    /// (`instantiate_mvars_leaves_an_unresolved_delayed_assignment_alone`'s
+    /// partial-application case) supplies fewer args than fvars and
+    /// bails at the arity guard before `beta_rev` ever runs, and the
+    /// single-fvar test (`instantiate_mvars_resolves_a_delayed_assignment`)
+    /// is degenerate for ordering: reversing a 1-element slice is a
+    /// no-op.
+    ///
+    /// `?new #[a, b] := ?m`, `?m := a` (asymmetric: mentions the FIRST
+    /// fvar, not the second), applied to two DISTINCT arguments `x`,
+    /// `y`: `?new x y`. The correct answer is `x` — `instantiate_rev`
+    /// is handed `[x, y]` UNREVERSED (`get_app_args`' own call order),
+    /// which lines up with `abstract_fvars`' own convention that the
+    /// LAST entry of `fvars` becomes `bvar 0`: `a` outermost, `b`
+    /// innermost, so `x` (first arg) substitutes `a`, `y` (second arg)
+    /// substitutes `b`, and the body `a` becomes `x`. Under the plan
+    /// brief's literal `.reverse()` step the substitution would instead
+    /// be `b := x`, `a := y` — since the body is bare `a`, that
+    /// convention answers `y`, not `x`.
+    ///
+    /// Task 10 note: this test was written against the `mk_lambda` +
+    /// `beta_rev` formulation, which task 10 replaced with the oracle's
+    /// raw `abstract_fvars` + `instantiate_rev` (`WHNF.lean:602-603`).
+    /// The convention it pins is unchanged and the test still
+    /// discriminates it — measured by re-inserting the `.reverse()` —
+    /// so only the prose above moved. The `lctx_restore` also moved to
+    /// BEFORE the instantiation, so this now covers the shape
+    /// production actually produces: `elim_mvar` delayed-assigns over a
+    /// whole telescope and the result is resolved only after that
+    /// telescope has closed. Multi-fvar and out-of-scope were each
+    /// covered alone; this is both at once.
+    #[test]
+    fn instantiate_mvars_delayed_app_maps_multiple_args_to_fvars_in_order() {
+        use crate::test_support::{fresh_fvar, with_ctx};
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            let b = fresh_fvar(ctx, sort0, "b");
+            let x = fresh_fvar(ctx, sort0, "x");
+            let y = fresh_fvar(ctx, sort0, "y");
+            let (new_e, new_id) = ctx.mk_aux_mvar(sort0).expect("aux");
+            let (_, pending) = ctx.mk_aux_mvar(sort0).expect("pending");
+
+            ctx.mctx_mut()
+                .assign_delayed(new_id, vec![a, b], pending)
+                .expect("delayed");
+            // asymmetric: mentions `a` only, so a wrong a<->b mapping
+            // is observable in the final answer.
+            ctx.mctx_mut().assign(pending, a).expect("pending := a");
+
+            // `?new x y`
+            let app1 = ctx.scratch.expr_app(base, new_e, x).expect("app1");
+            let applied = ctx.scratch.expr_app(base, app1, y).expect("app2");
+
+            // The telescope closes before the delayed assignment is
+            // resolved — the production ordering. See this test's doc.
+            ctx.lctx_restore(cp);
+
+            let got = ctx.instantiate_mvars(applied).expect("instantiate");
+
+            assert_eq!(
+                got, x,
+                "?new #[a, b] := ?m with ?m := a means `?new x y` is `x`: the \
+                 FIRST argument maps to the FIRST (outermost) fvar; a backwards \
+                 (reversed) mapping would answer `y` instead"
+            );
+        });
+    }
+
     /// Fix round 2 (mvar-lctx-followup, finding 1): a metavariable
     /// minted via `mk_aux_mvar_for` while a `defeq.rs`
     /// `is_def_eq_binding_shallow_body` telescope fvar is TRANSIENTLY
@@ -1920,5 +2480,57 @@ mod tests {
                 );
             },
         );
+    }
+
+    /// TDD RED/GREEN for plan task 7. `mk_aux_mvar_at` mints at the
+    /// GIVEN context and kind, not the ambient ones.
+    #[test]
+    fn mk_aux_mvar_at_uses_the_given_context_and_kind() {
+        use crate::test_support::{fresh_fvar, with_ctx};
+        use crate::LocalCtxSnapshot;
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let _a = fresh_fvar(ctx, sort0, "a");
+            // Ambient context now has one decl; mint at the EMPTY one.
+            let (_, id) = ctx
+                .mk_aux_mvar_at(LocalCtxSnapshot::empty(), sort0, MVarKind::SyntheticOpaque)
+                .expect("mk_aux_mvar_at");
+
+            let decl = ctx.mctx().decl(id).expect("declared");
+            assert_eq!(
+                decl.lctx.depth(),
+                0,
+                "minted at the GIVEN context, not the ambient one — minting at \
+                 the ambient context is what lets the new metavariable be \
+                 assigned the very fvar the abstraction removes"
+            );
+            assert_eq!(decl.kind, MVarKind::SyntheticOpaque, "the given kind");
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// `mk_aux_mvar` keeps its exact prior behavior: ambient context,
+    /// `Natural` kind. The generalization must be behavior-neutral for the
+    /// existing entry point.
+    #[test]
+    fn mk_aux_mvar_still_mints_at_the_ambient_context_as_natural() {
+        use crate::test_support::{fresh_fvar, with_ctx};
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let _a = fresh_fvar(ctx, sort0, "a");
+            let (_, id) = ctx.mk_aux_mvar(sort0).expect("mk_aux_mvar");
+            let decl = ctx.mctx().decl(id).expect("declared");
+            assert_eq!(decl.lctx.depth(), 1, "the ambient context, as before");
+            assert_eq!(decl.kind, MVarKind::Natural, "Natural, as before");
+            ctx.lctx_restore(cp);
+        });
     }
 }
