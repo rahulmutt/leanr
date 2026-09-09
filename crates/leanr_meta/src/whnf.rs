@@ -56,10 +56,10 @@
 //!   (`casesOn`/`brecOn`-shaped) unfolding inside `whnf_core` itself
 //!   (:696-701); lands with the extension that identifies
 //!   `isAuxRecursor`-equivalent definitions.
-//! - [`MetaCtx::whnf_delayed_assigned`] — delayed-mvar-assignment
-//!   expansion (:587-606); this plan's `MetavarContext` has no
-//!   delayed-assignment channel at all (`assign.rs`'s own citation) —
-//!   lands with plan 4 / M4b.
+//! - [`MetaCtx::whnf_delayed_assigned`] — LANDED (elimMVarDeps task 6):
+//!   delayed-mvar-assignment expansion (:587-606), delegating to
+//!   `assign.rs`'s `instantiate_delayed_app` now that the delayed
+//!   channel (`assign.rs`'s own citation) exists.
 //! - [`MetaCtx::to_ctor_when_k`] — compares structurally (`ExprId`
 //!   equality after `whnf`) instead of via `isDefEq`. `defeq.rs::
 //!   is_def_eq` (this plan's own unifier) now exists, but this call
@@ -472,18 +472,26 @@ impl<'e> MetaCtx<'e> {
         }
     }
 
-    /// SEAM: oracle `whnfDelayedAssigned?` (WHNF.lean:587-606). The
-    /// delayed-mvar-assignment channel (`getDelayedMVarAssignment?`)
-    /// does not exist on this plan's `MetavarContext` at all — a later
-    /// plan (plan 4 / M4b), not this one (`assign.rs`'s own citation
-    /// on why this crate has no delayed-assignment concept yet). Always
-    /// `None`.
+    /// oracle: `whnfDelayedAssigned?` (`Meta/WHNF.lean:587-606`).
+    ///
+    /// The same rule `instantiate_delayed_app` implements, on the whnf
+    /// hot path: a delayed-assigned metavariable head applied to at
+    /// least as many arguments as it abstracts, whose pending
+    /// metavariable is assigned to a metavariable-free value, reduces
+    /// to that value with the abstracted fvars substituted.
+    ///
+    /// Delegates rather than duplicating: this is `whnf_core_app`'s
+    /// single call site (`:426`), the rule is one rule, and two
+    /// transcriptions of it would be two things to keep in step.
     fn whnf_delayed_assigned(
         &mut self,
-        _f_prime: ExprId,
-        _e: ExprId,
+        f_prime: ExprId,
+        e: ExprId,
     ) -> Result<Option<ExprId>, MetaError> {
-        Ok(None)
+        if !matches!(self.node(f_prime), Node::MVar { .. }) {
+            return Ok(None);
+        }
+        self.instantiate_delayed_app(e)
     }
 
     /// oracle: `reduceMatcher?` (WHNF.lean:536-575). `numAlts` is

@@ -1199,6 +1199,62 @@ impl<'e> MetaCtx<'e> {
         self.guarded(|ctx| ctx.instantiate_mvars_body(e))
     }
 
+    /// oracle: the delayed-assignment case of `instantiateExprMVars`
+    /// (`instantiateExprMVarsImp`, `MetavarContext.lean:577-583`; the
+    /// body is C++, and `whnfDelayedAssigned?`,
+    /// `Meta/WHNF.lean:587-606`, is the readable statement of the same
+    /// rule).
+    ///
+    /// `?new #[y_1 … y_n] := ?m` applied to at least `n` arguments,
+    /// with `?m` assigned to `v`: the result is `v` with the `y`s
+    /// abstracted, applied to those arguments — which beta-reduces to
+    /// `v` with each `y_i` replaced by the matching argument.
+    /// `mk_lambda` is the abstraction, `beta_rev` the application.
+    ///
+    /// `None` (leave the term alone) in three cases, each matching the
+    /// oracle's own guard: the head is not a delayed-assigned
+    /// metavariable; there are fewer arguments than abstracted fvars
+    /// (`WHNF.lean:593-595`); or the pending value still carries a
+    /// metavariable (`:598-600`), so the answer is not settled yet.
+    pub(crate) fn instantiate_delayed_app(
+        &mut self,
+        e: ExprId,
+    ) -> Result<Option<ExprId>, MetaError> {
+        let f = self.get_app_fn(e);
+        let Node::MVar { id: Some(name) } = self.node(f) else {
+            return Ok(None);
+        };
+        let head = MVarId(name);
+        let Some(d) = self.mctx.delayed_assignment(head) else {
+            return Ok(None);
+        };
+        let (fvars, pending) = (d.fvars.clone(), d.mvar_id_pending);
+        let args = self.get_app_args(e);
+        if fvars.len() > args.len() {
+            return Ok(None);
+        }
+        let Some(val) = self.mctx.assignment(pending) else {
+            return Ok(None);
+        };
+        let val = self.instantiate_mvars(val)?;
+        if self.data(val).has_expr_mvar() {
+            return Ok(None);
+        }
+        let abstracted = self.mk_lambda(&fvars, val)?;
+        // `get_app_args` returns arguments in call/left-to-right order
+        // (`args[0]` is the FIRST argument applied), which is exactly
+        // what `beta_rev` expects: `whnf_core_app`'s own call site
+        // (`whnf.rs`, `let applied = self.beta_rev(f_prime, &args)?;`)
+        // passes `get_app_args`' result straight through, unreversed.
+        // No `.reverse()` here — that would swap which fvar each
+        // argument substitutes for.
+        let applied = self.beta_rev(abstracted, &args[..fvars.len()])?;
+        if args.len() == fvars.len() {
+            return Ok(Some(applied));
+        }
+        Ok(Some(self.mk_app_spine(applied, &args[fvars.len()..])?))
+    }
+
     fn instantiate_mvars_body(&mut self, e: ExprId) -> Result<ExprId, MetaError> {
         match self.node(e) {
             Node::MVar { id: Some(id) } => match self.mctx.assignment(MVarId(id)) {
@@ -1246,6 +1302,14 @@ impl<'e> MetaCtx<'e> {
                 }
             }
             Node::App { f, arg } => {
+                // oracle: `instantiateExprMVars`' delayed-assignment
+                // case. A delayed assignment `?new #[y…] := ?m` is
+                // resolvable only once `?m` is assigned; until then the
+                // application stands, and collapsing it early would
+                // lose the "not yet".
+                if let Some(resolved) = self.instantiate_delayed_app(e)? {
+                    return self.instantiate_mvars(resolved);
+                }
                 let f2 = self.instantiate_mvars(f)?;
                 let a2 = self.instantiate_mvars(arg)?;
                 if f2 == f && a2 == arg {
@@ -1852,6 +1916,120 @@ mod tests {
                 !ctx.is_def_eq(mv_before, later).expect("defeq"),
                 "a metavariable must still reject a variable minted after it"
             );
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// TDD RED/GREEN for plan task 6. `?new #[a] := ?m` with `?m := a`
+    /// means `?new a` instantiates to `a`: abstract `a` out of the pending
+    /// value, then apply it back.
+    #[test]
+    fn instantiate_mvars_resolves_a_delayed_assignment() {
+        use crate::test_support::{fresh_fvar, with_ctx};
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            let (new_e, new_id) = ctx.mk_aux_mvar(sort0).expect("aux");
+            let (_, pending) = ctx.mk_aux_mvar(sort0).expect("pending");
+
+            ctx.mctx_mut()
+                .assign_delayed(new_id, vec![a], pending)
+                .expect("delayed");
+            ctx.mctx_mut().assign(pending, a).expect("pending := a");
+
+            // `?new a`
+            let applied = ctx.scratch.expr_app(base, new_e, a).expect("app");
+            let got = ctx.instantiate_mvars(applied).expect("instantiate");
+
+            assert_eq!(
+                got, a,
+                "?new #[a] := ?m with ?m := a means `?new a` is `a`: \
+                 (fun a => a) a, beta-reduced"
+            );
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// The delayed assignment must NOT fire while the pending
+    /// metavariable is still unassigned — the term is not resolvable yet,
+    /// and collapsing it early loses the "not yet".
+    #[test]
+    fn instantiate_mvars_leaves_an_unresolved_delayed_assignment_alone() {
+        use crate::test_support::{fresh_fvar, with_ctx};
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            let (new_e, new_id) = ctx.mk_aux_mvar(sort0).expect("aux");
+            let (_, pending) = ctx.mk_aux_mvar(sort0).expect("pending");
+            ctx.mctx_mut()
+                .assign_delayed(new_id, vec![a], pending)
+                .expect("delayed");
+
+            let applied = ctx.scratch.expr_app(base, new_e, a).expect("app");
+            let got = ctx.instantiate_mvars(applied).expect("instantiate");
+
+            assert_eq!(got, applied, "unresolved: the term is returned unchanged");
+
+            // Partial application: `?new2 #[a, b] := ?m2` applied to
+            // only ONE of its two abstracted fvars must also stand
+            // unchanged — fewer arguments than abstracted fvars means
+            // the rule does not apply yet (oracle `WHNF.lean:593-595`),
+            // even with the pending mvar assigned.
+            let b = fresh_fvar(ctx, sort0, "b");
+            let (new2_e, new2_id) = ctx.mk_aux_mvar(sort0).expect("aux2");
+            let (_, pending2) = ctx.mk_aux_mvar(sort0).expect("pending2");
+            ctx.mctx_mut()
+                .assign_delayed(new2_id, vec![a, b], pending2)
+                .expect("delayed2");
+            ctx.mctx_mut().assign(pending2, a).expect("pending2 := a");
+
+            let partial = ctx.scratch.expr_app(base, new2_e, a).expect("app");
+            let got2 = ctx.instantiate_mvars(partial).expect("instantiate");
+            assert_eq!(
+                got2, partial,
+                "partial application (1 arg for a 2-fvar delayed assignment): \
+                 fewer arguments than abstracted fvars means the rule does not \
+                 fire yet"
+            );
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// The pending value still carrying a metavariable means the answer
+    /// is not settled: firing anyway bakes an unresolved metavariable
+    /// into the abstraction. Oracle `WHNF.lean:598-600`.
+    #[test]
+    fn instantiate_mvars_waits_when_the_pending_value_is_not_settled() {
+        use crate::test_support::{fresh_fvar, with_ctx};
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            let (new_e, new_id) = ctx.mk_aux_mvar(sort0).expect("aux");
+            let (_, pending) = ctx.mk_aux_mvar(sort0).expect("pending");
+            let (open_e, _) = ctx.mk_aux_mvar(sort0).expect("still open");
+
+            ctx.mctx_mut()
+                .assign_delayed(new_id, vec![a], pending)
+                .expect("delayed");
+            // pending := an application that still mentions an unassigned mvar
+            let v = ctx.scratch.expr_app(base, open_e, a).expect("app");
+            ctx.mctx_mut().assign(pending, v).expect("pending := v");
+
+            let applied = ctx.scratch.expr_app(base, new_e, a).expect("app");
+            let got = ctx.instantiate_mvars(applied).expect("instantiate");
+            assert_eq!(got, applied, "not settled: leave it alone");
             ctx.lctx_restore(cp);
         });
     }
