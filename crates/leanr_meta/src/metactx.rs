@@ -524,6 +524,7 @@ impl<'e> MetaCtx<'e> {
         let snap = Arc::new(LocalCtxSnapshot::new(
             self.lctx.clone(),
             self.local_names.clone(),
+            self.local_instances.to_vec(),
         ));
         self.lctx_snapshot = Some(Arc::clone(&snap));
         snap
@@ -535,10 +536,15 @@ impl<'e> MetaCtx<'e> {
     }
 
     /// Install `snapshot` as the ambient local context, returning the one
-    /// it replaced. Both halves swap together, because `local_names` and
-    /// `lctx` are asserted to stay in lockstep at every checkpoint,
-    /// restore and push — including the ones the caller performs while
-    /// the snapshot is installed. The cache is set to the installed
+    /// it replaced. `lctx` and `local_names` swap together, because they
+    /// are asserted to stay in lockstep at every checkpoint, restore and
+    /// push — including the ones the caller performs while the snapshot
+    /// is installed. `local_instances` swaps along with them (Task 5):
+    /// the oracle's `withLocalContextImp` (`Basic.lean:2002-2004`)
+    /// installs `lctx` and `localInstances` together in one
+    /// `withReader`, and leaving the instance stack behind would let a
+    /// metavariable's own context see a different instance set than the
+    /// one it was minted under. The cache is set to the installed
     /// snapshot so a metavariable minted while it is in force records the
     /// installed context without a fresh copy.
     ///
@@ -548,9 +554,10 @@ impl<'e> MetaCtx<'e> {
     /// the whole elaborator, not just `MetaCtx`.
     pub fn install_lctx(&mut self, snapshot: Arc<LocalCtxSnapshot>) -> Arc<LocalCtxSnapshot> {
         let previous = self.current_lctx();
-        let (lctx, names) = snapshot.parts();
+        let (lctx, names, instances) = snapshot.parts();
         self.lctx = lctx.clone();
         self.local_names = names.to_vec();
+        self.local_instances.replace(instances.to_vec());
         debug_assert_eq!(
             self.local_names.len(),
             self.lctx.save(),
@@ -566,10 +573,17 @@ impl<'e> MetaCtx<'e> {
     /// local context installed as the ambient one, and restores the
     /// caller's on the way out.
     ///
-    /// `localInstances` is NOT modelled: leanr has no local-instance
-    /// concept — instances come from the environment extension, not a
-    /// per-scope list — so the oracle's instance-cache flush has nothing
-    /// to flush. SEAM, owner: the slice that adds local instances.
+    /// `localInstances` travels inside the snapshot (`local_snapshot.rs`),
+    /// so this reinstalls the metavariable's instances along with its
+    /// declarations — the oracle's `withLocalContextImp` swaps both in
+    /// one `withReader` (`Basic.lean:2002-2004`).
+    ///
+    /// The oracle does NOT flush a synthesis cache here, and neither does
+    /// leanr: `withLocalContextImp` is a plain reader swap with no flush
+    /// in it, and leanr has no synthesis cache at all yet (the M4b-3 spec
+    /// assigns one to "the slice that builds the synthesis cache"). When
+    /// that slice lands it must decide cache-vs-local-instances on its
+    /// own terms; there is no flush to port from here.
     ///
     /// Plain save/run/restore with no drop guard, the same posture (and
     /// the same justification) as `with_transparency` and
@@ -2164,6 +2178,79 @@ mod tests {
             assert!(
                 ctx.infer_type(x).is_err(),
                 "the ambient context was restored on the way out"
+            );
+        });
+    }
+
+    /// oracle: `MVarId.withContext` → `withLocalContextImp`
+    /// (`Basic.lean:2002-2004`) swaps `lctx` AND `localInstances`
+    /// together. A metavariable minted under an instance binder must see
+    /// that instance when its own context is reinstalled — otherwise a
+    /// postponed goal resumed after its binder closed would synthesize
+    /// against a strictly smaller instance set than the oracle's.
+    #[test]
+    fn with_mvar_context_reinstalls_local_instances() {
+        with_class_ctx(|ctx, add| {
+            let add_n = class_app(ctx, add);
+            let n = const_named(ctx, "N");
+
+            // Mint a metavariable UNDER an instance binder.
+            let cp = ctx.lctx_checkpoint();
+            ctx.push_local_decl(None, add_n, BinderInfo::InstImplicit)
+                .expect("push");
+            let (_, m) = ctx.mk_aux_mvar(n).expect("mvar");
+            ctx.lctx_restore(cp);
+
+            // Back at top level, nothing is in scope.
+            assert!(
+                ctx.local_instances.entries().is_empty(),
+                "the binder closed, so its instance is out of scope here"
+            );
+
+            // Inside the metavariable's own context, it is.
+            let seen = ctx.with_mvar_context(m, |c| c.local_instances.entries().len());
+            assert_eq!(
+                seen, 1,
+                "the mvar's recorded context carries the instance that was \
+                 in scope when it was minted"
+            );
+
+            // And the caller's context is restored on the way out.
+            assert!(ctx.local_instances.entries().is_empty());
+        });
+    }
+
+    /// `reduced` erases an fvar from the context; its local instance must
+    /// go with it. oracle: `reduceLocalContext`
+    /// (`MetavarContext.lean:1065-1067`) removes the decl, and an
+    /// instance whose fvar is no longer declared is a dangling reference
+    /// that `get_instances` would offer as a candidate.
+    #[test]
+    fn reduced_drops_the_local_instance_of_an_erased_fvar() {
+        with_class_ctx(|ctx, add| {
+            let add_n = class_app(ctx, add);
+            let cp = ctx.lctx_checkpoint();
+            let inst = ctx
+                .push_local_decl(None, add_n, BinderInfo::InstImplicit)
+                .expect("push");
+            let snap = ctx.current_lctx();
+            ctx.lctx_restore(cp);
+
+            assert_eq!(snap.local_instances().len(), 1);
+
+            let id = match ctx.node(inst) {
+                Node::FVar { id: Some(id) } => id,
+                other => panic!("expected fvar, got {other:?}"),
+            };
+            let reduced = snap.reduced(&[(inst, id)], |f| match ctx.node(f) {
+                Node::FVar { id } => id,
+                _ => None,
+            });
+            assert!(
+                reduced.local_instances().is_empty(),
+                "erasing the declaration must erase its local instance too — \
+                 an instance pointing at an undeclared fvar is a candidate \
+                 `get_instances` would hand to the search"
             );
         });
     }

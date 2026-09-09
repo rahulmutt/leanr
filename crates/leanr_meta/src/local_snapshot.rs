@@ -17,6 +17,8 @@ use std::sync::Arc;
 use leanr_kernel::bank::{ExprId, NameId};
 use leanr_kernel::LocalContext;
 
+use crate::local_instance::LocalInstance;
+
 /// A copy of the ambient local context plus `MetaCtx::local_names`.
 ///
 /// Shared behind an `Arc`: every metavariable minted at one binder depth
@@ -26,16 +28,37 @@ use leanr_kernel::LocalContext;
 pub struct LocalCtxSnapshot {
     lctx: LocalContext,
     local_names: Vec<(Option<NameId>, ExprId)>,
+    /// oracle: `MetavarDecl.localInstances` (`MetavarContext.lean:320`),
+    /// which sits beside `MetavarDecl.lctx` (`:309`) for exactly this
+    /// reason — `MVarId.withContext` reinstalls the two together
+    /// (`withLocalContextImp`, `Basic.lean:2002-2004`).
+    ///
+    /// Carried INSIDE the snapshot rather than as a second field on
+    /// `MVarDecl`: `MVarDecl.lctx` is already an `Arc<LocalCtxSnapshot>`
+    /// (`mvar_ctx.rs:55-60`), so this reaches every metavariable with no
+    /// change to the metavariable-local-contexts slice's call sites.
+    ///
+    /// NOT in lockstep with either of the two above — it is sparse. See
+    /// `local_instance.rs`.
+    local_instances: Vec<LocalInstance>,
 }
 
 impl LocalCtxSnapshot {
-    pub(crate) fn new(lctx: LocalContext, local_names: Vec<(Option<NameId>, ExprId)>) -> Self {
+    pub(crate) fn new(
+        lctx: LocalContext,
+        local_names: Vec<(Option<NameId>, ExprId)>,
+        local_instances: Vec<LocalInstance>,
+    ) -> Self {
         debug_assert_eq!(
             local_names.len(),
             lctx.save(),
             "local_names/lctx lockstep invariant violated in a snapshot"
         );
-        LocalCtxSnapshot { lctx, local_names }
+        LocalCtxSnapshot {
+            lctx,
+            local_names,
+            local_instances,
+        }
     }
 
     /// The empty context — what a metavariable minted outside any binder
@@ -47,6 +70,7 @@ impl LocalCtxSnapshot {
         Arc::new(LocalCtxSnapshot {
             lctx: LocalContext::default(),
             local_names: Vec::new(),
+            local_instances: Vec::new(),
         })
     }
 
@@ -60,14 +84,28 @@ impl LocalCtxSnapshot {
         self.local_names.len()
     }
 
-    /// Both halves at once — `MetaCtx::install_lctx`'s only caller. The
-    /// two fields swap into `self.lctx`/`self.local_names` together
-    /// because they are asserted to stay in lockstep at every checkpoint,
-    /// restore and push (this struct's own doc comment); an accessor
-    /// that returned only one half would let a caller violate that
-    /// invariant by construction.
-    pub(crate) fn parts(&self) -> (&LocalContext, &[(Option<NameId>, ExprId)]) {
-        (&self.lctx, &self.local_names)
+    /// All three components at once — `MetaCtx::install_lctx`'s only
+    /// caller. The first two fields swap into `self.lctx`/
+    /// `self.local_names` together because they are asserted to stay in
+    /// lockstep at every checkpoint, restore and push (this struct's own
+    /// doc comment); an accessor that returned only one half would let a
+    /// caller violate that invariant by construction. The third half is
+    /// sparse and has no lockstep invariant, but travels with the other
+    /// two because installing a context without its instances is exactly
+    /// the divergence this slice exists to close.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn parts(&self) -> (&LocalContext, &[(Option<NameId>, ExprId)], &[LocalInstance]) {
+        (&self.lctx, &self.local_names, &self.local_instances)
+    }
+
+    /// The local instances in scope in this context, innermost last.
+    ///
+    /// No non-test consumer yet (Task 6's `get_instances`); exercised
+    /// today only by this crate's own tests, same posture as
+    /// `LocalInstanceStack::entries` (`local_instance.rs`).
+    #[allow(dead_code)]
+    pub(crate) fn local_instances(&self) -> &[LocalInstance] {
+        &self.local_instances
     }
 
     /// The declared fvars in DECLARATION ORDER, paired with their user
@@ -105,9 +143,13 @@ impl LocalCtxSnapshot {
     /// denoting the same fvar) rather than fixing an observed bug —
     /// behavior is unchanged.
     ///
-    /// Both halves are filtered together, because `LocalCtxSnapshot::new`
-    /// debug-asserts they are in lockstep and every reader of one is
-    /// paired with a reader of the other.
+    /// `local_names`/`lctx` are filtered together, because
+    /// `LocalCtxSnapshot::new` debug-asserts they are in lockstep and
+    /// every reader of one is paired with a reader of the other.
+    /// `local_instances` is filtered too, for the separate reason given
+    /// at its own filter below — it has no lockstep invariant with the
+    /// other two, but a stale instance is exactly as unsound as a stale
+    /// decl would be.
     pub(crate) fn reduced(
         &self,
         to_remove: &[(ExprId, NameId)],
@@ -125,7 +167,26 @@ impl LocalCtxSnapshot {
             })
             .cloned()
             .collect();
-        LocalCtxSnapshot::new(lctx, local_names)
+        // An instance whose declaration was erased must go too. This is
+        // NOT porting a filter the oracle performs here: the oracle's
+        // `reduceLocalContext` (`MetavarContext.lean:1065-1067`) erases
+        // only the `LocalContext` decl and says nothing about
+        // `localInstances`, which in the oracle is a separate array
+        // untouched by this function. The filter exists because leanr
+        // bundles instances INTO the snapshot (this struct's own doc
+        // comment): left unfiltered, an instance pointing at an fvar
+        // this snapshot no longer declares would be a dangling reference
+        // that `get_instances` would still offer the search as a
+        // candidate.
+        let local_instances = self
+            .local_instances
+            .iter()
+            .filter(|li| {
+                !fvar_id_of(li.fvar).is_some_and(|id| to_remove.iter().any(|(_, rid)| *rid == id))
+            })
+            .cloned()
+            .collect();
+        LocalCtxSnapshot::new(lctx, local_names, local_instances)
     }
 }
 

@@ -96,15 +96,15 @@ impl LocalInstanceStack {
     }
 
     /// Install a saved set wholesale — `MetaCtx::install_lctx`'s half of
-    /// the snapshot swap (Task 5). No caller yet.
-    #[allow(dead_code)]
+    /// the snapshot swap (Task 5).
     pub(crate) fn replace(&mut self, entries: Vec<LocalInstance>) {
         self.entries = entries;
     }
 
     /// The other half of the Task 5 snapshot swap: capture the current
-    /// set before `replace`-ing it with a saved one. No caller yet.
-    #[allow(dead_code)]
+    /// set before `replace`-ing it with a saved one. Called by
+    /// `MetaCtx::current_lctx`, which snapshots the ambient instances
+    /// alongside `lctx`/`local_names`.
     pub(crate) fn to_vec(&self) -> Vec<LocalInstance> {
         self.entries.clone()
     }
