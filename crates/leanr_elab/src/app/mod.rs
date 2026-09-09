@@ -42,11 +42,15 @@
 //! `literal_kinds_are_registered_not_deferred` gates that it stays gone.
 //!
 //! ```text
-//!   fType still an unassigned mvar after synthesis ... P4/P5 args.rs (`main`'s
-//!     synthesize_pending_and_normalize_fun_type) — CoeFun (P4) or
-//!     expected-type propagation into `fun` binder domains (P5). A
-//!     genuinely non-function fType at the same site is NOT a seam: it
-//!     reports `ElabError::FunctionExpected`, matching the oracle's own
+//!   fType still an unassigned mvar after synthesis ... P5  args.rs (`main`'s
+//!     synthesize_pending_and_normalize_fun_type) — expected-type
+//!     propagation into `fun` binder domains for the M4b-2 `fun` shape,
+//!     still owed. `coerceToFunction?` (CoeFun) is tried FIRST and, as
+//!     of M4b-3 P4 task 8, is no longer part of this seam: it either
+//!     bridges the type and the state machine proceeds, or answers
+//!     `none` and this row is what remains. A genuinely non-function
+//!     fType at the same site is NOT a seam either: it reports
+//!     `ElabError::FunctionExpected`, matching the oracle's own
 //!     diagnostic (`over_application_reports_function_expected`,
 //!     `tests/seam_audit.rs`).
 //!   coercions (CoeT/CoeFun/CoeSort, mkCoe) ........... P4  args.rs (ensureArgType)

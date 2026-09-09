@@ -16,8 +16,12 @@
 //!     `ensureHasType`/`ensureArgType` now INSERT a `CoeT` coercion
 //!     (`src/coe.rs`), so the `TypeMismatch` those sites still raise is
 //!     the oracle's own answer for "no coercion exists", not a seam.
-//!     What is left is `coerce_to_function?` at the application head
-//!     (`app/args.rs`'s "M4b-3 P4" message, task 8), asserted below by
+//!     Task 8 retired its second half too: `app/args.rs`'s
+//!     `synthesize_pending_and_normalize_fun_type` now ports
+//!     `coerceToFunction?` at the application head, and the seam's
+//!     message no longer names `CoeFun`/"M4b-3 P4" at all — it retargets
+//!     to P5 alone, for the still-owed expected-type propagation into
+//!     `fun` binder domains, asserted below by
 //!     `mvar_function_type_is_a_named_seam`.
 //!
 //! One thing this file pins is NOT a seam at all but its opposite — a
