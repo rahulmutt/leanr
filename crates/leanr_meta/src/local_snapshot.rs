@@ -78,7 +78,6 @@ impl LocalCtxSnapshot {
     /// `save`/`restore` by count). Positionally parallel to the
     /// `LocalContext`'s own decl list, by this struct's lockstep
     /// invariant, so an index into this slice is an index into that list.
-    #[allow(dead_code)]
     pub(crate) fn entries(&self) -> &[(Option<NameId>, ExprId)] {
         &self.local_names
     }
@@ -93,7 +92,6 @@ impl LocalCtxSnapshot {
     /// Both halves are filtered together, because `LocalCtxSnapshot::new`
     /// debug-asserts they are in lockstep and every reader of one is
     /// paired with a reader of the other.
-    #[allow(dead_code)]
     pub(crate) fn reduced(&self, to_remove: &[(ExprId, NameId)]) -> LocalCtxSnapshot {
         let mut lctx = self.lctx.clone();
         for (_, fvar_id) in to_remove {

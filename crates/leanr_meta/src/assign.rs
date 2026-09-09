@@ -1231,9 +1231,22 @@ impl<'e> MetaCtx<'e> {
     ///
     /// `?new #[y_1 … y_n] := ?m` applied to at least `n` arguments,
     /// with `?m` assigned to `v`: the result is `v` with the `y`s
-    /// abstracted, applied to those arguments — which beta-reduces to
-    /// `v` with each `y_i` replaced by the matching argument.
-    /// `mk_lambda` is the abstraction, `beta_rev` the application.
+    /// abstracted, applied to those arguments — which reduces to `v`
+    /// with each `y_i` replaced by the matching argument. The oracle
+    /// spells that as `newVal.abstract fvars` followed by
+    /// `instantiateRevRange 0 fvars.size args` and `mkAppRange`
+    /// (`WHNF.lean:601-604`), and this transcribes it step for step.
+    ///
+    /// **The abstraction is RAW (`abstract_fvars`), not `mk_lambda`,
+    /// and that is load-bearing.** `mk_lambda` needs each fvar's binder
+    /// TYPE, so it looks the fvar up in the ambient `lctx` — but the
+    /// only situation a delayed assignment is ever resolved in is one
+    /// where the binder has already closed and the fvars are out of
+    /// scope, so that lookup fails with "mk_binding: telescope fvar not
+    /// declared". The oracle's `Expr.abstract` needs no binder types
+    /// and no local context at all, which is precisely why it is the
+    /// operation used here. Pinned by
+    /// `instantiate_mvars_resolves_a_delayed_assignment_whose_fvars_left_scope`.
     ///
     /// `None` (leave the term alone) in three cases, each matching the
     /// oracle's own guard: the head is not a delayed-assigned
@@ -1264,15 +1277,40 @@ impl<'e> MetaCtx<'e> {
         if self.data(val).has_expr_mvar() {
             return Ok(None);
         }
-        let abstracted = self.mk_lambda(&fvars, val)?;
+        // oracle `:601`: `newVal.abstract fvars` — a raw abstraction,
+        // leaving loose bvars, NOT a `mkLambdaFVars`. See this fn's doc
+        // for why that difference decides whether this works at all.
+        let abstracted = abstract_fvars(
+            self.scratch,
+            Some(self.view.store),
+            val,
+            &fvars,
+            &mut self.guard,
+        )?;
+        // oracle `:602`: `instantiateRevRange 0 fvars.size args`.
+        //
+        // `instantiate_rev`, NOT `beta_rev`. `beta_rev` wants a `Lam`
+        // to peel and falls through to `mk_app_spine` when handed
+        // anything else (`whnf.rs:1767`) — and `abstract_fvars` returns
+        // a body with loose bvars, never a `Lam`. Pairing the two
+        // silently APPENDS the arguments instead of substituting them:
+        // measured, it turned `Wrapper.mk Nat (bvar 0)` into
+        // `Wrapper.mk Nat (bvar 0) (bvar 0)`. A raw abstraction is
+        // undone by a raw instantiation.
+        //
         // `get_app_args` returns arguments in call/left-to-right order
-        // (`args[0]` is the FIRST argument applied), which is exactly
-        // what `beta_rev` expects: `whnf_core_app`'s own call site
-        // (`whnf.rs`, `let applied = self.beta_rev(f_prime, &args)?;`)
-        // passes `get_app_args`' result straight through, unreversed.
-        // No `.reverse()` here — that would swap which fvar each
-        // argument substitutes for.
-        let applied = self.beta_rev(abstracted, &args[..fvars.len()])?;
+        // (`args[0]` is the FIRST argument applied), matching
+        // `abstract_fvars`' own convention that `fvars`' LAST entry
+        // becomes `bvar 0` — so `instantiate_rev` pairs them up
+        // correctly. No `.reverse()` here: that would swap which fvar
+        // each argument substitutes for.
+        let applied = instantiate_rev(
+            self.scratch,
+            Some(self.view.store),
+            abstracted,
+            &args[..fvars.len()],
+            &mut self.guard,
+        )?;
         if args.len() == fvars.len() {
             return Ok(Some(applied));
         }
@@ -1333,6 +1371,51 @@ impl<'e> MetaCtx<'e> {
                 // lose the "not yet".
                 if let Some(resolved) = self.instantiate_delayed_app(e)? {
                     return self.instantiate_mvars(resolved);
+                }
+                // A spine whose HEAD was a metavariable, and whose
+                // assignment turns out to be a lambda, reduces — it is
+                // not left standing as a redex.
+                //
+                // NOT transcribed from Lean source: `instantiateMVars`
+                // (`MetavarContext.lean:620`) delegates to
+                // `instantiateExprMVars` (`:580-583`), whose body is the
+                // `@[extern]` opaque `instantiateExprMVarsImp` (`:577`)
+                // — C++, absent from the pinned toolchain's Lean
+                // sources. The rule is pinned three other ways instead:
+                //
+                // 1. The pinned oracle's own committed answer. Corpus
+                //    record `tc/funWrapElided` is
+                //    `fun x => useWrap Nat instWrapNat x`, beta-reduced.
+                //    Without this arm leanr emits
+                //    `fun x => useWrap Nat ((fun _ => instWrapNat) x) x`.
+                //    Per AGENTS.md, agreement with the pinned toolchain
+                //    IS this repo's definition of correctness, and that
+                //    fixture is the citable statement of it.
+                // 2. `whnfDelayedAssigned?` (`Meta/WHNF.lean:587-606`)
+                //    is the readable statement of the same underlying
+                //    rule for the delayed case — an mvar head applied to
+                //    arguments reduces rather than standing.
+                // 3. Measured: with this arm, all 113 elaboration-corpus
+                //    records are byte-identical to the oracle; without
+                //    it, exactly one is not.
+                //
+                // DELIBERATELY NARROW: it fires only when the spine head
+                // was an `MVar` BEFORE instantiation and instantiates to
+                // a `Lam`. It is not a general beta-reduction pass —
+                // reducing redexes the oracle leaves alone would be its
+                // own divergence, in the opposite direction.
+                let head = self.get_app_fn(e);
+                if matches!(self.node(head), Node::MVar { id: Some(_) }) {
+                    let head2 = self.instantiate_mvars(head)?;
+                    if matches!(self.node(head2), Node::Lam { .. }) {
+                        let args = self.get_app_args(e);
+                        let mut args2 = Vec::with_capacity(args.len());
+                        for a in &args {
+                            args2.push(self.instantiate_mvars(*a)?);
+                        }
+                        let applied = self.beta_rev(head2, &args2)?;
+                        return self.instantiate_mvars(applied);
+                    }
                 }
                 let f2 = self.instantiate_mvars(f)?;
                 let a2 = self.instantiate_mvars(arg)?;
@@ -1975,6 +2058,139 @@ mod tests {
                  (fun a => a) a, beta-reduced"
             );
             ctx.lctx_restore(cp);
+        });
+    }
+
+    /// TDD RED/GREEN for task 10's Finding A.
+    ///
+    /// An application whose HEAD is a metavariable assigned a lambda
+    /// must come back beta-reduced, not as a standing redex. This is the
+    /// shape `elim_mvar`'s plain-assign branch creates: it leaves
+    /// `?m := ?new ys`, the elaborator later solves `?new` to a lambda,
+    /// and the read-back has to finish the job.
+    ///
+    /// Measured against the pinned oracle: without the head-mvar arm in
+    /// `instantiate_mvars_body`, corpus record `tc/funWrapElided` comes
+    /// out as `fun x => useWrap Nat ((fun _ => instWrapNat) x) x` where
+    /// the oracle says `fun x => useWrap Nat instWrapNat x`. This is
+    /// that divergence in miniature, so the corpus is not the only thing
+    /// standing between the arm and a silent regression.
+    ///
+    /// The second half pins the NARROWNESS, which matters as much as the
+    /// rule: a redex whose head is a plain lambda — no metavariable
+    /// anywhere in head position — must be left exactly as it is. The
+    /// oracle does not beta-reduce those during instantiation, and an
+    /// over-eager arm would diverge in the opposite direction.
+    #[test]
+    fn instantiate_mvars_betas_a_spine_whose_head_mvar_became_a_lambda() {
+        use crate::test_support::{fresh_fvar, with_ctx};
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            let (m_e, m_id) = ctx.mk_aux_mvar(sort0).expect("aux");
+
+            // `?m := fun (_ : Sort 0) => a`, a constant function, so the
+            // beta-reduced answer (`a`) differs from the argument and
+            // the assertion cannot pass by accident.
+            let s = ctx.scratch.intern_str(base, "u").expect("str");
+            let name = ctx.scratch.name_str(base, None, s).expect("name");
+            let lam = ctx
+                .scratch
+                .expr_lam(
+                    base,
+                    Some(name),
+                    sort0,
+                    a,
+                    leanr_kernel::BinderInfo::Default,
+                )
+                .expect("lam");
+            ctx.mctx_mut().assign(m_id, lam).expect("?m := lam");
+
+            // `?m a`
+            let applied = ctx.scratch.expr_app(base, m_e, a).expect("app");
+            let got = ctx.instantiate_mvars(applied).expect("instantiate");
+
+            assert_eq!(
+                got, a,
+                "`?m a` with `?m := fun _ => a` must instantiate to `a`. Leaving                  `(fun _ => a) a` standing is exactly the tc/funWrapElided divergence"
+            );
+
+            // NARROWNESS: the same redex with a literal lambda head —
+            // never a metavariable — must survive untouched.
+            let literal_redex = ctx.scratch.expr_app(base, lam, a).expect("app");
+            let untouched = ctx.instantiate_mvars(literal_redex).expect("instantiate");
+            assert_eq!(
+                untouched, literal_redex,
+                "a redex with a plain lambda head is NOT beta-reduced by                  instantiation — the arm fires only when the head WAS a metavariable"
+            );
+
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// TDD RED/GREEN for task 10's Finding B, and the case task 6 never
+    /// covered.
+    ///
+    /// Every other delayed-assignment test here resolves while the
+    /// abstracted fvars are STILL in the ambient local context (each one
+    /// calls `lctx_restore` only after `instantiate_mvars` has already
+    /// run). That is not how a delayed assignment is ever resolved in
+    /// production: `elim_mvar` mints one precisely so a metavariable can
+    /// outlive the binder it was created under, so by the time anything
+    /// instantiates it, the fvars are gone.
+    ///
+    /// This test restores the checkpoint FIRST. It discriminates: with
+    /// `mk_lambda` doing the abstraction — which needs each fvar's
+    /// binder type and so looks it up in the ambient `lctx` — it fails
+    /// with `mk_binding: telescope fvar not declared`. Measured: that is
+    /// exactly how the whole elaboration corpus's coercion path failed
+    /// the moment `elim_mvar_deps` was wired into `mk_binding`. The
+    /// oracle's raw `Expr.abstract` (`WHNF.lean:601`) needs no binder
+    /// types and so has no such failure mode.
+    ///
+    /// The argument is a DIFFERENT fvar from the one abstracted, so the
+    /// assertion also discriminates against simply returning the pending
+    /// value unsubstituted: `?new #[a] := ?m`, `?m := a`, applied to `b`
+    /// is `b`, not `a`.
+    #[test]
+    fn instantiate_mvars_resolves_a_delayed_assignment_whose_fvars_left_scope() {
+        use crate::test_support::{fresh_fvar, with_ctx};
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            let b = fresh_fvar(ctx, sort0, "b");
+            let (new_e, new_id) = ctx.mk_aux_mvar(sort0).expect("aux");
+            let (_, pending) = ctx.mk_aux_mvar(sort0).expect("pending");
+
+            ctx.mctx_mut()
+                .assign_delayed(new_id, vec![a], pending)
+                .expect("delayed");
+            ctx.mctx_mut().assign(pending, a).expect("pending := a");
+
+            // `?new b`, built while the binder is still open.
+            let applied = ctx.scratch.expr_app(base, new_e, b).expect("app");
+
+            // The binder closes. `a` and `b` are no longer declared
+            // anywhere — which is the normal state of affairs when a
+            // delayed assignment finally becomes resolvable.
+            ctx.lctx_restore(cp);
+
+            let got = ctx
+                .instantiate_mvars(applied)
+                .expect("a delayed assignment must resolve after its binder has closed");
+
+            assert_eq!(
+                got, b,
+                "?new #[a] := ?m with ?m := a, applied to b, is b — the abstraction                  must be the oracle's raw `Expr.abstract`, which needs no binder types                  and so no ambient lctx entry for `a`"
+            );
         });
     }
 

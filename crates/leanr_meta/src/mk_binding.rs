@@ -45,7 +45,6 @@ impl<'e> MetaCtx<'e> {
     /// else. `xs` and `to_revert` are carried as `Expr::fvar`
     /// references throughout (the oracle carries `Array Expr` too), so
     /// this is the one place the id is read out.
-    #[allow(dead_code)]
     pub(crate) fn fvar_id_of(&self, e: ExprId) -> Option<NameId> {
         match self.node(e) {
             Node::FVar { id } => id,
@@ -72,7 +71,6 @@ impl<'e> MetaCtx<'e> {
     ///
     /// An ASSIGNED metavariable is followed to its value instead
     /// (`:697-699`): its assignment is what the term really is.
-    #[allow(dead_code)]
     pub(crate) fn depends_on(&mut self, e: ExprId, pf: &[NameId]) -> Result<bool, MetaError> {
         if pf.is_empty() {
             return Ok(false);
@@ -137,7 +135,6 @@ impl<'e> MetaCtx<'e> {
     /// it as a caller argument instead), so there is nothing to branch
     /// on. This is the same missing bit that makes `mk_aux_mvar_type`
     /// refuse an ldecl in `to_revert`; see that function's doc.
-    #[allow(dead_code)]
     pub(crate) fn local_decl_depends_on(
         &mut self,
         ty: ExprId,
@@ -157,7 +154,6 @@ impl<'e> MetaCtx<'e> {
     /// `lctx` actually declares. Anything else is a binder this
     /// metavariable never saw, and reverting it would be reverting a
     /// variable that is not in its context.
-    #[allow(dead_code)]
     pub(crate) fn get_in_scope(&self, lctx: &LocalCtxSnapshot, xs: &[ExprId]) -> Vec<ExprId> {
         xs.iter()
             .filter(|x| {
@@ -179,7 +175,6 @@ impl<'e> MetaCtx<'e> {
     /// tactic-framework flag and leanr has no producer for it — the only
     /// caller here passes the `false` case. Named in the design spec's
     /// § What this ships.
-    #[allow(dead_code)]
     pub(crate) fn collect_forward_deps(
         &mut self,
         lctx: &LocalCtxSnapshot,
@@ -228,7 +223,6 @@ impl<'e> MetaCtx<'e> {
     /// the reverted fvars in place would let the new metavariable be
     /// assigned the very variable the abstraction is removing, which is
     /// this slice's own bug reappearing one level down.
-    #[allow(dead_code)]
     pub(crate) fn reduce_local_context(
         &self,
         lctx: &LocalCtxSnapshot,
@@ -250,7 +244,6 @@ impl<'e> MetaCtx<'e> {
     /// refusal (see `mk_aux_mvar_type`) `xs` never contains one, so the
     /// branches coincide and the `syntheticOpaque` form — apply
     /// everything — is the one written.
-    #[allow(dead_code)]
     pub(crate) fn mk_mvar_app(&mut self, mvar: ExprId, xs: &[ExprId]) -> Result<ExprId, MetaError> {
         let mut e = mvar;
         for x in xs {
@@ -266,7 +259,6 @@ impl<'e> MetaCtx<'e> {
     /// metavariable-free body a strict no-op. For a body that DOES carry
     /// one, behavior genuinely changes; see the design spec's § Risk
     /// item 1 and the Task 1 findings document.
-    #[allow(dead_code)]
     pub(crate) fn elim_mvar_deps(&mut self, xs: &[ExprId], e: ExprId) -> Result<ExprId, MetaError> {
         if !self.data(e).has_expr_mvar() {
             return Ok(e);
@@ -281,7 +273,6 @@ impl<'e> MetaCtx<'e> {
     /// type at position `i` has its metavariable dependencies eliminated
     /// with respect to every telescope variable, including ones declared
     /// after it.
-    #[allow(dead_code)]
     pub(crate) fn abstract_range(
         &mut self,
         xs: &[ExprId],
@@ -708,7 +699,13 @@ impl<'e> MetaCtx<'e> {
     /// it. This entry point supplies that one fresh cache; `elim_mvar`
     /// calls `mk_aux_mvar_type_with` and supplies its own, for the same
     /// single-reset scope.
-    #[allow(dead_code)]
+    /// Test-only: production reaches the same code through
+    /// `mk_aux_mvar_type_with`, which supplies the caller's cache
+    /// (`elim_mvar`, `:638`). This wrapper exists so the tests below can
+    /// exercise `mkAuxMVarType` on its own with the `withFreshCache`
+    /// scope the oracle gives it at `:1205`. `#[cfg(test)]` rather than
+    /// `#[allow(dead_code)]`: it states the fact instead of hiding it.
+    #[cfg(test)]
     pub(crate) fn mk_aux_mvar_type(
         &mut self,
         lctx: &LocalCtxSnapshot,

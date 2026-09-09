@@ -707,39 +707,41 @@ impl<'e> MetaCtx<'e> {
     /// the crate's own oracle-verified abstraction loop, since the kernel's
     /// `mk_pi`/`mk_lambda` are not re-exported from `leanr_kernel`.
     ///
-    /// # UNMODELLED: `MkBinding.elimMVarDeps`
+    /// # `MkBinding.elimMVarDeps`
     ///
     /// The oracle's `mkBinding` is not a bare abstraction. Before it
     /// abstracts, it runs `elimMVarDeps` (`MetavarContext.lean`) over
     /// `body`: an unassigned metavariable whose own local context
     /// contains the fvars being abstracted is replaced by a fresh
-    /// delayed-assigned metavariable APPLIED to them, so the occurrence
-    /// abstracts like any other argument and the original metavariable
-    /// stays assignable in its own context. This loop has no counterpart
-    /// — it abstracts what is there and leaves a surviving mvar alone.
+    /// metavariable APPLIED to them — delayed-assigned when the original
+    /// is `syntheticOpaque`, plainly assigned otherwise — so the
+    /// occurrence abstracts like any other argument and the original
+    /// metavariable stays assignable in its own context.
     ///
-    /// The observable consequence: when such a metavariable is assigned
-    /// LATER (the elaborator's synthetic-mvar fixpoint resuming a
-    /// postponed goal after the binder has closed), its value's free
-    /// variables were never abstracted, so leanr emits an unabstracted
-    /// `fvar` where the oracle emits a `bvar`. Measured, and pinned
-    /// executably one crate up by `leanr_elab`'s
-    /// `postponed_coe_under_a_binder_leaves_an_unabstracted_fvar_pending_elim_mvar_deps`
-    /// (`tests/seam_audit.rs`), with the full diagnosis in the M4b-3 P4
-    /// task-7 report.
-    ///
-    /// Deliberately NOT a refusal, unlike the let-decl case below: that
-    /// one rejects an input this function cannot express at all, while
-    /// this one is a gap in a path that is correct for every telescope
-    /// with no surviving mvar — which is every caller in M4b-3 except
-    /// the one above. Closing it means porting `elimMVarDeps`, a
-    /// non-additive change to this crate, and belongs to its own slice.
+    /// This is now modelled: `mk_binding.rs`'s `elim_mvar_deps`, called
+    /// twice below at the oracle's own two insertion points. Without it,
+    /// a metavariable assigned LATER (the elaborator's synthetic-mvar
+    /// fixpoint resuming a postponed goal after the binder has closed)
+    /// had its value spliced in with the free variables never
+    /// abstracted, so leanr emitted an unabstracted `fvar` where the
+    /// oracle emits a `bvar`. That divergence is pinned executably one
+    /// crate up by `leanr_elab`'s
+    /// `postponed_coe_under_a_binder_abstracts_via_elim_mvar_deps`
+    /// (`tests/seam_audit.rs`), which asserted the WRONG answer until
+    /// the elimMVarDeps slice landed and asserts the oracle's now.
     fn mk_binding(
         &mut self,
         is_lambda: bool,
         fvars: &[ExprId],
         body: ExprId,
     ) -> Result<ExprId, MetaError> {
+        // oracle: `mkBinding` abstracts through `abstractRange`
+        // (`MetavarContext.lean:1313`), which runs `elimMVarDeps` over
+        // the FULL telescope before abstracting. The peel-one-fvar-at-
+        // a-time loop below is leanr's own oracle-verified abstraction
+        // (transcribed from `infer.rs::rebuild_forall`), so the
+        // insertion points are what change, not the loop.
+        let body = self.elim_mvar_deps(fvars, body)?;
         let mut r = body;
         let mut i = fvars.len();
         while i > 0 {
@@ -779,13 +781,14 @@ impl<'e> MetaCtx<'e> {
                     ))
                 }
             };
-            let ty2 = abstract_fvars(
-                self.scratch,
-                Some(self.view.store),
-                ty,
-                &fvars[..i],
-                &mut self.guard,
-            )?;
+            // oracle: `abstractRange xs i type` (`:1320`) — note the
+            // FULL `fvars`, not `&fvars[..i]`: a binder type has its
+            // metavariable dependencies eliminated with respect to
+            // every telescope variable, including ones declared after
+            // it. That asymmetry is exactly what `abstract_range`
+            // (task 9's port of `abstractRange`) encapsulates, so this
+            // calls it rather than inlining its two halves.
+            let ty2 = self.abstract_range(fvars, i, ty)?;
             r = if is_lambda {
                 self.scratch
                     .expr_lam(Some(self.view.store), binder_name, ty2, r, binder_info)?
