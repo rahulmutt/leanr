@@ -140,9 +140,16 @@ impl<'e> TermElabM<'e> {
     /// oracle: `ensureType` (`TermElabM.lean:1935-1949`) — `isType e`
     /// (`InferType.lean:502-508`: the type `whnfD`s to a `Sort`); else
     /// `isDefEq eType (Sort ?u)` with a fresh level mvar; else
-    /// `coerceToSort?`; else "type expected". The `hasSyntheticSorry`
-    /// `throwAbortTerm` branch (`:1947`) has no producer here (leanr has
-    /// no `sorry` recovery).
+    /// `coerceToSort?`; else "type expected" (`:1946-1949`) — but only on
+    /// `coerceToSort?`'s `none` answer (no `CoeSort` instance at all).
+    /// `coerceToSort?` (`Coe.lean:114-126`) can also THROW, when the
+    /// post-expansion result still isn't a `Sort` (`:122-124`); the call
+    /// site at `:1943` has no `try` around it, so that throw propagates
+    /// as itself, exactly like `synthesize_coe_mvar`'s bare
+    /// `coerceCollectingNames?` call (this file, `:552`) — NOT folded
+    /// into "type expected", which is a distinct oracle error class. The
+    /// `hasSyntheticSorry` `throwAbortTerm` branch (`:1947`) has no
+    /// producer here (leanr has no `sorry` recovery).
     pub fn ensure_type(&mut self, _stx: &SynElem, e: ExprId) -> Result<ExprId, ElabError> {
         let ty = self.mctx.infer_type(e)?;
         let w = self
@@ -167,7 +174,10 @@ impl<'e> TermElabM<'e> {
         match self.mctx.coerce_to_sort(e) {
             Ok(Some(coerced)) => Ok(coerced),
             Ok(None) => Err(ElabError::TypeExpected { e, ty }),
-            Err(MetaError::CoeExpansionMismatch(_)) => Err(ElabError::TypeExpected { e, ty }),
+            // No `try` here either (`TermElabM.lean:1943`, unlike
+            // `mkCoe`'s `:1313`): a post-expansion throw is the
+            // elaboration error it is, NOT "type expected".
+            Err(err @ MetaError::CoeExpansionMismatch(_)) => Err(ElabError::from(err)),
             Err(MetaError::Unsupported(m)) => Err(ElabError::UnsupportedSyntax(m)),
             Err(err) => Err(ElabError::from(err)),
         }
