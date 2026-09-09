@@ -30,6 +30,15 @@ use leanr_kernel::bank::{ExprId, NameId};
 use crate::local_snapshot::LocalCtxSnapshot;
 use crate::{MetaCtx, MetaError};
 
+/// oracle: `MkBinding.State.cache` (`:956-960`). Scoped to one
+/// `elim_mvar_deps` call and reset again inside `elim_mvar` before
+/// `mk_aux_mvar_type` (`:1205`, "we must reset the cache because
+/// `toRevert` may not be equal to `xs`"), which is why it is a
+/// threaded parameter rather than a `MetaCtx` field: its lifetime is a
+/// matter of type here, not of discipline.
+#[derive(Default)]
+pub(crate) struct ElimCache(std::collections::HashMap<ExprId, ExprId>);
+
 impl<'e> MetaCtx<'e> {
     /// The `FVarId` behind an `Expr::fvar`, or `None` for anything
     /// else. `xs` and `to_revert` are carried as `Expr::fvar`
@@ -249,6 +258,271 @@ impl<'e> MetaCtx<'e> {
         Ok(e)
     }
 
+    /// oracle: `elimMVarDeps` (`:1252-1257`).
+    ///
+    /// Returns `e` unchanged when it carries no expr metavariable — the
+    /// fast path that makes every `mk_binding` call over a
+    /// metavariable-free body a strict no-op. For a body that DOES carry
+    /// one, behavior genuinely changes; see the design spec's § Risk
+    /// item 1 and the Task 1 findings document.
+    #[allow(dead_code)]
+    pub(crate) fn elim_mvar_deps(&mut self, xs: &[ExprId], e: ExprId) -> Result<ExprId, MetaError> {
+        if !self.data(e).has_expr_mvar() {
+            return Ok(e);
+        }
+        let mut cache = ElimCache::default();
+        self.elim(xs, e, &mut cache)
+    }
+
+    /// oracle: `abstractRange` (`:1277-1279`) — `elimMVarDeps` over the
+    /// FULL `xs`, then abstract only the first `i`. The asymmetry is
+    /// deliberate and is the oracle's, not a simplification: a binder
+    /// type at position `i` has its metavariable dependencies eliminated
+    /// with respect to every telescope variable, including ones declared
+    /// after it.
+    #[allow(dead_code)]
+    pub(crate) fn abstract_range(
+        &mut self,
+        xs: &[ExprId],
+        i: usize,
+        e: ExprId,
+    ) -> Result<ExprId, MetaError> {
+        let e = self.elim_mvar_deps(xs, e)?;
+        Ok(abstract_fvars(
+            self.scratch,
+            Some(self.view.store),
+            e,
+            &xs[..i],
+            &mut self.guard,
+        )?)
+    }
+
+    /// oracle: `elim` (`:1104`) — the cached entry to the traversal.
+    fn elim(
+        &mut self,
+        xs: &[ExprId],
+        e: ExprId,
+        cache: &mut ElimCache,
+    ) -> Result<ExprId, MetaError> {
+        if !self.data(e).has_expr_mvar() {
+            return Ok(e);
+        }
+        if let Some(hit) = cache.0.get(&e) {
+            return Ok(*hit);
+        }
+        self.step()?;
+        let out = self.guarded(|ctx| ctx.visit(xs, e, cache))?;
+        cache.0.insert(e, out);
+        Ok(out)
+    }
+
+    /// oracle: `visit` (`:1101`) — the structural arms. An application is
+    /// decomposed into head plus arguments and routed to `elim_app`,
+    /// because the head being a metavariable is what `elim_mvar` needs to
+    /// see.
+    fn visit(
+        &mut self,
+        xs: &[ExprId],
+        e: ExprId,
+        cache: &mut ElimCache,
+    ) -> Result<ExprId, MetaError> {
+        match self.node(e) {
+            Node::App { .. } => {
+                let f = self.get_app_fn(e);
+                let args = self.get_app_args(e);
+                self.elim_app(xs, f, &args, cache)
+            }
+            Node::MVar { .. } => self.elim_app(xs, e, &[], cache),
+            Node::Lam {
+                binder_name,
+                binder_type,
+                body,
+                binder_info,
+            } => {
+                let t = self.elim(xs, binder_type, cache)?;
+                let b = self.elim(xs, body, cache)?;
+                if t == binder_type && b == body {
+                    Ok(e)
+                } else {
+                    Ok(self.scratch.expr_lam(
+                        Some(self.view.store),
+                        binder_name,
+                        t,
+                        b,
+                        binder_info,
+                    )?)
+                }
+            }
+            Node::Forall {
+                binder_name,
+                binder_type,
+                body,
+                binder_info,
+            } => {
+                let t = self.elim(xs, binder_type, cache)?;
+                let b = self.elim(xs, body, cache)?;
+                if t == binder_type && b == body {
+                    Ok(e)
+                } else {
+                    Ok(self.scratch.expr_forall(
+                        Some(self.view.store),
+                        binder_name,
+                        t,
+                        b,
+                        binder_info,
+                    )?)
+                }
+            }
+            Node::LetE {
+                decl_name,
+                ty,
+                value,
+                body,
+                non_dep,
+            } => {
+                let t = self.elim(xs, ty, cache)?;
+                let v = self.elim(xs, value, cache)?;
+                let b = self.elim(xs, body, cache)?;
+                if t == ty && v == value && b == body {
+                    Ok(e)
+                } else {
+                    Ok(self
+                        .scratch
+                        .expr_let(Some(self.view.store), decl_name, t, v, b, non_dep)?)
+                }
+            }
+            _ => Ok(e),
+        }
+    }
+
+    /// oracle: `elimApp` (`:1230-1249`).
+    fn elim_app(
+        &mut self,
+        xs: &[ExprId],
+        f: ExprId,
+        args: &[ExprId],
+        cache: &mut ElimCache,
+    ) -> Result<ExprId, MetaError> {
+        if let Node::MVar { id: Some(n) } = self.node(f) {
+            let mid = crate::MVarId(n);
+            match self.mctx.assignment(mid) {
+                Some(new_f) => {
+                    if matches!(self.node(new_f), Node::Lam { .. }) {
+                        // oracle `:1236-1239`: arguments can become
+                        // irrelevant after beta, so beta FIRST, then elim.
+                        let mut visited = Vec::with_capacity(args.len());
+                        for a in args {
+                            visited.push(self.elim(xs, *a, cache)?);
+                        }
+                        // NOT reversed. The oracle writes
+                        // `newF.betaRev args.reverse` because Lean's
+                        // `Expr.betaRev` takes its arguments in REVERSE
+                        // application order; this crate's `beta_rev`
+                        // (`whnf.rs:1743`) takes them in CALL order —
+                        // `whnf_core_app` hands it `get_app_args`' result
+                        // straight through (`whnf.rs:423`), and
+                        // `instantiate_delayed_app` (`assign.rs`) does the
+                        // same with a test pinning the mapping
+                        // (`instantiate_mvars_delayed_app_maps_multiple_args_to_fvars_in_order`).
+                        // `visited` is already in call order, so it is
+                        // passed as-is; reversing here would swap which
+                        // binder each argument substitutes for.
+                        let applied = self.beta_rev(new_f, &visited)?;
+                        return self.elim(xs, applied, cache);
+                    }
+                    return self.elim_app(xs, new_f, args, cache);
+                }
+                None => {
+                    let (out, _) = self.elim_mvar(xs, mid, args, cache)?;
+                    return Ok(out);
+                }
+            }
+        }
+        let f2 = self.elim(xs, f, cache)?;
+        let mut out = f2;
+        for a in args {
+            let a2 = self.elim(xs, *a, cache)?;
+            out = self.scratch.expr_app(Some(self.view.store), out, a2)?;
+        }
+        Ok(out)
+    }
+
+    /// oracle: `elimMVar` (`:1176-1229`). Returns the rewritten
+    /// occurrence and the `to_revert` list, mirroring the oracle's pair
+    /// (the second component is `revert`'s, which leanr has no caller
+    /// for, but keeping the shape keeps the transcription readable).
+    fn elim_mvar(
+        &mut self,
+        xs: &[ExprId],
+        mvar_id: crate::MVarId,
+        args: &[ExprId],
+        cache: &mut ElimCache,
+    ) -> Result<(ExprId, Vec<ExprId>), MetaError> {
+        let Some(decl) = self.mctx.decl(mvar_id) else {
+            return Err(MetaError::MVar(format!(
+                "elim_mvar: metavariable {mvar_id:?} was never declared"
+            )));
+        };
+        let kind = decl.kind;
+        let decl_ty = decl.ty;
+        let mvar_lctx = Arc::clone(&decl.lctx);
+
+        let to_revert = self.get_in_scope(&mvar_lctx, xs);
+        let mvar_expr = self
+            .scratch
+            .expr_mvar(Some(self.view.store), Some(mvar_id.0))?;
+        if to_revert.is_empty() {
+            // oracle `:1180-1182`: nothing in this metavariable's context
+            // is being abstracted, so it stands; only the arguments are
+            // visited.
+            let mut out = mvar_expr;
+            for a in args {
+                let a2 = self.elim(xs, *a, cache)?;
+                out = self.scratch.expr_app(Some(self.view.store), out, a2)?;
+            }
+            return Ok((out, Vec::new()));
+        }
+
+        let mut visited = Vec::with_capacity(args.len());
+        for a in args {
+            visited.push(self.elim(xs, *a, cache)?);
+        }
+
+        let to_revert = self.collect_forward_deps(&mvar_lctx, to_revert)?;
+        let new_lctx = self.reduce_local_context(&mvar_lctx, &to_revert)?;
+        // oracle `:1205`: a FRESH cache here, because `to_revert` may
+        // differ from `xs` and a cached rewrite for one is wrong for the
+        // other. `mk_aux_mvar_type` reaches `elim_mvar_deps` through
+        // `abstract_range`, which allocates its own `ElimCache`.
+        let new_ty = self.mk_aux_mvar_type(&mvar_lctx, &to_revert, decl_ty)?;
+        let (new_mvar, new_id) = self.mk_aux_mvar_at(new_lctx, new_ty, kind)?;
+        let result = self.mk_mvar_app(new_mvar, &to_revert)?;
+
+        if kind != crate::MVarKind::SyntheticOpaque {
+            // oracle `:1214-1215`.
+            self.mctx.assign(mvar_id, result)?;
+        } else {
+            // oracle `:1216-1228`. A syntheticOpaque metavariable must
+            // only ever be assigned by the elaborator that created it, so
+            // the NEW one is delayed-assigned back to the original
+            // instead. `nested` carries any delayed assignment the
+            // original already had (`:1224-1226`).
+            let (pending, nested) = match self.mctx.delayed_assignment(mvar_id) {
+                Some(d) => (d.mvar_id_pending, d.fvars.clone()),
+                None => (mvar_id, Vec::new()),
+            };
+            let mut fvars = to_revert.clone();
+            fvars.extend(nested);
+            self.mctx.assign_delayed(new_id, fvars, pending)?;
+        }
+
+        let mut out = result;
+        for a in visited {
+            out = self.scratch.expr_app(Some(self.view.store), out, a)?;
+        }
+        Ok((out, to_revert))
+    }
+
     /// oracle: `mkAuxMVarType` (`:1123-1168`) — the type of the auxiliary
     /// metavariable `elim_mvar` mints: the original's type abstracted
     /// over `xs` and wrapped in one `forall` per reverted entry,
@@ -276,9 +550,14 @@ impl<'e> MetaCtx<'e> {
     /// and those refuse. Adding parameters no branch can consult would be
     /// surface without a producer.
     ///
-    /// Both `abstract_fvars` calls below stand in for the oracle's
-    /// `abstractRangeAux` (`:1165-1167`) — `abstract_range` does not
-    /// exist until Task 9, which swaps these calls (Task 9 Step 6).
+    /// Both abstractions below go through `abstract_range`, this port's
+    /// `abstractRangeAux` (`:1165-1167`): eliminate metavariable
+    /// dependencies over the whole of `xs` FIRST, then abstract the
+    /// prefix. That is also what makes `elim_mvar`'s "reset the cache"
+    /// note (`:1205`) true here — `abstract_range` reaches
+    /// `elim_mvar_deps`, which allocates a fresh `ElimCache` rather than
+    /// reusing the caller's, whose keys were computed for `xs` and not
+    /// for `to_revert`.
     #[allow(dead_code)]
     pub(crate) fn mk_aux_mvar_type(
         &mut self,
@@ -286,7 +565,7 @@ impl<'e> MetaCtx<'e> {
         xs: &[ExprId],
         ty: ExprId,
     ) -> Result<ExprId, MetaError> {
-        let mut e = abstract_fvars(self.scratch, Some(self.view.store), ty, xs, &mut self.guard)?;
+        let mut e = self.abstract_range(xs, xs.len(), ty)?;
         for i in (0..xs.len()).rev() {
             let x = xs[i];
             let (binder_name, binder_ty, binder_info) = match self.fvar_id_of(x) {
@@ -319,13 +598,7 @@ impl<'e> MetaCtx<'e> {
                     (decl.user_name, decl.ty, leanr_kernel::BinderInfo::Implicit)
                 }
             };
-            let binder_ty = abstract_fvars(
-                self.scratch,
-                Some(self.view.store),
-                binder_ty,
-                &xs[..i],
-                &mut self.guard,
-            )?;
+            let binder_ty = self.abstract_range(xs, i, binder_ty)?;
             e = self.scratch.expr_forall(
                 Some(self.view.store),
                 binder_name,
@@ -831,6 +1104,131 @@ mod tests {
                 }
                 other => panic!("expected Forall, got {other:?}"),
             }
+        });
+    }
+
+    /// TDD RED/GREEN for plan task 9, the DELAYED branch. A
+    /// `SyntheticOpaque` metavariable minted under `a`, met while
+    /// abstracting `[a]`, is replaced by `?new a`; the ORIGINAL is left
+    /// unassigned (it must only be assigned by the elaborator that made
+    /// it) and the NEW one is delayed-assigned back to it.
+    #[test]
+    fn elim_mvar_deps_delays_a_synthetic_opaque_metavariable() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            let lctx = ctx.current_lctx();
+            let (m, mid) = ctx
+                .mk_aux_mvar_at(lctx, sort0, crate::MVarKind::SyntheticOpaque)
+                .expect("opaque mvar under the binder");
+
+            let out = ctx.elim_mvar_deps(&[a], m).expect("elim_mvar_deps");
+
+            assert_ne!(out, m, "the occurrence was rewritten");
+            match ctx.node(out) {
+                Node::App { f, arg } => {
+                    assert_eq!(arg, a, "applied to the reverted fvar");
+                    let Node::MVar { id: Some(n) } = ctx.node(f) else {
+                        panic!("head should be the auxiliary metavariable");
+                    };
+                    let new_id = crate::MVarId(n);
+                    assert_ne!(new_id, mid, "a FRESH metavariable");
+                    assert!(
+                        ctx.mctx().assignment(mid).is_none(),
+                        "the syntheticOpaque original is NOT assigned — only the \
+                         elaborator that created it may assign it"
+                    );
+                    let d = ctx
+                        .mctx()
+                        .delayed_assignment(new_id)
+                        .expect("the new one is delayed-assigned back to the original");
+                    assert_eq!(d.mvar_id_pending, mid);
+                    assert_eq!(d.fvars, vec![a]);
+                    assert_eq!(
+                        ctx.mctx().decl(new_id).expect("declared").lctx.depth(),
+                        0,
+                        "minted at the REDUCED context — `a` is erased"
+                    );
+                }
+                other => panic!("expected App, got {other:?}"),
+            }
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// The PLAIN-ASSIGN branch: a `Synthetic` metavariable is assigned
+    /// outright, `?m := ?new a`. Oracle `:1214-1215`.
+    #[test]
+    fn elim_mvar_deps_assigns_a_synthetic_metavariable_outright() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            let lctx = ctx.current_lctx();
+            let (m, mid) = ctx
+                .mk_aux_mvar_at(lctx, sort0, crate::MVarKind::Synthetic)
+                .expect("synthetic mvar under the binder");
+
+            let _ = ctx.elim_mvar_deps(&[a], m).expect("elim_mvar_deps");
+
+            let assigned = ctx
+                .mctx()
+                .assignment(mid)
+                .expect("a non-opaque original IS assigned outright");
+            match ctx.node(assigned) {
+                Node::App { arg, .. } => assert_eq!(arg, a),
+                other => panic!("expected `?new a`, got {other:?}"),
+            }
+            assert!(
+                !ctx.mctx().is_delayed_assigned(mid),
+                "the plain branch uses no delayed assignment"
+            );
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// A metavariable whose own context does NOT contain any of `xs` is
+    /// left completely alone — `getInScope` is empty, oracle `:1180-1182`.
+    #[test]
+    fn elim_mvar_deps_leaves_an_out_of_scope_metavariable_alone() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            // Minted OUTSIDE the binder: empty declared context.
+            let (m, mid) = ctx.mk_aux_mvar(sort0).expect("mvar");
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+
+            let out = ctx.elim_mvar_deps(&[a], m).expect("elim_mvar_deps");
+            assert_eq!(out, m, "untouched");
+            assert!(ctx.mctx().assignment(mid).is_none());
+            assert!(!ctx.mctx().is_delayed_assigned(mid));
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// The fast path: a term with no expr metavariable is returned
+    /// unchanged, allocating nothing. Oracle `:1253-1254`.
+    #[test]
+    fn elim_mvar_deps_is_identity_on_a_metavariable_free_term() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            let app = ctx.scratch.expr_app(base, a, sort0).expect("app");
+            assert_eq!(ctx.elim_mvar_deps(&[a], app).expect("elim"), app);
+            ctx.lctx_restore(cp);
         });
     }
 }
