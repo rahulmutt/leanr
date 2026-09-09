@@ -258,8 +258,9 @@ impl<'e> MetaCtx<'e> {
     /// on `LocalDecl.ldecl (nondep := …)` (`:1131-1160`) and leanr's
     /// `LocalDecl` carries no `nondep` bit at all
     /// (`leanr_kernel/src/local_ctx.rs:37-43`; `mk_let_binding` takes it
-    /// as a caller argument, `metactx.rs:653`), so both ldecl arms have
-    /// no input. Writing one would be guessing, and a wrong `ExprId` is
+    /// as a caller argument, `metactx.rs:830` — `mk_let_expr`), so both
+    /// ldecl arms have no input. Writing one would be guessing, and a
+    /// wrong `ExprId` is
     /// worse than a named refusal — the same judgement, for the same
     /// reason, as `mk_binding`'s existing
     /// `"let-decl fvar in a cdecl telescope"` (`metactx.rs:769-772`).
@@ -748,6 +749,87 @@ mod tests {
                     }
                 }
                 other => panic!("expected outer Forall (a), got {other:?}"),
+            }
+        });
+    }
+
+    /// Task 8 fix round 1: the METAVARIABLE "may dependency" arm
+    /// (`:1157-1163`) had zero test coverage — none of the tests above
+    /// puts an `mvar` in `xs`. This reaches it directly: `xs = [m]`
+    /// where `m` is a bare, unassigned mvar (never routed through the
+    /// fvar path at all), and pins the THREE things that arm reads off
+    /// `MVarDecl` that the cdecl arm never would: the binder type is
+    /// the mvar's OWN type (`decl.ty`, not anything from `lctx`), the
+    /// binder name is the mvar's `user_name`, and — the part that makes
+    /// this more than a smoke test, because it is the one choice this
+    /// arm makes that the cdecl arm structurally cannot (a cdecl reads
+    /// `decl.binder_info` off the LOCAL CONTEXT; this arm hardcodes
+    /// `binderInfoForMVars`) — the binder info is `Implicit`.
+    #[test]
+    fn mk_aux_mvar_type_wraps_a_reverted_mvar_with_its_own_type_and_implicit_binder_info() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            // `fresh_mvar` always mints `user_name: None`; overwrite the
+            // declaration in place (same id, same lctx, same kind) so the
+            // binder-name propagation is pinned too, not just the type.
+            let (m, mid) = fresh_mvar(ctx, sort0);
+            let name_str = ctx
+                .scratch
+                .intern_str(base, "m")
+                .expect("interning a tiny fixed name is infallible");
+            let uname = ctx
+                .scratch
+                .name_str(base, None, name_str)
+                .expect("interning a tiny fixed name is infallible");
+            let lctx = ctx
+                .mctx()
+                .decl(mid)
+                .expect("fresh_mvar declared it")
+                .lctx
+                .clone();
+            ctx.mctx_mut().declare(
+                mid,
+                crate::MVarDecl {
+                    user_name: Some(uname),
+                    ty: sort0,
+                    lctx,
+                    kind: crate::MVarKind::Natural,
+                },
+            );
+
+            let snap = ctx.current_lctx();
+            let ty = ctx
+                .mk_aux_mvar_type(&snap, &[m], sort0)
+                .expect("mk_aux_mvar_type");
+            match ctx.node(ty) {
+                Node::Forall {
+                    binder_name,
+                    binder_type,
+                    binder_info,
+                    ..
+                } => {
+                    assert_eq!(
+                        binder_type, sort0,
+                        "the forall's binder type is the mvar's OWN type (decl.ty), \
+                         not anything read off lctx"
+                    );
+                    assert_eq!(
+                        binder_name,
+                        Some(uname),
+                        "the binder name comes from the mvar's user_name"
+                    );
+                    assert_eq!(
+                        binder_info,
+                        leanr_kernel::BinderInfo::Implicit,
+                        "binderInfoForMVars — the one choice this arm makes that the \
+                         cdecl arm structurally cannot, since a cdecl reads binder_info \
+                         off the local context instead of hardcoding it"
+                    );
+                }
+                other => panic!("expected Forall, got {other:?}"),
             }
         });
     }
