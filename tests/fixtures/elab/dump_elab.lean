@@ -618,7 +618,11 @@ that must be a local is written as a `fun` binder.
     leanr's `mk_lambda` (`leanr_meta/src/metactx.rs`, a plain
     `abstract_fvars`) does not model, so leanr leaks the free variable
     where the oracle emits `bvar 0`. Unmodelled and carried, not
-    silently accepted: see the M4b-3 P4 task-7 report.
+    silently accepted: `mk_binding`'s own doc records the gap, and
+    `leanr_elab`'s
+    `postponed_coe_under_a_binder_leaves_an_unabstracted_fvar_pending_elim_mvar_deps`
+    (`tests/seam_audit.rs`) pins the divergent output so it trips the
+    day the gap closes. Full diagnosis in the M4b-3 P4 task-7 report.
   * `coe/funApp` (task 8) — `g Nat.zero` with `g : Fn`:
     `coerceToFunction?` in `synthesizePendingAndNormalizeFunType`.
   * `coe/sortDomain` (task 9) — `fun (c : Carrier) (x : c) => x`:

@@ -97,17 +97,23 @@ impl<'e> TermElabM<'e> {
     /// own `mvarId.withContext` (`:545`) is the ladder's wrapper around
     /// every arm (`ladder.rs::with_mvar_local_context`), not this
     /// function's job.
+    ///
+    /// Unlike `mk_coe`, this arm does NOT re-label a post-expansion
+    /// throw: `:552` calls `coerceCollectingNames?` bare, with no `try`
+    /// around it, so `MetaError::CoeExpansionMismatch` propagates as
+    /// itself through `ElabError::Meta`. `mkCoe`'s `try` (`:1313-1317`)
+    /// is what makes `TypeMismatch` the answer THERE, and nowhere else.
     pub(crate) fn synthesize_coe_mvar(
         &mut self,
         mvar_id: MVarId,
         expected: ExprId,
         e: ExprId,
     ) -> Result<bool, ElabError> {
-        let (e_type, defeq) = self
+        let defeq = self
             .mctx
             .with_transparency(TransparencyMode::Default, |m| {
                 let e_type = m.infer_type(e)?;
-                Ok::<_, MetaError>((e_type, m.is_def_eq(e_type, expected)?))
+                m.is_def_eq(e_type, expected)
             })?;
         if defeq && self.mctx.check_occurs(mvar_id, e)? {
             self.mctx.mctx_mut().assign(mvar_id, e)?;
@@ -122,12 +128,10 @@ impl<'e> TermElabM<'e> {
                 Ok(false)
             }
             Ok(LOption::None) | Ok(LOption::Undef) => Ok(false),
-            // The oracle has no `try` here: a post-expansion throw
-            // propagates as the elaboration error it is.
-            Err(MetaError::CoeExpansionMismatch(_)) => Err(ElabError::TypeMismatch {
-                expected,
-                got: e_type,
-            }),
+            // The oracle has no `try` here (`:552`, unlike `mkCoe`'s
+            // `:1313`): a post-expansion throw propagates as the
+            // elaboration error it is, NOT as a `TypeMismatch`.
+            Err(err @ MetaError::CoeExpansionMismatch(_)) => Err(ElabError::from(err)),
             Err(MetaError::Unsupported(m)) => Err(ElabError::UnsupportedSyntax(m)),
             Err(err) => Err(ElabError::from(err)),
         }

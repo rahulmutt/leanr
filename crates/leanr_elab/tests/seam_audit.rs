@@ -12,11 +12,20 @@
 //!     either wrapper, so `app_smoke.rs`'s
 //!     `explicit_mode_skips_the_optparam_default` asserts it white-box
 //!     against a synthetic `f_type` instead;
-//!   * the **P4 coercion** seam, which is an `ElabError::TypeMismatch`
-//!     from `ensureArgType` rather than an `UnsupportedSyntax` — that IS
-//!     M4b-1's documented behavior (error on a defeq mismatch instead of
-//!     inserting a coercion), so it is a deliberately wrong-*shaped*
-//!     seam, not a missing one.
+//!   * the **P4 coercion** seam. M4b-3 P4 task 7 retired its first half:
+//!     `ensureHasType`/`ensureArgType` now INSERT a `CoeT` coercion
+//!     (`src/coe.rs`), so the `TypeMismatch` those sites still raise is
+//!     the oracle's own answer for "no coercion exists", not a seam.
+//!     What is left is `coerce_to_function?` at the application head
+//!     (`app/args.rs`'s "M4b-3 P4" message, task 8), asserted below by
+//!     `mvar_function_type_is_a_named_seam`.
+//!
+//! One thing this file pins is NOT a seam at all but its opposite — a
+//! confirmed, currently-silent divergence:
+//! `postponed_coe_under_a_binder_leaves_an_unabstracted_fvar_pending_elim_mvar_deps`.
+//! It lives here because this file is where the "never a wrong
+//! `ExprId`" half of the discipline is audited, and a gap the codebase
+//! cannot yet close is worse hidden in prose than pinned in a test.
 //!
 //! The **P2 instance-implicit** seams (the `InstImplicit` arm and the
 //! three pending-`inst_mvars` guards) used to be a third unreachable
@@ -598,5 +607,77 @@ fn no_seam_message_names_the_completed_p3_slice() {
     assert!(
         offenders.is_empty(),
         "M4b-3 P3 is complete; live (non-comment) source claiming it at {offenders:?}"
+    );
+}
+
+/// **CONFIRMED DIVERGENCE from the oracle, pinned on purpose.** This is
+/// not a seam: leanr answers, and the answer is WRONG. The repo's
+/// precedent for that situation is `leanr_meta/src/synth.rs`'s
+/// `mul_n_...` test — a known gap gets a test named for the thing it
+/// characterizes, so it is executable rather than prose, and so it
+/// trips the day the gap closes.
+///
+/// `fun (n : Nat) => pairW n Nat.zero` postpones a `.coe` metavariable
+/// at the first argument (`CoeT Nat n (Wrapper ?a)` is `.undef` while
+/// `?a` is unassigned), the second argument assigns `?a := Nat`, and the
+/// fixpoint resumes the coercion — all of which leanr gets right. But
+/// the fixpoint runs AFTER `mk_lambda` has already abstracted the
+/// binder, so the coerced value is still an unabstracted `fvar`:
+///
+/// ```text
+/// leanr : fun (n : Nat) => pairW Nat (Wrapper.mk Nat <fvar n>) Nat.zero
+/// oracle: fun (n : Nat) => pairW Nat (Wrapper.mk Nat  bvar 0  ) Nat.zero
+/// ```
+///
+/// The oracle absorbs this inside `mkLambdaFVars`, via
+/// `MkBinding.elimMVarDeps` (`MetavarContext.lean`): a `syntheticOpaque`
+/// mvar whose local context contains the abstracted fvars is replaced by
+/// a delayed-assigned mvar applied to them, so the occurrence abstracts
+/// like any other argument. leanr's `MetaCtx::mk_binding`
+/// (`leanr_meta/src/metactx.rs`, whose doc now says so) is a plain
+/// `abstract_fvars` with no mvar handling, so nothing rewrites the
+/// occurrence.
+///
+/// This is NOT a coercion bug — measured: the same postpone-then-resume
+/// path with no binder (`pairW Nat.zero Nat.zero`) agrees with the
+/// oracle byte-for-byte, and is the corpus record
+/// `coe/postponedThenResumed`. It is `mk_lambda`'s gap, and closing it
+/// is a non-additive `leanr_meta` change outside M4b-3 P4 (design spec
+/// § Amendment 6 is the precedent for how such a prerequisite is
+/// scoped). Recorded in `tests/fixtures/elab/dump_elab.lean`'s
+/// `coeQueries` doc block and in the M4b-3 P4 task-7 report.
+///
+/// **When `elimMVarDeps` lands, this test MUST be updated** to assert
+/// the oracle's answer: the first assertion below fails the moment the
+/// divergence closes, which is the point.
+#[test]
+fn postponed_coe_under_a_binder_leaves_an_unabstracted_fvar_pending_elim_mvar_deps() {
+    /// The pinned oracle's answer, dumped from `dump_elab.lean` against
+    /// `leanprover/lean4:v4.33.0-rc1` (a throwaway query, not landed as
+    /// a record — a record would fail the gate).
+    const ORACLE: &str = concat!(
+        r#"{"b":{"a":{"k":"const","n":"Nat.zero","us":[]},"f":{"a":{"a":{"i":0,"k":"bvar"},"#,
+        r#""f":{"a":{"k":"const","n":"Nat","us":[]},"f":{"k":"const","n":"Wrapper.mk","us":[]},"#,
+        r#""k":"app"},"k":"app"},"f":{"a":{"k":"const","n":"Nat","us":[]},"#,
+        r#""f":{"k":"const","n":"pairW","us":[]},"k":"app"},"k":"app"},"k":"app"},"#,
+        r#""bi":"d","k":"lam","t":{"k":"const","n":"Nat","us":[]}}"#,
+    );
+
+    let leanr = support::elab_and_synthesize("fun (n : Nat) => pairW n Nat.zero")
+        .expect("the coercion itself resolves; only the abstraction is wrong")
+        .to_string();
+
+    assert_ne!(
+        leanr, ORACLE,
+        "leanr now agrees with the oracle here — `elimMVarDeps` (or an equivalent) has landed. \
+         Retire this characterization: assert `leanr == ORACLE` and delete the gap notes in \
+         `metactx.rs::mk_binding`, `dump_elab.lean`'s `coeQueries` block, and this file's \
+         module doc"
+    );
+    assert_eq!(
+        leanr,
+        ORACLE.replace(r#""k":"bvar""#, r#""k":"fvar""#),
+        "the divergence must stay EXACTLY the unabstracted `fvar` — one token, everything else \
+         byte-identical to the oracle. Any other difference is a new bug, not this known gap"
     );
 }
