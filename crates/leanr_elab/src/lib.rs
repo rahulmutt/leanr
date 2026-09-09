@@ -90,14 +90,19 @@
 //! inside `app/` carries its owning slice in the message. Never a
 //! silent no-op, never a panic, never a wrong `ExprId`.
 //!
-//! - **coercions** — `mkCoe`/`ensureHasType` landed in M4b-3 P4 task 7
-//!   (`coe.rs`), so `elab_term_ensuring_type`, the `($e :)` ascription
-//!   arm and `app`'s own `ensureArgType` now insert a `CoeT` coercion
-//!   instead of erroring on a defeq mismatch. `coerceToFunction?` on an
-//!   application head (`CoeFun`) landed in task 8
-//!   (`app/args.rs`'s `synthesize_pending_and_normalize_fun_type`).
-//!   Still deferred: `ensureType`'s `coerceToSort?` on a binder domain
-//!   (`CoeSort`, task 9) — M4b-3 P4.
+//! - **coercions** — SHIPPED in M4b-3 P4 (`coe.rs`: `mk_coe` /
+//!   `ensure_has_type` / `ensure_type`; the ladder's `Coe` arm).
+//!   `mkCoe`/`ensureHasType` and the `CoeT` half landed in task 7, so
+//!   `elab_term_ensuring_type`, the `($e :)` ascription arm and `app`'s
+//!   own `ensureArgType` insert a `CoeT` coercion instead of erroring on
+//!   a defeq mismatch. `coerceToFunction?` on an application head
+//!   (`CoeFun`) landed in task 8 (`app/args.rs`'s
+//!   `synthesize_pending_and_normalize_fun_type`). `ensureType`'s
+//!   `coerceToSort?` on a binder domain (`CoeSort`) landed in task 9
+//!   (`coe.rs`'s `ensure_type`). Still deferred: `coerceMonadLift?`
+//!   (the do-notation slice; a shape guard in `leanr_meta::coe` names
+//!   it) and the `↑`/`⇑`/`↥` notations (the parser slice that adds
+//!   them).
 //! - **optParam/autoParam default filling and implicit-lambda
 //!   insertion** — M4b-3 P5. (The implicit-lambda *guard* is P1's, in
 //!   `elab.rs`; only the insertion is deferred.)

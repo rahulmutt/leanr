@@ -39,16 +39,18 @@ pub struct SavedContext {
 
 /// oracle: `inductive SyntheticMVarKind` (`TermElabM.lean:65-92`).
 ///
-/// **All four variants exist from P2a**, even though P2a produces only
+/// **All four variants exist from P2a**, even though P2a produced only
 /// `TypeClass` and `Postponed`: the oracle's control flow branches on
 /// the kind in places far from where it is set, and a missing variant is
-/// a silent fidelity hole where a missing *arm* is a named seam. P4
-/// produces `Coe`; P5 registers `Tactic`.
+/// a silent fidelity hole where a missing *arm* is a named seam. M4b-3
+/// P4 shipped the `Coe` producer (`coe.rs`'s `mk_coe`) and its two
+/// consumer arms (`ladder.rs`'s scheduling arm, `report.rs`'s stuck-
+/// coercion reporter arm); P5 registers `Tactic`.
 ///
 /// The oracle's message-carrying payloads (`extraErrorMsg?`,
 /// `mkErrorMsg?`, `header?`) are omitted: leanr defers the prose layer
 /// (design spec § Amendment, item 2). `Coe` keeps the two payloads that
-/// are `Expr`s rather than messages, because P4's arm computes with
+/// are `Expr`s rather than messages, because the `Coe` arm computes with
 /// them.
 #[derive(Debug, Clone)]
 pub enum SyntheticMVarKind {

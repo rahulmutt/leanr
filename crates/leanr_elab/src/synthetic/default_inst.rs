@@ -90,11 +90,15 @@ impl<'e> TermElabM<'e> {
     /// helpers alone would leave that public parameter with NO consumer
     /// at all — a `_kinds` on the crate's API surface, which is a louder
     /// falsehood than a threaded-but-unread argument, and would have to
-    /// be re-threaded through this exact cycle the moment a `.coe` or
-    /// `.postponed` arm (P4/P5) lands inside
-    /// `synthesize_pending_inst_mvar_committed`, since those DO
-    /// re-elaborate syntax. Recorded as a deliberate call, so a future
-    /// reader does not have to re-derive it.
+    /// be re-threaded through this exact cycle the moment a `.postponed`
+    /// arm (P5) lands inside `synthesize_pending_inst_mvar_committed`,
+    /// since that DOES re-elaborate syntax. (M4b-3 P4 shipped the `.coe`
+    /// producer and its two consumer arms, but neither lands here: this
+    /// rung's own walk skips every non-`.typeClass` kind by construction
+    /// — see the oracle citation on `synthesize_some_using_default_prio`
+    /// above — so the `.coe` half of this speculation resolved without
+    /// touching this function.) Recorded as a deliberate call, so a
+    /// future reader does not have to re-derive it.
     pub fn synthesize_using_default(&mut self, kinds: &KindInterner) -> Result<bool, ElabError> {
         // oracle: "Recall that `prioSet` is stored in descending order".
         // `MetaCtx::default_instance_priorities` guarantees that
@@ -205,10 +209,17 @@ impl<'e> TermElabM<'e> {
     /// `withAssignableSyntheticOpaque` (`:164`) is required because
     /// `coeAtOutParam` may mark a local instance's output parameter
     /// `syntheticOpaque`, which ordinary unification refuses to assign.
-    /// leanr has no `coeAtOutParam` producer yet (that is P2b/P4), so
-    /// the scope is currently a no-op on every reachable term — it is
-    /// ported anyway because it is one line and its absence would be a
-    /// silent divergence the moment P2b lands.
+    /// M4b-3 P2b-ii's local-instance outParam feature (`args.rs`'s
+    /// `is_next_out_param_of_local_instance_and_result`) does not itself
+    /// mint a `syntheticOpaque` mvar, but M4b-3 P4's `coe.rs::mk_coe`
+    /// does — its `.undef` arm mints exactly `MVarKind::SyntheticOpaque`
+    /// on a stuck coercion — so the scope is no longer unconditionally a
+    /// no-op. Whether `mk_coe`'s mint can coincide with a local
+    /// instance's own outParam mvar on a reachable term is the
+    /// missing-`MVarKind::SyntheticOpaque`-discriminator gap already
+    /// triaged as a deferred minor (not this task's to resolve); the
+    /// scope is kept ported regardless, so the day that gap closes this
+    /// line does not have to move.
     fn synthesize_using_default_instance(
         &mut self,
         mvar_id: MVarId,

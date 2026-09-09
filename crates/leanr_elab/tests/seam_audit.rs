@@ -4,25 +4,26 @@
 //!
 //! Scope, stated up front because a seam audit that quietly omits a seam
 //! is worse than one that names its own gaps. `app/mod.rs`'s module doc
-//! is the full site-by-site index; of the seams listed there, two are
+//! is the full site-by-site index; of the seams listed there, one is
 //! not reachable from any source term the hermetic `Elab0` fixture can
 //! express, and this file does not pretend otherwise:
 //!
 //!   * the **P5 optParam/autoParam** seam — no fixture parameter carries
 //!     either wrapper, so `app_smoke.rs`'s
 //!     `explicit_mode_skips_the_optparam_default` asserts it white-box
-//!     against a synthetic `f_type` instead;
-//!   * the **P4 coercion** seam. M4b-3 P4 task 7 retired its first half:
-//!     `ensureHasType`/`ensureArgType` now INSERT a `CoeT` coercion
-//!     (`src/coe.rs`), so the `TypeMismatch` those sites still raise is
-//!     the oracle's own answer for "no coercion exists", not a seam.
-//!     Task 8 retired its second half too: `app/args.rs`'s
-//!     `synthesize_pending_and_normalize_fun_type` now ports
-//!     `coerceToFunction?` at the application head, and the seam's
-//!     message no longer names `CoeFun`/"M4b-3 P4" at all — it retargets
-//!     to P5 alone, for the still-owed expected-type propagation into
-//!     `fun` binder domains, asserted below by
-//!     `mvar_function_type_is_a_named_seam`.
+//!     against a synthetic `f_type` instead.
+//!
+//! The still-open P5 seam this file DOES assert end-to-end,
+//! `mvar_function_type_is_a_named_seam` (expected-type propagation into
+//! `fun` binder domains), used to share its bullet here with the P4
+//! coercion seam — `coerceToFunction?` (`CoeFun`) was tried first at the
+//! same site and, on failure, fell through to the same message. M4b-3
+//! P4 retired that sharing along with the coercion seam itself: tasks
+//! 7-9 landed `CoeT` (`coe.rs`'s `mk_coe`/`ensure_has_type`), `CoeFun`
+//! (`app/args.rs`'s `synthesize_pending_and_normalize_fun_type`) and
+//! `CoeSort` (`coe.rs`'s `ensure_type`), so coercion insertion is real
+//! code now, exercised by `tests/oracle_elab.rs`'s `coe/*` records and
+//! `tests/synthetic_smoke.rs` rather than by this file.
 //!
 //! One thing this file pins is NOT a seam at all but its opposite — a
 //! confirmed, currently-silent divergence:
@@ -510,6 +511,41 @@ fn no_seam_points_at_the_retired_p2b_ii_label() {
         offenders.is_empty(),
         "P2b-ii retired the resultTypeOutParam? producer seam (it has a real body in \
          `app/args.rs`); stale label at {offenders:?}"
+    );
+}
+
+/// M4b-3 P4 RETIRED three seams — the ladder's `Coe` arm, the reporter's
+/// `Coe` arm, and the `CoeFun` half of `synthesize_pending_and_normalize_fun_type`'s
+/// mvar seam — and rewired every `TypeMismatch`-on-defeq-failure site
+/// through `mk_coe`. Their messages read "… coercion insertion — M4b-3
+/// P4" and "needs CoeFun (M4b-3 P4)". Mirrors the retired-label gates
+/// above and inherits their stated precondition: a TEXTUAL scan is a
+/// floor (the retired wording never comes back), not a ceiling.
+///
+/// The two needles are verified against the commits that actually
+/// removed them: task 7's `c999696` deleted
+/// `"coercion synthetic mvars require coercion insertion — M4b-3 P4"`
+/// (`ladder.rs`) and
+/// `"stuck coercion reporting requires coercion insertion — M4b-3 P4"`
+/// (`report.rs`); task 8's `0ecb795` deleted the `"... needs CoeFun
+/// (M4b-3 P4), or expected-type propagation ..."` message (`args.rs`).
+#[test]
+fn no_seam_points_at_the_retired_p4_label() {
+    let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    let needles = ["coercion insertion — M4b-3 P4", "needs CoeFun (M4b-3 P4)"];
+    let mut offenders = Vec::new();
+    for path in walk_rs_files(src_dir) {
+        let text = std::fs::read_to_string(&path).expect("readable source");
+        for (n, line) in text.lines().enumerate() {
+            if needles.iter().any(|needle| line.contains(needle)) {
+                offenders.push(format!("{}:{}", path.display(), n + 1));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "P4 retired the coercion seams (real bodies in `coe.rs`, `ladder.rs`, \
+         `report.rs`, `app/args.rs`); stale label at {offenders:?}"
     );
 }
 

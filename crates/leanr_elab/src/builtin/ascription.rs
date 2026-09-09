@@ -53,16 +53,16 @@
 //! result checked against the caller's actual `expected`
 //! (`ensureHasType expectedType? e`, `:435`).
 //!
-//! Getting both boundaries exactly right matters once P4 coercion
-//! insertion lands: `ensureHasType` is where a coercion's own mvar
-//! would be created, and that mvar must be free to escape to an OUTER
-//! scheduler rather than forced to resolve inside this narrower scope.
-//! `ensureHasType`'s coercion-insertion path (`mkCoe`) is out of scope
-//! now (M4b-3); a defeq mismatch ERRORS here instead, matching
-//! `elab_term_ensuring_type`'s own documented behavior. No fixture row
-//! exercises the second arm — the `opt(term)` type slot is genuinely
-//! optional grammar, transcribed anyway as the direct, unambiguous
-//! port.
+//! Getting both boundaries exactly right matters because `ensureHasType`
+//! (SHIPPED in M4b-3 P4, `coe.rs`'s `ensure_has_type`/`mk_coe`) is where
+//! a coercion's own mvar is created on a defeq mismatch, and that mvar
+//! must be free to escape to an OUTER scheduler rather than be forced
+//! to resolve inside this narrower scope — `elab_ascription`'s `None`
+//! arm below calls `ensure_has_type` exactly there, outside the
+//! `with_synthesize` scope, matching `elab_term_ensuring_type`'s own
+//! documented behavior. No fixture row exercises the second arm — the
+//! `opt(term)` type slot is genuinely optional grammar, transcribed
+//! anyway as the direct, unambiguous port.
 //!
 //! **Tree shape is NOT what the M4b-1 plan guessed.** A real parse dump
 //! (this task's own throwaway probe, never committed — see the task
@@ -131,10 +131,11 @@ pub fn elab_ascription(
         // `ensureHasType expectedType? e` (`:435`) runs AFTER that
         // scope returns, now inserting a coercion rather than merely
         // checking the result against `expected`. A Review finding
-        // (M4b-3 P2a task 6 review, finding 2): a wider scope here
-        // would force a future coercion's own mvar (P4) to resolve
-        // before this scope's own postponement returns, rather than
-        // escaping to whatever scheduler called this one.
+        // (M4b-3 P2a task 6 review, finding 2, since confirmed by M4b-3
+        // P4's `mk_coe`): a wider scope here would force a coercion's
+        // own mvar to resolve before this scope's own postponement
+        // returns, rather than escaping to whatever scheduler called
+        // this one.
         None => {
             let e_val = elab.with_synthesize(PostponeBehavior::No, kinds, |elab| {
                 elab.elab_term(e, kinds, None)

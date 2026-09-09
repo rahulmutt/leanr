@@ -144,10 +144,12 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 /// (task 8) and `CoeSort` (task 9) deferred. Reconciled a FIFTH time by
 /// M4b-3 P4 task 8: `coerceToFunction?` at the application head
 /// (`app/args.rs`'s `synthesize_pending_and_normalize_fun_type`) landed
-/// too, leaving only `CoeSort`:
+/// too, leaving only `CoeSort`. Reconciled a SIXTH time by M4b-3 P4
+/// task 9: `CoeSort`'s binder-domain arm landed in `ensure_type`
+/// (`coe.rs`), so coercion insertion (`CoeT`/`CoeFun`/`CoeSort`,
+/// `mkCoe`) is no longer deferred at all:
 /// ```text
 ///   letI / haveI / let_fun / let_delayed / let_tmp / letrec  later slice (own oracle tier each)
-///   coercions: CoeSort (mkCoe + CoeFun landed) . M4b-3 P4
 ///   optParam defaults / autoParam .............. M4b-3 P5
 ///   implicit-lambda insertion .................. M4b-3 P5
 ///   Term.proj / pipeProj / dotIdent ............ M4b-4 (LVal machinery)
