@@ -474,7 +474,21 @@ differentially observable.
     eager synthesis at `mkInstMVar` closes the instance goal and the
     default rung never fires here either. The contrast with `num/bare`
     is what shows the ladder escalating only when it must;
-  * `num/zero` — the `decodeNatLitVal?` single-`0` special case. -/
+  * `num/zero` — the `decodeNatLitVal?` single-`0` special case.
+  * `num/zeroUnderBinder` (elimMVarDeps task 11 fix round 1) — `num/bare`'s
+    default-instance walk with a BINDER around it, and the record that
+    keeps rung 3's `mvarId.withContext` (`SyntheticMVars.lean:114`,
+    `synthetic/default_inst.rs`) honest. `?α` and its `OfNat ?α 0` goal
+    are minted in a context holding `n` and are still unassigned when
+    `mkLambdaFVars` runs, so `elimMVarDeps`' plain-assign branch rewrites
+    them to `?aux n`; rung 3's `isDefEq` against the default candidate
+    then has to dereference `n` AFTER its binder has closed, which it can
+    do only under the goal's own local context. Measured kill: drop the
+    scoping and this record — with `dflt/polyInstImplicitUnderBinder` and
+    nothing else — fails with `unknown free variable`. It elaborated
+    correctly before `elimMVarDeps` was wired into `mk_binding` and
+    regressed silently when it was, with no record to notice; this is
+    that regression's executable memory. -/
 def numQueries : List (String × String) :=
   [ ("num/bare",        "42")
   , ("num/zero",        "0")
@@ -485,6 +499,7 @@ def numQueries : List (String × String) :=
   , ("num/ascribedNat", "(42 : Nat)")
   , ("num/ascribedTag", "(42 : Tag)")
   , ("num/inApp",       "pick 1 2")
+  , ("num/zeroUnderBinder", "fun (n : Nat) => 0")
   ]
 
 /-- M4b-3 P3 task 7: `char` and `scientific`.
@@ -543,9 +558,20 @@ refresh (a rigid `param u` here instead of `lmvar` means
 `mk_default_instance_candidate` built at the empty level list) and the
 nested `synthesizePending` fixpoint (an `mvar` in the `Seed` argument
 position means the candidate's instance-implicit binders were not
-collected). -/
+collected).
+
+`dflt/polyInstImplicitUnderBinder` (elimMVarDeps task 11 fix round 1) is
+the same walk under a binder, and is the SECOND half of rung 3's
+`mvarId.withContext` gate — see `num/zeroUnderBinder` above for the full
+diagnosis. It is kept alongside `num/zeroUnderBinder` rather than folded
+into it because the two reach rung 3 by different routes: the numeral's
+goal is `OfNat ?α 0` with a literal argument and a THREE-priority
+descending walk behind it, while `Fresh ?α` descends to priority 75 and
+its candidate carries an `instImplicit` binder of its own, so the
+scoping has to survive the nested `synthesizePending` too. -/
 def defaultPolyQueries : List (String × String) :=
   [ ("dflt/polyInstImplicit", "useFresh")
+  , ("dflt/polyInstImplicitUnderBinder", "fun (n : Nat) => useFresh")
   ]
 
 /-- M4b-3 P2b-ii: the elaborator outParam branch. The list below now
