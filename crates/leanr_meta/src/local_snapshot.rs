@@ -84,15 +84,35 @@ impl LocalCtxSnapshot {
 
     /// oracle: `reduceLocalContext` (`MetavarContext.lean:1065-1067`) —
     /// this context with every fvar in `to_remove` erased. Each entry is
-    /// the fvar's `Expr::fvar` reference paired with its `FVarId`: the
-    /// first filters `local_names`, the second drives
-    /// `LocalContext::erase`, and taking both spares this module a
-    /// `Store` borrow it has no other reason to hold.
+    /// the fvar's `Expr::fvar` reference paired with its `FVarId`:
+    /// `LocalContext::erase` is `NameId`-keyed already, so the second
+    /// half drives it directly; the first half exists only so the
+    /// caller (which has `Store` access) can hand this function a
+    /// decode closure keyed the same way `to_remove` itself is.
+    ///
+    /// The oracle compares by `FVarId` (`decl.fvarId == x.fvarId!`,
+    /// `MetavarContext.lean:1057-1058`); this filters `local_names` by
+    /// `NameId` too, via `fvar_id_of`, rather than comparing its
+    /// `ExprId` entries against `to_remove`'s `ExprId` halves directly.
+    /// `LocalCtxSnapshot` has no `Store` reference of its own, so it
+    /// cannot decode an `ExprId` into a `NameId` itself — `fvar_id_of`
+    /// is supplied by the caller (`MetaCtx::reduce_local_context`),
+    /// which has one. Comparing by `ExprId` would coincide with `NameId`
+    /// today only because `expr_fvar` interns canonically against
+    /// `Some(self.view.store)` everywhere; making the basis uniform with
+    /// `NameId` removes a silent-failure mode (entries interned through
+    /// a different store generation compare unequal by `ExprId` while
+    /// denoting the same fvar) rather than fixing an observed bug —
+    /// behavior is unchanged.
     ///
     /// Both halves are filtered together, because `LocalCtxSnapshot::new`
     /// debug-asserts they are in lockstep and every reader of one is
     /// paired with a reader of the other.
-    pub(crate) fn reduced(&self, to_remove: &[(ExprId, NameId)]) -> LocalCtxSnapshot {
+    pub(crate) fn reduced(
+        &self,
+        to_remove: &[(ExprId, NameId)],
+        fvar_id_of: impl Fn(ExprId) -> Option<NameId>,
+    ) -> LocalCtxSnapshot {
         let mut lctx = self.lctx.clone();
         for (_, fvar_id) in to_remove {
             lctx.erase(*fvar_id);
@@ -100,7 +120,9 @@ impl LocalCtxSnapshot {
         let local_names = self
             .local_names
             .iter()
-            .filter(|(_, f)| !to_remove.iter().any(|(rf, _)| rf == f))
+            .filter(|(_, f)| {
+                !fvar_id_of(*f).is_some_and(|id| to_remove.iter().any(|(_, rid)| *rid == id))
+            })
             .cloned()
             .collect();
         LocalCtxSnapshot::new(lctx, local_names)
@@ -140,7 +162,10 @@ mod tests {
 
             assert_eq!(snap.entries().len(), 3, "the full context has three decls");
 
-            let reduced = snap.reduced(&[(b, ib)]);
+            let reduced = snap.reduced(&[(b, ib)], |f| match ctx.node(f) {
+                Node::FVar { id } => id,
+                _ => None,
+            });
 
             assert_eq!(reduced.entries().len(), 2, "local_names lost exactly one");
             assert!(

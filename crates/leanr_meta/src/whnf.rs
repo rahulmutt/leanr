@@ -491,6 +491,24 @@ impl<'e> MetaCtx<'e> {
         if !matches!(self.node(f_prime), Node::MVar { .. }) {
             return Ok(None);
         }
+        // The oracle reduces on `f'.mvarId!` directly
+        // (`Meta/WHNF.lean:588-590`); `instantiate_delayed_app`
+        // re-derives its own head from `e` (`get_app_fn(e)`) instead of
+        // taking `f_prime` as a parameter. The two derivations can differ
+        // in principle if `whnf_core` rewrote the applied head from one
+        // metavariable to another before reaching here — e.g. `?m := ?n`
+        // where `?n` is itself delayed-assigned, so `f_prime` names `?n`
+        // while `e`'s literal head expression still reads `?m`. No
+        // producer in the workspace mints that shape today, so this
+        // guards a currently-silent divergence rather than fixing an
+        // observed one.
+        debug_assert_eq!(
+            self.get_app_fn(e),
+            f_prime,
+            "whnf_delayed_assigned: instantiate_delayed_app would re-derive a \
+             head from `e` that differs from `f_prime` — the oracle reduces \
+             on f_prime's own mvarId (Meta/WHNF.lean:588-590)"
+        );
         self.instantiate_delayed_app(e)
     }
 

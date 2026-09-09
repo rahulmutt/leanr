@@ -183,6 +183,20 @@ impl<'e> MetaCtx<'e> {
         if to_revert.is_empty() {
             return Ok(to_revert);
         }
+        // oracle compares by `FVarId` (`decl.fvarId == x.fvarId!`,
+        // `:1057-1058`); `get_in_scope`, two functions earlier, already
+        // compares by `NameId` (leanr's `FVarId` equivalent), so
+        // comparing `to_revert` against `entries` by raw `ExprId` here
+        // mixed the module's basis. The two coincide today because
+        // `expr_fvar` interns against `Some(self.view.store)`
+        // everywhere; making this uniform removes a silent-failure mode
+        // (a mismatched `ExprId` producing an empty `to_revert` and a
+        // bare `?m := ?new` with no error) rather than fixing an
+        // observed bug — behavior is unchanged.
+        let to_revert_ids: Vec<NameId> = to_revert
+            .iter()
+            .filter_map(|f| self.fvar_id_of(*f))
+            .collect();
         let entries: Vec<ExprId> = lctx.entries().iter().map(|(_, f)| *f).collect();
         // oracle `getLocalDeclWithSmallestIdx` (`:1052`): start at the
         // earliest declaration that is being reverted. Everything before it
@@ -190,28 +204,30 @@ impl<'e> MetaCtx<'e> {
         // on one.
         let start = entries
             .iter()
-            .position(|f| to_revert.contains(f))
+            .position(|f| {
+                self.fvar_id_of(*f)
+                    .is_some_and(|id| to_revert_ids.contains(&id))
+            })
             .unwrap_or(entries.len());
 
         let mut collected: Vec<ExprId> = Vec::with_capacity(to_revert.len());
+        let mut collected_ids: Vec<NameId> = Vec::with_capacity(to_revert.len());
         for fvar in entries.into_iter().skip(start) {
-            if to_revert.contains(&fvar) {
-                collected.push(fvar);
-                continue;
-            }
             let Some(id) = self.fvar_id_of(fvar) else {
                 continue;
             };
+            if to_revert_ids.contains(&id) {
+                collected.push(fvar);
+                collected_ids.push(id);
+                continue;
+            }
             let Some(decl) = lctx.lctx().get(id) else {
                 continue;
             };
             let (ty, value) = (decl.ty, decl.value);
-            let pf: Vec<NameId> = collected
-                .iter()
-                .filter_map(|f| self.fvar_id_of(*f))
-                .collect();
-            if self.local_decl_depends_on(ty, value, &pf)? {
+            if self.local_decl_depends_on(ty, value, &collected_ids)? {
                 collected.push(fvar);
+                collected_ids.push(id);
             }
         }
         Ok(collected)
@@ -232,7 +248,12 @@ impl<'e> MetaCtx<'e> {
             .iter()
             .filter_map(|f| self.fvar_id_of(*f).map(|id| (*f, id)))
             .collect();
-        Ok(Arc::new(lctx.reduced(&pairs)))
+        // `reduced` filters `local_names` by `NameId` too (see that
+        // function's doc), which needs an `ExprId -> NameId` decode it
+        // cannot do itself — `LocalCtxSnapshot` holds no `Store`
+        // reference. `Self::fvar_id_of` supplies it here, where one is
+        // in hand.
+        Ok(Arc::new(lctx.reduced(&pairs, |f| self.fvar_id_of(f))))
     }
 
     /// oracle: `mkMVarApp` (`:1090-1097`) — `mvar` applied to `xs`, first
@@ -743,7 +764,16 @@ impl<'e> MetaCtx<'e> {
                                 .into(),
                         ));
                     }
-                    (decl.binder_name, decl.ty, decl.binder_info)
+                    // oracle `:1132-1133` (cdecl arm): `let type :=
+                    // type.headBeta` before `abstractRangeAux`. An
+                    // earlier controller ruling parked this on the
+                    // (factually wrong) grounds that leanr has no
+                    // `headBeta`; `head_beta` exists (`whnf.rs:1789`)
+                    // and is `pub(crate)`. Applied BEFORE the
+                    // abstraction below, matching the oracle's
+                    // placement.
+                    let ty = self.head_beta(decl.ty)?;
+                    (decl.binder_name, ty, decl.binder_info)
                 }
                 None => {
                     // oracle `:1157-1163` — a "may dependency" metavariable.
@@ -756,7 +786,12 @@ impl<'e> MetaCtx<'e> {
                     let decl = self.mctx.decl(crate::MVarId(n)).ok_or_else(|| {
                         MetaError::Infer("mk_aux_mvar_type: undeclared may-dependency mvar".into())
                     })?;
-                    (decl.user_name, decl.ty, leanr_kernel::BinderInfo::Implicit)
+                    let user_name = decl.user_name;
+                    let ty = decl.ty;
+                    // oracle `:1159-1160` (mvar arm): same `headBeta`,
+                    // before the abstraction below.
+                    let ty = self.head_beta(ty)?;
+                    (user_name, ty, leanr_kernel::BinderInfo::Implicit)
                 }
             };
             let binder_ty = self.abstract_range_aux(xs, i, binder_ty, cache)?;
@@ -867,6 +902,46 @@ mod tests {
             assert!(
                 ctx.depends_on(m, &[ia]).expect("depends_on"),
                 "an assigned mvar is followed to its value"
+            );
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// Final-review fix wave, item 4: `local_decl_depends_on`'s VALUE
+    /// branch (`:147-148`) had no direct test — every existing caller
+    /// reaches it only through `collect_forward_deps`'s corpus-shaped
+    /// fixtures, none of which isolate a let-decl whose TYPE is clean
+    /// but whose VALUE alone carries the dependency. Measured: mutating
+    /// that branch to `Ok(false)` left the entire workspace suite green;
+    /// this is the test that splits on it.
+    #[test]
+    fn local_decl_depends_on_sees_a_dependency_carried_only_by_the_value() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            let ia = fvar_id(ctx, a);
+
+            // The TYPE is `Sort 0` — mentions nothing, so
+            // `local_decl_depends_on`'s first check (the type) must
+            // return false and fall through to the value. The VALUE is
+            // `a` itself.
+            assert!(
+                !ctx.depends_on(sort0, &[ia]).expect("depends_on"),
+                "the type must NOT depend on `a`, or this test would not \
+                 discriminate the value branch at all"
+            );
+            assert!(
+                ctx.local_decl_depends_on(sort0, Some(a), &[ia])
+                    .expect("local_decl_depends_on"),
+                "the VALUE mentions `a`; a let-decl with a clean type and \
+                 a dependent value must still be judged dependent — \
+                 oracle `findLocalDeclDependsOn`/`localDeclDependsOn` \
+                 (`:744`, `:767`) checks the value whenever one is \
+                 present"
             );
             ctx.lctx_restore(cp);
         });
@@ -1610,6 +1685,90 @@ mod tests {
             assert!(
                 ctx.mctx().assignment(nid).is_some(),
                 "`?n` — the metavariable actually reached — is the one assigned"
+            );
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// Final-review fix wave, item 5: `elim_app`'s post-beta re-entry
+    /// (oracle `:1238`) must use the STRUCTURAL `visit_guarded`, not the
+    /// cached `elim` — the port's own doc on `elim`'s inverted names
+    /// already says so (see `elim`'s doc comment above), but until now
+    /// nothing measured it: a prior round's mutation of that one call
+    /// site left the FULL suite green.
+    ///
+    /// `?o`, `syntheticOpaque` and minted UNDER `a`, is reached TWICE
+    /// while eliminating `h ?o (?m c)`: once directly, as the first
+    /// argument (which mints aux1 and populates `cache[?o]`), and once
+    /// again after `?m := fun x => ?o` — a CONSTANT lambda; its body
+    /// never mentions `x` — beta-reduces `?m c` to the exact SAME
+    /// `ExprId` as `?o`. The oracle's structural re-entry at that second
+    /// site does not consult the cache, so it re-enters `elim_mvar` and
+    /// mints a SECOND, DIFFERENT auxiliary metavariable (aux2). Measured:
+    /// swapping `visit_guarded` for the cached `elim` at that call site
+    /// turns the second occurrence into a cache HIT that answers aux1
+    /// again, and the assertion below flips.
+    #[test]
+    fn elim_app_post_beta_reentry_is_structural_not_cached() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            let h = fresh_fvar(ctx, sort0, "h");
+            let c = fresh_fvar(ctx, sort0, "c");
+            // `?o` is minted UNDER `a`, so `a` is in ITS OWN declared
+            // context — the precondition `elim_mvar`'s `getInScope`
+            // needs to touch it at all.
+            let lctx_with_a = ctx.current_lctx();
+            let (o, _oid) = ctx
+                .mk_aux_mvar_at(lctx_with_a, sort0, crate::MVarKind::SyntheticOpaque)
+                .expect("?o under `a`");
+
+            // `x` is the lambda's own fresh binder; only its scope is
+            // irrelevant — what matters is that the BODY (`o`) never
+            // mentions it, so beta substitutes nothing and the result is
+            // literally the same `ExprId` as `o`.
+            let x = fresh_fvar(ctx, sort0, "x");
+            let lam = ctx.mk_lambda(&[x], o).expect("mk_lambda: fun x => ?o");
+            let (m, mid) = ctx.mk_aux_mvar(sort0).expect("?m");
+            ctx.mctx_mut()
+                .assign(mid, lam)
+                .expect("?m := fun x => ?o, a CONSTANT lambda in x");
+
+            let m_c = ctx.scratch.expr_app(base, m, c).expect("?m c");
+            let h_o = ctx.scratch.expr_app(base, h, o).expect("h ?o");
+            let app = ctx.scratch.expr_app(base, h_o, m_c).expect("h ?o (?m c)");
+
+            let out = ctx.elim_mvar_deps(&[a], app).expect("elim_mvar_deps");
+
+            let args = ctx.get_app_args(out);
+            assert_eq!(
+                args.len(),
+                2,
+                "`h` applied to exactly the two original arguments' rewrites"
+            );
+            let aux_mvar_id = |ctx: &crate::MetaCtx, occurrence: leanr_kernel::bank::ExprId| {
+                let head = ctx.get_app_fn(occurrence);
+                match ctx.node(head) {
+                    Node::MVar { id: Some(n) } => crate::MVarId(n),
+                    other => panic!(
+                        "expected the rewritten occurrence's head to be an mvar, got {other:?}"
+                    ),
+                }
+            };
+            let aux1 = aux_mvar_id(ctx, args[0]);
+            let aux2 = aux_mvar_id(ctx, args[1]);
+            assert_ne!(
+                aux1, aux2,
+                "the first argument (`?o` directly) and the second (`?m c`, \
+                 which beta-reduces to the SAME `ExprId` as `?o`) must mint \
+                 TWO DIFFERENT auxiliary metavariables — the oracle's \
+                 structural re-entry after beta does not consult the cache. \
+                 A cached re-entry would answer the same aux id for both, \
+                 which is exactly the regression this test exists to catch"
             );
             ctx.lctx_restore(cp);
         });
