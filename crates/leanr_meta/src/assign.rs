@@ -1235,7 +1235,7 @@ impl<'e> MetaCtx<'e> {
     /// with each `y_i` replaced by the matching argument. The oracle
     /// spells that as `newVal.abstract fvars` followed by
     /// `instantiateRevRange 0 fvars.size args` and `mkAppRange`
-    /// (`WHNF.lean:601-604`), and this transcribes it step for step.
+    /// (`WHNF.lean:602-604`), and this transcribes it step for step.
     ///
     /// **The abstraction is RAW (`abstract_fvars`), not `mk_lambda`,
     /// and that is load-bearing.** `mk_lambda` needs each fvar's binder
@@ -1277,7 +1277,7 @@ impl<'e> MetaCtx<'e> {
         if self.data(val).has_expr_mvar() {
             return Ok(None);
         }
-        // oracle `:601`: `newVal.abstract fvars` — a raw abstraction,
+        // oracle `:602`: `newVal.abstract fvars` — a raw abstraction,
         // leaving loose bvars, NOT a `mkLambdaFVars`. See this fn's doc
         // for why that difference decides whether this works at all.
         let abstracted = abstract_fvars(
@@ -1287,7 +1287,7 @@ impl<'e> MetaCtx<'e> {
             &fvars,
             &mut self.guard,
         )?;
-        // oracle `:602`: `instantiateRevRange 0 fvars.size args`.
+        // oracle `:603`: `instantiateRevRange 0 fvars.size args`.
         //
         // `instantiate_rev`, NOT `beta_rev`. `beta_rev` wants a `Lam`
         // to peel and falls through to `mk_app_spine` when handed
@@ -2081,6 +2081,20 @@ mod tests {
     /// anywhere in head position — must be left exactly as it is. The
     /// oracle does not beta-reduce those during instantiation, and an
     /// over-eager arm would diverge in the opposite direction.
+    ///
+    /// **The narrowness half must reach the App arm to mean anything,
+    /// and getting there takes care.** `instantiate_mvars` early-returns
+    /// the term untouched when it carries neither an expr mvar nor a
+    /// level mvar (`:1220`), so the obvious literal redex — `(fun (_ :
+    /// Sort 0) => a) a` — never enters `instantiate_mvars_body` at all,
+    /// and asserting it comes back unchanged asserts only that the
+    /// early-out works. (It was written that way first; a review caught
+    /// it.) The binder type here is `Sort ?u` for exactly that reason:
+    /// an unassigned LEVEL mvar makes `has_level_mvar()` true, so the
+    /// walk descends and the App arm genuinely runs, while leaving no
+    /// EXPR mvar anywhere in head position — which is the condition
+    /// under test. Both halves are measured by mutation; see the
+    /// task-10 report.
     #[test]
     fn instantiate_mvars_betas_a_spine_whose_head_mvar_became_a_lambda() {
         use crate::test_support::{fresh_fvar, with_ctx};
@@ -2116,16 +2130,47 @@ mod tests {
 
             assert_eq!(
                 got, a,
-                "`?m a` with `?m := fun _ => a` must instantiate to `a`. Leaving                  `(fun _ => a) a` standing is exactly the tc/funWrapElided divergence"
+                "`?m a` with `?m := fun _ => a` must instantiate to `a`. Leaving \
+                 `(fun _ => a) a` standing is exactly the tc/funWrapElided divergence"
             );
 
-            // NARROWNESS: the same redex with a literal lambda head —
+            // NARROWNESS: the same shape with a literal lambda head —
             // never a metavariable — must survive untouched.
-            let literal_redex = ctx.scratch.expr_app(base, lam, a).expect("app");
+            //
+            // `Sort ?u` as the binder type, NOT `Sort 0`: it carries an
+            // unassigned level mvar, so `instantiate_mvars`' early-out
+            // at `:1220` does not fire and the walker actually reaches
+            // the App arm. With `Sort 0` this assertion is vacuous —
+            // the term never enters `instantiate_mvars_body`.
+            let (_lmid, u) = ctx.fresh_level_mvar().expect("fresh level mvar");
+            let sort_u = ctx.scratch.expr_sort(base, u).expect("Sort ?u");
+            let lam_u = ctx
+                .scratch
+                .expr_lam(
+                    base,
+                    Some(name),
+                    sort_u,
+                    a,
+                    leanr_kernel::BinderInfo::Default,
+                )
+                .expect("lam");
+            let literal_redex = ctx.scratch.expr_app(base, lam_u, a).expect("app");
+            assert!(
+                ctx.data(literal_redex).has_level_mvar(),
+                "the narrowness term must carry a level mvar, or `instantiate_mvars` \
+                 early-returns and the App arm under test is never reached"
+            );
+            assert!(
+                !ctx.data(literal_redex).has_expr_mvar(),
+                "and it must carry no EXPR mvar — a literal lambda head is the \
+                 condition being tested"
+            );
+
             let untouched = ctx.instantiate_mvars(literal_redex).expect("instantiate");
             assert_eq!(
                 untouched, literal_redex,
-                "a redex with a plain lambda head is NOT beta-reduced by                  instantiation — the arm fires only when the head WAS a metavariable"
+                "a redex with a plain lambda head is NOT beta-reduced by \
+                 instantiation — the arm fires only when the head WAS a metavariable"
             );
 
             ctx.lctx_restore(cp);
@@ -2149,7 +2194,7 @@ mod tests {
     /// with `mk_binding: telescope fvar not declared`. Measured: that is
     /// exactly how the whole elaboration corpus's coercion path failed
     /// the moment `elim_mvar_deps` was wired into `mk_binding`. The
-    /// oracle's raw `Expr.abstract` (`WHNF.lean:601`) needs no binder
+    /// oracle's raw `Expr.abstract` (`WHNF.lean:602`) needs no binder
     /// types and so has no such failure mode.
     ///
     /// The argument is a DIFFERENT fvar from the one abstracted, so the
@@ -2189,7 +2234,9 @@ mod tests {
 
             assert_eq!(
                 got, b,
-                "?new #[a] := ?m with ?m := a, applied to b, is b — the abstraction                  must be the oracle's raw `Expr.abstract`, which needs no binder types                  and so no ambient lctx entry for `a`"
+                "?new #[a] := ?m with ?m := a, applied to b, is b — the abstraction \
+                 must be the oracle's raw `Expr.abstract`, which needs no binder \
+                 types and so no ambient lctx entry for `a`"
             );
         });
     }
@@ -2286,14 +2333,27 @@ mod tests {
     ///
     /// `?new #[a, b] := ?m`, `?m := a` (asymmetric: mentions the FIRST
     /// fvar, not the second), applied to two DISTINCT arguments `x`,
-    /// `y`: `?new x y`. The correct answer is `x` — `beta_rev` is
-    /// handed `[x, y]` UNREVERSED (`get_app_args`' own call order,
-    /// matching `mk_lambda`'s "innermost fvar last": `a` outermost, `b`
+    /// `y`: `?new x y`. The correct answer is `x` — `instantiate_rev`
+    /// is handed `[x, y]` UNREVERSED (`get_app_args`' own call order),
+    /// which lines up with `abstract_fvars`' own convention that the
+    /// LAST entry of `fvars` becomes `bvar 0`: `a` outermost, `b`
     /// innermost, so `x` (first arg) substitutes `a`, `y` (second arg)
-    /// substitutes `b`, and the body `a` becomes `x`). Under the plan
-    /// brief's literal `.reverse()` step, `beta_rev` would instead see
-    /// `[y, x]`, substituting `b := x`, `a := y` — since the body is
-    /// bare `a`, that convention answers `y`, not `x`.
+    /// substitutes `b`, and the body `a` becomes `x`. Under the plan
+    /// brief's literal `.reverse()` step the substitution would instead
+    /// be `b := x`, `a := y` — since the body is bare `a`, that
+    /// convention answers `y`, not `x`.
+    ///
+    /// Task 10 note: this test was written against the `mk_lambda` +
+    /// `beta_rev` formulation, which task 10 replaced with the oracle's
+    /// raw `abstract_fvars` + `instantiate_rev` (`WHNF.lean:602-603`).
+    /// The convention it pins is unchanged and the test still
+    /// discriminates it — measured by re-inserting the `.reverse()` —
+    /// so only the prose above moved. The `lctx_restore` also moved to
+    /// BEFORE the instantiation, so this now covers the shape
+    /// production actually produces: `elim_mvar` delayed-assigns over a
+    /// whole telescope and the result is resolved only after that
+    /// telescope has closed. Multi-fvar and out-of-scope were each
+    /// covered alone; this is both at once.
     #[test]
     fn instantiate_mvars_delayed_app_maps_multiple_args_to_fvars_in_order() {
         use crate::test_support::{fresh_fvar, with_ctx};
@@ -2320,6 +2380,11 @@ mod tests {
             // `?new x y`
             let app1 = ctx.scratch.expr_app(base, new_e, x).expect("app1");
             let applied = ctx.scratch.expr_app(base, app1, y).expect("app2");
+
+            // The telescope closes before the delayed assignment is
+            // resolved — the production ordering. See this test's doc.
+            ctx.lctx_restore(cp);
+
             let got = ctx.instantiate_mvars(applied).expect("instantiate");
 
             assert_eq!(
@@ -2328,7 +2393,6 @@ mod tests {
                  FIRST argument maps to the FIRST (outermost) fvar; a backwards \
                  (reversed) mapping would answer `y` instead"
             );
-            ctx.lctx_restore(cp);
         });
     }
 

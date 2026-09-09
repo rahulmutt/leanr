@@ -738,7 +738,7 @@ fn postponed_coe_under_a_binder_abstracts_via_elim_mvar_deps() {
     );
 
     let leanr = support::elab_and_synthesize("fun (n : Nat) => pairW n Nat.zero")
-        .expect("the coercion itself resolves; only the abstraction is wrong")
+        .expect("this term elaborates and synthesizes cleanly")
         .to_string();
 
     assert_eq!(
