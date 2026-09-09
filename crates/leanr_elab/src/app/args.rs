@@ -895,8 +895,13 @@ fn elab_and_add_new_arg(
         Arg::Stx(elem) => app.elab.elab_term(&elem, kinds, Some(expected))?,
     };
     // oracle: `ensureArgType` = `ensureHasType expectedType arg none f`
-    // (`App.lean:54-62`); its `errToSorry` recovery arm is prose leanr
-    // does not do, so the `try … catch` collapses to the plain call.
+    // (`App.lean:54-62`); its `errToSorry` recovery arm is error
+    // recovery leanr does not do — `exceptionToSorry`
+    // (`TermElabM.lean:1365-1367`) logs the exception and puts a
+    // synthetic `sorry` TERM in the argument's place
+    // (`mkSyntheticSorryFor` -> `mkLabeledSorry`), so elaboration
+    // continues with a wrong-but-typed argument. leanr propagates the
+    // error instead, and the `try … catch` collapses to the plain call.
     let val = app.elab.ensure_has_type(&stx, Some(expected), val)?;
     add_new_arg(app, val)
 }

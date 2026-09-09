@@ -604,10 +604,12 @@ fn literal_kinds_are_registered_not_deferred() {
 
 /// Every `UnsupportedSyntax` message in the crate names a slice that
 /// still OWNS something. P3 shipped rung 3 and the three non-leaf
-/// literals, so no LIVE message may name "M4b-3 P3" any more.
+/// literals, and P4 shipped the coercion machinery, so no LIVE line may
+/// name "M4b-3 P3" or "M4b-3 P4" any more.
 ///
 /// Only non-comment lines are inspected, deliberately: a doc comment may
-/// and should cite P3 historically ("real since M4b-3 P3 task 5"), and
+/// and should cite a completed slice historically ("real since M4b-3 P3
+/// task 5", "shipped in M4b-3 P4 task 9"), and
 /// that is a record of what happened, not a claim that work is owed. A
 /// string literal handed to `UnsupportedSyntax` is the opposite — the
 /// crate's named-seam discipline reads it as "this construct is deferred
@@ -623,9 +625,9 @@ fn literal_kinds_are_registered_not_deferred() {
 /// future slice owns "implement this invariant".
 ///
 /// **KNOWN LIMITATION — this is a per-slice tripwire, and whoever
-/// completes a slice owes it a needle.** The needle is the literal
-/// `"M4b-3 P3"`, so the gate says nothing about any OTHER completed
-/// slice. A third message of exactly the shape above survived task 8's
+/// completes a slice owes it a needle.** The needles are the two
+/// literals in the body below, so the gate says nothing about any OTHER
+/// completed slice. A third message of exactly the shape above survived task 8's
 /// audit for precisely that reason: `synthetic::report`'s `.postponed`
 /// arm read "… — M4b-3 P2a invariant", naming a slice that is also
 /// complete, and only the whole-branch review caught it (reworded in
@@ -645,21 +647,39 @@ fn literal_kinds_are_registered_not_deferred() {
 /// false negatives — a reworded message evades it — and a gate that
 /// quietly stops catching things is worse than one that visibly needs
 /// updating. So: when a slice completes, add its label here.
+///
+/// **`M4b-3 P4` was added by the whole-branch fix wave, and the needle
+/// was measured non-vacuous before it was trusted.** P4 completed on
+/// this branch, and task 10 shipped only
+/// [`no_seam_points_at_the_retired_p4_label`], which pins two EXACT
+/// retired strings — so a newly written seam message naming the
+/// now-complete P4 as its owner would have passed both gates. Adding
+/// the label here first produced one offender, `src/lib.rs:263`
+/// (`pub mod coe; // M4b-3 P4` — a trailing comment on a live line, the
+/// one shape this scan's `starts_with("//")` filter does not exempt),
+/// which the same wave reworded to `// coercions`. Commands and output
+/// are in the fix-wave report; the point of recording it is that a
+/// needle added without watching it fire is a gate nobody has shown to
+/// gate anything.
 #[test]
-fn no_seam_message_names_the_completed_p3_slice() {
+fn no_seam_message_names_a_completed_slice() {
     let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    let needles = ["M4b-3 P3", "M4b-3 P4"];
     let mut offenders = Vec::new();
     for path in walk_rs_files(src_dir) {
         let text = std::fs::read_to_string(&path).expect("readable source");
         for (n, line) in text.lines().enumerate() {
-            if line.contains("M4b-3 P3") && !line.trim_start().starts_with("//") {
-                offenders.push(format!("{}:{}", path.display(), n + 1));
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            if let Some(needle) = needles.iter().find(|needle| line.contains(**needle)) {
+                offenders.push(format!("{}:{} ({needle})", path.display(), n + 1));
             }
         }
     }
     assert!(
         offenders.is_empty(),
-        "M4b-3 P3 is complete; live (non-comment) source claiming it at {offenders:?}"
+        "M4b-3 P3 and P4 are complete; live (non-comment) source claiming one at {offenders:?}"
     );
 }
 
