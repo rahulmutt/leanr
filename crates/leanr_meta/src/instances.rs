@@ -581,6 +581,26 @@ impl ClassTable {
         self.out_params.get(&class_name).map(|v| v.as_slice())
     }
 
+    /// Is `class_name` a registered type class? oracle:
+    /// `isClass env declName` (`Basic.lean:1512`), reading the same
+    /// `classExtension` this table is built from.
+    ///
+    /// Membership is `out_params(..).is_some()`, not "has output
+    /// parameters": every class gets a `classExtension` entry whether or
+    /// not it declares any, and a class with none has an entry with an
+    /// EMPTY slice. Reading emptiness as absence would make every
+    /// ordinary class invisible.
+    ///
+    /// No production caller yet — Task 4/6 wire `MetaCtx::is_class` (the
+    /// consumer of this) into the fvar-pushing chokepoints and
+    /// `get_instances` respectively; exercised today only by this
+    /// module's own tests, same posture as `local_instance.rs`'s
+    /// `LocalInstanceStack::push` (Task 2).
+    #[allow(dead_code)]
+    pub(crate) fn is_class_name(&self, class_name: NameId) -> bool {
+        self.out_params(class_name).is_some()
+    }
+
     pub(crate) fn out_level_params(&self, class_name: NameId) -> Option<&[usize]> {
         self.out_level_params.get(&class_name).map(|v| v.as_slice())
     }
@@ -592,7 +612,7 @@ mod tests {
     use leanr_olean::DiscrKey;
 
     use crate::test_support::{
-        const_named, instance_named, parse_goal, render_name, with_instances_ctx,
+        const_named, instance_named, parse_goal, render_name, with_ctx, with_instances_ctx,
     };
 
     /// Step-1 brief test: the goal `Add N` must turn up `instAddN`.
@@ -830,6 +850,108 @@ mod tests {
             // before idx3 (prio 1); within the idx1/idx2 tie, REVERSE of
             // insertion order (idx2 inserted after idx1) => idx2 first.
             assert_eq!(idxs, vec![2, 1, 0, 3], "found: {found:?}");
+        });
+    }
+
+    /// [`with_ctx`]'s empty environment, plus a synthetic single-entry
+    /// `ClassTable` registering `Add` as a class (task 3's own minimal
+    /// scaffold — the same "build the table by hand, no fixture replay"
+    /// idiom as `get_instances_orders_by_priority_desc_then_reverse_of_ties`'s
+    /// synthetic `InstanceTable` just above). `Add` deliberately has no
+    /// out params, matching `Instances.olean`'s real `Add` (see
+    /// `class_table_reads_out_param_positions`): a class is present with
+    /// an EMPTY slice, not absent. Hands the closure both the ctx and
+    /// `Add`'s own `NameId` so callers don't have to re-derive it.
+    fn with_class_ctx<R>(f: impl FnOnce(&mut MetaCtx, NameId) -> R) -> R {
+        with_ctx(|ctx| {
+            let add_expr = const_named(ctx, "Add");
+            let add = match ctx.node(add_expr) {
+                leanr_kernel::bank::terms::Node::Const { name: Some(n), .. } => n,
+                _ => panic!("Add is not a bare const"),
+            };
+            ctx.classes = ClassTable::build(&[ClassEntry {
+                name: add,
+                out_params: vec![],
+                out_level_params: vec![],
+            }]);
+            f(ctx, add)
+        })
+    }
+
+    /// `N -> Add N` — the shape a parametrized local instance's
+    /// conclusion takes (`is_class_looks_through_forall_binders`'s own
+    /// doc comment). `add` is `Add`'s `NameId`, as handed back by
+    /// [`with_class_ctx`], so the constant this builds is the SAME name
+    /// registered in the synthetic `ClassTable`, not a freshly-reinterned
+    /// lookalike.
+    fn arrow_to_class(ctx: &mut MetaCtx, add: NameId) -> ExprId {
+        let base = Some(ctx.view.store);
+        let no_levels = ctx.scratch.intern_level_list(base, &[]).expect("levels");
+        let add_expr = ctx
+            .scratch
+            .expr_const(base, Some(add), no_levels)
+            .expect("const");
+        let n = const_named(ctx, "N");
+        let add_n = ctx.mk_app_spine(add_expr, &[n]).expect("Add N");
+        ctx.mk_arrow(n, add_n).expect("N -> Add N")
+    }
+
+    /// `isClassQuick?`'s `.forallE` arm recurses into the BODY
+    /// (`Basic.lean:1366`): `{a : Type} → [Add a] → Add (Prod a a)` is a
+    /// class, because its conclusion is. This is the shape a
+    /// parametrized local instance has, so getting it wrong makes every
+    /// such binder invisible.
+    #[test]
+    fn is_class_looks_through_forall_binders() {
+        with_class_ctx(|ctx, add| {
+            let ty = arrow_to_class(ctx, add);
+            assert_eq!(
+                ctx.is_class(ty).expect("is_class"),
+                Some(add),
+                "a forall whose conclusion is a class IS a class"
+            );
+        });
+    }
+
+    /// A non-class head constant is NOT a class, however class-shaped it
+    /// looks. Kills a `is_class` that reports the head constant of any
+    /// application without consulting the class table.
+    #[test]
+    fn is_class_rejects_a_non_class_head() {
+        with_class_ctx(|ctx, _add| {
+            let n = const_named(ctx, "N");
+            assert_eq!(
+                ctx.is_class(n).expect("is_class"),
+                None,
+                "`N` is a type, not a class — a constant-true is_class \
+                 would register every binder as a local instance"
+            );
+        });
+    }
+
+    /// `isClassQuick?`'s `.sort`/`.lam`/`.lit`/`.fvar`/`.bvar` arms
+    /// return `.none` OUTRIGHT (`Basic.lean:1359-1363`) — they never
+    /// reach the expensive path. A port that fell through to
+    /// `isClassExpensive?` here would run whnf on shapes the oracle
+    /// never whnfs. Checked two ways: the `Option` result (must be
+    /// `None`) AND the step counter (must not move) — `None` alone does
+    /// NOT discriminate this, because the expensive path's `whnf` on a
+    /// bare `Sort` is a no-op that also answers `None` (see the commit
+    /// message's mutation-measurement note).
+    #[test]
+    fn is_class_rejects_a_sort_without_reducing() {
+        with_class_ctx(|ctx, _add| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+            let steps_before = ctx.steps();
+            assert_eq!(ctx.is_class(sort0).expect("is_class"), None);
+            assert_eq!(
+                ctx.steps(),
+                steps_before,
+                "a bare Sort must never reach whnf — is_class_quick's Sort \
+                 arm has to answer .none outright, not .undef"
+            );
         });
     }
 }

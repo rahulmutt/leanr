@@ -13,7 +13,7 @@ use leanr_kernel::abstract_fvars;
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, LevelId, NameId, Store};
 use leanr_kernel::{
-    BinderInfo, EnvView, ExprData, FVarIdGen, LocalContext, RecGuard, MAX_REC_DEPTH,
+    BinderInfo, ConstantInfo, EnvView, ExprData, FVarIdGen, LocalContext, RecGuard, MAX_REC_DEPTH,
 };
 use leanr_olean::{
     ClassEntry, DefaultInstanceEntry, EntryScope, InstanceEntry, MatcherEntry, ProjectionFnInfo,
@@ -23,7 +23,7 @@ use leanr_olean::{
 use crate::instances::{ClassTable, InstanceTable};
 use crate::local_instance::LocalInstanceStack;
 use crate::local_snapshot::LocalCtxSnapshot;
-use crate::{Config, LMVarId, MVarId, MetaError, MetavarContext, TransparencyMode};
+use crate::{Config, LMVarId, LOption, MVarId, MetaError, MetavarContext, TransparencyMode};
 
 /// Stack-growth constants — the same values `tc.rs` uses (private
 /// there, so restated; keep in sync by inspection). Verified against
@@ -1175,6 +1175,160 @@ impl<'e> MetaCtx<'e> {
     #[cfg(test)]
     pub(crate) fn set_step_budget(&mut self, n: u64) {
         self.step_budget = n;
+    }
+
+    /// Test-only step-count observer. `is_class`'s quick path (below)
+    /// must never call `whnf` — every `whnf` entry calls `step()`
+    /// (`whnf.rs:194`) — so a test that wants to tell "answered `None`
+    /// without reducing" apart from "reduced its way to the same
+    /// `None`" needs to see this counter move, not just the `Option`
+    /// result (`is_class_rejects_a_sort_without_reducing`'s own
+    /// mutation-table entry: both readings answer `None`).
+    #[cfg(test)]
+    pub(crate) fn steps(&self) -> u64 {
+        self.steps
+    }
+
+    /// oracle: `isClass?` (`Basic.lean:1542-1543`) — `isClassImp?`
+    /// (`:1524-1528`) with every exception swallowed (`try … catch _ =>
+    /// return none`). The swallow is modelled as error -> `None` rather
+    /// than propagated: a failure to decide makes something not-a-class,
+    /// never a hard error, and diverging here would turn an ordinary
+    /// binder into an elaboration failure.
+    ///
+    /// No production caller yet — Task 4 calls this at the two
+    /// fvar-pushing chokepoints and Task 6 calls it from
+    /// `get_instances`; exercised today only by this module's own
+    /// tests, same posture as `local_instance.rs`'s
+    /// `LocalInstanceStack::push` (Task 2).
+    #[allow(dead_code)]
+    pub(crate) fn is_class(&mut self, ty: ExprId) -> Result<Option<NameId>, MetaError> {
+        match self.is_class_quick(ty) {
+            LOption::Some(c) => Ok(Some(c)),
+            LOption::None => Ok(None),
+            LOption::Undef => Ok(self.is_class_expensive(ty).unwrap_or(None)),
+        }
+    }
+
+    /// oracle: `isClassQuick?` (`Basic.lean:1358-1381`) — a purely
+    /// structural walk that NEVER reduces. Keeping it whnf-free is not
+    /// only a speed matter: Task 6's `get_instances` calls `is_class`
+    /// while its instance table is `mem::take`n (`instances.rs:468-479`
+    /// per that task's brief), so a reduction on the common path would
+    /// re-enter instance lookup against an empty table.
+    ///
+    /// No production caller yet — see [`MetaCtx::is_class`]'s own doc.
+    #[allow(dead_code)]
+    fn is_class_quick(&mut self, ty: ExprId) -> LOption<NameId> {
+        match self.node(ty) {
+            // `:1359-1363` — outright `.none`, never the expensive path.
+            Node::BVar { .. }
+            | Node::BVarBig { .. }
+            | Node::LitNat { .. }
+            | Node::LitStr { .. }
+            | Node::FVar { .. }
+            | Node::Sort { .. }
+            | Node::Lam { .. } => LOption::None,
+            // `:1364-1365` — `.undef`: deciding needs reduction.
+            Node::LetE { .. } | Node::Proj { .. } | Node::ProjBig { .. } => LOption::Undef,
+            // `:1366` — look THROUGH the binder at the conclusion.
+            Node::Forall { body, .. } => self.is_class_quick(body),
+            Node::MData { expr, .. } => self.is_class_quick(expr),
+            Node::Const { name, .. } => self.is_class_quick_const(name),
+            // `:1369-1372` — an assigned mvar is its value; unassigned
+            // is `.none`.
+            Node::MVar { id } => match id.and_then(|n| self.mctx.assignment(MVarId(n))) {
+                Some(v) => self.is_class_quick(v),
+                None => LOption::None,
+            },
+            // `:1374-1381` — the head of the application decides.
+            Node::App { .. } => match self.node(self.get_app_fn(ty)) {
+                Node::Const { name, .. } => self.is_class_quick_const(name),
+                Node::Lam { .. } => LOption::Undef,
+                Node::MVar { id } => match id.and_then(|n| self.mctx.assignment(MVarId(n))) {
+                    Some(v) => match self.node(self.get_app_fn(v)) {
+                        Node::Const { name, .. } => self.is_class_quick_const(name),
+                        _ => LOption::Undef,
+                    },
+                    None => LOption::None,
+                },
+                _ => LOption::None,
+            },
+        }
+    }
+
+    /// oracle: `isClassQuickConst?` composed with `getConstTemp?` /
+    /// `getDefInfoTemp` (`Basic.lean:1329-1356`, transcribed verbatim —
+    /// **not** the task brief's own sketch, which collapsed every
+    /// non-class constant to `.undef`; Ruling R5 corrects that). `.some
+    /// c` when `c` is a registered class. Otherwise `.undef` **iff** `c`
+    /// is a `Defn` that is currently unfoldable (transparency `.all` /
+    /// `.default`, or else `status_of(c) == Reducible`); `.none` for a
+    /// theorem, an inductive/constructor/recursor/axiom/quotient/
+    /// opaque, a transparency-gated definition, an empty `Node::Const`
+    /// name, or an unknown constant. The oracle's unknown-constant arm
+    /// THROWS (`getConstTemp?`'s `none => throwUnknownConstantAt ..`);
+    /// `isClass?`'s top-level `try .. catch _ => return none` swallows
+    /// it, so the observable behavior is `.none` — modelled directly as
+    /// `.none` here rather than as a propagated error, same posture as
+    /// `is_class`'s own doc comment above.
+    ///
+    /// No production caller yet — see [`MetaCtx::is_class`]'s own doc.
+    #[allow(dead_code)]
+    fn is_class_quick_const(&self, name: Option<NameId>) -> LOption<NameId> {
+        let Some(n) = name else {
+            return LOption::None;
+        };
+        if self.classes.is_class_name(n) {
+            return LOption::Some(n);
+        }
+        match self.view.get(n) {
+            // `getConstTemp?`'s `thmInfo => none` arm.
+            Some(ConstantInfo::Thm(_)) => LOption::None,
+            // `getConstTemp?`'s `defnInfo => getDefInfoTemp info` arm.
+            Some(ConstantInfo::Defn(_)) => match self.cfg.transparency {
+                TransparencyMode::All | TransparencyMode::Default => LOption::Undef,
+                _ if self.status_of(n) == ReducibilityStatus::Reducible => LOption::Undef,
+                _ => LOption::None,
+            },
+            // Every other known `ConstantInfo` (inductive, constructor,
+            // recursor, axiom, quotient, opaque) passes through
+            // `getConstTemp?` as `some info`, but is not a `.defnInfo`,
+            // so `isClassQuickConst?`'s own match falls to its `_ =>
+            // .none` arm.
+            Some(_) => LOption::None,
+            // Unknown constant: see the doc comment above.
+            None => LOption::None,
+        }
+    }
+
+    /// oracle: `isClassExpensive?` (`Basic.lean:1520-1522`) —
+    /// `withReducible`, telescope the foralls down to the conclusion
+    /// (`forallTelescopeReducingAux .. (whnfType := true)`), then
+    /// `isClassApp?` (`:1510-1518`): the head constant, if the
+    /// environment says it is a class. The telescope's own fvar-opening
+    /// (`instantiateRevRange`, `Basic.lean:1462`) is not reproduced
+    /// here: it exists so a DEPENDENT conclusion's later binders resolve
+    /// correctly, but `isClassApp?` only ever inspects the FINAL
+    /// non-forall type's spine HEAD, never an argument value, so an
+    /// un-substituted bound variable left dangling under a stripped
+    /// binder cannot change which `ExprId` ends up at that head position
+    /// — it is either itself the head (not a `Const` either way) or
+    /// buried in an argument `whnf` never looks at for this purpose.
+    ///
+    /// No production caller yet — see [`MetaCtx::is_class`]'s own doc.
+    #[allow(dead_code)]
+    fn is_class_expensive(&mut self, ty: ExprId) -> Result<Option<NameId>, MetaError> {
+        self.with_transparency(TransparencyMode::Reducible, |ctx| {
+            let mut cur = ctx.whnf(ty)?;
+            while let Node::Forall { body, .. } = ctx.node(cur) {
+                cur = ctx.whnf(body)?;
+            }
+            Ok(match ctx.node(ctx.get_app_fn(cur)) {
+                Node::Const { name: Some(n), .. } if ctx.classes.is_class_name(n) => Some(n),
+                _ => None,
+            })
+        })
     }
 
     /// `pub` since M4b-3 P3 task 4 (design spec § Accessor ledger, P3's
