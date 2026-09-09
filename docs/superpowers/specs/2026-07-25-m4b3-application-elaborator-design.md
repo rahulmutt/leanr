@@ -883,6 +883,65 @@ itself does not change: the bug is its input, not the predicate.
 elaborator tier then resumes at its existing plan's task 7 with no
 redesign, and P5 follows it as § Next step already said.
 
+## Amendment 7 (2026-09-09, post-elimMVarDeps): the prerequisite gap slice landed; P5 next
+
+P4's elaborator tier landed on top of § Amendment 6's prerequisite (its
+own task 7 resumed with no redesign, as item 6 above said it would), and
+its whole-branch review found a second, separate prerequisite: a
+`.coe` metavariable postponed under a binder and resumed by the fixpoint
+AFTER that binder closed came back with an unabstracted `fvar` where the
+oracle emits `bvar 0` — `MetaCtx::mk_binding` was a plain `abstract_fvars`
+loop, where the oracle's `mkBinding` first runs `MkBinding.elimMVarDeps`
+(`MetavarContext.lean`) over the body and every binder type. Per § item 5
+above, "infrastructure every later slice that elaborates under a binder
+needs" describes this mechanism too, and P5 is exactly the slice that
+multiplies binder producers — so this got its own spec and plan ahead of
+P5 rather than folding into it:
+`docs/superpowers/specs/2026-09-09-elim-mvar-deps-design.md`,
+`docs/superpowers/plans/2026-09-09-elim-mvar-deps.md`.
+
+**That slice has now landed.** `MetaCtx::mk_binding`
+(`crates/leanr_meta/src/metactx.rs`) runs the ported `elim_mvar_deps`
+(`crates/leanr_meta/src/mk_binding.rs`) over the body and over each
+binder type before abstracting, at the oracle's own two insertion points
+(`MetavarContext.lean:1313`, `:1320`). Four mechanisms are pinned: two
+end-to-end by corpus record (`coe/postponedThenResumedUnderBinder`, the
+DELAYED branch; `elimMVarDeps/pendingInstanceUnderBinder`, the
+PLAIN-ASSIGN branch) and two by unit test only
+(`reduce_local_context`; `get_in_scope` and `collect_forward_deps`,
+whose own planned corpus records were built, reached their filters, and
+then survived their mutations along with the whole corpus — measured,
+not assumed, because leanr's elaborator only ever abstracts a
+contiguous, most-recently-pushed telescope, so `collect_forward_deps`'s
+forward closure never fires and `get_in_scope`'s filter is subsumed by
+it). The elaboration corpus grew from 113 to 117 records; every
+pre-existing record stayed byte-identical.
+
+**The `leanr_elab/src` constraint moved, for one function.** This
+spec's own § Global constraints and the elimMVarDeps plan's Global
+Constraints both scoped `leanr_elab/src` as untouched, on the argument
+that the fix lands entirely underneath `mk_forall`/`mk_lambda`. Wiring
+`elim_mvar_deps` into `mk_binding` falsified that premise for one seam:
+its PLAIN-ASSIGN branch rewrites an unassigned non-opaque metavariable
+whose context holds an abstracted binder into `?a := ?aux n`, which made
+a previously-dormant elaborator bug live — `fun (n : Nat) => 0`, oracle-
+exact before the wiring, started failing with `unknown free variable`
+after it. Cause, measured: `crates/leanr_elab/src/synthetic/default_inst.rs`
+rung 3 of the default-instance ladder was the one rung that did not
+reinstall the goal's own local context before dereferencing a binder
+inside it — rungs 1-2 already use `ladder.rs::with_mvar_local_context`.
+The fix ports the oracle's two remaining `mvarId.withContext` sites
+(`SyntheticMVars.lean:114`, `:135`) into that one function; both broken
+queries (`num/zeroUnderBinder`, `dflt/polyInstImplicitUnderBinder`) are
+now corpus records so the regression cannot recur silently. **A future
+slice deciding what P5 may touch in `leanr_elab/src` should read this as
+the constraint moving from absolute to "additive fixes to a seam a
+measured regression names," not as a blanket lift** — every other path
+in `leanr_elab/src` stays off-limits under the original rule.
+
+**Ordering.** P5 — binder and argument breadth — is next, with no
+further prerequisite slice.
+
 ## What M4b-3 ships — and the stated non-shipping
 
 Like all of M4a and M4b so far, **M4b-3 does not ship independently
@@ -1788,14 +1847,17 @@ synthetic-mvar ladder, the fixpoint, and instance arguments — shipped in
 outParam support inside synthesis — shipped in #34; P2b-ii — the
 elaborator outParam branch — shipped in #35; P4's **Meta tier** —
 `leanr_meta::coe`, the `coeDeclAttr` decode, `transform.rs` and both
-fixture tiers — shipped in #37.
+fixture tiers — shipped in #37; metavariable-local-contexts (the
+prerequisite § Amendment 6 named) shipped in #39, with a follow-up fix
+wave in #40; P4's **elaborator tier** — `mkCoe`, `ensureHasType`,
+`ensureType`, the `.coe` ladder and reporter arms, the six `coe/*`
+records — shipped in #41.
 
-P4's elaborator tier is written and blocked, not abandoned (§ Amendment
-6). The next implementation plan is
-`docs/superpowers/plans/2026-09-08-metavariable-local-contexts.md`
-(design:
-`docs/superpowers/specs/2026-09-08-metavariable-local-contexts-design.md`),
-which gives every metavariable a truthful local context — the mechanism
-four of P4's six records need. P4's own plan then resumes at its task 7
-with no redesign, and P5 gets its own implementation plan after that,
-mirroring M4b-2's rhythm.
+P4's whole-branch review found a second prerequisite and gave it its
+own slice ahead of P5 rather than folding it into P5's breadth (§
+Amendment 7): `MkBinding.elimMVarDeps`, spec
+`docs/superpowers/specs/2026-09-09-elim-mvar-deps-design.md`, plan
+`docs/superpowers/plans/2026-09-09-elim-mvar-deps.md`. That slice has
+landed. **P5 — binder and argument breadth — is next**, with no further
+prerequisite slice, and gets its own implementation plan, mirroring
+M4b-2's rhythm.
