@@ -730,8 +730,19 @@ fn no_seam_message_names_a_completed_slice() {
 #[test]
 fn postponed_coe_under_a_binder_abstracts_via_elim_mvar_deps() {
     /// The pinned oracle's answer, dumped from `dump_elab.lean` against
-    /// `leanprover/lean4:v4.33.0-rc1` (a throwaway query, not landed as
-    /// a record — a record would fail the gate).
+    /// `leanprover/lean4:v4.33.0-rc1` and kept INLINE. That is the whole
+    /// reason this test is worth keeping now that
+    /// `coe/postponedThenResumedUnderBinder` covers the same query in
+    /// the corpus: the expected bytes live in this file, so a corpus
+    /// regeneration cannot silently move the target. The record and this
+    /// constant are checked against each other by construction — they
+    /// are byte-identical today — and the day they disagree, the
+    /// regeneration environment drifted.
+    ///
+    /// It was a throwaway query when it was first dumped: while the
+    /// `elimMVarDeps` gap was open a record for this shape would have
+    /// failed the gate, so there was nowhere to land it. Task 11 of the
+    /// `elimMVarDeps` slice landed it.
     const ORACLE: &str = concat!(
         r#"{"b":{"a":{"k":"const","n":"Nat.zero","us":[]},"f":{"a":{"a":{"i":0,"k":"bvar"},"#,
         r#""f":{"a":{"k":"const","n":"Nat","us":[]},"f":{"k":"const","n":"Wrapper.mk","us":[]},"#,

@@ -674,7 +674,7 @@ def coeQueries : List (String × String) :=
   , ("coe/postponedThenResumedUnderBinder", "fun (n : Nat) => pairW n Nat.zero")
   ]
 
-/- elimMVarDeps task 11: the differential record for the
+/-- elimMVarDeps task 11: the differential record for the
 `MkBinding.elimMVarDeps` mechanism that
 `coe/postponedThenResumedUnderBinder` does NOT reach.
 
@@ -701,8 +701,12 @@ tests that DO kill their mutations):
     `collectForwardDeps` (`:1037-1062`), which iterates the
     METAVARIABLE's own local context and so re-drops anything
     `getInScope` would have dropped. Replacing `getInScope` with `xs`
-    unfiltered leaves all 115 records byte-identical; it is caught by
-    `get_in_scope_keeps_only_the_fvars_the_mvar_can_see` and
+    unfiltered leaves all 117 records byte-identical — re-measured at
+    the shipped corpus size, including the two under-a-binder
+    default-instance records, which are among the several that reach
+    `elimMVar` with an EMPTY `getInScope` result, the one path where the
+    two filters could differ. The only tests that fail workspace-wide
+    are `get_in_scope_keeps_only_the_fvars_the_mvar_can_see` and
     `elim_mvar_deps_leaves_an_out_of_scope_metavariable_alone`.
   * `collectForwardDeps`' closure never adds anything here. leanr's
     elaborator only ever abstracts a CONTIGUOUS, most-recently-pushed
@@ -711,8 +715,9 @@ tests that DO kill their mutations):
     in. A non-suffix reversion is the tactic framework's `revert`,
     which leanr has no producer for — the same reason
     `collect_forward_deps` does not model `preserveOrder`. Making it
-    the identity leaves all 115 records byte-identical; it is caught by
-    `collect_forward_deps_pulls_in_a_dependent_later_decl` and
+    the identity leaves all 117 records byte-identical — re-measured at
+    the shipped corpus size. The only tests that fail workspace-wide
+    are `collect_forward_deps_pulls_in_a_dependent_later_decl` and
     `collect_forward_deps_closes_transitively_through_a_chain`. -/
 def elimMVarDepsQueries : List (String × String) :=
   [ ("elimMVarDeps/pendingInstanceUnderBinder",
