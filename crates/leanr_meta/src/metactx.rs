@@ -21,6 +21,7 @@ use leanr_olean::{
 };
 
 use crate::instances::{ClassTable, InstanceTable};
+use crate::local_instance::LocalInstanceStack;
 use crate::local_snapshot::LocalCtxSnapshot;
 use crate::{Config, LMVarId, MVarId, MetaError, MetavarContext, TransparencyMode};
 
@@ -78,6 +79,15 @@ pub struct MetaCtx<'e> {
     /// truncation point with no second
     /// checkpoint API. See `lctx_lookup_by_name` (the reader) below.
     pub(crate) local_names: Vec<(Option<NameId>, ExprId)>,
+    /// The local instances in scope — oracle: `Meta.Context.localInstances`
+    /// (`Basic.lean`), stored per metavariable as
+    /// `MetavarDecl.localInstances` (`MetavarContext.lean:320`).
+    ///
+    /// SPARSE, unlike `local_names` above: only a class-typed
+    /// declaration produces an entry, so this length is unrelated to
+    /// `lctx.save()` and there is no lockstep invariant to assert. See
+    /// `local_instance.rs` for the truncation rule.
+    pub(crate) local_instances: LocalInstanceStack,
     /// Memoized `LocalCtxSnapshot` of the CURRENT `lctx`/`local_names`,
     /// dropped by every writer of either. `current_lctx` rebuilds it on
     /// demand, so N metavariables minted at one binder depth share one
@@ -389,6 +399,7 @@ impl<'e> MetaCtx<'e> {
             mctx: MetavarContext::new(),
             lctx: LocalContext::default(),
             local_names: Vec::new(),
+            local_instances: LocalInstanceStack::default(),
             lctx_snapshot: None,
             fvar_gen: FVarIdGen::default(),
             guard: RecGuard::new(),
@@ -606,6 +617,9 @@ impl<'e> MetaCtx<'e> {
         );
         self.lctx.restore(checkpoint);
         self.local_names.truncate(checkpoint);
+        // Sparse, so truncated by RECORDED DEPTH rather than by index —
+        // see `local_instance.rs`'s module doc.
+        self.local_instances.truncate_to(checkpoint);
         self.lctx_snapshot = None;
     }
 

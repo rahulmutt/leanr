@@ -22,6 +22,7 @@ mod infer;
 mod instances;
 mod lazy_delta;
 mod level;
+mod local_instance;
 mod local_snapshot;
 mod metactx;
 mod mk_binding;
