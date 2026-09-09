@@ -298,19 +298,25 @@ impl<'e> MetaCtx<'e> {
         )?)
     }
 
-    /// oracle: `abstractRangeAux` (`:1165-1167`) — `elim` over the FULL
-    /// `xs` on the CALLER's cache, then abstract only the first `i`.
+    /// oracle: `abstractRangeAux` (`:1165-1167`) — the oracle's
+    /// STRUCTURAL `elim` over the FULL `xs`, carrying the CALLER's
+    /// cache, then abstract only the first `i`.
     ///
-    /// Distinct from `abstract_range` above in exactly one respect, and
-    /// it is the respect that matters: the oracle's `abstractRangeAux`
-    /// runs on the ambient cache and the only reset in `MkBinding` is
-    /// `withFreshCache do mkAuxMVarType …` (`:1205`). Allocating a fresh
-    /// cache per abstraction site instead would not merely recompute:
-    /// for an unassigned `syntheticOpaque` subterm shared between the
-    /// metavariable's own type and a binder type, each site would take
-    /// the `to_revert`-non-empty path again and mint a DISTINCT
-    /// auxiliary metavariable delayed-assigned back to the same
-    /// original, where the oracle's shared cache mints one.
+    /// Two things distinguish it from `abstract_range` above, and both
+    /// are the oracle's:
+    ///
+    /// 1. **The cache is the caller's.** The only reset in `MkBinding`
+    ///    is `withFreshCache do mkAuxMVarType …` (`:1205`), so every
+    ///    abstraction site inside one `mkAuxMVarType` shares one cache.
+    ///    A fresh cache per site would re-elaborate a NESTED shared
+    ///    subterm and mint a second auxiliary metavariable for it.
+    /// 2. **The entry is structural**, `visit_guarded` and not `elim`:
+    ///    oracle `:1166` calls `elim`, the structural function, which
+    ///    does not reach `visit`'s `checkCache` (`:1102`). So a subterm
+    ///    shared as the whole of two sites' inputs re-enters `elimMVar`
+    ///    at each, minting one auxiliary metavariable per site — while a
+    ///    subterm shared NESTED inside them is reached through `elim`
+    ///    from within `visit` and hits the cache, minting one in total.
     fn abstract_range_aux(
         &mut self,
         xs: &[ExprId],
@@ -318,7 +324,7 @@ impl<'e> MetaCtx<'e> {
         e: ExprId,
         cache: &mut ElimCache,
     ) -> Result<ExprId, MetaError> {
-        let e = self.elim(xs, e, cache)?;
+        let e = self.visit_guarded(xs, e, cache)?;
         Ok(abstract_fvars(
             self.scratch,
             Some(self.view.store),
@@ -328,16 +334,21 @@ impl<'e> MetaCtx<'e> {
         )?)
     }
 
-    /// oracle: `elim` (`:1101`) — the cached entry to the traversal.
+    /// oracle: `visit` (`:1101`) — this port calls it `elim`. The
+    /// cached entry to the traversal: the `hasMVar` guard, then
+    /// `checkCache` (`:1102`), then the structural function.
     ///
-    /// **The port's two names are inverted relative to the oracle's.**
-    /// In `v4.33.0-rc1` the oracle's `elim` (`:1104`) is the STRUCTURAL
-    /// function and its `visit` (`:1101`) is the cached, `hasMVar`-
-    /// guarded entry; here `elim` is the entry and `visit` the
-    /// structural one. The roles are transcribed correctly — only the
-    /// names are swapped — so a reader diffing the two side by side
-    /// should pair this function with oracle `visit`, and the `visit`
-    /// below with oracle `elim`.
+    /// **The port's two names are INVERTED relative to the oracle's**,
+    /// and the inversion is a trap worth naming: in `v4.33.0-rc1` the
+    /// oracle's `visit` (`:1101`) is this cached entry and the oracle's
+    /// `elim` (`:1104`) is the structural function, while here the names
+    /// are the other way round. So a call reading `self.elim(…)` enters
+    /// at the CACHED level, not the structural one — which is why the
+    /// two sites that must enter structurally (`abstract_range_aux`,
+    /// oracle `:1166`; and `elim_app`'s post-beta re-entry, oracle
+    /// `:1238`) go through `visit_guarded` instead. `checkCache` appears
+    /// exactly once in the whole `MkBinding` traversal, at oracle
+    /// `:1102`, which is this function.
     fn elim(
         &mut self,
         xs: &[ExprId],
@@ -356,8 +367,33 @@ impl<'e> MetaCtx<'e> {
         Ok(out)
     }
 
-    /// oracle: `visit` (`:1104`) — the structural arms (see `elim`
-    /// above on the inverted names). An application is
+    /// The oracle's STRUCTURAL `elim` (`:1104`) entered directly — this
+    /// port's `visit`, under the same budget and depth guard `elim`
+    /// applies, but with NO cache lookup and no cache insert.
+    ///
+    /// Its two callers are the two places the oracle names `elim` rather
+    /// than `visit`: `abstractRangeAux` (`:1166`) and `elimApp`'s
+    /// post-beta re-entry (`:1238`). Entering at `elim` there instead
+    /// would consult a cache the oracle does not consult at those
+    /// points, and for a shared TOP-LEVEL subterm that is observable:
+    /// the oracle re-enters `elimMVar` per site and mints one auxiliary
+    /// metavariable each, where a cache hit would mint one in total.
+    /// Nested shared subterms still share, because the recursive calls
+    /// `visit` makes go through `elim` and so do hit the cache — which
+    /// is exactly the oracle's split.
+    fn visit_guarded(
+        &mut self,
+        xs: &[ExprId],
+        e: ExprId,
+        cache: &mut ElimCache,
+    ) -> Result<ExprId, MetaError> {
+        self.step()?;
+        self.guarded(|ctx| ctx.visit(xs, e, cache))
+    }
+
+    /// oracle: `elim` (`:1104`) — this port calls it `visit` (see
+    /// `elim` above on the inverted names). The structural arms; no
+    /// cache is consulted or populated here. An application is
     /// decomposed into head plus arguments and routed to `elim_app`,
     /// because the head being a metavariable is what `elim_mvar` needs to
     /// see.
@@ -528,7 +564,14 @@ impl<'e> MetaCtx<'e> {
                         // passed as-is; reversing here would swap which
                         // binder each argument substitutes for.
                         let applied = self.beta_rev(new_f, &visited)?;
-                        return self.elim(xs, applied, cache);
+                        // `visit_guarded`, not `elim`: oracle `:1238`
+                        // writes `elim xs <| newF.betaRev …`, the
+                        // STRUCTURAL function, so the beta-reduct is not
+                        // looked up in — nor added to — the cache. Same
+                        // cached-vs-structural distinction as
+                        // `abstract_range_aux`; see `elim`'s note on the
+                        // port's inverted names.
+                        return self.visit_guarded(xs, applied, cache);
                     }
                     return self.elim_app(xs, new_f, args, cache);
                 }
@@ -1595,22 +1638,118 @@ mod tests {
             ctx.lctx_restore(cp);
         });
     }
-    /// Fix round 1 (task 9 review, Important 3): the `withFreshCache`
-    /// SCOPE, oracle `:1205`. The reset wraps the whole of
-    /// `mkAuxMVarType`, not each abstraction inside it — and the
-    /// difference is observable, not merely a matter of recomputation.
+    /// Fix round 1 (task 9 review, Important 3), retargeted in fix
+    /// round 2: the `withFreshCache` SCOPE, oracle `:1205`. The reset
+    /// wraps the whole of `mkAuxMVarType`, not each abstraction inside
+    /// it, and the difference is observable rather than merely a matter
+    /// of recomputation.
     ///
     /// `?o : Sort 0` is an unassigned `syntheticOpaque` metavariable
-    /// whose context holds `a`; it appears BOTH as the original `?m`'s
-    /// own type and as `b`'s binder type, so `mk_aux_mvar_type` meets it
-    /// at two different abstraction sites. With one cache spanning the
-    /// function (the oracle's scope) both sites resolve to the SAME
-    /// auxiliary metavariable. With a fresh cache per abstraction site,
-    /// each site would take the `to_revert`-non-empty path again and
-    /// mint a distinct auxiliary metavariable, each delayed-assigned
-    /// back to the same `?o`.
+    /// whose context holds `a`. It appears NESTED — as `f ?o`, the
+    /// original `?m`'s own type, and as `g ?o`, `b`'s binder type — so
+    /// `mk_aux_mvar_type` meets it at two different abstraction sites,
+    /// each time below an application node.
+    ///
+    /// Nested is the configuration the oracle genuinely shares, and the
+    /// nesting is load-bearing, not incidental. `abstractRangeAux`
+    /// (`:1166`) enters at the oracle's STRUCTURAL `elim`, which does
+    /// not consult the cache; the cache is consulted only from the
+    /// oracle's `visit` (`checkCache`, `:1102`), which is where the
+    /// recursive descent into `f ?o`'s argument goes. So a subterm
+    /// shared BELOW the top of two sites is eliminated once and both
+    /// sites name the same auxiliary metavariable, while a subterm that
+    /// IS the whole of both sites' inputs re-enters `elimMVar` at each
+    /// and gets one auxiliary metavariable per site. This test pins the
+    /// first case; `visit_guarded` is what keeps the second one honest.
     #[test]
-    fn elim_mvar_deps_mints_one_aux_for_an_opaque_subterm_shared_across_abstraction_sites() {
+    fn elim_mvar_deps_mints_one_aux_for_a_nested_opaque_subterm_shared_across_sites() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            // `f` and `g` are declared BEFORE `a`, so neither can join
+            // `to_revert`; they exist only to put `?o` under an
+            // application node at both sites.
+            let f = fresh_fvar(ctx, sort0, "f");
+            let g = fresh_fvar(ctx, sort0, "g");
+            let a = fresh_fvar(ctx, sort0, "a");
+            let lctx_a = ctx.current_lctx();
+            let (o, _oid) = ctx
+                .mk_aux_mvar_at(lctx_a, sort0, crate::MVarKind::SyntheticOpaque)
+                .expect("`?o` under `a`");
+            let g_o = ctx.scratch.expr_app(base, g, o).expect("`g ?o`");
+            let f_o = ctx.scratch.expr_app(base, f, o).expect("`f ?o`");
+            // `b : g ?o`, so `?o` is nested in a binder type of
+            // `to_revert`; `?m : f ?o` nests it in the original's own
+            // type.
+            let b = fresh_fvar(ctx, g_o, "b");
+            let lctx_ab = ctx.current_lctx();
+            let (m, _mid) = ctx
+                .mk_aux_mvar_at(lctx_ab, f_o, crate::MVarKind::Natural)
+                .expect("`?m : f ?o` under `a`, `b`");
+
+            let out = ctx.elim_mvar_deps(&[a, b], m).expect("elim_mvar_deps");
+            let new_head = ctx.get_app_fn(out);
+            let Node::MVar { id: Some(h) } = ctx.node(new_head) else {
+                panic!("head should be the auxiliary metavariable");
+            };
+            let new_ty = ctx.mctx().decl(crate::MVarId(h)).expect("declared").ty;
+
+            // `forall (a : Sort 0) (b : g (?aux #0)), f (?aux #1)` — the
+            // two occurrences differ only in de Bruijn index, because the
+            // binder type is abstracted over a shorter prefix.
+            let Node::Forall { body: inner, .. } = ctx.node(new_ty) else {
+                panic!("expected the outer `a` binder, got {:?}", ctx.node(new_ty));
+            };
+            let Node::Forall {
+                binder_type: b_ty,
+                body: inner_body,
+                ..
+            } = ctx.node(inner)
+            else {
+                panic!("expected the `b` binder, got {:?}", ctx.node(inner));
+            };
+            let Node::App { arg: in_binder, .. } = ctx.node(b_ty) else {
+                panic!("expected `g (?aux #0)`, got {:?}", ctx.node(b_ty));
+            };
+            let Node::App { arg: in_body, .. } = ctx.node(inner_body) else {
+                panic!("expected `f (?aux #1)`, got {:?}", ctx.node(inner_body));
+            };
+            let head_in_binder = ctx.get_app_fn(in_binder);
+            let head_in_body = ctx.get_app_fn(in_body);
+            let (Node::MVar { id: Some(hb) }, Node::MVar { id: Some(hy) }) =
+                (ctx.node(head_in_binder), ctx.node(head_in_body))
+            else {
+                panic!("both occurrences should be headed by a metavariable");
+            };
+            assert_eq!(
+                crate::MVarId(hb),
+                crate::MVarId(hy),
+                "ONE auxiliary metavariable for the NESTED shared `?o`: the \
+                 oracle's `withFreshCache` wraps the whole of `mkAuxMVarType` \
+                 (`:1205`), so both sites share a cache, and a nested occurrence \
+                 is reached through the cached entry"
+            );
+            ctx.lctx_restore(cp);
+        });
+    }
+    /// The other half of `visit_guarded`'s split, and the half fix round
+    /// 1 got wrong: a subterm shared as the WHOLE of two abstraction
+    /// sites' inputs gets one auxiliary metavariable PER SITE.
+    ///
+    /// Same shape as the nested test above with the applications
+    /// removed: `?o` is `?m`'s own type outright, and `b`'s binder type
+    /// outright. `abstractRangeAux` (`:1166`) enters at the oracle's
+    /// structural `elim`, which never reaches `checkCache` (`:1102`), so
+    /// each site re-enters `elimMVar` and mints its own. No wrong term
+    /// results — both auxiliaries are delayed-assigned back to the same
+    /// `?o` over the same fvars, which this test also pins — but the
+    /// COUNT differs, and a count that drifts from the oracle's drifts
+    /// the name generator with it.
+    #[test]
+    fn elim_mvar_deps_mints_one_aux_per_site_for_a_top_level_shared_opaque_subterm() {
         with_ctx(|ctx| {
             let base = Some(ctx.view.store);
             let zero = ctx.scratch.level_zero(base).expect("level");
@@ -1619,11 +1758,9 @@ mod tests {
             let cp = ctx.lctx_checkpoint();
             let a = fresh_fvar(ctx, sort0, "a");
             let lctx_a = ctx.current_lctx();
-            let (o, _oid) = ctx
+            let (o, oid) = ctx
                 .mk_aux_mvar_at(lctx_a, sort0, crate::MVarKind::SyntheticOpaque)
                 .expect("`?o` under `a`");
-            // `b : ?o`, so `?o` is BOTH a binder type in `to_revert` and
-            // (below) the original metavariable's own type.
             let b = fresh_fvar(ctx, o, "b");
             let lctx_ab = ctx.current_lctx();
             let (m, _mid) = ctx
@@ -1637,9 +1774,7 @@ mod tests {
             };
             let new_ty = ctx.mctx().decl(crate::MVarId(h)).expect("declared").ty;
 
-            // `forall (a : Sort 0) (b : ?aux #0), ?aux #1` — the two
-            // occurrences differ only in de Bruijn index because the
-            // binder type is abstracted over a shorter prefix.
+            // `forall (a : Sort 0) (b : ?aux1 #0), ?aux2 #1`.
             let Node::Forall { body: inner, .. } = ctx.node(new_ty) else {
                 panic!("expected the outer `a` binder, got {:?}", ctx.node(new_ty));
             };
@@ -1651,19 +1786,34 @@ mod tests {
             else {
                 panic!("expected the `b` binder, got {:?}", ctx.node(inner));
             };
-            let head_in_binder = ctx.get_app_fn(b_ty);
-            let head_in_body = ctx.get_app_fn(inner_body);
-            let (Node::MVar { id: Some(hb) }, Node::MVar { id: Some(hy) }) =
-                (ctx.node(head_in_binder), ctx.node(head_in_body))
-            else {
+            let (Node::MVar { id: Some(hb) }, Node::MVar { id: Some(hy) }) = (
+                ctx.node(ctx.get_app_fn(b_ty)),
+                ctx.node(ctx.get_app_fn(inner_body)),
+            ) else {
                 panic!("both occurrences should be headed by a metavariable");
             };
-            assert_eq!(
-                crate::MVarId(hb),
-                crate::MVarId(hy),
-                "ONE auxiliary metavariable for the shared `?o`, not one per \
-                 abstraction site — the oracle's `withFreshCache` wraps the whole \
-                 of `mkAuxMVarType` (`:1205`), not each abstraction inside it"
+            let (aux1, aux2) = (crate::MVarId(hb), crate::MVarId(hy));
+            assert_ne!(
+                aux1, aux2,
+                "one auxiliary metavariable PER SITE for a TOP-LEVEL shared `?o`: \
+                 `abstractRangeAux` (`:1166`) enters at the oracle's structural \
+                 `elim`, which never reaches `checkCache` (`:1102`)"
+            );
+            for aux in [aux1, aux2] {
+                let d = ctx
+                    .mctx()
+                    .delayed_assignment(aux)
+                    .expect("each auxiliary is delayed-assigned");
+                assert_eq!(
+                    d.mvar_id_pending, oid,
+                    "both point back at the SAME original — the extra mint is a \
+                     count difference, not a wrong term"
+                );
+                assert_eq!(d.fvars, vec![a], "over the same reverted fvars");
+            }
+            assert!(
+                ctx.mctx().assignment(oid).is_none(),
+                "the syntheticOpaque original stays unassigned throughout"
             );
             ctx.lctx_restore(cp);
         });
