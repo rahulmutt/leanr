@@ -147,9 +147,8 @@ impl<'e> TermElabM<'e> {
     /// bound before `store_mut()` — the same disjoint-field-borrow
     /// convention `ident.rs` uses): NOT the self-contained-scratch
     /// `base = None` `mk_fresh_expr_mvar` uses below. A fresh level
-    /// mvar's `Sort ?u` is fed into `elab_term_ensuring_type`
-    /// (`binder::elab_type`, M4b-2), whose `is_def_eq` — on a Sort-vs-Sort
-    /// compare — round-trips the mvar's `LevelId` through
+    /// mvar's `Sort ?u` reaches an `is_def_eq` on a Sort-vs-Sort
+    /// compare, and THAT is what round-trips the mvar's `LevelId` through
     /// `level.rs::level_normalize` (`to_level` then `intern_level`),
     /// ALWAYS with `base = Some(view.store)` (that module's own fixed
     /// convention, never `None`). `intern_nat`'s `base`-first dedup
@@ -168,6 +167,16 @@ impl<'e> TermElabM<'e> {
     /// `level.rs::fresh_level_mvar`'s own convention exactly — makes the
     /// mint and every later re-intern agree on the same persistent-backed
     /// ids, closing the gap.
+    ///
+    /// WHICH `is_def_eq` that is has moved, and the argument has not.
+    /// In M4b-2 it was `elab_term_ensuring_type`'s trailing defeq check,
+    /// reached through `builtin::binder::elab_type`. Since M4b-3 P4
+    /// task 9 `elab_type` is `elab_term` + `ensure_type`, and the
+    /// Sort-vs-Sort compare is `ensure_type`'s own — `coe.rs`'s
+    /// `is_def_eq(ty, sort_u)`, against a `Sort ?u` built from a level
+    /// mvar THIS function minted moments earlier. The interning
+    /// argument is about where the mvar is MINTED, not about which
+    /// callee compares it, so it survives the move unchanged.
     pub fn mk_fresh_level_mvar(&mut self) -> Result<LevelId, ElabError> {
         let idx = self.level_mvar_gen;
         self.level_mvar_gen += 1;
@@ -295,6 +304,8 @@ impl<'e> TermElabM<'e> {
         dispatch::dispatch(self, elem, kinds, expected)
     }
 
+    /// oracle: `elabTermEnsuringType` = `elabTerm` then `ensureHasType`
+    /// (`TermElabM.lean`); coercion-inserting since M4b-3 P4.
     pub fn elab_term_ensuring_type(
         &mut self,
         elem: &SynElem,
@@ -302,16 +313,7 @@ impl<'e> TermElabM<'e> {
         expected: Option<ExprId>,
     ) -> Result<ExprId, ElabError> {
         let e = self.elab_term(elem, kinds, expected)?;
-        if let Some(t) = expected {
-            let inferred = self.mctx.infer_type(e)?;
-            if !self.mctx.is_def_eq(inferred, t)? {
-                return Err(ElabError::TypeMismatch {
-                    expected: t,
-                    got: inferred,
-                });
-            }
-        }
-        Ok(e)
+        self.ensure_has_type(elem, expected, e)
     }
 
     /// oracle: `elabTermAndSynthesize` (`SyntheticMVars.lean:696-698`) —

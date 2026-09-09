@@ -706,6 +706,34 @@ impl<'e> MetaCtx<'e> {
     /// from `infer.rs::rebuild_forall`'s `None`-value branch (infer.rs:802),
     /// the crate's own oracle-verified abstraction loop, since the kernel's
     /// `mk_pi`/`mk_lambda` are not re-exported from `leanr_kernel`.
+    ///
+    /// # UNMODELLED: `MkBinding.elimMVarDeps`
+    ///
+    /// The oracle's `mkBinding` is not a bare abstraction. Before it
+    /// abstracts, it runs `elimMVarDeps` (`MetavarContext.lean`) over
+    /// `body`: an unassigned metavariable whose own local context
+    /// contains the fvars being abstracted is replaced by a fresh
+    /// delayed-assigned metavariable APPLIED to them, so the occurrence
+    /// abstracts like any other argument and the original metavariable
+    /// stays assignable in its own context. This loop has no counterpart
+    /// — it abstracts what is there and leaves a surviving mvar alone.
+    ///
+    /// The observable consequence: when such a metavariable is assigned
+    /// LATER (the elaborator's synthetic-mvar fixpoint resuming a
+    /// postponed goal after the binder has closed), its value's free
+    /// variables were never abstracted, so leanr emits an unabstracted
+    /// `fvar` where the oracle emits a `bvar`. Measured, and pinned
+    /// executably one crate up by `leanr_elab`'s
+    /// `postponed_coe_under_a_binder_leaves_an_unabstracted_fvar_pending_elim_mvar_deps`
+    /// (`tests/seam_audit.rs`), with the full diagnosis in the M4b-3 P4
+    /// task-7 report.
+    ///
+    /// Deliberately NOT a refusal, unlike the let-decl case below: that
+    /// one rejects an input this function cannot express at all, while
+    /// this one is a gap in a path that is correct for every telescope
+    /// with no surviving mvar — which is every caller in M4b-3 except
+    /// the one above. Closing it means porting `elimMVarDeps`, a
+    /// non-additive change to this crate, and belongs to its own slice.
     fn mk_binding(
         &mut self,
         is_lambda: bool,

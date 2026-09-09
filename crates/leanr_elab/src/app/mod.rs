@@ -42,14 +42,18 @@
 //! `literal_kinds_are_registered_not_deferred` gates that it stays gone.
 //!
 //! ```text
-//!   fType still an unassigned mvar after synthesis ... P4/P5 args.rs (`main`'s
-//!     synthesize_pending_and_normalize_fun_type) — CoeFun (P4) or
-//!     expected-type propagation into `fun` binder domains (P5). A
-//!     genuinely non-function fType at the same site is NOT a seam: it
-//!     reports `ElabError::FunctionExpected`, matching the oracle's own
+//!   fType still an unassigned mvar after synthesis ... P5  args.rs (`main`'s
+//!     synthesize_pending_and_normalize_fun_type) — expected-type
+//!     propagation into `fun` binder domains for the M4b-2 `fun` shape,
+//!     still owed. `coerceToFunction?` (CoeFun) is tried FIRST and, as
+//!     of M4b-3 P4 task 8, is no longer part of this seam: it either
+//!     bridges the type and the state machine proceeds, or answers
+//!     `none` and this row is what remains. A genuinely non-function
+//!     fType at the same site is NOT a seam either: it reports
+//!     `ElabError::FunctionExpected`, matching the oracle's own
 //!     diagnostic (`over_application_reports_function_expected`,
 //!     `tests/seam_audit.rs`).
-//!   coercions (CoeT/CoeFun/CoeSort, mkCoe) ........... P4  args.rs (ensureArgType)
+//!   coercions (CoeT/CoeFun/CoeSort, mkCoe) ........... P4 SHIPPED — coe.rs, args.rs
 //!   optParam defaults / autoParam .................... P5  args.rs
 //!   implicit-lambda insertion ........................ P5  elab.rs, and `@t`/`@(t)` here
 //!   overload resolution (candidates > 1) ............. resolve_global slice  overload.rs
@@ -72,22 +76,23 @@
 //! `fixture_declares_no_undecoded_elab_attributes` is the source-text
 //! backstop keeping it out of the committed corpus in the meantime.
 //!
-//! Two of those are not reachable from any source term the hermetic
+//! One of those is not reachable from any source term the hermetic
 //! `Elab0` fixture can express, and `tests/seam_audit.rs` records why
 //! rather than pretending otherwise (a THIRD, the P2 instance-implicit
-//! seams, no longer belongs on this list as of M4b-3 P2a task 7:
+//! seams, no longer belonged on this list as of M4b-3 P2a task 7:
 //! `Elab0.lean` now declares `Wrap`/`Pair`/`NoInst`/`Dflt`, and
 //! `args.rs`'s `InstImplicit` arm and the three `inst_mvars` guards are
 //! real code, exercised by `tests/oracle_elab.rs`'s `tc/*` records and
-//! `tests/synthetic_smoke.rs`):
+//! `tests/synthetic_smoke.rs`; a FOURTH, the P4 coercion seam, no
+//! longer belongs here either as of M4b-3 P4: coercion insertion
+//! (`coe.rs`'s `mk_coe`/`ensure_has_type`/`ensure_type`) shipped, so
+//! `elab_and_add_new_arg`'s `ensureArgType` inserts a `CoeT` coercion on
+//! a defeq mismatch instead of erroring, and `ElabError::TypeMismatch`
+//! now names only `mk_coe`'s own immediate failure, not a
+//! missing-coercion seam — see `error.rs`'s doc on that variant):
 //!   * the P5 optParam/autoParam seam — no fixture parameter carries
 //!     either wrapper, so it is asserted white-box instead
-//!     (`app_smoke.rs`'s `explicit_mode_skips_the_optparam_default`);
-//!   * the P4 coercion seam, which is an `ElabError::TypeMismatch` from
-//!     `elab_and_add_new_arg`'s `ensureArgType` rather than an
-//!     `UnsupportedSyntax` — that IS M4b-1's documented behavior (error
-//!     on a defeq mismatch instead of inserting a coercion), so it is a
-//!     deliberate wrong-shaped seam, not a missing one.
+//!     (`app_smoke.rs`'s `explicit_mode_skips_the_optparam_default`).
 
 pub mod args;
 pub mod expand;

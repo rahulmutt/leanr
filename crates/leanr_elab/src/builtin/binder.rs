@@ -19,8 +19,7 @@ use crate::synthetic::PostponeBehavior;
 
 /// oracle: `elabType t` = `elabTerm t (mkSort (mkLevelMVar u))` then
 /// ensure-is-type. Here: a fresh level mvar `?u`, a `Sort ?u` expected
-/// type, and `elab_term_ensuring_type` (which drives `is_def_eq` between
-/// the inferred type and `Sort ?u`). Returns the elaborated type expr.
+/// type, `elab_term`, and `ensure_type`. Returns the elaborated type expr.
 pub(crate) fn elab_type(
     elab: &mut TermElabM,
     elem: &SynElem,
@@ -32,7 +31,12 @@ pub(crate) fn elab_type(
         .store_mut()
         .expr_sort(None, u)
         .map_err(leanr_meta::MetaError::from)?;
-    elab.elab_term_ensuring_type(elem, kinds, Some(sort))
+    // oracle: `elabType stx = elabTerm stx (mkSort ?u)` then `ensureType`
+    // (`TermElabM.lean:1951-1954`) — the second half is real since M4b-3
+    // P4 task 9; before that `elab_term_ensuring_type`'s `isDefEq` stood
+    // in for it, which is exact only while no domain can be coerced.
+    let e = elab.elab_term(elem, kinds, Some(sort))?;
+    elab.ensure_type(elem, e)
 }
 
 /// oracle: `elabArrow` (Binders.lean:293). `A -> B`: elaborate `A` and

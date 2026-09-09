@@ -594,6 +594,48 @@ def outParamQueries : List (String × String) :=
   , ("outParam/getElemAscribed",  "(Get.get cell 0 : Unit)")
   ]
 
+/-- M4b-3 P4 (design spec § P4, § Amendment 5 items 9-10): coercion
+insertion. The dumper elaborates closed terms only, so a coerced value
+that must be a local is written as a `fun` binder.
+  * `coe/natToInt` — `(n : Int)` with `n : Nat`: `ensureHasType` →
+    `mkCoe` → `CoeT Nat n Int` → `expandCoe` → `Int.ofNat n`. Dies if
+    `expand_coe` is the identity (the term would carry `CoeT.coe`).
+  * `coe/twoStep` — `(n : Big)`: solvable only through `CoeTC`'s
+    transitive instance; emits `Big.ofInt (Int.ofNat n)`.
+  * `coe/argPosition` — `takesInt n`: the `ensureArgType` site
+    (`App.lean:54-62`), not the ascription site. Dies if `args.rs`'s
+    rewire is reverted (`TypeMismatch`).
+  * `coe/postponedThenResumed` — `pairW Nat.zero Nat.zero`: `CoeT Nat
+    Nat.zero (Wrapper ?a)` is `.undef` at the first argument (`?a`
+    unassigned), so `mkCoe` registers a `.coe` mvar; the second argument
+    assigns `?a := Nat`; the entry point's fixpoint resumes the
+    coercion (`SyntheticMVars.lean:552-560`). Dies if the ladder's `Coe`
+    arm is reverted to its seam. Deliberately binder-FREE, unlike its
+    three siblings: the same query under a `fun` (`fun (n : Nat) =>
+    pairW n Nat.zero`) is a coercion resumed AFTER its binder closed,
+    which the oracle handles inside `mkLambdaFVars` via
+    `MkBinding.elimMVarDeps` (`MetavarContext.lean`) — a mechanism
+    leanr's `mk_lambda` (`leanr_meta/src/metactx.rs`, a plain
+    `abstract_fvars`) does not model, so leanr leaks the free variable
+    where the oracle emits `bvar 0`. Unmodelled and carried, not
+    silently accepted: `mk_binding`'s own doc records the gap, and
+    `leanr_elab`'s
+    `postponed_coe_under_a_binder_leaves_an_unabstracted_fvar_pending_elim_mvar_deps`
+    (`tests/seam_audit.rs`) pins the divergent output so it trips the
+    day the gap closes. Full diagnosis in the M4b-3 P4 task-7 report.
+  * `coe/funApp` (task 8) — `g Nat.zero` with `g : Fn`:
+    `coerceToFunction?` in `synthesizePendingAndNormalizeFunType`.
+  * `coe/sortDomain` (task 9) — `fun (c : Carrier) (x : c) => x`:
+    `ensureType` → `coerceToSort?` on the binder domain. -/
+def coeQueries : List (String × String) :=
+  [ ("coe/natToInt",             "fun (n : Nat) => (n : Int)")
+  , ("coe/twoStep",              "fun (n : Nat) => (n : Big)")
+  , ("coe/argPosition",          "fun (n : Nat) => takesInt n")
+  , ("coe/postponedThenResumed", "pairW Nat.zero Nat.zero")
+  , ("coe/funApp",               "fun (g : Fn) => g Nat.zero")
+  , ("coe/sortDomain",           "fun (c : Carrier) (x : c) => x")
+  ]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -607,7 +649,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>

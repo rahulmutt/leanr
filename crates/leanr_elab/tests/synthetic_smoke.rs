@@ -1308,3 +1308,58 @@ fn a_synthetic_mvar_resumes_under_its_own_local_context() {
         );
     });
 }
+
+/// The `.coe` ladder arm's FIRST branch (`SyntheticMVars.lean:546-551`,
+/// M4b-3 P4): when the types have become defeq under `withDefault`
+/// since the coercion was postponed, the mvar is assigned `e` ITSELF —
+/// no synthesis, no expansion. `Nat` vs `NatAlias` (a semireducible
+/// alias) is the discriminating shape: defeq at `Default`, NOT at
+/// `Instances`, so the second branch's `CoeT Nat e NatAlias` search
+/// would answer `.none` (design spec § Amendment 5 item 10). Kill:
+/// drop the first branch and this mvar stays unassigned / the ladder
+/// reports `StuckCoercion`.
+#[test]
+fn coe_arm_assigns_e_itself_when_types_became_defeq() {
+    support::with_app_harness("Nat.zero", |app| {
+        let kinds = support::any_kinds();
+        let zero = support::fixture_const(app, "Nat.zero");
+        let alias = support::fixture_const(app, "NatAlias");
+        let (mv, id) = app
+            .elab
+            .mk_fresh_expr_mvar_of_kind(alias, leanr_meta::MVarKind::SyntheticOpaque)
+            .expect("mvar");
+        app.elab.register_synthetic_mvar(
+            support::any_syn_elem(),
+            id,
+            leanr_elab::synthetic::state::SyntheticMVarKind::Coe {
+                expected_type: alias,
+                e: zero,
+            },
+        );
+        app.elab
+            .synthesize_synthetic_mvars_no_postponing(&kinds)
+            .expect("the arm assigns without searching");
+        let got = app.elab.mctx.instantiate_mvars(mv).expect("inst");
+        assert_eq!(got, zero, "assigned to `e` itself, not to an expansion");
+    });
+}
+
+/// The `.coe` arm's SECOND branch (`:552-560`) coerces once the
+/// expected type is known, and the reporter's `.coe` arm (`:304-310`)
+/// names a coercion that never became solvable. `pairW n` alone leaves
+/// `?a` unassigned forever: `CoeT Nat n (Wrapper ?a)` is `.undef` at
+/// registration AND at every retry, so the fixpoint ends with the
+/// `.coe` mvar pending and the reporter raises `StuckCoercion` — the
+/// oracle's `throwTypeMismatchError … "failed to create type class
+/// instance for …"`. The dumper drops this query on the oracle side —
+/// measured against the pin, `dump_elab` prints `elaboration failed for
+/// … Application type mismatch: the argument n has type Nat but is
+/// expected to have type Wrapper (?m n)` and emits nothing — which is
+/// why it is a smoke test and not a record.
+#[test]
+fn stuck_coercion_is_reported_by_the_coe_reporter_arm() {
+    match support::elab_and_synthesize("fun (n : Nat) => pairW n") {
+        Err(leanr_elab::ElabError::StuckCoercion { .. }) => {}
+        other => panic!("expected StuckCoercion, got {other:?}"),
+    }
+}

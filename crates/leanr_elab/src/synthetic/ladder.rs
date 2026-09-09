@@ -108,7 +108,15 @@ impl<'e> TermElabM<'e> {
     /// caller here is `Result`-based and `catch_unwind` appears nowhere
     /// in the workspace, so an unwinding caller cannot observe the
     /// un-restored context.
-    fn with_mvar_local_context<R>(&mut self, mvar_id: MVarId, f: impl FnOnce(&mut Self) -> R) -> R {
+    ///
+    /// `pub(super)` since M4b-3 P4: the stuck reporter needs it too, for
+    /// the same reason — the oracle wraps its `.coe` arm in
+    /// `mvarId.withContext` as well (`SyntheticMVars.lean:305`).
+    pub(super) fn with_mvar_local_context<R>(
+        &mut self,
+        mvar_id: MVarId,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
         let Some(snapshot) = self.mctx.mvar_lctx(mvar_id) else {
             return f(self);
         };
@@ -143,9 +151,9 @@ impl<'e> TermElabM<'e> {
             SyntheticMVarKind::Postponed { ref ctx } => {
                 elab.resume_postponed(ctx, &decl.stx, mvar_id, postpone_on_error, kinds)
             }
-            SyntheticMVarKind::Coe { .. } => Err(ElabError::UnsupportedSyntax(
-                "coercion synthetic mvars require coercion insertion — M4b-3 P4".to_string(),
-            )),
+            SyntheticMVarKind::Coe { expected_type, e } => {
+                elab.synthesize_coe_mvar(mvar_id, expected_type, e)
+            }
             SyntheticMVarKind::Tactic => {
                 // oracle: the `.tactic` arm runs the tactic only when
                 // `runTactics && !(delayOnMVars && (← mvarId.getType >>=

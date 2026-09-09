@@ -13,8 +13,15 @@ pub enum ElabError {
     UnsupportedSyntax(String),
     UnknownIdent(String),
     AmbiguousIdent(String),
-    /// ensureHasType mismatch. In slice 1 this errors; coercion
-    /// insertion (mkCoe) is M4b-3.
+    /// `ensureHasType`'s mismatch: `mkCoe`'s `.none` answer and its
+    /// caught `MetaError::CoeExpansionMismatch` both land here
+    /// (`TermElabM.lean:1307`, `:1313-1317`, `:1322`) — the coercion
+    /// search or a post-expansion check genuinely failed, as opposed to
+    /// `StuckCoercion` (not-yet-solvable). Before M4b-3 P4 this was
+    /// raised directly by every defeq-mismatch site; since P4 it is
+    /// raised only from inside `coe::mk_coe`/`ensure_has_type`, reached
+    /// through `elab_term_ensuring_type`, the `($e :)` ascription arm,
+    /// and `elab_and_add_new_arg`'s `ensureArgType`.
     TypeMismatch {
         expected: ExprId,
         got: ExprId,
@@ -57,6 +64,16 @@ pub enum ElabError {
     StuckSyntheticMVar {
         goal: ExprId,
     },
+    /// oracle: the stuck reporter's `.coe` arm (`SyntheticMVars.lean:304-310`)
+    /// — `throwTypeMismatchError header expectedType (← inferType e) e f?
+    /// "failed to create type class instance for {mvar type}"`. A
+    /// distinct variant from `TypeMismatch` (which `mkCoe`'s IMMEDIATE
+    /// failure keeps, `TermElabM.lean:1317,1322`) so a test can tell
+    /// "stuck" from "impossible". The mvar's type IS `expected`.
+    StuckCoercion {
+        expected: ExprId,
+        got: ExprId,
+    },
     /// oracle: `synthesizeInstMVarCore`'s assignment-mismatch throws
     /// (`TermElabM.lean:1265-1272`) — the synthesized instance is not
     /// defeq to the one typing already inferred. Two distinct call
@@ -76,6 +93,14 @@ pub enum ElabError {
     FunctionExpected {
         f: ExprId,
         f_type: ExprId,
+    },
+    /// oracle: `ensureType`'s "type expected, got …"
+    /// (`TermElabM.lean:1946-1949`). Raised from `binder.rs`'s
+    /// `elab_type` since M4b-3 P4; before that a non-type domain was
+    /// (wrongly) a value-level `TypeMismatch` against `Sort ?u`.
+    TypeExpected {
+        e: ExprId,
+        ty: ExprId,
     },
     /// oracle: `elabNumLit`'s two `getDecLevel` failure branches
     /// (`BuiltinTerm.lean:219-223`) — "numerals are data in Lean, but

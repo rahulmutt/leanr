@@ -117,7 +117,22 @@ fn synthesize_pending_and_normalize_fun_type(
     if app.f_type_is_forall()? {
         return Ok(());
     }
-    // oracle: `coerceToFunction? s.f` (:378) — M4b-3 P4.
+    // oracle: `if let some f ← coerceToFunction? s.f then modify fun s
+    // => { s with f, fType }` (`App.lean:378-380`) — the state machine's
+    // `main` loop re-tests `fTypeIsForall` on the new `fType` and
+    // proceeds (M4b-3 P4).
+    let f = app.st.f;
+    match app.elab.mctx.coerce_to_function(f) {
+        Ok(Some(f2)) => {
+            let f_type = app.elab.mctx.infer_type(f2)?;
+            app.st.f = f2;
+            app.st.f_type = f_type;
+            return Ok(());
+        }
+        Ok(None) => {}
+        Err(leanr_meta::MetaError::Unsupported(m)) => return Err(ElabError::UnsupportedSyntax(m)),
+        Err(e) => return Err(ElabError::from(e)),
+    }
     // The oracle's remaining arms are diagnostics: a deprecated-argument
     // linter, `throwInvalidNamedArg` (which needs `foundNamedArgs`
     // rendering leanr does not do), and the "Function expected" error.
@@ -126,8 +141,8 @@ fn synthesize_pending_and_normalize_fun_type(
     if app.f_type_is_mvar_after_instantiation()? {
         return Err(ElabError::UnsupportedSyntax(
             "function type is still an unassigned metavariable after synthesis: needs \
-             CoeFun (M4b-3 P4), or expected-type propagation into `fun` binder domains \
-             (M4b-3 P5) for the M4b-2 `fun` shape"
+             expected-type propagation into `fun` binder domains for the M4b-2 `fun` \
+             shape — M4b-3 P5"
                 .to_string(),
         ));
     }
@@ -866,19 +881,27 @@ fn elab_and_add_new_arg(
     arg: Arg,
 ) -> Result<(), ElabError> {
     let expected = app.get_arg_expected_type()?;
+    // The syntax `ensure_has_type` hands to a postponed `.coe` mvar as
+    // its reference. `Arg::Expr` is already-elaborated and carries no
+    // syntax of its own (`expand.rs`'s `Arg` doc: no P1 producer), so it
+    // falls back to the whole application's `stx` — the same ref
+    // `synthesize_app_inst_mvars` registers its mvars under.
+    let stx = match &arg {
+        Arg::Stx(elem) => elem.clone(),
+        Arg::Expr(_) => app.ctx.stx.clone(),
+    };
     let val = match arg {
         Arg::Expr(e) => e,
         Arg::Stx(elem) => app.elab.elab_term(&elem, kinds, Some(expected))?,
     };
-    // oracle: `ensureArgType` = `ensureHasType expected val`
-    // (coercion-inserting from P4 onward; here the M4b-1 behavior, which
-    // ERRORS on a defeq mismatch).
-    let inferred = app.elab.mctx.infer_type(val)?;
-    if !app.elab.mctx.is_def_eq(inferred, expected)? {
-        return Err(ElabError::TypeMismatch {
-            expected,
-            got: inferred,
-        });
-    }
+    // oracle: `ensureArgType` = `ensureHasType expectedType arg none f`
+    // (`App.lean:54-62`); its `errToSorry` recovery arm is error
+    // recovery leanr does not do — `exceptionToSorry`
+    // (`TermElabM.lean:1365-1367`) logs the exception and puts a
+    // synthetic `sorry` TERM in the argument's place
+    // (`mkSyntheticSorryFor` -> `mkLabeledSorry`), so elaboration
+    // continues with a wrong-but-typed argument. leanr propagates the
+    // error instead, and the `try … catch` collapses to the plain call.
+    let val = app.elab.ensure_has_type(&stx, Some(expected), val)?;
     add_new_arg(app, val)
 }

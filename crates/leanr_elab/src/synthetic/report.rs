@@ -94,9 +94,22 @@ impl<'e> TermElabM<'e> {
                 let goal = self.mctx.instantiate_mvars(goal)?;
                 Err(ElabError::StuckSyntheticMVar { goal })
             }
-            SyntheticMVarKind::Coe { .. } => Err(ElabError::UnsupportedSyntax(
-                "stuck coercion reporting requires coercion insertion — M4b-3 P4".to_string(),
-            )),
+            // oracle: `:304-310` — the arm runs under `mvarId.withContext`
+            // (`:305`), unlike the `.typeClass` arm above whose
+            // `instantiate_mvars` consults no `lctx`. A `.coe` mvar
+            // registered inside a binder carries `e` as a free variable
+            // of that binder, so `inferType e` needs the mvar's own
+            // local context reinstalled — the binder has closed by the
+            // time the reporter runs.
+            SyntheticMVarKind::Coe { expected_type, e } => {
+                self.with_mvar_local_context(mvar_id, |elab| {
+                    let got = elab.mctx.infer_type(e)?;
+                    Err(ElabError::StuckCoercion {
+                        expected: expected_type,
+                        got,
+                    })
+                })
+            }
             SyntheticMVarKind::Tactic => Err(ElabError::UnsupportedSyntax(
                 "stuck tactic reporting requires the `by` elaborator — later M4".to_string(),
             )),

@@ -41,6 +41,9 @@ fn oracle_elab_gate() {
     let queries = std::fs::read_to_string(fixture_in("elab", "elab-queries.jsonl"))
         .expect("committed elab corpus");
     let mut failures = Vec::new();
+    // Fix 2 of the M4b-3 P4 whole-branch fix wave: the WHOLE-CLASS
+    // detector for the `elimMVarDeps` gap. See the assertion below.
+    let mut leaked_fvars = Vec::new();
     let mut replayed = 0usize;
     for line in queries.lines().filter(|l| !l.trim().is_empty()) {
         replayed += 1;
@@ -124,6 +127,48 @@ fn oracle_elab_gate() {
                 // parameter.
                 let mut st = EncSt::default();
                 let got_json = encode_expr(elab.mctx.store(), Some(view.store), g, &mut st);
+                // EVERY term this corpus elaborates is CLOSED — the
+                // queries are standalone terms with no ambient local
+                // context (`replay_fixture_in` installs an environment,
+                // never an `lctx`), so after `elab_term_and_synthesize`'s
+                // internal `instantiate_mvars` the finished `Expr` must
+                // contain no `fvar` NODE AT ALL. `EncSt` is fresh per
+                // record and `encode_expr` interns every `Node::FVar` it
+                // walks into `st.fvars`, so a non-empty map is an exact
+                // "this term leaked a free variable" answer, not a
+                // heuristic.
+                //
+                // WHY THIS GUARDS A REAL CLASS, not a hypothetical.
+                // `MetaCtx::mk_binding` (`leanr_meta/src/metactx.rs`,
+                // under its own `# UNMODELLED: MkBinding.elimMVarDeps`
+                // heading) is a plain `abstract_fvars`: it does not run
+                // the oracle's `elimMVarDeps` (`MetavarContext.lean`),
+                // which rewrites an unassigned mvar whose local context
+                // holds the fvars being abstracted into a
+                // delayed-assigned mvar APPLIED to them. So any
+                // postponed synthetic mvar registered under a binder and
+                // resumed by the fixpoint AFTER that binder closed has
+                // its value spliced in unabstracted: leanr emits an
+                // `fvar` where the oracle emits a `bvar`. That is a
+                // WRONG `ExprId` emitted with NO error — silent
+                // divergence, which this repo's cardinal rule forbids —
+                // and until this wave it was pinned by exactly one
+                // hand-written shape
+                // (`seam_audit.rs`'s
+                // `postponed_coe_under_a_binder_leaves_an_unabstracted_fvar_pending_elim_mvar_deps`).
+                // This turns the whole class loud: every future instance
+                // fails HERE, named, instead of quietly shifting bytes.
+                //
+                // PLACEMENT: deliberately here, in the record replay,
+                // and NOT in `tests/support`'s shared `elab_and_synthesize`
+                // helper — that helper is the path the known-gap pin
+                // above goes through, and the pin's whole job is to
+                // PRODUCE an `fvar`. Guarding the corpus rather than the
+                // shared path keeps the predicate at full strength and
+                // needs no exemption for the pin.
+                if !st.fvars.is_empty() {
+                    leaked_fvars.push(format!("{id}: {got_json}"));
+                }
                 if got_json != q["exp"] {
                     failures.push(format!("{id}: leanr={got_json} oracle={}", q["exp"]));
                 }
@@ -131,6 +176,24 @@ fn oracle_elab_gate() {
             Err(e) => failures.push(format!("{id}: leanr errored: {e:?}")),
         }
     }
+    // Asserted BEFORE the byte-comparison below: a leaked `fvar` also
+    // shows up there as an ordinary divergence, and this message is the
+    // one that says which class it belongs to.
+    assert!(
+        leaked_fvars.is_empty(),
+        "{} record(s) finished with an UNABSTRACTED `fvar` in the term. Every \
+         corpus query is a closed term, so this is the `MkBinding.elimMVarDeps` \
+         gap documented on `MetaCtx::mk_binding` (`leanr_meta/src/metactx.rs`) \
+         and pinned by `seam_audit.rs`'s \
+         `postponed_coe_under_a_binder_leaves_an_unabstracted_fvar_pending_elim_mvar_deps`: \
+         a synthetic mvar postponed under a binder was resumed after the binder \
+         closed, so its value was spliced in without abstraction. Do NOT relax \
+         this assertion and do NOT edit the corpus — either close the gap (port \
+         `elimMVarDeps`) or, if the record is new, it is exercising the known \
+         gap and does not belong in the corpus yet. Offenders:\n{}",
+        leaked_fvars.len(),
+        leaked_fvars.join("\n")
+    );
     assert!(
         failures.is_empty(),
         "{} divergences:\n{}",
@@ -153,7 +216,7 @@ fn oracle_elab_gate() {
     // exactly `wc -l tests/fixtures/elab/elab-queries.jsonl` after the
     // regen. `>=`, not `==`, so adding a record is a one-line bump here
     // rather than a gate that fails before the author has looked.
-    const CORPUS_FLOOR: usize = 107;
+    const CORPUS_FLOOR: usize = 113;
     assert!(
         replayed >= CORPUS_FLOOR,
         "corpus shrank: replayed {replayed} records, floor is {CORPUS_FLOOR}. \

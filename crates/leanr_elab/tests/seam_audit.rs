@@ -4,19 +4,33 @@
 //!
 //! Scope, stated up front because a seam audit that quietly omits a seam
 //! is worse than one that names its own gaps. `app/mod.rs`'s module doc
-//! is the full site-by-site index; of the seams listed there, two are
+//! is the full site-by-site index; of the seams listed there, one is
 //! not reachable from any source term the hermetic `Elab0` fixture can
 //! express, and this file does not pretend otherwise:
 //!
 //!   * the **P5 optParam/autoParam** seam — no fixture parameter carries
 //!     either wrapper, so `app_smoke.rs`'s
 //!     `explicit_mode_skips_the_optparam_default` asserts it white-box
-//!     against a synthetic `f_type` instead;
-//!   * the **P4 coercion** seam, which is an `ElabError::TypeMismatch`
-//!     from `ensureArgType` rather than an `UnsupportedSyntax` — that IS
-//!     M4b-1's documented behavior (error on a defeq mismatch instead of
-//!     inserting a coercion), so it is a deliberately wrong-*shaped*
-//!     seam, not a missing one.
+//!     against a synthetic `f_type` instead.
+//!
+//! The still-open P5 seam this file DOES assert end-to-end,
+//! `mvar_function_type_is_a_named_seam` (expected-type propagation into
+//! `fun` binder domains), used to share its bullet here with the P4
+//! coercion seam — `coerceToFunction?` (`CoeFun`) was tried first at the
+//! same site and, on failure, fell through to the same message. M4b-3
+//! P4 retired that sharing along with the coercion seam itself: tasks
+//! 7-9 landed `CoeT` (`coe.rs`'s `mk_coe`/`ensure_has_type`), `CoeFun`
+//! (`app/args.rs`'s `synthesize_pending_and_normalize_fun_type`) and
+//! `CoeSort` (`coe.rs`'s `ensure_type`), so coercion insertion is real
+//! code now, exercised by `tests/oracle_elab.rs`'s `coe/*` records and
+//! `tests/synthetic_smoke.rs` rather than by this file.
+//!
+//! One thing this file pins is NOT a seam at all but its opposite — a
+//! confirmed, currently-silent divergence:
+//! `postponed_coe_under_a_binder_leaves_an_unabstracted_fvar_pending_elim_mvar_deps`.
+//! It lives here because this file is where the "never a wrong
+//! `ExprId`" half of the discipline is audited, and a gap the codebase
+//! cannot yet close is worse hidden in prose than pinned in a test.
 //!
 //! The **P2 instance-implicit** seams (the `InstImplicit` arm and the
 //! three pending-`inst_mvars` guards) used to be a third unreachable
@@ -156,7 +170,13 @@ fn over_application_reports_function_expected() {
 }
 
 /// A function type that is still an unassigned mvar after the fixpoint
-/// is a named P4/P5 seam, NOT a wrong term.
+/// is a named P5 seam, NOT a wrong term. The `CoeFun` half of this seam
+/// (`coerceToFunction?`, `App.lean:378-380`) landed in P4 task 8 — a
+/// non-forall function type that a `CoeFun` instance can bridge is
+/// coerced and the state machine proceeds. What remains here is the
+/// case `coerceToFunction?` cannot help with either: `f`'s type is
+/// still an unassigned mvar, not a concrete non-function type, so there
+/// is nothing yet for a `CoeFun` search to run against.
 ///
 /// This shape diverges from the oracle today and will keep diverging
 /// until expected types propagate into `fun` binder domains (plan
@@ -169,7 +189,7 @@ fn mvar_function_type_is_a_named_seam() {
         .expect_err("leanr cannot elaborate this yet");
     let msg = format!("{err:?}");
     assert!(
-        msg.contains("M4b-3 P4") || msg.contains("M4b-3 P5"),
+        msg.contains("M4b-3 P5"),
         "seam must name its owner, got {msg}"
     );
 }
@@ -494,6 +514,47 @@ fn no_seam_points_at_the_retired_p2b_ii_label() {
     );
 }
 
+/// M4b-3 P4 RETIRED three seams — the ladder's `Coe` arm, the reporter's
+/// `Coe` arm, and the `CoeFun` half of `synthesize_pending_and_normalize_fun_type`'s
+/// mvar seam — and rewired every `TypeMismatch`-on-defeq-failure site
+/// through `mk_coe`. Their messages read "… coercion insertion — M4b-3
+/// P4" and "… CoeFun (M4b-3 P4) …". Mirrors the retired-label gates
+/// above and inherits their stated precondition: a TEXTUAL scan is a
+/// floor (the retired wording never comes back), not a ceiling.
+///
+/// The two needles are verified against the commits that actually
+/// removed them: task 7's `c999696` deleted
+/// `"coercion synthetic mvars require coercion insertion — M4b-3 P4"`
+/// (`ladder.rs`) and
+/// `"stuck coercion reporting requires coercion insertion — M4b-3 P4"`
+/// (`report.rs`); task 8's `0ecb795` deleted a message whose Rust
+/// string-literal source wrapped across two physical lines —
+/// `"...synthesis: needs \"` then `"CoeFun (M4b-3 P4), or
+/// expected-type propagation..."` (`args.rs`) — so the needle is
+/// `"CoeFun (M4b-3 P4)"` alone (the fragment that survives on ONE
+/// physical line), not `"needs CoeFun (M4b-3 P4)"` (which spans the
+/// line break and this scanner's per-line `contains` can never match;
+/// fix-round-1 finding, see the report).
+#[test]
+fn no_seam_points_at_the_retired_p4_label() {
+    let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    let needles = ["coercion insertion — M4b-3 P4", "CoeFun (M4b-3 P4)"];
+    let mut offenders = Vec::new();
+    for path in walk_rs_files(src_dir) {
+        let text = std::fs::read_to_string(&path).expect("readable source");
+        for (n, line) in text.lines().enumerate() {
+            if needles.iter().any(|needle| line.contains(needle)) {
+                offenders.push(format!("{}:{}", path.display(), n + 1));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "P4 retired the coercion seams (real bodies in `coe.rs`, `ladder.rs`, \
+         `report.rs`, `app/args.rs`); stale label at {offenders:?}"
+    );
+}
+
 /// The four literal kinds are REGISTERED, so they must not appear in any
 /// of the crate's three deferral ledgers, and `rawNatLit` — which has no
 /// producer in leanr's own parser — must stay unregistered.
@@ -543,10 +604,12 @@ fn literal_kinds_are_registered_not_deferred() {
 
 /// Every `UnsupportedSyntax` message in the crate names a slice that
 /// still OWNS something. P3 shipped rung 3 and the three non-leaf
-/// literals, so no LIVE message may name "M4b-3 P3" any more.
+/// literals, and P4 shipped the coercion machinery, so no LIVE line may
+/// name "M4b-3 P3" or "M4b-3 P4" any more.
 ///
 /// Only non-comment lines are inspected, deliberately: a doc comment may
-/// and should cite P3 historically ("real since M4b-3 P3 task 5"), and
+/// and should cite a completed slice historically ("real since M4b-3 P3
+/// task 5", "shipped in M4b-3 P4 task 9"), and
 /// that is a record of what happened, not a claim that work is owed. A
 /// string literal handed to `UnsupportedSyntax` is the opposite — the
 /// crate's named-seam discipline reads it as "this construct is deferred
@@ -562,9 +625,9 @@ fn literal_kinds_are_registered_not_deferred() {
 /// future slice owns "implement this invariant".
 ///
 /// **KNOWN LIMITATION — this is a per-slice tripwire, and whoever
-/// completes a slice owes it a needle.** The needle is the literal
-/// `"M4b-3 P3"`, so the gate says nothing about any OTHER completed
-/// slice. A third message of exactly the shape above survived task 8's
+/// completes a slice owes it a needle.** The needles are the two
+/// literals in the body below, so the gate says nothing about any OTHER
+/// completed slice. A third message of exactly the shape above survived task 8's
 /// audit for precisely that reason: `synthetic::report`'s `.postponed`
 /// arm read "… — M4b-3 P2a invariant", naming a slice that is also
 /// complete, and only the whole-branch review caught it (reworded in
@@ -574,7 +637,8 @@ fn literal_kinds_are_registered_not_deferred() {
 /// reason is that no non-rotting formulation exists. Live source
 /// legitimately names INCOMPLETE slices in exactly this position — that
 /// is the named-seam discipline itself (`app/args.rs`'s "M4b-3 P2b",
-/// `elab.rs`'s "M4b-3 P5", `ladder.rs`'s "M4b-3 P4") — so telling an
+/// `elab.rs`'s "M4b-3 P5", `app/args.rs`'s own optParam/autoParam
+/// "M4b-3 P5") — so telling an
 /// offender from a correct seam requires knowing which slices are done,
 /// i.e. a hand-maintained completed-slice list that rots the same way
 /// this needle does, only silently. Widening the scan by SHAPE instead
@@ -583,20 +647,110 @@ fn literal_kinds_are_registered_not_deferred() {
 /// false negatives — a reworded message evades it — and a gate that
 /// quietly stops catching things is worse than one that visibly needs
 /// updating. So: when a slice completes, add its label here.
+///
+/// **`M4b-3 P4` was added by the whole-branch fix wave, and the needle
+/// was measured non-vacuous before it was trusted.** P4 completed on
+/// this branch, and task 10 shipped only
+/// [`no_seam_points_at_the_retired_p4_label`], which pins two EXACT
+/// retired strings — so a newly written seam message naming the
+/// now-complete P4 as its owner would have passed both gates. Adding
+/// the label here first produced one offender, `src/lib.rs:263`
+/// (`pub mod coe; // M4b-3 P4` — a trailing comment on a live line, the
+/// one shape this scan's `starts_with("//")` filter does not exempt),
+/// which the same wave reworded to `// coercions`. Commands and output
+/// are in the fix-wave report; the point of recording it is that a
+/// needle added without watching it fire is a gate nobody has shown to
+/// gate anything.
 #[test]
-fn no_seam_message_names_the_completed_p3_slice() {
+fn no_seam_message_names_a_completed_slice() {
     let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    let needles = ["M4b-3 P3", "M4b-3 P4"];
     let mut offenders = Vec::new();
     for path in walk_rs_files(src_dir) {
         let text = std::fs::read_to_string(&path).expect("readable source");
         for (n, line) in text.lines().enumerate() {
-            if line.contains("M4b-3 P3") && !line.trim_start().starts_with("//") {
-                offenders.push(format!("{}:{}", path.display(), n + 1));
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            if let Some(needle) = needles.iter().find(|needle| line.contains(**needle)) {
+                offenders.push(format!("{}:{} ({needle})", path.display(), n + 1));
             }
         }
     }
     assert!(
         offenders.is_empty(),
-        "M4b-3 P3 is complete; live (non-comment) source claiming it at {offenders:?}"
+        "M4b-3 P3 and P4 are complete; live (non-comment) source claiming one at {offenders:?}"
+    );
+}
+
+/// **CONFIRMED DIVERGENCE from the oracle, pinned on purpose.** This is
+/// not a seam: leanr answers, and the answer is WRONG. The repo's
+/// precedent for that situation is `leanr_meta/src/synth.rs`'s
+/// `mul_n_...` test — a known gap gets a test named for the thing it
+/// characterizes, so it is executable rather than prose, and so it
+/// trips the day the gap closes.
+///
+/// `fun (n : Nat) => pairW n Nat.zero` postpones a `.coe` metavariable
+/// at the first argument (`CoeT Nat n (Wrapper ?a)` is `.undef` while
+/// `?a` is unassigned), the second argument assigns `?a := Nat`, and the
+/// fixpoint resumes the coercion — all of which leanr gets right. But
+/// the fixpoint runs AFTER `mk_lambda` has already abstracted the
+/// binder, so the coerced value is still an unabstracted `fvar`:
+///
+/// ```text
+/// leanr : fun (n : Nat) => pairW Nat (Wrapper.mk Nat <fvar n>) Nat.zero
+/// oracle: fun (n : Nat) => pairW Nat (Wrapper.mk Nat  bvar 0  ) Nat.zero
+/// ```
+///
+/// The oracle absorbs this inside `mkLambdaFVars`, via
+/// `MkBinding.elimMVarDeps` (`MetavarContext.lean`): a `syntheticOpaque`
+/// mvar whose local context contains the abstracted fvars is replaced by
+/// a delayed-assigned mvar applied to them, so the occurrence abstracts
+/// like any other argument. leanr's `MetaCtx::mk_binding`
+/// (`leanr_meta/src/metactx.rs`, whose doc now says so) is a plain
+/// `abstract_fvars` with no mvar handling, so nothing rewrites the
+/// occurrence.
+///
+/// This is NOT a coercion bug — measured: the same postpone-then-resume
+/// path with no binder (`pairW Nat.zero Nat.zero`) agrees with the
+/// oracle byte-for-byte, and is the corpus record
+/// `coe/postponedThenResumed`. It is `mk_lambda`'s gap, and closing it
+/// is a non-additive `leanr_meta` change outside M4b-3 P4 (design spec
+/// § Amendment 6 is the precedent for how such a prerequisite is
+/// scoped). Recorded in `tests/fixtures/elab/dump_elab.lean`'s
+/// `coeQueries` doc block and in the M4b-3 P4 task-7 report.
+///
+/// **When `elimMVarDeps` lands, this test MUST be updated** to assert
+/// the oracle's answer: the first assertion below fails the moment the
+/// divergence closes, which is the point.
+#[test]
+fn postponed_coe_under_a_binder_leaves_an_unabstracted_fvar_pending_elim_mvar_deps() {
+    /// The pinned oracle's answer, dumped from `dump_elab.lean` against
+    /// `leanprover/lean4:v4.33.0-rc1` (a throwaway query, not landed as
+    /// a record — a record would fail the gate).
+    const ORACLE: &str = concat!(
+        r#"{"b":{"a":{"k":"const","n":"Nat.zero","us":[]},"f":{"a":{"a":{"i":0,"k":"bvar"},"#,
+        r#""f":{"a":{"k":"const","n":"Nat","us":[]},"f":{"k":"const","n":"Wrapper.mk","us":[]},"#,
+        r#""k":"app"},"k":"app"},"f":{"a":{"k":"const","n":"Nat","us":[]},"#,
+        r#""f":{"k":"const","n":"pairW","us":[]},"k":"app"},"k":"app"},"k":"app"},"#,
+        r#""bi":"d","k":"lam","t":{"k":"const","n":"Nat","us":[]}}"#,
+    );
+
+    let leanr = support::elab_and_synthesize("fun (n : Nat) => pairW n Nat.zero")
+        .expect("the coercion itself resolves; only the abstraction is wrong")
+        .to_string();
+
+    assert_ne!(
+        leanr, ORACLE,
+        "leanr now agrees with the oracle here — `elimMVarDeps` (or an equivalent) has landed. \
+         Retire this characterization: assert `leanr == ORACLE` and delete the gap notes in \
+         `metactx.rs::mk_binding`, `dump_elab.lean`'s `coeQueries` block, and this file's \
+         module doc"
+    );
+    assert_eq!(
+        leanr,
+        ORACLE.replace(r#""k":"bvar""#, r#""k":"fvar""#),
+        "the divergence must stay EXACTLY the unabstracted `fvar` — one token, everything else \
+         byte-identical to the oracle. Any other difference is a new bug, not this known gap"
     );
 }
