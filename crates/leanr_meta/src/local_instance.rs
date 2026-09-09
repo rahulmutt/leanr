@@ -65,9 +65,8 @@ pub(crate) struct LocalInstanceStack {
 }
 
 impl LocalInstanceStack {
-    /// No producer yet (Task 4 installs entries at the push chokepoints);
-    /// exercised today only by this module's own tests.
-    #[allow(dead_code)]
+    /// Called from `MetaCtx::install_local_instance_for` (Task 4), at
+    /// the two push chokepoints (`push_local_decl`/`push_let_decl`).
     pub(crate) fn push(&mut self, class_name: NameId, fvar: ExprId, at_depth: usize) {
         debug_assert!(
             self.entries.last().is_none_or(|e| e.at_depth <= at_depth),

@@ -641,6 +641,10 @@ impl<'e> MetaCtx<'e> {
             self.lctx.save(),
             "local_names/lctx lockstep invariant violated"
         );
+        // Read BEFORE the push below, so it is this declaration's own
+        // index in `lctx.decls` — see `local_instance.rs` for why the
+        // stack truncates by depth rather than by index.
+        let depth = self.lctx.save();
         let fvar = self.lctx.mk_local_decl(
             self.scratch,
             Some(self.view.store),
@@ -653,6 +657,12 @@ impl<'e> MetaCtx<'e> {
         // see that field's own doc comment. One entry per call, matching
         // `lctx.decls`'s own growth exactly (including `None` names).
         self.local_names.push((name, fvar));
+        // oracle: `withLocalDeclImp` → `withNewFVar`
+        // (`Basic.lean:1791`, `:1785-1789`) — a class-typed declaration
+        // becomes a local instance. Keyed on the TYPE only; binder info
+        // plays no part, so `fun (inst : Add N) => …` counts exactly as
+        // `[inst : Add N]` does.
+        self.install_local_instance_for(fvar, ty, depth)?;
         self.lctx_snapshot = None;
         Ok(fvar)
     }
@@ -675,6 +685,9 @@ impl<'e> MetaCtx<'e> {
             self.lctx.save(),
             "local_names/lctx lockstep invariant violated"
         );
+        // Read BEFORE the push below — see `push_local_decl`'s own
+        // `depth` comment.
+        let depth = self.lctx.save();
         let fvar = self.lctx.mk_let_decl(
             self.scratch,
             Some(self.view.store),
@@ -688,8 +701,36 @@ impl<'e> MetaCtx<'e> {
         // occurrence of the binder name resolves via
         // `lctx_lookup_by_name`.
         self.local_names.push((name, fvar));
+        // oracle: `withLetDeclImp` (`Basic.lean:1905-1911`) routes
+        // through the same `withNewFVar` as `push_local_decl` — a
+        // let-bound instance counts too.
+        self.install_local_instance_for(fvar, ty, depth)?;
         self.lctx_snapshot = None;
         Ok(fvar)
+    }
+
+    /// Install `fvar` as a local instance if its type is a class.
+    ///
+    /// oracle: `withNewFVar` (`Basic.lean:1785-1789`). The oracle's
+    /// implementation-detail filter (`withNewLocalInstanceImp`,
+    /// `:1383-1388`) is **vacuously satisfied** here: leanr's
+    /// `LocalDecl` (`leanr_kernel/src/local_ctx.rs:37-43`) carries no
+    /// kind field, and nothing in leanr mints an implementation-detail
+    /// declaration, so there is nothing to filter. Adding a field to a
+    /// kernel struct for a producer that does not exist would widen the
+    /// TCB for nothing. SEAM — trigger for revisiting: the slice that
+    /// builds the tactic framework or the match compiler is the first to
+    /// mint one, and it must add the filter in the same change.
+    fn install_local_instance_for(
+        &mut self,
+        fvar: ExprId,
+        ty: ExprId,
+        depth: usize,
+    ) -> Result<(), MetaError> {
+        if let Some(class_name) = self.is_class(ty)? {
+            self.local_instances.push(class_name, fvar, depth);
+        }
+        Ok(())
     }
 
     /// Look up `name` in the ambient local context, most-recently-pushed
@@ -1196,12 +1237,8 @@ impl<'e> MetaCtx<'e> {
     /// never a hard error, and diverging here would turn an ordinary
     /// binder into an elaboration failure.
     ///
-    /// No production caller yet — Task 4 calls this at the two
-    /// fvar-pushing chokepoints and Task 6 calls it from
-    /// `get_instances`; exercised today only by this module's own
-    /// tests, same posture as `local_instance.rs`'s
-    /// `LocalInstanceStack::push` (Task 2).
-    #[allow(dead_code)]
+    /// Called from `push_local_decl`/`push_let_decl` (Task 4) and, once
+    /// Task 6 lands, from `get_instances` too.
     pub(crate) fn is_class(&mut self, ty: ExprId) -> Result<Option<NameId>, MetaError> {
         match self.is_class_quick(ty) {
             LOption::Some(c) => Ok(Some(c)),
@@ -1217,7 +1254,7 @@ impl<'e> MetaCtx<'e> {
     /// per that task's brief), so a reduction on the common path would
     /// re-enter instance lookup against an empty table.
     ///
-    /// No production caller yet — see [`MetaCtx::is_class`]'s own doc.
+    /// Called from [`MetaCtx::is_class`] — see that method's own doc.
     ///
     /// **Review round 1, I3**: opened as a `loop` rather than the
     /// straight-line recursion every other arm of the oracle port
@@ -1243,7 +1280,6 @@ impl<'e> MetaCtx<'e> {
     /// and `is_class_rejects_a_real_inductive_without_reducing`'s own
     /// "never reaches whnf" step-delta assertions — this function must
     /// stay invisible to that counter, not merely bounded.
-    #[allow(dead_code)]
     fn is_class_quick(&mut self, mut ty: ExprId) -> LOption<NameId> {
         let mut mvar_chain_budget = MAX_REC_DEPTH;
         loop {
@@ -1319,8 +1355,8 @@ impl<'e> MetaCtx<'e> {
     /// `.none` here rather than as a propagated error, same posture as
     /// `is_class`'s own doc comment above.
     ///
-    /// No production caller yet — see [`MetaCtx::is_class`]'s own doc.
-    #[allow(dead_code)]
+    /// Called from [`MetaCtx::is_class_quick`] — see [`MetaCtx::is_class`]'s
+    /// own doc.
     fn is_class_quick_const(&self, name: Option<NameId>) -> LOption<NameId> {
         let Some(n) = name else {
             return LOption::None;
@@ -1404,8 +1440,7 @@ impl<'e> MetaCtx<'e> {
     /// half of the argument is what closes the gap, not the "always
     /// agrees" half alone.
     ///
-    /// No production caller yet — see [`MetaCtx::is_class`]'s own doc.
-    #[allow(dead_code)]
+    /// Called from [`MetaCtx::is_class`] — see that method's own doc.
     fn is_class_expensive(&mut self, ty: ExprId) -> Result<Option<NameId>, MetaError> {
         self.with_transparency(TransparencyMode::Reducible, |ctx| {
             let mut cur = ctx.whnf(ty)?;
@@ -1518,7 +1553,8 @@ pub struct MetaSnapshot {
 mod tests {
     use super::*;
     use crate::test_support::{
-        const_named, fresh_mvar, render_name, with_ctx, with_instances_ctx, with_prelude0_ctx,
+        class_app, const_named, fresh_mvar, render_name, with_class_ctx, with_ctx,
+        with_instances_ctx, with_prelude0_ctx,
     };
     use crate::MetaError;
 
@@ -1638,6 +1674,121 @@ mod tests {
             let err = ctx.mk_let_expr(fvar, fvar, false);
             ctx.lctx_restore(checkpoint);
             assert!(err.is_err(), "expected Err for a cdecl fvar, got {err:?}");
+        });
+    }
+
+    /// A class-typed binder becomes a local instance; a non-class binder
+    /// does not. oracle: `withNewFVar` (`Basic.lean:1785-1789`).
+    #[test]
+    fn pushing_a_class_typed_decl_installs_a_local_instance() {
+        with_class_ctx(|ctx, add| {
+            let add_n = class_app(ctx, add);
+            let n = const_named(ctx, "N");
+
+            let cp = ctx.lctx_checkpoint();
+            let _plain = ctx
+                .push_local_decl(None, n, BinderInfo::Default)
+                .expect("push");
+            assert!(
+                ctx.local_instances.entries().is_empty(),
+                "`(x : N)` is not a class-typed binder"
+            );
+
+            let inst = ctx
+                .push_local_decl(None, add_n, BinderInfo::InstImplicit)
+                .expect("push");
+            assert_eq!(ctx.local_instances.entries().len(), 1);
+            assert_eq!(ctx.local_instances.entries()[0].class_name, add);
+            assert_eq!(ctx.local_instances.entries()[0].fvar, inst);
+
+            // A checkpoint taken immediately AFTER the class-typed push,
+            // and a restore to it after pushing something else on top:
+            // the instance was installed BEFORE this checkpoint, so it
+            // must survive. This is the discriminator the brief's fourth
+            // mutation (capture `depth` after the push instead of
+            // before) needs and the original brief's sole restore
+            // assertion below does NOT provide — that one restores all
+            // the way to `cp` (depth 0), and `truncate_to` pops any
+            // recorded depth `>= 0` regardless of whether it is off by
+            // one, so the bug is invisible there. Here the recorded
+            // depth, if captured post-push, EQUALS this checkpoint, and
+            // `truncate_to`'s `>=` pops entries at exactly the
+            // checkpoint depth too — so the off-by-one bug pops an
+            // instance that a correct depth (this decl's own pre-push
+            // index) would have kept.
+            let cp_after_inst = ctx.lctx_checkpoint();
+            let _another_plain = ctx
+                .push_local_decl(None, n, BinderInfo::Default)
+                .expect("push");
+            ctx.lctx_restore(cp_after_inst);
+            assert_eq!(
+                ctx.local_instances.entries().len(),
+                1,
+                "the instance was pushed before this checkpoint, so restoring to it \
+                 must leave it in scope"
+            );
+
+            ctx.lctx_restore(cp);
+            assert!(
+                ctx.local_instances.entries().is_empty(),
+                "restoring the local context takes the instance out of scope"
+            );
+        });
+    }
+
+    /// Binder info does NOT gate installation: the oracle's
+    /// `withNewFVar` consults `isClass?` on the TYPE and nothing else,
+    /// so a class-typed EXPLICIT binder is a local instance too
+    /// (`fun (inst : Add N) => …`). A port that gated on
+    /// `BinderInfo::InstImplicit` would silently lose those.
+    #[test]
+    fn a_class_typed_explicit_binder_is_also_a_local_instance() {
+        with_class_ctx(|ctx, add| {
+            let add_n = class_app(ctx, add);
+            let cp = ctx.lctx_checkpoint();
+            ctx.push_local_decl(None, add_n, BinderInfo::Default)
+                .expect("push");
+            assert_eq!(
+                ctx.local_instances.entries().len(),
+                1,
+                "installation keys on the TYPE, never on the binder info"
+            );
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// oracle: `withLetDeclImp` (`Basic.lean:1905-1911`) routes through
+    /// the same `withNewFVar`, so a let-bound instance counts.
+    #[test]
+    fn pushing_a_class_typed_let_decl_installs_a_local_instance() {
+        with_class_ctx(|ctx, add| {
+            let add_n = class_app(ctx, add);
+            let n = const_named(ctx, "N");
+            let val = const_named(ctx, "instAddN");
+            let cp = ctx.lctx_checkpoint();
+            ctx.push_let_decl(None, add_n, val).expect("push");
+            assert_eq!(ctx.local_instances.entries().len(), 1);
+
+            // Same discriminator as `push_local_decl`'s own test above:
+            // a checkpoint taken immediately AFTER this push, then a
+            // restore to it after pushing something else on top, must
+            // leave the instance in scope — catches `depth` captured
+            // after the push (equal to this checkpoint) rather than
+            // before (this decl's own index, strictly less than it).
+            let cp_after_inst = ctx.lctx_checkpoint();
+            let _another_plain = ctx
+                .push_local_decl(None, n, BinderInfo::Default)
+                .expect("push");
+            ctx.lctx_restore(cp_after_inst);
+            assert_eq!(
+                ctx.local_instances.entries().len(),
+                1,
+                "the instance was pushed before this checkpoint, so restoring to it \
+                 must leave it in scope"
+            );
+
+            ctx.lctx_restore(cp);
+            assert!(ctx.local_instances.entries().is_empty());
         });
     }
 

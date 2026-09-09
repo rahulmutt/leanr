@@ -591,12 +591,9 @@ impl ClassTable {
     /// EMPTY slice. Reading emptiness as absence would make every
     /// ordinary class invisible.
     ///
-    /// No production caller yet — Task 4/6 wire `MetaCtx::is_class` (the
-    /// consumer of this) into the fvar-pushing chokepoints and
-    /// `get_instances` respectively; exercised today only by this
-    /// module's own tests, same posture as `local_instance.rs`'s
-    /// `LocalInstanceStack::push` (Task 2).
-    #[allow(dead_code)]
+    /// Called from `MetaCtx::is_class_quick_const`/`is_class_expensive`
+    /// (Task 4's `MetaCtx::is_class` wiring); Task 6's `get_instances`
+    /// will be a second caller.
     pub(crate) fn is_class_name(&self, class_name: NameId) -> bool {
         self.out_params(class_name).is_some()
     }
@@ -612,7 +609,8 @@ mod tests {
     use leanr_olean::DiscrKey;
 
     use crate::test_support::{
-        const_named, instance_named, parse_goal, render_name, with_ctx, with_instances_ctx,
+        class_app, const_named, instance_named, parse_goal, render_name, with_class_ctx,
+        with_instances_ctx,
     };
 
     /// Step-1 brief test: the goal `Add N` must turn up `instAddN`.
@@ -853,46 +851,17 @@ mod tests {
         });
     }
 
-    /// [`with_ctx`]'s empty environment, plus a synthetic single-entry
-    /// `ClassTable` registering `Add` as a class (task 3's own minimal
-    /// scaffold — the same "build the table by hand, no fixture replay"
-    /// idiom as `get_instances_orders_by_priority_desc_then_reverse_of_ties`'s
-    /// synthetic `InstanceTable` just above). `Add` deliberately has no
-    /// out params, matching `Instances.olean`'s real `Add` (see
-    /// `class_table_reads_out_param_positions`): a class is present with
-    /// an EMPTY slice, not absent. Hands the closure both the ctx and
-    /// `Add`'s own `NameId` so callers don't have to re-derive it.
-    fn with_class_ctx<R>(f: impl FnOnce(&mut MetaCtx, NameId) -> R) -> R {
-        with_ctx(|ctx| {
-            let add_expr = const_named(ctx, "Add");
-            let add = match ctx.node(add_expr) {
-                leanr_kernel::bank::terms::Node::Const { name: Some(n), .. } => n,
-                _ => panic!("Add is not a bare const"),
-            };
-            ctx.classes = ClassTable::build(&[ClassEntry {
-                name: add,
-                out_params: vec![],
-                out_level_params: vec![],
-            }]);
-            f(ctx, add)
-        })
-    }
-
     /// `N -> Add N` — the shape a parametrized local instance's
     /// conclusion takes (`is_class_looks_through_forall_binders`'s own
     /// doc comment). `add` is `Add`'s `NameId`, as handed back by
     /// [`with_class_ctx`], so the constant this builds is the SAME name
     /// registered in the synthetic `ClassTable`, not a freshly-reinterned
-    /// lookalike.
+    /// lookalike. Built from [`class_app`]'s `Add N`, promoted to
+    /// `test_support` (task 4, ruling R7) since task 4's `metactx.rs`
+    /// tests need that same application on its own, without the arrow.
     fn arrow_to_class(ctx: &mut MetaCtx, add: NameId) -> ExprId {
-        let base = Some(ctx.view.store);
-        let no_levels = ctx.scratch.intern_level_list(base, &[]).expect("levels");
-        let add_expr = ctx
-            .scratch
-            .expr_const(base, Some(add), no_levels)
-            .expect("const");
+        let add_n = class_app(ctx, add);
         let n = const_named(ctx, "N");
-        let add_n = ctx.mk_app_spine(add_expr, &[n]).expect("Add N");
         ctx.mk_arrow(n, add_n).expect("N -> Add N")
     }
 

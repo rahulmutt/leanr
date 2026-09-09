@@ -12,8 +12,9 @@ use leanr_kernel::bank::{ExprId, NameId, Store};
 use leanr_kernel::{
     BinderInfo, CheckedConstants, ConstSource, ConstantInfo, EnvView, Environment, Nat,
 };
-use leanr_olean::ModuleData;
+use leanr_olean::{ClassEntry, ModuleData};
 
+use crate::instances::ClassTable;
 use crate::{Config, EnvExtensions, LocalCtxSnapshot, MVarDecl, MVarId, MVarKind, MetaCtx};
 
 pub(crate) fn fixture_path(name: &str) -> std::path::PathBuf {
@@ -242,6 +243,52 @@ pub(crate) fn with_instances_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
         },
     );
     f(&mut ctx)
+}
+
+/// [`with_ctx`]'s empty environment, plus a synthetic single-entry
+/// `ClassTable` registering `Add` as a class (task 3's own minimal
+/// scaffold — the same "build the table by hand, no fixture replay"
+/// idiom as `instances.rs`'s synthetic `InstanceTable` tests use).
+/// `Add` deliberately has no out params, matching `Instances.olean`'s
+/// real `Add` (see `class_table_reads_out_param_positions`): a class is
+/// present with an EMPTY slice, not absent. Hands the closure both the
+/// ctx and `Add`'s own `NameId` so callers don't have to re-derive it.
+///
+/// Promoted here from `instances.rs`'s test module (task 3) by task 4's
+/// ruling R7: `metactx.rs`'s push-chokepoint tests need this exact
+/// fixture and could not reach a helper private to `instances.rs`'s own
+/// tests, so per this file's own module doc, the shared home is here
+/// rather than a second copy.
+pub(crate) fn with_class_ctx<R>(f: impl FnOnce(&mut MetaCtx, NameId) -> R) -> R {
+    with_ctx(|ctx| {
+        let add_expr = const_named(ctx, "Add");
+        let add = match ctx.node(add_expr) {
+            leanr_kernel::bank::terms::Node::Const { name: Some(n), .. } => n,
+            _ => panic!("Add is not a bare const"),
+        };
+        ctx.classes = ClassTable::build(&[ClassEntry {
+            name: add,
+            out_params: vec![],
+            out_level_params: vec![],
+        }]);
+        f(ctx, add)
+    })
+}
+
+/// `Add N` — the smallest class-typed application, built from the class
+/// name [`with_class_ctx`] hands back. Shared by `instances.rs`'s
+/// `arrow_to_class` (task 3, `N -> Add N`) and task 4's push-chokepoint
+/// tests, which need the bare application without the arrow around it —
+/// promoted here for the same reason as [`with_class_ctx`] just above.
+pub(crate) fn class_app(ctx: &mut MetaCtx, add: NameId) -> ExprId {
+    let base = Some(ctx.view.store);
+    let no_levels = ctx.scratch.intern_level_list(base, &[]).expect("levels");
+    let add_expr = ctx
+        .scratch
+        .expr_const(base, Some(add), no_levels)
+        .expect("const");
+    let n = const_named(ctx, "N");
+    ctx.mk_app_spine(add_expr, &[n]).expect("Add N")
 }
 
 /// Replay `meta/Synth0.olean` (task 1's verbatim `Init/Coe.lean` class

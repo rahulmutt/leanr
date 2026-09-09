@@ -2533,4 +2533,46 @@ mod tests {
             ctx.lctx_restore(cp);
         });
     }
+
+    /// `Add N -> N` — one instance-typed forall binder, the shape
+    /// `forall_bounded_telescope`'s single argument peels. Built from
+    /// `test_support::class_app`'s `Add N`, mirroring `instances.rs`'s
+    /// `arrow_to_class` (`N -> Add N`) with domain/codomain swapped:
+    /// here the CLASS is the binder the telescope pushes, not the
+    /// conclusion.
+    fn forall_over_class(ctx: &mut MetaCtx, add: NameId) -> ExprId {
+        use crate::test_support::{class_app, const_named};
+        let add_n = class_app(ctx, add);
+        let n = const_named(ctx, "N");
+        ctx.mk_arrow(add_n, n).expect("Add N -> N")
+    }
+
+    /// `forall_bounded_telescope` mints its fvars through
+    /// `push_local_decl` (`assign.rs:645`), so it installs local
+    /// instances with no separate wiring — the counterpart of the
+    /// oracle's `withNewLocalInstancesImp` at
+    /// `forallTelescopeReducingAux` (`Basic.lean:1472`, `:1477`). This
+    /// test exists because that is a claim about CURRENT call sites: if
+    /// a future change makes a telescope bypass the chokepoint, the
+    /// instances silently stop being installed and nothing else would
+    /// notice.
+    #[test]
+    fn a_telescope_installs_local_instances_for_its_binders() {
+        use crate::test_support::with_class_ctx;
+        with_class_ctx(|ctx, add| {
+            // `Add N → N`: one instance-typed binder.
+            let ty = forall_over_class(ctx, add);
+            let cp = ctx.lctx_checkpoint();
+            let xs = ctx.forall_bounded_telescope(ty, 1).expect("telescope");
+            assert_eq!(xs.len(), 1);
+            assert_eq!(
+                ctx.local_instances.entries().len(),
+                1,
+                "the telescope's binder is class-typed, so it is in scope \
+                 as a local instance while the telescope is open"
+            );
+            ctx.lctx_restore(cp);
+            assert!(ctx.local_instances.entries().is_empty());
+        });
+    }
 }
