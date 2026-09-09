@@ -518,7 +518,7 @@ fn no_seam_points_at_the_retired_p2b_ii_label() {
 /// `Coe` arm, and the `CoeFun` half of `synthesize_pending_and_normalize_fun_type`'s
 /// mvar seam — and rewired every `TypeMismatch`-on-defeq-failure site
 /// through `mk_coe`. Their messages read "… coercion insertion — M4b-3
-/// P4" and "needs CoeFun (M4b-3 P4)". Mirrors the retired-label gates
+/// P4" and "… CoeFun (M4b-3 P4) …". Mirrors the retired-label gates
 /// above and inherits their stated precondition: a TEXTUAL scan is a
 /// floor (the retired wording never comes back), not a ceiling.
 ///
@@ -527,12 +527,18 @@ fn no_seam_points_at_the_retired_p2b_ii_label() {
 /// `"coercion synthetic mvars require coercion insertion — M4b-3 P4"`
 /// (`ladder.rs`) and
 /// `"stuck coercion reporting requires coercion insertion — M4b-3 P4"`
-/// (`report.rs`); task 8's `0ecb795` deleted the `"... needs CoeFun
-/// (M4b-3 P4), or expected-type propagation ..."` message (`args.rs`).
+/// (`report.rs`); task 8's `0ecb795` deleted a message whose Rust
+/// string-literal source wrapped across two physical lines —
+/// `"...synthesis: needs \"` then `"CoeFun (M4b-3 P4), or
+/// expected-type propagation..."` (`args.rs`) — so the needle is
+/// `"CoeFun (M4b-3 P4)"` alone (the fragment that survives on ONE
+/// physical line), not `"needs CoeFun (M4b-3 P4)"` (which spans the
+/// line break and this scanner's per-line `contains` can never match;
+/// fix-round-1 finding, see the report).
 #[test]
 fn no_seam_points_at_the_retired_p4_label() {
     let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
-    let needles = ["coercion insertion — M4b-3 P4", "needs CoeFun (M4b-3 P4)"];
+    let needles = ["coercion insertion — M4b-3 P4", "CoeFun (M4b-3 P4)"];
     let mut offenders = Vec::new();
     for path in walk_rs_files(src_dir) {
         let text = std::fs::read_to_string(&path).expect("readable source");
