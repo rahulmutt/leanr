@@ -24,6 +24,7 @@ mod lazy_delta;
 mod level;
 mod local_snapshot;
 mod metactx;
+mod mk_binding;
 mod mvar_ctx;
 mod synth;
 #[cfg(test)]
