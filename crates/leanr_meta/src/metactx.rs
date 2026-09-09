@@ -1168,18 +1168,23 @@ impl<'e> MetaCtx<'e> {
     /// (`SyntheticMVars.lean:155-156`) runs inside one. Additive and
     /// behavior-neutral — a visibility widening only.
     pub fn checkpoint(&self) -> MetaSnapshot {
-        let (expr_assignments, level_assignments) = self.mctx.snapshot_assignments();
+        let (expr_assignments, level_assignments, delayed_assignments) =
+            self.mctx.snapshot_assignments();
         MetaSnapshot {
             expr_assignments,
             level_assignments,
+            delayed_assignments,
             postponed: self.postponed.clone(),
         }
     }
 
     /// `pub` since M4b-3 P3 task 4 — see [`MetaCtx::checkpoint`].
     pub fn rollback(&mut self, snap: MetaSnapshot) {
-        self.mctx
-            .restore_assignments(snap.expr_assignments, snap.level_assignments);
+        self.mctx.restore_assignments(
+            snap.expr_assignments,
+            snap.level_assignments,
+            snap.delayed_assignments,
+        );
         self.postponed = snap.postponed;
     }
 
@@ -1225,10 +1230,11 @@ impl<'e> MetaCtx<'e> {
 }
 
 /// A save point for `checkpointDefEq` (oracle Basic.lean:2438). Holds
-/// exactly what a failed trial unification must restore: the expr and
-/// level assignment maps and the postponed queue. NOT the permanent
-/// cache (it is monotone and shared) and NOT declarations (an mvar stays
-/// declared).
+/// exactly what a failed trial unification must restore: the expr,
+/// level, and delayed assignment maps and the postponed queue. NOT the
+/// permanent cache (it is monotone and shared) and NOT declarations (an
+/// mvar stays declared, but a delayed assignment made inside a trial is
+/// undone by rollback).
 ///
 /// `Clone` (task B5): the tabled-synthesis driver stores one snapshot
 /// PER NODE (the oracle's own `GeneratorNode.mctx`/`ConsumerNode.mctx`
@@ -1245,6 +1251,7 @@ impl<'e> MetaCtx<'e> {
 pub struct MetaSnapshot {
     expr_assignments: HashMap<MVarId, ExprId>,
     level_assignments: HashMap<LMVarId, LevelId>,
+    delayed_assignments: HashMap<MVarId, crate::DelayedMVarAssignment>,
     postponed: Vec<(LevelId, LevelId)>,
 }
 

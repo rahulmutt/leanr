@@ -222,20 +222,32 @@ impl MetavarContext {
     }
 
     /// Snapshot/restore support for `checkpointDefEq` (plan 3). Clones
-    /// the assignment maps; declarations are not snapshotted (an mvar,
-    /// once declared, stays declared even across a failed trial).
+    /// the expr, level, and delayed-assignment maps. Declarations are not
+    /// snapshotted (an mvar, once declared, stays declared even across a
+    /// failed trial — a rolled-back trial leaves the aux mvar declared but
+    /// no longer delayed-assigned).
     pub(crate) fn snapshot_assignments(
         &self,
-    ) -> (HashMap<MVarId, ExprId>, HashMap<LMVarId, LevelId>) {
-        (self.assignments.clone(), self.level_assignments.clone())
+    ) -> (
+        HashMap<MVarId, ExprId>,
+        HashMap<LMVarId, LevelId>,
+        HashMap<MVarId, DelayedMVarAssignment>,
+    ) {
+        (
+            self.assignments.clone(),
+            self.level_assignments.clone(),
+            self.d_assignment.clone(),
+        )
     }
     pub(crate) fn restore_assignments(
         &mut self,
         expr: HashMap<MVarId, ExprId>,
         level: HashMap<LMVarId, LevelId>,
+        delayed: HashMap<MVarId, DelayedMVarAssignment>,
     ) {
         self.assignments = expr;
         self.level_assignments = level;
+        self.d_assignment = delayed;
     }
 }
 
@@ -425,6 +437,50 @@ mod tests {
 
             assert_eq!(ctx.get_delayed_mvar_root(a), c);
             assert_eq!(ctx.get_delayed_mvar_root(c), c, "a root is its own root");
+        });
+    }
+
+    #[test]
+    fn checkpoint_rollback_undoes_delayed_assignment() {
+        use crate::test_support::{fresh_mvar, with_ctx};
+
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+            let (_, a) = fresh_mvar(ctx, sort0);
+            let (_, b) = fresh_mvar(ctx, sort0);
+            let (_, pre_assigned) = fresh_mvar(ctx, sort0);
+
+            // Assign one delayed BEFORE checkpoint
+            ctx.mctx_mut()
+                .assign_delayed(pre_assigned, vec![], b)
+                .expect("pre-checkpoint assign");
+            assert!(ctx.mctx().is_delayed_assigned(pre_assigned));
+
+            // Take a checkpoint with pre_assigned already delayed-assigned
+            let snap = ctx.checkpoint();
+
+            // Inside the trial, assign a second one
+            ctx.mctx_mut()
+                .assign_delayed(a, vec![], b)
+                .expect("assign inside trial");
+            assert!(ctx.mctx().is_delayed_assigned(a));
+
+            // Rollback the trial
+            ctx.rollback(snap);
+
+            // After rollback, the pre-checkpoint assignment is PRESERVED
+            assert!(ctx.mctx().is_delayed_assigned(pre_assigned));
+
+            // But the in-trial assignment is undone
+            assert!(!ctx.mctx().is_delayed_assigned(a));
+
+            // And we can assign it now (the permanence guard is not left tripped)
+            ctx.mctx_mut()
+                .assign_delayed(a, vec![], b)
+                .expect("assign after rollback must succeed");
+            assert!(ctx.mctx().is_delayed_assigned(a));
         });
     }
 }
