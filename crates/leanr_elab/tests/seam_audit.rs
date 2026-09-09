@@ -719,11 +719,14 @@ fn no_seam_message_names_a_completed_slice() {
 /// (`pairW Nat.zero Nat.zero`) agreed with the oracle byte-for-byte
 /// throughout, and is the corpus record `coe/postponedThenResumed`.
 ///
-/// `ORACLE` is kept inline and byte-for-byte as it was pinned. It is the
-/// only reason to keep this test rather than delete it: the corpus
-/// cannot carry this query (a record exercising the gap would have
-/// failed the gate while the gap was open), so this constant is the
-/// only committed copy of the oracle's answer for the shape.
+/// **The corpus now carries the same query too** — the record
+/// `coe/postponedThenResumedUnderBinder` (elimMVarDeps task 11), which
+/// could not exist while the gap was open because it would have failed
+/// the gate. This test stays as well rather than being replaced by it:
+/// `ORACLE` is kept inline and byte-for-byte as it was pinned, so it is
+/// a committed copy of the oracle's answer that a corpus regeneration
+/// cannot move. The two disagreeing is itself the signal that the
+/// regeneration environment drifted.
 #[test]
 fn postponed_coe_under_a_binder_abstracts_via_elim_mvar_deps() {
     /// The pinned oracle's answer, dumped from `dump_elab.lean` against

@@ -1273,6 +1273,17 @@ mod tests {
     /// abstracting `[a]`, is replaced by `?new a`; the ORIGINAL is left
     /// unassigned (it must only be assigned by the elaborator that made
     /// it) and the NEW one is delayed-assigned back to it.
+    ///
+    /// **The context is TWO binders and only `a` is reverted**
+    /// (elimMVarDeps task 11). That is what makes the closing
+    /// assertions discriminate `reduce_local_context`
+    /// (`reduceLocalContext`, `:1065-1067`) IN BOTH DIRECTIONS: the
+    /// auxiliary metavariable's declared context must have `a` ERASED
+    /// and `b` STILL PRESENT. The one-binder version this replaces
+    /// asserted only `depth() == 0`, which an implementation erasing
+    /// the WHOLE context satisfies — measured: erasing everything left
+    /// the old assertion green and fails the `b`-present one below,
+    /// while erasing nothing fails the `depth`/`a`-absent ones.
     #[test]
     fn elim_mvar_deps_delays_a_synthetic_opaque_metavariable() {
         with_ctx(|ctx| {
@@ -1282,6 +1293,9 @@ mod tests {
 
             let cp = ctx.lctx_checkpoint();
             let a = fresh_fvar(ctx, sort0, "a");
+            // `b` is declared AFTER `a` and is NOT reverted: it is the
+            // survivor `reduce_local_context` must leave in place.
+            let b = fresh_fvar(ctx, sort0, "b");
             let lctx = ctx.current_lctx();
             let (m, mid) = ctx
                 .mk_aux_mvar_at(lctx, sort0, crate::MVarKind::SyntheticOpaque)
@@ -1309,10 +1323,28 @@ mod tests {
                         .expect("the new one is delayed-assigned back to the original");
                     assert_eq!(d.mvar_id_pending, mid);
                     assert_eq!(d.fvars, vec![a]);
+                    let new_lctx =
+                        std::sync::Arc::clone(&ctx.mctx().decl(new_id).expect("declared").lctx);
                     assert_eq!(
-                        ctx.mctx().decl(new_id).expect("declared").lctx.depth(),
-                        0,
-                        "minted at the REDUCED context — `a` is erased"
+                        new_lctx.depth(),
+                        1,
+                        "minted at the REDUCED context — exactly one of the two \
+                         declarations survives"
+                    );
+                    assert!(
+                        new_lctx.lctx().get(fvar_id(ctx, a)).is_none(),
+                        "`a` — the reverted fvar — is ERASED from the auxiliary \
+                         metavariable's context. Leaving it would let the new \
+                         metavariable be assigned the very variable the abstraction \
+                         is removing (`reduce_local_context`'s own doc), which is \
+                         this slice's bug reappearing one level down"
+                    );
+                    assert!(
+                        new_lctx.lctx().get(fvar_id(ctx, b)).is_some(),
+                        "`b` — declared alongside `a` but NOT reverted — SURVIVES. \
+                         `reduceLocalContext` erases exactly `to_revert`, not the \
+                         whole context: an auxiliary metavariable that lost `b` \
+                         could no longer be assigned any term mentioning it"
                     );
                 }
                 other => panic!("expected App, got {other:?}"),
