@@ -23,6 +23,7 @@
 
 use std::sync::Arc;
 
+use leanr_kernel::abstract_fvars;
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, NameId};
 
@@ -244,6 +245,93 @@ impl<'e> MetaCtx<'e> {
         let mut e = mvar;
         for x in xs {
             e = self.scratch.expr_app(Some(self.view.store), e, *x)?;
+        }
+        Ok(e)
+    }
+
+    /// oracle: `mkAuxMVarType` (`:1123-1168`) — the type of the auxiliary
+    /// metavariable `elim_mvar` mints: the original's type abstracted
+    /// over `xs` and wrapped in one `forall` per reverted entry,
+    /// innermost last.
+    ///
+    /// **Let-declarations are REFUSED, not handled.** The oracle branches
+    /// on `LocalDecl.ldecl (nondep := …)` (`:1131-1160`) and leanr's
+    /// `LocalDecl` carries no `nondep` bit at all
+    /// (`leanr_kernel/src/local_ctx.rs:37-43`; `mk_let_binding` takes it
+    /// as a caller argument, `metactx.rs:653`), so both ldecl arms have
+    /// no input. Writing one would be guessing, and a wrong `ExprId` is
+    /// worse than a named refusal — the same judgement, for the same
+    /// reason, as `mk_binding`'s existing
+    /// `"let-decl fvar in a cdecl telescope"` (`metactx.rs:769-772`).
+    ///
+    /// The METAVARIABLE arm (`:1157-1163`) is transcribed: `xs` may carry
+    /// a metavariable as a "may dependency" once `collect_forward_deps`
+    /// has run, and the oracle wraps it in a `forall` over the
+    /// metavariable's own type with `binderInfoForMVars` (default
+    /// `.implicit`).
+    ///
+    /// The oracle's `kind` and `usedLetOnly` parameters are absent here
+    /// because every arm that reads them is an ldecl arm (`:1140-1157`),
+    /// and those refuse. Adding parameters no branch can consult would be
+    /// surface without a producer.
+    ///
+    /// Both `abstract_fvars` calls below stand in for the oracle's
+    /// `abstractRangeAux` (`:1165-1167`) — `abstract_range` does not
+    /// exist until Task 9, which swaps these calls (Task 9 Step 6).
+    #[allow(dead_code)]
+    pub(crate) fn mk_aux_mvar_type(
+        &mut self,
+        lctx: &LocalCtxSnapshot,
+        xs: &[ExprId],
+        ty: ExprId,
+    ) -> Result<ExprId, MetaError> {
+        let mut e = abstract_fvars(self.scratch, Some(self.view.store), ty, xs, &mut self.guard)?;
+        for i in (0..xs.len()).rev() {
+            let x = xs[i];
+            let (binder_name, binder_ty, binder_info) = match self.fvar_id_of(x) {
+                Some(id) => {
+                    let decl = lctx.lctx().get(id).ok_or_else(|| {
+                        MetaError::Infer(
+                            "mk_aux_mvar_type: fvar not declared in the mvar's context".into(),
+                        )
+                    })?;
+                    if decl.value.is_some() {
+                        return Err(MetaError::Infer(
+                            "mk_aux_mvar_type: let-decl fvar in to_revert (leanr's LocalDecl \
+                             carries no `nondep` bit, so the oracle's ldecl arms have no input)"
+                                .into(),
+                        ));
+                    }
+                    (decl.binder_name, decl.ty, decl.binder_info)
+                }
+                None => {
+                    // oracle `:1157-1163` — a "may dependency" metavariable.
+                    let Node::MVar { id: Some(n) } = self.node(x) else {
+                        return Err(MetaError::Infer(
+                            "mk_aux_mvar_type: to_revert entry is neither an fvar nor an mvar"
+                                .into(),
+                        ));
+                    };
+                    let decl = self.mctx.decl(crate::MVarId(n)).ok_or_else(|| {
+                        MetaError::Infer("mk_aux_mvar_type: undeclared may-dependency mvar".into())
+                    })?;
+                    (decl.user_name, decl.ty, leanr_kernel::BinderInfo::Implicit)
+                }
+            };
+            let binder_ty = abstract_fvars(
+                self.scratch,
+                Some(self.view.store),
+                binder_ty,
+                &xs[..i],
+                &mut self.guard,
+            )?;
+            e = self.scratch.expr_forall(
+                Some(self.view.store),
+                binder_name,
+                binder_ty,
+                e,
+                binder_info,
+            )?;
         }
         Ok(e)
     }
@@ -503,6 +591,163 @@ mod tests {
                     }
                 }
                 other => panic!("expected App, got {other:?}"),
+            }
+        });
+    }
+
+    /// TDD RED/GREEN for plan task 8. `?m : Sort 0` reverted over
+    /// `[a : Sort 0]` gets the type `∀ (a : Sort 0), Sort 0`.
+    #[test]
+    fn mk_aux_mvar_type_wraps_the_reverted_binders() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            let snap = ctx.current_lctx();
+            ctx.lctx_restore(cp);
+
+            let ty = ctx
+                .mk_aux_mvar_type(&snap, &[a], sort0)
+                .expect("mk_aux_mvar_type");
+            match ctx.node(ty) {
+                Node::Forall {
+                    binder_type, body, ..
+                } => {
+                    assert_eq!(binder_type, sort0, "the reverted binder's type");
+                    assert_eq!(body, sort0, "the original type, with nothing to abstract");
+                }
+                other => panic!("expected Forall, got {other:?}"),
+            }
+        });
+    }
+
+    /// The reverted binder must actually be ABSTRACTED out of the
+    /// original type, not merely prefixed: `?m : a` reverted over `[a]`
+    /// gets `∀ (a : Sort 0), #0`, never `∀ (a : Sort 0), <fvar a>`.
+    #[test]
+    fn mk_aux_mvar_type_abstracts_the_reverted_fvar_out_of_the_type() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            let snap = ctx.current_lctx();
+            ctx.lctx_restore(cp);
+
+            // The metavariable's own type IS the fvar.
+            let ty = ctx
+                .mk_aux_mvar_type(&snap, &[a], a)
+                .expect("mk_aux_mvar_type");
+            match ctx.node(ty) {
+                Node::Forall { body, .. } => assert!(
+                    matches!(ctx.node(body), Node::BVar { idx: 0 }),
+                    "the reverted fvar is abstracted to bvar 0 — leaving it as an \
+                     fvar is precisely the bug this whole slice removes, one level \
+                     down in the auxiliary metavariable's own type"
+                ),
+                other => panic!("expected Forall, got {other:?}"),
+            }
+        });
+    }
+
+    /// A let-declaration in `to_revert` is REFUSED, not guessed at:
+    /// leanr's LocalDecl carries no `nondep` bit, so the oracle's two
+    /// ldecl arms have no input.
+    #[test]
+    fn mk_aux_mvar_type_refuses_a_let_decl_in_to_revert() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let v = ctx
+                .push_let_decl(None, sort0, sort0)
+                .expect("push_let_decl");
+            let snap = ctx.current_lctx();
+            ctx.lctx_restore(cp);
+
+            let err = ctx
+                .mk_aux_mvar_type(&snap, &[v], sort0)
+                .expect_err("a let-decl in to_revert is refused");
+            assert!(
+                format!("{err:?}").contains("let-decl"),
+                "the refusal names itself: {err:?}"
+            );
+        });
+    }
+
+    /// Discriminates the third Step-5 mutation (iterate `0..xs.len()`
+    /// forward instead of `.rev()`), which the single-binder test above
+    /// cannot see: with one binder, forward vs. reverse iteration visits
+    /// the same (only) index, so the wrapping is identical either way.
+    /// Two binders with DISTINGUISHABLE types make the nesting order
+    /// observable: `[a : Sort 0, b : a]` reverted innermost-last must
+    /// produce `∀ (a : Sort 0), ∀ (b : #0), Sort 0` — `a` outermost,
+    /// `b` innermost, `b`'s own type abstracted over `a` (bvar 0). A
+    /// forward iteration would instead try to bind `b` (whose type
+    /// mentions the not-yet-bound `a`) outermost, so `a`'s abstraction
+    /// range would exclude `b`, giving a visibly different — and
+    /// wrong — nesting: this assertion reads the identity of the
+    /// OUTER binder's type (`Sort 0` vs. an abstracted `#0`), which a
+    /// test that only counts binders cannot distinguish.
+    #[test]
+    fn mk_aux_mvar_type_nests_two_reverted_binders_innermost_last() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            // `b`'s type IS the fvar `a` — distinguishable from `Sort 0`.
+            let b = fresh_fvar(ctx, a, "b");
+            let snap = ctx.current_lctx();
+            ctx.lctx_restore(cp);
+
+            let ty = ctx
+                .mk_aux_mvar_type(&snap, &[a, b], sort0)
+                .expect("mk_aux_mvar_type");
+            // Outer forall: binds `a`, whose type must be the UNABSTRACTED
+            // `Sort 0` — nothing precedes `a` in `to_revert`.
+            match ctx.node(ty) {
+                Node::Forall {
+                    binder_type: outer_binder_ty,
+                    body: inner,
+                    ..
+                } => {
+                    assert_eq!(
+                        outer_binder_ty, sort0,
+                        "the outer (a) binder's type is Sort 0 unabstracted"
+                    );
+                    match ctx.node(inner) {
+                        Node::Forall {
+                            binder_type: inner_binder_ty,
+                            body: innermost,
+                            ..
+                        } => {
+                            assert!(
+                                matches!(ctx.node(inner_binder_ty), Node::BVar { idx: 0 }),
+                                "the inner (b) binder's type was `a`, abstracted over the \
+                                 PRECEDING entry only (&xs[..1] = [a]) into bvar 0 — a \
+                                 forward iteration would instead try to abstract `a`'s \
+                                 type over `&xs[..0] = []` while `b` is still an fvar, \
+                                 producing a different nesting entirely"
+                            );
+                            assert_eq!(
+                                innermost, sort0,
+                                "the innermost body is the original type, nothing left to abstract"
+                            );
+                        }
+                        other => panic!("expected inner Forall (b), got {other:?}"),
+                    }
+                }
+                other => panic!("expected outer Forall (a), got {other:?}"),
             }
         });
     }
