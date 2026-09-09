@@ -685,8 +685,33 @@ impl<'e> MetaCtx<'e> {
     /// metavariable-local-contexts slice this minted an empty context,
     /// which made every ambient free variable look out of scope to
     /// `check_assignment_scope_body` and so made a metavariable
-    /// unassignable to any `fun`-bound variable.
+    /// unassignable to any `fun`-bound variable. This is now the
+    /// ambient/`Natural` specialization; see `mk_aux_mvar_at` for the
+    /// general form.
     pub(crate) fn mk_aux_mvar(&mut self, ty: ExprId) -> Result<(ExprId, MVarId), MetaError> {
+        let lctx = self.current_lctx();
+        self.mk_aux_mvar_at(lctx, ty, MVarKind::Natural)
+    }
+
+    /// `mk_aux_mvar` with the local context and kind chosen by the
+    /// caller — the form `elim_mvar` (`mk_binding.rs`) needs, which
+    /// mints at an explicitly constructed REDUCED context that is
+    /// neither the ambient one nor any existing metavariable's, and
+    /// which must carry the kind `elimMVar` computes
+    /// (`MetavarContext.lean:1195`) rather than always `Natural`.
+    ///
+    /// A generalization, not an addition: duplicating the
+    /// declare-and-intern sequence into a second minting function
+    /// would be two places to keep in step for one behavior. Flagged
+    /// per the M4b accessor precedent; behavior-neutral for
+    /// `mk_aux_mvar`, whose two tests above pin the ambient/`Natural`
+    /// pair it had before.
+    pub(crate) fn mk_aux_mvar_at(
+        &mut self,
+        lctx: std::sync::Arc<crate::LocalCtxSnapshot>,
+        ty: ExprId,
+        kind: MVarKind,
+    ) -> Result<(ExprId, MVarId), MetaError> {
         let idx = self.expr_mvar_gen;
         self.expr_mvar_gen += 1;
         let base = Some(self.view.store);
@@ -695,14 +720,13 @@ impl<'e> MetaCtx<'e> {
         let idx_id = self.scratch.intern_nat(base, &Nat::from(idx))?;
         let name = self.scratch.name_num(base, Some(prefix), idx_id)?;
         let id = MVarId(name);
-        let lctx = self.current_lctx();
         self.mctx.declare(
             id,
             MVarDecl {
                 user_name: None,
                 ty,
                 lctx,
-                kind: MVarKind::Natural,
+                kind,
             },
         );
         let expr = self.scratch.expr_mvar(base, Some(name))?;
@@ -2176,5 +2200,57 @@ mod tests {
                 );
             },
         );
+    }
+
+    /// TDD RED/GREEN for plan task 7. `mk_aux_mvar_at` mints at the
+    /// GIVEN context and kind, not the ambient ones.
+    #[test]
+    fn mk_aux_mvar_at_uses_the_given_context_and_kind() {
+        use crate::test_support::{fresh_fvar, with_ctx};
+        use crate::LocalCtxSnapshot;
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let _a = fresh_fvar(ctx, sort0, "a");
+            // Ambient context now has one decl; mint at the EMPTY one.
+            let (_, id) = ctx
+                .mk_aux_mvar_at(LocalCtxSnapshot::empty(), sort0, MVarKind::SyntheticOpaque)
+                .expect("mk_aux_mvar_at");
+
+            let decl = ctx.mctx().decl(id).expect("declared");
+            assert_eq!(
+                decl.lctx.depth(),
+                0,
+                "minted at the GIVEN context, not the ambient one — minting at \
+                 the ambient context is what lets the new metavariable be \
+                 assigned the very fvar the abstraction removes"
+            );
+            assert_eq!(decl.kind, MVarKind::SyntheticOpaque, "the given kind");
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// `mk_aux_mvar` keeps its exact prior behavior: ambient context,
+    /// `Natural` kind. The generalization must be behavior-neutral for the
+    /// existing entry point.
+    #[test]
+    fn mk_aux_mvar_still_mints_at_the_ambient_context_as_natural() {
+        use crate::test_support::{fresh_fvar, with_ctx};
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let _a = fresh_fvar(ctx, sort0, "a");
+            let (_, id) = ctx.mk_aux_mvar(sort0).expect("mk_aux_mvar");
+            let decl = ctx.mctx().decl(id).expect("declared");
+            assert_eq!(decl.lctx.depth(), 1, "the ambient context, as before");
+            assert_eq!(decl.kind, MVarKind::Natural, "Natural, as before");
+            ctx.lctx_restore(cp);
+        });
     }
 }
