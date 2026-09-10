@@ -876,8 +876,13 @@ fn extract_let_id_name(
 /// bracketedBinder`, `binderIdent = Ident <|> hole`).
 ///
 /// Named seams (→ `UnsupportedSyntax`): implicit / strict-implicit /
-/// instance bracketed binders (M4b-3, which brings implicit and
-/// instance arguments), and any other item shape.
+/// instance bracketed binders IN THIS, `let`/`have`'s OWN binder list,
+/// and any other item shape. The controller ruled this one stays open:
+/// the DECLARED-TYPE position (reached via `forall`, `extract_binder_group`)
+/// closed, but opening `let x [inst : T] := …` here would change
+/// `let`/`have` elaboration and needs its own oracle corpus record —
+/// unclaimed by any plan slice, so the message names "later M4" rather
+/// than a milestone this slice sits inside.
 ///
 /// The CALLER owns the `lctx_checkpoint`/`lctx_restore` bracket.
 fn push_let_binders(
@@ -905,7 +910,11 @@ fn push_let_binders(
                 let g = extract_binder_group(elab, n, kinds)?;
                 if !matches!(g.bi, BinderInfo::Default) {
                     return Err(ElabError::UnsupportedSyntax(
-                        "let: implicit/strict/instance binder (M4b-3)".into(),
+                        "let: implicit/strict/instance binder in let/have's own \
+                         binder list — later M4 (the declared-type position, \
+                         reached via `forall`, is closed; this own-binder-list \
+                         position is unclaimed by any plan slice)"
+                            .into(),
                     ));
                 }
                 fvars.extend(push_binder_group(elab, &g, kinds)?);

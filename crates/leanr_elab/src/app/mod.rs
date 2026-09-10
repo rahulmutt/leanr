@@ -21,7 +21,21 @@
 //! consumer (`App.lean:681-727`, `:638-646`), gated by `Elab0.lean`'s
 //! `Lean.Internal.coeM` exactly as the oracle's `App.lean:1355` gates
 //! it. `tests/seam_audit.rs`'s `no_seam_points_at_the_retired_p2b_ii_label`
-//! gates that its message never comes back.
+//! gates that its message never comes back. **Also no longer a seam, as
+//! of M4b-3 P5**: the `fType` still-an-unassigned-mvar row (task 4 —
+//! `propagateExpectedType`, `builtin/binder.rs`, now pins a `fun`
+//! binder's domain from its ascription before `app/args.rs` can ever
+//! see an unassigned mvar there; what remains is a genuine
+//! `FunctionExpected`, `tests/seam_audit.rs`'s
+//! `mvar_function_type_is_closed_by_propagation`), `optParam`/`autoParam`
+//! default filling (tasks 8-9 — `app/args.rs`'s `opt_param_default`/
+//! `auto_param_tactic`/`mk_tactic_mvar`, real code exercised by
+//! `tests/oracle_elab.rs`'s `p5/*` records now that `Elab0.lean`
+//! declares `withDefault`/`withTactic`), and implicit-lambda insertion
+//! ITSELF (tasks 5-6 — `elab.rs`'s `use_implicit_lambda`/
+//! `elab_implicit_lambda`). What P5 did NOT close: the `@($t)`/`@$t`
+//! wrap here that elaborates with insertion explicitly disabled — see
+//! `elab_explicit`'s own doc comment, retargeted to "later M4" below.
 //!
 //! NOT in this plan, each a named seam (never a silent fall-through).
 //! `Where` is the site that raises it; every message below carries its
@@ -42,20 +56,10 @@
 //! `literal_kinds_are_registered_not_deferred` gates that it stays gone.
 //!
 //! ```text
-//!   fType still an unassigned mvar after synthesis ... P5  args.rs (`main`'s
-//!     synthesize_pending_and_normalize_fun_type) — expected-type
-//!     propagation into `fun` binder domains for the M4b-2 `fun` shape,
-//!     still owed. `coerceToFunction?` (CoeFun) is tried FIRST and, as
-//!     of M4b-3 P4 task 8, is no longer part of this seam: it either
-//!     bridges the type and the state machine proceeds, or answers
-//!     `none` and this row is what remains. A genuinely non-function
-//!     fType at the same site is NOT a seam either: it reports
-//!     `ElabError::FunctionExpected`, matching the oracle's own
-//!     diagnostic (`over_application_reports_function_expected`,
-//!     `tests/seam_audit.rs`).
 //!   coercions (CoeT/CoeFun/CoeSort, mkCoe) ........... P4 SHIPPED — coe.rs, args.rs
-//!   optParam defaults / autoParam .................... P5  args.rs
-//!   implicit-lambda insertion ........................ P5  elab.rs, and `@t`/`@(t)` here
+//!   optParam defaults / autoParam .................... P5 SHIPPED — args.rs
+//!   implicit-lambda insertion (the feature) .......... P5 SHIPPED — elab.rs
+//!   `@($t)`/`@$t` disabling implicit-lambda insertion . later M4  here (`elab_explicit`)
 //!   overload resolution (candidates > 1) ............. resolve_global slice  overload.rs
 //!   elabAsElim, RECURSOR heads only (partial!) ....... M4b-4 head.rs
 //!   dot notation, LVal machinery ..................... M4b-4 head.rs, here, dispatch.rs
@@ -76,23 +80,24 @@
 //! `fixture_declares_no_undecoded_elab_attributes` is the source-text
 //! backstop keeping it out of the committed corpus in the meantime.
 //!
-//! One of those is not reachable from any source term the hermetic
-//! `Elab0` fixture can express, and `tests/seam_audit.rs` records why
-//! rather than pretending otherwise (a THIRD, the P2 instance-implicit
-//! seams, no longer belonged on this list as of M4b-3 P2a task 7:
-//! `Elab0.lean` now declares `Wrap`/`Pair`/`NoInst`/`Dflt`, and
-//! `args.rs`'s `InstImplicit` arm and the three `inst_mvars` guards are
-//! real code, exercised by `tests/oracle_elab.rs`'s `tc/*` records and
-//! `tests/synthetic_smoke.rs`; a FOURTH, the P4 coercion seam, no
-//! longer belongs here either as of M4b-3 P4: coercion insertion
-//! (`coe.rs`'s `mk_coe`/`ensure_has_type`/`ensure_type`) shipped, so
-//! `elab_and_add_new_arg`'s `ensureArgType` inserts a `CoeT` coercion on
-//! a defeq mismatch instead of erroring, and `ElabError::TypeMismatch`
-//! now names only `mk_coe`'s own immediate failure, not a
-//! missing-coercion seam — see `error.rs`'s doc on that variant):
-//!   * the P5 optParam/autoParam seam — no fixture parameter carries
-//!     either wrapper, so it is asserted white-box instead
-//!     (`app_smoke.rs`'s `explicit_mode_skips_the_optparam_default`).
+//! Historically this doc also tracked seams unreachable from any source
+//! term the hermetic `Elab0` fixture could express — the P2
+//! instance-implicit seams (closed as of M4b-3 P2a task 7: `Elab0.lean`
+//! now declares `Wrap`/`Pair`/`NoInst`/`Dflt`, real code exercised by
+//! `tests/oracle_elab.rs`'s `tc/*` records and `tests/synthetic_smoke.rs`),
+//! the P4 coercion seam (closed as of M4b-3 P4: `coe.rs`'s `mk_coe`/
+//! `ensure_has_type`/`ensure_type` shipped, so `elab_and_add_new_arg`'s
+//! `ensureArgType` inserts a `CoeT` coercion on a defeq mismatch instead
+//! of erroring), and the P5 `optParam`/`autoParam` seam (closed as of
+//! M4b-3 P5 tasks 8-9: `Elab0.lean` now declares `withDefault`/
+//! `withTactic` and both wrappers have real fixture coverage —
+//! `tests/oracle_elab.rs`'s `p5/optparam-*`/`p5/autoparam-*` records —
+//! so "no fixture parameter carries either wrapper" is no longer true;
+//! `app_smoke.rs`'s `explicit_mode_skips_the_optparam_default` stays as
+//! a white-box test of the `explicit == true` shape specifically, which
+//! no fixture declaration reaches either way, not as a seam assertion).
+//! All three are gone from the table above; none of the rows remaining
+//! in it are unreachable from fixture source.
 
 pub mod args;
 pub mod expand;
@@ -186,7 +191,13 @@ pub fn elab_atom(
 /// P1 implements the first family and NAMES the other two, because
 /// `@t` exists precisely to disable implicit-lambda insertion (P5's) —
 /// so routing it to `elab_atom` would not merely be incomplete, it
-/// would enter explicit mode the oracle never enters.
+/// would enter explicit mode the oracle never enters. Implicit-lambda
+/// insertion itself SHIPPED in M4b-3 P5 (`elab.rs`'s
+/// `use_implicit_lambda`/`elab_implicit_lambda`); actually WRAPPING
+/// `@($t)`/`@$t` to elaborate `t` with it disabled is a one-liner now
+/// that the feature exists, but no plan slice has claimed the change or
+/// added a corpus record for it, so it stays a named seam — retargeted
+/// below to "later M4" rather than the now-complete "M4b-3 P5".
 ///
 /// The `.field` forms are the LVal machinery (M4b-4); in leanr's tree
 /// a dotted name like `@Nat.succ` is a single `<ident>` TOKEN
@@ -212,7 +223,10 @@ pub fn elab_explicit(
         )),
         other => Err(ElabError::UnsupportedSyntax(format!(
             "`@` applied to `{other}` does not enter explicit mode — it DISABLES \
-             implicit-lambda insertion (App.lean:2269-2270) — M4b-3 P5"
+             implicit-lambda insertion (App.lean:2269-2270) — later M4 (the \
+             insertion itself already shipped; wrapping `@($t)`/`@$t` to \
+             elaborate with it disabled did not, and no plan slice has \
+             claimed it)"
         ))),
     }
 }

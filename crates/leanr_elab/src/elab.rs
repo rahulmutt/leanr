@@ -499,7 +499,15 @@ fn local_ident_of(
 /// (`2b0e402`, deleted by Task 4): the one shape this task's own arm can
 /// manufacture — an aux mvar applied to binder fvars, never itself
 /// reducible to something else — does not need the extra `whnf` to
-/// expose an `MVar` head, so the distinction is not drawn here.
+/// expose an `MVar` head, so the distinction is not drawn here. That is
+/// also the only option available: `leanr_meta::MetaCtx::whnf_r` is
+/// `pub(crate)` to that crate, not `pub`, so `leanr_elab` cannot call it
+/// without a new accessor — the crate boundary forces this, not merely
+/// a design preference. A caller that genuinely needed the
+/// REDUCIBLE-only distinction would have to add one (the same
+/// elab→meta accessor precedent this slice's own
+/// `push_local_decl_without_instance` /
+/// `install_local_instance_for_last_pushed` follow).
 fn is_mvar_app(elab: &mut TermElabM, e: ExprId) -> Result<bool, ElabError> {
     let e = elab.mctx.instantiate_mvars(e)?;
     let base = elab.view.store;

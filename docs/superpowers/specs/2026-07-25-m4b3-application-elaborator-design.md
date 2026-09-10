@@ -1035,6 +1035,301 @@ has zero changes across the whole branch, so the narrow exception it
 pre-authorized was never invoked. M4b-3 P5's instance-implicit binders
 now have a consumer.
 
+## Amendment 9 (2026-09-10, post-P5): P5 landed — this plan's own errors, the neutrality measurement, and what the next slice inherits
+
+P5 landed: implicit/strictImplicit/instImplicit binder breadth for
+`fun`/`let`/`have`, expected-type propagation into binder domains, real
+implicit-lambda insertion, and `optParam`/`autoParam` default-argument
+paths. This amendment is the seam-audit sweep's record, and it is
+written as a record for whoever picks up the next slice, not a victory
+lap: where this plan was wrong, it is said plainly, with how it was
+found.
+
+**1. What Amendment 8 got wrong, and why.** Two of its claims were
+already closed by the time P5's implementation plan started executing.
+**Local-instance wiring:** Amendment 8's items 1-2 argued that P5's
+instance-implicit binders had no consumer and needed a prerequisite
+slice; that slice (PR #43, `docs/superpowers/specs/2026-09-09-local-instances-design.md`)
+landed before P5's own plan began, and by then `push_local_decl`
+already installed a local instance on type alone — exactly the
+oracle's own rule (`withNewFVar`, `Basic.lean:1785-1789`) — so P5's
+binder-info-breadth tasks needed only to pass the right `BinderInfo`
+through already-real plumbing, not build new wiring. **The `..`
+ellipsis:** Amendment 8's revised § P5 bullet list (item 3, "seven
+items") still lists it as owed to P5, but it was closed by M4b-3 P1's
+own task 7 (`args.rs`'s `if app.ctx.ellipsis { add_implicit_arg }`,
+oracle `App.lean:856-857`), shipped in PR #31, well before Amendment 8
+was written. Amendment 8 (2026-09-09) inherited the ellipsis item from
+the ORIGINAL § P5 bullet list without re-checking it against what P1
+had already shipped. Neither error changed what P5's tasks actually
+built — both were caught before or during planning, not after — but
+both are corrected here so this document does not go on citing them as
+open.
+
+Separately: the P5 implementation plan's own task 10 brief assumed
+"`Add`/`instAddNat` may already be present [in `Elab0.lean`]; add only
+what `grep` shows missing." They were absent. Six tasks' tests
+referenced constants that did not exist in the committed environment,
+caught during planning and fixed by inserting a new Task 0 ahead of
+Task 1 (every fixture prerequisite — `optParam`, `autoParam` and its
+`Lean.Syntax`/`p5AutoTac` axioms, `class Add`/`instAddNat`,
+`withDefault`, `withTactic` — landing in its own commit, rebuilding
+`Elab0.olean`, and reverifying all 117 pre-existing records
+byte-identical before any P5 task touched them).
+
+**2. The `.postpone` finding.** P1 wrote off `useImplicitLambda`'s third
+result (`TermElabM.lean:1753-1778` — a local identifier whose type is
+still an mvar APPLICATION) on the grounds that no corpus term could
+reach it, and that leanr had no term-level postponement to resume it
+with even if one did. The second half still holds. The first aged
+badly: `elimMVarDeps` (PR #42) manufactures exactly that shape — an
+aux mvar applied to binder fvars — as the type of an as-yet-untyped
+`fun` binder, and P5 multiplies the binder producers on top of it, so
+"no corpus term reaches it" stopped being a safe assumption. M4b-3 P5
+task 6 models the arm explicitly rather than leaving it an unexamined
+assumption: `elab.rs`'s `UseImplicitLambda::Postpone` dispatches to a
+named `UnsupportedSyntax` seam owned by **M4b-4** (`elab.rs`'s
+`UseImplicitLambda::Postpone` doc, `:391-396`, and `use_implicit_lambda`'s
+own doc, `:414-422`; `tests/seam_audit.rs`'s
+`implicit_lambda_postpone_is_a_named_seam`).
+This is the concrete instance of this very spec's own standing
+warning that "no corpus term reaches it" is a claim with a shelf
+life, not a permanent fact — recorded here because it is worth having
+one on the record, not just the abstract warning.
+
+**3. The neutrality measurement (Task 11, numbers used verbatim, the
+controller's independent re-run confirms them).** Merge-base `44d004f`
+(the P5 planning-doc commit; not the plan's stale `a1f8f9e`, which
+`main` had already advanced past by the time this measurement ran).
+Elaboration corpus (`tests/fixtures/elab/elab-queries.jsonl`): **117 →
+134 records, +17, a pure append — zero removed-or-modified lines.** The
+differential gate passed on the FIRST regeneration. Synthesis corpus
+(`tests/fixtures/meta/synth-queries.jsonl`): **32 → 32, untouched**, as
+expected for a slice that adds no `leanr_meta` *behaviour*. `lean-toolchain`
+unbumped at `leanprover/lean4:v4.33.0-rc1`; `leanr_kernel` fully
+untouched (`git diff --stat` empty). `mise run ci` passed (fmt, clippy,
+the full suite including `meta:fast`). One committed elab query,
+`p5/propagate-short` (`(fun x y => Nat.zero : Nat -> Nat)`), is
+deliberately retained despite producing no oracle record: the oracle
+itself rejects it with a genuine type mismatch (two `fun` binders
+against a one-arrow expected type) — documented inline
+(`tests/fixtures/elab/dump_elab.lean`) so the gap does not read as a
+regen bug; it does not affect the 117→134 count.
+
+**4. The accessor ledger's P5 row, amended.** § Accessor ledger's P5 row
+above now records what Task 11 measured directly against the
+merge-base source: `crates/leanr_meta/src/metactx.rs` is +178/-12, and
+"additive" is not the right single word for it. Three distinct shapes
+in one commit — two genuinely new public methods
+(`push_local_decl_without_instance`, `install_local_instance_for_last_pushed`,
+purely additive, one new call site each in `builtin/binder.rs`), one
+mechanical extract (`push_local_decl_inner`, proven byte-identical to
+the merge-base body it was lifted from), and one edit to an existing
+function's body (`install_local_instance_for`'s memo-drop, proven
+behaviour-neutral for its two pre-existing callers by direct comparison
+against the merge-base source, not by trusting the in-code comment) —
+plus the reason the addition was needed (the oracle runs
+`propagateExpectedType` before its `isClass?` test; leanr's old
+`push_local_decl` minted, pushed and class-checked in one call, so an
+elided binder whose domain only becomes class-typed via propagation
+would silently lose its local instance) and the rejected alternative
+(leaving the divergence named in a comment — rejected because the
+failure is silent, which this slice's discipline forbids).
+
+**5. Rulings made during execution, carried forward.** The next slice
+inherits these as-is; none were reopened by this task.
+
+   - **The plan's own `optType` model was wrong**, and the shipped
+     elaborator deliberately diverges from the plan text. `expandFun`
+     (`Binders.lean:648-651`) maps `expandSimpleBinderWithType`
+     (`:265-270`) over the BINDERS of a `fun x y : T => e` group — `T`
+     becomes each binder's own domain — and throws "unexpected type
+     ascription" for any binder that is not a bare ident or `_`. The
+     plan's premise, that the `optType` ascribes the BODY, is false and
+     was verified false both against the pinned source and on the
+     pinned binary (`fun x y : Nat => Nat.zero` is `Nat → Nat → Nat`;
+     `fun (x : Nat) : Nat => x` and `fun (a : Type) (x : a) : a => x`
+     both ERROR in real Lean). Two of the plan's mandated tests and
+     three of its corpus queries were built on the false premise; the
+     corrected model is what shipped and is pinned by
+     `tests/binder_smoke.rs`'s `fun_opt_type_distributes_across_multiple_binders`
+     and `fun_opt_type_rejects_a_non_simple_binder`.
+   - **`let`/`have`'s OWN bracketed-binder list still rejects an
+     implicit/strict-implicit/instance binder.** `builtin/binder.rs`'s
+     `push_let_binders` guard stays a named seam: M4b-3 P5 task 3 closed
+     `instBinder` only for the DECLARED-TYPE position, reached via
+     `forall` (`extract_binder_group`); a binder INSIDE `let`/`have`'s
+     own binder list (`let x [inst : T] := …`) is a different code path
+     and was ruled to stay closed in this slice — opening it changes
+     `let`/`have` elaboration and needs its own oracle corpus record,
+     and nothing downstream in P5 built on it. Task 12 retargeted the
+     message's slice label off "M4b-3" (the milestone this very plan
+     sits inside, which read as self-referential) to "later M4",
+     unclaimed by any plan slice.
+   - **`elabExplicit`'s `` `(@($t)) ``/`` `(@$t) `` arm stays a named
+     seam**, for a different reason: closing it became a one-liner once
+     implicit-lambda insertion landed (Task 5-6 shipped
+     `use_implicit_lambda`/`elab_implicit_lambda`; wrapping the call
+     with `implicitLambda := false` needs no new machinery), but it is
+     an unplanned feature — no P5 task claimed the wrap, and no corpus
+     record exercises it. Task 12 retargeted `app/mod.rs`'s
+     `elab_explicit` message and its own module-doc seam table entry
+     from the now-complete "M4b-3 P5" to "later M4", and added
+     `tests/seam_audit.rs`'s `no_seam_points_at_the_retired_p5_implicit_lambda_label`
+     plus an "M4b-3 P5" entry in `no_seam_message_names_a_completed_slice`'s
+     needle list, mirroring the P2/P3/P2b-ii/P4 retired-label gates
+     already there.
+   - **The implicit-lambda wrap pushes its binders ANONYMOUSLY**, in
+     place of the oracle's `withFreshMacroScope`/`addMacroScope`
+     hygiene (`TermElabM.lean:1814-1815`). leanr has no macro scopes;
+     an unnamed binder reproduces hygiene's effect because user
+     identifiers resolve past it, and binder names are erased by the
+     differential encoder. Without this, `(fun (a : Type) => (a :
+     {a : Type} -> Type))` silently produced a different term than the
+     oracle. Full macro-scope hygiene remains a later slice's work.
+   - **`synthetic/report.rs`'s `SyntheticMVarKind::Tactic` arm is
+     unreachable today and was deliberately kept anyway.** The oracle
+     has the same shape: `SyntheticMVars.lean:565` always attempts the
+     tactic when `delayOnMVars` is false (leanr's only case), and its
+     reporter at `:316` falls to `unreachable!` otherwise. The arm goes
+     live once a later M4 slice puts a real tactic evaluator in rung 5.
+   - **`builtin/binder.rs` passed the plan's own ~1000-line soft
+     ceiling** (now ~1330, a substantial share of it the in-file test
+     module). Ruled to stay whole for this slice: the plan's own
+     rationale — that splitting mid-slice obscures the diff against the
+     oracle's single `Binders.lean` loop — still held. The split is a
+     pure no-behaviour refactor, available at any time, not owed to any
+     particular slice.
+
+**6. Citations this plan got wrong, and what Task 12 verified.**
+Every citation below was opened against the pinned toolchain source
+(`/home/dev/.elan/toolchains/leanprover--lean4---v4.33.0-rc1/src/lean/`)
+before being trusted, per this spec's own standing citation discipline.
+
+   - **`App.lean:2268-2270` → `:2269-2270`.** § P5's "Implicit-lambda
+     insertion" bullet above cited `:2268-2270` for `@` disabling
+     implicit-lambda insertion; `:2268` is the PRECEDING
+     `` `(@.$_:ident.{$_us,*}) `` match arm, and the two arms that
+     actually elaborate with `implicitLambda := false`
+     (`` `(@($t)) ``/`` `(@$t) ``) are `:2269-2270`. `crates/leanr_elab`'s
+     own citations (`app/mod.rs`, `app_smoke.rs`, `binder_smoke.rs`,
+     `seam_audit.rs`) already had this right; only this design-spec
+     bullet carried the off-by-one and is corrected by this task.
+   - **`blockImplicitLambda` — verified, no fix needed.** The task
+     brief flagged two competing citations in `elab.rs`,
+     `:1716-1720` and `:1715-1720` (`:1715` is the doc-comment line
+     above the `def`, `:1716` the `def` itself). Both live occurrences
+     in `crates/leanr_elab/src/elab.rs` and the one in
+     `tests/app_smoke.rs` already read `:1716-1720` — Task 5 had
+     already fixed this, and this task's own grep found no surviving
+     `:1715-1720`. Recorded as verified rather than silently assumed.
+   - **`toBinderViews`, wrong by ~290 lines — in the PLAN TEXT, not the
+     shipped code.** The P5 implementation plan's own briefs (Task 1's
+     background section, Task 3's brief) cited `toBinderViews` at
+     `Binders.lean:436-455` with an `instBinder` arm at `:450-453`;
+     those lines are actually inside the unrelated `elabFunBinderViews`
+     (`:423-448`). The real `toBinderViews` is `Binders.lean:140-166`,
+     with its `instBinder` arm at `:161-165` — verified directly against
+     the pinned source by this task. `crates/leanr_elab/src/builtin/binder.rs`
+     already carries the corrected citations (Task 3's own fix,
+     recorded in its report); this design spec never itself cited
+     `toBinderViews`, so there was nothing here to correct. The reason
+     this is worth recording at all: implementers transcribe oracle
+     citations from the plan text they are handed, so an error in the
+     plan propagates into every task brief downstream of it until
+     someone opens the actual line — which is exactly what happened
+     here, and exactly the discipline this spec's citation rule exists
+     to force.
+
+**7. The seam-audit sweep itself.** Every `M4b-3 P5`/`P5` mention in
+`crates/leanr_elab/src` and `crates/leanr_elab/tests` was located by
+content (line numbers had drifted from the brief's pre-plan list across
+eleven tasks' worth of edits) and classified. The great majority are
+accurate history ("M4b-3 P5 task N did X") and were left alone — a doc
+comment legitimately cites a completed slice historically; only a LIVE
+seam message claiming ownership by a slice that is actually complete is
+a stale claim. What Task 12 changed:
+
+   - **Closed and reconciled into "no longer a seam" prose** (matching
+     this crate's own established pattern for P2a/P2b-ii closures):
+     `app/mod.rs`'s module-doc seam table dropped the `fType`
+     still-an-unassigned-mvar row (closed by task 4 — confirmed live
+     against `app/args.rs`'s own comment at the site), the
+     `optParam`/`autoParam` row (closed by tasks 8-9, and the fixture
+     now carries real `p5/optparam-*`/`p5/autoparam-*` oracle records,
+     so the row's own former justification — "no fixture parameter
+     carries either wrapper" — was independently stale too) and
+     folded implicit-lambda insertion's own closure (elab.rs, tasks
+     5-6) into the same reconciliation paragraph. `dispatch.rs`'s
+     mirror table got the same treatment plus its own reconciliation
+     sentence. `lib.rs`'s "What is NOT built yet" bullet was rewritten
+     to SHIPPED, matching the style already used there for coercions.
+   - **Retargeted** (message text AND doc-table entry, both): the two
+     sites named above in item 5 — `push_let_binders`'s own-binder-list
+     guard and `elabExplicit`'s `other` arm — from "M4b-3 P5"/bare
+     "M4b-3" to "later M4".
+   - **Documentation minors fixed:** `app/state.rs`'s
+     `consume_opt_auto_param` doc claimed "all three of its call
+     sites"; task 9 deleted the third (the default-filling arms' own
+     seam check, replaced by a real producer), leaving two
+     (`app/propagate.rs:314`, `app/args.rs:623`) — corrected to "both".
+     `crates/leanr_meta/src/metactx.rs`'s `install_local_instance_for`
+     doc claimed to be "the ONE place that ever writes
+     `local_instances`"; `install_lctx`'s `replace` and `lctx_restore`'s
+     `truncate_to` also write it (both handle the memo correctly, so no
+     functional gap, but the claim would mislead a future
+     "every writer" audit) — scoped to "the one place a new local
+     instance is *pushed*". `elab.rs`'s `is_mvar_app` doc attributed
+     skipping `whnfR` to design preference alone; `leanr_meta::MetaCtx::whnf_r`
+     is `pub(crate)`, so the crate boundary forces it regardless —
+     recorded as both facts, not one. `tests/seam_audit.rs`'s
+     `.postpone` seam test doc said "aux-mvar applications over binder
+     fvars"; the shape the COMMITTED test actually exercises is a bare
+     zero-argument mvar, the degenerate case of the same spine-walk
+     classifier — corrected to say so. PRE-EXISTING, not this slice's
+     regression, left as-is: `install_local_instance_for`'s memo clear
+     is skipped when `is_class(ty)` returns `Err` (the `?` returns
+     early), leaving the memo stale after a partial mutation; the
+     callers' own clears were equally gated by the same `?` before this
+     slice, so nothing here got worse.
+   - **A live illustrative example inside `seam_audit.rs` itself went
+     stale mid-sweep and had to be rewritten**: the doc comment
+     explaining why `no_seam_message_names_a_completed_slice` cannot be
+     generalised to "any completed slice" used to cite `elab.rs`'s
+     "M4b-3 P5" and `app/args.rs`'s own optParam/autoParam "M4b-3 P5"
+     as examples of legitimately-incomplete live seam labels — both
+     examples were retired by this same task's other edits, so the
+     illustration was rewritten to cite currently-live "M4b-4" seams
+     instead (`elab.rs`'s `.postpone` arm, `app/mod.rs`'s LVal-on-`@`
+     arm).
+   - **A new retired-label gate.** Following this file's own stated
+     discipline ("whoever completes a slice owes it a needle"),
+     "M4b-3 P5" was added to `no_seam_message_names_a_completed_slice`'s
+     needle list, and its non-vacuity rests on having found and fixed
+     the one live (non-comment) occurrence directly
+     (`app/mod.rs:224`'s `elab_explicit` message) rather than on the
+     test having caught it — the same standard Task 10's P4 needle was
+     held to.
+
+**8. Still open — the `get_instances` re-entrancy seam.** `mem::take`
+of the instance table during `discr_get_match` means a NESTED
+`get_instances` call reports no *global* instances while the outer call
+is in progress. This plan deliberately left it open — closing it
+changes the global lookup path and is its own slice, not a P5 fix — and
+P5 is exactly the kind of change that puts new pressure on it: it
+creates binder-scoped synthesis goals (instance-implicit `fun`/`let`
+binders installing real local instances, per Amendment 8's landed
+prerequisite) that did not exist before this slice. **Whether P5 makes
+this seam LIVE — reachable, not just theoretically present — is
+explicitly Step 3's question, and this task did not run Step 3.** Per
+the controller's own instruction, the whole-branch review (with this
+hazard, `MetavarDecl.localInstances` surviving postponement, and
+`LocalCtxSnapshot::reduced()` renumbering carried in as explicit
+probes) runs separately, on a more capable model, after this task
+completes. This amendment records the seam as still open and still
+unresolved by P5 — not as closed, and not as confirmed live — and
+leaves the determination to that review.
+
 ## What M4b-3 ships — and the stated non-shipping
 
 Like all of M4a and M4b so far, **M4b-3 does not ship independently
@@ -1692,7 +1987,7 @@ offers it ahead of every global.
   `elabTermAux` via `useImplicitLambda` (`TermElabM.lean:1743`,
   `1823-1880`), affects every term elaborated against an
   implicit-`forall` expected type, and `@` exists partly to disable it
-  (`App.lean:2268-2270`). That path becomes reachable in **P1**, the
+  (`App.lean:2269-2270`). That path becomes reachable in **P1**, the
   moment ascription starts supplying expected types, so **P1 ships the
   guard** (detect the `useImplicitLambda` condition → `UnsupportedSyntax
   ("implicit lambda insertion — M4b-3 P5")`) and **P5 replaces the guard
@@ -1714,7 +2009,7 @@ additive; it says so.
 | P2b-ii | none expected — it reads P2b-i's class accessors and otherwise stays in `leanr_elab` |
 | P3 | Audited against the merged P2a code; larger than this spec's original three. **Additive forwarders:** `get_dec_level` (composes the private `get_level`, `infer.rs:754`, `level_normalize`, and `dec_level_top`, `level.rs`); `is_prop` (widening the `pub(crate)` `lazy_delta.rs:171` to `pub` — needed by `num`'s Prop failure branch; no name clash exists, so no forwarder was added); `checkpoint`/`rollback` (widening the `pub(crate)` `metactx.rs:944`/`:954` to `pub`, plus a `pub` `MetaSnapshot` re-export — needed for `commitWhen`, `Lean/Util/MonadBacktrack.lean:50-60`; both line numbers corrected in the P3 fix wave — `:952` was blank, and `:56` truncated the citation before the `catch ex => restoreState s; throw ex` arm that is the whole reason `rollback` is needed on the error path); `with_assignable_synthetic_opaque` (needed by this plan only for `synthesizeUsingDefaultInstance`, `SyntheticMVars.lean:164` — the spec's earlier attribution to `synthesizeUsingDefaultPrio` was off by one function, and "only" is scope-local: the pin turns the flag on in eleven places, enumerated in `config.rs`'s field doc; both corrected against the pinned v4.33.0-rc1 source in M4b-3 P3 task 4 — moved here from P2a, whose ladder never reaches it; `config.rs`'s module doc named `assign_synthetic_opaque` as a deferred field; task 4 added it, cutting that list from three to two). **The `Config` field's READ SITES are part of this row's contract, not an implementation detail** (added in the P3 fix wave: a config field with no consumer is dead, and a later slice reading only "added the field and the scope" would not know where the flag is consulted). `Config::assign_synthetic_opaque` (`crates/leanr_meta/src/config.rs:95-163`, whose field doc enumerates all three sites and is the authority this row mirrors) is open-coded at three `syntheticOpaque` checks, two of them **gated by the flag**: `assign.rs:157-166` (`unassigned_mvar_id`, transcribing `isAssignable`, `ExprDefEq.lean:1731-1733`) and `lazy_delta.rs:498-501` (`is_def_eq_singleton`'s `isAssignable sFn`, `ExprDefEq.lean:2156` → the same `:1731-1733`; gated in P3 task 4 fix round 1, because it is reachable from inside an `isDefEq` and an ungated copy would refuse an assignment the oracle permits). The third, `discr_path.rs`'s discrimination-key builder (`DiscrTree/Main.lean:308`), is **deliberately NOT gated** — and the reason is not "the oracle never runs it inside the scope", which is false (the flag does survive into synthesis; `synthInstanceCore?`'s `withConfig`, `SynthInstance.lean:963-964`, overrides six fields but not this one). What moots the gate there is `withNewMCtxDepth` (`SynthInstance.lean:978`): every mvar from outside the search is at a different depth, so `isReadOnlyOrSyntheticOpaque`'s FIRST arm (`Basic.lean:981-982`) returns `true` before the kind is examined. Depth is this crate's standing tier-1 seam, so wiring the flag in there without modelling depth would flip `Star`/`Other` keys the oracle keeps at `Other`. `whnf.rs`'s `synth_pending` guard is not on the list at all: `synthPendingImp` (`SynthInstance.lean:1033-1036`) matches `mvarDecl.kind` directly and never reads the config. `mk_raw_nat_lit` is NOT needed (M4b-3 P3 task 4): `Store::expr_lit_nat` (`leanr_kernel/src/bank/terms.rs:535`) and `MetaCtx::store_mut` are both already public, which is exactly how `builtin/lit.rs`'s `elab_str` reaches `expr_lit_str`. **New:** `default_instance_priorities` — the *global* descending distinct priority set (`getDefaultInstancesPriorities`); the existing `default_instances_of` is per-class and cannot produce it. **Not additive, and the one item that isn't:** `mk_const_with_fresh_mvar_levels` and `forall_meta_telescope_reducing` (returning binder infos, which `synthesizeUsingDefaultInstance` needs to pick out the `instImplicit` binders as new pending goals). Both loops existed — `refresh_instance_levels` and the telescope inside `get_subgoals` — but private, specialized to `&Instance`, and discarding binder infos. (Line references dropped: M4b-3 P3 task 4 renamed the first and moved the second, so the numbers this row carried before the commit no longer resolve. The generalized forms are `MetaCtx::mk_const_with_fresh_mvar_levels` and `MetaCtx::forall_meta_telescope_reducing`, both in `synth.rs`.) P3 **generalizes them out of `synth.rs` and has `get_subgoals` call the generalized form**, rather than duplicating a fidelity-critical telescope loop in `leanr_elab`. Behavior-neutral, gated by `synth.rs`'s existing tests plus the `leanr_meta` oracle corpus staying byte-identical. |
 | P4 | Revised by § Amendment 5 item 12. The originally listed `unfold_definition`, `get_level`, `whnf_r`, `mk_arrow` are NOT widened: `coe.rs` lives inside `leanr_meta`, so `unfold_definition` (`whnf.rs:2594`) and `get_level` (`infer.rs:754`) stay `pub(crate)`, `whnf_r` is an in-crate two-line composition, and `mk_arrow` (today only `synth.rs:3274`'s test helper) becomes a crate-private constructor. What P4 adds to the public surface: the **new modules** `coe.rs` + `transform.rs` (§ Global constraints — the deliberate widening) with entry points `coerce` / `coerce_to_function` / `coerce_to_sort` / `expand_coe`; `try_synth_instance` + `pub enum LOption` (moved from `ladder.rs`, item 3); a scoped `with_transparency(mode, f)` helper over the existing `pub set_transparency` (`metactx.rs:401`), save/run/restore with the same no-drop-guard caveat and justification as `with_assignable_synthetic_opaque` (§ Follow-ups item 4); `MetaError::CoeExpansionMismatch(String)` for the three post-expansion hard errors (item 7); and the `coe_decls` `EnvExtensions` field (item 2). All additive; no existing `leanr_meta` path changes behaviour, gated by both crates' committed corpora staying byte-identical. |
-| P5 | none expected |
+| P5 | Revised by Amendment 9 — the row read "none expected" through planning, but `crates/leanr_meta/src/metactx.rs` is +178/-12, the only `leanr_meta` file this plan touches. "Additive" is not the right single word for it; three distinct shapes, all in one commit. **(1) Two genuinely new public methods:** `push_local_decl_without_instance` and `install_local_instance_for_last_pushed` — a mint-then-defer-the-install pair for `builtin/binder.rs`'s `fun`-binder path, which must refine an elided binder's domain via `propagateExpectedType` (matching the oracle's own `elabFunBinderViews` ordering, `Binders.lean:442` before `:444`) after the fvar exists but before the `isClass?` test. Purely additive; one call site each, both new code on this branch (`binder.rs:812`, `:816`). **(2) One mechanical extract:** `push_local_decl`'s mint-and-push body moved into a new private `push_local_decl_inner`, shared by the new method in (1); the 12 deleted lines are a doc block, a signature line and one comment, no behavioural line removed — verified byte-for-byte against the merge-base `push_local_decl`. **(3) One edit to an existing function:** `install_local_instance_for` gained an unconditional `self.lctx_snapshot = None` after its `is_class` check, moving a memo-drop that both pre-existing callers (`push_local_decl`, `push_let_decl`) already performed themselves immediately after calling it — proven behaviour-neutral for both by direct comparison against the merge-base source (the final observable state, `lctx_snapshot == None`, is unchanged; the callers keep their own now-redundant clears too, "harmless double-clearing, not load-bearing duplication"). The new line is load-bearing only for the new caller in (1), which has no clear of its own and depends on it to fix a real round-1 bug (a stale memo surviving a deferred install). **Why the addition was needed:** the oracle runs `propagateExpectedType` before its `isClass? type` test, while leanr's `push_local_decl` used to mint, push and class-check in one call — an elided binder whose domain only becomes class-typed via propagation would silently lose its local instance, a silently different term. **The rejected alternative:** leave the divergence and name it in a comment; rejected because the failure is silent rather than loud, which this slice's own discipline forbids. Neutrality: the synthesis corpus stayed at 32 records (unmoved), matching a slice that adds no `leanr_meta` *behaviour*, only additive accessors plus one behaviour-neutral edit. |
 
 ## Error handling
 

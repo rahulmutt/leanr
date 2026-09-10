@@ -471,8 +471,9 @@ fn ellipsis_fills_missing_explicit_args_with_implicit_mvars() {
 /// hides a telescope behind a redex), so the type is built by hand:
 /// `∀ (x : Nat), (fun (_ : Sort 0) => ∀ (y : optParam Nat Nat), Nat) (Sort 0)`.
 /// Only a REDUCING walk sees `y`'s wrapper. With it, `x` becomes an eta
-/// argument and the loop then hits `y`'s own P5 optParam seam; without
-/// it, `main` would return the unchanged `pick`.
+/// argument and the loop then finds `y`'s own `optParam` wrapper (real
+/// code since M4b-3 P5 task 8, not a seam); without it, `main` would
+/// return the unchanged `pick`.
 #[test]
 fn has_opt_auto_params_reduces_to_find_a_hidden_optparam() {
     support::with_app_harness("pick", |app| {
@@ -697,19 +698,24 @@ fn explicit_univ_list_uses_sep_args_not_every_child() {
 
 /// oracle: `elabExplicit`'s `` `(@($t)) ``/`` `(@$t) `` arms
 /// (`App.lean:2269-2270`) do NOT enter explicit mode — they elaborate
-/// `t` with `implicitLambda := false`, which is M4b-3 P5. Routing them
-/// to `elab_atom` would enter explicit mode the oracle never enters, so
-/// the seam must NAME P5 rather than fall through.
+/// `t` with `implicitLambda := false`. Implicit-lambda insertion itself
+/// shipped in M4b-3 P5 (tasks 5-6), but wrapping `@($t)`/`@$t` to
+/// elaborate with it explicitly disabled did not: it is a one-liner now
+/// that insertion exists, yet no plan slice claimed it, so Task 12
+/// retargeted the seam from the now-complete "M4b-3 P5" to "later M4".
+/// Routing them to `elab_atom` would enter explicit mode the oracle
+/// never enters, so the seam must NAME its owner rather than fall
+/// through.
 #[test]
-fn at_on_a_non_atom_names_the_p5_seam() {
+fn at_on_a_non_atom_names_the_later_m4_seam() {
     match elab_src("@(Nat.succ Nat.zero)") {
         Err(leanr_elab::ElabError::UnsupportedSyntax(m)) => {
             assert!(
-                m.contains("M4b-3 P5") && m.contains("implicit-lambda"),
-                "the `@t` seam must name P5 and say why, got {m:?}"
+                m.contains("later M4") && m.contains("implicit-lambda"),
+                "the `@t` seam must name its owner and say why, got {m:?}"
             );
         }
-        other => panic!("expected the P5 seam, got {other:?}"),
+        other => panic!("expected the later-M4 seam, got {other:?}"),
     }
 }
 

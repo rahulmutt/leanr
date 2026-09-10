@@ -292,14 +292,18 @@ impl<'a, 'e> AppElab<'a, 'e> {
 
     /// The `optParam`/`autoParam` HALF of `consume_type_annotations`, and
     /// only that half. `consume_opt_auto_param(x) != x` is exactly the
-    /// oracle's `x.isOptParam || x.isAutoParam`, which is what all three
+    /// oracle's `x.isOptParam || x.isAutoParam`, which is what both
     /// of its call sites test for: `hasOptAutoParams`
-    /// (`App.lean:121-127`, via `app::args::has_opt_auto_params`), the
+    /// (`App.lean:121-127`, via `app::args::has_opt_auto_params`) and the
     /// propagation guard at `App.lean:472` (via
-    /// `app::propagate::is_opt_or_auto_param`), and the default-filling
-    /// arms at `App.lean:827-854` (via `app::args`'s own seam check).
-    /// Every one of those asks "does this parameter carry a DEFAULT
-    /// VALUE" — which `outParam`/`semiOutParam` do not.
+    /// `app::propagate::is_opt_or_auto_param`). (A third call site used
+    /// to sit at the default-filling arms' own seam check; M4b-3 P5
+    /// task 9 gave `optParam`/`autoParam` default-filling a real
+    /// producer — `app::args`'s `opt_param_default`/`auto_param_tactic`
+    /// — which reads the wrapper directly rather than going through this
+    /// predicate, so that third call site is gone.) Both remaining call
+    /// sites ask "does this parameter carry a DEFAULT VALUE" — which
+    /// `outParam`/`semiOutParam` do not.
     ///
     /// Safe on a binder type carrying LOOSE BVARS — which the
     /// `propagate.rs` caller genuinely passes, since `main'` recurses

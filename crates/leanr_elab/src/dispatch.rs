@@ -147,11 +147,16 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 /// too, leaving only `CoeSort`. Reconciled a SIXTH time by M4b-3 P4
 /// task 9: `CoeSort`'s binder-domain arm landed in `ensure_type`
 /// (`coe.rs`), so coercion insertion (`CoeT`/`CoeFun`/`CoeSort`,
-/// `mkCoe`) is no longer deferred at all:
+/// `mkCoe`) is no longer deferred at all. Reconciled a SEVENTH time by
+/// M4b-3 P5: `optParam` defaults (task 8) and `autoParam` (task 9)
+/// landed in `app/args.rs`, and implicit-lambda insertion itself landed
+/// in `elab.rs` (tasks 5-6), so neither is deferred either — only the
+/// `@($t)`/`@$t` wrap that elaborates with insertion explicitly
+/// disabled stays a named seam, and no P5 task claimed it (retargeted
+/// to "later M4" — see `app/mod.rs`'s `elab_explicit`):
 /// ```text
 ///   letI / haveI / let_fun / let_delayed / let_tmp / letrec  later slice (own oracle tier each)
-///   optParam defaults / autoParam .............. M4b-3 P5
-///   implicit-lambda insertion .................. M4b-3 P5
+///   `@($t)`/`@$t` disabling implicit-lambda insertion .. later M4 (app/mod.rs's elab_explicit)
 ///   Term.proj / pipeProj / dotIdent ............ M4b-4 (LVal machinery)
 ///   Term.namedPattern / choice ................. M4b-4 (same elabAppFn arms)
 ///   elabAsElim (recursor heads seamed; aux

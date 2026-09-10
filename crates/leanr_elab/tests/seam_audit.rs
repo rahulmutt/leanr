@@ -132,9 +132,13 @@ fn elab_src(src: &str) -> Result<leanr_kernel::bank::ExprId, leanr_elab::ElabErr
 ///     implemented it (`args.rs`'s `if app.ctx.ellipsis then
 ///     add_implicit_arg`, oracle `App.lean:856-857`), so this source
 ///     now elaborates to `Nat.succ ?m` — which is also exactly what the
-///     pinned oracle emits for it. Only optParam/autoParam DEFAULT
-///     filling is still P5's, and that is unreachable from source here
-///     (see the module doc). Replaced with `@(..)`, the other P5 seam.
+///     pinned oracle emits for it. At the time this replacement was
+///     written, optParam/autoParam DEFAULT filling was still P5's and
+///     unreachable from source here (see the module doc); both have
+///     since shipped (tasks 8-9) and are no longer deferred either.
+///     Replaced with `@(..)`, the seam below — which itself later moved
+///     from "M4b-3 P5" to "later M4" once implicit-lambda insertion
+///     shipped but the `@($t)`/`@$t` wrap disabling it did not.
 ///   * `("(Nat.succ : Nat -> Nat) Nat.zero Nat.zero", "P2")` — this
 ///     never reached P2. Its head is a `typeAscription`, so it stops one
 ///     step earlier, in `head.rs`, before any argument is processed.
@@ -157,8 +161,11 @@ fn deferred_constructs_are_named_seams() {
         //
         // `elabExplicit`'s `` `(@($t)) `` arm (`App.lean:2269`): `@` on
         // a non-atom does NOT enter explicit mode, it disables
-        // implicit-lambda insertion — P5's.
-        ("@(Nat.succ Nat.zero)", "M4b-3 P5"),
+        // implicit-lambda insertion. The insertion itself shipped in
+        // M4b-3 P5, but wrapping `@($t)`/`@$t` to elaborate with it
+        // disabled did not — no plan slice has claimed it, so the seam
+        // is "later M4", not "M4b-3 P5" (which is now complete).
+        ("@(Nat.succ Nat.zero)", "later M4"),
         // `elab_explicit`'s LVal arm: `@` on a projection head.
         ("@(Nat.zero).1", "M4b-4"),
         // `peel_head`'s `App.lean:2118` arm — an INVALID occurrence of
@@ -682,9 +689,13 @@ fn literal_kinds_are_registered_not_deferred() {
 /// It is deliberately NOT generalised to "any completed slice", and the
 /// reason is that no non-rotting formulation exists. Live source
 /// legitimately names INCOMPLETE slices in exactly this position — that
-/// is the named-seam discipline itself (`app/args.rs`'s "M4b-3 P2b",
-/// `elab.rs`'s "M4b-3 P5", `app/args.rs`'s own optParam/autoParam
-/// "M4b-3 P5") — so telling an
+/// is the named-seam discipline itself (`elab.rs`'s `.postpone` seam
+/// and `app/mod.rs`'s LVal-on-`@` arm both name "M4b-4"; `app/mod.rs`'s
+/// `elabExplicit` "other" arm names "later M4" — none of these are
+/// "M4b-3 P5" any more, now that P5 is complete: this example set itself
+/// had to be rewritten by Task 12 when the two live seams it used to
+/// cite, `elab.rs`'s and `app/args.rs`'s own "M4b-3 P5", were closed or
+/// retargeted) — so telling an
 /// offender from a correct seam requires knowing which slices are done,
 /// i.e. a hand-maintained completed-slice list that rots the same way
 /// this needle does, only silently. Widening the scan by SHAPE instead
@@ -707,10 +718,24 @@ fn literal_kinds_are_registered_not_deferred() {
 /// are in the fix-wave report; the point of recording it is that a
 /// needle added without watching it fire is a gate nobody has shown to
 /// gate anything.
+///
+/// **`M4b-3 P5` was added by Task 12's seam-audit sweep, and it too was
+/// measured non-vacuous, not merely assumed clean.** Before this
+/// needle was added, `app/mod.rs`'s `elab_explicit` "other" arm raised
+/// exactly `"... — M4b-3 P5"` for the `@($t)`/`@$t` wrap — a live
+/// (non-comment) line naming a slice that, by the end of this same
+/// task, is complete. Task 12 retargeted that one message to "later
+/// M4" (see [`no_seam_points_at_the_retired_p5_implicit_lambda_label`])
+/// before adding the needle here, so by the time this test runs it is
+/// vacuous BY CONSTRUCTION for that offender — the non-vacuity claim
+/// rests on having found and fixed the one live occurrence directly
+/// (`grep -rn 'M4b-3 P5' crates/leanr_elab/src` returned exactly one
+/// non-comment hit before the fix), not on this test having caught it
+/// itself.
 #[test]
 fn no_seam_message_names_a_completed_slice() {
     let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
-    let needles = ["M4b-3 P3", "M4b-3 P4"];
+    let needles = ["M4b-3 P3", "M4b-3 P4", "M4b-3 P5"];
     let mut offenders = Vec::new();
     for path in walk_rs_files(src_dir) {
         let text = std::fs::read_to_string(&path).expect("readable source");
@@ -725,7 +750,8 @@ fn no_seam_message_names_a_completed_slice() {
     }
     assert!(
         offenders.is_empty(),
-        "M4b-3 P3 and P4 are complete; live (non-comment) source claiming one at {offenders:?}"
+        "M4b-3 P3, P4 and P5 are complete; live (non-comment) source claiming one at \
+         {offenders:?}"
     );
 }
 
@@ -809,10 +835,14 @@ fn postponed_coe_under_a_binder_abstracts_via_elim_mvar_deps() {
 
 /// M4b-3 P5 Task 6. `useImplicitLambda`'s `.postpone` arm
 /// (`TermElabM.lean:1753-1778`) fires when the term is a local
-/// identifier whose type is an mvar APPLICATION. PR #42 (elimMVarDeps)
-/// manufactures exactly that shape — aux-mvar applications over binder
-/// fvars — so P1's "no corpus term reaches it" is no longer a safe
-/// assumption.
+/// identifier whose type is an mvar APPLICATION — `is_mvar_app`'s spine
+/// walk classifies a bare (zero-argument) mvar the same way, since it is
+/// the degenerate case of the same spine walk. PR #42 (elimMVarDeps)
+/// manufactures aux-mvar applications over binder fvars as the type of
+/// an as-yet-untyped `fun` binder; the shape THIS test commits is the
+/// simpler bare-mvar case (`x`'s type is a fresh anonymous type mvar
+/// with no arguments), reached via the same classifier path — so P1's
+/// "no corpus term reaches it" is no longer a safe assumption.
 ///
 /// leanr has no term-level postponement (`lib.rs`: `may_postpone` is
 /// written, never read), so this must be a NAMED SEAM — an error the
@@ -893,6 +923,37 @@ fn no_seam_points_at_the_retired_p5_optparam_autoparam_label() {
         "P5 task 9 retired the combined optParam/autoParam seam (optParam has a real \
          body since task 8, autoParam mints-then-reports since task 9); stale label at \
          {offenders:?}"
+    );
+}
+
+/// Task 12's own retired-label gate. Implicit-lambda insertion shipped
+/// in M4b-3 P5 (tasks 5-6, `elab.rs`), which completes P5 as a slice —
+/// but `elabExplicit`'s "other" arm (`app/mod.rs`) used to raise this
+/// exact message for the `@($t)`/`@$t` wrap that disables insertion, a
+/// DIFFERENT and still-unclaimed piece of work no P5 task actually did.
+/// Task 12 retargeted it to "later M4" rather than leave a completed
+/// slice's name on an open seam. A bare `"M4b-3 P5"` needle is
+/// deliberately NOT used here (unlike the P2/P2b-ii/P4 gates above):
+/// this plan's own doc comments legitimately cite "M4b-3 P5 task N" by
+/// the dozen as history throughout this crate, so the needle has to be
+/// the specific retired MESSAGE text, not the bare slice label.
+#[test]
+fn no_seam_points_at_the_retired_p5_implicit_lambda_label() {
+    let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    let needle = "implicit-lambda insertion (App.lean:2269-2270) — M4b-3 P5";
+    let mut offenders = Vec::new();
+    for path in walk_rs_files(src_dir) {
+        let text = std::fs::read_to_string(&path).expect("readable source");
+        for (n, line) in text.lines().enumerate() {
+            if line.contains(needle) {
+                offenders.push(format!("{}:{}", path.display(), n + 1));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "elabExplicit's `@($t)`/`@$t` arm was retargeted from \"M4b-3 P5\" (complete) to \
+         \"later M4\" (unclaimed) by Task 12; stale label at {offenders:?}"
     );
 }
 

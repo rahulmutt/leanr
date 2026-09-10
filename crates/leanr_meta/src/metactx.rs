@@ -847,7 +847,13 @@ impl<'e> MetaCtx<'e> {
     /// mint one, and it must add the filter in the same change.
     ///
     /// **`lctx_snapshot` correctness (fix round 2)**: this is the ONE
-    /// place that ever writes `local_instances`, so the memo-drop that
+    /// place a NEW local instance is ever *pushed* onto `local_instances`
+    /// (`install_lctx`'s `replace` and `lctx_restore`'s `truncate_to` are
+    /// the other two writers of the field — swapping and truncating the
+    /// stack wholesale rather than pushing a new entry — and both clear
+    /// `lctx_snapshot` at their own call sites, so there is no functional
+    /// gap; this doc scopes its claim to *pushed* so it does not mislead
+    /// a future "every writer" audit). So the memo-drop that
     /// invariant needs (`lctx_snapshot`'s own doc: "dropped by every
     /// writer of either [`lctx` or `local_instances`]") lives HERE,
     /// unconditionally, rather than at each of this method's callers.
