@@ -486,10 +486,19 @@ impl<'e> MetaCtx<'e> {
         // `Reducible`; even its "quick" path answers `.undef`, i.e.
         // falls through to that path, for any definition-headed type
         // under the ambient transparency). Calling it up here puts
-        // whatever it reduces strictly OUTSIDE that window — see the
-        // window's own invariant note below. The faithful order and the
-        // safe order are the same order, which is worth not
-        // re-deriving later.
+        // whatever it reduces strictly OUTSIDE that window, which the
+        // note on the window below shows is load-bearing rather than
+        // tidy: a whnf inside the window CAN re-enter `get_instances`.
+        // The faithful order and the safe order are the same order,
+        // which is worth not re-deriving later.
+        //
+        // `is_class` swallows its own errors to `None`
+        // (`metactx.rs:1256-1262`, the oracle's `try … catch _ =>
+        // return none`, `Basic.lean:1542-1543`), so a step-budget
+        // exhaustion or a loose bvar inside THAT whnf silently drops
+        // every LOCAL candidate here while still returning the globals
+        // — incompleteness, never a wrong candidate, but a failure this
+        // function cannot see.
         //
         // Two deliberate differences from the oracle at this point, both
         // pre-existing (see the module doc): this takes an
@@ -498,29 +507,72 @@ impl<'e> MetaCtx<'e> {
         // oracle's own "read `localInstances` before the telescope
         // updates them" precaution (:203-204); and a goal that is not a
         // class is `None` here rather than the oracle's hard error
-        // (:207), leaving `synth.rs` to own that diagnosis. `None` only
-        // suppresses the local half below — the global lookup is
-        // unchanged, so no existing caller's result moves.
+        // (:207). `None` only suppresses the local half below — the
+        // global lookup is unchanged, so no existing caller's result
+        // moves.
+        //
+        // SEAM (unowned): nothing downstream raises that error either.
+        // `mk_generator_node` (`synth.rs:2358-2367`) returns `Ok(None)`
+        // on an empty candidate list, where the oracle throws "type
+        // class instance expected" (:207) — so a non-class synthesis
+        // goal is reported as "no instance found" rather than as the
+        // malformed goal it is. Diagnostic quality only, never a wrong
+        // verdict; no task in the local-instances slice owns it (task
+        // 10's own seam note leaves the same divergence alone for the
+        // same reason).
         let class_name = self.is_class(goal)?;
 
         // INVARIANT (re-entrancy): `self.instances` is `InstanceTable::default()`
         // (empty) for the whole duration of the `discr_get_match` call
-        // below. Harmless today because `mk_path`/`whnf` never consult
-        // the instance table, so nothing reachable from
-        // `discr_get_match` can observe the table being briefly taken.
-        // If a future change makes path construction (or anything else
-        // `discr_get_match` transitively calls) re-entrant into instance
-        // lookup, a nested `get_instances` call here would silently see
-        // this now-empty placeholder table and report "no instances"
-        // rather than erroring — there is no assertion below that would
-        // catch that, so a future change widening what `discr_get_match`
-        // touches must re-check this invariant by inspection. `is_class`
-        // above and `local_instance_candidate` below (which whnfs a
-        // candidate's telescope) are deliberately OUTSIDE the take for
-        // exactly this reason; NO test pins that placement, because
-        // moving either one inside is still correct against today's
-        // `discr_get_match` — it is guarded by this comment and by
-        // review.
+        // below.
+        //
+        // This window is REACHABLE from instance lookup, contrary to
+        // what this comment claimed before the local-instances slice
+        // ("harmless, `mk_path`/`whnf` never consult the instance
+        // table"). Traced hop by hop:
+        //
+        //   `discr_get_match` -> `mk_path` -> `mk_path_aux` ->
+        //   `push_args_aux` (`discr_path.rs:462,471`) ->
+        //   `param_binder_infos` (`:527`) -> `self.whnf(ty)` (`:538`;
+        //   `is_type`/`is_proof` reach `whnf_default` the same way) ->
+        //   `unfold_definition`'s smart-unfolding channel
+        //   (`whnf.rs:2698,2731`) -> `smart_unfolding_reduce` (`:1454`)
+        //   -> `sunfold_go_match_body` (`:1721`) -> `synth_pending`
+        //   (`:1740`, `:1380`) -> `synth_instance` (`:1434`;
+        //   `synth.rs:1644`) -> `mk_generator_node` (`synth.rs:2358`)
+        //   -> `get_instances` (`synth.rs:2365`).
+        //
+        // CONSEQUENCE: a `get_instances` entered through that chain
+        // while this window is open takes an ALREADY-EMPTY table, finds
+        // no global candidates, and answers "no instances" without
+        // erroring — silent incompleteness at the synthesis layer.
+        // (Its LOCAL half is unaffected: locals come off
+        // `MetaCtx::local_instances`, never off this table.) Nothing
+        // asserts against it and no committed test constructs the
+        // nesting, so it is a latent hazard rather than an observed
+        // failure. It PREDATES this slice — both the take and the false
+        // "harmless" claim were already here — and is deliberately left
+        // in place (ruling R9): closing it changes how the GLOBAL
+        // lookup path holds its table, and that behavior change must
+        // not land inside this slice's corpus-neutrality gate.
+        // Recorded here as the named seam it is.
+        //
+        // It terminates rather than looping: `synth_pending` is capped
+        // by `MAX_SYNTH_PENDING_DEPTH` (`whnf.rs:138`, checked at
+        // `:1417`), `synth_instance` bumps `guarded` (`synth.rs:1645`),
+        // and `step()` (`metactx.rs:1142-1148`) bounds the whole thing.
+        //
+        // WHAT THIS BUYS THE CODE BELOW: `is_class` above, and
+        // `local_instance_candidate` further down (which whnfs a
+        // candidate's telescope, and whose `push_local_decl` runs
+        // `is_class` again per binder), both sit OUTSIDE this window,
+        // so a nested lookup entered from either sees the FULL table.
+        // That placement is load-bearing, not stylistic; their
+        // telescopes ride the same cycle and inherit the same bounds.
+        // NO test pins the placement, because moving `is_class` inside
+        // still answers correctly for the OUTER query — only a nested
+        // inner query would be degraded, and nothing in the tests
+        // constructs one. Guarded by this comment and by review.
         let table = std::mem::take(&mut self.instances);
         let result: Result<Vec<Instance>, MetaError> = self
             .discr_get_match(&table.tree, goal)
@@ -632,10 +684,21 @@ impl<'e> MetaCtx<'e> {
     /// very set `get_instances` is iterating — which is exactly the
     /// oracle's behavior, `forallTelescopeReducing` installing through
     /// `withNewLocalInstancesImp` (`Basic.lean:1472`), and the
-    /// self-reference `Basic.lean:1402-1406` acknowledges. It
-    /// terminates because the telescope is finite, and it is invisible
-    /// to the caller because `get_instances` iterates a SNAPSHOT and
-    /// this call is bracketed by `lctx_restore`.
+    /// self-reference `Basic.lean:1402-1406` acknowledges. It is
+    /// invisible to the caller because `get_instances` iterates a
+    /// SNAPSHOT and this call is bracketed by `lctx_restore`.
+    ///
+    /// Termination is NOT simply "the telescope is finite". The `whnf`
+    /// below, and the `is_class` each `push_local_decl` runs, both sit
+    /// on the `whnf -> smart unfolding -> synth_pending ->
+    /// synth_instance -> get_instances` cycle traced in
+    /// `get_instances`' own re-entrancy note, so this can re-enter
+    /// instance lookup and reach here again. What bounds it is that
+    /// cycle's own bounds: `MAX_SYNTH_PENDING_DEPTH` (`whnf.rs:138`),
+    /// `synth_instance`'s `guarded` bump (`synth.rs:1645`), and the
+    /// step budget (`metactx.rs:1142-1148`). Each such re-entry does
+    /// see the full instance table, because this method runs outside
+    /// `get_instances`' `mem::take` window.
     fn instimplicit_binder_positions(&mut self, ty: ExprId) -> Result<Vec<usize>, MetaError> {
         let mut synth_order = Vec::new();
         let mut xs: Vec<ExprId> = Vec::new();
