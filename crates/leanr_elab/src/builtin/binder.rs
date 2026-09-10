@@ -334,50 +334,177 @@ fn intern_binder_name(elab: &mut TermElabM, text: &str) -> Result<NameId, ElabEr
     Ok(n)
 }
 
-/// Extract `(binder_name, optional-type-syntax)` from one `funBinder`.
-/// M4b-2 handles a bare ident token (elided type → `None`) and a
-/// single-name parenthesised binder `(x : T)`, which the grammar parses
+/// One elaborated-binder view: the oracle's `BinderView`
+/// (`Lean/Elab/Binders.lean`, `toBinderViews` at `:436`). A single
+/// `funBinder` item can expand to SEVERAL views — `{a b : Type}` binds
+/// two names sharing one type syntax.
+struct FunBinderView {
+    name: Option<NameId>,
+    ty: Option<SynElem>,
+    bi: BinderInfo,
+}
+
+/// The `instBinder` child layout `["[", optIdent(null), T, "]"]`: an
+/// OPTIONAL name at child `[1]` (null-wrapped) and a BARE type at child
+/// `[2]` — unlike the explicit/implicit/strict groups, whose type slot
+/// is a `KIND_NULL` wrapper holding `[":", T]`. Shared by
+/// `extract_fun_binder_views`'s `instBinder` arm and `extract_binder_group`
+/// (Task 3), so named without a `fun`-specific reading. oracle:
+/// `toBinderViews`, `Binders.lean:450-453`.
+fn extract_inst_binder_layout(
+    elab: &mut TermElabM,
+    node: &SyntaxNode,
+    kinds: &KindInterner,
+) -> Result<(Option<NameId>, SynElem), ElabError> {
+    let ch = non_trivia_children(node);
+    let name = match ch.get(1).and_then(|el| el.as_node()) {
+        Some(opt) => match non_trivia_children(opt).first() {
+            Some(el) => intern_fun_binder_ident(elab, el, kinds)?,
+            None => None,
+        },
+        None => None,
+    };
+    let ty = ch
+        .get(2)
+        .cloned()
+        .ok_or_else(|| ElabError::UnsupportedSyntax("inst binder: type slot".into()))?;
+    Ok((name, ty))
+}
+
+/// A binder identifier is either an `<ident>` token or a `_` hole node
+/// (`binderIdent`). A hole binds an anonymous local. oracle:
+/// `expandBinderIdent` (`Binders.lean:32-36`).
+fn intern_fun_binder_ident(
+    elab: &mut TermElabM,
+    el: &SynElem,
+    kinds: &KindInterner,
+) -> Result<Option<NameId>, ElabError> {
+    match el {
+        NodeOrToken::Token(tok) if kinds.name(tok.kind()) == "<ident>" => {
+            Ok(Some(intern_binder_name(elab, tok.text())?))
+        }
+        NodeOrToken::Node(n) if kinds.name(n.kind()) == "Lean.Parser.Term.hole" => Ok(None),
+        _ => Err(ElabError::UnsupportedSyntax(format!(
+            "fun binder name: {}",
+            kinds.name(el.kind())
+        ))),
+    }
+}
+
+/// Move of the old `extract_fun_binder`'s `typeAscription` arm: a
+/// parenthesised single-name binder `(x : T)`, which the grammar parses
 /// as a `Term.typeAscription` node (probe-confirmed), NOT an
-/// `explicitBinder`. Named seams (→ `UnsupportedSyntax`): implicit /
-/// strict / instance binder nodes, a paren binder whose leading child is
-/// not a lone ident (`(x y : T)` / `(f a : T)`), and a paren binder with
-/// no type slot.
-fn extract_fun_binder(
+/// `explicitBinder`. Named seams (→ `UnsupportedSyntax`): a leading
+/// child that is not a lone ident (`(x y : T)` / `(f a : T)`), and a
+/// paren binder with no type slot.
+fn extract_paren_fun_binder(
+    elab: &mut TermElabM,
+    n: &SyntaxNode,
+    kinds: &KindInterner,
+) -> Result<(NameId, SynElem), ElabError> {
+    let tch = non_trivia_children(n);
+    let name_tok = tch
+        .get(1)
+        .and_then(|el| el.as_token())
+        .filter(|t| kinds.name(t.kind()) == "<ident>")
+        .ok_or_else(|| {
+            ElabError::UnsupportedSyntax("fun: paren binder is not a single ident (M4b-3)".into())
+        })?;
+    let name = intern_binder_name(elab, name_tok.text())?;
+    let ty_null = tch
+        .get(3)
+        .and_then(|el| el.as_node())
+        .ok_or_else(|| ElabError::UnsupportedSyntax("fun: binder type slot".into()))?;
+    let ty_elem = non_trivia_children(ty_null)
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            ElabError::UnsupportedSyntax("fun: paren binder without a type (M4b-3)".into())
+        })?;
+    Ok((name, ty_elem))
+}
+
+/// oracle: `toBinderViews` (`Binders.lean:436-455`), restricted to the
+/// four `funBinder` alternatives (`Parser/Term.lean:379-381`).
+///
+/// Unlike the `forall`/`let` telescope, a `fun` binder's type may be
+/// ABSENT (`fun {a} => …`), so this tolerates an empty binder-type slot
+/// where `extract_binder_group` errors.
+fn extract_fun_binder_views(
     elab: &mut TermElabM,
     item: &SynElem,
     kinds: &KindInterner,
-) -> Result<(Option<NameId>, Option<SynElem>), ElabError> {
+) -> Result<Vec<FunBinderView>, ElabError> {
     match item {
         // Bare ident binder: `fun x => …` — elided type.
         NodeOrToken::Token(tok) if kinds.name(tok.kind()) == "<ident>" => {
             let name = intern_binder_name(elab, tok.text())?;
-            Ok((Some(name), None))
+            Ok(vec![FunBinderView {
+                name: Some(name),
+                ty: None,
+                bi: BinderInfo::Default,
+            }])
         }
-        // Parenthesised binder `(x : T)` — a typeAscription node with
-        // children [hygienicLParen, name, ":", null[T], ")"].
-        NodeOrToken::Node(n) if kinds.name(n.kind()) == "Lean.Parser.Term.typeAscription" => {
-            let tch = non_trivia_children(n);
-            let name_tok = tch
-                .get(1)
-                .and_then(|el| el.as_token())
-                .filter(|t| kinds.name(t.kind()) == "<ident>")
-                .ok_or_else(|| {
-                    ElabError::UnsupportedSyntax(
-                        "fun: paren binder is not a single ident (M4b-3)".into(),
-                    )
-                })?;
-            let name = intern_binder_name(elab, name_tok.text())?;
-            let ty_null = tch
-                .get(3)
-                .and_then(|el| el.as_node())
-                .ok_or_else(|| ElabError::UnsupportedSyntax("fun: binder type slot".into()))?;
-            let ty_elem = non_trivia_children(ty_null)
-                .into_iter()
-                .next()
-                .ok_or_else(|| {
-                    ElabError::UnsupportedSyntax("fun: paren binder without a type (M4b-3)".into())
-                })?;
-            Ok((Some(name), Some(ty_elem)))
+        NodeOrToken::Node(n) => {
+            let kind = kinds.name(n.kind());
+            match kind {
+                // Parenthesised binder `(x : T)` — the `termParser
+                // maxPrec` alternative, parsed as a typeAscription.
+                "Lean.Parser.Term.typeAscription" => {
+                    let (name, ty) = extract_paren_fun_binder(elab, n, kinds)?;
+                    Ok(vec![FunBinderView {
+                        name: Some(name),
+                        ty: Some(ty),
+                        bi: BinderInfo::Default,
+                    }])
+                }
+                // `{a b : T}` / `{a b}` and `⦃a b : T⦄` / `⦃a b⦄`.
+                "Lean.Parser.Term.implicitBinder" | "Lean.Parser.Term.strictImplicitBinder" => {
+                    let bi = if kind == "Lean.Parser.Term.implicitBinder" {
+                        BinderInfo::Implicit
+                    } else {
+                        BinderInfo::StrictImplicit
+                    };
+                    let ch = non_trivia_children(n);
+                    let names_null = ch.get(1).and_then(|el| el.as_node()).ok_or_else(|| {
+                        ElabError::UnsupportedSyntax("fun binder group: names slot".into())
+                    })?;
+                    let ty_null = ch.get(2).and_then(|el| el.as_node()).ok_or_else(|| {
+                        ElabError::UnsupportedSyntax("fun binder group: type slot".into())
+                    })?;
+                    // `[":", T]` when a type was written; empty otherwise.
+                    let ty = non_trivia_children(ty_null).into_iter().nth(1);
+                    let mut views = Vec::new();
+                    for name_el in non_trivia_children(names_null) {
+                        let name = intern_fun_binder_ident(elab, &name_el, kinds)?;
+                        views.push(FunBinderView {
+                            name,
+                            ty: ty.clone(),
+                            bi,
+                        });
+                    }
+                    if views.is_empty() {
+                        return Err(ElabError::UnsupportedSyntax(
+                            "fun binder group: no names".into(),
+                        ));
+                    }
+                    Ok(views)
+                }
+                // `[inst : C α]` / `[C α]` — optional name, BARE type at
+                // child [2] (no `KIND_NULL` wrapper, unlike the groups
+                // above). oracle: `Binders.lean:450-453`.
+                "Lean.Parser.Term.instBinder" => {
+                    let (name, ty) = extract_inst_binder_layout(elab, n, kinds)?;
+                    Ok(vec![FunBinderView {
+                        name,
+                        ty: Some(ty),
+                        bi: BinderInfo::InstImplicit,
+                    }])
+                }
+                _ => Err(ElabError::UnsupportedSyntax(format!(
+                    "fun: unsupported binder kind {kind}"
+                ))),
+            }
         }
         _ => Err(ElabError::UnsupportedSyntax(format!(
             "fun: unsupported binder kind {}",
@@ -391,8 +518,8 @@ fn extract_fun_binder(
 /// here (see the plan's § Task 2 design note) — an elided binder's domain
 /// is a fresh type mvar unified by the outer `elab_term_ensuring_type`.
 /// Named seams: the `matchAlts` (pattern) arm, `optType`
-/// (`fun x : T => e`), and the funBinder forms `extract_fun_binder`
-/// rejects.
+/// (`fun x : T => e`), and the funBinder forms
+/// `extract_fun_binder_views` rejects.
 ///
 /// `Term.fun` children: `[("λ"|"fun"), (basicFun | matchAlts)]`.
 /// `Term.basicFun` children: `[binderList(null), optType(null),
@@ -443,16 +570,21 @@ pub fn elab_fun(
     let result = (|| {
         let mut fvars: Vec<ExprId> = Vec::new();
         for item in &items {
-            let (name, ty_syntax) = extract_fun_binder(elab, item, kinds)?;
-            let dom = match ty_syntax {
-                Some(ty_elem) => elab_type(elab, &ty_elem, kinds)?,
-                None => fresh_type_mvar(elab)?,
-            };
-            let fvar = elab
-                .mctx
-                .push_local_decl(name, dom, BinderInfo::Default)
-                .map_err(ElabError::from)?;
-            fvars.push(fvar);
+            for view in extract_fun_binder_views(elab, item, kinds)? {
+                let dom = match &view.ty {
+                    Some(ty_elem) => elab_type(elab, ty_elem, kinds)?,
+                    None => fresh_type_mvar(elab)?,
+                };
+                // `push_local_decl` installs a local instance when `dom`
+                // is class-typed — keyed on the TYPE, not on `view.bi`,
+                // exactly as the oracle's `isClass? type` test is
+                // (`Binders.lean:445`). Nothing further is needed here.
+                let fvar = elab
+                    .mctx
+                    .push_local_decl(view.name, dom, view.bi)
+                    .map_err(ElabError::from)?;
+                fvars.push(fvar);
+            }
         }
         // Body with expected `None` (see § Task 2 design note).
         let body = elab.elab_term(&body_elem, kinds, None)?;

@@ -258,6 +258,64 @@ fn fun_ascribed_explicit_binder() {
 }
 
 #[test]
+fn fun_implicit_binder_carries_binder_info() {
+    // fun {a : Type} => a  →  lam bi=i (Sort ..) (bvar 0)
+    let j = elab_json("fun {a : Type} => a");
+    assert_eq!(j["k"], "lam");
+    assert_eq!(j["bi"], "i");
+    assert_eq!(j["b"]["k"], "bvar");
+    assert_eq!(j["b"]["i"], 0);
+}
+
+#[test]
+fn fun_strict_implicit_binder_carries_binder_info() {
+    let j = elab_json("fun ⦃a : Type⦄ => a");
+    assert_eq!(j["k"], "lam");
+    assert_eq!(j["bi"], "s");
+}
+
+#[test]
+fn fun_inst_binder_named_carries_binder_info() {
+    // `Add` is in Elab0's environment (Task 10 guarantees it).
+    let j = elab_json("fun [inst : Add Nat] => inst");
+    assert_eq!(j["k"], "lam");
+    assert_eq!(j["bi"], "c");
+    assert_eq!(j["b"]["k"], "bvar");
+    assert_eq!(j["b"]["i"], 0);
+}
+
+#[test]
+fn fun_inst_binder_anonymous_still_binds() {
+    // `[Add Nat]` — no name written. The oracle's `expandOptIdent` mints
+    // an inaccessible one; leanr interns `None`. Binder names are erased
+    // by the encoder, so only the shape and `bi` are asserted.
+    let j = elab_json("fun [Add Nat] => Nat.zero");
+    assert_eq!(j["k"], "lam");
+    assert_eq!(j["bi"], "c");
+}
+
+#[test]
+fn fun_implicit_group_binds_every_name() {
+    // fun {a b : Type} => a  →  lam (lam (bvar 1))
+    let j = elab_json("fun {a b : Type} => a");
+    assert_eq!(j["k"], "lam");
+    assert_eq!(j["bi"], "i");
+    assert_eq!(j["b"]["k"], "lam");
+    assert_eq!(j["b"]["bi"], "i");
+    assert_eq!(j["b"]["b"]["k"], "bvar");
+    assert_eq!(j["b"]["b"]["i"], 1);
+}
+
+#[test]
+fn fun_implicit_binder_without_type_gets_an_mvar_domain() {
+    // fun {a} => a — no type written; domain is a fresh type mvar.
+    let j = elab_json("fun {a} => a");
+    assert_eq!(j["k"], "lam");
+    assert_eq!(j["bi"], "i");
+    assert_eq!(j["t"]["k"], "mvar");
+}
+
+#[test]
 fn let_typed_binding() {
     // let x : Nat := Nat.zero; x  →  letE Nat Nat.zero (bvar 0), nd=false
     let j = elab_json("let x : Nat := Nat.zero; x");

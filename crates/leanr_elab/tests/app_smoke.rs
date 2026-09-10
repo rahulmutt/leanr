@@ -828,7 +828,7 @@ fn block_implicit_lambda_covers_the_oracles_exclusion_list() {
     // but a DIFFERENT named seam is reached, identified by its message.
     for (src, seam) in [
         // isExplicit — `@f`
-        ("@Nat.succ", None),
+        ("@Nat.succ", None::<&str>),
         // isExplicitApp — `@f a`
         ("@id Nat Nat.zero", None),
         // isHole — `_`
@@ -836,13 +836,10 @@ fn block_implicit_lambda_covers_the_oracles_exclusion_list() {
         // isTypeAscription — `(e : T)`
         ("(Nat.zero : Nat)", None),
         // isLambdaWithImplicit — `fun {α} => ..`. `fun`'s own
-        // implicit-binder arm is a separate, unrelated P-seam
-        // (`builtin::binder`), so this source cannot reach `Ok` — but it
-        // must reach THAT seam, never the implicit-lambda one.
-        (
-            "fun {a : Nat} => Nat.zero",
-            Some("unsupported binder kind Lean.Parser.Term.implicitBinder"),
-        ),
+        // implicit-binder arm (`builtin::binder`) now elaborates (M4b-3
+        // P5 task 1), so this source positively demonstrates guard
+        // suppression via full success, like the other disjuncts.
+        ("fun {a : Nat} => Nat.zero", None),
         // dropParens: the disjuncts see through leading `(..)`
         ("(@Nat.succ)", None),
     ] {
