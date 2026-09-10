@@ -982,15 +982,19 @@ fn explicit_mode_fills_a_strict_implicit_from_positional_args() {
     }
 }
 
-/// `optParam Nat Nat` built by hand — Elab0 declares no `optParam`
-/// parameter. `consume_type_annotations` only reads the head constant's
-/// NAME and the first spine argument, so the default value's own type is
-/// irrelevant. `Some(base)` throughout, per
+/// `optParam <ty> <default>` built by hand — Elab0 declares no
+/// `optParam` parameter. `ty` and `default` are taken SEPARATELY (not a
+/// single `nat` reused for both) so a test built from this can tell
+/// `opt_param_default` apart from a broken sibling that returns
+/// `args[0]` (the annotated type) instead of `args[1]` (the default) —
+/// passing the same `ExprId` for both would make that swap invisible.
+/// `Some(base)` throughout, per
 /// `f_type_is_forall_reconstructs_dependent_domain_with_correct_base`'s
 /// store-routing citation.
 fn opt_param_of(
     app: &mut leanr_elab::app::state::AppElab,
-    nat: leanr_kernel::bank::ExprId,
+    ty: leanr_kernel::bank::ExprId,
+    default: leanr_kernel::bank::ExprId,
 ) -> leanr_kernel::bank::ExprId {
     let base = app.elab.view.store;
     let opt_name = {
@@ -1014,12 +1018,12 @@ fn opt_param_of(
         .elab
         .mctx
         .store_mut()
-        .expr_app(Some(base), opt_const, nat)
+        .expr_app(Some(base), opt_const, ty)
         .unwrap();
     app.elab
         .mctx
         .store_mut()
-        .expr_app(Some(base), partial, nat)
+        .expr_app(Some(base), partial, default)
         .unwrap()
 }
 
@@ -1053,7 +1057,12 @@ fn explicit_mode_skips_the_optparam_default() {
         support::with_app_harness("pick", |app| {
             let base = app.elab.view.store;
             let nat = nat_of(app);
-            let opt_nat = opt_param_of(app, nat);
+            // A default DISTINCT from the annotated type — `Nat.zero`,
+            // not `nat` again — so this test can tell `opt_param_default`
+            // apart from a broken sibling that returns `args[0]` (the
+            // type) instead of `args[1]` (the default).
+            let default = support::fixture_const(app, "Nat.zero");
+            let opt_nat = opt_param_of(app, nat, default);
             app.st.f_type = app
                 .elab
                 .mctx
@@ -1086,7 +1095,7 @@ fn explicit_mode_skips_the_optparam_default() {
                     .elab
                     .mctx
                     .store_mut()
-                    .expr_app(Some(base), f_before, nat)
+                    .expr_app(Some(base), f_before, default)
                     .unwrap();
                 assert_eq!(
                     got.expect("without `@` the declared default fills the argument"),
@@ -1122,7 +1131,13 @@ fn explicit_mode_skips_the_optparam_eta_escape() {
         support::with_app_harness("pick", |app| {
             let base = app.elab.view.store;
             let nat = nat_of(app);
-            let opt_nat = opt_param_of(app, nat);
+            // Distinct from `nat` for the same reason as
+            // `explicit_mode_skips_the_optparam_default`, even though
+            // this test doesn't assert the filled value's identity —
+            // keeping `opt_param_of`'s two arguments genuinely distinct
+            // everywhere is what makes the helper itself trustworthy.
+            let default = support::fixture_const(app, "Nat.zero");
+            let opt_nat = opt_param_of(app, nat, default);
             let inner = app
                 .elab
                 .mctx
