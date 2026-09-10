@@ -406,6 +406,16 @@ fn process_explicit_arg(
     // falling through to the eta chain and building a different term.
     if !app.ctx.explicit {
         let param_type = app.get_param_type()?;
+        // oracle: `App.lean:827` — `| false, some defVal, _ => addNewArg
+        // argName defVal; main`. The `optParam` half of the arm; task 9
+        // adds the `autoParam` half beside this `if`.
+        if let Some(def_val) = opt_param_default(app, param_type)? {
+            // oracle: `addNewArg argName defVal` — the declared default
+            // becomes the argument DIRECTLY. Not re-elaborated, not a
+            // fresh mvar.
+            add_new_arg(app, def_val)?;
+            return Ok(true);
+        }
         if app.consume_opt_auto_param(param_type)? != param_type {
             return Err(ElabError::UnsupportedSyntax(
                 "optParam default / autoParam tactic argument — M4b-3 P5".to_string(),
@@ -453,6 +463,37 @@ fn process_explicit_arg(
 
     // oracle: `finalize` (`App.lean:875`/`877`).
     Ok(false)
+}
+
+/// oracle: `Expr.getOptParamDefault?` (`Lean/Expr.lean:1695-1699`):
+///
+/// ```lean
+/// def getOptParamDefault? (e : Expr) : Option Expr :=
+///   if e.isAppOfArity ``optParam 2 then some e.appArg! else none
+/// ```
+///
+/// `optParam α d` is a reducible two-argument application (`@[reducible]
+/// def optParam (α : Sort u) (default : α) : Sort u := α`,
+/// `Init/Prelude.lean:684`); `d` is `e.appArg!`, the SECOND argument
+/// (`α` the first). A pure syntactic head test — no whnf, no mvar
+/// instantiation — matching the oracle's own `Expr -> Option Expr`
+/// signature.
+///
+/// Reuses `AppElab::type_annotation_head`'s name+arity spine walk
+/// (`app/state.rs`) for the `isAppOfArity` test rather than writing a
+/// third copy of it: that helper already answers "is the head a Const
+/// named X applied to N arguments", which is exactly `isAppOfArity`.
+/// `type_annotation_at_head` (the OTHER existing helper) can't be
+/// reused as-is here — it returns the FIRST argument (the annotated
+/// type `α`), for `consumeTypeAnnotations`'s different purpose, and it
+/// also accepts `autoParam`, which this must not: `getOptParamDefault?`
+/// is `optParam`-only, `getAutoParamTactic?` is `autoParam`'s own
+/// separate reader (Task 9).
+fn opt_param_default(app: &AppElab, ty: ExprId) -> Result<Option<ExprId>, ElabError> {
+    match app.type_annotation_head(ty) {
+        Some((name, 2)) if name == "optParam" => Ok(Some(app.app_args(ty)[1])),
+        _ => Ok(None),
+    }
 }
 
 /// oracle: `hasOptAutoParams` (`App.lean:121-127`) — does ANY parameter

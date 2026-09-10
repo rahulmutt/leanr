@@ -344,7 +344,14 @@ impl<'a, 'e> AppElab<'a, 'e> {
 
     /// The rendered name of an application spine's head `Const` and the
     /// spine's arity, if the head is a `Const` and the spine non-empty.
-    fn type_annotation_head(&self, e: ExprId) -> Option<(String, usize)> {
+    ///
+    /// `pub(crate)` (not private) so `app::args::opt_param_default` can
+    /// reuse this exact name+arity test — `isAppOfArity` in the
+    /// oracle's `getOptParamDefault?` — instead of writing a third copy
+    /// of the spine walk `type_annotation_at_head` above already
+    /// performs for a different purpose (returning the first argument,
+    /// not testing which gadget is at the head).
+    pub(crate) fn type_annotation_head(&self, e: ExprId) -> Option<(String, usize)> {
         let mut arity = 0usize;
         let mut cur = e;
         while let Node::App { f, .. } = self.node(cur) {

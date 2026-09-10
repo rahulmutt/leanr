@@ -565,17 +565,15 @@ fn has_opt_auto_params_reduces_to_find_a_hidden_optparam() {
 
         let snap = builtin::snapshot();
         let kinds = snap.kinds();
-        match leanr_elab::app::args::main(app, &kinds) {
-            Err(leanr_elab::ElabError::UnsupportedSyntax(msg)) => assert!(
-                msg.contains("optParam default"),
-                "expected the P5 optParam seam once the eta argument exposed \
-                 the hidden binder, got {msg:?}"
-            ),
-            other => panic!(
-                "a non-reducing `has_opt_auto_params` would finalize the bare \
-                 partial application instead of eta-expanding; got {other:?}"
-            ),
-        }
+        // A non-reducing `has_opt_auto_params` would fail to see `y`'s
+        // optParam through the beta-redex, leave `eta_args` empty, and
+        // finalize the bare partial application instead of eta-expanding
+        // `x` and then filling `y`'s default (Task 8) — so success alone
+        // does not discriminate; the `eta_args` assertion below does.
+        leanr_elab::app::args::main(app, &kinds).expect(
+            "the reducing eta escape must expose `y`'s optParam default, \
+             which Task 8 now fills",
+        );
         assert_eq!(
             app.st.eta_args.len(),
             1,
@@ -1039,12 +1037,16 @@ fn nat_of(app: &leanr_elab::app::state::AppElab) -> leanr_kernel::bank::ExprId {
 /// none of them match and control falls through to `App.lean:855`'s
 /// `| _, _, _ =>` arm. `fType` here is `∀ (y : optParam Nat Nat), Nat`,
 /// so the CURRENT parameter is the wrapped one:
-///   * `explicit = false` — leanr's P5 seam for the deferred default;
+///   * `explicit = false` — Task 8's `optParam` default arm fires:
+///     `y`'s default (the synthetic `nat` built by `opt_param_of`) is
+///     appended as the argument.
 ///   * `explicit = true`  — falls through to `finalize`, `f` unchanged.
 ///
-/// This gate was written in Task 4/5 while `ctx.explicit` was
-/// permanently `false`, so its `!` had never mattered; the corpus cannot
-/// reach it either (Elab0 declares no `optParam` parameter).
+/// Was written in Task 4/5, while `ctx.explicit` was permanently
+/// `false` and the default arm itself was still the deferred P5 seam;
+/// updated by Task 8 now that the arm is implemented. The corpus still
+/// cannot reach this shape (Elab0 declares no bare `optParam` parameter
+/// on a two-`Nat`-arg function), hence the direct test.
 #[test]
 fn explicit_mode_skips_the_optparam_default() {
     for explicit in [false, true] {
@@ -1080,13 +1082,18 @@ fn explicit_mode_skips_the_optparam_default() {
                      (App.lean:827-828)"
                 );
             } else {
-                match got {
-                    Err(leanr_elab::ElabError::UnsupportedSyntax(m)) => assert!(
-                        m.contains("optParam default"),
-                        "without `@` the default-filling arm is reached, got {m:?}"
-                    ),
-                    other => panic!("expected the P5 optParam seam without `@`, got {other:?}"),
-                }
+                let expected = app
+                    .elab
+                    .mctx
+                    .store_mut()
+                    .expr_app(Some(base), f_before, nat)
+                    .unwrap();
+                assert_eq!(
+                    got.expect("without `@` the declared default fills the argument"),
+                    expected,
+                    "without `@` the optParam default (App.lean:827-828) must be \
+                     appended to `f` directly, not left unfilled"
+                );
             }
         });
     }
@@ -1100,7 +1107,8 @@ fn explicit_mode_skips_the_optparam_default() {
 /// `∀ (x : Nat) (y : optParam Nat Nat), Nat`, so the current parameter
 /// (`x`) is unwrapped and only `hasOptAutoParams` can see `y`:
 ///   * `explicit = false` — `x` becomes an eta argument, and the loop
-///     then hits `y`'s own P5 optParam seam;
+///     then reaches `y`'s own optParam default arm (Task 8), which fills
+///     it and finalizes successfully;
 ///   * `explicit = true`  — finalizes `f` unchanged, no eta argument.
 ///
 /// A separate test from `explicit_mode_skips_the_optparam_default`
@@ -1158,13 +1166,10 @@ fn explicit_mode_skips_the_optparam_eta_escape() {
                     "under `@` no eta argument is added"
                 );
             } else {
-                match got {
-                    Err(leanr_elab::ElabError::UnsupportedSyntax(m)) => assert!(
-                        m.contains("optParam default"),
-                        "without `@` the eta escape exposes `y`'s optParam seam, got {m:?}"
-                    ),
-                    other => panic!("expected the P5 optParam seam without `@`, got {other:?}"),
-                }
+                got.expect(
+                    "without `@` the eta escape exposes `y`'s optParam default, \
+                     which Task 8 now fills",
+                );
                 assert_eq!(
                     app.st.eta_args.len(),
                     1,
@@ -1570,4 +1575,49 @@ fn bare_ascription_coerces_against_the_callers_expected_type() {
         bare.to_string().contains("Int.ofNat"),
         "the coercion is present, not merely a defeq pass: {bare}"
     );
+}
+
+/// oracle: `App.lean:826-829`'s `| false, some defVal, _ => addNewArg
+/// argName defVal`. `withDefault (n : Nat := Nat.zero) : Nat := n`
+/// (`Elab0.lean`) — an omitted argument takes the DECLARED default
+/// value directly, not a fresh mvar.
+#[test]
+fn opt_param_default_is_the_declared_value() {
+    let j = support::elab_and_synthesize("withDefault")
+        .expect("an omitted optParam argument fills with the declared default");
+    assert_eq!(j["k"], "app");
+    assert_eq!(j["f"]["n"], "withDefault");
+    assert_eq!(j["a"]["k"], "const");
+    assert_eq!(j["a"]["n"], "Nat.zero");
+}
+
+/// The oracle's match scrutinee is `(← read).explicit` — under `@` the
+/// arm is not reached at all, so `withDefault`'s parameter must still
+/// be supplied positionally rather than defaulted.
+#[test]
+fn opt_param_explicit_mode_does_not_fill() {
+    let j = support::elab_and_synthesize("@withDefault Nat.zero")
+        .expect("`@withDefault` supplies the optParam positionally");
+    assert_eq!(j["k"], "app");
+    assert_eq!(j["f"]["n"], "withDefault");
+    assert_eq!(j["a"]["k"], "const");
+    assert_eq!(j["a"]["n"], "Nat.zero");
+}
+
+/// Amendment 3: an omitted `autoParam` argument must still reach the
+/// OLD seam (Task 9's, not this task's) — `withTactic (n : autoParam Nat
+/// p5AutoTac) : Nat := n` (`Elab0.lean`). This pins that Task 8's new
+/// `optParam`-only arm falls through rather than swallowing the
+/// `autoParam` case too.
+#[test]
+fn opt_param_arm_falls_through_for_autoparam() {
+    match support::elab_and_synthesize("withTactic") {
+        Err(leanr_elab::ElabError::UnsupportedSyntax(m)) => assert!(
+            m.contains("optParam default / autoParam tactic argument"),
+            "an omitted autoParam argument must still hit the old P5 seam, got {m:?}"
+        ),
+        other => panic!(
+            "expected the old optParam/autoParam seam for an omitted autoParam, got {other:?}"
+        ),
+    }
 }
