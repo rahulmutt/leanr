@@ -25,6 +25,16 @@ Record shape (one per curated query):
   , "q"    : "synth"
   , "goal" : <E>                     -- the synthesis goal type
   , "mvars": [ {"i":<N>, "t":<E>} ]  -- goal mvars: canonical index + TYPE
+  , "fvars": [ {"i":<N>, "t":<E>, "bi":<S>, "v":<E>} ]
+                                     -- the LOCAL CONTEXT the goal is
+                                     -- asked in: canonical index, TYPE,
+                                     -- binder info, and (let-decls only)
+                                     -- the VALUE. Ascending by `i`;
+                                     -- entry `i`'s type may mention any
+                                     -- fvar `j < i`. Absent/empty means
+                                     -- the goal is asked at top level,
+                                     -- which is every record committed
+                                     -- before the local-instances slice.
   , "ok"   : true|false              -- oracle verdict
   , "val"  : <E>                     -- present iff ok; the instance TERM
   , "assigns": [ {"i":<N>, "e":<E>} ]  -- post-synthesis assignments
@@ -49,6 +59,17 @@ synthesis record has no such parallel side, so the type is emitted
 EXPLICITLY here. Indices are numbered in the SAME `EncSt` that
 numbered `goal`, so they line up with the `{"k":"mvar","i":N}` nodes
 inside it.
+
+`fvars` exists for the same reason `mvars` does — the canonical expr
+scheme numbers free variables but carries no way to declare them, so a
+replayed `{"k":"fvar","i":0}` would otherwise denote a variable in no
+local context. It is ALSO the local-instances slice's only differential
+channel: a local instance is an fvar whose type is a class, so without a
+declarable local context the mechanism has no source producer at this
+tier (the elaborator's is M4b-3 P5, which lands after). `bi` is carried
+because a local instance's `synthOrder` is read off the INSTANCE-IMPLICIT
+binders of its own type (`SynthInstance.lean:231-238`); a round trip that
+dropped binder info could not reconstruct it.
 
 `near_budget` implements the global determinism constraint ("queries
 near any step/depth budget are recorded and excluded from the gate").
@@ -162,6 +183,54 @@ partial def encExpr : Expr → EncM Json
 
 -- ===== query corpus =====
 
+/-- One local declaration a query asks its goal under. `value?` present
+means a let-declaration (`withLetDecl`), absent means a cdecl
+(`withLocalDecl`). Both install local instances in the oracle
+(`Basic.lean:1791`, `:1905-1911`, both via `withNewFVar`), which is
+exactly what the local-instances records need to observe. -/
+structure FVarSpec where
+  userName : Name
+  bi       : BinderInfo
+  type     : MetaM Expr
+  value?   : Option (MetaM Expr) := none
+
+/-- Open `specs` in order — each type is elaborated INSIDE the scope of
+the ones before it, so entry `i`'s type may mention entry `j < i` —
+then run `k` with the opened fvars, each paired with its binder info
+and (for a let-declaration) the VALUE actually pushed. The value is
+threaded through here rather than re-derived by re-running `value?` a
+second time later: `value?` is an arbitrary `MetaM Expr` action, and
+the record writer below needs the exact term that was installed, not a
+freshly (and possibly differently) computed one. -/
+private partial def withFVarSpecs (specs : List FVarSpec)
+    (acc : Array (Expr × BinderInfo × Option Expr))
+    (k : Array (Expr × BinderInfo × Option Expr) → MetaM α) : MetaM α := do
+  match specs with
+  | [] => k acc
+  | s :: rest =>
+    let ty ← s.type
+    match s.value? with
+    | none =>
+      withLocalDecl s.userName s.bi ty fun x =>
+        withFVarSpecs rest (acc.push (x, s.bi, none)) k
+    | some mkVal =>
+      let v ← mkVal
+      withLetDecl s.userName ty v fun x =>
+        withFVarSpecs rest (acc.push (x, s.bi, some v)) k
+
+/-- `fvars[].bi` spelling — the FULL constructor name, unlike the
+terse `biStr` kind-letter used inside `pi`/`lam` nodes elsewhere in the
+same record: a local instance's `synthOrder` is read off its own type's
+INSTANCE-IMPLICIT binders (`SynthInstance.lean:231-238`), and this
+field is what a later local-instances task reads to reconstruct it, so
+it is spelled for a human/task-brief to read directly off the JSON
+rather than decoded through `biStr`'s single-letter table. -/
+private def binderInfoName : BinderInfo → String
+  | .default        => "default"
+  | .implicit       => "implicit"
+  | .strictImplicit => "strictImplicit"
+  | .instImplicit   => "instImplicit"
+
 /-- `Sort 0`'s successor, i.e. `Type` — the universe every class and
 every carrier type in `Synth0.lean` is declared at once its `u` is
 instantiated to `0`. -/
@@ -176,10 +245,13 @@ def prod2 (a b : Expr) : Expr :=
 
 def nTy : Expr := mkConst `N
 
-/-- The curated synthesis corpus. `(tag, index, goal-builder)`; the
-builder runs in `MetaM` so a query can mint a metavariable (the stuck
-case). The index is per-TAG, never a global counter, matching
-`dump_defeq.lean`'s `constant/kind/index` id contract.
+/-- The curated synthesis corpus. `(tag, index, fvar-specs,
+goal-builder)`; the builder runs in `MetaM`, INSIDE the local context
+`fvar-specs` opens (empty for every entry but `fvarCtx`), so a query
+can mint a metavariable (the stuck case) or read back a declared local
+(`fvarCtx`, via `getLCtx`). The index is per-TAG, never a global
+counter, matching `dump_defeq.lean`'s `constant/kind/index` id
+contract.
 
 What each entry exercises (task B7's brief):
 * `simple`      — one-step resolution against a concrete instance.
@@ -291,43 +363,122 @@ What each entry exercises (task B7's brief):
                   universe above `FnN`, so this goal's levels are `2`
                   where `coeFun`'s are `1`): each class's last
                   parameter is an `outParam`, so the goal mvar is
-                  ASSIGNED by the search and shows up in `assigns`. -/
-def synthQueries : List (Name × Nat × MetaM Expr) :=
-  [ (`simple,      0, pure (cls1 `Add nTy))
-  , (`simple,      1, pure (cls1 `Mul nTy))
-  , (`diamond,     0, pure (cls1 `Mul nTy))
-  , (`superclass,  0, pure (cls1 `Semigroup nTy))
-  , (`superclass,  1, pure (cls1 `Monoid nTy))
-  , (`chain,       0, pure (cls1 `Add (prod2 nTy nTy)))
-  , (`chain,       1, pure (cls1 `Add (prod2 nTy (prod2 nTy nTy))))
-  , (`chain,       2, pure (cls1 `Chain (prod2 nTy nTy)))
-  , (`default,     0, pure (mkApp (mkApp (mkConst `OfN [Level.zero]) (mkConst `N.zero)) nTy))
-  , (`priority,    0, pure (cls1 `Pri nTy))
-  , (`negative,    0, pure (cls1 `NoInst nTy))
-  , (`negativeSub, 0, pure (cls1 `Chain (prod2 (mkConst `NoBase) nTy)))
-  , (`cyclic,      0, pure (cls1 `CycA nTy))
-  , (`mvarGoal,    0, do
+                  ASSIGNED by the search and shows up in `assigns`.
+* `fvarCtx`     — `OfN x N` asked with `(x : N)` in scope, using the
+                  SAME instance (`instOfNN`, parametrized over any
+                  `n : N`) the `default` query above resolves against
+                  `N.zero`. `N` is not a class, so `x` is never a local
+                  instance either before or after the local-instances
+                  slice, and `instOfNN x` is the answer both ways — the
+                  record's job is the CHANNEL: it pins that a declared
+                  local context round trips through `fvars` and that a
+                  goal decoded against it (here, `x` occurs in `goal`
+                  itself, as the class's own first argument, AND in the
+                  answer `val`) resolves its fvar references to real
+                  declarations rather than to dangling stand-ins. (A
+                  goal of plain `Add N` — mentioning `x` nowhere at all
+                  — was tried first and found NON-discriminating: with
+                  no `{"k":"fvar",...}` node anywhere in the record, the
+                  `fv`-seeding mutation in `oracle_synth.rs` had nothing
+                  to corrupt. `OfN x N` fixes that by putting `x` in a
+                  term position the class itself is parametrized over.)
+
+=== Local-instances slice (M4b-3 P5 task 8) ===
+
+* `noInstLocal`      — `NoInst N` with `[h : NoInst N]` in scope.
+                       `NoInst` has no global instance anywhere in the
+                       fixture, so the local is the ONLY candidate and
+                       the answer is `h` itself. Kills "locals are
+                       never appended" (skipping `get_instances`' local
+                       append).
+* `localBeatsGlobal` — `Add N` with `[h : Add N]` in scope, where
+                       `instAddN` also matches. The oracle appends
+                       locals to the END of the ascending array and
+                       consumes back-to-front, so the answer is `h`,
+                       NOT `instAddN`. Kills the append moved before
+                       the priority sort — the slice's most mutable
+                       line.
+* `letLocal`         — `Add N` with `let h : Add N := instAddN` in
+                       scope. `withLetDeclImp` routes through the same
+                       `withNewFVar` (`Basic.lean:1905-1911`) as a
+                       cdecl, so a let-bound instance counts; the
+                       answer is `h`. Kills dropping the install from
+                       `push_let_decl`. This is the FIRST record ever
+                       to exercise that path (Task 1 built both
+                       `withFVarSpecs`' `value?` branch here and the
+                       replay side's `push_let_decl` branch in
+                       `oracle_synth.rs`, but shipped with no consumer
+                       — flagged unverified in that task's review).
+* `noInstParamLocal` — `NoInst (Prod N N)` with
+                       `[h : {a b : Type} → [NoInst a] → [NoInst b] →
+                       NoInst (Prod a b)]` and `[ha : NoInst N]` in
+                       scope. `NoInst` has no global instance for
+                       `Prod` at all (deliberately: `Synth0.lean` was
+                       checked before this task and NOT extended —
+                       `NoInst` at `Synth0.lean:121` already gives a
+                       class with no global instance, and no
+                       `instance : NoInst (Prod a b)` exists anywhere
+                       in the fixture — see Controller Ruling R2), so a
+                       PARAMETRIZED local instance is the only way to
+                       solve the goal. Its own `[NoInst a]`/`[NoInst
+                       b]` binders are what give the local candidate a
+                       non-empty `synthOrder` (`SynthInstance.lean:
+                       231-238`) — with an empty one the search never
+                       schedules the subgoals and the goal fails. Kills
+                       `synth_order: Vec::new()` for locals.
+* `nonClassFvar`     — `Add N` with `(x : N)` AND `(f : N → N)` in
+                       scope. Neither is class-typed, so neither is a
+                       candidate and the answer stays `instAddN`. NOTE:
+                       this record does NOT kill a constant-true
+                       `is_class` on its own — its fvars are typed `N`
+                       and `N → N`, and a constant-true `is_class`
+                       would register them under class `N`, which no
+                       goal in the corpus asks for, so no answer
+                       changes. `is_class_rejects_a_non_class_head`
+                       (unit test, `instances.rs`) is what kills that
+                       mutation instead.
+* `outOfScope`       — deliberately ABSENT. Scope exit is not
+                       expressible in this record shape: every `fvars`
+                       entry is open for the whole query. Covered by
+                       `a_closed_binders_instance_is_not_offered`
+                       (Task 6) instead — recorded here so a later
+                       reader does not assume the corpus covers it. -/
+def synthQueries : List (Name × Nat × List FVarSpec × MetaM Expr) :=
+  [ (`simple,      0, [], pure (cls1 `Add nTy))
+  , (`simple,      1, [], pure (cls1 `Mul nTy))
+  , (`diamond,     0, [], pure (cls1 `Mul nTy))
+  , (`superclass,  0, [], pure (cls1 `Semigroup nTy))
+  , (`superclass,  1, [], pure (cls1 `Monoid nTy))
+  , (`chain,       0, [], pure (cls1 `Add (prod2 nTy nTy)))
+  , (`chain,       1, [], pure (cls1 `Add (prod2 nTy (prod2 nTy nTy))))
+  , (`chain,       2, [], pure (cls1 `Chain (prod2 nTy nTy)))
+  , (`default,     0, [], pure (mkApp (mkApp (mkConst `OfN [Level.zero]) (mkConst `N.zero)) nTy))
+  , (`priority,    0, [], pure (cls1 `Pri nTy))
+  , (`negative,    0, [], pure (cls1 `NoInst nTy))
+  , (`negativeSub, 0, [], pure (cls1 `Chain (prod2 (mkConst `NoBase) nTy)))
+  , (`cyclic,      0, [], pure (cls1 `CycA nTy))
+  , (`mvarGoal,    0, [], do
       pure (mkApp (mkApp (mkConst `OfN [Level.zero]) (← mkFreshExprMVar nTy)) nTy))
-  , (`outParam,        0, do
+  , (`outParam,        0, [], do
       pure (mkApp (mkApp (mkApp (mkConst `Op [Level.zero]) nTy) nTy) (← mkFreshExprMVar type0)))
-  , (`outParamReject,  0, pure (mkApp (mkApp (mkApp (mkConst `Op [Level.zero]) nTy) nTy)
+  , (`outParamReject,  0, [], pure (mkApp (mkApp (mkApp (mkConst `Op [Level.zero]) nTy) nTy)
       (mkConst `NoBase)))
-  , (`outParamNoMVars, 0, pure (mkApp (mkApp (mkApp (mkConst `Op [Level.zero]) nTy) nTy)
+  , (`outParamNoMVars, 0, [], pure (mkApp (mkApp (mkApp (mkConst `Op [Level.zero]) nTy) nTy)
       (mkApp (mkConst `Dual) nTy)))
-  , (`outParamLevel,   0, do
+  , (`outParamLevel,   0, [], do
       pure (mkApp (mkApp (mkConst `Lvl [Level.zero, Level.zero]) nTy) (← mkFreshExprMVar type0)))
-  , (`outParamGet,     0, do
+  , (`outParamGet,     0, [], do
       pure (mkApp (mkApp (mkApp (mkConst `Get [Level.zero, Level.zero, Level.zero]) nTy) nTy)
         (← mkFreshExprMVar type0)))
-  , (`stuck,       0, do pure (cls1 `Add (← mkFreshExprMVar type0)))
-  , (`coeChain, 0, pure (mkApp3 (mkConst `CoeT [Level.one, Level.one]) nTy (mkConst `N.zero) (mkConst `M)))
-  , (`coeChain, 1, pure (mkApp3 (mkConst `CoeT [Level.one, Level.one]) nTy (mkConst `N.zero) (mkConst `Big)))
-  , (`coeChain, 2, pure (mkApp3 (mkConst `CoeT [Level.one, Level.one]) nTy (mkConst `N.zero) nTy))
-  , (`coeChain, 3, pure (mkApp3 (mkConst `CoeT [Level.one, Level.one]) nTy (mkConst `N.zero) (mkConst `NoBase)))
-  , (`coeFun,   0, do
+  , (`stuck,       0, [], do pure (cls1 `Add (← mkFreshExprMVar type0)))
+  , (`coeChain, 0, [], pure (mkApp3 (mkConst `CoeT [Level.one, Level.one]) nTy (mkConst `N.zero) (mkConst `M)))
+  , (`coeChain, 1, [], pure (mkApp3 (mkConst `CoeT [Level.one, Level.one]) nTy (mkConst `N.zero) (mkConst `Big)))
+  , (`coeChain, 2, [], pure (mkApp3 (mkConst `CoeT [Level.one, Level.one]) nTy (mkConst `N.zero) nTy))
+  , (`coeChain, 3, [], pure (mkApp3 (mkConst `CoeT [Level.one, Level.one]) nTy (mkConst `N.zero) (mkConst `NoBase)))
+  , (`coeFun,   0, [], do
       let γ ← mkFreshExprMVar (mkForall `f BinderInfo.default (mkConst `FnN) (mkSort Level.one))
       pure (mkApp2 (mkConst `CoeFun [Level.one, Level.one]) (mkConst `FnN) γ))
-  , (`coeSort,  0, do
+  , (`coeSort,  0, [], do
       -- `SortN`'s field `ty : Type` makes `SortN` itself a `Type 1`
       -- (`Sort 2`) carrier — packaging a `Type`-classified value bumps
       -- the enclosing structure a universe above an ordinary carrier
@@ -337,6 +488,53 @@ def synthQueries : List (Name × Nat × MetaM Expr) :=
       -- must match that level, not `Level.one`.
       pure (mkApp2 (mkConst `CoeSort [Level.succ Level.one, Level.succ Level.one]) (mkConst `SortN)
         (← mkFreshExprMVar (mkSort (Level.succ Level.one)))))
+  , (`fvarCtx, 0,
+      [ { userName := `x, bi := .default, type := pure nTy } ],
+      do
+        -- `x` is not passed in positionally: it is looked up via
+        -- `getLCtx`, the SAME way any ordinary `MetaM` goal-builder
+        -- would see a binder opened around it (`withFVarSpecs` opens
+        -- `fvarCtx`'s single local BEFORE this action runs, exactly
+        -- like every other entry's builder runs inside the — here
+        -- empty — scope its own `fvar-specs` opens).
+        let some ldecl := (← getLCtx).findFromUserName? `x
+          | panic! "fvarCtx/synth/0: `x` not found in local context"
+        pure (mkApp (mkApp (mkConst `OfN [Level.zero]) ldecl.toExpr) nTy))
+  -- === Local-instances slice (M4b-3 P5 task 8) — see this file's
+  -- header for what each record kills. ===
+  , (`noInstLocal, 0,
+      [ { userName := `h, bi := .instImplicit, type := pure (cls1 `NoInst nTy) } ],
+      pure (cls1 `NoInst nTy))
+  , (`localBeatsGlobal, 0,
+      [ { userName := `h, bi := .instImplicit, type := pure (cls1 `Add nTy) } ],
+      pure (cls1 `Add nTy))
+  , (`letLocal, 0,
+      [ { userName := `h, bi := .default, type := pure (cls1 `Add nTy),
+          value? := some (pure (mkConst `instAddN)) } ],
+      pure (cls1 `Add nTy))
+  , (`noInstParamLocal, 0,
+      [ { userName := `h, bi := .instImplicit,
+          -- `h`'s type is built as a standalone closed Pi-term via
+          -- `mkForallFVars`, NOT as further entries in this query's
+          -- own `fvars` list: `a`/`b`/the two instance-implicit
+          -- binders are `h`'s OWN telescope, the thing
+          -- `local_instance_candidate`/`instimplicit_binder_positions`
+          -- reads to compute its `synthOrder` — they must never
+          -- themselves become separate outer-context fvars.
+          type := do
+            withLocalDecl `a .implicit type0 fun a =>
+            withLocalDecl `b .implicit type0 fun b =>
+            withLocalDecl `hA .instImplicit (cls1 `NoInst a) fun hA =>
+            withLocalDecl `hB .instImplicit (cls1 `NoInst b) fun hB =>
+              mkForallFVars #[a, b, hA, hB] (cls1 `NoInst (prod2 a b)) }
+      , { userName := `ha, bi := .instImplicit, type := pure (cls1 `NoInst nTy) }
+      ],
+      pure (cls1 `NoInst (prod2 nTy nTy)))
+  , (`nonClassFvar, 0,
+      [ { userName := `x, bi := .default, type := pure nTy }
+      , { userName := `f, bi := .default, type := pure (mkForall `_ BinderInfo.default nTy nTy) }
+      ],
+      pure (cls1 `Add nTy))
   ]
 
 /-- Anything over this fraction (in percent) of the oracle's
@@ -358,68 +556,108 @@ unsafe def main : IO Unit := do
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
     let maxHb := (← readThe Core.Context).maxHeartbeats
-    for (tag, i, mkGoal) in synthQueries do
+    for (tag, i, fvarSpecs, mkGoal) in synthQueries do
       let id := s!"{tag.toString (escape := false)}/synth/{i}"
-      let goal ← mkGoal
-      -- Every mvar reachable from the goal, with its declared type —
-      -- see this file's header for why `mvars` is emitted explicitly.
-      let goalMVars := (← getMVars goal)
-      -- `goal` and `mvars[].t` are encoded BEFORE synthesis: they record
-      -- the query AS ASKED. Post-synthesis state belongs in `assigns`
-      -- below, not smuggled into `goal` — and an output parameter the
-      -- oracle assigns (`assignOutParams`, SynthInstance.lean:825-845)
-      -- would otherwise vanish from `goal` entirely and take the
-      -- `mvars[].i` numbering with it. Every record committed before
-      -- M4b-3 P2b-i is byte-identical either way: no query in the corpus
-      -- at that point could assign a goal mvar.
-      let (goalJ, st0) := (encExpr (← instantiateMVars goal)).run {}
-      let (mvarsJ, st1) ← goalMVars.foldlM (fun (acc, st) (m : MVarId) => do
-        let ty ← instantiateMVars (← m.getType)
-        let (tyJ, st') := (encExpr ty).run st
-        let idx := match st'.mvars.get? m with
-          | some i => i
-          | none => panic! s!"dump_synth: mvar {m.name} not numbered by `goal` (collected by \
-              getMVars before synthInstance? but not reachable from the pre-synthesis goal)"
-        pure (acc.push (Json.mkObj [("i", idx), ("t", tyJ)]), st'))
-        (#[], st0)
-      let hb0 ← IO.getNumHeartbeats
-      let r : Except String (Option Expr) ←
-        try
-          Except.ok <$> Meta.synthInstance? goal
-        catch ex => Except.error <$> ex.toMessageData.toString
-      let hb1 ← IO.getNumHeartbeats
-      -- `assigns`: the post-synthesis state of every goal mvar. This is
-      -- the ONLY place `assignOutParams`' effect is observable —
-      -- `ok`/`val` are identical whether or not the caller's output
-      -- parameter was assigned (design spec § Amendment 3, item 6). An
-      -- mvar that is still unassigned contributes no entry.
-      let (assignsJ, _) ← goalMVars.foldlM (fun (acc, st) (m : MVarId) => do
-        if !(← m.isAssigned) then pure (acc, st) else
-        let v ← instantiateMVars (.mvar m)
-        let (vJ, st') := (encExpr v).run st
-        let idx := (st'.mvars.get? m).getD 0
-        pure (acc.push (Json.mkObj [("i", idx), ("e", vJ)]), st'))
-        (#[], st1)
-      match r with
-      | Except.error msg =>
-        -- Not a corpus record in the ordinary sense (no oracle VERDICT
-        -- to compare against, so it is skipped by the gate), but `goal`/
-        -- `mvars` are still emitted so the query it names can be
-        -- replayed directly rather than hand-reconstructed — see this
-        -- file's header and `oracle_synth.rs`'s `SEAM_EXCLUSIONS`
-        -- sibling test for the `isDefEqStuckEx` seam.
-        IO.println <| Json.compress <| Json.mkObj
-          [("id", id), ("q", "exc"), ("goal", goalJ), ("mvars", Json.arr mvarsJ),
-           ("assigns", Json.arr assignsJ), ("msg", msg)]
-      | Except.ok val? =>
-        let val? ← val?.mapM instantiateMVars
-        let nearBudget := maxHb != 0 && (hb1 - hb0) * 100 > maxHb * nearBudgetPercent
-        let fields :=
-          [("id", Json.str id), ("q", Json.str "synth"), ("goal", goalJ),
-           ("mvars", Json.arr mvarsJ), ("ok", Json.bool val?.isSome)]
-          ++ (match val? with
-              | some v => [("val", (encExpr v).run' st1)]
-              | none => [])
-          ++ [("assigns", Json.arr assignsJ), ("near_budget", Json.bool nearBudget)]
-        IO.println <| Json.compress <| Json.mkObj fields
+      -- Opens `fvarSpecs` (empty for every query but `fvarCtx`) around
+      -- BOTH `mkGoal` and the rest of this record: `mkGoal` runs inside
+      -- the opened scope so it can read a declared local back off
+      -- `getLCtx`, and the whole local-instances point of `fvars` is
+      -- that the record's `goal`/`val` are encoded while those locals
+      -- are genuinely in the ambient context, not merely described.
+      withFVarSpecs fvarSpecs #[] fun openedFVars => do
+        let goal ← mkGoal
+        -- `fvars` is encoded FIRST, before `goal`, so declaration order
+        -- and canonical fvar numbering agree: entry `i` is fvar `i`. The
+        -- numbering state `stF` is threaded exactly the way the
+        -- existing `goal` -> `mvars[].t` -> `val` chain threads it.
+        let (fvarsJ, stF) ← openedFVars.foldlM (fun (acc, st) (x, bi, val?) => do
+          let ty ← instantiateMVars (← inferType x)
+          let (tJ, st') := (encExpr ty).run st
+          let (_, st'') := (encExpr x).run st'
+          let idx := match st''.fvars.get? x.fvarId! with
+            | some n => n
+            | none => panic! "dump_synth: encExpr of a freshly-opened fvar did not register it"
+          let (vJ, st''') ← match val? with
+            | none => pure (none, st'')
+            | some v => do
+              let (vJv, stv) := (encExpr (← instantiateMVars v)).run st''
+              pure (some vJv, stv)
+          let entry := Json.mkObj <|
+            [("i", idx), ("t", tJ), ("bi", Json.str (binderInfoName bi))]
+            ++ (match vJ with | some vJv => [("v", vJv)] | none => [])
+          pure (acc.push entry, st'''))
+          (#[], {})
+        -- Every mvar reachable from the goal, with its declared type —
+        -- see this file's header for why `mvars` is emitted explicitly.
+        let goalMVars := (← getMVars goal)
+        -- `goal` and `mvars[].t` are encoded BEFORE synthesis: they record
+        -- the query AS ASKED. Post-synthesis state belongs in `assigns`
+        -- below, not smuggled into `goal` — and an output parameter the
+        -- oracle assigns (`assignOutParams`, SynthInstance.lean:825-845)
+        -- would otherwise vanish from `goal` entirely and take the
+        -- `mvars[].i` numbering with it. Every record committed before
+        -- M4b-3 P2b-i is byte-identical either way: no query in the corpus
+        -- at that point could assign a goal mvar.
+        let (goalJ, st0) := (encExpr (← instantiateMVars goal)).run stF
+        let (mvarsJ, st1) ← goalMVars.foldlM (fun (acc, st) (m : MVarId) => do
+          let ty ← instantiateMVars (← m.getType)
+          let (tyJ, st') := (encExpr ty).run st
+          let idx := match st'.mvars.get? m with
+            | some i => i
+            | none => panic! s!"dump_synth: mvar {m.name} not numbered by `goal` (collected by \
+                getMVars before synthInstance? but not reachable from the pre-synthesis goal)"
+          pure (acc.push (Json.mkObj [("i", idx), ("t", tyJ)]), st'))
+          (#[], st0)
+        let hb0 ← IO.getNumHeartbeats
+        let r : Except String (Option Expr) ←
+          try
+            Except.ok <$> Meta.synthInstance? goal
+          catch ex => Except.error <$> ex.toMessageData.toString
+        let hb1 ← IO.getNumHeartbeats
+        -- `assigns`: the post-synthesis state of every goal mvar. This is
+        -- the ONLY place `assignOutParams`' effect is observable —
+        -- `ok`/`val` are identical whether or not the caller's output
+        -- parameter was assigned (design spec § Amendment 3, item 6). An
+        -- mvar that is still unassigned contributes no entry.
+        let (assignsJ, _) ← goalMVars.foldlM (fun (acc, st) (m : MVarId) => do
+          if !(← m.isAssigned) then pure (acc, st) else
+          let v ← instantiateMVars (.mvar m)
+          let (vJ, st') := (encExpr v).run st
+          let idx := (st'.mvars.get? m).getD 0
+          pure (acc.push (Json.mkObj [("i", idx), ("e", vJ)]), st'))
+          (#[], st1)
+        -- `fvars` is emitted ONLY when non-empty: every record committed
+        -- before the local-instances slice has no local context, and
+        -- emitting the key unconditionally would rewrite every one of
+        -- those byte-identical lines for no informational gain (a
+        -- present-but-empty `[]` and an absent key decode identically —
+        -- `oracle_synth.rs` reads `fvars` via `unwrap_or(&empty_fvars)`).
+        let fvarsField : List (String × Json) :=
+          if fvarsJ.isEmpty then [] else [("fvars", Json.arr fvarsJ)]
+        match r with
+        | Except.error msg =>
+          -- Not a corpus record in the ordinary sense (no oracle VERDICT
+          -- to compare against, so it is skipped by the gate), but `goal`/
+          -- `mvars` are still emitted so the query it names can be
+          -- replayed directly rather than hand-reconstructed — see this
+          -- file's header and `oracle_synth.rs`'s `SEAM_EXCLUSIONS`
+          -- sibling test for the `isDefEqStuckEx` seam.
+          IO.println <| Json.compress <| Json.mkObj <|
+            [("id", Json.str id), ("q", Json.str "exc"), ("goal", goalJ),
+             ("mvars", Json.arr mvarsJ)]
+            ++ fvarsField
+            ++ [("assigns", Json.arr assignsJ), ("msg", Json.str msg)]
+        | Except.ok val? =>
+          let val? ← val?.mapM instantiateMVars
+          let nearBudget := maxHb != 0 && (hb1 - hb0) * 100 > maxHb * nearBudgetPercent
+          let fields :=
+            [("id", Json.str id), ("q", Json.str "synth"), ("goal", goalJ),
+             ("mvars", Json.arr mvarsJ)]
+            ++ fvarsField
+            ++ [("ok", Json.bool val?.isSome)]
+            ++ (match val? with
+                | some v => [("val", (encExpr v).run' st1)]
+                | none => [])
+            ++ [("assigns", Json.arr assignsJ), ("near_budget", Json.bool nearBudget)]
+          IO.println <| Json.compress <| Json.mkObj fields
   discard <| go.toIO coreCtx coreState

@@ -693,13 +693,13 @@ impl<'e> MetaCtx<'e> {
     /// **Let-declarations are REFUSED, not handled.** The oracle branches
     /// on `LocalDecl.ldecl (nondep := …)` (`:1131-1160`) and leanr's
     /// `LocalDecl` carries no `nondep` bit at all
-    /// (`leanr_kernel/src/local_ctx.rs:37-43`; `mk_let_binding` takes it
-    /// as a caller argument, `metactx.rs:830` — `mk_let_expr`), so both
+    /// (`leanr_kernel/src/local_ctx.rs:37-43`; leanr's `mk_let_expr` takes
+    /// it as a caller argument, `metactx.rs:925-930`), so both
     /// ldecl arms have no input. Writing one would be guessing, and a
     /// wrong `ExprId` is
     /// worse than a named refusal — the same judgement, for the same
     /// reason, as `mk_binding`'s existing
-    /// `"let-decl fvar in a cdecl telescope"` (`metactx.rs:769-772`).
+    /// `"let-decl fvar in a cdecl telescope"` (`metactx.rs:862-866`).
     ///
     /// The METAVARIABLE arm (`:1157-1163`) is transcribed: `xs` may carry
     /// a metavariable as a "may dependency" once `collect_forward_deps`

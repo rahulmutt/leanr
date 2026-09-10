@@ -18,12 +18,13 @@
 
 use std::collections::HashMap;
 
+use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, NameId, Store};
-use leanr_kernel::EnvView;
+use leanr_kernel::{BinderInfo, EnvView};
 use leanr_meta::{Config, EnvExtensions, LocalCtxSnapshot, MVarDecl, MVarId, MVarKind, MetaCtx};
 
 mod support;
-use support::{decode_expr, encode_expr, fixture, replay_fixture, EncSt};
+use support::{decode_expr, encode_expr, fixture, replay_fixture, synth_name, EncSt};
 
 /// Committed corpus records that this gate does NOT compare, each with
 /// the DOCUMENTED seam that makes leanr's answer differ from the
@@ -139,23 +140,13 @@ fn oracle_synth_gate() {
         let mut scratch = Store::scratch();
         let mut fv = HashMap::new();
         let mut mv: HashMap<u64, NameId> = HashMap::new();
-        let goal = decode_expr(&mut scratch, base, &q["goal"], &mut fv, &mut mv);
-        // Goal-mvar TYPES come from the record's own `mvars` array (the
-        // canonical expr scheme has no mvar-type field, and unlike
-        // `oracle_fast.rs`'s `defeq_mvar` arm there is no structurally
-        // parallel side to re-derive them from) — see `dump_synth.lean`'s
-        // header. Decoded here, before `ctx` takes `scratch` by `&mut`.
-        let mvar_decls: Vec<(u64, ExprId)> = q["mvars"]
-            .as_array()
-            .expect("mvars field")
-            .iter()
-            .map(|m| {
-                let i = m["i"].as_u64().expect("mvars[].i field");
-                let ty = decode_expr(&mut scratch, base, &m["t"], &mut fv, &mut mv);
-                (i, ty)
-            })
-            .collect();
-
+        // `ctx` is constructed BEFORE `goal`/`mvars` are decoded (unlike
+        // `oracle_fast.rs`'s parallel gate) because the local context the
+        // goal is asked in (`fvars`, local-instances slice, below) must be
+        // pushed before `goal` is decoded, and pushing it needs `ctx`.
+        // `decode_expr` reborrows `scratch` via `ctx.store_mut()` from
+        // here on instead of taking it directly, since `ctx` now holds
+        // the exclusive `&mut Store` for the rest of this query.
         let mut ctx = MetaCtx::new(
             view,
             &mut scratch,
@@ -170,6 +161,74 @@ fn oracle_synth_gate() {
                 coe_decls: &coe_decls,
             },
         );
+        // The local context the goal is asked in (local-instances
+        // slice). Pushed BEFORE `goal` is decoded, and seeded into `fv`,
+        // so the goal's own `{"k":"fvar","i":N}` references resolve to
+        // declarations that really exist rather than to freshly interned
+        // dangling names. Ascending by `i`, because entry `i`'s type may
+        // mention any earlier entry.
+        //
+        // These go through `push_local_decl`/`push_let_decl` — the very
+        // chokepoints that install local instances — so the fixture's
+        // local context IS the producer under test. There is no
+        // test-only path that could install an instance a real run
+        // would not.
+        let empty_fvars = Vec::new();
+        let fvar_specs = q
+            .get("fvars")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&empty_fvars);
+        let lctx_cp = ctx.lctx_checkpoint();
+        for spec in fvar_specs {
+            let idx = spec["i"].as_u64().expect("fvars[].i field");
+            let ty = decode_expr(ctx.store_mut(), base, &spec["t"], &mut fv, &mut mv);
+            let bi = match spec["bi"].as_str().expect("fvars[].bi field") {
+                "default" => BinderInfo::Default,
+                "implicit" => BinderInfo::Implicit,
+                "strictImplicit" => BinderInfo::StrictImplicit,
+                "instImplicit" => BinderInfo::InstImplicit,
+                other => panic!("{id}: unknown binder info {other:?}"),
+            };
+            let name = synth_name(ctx.store_mut(), base, "#f", idx);
+            let fvar = match spec.get("v") {
+                None => ctx
+                    .push_local_decl(Some(name), ty, bi)
+                    .unwrap_or_else(|e| panic!("{id}: push_local_decl: {e:?}")),
+                Some(v) => {
+                    let value = decode_expr(ctx.store_mut(), base, v, &mut fv, &mut mv);
+                    ctx.push_let_decl(Some(name), ty, value)
+                        .unwrap_or_else(|e| panic!("{id}: push_let_decl: {e:?}"))
+                }
+            };
+            let nid = match ctx.store().expr_node(base, fvar) {
+                Node::FVar { id: Some(id) } => id,
+                other => panic!("{id}: push returned a non-fvar {other:?}"),
+            };
+            // Seed the decode map so `goal` resolves index -> this decl.
+            let previous = fv.insert(idx, nid);
+            assert!(
+                previous.is_none(),
+                "{id}: fvars[].i={idx} is declared twice, or `goal` was \
+                 decoded before the context was pushed"
+            );
+        }
+        let goal = decode_expr(ctx.store_mut(), base, &q["goal"], &mut fv, &mut mv);
+        // Goal-mvar TYPES come from the record's own `mvars` array (the
+        // canonical expr scheme has no mvar-type field, and unlike
+        // `oracle_fast.rs`'s `defeq_mvar` arm there is no structurally
+        // parallel side to re-derive them from) — see `dump_synth.lean`'s
+        // header.
+        let mvar_decls: Vec<(u64, ExprId)> = q["mvars"]
+            .as_array()
+            .expect("mvars field")
+            .iter()
+            .map(|m| {
+                let i = m["i"].as_u64().expect("mvars[].i field");
+                let ty = decode_expr(ctx.store_mut(), base, &m["t"], &mut fv, &mut mv);
+                (i, ty)
+            })
+            .collect();
+
         // DECLARE every goal mvar (ledger note, task B6): `decode_expr`
         // interns an mvar node but never declares it, and an undeclared
         // mvar makes `synth_pending` raise `MetaError::MVar` rather than
@@ -197,6 +256,33 @@ fn oracle_synth_gate() {
             if ctx.mctx().decl(MVarId(nid)).is_some() {
                 continue;
             }
+            // `LocalCtxSnapshot::empty()` is a STANDING ASSUMPTION, not
+            // a neutral default: `synth_pending` and friends reach a
+            // goal mvar through `with_mvar_context`, which installs this
+            // snapshot's `lctx` AND its local instances as the ambient
+            // ones. For a record that declares `fvars`, an empty
+            // snapshot means the nested synthesis runs with the
+            // fixture's local context — and therefore its local
+            // instances — thrown away, silently answering against a
+            // strictly smaller instance set than the oracle's.
+            //
+            // No committed record combines `fvars` with `mvars`, so this
+            // is unreachable today; the assertion below is what keeps it
+            // that way. The first record that needs both must give each
+            // goal mvar a real context (`ctx.current_lctx()` is the
+            // ambient one at this point, and is the right starting
+            // answer only if the oracle really asked that mvar in the
+            // full fixture context — the dump carries no per-mvar
+            // `lctx` field to check that against, so it is a decision
+            // for that slice, not a default to fall into).
+            assert!(
+                fvar_specs.is_empty(),
+                "{id}: this record declares both `fvars` and `mvars`, and the \
+                 gate declares every goal mvar with an EMPTY local context — \
+                 so the fixture's local instances would be invisible to any \
+                 nested synthesis. Give the mvar a real `lctx` before adding \
+                 this record."
+            );
             ctx.mctx_mut().declare(
                 MVarId(nid),
                 MVarDecl {
@@ -250,6 +336,11 @@ fn oracle_synth_gate() {
             }
         }
         assigned.sort_by_key(|(i, _)| *i);
+        // Undo the `fvars` push above before the next iteration reuses
+        // this `MetaCtx`'s local-name/lctx bookkeeping — queries must
+        // stay independent (same contract this loop already states for
+        // `view`/`Store`/`MetaCtx` themselves).
+        ctx.lctx_restore(lctx_cp);
         // End the mutable borrow of `scratch` before reading it back.
         drop(ctx);
 
@@ -363,11 +454,14 @@ fn oracle_synth_gate() {
     // number of records actually COMPARED, so deleting or `exc`-ing a
     // curated query fails here instead of quietly shrinking the corpus.
     assert_eq!(
-        compared, 24,
-        "expected 24 compared synthesis records (skipped `exc`: {skipped_exc:?}; \
+        compared, 30,
+        "expected 30 compared synthesis records (skipped `exc`: {skipped_exc:?}; \
          skipped near-budget: {skipped_near_budget:?}; seam-excluded: \
          {skipped_seam:?}) — if the curated list in dump_synth.lean grew or shrank \
-         deliberately, update this count; M4b-3 P4 task 1 added the six coe* records"
+         deliberately, update this count; M4b-3 P4 task 1 added the six coe* records, \
+         local-instances task 1 added `fvarCtx/synth/0`, local-instances task 8 added the \
+         five differential records (`noInstLocal`, `localBeatsGlobal`, `letLocal`, \
+         `noInstParamLocal`, `nonClassFvar`)"
     );
 }
 

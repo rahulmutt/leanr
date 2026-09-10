@@ -13,7 +13,7 @@ use leanr_kernel::abstract_fvars;
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, LevelId, NameId, Store};
 use leanr_kernel::{
-    BinderInfo, EnvView, ExprData, FVarIdGen, LocalContext, RecGuard, MAX_REC_DEPTH,
+    BinderInfo, ConstantInfo, EnvView, ExprData, FVarIdGen, LocalContext, RecGuard, MAX_REC_DEPTH,
 };
 use leanr_olean::{
     ClassEntry, DefaultInstanceEntry, EntryScope, InstanceEntry, MatcherEntry, ProjectionFnInfo,
@@ -21,8 +21,9 @@ use leanr_olean::{
 };
 
 use crate::instances::{ClassTable, InstanceTable};
+use crate::local_instance::LocalInstanceStack;
 use crate::local_snapshot::LocalCtxSnapshot;
-use crate::{Config, LMVarId, MVarId, MetaError, MetavarContext, TransparencyMode};
+use crate::{Config, LMVarId, LOption, MVarId, MetaError, MetavarContext, TransparencyMode};
 
 /// Stack-growth constants — the same values `tc.rs` uses (private
 /// there, so restated; keep in sync by inspection). Verified against
@@ -78,6 +79,15 @@ pub struct MetaCtx<'e> {
     /// truncation point with no second
     /// checkpoint API. See `lctx_lookup_by_name` (the reader) below.
     pub(crate) local_names: Vec<(Option<NameId>, ExprId)>,
+    /// The local instances in scope — oracle: `Meta.Context.localInstances`
+    /// (`Basic.lean`), stored per metavariable as
+    /// `MetavarDecl.localInstances` (`MetavarContext.lean:320`).
+    ///
+    /// SPARSE, unlike `local_names` above: only a class-typed
+    /// declaration produces an entry, so this length is unrelated to
+    /// `lctx.save()` and there is no lockstep invariant to assert. See
+    /// `local_instance.rs` for the truncation rule.
+    pub(crate) local_instances: LocalInstanceStack,
     /// Memoized `LocalCtxSnapshot` of the CURRENT `lctx`/`local_names`,
     /// dropped by every writer of either. `current_lctx` rebuilds it on
     /// demand, so N metavariables minted at one binder depth share one
@@ -389,6 +399,7 @@ impl<'e> MetaCtx<'e> {
             mctx: MetavarContext::new(),
             lctx: LocalContext::default(),
             local_names: Vec::new(),
+            local_instances: LocalInstanceStack::default(),
             lctx_snapshot: None,
             fvar_gen: FVarIdGen::default(),
             guard: RecGuard::new(),
@@ -513,6 +524,7 @@ impl<'e> MetaCtx<'e> {
         let snap = Arc::new(LocalCtxSnapshot::new(
             self.lctx.clone(),
             self.local_names.clone(),
+            self.local_instances.to_vec(),
         ));
         self.lctx_snapshot = Some(Arc::clone(&snap));
         snap
@@ -524,10 +536,15 @@ impl<'e> MetaCtx<'e> {
     }
 
     /// Install `snapshot` as the ambient local context, returning the one
-    /// it replaced. Both halves swap together, because `local_names` and
-    /// `lctx` are asserted to stay in lockstep at every checkpoint,
-    /// restore and push — including the ones the caller performs while
-    /// the snapshot is installed. The cache is set to the installed
+    /// it replaced. `lctx` and `local_names` swap together, because they
+    /// are asserted to stay in lockstep at every checkpoint, restore and
+    /// push — including the ones the caller performs while the snapshot
+    /// is installed. `local_instances` swaps along with them (Task 5):
+    /// the oracle's `withLocalContextImp` (`Basic.lean:2002-2004`)
+    /// installs `lctx` and `localInstances` together in one
+    /// `withReader`, and leaving the instance stack behind would let a
+    /// metavariable's own context see a different instance set than the
+    /// one it was minted under. The cache is set to the installed
     /// snapshot so a metavariable minted while it is in force records the
     /// installed context without a fresh copy.
     ///
@@ -537,9 +554,10 @@ impl<'e> MetaCtx<'e> {
     /// the whole elaborator, not just `MetaCtx`.
     pub fn install_lctx(&mut self, snapshot: Arc<LocalCtxSnapshot>) -> Arc<LocalCtxSnapshot> {
         let previous = self.current_lctx();
-        let (lctx, names) = snapshot.parts();
+        let (lctx, names, instances) = snapshot.parts();
         self.lctx = lctx.clone();
         self.local_names = names.to_vec();
+        self.local_instances.replace(instances.to_vec());
         debug_assert_eq!(
             self.local_names.len(),
             self.lctx.save(),
@@ -555,10 +573,39 @@ impl<'e> MetaCtx<'e> {
     /// local context installed as the ambient one, and restores the
     /// caller's on the way out.
     ///
-    /// `localInstances` is NOT modelled: leanr has no local-instance
-    /// concept — instances come from the environment extension, not a
-    /// per-scope list — so the oracle's instance-cache flush has nothing
-    /// to flush. SEAM, owner: the slice that adds local instances.
+    /// `localInstances` travels inside the snapshot (`local_snapshot.rs`),
+    /// so this reinstalls the metavariable's instances along with its
+    /// declarations — the oracle's `withLocalContextImp` swaps both in
+    /// one `withReader` (`Basic.lean:2002-2004`).
+    ///
+    /// The oracle does NOT flush a synthesis cache here, and neither does
+    /// leanr: `withLocalContextImp` is a plain reader swap with no flush
+    /// in it, and leanr has no synthesis cache at all yet (the M4b-3 spec
+    /// assigns one to "the slice that builds the synthesis cache").
+    ///
+    /// **Why there is no flush, and what the slice that builds the cache
+    /// must do instead.** The oracle needs none because its cache is
+    /// KEYED by the local instances: `SynthInstanceCacheKey`
+    /// (`Basic.lean:328-336`) is `localInsts : LocalInstances`
+    /// (`:329`) + `type` (`:330`) + `synthPendingDepth` (`:335`), so a
+    /// lookup under a different `LocalInstances` simply misses. A leanr
+    /// synthesis cache must key by the local instances the same way;
+    /// caching by goal type alone would return an answer synthesized
+    /// under a different instance set, which is wrong under a binder,
+    /// and this reader swap is exactly where the two sets differ.
+    /// Do not read "no flush to port" as "nothing to do".
+    ///
+    /// `MVarId.withContext`'s own docstring (`:2047-2050`) appears to
+    /// say the opposite — "The type class resolution cache is flushed
+    /// when executing `x` if its `LocalInstances` are different from
+    /// the current ones". It describes the EFFECT, not the mechanism:
+    /// `withMVarContextImp` (`:2043-2045`) is `withLocalContextImp
+    /// mvarDecl.lctx mvarDecl.localInstances x`, `withLocalContextImp`
+    /// (`:2002-2004`) is a bare `withReader`, and nothing on that path
+    /// touches the cache — the "flush" is the key miss described above.
+    /// Recorded so a future reader who goes to check that sentence
+    /// finds the resolution here rather than an apparent contradiction,
+    /// and does not port a flush that does not exist.
     ///
     /// Plain save/run/restore with no drop guard, the same posture (and
     /// the same justification) as `with_transparency` and
@@ -606,6 +653,9 @@ impl<'e> MetaCtx<'e> {
         );
         self.lctx.restore(checkpoint);
         self.local_names.truncate(checkpoint);
+        // Sparse, so truncated by RECORDED DEPTH rather than by index —
+        // see `local_instance.rs`'s module doc.
+        self.local_instances.truncate_to(checkpoint);
         self.lctx_snapshot = None;
     }
 
@@ -627,6 +677,10 @@ impl<'e> MetaCtx<'e> {
             self.lctx.save(),
             "local_names/lctx lockstep invariant violated"
         );
+        // Read BEFORE the push below, so it is this declaration's own
+        // index in `lctx.decls` — see `local_instance.rs` for why the
+        // stack truncates by depth rather than by index.
+        let depth = self.lctx.save();
         let fvar = self.lctx.mk_local_decl(
             self.scratch,
             Some(self.view.store),
@@ -639,6 +693,12 @@ impl<'e> MetaCtx<'e> {
         // see that field's own doc comment. One entry per call, matching
         // `lctx.decls`'s own growth exactly (including `None` names).
         self.local_names.push((name, fvar));
+        // oracle: `withLocalDeclImp` → `withNewFVar`
+        // (`Basic.lean:1791`, `:1785-1789`) — a class-typed declaration
+        // becomes a local instance. Keyed on the TYPE only; binder info
+        // plays no part, so `fun (inst : Add N) => …` counts exactly as
+        // `[inst : Add N]` does.
+        self.install_local_instance_for(fvar, ty, depth)?;
         self.lctx_snapshot = None;
         Ok(fvar)
     }
@@ -661,6 +721,9 @@ impl<'e> MetaCtx<'e> {
             self.lctx.save(),
             "local_names/lctx lockstep invariant violated"
         );
+        // Read BEFORE the push below — see `push_local_decl`'s own
+        // `depth` comment.
+        let depth = self.lctx.save();
         let fvar = self.lctx.mk_let_decl(
             self.scratch,
             Some(self.view.store),
@@ -674,8 +737,36 @@ impl<'e> MetaCtx<'e> {
         // occurrence of the binder name resolves via
         // `lctx_lookup_by_name`.
         self.local_names.push((name, fvar));
+        // oracle: `withLetDeclImp` (`Basic.lean:1905-1911`) routes
+        // through the same `withNewFVar` as `push_local_decl` — a
+        // let-bound instance counts too.
+        self.install_local_instance_for(fvar, ty, depth)?;
         self.lctx_snapshot = None;
         Ok(fvar)
+    }
+
+    /// Install `fvar` as a local instance if its type is a class.
+    ///
+    /// oracle: `withNewFVar` (`Basic.lean:1785-1789`). The oracle's
+    /// implementation-detail filter (`withNewLocalInstanceImp`,
+    /// `:1383-1388`) is **vacuously satisfied** here: leanr's
+    /// `LocalDecl` (`leanr_kernel/src/local_ctx.rs:37-43`) carries no
+    /// kind field, and nothing in leanr mints an implementation-detail
+    /// declaration, so there is nothing to filter. Adding a field to a
+    /// kernel struct for a producer that does not exist would widen the
+    /// TCB for nothing. SEAM — trigger for revisiting: the slice that
+    /// builds the tactic framework or the match compiler is the first to
+    /// mint one, and it must add the filter in the same change.
+    fn install_local_instance_for(
+        &mut self,
+        fvar: ExprId,
+        ty: ExprId,
+        depth: usize,
+    ) -> Result<(), MetaError> {
+        if let Some(class_name) = self.is_class(ty)? {
+            self.local_instances.push(class_name, fvar, depth);
+        }
+        Ok(())
     }
 
     /// Look up `name` in the ambient local context, most-recently-pushed
@@ -1163,6 +1254,267 @@ impl<'e> MetaCtx<'e> {
         self.step_budget = n;
     }
 
+    /// Test-only step-count observer. `is_class`'s quick path (below)
+    /// must never call `whnf` — every `whnf` entry calls `step()`
+    /// (`whnf.rs:194`) — so a test that wants to tell "answered `None`
+    /// without reducing" apart from "reduced its way to the same
+    /// `None`" needs to see this counter move, not just the `Option`
+    /// result (`is_class_rejects_a_sort_without_reducing`'s own
+    /// mutation-table entry: both readings answer `None`).
+    #[cfg(test)]
+    pub(crate) fn steps(&self) -> u64 {
+        self.steps
+    }
+
+    /// oracle: `isClass?` (`Basic.lean:1542-1543`) — `isClassImp?`
+    /// (`:1524-1528`) with every exception swallowed (`try … catch _ =>
+    /// return none`). The swallow is modelled as error -> `None` rather
+    /// than propagated: a failure to decide makes something not-a-class,
+    /// never a hard error, and diverging here would turn an ordinary
+    /// binder into an elaboration failure.
+    ///
+    /// Called from `push_local_decl`/`push_let_decl` (Task 4) and from
+    /// `get_instances` (Task 6), which resolves its goal's class name
+    /// through this.
+    ///
+    /// **The swallow covers the two budget errors too, and they are not
+    /// alike.** `StepBudgetExhausted` is SELF-LIMITING: `self.steps`
+    /// only ever increases (`step`, `:1164-1170`), so the very next
+    /// `step()` anywhere re-raises it and the swallowed answer cannot
+    /// travel far. `DepthBudgetExhausted` is NOT sticky: `guarded`
+    /// (`:1173-1184`) decrements `guard_depth` on the way out, so an
+    /// `is_class` called near `MAX_REC_DEPTH` can answer "not a class"
+    /// while a shallower caller goes on to succeed. The consequence is
+    /// that a class-typed binder can fail to install its local instance,
+    /// which is INCOMPLETENESS (a synthesis that finds fewer candidates
+    /// than the oracle), never unsoundness — no wrong term is built.
+    /// Left as-is deliberately: propagating would turn an ordinary
+    /// binder into an elaboration failure, which is the very thing the
+    /// oracle's own `catch _ => return none` avoids.
+    pub(crate) fn is_class(&mut self, ty: ExprId) -> Result<Option<NameId>, MetaError> {
+        match self.is_class_quick(ty) {
+            LOption::Some(c) => Ok(Some(c)),
+            LOption::None => Ok(None),
+            LOption::Undef => Ok(self.is_class_expensive(ty).unwrap_or(None)),
+        }
+    }
+
+    /// oracle: `isClassQuick?` (`Basic.lean:1358-1381`) — a purely
+    /// structural walk that NEVER reduces; deciding needs `.undef` to
+    /// hand off to `is_class_expensive`, which does.
+    ///
+    /// **Correction (task 6)**: an earlier version of this comment
+    /// claimed the whnf-free quick path was load-bearing for
+    /// `get_instances`' `mem::take` window. It is not, and the premise
+    /// was wrong anyway — `is_class_quick_const` reads the AMBIENT
+    /// transparency, so at `TransparencyMode::Default` every
+    /// definition-headed type answers `.undef` and reaches whnf after
+    /// all. What actually protects that window is placement:
+    /// `get_instances` calls `is_class` BEFORE it takes its table (see
+    /// that function's own invariant note), so whatever this reduces
+    /// cannot re-enter an emptied table.
+    ///
+    /// Called from [`MetaCtx::is_class`] — see that method's own doc.
+    ///
+    /// **Review round 1, I3**: opened as a `loop` rather than the
+    /// straight-line recursion every other arm of the oracle port
+    /// (`self.is_class_quick(body)`) reads more naturally as. All three
+    /// of the oracle's recursive arms (`.forallE`, `.mdata`, the
+    /// assigned-`.mvar` case) are TAIL calls with nothing left to do
+    /// after the recursive result comes back, so a `loop` reproduces
+    /// them exactly with zero Rust call-stack growth — unlike every
+    /// other recursive `ExprId` traversal in this crate (35 call sites,
+    /// `occurs_check` at `assign.rs:1153-1157` the direct structural
+    /// analogue), this one is not routed through `MetaCtx::guarded`
+    /// (`:1173-1184`, `MAX_REC_DEPTH` + `stacker::maybe_grow`) because a
+    /// tail loop has no frames to grow a guard against. The `.mvar` arm
+    /// still needs an explicit bound distinct from stack depth: it
+    /// follows `MetavarContext::assignment` chains, and — same posture
+    /// `whnf_easy_cases` documents for its own `MVar`/`FVar` dereference
+    /// loop (`whnf.rs:227-234`) — `MetavarContext::assign` has no cycle
+    /// detection, so an unbounded chain here is a hang, not merely deep
+    /// recursion. Bounded with a local counter (`MAX_REC_DEPTH`, the
+    /// same budget `guarded` uses), never `self.step()`: `step()` would
+    /// move `steps()` on the ordinary (non-cyclic, non-pathological)
+    /// path too, which would falsify `is_class_rejects_a_sort_without_reducing`
+    /// and `is_class_rejects_a_real_inductive_without_reducing`'s own
+    /// "never reaches whnf" step-delta assertions — this function must
+    /// stay invisible to that counter, not merely bounded.
+    fn is_class_quick(&mut self, mut ty: ExprId) -> LOption<NameId> {
+        let mut mvar_chain_budget = MAX_REC_DEPTH;
+        loop {
+            match self.node(ty) {
+                // `:1359-1363` — outright `.none`, never the expensive path.
+                Node::BVar { .. }
+                | Node::BVarBig { .. }
+                | Node::LitNat { .. }
+                | Node::LitStr { .. }
+                | Node::FVar { .. }
+                | Node::Sort { .. }
+                | Node::Lam { .. } => return LOption::None,
+                // `:1364-1365` — `.undef`: deciding needs reduction.
+                Node::LetE { .. } | Node::Proj { .. } | Node::ProjBig { .. } => {
+                    return LOption::Undef
+                }
+                // `:1366` — look THROUGH the binder at the conclusion.
+                Node::Forall { body, .. } => ty = body,
+                Node::MData { expr, .. } => ty = expr,
+                Node::Const { name, .. } => return self.is_class_quick_const(name),
+                // `:1369-1372` — an assigned mvar is its value; unassigned
+                // is `.none`. A chain that outruns `mvar_chain_budget`
+                // (only reachable via a hypothetical assignment cycle,
+                // never real elaborator output — see the doc comment
+                // above) answers `.none`: a failure to decide is
+                // not-a-class, never a hang, same posture as
+                // `is_class`'s own exception-swallow.
+                Node::MVar { id } => match id.and_then(|n| self.mctx.assignment(MVarId(n))) {
+                    Some(v) if mvar_chain_budget > 0 => {
+                        mvar_chain_budget -= 1;
+                        ty = v;
+                    }
+                    _ => return LOption::None,
+                },
+                // `:1374-1381` — the head of the application decides.
+                // Not a further `is_class_quick` recursion (the oracle's
+                // own `.app` arm never calls `isClassQuick?` again
+                // either — it inspects `f.getAppFn` directly), so this
+                // arm needs neither the loop nor the budget above.
+                Node::App { .. } => {
+                    return match self.node(self.get_app_fn(ty)) {
+                        Node::Const { name, .. } => self.is_class_quick_const(name),
+                        Node::Lam { .. } => LOption::Undef,
+                        Node::MVar { id } => {
+                            match id.and_then(|n| self.mctx.assignment(MVarId(n))) {
+                                Some(v) => match self.node(self.get_app_fn(v)) {
+                                    Node::Const { name, .. } => self.is_class_quick_const(name),
+                                    _ => LOption::Undef,
+                                },
+                                None => LOption::None,
+                            }
+                        }
+                        _ => LOption::None,
+                    }
+                }
+            }
+        }
+    }
+
+    /// oracle: `isClassQuickConst?` composed with `getConstTemp?` /
+    /// `getDefInfoTemp` (`Basic.lean:1329-1356`, transcribed verbatim —
+    /// **not** the task brief's own sketch, which collapsed every
+    /// non-class constant to `.undef`; Ruling R5 corrects that). `.some
+    /// c` when `c` is a registered class. Otherwise `.undef` **iff** `c`
+    /// is a `Defn` that is currently unfoldable (transparency `.all` /
+    /// `.default`, or else `status_of(c) == Reducible`); `.none` for a
+    /// theorem, an inductive/constructor/recursor/axiom/quotient/
+    /// opaque, a transparency-gated definition, an empty `Node::Const`
+    /// name, or an unknown constant. The oracle's unknown-constant arm
+    /// THROWS (`getConstTemp?`'s `none => throwUnknownConstantAt ..`);
+    /// `isClass?`'s top-level `try .. catch _ => return none` swallows
+    /// it, so the observable behavior is `.none` — modelled directly as
+    /// `.none` here rather than as a propagated error, same posture as
+    /// `is_class`'s own doc comment above.
+    ///
+    /// Called from [`MetaCtx::is_class_quick`] — see [`MetaCtx::is_class`]'s
+    /// own doc.
+    fn is_class_quick_const(&self, name: Option<NameId>) -> LOption<NameId> {
+        let Some(n) = name else {
+            return LOption::None;
+        };
+        if self.classes.is_class_name(n) {
+            return LOption::Some(n);
+        }
+        match self.view.get(n) {
+            // `getConstTemp?`'s `thmInfo => none` arm.
+            Some(ConstantInfo::Thm(_)) => LOption::None,
+            // `getConstTemp?`'s `defnInfo => getDefInfoTemp info` arm.
+            Some(ConstantInfo::Defn(_)) => match self.cfg.transparency {
+                TransparencyMode::All | TransparencyMode::Default => LOption::Undef,
+                _ if self.status_of(n) == ReducibilityStatus::Reducible => LOption::Undef,
+                _ => LOption::None,
+            },
+            // Every other known `ConstantInfo` (inductive, constructor,
+            // recursor, axiom, quotient, opaque) passes through
+            // `getConstTemp?` as `some info`, but is not a `.defnInfo`,
+            // so `isClassQuickConst?`'s own match falls to its `_ =>
+            // .none` arm.
+            Some(_) => LOption::None,
+            // Unknown constant: see the doc comment above.
+            None => LOption::None,
+        }
+    }
+
+    /// oracle: `isClassExpensive?` (`Basic.lean:1520-1522`) —
+    /// `withReducible`, telescope the foralls down to the conclusion
+    /// (`forallTelescopeReducingAux .. (whnfType := true)`), then
+    /// `isClassApp?` (`:1510-1518`): the head constant, if the
+    /// environment says it is a class.
+    ///
+    /// **Plan-mandated deviation (Controller Ruling R6), not a bug**:
+    /// the oracle's telescope (`forallTelescopeReducingAuxAux.process`,
+    /// `Basic.lean:1458-1487`, inside `forallTelescopeReducingAuxAux`
+    /// itself at `:1453-1488`) peels each `Forall` by substituting a
+    /// FRESH FVAR for the bound variable (`instantiateRevRange`,
+    /// `:1462`, backed by `mkFreshFVarId`/`lctx.mkLocalDecl`) before
+    /// whnf-ing the next binder's body. This loop does not: it whnfs
+    /// `body` directly, still carrying a loose bvar for the binder just
+    /// stripped. Porting the real telescope would mean opening each
+    /// binder with `push_local_decl`, which is exactly the fvar-pushing
+    /// chokepoint Task 4 owns — R6 keeps that producer out of this task
+    /// rather than widening it past its brief.
+    ///
+    /// This is sound, not merely harmless, and the reason is a real
+    /// (verified, not assumed) fact about THIS crate's `whnf`, not a
+    /// claim about where a bare bvar can appear: `whnf_easy_cases`
+    /// (`whnf.rs:232-246`) calls `self.step()` and then, on a
+    /// `Node::BVar`/`Node::BVarBig` HEAD, returns
+    /// `Err(MetaError::Infer("loose bvar in whnf"))` — this crate's
+    /// substitute for the oracle's own `panic! "loose bvar in
+    /// expression"` at the same site (`WHNF.lean:391`; Global
+    /// Constraints forbid the panic). `whnf` is not a leaf function: the
+    /// nat/recursor/proj/smart-unfolding arms it dispatches to each
+    /// recursively `whnf` a subterm (an argument, a major premise, a
+    /// projected structure, a match discriminant), so a dangling bvar
+    /// left under a stripped binder can surface this `Err` from
+    /// anywhere inside the call, not only at the very top. That `Err`
+    /// propagates out of THIS function via `?` and is swallowed by
+    /// `is_class`'s `unwrap_or(None)` (this file, `MetaCtx::is_class`)
+    /// — exactly the oracle's own `isClass?`'s `try .. catch _ => none`
+    /// swallow, just reached via a different failure than the oracle's
+    /// (whose telescope never produces a loose bvar in the first place,
+    /// since it substitutes one before whnf ever sees it). And a
+    /// genuinely stuck-on-a-variable reduction — bvar, fvar, an
+    /// unresolved recursor/matcher, or an un-unfolded `Defn` under
+    /// `Reducible` transparency — is never itself a registered class
+    /// (`is_class_name` only ever matches an inductive/structure head),
+    /// so on every path that does NOT error, this loop's answer agrees
+    /// with the oracle's real telescope too: `isClassApp?` only ever
+    /// inspects the FINAL non-forall type's spine HEAD, never an
+    /// argument value, and a dangling bvar can only ever occupy that
+    /// head position itself (not a `Const` either way) or sit buried in
+    /// an argument `isClassApp?` never looks at. **This soundness
+    /// depends on `whnf.rs:241-246` staying an `Err` rather than
+    /// becoming a `panic!` or a silent no-op** — if a future change
+    /// makes whnf tolerate a loose bvar (e.g. by treating it as stuck
+    /// and returning it unchanged instead of erroring), this reasoning
+    /// would need re-checking, since the "errors instead of misanswering"
+    /// half of the argument is what closes the gap, not the "always
+    /// agrees" half alone.
+    ///
+    /// Called from [`MetaCtx::is_class`] — see that method's own doc.
+    fn is_class_expensive(&mut self, ty: ExprId) -> Result<Option<NameId>, MetaError> {
+        self.with_transparency(TransparencyMode::Reducible, |ctx| {
+            let mut cur = ctx.whnf(ty)?;
+            while let Node::Forall { body, .. } = ctx.node(cur) {
+                cur = ctx.whnf(body)?;
+            }
+            Ok(match ctx.node(ctx.get_app_fn(cur)) {
+                Node::Const { name: Some(n), .. } if ctx.classes.is_class_name(n) => Some(n),
+                _ => None,
+            })
+        })
+    }
+
     /// `pub` since M4b-3 P3 task 4 (design spec § Accessor ledger, P3's
     /// row): the elaborator's `commitWhen`
     /// (`Lean/Util/MonadBacktrack.lean:50-60`) is a
@@ -1262,7 +1614,8 @@ pub struct MetaSnapshot {
 mod tests {
     use super::*;
     use crate::test_support::{
-        const_named, fresh_mvar, render_name, with_ctx, with_instances_ctx, with_prelude0_ctx,
+        class_app, const_named, fresh_mvar, render_name, with_class_ctx, with_ctx,
+        with_instances_ctx, with_prelude0_ctx,
     };
     use crate::MetaError;
 
@@ -1382,6 +1735,121 @@ mod tests {
             let err = ctx.mk_let_expr(fvar, fvar, false);
             ctx.lctx_restore(checkpoint);
             assert!(err.is_err(), "expected Err for a cdecl fvar, got {err:?}");
+        });
+    }
+
+    /// A class-typed binder becomes a local instance; a non-class binder
+    /// does not. oracle: `withNewFVar` (`Basic.lean:1785-1789`).
+    #[test]
+    fn pushing_a_class_typed_decl_installs_a_local_instance() {
+        with_class_ctx(|ctx, add| {
+            let add_n = class_app(ctx, add);
+            let n = const_named(ctx, "N");
+
+            let cp = ctx.lctx_checkpoint();
+            let _plain = ctx
+                .push_local_decl(None, n, BinderInfo::Default)
+                .expect("push");
+            assert!(
+                ctx.local_instances.entries().is_empty(),
+                "`(x : N)` is not a class-typed binder"
+            );
+
+            let inst = ctx
+                .push_local_decl(None, add_n, BinderInfo::InstImplicit)
+                .expect("push");
+            assert_eq!(ctx.local_instances.entries().len(), 1);
+            assert_eq!(ctx.local_instances.entries()[0].class_name, add);
+            assert_eq!(ctx.local_instances.entries()[0].fvar, inst);
+
+            // A checkpoint taken immediately AFTER the class-typed push,
+            // and a restore to it after pushing something else on top:
+            // the instance was installed BEFORE this checkpoint, so it
+            // must survive. This is the discriminator the brief's fourth
+            // mutation (capture `depth` after the push instead of
+            // before) needs and the original brief's sole restore
+            // assertion below does NOT provide — that one restores all
+            // the way to `cp` (depth 0), and `truncate_to` pops any
+            // recorded depth `>= 0` regardless of whether it is off by
+            // one, so the bug is invisible there. Here the recorded
+            // depth, if captured post-push, EQUALS this checkpoint, and
+            // `truncate_to`'s `>=` pops entries at exactly the
+            // checkpoint depth too — so the off-by-one bug pops an
+            // instance that a correct depth (this decl's own pre-push
+            // index) would have kept.
+            let cp_after_inst = ctx.lctx_checkpoint();
+            let _another_plain = ctx
+                .push_local_decl(None, n, BinderInfo::Default)
+                .expect("push");
+            ctx.lctx_restore(cp_after_inst);
+            assert_eq!(
+                ctx.local_instances.entries().len(),
+                1,
+                "the instance was pushed before this checkpoint, so restoring to it \
+                 must leave it in scope"
+            );
+
+            ctx.lctx_restore(cp);
+            assert!(
+                ctx.local_instances.entries().is_empty(),
+                "restoring the local context takes the instance out of scope"
+            );
+        });
+    }
+
+    /// Binder info does NOT gate installation: the oracle's
+    /// `withNewFVar` consults `isClass?` on the TYPE and nothing else,
+    /// so a class-typed EXPLICIT binder is a local instance too
+    /// (`fun (inst : Add N) => …`). A port that gated on
+    /// `BinderInfo::InstImplicit` would silently lose those.
+    #[test]
+    fn a_class_typed_explicit_binder_is_also_a_local_instance() {
+        with_class_ctx(|ctx, add| {
+            let add_n = class_app(ctx, add);
+            let cp = ctx.lctx_checkpoint();
+            ctx.push_local_decl(None, add_n, BinderInfo::Default)
+                .expect("push");
+            assert_eq!(
+                ctx.local_instances.entries().len(),
+                1,
+                "installation keys on the TYPE, never on the binder info"
+            );
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// oracle: `withLetDeclImp` (`Basic.lean:1905-1911`) routes through
+    /// the same `withNewFVar`, so a let-bound instance counts.
+    #[test]
+    fn pushing_a_class_typed_let_decl_installs_a_local_instance() {
+        with_class_ctx(|ctx, add| {
+            let add_n = class_app(ctx, add);
+            let n = const_named(ctx, "N");
+            let val = const_named(ctx, "instAddN");
+            let cp = ctx.lctx_checkpoint();
+            ctx.push_let_decl(None, add_n, val).expect("push");
+            assert_eq!(ctx.local_instances.entries().len(), 1);
+
+            // Same discriminator as `push_local_decl`'s own test above:
+            // a checkpoint taken immediately AFTER this push, then a
+            // restore to it after pushing something else on top, must
+            // leave the instance in scope — catches `depth` captured
+            // after the push (equal to this checkpoint) rather than
+            // before (this decl's own index, strictly less than it).
+            let cp_after_inst = ctx.lctx_checkpoint();
+            let _another_plain = ctx
+                .push_local_decl(None, n, BinderInfo::Default)
+                .expect("push");
+            ctx.lctx_restore(cp_after_inst);
+            assert_eq!(
+                ctx.local_instances.entries().len(),
+                1,
+                "the instance was pushed before this checkpoint, so restoring to it \
+                 must leave it in scope"
+            );
+
+            ctx.lctx_restore(cp);
+            assert!(ctx.local_instances.entries().is_empty());
         });
     }
 
@@ -1757,6 +2225,202 @@ mod tests {
             assert!(
                 ctx.infer_type(x).is_err(),
                 "the ambient context was restored on the way out"
+            );
+        });
+    }
+
+    /// oracle: `MVarId.withContext` → `withLocalContextImp`
+    /// (`Basic.lean:2002-2004`) swaps `lctx` AND `localInstances`
+    /// together. A metavariable minted under an instance binder must see
+    /// that instance when its own context is reinstalled — otherwise a
+    /// postponed goal resumed after its binder closed would synthesize
+    /// against a strictly smaller instance set than the oracle's.
+    #[test]
+    fn with_mvar_context_reinstalls_local_instances() {
+        with_class_ctx(|ctx, add| {
+            let add_n = class_app(ctx, add);
+            let n = const_named(ctx, "N");
+
+            // Mint a metavariable UNDER an instance binder.
+            let cp = ctx.lctx_checkpoint();
+            ctx.push_local_decl(None, add_n, BinderInfo::InstImplicit)
+                .expect("push");
+            let (_, m) = ctx.mk_aux_mvar(n).expect("mvar");
+            ctx.lctx_restore(cp);
+
+            // Back at top level, nothing is in scope.
+            assert!(
+                ctx.local_instances.entries().is_empty(),
+                "the binder closed, so its instance is out of scope here"
+            );
+
+            // Inside the metavariable's own context, it is.
+            let seen = ctx.with_mvar_context(m, |c| c.local_instances.entries().len());
+            assert_eq!(
+                seen, 1,
+                "the mvar's recorded context carries the instance that was \
+                 in scope when it was minted"
+            );
+
+            // And the caller's context is restored on the way out.
+            assert!(ctx.local_instances.entries().is_empty());
+        });
+    }
+
+    /// `reduced` erases an fvar from the context; its local instance must
+    /// go with it — and ONLY it. oracle: `reduceLocalContext`
+    /// (`MetavarContext.lean:1065-1067`) removes the decl, and an
+    /// instance whose fvar is no longer declared is a dangling reference
+    /// that `get_instances` would offer as a candidate.
+    ///
+    /// TWO instance binders are pushed, and only one is erased, so this
+    /// discriminates selective filtering from wholesale clearing — the
+    /// same shape as `reduced_drops_the_named_fvars_from_both_halves`
+    /// (`local_snapshot.rs`), which uses three fvars and erases only one
+    /// for the identical reason. A version of `reduced` that replaced
+    /// the instance filter with an unconditional `Vec::new()` would
+    /// still pass a single-instance fixture; it cannot pass this one,
+    /// since `inst_b`'s instance must survive.
+    #[test]
+    fn reduced_drops_only_the_local_instance_of_the_erased_fvar() {
+        with_class_ctx(|ctx, add| {
+            let add_n = class_app(ctx, add);
+            let cp = ctx.lctx_checkpoint();
+            let inst_a = ctx
+                .push_local_decl(None, add_n, BinderInfo::InstImplicit)
+                .expect("push inst_a");
+            let inst_b = ctx
+                .push_local_decl(None, add_n, BinderInfo::InstImplicit)
+                .expect("push inst_b");
+            let snap = ctx.current_lctx();
+            ctx.lctx_restore(cp);
+
+            assert_eq!(
+                snap.local_instances().len(),
+                2,
+                "both instance binders were pushed"
+            );
+
+            let id_of = |ctx: &MetaCtx, e| match ctx.node(e) {
+                Node::FVar { id: Some(id) } => id,
+                other => panic!("expected fvar, got {other:?}"),
+            };
+            let id_a = id_of(ctx, inst_a);
+
+            // Erase only inst_a's declaration.
+            let reduced = snap.reduced(&[(inst_a, id_a)], |f| match ctx.node(f) {
+                Node::FVar { id } => id,
+                _ => None,
+            });
+            assert_eq!(
+                reduced.local_instances().len(),
+                1,
+                "erasing inst_a's declaration must erase its local instance too — \
+                 an instance pointing at an undeclared fvar is a candidate \
+                 `get_instances` would hand to the search"
+            );
+            assert!(
+                reduced.local_instances().iter().all(|li| li.fvar != inst_a),
+                "the erased instance (inst_a) must not survive"
+            );
+            assert!(
+                reduced.local_instances().iter().any(|li| li.fvar == inst_b),
+                "the untouched instance (inst_b) must survive — proves the \
+                 filter is selective by `to_remove`, not a wholesale clear"
+            );
+        });
+    }
+    /// `reduced` erases a decl from the MIDDLE of `lctx`, and
+    /// `LocalContext::erase` (`leanr_kernel/src/local_ctx.rs`) reindexes
+    /// every later decl down by one. A surviving instance's `at_depth` —
+    /// by its own definition "the index of its own declaration in
+    /// `lctx.decls`" (`local_instance.rs`) — therefore has to be
+    /// recomputed against the FILTERED decl list, or it names a position
+    /// past the end of the context it now travels with.
+    ///
+    /// The discriminating shape is an ORDINARY (non-class) binder in
+    /// FRONT of the instance binder, and only the ordinary one erased:
+    /// the instance is recorded at depth 1, the reduced context has one
+    /// decl, and a stale `at_depth = 1` is `>=` every checkpoint that
+    /// context can produce. So the first ordinary telescope opened under
+    /// the installed snapshot — `lctx_checkpoint` / `push_local_decl` /
+    /// `lctx_restore`, which is what `local_instance_candidate` and
+    /// `forall_bounded_telescope` both do — silently pops a still-in-scope
+    /// local instance, and `get_instances` stops offering it for the rest
+    /// of the window. Nothing errors; the answer just gets smaller.
+    ///
+    /// `reduced_drops_only_the_local_instance_of_the_erased_fvar` above
+    /// cannot catch this: it erases the FIRST of two instance binders,
+    /// so the survivor's recorded depth (1) coincides with the count of
+    /// decls it followed in the ORIGINAL context, and it never installs
+    /// the result.
+    #[test]
+    fn reduced_renumbers_a_surviving_instances_depth() {
+        with_class_ctx(|ctx, add| {
+            let add_n = class_app(ctx, add);
+            let n = const_named(ctx, "N");
+
+            let cp = ctx.lctx_checkpoint();
+            // depth 0: an ordinary binder, no local instance.
+            let plain = ctx
+                .push_local_decl(None, n, BinderInfo::Default)
+                .expect("push plain");
+            // depth 1: the instance binder whose entry must survive.
+            let inst = ctx
+                .push_local_decl(None, add_n, BinderInfo::InstImplicit)
+                .expect("push inst");
+            let snap = ctx.current_lctx();
+            ctx.lctx_restore(cp);
+
+            let id_of = |ctx: &MetaCtx, e| match ctx.node(e) {
+                Node::FVar { id: Some(id) } => id,
+                other => panic!("expected fvar, got {other:?}"),
+            };
+            let id_plain = id_of(ctx, plain);
+
+            // Erase ONLY the ordinary binder in front of the instance.
+            let reduced =
+                std::sync::Arc::new(snap.reduced(&[(plain, id_plain)], |f| match ctx.node(f) {
+                    Node::FVar { id } => id,
+                    _ => None,
+                }));
+            assert_eq!(reduced.entries().len(), 1, "one decl erased, one survivor");
+            assert_eq!(
+                reduced.local_instances().len(),
+                1,
+                "the instance's own decl was not erased, so it survives"
+            );
+            assert_eq!(
+                reduced.local_instances()[0].fvar,
+                inst,
+                "and it is the instance binder's own entry"
+            );
+            assert_eq!(
+                reduced.local_instances()[0].at_depth,
+                0,
+                "the survivor is now the FIRST decl of the reduced context, \
+                 so its recorded depth must be 0 — keeping the original 1 \
+                 names a decl index the reduced context does not have"
+            );
+
+            // The consequence, stated as behavior rather than as a field
+            // value: install the reduced snapshot and open one ordinary
+            // telescope under it, exactly as `local_instance_candidate`
+            // does for every candidate.
+            let saved = ctx.install_lctx(reduced);
+            let inner = ctx.lctx_checkpoint();
+            ctx.push_local_decl(None, n, BinderInfo::Default)
+                .expect("push inside");
+            ctx.lctx_restore(inner);
+            let survivors = ctx.local_instances.entries().len();
+            ctx.install_lctx(saved);
+
+            assert_eq!(
+                survivors, 1,
+                "the local instance is still in scope after a telescope \
+                 opened and closed under it — with a stale `at_depth` the \
+                 restore's `truncate_to` pops it and `get_instances` \
+                 silently stops offering it"
             );
         });
     }

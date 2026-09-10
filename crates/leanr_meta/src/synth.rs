@@ -468,7 +468,7 @@ impl<'a, 'e> KeyNormalizer<'a, 'e> {
         })
     }
 
-    /// `MetaCtx::guarded`'s exact body (`metactx.rs:335-346`), restated
+    /// `MetaCtx::guarded`'s exact body (`metactx.rs:1173-1184`), restated
     /// against `Self` instead of `MetaCtx` -- see the module-level
     /// `RED_ZONE`/`STACK_CHUNK` doc comment for why this can't just
     /// call that method directly.
@@ -2562,6 +2562,10 @@ impl<'e> MetaCtx<'e> {
         // `instances.rs` is `mkConstWithLevelParams`, i.e. still the
         // declaration's own RIGID `Level.param`s, so the refresh has to
         // happen HERE, before anything unifies against it.
+        //
+        // For a LOCAL instance this is a no-op by construction: `val` is
+        // an fvar, so there are no universe arguments to refresh, which
+        // is exactly the oracle's own treatment of locals.
         let inst_val = self.mk_const_with_fresh_mvar_levels(inst.val)?;
         let inst_type = self.infer_type(inst_val)?;
         let (mvars, _bis, inst_type_body) = self.forall_meta_telescope_reducing(inst_type)?;
@@ -2673,6 +2677,13 @@ impl<'e> MetaCtx<'e> {
     /// and refreshes the levels it already carries.
     pub fn mk_const_with_fresh_mvar_levels(&mut self, val: ExprId) -> Result<ExprId, MetaError> {
         let base = Some(self.view.store);
+        // The non-`Const` passthrough is LOAD-BEARING, not incidental: a
+        // local instance's `val` is an fvar (`get_instances`' local
+        // append), and the oracle refreshes no levels for locals — its
+        // refresh lives in `getInstances`' `.const` arm
+        // (`SynthInstance.lean:217-228`) while locals are pushed raw
+        // (:239). Pinned by
+        // `mk_const_with_fresh_mvar_levels_passes_an_fvar_through_unchanged`.
         let Node::Const { name, levels } = self.node(val) else {
             return Ok(val);
         };
@@ -2893,8 +2904,8 @@ mod tests {
 
     use super::*;
     use crate::test_support::{
-        const_named, fresh_mvar, fresh_mvar_of_kind, parse_goal, render_expr, render_name,
-        with_cyclic_instances_ctx, with_instances_ctx,
+        const_named, fresh_fvar, fresh_mvar, fresh_mvar_of_kind, parse_goal, render_expr,
+        render_name, with_ctx, with_cyclic_instances_ctx, with_instances_ctx,
     };
     use crate::MVarKind;
     use leanr_kernel::bank::ExprId;
@@ -3313,6 +3324,12 @@ mod tests {
             let insts = ctx.get_instances(goal).expect("get_instances");
             let order: Vec<String> = insts
                 .iter()
+                // `expect` is correct HERE and is not a general
+                // invariant: a LOCAL candidate's `global_name` is
+                // legitimately `None` (`local_instance_candidate`'s own
+                // doc, `instances.rs`). `with_instances_ctx` declares no
+                // local instance, so every result is a global. A future
+                // test that puts one in scope must stop expecting.
                 .map(|i| render_name(ctx, i.global_name.expect("global_name")))
                 .collect();
             assert_eq!(
@@ -3978,6 +3995,34 @@ mod tests {
                 ctx.try_synth_instance(goal).expect("ok"),
                 LOption::None
             ));
+        });
+    }
+
+    // -----------------------------------------------------------------
+    // mk_const_with_fresh_mvar_levels — the non-Const passthrough
+    // (local instances, task 7)
+    // -----------------------------------------------------------------
+
+    /// A local instance's `val` is an FVAR, and the oracle refreshes no
+    /// universe levels for locals — `getInstances` refreshes only in its
+    /// `.const` arm (`SynthInstance.lean:217-228`) and pushes the raw
+    /// fvar for locals (`:239`). leanr moved that refresh into
+    /// `get_subgoals`, so the passthrough for non-`Const` values is
+    /// load-bearing rather than incidental: refreshing (or erroring on)
+    /// an fvar here would corrupt every local-instance candidate.
+    #[test]
+    fn mk_const_with_fresh_mvar_levels_passes_an_fvar_through_unchanged() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+            let fvar = fresh_fvar(ctx, sort0, "inst");
+            assert_eq!(
+                ctx.mk_const_with_fresh_mvar_levels(fvar).expect("refresh"),
+                fvar,
+                "an fvar has no universe arguments; it must come back \
+                 identical, not rebuilt"
+            );
         });
     }
 }

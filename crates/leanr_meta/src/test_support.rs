@@ -12,8 +12,9 @@ use leanr_kernel::bank::{ExprId, NameId, Store};
 use leanr_kernel::{
     BinderInfo, CheckedConstants, ConstSource, ConstantInfo, EnvView, Environment, Nat,
 };
-use leanr_olean::ModuleData;
+use leanr_olean::{ClassEntry, ModuleData};
 
+use crate::instances::ClassTable;
 use crate::{Config, EnvExtensions, LocalCtxSnapshot, MVarDecl, MVarId, MVarKind, MetaCtx};
 
 pub(crate) fn fixture_path(name: &str) -> std::path::PathBuf {
@@ -242,6 +243,117 @@ pub(crate) fn with_instances_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
         },
     );
     f(&mut ctx)
+}
+
+/// [`with_ctx`]'s empty environment, plus a synthetic single-entry
+/// `ClassTable` registering `Add` as a class (task 3's own minimal
+/// scaffold — the same "build the table by hand, no fixture replay"
+/// idiom as `instances.rs`'s synthetic `InstanceTable` tests use).
+/// `Add` deliberately has no out params, matching `Instances.olean`'s
+/// real `Add` (see `class_table_reads_out_param_positions`): a class is
+/// present with an EMPTY slice, not absent. Hands the closure both the
+/// ctx and `Add`'s own `NameId` so callers don't have to re-derive it.
+///
+/// Promoted here from `instances.rs`'s test module (task 3) by task 4's
+/// ruling R7: `metactx.rs`'s push-chokepoint tests need this exact
+/// fixture and could not reach a helper private to `instances.rs`'s own
+/// tests, so per this file's own module doc, the shared home is here
+/// rather than a second copy.
+pub(crate) fn with_class_ctx<R>(f: impl FnOnce(&mut MetaCtx, NameId) -> R) -> R {
+    with_ctx(|ctx| {
+        let add_expr = const_named(ctx, "Add");
+        let add = match ctx.node(add_expr) {
+            leanr_kernel::bank::terms::Node::Const { name: Some(n), .. } => n,
+            _ => panic!("Add is not a bare const"),
+        };
+        ctx.classes = ClassTable::build(&[ClassEntry {
+            name: add,
+            out_params: vec![],
+            out_level_params: vec![],
+        }]);
+        f(ctx, add)
+    })
+}
+
+/// `Add N` — the smallest class-typed application, built from the class
+/// name [`with_class_ctx`] hands back. Shared by `instances.rs`'s
+/// `arrow_to_class` (task 3, `N -> Add N`) and task 4's push-chokepoint
+/// tests, which need the bare application without the arrow around it —
+/// promoted here for the same reason as [`with_class_ctx`] just above.
+pub(crate) fn class_app(ctx: &mut MetaCtx, add: NameId) -> ExprId {
+    let base = Some(ctx.view.store);
+    let no_levels = ctx.scratch.intern_level_list(base, &[]).expect("levels");
+    let add_expr = ctx
+        .scratch
+        .expr_const(base, Some(add), no_levels)
+        .expect("const");
+    let n = const_named(ctx, "N");
+    ctx.mk_app_spine(add_expr, &[n]).expect("Add N")
+}
+
+/// A root (single-component) `NameId`, interned against the current
+/// store's persistent base — the naming half of [`const_named`], for
+/// callers that need the NAME rather than an `Expr.const` wrapping it
+/// (here: a binder's cosmetic name).
+fn root_name(ctx: &mut MetaCtx, name: &str) -> NameId {
+    let base = Some(ctx.view.store);
+    let s = ctx.scratch.intern_str(base, name).expect("intern");
+    ctx.scratch.name_str(base, None, s).expect("name")
+}
+
+/// `{a : Type} → [Add a] → Add (Prod a a)` — the type of a
+/// PARAMETRIZED local instance, the same shape as
+/// `Instances.olean`'s own global `instAddProd`. Binder 0 is implicit,
+/// binder 1 is instance-implicit, so a telescope that reads binder info
+/// correctly yields `synth_order == [1]`.
+///
+/// Built by hand rather than read off the fixture because the fixture
+/// has no *local* instances at all — a local is whatever the caller
+/// pushes. Constants come through [`const_named`], so their universe
+/// arguments are filled to each declaration's real arity, exactly as
+/// [`parse_goal`] does for the goal side.
+///
+/// The `[Add a]` domain deliberately MENTIONS the first binder (as a
+/// loose bvar until the telescope opens it), which is what makes this
+/// fixture worth building by hand: a telescope that pushed each domain
+/// raw would declare `Add #0` — a loose bvar — into the local context.
+pub(crate) fn parametrized_instance_type(ctx: &mut MetaCtx) -> ExprId {
+    let base = Some(ctx.view.store);
+    let zero = ctx.scratch.level_zero(base).expect("level");
+    let one = ctx.scratch.level_succ(base, zero).expect("level");
+    // `Type`, i.e. `Sort 1` — the sort `Instances.lean`'s `Add`
+    // quantifies its parameter over.
+    let type_sort = ctx.scratch.expr_sort(base, one).expect("Sort 1");
+    let bvar0 = ctx
+        .scratch
+        .expr_bvar(base, &Nat::from(0u64))
+        .expect("bvar 0");
+    let bvar1 = ctx
+        .scratch
+        .expr_bvar(base, &Nat::from(1u64))
+        .expect("bvar 1");
+    let add = const_named(ctx, "Add");
+    // `Add a` under ONE binder: `a` is `#0`.
+    let add_a = ctx.mk_app_spine(add, &[bvar0]).expect("Add a");
+    // `Add (Prod a a)` under TWO binders: `a` is now `#1`.
+    let prod = const_named(ctx, "Prod");
+    let prod_a_a = ctx.mk_app_spine(prod, &[bvar1, bvar1]).expect("Prod a a");
+    let concl = ctx.mk_app_spine(add, &[prod_a_a]).expect("Add (Prod a a)");
+    let a_name = root_name(ctx, "a");
+    let inst_name = root_name(ctx, "inst");
+    let inner = ctx
+        .scratch
+        .expr_forall(
+            base,
+            Some(inst_name),
+            add_a,
+            concl,
+            BinderInfo::InstImplicit,
+        )
+        .expect("[Add a] -> ..");
+    ctx.scratch
+        .expr_forall(base, Some(a_name), type_sort, inner, BinderInfo::Implicit)
+        .expect("{a : Type} -> ..")
 }
 
 /// Replay `meta/Synth0.olean` (task 1's verbatim `Init/Coe.lean` class

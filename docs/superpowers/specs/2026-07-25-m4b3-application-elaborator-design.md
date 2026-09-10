@@ -942,6 +942,99 @@ in `leanr_elab/src` stays off-limits under the original rule.
 **Ordering.** P5 — binder and argument breadth — is next, with no
 further prerequisite slice.
 
+## Amendment 8 (2026-09-09, P5 scoping): one further prerequisite — local instances — and P5's seventh item
+
+§ Amendment 7 closed with "P5 — binder and argument breadth — is next,
+with no further prerequisite slice." **That sentence is superseded**, on
+a fact Amendment 7 did not have: P5's instance-implicit binders have no
+consumer.
+
+**1. Local instances are not modelled, and P5 is their first producer.**
+`instances.rs:95-100` records that local instances
+(`getLocalInstances` / `SynthInstance.lean:204`, `:230-239`) are a
+different mechanism from the `instanceExtension` table, never serialized
+to `.olean`, and assigns them to "a future B5 task ... from
+`MetaCtx::lctx`, not from this table". `get_instances`
+(`instances.rs:467`) reads the global table only. There has never been a
+producer, because leanr's elaborator has never had an instance-implicit
+binder. P5's `fun [inst : C α] => …` is that first producer, and without
+the consumer the binder form ships decorative: a goal the binder should
+discharge fails synthesis where the oracle succeeds. An error, not a
+wrong term — the mild failure class — but the spec's own P5 promise
+("instImplicit binders for `fun`/`let`/`have`") would be half-kept.
+
+**2. It sits below the elaborator, on three measured facts.** The oracle
+installs local instances at every fvar-pushing scope, not at the binder
+elaborator (`withLocalDeclImp` → `withNewFVar`, `Basic.lean:1791`,
+`:1785-1789`; `withLetDeclImp`, `:1905-1911`;
+`forallTelescopeReducingAux` → `withNewLocalInstancesImp`, `:1472`,
+`:1477`) — leanr's counterparts are all in `leanr_meta`.
+`MetavarDecl.localInstances` (`MetavarContext.lean:320`) sits beside
+`MetavarDecl.lctx`, so the slice amends the structures PR #39/#40 built.
+And it is non-additive in `leanr_meta/src` — `get_instances`' result
+changes — which per the accessor precedent must be flagged with the
+rejected alternative and a neutrality gate.
+
+So it gets its own spec and plan ahead of P5 rather than folding into
+it, the same treatment § Amendment 6 and § Amendment 7 gave the
+metavariable-local-contexts and elimMVarDeps prerequisites, and for the
+same stated reason — infrastructure every later slice that elaborates
+under a binder needs:
+`docs/superpowers/specs/2026-09-09-local-instances-design.md`.
+
+**3. P5 has a seventh item the § P5 bullet list never named.**
+`app/args.rs:145` and `tests/seam_audit.rs`'s
+`mvar_function_type_is_a_named_seam` both assign
+`(fun f => f Nat.zero : (Nat -> Nat) -> Nat)` to P5, owed on
+"expected-type propagation into `fun` binder domains"; P4 task 8
+deliberately narrowed that seam's message to P5 alone when the `CoeFun`
+half landed. The oracle is `FunBinders.propagateExpectedType`
+(`Binders.lean:410-421`): `whnfForall` the expected type, `isDefEq` the
+elaborated binder type against the domain, instantiate the body, and
+hand the residual to `elabTermEnsuringType body` (`:689`). It lives
+inside `elabFunBinderViews` — the same loop the binder-info breadth
+already rewrites — so it is **P5's, as one task**, and the § P5 bullet
+list is amended to seven items rather than the seam being retargeted a
+second time.
+
+**4. P5's shape.** One plan, one PR, ~13 tasks, with the **binder family
+ordered first**: binder-info breadth for `fun`/`let`/`have`, `fun`'s
+`optType`, `propagateExpectedType`, and implicit-lambda insertion
+replacing P1's guard — then the argument family (`optParam` defaults,
+`autoParam`, `..` ellipsis), which creates no binders and is independent
+of it.
+
+At the boundary between the two families, P5 carries an explicit
+**scoping-audit task**: an `mvarId.withContext` sweep of the elaborator
+paths the new binder producers can now reach. It has two independent
+reasons, not one. The elimMVarDeps carry-over is the first — that slice
+turned unassigned mvars into aux-mvar applications over binder fvars and
+made a dormant seam live (`default_inst.rs` rung 3, `fun (n : Nat) => 0`),
+and P5 multiplies the producers, so "no corpus term reaches it" is a
+claim with a shelf life. Local instances are the second: they change
+what synthesis finds under a binder.
+
+**5. Ordering.** Local instances, then P5. No P5 content changes as a
+result of the prerequisite beyond item 3 — instance-implicit binders
+simply become live rather than decorative.
+
+**That slice has now landed.** `MetaCtx` carries a sparse
+`local_instances` stack installed at `push_local_decl`/`push_let_decl`
+(and so at every telescope), carried on `LocalCtxSnapshot` and therefore
+on every `MetavarDecl`, and consumed by `get_instances`, which resolves
+the goal's class name before taking its table and appends matching
+locals between the priority sort and the reverse — so locals are tried
+first. The synth record shape gained an `fvars` field. Measured against
+the pre-slice baseline (`22255fe`, `main`'s merge-base with this
+branch): the elaboration corpus is byte-identical at 117 records — the
+diff is literally zero lines — and the synthesis corpus grew from 26 to
+32 as a pure append (six added lines, zero deletions); no pre-existing
+record moved or was modified. The predicted `leanr_elab` seam (the local
+instances spec's own § One prediction) did not land: `crates/leanr_elab/src/`
+has zero changes across the whole branch, so the narrow exception it
+pre-authorized was never invoked. M4b-3 P5's instance-implicit binders
+now have a consumer.
+
 ## What M4b-3 ships — and the stated non-shipping
 
 Like all of M4a and M4b so far, **M4b-3 does not ship independently
@@ -1570,6 +1663,15 @@ the elaborator tier pinning the expanded function (`Int.ofNat n`) the
 records emit.
 
 ### P5 — binder and argument breadth
+
+**Amended by § Amendment 8**, which adds a seventh item to this
+list (`FunBinders.propagateExpectedType`), pins P5's shape, and
+puts the local-instances prerequisite ahead of it. That prerequisite
+**has landed** (§ Amendment 8, "That slice has now landed"), so the
+instance-implicit binders below are live rather than decorative: a
+binder P5 introduces installs a local instance at the
+`push_local_decl`/`push_let_decl` chokepoint, and `get_instances`
+offers it ahead of every global.
 
 - **Binder info breadth**: `fun`'s implicit / strictImplicit /
   instImplicit `funBinder` forms and its `optType`; `let`/`have`'s
