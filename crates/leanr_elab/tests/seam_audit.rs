@@ -53,11 +53,28 @@
 //! `tests/oracle_elab.rs`'s `tc/*` records and
 //! `tests/synthetic_smoke.rs` rather than by this file.
 //!
+//! **The implicit-lambda `.postpone` arm** (`useImplicitLambda`'s third
+//! result, `TermElabM.lean:1753-1778`) used to be a fourth unreachable
+//! row here too — P1 wrote it off because it needs `isLocalIdent?` and
+//! `isMVarApp` machinery P1 deliberately did not have, AND both of its
+//! continuations need the postponement ladder P1 deliberately does not
+//! have. `elimMVarDeps` (PR #42) closed the first half of that
+//! reasoning: an unassigned `fun` binder's type is now exactly an aux
+//! mvar applied to binder fvars — an mvar APPLICATION, the shape
+//! `isMVarApp` tests for — and M4b-3 P5 multiplies binder producers on
+//! top, so leanr can no longer assume no corpus term reaches it. The
+//! second half — leanr still has no term-level postponement — has not
+//! closed, so M4b-3 P5 Task 6 models the arm explicitly and reports it
+//! as a named `M4b-4` seam (`elab.rs`'s `UseImplicitLambda::Postpone`
+//! dispatch) rather than leaving it an unexamined assumption.
+//! `implicit_lambda_postpone_is_a_named_seam` below asserts it.
+//!
 //! Everything else is asserted below, end-to-end from source text.
 
 mod support;
 
 use leanr_syntax::{builtin, parse_term};
+use support::elab_result;
 
 /// Elaborate `src` through the same construction `oracle_elab.rs` uses
 /// — replay `Elab0.olean`, parse with leanr's own parser, dispatch the
@@ -769,5 +786,31 @@ fn postponed_coe_under_a_binder_abstracts_via_elim_mvar_deps() {
          `MkBinding.elimMVarDeps`' whole job, and `MetaCtx::mk_binding` runs \
          `elim_mvar_deps` over the telescope to get it. A `fvar` here means the \
          body-side `elim_mvar_deps` call is no longer reaching this metavariable"
+    );
+}
+
+/// M4b-3 P5 Task 6. `useImplicitLambda`'s `.postpone` arm
+/// (`TermElabM.lean:1753-1778`) fires when the term is a local
+/// identifier whose type is an mvar APPLICATION. PR #42 (elimMVarDeps)
+/// manufactures exactly that shape — aux-mvar applications over binder
+/// fvars — so P1's "no corpus term reaches it" is no longer a safe
+/// assumption.
+///
+/// leanr has no term-level postponement (`lib.rs`: `may_postpone` is
+/// written, never read), so this must be a NAMED SEAM — an error the
+/// caller can see — and never a silently different term.
+#[test]
+fn implicit_lambda_postpone_is_a_named_seam() {
+    // A binder-bound local whose type is an unassigned mvar, used where
+    // an implicit forall is expected.
+    let src = "fun x => (x : {a : Type} -> Nat)";
+    let e = elab_result(src);
+    let msg = match e {
+        Err(leanr_elab::ElabError::UnsupportedSyntax(m)) => m,
+        other => panic!("expected a named seam for {src:?}, got {other:?}"),
+    };
+    assert!(
+        msg.contains("implicit lambda postponement") && msg.contains("M4b-4"),
+        "seam must name the postponement gap and its owning slice: {msg}"
     );
 }

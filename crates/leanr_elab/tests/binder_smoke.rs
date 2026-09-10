@@ -5,7 +5,7 @@
 //! deliberately do not pin exact encoder bytes (universe levels etc.).
 
 mod support;
-use support::{encode_expr, replay_fixture_in, EncSt, Replayed};
+use support::{elab_result, encode_expr, replay_fixture_in, EncSt, Replayed};
 
 use leanr_elab::TermElabM;
 use leanr_kernel::bank::Store;
@@ -65,56 +65,6 @@ fn elab_json(src: &str) -> serde_json::Value {
         .unwrap_or_else(|err| panic!("elaboration failed for {src:?}: {err:?}"));
     let mut st = EncSt::default();
     encode_expr(elab.mctx.store(), Some(view.store), e, &mut st)
-}
-
-/// Like `elab_json`, but returns the raw `Result` instead of panicking
-/// on failure or encoding to JSON — for tests asserting a specific
-/// `ElabError` variant rather than a successful shape.
-fn elab_result(src: &str) -> Result<leanr_kernel::bank::ExprId, leanr_elab::ElabError> {
-    let Replayed {
-        env,
-        reducibility,
-        matchers,
-        instances,
-        default_instances,
-        projection_fns,
-        classes,
-        coe_decls,
-    } = replay_fixture_in("elab", "Elab0.olean");
-    let snap = builtin::snapshot();
-    let view: EnvView = env.view();
-    let parsed = parse_term(src, &snap);
-    assert!(
-        parsed.errors.is_empty(),
-        "parse errors for {src:?}: {:?}",
-        parsed.errors
-    );
-    let root = parsed.tree.root();
-    let term_elem = root
-        .first_child_or_token()
-        .unwrap_or_else(|| panic!("no term child for {src:?}"));
-    let mut scratch = Store::scratch();
-    let mctx = MetaCtx::new(
-        view,
-        &mut scratch,
-        Config::default(),
-        EnvExtensions {
-            reducibility: &reducibility,
-            matchers: &matchers,
-            instances: &instances,
-            default_instances: &default_instances,
-            projection_fns: &projection_fns,
-            classes: &classes,
-            coe_decls: &coe_decls,
-        },
-    );
-    let mut elab = TermElabM::new(mctx, view);
-    elab.elab_term_ensuring_type(&term_elem, &parsed.tree.kinds, None)
-        .and_then(|e| {
-            elab.mctx
-                .instantiate_mvars(e)
-                .map_err(leanr_elab::ElabError::from)
-        })
 }
 
 #[test]

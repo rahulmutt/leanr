@@ -306,9 +306,23 @@ impl<'e> TermElabM<'e> {
         // than falling through to it.
         match use_implicit_lambda(self, elem, kinds, expected)? {
             UseImplicitLambda::Yes(ty) => return elab_implicit_lambda(self, elem, kinds, ty),
-            // Task 6 owns constructing this variant; until it does,
-            // `use_implicit_lambda` never returns it.
-            UseImplicitLambda::Postpone => {}
+            // oracle: this is where a real elaborator would postpone
+            // (`Exception.postpone`, caught by `withSynthesize`'s
+            // `catchPostpone`) and retry once the local's type is known.
+            // leanr has no term-level postponement (`lib.rs`:
+            // `may_postpone` is written but never read, and
+            // `postpone_elab_term` has no call site) — a named seam
+            // rather than a silent fall-through to `dispatch::dispatch`,
+            // which would elaborate a DIFFERENT term than the oracle.
+            UseImplicitLambda::Postpone => {
+                return Err(ElabError::UnsupportedSyntax(
+                    "implicit lambda postponement: the term is a local whose type is an \
+                     unassigned metavariable application, which the oracle postpones \
+                     (TermElabM.lean:1753-1778). leanr has no term-level postponement \
+                     (`may_postpone` is written but never read) — M4b-4"
+                        .to_string(),
+                ));
+            }
             UseImplicitLambda::No => {}
         }
         dispatch::dispatch(self, elem, kinds, expected)
@@ -376,8 +390,10 @@ enum UseImplicitLambda {
     Yes(ExprId),
     /// `stx` is a local identifier whose type is still an mvar
     /// application (`:1753-1778`). Needs term-level postponement, which
-    /// leanr does not have — Task 6 owns constructing this variant.
-    #[allow(dead_code)]
+    /// leanr does not have (`lib.rs`: `may_postpone` is written, never
+    /// read) — `elab_term`'s dispatch (M4b-3 P5 Task 6) reports this as
+    /// a named `UnsupportedSyntax` seam owned by M4b-4 rather than
+    /// falling through to a different term.
     Postpone,
 }
 
@@ -396,10 +412,15 @@ enum UseImplicitLambda {
 ///     keeps this from firing on the ascribed corpus records.
 ///
 /// `useImplicitLambda`'s third result, `.postpone` (`:1753-1778`, a
-/// local identifier whose type is still an mvar application), is not
-/// modelled: `isLocalIdent?`/`isMVarApp` need machinery P1 deliberately
-/// does not have (`elab.rs`'s own module doc) — Task 6 owns it. This
-/// function therefore never returns `UseImplicitLambda::Postpone`.
+/// local identifier whose type is still an mvar application) IS
+/// modelled, as of M4b-3 P5 Task 6: `elimMVarDeps` (PR #42) manufactures
+/// exactly that shape — an aux mvar applied to binder fvars — as the
+/// type of an as-yet-untyped `fun` binder, so "no corpus term reaches
+/// it" stopped being a safe assumption once P5 multiplied binder
+/// producers on top. `local_ident_of`/`is_mvar_app` below are the
+/// `isLocalIdent?`/`isMVarApp` transliterations; `elab_term`'s dispatch
+/// turns the `.postpone` result into a named seam, since leanr has no
+/// term-level postponement to actually resume it with.
 ///
 /// `hasNoImplicitLambdaAnnotation` (`:1706-1707`, an `annotation?
 /// \`noImplicitLambda` on the expected type) is likewise not modelled:
@@ -431,7 +452,65 @@ fn use_implicit_lambda(
     if !matches!(binder_info, BinderInfo::Implicit | BinderInfo::InstImplicit) {
         return Ok(UseImplicitLambda::No);
     }
+    // oracle: `if let some x ← isLocalIdent? stx then if (← isMVarApp
+    // (← inferType x)) then return .postpone` (`:1753-1778`). The
+    // comment there explains why: adding implicit lambdas to a local
+    // whose type is not yet known makes elaboration fail, because the
+    // fvars the wrap introduces are not in the local's mvar scope.
+    if let Some(x) = local_ident_of(elab, elem, kinds)? {
+        let x_ty = elab.mctx.infer_type(x)?;
+        if is_mvar_app(elab, x_ty)? {
+            return Ok(UseImplicitLambda::Postpone);
+        }
+    }
     Ok(UseImplicitLambda::Yes(reduced))
+}
+
+/// oracle: `isLocalIdent?` (`TermElabM.lean:1723-1730`) — `stx` is a
+/// bare `Syntax.ident` AND `resolveLocalName` resolves it to a local
+/// with NO leftover field-projection suffix (`some (fvar, [])`; any
+/// other result, including a leftover suffix or no match at all, is
+/// `none`). leanr's identifier tokens already carry a whole dotted name
+/// as one token (`app/head.rs`'s own `hierarchical_idents_are_one_token`
+/// note) and this crate has no field-projection resolution to produce a
+/// leftover suffix, so "found in the local context under this exact
+/// name" is the whole test: `MetaCtx::lctx_lookup_by_name` is the
+/// oracle's `LocalContext.findFromUserName?`, the lookup
+/// `resolveLocalName` itself is built from.
+fn local_ident_of(
+    elab: &mut TermElabM,
+    elem: &SynElem,
+    kinds: &KindInterner,
+) -> Result<Option<ExprId>, ElabError> {
+    if kinds.name(elem.kind()) != "<ident>" {
+        return Ok(None);
+    }
+    let leanr_syntax::tree::NodeOrToken::Token(tok) = elem else {
+        return Ok(None);
+    };
+    let name = crate::app::head::intern_dotted(elab, tok.text())?;
+    Ok(elab.mctx.lctx_lookup_by_name(name))
+}
+
+/// oracle: `isMVarApp` (`TermElabM.lean:1375`) — `(← whnfR
+/// e).getAppFn.isMVar`, a REDUCIBLE-transparency whnf then a spine walk.
+/// This is the looser (pre-Task-4) `instantiate_mvars` + spine-walk
+/// shape `app/state.rs`'s `f_type_is_mvar_after_instantiation` used
+/// (`2b0e402`, deleted by Task 4): the one shape this task's own arm can
+/// manufacture — an aux mvar applied to binder fvars, never itself
+/// reducible to something else — does not need the extra `whnf` to
+/// expose an `MVar` head, so the distinction is not drawn here.
+fn is_mvar_app(elab: &mut TermElabM, e: ExprId) -> Result<bool, ElabError> {
+    let e = elab.mctx.instantiate_mvars(e)?;
+    let base = elab.view.store;
+    let mut cur = e;
+    while let Node::App { f, .. } = elab.mctx.store().expr_node(Some(base), cur) {
+        cur = f;
+    }
+    Ok(matches!(
+        elab.mctx.store().expr_node(Some(base), cur),
+        Node::MVar { .. }
+    ))
 }
 
 /// oracle: `elabImplicitLambda` (`TermElabM.lean:1806-1820`) — peel
