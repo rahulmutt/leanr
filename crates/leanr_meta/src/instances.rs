@@ -86,36 +86,31 @@
 //! `scoped instance` — same unowned-seam treatment as the
 //! erasure/private-instance seam documented further below.
 //!
-//! # `global_name: None` (named seam, not a silent skip)
+//! # `global_name: None` — two sources, only one of them adversarial
 //!
-//! Scope: this section is about an entry of THIS TABLE, i.e. one
-//! decoded from `instanceExtension`. A candidate `get_instances`
-//! RETURNS may legitimately carry `global_name: None` without any of
-//! the below applying — that is exactly what a local instance is (see
-//! `MetaCtx::local_instance_candidate`).
+//! **A local instance (legitimate).** `get_instances` constructs a
+//! candidate directly for every in-scope local instance
+//! (oracle: `getInstances` :230-237), whose `val` is an fvar and which
+//! has no declaration name at all. These never pass through
+//! `InstanceTable::build` and are never serialized — `addInstance`
+//! (`Instances.lean:283-304`) is the only producer of a persisted
+//! `instanceExtension` entry and always sets `globalName? := declName`.
+//! So `global_name: None` on a candidate returned by `get_instances`
+//! means "local", and any reader that treats it as malformed input is
+//! wrong.
 //!
-//! `addInstance` (`Instances.lean:283-304`) is the ONLY producer of a
-//! persisted `instanceExtension` entry, and it unconditionally sets
-//! `globalName? := declName` (line 304) — a `some`. A LOCAL instance
-//! (introduced by a hypothesis in the local context, e.g. inside a
-//! tactic block) is a completely different mechanism
-//! (`getLocalInstances`/`LocalInstance`, `SynthInstance.lean:204,
-//! 230-239`) that never touches `instanceExtension` and is never
-//! serialized to `.olean` at all — `getInstances` appends those
-//! separately, at query time, from the CALLER's local context, which is
-//! what `get_instances` below now does from `MetaCtx::local_instances`
-//! (the local-instances slice, task 6), never from this table. So every
-//! `InstanceEntry` this crate ever decodes from a real `.olean` has
-//! `global_name = Some(_)`, and a TABLE entry with `global_name: None`
-//! is reachable ONLY via adversarial/malformed bytes (Global
-//! Constraints: `.olean` bytes are untrusted). Since there is then no
-//! `Name` to resolve a `ty` from (`EnvView::get` needs one) and no other
-//! source for the instance's declared type, `InstanceTable::build`
-//! drops such an entry from the table — documented here as the named
-//! seam it is, not a silently-absorbed one: dropping a candidate is
+//! **A malformed decode (adversarial).** Inside `InstanceTable::build`,
+//! reading `global_name = None` off `.olean` bytes still means exactly
+//! what it meant before: there is no `Name` to resolve a `ty` from
+//! (`EnvView::get` needs one) and no other source for the instance's
+//! declared type, so `build` drops the entry. Dropping a candidate is
 //! incompleteness only (`get_instances` simply never offers it; the
 //! kernel independently re-checks whatever IS synthesized), never a
-//! wrong verdict.
+//! wrong verdict. Global Constraints: `.olean` bytes are untrusted.
+//!
+//! The distinction is by CONSTRUCTION SITE, not by inspection: nothing
+//! about a `None` tells you which it was. Readers must therefore not
+//! infer "malformed" from `global_name.is_none()`.
 //!
 //! # Unresolvable `global_name` (named seam)
 //!
