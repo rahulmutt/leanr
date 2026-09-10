@@ -1619,20 +1619,49 @@ fn opt_param_explicit_mode_does_not_fill() {
     assert_eq!(j["a"]["n"], "Nat.zero");
 }
 
-/// Amendment 3: an omitted `autoParam` argument must still reach the
-/// OLD seam (Task 9's, not this task's) — `withTactic (n : autoParam Nat
-/// p5AutoTac) : Nat := n` (`Elab0.lean`). This pins that Task 8's new
-/// `optParam`-only arm falls through rather than swallowing the
-/// `autoParam` case too.
+/// M4b-3 P5 Task 9. `def withTactic (n : autoParam Nat p5AutoTac) : Nat
+/// := n` (`Elab0.lean`). Supplying the argument bypasses the tactic
+/// entirely — `process_explicit_arg`'s positional-argument branch
+/// (`App.lean:803-808`) consumes `Nat.zero` and returns before the
+/// `!explicit`/`getAutoParamTactic?` arms this task adds are ever
+/// reached, exactly as `opt_param_explicit_mode_does_not_fill` above
+/// pins for the `optParam` sibling.
 #[test]
-fn opt_param_arm_falls_through_for_autoparam() {
+fn auto_param_explicit_argument_elaborates_normally() {
+    let j = support::elab_and_synthesize("withTactic Nat.zero")
+        .expect("an explicitly supplied autoParam argument elaborates normally");
+    assert_eq!(j["k"], "app");
+    assert_eq!(j["f"]["n"], "withTactic");
+    assert_eq!(j["a"]["k"], "const");
+    assert_eq!(j["a"]["n"], "Nat.zero");
+}
+
+/// M4b-3 P5 Task 9. This test's own history is the point: it used to be
+/// `opt_param_arm_falls_through_for_autoparam`, pinned to Task 8's
+/// placeholder — an omitted `autoParam` argument still hit the OLD
+/// combined `UnsupportedSyntax` seam Task 8 deliberately left erroring
+/// (`args.rs`'s `"optParam default / autoParam tactic argument — M4b-3
+/// P5"`). This task deletes that seam and gives `autoParam` its own real
+/// body: mint a `.tactic` synthetic mvar (oracle `App.lean:846`,
+/// `mkTacticMVar`) and let the ladder report it unsolved, because
+/// EXECUTING the tactic needs the `by` elaborator and the tactic
+/// framework — a later M4 slice, not this one.
+/// `seam_audit.rs`'s `omitted_auto_param_is_a_reported_tactic_mvar`
+/// asserts the same fact from that file's own seam-audit angle; this
+/// one keeps the coverage where Task 8 first put it.
+#[test]
+fn omitted_auto_param_mints_a_reported_tactic_mvar() {
     match support::elab_and_synthesize("withTactic") {
-        Err(leanr_elab::ElabError::UnsupportedSyntax(m)) => assert!(
-            m.contains("optParam default / autoParam tactic argument"),
-            "an omitted autoParam argument must still hit the old P5 seam, got {m:?}"
-        ),
-        other => panic!(
-            "expected the old optParam/autoParam seam for an omitted autoParam, got {other:?}"
-        ),
+        Err(leanr_elab::ElabError::UnsupportedSyntax(m)) => {
+            assert!(m.contains("tactic"), "must name the tactic mvar: {m:?}");
+            assert!(
+                m.contains("parameter `n`"),
+                "must name the stuck parameter: {m:?}"
+            );
+            assert!(m.contains("M4"), "must name the deferring slice: {m:?}");
+        }
+        other => {
+            panic!("an omitted autoParam argument must never silently elaborate, got {other:?}")
+        }
     }
 }

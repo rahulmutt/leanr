@@ -154,7 +154,7 @@ impl<'e> TermElabM<'e> {
             SyntheticMVarKind::Coe { expected_type, e } => {
                 elab.synthesize_coe_mvar(mvar_id, expected_type, e)
             }
-            SyntheticMVarKind::Tactic => {
+            SyntheticMVarKind::Tactic { ref param_name } => {
                 // oracle: the `.tactic` arm runs the tactic only when
                 // `runTactics && !(delayOnMVars && (← mvarId.getType >>=
                 // instantiateExprMVars).hasExprMVar)`
@@ -172,10 +172,18 @@ impl<'e> TermElabM<'e> {
                 // reachable ONLY there — a silent `false` here would make
                 // the ladder report "stuck" for a reason the user cannot
                 // see.
+                //
+                // This is the arm that actually fires for an omitted
+                // `autoParam` argument (M4b-3 P5 task 9): every mvar this
+                // crate mints with kind `Tactic` reaches rung 5 with
+                // `run_tactics: true` before `synthesize_synthetic_mvars`
+                // could ever fall through to the final stuck-report step
+                // (`report.rs`'s own `Tactic` arm doc explains why THAT
+                // one is unreachable today), so this `Err` — not the
+                // reporter's — is what a caller actually observes.
                 if run_tactics {
                     Err(ElabError::UnsupportedSyntax(
-                        "autoParam tactic execution requires the `by` elaborator — later M4"
-                            .to_string(),
+                        super::state::tactic_seam_message(param_name.as_deref()),
                     ))
                 } else {
                     Ok(false)

@@ -45,19 +45,51 @@ pub struct SavedContext {
 /// a silent fidelity hole where a missing *arm* is a named seam. M4b-3
 /// P4 shipped the `Coe` producer (`coe.rs`'s `mk_coe`) and its two
 /// consumer arms (`ladder.rs`'s scheduling arm, `report.rs`'s stuck-
-/// coercion reporter arm); P5 registers `Tactic`.
+/// coercion reporter arm); P5 task 9 wires up `Tactic`'s own producer
+/// (`app/args.rs`'s `mk_tactic_mvar`, mirroring `mkTacticMVar` at its
+/// `.autoParam` call site, `App.lean:846`).
 ///
 /// The oracle's message-carrying payloads (`extraErrorMsg?`,
 /// `mkErrorMsg?`, `header?`) are omitted: leanr defers the prose layer
 /// (design spec § Amendment, item 2). `Coe` keeps the two payloads that
 /// are `Expr`s rather than messages, because the `Coe` arm computes with
-/// them.
+/// them. `Tactic`'s `param_name` is the same kind of real DATA, not
+/// prose: the oracle's own `.tactic` case carries a `TacticMVarKind`
+/// (`TermElabM.lean:56-62`), and the `.autoParam (argName : Name)`
+/// variant IS that argument name — leanr keeps the rendered name for
+/// exactly the reason the oracle keeps the `Name`, to say WHICH
+/// parameter is stuck, and renders it once at the single producer call
+/// site (`AppElab::render_name`'s own idiom) rather than threading
+/// `Store` access into `ladder.rs`/`report.rs`, neither of which needs
+/// it for anything else. The oracle's `tacticCode : Syntax` and
+/// `ctx : SavedContext` payloads are NOT modelled: leanr never runs the
+/// tactic (this slice's own scope boundary — see `mk_tactic_mvar`'s
+/// doc), so there is no tactic syntax to save for a later run.
 #[derive(Debug, Clone)]
 pub enum SyntheticMVarKind {
     TypeClass,
     Coe { expected_type: ExprId, e: ExprId },
-    Tactic,
+    Tactic { param_name: Option<String> },
     Postponed { ctx: SavedContext },
+}
+
+/// Shared wording for the `.tactic` seam, so `ladder.rs`'s rung-5 arm
+/// (the one actually reachable today — see its own doc) and
+/// `report.rs`'s stuck-reporter arm (unreachable today, kept for the
+/// day a real tactic evaluator lands in rung 5 and CAN return `false`
+/// for a genuinely stuck tactic) cannot drift apart on the same fact:
+/// executing an `autoParam` tactic needs the `by` elaborator and the
+/// tactic framework, which the roadmap assigns to a later M4 slice.
+pub(crate) fn tactic_seam_message(param_name: Option<&str>) -> String {
+    match param_name {
+        Some(name) => format!(
+            "autoParam tactic execution for parameter `{name}` requires the `by` elaborator \
+             and the tactic framework — later M4"
+        ),
+        None => "autoParam tactic execution requires the `by` elaborator and the tactic \
+                  framework — later M4"
+            .to_string(),
+    }
 }
 
 /// oracle: `structure SyntheticMVarDecl` (`TermElabM.lean:107`).

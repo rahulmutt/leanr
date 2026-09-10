@@ -4,14 +4,27 @@
 //!
 //! Scope, stated up front because a seam audit that quietly omits a seam
 //! is worse than one that names its own gaps. `app/mod.rs`'s module doc
-//! is the full site-by-site index; of the seams listed there, one is
-//! not reachable from any source term the hermetic `Elab0` fixture can
-//! express, and this file does not pretend otherwise:
+//! is the full site-by-site index.
 //!
-//!   * the **P5 optParam/autoParam** seam — no fixture parameter carries
-//!     either wrapper, so `app_smoke.rs`'s
-//!     `explicit_mode_skips_the_optparam_default` asserts it white-box
-//!     against a synthetic `f_type` instead.
+//! **The P5 optParam/autoParam seam used to be listed here as
+//! unreachable** — "no fixture parameter carries either wrapper", so
+//! `app_smoke.rs`'s `explicit_mode_skips_the_optparam_default` asserted
+//! it white-box against a synthetic `f_type` instead. That stopped being
+//! true once `Elab0.lean` declared `withDefault`/`withTactic` (P5 tasks
+//! 8/9), and the seam itself is now RETIRED rather than merely reached:
+//! `optParam` fills its declared default with real code (task 8,
+//! `app_smoke.rs`'s `opt_param_default_is_the_declared_value`), and an
+//! omitted `autoParam` mints a `.tactic` synthetic mvar that the ladder
+//! reports unsolved — `omitted_auto_param_is_a_reported_tactic_mvar`
+//! below, and `app_smoke.rs`'s
+//! `omitted_auto_param_mints_a_reported_tactic_mvar` — rather than
+//! raising the old combined `UnsupportedSyntax` seam directly from
+//! `args.rs`. `no_seam_points_at_the_retired_p5_optparam_autoparam_label`
+//! below is this file's own retired-label gate for it, mirroring the
+//! P2/P3/P2b-ii/P4 gates already here. `explicit_mode_skips_the_optparam_default`
+//! (`app_smoke.rs`) stays: it is still the only test that exercises
+//! `process_explicit_arg`'s `optParam` arm with `explicit == true`,
+//! a shape no fixture declaration reaches either way.
 //!
 //! The mvar-fType seam this file USED TO assert end-to-end,
 //! `mvar_function_type_is_a_named_seam` (expected-type propagation into
@@ -817,6 +830,69 @@ fn implicit_lambda_postpone_is_a_named_seam() {
     assert!(
         msg.contains("implicit lambda postponement") && msg.contains("M4b-4"),
         "seam must name the postponement gap and its owning slice: {msg}"
+    );
+}
+
+/// M4b-3 P5 Task 9. An OMITTED autoParam argument mints a `.tactic`
+/// synthetic mvar (oracle `App.lean:846`, `mkTacticMVar`). Executing it
+/// needs the `by` elaborator and the tactic framework, which the roadmap
+/// assigns to a later M4 slice — so the ladder must REPORT it, not solve
+/// it, and never fall through to a different term.
+///
+/// `elab_and_synthesize`, not `elab_result`: the mint site
+/// (`app::args::process_explicit_arg`) does not raise eagerly — it
+/// returns `Ok(true)` and lets `main` finalize — so the report only
+/// surfaces once the synthetic-mvar FIXPOINT runs to completion.
+/// `elab_result` (`elab_term_ensuring_type` + `instantiate_mvars`, no
+/// fixpoint) would return `Ok` here with the mvar left bare inside the
+/// term; measured, not assumed, before this test was written this way.
+#[test]
+fn omitted_auto_param_is_a_reported_tactic_mvar() {
+    let e = elab_and_synthesize("withTactic");
+    let msg = match e {
+        Err(err) => format!("{err:?}"),
+        Ok(j) => panic!("an omitted autoParam must not silently elaborate, got {j}"),
+    };
+    assert!(
+        msg.contains("tactic"),
+        "the report must name the tactic mvar: {msg}"
+    );
+    assert!(
+        msg.contains("parameter `n`"),
+        "the report must name the stuck parameter: {msg}"
+    );
+    assert!(
+        msg.contains("M4"),
+        "the report must name the deferring slice: {msg}"
+    );
+}
+
+/// M4b-3 P5 task 9 RETIRED the combined optParam/autoParam seam —
+/// `args.rs`'s single "optParam default / autoParam tactic argument —
+/// M4b-3 P5" message that used to fire for EITHER an omitted `optParam`
+/// (task 8 gave it a real body first) or an omitted `autoParam` (this
+/// task's own real body: mint-then-report, above). Mirrors the other
+/// retired-label gates in this file and inherits their stated
+/// precondition: a TEXTUAL scan is a floor (the retired wording never
+/// comes back), not a ceiling.
+#[test]
+fn no_seam_points_at_the_retired_p5_optparam_autoparam_label() {
+    let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    let needle = "optParam default / autoParam tactic argument";
+    let mut offenders = Vec::new();
+    for path in walk_rs_files(src_dir) {
+        let text = std::fs::read_to_string(&path).expect("readable source");
+        for (n, line) in text.lines().enumerate() {
+            if line.contains(needle) {
+                offenders.push(format!("{}:{}", path.display(), n + 1));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "P5 task 9 retired the combined optParam/autoParam seam (optParam has a real \
+         body since task 8, autoParam mints-then-reports since task 9); stale label at \
+         {offenders:?}"
     );
 }
 

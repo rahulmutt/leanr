@@ -110,8 +110,19 @@ impl<'e> TermElabM<'e> {
                     })
                 })
             }
-            SyntheticMVarKind::Tactic => Err(ElabError::UnsupportedSyntax(
-                "stuck tactic reporting requires the `by` elaborator — later M4".to_string(),
+            // oracle: `SyntheticMVars.lean:304-310`'s `.tactic` arm —
+            // reachable only once a real `by`/tactic-framework evaluator
+            // occupies rung 5 (`ladder.rs`) and can answer `false` for a
+            // genuinely stuck tactic; today rung 5 always errors before
+            // this step could see the mvar (`ladder.rs`'s own `Tactic`
+            // arm doc). Kept, not collapsed to `unreachable!` like the
+            // `Postponed` arm below: unlike a postponed mvar (which the
+            // oracle itself asserts can never reach here), a stuck
+            // `.tactic` mvar genuinely CAN reach this arm once the later
+            // M4 slice lands — this branch is dead FOR NOW, not
+            // impossible BY CONSTRUCTION.
+            SyntheticMVarKind::Tactic { param_name } => Err(ElabError::UnsupportedSyntax(
+                super::state::tactic_seam_message(param_name.as_deref()),
             )),
             // oracle: `| _ => unreachable!` (:316) — `.postponed` never
             // reaches the reporter, because a postponed mvar that could
