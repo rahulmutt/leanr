@@ -64,22 +64,30 @@
 //!
 //! One further, deliberate difference from the oracle belongs in this
 //! same note. The oracle's own EXPENSIVE-path telescope
-//! (`forallTelescopeReducingAuxAux`) runs `withNewLocalInstancesImp`
-//! over each batch of peeled binders (`Basic.lean:1407-1418`) BEFORE
-//! its `whnf` call on the non-forall tail (the call site at `:1472`) —
-//! so the peeled binders' own local instances ARE in scope for that
-//! `whnf`, which is exactly the self-reference `Basic.lean:1402-1406`
-//! documents. leanr's `MetaCtx::is_class_expensive` (`metactx.rs`) does
-//! NOT reproduce that: it walks the `Forall` spine structurally,
-//! calling `whnf` on each successive `body` without ever opening a
-//! binder or installing anything, so those `whnf` calls never see
-//! instances the binders being walked past would have contributed.
-//! Recorded here as a known, deliberate difference rather than left for
-//! a future reader to rediscover — closing it would mean
-//! `is_class_expensive` opening binders the way
-//! `local_instance_candidate`'s own telescope (`instances.rs`'s
-//! `instimplicit_binder_positions`) already does, which this slice does
-//! not attempt.
+//! (`forallTelescopeReducingAuxAux`, `Basic.lean:1453-1488`) reaches
+//! the non-forall-tail arm (`| _ =>`, `:1474-1487`) and there installs
+//! the peeled binders' own local instances via `withNewLocalInstancesImp`
+//! (defined `:1407-1420`) at the call site `:1477`, BEFORE its own
+//! `whnf` call on that tail at `:1479` — so those binders' own local
+//! instances ARE in scope for that `whnf`, which is exactly the
+//! self-reference `Basic.lean:1402-1406` documents. (The same function
+//! also calls `withNewLocalInstancesImp` earlier, at `:1472`, but that
+//! call sits in the `.forallE` arm's `else` branch — taken only when
+//! `fvarsSizeLtMaxFVars` is `false` — and `isClassExpensive?`
+//! (`:1520-1522`) always passes `maxFVars? := none`, for which
+//! `fvarsSizeLtMaxFVars` (`:1395-1398`) is unconditionally `true`, so
+//! that branch is dead on this call path; `:1477`/`:1479` is the
+//! install/whnf pair that actually executes.) leanr's
+//! `MetaCtx::is_class_expensive` (`metactx.rs`) does NOT reproduce any
+//! of this: it walks the `Forall` spine structurally, calling `whnf`
+//! on each successive `body` without ever opening a binder or
+//! installing anything, so those `whnf` calls never see instances the
+//! binders being walked past would have contributed. Recorded here as
+//! a known, deliberate difference rather than left for a future reader
+//! to rediscover — closing it would mean `is_class_expensive` opening
+//! binders the way `local_instance_candidate`'s own telescope
+//! (`instances.rs`'s `instimplicit_binder_positions`) already does,
+//! which this slice does not attempt.
 //!
 //! # Seams this slice does NOT close
 //!

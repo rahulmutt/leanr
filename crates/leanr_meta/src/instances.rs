@@ -512,14 +512,14 @@ impl<'e> MetaCtx<'e> {
         // oracle's own "read `localInstances` before the telescope
         // updates them" precaution (:203-204); and a goal that is not a
         // class is `None` here rather than the oracle's hard error
-        // (:207). `None` only suppresses the local half below — the
+        // (:207-208). `None` only suppresses the local half below — the
         // global lookup is unchanged, so no existing caller's result
         // moves.
         //
         // SEAM (unowned): nothing downstream raises that error either.
         // `mk_generator_node` (`synth.rs:2358-2367`) returns `Ok(None)`
         // on an empty candidate list, where the oracle throws "type
-        // class instance expected" (:207) — so a non-class synthesis
+        // class instance expected" (:207-208) — so a non-class synthesis
         // goal is reported as "no instance found" rather than as the
         // malformed goal it is. Diagnostic quality only, never a wrong
         // verdict; no task in the local-instances slice owns it (task
