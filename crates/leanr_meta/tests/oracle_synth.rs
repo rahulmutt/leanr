@@ -277,7 +277,11 @@ fn oracle_synth_gate() {
             // for that slice, not a default to fall into).
             assert!(
                 fvar_specs.is_empty(),
-                "{id}: this record declares both `fvars` and `mvars`, and the                  gate declares every goal mvar with an EMPTY local context —                  so the fixture's local instances would be invisible to any                  nested synthesis. Give the mvar a real `lctx` before adding                  this record."
+                "{id}: this record declares both `fvars` and `mvars`, and the \
+                 gate declares every goal mvar with an EMPTY local context — \
+                 so the fixture's local instances would be invisible to any \
+                 nested synthesis. Give the mvar a real `lctx` before adding \
+                 this record."
             );
             ctx.mctx_mut().declare(
                 MVarId(nid),

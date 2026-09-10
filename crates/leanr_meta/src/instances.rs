@@ -574,26 +574,36 @@ impl<'e> MetaCtx<'e> {
         // `is_class` again per binder), both sit OUTSIDE this window,
         // so a lookup entered from either sees the FULL table.
         //
-        // Scope of that claim, stated precisely: it is a guarantee for
-        // the OUTERMOST `get_instances` only, and today it is VACUOUS
-        // rather than merely unpinned. Nesting rides `synth_pending`,
-        // which is capped at `MAX_SYNTH_PENDING_DEPTH = 1`
-        // (`whnf.rs:138`, transcribing the oracle's own
-        // `maxSynthPendingDepth` default of `1`, `Basic.lean:458-461`),
-        // so the chain above can produce G0 -> G1 but never G2: the one
-        // nested query that exists is entered from OUTSIDE G0's window
-        // (via `is_class`/`local_instance_candidate`), and there is no
-        // third level to be entered from inside G1's. So no query can
-        // currently observe an emptied table, and no test could
-        // construct one to pin the placement.
+        // Scope of that claim, stated precisely: it holds for `is_class`
+        // and `local_instance_candidate` at EVERY nesting depth --
+        // neither ever runs inside a `mem::take` window, no matter how
+        // many `get_instances` calls are stacked, so whichever call
+        // reaches them sees the FULL table. It says nothing about
+        // `discr_get_match` itself, which IS inside the window -- that
+        // is exactly the seam traced above, where a nested
+        // `get_instances` re-entering through `discr_get_match` takes
+        // the outer call's emptied table. This placement argument does
+        // not close that seam and was never meant to; it only says
+        // where the seam is NOT.
         //
-        // TRIGGER FOR REVISITING: raising `MAX_SYNTH_PENDING_DEPTH`
-        // above 1. That is the single change that makes G2 reachable,
-        // at which point a nested lookup CAN be entered from inside an
-        // outer window, this placement stops being vacuously safe and
-        // becomes load-bearing for real, and the take-the-table seam
-        // above turns from latent into live. Anyone raising that
-        // constant owns closing this.
+        // (Aside, on how deep the chain above can recurse:
+        // `synth_pending_depth` starts at `0` (`metactx.rs:407`), and
+        // `synth_pending` refuses only once the counter EXCEEDS
+        // `MAX_SYNTH_PENDING_DEPTH = 1` (`whnf.rs:1417`, constant at
+        // `:138`) -- so a depth-`0` call and a depth-`1` call both
+        // proceed, and only a third, depth-`2` nesting is refused. That
+        // bounds how many times the re-entry can repeat; it says
+        // nothing about whether the ONE level it already reaches is
+        // observable -- it is, per the trace above, regardless of this
+        // bound.)
+        //
+        // TRIGGER FOR REVISITING: any future change that widens what
+        // `discr_get_match` transitively touches -- a new unfolding
+        // path, a new match-compilation channel, anything that lets it
+        // call back into `synth_pending`/`synth_instance` beyond the
+        // chain already traced above -- grows this seam's surface.
+        // Whoever makes such a change owns re-examining whether the
+        // take-the-table window still holds.
         let table = std::mem::take(&mut self.instances);
         let result: Result<Vec<Instance>, MetaError> = self
             .discr_get_match(&table.tree, goal)

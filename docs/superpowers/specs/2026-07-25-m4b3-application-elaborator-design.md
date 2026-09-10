@@ -1666,7 +1666,7 @@ records emit.
 
 **Amended by § Amendment 8**, which adds a seventh item to this
 list (`FunBinders.propagateExpectedType`), pins P5's shape, and
-put the local-instances prerequisite ahead of it. That prerequisite
+puts the local-instances prerequisite ahead of it. That prerequisite
 **has landed** (§ Amendment 8, "That slice has now landed"), so the
 instance-implicit binders below are live rather than decorative: a
 binder P5 introduces installs a local instance at the
