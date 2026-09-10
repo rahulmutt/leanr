@@ -688,8 +688,9 @@ impl<'e> MetaCtx<'e> {
     /// binder (task 4's chokepoint), so this recursion re-enters the
     /// very set `get_instances` is iterating — which is exactly the
     /// oracle's behavior, `forallTelescopeReducing` installing through
-    /// `withNewLocalInstancesImp` (`Basic.lean:1472`), and the
-    /// self-reference `Basic.lean:1402-1406` acknowledges. It is
+    /// `withNewLocalInstancesImp` (`Basic.lean:1477` — the non-forall-tail
+    /// arm's install, the one that actually runs when `maxFVars? = none`),
+    /// and the self-reference `Basic.lean:1402-1406` acknowledges. It is
     /// invisible to the caller because `get_instances` iterates a
     /// SNAPSHOT and this call is bracketed by `lctx_restore`.
     ///
@@ -1484,7 +1485,7 @@ mod tests {
     ///
     /// Ruling R8's companion. The telescope really opens each binder,
     /// and `push_local_decl` is itself a local-instance PRODUCER (the
-    /// oracle's own telescope installs too — `Basic.lean:1472`'s
+    /// oracle's own telescope installs too — `Basic.lean:1477`'s
     /// `withNewLocalInstancesImp`), so a missing `lctx_restore` would
     /// leave a `get_instances` QUERY mutating the ambient context and
     /// growing the local-instance set on every call. Not named by the
