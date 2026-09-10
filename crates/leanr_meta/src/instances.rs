@@ -682,7 +682,7 @@ impl<'e> MetaCtx<'e> {
     /// that later reduces that type rejects outright
     /// (`whnf.rs:239-246`). The non-forall tail is instantiated the
     /// same way before it is whnf'd, matching the oracle's own
-    /// `type.instantiateRevRange` on that arm (`Basic.lean:1473`).
+    /// `type.instantiateRevRange` on that arm (`Basic.lean:1475`).
     ///
     /// `push_local_decl` INSTALLS a local instance for each class-typed
     /// binder (task 4's chokepoint), so this recursion re-enters the
