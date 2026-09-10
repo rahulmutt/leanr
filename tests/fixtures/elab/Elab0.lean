@@ -601,6 +601,7 @@ instance instCoeSortCarrier : CoeSort Carrier Type := ⟨Carrier.ty⟩
 -- sugar `(n : α := d)` desugars to `optParam α d`, and the oracle's
 -- `getOptParamDefault?` (`Lean/Expr.lean:1695`) is an arity-2 head test
 -- against this very name.
+set_option linter.unusedVariables false in
 @[reducible] def optParam (α : Sort u) (default : α) : Sort u := α
 
 -- `autoParam` mirrors `Init/Tactics.lean:2635`. Its second argument is a
@@ -616,6 +617,7 @@ namespace Lean
 axiom Syntax : Type
 end Lean
 
+set_option linter.unusedVariables false in
 abbrev autoParam (α : Sort u) (tactic : Lean.Syntax) : Sort u := α
 
 axiom p5AutoTac : Lean.Syntax
