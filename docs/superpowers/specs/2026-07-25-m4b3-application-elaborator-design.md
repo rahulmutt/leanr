@@ -1118,8 +1118,12 @@ regen bug; it does not affect the 117→134 count.
 
 **4. The accessor ledger's P5 row, amended.** § Accessor ledger's P5 row
 above now records what Task 11 measured directly against the
-merge-base source: `crates/leanr_meta/src/metactx.rs` is +178/-12, and
-"additive" is not the right single word for it. Three distinct shapes
+merge-base source: `crates/leanr_meta/src/metactx.rs` is +184/-12 at
+HEAD (`736d0a2`) — +178/-12 through Task 11's own edits, plus 6 more
+insertion lines from this same Amendment 9 commit's own doc edit to
+`install_local_instance_for`'s comment, landing after Task 11's
+measurement ran — and "additive" is not the right single word for it.
+Three distinct shapes
 in one commit — two genuinely new public methods
 (`push_local_decl_without_instance`, `install_local_instance_for_last_pushed`,
 purely additive, one new call site each in `builtin/binder.rs`), one
@@ -1194,12 +1198,35 @@ inherits these as-is; none were reopened by this task.
      reporter at `:316` falls to `unreachable!` otherwise. The arm goes
      live once a later M4 slice puts a real tactic evaluator in rung 5.
    - **`builtin/binder.rs` passed the plan's own ~1000-line soft
-     ceiling** (now ~1330, a substantial share of it the in-file test
+     ceiling** (now 1399 lines at HEAD `736d0a2`, a substantial share of it the in-file test
      module). Ruled to stay whole for this slice: the plan's own
      rationale — that splitting mid-slice obscures the diff against the
      oracle's single `Binders.lean` loop — still held. The split is a
      pure no-behaviour refactor, available at any time, not owed to any
      particular slice.
+   - **`install_local_instance_for`'s implementation-detail filter is
+     genuinely missing, not vacuous — the most concrete thing the next
+     slice inherits.** The oracle's `withNewLocalInstanceImp`
+     (`Meta/Basic.lean:1383-1388`) skips the local-instance push when
+     `localDecl.isImplementationDetail` holds. leanr's `LocalDecl`
+     carries no kind field, but the oracle's producer of such a
+     declaration is ordinary surface syntax leanr already elaborates:
+     `LocalDeclKind.ofBinderName` (`BindersUtil.lean:21-23`) classifies
+     ANY user-written binder name beginning with `__` as
+     `.implDetail`. Concretely, on the pinned binary `fun __i : Foo Nat
+     => (Foo.bar : Nat)` elaborates against the GLOBAL instance while
+     `fun i : Foo Nat => …` elaborates against the LOCAL one, but
+     `install_local_instance_for` installs the local instance
+     unconditionally for both — leanr emits a silently DIFFERENT term
+     for any `__`-prefixed binder whose type is a class, with no error.
+     This predates M4b-3 P5 (it arrived with the local-instances PR,
+     #43); P5 did not introduce it and does not touch it. The fix (a
+     `Name.isImplementationDetail`-style test on the binder name inside
+     `install_local_instance_for`) is a `leanr_meta` BEHAVIOUR change,
+     which this branch's additive-only `leanr_meta` exception does not
+     cover — it is a follow-up slice's work, not a documentation-only
+     fix. See `metactx.rs`'s own doc on `install_local_instance_for`
+     for the full account.
 
 **6. Citations this plan got wrong, and what Task 12 verified.**
 Every citation below was opened against the pinned toolchain source
@@ -1311,24 +1338,49 @@ a stale claim. What Task 12 changed:
      test having caught it — the same standard Task 10's P4 needle was
      held to.
 
-**8. Still open — the `get_instances` re-entrancy seam.** `mem::take`
-of the instance table during `discr_get_match` means a NESTED
-`get_instances` call reports no *global* instances while the outer call
-is in progress. This plan deliberately left it open — closing it
-changes the global lookup path and is its own slice, not a P5 fix — and
-P5 is exactly the kind of change that puts new pressure on it: it
-creates binder-scoped synthesis goals (instance-implicit `fun`/`let`
-binders installing real local instances, per Amendment 8's landed
-prerequisite) that did not exist before this slice. **Whether P5 makes
-this seam LIVE — reachable, not just theoretically present — is
-explicitly Step 3's question, and this task did not run Step 3.** Per
-the controller's own instruction, the whole-branch review (with this
-hazard, `MetavarDecl.localInstances` surviving postponement, and
-`LocalCtxSnapshot::reduced()` renumbering carried in as explicit
-probes) runs separately, on a more capable model, after this task
-completes. This amendment records the seam as still open and still
-unresolved by P5 — not as closed, and not as confirmed live — and
-leaves the determination to that review.
+**8. Determined by the whole-branch review — the `get_instances`
+re-entrancy seam stays LATENT; P5 does not make it live.** `mem::take`
+of the instance table during `discr_get_match` (`instances.rs:607-611`)
+means a NESTED `get_instances` call reports no *global* instances while
+the outer call is in progress. This plan deliberately left the seam
+itself open — closing it changes the global lookup path and is its own
+slice, not a P5 fix — and Amendment 9's first draft left OPEN whether
+P5 puts new pressure on it, since P5 creates binder-scoped synthesis
+goals (instance-implicit `fun`/`let` binders installing real local
+instances, per Amendment 8's landed prerequisite) that did not exist
+before this slice. The whole-branch review that ran after this task
+made that determination, with the evidence recorded here so a future
+reader does not have to re-derive it:
+
+   - The window is reachable only via the traced chain ending in a REAL
+     matcher constant — `reduce_matcher`'s `Stuck` verdict feeding
+     `synth_pending` (`whnf.rs:1740`, inside `sunfold_go_match_body`) —
+     and that call site is the ONLY non-test caller of `synth_pending`
+     in the crate (every other call is inside a `#[test]` fn in
+     `whnf.rs`'s own test module).
+   - `tests/fixtures/elab/Elab0.lean`, the committed environment every
+     P5 corpus record elaborates against, declares no `match`-headed
+     definition and no `_sunfold`-style smart-unfolding auxiliary —
+     nothing P5 added introduces a matcher for that chain to reduce.
+   - Separately, and independently of whether a matcher exists:
+     `local_instance_candidate` (`instances.rs:674`, called at `:642`)
+     is the function P5's new local-instance producers actually feed
+     (`get_instances`' local-candidate loop, `instances.rs:636-644`),
+     and it runs AFTER `self.instances = table` restores the table at
+     `:611` — outside the `mem::take` window at every nesting depth, per
+     the placement argument already recorded in `instances.rs`'s own
+     comment above `get_instances`.
+   - So the seam stays LATENT, not live: P5 shipped new PRODUCERS of
+     local instances but no new PATH into the window itself. The
+     trigger for revisiting is unchanged from the pre-existing comment's
+     own TRIGGER FOR REVISITING note — the first environment carrying a
+     real matcher or smart-unfolding auxiliary, which is M4b-4's match
+     compiler or Mathlib scale, whichever lands first.
+
+`MetavarDecl.localInstances` surviving postponement and
+`LocalCtxSnapshot::reduced()` renumbering, the review's other two
+explicit probes on this hazard, are unaffected by this determination
+and are not separately recorded here.
 
 ## What M4b-3 ships — and the stated non-shipping
 
@@ -2009,7 +2061,7 @@ additive; it says so.
 | P2b-ii | none expected — it reads P2b-i's class accessors and otherwise stays in `leanr_elab` |
 | P3 | Audited against the merged P2a code; larger than this spec's original three. **Additive forwarders:** `get_dec_level` (composes the private `get_level`, `infer.rs:754`, `level_normalize`, and `dec_level_top`, `level.rs`); `is_prop` (widening the `pub(crate)` `lazy_delta.rs:171` to `pub` — needed by `num`'s Prop failure branch; no name clash exists, so no forwarder was added); `checkpoint`/`rollback` (widening the `pub(crate)` `metactx.rs:944`/`:954` to `pub`, plus a `pub` `MetaSnapshot` re-export — needed for `commitWhen`, `Lean/Util/MonadBacktrack.lean:50-60`; both line numbers corrected in the P3 fix wave — `:952` was blank, and `:56` truncated the citation before the `catch ex => restoreState s; throw ex` arm that is the whole reason `rollback` is needed on the error path); `with_assignable_synthetic_opaque` (needed by this plan only for `synthesizeUsingDefaultInstance`, `SyntheticMVars.lean:164` — the spec's earlier attribution to `synthesizeUsingDefaultPrio` was off by one function, and "only" is scope-local: the pin turns the flag on in eleven places, enumerated in `config.rs`'s field doc; both corrected against the pinned v4.33.0-rc1 source in M4b-3 P3 task 4 — moved here from P2a, whose ladder never reaches it; `config.rs`'s module doc named `assign_synthetic_opaque` as a deferred field; task 4 added it, cutting that list from three to two). **The `Config` field's READ SITES are part of this row's contract, not an implementation detail** (added in the P3 fix wave: a config field with no consumer is dead, and a later slice reading only "added the field and the scope" would not know where the flag is consulted). `Config::assign_synthetic_opaque` (`crates/leanr_meta/src/config.rs:95-163`, whose field doc enumerates all three sites and is the authority this row mirrors) is open-coded at three `syntheticOpaque` checks, two of them **gated by the flag**: `assign.rs:157-166` (`unassigned_mvar_id`, transcribing `isAssignable`, `ExprDefEq.lean:1731-1733`) and `lazy_delta.rs:498-501` (`is_def_eq_singleton`'s `isAssignable sFn`, `ExprDefEq.lean:2156` → the same `:1731-1733`; gated in P3 task 4 fix round 1, because it is reachable from inside an `isDefEq` and an ungated copy would refuse an assignment the oracle permits). The third, `discr_path.rs`'s discrimination-key builder (`DiscrTree/Main.lean:308`), is **deliberately NOT gated** — and the reason is not "the oracle never runs it inside the scope", which is false (the flag does survive into synthesis; `synthInstanceCore?`'s `withConfig`, `SynthInstance.lean:963-964`, overrides six fields but not this one). What moots the gate there is `withNewMCtxDepth` (`SynthInstance.lean:978`): every mvar from outside the search is at a different depth, so `isReadOnlyOrSyntheticOpaque`'s FIRST arm (`Basic.lean:981-982`) returns `true` before the kind is examined. Depth is this crate's standing tier-1 seam, so wiring the flag in there without modelling depth would flip `Star`/`Other` keys the oracle keeps at `Other`. `whnf.rs`'s `synth_pending` guard is not on the list at all: `synthPendingImp` (`SynthInstance.lean:1033-1036`) matches `mvarDecl.kind` directly and never reads the config. `mk_raw_nat_lit` is NOT needed (M4b-3 P3 task 4): `Store::expr_lit_nat` (`leanr_kernel/src/bank/terms.rs:535`) and `MetaCtx::store_mut` are both already public, which is exactly how `builtin/lit.rs`'s `elab_str` reaches `expr_lit_str`. **New:** `default_instance_priorities` — the *global* descending distinct priority set (`getDefaultInstancesPriorities`); the existing `default_instances_of` is per-class and cannot produce it. **Not additive, and the one item that isn't:** `mk_const_with_fresh_mvar_levels` and `forall_meta_telescope_reducing` (returning binder infos, which `synthesizeUsingDefaultInstance` needs to pick out the `instImplicit` binders as new pending goals). Both loops existed — `refresh_instance_levels` and the telescope inside `get_subgoals` — but private, specialized to `&Instance`, and discarding binder infos. (Line references dropped: M4b-3 P3 task 4 renamed the first and moved the second, so the numbers this row carried before the commit no longer resolve. The generalized forms are `MetaCtx::mk_const_with_fresh_mvar_levels` and `MetaCtx::forall_meta_telescope_reducing`, both in `synth.rs`.) P3 **generalizes them out of `synth.rs` and has `get_subgoals` call the generalized form**, rather than duplicating a fidelity-critical telescope loop in `leanr_elab`. Behavior-neutral, gated by `synth.rs`'s existing tests plus the `leanr_meta` oracle corpus staying byte-identical. |
 | P4 | Revised by § Amendment 5 item 12. The originally listed `unfold_definition`, `get_level`, `whnf_r`, `mk_arrow` are NOT widened: `coe.rs` lives inside `leanr_meta`, so `unfold_definition` (`whnf.rs:2594`) and `get_level` (`infer.rs:754`) stay `pub(crate)`, `whnf_r` is an in-crate two-line composition, and `mk_arrow` (today only `synth.rs:3274`'s test helper) becomes a crate-private constructor. What P4 adds to the public surface: the **new modules** `coe.rs` + `transform.rs` (§ Global constraints — the deliberate widening) with entry points `coerce` / `coerce_to_function` / `coerce_to_sort` / `expand_coe`; `try_synth_instance` + `pub enum LOption` (moved from `ladder.rs`, item 3); a scoped `with_transparency(mode, f)` helper over the existing `pub set_transparency` (`metactx.rs:401`), save/run/restore with the same no-drop-guard caveat and justification as `with_assignable_synthetic_opaque` (§ Follow-ups item 4); `MetaError::CoeExpansionMismatch(String)` for the three post-expansion hard errors (item 7); and the `coe_decls` `EnvExtensions` field (item 2). All additive; no existing `leanr_meta` path changes behaviour, gated by both crates' committed corpora staying byte-identical. |
-| P5 | Revised by Amendment 9 — the row read "none expected" through planning, but `crates/leanr_meta/src/metactx.rs` is +178/-12, the only `leanr_meta` file this plan touches. "Additive" is not the right single word for it; three distinct shapes, all in one commit. **(1) Two genuinely new public methods:** `push_local_decl_without_instance` and `install_local_instance_for_last_pushed` — a mint-then-defer-the-install pair for `builtin/binder.rs`'s `fun`-binder path, which must refine an elided binder's domain via `propagateExpectedType` (matching the oracle's own `elabFunBinderViews` ordering, `Binders.lean:442` before `:444`) after the fvar exists but before the `isClass?` test. Purely additive; one call site each, both new code on this branch (`binder.rs:812`, `:816`). **(2) One mechanical extract:** `push_local_decl`'s mint-and-push body moved into a new private `push_local_decl_inner`, shared by the new method in (1); the 12 deleted lines are a doc block, a signature line and one comment, no behavioural line removed — verified byte-for-byte against the merge-base `push_local_decl`. **(3) One edit to an existing function:** `install_local_instance_for` gained an unconditional `self.lctx_snapshot = None` after its `is_class` check, moving a memo-drop that both pre-existing callers (`push_local_decl`, `push_let_decl`) already performed themselves immediately after calling it — proven behaviour-neutral for both by direct comparison against the merge-base source (the final observable state, `lctx_snapshot == None`, is unchanged; the callers keep their own now-redundant clears too, "harmless double-clearing, not load-bearing duplication"). The new line is load-bearing only for the new caller in (1), which has no clear of its own and depends on it to fix a real round-1 bug (a stale memo surviving a deferred install). **Why the addition was needed:** the oracle runs `propagateExpectedType` before its `isClass? type` test, while leanr's `push_local_decl` used to mint, push and class-check in one call — an elided binder whose domain only becomes class-typed via propagation would silently lose its local instance, a silently different term. **The rejected alternative:** leave the divergence and name it in a comment; rejected because the failure is silent rather than loud, which this slice's own discipline forbids. Neutrality: the synthesis corpus stayed at 32 records (unmoved), matching a slice that adds no `leanr_meta` *behaviour*, only additive accessors plus one behaviour-neutral edit. |
+| P5 | Revised by Amendment 9 — the row read "none expected" through planning, but `crates/leanr_meta/src/metactx.rs` is +184/-12 (measured at HEAD `736d0a2`; +178/-12 was Task 11's own snapshot, before this same Amendment 9 commit's own doc edit to `install_local_instance_for` added 6 more lines), the only `leanr_meta` file this plan touches. "Additive" is not the right single word for it; three distinct shapes, all in one commit. **(1) Two genuinely new public methods:** `push_local_decl_without_instance` and `install_local_instance_for_last_pushed` — a mint-then-defer-the-install pair for `builtin/binder.rs`'s `fun`-binder path, which must refine an elided binder's domain via `propagateExpectedType` (matching the oracle's own `elabFunBinderViews` ordering, `Binders.lean:442` before `:444`) after the fvar exists but before the `isClass?` test. Purely additive; one call site each, both new code on this branch (`binder.rs:812`, `:816`). **(2) One mechanical extract:** `push_local_decl`'s mint-and-push body moved into a new private `push_local_decl_inner`, shared by the new method in (1); the 12 deleted lines are a doc block, a signature line and one comment, no behavioural line removed — verified byte-for-byte against the merge-base `push_local_decl`. **(3) One edit to an existing function:** `install_local_instance_for` gained an unconditional `self.lctx_snapshot = None` after its `is_class` check, moving a memo-drop that both pre-existing callers (`push_local_decl`, `push_let_decl`) already performed themselves immediately after calling it — proven behaviour-neutral for both by direct comparison against the merge-base source (the final observable state, `lctx_snapshot == None`, is unchanged; the callers keep their own now-redundant clears too, "harmless double-clearing, not load-bearing duplication"). The new line is load-bearing only for the new caller in (1), which has no clear of its own and depends on it to fix a real round-1 bug (a stale memo surviving a deferred install). **Why the addition was needed:** the oracle runs `propagateExpectedType` before its `isClass? type` test, while leanr's `push_local_decl` used to mint, push and class-check in one call — an elided binder whose domain only becomes class-typed via propagation would silently lose its local instance, a silently different term. **The rejected alternative:** leave the divergence and name it in a comment; rejected because the failure is silent rather than loud, which this slice's own discipline forbids. Neutrality: the synthesis corpus stayed at 32 records (unmoved), matching a slice that adds no `leanr_meta` *behaviour*, only additive accessors plus one behaviour-neutral edit. |
 
 ## Error handling
 

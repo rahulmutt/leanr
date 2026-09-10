@@ -459,7 +459,7 @@ fn intern_binder_name(elab: &mut TermElabM, text: &str) -> Result<NameId, ElabEr
 }
 
 /// One elaborated-binder view: the oracle's `BinderView`
-/// (`Lean/Elab/Binders.lean`, `toBinderViews` at `:436`). A single
+/// (`Lean/Elab/Binders.lean`, `toBinderViews` at `:140-166`). A single
 /// `funBinder` item can expand to SEVERAL views — `{a b : Type}` binds
 /// two names sharing one type syntax.
 struct FunBinderView {
@@ -624,7 +624,8 @@ fn extract_fun_binder_views(
                 }
                 // `[inst : C α]` / `[C α]` — optional name, BARE type at
                 // child [2] (no `KIND_NULL` wrapper, unlike the groups
-                // above). oracle: `Binders.lean:450-453`.
+                // above). oracle: `toBinderViews`'s `instBinder` arm,
+                // `Binders.lean:161-165`.
                 "Lean.Parser.Term.instBinder" => {
                     let (name, ty) = extract_inst_binder_layout(elab, n, kinds)?;
                     Ok(vec![FunBinderView {
@@ -807,6 +808,20 @@ pub fn elab_fun(
                 // part of the push (fix round 1, Finding 2:
                 // `push_local_decl`'s own inline install ran BEFORE
                 // propagation and silently missed exactly this case).
+                // NOT reproduced: the oracle runs `propagateExpectedType`
+                // under `withLCtx s.lctx s.localInsts` where `s.lctx`
+                // does NOT yet hold the new binder — `lctx` with the
+                // binder is a local value at `:440`, only folded into
+                // `s` at `:443`, AFTER `:442`'s propagation call —
+                // whereas this pushes `fvar` into the ambient `lctx`
+                // first and propagates second, so an aux mvar MINTED
+                // DURING this propagation call captures a wider ambient
+                // context than the oracle's equivalent step would (the
+                // `is_def_eq` assignment on the domain mvar itself is
+                // unaffected: that mvar's own recorded lctx predates
+                // this push, and scope-checking keys on that recorded
+                // lctx, not on whatever is ambient when the assignment
+                // happens).
                 let fvar = elab
                     .mctx
                     .push_local_decl_without_instance(view.name, dom, view.bi)

@@ -111,15 +111,22 @@ impl<'e> TermElabM<'e> {
     /// helpers alone would leave that public parameter with NO consumer
     /// at all — a `_kinds` on the crate's API surface, which is a louder
     /// falsehood than a threaded-but-unread argument, and would have to
-    /// be re-threaded through this exact cycle the moment a `.postponed`
-    /// arm (P5) lands inside `synthesize_pending_inst_mvar_committed`,
-    /// since that DOES re-elaborate syntax. (M4b-3 P4 shipped the `.coe`
+    /// be re-threaded through this exact cycle if a future `.postponed`
+    /// arm ever lands inside `synthesize_pending_inst_mvar_committed`,
+    /// since that WOULD re-elaborate syntax. **P5 did not land one
+    /// there** — its own postponement work (M4b-3 P5 task 6, the
+    /// `useImplicitLambda` third-result finding) dispatches through a
+    /// different mechanism, `elab.rs`'s `UseImplicitLambda::Postpone`,
+    /// to a named `UnsupportedSyntax` seam owned by M4b-4, not through
+    /// this fixpoint's `.typeClass` walk. (M4b-3 P4 shipped the `.coe`
     /// producer and its two consumer arms, but neither lands here: this
     /// rung's own walk skips every non-`.typeClass` kind by construction
     /// — see the oracle citation on `synthesize_some_using_default_prio`
     /// above — so the `.coe` half of this speculation resolved without
-    /// touching this function.) Recorded as a deliberate call, so a
-    /// future reader does not have to re-derive it.
+    /// touching this function.) So this parameter's `.postponed`
+    /// justification is STILL speculative, unclaimed by any landed
+    /// slice — recorded as a deliberate call, so a future reader does
+    /// not have to re-derive it or wonder whether P5 already closed it.
     pub fn synthesize_using_default(&mut self, kinds: &KindInterner) -> Result<bool, ElabError> {
         // oracle: "Recall that `prioSet` is stored in descending order".
         // `MetaCtx::default_instance_priorities` guarantees that

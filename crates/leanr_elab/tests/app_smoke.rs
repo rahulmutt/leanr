@@ -1598,7 +1598,7 @@ fn bare_ascription_coerces_against_the_callers_expected_type() {
     );
 }
 
-/// oracle: `App.lean:826-829`'s `| false, some defVal, _ => addNewArg
+/// oracle: `App.lean:828`'s `| false, some defVal, _ => addNewArg
 /// argName defVal`. `withDefault (n : Nat := Nat.zero) : Nat := n`
 /// (`Elab0.lean`) — an omitted argument takes the DECLARED default
 /// value directly, not a fresh mvar.
@@ -1670,4 +1670,97 @@ fn omitted_auto_param_mints_a_reported_tactic_mvar() {
             panic!("an omitted autoParam argument must never silently elaborate, got {other:?}")
         }
     }
+}
+
+// -- Whole-branch review, item 11: a `.typeClass` synthetic mvar --------
+// -- registered under an instance-implicit binder, deferred past its --
+// -- closing, resolved at the top-level fixpoint against the LOCAL -----
+// -- instance -------------------------------------------------------
+
+/// Coverage gap the review named: every existing test that resolves a
+/// `.typeClass` mvar minted under an instance-implicit `fun [inst : C]`
+/// binder either resolves it at `finalize` WHILE STILL IN SCOPE
+/// (`binder_smoke.rs`'s `fun_elided_binder_registers_as_a_local_instance_only_after_propagation`)
+/// or crosses the binder and lands on a GLOBAL instance. The mechanism
+/// that reinstalls a closed binder's local instances for a mvar
+/// resolved after the fact is covered at unit level
+/// (`leanr_meta::metactx`'s `with_mvar_context_reinstalls_local_instances`,
+/// which drives `with_mvar_context` directly on a hand-built `MetaCtx`)
+/// but not end-to-end through `synthesize_app_inst_mvars`
+/// (`app/state.rs:459-473`) and the real fixpoint. This closes that gap.
+///
+/// **Why `useWrap` used BARE forces genuine deferral.** `useWrap {a :
+/// Type} [Wrap a] (x : a) : a := Wrap.wrap x` (`Elab0.lean`). A bare
+/// `useWrap` (no explicit args supplied) auto-inserts `{a}` and
+/// `[Wrap a]` as fresh mvars, then FINALIZES without ever reaching the
+/// explicit `x` param (no more args, no expected type to eta-expand
+/// against) — so `a` stays unassigned when `synthesize_app_inst_mvars`
+/// commits, `Wrap ?a` is genuinely stuck (`try_synth_instance` answers
+/// `LOption::Undef`, not a candidate list), and the `[Wrap a]` mvar is
+/// registered as a PENDING `.typeClass` synthetic mvar rather than
+/// resolved inline. Confirmed in isolation: `(fun [inst : Wrap Nat] =>
+/// useWrap)` alone (nothing left to fix `a`) elaborates to
+/// `ElabError::StuckSyntheticMVar` — the same deferral this test
+/// exploits, just left permanently unresolved there.
+///
+/// **What supplies the LATER fix for `a`, after the binder has
+/// closed.** `let g := useWrap; g Nat.zero` gives the bare `useWrap`
+/// (still inside `inst`'s scope, since it is the `let`'s VALUE) its own
+/// separate finalize — deferred exactly as above — and then applies the
+/// let-bound `g` to `Nat.zero` in a SEPARATE application unit. That
+/// unit's own argument check (`ensure_has_type`, `Nat.zero`'s type
+/// against `g`'s domain `?a`) assigns `?a := Nat` — the assignment that
+/// finally makes the pending mvar's type ground. Both units are still
+/// textually inside the outer `fun [inst : Wrap Nat] => …`'s body, but
+/// neither the elaborator nor this test needs them to be: the whole
+/// point is that resolution happens through the TOP-LEVEL fixpoint
+/// (`elab_term_and_synthesize`, called once after the ENTIRE term —
+/// including the outer binder's own `lctx_restore` — has already been
+/// built), not through any in-scope retry. By fixpoint time `inst` is
+/// off the ambient `lctx`; the mvar's own RECORDED context (captured at
+/// mint time, still carrying `inst`) is what `with_mvar_context`
+/// reinstalls to find it.
+///
+/// A bare identifier as an application HEAD that is itself a `fun` is
+/// unavailable here — `elabAppFn` is scoped to the identifier case only
+/// in this slice (M4b-1 P1; the general-term-in-function-position arm
+/// is M4b-4's LVal machinery) — so this cannot be written as
+/// `(fun [inst : Wrap Nat] => useWrap) Nat.zero`. Naming the
+/// intermediate value with `let` sidesteps that restriction; it is not
+/// load-bearing for what this test demonstrates; wrapping `useWrap`
+/// itself in a second `fun` before the `let` was also tried and hits an
+/// unrelated pre-existing limitation (`let g := (fun (z : Nat) => id);
+/// g Nat.zero Nat.zero` fails the same way, with no instance or local
+/// context involved at all) — worth a future look, but out of scope
+/// here since this construction does not need it.
+///
+/// **Mutation-discriminating by construction, not by an added check**:
+/// the LOCAL `inst` and the GLOBAL `instWrapNat` (also in scope,
+/// `Elab0.lean`) both solve `Wrap Nat` and are individually sufficient,
+/// but they encode to DIFFERENT terms — a bound-variable reference vs.
+/// a `const` — so a version of `with_mvar_context` that failed to
+/// reinstall the mvar's recorded local instances would make this
+/// resolve to the global `instWrapNat` instead, and the assertion below
+/// would fail. Confirmed directly: `let g := useWrap; g Nat.zero` with
+/// NO enclosing instance binder (same deferral, no local instance in
+/// scope at fixpoint time) resolves to `instWrapNat`, not a bvar — the
+/// contrasting case that shows this test is reading the local/global
+/// choice, not some other property.
+#[test]
+fn deferred_typeclass_mvar_under_a_closed_binder_resolves_to_the_local_instance() {
+    let j = support::elab_and_synthesize("fun [inst : Wrap Nat] => let g := useWrap; g Nat.zero")
+        .expect("the pending .typeClass mvar must resolve once `a` is grounded");
+    assert_eq!(j["k"], "lam");
+    assert_eq!(j["bi"], "c", "the outer binder is instance-implicit");
+    let let_value = &j["b"]["v"];
+    assert_eq!(let_value["k"], "app", "@useWrap Nat <instance>");
+    assert_eq!(let_value["f"]["f"]["n"], "useWrap");
+    assert_eq!(
+        let_value["a"],
+        serde_json::json!({"k": "bvar", "i": 0}),
+        "must be the LOCAL `inst` (a bound-variable reference into the \
+         closed binder's recorded context), not the global `instWrapNat` \
+         — proves `with_mvar_context` reinstalled the local instance \
+         table for a mvar resolved after its binder closed"
+    );
 }

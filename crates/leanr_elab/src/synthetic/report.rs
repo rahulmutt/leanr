@@ -110,7 +110,7 @@ impl<'e> TermElabM<'e> {
                     })
                 })
             }
-            // oracle: `SyntheticMVars.lean:304-310`'s `.tactic` arm —
+            // oracle: `SyntheticMVars.lean:311-315`'s `.tactic` arm —
             // reachable only once a real `by`/tactic-framework evaluator
             // occupies rung 5 (`ladder.rs`) and can answer `false` for a
             // genuinely stuck tactic; today rung 5 always errors before

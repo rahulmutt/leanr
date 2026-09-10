@@ -406,7 +406,7 @@ fn process_explicit_arg(
     // falling through to the eta chain and building a different term.
     if !app.ctx.explicit {
         let param_type = app.get_param_type()?;
-        // oracle: `App.lean:827` — `| false, some defVal, _ => addNewArg
+        // oracle: `App.lean:828` — `| false, some defVal, _ => addNewArg
         // argName defVal; main`. The `optParam` half of the arm.
         if let Some(def_val) = opt_param_default(app, param_type)? {
             // oracle: `addNewArg argName defVal` — the declared default
@@ -415,7 +415,7 @@ fn process_explicit_arg(
             add_new_arg(app, def_val)?;
             return Ok(true);
         }
-        // oracle: `App.lean:828-852` — `| false, _, some (.const
+        // oracle: `App.lean:829-852` — `| false, _, some (.const
         // tacticDecl _) => ...`, the `autoParam` half of the same match.
         // `getAutoParamTactic?` (`Lean/Expr.lean:1702-1705`) returns
         // `some tacticDecl`; the oracle then `evalSyntaxConstant`s that
@@ -549,10 +549,11 @@ fn auto_param_tactic(app: &AppElab, ty: ExprId) -> Result<Option<ExprId>, ElabEr
 /// producer for `SyntheticMVarKind::Coe`) and register it under the new
 /// `Tactic` kind so the synthetic-mvar ladder owns it from here on.
 ///
-/// Two things the oracle's `mkTacticMVar` does that this does NOT, both
-/// deliberately, both because EXECUTING the tactic is out of this
-/// task's scope (the brief's own words: mint the mvar, register it,
-/// "with execution left to" the ladder — never evaluate the tactic):
+/// Three things the oracle's caller-side match does that this does NOT
+/// model, all deliberately, all because EXECUTING the tactic is out of
+/// this task's scope (the brief's own words: mint the mvar, register
+/// it, "with execution left to" the ladder — never evaluate the
+/// tactic):
 ///   - `debug.byAsSorry`'s `Prop`-typed short-circuit
 ///     (`TermElabM.lean:1469-1470`) replaces the mvar with a labeled
 ///     `sorry` under a debug option. There is no `by`-block here to
@@ -562,6 +563,17 @@ fn auto_param_tactic(app: &AppElab, ty: ExprId) -> Result<Option<ExprId>, ElabEr
 ///     oracle's `.tactic` kind carries are not stored: nothing in leanr
 ///     ever resumes this mvar with a real tactic run, so there is no
 ///     later reader for either.
+///   - the caller, `auto_param_tactic` (`args.rs:437`), reads only
+///     `.is_some()` on the wrapper, collapsing the oracle's TWO
+///     `getAutoParamTactic? = some _` arms into one: `some (.const
+///     tacticDecl _)` (`App.lean:829`), which the oracle evaluates and
+///     mints a tactic mvar for, versus `some _` (`:853-854`, "autoParam
+///     `{argName}` is not a constant"), which the oracle rejects
+///     outright. Both leanr paths end in an error either way — a
+///     `TacticMVar` the ladder reports unsolved, or the eventual
+///     elaboration error for a malformed `autoParam` wrapper — so no
+///     wrong TERM results, but the `.const`-vs-`_` distinction itself is
+///     unmodelled.
 ///
 /// `param_name` is the oracle's own `TacticMVarKind.autoParam (argName :
 /// Name)` payload — rendered ONCE here (`AppElab::render_name`'s own

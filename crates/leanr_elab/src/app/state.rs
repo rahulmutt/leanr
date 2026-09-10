@@ -222,7 +222,8 @@ impl<'a, 'e> AppElab<'a, 'e> {
     /// oracle: `getArgExpectedType` (`App.lean:269-273`) —
     /// `getParamType` with `consumeTypeAnnotations` applied, i.e. the
     /// `optParam`/`autoParam`/`outParam`/`semiOutParam` wrapper stripped.
-    /// P1 still has no optParam/autoParam ARM (that is P5's); the
+    /// P5 landed the optParam/autoParam default-filling ARM
+    /// (`app/args.rs`'s `opt_param_default`/`auto_param_tactic`); the
     /// `outParam` half has been live since M4b-3 P2b-ii's `Get`
     /// (`@Get.get`'s `{elem : outParam (Type u_3)}` is stripped on
     /// every `Get.get` record) and is behaviour-neutral on current

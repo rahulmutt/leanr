@@ -783,6 +783,11 @@ impl<'e> MetaCtx<'e> {
         ty: ExprId,
     ) -> Result<(), MetaError> {
         debug_assert_eq!(
+            self.local_names.len(),
+            self.lctx.save(),
+            "local_names/lctx lockstep invariant violated"
+        );
+        debug_assert_eq!(
             self.local_names.last().map(|(_, f)| *f),
             Some(fvar),
             "fvar must be the most recently pushed local decl"
@@ -837,14 +842,32 @@ impl<'e> MetaCtx<'e> {
     ///
     /// oracle: `withNewFVar` (`Basic.lean:1785-1789`). The oracle's
     /// implementation-detail filter (`withNewLocalInstanceImp`,
-    /// `:1383-1388`) is **vacuously satisfied** here: leanr's
-    /// `LocalDecl` (`leanr_kernel/src/local_ctx.rs:37-43`) carries no
-    /// kind field, and nothing in leanr mints an implementation-detail
-    /// declaration, so there is nothing to filter. Adding a field to a
-    /// kernel struct for a producer that does not exist would widen the
-    /// TCB for nothing. SEAM — trigger for revisiting: the slice that
-    /// builds the tactic framework or the match compiler is the first to
-    /// mint one, and it must add the filter in the same change.
+    /// `Meta/Basic.lean:1383-1388`) checks `localDecl.isImplementationDetail`
+    /// and skips the push when it holds. That filter is **genuinely
+    /// missing here, not vacuous**: leanr's `LocalDecl`
+    /// (`leanr_kernel/src/local_ctx.rs:37-43`) carries no kind field, but
+    /// the oracle's producer of an implementation-detail declaration is
+    /// not some internal minting leanr has no counterpart for — it is
+    /// `LocalDeclKind.ofBinderName` (`BindersUtil.lean:21-23`), which
+    /// classifies ANY **user-written** binder name beginning with `__`
+    /// as `.implDetail`. That is ordinary surface syntax leanr already
+    /// elaborates. Concretely, on the pinned binary
+    /// `fun __i : Foo Nat => (Foo.bar : Nat)` elaborates against the
+    /// GLOBAL instance (the `__i` local is filtered out) while
+    /// `fun i : Foo Nat => …` elaborates against the LOCAL one — but
+    /// `push_local_decl_inner` installs the local instance unconditionally
+    /// for both, so leanr emits a **silently different term than the
+    /// oracle for any `__`-prefixed binder whose type is a class**, with
+    /// no error. This predates M4b-3 P5 — `install_local_instance_for`
+    /// arrived with the local-instances PR (#43) — and the fix (an
+    /// `isImplementationDetail`-style test on the binder name inside this
+    /// method) is a `leanr_meta` BEHAVIOUR change, which this slice's
+    /// additive-only `leanr_meta` exception does not cover; it belongs to
+    /// a follow-up slice. SEAM — trigger for revisiting: any slice that
+    /// elaborates or generates `__`-prefixed binders under a class type
+    /// (the tactic framework and the match compiler are the most likely
+    /// first minters of such names) must close this before that path is
+    /// trustworthy.
     ///
     /// **`lctx_snapshot` correctness (fix round 2)**: this is the ONE
     /// place a NEW local instance is ever *pushed* onto `local_instances`
