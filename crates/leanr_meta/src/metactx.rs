@@ -764,6 +764,19 @@ impl<'e> MetaCtx<'e> {
     /// `is_def_eq` in between (M4b-3 P5 task 4's own use) sees that
     /// assignment: `is_class` (`Basic.lean:1358-1381` port) reduces
     /// through it via `is_class_expensive`'s whnf fallback.
+    ///
+    /// **Fix round 2**: this used to return without dropping
+    /// `lctx_snapshot`, leaving the memo stale across the very window
+    /// this method exists to close — anything between the push and this
+    /// call that repopulates the cache (`with_mvar_context`'s own
+    /// `install_lctx`, reachable from `propagate_expected_type` through
+    /// `whnf.rs`'s pending-instance-mvar path or `assign.rs`'s
+    /// `mk_aux_mvar_for` rescue) left a snapshot missing the
+    /// just-installed instance in force for every mvar minted
+    /// afterward, silently. The drop now lives inside
+    /// `install_local_instance_for` itself (this method's own callee),
+    /// so it is no longer this method's job to remember — see that
+    /// method's doc for why the fix sits there instead of here.
     pub fn install_local_instance_for_last_pushed(
         &mut self,
         fvar: ExprId,
@@ -832,6 +845,27 @@ impl<'e> MetaCtx<'e> {
     /// TCB for nothing. SEAM — trigger for revisiting: the slice that
     /// builds the tactic framework or the match compiler is the first to
     /// mint one, and it must add the filter in the same change.
+    ///
+    /// **`lctx_snapshot` correctness (fix round 2)**: this is the ONE
+    /// place that ever writes `local_instances`, so the memo-drop that
+    /// invariant needs (`lctx_snapshot`'s own doc: "dropped by every
+    /// writer of either [`lctx` or `local_instances`]") lives HERE,
+    /// unconditionally, rather than at each of this method's callers.
+    /// Round 1 put it at two of the three call sites
+    /// (`push_local_decl`, `push_let_decl`) and missed the third
+    /// (`install_local_instance_for_last_pushed`) — a caller-side
+    /// convention that is easy to forget exactly because nothing
+    /// enforces it. Folding the drop in here makes it structural: ANY
+    /// future caller of this method gets it for free, and it fires even
+    /// on the `is_class? = none` branch (a no-op clear is always safe;
+    /// a missed one on the ELSE branch — reachable whenever `is_class`
+    /// itself repopulates the cache internally via its own reduction —
+    /// would reopen the same hole for a class-typed `ty` that answers
+    /// `none`). The two callers below keep their own EXPLICIT clears
+    /// too, since `push_local_decl_inner`'s mint-and-push half is
+    /// ALSO independently a writer of `lctx`/`local_names` and would
+    /// need one regardless of this method ever running — harmless
+    /// double-clearing, not load-bearing duplication.
     fn install_local_instance_for(
         &mut self,
         fvar: ExprId,
@@ -841,6 +875,7 @@ impl<'e> MetaCtx<'e> {
         if let Some(class_name) = self.is_class(ty)? {
             self.local_instances.push(class_name, fvar, depth);
         }
+        self.lctx_snapshot = None;
         Ok(())
     }
 
@@ -1868,6 +1903,62 @@ mod tests {
             assert!(
                 ctx.local_instances.entries().is_empty(),
                 "restoring the local context takes the instance out of scope"
+            );
+        });
+    }
+
+    /// Fix round 2: `install_local_instance_for_last_pushed`
+    /// (`push_local_decl_without_instance`'s deferred install half,
+    /// added round 1 for Finding 2's ordering fix) used to return
+    /// without dropping `lctx_snapshot`, leaving the memo STALE across
+    /// exactly the window it exists to close. Reproduces the review's
+    /// own reachability path directly rather than asserting the drop in
+    /// isolation: `with_mvar_context` — reachable from
+    /// `propagate_expected_type`'s own `is_def_eq` via `whnf.rs`'s
+    /// pending-instance-mvar path or `assign.rs`'s `mk_aux_mvar_for`
+    /// rescue — REPOPULATES the cache on its way out (`install_lctx`
+    /// reads, and so rebuilds and caches, `current_lctx()` on entry,
+    /// then reinstalls that exact snapshot on exit), with a snapshot
+    /// that predates the instance install below.
+    #[test]
+    fn install_local_instance_for_last_pushed_drops_a_stale_memo() {
+        with_class_ctx(|ctx, add| {
+            let add_n = class_app(ctx, add);
+            let n = const_named(ctx, "N");
+
+            // `propagate_expected_type`'s own shape: push first, WITHOUT
+            // installing — the domain is not yet known to be class-typed
+            // (an elided binder's domain starts as a fresh mvar; `n`
+            // stands in for "not yet Add N" here).
+            let fvar = ctx
+                .push_local_decl_without_instance(None, n, BinderInfo::Default)
+                .expect("push");
+
+            // Anything on `propagate_expected_type`'s own path that
+            // enters and leaves a metavariable's context repopulates the
+            // memo in between — any DECLARED mvar does.
+            let (_, other_mvar) = fresh_mvar(ctx, n);
+            ctx.with_mvar_context(other_mvar, |_| {});
+            assert!(
+                ctx.lctx_snapshot.is_some(),
+                "with_mvar_context must have repopulated the memo for \
+                 this test to mean anything"
+            );
+
+            // NOW the domain is discovered to be class-typed (the
+            // oracle's own `isClass? type` test, run AFTER propagation
+            // per Finding 2) and installed.
+            ctx.install_local_instance_for_last_pushed(fvar, add_n)
+                .expect("install");
+
+            // The memo must reflect the just-installed instance, not
+            // the stale pre-install snapshot `with_mvar_context` cached.
+            let snap = ctx.current_lctx();
+            assert_eq!(
+                snap.local_instances().len(),
+                1,
+                "current_lctx() returned a snapshot that predates the \
+                 local-instance install"
             );
         });
     }

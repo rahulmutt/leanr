@@ -595,19 +595,19 @@ fn fun_binder_domain_comes_from_the_expected_type() {
     assert_eq!(j["b"]["k"], "app");
 }
 
-/// Fix round 1, Finding 3: `fun_propagation_walks_a_multi_binder_telescope`
-/// (`(fun x y => x : Nat -> Nat -> Nat)`) lived here and is DELETED, not
-/// kept — the mutation check in this task's own report showed it passes
-/// even with `propagate_expected_type` stubbed to `Ok(None)`:
-/// `elab_ascription`'s own final `isDefEq` between the fun's inferred
-/// (mvar-domain) Pi type and the ascribed Pi type assigns both domain
-/// mvars post hoc, with no help from propagation, because neither
-/// binder's domain is actually NEEDED before the whole lambda is built
-/// (the body `x` never applies a bound variable as a function).
-/// `fun_propagation_pins_the_second_binders_domain_too` below subsumes
-/// its case (also a multi-binder telescope) while actually
-/// discriminating the feature (confirmed by the same mutation check).
-///
+// Fix round 1, Finding 3: `fun_propagation_walks_a_multi_binder_telescope`
+// (`(fun x y => x : Nat -> Nat -> Nat)`) lived here and is DELETED, not
+// kept — the mutation check in this task's own report showed it passes
+// even with `propagate_expected_type` stubbed to `Ok(None)`:
+// `elab_ascription`'s own final `isDefEq` between the fun's inferred
+// (mvar-domain) Pi type and the ascribed Pi type assigns both domain
+// mvars post hoc, with no help from propagation, because neither
+// binder's domain is actually NEEDED before the whole lambda is built
+// (the body `x` never applies a bound variable as a function).
+// `fun_propagation_pins_the_second_binders_domain_too` below subsumes
+// its case (also a multi-binder telescope) while actually
+// discriminating the feature (confirmed by the same mutation check).
+
 /// The non-`forallE` arm of `propagateExpectedType` drops the expected
 /// type to `none` rather than keeping the stale one — once the
 /// telescope runs out of expected-type domains, propagation ITSELF
