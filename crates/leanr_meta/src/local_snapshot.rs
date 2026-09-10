@@ -54,6 +54,32 @@ impl LocalCtxSnapshot {
             lctx.save(),
             "local_names/lctx lockstep invariant violated in a snapshot"
         );
+        // `LocalInstance::at_depth` is "the index of its own declaration
+        // in `lctx.decls`" (`local_instance.rs`), and `local_names` is
+        // positionally parallel to that list by the assertion just
+        // above — so the entry it names must be the instance's own
+        // fvar. Checked HERE because a snapshot is the only place the
+        // three components are assembled from parts that were not
+        // necessarily built together: `reduced` filters and renumbers
+        // them, and a renumbering that got the arithmetic wrong is
+        // otherwise invisible until `truncate_to` silently pops a
+        // still-in-scope instance one call site away.
+        debug_assert!(
+            local_instances.iter().all(|li| local_names
+                .get(li.at_depth)
+                .is_some_and(|(_, f)| *f == li.fvar)),
+            "a local instance's at_depth must index its own declaration"
+        );
+        // `LocalInstanceStack::truncate_to` pops from the back and stops
+        // at the first survivor, so the entries it is handed must be in
+        // non-decreasing depth order — the same precondition
+        // `LocalInstanceStack::push` asserts one entry at a time.
+        debug_assert!(
+            local_instances
+                .windows(2)
+                .all(|w| w[0].at_depth <= w[1].at_depth),
+            "local instances in a snapshot must be in non-decreasing depth order"
+        );
         LocalCtxSnapshot {
             lctx,
             local_names,
@@ -100,9 +126,13 @@ impl LocalCtxSnapshot {
 
     /// The local instances in scope in this context, innermost last.
     ///
-    /// No non-test consumer yet (Task 6's `get_instances`); exercised
-    /// today only by this crate's own tests, same posture as
-    /// `LocalInstanceStack::entries` (`local_instance.rs`).
+    /// No non-test consumer, and none is coming: `get_instances`
+    /// (`instances.rs`) reads the AMBIENT stack
+    /// (`self.local_instances.to_vec()`) rather than a snapshot,
+    /// because a snapshot only ever reaches it already installed as the
+    /// ambient context by `install_lctx`. Exercised today only by this
+    /// crate's own tests, same posture as `LocalInstanceStack::entries`
+    /// (`local_instance.rs`).
     #[allow(dead_code)]
     pub(crate) fn local_instances(&self) -> &[LocalInstance] {
         &self.local_instances
@@ -146,10 +176,12 @@ impl LocalCtxSnapshot {
     /// `local_names`/`lctx` are filtered together, because
     /// `LocalCtxSnapshot::new` debug-asserts they are in lockstep and
     /// every reader of one is paired with a reader of the other.
-    /// `local_instances` is filtered too, for the separate reason given
-    /// at its own filter below — it has no lockstep invariant with the
-    /// other two, but a stale instance is exactly as unsound as a stale
-    /// decl would be.
+    /// `local_instances` is filtered AND RENUMBERED too, for the
+    /// separate reasons given at its own filter below — it has no
+    /// lockstep invariant with the other two, but a stale instance is
+    /// exactly as unsound as a stale decl would be, and an instance
+    /// whose recorded depth still counts erased decls is stale even
+    /// when its own declaration survived.
     pub(crate) fn reduced(
         &self,
         to_remove: &[(ExprId, NameId)],
@@ -159,14 +191,33 @@ impl LocalCtxSnapshot {
         for (_, fvar_id) in to_remove {
             lctx.erase(*fvar_id);
         }
-        let local_names = self
-            .local_names
-            .iter()
-            .filter(|(_, f)| {
-                !fvar_id_of(*f).is_some_and(|id| to_remove.iter().any(|(_, rid)| *rid == id))
-            })
-            .cloned()
-            .collect();
+        // One predicate for both halves below: "is this fvar one of the
+        // ones being erased", decoded through the caller's `fvar_id_of`
+        // for the reason the paragraph above gives. The two filters were
+        // the same expression modulo the field extracted; sharing the
+        // closure keeps them from drifting apart.
+        let erased = |fvar: ExprId| {
+            fvar_id_of(fvar).is_some_and(|id| to_remove.iter().any(|(_, rid)| *rid == id))
+        };
+        // Filtering `local_names` also fixes each surviving position:
+        // `new_depth[i]` is where the decl originally at index `i` ends
+        // up in the reduced context, or `None` if it was erased. The
+        // instance filter below needs it, because `LocalContext::erase`
+        // (`leanr_kernel/src/local_ctx.rs`) removes from the MIDDLE of
+        // `decls` and reindexes every later decl down by one — a
+        // survivor's `at_depth`, which is by definition "the index of
+        // its own declaration in `lctx.decls`" (`local_instance.rs`),
+        // is stale the moment anything in front of it is erased.
+        let mut new_depth: Vec<Option<usize>> = Vec::with_capacity(self.local_names.len());
+        let mut local_names: Vec<(Option<NameId>, ExprId)> = Vec::new();
+        for (name, fvar) in &self.local_names {
+            if erased(*fvar) {
+                new_depth.push(None);
+            } else {
+                new_depth.push(Some(local_names.len()));
+                local_names.push((*name, *fvar));
+            }
+        }
         // An instance whose declaration was erased must go too. This is
         // NOT porting a filter the oracle performs here: the oracle's
         // `reduceLocalContext` (`MetavarContext.lean:1065-1067`) erases
@@ -178,13 +229,36 @@ impl LocalCtxSnapshot {
         // this snapshot no longer declares would be a dangling reference
         // that `get_instances` would still offer the search as a
         // candidate.
+        //
+        // A survivor's `at_depth` is renumbered through `new_depth`
+        // rather than left alone. Left alone it is too LARGE by the
+        // number of erased decls in front of it, and two things go
+        // wrong once the reduced snapshot is installed
+        // (`MetaCtx::install_lctx`, reached from `with_mvar_context`
+        // and from `leanr_elab`'s ladder): `lctx_restore`'s
+        // `truncate_to` pops a still-in-scope instance whose recorded
+        // depth is `>=` the checkpoint, so `get_instances` silently
+        // stops offering it; and a later `push` trips
+        // `LocalInstanceStack::push`'s non-decreasing-depth
+        // `debug_assert` on a state ordinary code produces.
+        // `new_depth[li.at_depth]` is `Some` for every survivor,
+        // because that slot holds the instance's OWN declaration and a
+        // survivor is precisely one whose declaration was not erased.
         let local_instances = self
             .local_instances
             .iter()
-            .filter(|li| {
-                !fvar_id_of(li.fvar).is_some_and(|id| to_remove.iter().any(|(_, rid)| *rid == id))
+            .filter(|li| !erased(li.fvar))
+            .map(|li| {
+                let at_depth = new_depth
+                    .get(li.at_depth)
+                    .copied()
+                    .flatten()
+                    .unwrap_or(li.at_depth);
+                LocalInstance {
+                    at_depth,
+                    ..li.clone()
+                }
             })
-            .cloned()
             .collect();
         LocalCtxSnapshot::new(lctx, local_names, local_instances)
     }

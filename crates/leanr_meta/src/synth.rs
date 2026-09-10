@@ -468,7 +468,7 @@ impl<'a, 'e> KeyNormalizer<'a, 'e> {
         })
     }
 
-    /// `MetaCtx::guarded`'s exact body (`metactx.rs:335-346`), restated
+    /// `MetaCtx::guarded`'s exact body (`metactx.rs:1173-1184`), restated
     /// against `Self` instead of `MetaCtx` -- see the module-level
     /// `RED_ZONE`/`STACK_CHUNK` doc comment for why this can't just
     /// call that method directly.
@@ -3324,6 +3324,12 @@ mod tests {
             let insts = ctx.get_instances(goal).expect("get_instances");
             let order: Vec<String> = insts
                 .iter()
+                // `expect` is correct HERE and is not a general
+                // invariant: a LOCAL candidate's `global_name` is
+                // legitimately `None` (`local_instance_candidate`'s own
+                // doc, `instances.rs`). `with_instances_ctx` declares no
+                // local instance, so every result is a global. A future
+                // test that puts one in scope must stop expecting.
                 .map(|i| render_name(ctx, i.global_name.expect("global_name")))
                 .collect();
             assert_eq!(

@@ -1666,9 +1666,12 @@ records emit.
 
 **Amended by § Amendment 8**, which adds a seventh item to this
 list (`FunBinders.propagateExpectedType`), pins P5's shape, and
-puts the local-instances prerequisite ahead of it. The
-instance-implicit binders below are decorative until that slice
-lands.
+put the local-instances prerequisite ahead of it. That prerequisite
+**has landed** (§ Amendment 8, "That slice has now landed"), so the
+instance-implicit binders below are live rather than decorative: a
+binder P5 introduces installs a local instance at the
+`push_local_decl`/`push_let_decl` chokepoint, and `get_instances`
+offers it ahead of every global.
 
 - **Binder info breadth**: `fun`'s implicit / strictImplicit /
   instImplicit `funBinder` forms and its `optType`; `let`/`have`'s

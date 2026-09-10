@@ -581,9 +581,31 @@ impl<'e> MetaCtx<'e> {
     /// The oracle does NOT flush a synthesis cache here, and neither does
     /// leanr: `withLocalContextImp` is a plain reader swap with no flush
     /// in it, and leanr has no synthesis cache at all yet (the M4b-3 spec
-    /// assigns one to "the slice that builds the synthesis cache"). When
-    /// that slice lands it must decide cache-vs-local-instances on its
-    /// own terms; there is no flush to port from here.
+    /// assigns one to "the slice that builds the synthesis cache").
+    ///
+    /// **Why there is no flush, and what the slice that builds the cache
+    /// must do instead.** The oracle needs none because its cache is
+    /// KEYED by the local instances: `SynthInstanceCacheKey`
+    /// (`Basic.lean:328-336`) is `localInsts : LocalInstances`
+    /// (`:329`) + `type` (`:330`) + `synthPendingDepth` (`:335`), so a
+    /// lookup under a different `LocalInstances` simply misses. A leanr
+    /// synthesis cache must key by the local instances the same way;
+    /// caching by goal type alone would return an answer synthesized
+    /// under a different instance set, which is wrong under a binder,
+    /// and this reader swap is exactly where the two sets differ.
+    /// Do not read "no flush to port" as "nothing to do".
+    ///
+    /// `MVarId.withContext`'s own docstring (`:2047-2050`) appears to
+    /// say the opposite — "The type class resolution cache is flushed
+    /// when executing `x` if its `LocalInstances` are different from
+    /// the current ones". It describes the EFFECT, not the mechanism:
+    /// `withMVarContextImp` (`:2043-2045`) is `withLocalContextImp
+    /// mvarDecl.lctx mvarDecl.localInstances x`, `withLocalContextImp`
+    /// (`:2002-2004`) is a bare `withReader`, and nothing on that path
+    /// touches the cache — the "flush" is the key miss described above.
+    /// Recorded so a future reader who goes to check that sentence
+    /// finds the resolution here rather than an apparent contradiction,
+    /// and does not port a flush that does not exist.
     ///
     /// Plain save/run/restore with no drop guard, the same posture (and
     /// the same justification) as `with_transparency` and
@@ -1254,6 +1276,21 @@ impl<'e> MetaCtx<'e> {
     /// Called from `push_local_decl`/`push_let_decl` (Task 4) and from
     /// `get_instances` (Task 6), which resolves its goal's class name
     /// through this.
+    ///
+    /// **The swallow covers the two budget errors too, and they are not
+    /// alike.** `StepBudgetExhausted` is SELF-LIMITING: `self.steps`
+    /// only ever increases (`step`, `:1164-1170`), so the very next
+    /// `step()` anywhere re-raises it and the swallowed answer cannot
+    /// travel far. `DepthBudgetExhausted` is NOT sticky: `guarded`
+    /// (`:1173-1184`) decrements `guard_depth` on the way out, so an
+    /// `is_class` called near `MAX_REC_DEPTH` can answer "not a class"
+    /// while a shallower caller goes on to succeed. The consequence is
+    /// that a class-typed binder can fail to install its local instance,
+    /// which is INCOMPLETENESS (a synthesis that finds fewer candidates
+    /// than the oracle), never unsoundness — no wrong term is built.
+    /// Left as-is deliberately: propagating would turn an ordinary
+    /// binder into an elaboration failure, which is the very thing the
+    /// oracle's own `catch _ => return none` avoids.
     pub(crate) fn is_class(&mut self, ty: ExprId) -> Result<Option<NameId>, MetaError> {
         match self.is_class_quick(ty) {
             LOption::Some(c) => Ok(Some(c)),
@@ -1289,7 +1326,7 @@ impl<'e> MetaCtx<'e> {
     /// other recursive `ExprId` traversal in this crate (35 call sites,
     /// `occurs_check` at `assign.rs:1153-1157` the direct structural
     /// analogue), this one is not routed through `MetaCtx::guarded`
-    /// (`:1096-1107`, `MAX_REC_DEPTH` + `stacker::maybe_grow`) because a
+    /// (`:1173-1184`, `MAX_REC_DEPTH` + `stacker::maybe_grow`) because a
     /// tail loop has no frames to grow a guard against. The `.mvar` arm
     /// still needs an explicit bound distinct from stack depth: it
     /// follows `MetavarContext::assignment` chains, and — same posture
@@ -1415,7 +1452,8 @@ impl<'e> MetaCtx<'e> {
     ///
     /// **Plan-mandated deviation (Controller Ruling R6), not a bug**:
     /// the oracle's telescope (`forallTelescopeReducingAuxAux.process`,
-    /// `Basic.lean:1452-1478`) peels each `Forall` by substituting a
+    /// `Basic.lean:1458-1487`, inside `forallTelescopeReducingAuxAux`
+    /// itself at `:1453-1488`) peels each `Forall` by substituting a
     /// FRESH FVAR for the bound variable (`instantiateRevRange`,
     /// `:1462`, backed by `mkFreshFVarId`/`lctx.mkLocalDecl`) before
     /// whnf-ing the next binder's body. This loop does not: it whnfs
@@ -2289,6 +2327,100 @@ mod tests {
                 reduced.local_instances().iter().any(|li| li.fvar == inst_b),
                 "the untouched instance (inst_b) must survive — proves the \
                  filter is selective by `to_remove`, not a wholesale clear"
+            );
+        });
+    }
+    /// `reduced` erases a decl from the MIDDLE of `lctx`, and
+    /// `LocalContext::erase` (`leanr_kernel/src/local_ctx.rs`) reindexes
+    /// every later decl down by one. A surviving instance's `at_depth` —
+    /// by its own definition "the index of its own declaration in
+    /// `lctx.decls`" (`local_instance.rs`) — therefore has to be
+    /// recomputed against the FILTERED decl list, or it names a position
+    /// past the end of the context it now travels with.
+    ///
+    /// The discriminating shape is an ORDINARY (non-class) binder in
+    /// FRONT of the instance binder, and only the ordinary one erased:
+    /// the instance is recorded at depth 1, the reduced context has one
+    /// decl, and a stale `at_depth = 1` is `>=` every checkpoint that
+    /// context can produce. So the first ordinary telescope opened under
+    /// the installed snapshot — `lctx_checkpoint` / `push_local_decl` /
+    /// `lctx_restore`, which is what `local_instance_candidate` and
+    /// `forall_bounded_telescope` both do — silently pops a still-in-scope
+    /// local instance, and `get_instances` stops offering it for the rest
+    /// of the window. Nothing errors; the answer just gets smaller.
+    ///
+    /// `reduced_drops_only_the_local_instance_of_the_erased_fvar` above
+    /// cannot catch this: it erases the FIRST of two instance binders,
+    /// so the survivor's recorded depth (1) coincides with the count of
+    /// decls it followed in the ORIGINAL context, and it never installs
+    /// the result.
+    #[test]
+    fn reduced_renumbers_a_surviving_instances_depth() {
+        with_class_ctx(|ctx, add| {
+            let add_n = class_app(ctx, add);
+            let n = const_named(ctx, "N");
+
+            let cp = ctx.lctx_checkpoint();
+            // depth 0: an ordinary binder, no local instance.
+            let plain = ctx
+                .push_local_decl(None, n, BinderInfo::Default)
+                .expect("push plain");
+            // depth 1: the instance binder whose entry must survive.
+            let inst = ctx
+                .push_local_decl(None, add_n, BinderInfo::InstImplicit)
+                .expect("push inst");
+            let snap = ctx.current_lctx();
+            ctx.lctx_restore(cp);
+
+            let id_of = |ctx: &MetaCtx, e| match ctx.node(e) {
+                Node::FVar { id: Some(id) } => id,
+                other => panic!("expected fvar, got {other:?}"),
+            };
+            let id_plain = id_of(ctx, plain);
+
+            // Erase ONLY the ordinary binder in front of the instance.
+            let reduced =
+                std::sync::Arc::new(snap.reduced(&[(plain, id_plain)], |f| match ctx.node(f) {
+                    Node::FVar { id } => id,
+                    _ => None,
+                }));
+            assert_eq!(reduced.entries().len(), 1, "one decl erased, one survivor");
+            assert_eq!(
+                reduced.local_instances().len(),
+                1,
+                "the instance's own decl was not erased, so it survives"
+            );
+            assert_eq!(
+                reduced.local_instances()[0].fvar,
+                inst,
+                "and it is the instance binder's own entry"
+            );
+            assert_eq!(
+                reduced.local_instances()[0].at_depth,
+                0,
+                "the survivor is now the FIRST decl of the reduced context, \
+                 so its recorded depth must be 0 — keeping the original 1 \
+                 names a decl index the reduced context does not have"
+            );
+
+            // The consequence, stated as behavior rather than as a field
+            // value: install the reduced snapshot and open one ordinary
+            // telescope under it, exactly as `local_instance_candidate`
+            // does for every candidate.
+            let saved = ctx.install_lctx(reduced);
+            let inner = ctx.lctx_checkpoint();
+            ctx.push_local_decl(None, n, BinderInfo::Default)
+                .expect("push inside");
+            ctx.lctx_restore(inner);
+            let survivors = ctx.local_instances.entries().len();
+            ctx.install_lctx(saved);
+
+            assert_eq!(
+                survivors, 1,
+                "the local instance is still in scope after a telescope \
+                 opened and closed under it — with a stale `at_depth` the \
+                 restore's `truncate_to` pops it and `get_instances` \
+                 silently stops offering it"
             );
         });
     }

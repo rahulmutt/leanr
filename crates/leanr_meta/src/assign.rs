@@ -2548,7 +2548,7 @@ mod tests {
     }
 
     /// `forall_bounded_telescope` mints its fvars through
-    /// `push_local_decl` (`assign.rs:645`), so it installs local
+    /// `push_local_decl` (`assign.rs:643`), so it installs local
     /// instances with no separate wiring — the counterpart of the
     /// oracle's `withNewLocalInstancesImp` at
     /// `forallTelescopeReducingAux` (`Basic.lean:1472`, `:1477`). This

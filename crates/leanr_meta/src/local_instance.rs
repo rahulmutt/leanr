@@ -16,7 +16,7 @@
 //!
 //! # The scoping rule
 //!
-//! `MetaCtx::local_names` (`metactx.rs:80`) has exactly one entry per
+//! `MetaCtx::local_names` (`metactx.rs:81`) has exactly one entry per
 //! `push_local_decl`/`push_let_decl` call, so `lctx_restore(cp)`
 //! truncates it to `cp` and a `debug_assert` keeps the two honest. This
 //! stack cannot do that: only a CLASS-TYPED declaration produces an
@@ -58,7 +58,7 @@
 //! re-entrancy note traces, and inherit that cycle's bounds —
 //! `MAX_SYNTH_PENDING_DEPTH` (`whnf.rs:138`), `synth_instance`'s
 //! `guarded` bump (`synth.rs:1645`), and the step budget
-//! (`metactx.rs:1142-1148`). Being bounded is not the same as being
+//! (`metactx.rs:1164-1170`). Being bounded is not the same as being
 //! "resolved", and a future change that makes `is_class` consult the
 //! instance table would close the loop for real.
 //!
@@ -123,6 +123,15 @@ pub(crate) struct LocalInstance {
     /// part of the oracle's record: the oracle's `LocalInstances` is a
     /// persistent array captured by `withReader`, so scope exit restores
     /// it for free.
+    ///
+    /// It is an INDEX INTO A PARTICULAR `lctx`, not a stable identity, so
+    /// anything that reshapes that `lctx` owes it a recomputation. There
+    /// is exactly one such place: `LocalCtxSnapshot::reduced`
+    /// (`local_snapshot.rs`), which erases decls from the MIDDLE via
+    /// `LocalContext::erase` and so shifts every later decl down —
+    /// it renumbers survivors, and `LocalCtxSnapshot::new` debug-asserts
+    /// that every entry indexes its own declaration. `truncate_to` only
+    /// ever drops from the end, so it needs no such repair.
     pub at_depth: usize,
 }
 

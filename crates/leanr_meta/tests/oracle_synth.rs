@@ -256,6 +256,29 @@ fn oracle_synth_gate() {
             if ctx.mctx().decl(MVarId(nid)).is_some() {
                 continue;
             }
+            // `LocalCtxSnapshot::empty()` is a STANDING ASSUMPTION, not
+            // a neutral default: `synth_pending` and friends reach a
+            // goal mvar through `with_mvar_context`, which installs this
+            // snapshot's `lctx` AND its local instances as the ambient
+            // ones. For a record that declares `fvars`, an empty
+            // snapshot means the nested synthesis runs with the
+            // fixture's local context — and therefore its local
+            // instances — thrown away, silently answering against a
+            // strictly smaller instance set than the oracle's.
+            //
+            // No committed record combines `fvars` with `mvars`, so this
+            // is unreachable today; the assertion below is what keeps it
+            // that way. The first record that needs both must give each
+            // goal mvar a real context (`ctx.current_lctx()` is the
+            // ambient one at this point, and is the right starting
+            // answer only if the oracle really asked that mvar in the
+            // full fixture context — the dump carries no per-mvar
+            // `lctx` field to check that against, so it is a decision
+            // for that slice, not a default to fall into).
+            assert!(
+                fvar_specs.is_empty(),
+                "{id}: this record declares both `fvars` and `mvars`, and the                  gate declares every goal mvar with an EMPTY local context —                  so the fixture's local instances would be invisible to any                  nested synthesis. Give the mvar a real `lctx` before adding                  this record."
+            );
             ctx.mctx_mut().declare(
                 MVarId(nid),
                 MVarDecl {

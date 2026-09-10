@@ -491,14 +491,15 @@ impl<'e> MetaCtx<'e> {
         // `Reducible`; even its "quick" path answers `.undef`, i.e.
         // falls through to that path, for any definition-headed type
         // under the ambient transparency). Calling it up here puts
-        // whatever it reduces strictly OUTSIDE that window, which the
-        // note on the window below shows is load-bearing rather than
-        // tidy: a whnf inside the window CAN re-enter `get_instances`.
-        // The faithful order and the safe order are the same order,
-        // which is worth not re-deriving later.
+        // whatever it reduces strictly OUTSIDE that window, which
+        // matters because a whnf inside the window CAN re-enter
+        // `get_instances` (the note on the window below traces the
+        // chain, and bounds how deep it can go today). The faithful
+        // order and the safe order are the same order, which is worth
+        // not re-deriving later.
         //
         // `is_class` swallows its own errors to `None`
-        // (`metactx.rs:1256-1262`, the oracle's `try … catch _ =>
+        // (`metactx.rs:1294-1300`, the oracle's `try … catch _ =>
         // return none`, `Basic.lean:1542-1543`), so a step-budget
         // exhaustion or a loose bvar inside THAT whnf silently drops
         // every LOCAL candidate here while still returning the globals
@@ -565,19 +566,34 @@ impl<'e> MetaCtx<'e> {
         // It terminates rather than looping: `synth_pending` is capped
         // by `MAX_SYNTH_PENDING_DEPTH` (`whnf.rs:138`, checked at
         // `:1417`), `synth_instance` bumps `guarded` (`synth.rs:1645`),
-        // and `step()` (`metactx.rs:1142-1148`) bounds the whole thing.
+        // and `step()` (`metactx.rs:1164-1170`) bounds the whole thing.
         //
         // WHAT THIS BUYS THE CODE BELOW: `is_class` above, and
         // `local_instance_candidate` further down (which whnfs a
         // candidate's telescope, and whose `push_local_decl` runs
         // `is_class` again per binder), both sit OUTSIDE this window,
-        // so a nested lookup entered from either sees the FULL table.
-        // That placement is load-bearing, not stylistic; their
-        // telescopes ride the same cycle and inherit the same bounds.
-        // NO test pins the placement, because moving `is_class` inside
-        // still answers correctly for the OUTER query — only a nested
-        // inner query would be degraded, and nothing in the tests
-        // constructs one. Guarded by this comment and by review.
+        // so a lookup entered from either sees the FULL table.
+        //
+        // Scope of that claim, stated precisely: it is a guarantee for
+        // the OUTERMOST `get_instances` only, and today it is VACUOUS
+        // rather than merely unpinned. Nesting rides `synth_pending`,
+        // which is capped at `MAX_SYNTH_PENDING_DEPTH = 1`
+        // (`whnf.rs:138`, transcribing the oracle's own
+        // `maxSynthPendingDepth` default of `1`, `Basic.lean:458-461`),
+        // so the chain above can produce G0 -> G1 but never G2: the one
+        // nested query that exists is entered from OUTSIDE G0's window
+        // (via `is_class`/`local_instance_candidate`), and there is no
+        // third level to be entered from inside G1's. So no query can
+        // currently observe an emptied table, and no test could
+        // construct one to pin the placement.
+        //
+        // TRIGGER FOR REVISITING: raising `MAX_SYNTH_PENDING_DEPTH`
+        // above 1. That is the single change that makes G2 reachable,
+        // at which point a nested lookup CAN be entered from inside an
+        // outer window, this placement stops being vacuously safe and
+        // becomes load-bearing for real, and the take-the-table seam
+        // above turns from latent into live. Anyone raising that
+        // constant owns closing this.
         let table = std::mem::take(&mut self.instances);
         let result: Result<Vec<Instance>, MetaError> = self
             .discr_get_match(&table.tree, goal)
@@ -676,13 +692,46 @@ impl<'e> MetaCtx<'e> {
     /// one, so each domain is `instantiate_rev`'d against the fvars
     /// pushed so far before it is declared — the oracle's own
     /// `d.instantiateRevRange j fvars.size fvars`
-    /// (`Basic.lean:1461`, inside `forallTelescopeReducingAuxAux`).
+    /// (`Basic.lean:1462`, inside `forallTelescopeReducingAuxAux`;
+    /// `:1461` is the `if fvarsSizeLtMaxFVars fvars maxFVars? then`
+    /// guard above it).
     /// Pushing a domain raw would declare `Add #0` — a decl whose type
     /// carries a LOOSE BVAR — into the local context, which every path
     /// that later reduces that type rejects outright
-    /// (`whnf.rs:239-246`). The non-forall tail is instantiated the
+    /// (`whnf.rs:241-246`). The non-forall tail is instantiated the
     /// same way before it is whnf'd, matching the oracle's own
     /// `type.instantiateRevRange` on that arm (`Basic.lean:1475`).
+    ///
+    /// **Why instantiating against the whole `xs` is equivalent to the
+    /// oracle's `d.instantiateRevRange j fvars.size fvars`**, and why
+    /// the sibling `forall_meta_telescope_reducing` (`synth.rs`) —
+    /// which clears its `subst` after each `whnf` — is NOT a template
+    /// to be copied here.
+    ///
+    /// The oracle's `j` starts at 0 and stays there while it peels
+    /// syntactic foralls (`process lctx fvars j b`, `Basic.lean:1468`),
+    /// so on that path its range `j ..< fvars.size` IS the whole
+    /// `fvars`, which is exactly `instantiate_rev(.., &xs)` here. It
+    /// advances `j` in one place only: after a `whnf` that produced a
+    /// forall (`process lctx fvars fvars.size newType`, `:1481`). It
+    /// can, because that `newType` is the whnf of a type already
+    /// instantiated over all of `fvars` (`:1475`) and therefore carries
+    /// no loose bvar reaching back into them — so the prefix `j` skips
+    /// is REDUNDANT, not wrong to include. This loop reaches the same
+    /// state (its `whnf` is likewise applied to a term closed over all
+    /// of `xs`) and simply keeps instantiating over the redundant
+    /// prefix, which substitutes nothing. Same substitution, different
+    /// bookkeeping.
+    ///
+    /// That it is redundant rather than load-bearing is a property of
+    /// `instantiate_rev`'s indexing: `subst[subst.len()-1]` replaces
+    /// `#0` (`leanr_kernel/src/subst.rs:126-129`), so entries added at
+    /// the FRONT of `xs` never shift what a low-numbered bvar resolves
+    /// to. `forall_meta_telescope_reducing`'s `subst.clear()` is the
+    /// same redundancy handled explicitly — it models the oracle's `j`
+    /// advance directly — and is likewise bookkeeping, not a fix for a
+    /// misnumbering. Neither loop should be "corrected" to match the
+    /// other.
     ///
     /// `push_local_decl` INSTALLS a local instance for each class-typed
     /// binder (task 4's chokepoint), so this recursion re-enters the
@@ -702,7 +751,7 @@ impl<'e> MetaCtx<'e> {
     /// instance lookup and reach here again. What bounds it is that
     /// cycle's own bounds: `MAX_SYNTH_PENDING_DEPTH` (`whnf.rs:138`),
     /// `synth_instance`'s `guarded` bump (`synth.rs:1645`), and the
-    /// step budget (`metactx.rs:1142-1148`). Each such re-entry does
+    /// step budget (`metactx.rs:1164-1170`). Each such re-entry does
     /// see the full instance table, because this method runs outside
     /// `get_instances`' `mem::take` window.
     fn instimplicit_binder_positions(&mut self, ty: ExprId) -> Result<Vec<usize>, MetaError> {
@@ -711,6 +760,16 @@ impl<'e> MetaCtx<'e> {
         let mut cur = ty;
         let mut i = 0usize;
         loop {
+            // The sibling telescope `forall_meta_telescope_reducing`
+            // charges the budget at the top of its own loop
+            // (`synth.rs`), and this one has the same shape and the same
+            // exposure: `ty` comes off an `.olean`, so its spine length
+            // is untrusted input, and the syntactic-`Forall` fast path
+            // below reaches `push_local_decl` without going through
+            // `whnf` (which charges its own `step()`). Charging here
+            // means every iteration is accounted for, not just the ones
+            // that reduce.
+            self.step()?;
             let t = if matches!(self.node(cur), Node::Forall { .. }) {
                 cur
             } else {
@@ -843,7 +902,8 @@ impl ClassTable {
     }
 
     /// Is `class_name` a registered type class? oracle:
-    /// `isClass env declName` (`Basic.lean:1512`), reading the same
+    /// `isClass env c` (`Basic.lean:1514`, inside `isClassApp?`'s
+    /// `.const c _` arm which opens at `:1512`), reading the same
     /// `classExtension` this table is built from.
     ///
     /// Membership is `out_params(..).is_some()`, not "has output
@@ -1103,6 +1163,12 @@ mod tests {
             let found = ctx.get_instances(goal).expect("get_instances");
             let idxs: Vec<u32> = found
                 .iter()
+                // `expect` is correct HERE and is not a general
+                // invariant: a LOCAL candidate's `global_name` is
+                // legitimately `None` (`local_instance_candidate`'s own
+                // doc). This fixture declares no local instance, so
+                // every result is a global. A future edit that puts a
+                // local in scope must stop expecting.
                 .map(|i| i.global_name.expect("global_name").index() as u32)
                 .collect();
             // priority-desc: idx1/idx2 (prio 10) before idx0 (prio 5)
