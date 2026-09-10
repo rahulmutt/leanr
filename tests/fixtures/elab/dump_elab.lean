@@ -724,6 +724,45 @@ def elimMVarDepsQueries : List (String × String) :=
       "(fun (n : Nat) x => useWrap x : Nat -> Nat -> Nat)")
   ]
 
+/-- M4b-3 P5 binder family: implicit / strict-implicit / instance-implicit
+`fun` binders, multi-name groups, type-less binders, `optType`, and
+expected-type propagation into binder domains. The `optType` queries are
+amendment 4's replacements: `fun bs : T => e` maps `T` over the BINDERS
+(`expandSimpleBinderWithType`), not the body — a non-ident/`_` binder makes
+the real elaborator throw "unexpected type ascription", so the plan's
+original `fun (x : Nat) : Nat => x` / `fun (a : Type) (x : a) : a => x`
+forms are dropped in favour of the two that actually elaborate. -/
+def p5BinderQueries : List (String × String) :=
+  [ ("p5/fun-implicit",         "fun {a : Type} => a")
+  , ("p5/fun-implicit-untyped", "fun {a} => a")
+  , ("p5/fun-implicit-group",   "fun {a b : Type} => a")
+  , ("p5/fun-strict",           "fun ⦃a : Type⦄ => a")
+  , ("p5/fun-inst-named",       "fun [inst : Add Nat] => inst")
+  , ("p5/fun-inst-anon",        "fun [Add Nat] => Nat.zero")
+  , ("p5/fun-opttype",          "fun x : Nat => x")
+  , ("p5/fun-opttype-group",    "fun x y : Nat => x")
+  , ("p5/forall-inst",          "forall [inst : Add Nat], Nat")
+  , ("p5/propagate-fn",         "(fun f => f Nat.zero : (Nat -> Nat) -> Nat)")
+  , ("p5/propagate-two",        "(fun x y => x : Nat -> Nat -> Nat)")
+  , ("p5/propagate-short",      "(fun x y => Nat.zero : Nat -> Nat)")
+  ]
+
+/-- M4b-3 P5 implicit-lambda insertion (`TermElabM.lean:1806-1820`). -/
+def p5ImplicitLambdaQueries : List (String × String) :=
+  [ ("p5/implam-one",    "(Nat.zero : {a : Type} -> Nat)")
+  , ("p5/implam-inst",   "(Nat.zero : [inst : Add Nat] -> Nat)")
+  , ("p5/implam-nested", "(Nat.zero : {a : Type} -> {b : Type} -> Nat)")
+  ]
+
+/-- M4b-3 P5 argument family: `optParam` defaults and an explicitly
+supplied `autoParam` argument. An OMITTED autoParam is a reported seam,
+not a record — executing the tactic is a later M4 slice. -/
+def p5ArgQueries : List (String × String) :=
+  [ ("p5/optparam-default",   "withDefault")
+  , ("p5/optparam-explicit",  "@withDefault Nat.zero")
+  , ("p5/autoparam-supplied", "withTactic Nat.zero")
+  ]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -737,7 +776,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>
