@@ -718,3 +718,91 @@ fn fun_elided_binder_registers_as_a_local_instance_only_after_propagation() {
     assert_eq!(j["b"]["b"]["f"], serde_json::json!({"k": "bvar", "i": 0}));
     assert_eq!(j["b"]["b"]["a"], serde_json::json!({"k": "bvar", "i": 1}));
 }
+
+// -- M4b-3 P5 task 5: implicit-lambda insertion, the `.yes` path -----
+
+#[test]
+fn implicit_lambda_wraps_against_an_implicit_forall() {
+    // `(Nat.zero : {a : Type} -> Nat)` — the expected type is an
+    // implicit forall, so the oracle wraps the WHOLE term in a lambda
+    // rather than dispatching on its kind.
+    let j = elab_json("(Nat.zero : {a : Type} -> Nat)");
+    assert_eq!(j["k"], "lam");
+    assert_eq!(j["bi"], "i");
+    assert_eq!(j["b"]["k"], "const");
+    assert_eq!(j["b"]["n"], "Nat.zero");
+}
+
+#[test]
+fn implicit_lambda_wraps_instance_implicit_too() {
+    // `Add`/`instAddNat` are in Elab0's environment (controller
+    // amendment 2 confirms this record is runnable as written).
+    let j = elab_json("(Nat.zero : [inst : Add Nat] -> Nat)");
+    assert_eq!(j["k"], "lam");
+    assert_eq!(j["bi"], "c");
+}
+
+#[test]
+fn implicit_lambda_nests_for_several_implicit_binders() {
+    let j = elab_json("(Nat.zero : {a : Type} -> {b : Type} -> Nat)");
+    assert_eq!(j["k"], "lam");
+    assert_eq!(j["bi"], "i");
+    assert_eq!(j["b"]["k"], "lam");
+    assert_eq!(j["b"]["bi"], "i");
+    assert_eq!(j["b"]["b"]["n"], "Nat.zero");
+}
+
+/// oracle: `unless c.isImplicit || c.isInstImplicit do return .no`, and
+/// `useImplicitLambda`'s own doc: "implicit lambdas are not triggered
+/// by the strict implicit binder annotation". Confirmed against the
+/// pinned `lean` binary: `(Nat.zero : ⦃a : Type⦄ -> Nat)` reports a
+/// plain type-mismatch error — `Nat.zero has type Nat ... but is
+/// expected to have type ⦃a : Type⦄ → Nat of sort Type 1` — with no
+/// lambda wrap and no implicit-lambda-flavoured message at all.
+///
+/// Controller amendment 3: the brief's own draft of this test ended in
+/// `_ => {}`, so it passed on every outcome except an `UnsupportedSyntax`
+/// naming "implicit lambda" — including an unrelated failure, and
+/// including strict-implicit wrongly firing and reporting some OTHER
+/// error. Rewritten to discriminate: `Ok` must not be a `lam`; `Err`
+/// must be the ascription's own type-mismatch machinery, not a named
+/// implicit-lambda seam (there is no longer any such seam after this
+/// task — `check_implicit_lambda`'s old `UnsupportedSyntax("implicit
+/// lambda insertion — M4b-3 P5")` is gone, replaced by the real wrap);
+/// anything else panics rather than being silently accepted.
+#[test]
+fn implicit_lambda_does_not_fire_on_strict_implicit() {
+    match elab_result("(Nat.zero : ⦃a : Type⦄ -> Nat)") {
+        Err(leanr_elab::ElabError::TypeMismatch { .. }) => {}
+        Err(other) => panic!("expected the ascription's own TypeMismatch, got {other:?}"),
+        Ok(e) => panic!("strict-implicit wrongly succeeded, no wrap should be possible: {e:?}"),
+    }
+}
+
+/// oracle: `App.lean:2269-2270` — `@` exists partly to disable the
+/// implicit-lambda feature: `` `(@($t)) `` and `` `(@$t) `` both
+/// elaborate `t` with `implicitLambda := false`.
+///
+/// Controller amendment 4: `elab_json` panics on an `Err`, and this
+/// term DOES error — but not because implicit-lambda insertion ever
+/// gets a chance to run. `block_implicit_lambda` correctly recognizes
+/// the outer `Lean.Parser.Term.explicit` node and blocks BEFORE
+/// `use_implicit_lambda` even looks at the expected type, so dispatch
+/// falls through to `app::elab_explicit`, whose `` `(@($t)) ``/`` `(@$t)
+/// `` fallback (the arms that literally implement `implicitLambda :=
+/// false`) is a separate, pre-existing, un-implemented seam
+/// (`app/mod.rs::elab_explicit`'s `other` arm — `seam_audit.rs`'s own
+/// `("@(Nat.succ Nat.zero)", "M4b-3 P5")` case) that this task does not
+/// touch. So this term can never reach a *successful* elaboration to
+/// inspect for a `lam` head — what this test discriminates instead is
+/// that whatever failure occurs is NOT the (now-deleted) implicit-lambda
+/// seam and is not evidence a lambda wrap silently happened.
+#[test]
+fn at_sign_disables_implicit_lambda() {
+    match elab_result("(@(Nat.succ Nat.zero) : {a : Type} -> Nat)") {
+        Err(leanr_elab::ElabError::UnsupportedSyntax(m)) => {
+            assert!(!m.contains("implicit lambda"), "unexpected seam: {m}");
+        }
+        other => panic!("expected the pre-existing elab_explicit seam, got {other:?}"),
+    }
+}

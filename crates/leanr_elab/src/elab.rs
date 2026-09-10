@@ -300,7 +300,17 @@ impl<'e> TermElabM<'e> {
         kinds: &KindInterner,
         expected: Option<ExprId>,
     ) -> Result<ExprId, ElabError> {
-        check_implicit_lambda(self, elem, kinds, expected)?;
+        // oracle: `elabTermAux`'s own dispatch — `useImplicitLambda`
+        // runs BEFORE `elabUsingElabFns` (`TermElabM.lean:1839-1841`),
+        // and its `.yes` result short-circuits dispatch entirely rather
+        // than falling through to it.
+        match use_implicit_lambda(self, elem, kinds, expected)? {
+            UseImplicitLambda::Yes(ty) => return elab_implicit_lambda(self, elem, kinds, ty),
+            // Task 6 owns constructing this variant; until it does,
+            // `use_implicit_lambda` never returns it.
+            UseImplicitLambda::Postpone => {}
+            UseImplicitLambda::No => {}
+        }
         dispatch::dispatch(self, elem, kinds, expected)
     }
 
@@ -358,12 +368,21 @@ impl<'e> TermElabM<'e> {
 /// term in implicit lambdas and never dispatches on its kind at all
 /// when the feature fires.
 ///
-/// M4b-3 P5 owns the wrapping itself (`elabImplicitLambda`,
-/// `TermElabM.lean:1806-1820`). This is the named seam that keeps the
-/// path from being silently skipped now that Task 6's source ascription
-/// can supply an expected type: without it, `(f : {α : Type} → α → α)`-
-/// shaped input would elaborate `f` with NO lambda wrap and emit a
-/// different term than the oracle's, with no error.
+/// oracle: `useImplicitLambda`'s three-way result
+/// (`UseImplicitLambdaResult`, `TermElabM.lean:1732-1735`; the function
+/// itself `:1743-1779`).
+enum UseImplicitLambda {
+    No,
+    Yes(ExprId),
+    /// `stx` is a local identifier whose type is still an mvar
+    /// application (`:1753-1778`). Needs term-level postponement, which
+    /// leanr does not have — Task 6 owns constructing this variant.
+    #[allow(dead_code)]
+    Postpone,
+}
+
+/// oracle: `useImplicitLambda` (see `UseImplicitLambda` above for the
+/// result type's own citations).
 ///
 /// Transliterated from the pinned source, not the plan's paraphrase —
 /// two places where they differ:
@@ -378,29 +397,26 @@ impl<'e> TermElabM<'e> {
 ///
 /// `useImplicitLambda`'s third result, `.postpone` (`:1753-1778`, a
 /// local identifier whose type is still an mvar application), is not
-/// modelled: it is only reachable AFTER the implicit-forall test above
-/// has already succeeded, and both of its continuations —
-/// `postponeElabTerm` when `mayPostpone`, `elabUsingElabFns` otherwise —
-/// need the postponement ladder P1 deliberately does not have
-/// (`elab.rs`'s own module doc). Distinguishing it here would only
-/// change which unimplemented path is named.
+/// modelled: `isLocalIdent?`/`isMVarApp` need machinery P1 deliberately
+/// does not have (`elab.rs`'s own module doc) — Task 6 owns it. This
+/// function therefore never returns `UseImplicitLambda::Postpone`.
 ///
 /// `hasNoImplicitLambdaAnnotation` (`:1706-1707`, an `annotation?
 /// \`noImplicitLambda` on the expected type) is likewise not modelled:
 /// the annotation is minted only by `mkNoImplicitLambdaAnnotation`, and
 /// nothing in leanr builds one — no `MData` node this crate emits
 /// carries that key — so the test is vacuously false here.
-fn check_implicit_lambda(
+fn use_implicit_lambda(
     elab: &mut TermElabM,
     elem: &SynElem,
     kinds: &KindInterner,
     expected: Option<ExprId>,
-) -> Result<(), ElabError> {
+) -> Result<UseImplicitLambda, ElabError> {
     if block_implicit_lambda(elem, kinds) {
-        return Ok(());
+        return Ok(UseImplicitLambda::No);
     }
     let Some(expected) = expected else {
-        return Ok(());
+        return Ok(UseImplicitLambda::No);
     };
     // oracle: `whnfForall expectedType` then `let .forallE _ _ _ c :=
     // expectedType | return .no`. `whnfForall` keeps the ORIGINAL term
@@ -409,18 +425,95 @@ fn check_implicit_lambda(
     let reduced = elab.mctx.whnf(expected)?;
     let base = elab.view.store;
     let Node::Forall { binder_info, .. } = elab.mctx.store().expr_node(Some(base), reduced) else {
-        return Ok(());
+        return Ok(UseImplicitLambda::No);
     };
     // oracle: `unless c.isImplicit || c.isInstImplicit do return .no`.
     if !matches!(binder_info, BinderInfo::Implicit | BinderInfo::InstImplicit) {
-        return Ok(());
+        return Ok(UseImplicitLambda::No);
     }
-    Err(ElabError::UnsupportedSyntax(
-        "implicit lambda insertion — M4b-3 P5".to_string(),
-    ))
+    Ok(UseImplicitLambda::Yes(reduced))
 }
 
-/// oracle: `blockImplicitLambda` (`TermElabM.lean:1715-1720`) —
+/// oracle: `elabImplicitLambda` (`TermElabM.lean:1806-1820`) — peel
+/// leading implicit / strict-implicit / instance-implicit binders off
+/// the expected type, pushing an fvar for each, elaborate `elem`
+/// against the residual, and `mkLambdaFVars` back over the collected
+/// fvars.
+///
+/// **Correction to the plan's own paraphrase, checked against the
+/// pinned source (`:1811-1818`) rather than trusted:** the internal
+/// `loop`'s stop condition is `c.isExplicit` (true only for
+/// `BinderInfo.default`, `Expr.lean:92-95`), NOT `bi.isImplicit ||
+/// bi.isInstImplicit`. So once inside this function — which only
+/// happens after `use_implicit_lambda`'s OWN gate has confirmed the
+/// leading binder is implicit or inst-implicit — the loop keeps peeling
+/// through a STRICT-implicit binder too, if one follows. Confirmed
+/// against the pinned `lean` binary
+/// (`(Nat.zero : {a : Type} -> ⦃b : Type⦄ -> Nat)` elaborates to `fun
+/// {a : Type} ⦃b : Type⦄ => Nat.zero`, both binders absorbed into the
+/// SAME wrap) — this is a genuinely different predicate from
+/// `use_implicit_lambda`'s own gate, which correctly excludes
+/// strict-implicit as the FIRST binder (`useImplicitLambda`'s own doc:
+/// "implicit lambdas are not triggered by the strict implicit binder
+/// annotation" — that remark is about the GATE, not about every binder
+/// the wrap subsequently peels once already inside it). The loop below
+/// also re-`whnf`s `ty` on every iteration, matching the oracle's own
+/// `whnfForall type` inside `loop` — not just once before the loop
+/// starts, so a residual type that only becomes a forall after
+/// reduction (e.g. behind a reducible local) is still peeled.
+///
+/// The wrap is around the WHOLE term and happens BEFORE any leaf or app
+/// elaborator runs (`elabTermAux`, `:1839-1841`) — which is why it
+/// lives here in `elab_term` rather than inside a leaf.
+fn elab_implicit_lambda(
+    elab: &mut TermElabM,
+    elem: &SynElem,
+    kinds: &KindInterner,
+    mut ty: ExprId,
+) -> Result<ExprId, ElabError> {
+    // Bracket the telescope: restore `lctx` on EVERY exit path (Ok or
+    // Err), the same idiom `elab_fun`'s own telescope uses
+    // (`builtin/binder.rs`).
+    let checkpoint = elab.mctx.lctx_checkpoint();
+    let result = (|| {
+        let base = elab.view.store;
+        let mut fvars: Vec<ExprId> = Vec::new();
+        loop {
+            // oracle: `whnfForall type` — re-reduced every iteration,
+            // not just once before the loop (see this function's own
+            // doc comment).
+            let reduced = elab.mctx.whnf(ty)?;
+            let Node::Forall {
+                binder_name,
+                binder_type,
+                body,
+                binder_info,
+            } = elab.mctx.store().expr_node(Some(base), reduced)
+            else {
+                break;
+            };
+            // oracle: `if c.isExplicit then elabImplicitLambdaAux ..
+            // else ..` — stop only on an EXPLICIT (`Default`) binder,
+            // not merely a non-implicit/inst-implicit one.
+            if binder_info == BinderInfo::Default {
+                break;
+            }
+            let fvar = elab
+                .mctx
+                .push_local_decl(binder_name, binder_type, binder_info)?;
+            ty = elab.mctx.instantiate_beta_rev_range(body, &[fvar])?;
+            fvars.push(fvar);
+        }
+        // oracle: `elabImplicitLambdaAux` — elaborate against the
+        // RESIDUAL type, then wrap.
+        let e = elab.elab_term_ensuring_type(elem, kinds, Some(ty))?;
+        elab.mctx.mk_lambda(&fvars, e).map_err(ElabError::from)
+    })();
+    elab.mctx.lctx_restore(checkpoint);
+    result
+}
+
+/// oracle: `blockImplicitLambda` (`TermElabM.lean:1716-1720`) —
 /// "Block usage of implicit lambdas if `stx` is `@f` or `@f arg1 ...`
 /// or `fun` with an implicit binder annotation":
 ///

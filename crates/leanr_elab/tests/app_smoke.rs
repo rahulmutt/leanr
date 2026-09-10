@@ -768,6 +768,13 @@ fn explicit_mode_consumes_implicit_params_positionally() {
 /// spelling out the exclusion: "implicit lambdas are not triggered by
 /// the strict implicit binder annotation `{{a : α}} → β`".
 ///
+/// Was `implicit_lambda_guard_fires_only_for_implicit_and_inst_implicit`,
+/// asserting the P1 guard's `Err(UnsupportedSyntax("implicit lambda
+/// insertion"))`. M4b-3 P5 task 5 turned that guard into a real wrap
+/// (`elab.rs`'s `use_implicit_lambda` + `elab_implicit_lambda`), so
+/// "fires" now means "produces a `Lam`", not "errors" — updated in
+/// place rather than left pinning behaviour that no longer exists.
+///
 /// The corpus cannot discriminate this at all: no committed record has
 /// an implicit-`forall` expected type (source ascription is the only
 /// expected-type source, and no fixture declaration is ascribed to one),
@@ -775,9 +782,9 @@ fn explicit_mode_consumes_implicit_params_positionally() {
 /// task's own brief paraphrased — would keep every record green while
 /// diverging from the oracle. Each binder info is asserted directly.
 #[test]
-fn implicit_lambda_guard_fires_only_for_implicit_and_inst_implicit() {
+fn implicit_lambda_wraps_only_for_implicit_and_inst_implicit() {
     use leanr_kernel::BinderInfo::*;
-    for (bi, should_fire) in [
+    for (bi, should_wrap) in [
         (Implicit, true),
         (InstImplicit, true),
         (StrictImplicit, false),
@@ -801,13 +808,13 @@ fn implicit_lambda_guard_fires_only_for_implicit_and_inst_implicit() {
             let elem = parsed.tree.root().first_child_or_token().unwrap();
             let got = app
                 .elab
-                .elab_term(&elem, &parsed.tree.kinds, Some(expected));
-            let fired = matches!(
-                &got,
-                Err(leanr_elab::ElabError::UnsupportedSyntax(m))
-                    if m.contains("implicit lambda insertion")
+                .elab_term(&elem, &parsed.tree.kinds, Some(expected))
+                .unwrap_or_else(|e| panic!("binder info {bi:?}: elaboration failed: {e:?}"));
+            let wrapped = matches!(
+                app.node(got),
+                leanr_kernel::bank::terms::Node::Lam { binder_info, .. } if binder_info == bi
             );
-            assert_eq!(fired, should_fire, "binder info {bi:?}: got {got:?}");
+            assert_eq!(wrapped, should_wrap, "binder info {bi:?}: got {got:?}");
         });
     }
 }
