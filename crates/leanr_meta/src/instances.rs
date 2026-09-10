@@ -61,7 +61,7 @@
 //! be added; re-deriving it here would be redundant with, and could
 //! silently drift from, the toolchain's own already-serialized answer.
 //!
-//! # Scope: global instances only (named seam)
+//! # Scope: `scoped instance` activation only (named seam)
 //!
 //! `instanceExtension` is a `SimpleScopedEnvExtension`
 //! (`Instances.lean:95-102`), so a `scoped instance` can in principle
@@ -77,6 +77,16 @@
 //! revisit when a corpus divergence implicates one"). `Instances.olean`
 //! (this task's fixture) declares no `scoped instance`, so this seam is
 //! not exercised either way by the fixture.
+//!
+//! **The local-instances slice does not touch this.** `LocalInstance`
+//! (`fvar`-keyed, installed at `push_local_decl`/`push_let_decl` and
+//! consumed by `get_instances` below) and a `scoped instance`'s
+//! namespace-open visibility are two different pieces of oracle state —
+//! `MetavarContext.lean:268-273` vs. `Instances.lean:95-102` — and this
+//! module now models the former in full: local instances ARE in scope.
+//! What remains unowned is only the latter: whether a GLOBAL
+//! `instanceExtension` entry is visible at all given which namespaces
+//! are currently open.
 //!
 //! **Ownership**: closing this gap needs the same M3b3-style
 //! namespace-open-tracking/activation model `MetaCtx::new`'s own

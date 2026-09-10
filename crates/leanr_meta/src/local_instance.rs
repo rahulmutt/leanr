@@ -40,6 +40,66 @@
 //! guard has nothing to guard. Named rather than silently omitted; a
 //! future port of `withExistingLocalDecls` (`Basic.lean:1955-1959`)
 //! would need it.
+//!
+//! # An inherited circularity, named rather than resolved
+//!
+//! `isClassExpensive?` runs whnf, and whnf depends indirectly on the set
+//! of local instances being computed. The oracle says so in as many
+//! words (`Basic.lean:1402-1406`). leanr inherits it exactly, and it
+//! surfaces a second time in `get_instances`'
+//! `local_instance_candidate`, whose telescope installs further local
+//! instances while computing one candidate's `synthOrder`. Both
+//! terminate — but NOT because either loop is locally finite
+//! (`instimplicit_binder_positions`'s own docstring in `instances.rs`
+//! is explicit that its telescope's termination is "NOT simply 'the
+//! telescope is finite'"): both `is_class_expensive`'s whnf and this
+//! telescope's whnf ride the same `whnf -> smart unfolding -> synth_pending ->
+//! synth_instance -> get_instances` cycle that `get_instances`' own
+//! re-entrancy note traces, and inherit that cycle's bounds —
+//! `MAX_SYNTH_PENDING_DEPTH` (`whnf.rs:138`), `synth_instance`'s
+//! `guarded` bump (`synth.rs:1645`), and the step budget
+//! (`metactx.rs:1142-1148`). Being bounded is not the same as being
+//! "resolved", and a future change that makes `is_class` consult the
+//! instance table would close the loop for real.
+//!
+//! One further, deliberate difference from the oracle belongs in this
+//! same note. The oracle's own EXPENSIVE-path telescope
+//! (`forallTelescopeReducingAuxAux`) runs `withNewLocalInstancesImp`
+//! over each batch of peeled binders (`Basic.lean:1407-1418`) BEFORE
+//! its `whnf` call on the non-forall tail (the call site at `:1472`) —
+//! so the peeled binders' own local instances ARE in scope for that
+//! `whnf`, which is exactly the self-reference `Basic.lean:1402-1406`
+//! documents. leanr's `MetaCtx::is_class_expensive` (`metactx.rs`) does
+//! NOT reproduce that: it walks the `Forall` spine structurally,
+//! calling `whnf` on each successive `body` without ever opening a
+//! binder or installing anything, so those `whnf` calls never see
+//! instances the binders being walked past would have contributed.
+//! Recorded here as a known, deliberate difference rather than left for
+//! a future reader to rediscover — closing it would mean
+//! `is_class_expensive` opening binders the way
+//! `local_instance_candidate`'s own telescope (`instances.rs`'s
+//! `instimplicit_binder_positions`) already does, which this slice does
+//! not attempt.
+//!
+//! # Seams this slice does NOT close
+//!
+//! * `"type class instance expected"` — the oracle throws when a goal's
+//!   `isClass?` is `none` (`SynthInstance.lean:207-208`); leanr's
+//!   `get_instances` returns candidates regardless. PRE-EXISTING, and
+//!   deliberately left: closing it here would put corpus movement from
+//!   an unrelated fix inside this slice's neutrality gate, which is the
+//!   whole approval argument for a non-additive change. Explicitly
+//!   unowned.
+//! * `scoped instance` namespace activation — unchanged, still unowned
+//!   (`instances.rs`'s own "Scope: `scoped instance` activation only"
+//!   section).
+//! * erasure / private-instance filtering — unchanged, still unowned.
+//!   Note these filters live in `getInstances`' `.const` arm
+//!   (`SynthInstance.lean:216-228`) and so do not apply to locals at
+//!   all, which is faithful rather than a gap.
+//! * `withNewMCtxDepth`'s depth machinery does not reach local
+//!   instances: they are fvars, not metavariables. Recorded as a
+//!   NON-interaction so a later reader does not go looking for one.
 
 use leanr_kernel::bank::{ExprId, NameId};
 

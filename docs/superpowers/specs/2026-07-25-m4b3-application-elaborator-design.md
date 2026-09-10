@@ -1018,6 +1018,23 @@ what synthesis finds under a binder.
 result of the prerequisite beyond item 3 — instance-implicit binders
 simply become live rather than decorative.
 
+**That slice has now landed.** `MetaCtx` carries a sparse
+`local_instances` stack installed at `push_local_decl`/`push_let_decl`
+(and so at every telescope), carried on `LocalCtxSnapshot` and therefore
+on every `MetavarDecl`, and consumed by `get_instances`, which resolves
+the goal's class name before taking its table and appends matching
+locals between the priority sort and the reverse — so locals are tried
+first. The synth record shape gained an `fvars` field. Measured against
+the pre-slice baseline (`22255fe`, `main`'s merge-base with this
+branch): the elaboration corpus is byte-identical at 117 records — the
+diff is literally zero lines — and the synthesis corpus grew from 26 to
+32 as a pure append (six added lines, zero deletions); no pre-existing
+record moved or was modified. The predicted `leanr_elab` seam (the local
+instances spec's own § One prediction) did not land: `crates/leanr_elab/src/`
+has zero changes across the whole branch, so the narrow exception it
+pre-authorized was never invoked. M4b-3 P5's instance-implicit binders
+now have a consumer.
+
 ## What M4b-3 ships — and the stated non-shipping
 
 Like all of M4a and M4b so far, **M4b-3 does not ship independently
