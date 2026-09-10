@@ -69,12 +69,17 @@
 //! dispatch) rather than leaving it an unexamined assumption.
 //! `implicit_lambda_postpone_is_a_named_seam` below asserts it.
 //!
+//! **`mod scoping_audit` below is a different kind of section: an
+//! AUDIT, not a seam list.** M4b-3 P5 Task 7 (design spec § Amendment
+//! 8 item 4). Its own module doc carries the Step 1 enumeration and
+//! its findings; nothing above this paragraph is part of it.
+//!
 //! Everything else is asserted below, end-to-end from source text.
 
 mod support;
 
 use leanr_syntax::{builtin, parse_term};
-use support::elab_result;
+use support::{elab_and_synthesize, elab_result};
 
 /// Elaborate `src` through the same construction `oracle_elab.rs` uses
 /// — replay `Elab0.olean`, parse with leanr's own parser, dispatch the
@@ -813,4 +818,445 @@ fn implicit_lambda_postpone_is_a_named_seam() {
         msg.contains("implicit lambda postponement") && msg.contains("M4b-4"),
         "seam must name the postponement gap and its owning slice: {msg}"
     );
+}
+
+/// M4b-3 P5 Task 7 — scoping audit at the binder/argument family
+/// boundary (design spec § Amendment 8 item 4). Two reasons motivate
+/// it, both already realised once as real bugs in this plan:
+///
+///   1. `elim_mvar_deps` (`leanr_meta/src/mk_binding.rs`, wired into
+///      `MetaCtx::mk_binding`) turns an unassigned mvar that depends on
+///      a closing binder's fvars into an AUX-MVAR APPLICATION over
+///      those fvars, and PLAINLY ASSIGNS the original to it
+///      (`mk_binding.rs:665`, `self.mctx.assign(mvar_id, result)` inside
+///      `elim_mvar`). The assignment permanently embeds the abstracted
+///      fvar — `?a`'s value becomes `?aux_a @ n` FOREVER, in the
+///      metavariable context's own assignment table, which the later
+///      fvar->bvar abstraction pass never revisits. Any later code
+///      that dereferences that assignment (`instantiate_mvars`,
+///      `infer_type`, `is_def_eq`) needs the ORIGINAL binder's fvar
+///      back in scope to resolve it — the oracle's rule is
+///      `mvarId.withContext` before touching a goal. This went live
+///      once already: rung 3 (`default_inst.rs`) shipped without it,
+///      and `fun (n : Nat) => 0` broke with "unknown free variable"
+///      the day `elim_mvar_deps` was wired in, silently, with no
+///      corpus record to notice (`default_inst.rs`'s own module doc,
+///      "The history" section). Tasks 1-6 of this plan multiplied
+///      binder producers — `fun`'s per-binder `BinderInfo` (Task 1),
+///      `instBinder` in the bracketed telescope (Task 3),
+///      implicit-lambda insertion (Task 5), the `.postpone` seam
+///      (Task 6) — so the question is worth re-asking at each one.
+///   2. Local instances (PR #43) change *what synthesis finds* under a
+///      binder: a goal solved under the wrong local context now
+///      silently picks a DIFFERENT instance rather than merely
+///      failing. Task 4 found this twice in one task while landing
+///      local-instance install for `fun`'s own telescope: an ordering
+///      divergence (the oracle propagates the expected type before its
+///      `isClass?` test; leanr's install used to run before
+///      propagation too and missed an elided-domain binder that only
+///      becomes class-typed via propagation), and a stale
+///      `lctx_snapshot` memo left in force by the fix for the first
+///      bug. Both are cited below as fixed and tested elsewhere; this
+///      audit's job is to check every OTHER call site this plan's new
+///      binder producers can reach.
+///
+/// **Step 1 — the enumeration**, the output of
+///
+/// ```text
+/// grep -rn "synth_instance\|synthesize_pending\|infer_type\|is_def_eq" \
+///     crates/leanr_elab/src --include=*.rs | grep -v "^.*tests"
+/// ```
+///
+/// filtered to the REAL call sites (doc-comment citations of the same
+/// names are not call sites and are omitted). For each: whose local
+/// context is ambient when it runs, and why that is either correct or
+/// was made correct.
+///
+/// **Wrapped in `with_mvar_local_context`/`MetaCtx::with_mvar_context`
+/// — the mvar's OWN context, reinstalled before the call:**
+///   * `synthetic/ladder.rs:149` `synthesize_synthetic_mvar` — wraps
+///     ALL FOUR dispatch arms (`.typeClass`, `.postponed`, `.coe`,
+///     `.tactic`), matching the oracle's own
+///     `resumePostponed`/`synthesizeSyntheticMVar` posture: this is the
+///     ladder's own resumption entry point, reached after whatever
+///     binder registered the mvar may have long since closed.
+///     `synthesize_inst_mvar_core`'s `try_synth_instance` (`:202`),
+///     `is_def_eq` (`:216`, `:256`) and `infer_type` (`:234`) inherit
+///     this scope; so does `coe.rs`'s `synthesize_coe_mvar` (dispatched
+///     from the `.coe` arm — its own doc at `coe.rs:147-149` names this
+///     exact wrapper as "not this function's job", i.e. deliberately
+///     NOT re-wrapped, because the caller already did it).
+///   * `synthetic/report.rs:105` `report_stuck_synthetic_mvars`'s
+///     `.coe` arm — the oracle's `:305` runs this arm under
+///     `mvarId.withContext` too (its own comment: "A `.coe` mvar
+///     registered inside a binder carries `e` as a free variable of
+///     that binder ... the binder has closed by the time the reporter
+///     runs"). `infer_type(e)` at `:106` is inside the wrap.
+///   * `synthetic/default_inst.rs:213`
+///     `synthesize_using_default_prio` — rung 3's own re-entry, ported
+///     from the oracle's `:114` (this is the site that was the
+///     dormant/then-live seam). Everything nested inside it in the
+///     SAME call — `synthesize_using_default_instance`'s
+///     `infer_type(candidate)` (`:260`) and
+///     `with_assignable_synthetic_opaque(|m| m.is_def_eq(..))`
+///     (`:288`), and the recursive `synthesize_pending` (`:301`) ->
+///     `synthesize_using_instances` ->
+///     `synthesize_pending_inst_mvar_committed` chain — inherits this
+///     scope UNLESS it re-enters for a DIFFERENT goal id, which is the
+///     next bullet.
+///   * `synthetic/default_inst.rs:422`
+///     `synthesize_pending_inst_mvar_committed` — opens its OWN scope
+///     for its OWN `mvar_id` parameter (an instImplicit subgoal a
+///     default-instance candidate introduced), ported from the
+///     oracle's `commitWhen <| mvarId.withContext do` (`:135`). This is
+///     the site the Task 4 fix wave's "found it twice" history lives
+///     on: see the module doc above it for the ordering divergence and
+///     stale-memo fixes, both closed and tested elsewhere
+///     (`metactx.rs`'s own `install_local_instance_for_last_pushed_drops_a_stale_memo`).
+///     `synthesize_inst_mvar_core` (dispatched from here) inherits this
+///     scope.
+///
+/// **Ambient by construction — synchronous, in-scope, no stored mvar
+/// is being resumed across a closed binder:**
+///   * `app/args.rs:127` (`infer_type(f2)`, post-`coerceToFunction?`),
+///     `app/args.rs:672` (`infer_type(head)`, an instImplicit binder's
+///     class head while walking the CURRENT application's own
+///     f_type telescope), `app/mod.rs:367` (`infer_type(f)`, the
+///     just-elaborated head), `app/finalize.rs:59,102`
+///     (`infer_type(e)`/`is_def_eq(expected, e_type)` — `finalize`'s
+///     own doc: "the eta fvars are still live in the ambient `lctx`
+///     here"), `app/propagate.rs:88` (`is_def_eq(expected, resulting)`,
+///     mid-telescope) — every one of these runs inside the SAME
+///     synchronous `main`/`finalize` call that minted whatever it is
+///     looking at; the binder it needs, if any, has not closed.
+///   * `app/state.rs:433,454`
+///     (`try_synthesize_app_inst_mvars`/`synthesize_app_inst_mvars`,
+///     both calling `synthesize_inst_mvar_core` DIRECTLY, with no
+///     `with_mvar_local_context`) — looked the most suspicious hit in
+///     the whole enumeration, since it calls the same core the wrapped
+///     sites call, unwrapped. Confirmed correct rather than assumed:
+///     every `mvar_id` here is one THIS SAME `AppElab` call minted
+///     (`args.rs`'s `mk_inst_mvar`/`process_inst_implicit_arg`) at the
+///     CURRENT ambient scope, and both callers run before that scope
+///     can close (`propagate.rs:87`, mid-telescope; `finalize.rs:73,95,111`,
+///     before `elab_app_aux`'s own bracket restores `lctx` — see
+///     `finalize.rs`'s own eta-fvars comment above). A nested argument
+///     that is itself a binder (e.g. `f [inst] (fun y => ..)`) restores
+///     ITS OWN checkpoint on exit, so ambient is back to identical by
+///     the time control returns here either way.
+///   * `builtin/binder.rs:439` (`is_def_eq(fvar_type, domain)`,
+///     `propagate_expected_type`) and `builtin/lit/mod.rs:88`
+///     (`is_def_eq(e, ty_mvar)`, `mk_fresh_type_mvar_for`) — both run
+///     mid-telescope, immediately after minting the fvar/mvar they
+///     unify, in the same binder's own still-open scope. This is ALSO
+///     the mechanism that quietly resolves an ASCRIBED elided binder
+///     without ever reaching rung 3 at all (see
+///     `default_instance_rung_reinstalls_the_binder_elim_mvar_deps_abstracted_over`'s
+///     own doc below for where that surprised this audit).
+///   * `coe.rs:75,111,112,222,239` (`mk_coe`, `ensure_has_type`,
+///     `ensure_type`) — every caller is in-crate and synchronous
+///     (`coe.rs`'s own doc: "every caller is in-crate"); these never
+///     resume a stored goal, they act on an `ExprId` the caller already
+///     holds in the current call.
+///   * `elab.rs:461` (`infer_type(x)`, `use_implicit_lambda`'s
+///     `isLocalIdent?` check) — `x` is an fvar `local_ident_of` just
+///     resolved via `lctx_lookup_by_name` against the CURRENT ambient
+///     `lctx`, so it is in ambient by construction.
+///
+/// **Deliberately ambient, by the oracle's own transcription (not a
+/// gap):**
+///   * `synthetic/report.rs:33` (`pending_class_name`'s
+///     `instantiate_mvars`) and `synthetic/report.rs:94`
+///     (`report_stuck_synthetic_mvars`'s `.typeClass` arm) —
+///     `instantiate_mvars` substitutes ASSIGNED mvars into an `Expr`
+///     and consults no `lctx` at all, so which context is ambient when
+///     it runs cannot change its answer (`report.rs:98-99`'s own
+///     comment makes this contrast explicit against the `.coe` arm
+///     right next to it, which DOES need the wrap because it calls
+///     `infer_type`, not `instantiate_mvars`). `pending_class_name` is
+///     ALSO called from rung 3 (`default_inst.rs:214`, already
+///     wrapped there for `infer_type`'s benefit further down the same
+///     closure) — its own `instantiate_mvars` call would be safe
+///     either way.
+///
+/// **Conclusion.** Every reachable call site the grep turned up is
+/// either wrapped, ambient-correct-by-construction, or ambient because
+/// the operation itself does not consult `lctx`. Nothing new was found
+/// wrong. Two genuinely NEW paths this plan's own binder producers
+/// opened — implicit-lambda-inserted (Task 5) instance-implicit
+/// binders, and a default-instance-rung dereference nested two levels
+/// under an unrelated local-instance binder — had no existing test
+/// discriminating on their SCOPING (as opposed to their shape), so
+/// `implicit_lambda_inserted_local_instance_is_preferred` and
+/// `nested_local_instance_does_not_disturb_the_default_rungs_scoping`
+/// below close that gap. See each test's own doc for its mutation
+/// check, INCLUDING one case where building the intended nested test
+/// first required correcting which source shape actually reaches rung
+/// 3 at all — recorded there rather than silently fixed, since it is
+/// itself a finding about how easy this seam is to test around by
+/// accident.
+mod scoping_audit {
+    use super::*;
+
+    /// Reason 2, the shape Task 1/3 introduced and PR #43 makes
+    /// observable: synthesis under an explicit instance-implicit binder
+    /// must find the LOCAL instance, not `Elab0`'s global
+    /// `instAddNat` — `get_instances` appends matching locals ahead of
+    /// globals (PR #43's own doc).
+    ///
+    /// Asserts the FULL body shape, not merely "a `bvar` appears
+    /// somewhere" (the brief's own sample test, and this task's
+    /// standing carry-over calls that weak by name): the instance
+    /// argument slot of `Add.add {Nat} [self] Nat.zero Nat.zero` must
+    /// be EXACTLY `bvar 0` (the binder), and nothing else in the term
+    /// may have changed shape either. A mutation that made the local
+    /// search silently no-op (picking `instAddNat` instead) would put
+    /// `const "instAddNat"` in that exact slot instead — caught, not
+    /// merely "some bvar somewhere else in the term".
+    ///
+    /// Mutation check (task 7 report has the full transcript): with
+    /// `MetaCtx::install_local_instance_for` (`metactx.rs`) short-circuited
+    /// to skip the `local_instances` registration, this test FAILS —
+    /// the instance slot becomes `{"k":"const","n":"instAddNat","us":[]}`
+    /// — and passes again once restored.
+    #[test]
+    fn synthesis_under_a_local_instance_binder_prefers_the_local() {
+        let j = elab_and_synthesize("fun [inst : Add Nat] => (Add.add Nat.zero Nat.zero : Nat)")
+            .expect("fun [inst : Add Nat] => .. must elaborate");
+        assert_eq!(j["k"], "lam");
+        assert_eq!(j["bi"], "c");
+        assert_eq!(
+            j["b"],
+            serde_json::json!({
+                "k": "app",
+                "f": {
+                    "k": "app",
+                    "f": {
+                        "k": "app",
+                        "f": {
+                            "k": "app",
+                            "f": {"k": "const", "n": "Add.add", "us": []},
+                            "a": {"k": "const", "n": "Nat", "us": []}
+                        },
+                        "a": {"k": "bvar", "i": 0}
+                    },
+                    "a": {"k": "const", "n": "Nat.zero", "us": []}
+                },
+                "a": {"k": "const", "n": "Nat.zero", "us": []}
+            }),
+            "the instance argument (second application from the head) must be the \
+             BINDER's own bvar, not a global constant"
+        );
+    }
+
+    /// Reason 1, exactly as the design spec cites it: `fun (n : Nat) =>
+    /// 0` is the MEASURED historical break (`default_inst.rs`'s own
+    /// module doc, "The history" section) — `elim_mvar_deps` PLAINLY
+    /// ASSIGNS `0`'s unresolved `OfNat` carrier/instance mvars to aux-mvar
+    /// applications over `n` the moment `n`'s lambda closes
+    /// (`MetaCtx::mk_binding`, `mk_binding.rs:665`), and that assignment
+    /// permanently embeds `n` as a raw fvar reference. Rung 3 (the only
+    /// rung that can still ground this goal, since the carrier is
+    /// otherwise unconstrained) must reinstall `n`'s own local context
+    /// before dereferencing it or this fails with "unknown free
+    /// variable".
+    ///
+    /// **Correction to the brief's own sample test**, checked rather
+    /// than trusted (this task's standing carry-over): the brief's
+    /// `fun (n : Nat) => (fun x => x : Nat -> Nat)` does NOT exercise
+    /// this at all. `x`'s elided domain mvar is unified directly against
+    /// the ascription's `Nat` by `propagate_expected_type`'s inline
+    /// `is_def_eq` the moment `x` is pushed — it is ASSIGNED long
+    /// before `n`'s own `mk_lambda` ever runs `elim_mvar_deps`, so no
+    /// aux-mvar application is ever produced and the test would pass
+    /// unchanged even with rung 3's scoping wrap deleted entirely
+    /// (measured directly: run against the SAME mutation this test's own
+    /// check below uses, that shape still elaborates correctly). `fun (n
+    /// : Nat) => 0` is the corpus's own `num/zeroUnderBinder` record;
+    /// this test pins the SAME source here too, deliberately, as the
+    /// scoping story's self-contained anchor rather than sending a
+    /// reader to a different file to see why it matters.
+    ///
+    /// Mutation check: with `synthesize_using_default_prio`'s
+    /// `with_mvar_local_context` wrap bypassed (the closure invoked
+    /// directly on `self` instead), this test FAILS with a `MetaError`
+    /// (`Infer("unknown free variable")` dereferencing `n`) rather than
+    /// elaborating — confirmed, restored.
+    #[test]
+    fn default_instance_rung_reinstalls_the_binder_elim_mvar_deps_abstracted_over() {
+        let j =
+            elab_and_synthesize("fun (n : Nat) => 0").expect("fun (n : Nat) => 0 must elaborate");
+        assert_eq!(
+            j,
+            serde_json::json!({
+                "k": "lam",
+                "bi": "d",
+                "t": {"k": "const", "n": "Nat", "us": []},
+                "b": {
+                    "k": "app",
+                    "f": {
+                        "k": "app",
+                        "f": {
+                            "k": "app",
+                            "f": {"k": "const", "n": "OfNat.ofNat", "us": [{"k": "zero"}]},
+                            "a": {"k": "const", "n": "Nat", "us": []}
+                        },
+                        "a": {"k": "lit", "n": "0"}
+                    },
+                    "a": {
+                        "k": "app",
+                        "f": {"k": "const", "n": "instOfNatNat", "us": []},
+                        "a": {"k": "lit", "n": "0"}
+                    }
+                }
+            }),
+            "must match the oracle's own answer (fixture id num/zeroUnderBinder) byte \
+             for byte: instOfNatNat found and applied, no dangling mvar or fvar"
+        );
+    }
+
+    /// Reason 2's NEW producer: Task 5's implicit-lambda insertion
+    /// pushes its instance-implicit binder ANONYMOUSLY
+    /// (`elab.rs::elab_implicit_lambda`'s own doc: pushed with `None`,
+    /// not the expected type's own binder name, to reproduce hygiene's
+    /// effect). `binder_smoke.rs`'s
+    /// `implicit_lambda_wraps_instance_implicit_too` already pins the
+    /// WRAP's shape (`fun [inst : Add Nat] => Nat.zero`) but its body
+    /// never performs an instance search, so it cannot discriminate
+    /// whether the anonymous local actually got INSTALLED — a gap this
+    /// audit closes rather than assumes closed.
+    ///
+    /// `elab_implicit_lambda` pushes via the combined `push_local_decl`
+    /// (`metactx.rs:706`, mint-and-install in one call), not the split
+    /// `push_local_decl_without_instance` /
+    /// `install_local_instance_for_last_pushed` pair `fun`'s own
+    /// telescope needs (`metactx.rs:723-735`'s own doc: that split
+    /// exists only for a domain that still needs `propagateExpectedType`
+    /// to refine AFTER the push; the implicit-lambda wrap's binder type
+    /// comes straight off an already-fully-elaborated `Forall` node, so
+    /// there is nothing left to refine and the plain combined call is
+    /// correct here, the same as every OTHER `push_local_decl` caller
+    /// `forall`/`let`/`have`).
+    ///
+    /// `(Add.add Nat.zero Nat.zero : [inst : Add Nat] -> Nat)` produces
+    /// byte-identical `j["b"]` to the EXPLICIT-binder test above — two
+    /// different producers (a user-written `fun [inst : ..] => ..`
+    /// versus an auto-inserted wrap) reaching the same term is the
+    /// point: both correctly install, and both correctly search, the
+    /// same local instance.
+    ///
+    /// Mutation check: same mutation as the explicit-binder test above
+    /// (`install_local_instance_for` short-circuited) — this test FAILS
+    /// the same way, the instance slot becoming `const "instAddNat"`;
+    /// restored. A SECOND, narrower mutation — swapping
+    /// `elab_implicit_lambda`'s `push_local_decl` call for
+    /// `push_local_decl_without_instance` alone (no matching
+    /// `install_local_instance_for_last_pushed` added back) — also
+    /// fails this test the same way while leaving the EXPLICIT-binder
+    /// test untouched, confirming this test discriminates the
+    /// IMPLICIT-LAMBDA install path specifically, not just the shared
+    /// `install_local_instance_for` machinery both tests exercise.
+    #[test]
+    fn implicit_lambda_inserted_local_instance_is_preferred() {
+        let j = elab_and_synthesize("(Add.add Nat.zero Nat.zero : [inst : Add Nat] -> Nat)")
+            .expect("the implicit-lambda wrap must fire and elaborate");
+        assert_eq!(j["k"], "lam");
+        assert_eq!(j["bi"], "c");
+        assert_eq!(
+            j["b"],
+            serde_json::json!({
+                "k": "app",
+                "f": {
+                    "k": "app",
+                    "f": {
+                        "k": "app",
+                        "f": {
+                            "k": "app",
+                            "f": {"k": "const", "n": "Add.add", "us": []},
+                            "a": {"k": "const", "n": "Nat", "us": []}
+                        },
+                        "a": {"k": "bvar", "i": 0}
+                    },
+                    "a": {"k": "const", "n": "Nat.zero", "us": []}
+                },
+                "a": {"k": "const", "n": "Nat.zero", "us": []}
+            }),
+            "the auto-inserted implicit-lambda binder's own instance must be found, \
+             exactly as the explicit-binder form is"
+        );
+    }
+
+    /// Both reasons TOGETHER, nested: an outer EXPLICIT local-instance
+    /// binder (`[inst : Add Nat]`, unrelated to the goal below it)
+    /// enclosing the exact `fun (n : Nat) => 0` aux-mvar shape from
+    /// `default_instance_rung_reinstalls_the_binder_elim_mvar_deps_abstracted_over`
+    /// above. This is the shape the Task 4 fix wave's own history warns
+    /// a reader to expect more of: a local-instance install sitting in
+    /// an ENCLOSING scope while a DIFFERENT, inner binder's own
+    /// aux-mvar goal gets resolved by rung 3.
+    ///
+    /// **Measured, not assumed, which source shape actually reaches
+    /// rung 3 here.** The first draft ascribed the inner `fun` (`(fun (n
+    /// : Nat) => 0 : Nat -> Nat)`, mirroring how the OTHER tests in this
+    /// module ascribe their inner binders) and it is WRONG for this
+    /// purpose: `ensure_has_type`'s `is_def_eq` between the ascription's
+    /// `Nat -> Nat` and the lambda's inferred `Nat -> ?a` PATTERN-SOLVES
+    /// `?a` directly (`?a`'s underlying aux-mvar gets assigned `fun _ =>
+    /// Nat` while comparing the two `Pi` bodies under a temporary local
+    /// for `n` — ordinary unification, no rung 3 involved), which
+    /// grounds the `OfNat` carrier before the top-level fixpoint even
+    /// starts. Confirmed by instrumentation: with the ascription present,
+    /// `synthesize_using_default_prio` is called ZERO times for this
+    /// source; `pending_mvars` is already empty by the time rung 3 would
+    /// run. Dropping the ascription (`fun [inst : Add Nat] => (fun (n :
+    /// Nat) => 0)`, this test's actual source) restores the ORIGINAL,
+    /// unascribed `num/zeroUnderBinder` shape as the outer binder's
+    /// body, confirmed BY THE SAME INSTRUMENTATION to reach
+    /// `synthesize_using_default_prio` exactly as the single-binder test
+    /// above does — and it elaborates to byte-identical output either
+    /// way, since both paths reach the same ground answer.
+    ///
+    /// Two ways nesting specifically could break here that the
+    /// single-binder test above cannot catch: `lctx_restore`'s
+    /// depth-based truncation of `local_instances` (`metactx.rs`'s own
+    /// doc on why it truncates by DEPTH, not index) mis-tracking the
+    /// depth across a NESTED push, or rung 3's `with_mvar_local_context`
+    /// reinstalling only a partial snapshot that drops the outer
+    /// binder's entry.
+    ///
+    /// Mutation check: same `synthesize_using_default_prio` wrap-bypass
+    /// mutation as the single-binder aux-mvar test — this test FAILS
+    /// the same way (`Infer("unknown free variable")` dereferencing
+    /// `n`); restored.
+    #[test]
+    fn nested_local_instance_does_not_disturb_the_default_rungs_scoping() {
+        let j = elab_and_synthesize("fun [inst : Add Nat] => (fun (n : Nat) => 0)")
+            .expect("nested binder must still resolve rung 3 correctly");
+        assert_eq!(j["k"], "lam");
+        assert_eq!(j["bi"], "c");
+        assert_eq!(j["b"]["k"], "lam");
+        assert_eq!(j["b"]["bi"], "d");
+        assert_eq!(
+            j["b"]["b"],
+            serde_json::json!({
+                "k": "app",
+                "f": {
+                    "k": "app",
+                    "f": {
+                        "k": "app",
+                        "f": {"k": "const", "n": "OfNat.ofNat", "us": [{"k": "zero"}]},
+                        "a": {"k": "const", "n": "Nat", "us": []}
+                    },
+                    "a": {"k": "lit", "n": "0"}
+                },
+                "a": {
+                    "k": "app",
+                    "f": {"k": "const", "n": "instOfNatNat", "us": []},
+                    "a": {"k": "lit", "n": "0"}
+                }
+            }),
+            "the inner binder's own default-instance goal must resolve exactly as it \
+             does with no outer local-instance binder present"
+        );
+    }
 }
