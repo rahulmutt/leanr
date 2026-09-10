@@ -443,7 +443,7 @@ fn use_implicit_lambda(
 /// **Correction to the plan's own paraphrase, checked against the
 /// pinned source (`:1811-1818`) rather than trusted:** the internal
 /// `loop`'s stop condition is `c.isExplicit` (true only for
-/// `BinderInfo.default`, `Expr.lean:92-95`), NOT `bi.isImplicit ||
+/// `BinderInfo.default`, `Expr.lean:92-96`), NOT `bi.isImplicit ||
 /// bi.isInstImplicit`. So once inside this function — which only
 /// happens after `use_implicit_lambda`'s OWN gate has confirmed the
 /// leading binder is implicit or inst-implicit — the loop keeps peeling
@@ -465,6 +465,24 @@ fn use_implicit_lambda(
 /// The wrap is around the WHOLE term and happens BEFORE any leaf or app
 /// elaborator runs (`elabTermAux`, `:1839-1841`) — which is why it
 /// lives here in `elab_term` rather than inside a leaf.
+///
+/// Two further, deliberate divergences from `elabImplicitLambdaAux`
+/// (`:1796-1804`), added to this comment's own unmodelled-arms list
+/// alongside `use_implicit_lambda`'s `.postpone` and
+/// `hasNoImplicitLambdaAnnotation`:
+///   * the oracle elaborates the residual body with `elabUsingElabFns
+///     stx expectedType catchExPostpone` (`:1797`) THEN a separate
+///     `ensureHasType` (`:1799`); this calls `elab_term_ensuring_type`
+///     (`elab_term` then `ensure_has_type`) instead, which is the same
+///     two steps in the same order — reviewer-verified behaviourally
+///     equivalent, not merely assumed so.
+///   * `decorateErrorMessageWithLambdaImplicitVars` (`:1781-1792`,
+///     wired in via the `try/catch` at `:1798,1803-1804`) augments a
+///     FAILED elaboration's error MESSAGE with the introduced implicit
+///     fvars' types and a hint about `@`/explicit binder annotations.
+///     Message-only — it changes no control flow and produces no
+///     different `ExprId` — so it is not modelled; an error surfaces
+///     here without that extra prose.
 fn elab_implicit_lambda(
     elab: &mut TermElabM,
     elem: &SynElem,
@@ -484,10 +502,10 @@ fn elab_implicit_lambda(
             // doc comment).
             let reduced = elab.mctx.whnf(ty)?;
             let Node::Forall {
-                binder_name,
                 binder_type,
                 body,
                 binder_info,
+                ..
             } = elab.mctx.store().expr_node(Some(base), reduced)
             else {
                 break;
@@ -498,9 +516,29 @@ fn elab_implicit_lambda(
             if binder_info == BinderInfo::Default {
                 break;
             }
-            let fvar = elab
-                .mctx
-                .push_local_decl(binder_name, binder_type, binder_info)?;
+            // oracle: `withFreshMacroScope <| .. MonadQuotation.addMacroScope
+            // n ..` (`:1814-1815`) hygienizes the binder name before
+            // `withLocalDecl`, so a user identifier written in `elem`
+            // that happens to share the expected type's binder name
+            // still resolves past this fvar to whatever it would have
+            // resolved to without the wrap. leanr's names carry no
+            // macro scopes (this crate's own fresh-name idiom is a
+            // distinct "fixed prefix + counter" generator, not a
+            // hygiene mechanism `lctx_lookup_by_name` would treat any
+            // differently from a real user name) — so reusing the
+            // expected type's own `binder_name` here would let it
+            // SHADOW/CAPTURE a same-named outer binder the user actually
+            // meant, silently producing a DIFFERENT term than the
+            // oracle's rather than a named seam (this slice's own
+            // discipline: fix round 1, finding 3). Pushing the fvar
+            // anonymously (`None`, the same convention Task 1 uses for
+            // `_` holes) reproduces hygiene's EFFECT for this one case
+            // without implementing hygiene itself: an unnamed local is
+            // never found by `lctx_lookup_by_name`, so a user ident
+            // resolves past it to the true outer binder, exactly as
+            // `addMacroScope` arranges. Binder names are erased by the
+            // differential encoder, so this is neutral for the gate.
+            let fvar = elab.mctx.push_local_decl(None, binder_type, binder_info)?;
             ty = elab.mctx.instantiate_beta_rev_range(body, &[fvar])?;
             fvars.push(fvar);
         }

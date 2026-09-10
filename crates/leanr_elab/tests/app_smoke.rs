@@ -814,12 +814,17 @@ fn implicit_lambda_wraps_only_for_implicit_and_inst_implicit() {
                 app.node(got),
                 leanr_kernel::bank::terms::Node::Lam { binder_info, .. } if binder_info == bi
             );
-            assert_eq!(wrapped, should_wrap, "binder info {bi:?}: got {got:?}");
+            assert_eq!(
+                wrapped,
+                should_wrap,
+                "binder info {bi:?}: got {:?}",
+                app.node(got)
+            );
         });
     }
 }
 
-/// oracle: `blockImplicitLambda` (`TermElabM.lean:1715-1720`) runs
+/// oracle: `blockImplicitLambda` (`TermElabM.lean:1716-1720`) runs
 /// BEFORE the expected type is examined, and its exclusion list is what
 /// keeps the guard above from firing on shapes the oracle elaborates
 /// normally. Each entry is checked against the SAME implicit-`forall`

@@ -740,6 +740,8 @@ fn implicit_lambda_wraps_instance_implicit_too() {
     let j = elab_json("(Nat.zero : [inst : Add Nat] -> Nat)");
     assert_eq!(j["k"], "lam");
     assert_eq!(j["bi"], "c");
+    assert_eq!(j["b"]["k"], "const");
+    assert_eq!(j["b"]["n"], "Nat.zero");
 }
 
 #[test]
@@ -749,6 +751,31 @@ fn implicit_lambda_nests_for_several_implicit_binders() {
     assert_eq!(j["bi"], "i");
     assert_eq!(j["b"]["k"], "lam");
     assert_eq!(j["b"]["bi"], "i");
+    assert_eq!(j["b"]["b"]["n"], "Nat.zero");
+}
+
+/// Fix round 1, finding 2: pins `elab_implicit_lambda`'s own headline
+/// correction (the loop's stop condition is `c.isExplicit`, i.e.
+/// `BinderInfo::Default`, NOT `!(Implicit || InstImplicit)`) with an
+/// actual test — the two tests above use two IDENTICAL binder kinds, so
+/// a regression back to the brief's wrong predicate (which would stop
+/// peeling as soon as it saw the strict-implicit `b` and hand
+/// `elab_implicit_lambda_aux` the un-peeled `⦃b : Type⦄ -> Nat`
+/// residual) would still pass them both. Confirmed against the pinned
+/// `lean` binary (`elab.rs`'s own `elab_implicit_lambda` doc comment):
+/// `(Nat.zero : {a : Type} -> ⦃b : Type⦄ -> Nat)` elaborates to `fun
+/// {a : Type} ⦃b : Type⦄ => Nat.zero`, both binders absorbed into ONE
+/// wrap. Being mixed-kind (`i` then `s`), this also closes the
+/// nesting-ORDER gap the two-identical-implicit test above cannot
+/// cover: a bug that reversed `fvars`' push order (or otherwise mixed
+/// up which binder became the outer vs. inner `lam`) would be invisible
+/// there but flips `bi`/`bi` here.
+#[test]
+fn implicit_lambda_nests_across_implicit_and_strict_implicit() {
+    let j = elab_json("(Nat.zero : {a : Type} -> ⦃b : Type⦄ -> Nat)");
+    assert_eq!(j["bi"], "i");
+    assert_eq!(j["b"]["k"], "lam");
+    assert_eq!(j["b"]["bi"], "s");
     assert_eq!(j["b"]["b"]["n"], "Nat.zero");
 }
 
@@ -783,26 +810,73 @@ fn implicit_lambda_does_not_fire_on_strict_implicit() {
 /// implicit-lambda feature: `` `(@($t)) `` and `` `(@$t) `` both
 /// elaborate `t` with `implicitLambda := false`.
 ///
-/// Controller amendment 4: `elab_json` panics on an `Err`, and this
-/// term DOES error — but not because implicit-lambda insertion ever
-/// gets a chance to run. `block_implicit_lambda` correctly recognizes
-/// the outer `Lean.Parser.Term.explicit` node and blocks BEFORE
-/// `use_implicit_lambda` even looks at the expected type, so dispatch
-/// falls through to `app::elab_explicit`, whose `` `(@($t)) ``/`` `(@$t)
-/// `` fallback (the arms that literally implement `implicitLambda :=
-/// false`) is a separate, pre-existing, un-implemented seam
-/// (`app/mod.rs::elab_explicit`'s `other` arm — `seam_audit.rs`'s own
-/// `("@(Nat.succ Nat.zero)", "M4b-3 P5")` case) that this task does not
-/// touch. So this term can never reach a *successful* elaboration to
-/// inspect for a `lam` head — what this test discriminates instead is
-/// that whatever failure occurs is NOT the (now-deleted) implicit-lambda
-/// seam and is not evidence a lambda wrap silently happened.
+/// Fix round 1, finding 1: the original draft used `@(Nat.succ
+/// Nat.zero)`, whose inner kind is `Lean.Parser.Term.paren` — that
+/// routes to `app::elab_explicit`'s `other` arm, a SEPARATE,
+/// pre-existing, un-implemented seam (`` `(@($t)) ``/`` `(@$t) ``'s own
+/// fallback, `seam_audit.rs`'s `("@(Nat.succ Nat.zero)", "M4b-3 P5")`
+/// case) that errors unconditionally, before the expected type — and
+/// therefore before `use_implicit_lambda` — is ever consulted. A
+/// mutation check confirmed that term's error is IDENTICAL whether or
+/// not `block_implicit_lambda` actually blocks the wrap, so it pinned
+/// the wrong seam.
+///
+/// `@Nat.zero`'s inner kind is plain `<ident>`, which `elab_explicit`
+/// already routes to `elab_atom` (a real, implemented path,
+/// `app/mod.rs:207`) — confirmed against the pinned `lean` binary:
+/// `(@Nat.zero : {a : Type} -> Nat)` reports `Type mismatch: Nat.zero
+/// has type Nat ... but is expected to have type {a : Type} → Nat`,
+/// i.e. `@` disables the wrap and `Nat.zero`'s own (non-implicit) type
+/// is checked directly against the un-peeled expected type — NOT a
+/// `lam`. With blocking intact this is `Err(TypeMismatch)`; a mutation
+/// that breaks `block_implicit_lambda`'s `explicit` arm turns it into
+/// `Ok` with a `lam` head (checked below).
 #[test]
 fn at_sign_disables_implicit_lambda() {
-    match elab_result("(@(Nat.succ Nat.zero) : {a : Type} -> Nat)") {
-        Err(leanr_elab::ElabError::UnsupportedSyntax(m)) => {
-            assert!(!m.contains("implicit lambda"), "unexpected seam: {m}");
-        }
-        other => panic!("expected the pre-existing elab_explicit seam, got {other:?}"),
+    match elab_result("(@Nat.zero : {a : Type} -> Nat)") {
+        Err(leanr_elab::ElabError::TypeMismatch { .. }) => {}
+        other => panic!("expected the ascription's own TypeMismatch, got {other:?}"),
     }
+}
+
+/// Fix round 1, finding 3: oracle `elabImplicitLambda`
+/// (`TermElabM.lean:1814-1815`) hygienizes the wrap's own binder name
+/// (`withFreshMacroScope <| .. addMacroScope n ..`) before pushing it,
+/// so a user identifier that happens to share the expected type's
+/// binder name still resolves to whatever it would have without the
+/// wrap. `elab_implicit_lambda` pushes the wrap's fvar with `None`
+/// instead of the expected type's own `binder_name` to reproduce that
+/// EFFECT (not the mechanism — see this crate's own doc comment on the
+/// push site): an unnamed local is never found by
+/// `lctx_lookup_by_name`, so lookup falls through to the real outer
+/// binder.
+///
+/// `(fun (a : Type) => (a : {a : Type} -> Type))`: the outer `fun`
+/// binds `a`; its body ascribes the SAME identifier `a` against
+/// `{a : Type} -> Type`, an implicit forall whose OWN binder is also
+/// named `a`. Both readings of the inner `a` typecheck (both the outer
+/// binder and the wrap's own fvar have type `Type`, checked against the
+/// residual `Type`), so this is exactly the case fix round 1 flagged:
+/// silently producing a DIFFERENT (self-referential) term rather than
+/// erroring. Confirmed against the pinned `lean` binary's own
+/// resolution rule (macro-scope hygiene: an unqualified user `a` always
+/// binds to the nearest SOURCE-level `a`, never to a hygienically
+/// introduced one) — the oracle's wrap fvar can never be what a plain
+/// user identifier resolves to.
+///
+/// If the wrap's own fvar were pushed under the SHARED name `a`
+/// (mutation below), `lctx_lookup_by_name` would find the MOST
+/// RECENTLY pushed `a` — the wrap's own fvar, not the outer `fun`'s —
+/// and the body would self-reference (`bvar 0`, the identity-shaped
+/// inner lambda) instead of reaching the outer binder (`bvar 1`).
+#[test]
+fn implicit_lambda_wrap_binder_does_not_capture_a_same_named_outer_binder() {
+    let j = elab_json("(fun (a : Type) => (a : {a : Type} -> Type))");
+    assert_eq!(j["k"], "lam");
+    assert_eq!(j["bi"], "d");
+    assert_eq!(j["b"]["k"], "lam");
+    assert_eq!(j["b"]["bi"], "i");
+    // bvar 1 = the OUTER `fun`'s `a`, not the wrap's own (unused) fvar
+    // at bvar 0.
+    assert_eq!(j["b"]["b"], serde_json::json!({"k": "bvar", "i": 1}));
 }
