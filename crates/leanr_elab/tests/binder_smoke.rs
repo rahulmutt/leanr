@@ -482,6 +482,77 @@ fn let_nested_indexes_bvars() {
     assert_eq!(j["b"]["b"], serde_json::json!({"k": "bvar", "i": 0}));
 }
 
+#[test]
+fn forall_inst_binder_carries_binder_info() {
+    let j = elab_json("forall [inst : Add Nat], Nat");
+    assert_eq!(j["k"], "pi");
+    assert_eq!(j["bi"], "c");
+}
+
+#[test]
+fn forall_inst_binder_anonymous() {
+    let j = elab_json("forall [Add Nat], Nat");
+    assert_eq!(j["k"], "pi");
+    assert_eq!(j["bi"], "c");
+}
+
+#[test]
+fn have_inst_binder_binds_and_abstracts() {
+    // have f : forall [inst : Add Nat], Nat := fun [inst : Add Nat] =>
+    //   Nat.zero; f
+    //
+    // The declared type's `forall [inst : Add Nat], Nat` only elaborates
+    // through `extract_binder_group`'s new `instBinder` branch — the
+    // value's `fun [inst : Add Nat] => …` already went through
+    // `extract_fun_binder_views`'s existing `instBinder` arm before this
+    // task, so `j["v"]["bi"]` alone would not discriminate a working
+    // `extract_binder_group` from a broken one. `j["t"]["bi"]`/`j["t"]["t"]`
+    // (the `Add Nat` domain, only reachable once the instBinder's BARE
+    // type slot is read correctly) are the assertions this task's change
+    // is actually responsible for.
+    //
+    // The body `f` is NOT a bare `bvar` here: `f`'s type is headed by an
+    // instance-implicit `forallE`, so the existing (pre-Task-3) app-elab
+    // machinery (`app/args.rs`'s `InstImplicit` arm, exercised via
+    // `elab_atom`'s zero-arg path) auto-inserts the synthesized instance
+    // — `f` elaborates to `f instAddNat`, the same auto-application the
+    // real elaborator performs for any identifier whose type begins with
+    // an instance-implicit binder. That is itself a second, independent
+    // confirmation that the new `instBinder` pi carries `InstImplicit`
+    // (a `Default`/`Implicit` binder-info would never trigger the
+    // instance-arg search, and the whole term would fail to elaborate:
+    // `instAddNat` would then be a wrong-typed value applied to a
+    // pi-expecting `f`).
+    let j =
+        elab_json("have f : forall [inst : Add Nat], Nat := fun [inst : Add Nat] => Nat.zero; f");
+    assert_eq!(j["k"], "let");
+    assert_eq!(j["nd"], true);
+    assert_eq!(j["t"]["k"], "pi");
+    assert_eq!(j["t"]["bi"], "c");
+    assert_eq!(
+        j["t"]["t"],
+        serde_json::json!({
+            "k": "app",
+            "f": {"k": "const", "n": "Add", "us": []},
+            "a": {"k": "const", "n": "Nat", "us": []}
+        })
+    );
+    assert_eq!(
+        j["t"]["b"],
+        serde_json::json!({"k": "const", "n": "Nat", "us": []})
+    );
+    assert_eq!(j["v"]["k"], "lam");
+    assert_eq!(j["v"]["bi"], "c");
+    assert_eq!(
+        j["b"],
+        serde_json::json!({
+            "k": "app",
+            "f": {"k": "bvar", "i": 0},
+            "a": {"k": "const", "n": "instAddNat", "us": []}
+        })
+    );
+}
+
 /// `ensureType` (`TermElabM.lean:1935-1949`, M4b-3 P4 task 9): a binder
 /// domain that is neither a `Sort` nor unifiable with one, and has no
 /// `CoeSort` instance, is "type expected" — a distinct error from the

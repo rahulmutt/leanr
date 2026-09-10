@@ -82,14 +82,16 @@ pub(crate) struct BinderGroup {
 }
 
 /// Map a bracketed-binder kind name to its `BinderInfo`. `instBinder`
-/// (`[…]`, a different child layout — optional name + bare type) is not
-/// used by any Plan-1 corpus term and is deferred to M4b-3 (instance
-/// args); it returns `None` here so the caller names the seam.
+/// (`[…]`) has a different child layout — optional name + bare type,
+/// handled by `extract_binder_group`'s own `instBinder` branch (Task 3;
+/// it calls the shared `extract_inst_binder_layout` helper rather than
+/// walking that layout again here).
 fn binder_info_of(kind: &str) -> Option<BinderInfo> {
     match kind {
         "Lean.Parser.Term.explicitBinder" => Some(BinderInfo::Default),
         "Lean.Parser.Term.implicitBinder" => Some(BinderInfo::Implicit),
         "Lean.Parser.Term.strictImplicitBinder" => Some(BinderInfo::StrictImplicit),
+        "Lean.Parser.Term.instBinder" => Some(BinderInfo::InstImplicit),
         _ => None,
     }
 }
@@ -108,6 +110,22 @@ pub(crate) fn extract_binder_group(
     let kind = kinds.name(group.kind());
     let bi = binder_info_of(kind)
         .ok_or_else(|| ElabError::UnsupportedSyntax(format!("binder group: {kind}")))?;
+
+    // `instBinder` (`[inst : C α]` / `[C α]`) has a layout of its own —
+    // optional name + BARE type, not the `KIND_NULL`-wrapped names list
+    // and `[":", T]` type slot the explicit/implicit/strict groups below
+    // share. `extract_fun_binder_views` already walks this same spine for
+    // `fun`'s own `instBinder` arm (Task 1); call that shared helper
+    // rather than carrying a second copy of the walk here.
+    if kind == "Lean.Parser.Term.instBinder" {
+        let (name, ty) = extract_inst_binder_layout(elab, group, kinds)?;
+        return Ok(BinderGroup {
+            names: vec![name],
+            ty,
+            bi,
+        });
+    }
+
     let ch = non_trivia_children(group);
     let names_node = ch
         .get(1)
@@ -350,7 +368,9 @@ struct FunBinderView {
 /// is a `KIND_NULL` wrapper holding `[":", T]`. Shared by
 /// `extract_fun_binder_views`'s `instBinder` arm and `extract_binder_group`
 /// (Task 3), so named without a `fun`-specific reading. oracle:
-/// `toBinderViews`, `Binders.lean:450-453`.
+/// `toBinderViews`'s `instBinder` arm, `Binders.lean:161-165` (verified
+/// against the pinned toolchain — a plan-inherited citation once pointed
+/// at `:450-453`, which is inside the unrelated `elabFunBinderViews`).
 fn extract_inst_binder_layout(
     elab: &mut TermElabM,
     node: &SyntaxNode,
@@ -384,8 +404,12 @@ fn intern_fun_binder_ident(
             Ok(Some(intern_binder_name(elab, tok.text())?))
         }
         NodeOrToken::Node(n) if kinds.name(n.kind()) == "Lean.Parser.Term.hole" => Ok(None),
+        // Named without a `fun`-specific reading: `extract_binder_group`
+        // (Task 3) reaches this through `extract_inst_binder_layout` for
+        // `forall`/`let`/`have` too, so a message hardcoding "fun" would
+        // misreport the owning construct on failure.
         _ => Err(ElabError::UnsupportedSyntax(format!(
-            "fun binder name: {}",
+            "binder identifier: {}",
             kinds.name(el.kind())
         ))),
     }
@@ -424,8 +448,10 @@ fn extract_paren_fun_binder(
     Ok((name, ty_elem))
 }
 
-/// oracle: `toBinderViews` (`Binders.lean:436-455`), restricted to the
-/// four `funBinder` alternatives (`Parser/Term.lean:379-381`).
+/// oracle: `toBinderViews` (`Binders.lean:140-166`), restricted to the
+/// four `funBinder` alternatives (`Parser/Term.lean:379-381`). (Verified
+/// against the pinned toolchain — a plan-inherited citation once pointed
+/// at `:436-455`, which is inside the unrelated `elabFunBinderViews`.)
 ///
 /// Unlike the `forall`/`let` telescope, a `fun` binder's type may be
 /// ABSENT (`fun {a} => …`), so this tolerates an empty binder-type slot
