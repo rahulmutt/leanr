@@ -427,12 +427,14 @@ fn oracle_synth_gate() {
     // number of records actually COMPARED, so deleting or `exc`-ing a
     // curated query fails here instead of quietly shrinking the corpus.
     assert_eq!(
-        compared, 25,
-        "expected 25 compared synthesis records (skipped `exc`: {skipped_exc:?}; \
+        compared, 30,
+        "expected 30 compared synthesis records (skipped `exc`: {skipped_exc:?}; \
          skipped near-budget: {skipped_near_budget:?}; seam-excluded: \
          {skipped_seam:?}) — if the curated list in dump_synth.lean grew or shrank \
          deliberately, update this count; M4b-3 P4 task 1 added the six coe* records, \
-         local-instances task 1 added `fvarCtx/synth/0`"
+         local-instances task 1 added `fvarCtx/synth/0`, local-instances task 8 added the \
+         five differential records (`noInstLocal`, `localBeatsGlobal`, `letLocal`, \
+         `noInstParamLocal`, `nonClassFvar`)"
     );
 }
 

@@ -381,7 +381,68 @@ What each entry exercises (task B7's brief):
                   no `{"k":"fvar",...}` node anywhere in the record, the
                   `fv`-seeding mutation in `oracle_synth.rs` had nothing
                   to corrupt. `OfN x N` fixes that by putting `x` in a
-                  term position the class itself is parametrized over.) -/
+                  term position the class itself is parametrized over.)
+
+=== Local-instances slice (M4b-3 P5 task 8) ===
+
+* `noInstLocal`      — `NoInst N` with `[h : NoInst N]` in scope.
+                       `NoInst` has no global instance anywhere in the
+                       fixture, so the local is the ONLY candidate and
+                       the answer is `h` itself. Kills "locals are
+                       never appended" (skipping `get_instances`' local
+                       append).
+* `localBeatsGlobal` — `Add N` with `[h : Add N]` in scope, where
+                       `instAddN` also matches. The oracle appends
+                       locals to the END of the ascending array and
+                       consumes back-to-front, so the answer is `h`,
+                       NOT `instAddN`. Kills the append moved before
+                       the priority sort — the slice's most mutable
+                       line.
+* `letLocal`         — `Add N` with `let h : Add N := instAddN` in
+                       scope. `withLetDeclImp` routes through the same
+                       `withNewFVar` (`Basic.lean:1905-1911`) as a
+                       cdecl, so a let-bound instance counts; the
+                       answer is `h`. Kills dropping the install from
+                       `push_let_decl`. This is the FIRST record ever
+                       to exercise that path (Task 1 built both
+                       `withFVarSpecs`' `value?` branch here and the
+                       replay side's `push_let_decl` branch in
+                       `oracle_synth.rs`, but shipped with no consumer
+                       — flagged unverified in that task's review).
+* `noInstParamLocal` — `NoInst (Prod N N)` with
+                       `[h : {a b : Type} → [NoInst a] → [NoInst b] →
+                       NoInst (Prod a b)]` and `[ha : NoInst N]` in
+                       scope. `NoInst` has no global instance for
+                       `Prod` at all (deliberately: `Synth0.lean` was
+                       checked before this task and NOT extended —
+                       `NoInst` at `Synth0.lean:121` already gives a
+                       class with no global instance, and no
+                       `instance : NoInst (Prod a b)` exists anywhere
+                       in the fixture — see Controller Ruling R2), so a
+                       PARAMETRIZED local instance is the only way to
+                       solve the goal. Its own `[NoInst a]`/`[NoInst
+                       b]` binders are what give the local candidate a
+                       non-empty `synthOrder` (`SynthInstance.lean:
+                       231-238`) — with an empty one the search never
+                       schedules the subgoals and the goal fails. Kills
+                       `synth_order: Vec::new()` for locals.
+* `nonClassFvar`     — `Add N` with `(x : N)` AND `(f : N → N)` in
+                       scope. Neither is class-typed, so neither is a
+                       candidate and the answer stays `instAddN`. NOTE:
+                       this record does NOT kill a constant-true
+                       `is_class` on its own — its fvars are typed `N`
+                       and `N → N`, and a constant-true `is_class`
+                       would register them under class `N`, which no
+                       goal in the corpus asks for, so no answer
+                       changes. `is_class_rejects_a_non_class_head`
+                       (unit test, `instances.rs`) is what kills that
+                       mutation instead.
+* `outOfScope`       — deliberately ABSENT. Scope exit is not
+                       expressible in this record shape: every `fvars`
+                       entry is open for the whole query. Covered by
+                       `a_closed_binders_instance_is_not_offered`
+                       (Task 6) instead — recorded here so a later
+                       reader does not assume the corpus covers it. -/
 def synthQueries : List (Name × Nat × List FVarSpec × MetaM Expr) :=
   [ (`simple,      0, [], pure (cls1 `Add nTy))
   , (`simple,      1, [], pure (cls1 `Mul nTy))
@@ -439,6 +500,41 @@ def synthQueries : List (Name × Nat × List FVarSpec × MetaM Expr) :=
         let some ldecl := (← getLCtx).findFromUserName? `x
           | panic! "fvarCtx/synth/0: `x` not found in local context"
         pure (mkApp (mkApp (mkConst `OfN [Level.zero]) ldecl.toExpr) nTy))
+  -- === Local-instances slice (M4b-3 P5 task 8) — see this file's
+  -- header for what each record kills. ===
+  , (`noInstLocal, 0,
+      [ { userName := `h, bi := .instImplicit, type := pure (cls1 `NoInst nTy) } ],
+      pure (cls1 `NoInst nTy))
+  , (`localBeatsGlobal, 0,
+      [ { userName := `h, bi := .instImplicit, type := pure (cls1 `Add nTy) } ],
+      pure (cls1 `Add nTy))
+  , (`letLocal, 0,
+      [ { userName := `h, bi := .default, type := pure (cls1 `Add nTy),
+          value? := some (pure (mkConst `instAddN)) } ],
+      pure (cls1 `Add nTy))
+  , (`noInstParamLocal, 0,
+      [ { userName := `h, bi := .instImplicit,
+          -- `h`'s type is built as a standalone closed Pi-term via
+          -- `mkForallFVars`, NOT as further entries in this query's
+          -- own `fvars` list: `a`/`b`/the two instance-implicit
+          -- binders are `h`'s OWN telescope, the thing
+          -- `local_instance_candidate`/`instimplicit_binder_positions`
+          -- reads to compute its `synthOrder` — they must never
+          -- themselves become separate outer-context fvars.
+          type := do
+            withLocalDecl `a .implicit type0 fun a =>
+            withLocalDecl `b .implicit type0 fun b =>
+            withLocalDecl `hA .instImplicit (cls1 `NoInst a) fun hA =>
+            withLocalDecl `hB .instImplicit (cls1 `NoInst b) fun hB =>
+              mkForallFVars #[a, b, hA, hB] (cls1 `NoInst (prod2 a b)) }
+      , { userName := `ha, bi := .instImplicit, type := pure (cls1 `NoInst nTy) }
+      ],
+      pure (cls1 `NoInst (prod2 nTy nTy)))
+  , (`nonClassFvar, 0,
+      [ { userName := `x, bi := .default, type := pure nTy }
+      , { userName := `f, bi := .default, type := pure (mkForall `_ BinderInfo.default nTy nTy) }
+      ],
+      pure (cls1 `Add nTy))
   ]
 
 /-- Anything over this fraction (in percent) of the oracle's
