@@ -2681,8 +2681,8 @@ impl<'e> MetaCtx<'e> {
         // local instance's `val` is an fvar (`get_instances`' local
         // append), and the oracle refreshes no levels for locals — its
         // refresh lives in `getInstances`' `.const` arm
-        // (`SynthInstance.lean:216-226`) while locals are pushed raw
-        // (:237). Pinned by
+        // (`SynthInstance.lean:217-228`) while locals are pushed raw
+        // (:239). Pinned by
         // `mk_const_with_fresh_mvar_levels_passes_an_fvar_through_unchanged`.
         let Node::Const { name, levels } = self.node(val) else {
             return Ok(val);
@@ -3999,8 +3999,8 @@ mod tests {
 
     /// A local instance's `val` is an FVAR, and the oracle refreshes no
     /// universe levels for locals — `getInstances` refreshes only in its
-    /// `.const` arm (`SynthInstance.lean:216-226`) and pushes the raw
-    /// fvar for locals (`:237`). leanr moved that refresh into
+    /// `.const` arm (`SynthInstance.lean:217-228`) and pushes the raw
+    /// fvar for locals (`:239`). leanr moved that refresh into
     /// `get_subgoals`, so the passthrough for non-`Const` values is
     /// load-bearing rather than incidental: refreshing (or erroring on)
     /// an fvar here would corrupt every local-instance candidate.

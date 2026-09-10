@@ -90,7 +90,7 @@
 //!
 //! **A local instance (legitimate).** `get_instances` constructs a
 //! candidate directly for every in-scope local instance
-//! (oracle: `getInstances` :230-237), whose `val` is an fvar and which
+//! (oracle: `getInstances` :230-239), whose `val` is an fvar and which
 //! has no declaration name at all. These never pass through
 //! `InstanceTable::build` and are never serialized — `addInstance`
 //! (`Instances.lean:283-304`) is the only producer of a persisted
@@ -622,12 +622,12 @@ impl<'e> MetaCtx<'e> {
     /// `global_name` is `None`, and legitimately so — not the
     /// malformed-bytes case this module's doc describes for a GLOBAL
     /// entry: the oracle's own local record is `{ val := linst.fvar,
-    /// synthOrder }` (:237), a bare fvar with no declaration name
+    /// synthOrder }` (:239), a bare fvar with no declaration name
     /// anywhere in it.
     ///
     /// `priority` has no oracle counterpart at all: `LocalInstance`
     /// (`MetavarContext.lean:268-273`) carries a `className` and an
-    /// `fvar`, nothing else, and the record pushed at :237 carries no
+    /// `fvar`, nothing else, and the record pushed at :239 carries no
     /// priority either. `0` is therefore a placeholder, never a
     /// transcription — no ordering reads it today, since
     /// `get_instances` appends locals AFTER its sort. It is
@@ -1268,7 +1268,7 @@ mod tests {
             assert!(
                 li.global_name.is_none(),
                 "a local instance has no declaration name — the oracle's own \
-                 record is `{{ val := linst.fvar, synthOrder }}` (:237)"
+                 record is `{{ val := linst.fvar, synthOrder }}` (:239)"
             );
             assert_eq!(
                 li.ty, add_n,
@@ -1279,7 +1279,7 @@ mod tests {
     }
 
     /// A local instance is tried BEFORE every global. oracle: appended
-    /// to the end of the ascending array (:230-237), consumed
+    /// to the end of the ascending array (:230-239), consumed
     /// back-to-front by `generate` — which this crate transcribes as
     /// sort-ascending-then-reverse (see the module doc), so the append
     /// must land between the sort and the reverse.
