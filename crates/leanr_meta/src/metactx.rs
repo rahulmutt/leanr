@@ -659,27 +659,27 @@ impl<'e> MetaCtx<'e> {
         self.lctx_snapshot = None;
     }
 
-    /// Mint a cdecl fvar `(name : ty)` with binder-info `bi` into the ambient
-    /// `lctx` and return its `Expr::fvar`. The additive elab-layer seam for
-    /// `mk_local_decl`, already used internally at assign.rs:633. The caller
-    /// brackets with `lctx_checkpoint`/`lctx_restore`. The invariant (checked
-    /// via debug_assert) is safe because `leanr_meta` internal code never
-    /// re-enters the elab layer, so no internal `mk_local_decl` decl is ever
-    /// transiently present in `lctx` at a `checkpoint`/`restore` boundary.
-    pub fn push_local_decl(
+    /// The mint-and-push half shared by `push_local_decl` and
+    /// `push_local_decl_without_instance` below — everything EXCEPT the
+    /// local-instance install, which the two callers do at different
+    /// times. Returns `(fvar, depth)`; `depth` is this declaration's own
+    /// index in `lctx.decls`, read BEFORE the push (see
+    /// `local_instance.rs` for why the stack truncates by depth rather
+    /// than by index) — a caller that defers the install needs it too
+    /// (`install_local_instance_for_last_pushed` re-derives the same
+    /// value from `lctx.save()` afterward, since nothing else may push
+    /// in between).
+    fn push_local_decl_inner(
         &mut self,
         name: Option<NameId>,
         ty: ExprId,
         bi: BinderInfo,
-    ) -> Result<ExprId, MetaError> {
+    ) -> Result<(ExprId, usize), MetaError> {
         debug_assert_eq!(
             self.local_names.len(),
             self.lctx.save(),
             "local_names/lctx lockstep invariant violated"
         );
-        // Read BEFORE the push below, so it is this declaration's own
-        // index in `lctx.decls` — see `local_instance.rs` for why the
-        // stack truncates by depth rather than by index.
         let depth = self.lctx.save();
         let fvar = self.lctx.mk_local_decl(
             self.scratch,
@@ -693,6 +693,23 @@ impl<'e> MetaCtx<'e> {
         // see that field's own doc comment. One entry per call, matching
         // `lctx.decls`'s own growth exactly (including `None` names).
         self.local_names.push((name, fvar));
+        Ok((fvar, depth))
+    }
+
+    /// Mint a cdecl fvar `(name : ty)` with binder-info `bi` into the ambient
+    /// `lctx` and return its `Expr::fvar`. The additive elab-layer seam for
+    /// `mk_local_decl`, already used internally at assign.rs:633. The caller
+    /// brackets with `lctx_checkpoint`/`lctx_restore`. The invariant (checked
+    /// via debug_assert) is safe because `leanr_meta` internal code never
+    /// re-enters the elab layer, so no internal `mk_local_decl` decl is ever
+    /// transiently present in `lctx` at a `checkpoint`/`restore` boundary.
+    pub fn push_local_decl(
+        &mut self,
+        name: Option<NameId>,
+        ty: ExprId,
+        bi: BinderInfo,
+    ) -> Result<ExprId, MetaError> {
+        let (fvar, depth) = self.push_local_decl_inner(name, ty, bi)?;
         // oracle: `withLocalDeclImp` → `withNewFVar`
         // (`Basic.lean:1791`, `:1785-1789`) — a class-typed declaration
         // becomes a local instance. Keyed on the TYPE only; binder info
@@ -701,6 +718,64 @@ impl<'e> MetaCtx<'e> {
         self.install_local_instance_for(fvar, ty, depth)?;
         self.lctx_snapshot = None;
         Ok(fvar)
+    }
+
+    /// The mint-and-push half of `push_local_decl`, WITHOUT the
+    /// automatic local-instance install that normally follows
+    /// immediately — paired with `install_local_instance_for_last_pushed`
+    /// below. Exists for a caller that must refine `ty` (e.g. an
+    /// `isDefEq` mvar assignment) AFTER the fvar already exists but
+    /// BEFORE the class check runs, matching the oracle's own ordering
+    /// in `elabFunBinderViews`: mint the fvar, run
+    /// `propagateExpectedType`, THEN test `isClass? type`
+    /// (`Lean/Elab/Binders.lean:429-444`) — `push_local_decl`'s own
+    /// ordering (class-check immediately, before any later refinement)
+    /// only diverges from that for a `fun` binder whose domain is an
+    /// ELIDED (fresh-mvar) type that `propagateExpectedType` then
+    /// assigns to a class (M4b-3 P5 task 4's own finding).
+    ///
+    /// Every OTHER `push_local_decl` caller (`forall`/`depArrow`/
+    /// `let`/`have`) has its domain fully elaborated BEFORE the push —
+    /// nothing refines it afterward — so this split changes nothing for
+    /// them and they keep calling `push_local_decl` unchanged.
+    /// Additive + behavior-neutral: `push_local_decl` itself still does
+    /// mint-and-install in one call via the same shared
+    /// `push_local_decl_inner`, byte-for-byte the same sequence of
+    /// operations as before this split.
+    pub fn push_local_decl_without_instance(
+        &mut self,
+        name: Option<NameId>,
+        ty: ExprId,
+        bi: BinderInfo,
+    ) -> Result<ExprId, MetaError> {
+        let (fvar, _depth) = self.push_local_decl_inner(name, ty, bi)?;
+        self.lctx_snapshot = None;
+        Ok(fvar)
+    }
+
+    /// The install half `push_local_decl_without_instance` defers — see
+    /// that method's own doc. `fvar` must be the MOST RECENTLY pushed
+    /// local decl (no intervening `push_local_decl`/`push_let_decl`/
+    /// `push_local_decl_without_instance` call), checked via
+    /// `debug_assert` against `local_names`' own tail — the same
+    /// lockstep invariant `push_local_decl_inner` itself asserts on
+    /// entry. `ty` is read fresh from the caller rather than
+    /// re-derived from `lctx`, so a caller that assigned an mvar via
+    /// `is_def_eq` in between (M4b-3 P5 task 4's own use) sees that
+    /// assignment: `is_class` (`Basic.lean:1358-1381` port) reduces
+    /// through it via `is_class_expensive`'s whnf fallback.
+    pub fn install_local_instance_for_last_pushed(
+        &mut self,
+        fvar: ExprId,
+        ty: ExprId,
+    ) -> Result<(), MetaError> {
+        debug_assert_eq!(
+            self.local_names.last().map(|(_, f)| *f),
+            Some(fvar),
+            "fvar must be the most recently pushed local decl"
+        );
+        let depth = self.lctx.save().saturating_sub(1);
+        self.install_local_instance_for(fvar, ty, depth)
     }
 
     /// Mint an ldecl fvar `(name : ty := value)` into the ambient `lctx`

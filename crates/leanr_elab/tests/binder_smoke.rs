@@ -315,10 +315,26 @@ fn fun_implicit_binder_without_type_gets_an_mvar_domain() {
     assert_eq!(j["t"]["k"], "mvar");
 }
 
+/// Fix round 1, Finding 1: the ORIGINAL version of this test (and its
+/// two neighbors below, all since rewritten) asserted `fun (x : Nat) :
+/// Nat => x` elaborates — a term the real oracle REJECTS. Checked
+/// directly against the pinned binary: `expandFun`'s `optType` macro
+/// arm (`Lean/Elab/Binders.lean:648-651`) distributes `T` over the
+/// BINDERS via `expandSimpleBinderWithType` (`:265-270`), which only
+/// accepts a bare ident or `_` hole — `(x : Nat)` is neither, so real
+/// Lean reports `unexpected type ascription` for that source, not a
+/// successful lambda. `fun x : Nat => x` (bare ident) is the shape the
+/// macro actually accepts; it also still catches the ORIGINAL
+/// regression this test's predecessor was written for: `optType`'s
+/// non-empty wrapper holds ONE `typeSpec` node (`[":", T]` is
+/// `typeSpec`'s OWN children, not the wrapper's direct children), so a
+/// flat `nth(1)` read off the wrapper used to silently land on `None`
+/// for every `fun x : T => e` — if that regressed, `x`'s domain would
+/// stay an elided mvar here instead of `Nat`.
 #[test]
-fn fun_opt_type_ascribes_the_body() {
-    // fun (x : Nat) : Nat => x
-    let j = elab_json("fun (x : Nat) : Nat => x");
+fn fun_opt_type_distributes_to_a_single_binder() {
+    // fun x : Nat => x
+    let j = elab_json("fun x : Nat => x");
     assert_eq!(j["k"], "lam");
     assert_eq!(j["t"]["k"], "const");
     assert_eq!(j["t"]["n"], "Nat");
@@ -326,40 +342,37 @@ fn fun_opt_type_ascribes_the_body() {
     assert_eq!(j["b"]["i"], 0);
 }
 
+/// oracle: `expandFun`'s `optType` arm distributes `T` to EVERY simple
+/// binder in the group, independently — `fun x y : Nat => x` expands to
+/// `fun (x : Nat) (y : Nat) => x`, not just the first name.
 #[test]
-fn fun_opt_type_may_mention_the_binders() {
-    // fun (a : Type) (x : a) : a => x — the optType `a` refers to the
-    // first binder, so it must elaborate INSIDE the telescope.
-    let j = elab_json("fun (a : Type) (x : a) : a => x");
+fn fun_opt_type_distributes_across_multiple_binders() {
+    // fun x y : Nat => x — both x and y get domain Nat; body refers to
+    // the OUTER binder x, bvar index 1 (y is innermost, index 0).
+    let j = elab_json("fun x y : Nat => x");
     assert_eq!(j["k"], "lam");
+    assert_eq!(j["t"]["n"], "Nat");
     assert_eq!(j["b"]["k"], "lam");
-    assert_eq!(j["b"]["b"]["k"], "bvar");
-    assert_eq!(j["b"]["b"]["i"], 0);
+    assert_eq!(j["b"]["t"]["n"], "Nat");
+    assert_eq!(j["b"]["b"], serde_json::json!({"k": "bvar", "i": 1}));
 }
 
+/// oracle: `expandSimpleBinderWithType`'s `else` branch —
+/// `Macro.throwErrorAt type "unexpected type ascription"`
+/// (`Binders.lean:265-270`), fired when `optType` is present but a
+/// binder item is neither a bare ident nor a `_` hole. Verified against
+/// the pinned binary directly: `fun (x : Nat) : Nat => x` really does
+/// report `unexpected type ascription`, not a successful lambda (see
+/// `fun_opt_type_distributes_to_a_single_binder`'s own doc for the
+/// history of this being asserted the other way).
 #[test]
-fn fun_opt_type_actually_ascribes_not_just_parses() {
-    // fun (x : Nat) : Int => x — `Coe Nat Int` (`instCoeNatInt`) is in
-    // Elab0's environment, so a body whose optType differs from its own
-    // inferred type only elaborates if optType genuinely reaches
-    // `elab_term_ensuring_type` as the expected type: `x : Nat` must be
-    // COERCED to `Int.ofNat x`. The two tests above (`fun (x : Nat) :
-    // Nat => x`, `fun (a : Type) (x : a) : a => x`) both ascribe a type
-    // the body already has, so neither discriminates a broken optType
-    // path from a correct one — this record does: it caught a real bug
-    // where `optType`'s non-empty wrapper holds ONE `typeSpec` node
-    // (`[":", T]` is `typeSpec`'s OWN children, not the wrapper's direct
-    // children), so a flat `nth(1)` read off the wrapper silently landed
-    // on `None` for every `fun x : T => e` — no error, no wrong term,
-    // just the ascription dropped.
-    let j = elab_json("fun (x : Nat) : Int => x");
-    assert_eq!(j["k"], "lam");
-    assert_eq!(j["b"]["k"], "app");
-    assert_eq!(
-        j["b"]["f"],
-        serde_json::json!({"k": "const", "n": "Int.ofNat", "us": []})
-    );
-    assert_eq!(j["b"]["a"], serde_json::json!({"k": "bvar", "i": 0}));
+fn fun_opt_type_rejects_a_non_simple_binder() {
+    match elab_result("fun (x : Nat) : Nat => x") {
+        Err(leanr_elab::ElabError::IllFormedSyntax(msg)) => {
+            assert!(msg.contains("unexpected type ascription"), "got {msg:?}");
+        }
+        other => panic!("expected IllFormedSyntax(\"unexpected type ascription\"), got {other:?}"),
+    }
 }
 
 #[test]
@@ -582,21 +595,19 @@ fn fun_binder_domain_comes_from_the_expected_type() {
     assert_eq!(j["b"]["k"], "app");
 }
 
-/// The residual expected type threads one binder at a time: each
-/// `propagate_expected_type` call instantiates the forall body with the
-/// PREVIOUS binder's fvar before the next binder's domain elaborates.
-#[test]
-fn fun_propagation_walks_a_multi_binder_telescope() {
-    // (fun x y => x : Nat -> Nat -> Nat) — both domains come from the
-    // expected type, one binder at a time.
-    let j = elab_json("(fun x y => x : Nat -> Nat -> Nat)");
-    assert_eq!(j["k"], "lam");
-    assert_eq!(j["t"]["n"], "Nat");
-    assert_eq!(j["b"]["k"], "lam");
-    assert_eq!(j["b"]["t"]["n"], "Nat");
-    assert_eq!(j["b"]["b"]["i"], 1);
-}
-
+/// Fix round 1, Finding 3: `fun_propagation_walks_a_multi_binder_telescope`
+/// (`(fun x y => x : Nat -> Nat -> Nat)`) lived here and is DELETED, not
+/// kept — the mutation check in this task's own report showed it passes
+/// even with `propagate_expected_type` stubbed to `Ok(None)`:
+/// `elab_ascription`'s own final `isDefEq` between the fun's inferred
+/// (mvar-domain) Pi type and the ascribed Pi type assigns both domain
+/// mvars post hoc, with no help from propagation, because neither
+/// binder's domain is actually NEEDED before the whole lambda is built
+/// (the body `x` never applies a bound variable as a function).
+/// `fun_propagation_pins_the_second_binders_domain_too` below subsumes
+/// its case (also a multi-binder telescope) while actually
+/// discriminating the feature (confirmed by the same mutation check).
+///
 /// The non-`forallE` arm of `propagateExpectedType` drops the expected
 /// type to `none` rather than keeping the stale one — once the
 /// telescope runs out of expected-type domains, propagation ITSELF
@@ -635,29 +646,31 @@ fn fun_propagation_walks_a_multi_binder_telescope() {
 /// not `TypeMismatch` (`mkCoe`'s IMMEDIATE-failure variant): the
 /// failure is reached through the postponement ladder, matching the
 /// oracle's own two-phase shape.
+/// Renamed from `fun_propagation_stops_at_a_non_forall_expected_type`
+/// (fix round 1, minor): the OLD name described the mechanism
+/// (propagation stopping), but what this actually pins, end-to-end, is
+/// the downstream STUCK COERCION `ensureHasType` produces once that
+/// stopped propagation leaves an arity mismatch the fixpoint forces.
 #[test]
-fn fun_propagation_stops_at_a_non_forall_expected_type() {
+fn fun_more_binders_than_expected_pi_levels_is_a_stuck_coercion() {
     match support::elab_and_synthesize("(fun x y => Nat.zero : Nat -> Nat)") {
         Err(leanr_elab::ElabError::StuckCoercion { .. }) => {}
         other => panic!("expected a stuck coercion once forced, got {other:?}"),
     }
 }
 
-/// Mutation-testing note (standing carry-over, this plan's own): probed
-/// BEFORE implementing this task, `fun_propagation_walks_a_multi_binder_telescope`
-/// above already passes against the UNMODIFIED tree — `elab_ascription`'s
-/// own final `isDefEq` between the fun's inferred (mvar-domain) Pi type
-/// and the ascribed Pi type assigns both domain mvars post hoc, with no
-/// help from `propagate_expected_type`, because neither binder's domain
-/// is actually NEEDED before the whole lambda is built (the body `x`
-/// never applies a bound variable as a function). That test is the
-/// brief's own verbatim text (kept as specified), but it does not by
-/// itself discriminate this task's feature, so this test supplies the
-/// missing case: `g`, the SECOND binder, is applied to `x` in the body,
-/// so `g`'s domain must already be assigned (not just structurally
-/// matched later) for `g x` to elaborate at all — this can only work if
-/// the residual expected type threaded correctly PAST the first binder
-/// to reach the second `forallE`'s domain.
+/// Mutation-testing note (standing carry-over, this plan's own): see
+/// the deleted `fun_propagation_walks_a_multi_binder_telescope`'s own
+/// note above — `elab_ascription`'s own final `isDefEq` between the
+/// fun's inferred (mvar-domain) Pi type and the ascribed Pi type
+/// assigns both domain mvars post hoc whenever neither binder's domain
+/// is actually NEEDED before the whole lambda is built. This test
+/// supplies the discriminating case that one didn't: `g`, the SECOND
+/// binder, is applied to `x` in the body, so `g`'s domain must already
+/// be assigned (not just structurally matched later) for `g x` to
+/// elaborate at all — this can only work if the residual expected type
+/// threaded correctly PAST the first binder to reach the second
+/// `forallE`'s domain.
 #[test]
 fn fun_propagation_pins_the_second_binders_domain_too() {
     // fun x g => g x : Nat -> (Nat -> Nat) -> Nat
@@ -673,4 +686,35 @@ fn fun_propagation_pins_the_second_binders_domain_too() {
     assert_eq!(j["b"]["t"]["k"], "pi");
     assert_eq!(j["b"]["t"]["t"]["n"], "Nat");
     assert_eq!(j["b"]["b"]["k"], "app");
+}
+
+/// Fix round 1, Finding 2: an ELIDED `fun` binder whose domain becomes
+/// a CLASS type ONLY via `propagate_expected_type` must still register
+/// as a local instance — the oracle's own `elabFunBinderViews` runs
+/// `propagateExpectedType` BEFORE its `isClass? type` test
+/// (`Binders.lean:442,444`), not after. `NoInst` (`Elab0.lean`) is the
+/// fixture's class with ZERO instances anywhere — global or local — so
+/// this can only succeed by finding `inst` (binder 1, propagated to
+/// `NoInst Nat`) as a LOCAL instance for binder 2's own forall-typed
+/// use of `f`. Before this fix, `push_local_decl`'s inline class check
+/// ran BEFORE propagation and always saw `inst`'s domain as an
+/// unassigned mvar, so it silently missed the instance and this would
+/// fail with a synthesis error instead of elaborating.
+#[test]
+fn fun_elided_binder_registers_as_a_local_instance_only_after_propagation() {
+    // fun inst f => f
+    //   : NoInst Nat -> (forall [inst2 : NoInst Nat], Nat) -> Nat
+    // `inst`'s domain (elided) becomes `NoInst Nat` via propagation.
+    // `f`'s own domain (also elided) becomes the inst-implicit forall,
+    // so eliding `f` as the body auto-applies its own inst-implicit
+    // parameter — findable only via `inst`, the local instance.
+    let j =
+        elab_json("(fun inst f => f : NoInst Nat -> (forall [inst2 : NoInst Nat], Nat) -> Nat)");
+    assert_eq!(j["k"], "lam");
+    assert_eq!(j["b"]["k"], "lam");
+    // f (bvar 0, innermost) applied to inst (bvar 1, outer) — the
+    // LOCAL instance search resolved to the propagation-typed binder.
+    assert_eq!(j["b"]["b"]["k"], "app");
+    assert_eq!(j["b"]["b"]["f"], serde_json::json!({"k": "bvar", "i": 0}));
+    assert_eq!(j["b"]["b"]["a"], serde_json::json!({"k": "bvar", "i": 1}));
 }

@@ -336,7 +336,8 @@ fn fresh_type_mvar(elab: &mut TermElabM) -> Result<ExprId, ElabError> {
     elab.mk_fresh_expr_mvar(sort)
 }
 
-/// oracle: `Expr.cleanupAnnotations` (`Lean/Expr.lean:1748-1756`) —
+/// oracle: `Expr.cleanupAnnotations` (`Lean/Expr.lean:1754-1756`; the
+/// definition itself — `:1748` is inside its docstring) —
 /// `e.consumeMData.consumeTypeAnnotations`, looped to a fixpoint:
 ///
 /// ```lean
@@ -645,16 +646,36 @@ fn extract_fun_binder_views(
 }
 
 /// oracle: `elabFun` (Binders.lean:678) → `elabFunBinders`, `basicFun`
-/// arm only. `optType` (`fun x : T => e`) ascribes the BODY under the
-/// telescope (M4b-3 P5 task 2 — the `expandFun` macro rewrites
-/// `fun bs : T => e` to `fun bs => (e : T)`). `expected` (M4b-3 P5 task
-/// 4) threads `FunBinders.propagateExpectedType` per binder: each
-/// elided binder's fresh domain mvar gets unified against the running
-/// residual's forall domain, and `optType`, when present, WINS over the
-/// final residual for the body (the oracle's `expandFun` rewrite makes
-/// the ascription the body's own expected type; `expected` only ever
-/// reaches the binders here). Named seams: the `matchAlts` (pattern) arm
-/// and the funBinder forms `extract_fun_binder_views` rejects.
+/// arm only. `optType` (`fun x : T => e`) is `expandFun`'s FIRST macro
+/// arm (`Lean/Elab/Binders.lean:648-651`):
+///
+/// ```lean
+/// | `(fun $binders* : $ty => $body) => do
+///     let binders ← binders.mapM (expandSimpleBinderWithType ty)
+///     `(fun $binders* => $body)
+/// ```
+///
+/// — `T` distributes over the BINDERS, not the body: EVERY item in
+/// `$binders*` is rewritten via `expandSimpleBinderWithType`
+/// (`:265-270`) into `(binder : $ty)`, requiring each to be a bare
+/// ident or `_` hole; anything else is a macro-time error,
+/// `"unexpected type ascription"`. (An EARLIER version of this comment
+/// claimed the opposite — that `T` ascribes the body via a `(e : T)`
+/// rewrite — which is wrong: `expandSimpleBinderWithType`'s `else`
+/// branch throws exactly the two terms that claim tested as
+/// successes. Corrected after checking the pinned binary directly:
+/// `fun x y : Nat => Nat.zero` elaborates fine, `fun (x : Nat) : Nat =>
+/// x` is a real error.) leanr has no macro-expansion phase (module
+/// doc), so this models the same restriction directly in the
+/// telescope loop below rather than rewriting syntax first.
+///
+/// `expected` (M4b-3 P5 task 4) threads `FunBinders.propagateExpectedType`
+/// per binder: each binder's domain (elided or, per the above,
+/// `optType`-supplied) gets unified against the running residual's
+/// forall domain, and the FINAL residual — never an `optType`, which
+/// leaves nothing for the body per the macro above — is the body's own
+/// expected type. Named seams: the `matchAlts` (pattern) arm and the
+/// funBinder forms `extract_fun_binder_views` rejects.
 ///
 /// `Term.fun` children: `[("λ"|"fun"), (basicFun | matchAlts)]`.
 /// `Term.basicFun` children: `[binderList(null), optType(null),
@@ -691,10 +712,10 @@ pub fn elab_fun(
     // against the pinned toolchain source after a flat `nth(1)` read
     // directly off the wrapper silently produced `None` for every
     // `fun x : T => e` here — no error, no wrong term, just the
-    // ascription dropped (`fun_opt_type_actually_ascribes_not_just_parses`
-    // in `binder_smoke.rs` pins the regression).
-    // oracle: the `expandFun` macro rewrites `fun bs : T => e` to
-    // `fun bs => (e : T)`, so `T` ascribes the BODY, under the binders.
+    // ascription dropped (`fun_opt_type_distributes_to_a_single_binder`
+    // in `binder_smoke.rs` pins the regression). `T` itself DISTRIBUTES
+    // over the binders, not the body — see this function's own doc
+    // comment above for the corrected model and its citations.
     let opt_type_null = bch
         .get(1)
         .and_then(|el| el.as_node())
@@ -739,34 +760,70 @@ pub fn elab_fun(
         // next (M4b-3 P5 task 4).
         let mut residual = expected;
         for item in &items {
-            for view in extract_fun_binder_views(elab, item, kinds)? {
+            // oracle: `expandFun`'s `optType` macro arm
+            // (`Binders.lean:648-651`, `expandSimpleBinderWithType`
+            // `:265-270`) — when `optType` is present, EVERY item must
+            // be a bare ident or `_` hole; each becomes its OWN
+            // `Default` binder with `optType`'s term as its domain.
+            // Anything else is the macro's own error, ported as a real
+            // elaboration error (not a deferred seam — this shape is
+            // rejected by every future slice too, never just "not
+            // landed yet").
+            let views: Vec<FunBinderView> = match &opt_type {
+                Some(ty_elem) => {
+                    let name = match item {
+                        NodeOrToken::Token(tok) if kinds.name(tok.kind()) == "<ident>" => {
+                            Some(intern_binder_name(elab, tok.text())?)
+                        }
+                        NodeOrToken::Node(n) if kinds.name(n.kind()) == "Lean.Parser.Term.hole" => {
+                            None
+                        }
+                        _ => {
+                            return Err(ElabError::IllFormedSyntax(
+                                "unexpected type ascription".into(),
+                            ));
+                        }
+                    };
+                    vec![FunBinderView {
+                        name,
+                        ty: Some(ty_elem.clone()),
+                        bi: BinderInfo::Default,
+                    }]
+                }
+                None => extract_fun_binder_views(elab, item, kinds)?,
+            };
+            for view in views {
                 let dom = match &view.ty {
                     Some(ty_elem) => elab_type(elab, ty_elem, kinds)?,
                     None => fresh_type_mvar(elab)?,
                 };
-                // `push_local_decl` installs a local instance when `dom`
-                // is class-typed — keyed on the TYPE, not on `view.bi`,
-                // exactly as the oracle's `isClass? type` test is
-                // (`Binders.lean:445`). Nothing further is needed here.
+                // oracle: `elabFunBinderViews` mints the fvar
+                // (`Binders.lean:430-432`), runs `propagateExpectedType`
+                // (`:442`), and only THEN tests `isClass? type` (`:444`
+                // — the test itself, not `:445`, its FIRST match arm).
+                // An ELIDED binder's domain mvar may only become
+                // class-typed via that propagation step, so the
+                // local-instance install has to happen AFTER it, not as
+                // part of the push (fix round 1, Finding 2:
+                // `push_local_decl`'s own inline install ran BEFORE
+                // propagation and silently missed exactly this case).
                 let fvar = elab
                     .mctx
-                    .push_local_decl(view.name, dom, view.bi)
+                    .push_local_decl_without_instance(view.name, dom, view.bi)
                     .map_err(ElabError::from)?;
                 residual = propagate_expected_type(elab, fvar, dom, residual)?;
+                elab.mctx
+                    .install_local_instance_for_last_pushed(fvar, dom)
+                    .map_err(ElabError::from)?;
                 fvars.push(fvar);
             }
         }
-        // The optType elaborates INSIDE the telescope: it may mention
-        // the binders (`fun (a : Type) (x : a) : a => x`). It WINS over
-        // the propagated residual when both are present — the oracle's
-        // `expandFun` macro turns `fun bs : T => e` into `fun bs => (e :
-        // T)`, so an explicit ascription is what `elabTermEnsuringType`
-        // sees for the body, not whatever `expected` propagated down to.
-        let expected_body = match &opt_type {
-            Some(ty_elem) => Some(elab_type(elab, ty_elem, kinds)?),
-            None => residual,
-        };
-        let body = match expected_body {
+        // oracle: `expandFun`'s `optType` arm leaves the body with NO
+        // ascription at all — `T` was already distributed over the
+        // binders above, so the body's expected type is whatever
+        // `propagateExpectedType` threaded through, exactly like every
+        // other binder telescope.
+        let body = match residual {
             Some(t) => elab.elab_term_ensuring_type(&body_elem, kinds, Some(t))?,
             None => elab.elab_term(&body_elem, kinds, None)?,
         };
@@ -1077,6 +1134,8 @@ mod tests {
     // once WHNF has already answered "not a forall", so "keep the
     // stale value" and "drop it" are indistinguishable from THAT
     // vantage point — measured, not assumed, while writing
+    // `fun_more_binders_than_expected_pi_levels_is_a_stuck_coercion`
+    // (`tests/binder_smoke.rs`, renamed in fix round 1 from
     // `fun_propagation_stops_at_a_non_forall_expected_type`). Calling
     // the function directly is the only way to pin oracle detail 3
     // (non-forallE returns `none`, not the old value) precisely.
@@ -1177,5 +1236,155 @@ mod tests {
         let residual = propagate_expected_type(&mut elab, not_a_forall, not_a_forall, None)
             .expect("`expected = None` never touches fvar/fvar_type");
         assert_eq!(residual, None);
+    }
+
+    /// Fix round 1, Finding 4: `cleanup_annotations`/
+    /// `strip_one_type_annotation` (~45 lines) had NO covering test —
+    /// every test above would pass unchanged if `cleanup_annotations`
+    /// simply returned its input. Pins the actual oracle detail:
+    /// `discard <| isDefEq fvarType d.cleanupAnnotations` unifies
+    /// against the STRIPPED domain, not the `optParam`-wrapped one.
+    /// Builds `expected = ∀ (_ : optParam Sort0 Sort0), bvar 0` by hand
+    /// (`optParam`'s own arity-2 shape — `Lean/Expr.lean:1709-1722`) and
+    /// checks `fvar_type` resolves to the UNWRAPPED domain: if
+    /// `cleanup_annotations` were a no-op, `fvar_type` would resolve to
+    /// the wrapper application instead (`is_def_eq` assigns a fresh mvar
+    /// to whatever it is asked to unify against, wrapped or not).
+    #[test]
+    fn forall_arm_strips_opt_param_before_unifying() {
+        let env = Environment::default();
+        let view = env.view();
+        let mut scratch = Store::scratch();
+        let mctx = MetaCtx::new(
+            view,
+            &mut scratch,
+            Config::default(),
+            EnvExtensions::default(),
+        );
+        let mut elab = TermElabM::new(mctx, view);
+        let base = elab.view.store;
+
+        let z = elab.mctx.store_mut().level_zero(None).unwrap();
+        // `D`, the domain `cleanupAnnotations` must uncover.
+        let domain = elab.mctx.store_mut().expr_sort(None, z).unwrap();
+        // `optParam`'s second argument (the default value) — any expr;
+        // its content is never inspected, only its POSITION as arg 2.
+        let default_val = elab.mctx.store_mut().expr_sort(None, z).unwrap();
+
+        let opt_param_name = {
+            let store = elab.mctx.store_mut();
+            let s = store.intern_str(Some(base), "optParam").unwrap();
+            store.name_str(Some(base), None, s).unwrap()
+        };
+        let no_levels = elab
+            .mctx
+            .store_mut()
+            .intern_level_list(Some(base), &[])
+            .unwrap();
+        let head = elab
+            .mctx
+            .store_mut()
+            .expr_const(Some(base), Some(opt_param_name), no_levels)
+            .unwrap();
+        let applied1 = elab
+            .mctx
+            .store_mut()
+            .expr_app(Some(base), head, domain)
+            .unwrap();
+        // `wrapped` = `optParam D default_val` — the oracle's own
+        // `optParam`-arity-2 shape.
+        let wrapped = elab
+            .mctx
+            .store_mut()
+            .expr_app(Some(base), applied1, default_val)
+            .unwrap();
+
+        let bvar0 = elab
+            .mctx
+            .store_mut()
+            .expr_bvar(None, &Nat::from(0u64))
+            .unwrap();
+        let expected = elab
+            .mctx
+            .store_mut()
+            .expr_forall(None, None, wrapped, bvar0, BinderInfo::Default)
+            .unwrap();
+
+        let fvar_type = fresh_type_mvar(&mut elab).unwrap();
+        let fvar = elab
+            .mctx
+            .push_local_decl(None, fvar_type, BinderInfo::Default)
+            .map_err(crate::error::ElabError::from)
+            .unwrap();
+
+        let residual = propagate_expected_type(&mut elab, fvar, fvar_type, Some(expected)).unwrap();
+        assert_eq!(residual, Some(fvar));
+
+        let resolved = elab.mctx.instantiate_mvars(fvar_type).unwrap();
+        assert_eq!(
+            resolved, domain,
+            "fvar_type must resolve to the UNWRAPPED domain D, not `optParam D default_val` \
+             — cleanup_annotations must strip the wrapper before isDefEq runs"
+        );
+    }
+
+    /// Fix round 1, Finding 4: the other half with no covering test — a
+    /// FAILED `isDefEq` (oracle: `discard <|`, a `false` result, not a
+    /// `MetaError`) must not stop the walk or surface as an error.
+    /// `fvar_type` here is a CONCRETE `Sort 0` (not a fresh mvar), which
+    /// cannot unify with the forall's `Sort 1` domain — a genuine,
+    /// cleanly-decidable `false`, not `IsDefEqStuck` (both sides are
+    /// fully concrete levels, no metavariable blocks the decision).
+    #[test]
+    fn forall_arm_survives_a_failed_unification() {
+        let env = Environment::default();
+        let view = env.view();
+        let mut scratch = Store::scratch();
+        let mctx = MetaCtx::new(
+            view,
+            &mut scratch,
+            Config::default(),
+            EnvExtensions::default(),
+        );
+        let mut elab = TermElabM::new(mctx, view);
+
+        let zero = elab.mctx.store_mut().level_zero(None).unwrap();
+        let one = elab.mctx.store_mut().level_succ(None, zero).unwrap();
+        let sort0 = elab.mctx.store_mut().expr_sort(None, zero).unwrap();
+        let sort1 = elab.mctx.store_mut().expr_sort(None, one).unwrap();
+        let bvar0 = elab
+            .mctx
+            .store_mut()
+            .expr_bvar(None, &Nat::from(0u64))
+            .unwrap();
+        // ∀ (_ : Sort 1), bvar 0
+        let expected = elab
+            .mctx
+            .store_mut()
+            .expr_forall(None, None, sort1, bvar0, BinderInfo::Default)
+            .unwrap();
+
+        // `fvar_type` is concretely `Sort 0` — NOT a fresh mvar, so
+        // `isDefEq (Sort 0) (Sort 1)` genuinely fails rather than
+        // assigning anything.
+        let fvar = elab
+            .mctx
+            .push_local_decl(None, sort0, BinderInfo::Default)
+            .map_err(crate::error::ElabError::from)
+            .unwrap();
+
+        let residual = propagate_expected_type(&mut elab, fvar, sort0, Some(expected))
+            .expect("a FAILED isDefEq must not surface as an Err — only a MetaError may");
+        assert_eq!(
+            residual,
+            Some(fvar),
+            "the walk must stay intact (Ok(Some(_))) even though the domains do not unify"
+        );
+
+        // `fvar_type` (`sort0`) was never a metavariable here, so there
+        // is nothing to assign either way — the discriminating claim is
+        // the `Ok` verdict and the intact residual above, not this.
+        let resolved = elab.mctx.instantiate_mvars(sort0).unwrap();
+        assert_eq!(resolved, sort0);
     }
 }
