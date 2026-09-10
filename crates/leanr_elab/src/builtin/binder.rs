@@ -545,14 +545,45 @@ pub fn elab_fun(
         .first()
         .and_then(|el| el.as_node())
         .ok_or_else(|| ElabError::UnsupportedSyntax("fun: binder list".into()))?;
-    // `optType` (`fun x : T => e`, `Parser/Term.lean:384`). Child [1] is
-    // the null-wrapped optional; a non-empty wrapper holds `[":", T]`.
+    // `optType` (`fun x : T => e`, `basicFun`, `Parser/Term.lean:384`).
+    // Child [1] is the null-wrapped optional. oracle: `optType :=
+    // optional typeSpec` (`Lean/Parser/Term/Basic.lean:265`) where
+    // `typeSpec := " : " >> termParser` (`:262`) — a NAMED sub-parser, not
+    // an inline `":" >> term` pair, so a non-empty wrapper holds ONE
+    // `Lean.Parser.Term.typeSpec` node whose OWN children are `[":", T]`
+    // — the same layout `push_let_binders`' `optType` unwrap already
+    // accounts for (`binder.rs`, around `let: optType slot`). Verified
+    // against the pinned toolchain source after a flat `nth(1)` read
+    // directly off the wrapper silently produced `None` for every
+    // `fun x : T => e` here — no error, no wrong term, just the
+    // ascription dropped (`fun_opt_type_actually_ascribes_not_just_parses`
+    // in `binder_smoke.rs` pins the regression).
     // oracle: the `expandFun` macro rewrites `fun bs : T => e` to
     // `fun bs => (e : T)`, so `T` ascribes the BODY, under the binders.
-    let opt_type = bch
+    let opt_type_null = bch
         .get(1)
         .and_then(|el| el.as_node())
-        .and_then(|opt| non_trivia_children(opt).into_iter().nth(1));
+        .ok_or_else(|| ElabError::UnsupportedSyntax("fun: optType slot".into()))?;
+    let opt_type = match non_trivia_children(opt_type_null)
+        .first()
+        .and_then(|el| el.as_node())
+    {
+        Some(spec) => {
+            let spec_kind = kinds.name(spec.kind());
+            if spec_kind != "Lean.Parser.Term.typeSpec" {
+                return Err(ElabError::UnsupportedSyntax(format!(
+                    "fun: optType {spec_kind}"
+                )));
+            }
+            Some(
+                non_trivia_children(spec)
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| ElabError::UnsupportedSyntax("fun: typeSpec type".into()))?,
+            )
+        }
+        None => None,
+    };
     let body_elem = bch
         .get(3)
         .cloned()

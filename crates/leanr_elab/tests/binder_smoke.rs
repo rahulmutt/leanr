@@ -338,6 +338,31 @@ fn fun_opt_type_may_mention_the_binders() {
 }
 
 #[test]
+fn fun_opt_type_actually_ascribes_not_just_parses() {
+    // fun (x : Nat) : Int => x — `Coe Nat Int` (`instCoeNatInt`) is in
+    // Elab0's environment, so a body whose optType differs from its own
+    // inferred type only elaborates if optType genuinely reaches
+    // `elab_term_ensuring_type` as the expected type: `x : Nat` must be
+    // COERCED to `Int.ofNat x`. The two tests above (`fun (x : Nat) :
+    // Nat => x`, `fun (a : Type) (x : a) : a => x`) both ascribe a type
+    // the body already has, so neither discriminates a broken optType
+    // path from a correct one — this record does: it caught a real bug
+    // where `optType`'s non-empty wrapper holds ONE `typeSpec` node
+    // (`[":", T]` is `typeSpec`'s OWN children, not the wrapper's direct
+    // children), so a flat `nth(1)` read off the wrapper silently landed
+    // on `None` for every `fun x : T => e` — no error, no wrong term,
+    // just the ascription dropped.
+    let j = elab_json("fun (x : Nat) : Int => x");
+    assert_eq!(j["k"], "lam");
+    assert_eq!(j["b"]["k"], "app");
+    assert_eq!(
+        j["b"]["f"],
+        serde_json::json!({"k": "const", "n": "Int.ofNat", "us": []})
+    );
+    assert_eq!(j["b"]["a"], serde_json::json!({"k": "bvar", "i": 0}));
+}
+
+#[test]
 fn let_typed_binding() {
     // let x : Nat := Nat.zero; x  →  letE Nat Nat.zero (bvar 0), nd=false
     let j = elab_json("let x : Nat := Nat.zero; x");
