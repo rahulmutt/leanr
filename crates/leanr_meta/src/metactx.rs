@@ -2221,36 +2221,65 @@ mod tests {
     }
 
     /// `reduced` erases an fvar from the context; its local instance must
-    /// go with it. oracle: `reduceLocalContext`
+    /// go with it — and ONLY it. oracle: `reduceLocalContext`
     /// (`MetavarContext.lean:1065-1067`) removes the decl, and an
     /// instance whose fvar is no longer declared is a dangling reference
     /// that `get_instances` would offer as a candidate.
+    ///
+    /// TWO instance binders are pushed, and only one is erased, so this
+    /// discriminates selective filtering from wholesale clearing — the
+    /// same shape as `reduced_drops_the_named_fvars_from_both_halves`
+    /// (`local_snapshot.rs`), which uses three fvars and erases only one
+    /// for the identical reason. A version of `reduced` that replaced
+    /// the instance filter with an unconditional `Vec::new()` would
+    /// still pass a single-instance fixture; it cannot pass this one,
+    /// since `inst_b`'s instance must survive.
     #[test]
-    fn reduced_drops_the_local_instance_of_an_erased_fvar() {
+    fn reduced_drops_only_the_local_instance_of_the_erased_fvar() {
         with_class_ctx(|ctx, add| {
             let add_n = class_app(ctx, add);
             let cp = ctx.lctx_checkpoint();
-            let inst = ctx
+            let inst_a = ctx
                 .push_local_decl(None, add_n, BinderInfo::InstImplicit)
-                .expect("push");
+                .expect("push inst_a");
+            let inst_b = ctx
+                .push_local_decl(None, add_n, BinderInfo::InstImplicit)
+                .expect("push inst_b");
             let snap = ctx.current_lctx();
             ctx.lctx_restore(cp);
 
-            assert_eq!(snap.local_instances().len(), 1);
+            assert_eq!(
+                snap.local_instances().len(),
+                2,
+                "both instance binders were pushed"
+            );
 
-            let id = match ctx.node(inst) {
+            let id_of = |ctx: &MetaCtx, e| match ctx.node(e) {
                 Node::FVar { id: Some(id) } => id,
                 other => panic!("expected fvar, got {other:?}"),
             };
-            let reduced = snap.reduced(&[(inst, id)], |f| match ctx.node(f) {
+            let id_a = id_of(ctx, inst_a);
+
+            // Erase only inst_a's declaration.
+            let reduced = snap.reduced(&[(inst_a, id_a)], |f| match ctx.node(f) {
                 Node::FVar { id } => id,
                 _ => None,
             });
-            assert!(
-                reduced.local_instances().is_empty(),
-                "erasing the declaration must erase its local instance too — \
+            assert_eq!(
+                reduced.local_instances().len(),
+                1,
+                "erasing inst_a's declaration must erase its local instance too — \
                  an instance pointing at an undeclared fvar is a candidate \
                  `get_instances` would hand to the search"
+            );
+            assert!(
+                reduced.local_instances().iter().all(|li| li.fvar != inst_a),
+                "the erased instance (inst_a) must not survive"
+            );
+            assert!(
+                reduced.local_instances().iter().any(|li| li.fvar == inst_b),
+                "the untouched instance (inst_b) must survive — proves the \
+                 filter is selective by `to_remove`, not a wholesale clear"
             );
         });
     }
