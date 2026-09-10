@@ -872,6 +872,54 @@ fn implicit_lambda_postpone_is_a_named_seam() {
 /// context is ambient when it runs, and why that is either correct or
 /// was made correct.
 ///
+/// **That literal grep is not, on its own, a complete search, and this
+/// enumeration does not rely on it alone** — `synthesize_inst_mvar_core`
+/// (`synthetic/ladder.rs:192`), the LEAF every rung-1 path bottoms out
+/// at, contains none of the four grepped substrings in its own NAME, so
+/// a caller of it that is not itself named `synth_instance`/
+/// `synthesize_pending`/`infer_type`/`is_def_eq` is invisible to the
+/// literal command above. Closed with a second, targeted search (fix
+/// round 1, after a reviewer caught exactly this gap):
+///
+/// ```text
+/// grep -rn "synthesize_inst_mvar_core\|try_synth_instance\|\.mk_inst_mvar(\|\.synth_instance(" \
+///     crates/leanr_elab/src --include=*.rs
+/// ```
+///
+/// `synthesize_inst_mvar_core` has exactly FOUR real callers, not the
+/// three the first pass of this audit found: `ladder.rs:276`
+/// (`synthesize_pending_inst_mvar`, already listed below, wrapped),
+/// `default_inst.rs:422` (already listed, wrapped), `app/state.rs:433,454`
+/// (already listed, ambient-by-construction) — and the one the first
+/// pass missed, `synthetic/state.rs:205`, inside `TermElabM::mk_inst_mvar`,
+/// now listed below. `try_synth_instance` has exactly ONE caller
+/// (`ladder.rs:202`, already listed, wrapped). `MetaCtx::synth_instance`
+/// (the non-`try_` hard-failing variant) has ZERO callers anywhere in
+/// `leanr_elab/src` — negative result, recorded rather than left
+/// silent. `TermElabM::mk_inst_mvar` (the function `synthetic/state.rs:205`
+/// lives in) has exactly two callers, both in `builtin/lit/mod.rs`
+/// (`:309`, `:398`), both already covered by the classification below.
+/// A THIRD, unrelated function also named `mk_inst_mvar`
+/// (`app/args.rs:826`, `pub(crate)`-private to that module) is a
+/// different function entirely — it only mints and registers a pending
+/// goal (`app.st.inst_mvars.push(mvar_id)`), calling
+/// `synthesize_inst_mvar_core` NOT AT ALL, so it needed no new entry;
+/// its own synchronous-processing callers were already covered via
+/// `app/state.rs:433,454` above the first time.
+///
+/// Every function this crate defines whose name starts with
+/// `synthesize_`/`synth_`/`try_synth` was also enumerated directly
+/// (`grep -rn "fn synthesize_\|fn try_synth\|fn synth_"
+/// crates/leanr_elab/src --include=*.rs`) as a cross-check: all 21
+/// hits resolve to functions already reachable from one of the entries
+/// below (every one of them lives in `ladder.rs`, `default_inst.rs`,
+/// `app/state.rs`, `app/args.rs`, or `coe.rs`, all already covered), so
+/// this second pass closes the gap rather than merely relocating it.
+///
+/// For each real call site below: whose local
+/// context is ambient when it runs, and why that is either correct or
+/// was made correct.
+///
 /// **Wrapped in `with_mvar_local_context`/`MetaCtx::with_mvar_context`
 /// — the mvar's OWN context, reinstalled before the call:**
 ///   * `synthetic/ladder.rs:149` `synthesize_synthetic_mvar` — wraps
@@ -944,6 +992,21 @@ fn implicit_lambda_postpone_is_a_named_seam() {
 ///     that is itself a binder (e.g. `f [inst] (fun y => ..)`) restores
 ///     ITS OWN checkpoint on exit, so ambient is back to identical by
 ///     the time control returns here either way.
+///   * `synthetic/state.rs:205`, inside `TermElabM::mk_inst_mvar` —
+///     THE ENTRY THE SECOND SEARCH ABOVE FOUND, missed by the first
+///     pass because `mk_inst_mvar` matches none of the brief's four
+///     grepped substrings. Same shape as the `app/state.rs` pair right
+///     above it, and the SAME reasoning: `mk_fresh_expr_mvar_of_kind`
+///     mints `mvar_id` (capturing whatever `lctx` is ambient AT THAT
+///     INSTANT as the new mvar's own declared context), and the very
+///     next line, still inside the same function call with nothing
+///     between them, tries `synthesize_inst_mvar_core(mvar_id)` — no
+///     scope can possibly have changed between the mint and the try.
+///     Its own two callers, `builtin/lit/mod.rs:309`
+///     (`elab_num`) and `:398` (`elab_scientific`), are themselves
+///     synchronous leaf elaborators invoked mid-telescope, so whatever
+///     binder is open when a numeral or scientific literal is
+///     elaborated is still open here too.
 ///   * `builtin/binder.rs:439` (`is_def_eq(fvar_type, domain)`,
 ///     `propagate_expected_type`) and `builtin/lit/mod.rs:88`
 ///     (`is_def_eq(e, ty_mvar)`, `mk_fresh_type_mvar_for`) — both run
@@ -979,10 +1042,19 @@ fn implicit_lambda_postpone_is_a_named_seam() {
 ///     closure) — its own `instantiate_mvars` call would be safe
 ///     either way.
 ///
-/// **Conclusion.** Every reachable call site the grep turned up is
-/// either wrapped, ambient-correct-by-construction, or ambient because
-/// the operation itself does not consult `lctx`. Nothing new was found
-/// wrong. Two genuinely NEW paths this plan's own binder producers
+/// **Conclusion.** Every reachable call site EITHER the brief's literal
+/// grep OR the second, targeted search for direct callers of
+/// `synthesize_inst_mvar_core`/`try_synth_instance`/`.synth_instance(`
+/// turned up is either wrapped, ambient-correct-by-construction, or
+/// ambient because the operation itself does not consult `lctx`.
+/// Nothing new was found wrong — the one entry the second pass added
+/// (`synthetic/state.rs:205`) turned out to be the same
+/// ambient-by-construction shape as its already-classified siblings,
+/// not a new bug. That does not make the second pass redundant: the
+/// literal grep alone could not have found it, and a search that only
+/// checks the names the brief happened to grep for is not the same
+/// claim as a search over every real call site. Two genuinely NEW paths
+/// this plan's own binder producers
 /// opened — implicit-lambda-inserted (Task 5) instance-implicit
 /// binders, and a default-instance-rung dereference nested two levels
 /// under an unrelated local-instance binder — had no existing test
