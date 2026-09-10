@@ -269,7 +269,7 @@ pub fn dispatch(
             crate::builtin::binder::elab_dep_arrow(elab, node, kinds)
         }
         ("Lean.Parser.Term.fun", NodeOrToken::Node(node)) => {
-            crate::builtin::binder::elab_fun(elab, node, kinds)
+            crate::builtin::binder::elab_fun(elab, node, kinds, expected)
         }
         ("Lean.Parser.Term.let", NodeOrToken::Node(node)) => {
             crate::builtin::binder::elab_let_like(elab, node, kinds, expected, false)

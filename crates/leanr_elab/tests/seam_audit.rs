@@ -13,9 +13,9 @@
 //!     `explicit_mode_skips_the_optparam_default` asserts it white-box
 //!     against a synthetic `f_type` instead.
 //!
-//! The still-open P5 seam this file DOES assert end-to-end,
+//! The mvar-fType seam this file USED TO assert end-to-end,
 //! `mvar_function_type_is_a_named_seam` (expected-type propagation into
-//! `fun` binder domains), used to share its bullet here with the P4
+//! `fun` binder domains), once shared its bullet here with the P4
 //! coercion seam — `coerceToFunction?` (`CoeFun`) was tried first at the
 //! same site and, on failure, fell through to the same message. M4b-3
 //! P4 retired that sharing along with the coercion seam itself: tasks
@@ -23,7 +23,16 @@
 //! (`app/args.rs`'s `synthesize_pending_and_normalize_fun_type`) and
 //! `CoeSort` (`coe.rs`'s `ensure_type`), so coercion insertion is real
 //! code now, exercised by `tests/oracle_elab.rs`'s `coe/*` records and
-//! `tests/synthetic_smoke.rs` rather than by this file.
+//! `tests/synthetic_smoke.rs` rather than by this file. M4b-3 P5 task 4
+//! then closed the mvar-fType seam itself: `propagateExpectedType`
+//! (`builtin/binder.rs`) now pins a `fun` binder's domain from the
+//! ascription BEFORE `app/args.rs` can ever see an unassigned mvar
+//! there, so what remains at that site is a genuine `FunctionExpected`
+//! (`over_application_reports_function_expected` above already covers
+//! that shape). `mvar_function_type_is_closed_by_propagation` below
+//! asserts the now-CLOSED shape end-to-end — the same pattern
+//! `postponed_coe_under_a_binder_abstracts_via_elim_mvar_deps` below
+//! already uses for a divergence that flipped from wrong to right.
 //!
 //! One thing this file pins is NOT a seam at all but its opposite — a
 //! CLOSED divergence, kept as a regression test:
@@ -103,8 +112,9 @@ fn elab_src(src: &str) -> Result<leanr_kernel::bank::ExprId, leanr_elab::ElabErr
 ///     which reports the genuinely-non-function case as
 ///     `ElabError::FunctionExpected`, not a named `UnsupportedSyntax`
 ///     seam. Moved to `over_application_reports_function_expected` and
-///     `mvar_function_type_is_a_named_seam` below, which assert the two
-///     split failure modes directly.
+///     `mvar_function_type_is_closed_by_propagation` below, which assert
+///     the two split failure modes directly — the latter now a CLOSED
+///     one, since M4b-3 P5 task 4 (see the module doc above).
 #[test]
 fn deferred_constructs_are_named_seams() {
     let cases: &[(&str, &str)] = &[
@@ -173,29 +183,26 @@ fn over_application_reports_function_expected() {
     );
 }
 
-/// A function type that is still an unassigned mvar after the fixpoint
-/// is a named P5 seam, NOT a wrong term. The `CoeFun` half of this seam
-/// (`coerceToFunction?`, `App.lean:378-380`) landed in P4 task 8 — a
-/// non-forall function type that a `CoeFun` instance can bridge is
-/// coerced and the state machine proceeds. What remains here is the
-/// case `coerceToFunction?` cannot help with either: `f`'s type is
-/// still an unassigned mvar, not a concrete non-function type, so there
-/// is nothing yet for a `CoeFun` search to run against.
+/// Was `mvar_function_type_is_a_named_seam`. M4b-3 P5 Task 4 closed it:
+/// `propagateExpectedType` supplies `f`'s domain from the ascription, so
+/// the application proceeds instead of reporting an unassigned fType.
 ///
-/// This shape diverges from the oracle today and will keep diverging
-/// until expected types propagate into `fun` binder domains (plan
-/// § Measured facts, item 4). The assertion pins that it stays an
-/// ERROR naming its owner — the failure mode this discipline exists to
-/// prevent is emitting a different term silently.
+/// The `CoeFun` half of this seam (`coerceToFunction?`,
+/// `App.lean:378-380`) landed in P4 task 8 — a non-forall function type
+/// that a `CoeFun` instance can bridge is coerced and the state machine
+/// proceeds. What used to remain was the case `coerceToFunction?`
+/// cannot help with either: `f`'s type still an unassigned mvar, not a
+/// concrete non-function type, so there was nothing yet for a `CoeFun`
+/// search to run against. `propagate_expected_type` (`builtin/binder.rs`)
+/// now pins that mvar to `Nat -> Nat` before `f Nat.zero` is ever
+/// elaborated, so this site is reached with a concrete forall and the
+/// seam this test used to pin no longer exists.
 #[test]
-fn mvar_function_type_is_a_named_seam() {
-    let err = elab_src("(fun f => f Nat.zero : (Nat -> Nat) -> Nat)")
-        .expect_err("leanr cannot elaborate this yet");
-    let msg = format!("{err:?}");
-    assert!(
-        msg.contains("M4b-3 P5"),
-        "seam must name its owner, got {msg}"
-    );
+fn mvar_function_type_is_closed_by_propagation() {
+    let j = support::elab_only("(fun f => f Nat.zero : (Nat -> Nat) -> Nat)")
+        .expect("propagate_expected_type pins f's domain, so this now elaborates");
+    assert_eq!(j["k"], "lam");
+    assert_eq!(j["b"]["k"], "app");
 }
 
 /// The `shouldElabAsElim` guard must NOT fire under `@` or `..`.

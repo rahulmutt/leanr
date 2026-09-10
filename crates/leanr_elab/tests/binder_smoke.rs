@@ -565,3 +565,112 @@ fn non_type_binder_domain_without_coe_sort_is_type_expected() {
         other => panic!("expected TypeExpected, got {other:?}"),
     }
 }
+
+/// `propagateExpectedType` (`Binders.lean:410-421`, M4b-3 P5 task 4):
+/// an elided `fun` binder's domain comes from the ascribed expected
+/// type's own forall domain, not a bare mvar.
+#[test]
+fn fun_binder_domain_comes_from_the_expected_type() {
+    // The seam this closes: `(fun f => f Nat.zero : (Nat -> Nat) -> Nat)`.
+    // Without propagation, `f`'s domain stays an unassigned mvar and the
+    // application `f Nat.zero` cannot proceed.
+    let j = elab_json("(fun f => f Nat.zero : (Nat -> Nat) -> Nat)");
+    assert_eq!(j["k"], "lam");
+    // f's domain is now `Nat -> Nat`, not a bare mvar.
+    assert_eq!(j["t"]["k"], "pi");
+    assert_eq!(j["t"]["t"]["n"], "Nat");
+    assert_eq!(j["b"]["k"], "app");
+}
+
+/// The residual expected type threads one binder at a time: each
+/// `propagate_expected_type` call instantiates the forall body with the
+/// PREVIOUS binder's fvar before the next binder's domain elaborates.
+#[test]
+fn fun_propagation_walks_a_multi_binder_telescope() {
+    // (fun x y => x : Nat -> Nat -> Nat) — both domains come from the
+    // expected type, one binder at a time.
+    let j = elab_json("(fun x y => x : Nat -> Nat -> Nat)");
+    assert_eq!(j["k"], "lam");
+    assert_eq!(j["t"]["n"], "Nat");
+    assert_eq!(j["b"]["k"], "lam");
+    assert_eq!(j["b"]["t"]["n"], "Nat");
+    assert_eq!(j["b"]["b"]["i"], 1);
+}
+
+/// The non-`forallE` arm of `propagateExpectedType` drops the expected
+/// type to `none` rather than keeping the stale one — once the
+/// telescope runs out of expected-type domains, propagation ITSELF
+/// must not error; the remaining binders' domains just stay mvars.
+/// (`builtin/binder.rs`'s own `#[cfg(test)]` module pins that half
+/// directly, in isolation from everything below.)
+///
+/// The BRIEF's own version of this test asserted the ascription still
+/// succeeds as a plain `lam` with a bare-mvar second domain — checked
+/// against the pinned oracle directly rather than trusted (per this
+/// plan's own standing carry-over): `lean probe.lean` on
+/// `#check (fun x y => Nat.zero : Nat -> Nat)` reports
+///
+/// ```text
+/// error: Type mismatch
+///   fun x y => Nat.zero
+/// has type
+///   (x : Nat) → ?m.3 x → Nat
+/// but is expected to have type
+///   Nat → Nat
+/// ```
+///
+/// — a genuine, oracle-matching type mismatch, not a successful lambda:
+/// `fun x y => Nat.zero` really is a 2-argument function and `Nat ->
+/// Nat` can only type a 1-argument one, no matter how the non-`forallE`
+/// arm answers. `elab_json` (`elab_term_ensuring_type` alone, no
+/// fixpoint) cannot observe that: the outer ascription's
+/// `ensureHasType` finds the mismatch and defers it to a postponed
+/// `.coe` synthetic mvar (oracle: `synthesizeSyntheticMVar`'s `.coe`
+/// arm) that `elab_json`'s harness never forces, so it silently reports
+/// a bare unresolved `mvar` instead of the real answer — the brief's
+/// test passed for the wrong reason. `elab_and_synthesize` (the real
+/// top-level entry point: `elab_term` + the fixpoint +
+/// `instantiate_mvars`) forces it, surfacing `ElabError::StuckCoercion`
+/// — the oracle's own `.coe`-arm error (`SyntheticMVars.lean:304-310`),
+/// not `TypeMismatch` (`mkCoe`'s IMMEDIATE-failure variant): the
+/// failure is reached through the postponement ladder, matching the
+/// oracle's own two-phase shape.
+#[test]
+fn fun_propagation_stops_at_a_non_forall_expected_type() {
+    match support::elab_and_synthesize("(fun x y => Nat.zero : Nat -> Nat)") {
+        Err(leanr_elab::ElabError::StuckCoercion { .. }) => {}
+        other => panic!("expected a stuck coercion once forced, got {other:?}"),
+    }
+}
+
+/// Mutation-testing note (standing carry-over, this plan's own): probed
+/// BEFORE implementing this task, `fun_propagation_walks_a_multi_binder_telescope`
+/// above already passes against the UNMODIFIED tree — `elab_ascription`'s
+/// own final `isDefEq` between the fun's inferred (mvar-domain) Pi type
+/// and the ascribed Pi type assigns both domain mvars post hoc, with no
+/// help from `propagate_expected_type`, because neither binder's domain
+/// is actually NEEDED before the whole lambda is built (the body `x`
+/// never applies a bound variable as a function). That test is the
+/// brief's own verbatim text (kept as specified), but it does not by
+/// itself discriminate this task's feature, so this test supplies the
+/// missing case: `g`, the SECOND binder, is applied to `x` in the body,
+/// so `g`'s domain must already be assigned (not just structurally
+/// matched later) for `g x` to elaborate at all — this can only work if
+/// the residual expected type threaded correctly PAST the first binder
+/// to reach the second `forallE`'s domain.
+#[test]
+fn fun_propagation_pins_the_second_binders_domain_too() {
+    // fun x g => g x : Nat -> (Nat -> Nat) -> Nat
+    // x : Nat (1st Pi domain), g : Nat -> Nat (2nd Pi domain, reached
+    // only via the residual left after x's binder). Elaborating the
+    // body `g x` needs g's domain pinned BEFORE the application can
+    // proceed — the same seam `fun_binder_domain_comes_from_the_expected_type`
+    // closes, but exercised on the SECOND binder rather than the first.
+    let j = elab_json("(fun x g => g x : Nat -> (Nat -> Nat) -> Nat)");
+    assert_eq!(j["k"], "lam");
+    assert_eq!(j["t"]["n"], "Nat");
+    assert_eq!(j["b"]["k"], "lam");
+    assert_eq!(j["b"]["t"]["k"], "pi");
+    assert_eq!(j["b"]["t"]["t"]["n"], "Nat");
+    assert_eq!(j["b"]["b"]["k"], "app");
+}

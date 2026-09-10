@@ -137,15 +137,14 @@ fn synthesize_pending_and_normalize_fun_type(
     // linter, `throwInvalidNamedArg` (which needs `foundNamedArgs`
     // rendering leanr does not do), and the "Function expected" error.
     // Only the last changes control flow, so only it is ported.
+    //
+    // M4b-3 P5 task 4 closed the mvar-fType seam that used to sit here:
+    // `propagateExpectedType` (`builtin/binder.rs`) now pins a `fun`
+    // binder's domain from the ascription BEFORE this point is ever
+    // reached, so an `fType` still an unassigned mvar here is a genuine
+    // "Function expected" — the oracle draws no distinction either
+    // (`App.lean:395-411` falls straight through to it).
     let f_type = app.st.f_type;
-    if app.f_type_is_mvar_after_instantiation()? {
-        return Err(ElabError::UnsupportedSyntax(
-            "function type is still an unassigned metavariable after synthesis: needs \
-             expected-type propagation into `fun` binder domains for the M4b-2 `fun` \
-             shape — M4b-3 P5"
-                .to_string(),
-        ));
-    }
     Err(ElabError::FunctionExpected {
         f: app.st.f,
         f_type,
