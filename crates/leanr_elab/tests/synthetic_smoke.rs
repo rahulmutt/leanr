@@ -848,7 +848,11 @@ fn with_synthesize_saves_clears_and_restores_pending() {
                 let (_expr, id) = e
                     .mk_fresh_expr_mvar_of_kind(ty, leanr_meta::MVarKind::Synthetic)
                     .expect("fresh mvar");
-                e.register_synthetic_mvar(support::any_syn_elem(), id, SyntheticMVarKind::Tactic);
+                e.register_synthetic_mvar(
+                    support::any_syn_elem(),
+                    id,
+                    SyntheticMVarKind::Tactic { param_name: None },
+                );
                 inner_id = Some(id);
                 Ok(())
             });
@@ -881,7 +885,7 @@ fn with_synthesize_saves_clears_and_restores_pending() {
                     e.register_synthetic_mvar(
                         support::any_syn_elem(),
                         id,
-                        SyntheticMVarKind::Tactic,
+                        SyntheticMVarKind::Tactic { param_name: None },
                     );
                     inner_id2 = Some(id);
                     Err(leanr_elab::ElabError::UnsupportedSyntax("probe".into()))

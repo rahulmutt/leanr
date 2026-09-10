@@ -174,22 +174,6 @@ impl<'a, 'e> AppElab<'a, 'e> {
         Ok(matches!(self.node(reduced), Node::Forall { .. }))
     }
 
-    /// Is `fType` still an unassigned metavariable after
-    /// `synthesize_pending_and_normalize_fun_type`'s fixpoint attempt?
-    /// Distinguishes the P5 seam (a function type that has not been
-    /// PINNED DOWN yet — expected-type propagation into `fun` binder
-    /// domains, still owed) from a genuinely non-function type, which is
-    /// `ElabError::FunctionExpected` — the oracle does not need this
-    /// split because `coerceToFunction?` (P4, ported task 8) is tried
-    /// FIRST and handles a concrete non-function type on its own; this
-    /// check only runs once that has already answered `none`, so leanr
-    /// must not conflate a later-slice bug (a type never pinned down)
-    /// with a real user error.
-    pub(crate) fn f_type_is_mvar_after_instantiation(&mut self) -> Result<bool, ElabError> {
-        let f_type = self.elab.mctx.instantiate_mvars(self.st.f_type)?;
-        Ok(matches!(self.node(f_type), Node::MVar { .. }))
-    }
-
     /// oracle: `whnfForall` (`Lean/Meta/Basic.lean`) — WHNF, but keep the
     /// ORIGINAL term if the reduct is not a forall. Composed from the
     /// public `MetaCtx::whnf`; no accessor needed.
@@ -238,7 +222,8 @@ impl<'a, 'e> AppElab<'a, 'e> {
     /// oracle: `getArgExpectedType` (`App.lean:269-273`) —
     /// `getParamType` with `consumeTypeAnnotations` applied, i.e. the
     /// `optParam`/`autoParam`/`outParam`/`semiOutParam` wrapper stripped.
-    /// P1 still has no optParam/autoParam ARM (that is P5's); the
+    /// P5 landed the optParam/autoParam default-filling ARM
+    /// (`app/args.rs`'s `opt_param_default`/`auto_param_tactic`); the
     /// `outParam` half has been live since M4b-3 P2b-ii's `Get`
     /// (`@Get.get`'s `{elem : outParam (Type u_3)}` is stripped on
     /// every `Get.get` record) and is behaviour-neutral on current
@@ -308,14 +293,18 @@ impl<'a, 'e> AppElab<'a, 'e> {
 
     /// The `optParam`/`autoParam` HALF of `consume_type_annotations`, and
     /// only that half. `consume_opt_auto_param(x) != x` is exactly the
-    /// oracle's `x.isOptParam || x.isAutoParam`, which is what all three
+    /// oracle's `x.isOptParam || x.isAutoParam`, which is what both
     /// of its call sites test for: `hasOptAutoParams`
-    /// (`App.lean:121-127`, via `app::args::has_opt_auto_params`), the
+    /// (`App.lean:121-127`, via `app::args::has_opt_auto_params`) and the
     /// propagation guard at `App.lean:472` (via
-    /// `app::propagate::is_opt_or_auto_param`), and the default-filling
-    /// arms at `App.lean:827-854` (via `app::args`'s own seam check).
-    /// Every one of those asks "does this parameter carry a DEFAULT
-    /// VALUE" — which `outParam`/`semiOutParam` do not.
+    /// `app::propagate::is_opt_or_auto_param`). (A third call site used
+    /// to sit at the default-filling arms' own seam check; M4b-3 P5
+    /// task 9 gave `optParam`/`autoParam` default-filling a real
+    /// producer — `app::args`'s `opt_param_default`/`auto_param_tactic`
+    /// — which reads the wrapper directly rather than going through this
+    /// predicate, so that third call site is gone.) Both remaining call
+    /// sites ask "does this parameter carry a DEFAULT VALUE" — which
+    /// `outParam`/`semiOutParam` do not.
     ///
     /// Safe on a binder type carrying LOOSE BVARS — which the
     /// `propagate.rs` caller genuinely passes, since `main'` recurses
@@ -360,7 +349,14 @@ impl<'a, 'e> AppElab<'a, 'e> {
 
     /// The rendered name of an application spine's head `Const` and the
     /// spine's arity, if the head is a `Const` and the spine non-empty.
-    fn type_annotation_head(&self, e: ExprId) -> Option<(String, usize)> {
+    ///
+    /// `pub(crate)` (not private) so `app::args::opt_param_default` can
+    /// reuse this exact name+arity test — `isAppOfArity` in the
+    /// oracle's `getOptParamDefault?` — instead of writing a third copy
+    /// of the spine walk `type_annotation_at_head` above already
+    /// performs for a different purpose (returning the first argument,
+    /// not testing which gadget is at the head).
+    pub(crate) fn type_annotation_head(&self, e: ExprId) -> Option<(String, usize)> {
         let mut arity = 0usize;
         let mut cur = e;
         while let Node::App { f, .. } = self.node(cur) {

@@ -659,27 +659,27 @@ impl<'e> MetaCtx<'e> {
         self.lctx_snapshot = None;
     }
 
-    /// Mint a cdecl fvar `(name : ty)` with binder-info `bi` into the ambient
-    /// `lctx` and return its `Expr::fvar`. The additive elab-layer seam for
-    /// `mk_local_decl`, already used internally at assign.rs:633. The caller
-    /// brackets with `lctx_checkpoint`/`lctx_restore`. The invariant (checked
-    /// via debug_assert) is safe because `leanr_meta` internal code never
-    /// re-enters the elab layer, so no internal `mk_local_decl` decl is ever
-    /// transiently present in `lctx` at a `checkpoint`/`restore` boundary.
-    pub fn push_local_decl(
+    /// The mint-and-push half shared by `push_local_decl` and
+    /// `push_local_decl_without_instance` below — everything EXCEPT the
+    /// local-instance install, which the two callers do at different
+    /// times. Returns `(fvar, depth)`; `depth` is this declaration's own
+    /// index in `lctx.decls`, read BEFORE the push (see
+    /// `local_instance.rs` for why the stack truncates by depth rather
+    /// than by index) — a caller that defers the install needs it too
+    /// (`install_local_instance_for_last_pushed` re-derives the same
+    /// value from `lctx.save()` afterward, since nothing else may push
+    /// in between).
+    fn push_local_decl_inner(
         &mut self,
         name: Option<NameId>,
         ty: ExprId,
         bi: BinderInfo,
-    ) -> Result<ExprId, MetaError> {
+    ) -> Result<(ExprId, usize), MetaError> {
         debug_assert_eq!(
             self.local_names.len(),
             self.lctx.save(),
             "local_names/lctx lockstep invariant violated"
         );
-        // Read BEFORE the push below, so it is this declaration's own
-        // index in `lctx.decls` — see `local_instance.rs` for why the
-        // stack truncates by depth rather than by index.
         let depth = self.lctx.save();
         let fvar = self.lctx.mk_local_decl(
             self.scratch,
@@ -693,6 +693,23 @@ impl<'e> MetaCtx<'e> {
         // see that field's own doc comment. One entry per call, matching
         // `lctx.decls`'s own growth exactly (including `None` names).
         self.local_names.push((name, fvar));
+        Ok((fvar, depth))
+    }
+
+    /// Mint a cdecl fvar `(name : ty)` with binder-info `bi` into the ambient
+    /// `lctx` and return its `Expr::fvar`. The additive elab-layer seam for
+    /// `mk_local_decl`, already used internally at assign.rs:633. The caller
+    /// brackets with `lctx_checkpoint`/`lctx_restore`. The invariant (checked
+    /// via debug_assert) is safe because `leanr_meta` internal code never
+    /// re-enters the elab layer, so no internal `mk_local_decl` decl is ever
+    /// transiently present in `lctx` at a `checkpoint`/`restore` boundary.
+    pub fn push_local_decl(
+        &mut self,
+        name: Option<NameId>,
+        ty: ExprId,
+        bi: BinderInfo,
+    ) -> Result<ExprId, MetaError> {
+        let (fvar, depth) = self.push_local_decl_inner(name, ty, bi)?;
         // oracle: `withLocalDeclImp` → `withNewFVar`
         // (`Basic.lean:1791`, `:1785-1789`) — a class-typed declaration
         // becomes a local instance. Keyed on the TYPE only; binder info
@@ -701,6 +718,82 @@ impl<'e> MetaCtx<'e> {
         self.install_local_instance_for(fvar, ty, depth)?;
         self.lctx_snapshot = None;
         Ok(fvar)
+    }
+
+    /// The mint-and-push half of `push_local_decl`, WITHOUT the
+    /// automatic local-instance install that normally follows
+    /// immediately — paired with `install_local_instance_for_last_pushed`
+    /// below. Exists for a caller that must refine `ty` (e.g. an
+    /// `isDefEq` mvar assignment) AFTER the fvar already exists but
+    /// BEFORE the class check runs, matching the oracle's own ordering
+    /// in `elabFunBinderViews`: mint the fvar, run
+    /// `propagateExpectedType`, THEN test `isClass? type`
+    /// (`Lean/Elab/Binders.lean:429-444`) — `push_local_decl`'s own
+    /// ordering (class-check immediately, before any later refinement)
+    /// only diverges from that for a `fun` binder whose domain is an
+    /// ELIDED (fresh-mvar) type that `propagateExpectedType` then
+    /// assigns to a class (M4b-3 P5 task 4's own finding).
+    ///
+    /// Every OTHER `push_local_decl` caller (`forall`/`depArrow`/
+    /// `let`/`have`) has its domain fully elaborated BEFORE the push —
+    /// nothing refines it afterward — so this split changes nothing for
+    /// them and they keep calling `push_local_decl` unchanged.
+    /// Additive + behavior-neutral: `push_local_decl` itself still does
+    /// mint-and-install in one call via the same shared
+    /// `push_local_decl_inner`, byte-for-byte the same sequence of
+    /// operations as before this split.
+    pub fn push_local_decl_without_instance(
+        &mut self,
+        name: Option<NameId>,
+        ty: ExprId,
+        bi: BinderInfo,
+    ) -> Result<ExprId, MetaError> {
+        let (fvar, _depth) = self.push_local_decl_inner(name, ty, bi)?;
+        self.lctx_snapshot = None;
+        Ok(fvar)
+    }
+
+    /// The install half `push_local_decl_without_instance` defers — see
+    /// that method's own doc. `fvar` must be the MOST RECENTLY pushed
+    /// local decl (no intervening `push_local_decl`/`push_let_decl`/
+    /// `push_local_decl_without_instance` call), checked via
+    /// `debug_assert` against `local_names`' own tail — the same
+    /// lockstep invariant `push_local_decl_inner` itself asserts on
+    /// entry. `ty` is read fresh from the caller rather than
+    /// re-derived from `lctx`, so a caller that assigned an mvar via
+    /// `is_def_eq` in between (M4b-3 P5 task 4's own use) sees that
+    /// assignment: `is_class` (`Basic.lean:1358-1381` port) reduces
+    /// through it via `is_class_expensive`'s whnf fallback.
+    ///
+    /// **Fix round 2**: this used to return without dropping
+    /// `lctx_snapshot`, leaving the memo stale across the very window
+    /// this method exists to close — anything between the push and this
+    /// call that repopulates the cache (`with_mvar_context`'s own
+    /// `install_lctx`, reachable from `propagate_expected_type` through
+    /// `whnf.rs`'s pending-instance-mvar path or `assign.rs`'s
+    /// `mk_aux_mvar_for` rescue) left a snapshot missing the
+    /// just-installed instance in force for every mvar minted
+    /// afterward, silently. The drop now lives inside
+    /// `install_local_instance_for` itself (this method's own callee),
+    /// so it is no longer this method's job to remember — see that
+    /// method's doc for why the fix sits there instead of here.
+    pub fn install_local_instance_for_last_pushed(
+        &mut self,
+        fvar: ExprId,
+        ty: ExprId,
+    ) -> Result<(), MetaError> {
+        debug_assert_eq!(
+            self.local_names.len(),
+            self.lctx.save(),
+            "local_names/lctx lockstep invariant violated"
+        );
+        debug_assert_eq!(
+            self.local_names.last().map(|(_, f)| *f),
+            Some(fvar),
+            "fvar must be the most recently pushed local decl"
+        );
+        let depth = self.lctx.save().saturating_sub(1);
+        self.install_local_instance_for(fvar, ty, depth)
     }
 
     /// Mint an ldecl fvar `(name : ty := value)` into the ambient `lctx`
@@ -749,14 +842,59 @@ impl<'e> MetaCtx<'e> {
     ///
     /// oracle: `withNewFVar` (`Basic.lean:1785-1789`). The oracle's
     /// implementation-detail filter (`withNewLocalInstanceImp`,
-    /// `:1383-1388`) is **vacuously satisfied** here: leanr's
-    /// `LocalDecl` (`leanr_kernel/src/local_ctx.rs:37-43`) carries no
-    /// kind field, and nothing in leanr mints an implementation-detail
-    /// declaration, so there is nothing to filter. Adding a field to a
-    /// kernel struct for a producer that does not exist would widen the
-    /// TCB for nothing. SEAM — trigger for revisiting: the slice that
-    /// builds the tactic framework or the match compiler is the first to
-    /// mint one, and it must add the filter in the same change.
+    /// `Meta/Basic.lean:1383-1388`) checks `localDecl.isImplementationDetail`
+    /// and skips the push when it holds. That filter is **genuinely
+    /// missing here, not vacuous**: leanr's `LocalDecl`
+    /// (`leanr_kernel/src/local_ctx.rs:37-43`) carries no kind field, but
+    /// the oracle's producer of an implementation-detail declaration is
+    /// not some internal minting leanr has no counterpart for — it is
+    /// `LocalDeclKind.ofBinderName` (`BindersUtil.lean:21-23`), which
+    /// classifies ANY **user-written** binder name beginning with `__`
+    /// as `.implDetail`. That is ordinary surface syntax leanr already
+    /// elaborates. Concretely, on the pinned binary
+    /// `fun __i : Foo Nat => (Foo.bar : Nat)` elaborates against the
+    /// GLOBAL instance (the `__i` local is filtered out) while
+    /// `fun i : Foo Nat => …` elaborates against the LOCAL one — but
+    /// `push_local_decl_inner` installs the local instance unconditionally
+    /// for both, so leanr emits a **silently different term than the
+    /// oracle for any `__`-prefixed binder whose type is a class**, with
+    /// no error. This predates M4b-3 P5 — `install_local_instance_for`
+    /// arrived with the local-instances PR (#43) — and the fix (an
+    /// `isImplementationDetail`-style test on the binder name inside this
+    /// method) is a `leanr_meta` BEHAVIOUR change, which this slice's
+    /// additive-only `leanr_meta` exception does not cover; it belongs to
+    /// a follow-up slice. SEAM — trigger for revisiting: any slice that
+    /// elaborates or generates `__`-prefixed binders under a class type
+    /// (the tactic framework and the match compiler are the most likely
+    /// first minters of such names) must close this before that path is
+    /// trustworthy.
+    ///
+    /// **`lctx_snapshot` correctness (fix round 2)**: this is the ONE
+    /// place a NEW local instance is ever *pushed* onto `local_instances`
+    /// (`install_lctx`'s `replace` and `lctx_restore`'s `truncate_to` are
+    /// the other two writers of the field — swapping and truncating the
+    /// stack wholesale rather than pushing a new entry — and both clear
+    /// `lctx_snapshot` at their own call sites, so there is no functional
+    /// gap; this doc scopes its claim to *pushed* so it does not mislead
+    /// a future "every writer" audit). So the memo-drop that
+    /// invariant needs (`lctx_snapshot`'s own doc: "dropped by every
+    /// writer of either [`lctx` or `local_instances`]") lives HERE,
+    /// unconditionally, rather than at each of this method's callers.
+    /// Round 1 put it at two of the three call sites
+    /// (`push_local_decl`, `push_let_decl`) and missed the third
+    /// (`install_local_instance_for_last_pushed`) — a caller-side
+    /// convention that is easy to forget exactly because nothing
+    /// enforces it. Folding the drop in here makes it structural: ANY
+    /// future caller of this method gets it for free, and it fires even
+    /// on the `is_class? = none` branch (a no-op clear is always safe;
+    /// a missed one on the ELSE branch — reachable whenever `is_class`
+    /// itself repopulates the cache internally via its own reduction —
+    /// would reopen the same hole for a class-typed `ty` that answers
+    /// `none`). The two callers below keep their own EXPLICIT clears
+    /// too, since `push_local_decl_inner`'s mint-and-push half is
+    /// ALSO independently a writer of `lctx`/`local_names` and would
+    /// need one regardless of this method ever running — harmless
+    /// double-clearing, not load-bearing duplication.
     fn install_local_instance_for(
         &mut self,
         fvar: ExprId,
@@ -766,6 +904,7 @@ impl<'e> MetaCtx<'e> {
         if let Some(class_name) = self.is_class(ty)? {
             self.local_instances.push(class_name, fvar, depth);
         }
+        self.lctx_snapshot = None;
         Ok(())
     }
 
@@ -1793,6 +1932,62 @@ mod tests {
             assert!(
                 ctx.local_instances.entries().is_empty(),
                 "restoring the local context takes the instance out of scope"
+            );
+        });
+    }
+
+    /// Fix round 2: `install_local_instance_for_last_pushed`
+    /// (`push_local_decl_without_instance`'s deferred install half,
+    /// added round 1 for Finding 2's ordering fix) used to return
+    /// without dropping `lctx_snapshot`, leaving the memo STALE across
+    /// exactly the window it exists to close. Reproduces the review's
+    /// own reachability path directly rather than asserting the drop in
+    /// isolation: `with_mvar_context` — reachable from
+    /// `propagate_expected_type`'s own `is_def_eq` via `whnf.rs`'s
+    /// pending-instance-mvar path or `assign.rs`'s `mk_aux_mvar_for`
+    /// rescue — REPOPULATES the cache on its way out (`install_lctx`
+    /// reads, and so rebuilds and caches, `current_lctx()` on entry,
+    /// then reinstalls that exact snapshot on exit), with a snapshot
+    /// that predates the instance install below.
+    #[test]
+    fn install_local_instance_for_last_pushed_drops_a_stale_memo() {
+        with_class_ctx(|ctx, add| {
+            let add_n = class_app(ctx, add);
+            let n = const_named(ctx, "N");
+
+            // `propagate_expected_type`'s own shape: push first, WITHOUT
+            // installing — the domain is not yet known to be class-typed
+            // (an elided binder's domain starts as a fresh mvar; `n`
+            // stands in for "not yet Add N" here).
+            let fvar = ctx
+                .push_local_decl_without_instance(None, n, BinderInfo::Default)
+                .expect("push");
+
+            // Anything on `propagate_expected_type`'s own path that
+            // enters and leaves a metavariable's context repopulates the
+            // memo in between — any DECLARED mvar does.
+            let (_, other_mvar) = fresh_mvar(ctx, n);
+            ctx.with_mvar_context(other_mvar, |_| {});
+            assert!(
+                ctx.lctx_snapshot.is_some(),
+                "with_mvar_context must have repopulated the memo for \
+                 this test to mean anything"
+            );
+
+            // NOW the domain is discovered to be class-typed (the
+            // oracle's own `isClass? type` test, run AFTER propagation
+            // per Finding 2) and installed.
+            ctx.install_local_instance_for_last_pushed(fvar, add_n)
+                .expect("install");
+
+            // The memo must reflect the just-installed instance, not
+            // the stale pre-install snapshot `with_mvar_context` cached.
+            let snap = ctx.current_lctx();
+            assert_eq!(
+                snap.local_instances().len(),
+                1,
+                "current_lctx() returned a snapshot that predates the \
+                 local-instance install"
             );
         });
     }

@@ -104,8 +104,18 @@
 //!   it) and the `↑`/`⇑`/`↥` notations (the parser slice that adds
 //!   them).
 //! - **optParam/autoParam default filling and implicit-lambda
-//!   insertion** — M4b-3 P5. (The implicit-lambda *guard* is P1's, in
-//!   `elab.rs`; only the insertion is deferred.)
+//!   insertion** — SHIPPED in M4b-3 P5. `optParam` fills its declared
+//!   default (task 8, `app/args.rs`'s `opt_param_default`); an omitted
+//!   `autoParam` mints a `.tactic` synthetic mvar the ladder reports
+//!   unsolved (task 9, `mk_tactic_mvar`); implicit-lambda insertion
+//!   itself landed in `elab.rs` (tasks 5-6, `use_implicit_lambda`/
+//!   `elab_implicit_lambda` — the *guard* was P1's, `block_implicit_lambda`).
+//!   Still deferred: wrapping `@($t)`/`@$t` to elaborate with insertion
+//!   explicitly disabled (`app/mod.rs`'s `elab_explicit`) — a one-liner
+//!   now that insertion exists, but unclaimed by any plan slice, named
+//!   "later M4" rather than "M4b-3 P5" — and `useImplicitLambda`'s
+//!   `.postpone` arm, a named `M4b-4` seam (`elab.rs`'s
+//!   `UseImplicitLambda::Postpone`).
 //! - **overload resolution** (more than one candidate from
 //!   `elabAppFn`) — the slice that grows `resolve_global`, since it is
 //!   unreachable while only exact names resolve.

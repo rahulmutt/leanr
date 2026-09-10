@@ -593,3 +593,48 @@ structure Carrier where
   ty : Type
 
 instance instCoeSortCarrier : CoeSort Carrier Type := ⟨Carrier.ty⟩
+
+-- M4b-3 P5: the two default-argument wrappers. Elab0 is prelude-mode and
+-- import-free, so both must be declared here rather than imported.
+--
+-- `optParam` is copied verbatim from `Init/Prelude.lean:684`; the binder
+-- sugar `(n : α := d)` desugars to `optParam α d`, and the oracle's
+-- `getOptParamDefault?` (`Lean/Expr.lean:1695`) is an arity-2 head test
+-- against this very name.
+set_option linter.unusedVariables false in
+@[reducible] def optParam (α : Sort u) (default : α) : Sort u := α
+
+-- `autoParam` mirrors `Init/Tactics.lean:2635`. Its second argument is a
+-- `Lean.Syntax`, which prelude-mode cannot construct: the `syntax` command
+-- needs `Lean.ParserDescr` and `by`-blocks need the tactic framework, neither
+-- of which an import-free module has. An opaque carrier is enough — the
+-- oracle's `getAutoParamTactic?` (`Lean/Expr.lean:1702`) and leanr's reader
+-- are both arity-2 head tests that never look at the tactic value, and the
+-- only corpus query is the EXPLICITLY-supplied form, which strips the
+-- wrapper without consulting it. An OMITTED autoParam is a reported seam
+-- (P5 Task 9), never an oracle record.
+namespace Lean
+axiom Syntax : Type
+end Lean
+
+set_option linter.unusedVariables false in
+abbrev autoParam (α : Sort u) (tactic : Lean.Syntax) : Sort u := α
+
+axiom p5AutoTac : Lean.Syntax
+
+-- M4b-3 P5 Tasks 1/3/5/7: an instance-implicit binder needs a class in scope
+-- whose LOCAL instance can be preferred over a global one — the scoping audit
+-- (Task 7) discriminates on exactly that, so the global instance must exist
+-- too. `Add`'s shape follows the file's other classes (`Wrap`, `Pair`).
+class Add (a : Type) where
+  add : a → a → a
+
+instance instAddNat : Add Nat where
+  add x _ := x
+
+-- M4b-3 P5 Tasks 8/9: the default-argument carriers. `withDefault` has a
+-- declared default (oracle `App.lean:827-828`); `withTactic` an auto-param
+-- whose EXECUTION is a later M4 slice.
+def withDefault (n : Nat := Nat.zero) : Nat := n
+
+def withTactic (n : autoParam Nat p5AutoTac) : Nat := n

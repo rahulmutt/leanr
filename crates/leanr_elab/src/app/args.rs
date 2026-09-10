@@ -18,7 +18,7 @@ use leanr_syntax::kind::KindInterner;
 use crate::app::expand::{Arg, NamedArg};
 use crate::app::state::AppElab;
 use crate::error::ElabError;
-use crate::synthetic::PostponeBehavior;
+use crate::synthetic::{PostponeBehavior, SyntheticMVarKind};
 
 /// oracle: `main` (`App.lean:926-951`).
 pub fn main(app: &mut AppElab, kinds: &KindInterner) -> Result<ExprId, ElabError> {
@@ -137,15 +137,14 @@ fn synthesize_pending_and_normalize_fun_type(
     // linter, `throwInvalidNamedArg` (which needs `foundNamedArgs`
     // rendering leanr does not do), and the "Function expected" error.
     // Only the last changes control flow, so only it is ported.
+    //
+    // M4b-3 P5 task 4 closed the mvar-fType seam that used to sit here:
+    // `propagateExpectedType` (`builtin/binder.rs`) now pins a `fun`
+    // binder's domain from the ascription BEFORE this point is ever
+    // reached, so an `fType` still an unassigned mvar here is a genuine
+    // "Function expected" — the oracle draws no distinction either
+    // (`App.lean:395-411` falls straight through to it).
     let f_type = app.st.f_type;
-    if app.f_type_is_mvar_after_instantiation()? {
-        return Err(ElabError::UnsupportedSyntax(
-            "function type is still an unassigned metavariable after synthesis: needs \
-             expected-type propagation into `fun` binder domains for the M4b-2 `fun` \
-             shape — M4b-3 P5"
-                .to_string(),
-        ));
-    }
     Err(ElabError::FunctionExpected {
         f: app.st.f,
         f_type,
@@ -399,7 +398,7 @@ fn process_explicit_arg(
     // than omitted, and the plain-ellipsis arm below is what `..` takes.
 
     // oracle: the `optParam`/`autoParam` default-filling arms
-    // (`App.lean:827-854`), on the CURRENT parameter's type and gated on
+    // (`App.lean:827-852`), on the CURRENT parameter's type and gated on
     // `!explicit` exactly as the oracle's `match` scrutinee is.
     // `get_arg_expected_type` already STRIPS the wrapper (task 3), so an
     // explicitly-supplied argument to a wrapped parameter is handled
@@ -407,10 +406,37 @@ fn process_explicit_arg(
     // falling through to the eta chain and building a different term.
     if !app.ctx.explicit {
         let param_type = app.get_param_type()?;
-        if app.consume_opt_auto_param(param_type)? != param_type {
-            return Err(ElabError::UnsupportedSyntax(
-                "optParam default / autoParam tactic argument — M4b-3 P5".to_string(),
-            ));
+        // oracle: `App.lean:828` — `| false, some defVal, _ => addNewArg
+        // argName defVal; main`. The `optParam` half of the arm.
+        if let Some(def_val) = opt_param_default(app, param_type)? {
+            // oracle: `addNewArg argName defVal` — the declared default
+            // becomes the argument DIRECTLY. Not re-elaborated, not a
+            // fresh mvar.
+            add_new_arg(app, def_val)?;
+            return Ok(true);
+        }
+        // oracle: `App.lean:829-852` — `| false, _, some (.const
+        // tacticDecl _) => ...`, the `autoParam` half of the same match.
+        // `getAutoParamTactic?` (`Lean/Expr.lean:1702-1705`) returns
+        // `some tacticDecl`; the oracle then `evalSyntaxConstant`s that
+        // constant and quotes `` `(by $tacticSyntax) `` (`:829-845`) —
+        // pulling in the `by` elaborator and the tactic framework, which
+        // the roadmap assigns to a later M4 slice. leanr's
+        // `auto_param_tactic` reads only WHETHER the wrapper is present
+        // (its `.is_some()`, never the wrapped tactic value — the
+        // fixture's `p5AutoTac` is an opaque axiom precisely because
+        // prelude-mode cannot construct a real `Lean.Syntax`; see this
+        // task's brief, Amendment 2), and `mk_tactic_mvar` mints the same
+        // `mkTacticMVar` (`TermElabM.lean:1467-1475`) would at
+        // `App.lean:846` — same expected type, same `.tactic` kind, same
+        // `syntheticOpaque` metavariable kind — then hands EXECUTION to
+        // the synthetic-mvar ladder, which reports it unsolved rather
+        // than running it.
+        if auto_param_tactic(app, param_type)?.is_some() {
+            let expected = app.get_arg_expected_type()?;
+            let mvar = mk_tactic_mvar(app, expected, binder_name)?;
+            add_new_arg(app, mvar)?;
+            return Ok(true);
         }
     }
 
@@ -454,6 +480,126 @@ fn process_explicit_arg(
 
     // oracle: `finalize` (`App.lean:875`/`877`).
     Ok(false)
+}
+
+/// oracle: `Expr.getOptParamDefault?` (`Lean/Expr.lean:1695-1699`):
+///
+/// ```lean
+/// def getOptParamDefault? (e : Expr) : Option Expr :=
+///   if e.isAppOfArity ``optParam 2 then some e.appArg! else none
+/// ```
+///
+/// `optParam α d` is a reducible two-argument application (`@[reducible]
+/// def optParam (α : Sort u) (default : α) : Sort u := α`,
+/// `Init/Prelude.lean:684`); `d` is `e.appArg!`, the SECOND argument
+/// (`α` the first). A pure syntactic head test — no whnf, no mvar
+/// instantiation — matching the oracle's own `Expr -> Option Expr`
+/// signature.
+///
+/// Reuses `AppElab::type_annotation_head`'s name+arity spine walk
+/// (`app/state.rs`) for the `isAppOfArity` test rather than writing a
+/// third copy of it: that helper already answers "is the head a Const
+/// named X applied to N arguments", which is exactly `isAppOfArity`.
+/// `type_annotation_at_head` (the OTHER existing helper) can't be
+/// reused as-is here — it returns the FIRST argument (the annotated
+/// type `α`), for `consumeTypeAnnotations`'s different purpose, and it
+/// also accepts `autoParam`, which this must not: `getOptParamDefault?`
+/// is `optParam`-only, `getAutoParamTactic?` is `autoParam`'s own
+/// separate reader (Task 9).
+fn opt_param_default(app: &AppElab, ty: ExprId) -> Result<Option<ExprId>, ElabError> {
+    match app.type_annotation_head(ty) {
+        Some((name, 2)) if name == "optParam" => Ok(Some(app.app_args(ty)[1])),
+        _ => Ok(None),
+    }
+}
+
+/// oracle: `Expr.getAutoParamTactic?` (`Lean/Expr.lean:1702-1705`):
+///
+/// ```lean
+/// def getAutoParamTactic? (e : Expr) : Option Expr :=
+///   if e.isAppOfArity ``autoParam 2 then some e.appArg! else none
+/// ```
+///
+/// `autoParam α tac` is a reducible two-argument application
+/// (`autoParam`'s own declaration mirrors `Init/Tactics.lean:2635`; the
+/// fixture's copy is `Elab0.lean`'s, since prelude-mode cannot import
+/// it — see this task's brief, Amendment 2); `tac` is `e.appArg!`, the
+/// SECOND argument. Task 9 reads only WHETHER this returns `Some` — the
+/// caller never inspects the tactic value itself, because evaluating it
+/// is exactly the part this task defers (see `mk_tactic_mvar`'s doc).
+///
+/// Reuses `AppElab::type_annotation_head`'s name+arity spine walk, for
+/// the same reason `opt_param_default` above does: one spine walk, two
+/// readers, rather than a third copy of the `isAppOfArity` test.
+/// `opt_param_default` cannot be widened to cover this case instead —
+/// it must stay `optParam`-only so a wrapped `optParam` is never
+/// mistaken for one with no default, and vice versa for `autoParam`
+/// here.
+fn auto_param_tactic(app: &AppElab, ty: ExprId) -> Result<Option<ExprId>, ElabError> {
+    match app.type_annotation_head(ty) {
+        Some((name, 2)) if name == "autoParam" => Ok(Some(app.app_args(ty)[1])),
+        _ => Ok(None),
+    }
+}
+
+/// oracle: `mkTacticMVar` (`TermElabM.lean:1467-1475`), restricted to
+/// its call site at `App.lean:846` (`mkTacticMVar (← getArgExpectedType)
+/// tacticBlock (.autoParam argName)`) — mint a fresh `syntheticOpaque`
+/// metavariable at `ty` (mirroring `coe.rs`'s `mk_coe`, the sibling
+/// producer for `SyntheticMVarKind::Coe`) and register it under the new
+/// `Tactic` kind so the synthetic-mvar ladder owns it from here on.
+///
+/// Three things the oracle's caller-side match does that this does NOT
+/// model, all deliberately, all because EXECUTING the tactic is out of
+/// this task's scope (the brief's own words: mint the mvar, register
+/// it, "with execution left to" the ladder — never evaluate the
+/// tactic):
+///   - `debug.byAsSorry`'s `Prop`-typed short-circuit
+///     (`TermElabM.lean:1469-1470`) replaces the mvar with a labeled
+///     `sorry` under a debug option. There is no `by`-block here to
+///     replace — leanr never builds one — so there is nothing for this
+///     option to intercept.
+///   - the `tacticCode : Syntax` / `ctx : SavedContext` payloads the
+///     oracle's `.tactic` kind carries are not stored: nothing in leanr
+///     ever resumes this mvar with a real tactic run, so there is no
+///     later reader for either.
+///   - the caller, `auto_param_tactic` (`args.rs:437`), reads only
+///     `.is_some()` on the wrapper, collapsing the oracle's TWO
+///     `getAutoParamTactic? = some _` arms into one: `some (.const
+///     tacticDecl _)` (`App.lean:829`), which the oracle evaluates and
+///     mints a tactic mvar for, versus `some _` (`:853-854`, "autoParam
+///     `{argName}` is not a constant"), which the oracle rejects
+///     outright. Both leanr paths end in an error either way — a
+///     `TacticMVar` the ladder reports unsolved, or the eventual
+///     elaboration error for a malformed `autoParam` wrapper — so no
+///     wrong TERM results, but the `.const`-vs-`_` distinction itself is
+///     unmodelled.
+///
+/// `param_name` is the oracle's own `TacticMVarKind.autoParam (argName :
+/// Name)` payload — rendered ONCE here (`AppElab::render_name`'s own
+/// idiom, e.g. `find_named_arg`'s callers) rather than carried as a
+/// `NameId` for `ladder.rs`/`report.rs` to render later, since neither
+/// of those needs `Store` access for anything else and the payload
+/// exists solely to name the parameter in the eventual seam message
+/// (`SyntheticMVarKind`'s own doc).
+fn mk_tactic_mvar(
+    app: &mut AppElab,
+    ty: ExprId,
+    param_name: Option<NameId>,
+) -> Result<ExprId, ElabError> {
+    let stx = app.ctx.stx.clone();
+    let (mvar, id) = app
+        .elab
+        .mk_fresh_expr_mvar_of_kind(ty, MVarKind::SyntheticOpaque)?;
+    let rendered = param_name.map(|n| app.render_name(n));
+    app.elab.register_synthetic_mvar(
+        stx,
+        id,
+        SyntheticMVarKind::Tactic {
+            param_name: rendered,
+        },
+    );
+    Ok(mvar)
 }
 
 /// oracle: `hasOptAutoParams` (`App.lean:121-127`) — does ANY parameter

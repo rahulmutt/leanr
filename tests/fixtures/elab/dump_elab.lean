@@ -724,6 +724,65 @@ def elimMVarDepsQueries : List (String × String) :=
       "(fun (n : Nat) x => useWrap x : Nat -> Nat -> Nat)")
   ]
 
+/-- M4b-3 P5 binder family: implicit / strict-implicit / instance-implicit
+`fun` binders, multi-name groups, type-less binders, `optType`, and
+expected-type propagation into binder domains. The `optType` queries are
+amendment 4's replacements: `fun bs : T => e` maps `T` over the BINDERS
+(`expandSimpleBinderWithType`), not the body — a non-ident/`_` binder makes
+the real elaborator throw "unexpected type ascription", so the plan's
+original `fun (x : Nat) : Nat => x` / `fun (a : Type) (x : a) : a => x`
+forms are dropped in favour of the two that actually elaborate.
+
+Type-less binders are queried only for the implicit case
+(`fun {a} => a`, `p5/fun-implicit-untyped`); explicit/strict/instance
+type-less variants are out of scope here — the brief's form list did not
+call for them, and adding them is a separate decision, not an oversight
+of this task.
+
+`p5/propagate-short` is retained deliberately even though it produces NO
+record: the oracle rejects `(fun x y => Nat.zero : Nat -> Nat)` with a
+genuine type mismatch — two `fun` binders against a one-arrow expected
+type leave the second binder's domain an unresolved metavariable, and
+`(x : Nat) → ?m x → Nat` does not unify with `Nat → Nat`. Confirmed
+independently against a full-Init environment, which renders the same
+failure as a readable "Type mismatch ... but is expected to have type
+Nat → Nat" rather than this file's opaque `internal exception #3`. Kept
+here (not dropped) so the gap in `elab-queries.jsonl` reads as intentional
+rather than a regen bug; every `fixtures:regen-elab` run re-emits this
+query's `eprintln` for the same reason. -/
+def p5BinderQueries : List (String × String) :=
+  [ ("p5/fun-implicit",         "fun {a : Type} => a")
+  , ("p5/fun-implicit-untyped", "fun {a} => a")
+  , ("p5/fun-implicit-group",   "fun {a b : Type} => a")
+  , ("p5/fun-strict",           "fun ⦃a : Type⦄ => a")
+  , ("p5/fun-inst-named",       "fun [inst : Add Nat] => inst")
+  , ("p5/fun-inst-anon",        "fun [Add Nat] => Nat.zero")
+  , ("p5/fun-opttype",          "fun x : Nat => x")
+  , ("p5/fun-opttype-group",    "fun x y : Nat => x")
+  , ("p5/forall-inst",          "forall [inst : Add Nat], Nat")
+  , ("p5/propagate-fn",         "(fun f => f Nat.zero : (Nat -> Nat) -> Nat)")
+  , ("p5/propagate-two",        "(fun x y => x : Nat -> Nat -> Nat)")
+    -- Oracle-rejected; see doc comment above. No record — do not "fix"
+    -- this by editing the query.
+  , ("p5/propagate-short",      "(fun x y => Nat.zero : Nat -> Nat)")
+  ]
+
+/-- M4b-3 P5 implicit-lambda insertion (`TermElabM.lean:1806-1820`). -/
+def p5ImplicitLambdaQueries : List (String × String) :=
+  [ ("p5/implam-one",    "(Nat.zero : {a : Type} -> Nat)")
+  , ("p5/implam-inst",   "(Nat.zero : [inst : Add Nat] -> Nat)")
+  , ("p5/implam-nested", "(Nat.zero : {a : Type} -> {b : Type} -> Nat)")
+  ]
+
+/-- M4b-3 P5 argument family: `optParam` defaults and an explicitly
+supplied `autoParam` argument. An OMITTED autoParam is a reported seam,
+not a record — executing the tactic is a later M4 slice. -/
+def p5ArgQueries : List (String × String) :=
+  [ ("p5/optparam-default",   "withDefault")
+  , ("p5/optparam-explicit",  "@withDefault Nat.zero")
+  , ("p5/autoparam-supplied", "withTactic Nat.zero")
+  ]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -737,7 +796,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>

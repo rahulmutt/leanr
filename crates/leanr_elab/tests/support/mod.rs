@@ -804,3 +804,24 @@ pub fn elab_and_synthesize(src: &str) -> Result<serde_json::Value, leanr_elab::E
         Ok(encode_expr(elab.mctx.store(), Some(base), e, &mut st))
     })
 }
+
+/// Elaborate `src` through `elab_term_ensuring_type` then
+/// `instantiate_mvars`, returning the raw `Result` rather than
+/// panicking on failure or encoding to JSON — for tests asserting a
+/// specific `ElabError` variant rather than a successful shape.
+///
+/// Moved here from `binder_smoke.rs` (M4b-3 P5 Task 6): that file,
+/// `oracle_elab.rs` and `seam_audit.rs` all build the same shape of
+/// `MetaCtx` (this file's `with_elab_harness`, above, is that
+/// construction), and a fourth copy of this small helper is where drift
+/// starts.
+pub fn elab_result(src: &str) -> Result<leanr_kernel::bank::ExprId, leanr_elab::ElabError> {
+    with_elab_harness("elab_result", src, |elab, term_elem, kinds| {
+        elab.elab_term_ensuring_type(term_elem, kinds, None)
+            .and_then(|e| {
+                elab.mctx
+                    .instantiate_mvars(e)
+                    .map_err(leanr_elab::ElabError::from)
+            })
+    })
+}
