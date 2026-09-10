@@ -517,9 +517,10 @@ fn extract_fun_binder_views(
 /// arm only. M4b-2: no scheduler, and the expected type is NOT consumed
 /// here (see the plan's § Task 2 design note) — an elided binder's domain
 /// is a fresh type mvar unified by the outer `elab_term_ensuring_type`.
-/// Named seams: the `matchAlts` (pattern) arm, `optType`
-/// (`fun x : T => e`), and the funBinder forms
-/// `extract_fun_binder_views` rejects.
+/// `optType` (`fun x : T => e`) ascribes the BODY under the telescope
+/// (M4b-3 P5 task 2 — the `expandFun` macro rewrites `fun bs : T => e`
+/// to `fun bs => (e : T)`). Named seams: the `matchAlts` (pattern) arm
+/// and the funBinder forms `extract_fun_binder_views` rejects.
 ///
 /// `Term.fun` children: `[("λ"|"fun"), (basicFun | matchAlts)]`.
 /// `Term.basicFun` children: `[binderList(null), optType(null),
@@ -544,16 +545,14 @@ pub fn elab_fun(
         .first()
         .and_then(|el| el.as_node())
         .ok_or_else(|| ElabError::UnsupportedSyntax("fun: binder list".into()))?;
-    // `optType` (`fun x : T => e`) → named seam (M4b-3). Child [1] is the
-    // null-wrapped optional; a non-empty wrapper means a return type was
-    // written.
-    if let Some(opt) = bch.get(1).and_then(|el| el.as_node()) {
-        if !non_trivia_children(opt).is_empty() {
-            return Err(ElabError::UnsupportedSyntax(
-                "fun: return-type optType (M4b-3)".into(),
-            ));
-        }
-    }
+    // `optType` (`fun x : T => e`, `Parser/Term.lean:384`). Child [1] is
+    // the null-wrapped optional; a non-empty wrapper holds `[":", T]`.
+    // oracle: the `expandFun` macro rewrites `fun bs : T => e` to
+    // `fun bs => (e : T)`, so `T` ascribes the BODY, under the binders.
+    let opt_type = bch
+        .get(1)
+        .and_then(|el| el.as_node())
+        .and_then(|opt| non_trivia_children(opt).into_iter().nth(1));
     let body_elem = bch
         .get(3)
         .cloned()
@@ -586,8 +585,16 @@ pub fn elab_fun(
                 fvars.push(fvar);
             }
         }
-        // Body with expected `None` (see § Task 2 design note).
-        let body = elab.elab_term(&body_elem, kinds, None)?;
+        // The optType elaborates INSIDE the telescope: it may mention
+        // the binders (`fun (a : Type) (x : a) : a => x`).
+        let expected_body = match &opt_type {
+            Some(ty_elem) => Some(elab_type(elab, ty_elem, kinds)?),
+            None => None,
+        };
+        let body = match expected_body {
+            Some(t) => elab.elab_term_ensuring_type(&body_elem, kinds, Some(t))?,
+            None => elab.elab_term(&body_elem, kinds, None)?,
+        };
         elab.mctx.mk_lambda(&fvars, body).map_err(ElabError::from)
     })();
     elab.mctx.lctx_restore(checkpoint);

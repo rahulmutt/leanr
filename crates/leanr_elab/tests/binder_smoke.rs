@@ -316,6 +316,28 @@ fn fun_implicit_binder_without_type_gets_an_mvar_domain() {
 }
 
 #[test]
+fn fun_opt_type_ascribes_the_body() {
+    // fun (x : Nat) : Nat => x
+    let j = elab_json("fun (x : Nat) : Nat => x");
+    assert_eq!(j["k"], "lam");
+    assert_eq!(j["t"]["k"], "const");
+    assert_eq!(j["t"]["n"], "Nat");
+    assert_eq!(j["b"]["k"], "bvar");
+    assert_eq!(j["b"]["i"], 0);
+}
+
+#[test]
+fn fun_opt_type_may_mention_the_binders() {
+    // fun (a : Type) (x : a) : a => x — the optType `a` refers to the
+    // first binder, so it must elaborate INSIDE the telescope.
+    let j = elab_json("fun (a : Type) (x : a) : a => x");
+    assert_eq!(j["k"], "lam");
+    assert_eq!(j["b"]["k"], "lam");
+    assert_eq!(j["b"]["b"]["k"], "bvar");
+    assert_eq!(j["b"]["b"]["i"], 0);
+}
+
+#[test]
 fn let_typed_binding() {
     // let x : Nat := Nat.zero; x  →  letE Nat Nat.zero (bvar 0), nd=false
     let j = elab_json("let x : Nat := Nat.zero; x");
