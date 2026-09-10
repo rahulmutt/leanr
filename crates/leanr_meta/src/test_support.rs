@@ -291,6 +291,71 @@ pub(crate) fn class_app(ctx: &mut MetaCtx, add: NameId) -> ExprId {
     ctx.mk_app_spine(add_expr, &[n]).expect("Add N")
 }
 
+/// A root (single-component) `NameId`, interned against the current
+/// store's persistent base — the naming half of [`const_named`], for
+/// callers that need the NAME rather than an `Expr.const` wrapping it
+/// (here: a binder's cosmetic name).
+fn root_name(ctx: &mut MetaCtx, name: &str) -> NameId {
+    let base = Some(ctx.view.store);
+    let s = ctx.scratch.intern_str(base, name).expect("intern");
+    ctx.scratch.name_str(base, None, s).expect("name")
+}
+
+/// `{a : Type} → [Add a] → Add (Prod a a)` — the type of a
+/// PARAMETRIZED local instance, the same shape as
+/// `Instances.olean`'s own global `instAddProd`. Binder 0 is implicit,
+/// binder 1 is instance-implicit, so a telescope that reads binder info
+/// correctly yields `synth_order == [1]`.
+///
+/// Built by hand rather than read off the fixture because the fixture
+/// has no *local* instances at all — a local is whatever the caller
+/// pushes. Constants come through [`const_named`], so their universe
+/// arguments are filled to each declaration's real arity, exactly as
+/// [`parse_goal`] does for the goal side.
+///
+/// The `[Add a]` domain deliberately MENTIONS the first binder (as a
+/// loose bvar until the telescope opens it), which is what makes this
+/// fixture worth building by hand: a telescope that pushed each domain
+/// raw would declare `Add #0` — a loose bvar — into the local context.
+pub(crate) fn parametrized_instance_type(ctx: &mut MetaCtx) -> ExprId {
+    let base = Some(ctx.view.store);
+    let zero = ctx.scratch.level_zero(base).expect("level");
+    let one = ctx.scratch.level_succ(base, zero).expect("level");
+    // `Type`, i.e. `Sort 1` — the sort `Instances.lean`'s `Add`
+    // quantifies its parameter over.
+    let type_sort = ctx.scratch.expr_sort(base, one).expect("Sort 1");
+    let bvar0 = ctx
+        .scratch
+        .expr_bvar(base, &Nat::from(0u64))
+        .expect("bvar 0");
+    let bvar1 = ctx
+        .scratch
+        .expr_bvar(base, &Nat::from(1u64))
+        .expect("bvar 1");
+    let add = const_named(ctx, "Add");
+    // `Add a` under ONE binder: `a` is `#0`.
+    let add_a = ctx.mk_app_spine(add, &[bvar0]).expect("Add a");
+    // `Add (Prod a a)` under TWO binders: `a` is now `#1`.
+    let prod = const_named(ctx, "Prod");
+    let prod_a_a = ctx.mk_app_spine(prod, &[bvar1, bvar1]).expect("Prod a a");
+    let concl = ctx.mk_app_spine(add, &[prod_a_a]).expect("Add (Prod a a)");
+    let a_name = root_name(ctx, "a");
+    let inst_name = root_name(ctx, "inst");
+    let inner = ctx
+        .scratch
+        .expr_forall(
+            base,
+            Some(inst_name),
+            add_a,
+            concl,
+            BinderInfo::InstImplicit,
+        )
+        .expect("[Add a] -> ..");
+    ctx.scratch
+        .expr_forall(base, Some(a_name), type_sort, inner, BinderInfo::Implicit)
+        .expect("{a : Type} -> ..")
+}
+
 /// Replay `meta/Synth0.olean` (task 1's verbatim `Init/Coe.lean` class
 /// chain fixture; M4b-3 P4 task 2). Same `prelude`-mode, import-free
 /// shape as [`with_instances_ctx`] just above — see `Synth0.lean`'s own

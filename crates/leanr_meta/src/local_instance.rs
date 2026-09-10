@@ -88,8 +88,10 @@ impl LocalInstanceStack {
         }
     }
 
-    /// No consumer yet (Task 6's `get_instances`); exercised today only
-    /// by this module's own tests.
+    /// No production consumer: task 6's `get_instances` needs an OWNED
+    /// snapshot ([`LocalInstanceStack::to_vec`]) because it calls back
+    /// into `&mut self` for each candidate while iterating. Exercised
+    /// today only by tests, hence the allow.
     #[allow(dead_code)]
     pub(crate) fn entries(&self) -> &[LocalInstance] {
         &self.entries

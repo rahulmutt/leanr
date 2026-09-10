@@ -1251,8 +1251,9 @@ impl<'e> MetaCtx<'e> {
     /// never a hard error, and diverging here would turn an ordinary
     /// binder into an elaboration failure.
     ///
-    /// Called from `push_local_decl`/`push_let_decl` (Task 4) and, once
-    /// Task 6 lands, from `get_instances` too.
+    /// Called from `push_local_decl`/`push_let_decl` (Task 4) and from
+    /// `get_instances` (Task 6), which resolves its goal's class name
+    /// through this.
     pub(crate) fn is_class(&mut self, ty: ExprId) -> Result<Option<NameId>, MetaError> {
         match self.is_class_quick(ty) {
             LOption::Some(c) => Ok(Some(c)),
@@ -1262,11 +1263,19 @@ impl<'e> MetaCtx<'e> {
     }
 
     /// oracle: `isClassQuick?` (`Basic.lean:1358-1381`) — a purely
-    /// structural walk that NEVER reduces. Keeping it whnf-free is not
-    /// only a speed matter: Task 6's `get_instances` calls `is_class`
-    /// while its instance table is `mem::take`n (`instances.rs:468-479`
-    /// per that task's brief), so a reduction on the common path would
-    /// re-enter instance lookup against an empty table.
+    /// structural walk that NEVER reduces; deciding needs `.undef` to
+    /// hand off to `is_class_expensive`, which does.
+    ///
+    /// **Correction (task 6)**: an earlier version of this comment
+    /// claimed the whnf-free quick path was load-bearing for
+    /// `get_instances`' `mem::take` window. It is not, and the premise
+    /// was wrong anyway — `is_class_quick_const` reads the AMBIENT
+    /// transparency, so at `TransparencyMode::Default` every
+    /// definition-headed type answers `.undef` and reaches whnf after
+    /// all. What actually protects that window is placement:
+    /// `get_instances` calls `is_class` BEFORE it takes its table (see
+    /// that function's own invariant note), so whatever this reduces
+    /// cannot re-enter an emptied table.
     ///
     /// Called from [`MetaCtx::is_class`] — see that method's own doc.
     ///

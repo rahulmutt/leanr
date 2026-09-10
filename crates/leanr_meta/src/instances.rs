@@ -88,6 +88,12 @@
 //!
 //! # `global_name: None` (named seam, not a silent skip)
 //!
+//! Scope: this section is about an entry of THIS TABLE, i.e. one
+//! decoded from `instanceExtension`. A candidate `get_instances`
+//! RETURNS may legitimately carry `global_name: None` without any of
+//! the below applying — that is exactly what a local instance is (see
+//! `MetaCtx::local_instance_candidate`).
+//!
 //! `addInstance` (`Instances.lean:283-304`) is the ONLY producer of a
 //! persisted `instanceExtension` entry, and it unconditionally sets
 //! `globalName? := declName` (line 304) — a `some`. A LOCAL instance
@@ -97,9 +103,10 @@
 //! 230-239`) that never touches `instanceExtension` and is never
 //! serialized to `.olean` at all — `getInstances` appends those
 //! separately, at query time, from the CALLER's local context, which is
-//! exactly what a future B5 task must do from `MetaCtx::lctx`, not from
-//! this table. So every `InstanceEntry` this crate ever decodes from a
-//! real `.olean` has `global_name = Some(_)`, and `global_name: None`
+//! what `get_instances` below now does from `MetaCtx::local_instances`
+//! (the local-instances slice, task 6), never from this table. So every
+//! `InstanceEntry` this crate ever decodes from a real `.olean` has
+//! `global_name = Some(_)`, and a TABLE entry with `global_name: None`
 //! is reachable ONLY via adversarial/malformed bytes (Global
 //! Constraints: `.olean` bytes are untrusted). Since there is then no
 //! `Name` to resolve a `ty` from (`EnvView::get` needs one) and no other
@@ -204,10 +211,14 @@
 //! so this module's own `#[cfg(test)]` builds a synthetic tied scenario
 //! to pin it (`get_instances_orders_by_priority_desc_then_reverse_of_ties`).
 //!
-//! Local instances (`SynthInstance.lean:230-239`, pushed onto the END of
-//! `result` AFTER the sort above, with no further sort) are out of
-//! scope for this table (see the `global_name: None` seam above) and so
-//! is the `isClass?`/`forallTelescopeReducing` goal-telescoping
+//! Local instances (`SynthInstance.lean:230-239`) are pushed onto the
+//! END of `result` AFTER the sort above, with no further sort — i.e.
+//! `generate`, reading back-to-front, reaches them FIRST. They are not
+//! part of this TABLE (they never touch `instanceExtension` — see the
+//! `global_name: None` seam above); `get_instances` appends them at
+//! query time off `MetaCtx::local_instances`, between the sort and the
+//! reverse, so they come out ahead of every global. Still out of scope
+//! here is the `isClass?`/`forallTelescopeReducing` goal-telescoping
 //! `getInstances` itself does up front (`SynthInstance.lean:205-206`) —
 //! `get_instances` here takes an already-telescoped class application,
 //! matching every other B2/B1 query-side helper's contract; a future B5
@@ -277,8 +288,9 @@
 
 use std::collections::HashMap;
 
+use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, NameId};
-use leanr_kernel::EnvView;
+use leanr_kernel::{instantiate_rev, BinderInfo, EnvView};
 use leanr_olean::{ClassEntry, DefaultInstanceEntry, EntryScope, InstanceEntry};
 
 use crate::discr_tree::DiscrTree;
@@ -465,6 +477,32 @@ impl<'e> MetaCtx<'e> {
     /// `InstanceTable::default()`, an empty table, for the duration of
     /// the call) and put back immediately after.
     pub(crate) fn get_instances(&mut self, goal: ExprId) -> Result<Vec<Instance>, MetaError> {
+        // oracle: `getInstances` resolves the goal's class name
+        // (`SynthInstance.lean:205-209`) BEFORE it touches the global
+        // index (:210), and this transcription keeps that order for a
+        // second reason of its own: the `mem::take` below leaves
+        // `self.instances` EMPTY for the duration of `discr_get_match`,
+        // and `is_class` can REDUCE (its expensive path runs whnf under
+        // `Reducible`; even its "quick" path answers `.undef`, i.e.
+        // falls through to that path, for any definition-headed type
+        // under the ambient transparency). Calling it up here puts
+        // whatever it reduces strictly OUTSIDE that window — see the
+        // window's own invariant note below. The faithful order and the
+        // safe order are the same order, which is worth not
+        // re-deriving later.
+        //
+        // Two deliberate differences from the oracle at this point, both
+        // pre-existing (see the module doc): this takes an
+        // ALREADY-telescoped class application, so there is no
+        // `forallTelescopeReducing` here — and hence no need for the
+        // oracle's own "read `localInstances` before the telescope
+        // updates them" precaution (:203-204); and a goal that is not a
+        // class is `None` here rather than the oracle's hard error
+        // (:207), leaving `synth.rs` to own that diagnosis. `None` only
+        // suppresses the local half below — the global lookup is
+        // unchanged, so no existing caller's result moves.
+        let class_name = self.is_class(goal)?;
+
         // INVARIANT (re-entrancy): `self.instances` is `InstanceTable::default()`
         // (empty) for the whole duration of the `discr_get_match` call
         // below. Harmless today because `mk_path`/`whnf` never consult
@@ -476,7 +514,13 @@ impl<'e> MetaCtx<'e> {
         // this now-empty placeholder table and report "no instances"
         // rather than erroring — there is no assertion below that would
         // catch that, so a future change widening what `discr_get_match`
-        // touches must re-check this invariant by inspection.
+        // touches must re-check this invariant by inspection. `is_class`
+        // above and `local_instance_candidate` below (which whnfs a
+        // candidate's telescope) are deliberately OUTSIDE the take for
+        // exactly this reason; NO test pins that placement, because
+        // moving either one inside is still correct against today's
+        // `discr_get_match` — it is guarded by this comment and by
+        // review.
         let table = std::mem::take(&mut self.instances);
         let result: Result<Vec<Instance>, MetaError> = self
             .discr_get_match(&table.tree, goal)
@@ -489,8 +533,156 @@ impl<'e> MetaCtx<'e> {
         // reverse the whole vector" is the exact (not approximate)
         // transcription of that composition.
         found.sort_by_key(|i| i.priority);
+        // oracle: :236-237 — the locals are appended to the END of the
+        // ascending array, i.e. `generate` reaches them FIRST. With the
+        // sort-then-reverse transcription above they therefore go on
+        // AFTER the sort and BEFORE the reverse. Appending before the
+        // sort would instead file them among the globals at whatever
+        // placeholder priority they carry
+        // (`a_local_instance_is_tried_before_every_global`).
+        //
+        // In `localInstances` order (outermost first), so the reverse
+        // below leaves the INNERMOST binder's instance first — the
+        // oracle's own shadowing order
+        // (`the_innermost_local_instance_is_tried_first`).
+        if let Some(class_name) = class_name {
+            // Snapshot before the loop, not iterated live:
+            // `local_instance_candidate` telescopes each candidate's
+            // type through `push_local_decl`, which INSTALLS local
+            // instances of its own (and `lctx_restore` then removes
+            // them), so the live stack is a moving target here — the
+            // same hazard the oracle's `:203-204` guards against.
+            for li in self.local_instances.to_vec() {
+                // oracle: `if linst.className == className` (:231) —
+                // exact name equality, never defeq.
+                if li.class_name != class_name {
+                    continue;
+                }
+                found.push(self.local_instance_candidate(li.fvar)?);
+            }
+        }
         found.reverse();
         Ok(found)
+    }
+
+    /// oracle: `getInstances` :231-238 — a local instance's candidate
+    /// record. Unlike a global's, its `synthOrder` is computed HERE, at
+    /// query time, rather than read off the instance extension:
+    /// telescope the fvar's own type (`forallTelescopeReducing (←
+    /// inferType linst.fvar)`) and collect the positions whose binder
+    /// info is instance-implicit.
+    ///
+    /// `global_name` is `None`, and legitimately so — not the
+    /// malformed-bytes case this module's doc describes for a GLOBAL
+    /// entry: the oracle's own local record is `{ val := linst.fvar,
+    /// synthOrder }` (:237), a bare fvar with no declaration name
+    /// anywhere in it.
+    ///
+    /// `priority` has no oracle counterpart at all: `LocalInstance`
+    /// (`MetavarContext.lean:268-273`) carries a `className` and an
+    /// `fvar`, nothing else, and the record pushed at :237 carries no
+    /// priority either. `0` is therefore a placeholder, never a
+    /// transcription — no ordering reads it today, since
+    /// `get_instances` appends locals AFTER its sort. It is
+    /// deliberately the LOWEST value rather than the highest: were a
+    /// future edit to move that append before the sort, a
+    /// highest-priority placeholder would silently keep the locals in
+    /// front and hide the mistake, while `0` makes it observable.
+    fn local_instance_candidate(&mut self, fvar: ExprId) -> Result<Instance, MetaError> {
+        let ty = self.infer_type(fvar)?;
+        let cp = self.lctx_checkpoint();
+        let synth_order = self.instimplicit_binder_positions(ty);
+        // Restored unconditionally, error path included — the
+        // `is_def_eq_binding_shallow`/`_body` split idiom
+        // (`defeq.rs:357-365`). The telescope's fvars, and the local
+        // instances `push_local_decl` installed for the
+        // instance-implicit ones, must not outlive this call even when
+        // a binder's type fails to reduce
+        // (`building_a_local_candidate_restores_the_context`).
+        self.lctx_restore(cp);
+        Ok(Instance {
+            val: fvar,
+            ty,
+            priority: 0,
+            synth_order: synth_order?,
+            global_name: None,
+        })
+    }
+
+    /// The telescope half of [`MetaCtx::local_instance_candidate`]: the
+    /// positions of `ty`'s instance-implicit binders. Leaves its fvars
+    /// in `lctx` — the caller restores.
+    ///
+    /// The telescope really OPENS each binder, `forall_bounded_telescope`
+    /// -style (`assign.rs:614-648`), rather than walking the `Forall`
+    /// spine structurally: a later binder's type may mention an earlier
+    /// one, so each domain is `instantiate_rev`'d against the fvars
+    /// pushed so far before it is declared — the oracle's own
+    /// `d.instantiateRevRange j fvars.size fvars`
+    /// (`Basic.lean:1461`, inside `forallTelescopeReducingAuxAux`).
+    /// Pushing a domain raw would declare `Add #0` — a decl whose type
+    /// carries a LOOSE BVAR — into the local context, which every path
+    /// that later reduces that type rejects outright
+    /// (`whnf.rs:239-246`). The non-forall tail is instantiated the
+    /// same way before it is whnf'd, matching the oracle's own
+    /// `type.instantiateRevRange` on that arm (`Basic.lean:1473`).
+    ///
+    /// `push_local_decl` INSTALLS a local instance for each class-typed
+    /// binder (task 4's chokepoint), so this recursion re-enters the
+    /// very set `get_instances` is iterating — which is exactly the
+    /// oracle's behavior, `forallTelescopeReducing` installing through
+    /// `withNewLocalInstancesImp` (`Basic.lean:1472`), and the
+    /// self-reference `Basic.lean:1402-1406` acknowledges. It
+    /// terminates because the telescope is finite, and it is invisible
+    /// to the caller because `get_instances` iterates a SNAPSHOT and
+    /// this call is bracketed by `lctx_restore`.
+    fn instimplicit_binder_positions(&mut self, ty: ExprId) -> Result<Vec<usize>, MetaError> {
+        let mut synth_order = Vec::new();
+        let mut xs: Vec<ExprId> = Vec::new();
+        let mut cur = ty;
+        let mut i = 0usize;
+        loop {
+            let t = if matches!(self.node(cur), Node::Forall { .. }) {
+                cur
+            } else {
+                let closed = instantiate_rev(
+                    self.scratch,
+                    Some(self.view.store),
+                    cur,
+                    &xs,
+                    &mut self.guard,
+                )?;
+                self.whnf(closed)?
+            };
+            let Node::Forall {
+                binder_name,
+                binder_type,
+                body,
+                binder_info,
+            } = self.node(t)
+            else {
+                break;
+            };
+            // oracle: `if (← getFVarLocalDecl x).binderInfo ==
+            // .instImplicit then order := order.push i` (:234-236) —
+            // the index is over the WHOLE telescope, not over the
+            // instance-implicit binders alone.
+            if binder_info == BinderInfo::InstImplicit {
+                synth_order.push(i);
+            }
+            let d = instantiate_rev(
+                self.scratch,
+                Some(self.view.store),
+                binder_type,
+                &xs,
+                &mut self.guard,
+            )?;
+            let fvar = self.push_local_decl(binder_name, d, binder_info)?;
+            xs.push(fvar);
+            cur = body;
+            i += 1;
+        }
+        Ok(synth_order)
     }
 
     /// Find one instance by its declaration name. Not part of the
@@ -592,8 +784,8 @@ impl ClassTable {
     /// ordinary class invisible.
     ///
     /// Called from `MetaCtx::is_class_quick_const`/`is_class_expensive`
-    /// (Task 4's `MetaCtx::is_class` wiring); Task 6's `get_instances`
-    /// will be a second caller.
+    /// (Task 4's `MetaCtx::is_class` wiring), which `get_instances`
+    /// (Task 6) is now itself a caller of.
     pub(crate) fn is_class_name(&self, class_name: NameId) -> bool {
         self.out_params(class_name).is_some()
     }
@@ -609,8 +801,8 @@ mod tests {
     use leanr_olean::DiscrKey;
 
     use crate::test_support::{
-        class_app, const_named, instance_named, parse_goal, render_name, with_class_ctx,
-        with_instances_ctx,
+        class_app, const_named, instance_named, parametrized_instance_type, parse_goal,
+        render_name, with_class_ctx, with_instances_ctx,
     };
 
     /// Step-1 brief test: the goal `Add N` must turn up `instAddN`.
@@ -986,6 +1178,271 @@ mod tests {
                  (steps before: {steps_before}, after: {})",
                 ctx.steps()
             );
+        });
+    }
+
+    /// A local instance is offered as a candidate. oracle:
+    /// `getInstances` `:236-237`.
+    ///
+    /// Fixture note: this and every test below run over
+    /// `with_instances_ctx`, NOT the synthetic `with_class_ctx` the task
+    /// brief sketched. `get_instances` starts by building a
+    /// discrimination-tree PATH for the goal, which resolves the goal's
+    /// head constant in the environment (`Infer("unknown constant
+    /// 'Add'")` otherwise) — so a query needs a replayed environment,
+    /// not a hand-built one-entry `ClassTable`. `Instances.olean` has a
+    /// real `class Add`, a real `class Mul`, and real global instances,
+    /// which is also what lets the ordering test below measure a local
+    /// against a genuine global rather than a synthetic one.
+    #[test]
+    fn a_local_instance_is_offered_as_a_candidate() {
+        with_instances_ctx(|ctx| {
+            let add_n = parse_goal(ctx, "Add N");
+            let cp = ctx.lctx_checkpoint();
+            let inst = ctx
+                .push_local_decl(None, add_n, BinderInfo::InstImplicit)
+                .expect("push");
+            let found = ctx.get_instances(add_n).expect("get_instances");
+            let li = found
+                .iter()
+                .find(|i| i.val == inst)
+                .expect("the in-scope local instance must be a candidate");
+            assert!(
+                li.global_name.is_none(),
+                "a local instance has no declaration name — the oracle's own \
+                 record is `{{ val := linst.fvar, synthOrder }}` (:237)"
+            );
+            assert_eq!(
+                li.ty, add_n,
+                "a local candidate's `ty` is the fvar's own inferred type"
+            );
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// A local instance is tried BEFORE every global. oracle: appended
+    /// to the end of the ascending array (:230-237), consumed
+    /// back-to-front by `generate` — which this crate transcribes as
+    /// sort-ascending-then-reverse (see the module doc), so the append
+    /// must land between the sort and the reverse.
+    ///
+    /// This is the slice's most mutable line: appending before the sort
+    /// files the local at its placeholder priority among the globals
+    /// instead of ahead of all of them (`instAddN` carries the oracle's
+    /// default priority, `1000`, so it would win that comparison).
+    #[test]
+    fn a_local_instance_is_tried_before_every_global() {
+        with_instances_ctx(|ctx| {
+            let add_n = parse_goal(ctx, "Add N");
+            let cp = ctx.lctx_checkpoint();
+            let local = ctx
+                .push_local_decl(None, add_n, BinderInfo::InstImplicit)
+                .expect("push");
+            let found = ctx.get_instances(add_n).expect("get_instances");
+            let li = found
+                .iter()
+                .position(|i| i.val == local)
+                .expect("local present");
+            let gi = found
+                .iter()
+                .position(|i| i.global_name.map(|n| render_name(ctx, n)) == Some("instAddN".into()))
+                .expect("instAddN present");
+            assert!(
+                li < gi,
+                "local at {li}, instAddN at {gi}: locals are consumed first, \
+                 so they must come first in this vector"
+            );
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// The INNERMOST local instance is tried first, and both locals
+    /// still come ahead of every global. oracle: the locals are pushed
+    /// in `localInstances` order (outermost first, `:236-237`) onto an
+    /// array `generate` reads back-to-front, so the innermost binder
+    /// wins — shadowing an outer instance the way scoping demands.
+    ///
+    /// Not named by the task's own mutation table: an implementation
+    /// that reversed only the local segment, or that walked the
+    /// snapshot backwards, would still put "a local" first and pass the
+    /// test above.
+    #[test]
+    fn the_innermost_local_instance_is_tried_first() {
+        with_instances_ctx(|ctx| {
+            let add_n = parse_goal(ctx, "Add N");
+            let cp = ctx.lctx_checkpoint();
+            let outer = ctx
+                .push_local_decl(None, add_n, BinderInfo::InstImplicit)
+                .expect("push outer");
+            let inner = ctx
+                .push_local_decl(None, add_n, BinderInfo::InstImplicit)
+                .expect("push inner");
+            let found = ctx.get_instances(add_n).expect("get_instances");
+            let heads: Vec<ExprId> = found.iter().take(2).map(|i| i.val).collect();
+            assert_eq!(
+                heads,
+                vec![inner, outer],
+                "innermost local first, then the outer one, then the globals"
+            );
+            assert!(
+                found.len() > 2,
+                "the globals must still be there behind them: {found:?}"
+            );
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// An out-of-scope local instance is not a candidate.
+    #[test]
+    fn a_closed_binders_instance_is_not_offered() {
+        with_instances_ctx(|ctx| {
+            let add_n = parse_goal(ctx, "Add N");
+            let cp = ctx.lctx_checkpoint();
+            let inst = ctx
+                .push_local_decl(None, add_n, BinderInfo::InstImplicit)
+                .expect("push");
+            ctx.lctx_restore(cp);
+            let found = ctx.get_instances(add_n).expect("get_instances");
+            assert!(
+                found.iter().all(|i| i.val != inst),
+                "the binder is closed: its instance left scope with it"
+            );
+        });
+    }
+
+    /// A local instance of a DIFFERENT class is not offered. oracle:
+    /// `if linst.className == className` (:231) — exact name equality,
+    /// never defeq. `Mul N` and `Add N` are two real, distinct classes
+    /// of `Instances.olean`, applied to the same type.
+    #[test]
+    fn a_local_instance_of_another_class_is_not_offered() {
+        with_instances_ctx(|ctx| {
+            let mul_n = parse_goal(ctx, "Mul N");
+            let add_n = parse_goal(ctx, "Add N");
+            let cp = ctx.lctx_checkpoint();
+            let inst = ctx
+                .push_local_decl(None, mul_n, BinderInfo::InstImplicit)
+                .expect("push");
+            let found = ctx.get_instances(add_n).expect("get_instances");
+            assert!(
+                found.iter().all(|i| i.val != inst),
+                "a `Mul N` in scope is not a candidate for an `Add N` goal"
+            );
+            // ... and it IS one for its own class, so the guard above is
+            // rejecting on the class name rather than on locals wholesale.
+            let for_mul = ctx.get_instances(mul_n).expect("get_instances");
+            assert!(
+                for_mul.iter().any(|i| i.val == inst),
+                "the same local IS a candidate for `Mul N`"
+            );
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// A local's `synth_order` is read off the INSTANCE-IMPLICIT binders
+    /// of its own type. oracle: :231-238 — computed at QUERY time, from
+    /// the fvar's own inferred type, where a global's is precomputed by
+    /// the instance extension.
+    #[test]
+    fn a_local_instances_synth_order_comes_from_its_instimplicit_binders() {
+        with_instances_ctx(|ctx| {
+            // `{a : Type} → [Add a] → Add (Prod a a)`: binder 0 is
+            // implicit, binder 1 is instance-implicit.
+            let ty = parametrized_instance_type(ctx);
+            let goal = parse_goal(ctx, "Add (Prod N N)");
+            let cp = ctx.lctx_checkpoint();
+            let inst = ctx
+                .push_local_decl(None, ty, BinderInfo::InstImplicit)
+                .expect("push");
+            let found = ctx.get_instances(goal).expect("get_instances");
+            let li = found.iter().find(|i| i.val == inst).expect("local present");
+            assert_eq!(
+                li.synth_order,
+                vec![1],
+                "only binder 1 is instance-implicit; an empty synth_order \
+                 would make the search never solve the subgoal"
+            );
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// Controller ruling R8: the telescope really OPENS each binder, so
+    /// every decl it pushes has a CLOSED type. The task brief's own
+    /// sketch declared each domain RAW, which puts `Add #0` — a type
+    /// carrying a loose bvar — into the local context for the whole
+    /// duration of the telescope.
+    ///
+    /// Nothing `get_instances` itself returns can see that (`is_class`
+    /// answers off the head constant without reducing, so this
+    /// fixture's `synth_order` comes out `[1]` either way, and
+    /// `is_class` swallows the error a reduction WOULD raise), which is
+    /// exactly why this test reaches under `local_instance_candidate`
+    /// to the telescope itself and inspects the local context before it
+    /// is restored: the defect is a malformed `lctx`, not a wrong
+    /// answer. Every consumer that later reduces such a type — whnf
+    /// rejects a loose bvar outright, `whnf.rs:239-246` — is the real
+    /// exposure.
+    #[test]
+    fn the_telescope_declares_each_binder_with_a_closed_type() {
+        with_instances_ctx(|ctx| {
+            // `{a : Type} → [Add a] → Add (Prod a a)`: binder 1's
+            // domain MENTIONS binder 0.
+            let ty = parametrized_instance_type(ctx);
+            let cp = ctx.lctx_checkpoint();
+            let order = ctx.instimplicit_binder_positions(ty).expect("telescope");
+            assert_eq!(order, vec![1], "binder 1 is the instance-implicit one");
+            let pushed: Vec<ExprId> = ctx.local_names[cp..].iter().map(|(_, f)| *f).collect();
+            assert_eq!(pushed.len(), 2, "both binders were opened");
+            for (i, fvar) in pushed.into_iter().enumerate() {
+                let Node::FVar { id: Some(id) } = ctx.node(fvar) else {
+                    panic!("push_local_decl returned a non-fvar")
+                };
+                let decl_ty = ctx.lctx.get(id).expect("declared").ty;
+                assert_eq!(
+                    ctx.data(decl_ty).loose_bvar_range(),
+                    0,
+                    "binder {i} was declared with a type carrying a loose \
+                     bvar — the telescope substituted no fvar for the \
+                     binder it opened before it"
+                );
+            }
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// Telescoping a parametrized local instance leaves NOTHING behind:
+    /// neither the binders it opened nor the local instances
+    /// `push_local_decl` installed for the instance-implicit ones.
+    ///
+    /// Ruling R8's companion. The telescope really opens each binder,
+    /// and `push_local_decl` is itself a local-instance PRODUCER (the
+    /// oracle's own telescope installs too — `Basic.lean:1472`'s
+    /// `withNewLocalInstancesImp`), so a missing `lctx_restore` would
+    /// leave a `get_instances` QUERY mutating the ambient context and
+    /// growing the local-instance set on every call. Not named by the
+    /// task's own mutation table.
+    #[test]
+    fn building_a_local_candidate_restores_the_context() {
+        with_instances_ctx(|ctx| {
+            let ty = parametrized_instance_type(ctx);
+            let goal = parse_goal(ctx, "Add (Prod N N)");
+            let cp = ctx.lctx_checkpoint();
+            ctx.push_local_decl(None, ty, BinderInfo::InstImplicit)
+                .expect("push");
+            let depth_before = ctx.lctx_checkpoint();
+            let instances_before = ctx.local_instances.entries().len();
+            ctx.get_instances(goal).expect("get_instances");
+            assert_eq!(
+                ctx.lctx_checkpoint(),
+                depth_before,
+                "the telescope's binders must not outlive the query"
+            );
+            assert_eq!(
+                ctx.local_instances.entries().len(),
+                instances_before,
+                "nor the local instances those binders installed"
+            );
+            ctx.lctx_restore(cp);
         });
     }
 }
