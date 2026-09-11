@@ -11,6 +11,7 @@ use leanr_syntax::tree::SyntaxNode;
 
 use super::{
     elab_type, extract_binder_group, fresh_type_mvar, intern_binder_name, push_binder_group,
+    push_user_binder, push_user_let_decl,
 };
 use crate::dispatch::{non_trivia_children, SynElem};
 use crate::elab::TermElabM;
@@ -84,10 +85,7 @@ fn push_let_binders(
             // bracketed-binder kind.
             NodeOrToken::Node(n) if kinds.name(n.kind()) == "Lean.Parser.Term.hole" => {
                 let dom = fresh_type_mvar(elab)?;
-                let fvar = elab
-                    .mctx
-                    .push_local_decl(None, dom, BinderInfo::Default)
-                    .map_err(ElabError::from)?;
+                let fvar = push_user_binder(elab, None, dom, BinderInfo::Default)?;
                 fvars.push(fvar);
             }
             NodeOrToken::Node(n) => {
@@ -106,10 +104,7 @@ fn push_let_binders(
             NodeOrToken::Token(tok) if kinds.name(tok.kind()) == "<ident>" => {
                 let name = intern_binder_name(elab, tok.text())?;
                 let dom = fresh_type_mvar(elab)?;
-                let fvar = elab
-                    .mctx
-                    .push_local_decl(Some(name), dom, BinderInfo::Default)
-                    .map_err(ElabError::from)?;
+                let fvar = push_user_binder(elab, Some(name), dom, BinderInfo::Default)?;
                 fvars.push(fvar);
             }
             _ => {
@@ -293,10 +288,7 @@ pub fn elab_let_like(
     // discipline.
     let cp_let = elab.mctx.lctx_checkpoint();
     let result = (|| {
-        let fvar = elab
-            .mctx
-            .push_let_decl(name, ty, value)
-            .map_err(ElabError::from)?;
+        let fvar = push_user_let_decl(elab, name, ty, value)?;
         let body = elab.elab_term_ensuring_type(&body_elem, kinds, expected)?;
         elab.mctx
             .mk_let_expr(fvar, body, non_dep)

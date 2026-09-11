@@ -12,7 +12,7 @@ use leanr_syntax::tree::SyntaxNode;
 
 use super::{
     elab_type, extract_inst_binder_layout, fresh_type_mvar, intern_binder_name,
-    intern_fun_binder_ident,
+    intern_fun_binder_ident, user_binder_kind,
 };
 use crate::dispatch::{non_trivia_children, SynElem};
 use crate::elab::TermElabM;
@@ -439,12 +439,9 @@ pub fn elab_fun(
                     .push_local_decl_without_instance(view.name, dom, view.bi)
                     .map_err(ElabError::from)?;
                 residual = propagate_expected_type(elab, fvar, dom, residual)?;
+                let kind = user_binder_kind(elab, view.name);
                 elab.mctx
-                    .install_local_instance_for_last_pushed(
-                        fvar,
-                        dom,
-                        leanr_meta::LocalDeclKind::Default,
-                    )
+                    .install_local_instance_for_last_pushed(fvar, dom, kind)
                     .map_err(ElabError::from)?;
                 fvars.push(fvar);
             }

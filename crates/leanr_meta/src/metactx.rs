@@ -1083,6 +1083,16 @@ impl<'e> MetaCtx<'e> {
     /// `ty`/`binder_info`. Additive + behavior-neutral: exposes
     /// capability the crate already exercises (`expr_let` +
     /// `abstract_fvars`), adds no state, changes no existing path.
+    ///
+    /// **Known gap (M4b-3 close-out spec, § Amendment 1).** Unlike
+    /// `mk_binding`, this does not run `elim_mvar_deps` over `body`, so an
+    /// unassigned metavariable whose context holds `fvar` and which is
+    /// assigned AFTER this call leaks `fvar` unabstracted. It is reachable
+    /// today: a let-bound local instance consumed through the synthesis
+    /// fixpoint (`leanr_elab`'s `seam_audit.rs`,
+    /// `a_let_bound_local_instance_consumed_by_synthesis_leaks_an_fvar`).
+    /// Closing it needs `mkAuxMVarType`'s ldecl arm, which needs a `nondep`
+    /// bit `LocalDecl` does not carry — its own slice.
     pub fn mk_let_expr(
         &mut self,
         fvar: ExprId,

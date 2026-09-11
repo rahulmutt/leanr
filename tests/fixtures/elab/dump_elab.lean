@@ -783,6 +783,29 @@ def p5ArgQueries : List (String × String) :=
   , ("p5/autoparam-supplied", "withTactic Nat.zero")
   ]
 
+/-- M4b-3 close-out: implementation-detail binders. The oracle gives a
+user-written binder whose name's root component starts with `__` the kind
+`.implDetail` (`LocalDeclKind.ofBinderName`, `Elab/BindersUtil.lean:21-25`),
+and `withNewLocalInstanceImp` (`Meta/Basic.lean:1383-1388`) never installs
+it as a local instance. Each `__` query below therefore elaborates against
+the GLOBAL `instAddNat`; each `-twin` against the local binder.
+
+`let`/`have` have no twin, deliberately: a let-bound local instance
+consumed through synthesis leaks an unabstracted fvar on leanr
+(`seam_audit.rs`'s
+`a_let_bound_local_instance_consumed_by_synthesis_leaks_an_fvar`; close-out
+spec § Amendment 1), which `oracle_elab`'s leaked-fvar assertion rejects. -/
+def closeoutImplDetailQueries : List (String × String) :=
+  [ ("closeout/impl-detail-fun",           "fun (__i : Add Nat) => (Add.add Nat.zero Nat.zero : Nat)")
+  , ("closeout/impl-detail-fun-twin",      "fun (i : Add Nat) => (Add.add Nat.zero Nat.zero : Nat)")
+  , ("closeout/impl-detail-fun-inst",      "fun [__i : Add Nat] => (Add.add Nat.zero Nat.zero : Nat)")
+  , ("closeout/impl-detail-fun-inst-twin", "fun [i : Add Nat] => (Add.add Nat.zero Nat.zero : Nat)")
+  , ("closeout/impl-detail-forall",        "forall (__i : Add Nat), Eq (Add.add Nat.zero Nat.zero) Nat.zero")
+  , ("closeout/impl-detail-forall-twin",   "forall (i : Add Nat), Eq (Add.add Nat.zero Nat.zero) Nat.zero")
+  , ("closeout/impl-detail-let",           "let __i : Add Nat := instAddNat; (Add.add Nat.zero Nat.zero : Nat)")
+  , ("closeout/impl-detail-have",          "have __i : Add Nat := instAddNat; (Add.add Nat.zero Nat.zero : Nat)")
+  ]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -796,7 +819,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>

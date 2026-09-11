@@ -227,7 +227,10 @@ fn oracle_elab_gate() {
     // 113 -> 117 (elimMVarDeps task 11): `coe/postponedThenResumedUnderBinder`,
     // `elimMVarDeps/pendingInstanceUnderBinder`, `num/zeroUnderBinder`,
     // `dflt/polyInstImplicitUnderBinder`.
-    const CORPUS_FLOOR: usize = 117;
+    //
+    // 117 -> 142 (M4b-3 close-out task 3): P5's 17 records (never folded
+    // into the floor) plus the eight `closeout/impl-detail-*` records.
+    const CORPUS_FLOOR: usize = 142;
     assert!(
         replayed >= CORPUS_FLOOR,
         "corpus shrank: replayed {replayed} records, floor is {CORPUS_FLOOR}. \

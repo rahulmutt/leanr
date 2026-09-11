@@ -7,6 +7,7 @@
 use leanr_kernel::bank::ExprId;
 use leanr_kernel::bank::NameId;
 use leanr_kernel::BinderInfo;
+use leanr_meta::LocalDeclKind;
 use leanr_syntax::kind::KindInterner;
 use leanr_syntax::tree::NodeOrToken;
 use leanr_syntax::tree::SyntaxNode;
@@ -183,13 +184,52 @@ fn push_binder_group(
     let dom = elab_type(elab, &g.ty, kinds)?;
     let mut fvars = Vec::with_capacity(g.names.len());
     for &name in &g.names {
-        fvars.push(
-            elab.mctx
-                .push_local_decl(name, dom, g.bi)
-                .map_err(ElabError::from)?,
-        );
+        fvars.push(push_user_binder(elab, name, dom, g.bi)?);
     }
     Ok(fvars)
+}
+
+/// oracle: the `kind := .ofBinderName id` argument
+/// (`LocalDeclKind.ofBinderName`, `Elab/BindersUtil.lean:21-25`). Only the
+/// oracle's user-written-binder sites pass it, and only they route through
+/// here: `elabBinderViews` (`Binders.lean:221`) = `push_binder_group` and
+/// `let_like.rs`'s `push_let_binders` ident/hole arms; `elabFunBinderViews`
+/// (`:434`) = `fun.rs`'s `elab_fun`; `elabLetDeclAux` (`:805`) =
+/// `let_like.rs`'s `elab_let_like`. Every other push — implicit-lambda
+/// binders (`elab.rs`), eta arguments and telescopes (`app/`) — stays on
+/// `push_local_decl`, `.default`, as the oracle's own `withLocalDecl`
+/// default does, even for a `__`-prefixed name.
+fn user_binder_kind(elab: &TermElabM, name: Option<NameId>) -> LocalDeclKind {
+    LocalDeclKind::of_binder_name(elab.mctx.store(), Some(elab.view.store), name)
+}
+
+/// Push a user-written cdecl binder with its `.ofBinderName` kind. See
+/// [`user_binder_kind`].
+fn push_user_binder(
+    elab: &mut TermElabM,
+    name: Option<NameId>,
+    ty: ExprId,
+    bi: BinderInfo,
+) -> Result<ExprId, ElabError> {
+    let kind = user_binder_kind(elab, name);
+    elab.mctx
+        .push_local_decl_with_kind(name, ty, bi, kind)
+        .map_err(ElabError::from)
+}
+
+/// Push a user-written let-declaration with its `.ofBinderName` kind
+/// (oracle `elabLetDeclAux`, `Binders.lean:805-808`). See
+/// [`user_binder_kind`].
+fn push_user_let_decl(
+    elab: &mut TermElabM,
+    name: Option<NameId>,
+    ty: ExprId,
+    value: ExprId,
+) -> Result<ExprId, ElabError> {
+    let kind = user_binder_kind(elab, name);
+    elab.mctx
+        .push_let_decl_with_kind(name, ty, value, kind)
+        .map_err(ElabError::from)
 }
 
 /// A fresh type metavariable `?α : Sort ?u` — the elided-binder domain
