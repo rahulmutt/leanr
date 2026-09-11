@@ -759,6 +759,51 @@ fn at_on_a_non_atom_head_is_an_invalid_occurrence() {
     }
 }
 
+/// Pins spec § Design 5's first bullet: "`false` skips
+/// `use_implicit_lambda` entirely, including its `.postpone` arm."
+/// oracle: `useImplicitLambda`'s local-identifier-with-mvar-type special
+/// case, `TermElabM.lean:1753-1778` (`return .postpone` at `:1778`),
+/// consulted by `elabTermAux`'s `| .postpone =>` dispatch arm
+/// (`:1843`) — but only when `elabTermAux` is called with
+/// `implicitLambda := true`; `elab_term_core`'s `false` path never
+/// calls `use_implicit_lambda` at all (`elab.rs`, above), so this local
+/// never reaches the postpone check in the first place.
+///
+/// `@(f)`'s inner `f` is exactly the shape `useImplicitLambda`'s
+/// special case exists for: a bare local identifier whose own type is
+/// still an unassigned metavariable (`fun f => ..` gives `f` no
+/// annotation). Confirmed against the pinned `lean` binary: `fun f =>
+/// (@(f) : {a : Type} -> Nat)` elaborates to `fun (f : {a : Type} →
+/// Nat) => f` — `f`'s mvar type unifies directly against the
+/// ascription's expected type, with no implicit-lambda wrapping and no
+/// postponement.
+///
+/// Without the guard this test exists to pin, a caller could
+/// reintroduce a `use_implicit_lambda` consultation into the `false`
+/// path (e.g. ahead of dispatch) and every other `leanr_elab` test
+/// still passes, because nothing else drives an `@`-disabled term
+/// through a local whose type is an unassigned mvar. Asserting on the
+/// JSON shape (not just `is_ok`) also rules out a version that
+/// succeeds for the wrong reason (e.g. an implicit lambda silently
+/// re-inserted around `f`).
+#[test]
+fn at_on_a_local_with_mvar_type_skips_the_postpone_arm() {
+    let j = support::elab_and_synthesize("(fun f => (@(f) : {a : Type} -> Nat))")
+        .unwrap_or_else(|e| panic!("expected Ok, got {e:?}"));
+    assert_eq!(
+        j["k"], "lam",
+        "must be `fun (f : {{a : Type}} -> Nat) => f`"
+    );
+    assert_eq!(
+        j["b"],
+        serde_json::json!({"k": "bvar", "i": 0}),
+        "the body must be plain `f` (a bvar into the outer binder) — an \
+         implicit lambda around it, or a postpone-arm error, would both \
+         show `use_implicit_lambda` was consulted for `f` despite the \
+         `false` (no-implicit-lambda) path"
+    );
+}
+
 /// Under `@`, `processImplicitArg` delegates to `processExplicitArg`
 /// (`App.lean:882-886`), so an implicit parameter is filled from the
 /// POSITIONAL arguments. The corpus record `app/atId` covers the
