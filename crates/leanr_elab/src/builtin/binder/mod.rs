@@ -278,16 +278,6 @@ fn check_inst_binder_type(elab: &mut TermElabM, ty: ExprId) -> Result<(), ElabEr
 /// `push_local_decl`; `instantiate1` is `instantiate_beta_rev_range` with
 /// one argument (`app/args.rs`'s own `type.instantiate1 x`). The pushed
 /// parameters are dropped on every exit path.
-///
-/// Deviation from the plan brief (Ruling 3): the brief's
-/// `check_local_instance_parameters` wraps the loop in an immediately-invoked
-/// closure (`let result = (|| { .. })();`) so `?` can return early while a
-/// single `lctx_restore` still runs after. `cargo clippy -- -D warnings`
-/// flags that shape as `clippy::redundant_closure_call`. Restructured here
-/// as an inner `fn run` holding the loop, called between `lctx_checkpoint`
-/// and `lctx_restore` — identical semantics (the context is restored on
-/// every exit path, including every `?` error), just without the
-/// redundant closure.
 fn check_local_instance_parameters(elab: &mut TermElabM, ty: ExprId) -> Result<(), ElabError> {
     fn run(elab: &mut TermElabM, ty: ExprId) -> Result<(), ElabError> {
         let mut cur = ty;

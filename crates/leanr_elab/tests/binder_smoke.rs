@@ -870,3 +870,18 @@ fn parametric_inst_binder_without_forward_dependency_is_rejected() {
         }
     }
 }
+
+/// `check_local_instance_parameters`'s own pushed parameter (the `a` in
+/// `forall (a : Type), Add a`) must not escape into the OUTER `forall`'s
+/// body: it exists only to test forward dependency and is popped
+/// (`lctx_restore`) before `push_binder_group` pushes the outer `i`. Since
+/// the outer body's `a` was never bound by anything the elaborator keeps,
+/// it is an unknown identifier — confirmed against the pinned `lean`
+/// binary: `Unknown identifier 'a'`.
+#[test]
+fn checked_parameter_does_not_leak_past_the_check() {
+    match elab_result("forall [i : forall (a : Type), Add a], a") {
+        Err(leanr_elab::ElabError::UnknownIdent(_)) => {}
+        other => panic!("expected UnknownIdent, got {other:?}"),
+    }
+}
