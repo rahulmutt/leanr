@@ -444,3 +444,36 @@ slice.** In this slice:
 The follow-up slice must choose where the `nondep` bit lives: a
 `leanr_meta` side table, or a kernel `LocalDecl` field. The latter
 touches the TCB and must be flagged.
+
+## Landed
+
+Measured against merge-base `33ebb32`:
+
+- Elaboration corpus 134 → 160, a pure append (`26 0`); zero removed or
+  changed lines. Synthesis corpus byte-identical.
+- `leanr_kernel`, `lean-toolchain`, `Elab0.lean`/`Elab0.olean`: untouched.
+- `leanr_meta/src`: `lib.rs | 2 +`, `local_decl_kind.rs | 139
+  ++++++++++++++++++++++++`, `metactx.rs | 177
+  +++++++++++++++++++++++++------` (3 files changed, 284 insertions(+),
+  34 deletions(-)) — exactly the accessor ledger above.
+- `mise run ci`: pass.
+- Mutations: every row of § Verification's mutation table was run and
+  failed as listed (task reports).
+- Still open, as designed: § Seams and deferrals, including § Amendment 1's
+  let-bound local-instance leak, pinned by `seam_audit.rs`'s
+  `a_let_bound_local_instance_consumed_by_synthesis_leaks_an_fvar`.
+- A ruling made during execution: `let_like.rs`'s `push_let_binders` hole
+  arm pushes through `push_user_binder` (the brief's routing), while
+  § Design 2 says anonymous pushes (holes) stay on `push_local_decl`. The
+  behaviour is identical — an anonymous name classifies as `Default` — so
+  this is recorded as a noted drift from § Design 2's wording, not a
+  behaviour change.
+- Mutation provenance: two § Verification rows were exercised by tests
+  other than the ones named. "Delete the `ImplDetail` skip" was run
+  against `leanr_meta`'s unit test in Task 2, and against the
+  `closeout/impl-detail-*` records in Task 3. "Run the check in
+  `elab_fun` too" was killed by the oracle record
+  `closeout/binder-check-fun-unchecked` rather than a unit test. Task 4
+  also added a `binder_smoke.rs` test,
+  `checked_parameter_does_not_leak_past_the_check`, which kills dropping
+  the local-context restore; that row is not in the table.
