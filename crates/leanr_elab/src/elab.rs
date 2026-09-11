@@ -300,6 +300,53 @@ impl<'e> TermElabM<'e> {
         kinds: &KindInterner,
         expected: Option<ExprId>,
     ) -> Result<ExprId, ElabError> {
+        self.elab_term_core(elem, kinds, expected, true)
+    }
+
+    /// oracle: `elabTerm stx expectedType? (implicitLambda := false)`
+    /// (`Lean/Elab/Term/TermElabM.lean:1879-1880`). The flag switches off
+    /// `useImplicitLambda` for `elem` only, not for its subterms (the
+    /// oracle's doc, `:1876-1877`), which is why it is a parameter and
+    /// never `TermElabM` state. Its caller is `@($t)`/`@$t`
+    /// (`app::elab_explicit`, oracle `App.lean:2269-2270`).
+    pub fn elab_term_without_implicit_lambda(
+        &mut self,
+        elem: &SynElem,
+        kinds: &KindInterner,
+        expected: Option<ExprId>,
+    ) -> Result<ExprId, ElabError> {
+        self.elab_term_core(elem, kinds, expected, false)
+    }
+
+    /// oracle: `elabTermAux` (`TermElabM.lean:1823`).
+    fn elab_term_core(
+        &mut self,
+        elem: &SynElem,
+        kinds: &KindInterner,
+        expected: Option<ExprId>,
+        implicit_lambda: bool,
+    ) -> Result<ExprId, ElabError> {
+        if !implicit_lambda {
+            // oracle: a macro's expansion is elaborated with the SAME
+            // `implicitLambda` flag (`TermElabM.lean:1837`), and
+            // `Term.paren` is a macro (`expandParen`,
+            // `Lean/Elab/BuiltinNotation.lean:410`). leanr runs `paren` as
+            // an elaborator (`builtin::ascription::elab_paren`, which calls
+            // `elab_term` with the flag back ON), so the flag is carried
+            // through the parentheses here instead. `paren` is the only
+            // oracle macro leanr models as an elaborator. A loop, because
+            // nesting depth is the user's.
+            let mut cur = elem.clone();
+            while kinds.name(cur.kind()) == "Lean.Parser.Term.paren" {
+                cur = cur
+                    .as_node()
+                    .and_then(|n| dispatch::non_trivia_children(n).into_iter().nth(1))
+                    .ok_or_else(|| {
+                        ElabError::IllFormedSyntax("paren: no inner term".to_string())
+                    })?;
+            }
+            return dispatch::dispatch(self, &cur, kinds, expected);
+        }
         // oracle: `elabTermAux`'s own dispatch — `useImplicitLambda`
         // runs BEFORE `elabUsingElabFns` (`TermElabM.lean:1839-1841`),
         // and its `.yes` result short-circuits dispatch entirely rather

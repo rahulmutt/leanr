@@ -138,7 +138,9 @@ fn elab_src(src: &str) -> Result<leanr_kernel::bank::ExprId, leanr_elab::ElabErr
 ///     since shipped (tasks 8-9) and are no longer deferred either.
 ///     Replaced with `@(..)`, the seam below — which itself later moved
 ///     from "M4b-3 P5" to "later M4" once implicit-lambda insertion
-///     shipped but the `@($t)`/`@$t` wrap disabling it did not.
+///     shipped but the `@($t)`/`@$t` wrap disabling it did not. The
+///     M4b-3 close-out then implemented the wrap and the case was
+///     removed.
 ///   * `("(Nat.succ : Nat -> Nat) Nat.zero Nat.zero", "P2")` — this
 ///     never reached P2. Its head is a `typeAscription`, so it stops one
 ///     step earlier, in `head.rs`, before any argument is processed.
@@ -159,13 +161,6 @@ fn deferred_constructs_are_named_seams() {
     let cases: &[(&str, &str)] = &[
         // (source, expected slice marker in the message)
         //
-        // `elabExplicit`'s `` `(@($t)) `` arm (`App.lean:2269`): `@` on
-        // a non-atom does NOT enter explicit mode, it disables
-        // implicit-lambda insertion. The insertion itself shipped in
-        // M4b-3 P5, but wrapping `@($t)`/`@$t` to elaborate with it
-        // disabled did not — no plan slice has claimed it, so the seam
-        // is "later M4", not "M4b-3 P5" (which is now complete).
-        ("@(Nat.succ Nat.zero)", "later M4"),
         // `elab_explicit`'s LVal arm: `@` on a projection head.
         ("@(Nat.zero).1", "M4b-4"),
         // `peel_head`'s `App.lean:2118` arm — an INVALID occurrence of
@@ -690,10 +685,9 @@ fn literal_kinds_are_registered_not_deferred() {
 /// reason is that no non-rotting formulation exists. Live source
 /// legitimately names INCOMPLETE slices in exactly this position — that
 /// is the named-seam discipline itself (`elab.rs`'s `.postpone` seam
-/// and `app/mod.rs`'s LVal-on-`@` arm both name "M4b-4"; `app/mod.rs`'s
-/// `elabExplicit` "other" arm names "later M4" — none of these are
-/// "M4b-3 P5" any more, now that P5 is complete: this example set itself
-/// had to be rewritten by Task 12 when the two live seams it used to
+/// and `app/mod.rs`'s LVal-on-`@` arm both name "M4b-4"; none of these
+/// are "M4b-3 P5" any more, now that P5 is complete: this example set
+/// itself had to be rewritten by Task 12 when the two live seams it used to
 /// cite, `elab.rs`'s and `app/args.rs`'s own "M4b-3 P5", were closed or
 /// retargeted) — so telling an
 /// offender from a correct seam requires knowing which slices are done,
@@ -1512,6 +1506,8 @@ fn no_seam_points_at_a_retired_closeout_label() {
     let needles = [
         // `let_like.rs`'s `push_let_binders` guard (task 5).
         "let: implicit/strict/instance binder in let/have",
+        // `app/mod.rs`'s `elab_explicit` fallback arm (task 6).
+        "does not enter explicit mode",
     ];
     let mut offenders = Vec::new();
     for path in walk_rs_files(src_dir) {

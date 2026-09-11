@@ -762,16 +762,16 @@ fn implicit_lambda_does_not_fire_on_strict_implicit() {
 ///
 /// Fix round 1, finding 1: the original draft used `@(Nat.succ
 /// Nat.zero)`, whose inner kind is `Lean.Parser.Term.paren` — that
-/// routes to `app::elab_explicit`'s `other` arm, a SEPARATE,
-/// pre-existing, un-implemented seam (`` `(@($t)) ``/`` `(@$t) ``'s own
-/// fallback, `seam_audit.rs`'s `("@(Nat.succ Nat.zero)", "later M4")`
-/// case — "M4b-3 P5" at the time this test was written, retargeted by
-/// Task 12 once P5 completed without that seam) that errors
-/// unconditionally, before the expected type — and
-/// therefore before `use_implicit_lambda` — is ever consulted. A
-/// mutation check confirmed that term's error is IDENTICAL whether or
-/// not `block_implicit_lambda` actually blocks the wrap, so it pinned
-/// the wrong seam.
+/// routes to `app::elab_explicit`'s `other` arm, at the time a SEPARATE,
+/// un-implemented seam (`` `(@($t)) ``/`` `(@$t) ``'s own fallback,
+/// `seam_audit.rs`'s `("@(Nat.succ Nat.zero)", "later M4")` case —
+/// "M4b-3 P5" at the time this test was written, retargeted by Task 12
+/// once P5 completed without that seam); the M4b-3 close-out has since
+/// implemented that arm that errors unconditionally, before the
+/// expected type — and therefore before `use_implicit_lambda` — is ever
+/// consulted. A mutation check confirmed that term's error is IDENTICAL
+/// whether or not `block_implicit_lambda` actually blocks the wrap, so
+/// it pinned the wrong seam.
 ///
 /// `@Nat.zero`'s inner kind is plain `<ident>`, which `elab_explicit`
 /// already routes to `elab_atom` (a real, implemented path,

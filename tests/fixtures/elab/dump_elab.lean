@@ -837,6 +837,22 @@ def closeoutLetBinderQueries : List (String × String) :=
   , ("closeout/have-implicit",        "have f {a : Type} (x : a) : a := x; f Nat.zero")
   ]
 
+/-- M4b-3 close-out: `@($t)` / `@$t` elaborate `t` with
+`implicitLambda := false` (`Elab/App.lean:2269-2270`). The flag covers
+`t` itself, not its subterms (`Elab/Term/TermElabM.lean:1876-1877`), but
+it survives macro expansion (`:1837`) and `paren` is a macro
+(`expandParen`, `Elab/BuiltinNotation.lean:410`), hence the nested-paren
+and subterm queries. `(fun (a : Type) => a : {a : Type} -> Type)` without
+the `@` is a type mismatch in the oracle; with it, it elaborates. -/
+def closeoutExplicitQueries : List (String × String) :=
+  [ ("closeout/explicit-paren",        "(@(fun (a : Type) => a) : {a : Type} -> Type)")
+  , ("closeout/explicit-nested-paren", "(@((fun (a : Type) => a)) : {a : Type} -> Type)")
+  , ("closeout/explicit-subterm",      "(@(fun (a : Type) => (Nat.zero : {b : Type} -> Nat)) : {a : Type} -> {b : Type} -> Nat)")
+  , ("closeout/explicit-no-expected",  "@(fun (a : Type) => a)")
+  , ("closeout/explicit-implicit-fun", "(@(fun {a : Type} => Nat.zero) : {a : Type} -> Nat)")
+  , ("closeout/explicit-app",          "@(Nat.succ Nat.zero)")
+  ]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -850,7 +866,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries ++ closeoutExplicitQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>
