@@ -280,7 +280,15 @@ pub fn elab_let_like(
     let cp_let = elab.mctx.lctx_checkpoint();
     let result = (|| {
         let fvar = push_user_let_decl(elab, name, ty, value)?;
+        // oracle: `elabTermEnsuringType body expectedType? >>=
+        // instantiateMVars` (`Binders.lean:824`). An instance solved
+        // eagerly in the body is an ASSIGNED mvar here, and `mk_let_expr`'s
+        // bare `abstract_fvars` cannot see through one: without this, the
+        // let-bound local instance leaks as an fvar once the assignment is
+        // instantiated later (`seam_audit.rs`'s
+        // `a_let_bound_local_instance_consumed_by_an_application_abstracts_to_bvar_0`).
         let body = elab.elab_term_ensuring_type(&body_elem, kinds, expected)?;
+        let body = elab.mctx.instantiate_mvars(body)?;
         elab.mctx
             .mk_let_expr(fvar, body, non_dep)
             .map_err(ElabError::from)

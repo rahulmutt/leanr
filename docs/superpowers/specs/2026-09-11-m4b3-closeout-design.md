@@ -489,3 +489,44 @@ Measured against merge-base `33ebb32`:
   `false`/no-implicit-lambda path in `elab_term_core` really does skip
   `use_implicit_lambda`'s `.postpone` arm, per § Design 5's first
   bullet.
+
+## Amendment 2 (2026-09-11, post-merge): Amendment 1's diagnosis was wrong — two gaps, not one
+
+Found while scoping the follow-up slice Amendment 1 called for. Every
+claim below was run: leanr through `elab_term_and_synthesize` on `main`
+@ `5dc2314`, the oracle through `dump_elab.lean` with the query list
+swapped, against the committed `Elab0.olean`.
+
+| Term | Oracle | leanr @ `5dc2314` | leanr + `instantiate_mvars` on the body |
+|---|---|---|---|
+| `let`/`have i : Add Nat := instAddNat; Add.add Nat.zero Nat.zero` | `bvar 0` | `fvar` | `bvar 0` |
+| `let`/`have n : Nat := Nat.zero; pairW n Nat.zero` | `Wrapper.mk Nat (bvar 0)` | `fvar` | `fvar` |
+| `fun (n : Nat) => pairW n Nat.zero` | `bvar 0` | `bvar 0` | `bvar 0` |
+
+**Gap 1 — the leak Amendment 1 pinned.** Nothing is postponed. The
+instance is solved eagerly (`synthesize_app_inst_mvars`), so `?inst := i`
+is assigned before the `let` closes; it is simply never substituted into
+the body, and `mk_let_expr`'s bare `abstract_fvars` cannot see through an
+assigned mvar. The oracle instantiates the body first
+(`elabTermEnsuringType body expectedType? >>= instantiateMVars`,
+`Elab/Binders.lean:824`, the only such call on the path leanr ports).
+`elab_let_like` now does too. That closes it without any `nondep` bit: the
+`closeout/impl-detail-let-twin` / `-have-twin` records land (corpus 160 →
+162, `2 0`), and `seam_audit.rs`'s pinning test is flipped and renamed
+`a_let_bound_local_instance_consumed_by_an_application_abstracts_to_bvar_0`.
+The `fun` twin was only ever correct because `mk_binding`'s
+`elim_mvar_deps` substitutes assigned mvars as it walks.
+
+**Gap 2 — the real `elim_mvar_deps` gap, previously unobserved.** A
+coercion postponed inside a `let`/`have` body is still UNASSIGNED when the
+`let` closes, so instantiating does not help and the resumed coercion
+leaks the let-bound `fvar`. This is the divergence Amendment 1's cause
+paragraph actually describes: closing it needs `mk_let_expr` to run
+`elim_mvar_deps`, whose `mkAuxMVarType` ldecl arms
+(`MetavarContext.lean:1133-1156`) and `mkMVarApp` `isLet` test (`:1097`)
+read a `nondep` bit leanr's local declarations do not carry. Pinned by
+`seam_audit.rs`'s `a_coercion_postponed_under_a_let_leaks_an_fvar`
+(asserting the wrong answer); owned by its own slice.
+
+§ Seams and deferrals' last row, left as written, is superseded by
+this amendment: the open seam is gap 2, not gap 1.

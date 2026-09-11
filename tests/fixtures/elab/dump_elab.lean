@@ -790,11 +790,11 @@ and `withNewLocalInstanceImp` (`Meta/Basic.lean:1383-1388`) never installs
 it as a local instance. Each `__` query below therefore elaborates against
 the GLOBAL `instAddNat`; each `-twin` against the local binder.
 
-`let`/`have` have no twin, deliberately: a let-bound local instance
-consumed through synthesis leaks an unabstracted fvar on leanr
-(`seam_audit.rs`'s
-`a_let_bound_local_instance_consumed_by_synthesis_leaks_an_fvar`; close-out
-spec § Amendment 1), which `oracle_elab`'s leaked-fvar assertion rejects. -/
+The `let`/`have` twins landed after the close-out: until `elab_let_like`
+instantiated the body before `mk_let_expr` (the oracle's `>>=
+instantiateMVars`, `Elab/Binders.lean:824`), the local instance leaked an
+unabstracted fvar, which `oracle_elab`'s leaked-fvar assertion rejects
+(close-out spec § Amendment 2). -/
 def closeoutImplDetailQueries : List (String × String) :=
   [ ("closeout/impl-detail-fun",           "fun (__i : Add Nat) => (Add.add Nat.zero Nat.zero : Nat)")
   , ("closeout/impl-detail-fun-twin",      "fun (i : Add Nat) => (Add.add Nat.zero Nat.zero : Nat)")
@@ -804,6 +804,8 @@ def closeoutImplDetailQueries : List (String × String) :=
   , ("closeout/impl-detail-forall-twin",   "forall (i : Add Nat), Eq (Add.add Nat.zero Nat.zero) Nat.zero")
   , ("closeout/impl-detail-let",           "let __i : Add Nat := instAddNat; (Add.add Nat.zero Nat.zero : Nat)")
   , ("closeout/impl-detail-have",          "have __i : Add Nat := instAddNat; (Add.add Nat.zero Nat.zero : Nat)")
+  , ("closeout/impl-detail-let-twin",      "let i : Add Nat := instAddNat; (Add.add Nat.zero Nat.zero : Nat)")
+  , ("closeout/impl-detail-have-twin",     "have i : Add Nat := instAddNat; (Add.add Nat.zero Nat.zero : Nat)")
   ]
 
 /-- M4b-3 close-out: instance-binder forms the oracle ACCEPTS
