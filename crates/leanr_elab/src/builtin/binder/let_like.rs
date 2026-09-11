@@ -60,14 +60,11 @@ fn extract_let_id_name(
 /// anonymous twin of the bare-ident arm (`letIdBinder := binderIdent <|>
 /// bracketedBinder`, `binderIdent = Ident <|> hole`).
 ///
-/// Named seams (→ `UnsupportedSyntax`): implicit / strict-implicit /
-/// instance bracketed binders IN THIS, `let`/`have`'s OWN binder list,
-/// and any other item shape. The controller ruled this one stays open:
-/// the DECLARED-TYPE position (reached via `forall`, `extract_binder_group`)
-/// closed, but opening `let x [inst : T] := …` here would change
-/// `let`/`have` elaboration and needs its own oracle corpus record —
-/// unclaimed by any plan slice, so the message names "later M4" rather
-/// than a milestone this slice sits inside.
+/// Implicit, strict-implicit and instance bracketed binders are accepted
+/// (opened by the M4b-3 close-out): `push_binder_group` pushes each with
+/// its own `BinderInfo` and runs the instance-binder check, exactly as
+/// the `forall` telescope does. Named seam (→ `UnsupportedSyntax`): any
+/// other item shape.
 ///
 /// The CALLER owns the `lctx_checkpoint`/`lctx_restore` bracket.
 fn push_let_binders(
@@ -88,17 +85,11 @@ fn push_let_binders(
                 let fvar = push_user_binder(elab, None, dom, BinderInfo::Default)?;
                 fvars.push(fvar);
             }
+            // Any binder info: `push_binder_group` is the `elabBinderViews`
+            // port, so it pushes the group's own `BinderInfo` and runs the
+            // instance-binder check (`Binders.lean:216-219`).
             NodeOrToken::Node(n) => {
                 let g = extract_binder_group(elab, n, kinds)?;
-                if !matches!(g.bi, BinderInfo::Default) {
-                    return Err(ElabError::UnsupportedSyntax(
-                        "let: implicit/strict/instance binder in let/have's own \
-                         binder list — later M4 (the declared-type position, \
-                         reached via `forall`, is closed; this own-binder-list \
-                         position is unclaimed by any plan slice)"
-                            .into(),
-                    ));
-                }
                 fvars.extend(push_binder_group(elab, &g, kinds)?);
             }
             NodeOrToken::Token(tok) if kinds.name(tok.kind()) == "<ident>" => {

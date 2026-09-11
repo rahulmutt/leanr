@@ -822,6 +822,21 @@ def closeoutBinderCheckQueries : List (String × String) :=
   , ("closeout/binder-check-fun-unchecked", "fun [i : Nat] => i")
   ]
 
+/-- M4b-3 close-out: `let`/`have`'s OWN binder list with implicit,
+strict-implicit and instance binders (`elabLetDeclAux` →
+`elabBindersEx`, `Elab/Binders.lean:745`, `:751`). The value is
+abstracted over the binders, so `f`'s type carries their binder infos and
+the body's `f` gets its instance / implicit arguments inserted. -/
+def closeoutLetBinderQueries : List (String × String) :=
+  [ ("closeout/let-inst-named",       "let f [i : Add Nat] : Nat := Add.add Nat.zero Nat.zero; f")
+  , ("closeout/let-inst-anon",        "let f [Add Nat] : Nat := Add.add Nat.zero Nat.zero; f")
+  , ("closeout/let-inst-impl-detail", "let f [__i : Add Nat] : Nat := Add.add Nat.zero Nat.zero; f")
+  , ("closeout/let-implicit",         "let f {a : Type} (x : a) : a := x; f Nat.zero")
+  , ("closeout/let-strict",           "let f ⦃a : Type⦄ (x : a) : a := x; f")
+  , ("closeout/have-inst-named",      "have f [i : Add Nat] : Nat := Add.add Nat.zero Nat.zero; f")
+  , ("closeout/have-implicit",        "have f {a : Type} (x : a) : a := x; f Nat.zero")
+  ]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -835,7 +850,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>

@@ -885,3 +885,25 @@ fn checked_parameter_does_not_leak_past_the_check() {
         other => panic!("expected UnknownIdent, got {other:?}"),
     }
 }
+
+/// `let`/`have`'s own binders go through `elabBinderViews` too
+/// (`elabLetDeclAux` → `elabBindersEx`, `Elab/Binders.lean:751`), so the
+/// instance-binder check applies. Run on the pinned binary: both
+/// non-class forms report "invalid binder annotation", the parametric one
+/// "invalid parametric local instance".
+#[test]
+fn let_and_have_own_inst_binders_run_the_annotation_check() {
+    for src in [
+        "let f [i : Nat] : Nat := Nat.zero; Nat.zero",
+        "have f [i : Nat] : Nat := Nat.zero; Nat.zero",
+    ] {
+        match elab_result(src) {
+            Err(leanr_elab::ElabError::InvalidBinderAnnotation { .. }) => {}
+            other => panic!("{src}: expected InvalidBinderAnnotation, got {other:?}"),
+        }
+    }
+    match elab_result("let f [i : Nat -> Add Nat] : Nat := Nat.zero; Nat.zero") {
+        Err(leanr_elab::ElabError::InvalidParametricLocalInstance { .. }) => {}
+        other => panic!("expected InvalidParametricLocalInstance, got {other:?}"),
+    }
+}

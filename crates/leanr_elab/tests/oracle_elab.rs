@@ -233,7 +233,10 @@ fn oracle_elab_gate() {
     //
     // 142 -> 147 (M4b-3 close-out task 4): the five closeout/binder-check-*
     // records.
-    const CORPUS_FLOOR: usize = 147;
+    //
+    // 147 -> 154 (M4b-3 close-out task 5): the seven closeout/let-* and
+    // closeout/have-* records.
+    const CORPUS_FLOOR: usize = 154;
     assert!(
         replayed >= CORPUS_FLOOR,
         "corpus shrank: replayed {replayed} records, floor is {CORPUS_FLOOR}. \

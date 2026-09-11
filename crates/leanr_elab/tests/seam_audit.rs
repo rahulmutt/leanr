@@ -1499,3 +1499,31 @@ fn a_let_bound_local_instance_consumed_by_synthesis_leaks_an_fvar() {
          let/have twin records. Got {inst}"
     );
 }
+
+/// M4b-3 close-out: retired "later M4" seam messages. Each needle is one
+/// LINE of a message the close-out deleted (a textual scan is a floor: the
+/// retired wording never comes back), following
+/// `no_seam_points_at_the_retired_p5_optparam_autoparam_label`. Neither
+/// label named a slice, so `no_seam_message_names_a_completed_slice`'s
+/// needle list cannot cover them.
+#[test]
+fn no_seam_points_at_a_retired_closeout_label() {
+    let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    let needles = [
+        // `let_like.rs`'s `push_let_binders` guard (task 5).
+        "let: implicit/strict/instance binder in let/have",
+    ];
+    let mut offenders = Vec::new();
+    for path in walk_rs_files(src_dir) {
+        let text = std::fs::read_to_string(&path).expect("readable source");
+        for (n, line) in text.lines().enumerate() {
+            if let Some(needle) = needles.iter().find(|needle| line.contains(**needle)) {
+                offenders.push(format!("{}:{} ({needle})", path.display(), n + 1));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the M4b-3 close-out retired these seams; stale label at {offenders:?}"
+    );
+}
