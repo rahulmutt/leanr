@@ -1462,7 +1462,11 @@ impl<'e> MetaCtx<'e> {
     /// Left as-is deliberately: propagating would turn an ordinary
     /// binder into an elaboration failure, which is the very thing the
     /// oracle's own `catch _ => return none` avoids.
-    pub(crate) fn is_class(&mut self, ty: ExprId) -> Result<Option<NameId>, MetaError> {
+    ///
+    /// `pub` since the M4b-3 close-out: `leanr_elab`'s binder-annotation
+    /// check (`builtin/binder/mod.rs`) calls it directly, as the
+    /// oracle's `elabBinderViews` calls `isClass?`.
+    pub fn is_class(&mut self, ty: ExprId) -> Result<Option<NameId>, MetaError> {
         match self.is_class_quick(ty) {
             LOption::Some(c) => Ok(Some(c)),
             LOption::None => Ok(None),

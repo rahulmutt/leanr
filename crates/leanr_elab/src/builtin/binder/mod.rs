@@ -4,6 +4,7 @@
 //! bracketed-binder-group extraction and pushing, and binder-name
 //! interning. Oracle: `Lean/Elab/Binders.lean`.
 
+use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::ExprId;
 use leanr_kernel::bank::NameId;
 use leanr_kernel::BinderInfo;
@@ -182,6 +183,14 @@ fn push_binder_group(
     kinds: &KindInterner,
 ) -> Result<Vec<ExprId>, ElabError> {
     let dom = elab_type(elab, &g.ty, kinds)?;
+    // oracle: `elabBinderViews` (`Binders.lean:216-219`) — after
+    // `elabType`, before the binder is pushed. `push_binder_group` is the
+    // only leanr port of `elabBinderViews`, so this covers `forall`,
+    // `depArrow` and `let`/`have`'s own binders; `fun`
+    // (`elabFunBinderViews`) runs no such check.
+    if matches!(g.bi, BinderInfo::InstImplicit) {
+        check_inst_binder_type(elab, dom)?;
+    }
     let mut fvars = Vec::with_capacity(g.names.len());
     for &name in &g.names {
         fvars.push(push_user_binder(elab, name, dom, g.bi)?);
@@ -230,6 +239,93 @@ fn push_user_let_decl(
     elab.mctx
         .push_let_decl_with_kind(name, ty, value, kind)
         .map_err(ElabError::from)
+}
+
+/// oracle: `elabBinderViews`' instance-binder check
+/// (`Elab/Binders.lean:216-219`), which runs after `elabType` and before
+/// `withLocalDecl`:
+///
+/// ```lean
+/// if binderView.bi.isInstImplicit && checkBinderAnnotations.get (← getOptions) then
+///   unless (← isClass? type).isSome do
+///     throwErrorAt binderView.type (m!"invalid binder annotation, type is not a class instance…")
+///   withRef binderView.type <| checkLocalInstanceParameters type
+/// ```
+///
+/// `checkBinderAnnotations` is always on (leanr has no options).
+fn check_inst_binder_type(elab: &mut TermElabM, ty: ExprId) -> Result<(), ElabError> {
+    if elab.mctx.is_class(ty)?.is_none() {
+        return Err(ElabError::InvalidBinderAnnotation { ty });
+    }
+    check_local_instance_parameters(elab, ty)
+}
+
+/// oracle: `checkLocalInstanceParameters` (`Elab/Binders.lean:199-206`):
+///
+/// ```lean
+/// private partial def checkLocalInstanceParameters (type : Expr) : TermElabM Unit := do
+///   let .forallE n d b bi ← whnf type | return ()
+///   if bi != .instImplicit && !b.hasLooseBVar 0 then
+///     throwError "invalid parametric local instance, …"
+///   withLocalDecl n bi d fun x => checkLocalInstanceParameters (b.instantiate1 x)
+/// ```
+///
+/// A loop, not recursion: every step is a tail call and the depth is the
+/// user's. `b.hasLooseBVar 0`: `ty` is closed (binder fvars, never loose
+/// bvars), so after `whnf` the only loose bvar `b` can hold is 0, and
+/// `loose_bvar_range() > 0` is exact for it (`app/state.rs`'s
+/// `has_loose_bvars` doc). `withLocalDecl` is the default kind, so a plain
+/// `push_local_decl`; `instantiate1` is `instantiate_beta_rev_range` with
+/// one argument (`app/args.rs`'s own `type.instantiate1 x`). The pushed
+/// parameters are dropped on every exit path.
+///
+/// Deviation from the plan brief (Ruling 3): the brief's
+/// `check_local_instance_parameters` wraps the loop in an immediately-invoked
+/// closure (`let result = (|| { .. })();`) so `?` can return early while a
+/// single `lctx_restore` still runs after. `cargo clippy -- -D warnings`
+/// flags that shape as `clippy::redundant_closure_call`. Restructured here
+/// as an inner `fn run` holding the loop, called between `lctx_checkpoint`
+/// and `lctx_restore` — identical semantics (the context is restored on
+/// every exit path, including every `?` error), just without the
+/// redundant closure.
+fn check_local_instance_parameters(elab: &mut TermElabM, ty: ExprId) -> Result<(), ElabError> {
+    fn run(elab: &mut TermElabM, ty: ExprId) -> Result<(), ElabError> {
+        let mut cur = ty;
+        loop {
+            let reduced = elab.mctx.whnf(cur)?;
+            let base = elab.view.store;
+            let Node::Forall {
+                binder_name,
+                binder_type,
+                body,
+                binder_info,
+            } = elab.mctx.store().expr_node(Some(base), reduced)
+            else {
+                return Ok(());
+            };
+            let body_uses_binder = elab
+                .mctx
+                .store()
+                .expr_data(Some(base), body)
+                .loose_bvar_range()
+                > 0;
+            if !matches!(binder_info, BinderInfo::InstImplicit) && !body_uses_binder {
+                return Err(ElabError::InvalidParametricLocalInstance {
+                    param_ty: binder_type,
+                });
+            }
+            let x = elab
+                .mctx
+                .push_local_decl(binder_name, binder_type, binder_info)?;
+            cur = elab
+                .mctx
+                .instantiate_beta_rev_range(body, std::slice::from_ref(&x))?;
+        }
+    }
+    let checkpoint = elab.mctx.lctx_checkpoint();
+    let result = run(elab, ty);
+    elab.mctx.lctx_restore(checkpoint);
+    result
 }
 
 /// A fresh type metavariable `?α : Sort ?u` — the elided-binder domain

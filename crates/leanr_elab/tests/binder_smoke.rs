@@ -832,3 +832,41 @@ fn implicit_lambda_wrap_binder_does_not_capture_a_same_named_outer_binder() {
     // at bvar 0.
     assert_eq!(j["b"]["b"], serde_json::json!({"k": "bvar", "i": 1}));
 }
+
+/// oracle: `elabBinderViews` (`Elab/Binders.lean:216-218`) — an
+/// instance-implicit binder whose type is not a class is rejected ("invalid
+/// binder annotation, type is not a class instance"). Each source was run
+/// on the pinned binary. `forall [i : _]` is included because an
+/// unassigned metavariable is "not a class" too.
+#[test]
+fn inst_binder_whose_type_is_not_a_class_is_rejected() {
+    for src in [
+        "forall [i : Nat], Nat",
+        "[i : Nat] -> Nat",
+        "forall [i : _], Nat",
+    ] {
+        match elab_result(src) {
+            Err(leanr_elab::ElabError::InvalidBinderAnnotation { .. }) => {}
+            other => panic!("{src}: expected InvalidBinderAnnotation, got {other:?}"),
+        }
+    }
+}
+
+/// oracle: `checkLocalInstanceParameters` (`Elab/Binders.lean:199-206`) —
+/// a function-typed instance binder whose non-instance parameter the body
+/// does not depend on is rejected. The third source fails on its SECOND
+/// parameter: the first (`a : Type`) has a forward dependency, so only a
+/// check that keeps walking after it finds `Nat`.
+#[test]
+fn parametric_inst_binder_without_forward_dependency_is_rejected() {
+    for src in [
+        "forall [i : Nat -> Add Nat], Nat",
+        "forall [i : forall {a : Type}, Add Nat], Nat",
+        "forall [i : forall (a : Type), Nat -> Add a], Nat",
+    ] {
+        match elab_result(src) {
+            Err(leanr_elab::ElabError::InvalidParametricLocalInstance { .. }) => {}
+            other => panic!("{src}: expected InvalidParametricLocalInstance, got {other:?}"),
+        }
+    }
+}

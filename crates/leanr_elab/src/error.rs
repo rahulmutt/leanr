@@ -102,6 +102,22 @@ pub enum ElabError {
         e: ExprId,
         ty: ExprId,
     },
+    /// oracle: `elabBinderViews`' "invalid binder annotation, type is not a
+    /// class instance" (`Elab/Binders.lean:218`). Carries the binder's
+    /// elaborated type. Raised for `forall`, `depArrow` and `let`/`have`'s
+    /// own instance binders — never for `fun`, whose `elabFunBinderViews`
+    /// runs no check. `set_option checkBinderAnnotations false` is not
+    /// modelled (leanr has no options; the check always runs, the
+    /// oracle's default).
+    InvalidBinderAnnotation {
+        ty: ExprId,
+    },
+    /// oracle: `checkLocalInstanceParameters`' "invalid parametric local
+    /// instance, parameter with type … does not have forward dependencies"
+    /// (`Elab/Binders.lean:205`). Carries the offending parameter's type.
+    InvalidParametricLocalInstance {
+        param_ty: ExprId,
+    },
     /// oracle: `elabNumLit`'s two `getDecLevel` failure branches
     /// (`BuiltinTerm.lean:219-223`) — "numerals are data in Lean, but
     /// the expected type is a proposition" and "…is universe
