@@ -743,8 +743,9 @@ fn at_on_an_ascription_is_a_type_mismatch() {
 /// (`App.lean:2118`) — in a FUNCTION position `@` on anything outside
 /// the seven `elabAtom` shapes is simply invalid; it is NOT the
 /// implicit-lambda-disabling form (that one is only reachable when the
-/// `@..` node is the whole term). Two different oracle arms, so two
-/// different seams.
+/// `@..` node is the whole term). Two different oracle arms; only this
+/// one is still a seam (the other is implemented by the M4b-3
+/// close-out).
 #[test]
 fn at_on_a_non_atom_head_is_an_invalid_occurrence() {
     match elab_src("@(Nat.succ) Nat.zero") {

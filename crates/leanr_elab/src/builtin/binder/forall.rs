@@ -126,7 +126,8 @@ pub fn elab_forall(
 /// (term.rs:1103): `[bracketedBinder, "->", body]` — always exactly one
 /// bracketed binder with a mandatory type (`require_type = true`).
 /// Dependent: the body may reference the binder, so it goes through the
-/// full `push_local_decl` + `mk_forall` telescope, unlike `arrow`.
+/// full `push_binder_group` → `push_user_binder` (carrying the
+/// `.ofBinderName` kind) + `mk_forall` telescope, unlike `arrow`.
 pub fn elab_dep_arrow(
     elab: &mut TermElabM,
     node: &SyntaxNode,

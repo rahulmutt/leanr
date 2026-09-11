@@ -458,7 +458,7 @@ Measured against merge-base `33ebb32`:
   34 deletions(-)) — exactly the accessor ledger above.
 - `mise run ci`: pass.
 - Mutations: every row of § Verification's mutation table was run and
-  failed as listed (task reports).
+  failed, with provenance noted below (task reports).
 - Still open, as designed: § Seams and deferrals, including § Amendment 1's
   let-bound local-instance leak, pinned by `seam_audit.rs`'s
   `a_let_bound_local_instance_consumed_by_synthesis_leaks_an_fvar`.
@@ -477,3 +477,15 @@ Measured against merge-base `33ebb32`:
   also added a `binder_smoke.rs` test,
   `checked_parameter_does_not_leak_past_the_check`, which kills dropping
   the local-context restore; that row is not in the table.
+- Final-review correction: § Design 5's "`paren` is the only oracle
+  macro leanr models as an elaborator" is overbroad —
+  `typeAscription`, `forall`, `fun` and `explicit` also carry oracle
+  `builtin_macro`s that leanr dispatches as elaborators. The precise
+  statement is the one now in `elab.rs`: `paren` is the only oracle
+  macro whose leanr elaborator re-enters `elab_term` on its inner term
+  with the node's own expected type.
+- Final-review addition: `app_smoke.rs`'s
+  `at_on_a_local_with_mvar_type_skips_the_postpone_arm` pins that the
+  `false`/no-implicit-lambda path in `elab_term_core` really does skip
+  `use_implicit_lambda`'s `.postpone` arm, per § Design 5's first
+  bullet.

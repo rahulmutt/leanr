@@ -924,9 +924,10 @@ fn no_seam_points_at_the_retired_p5_optparam_autoparam_label() {
 /// in M4b-3 P5 (tasks 5-6, `elab.rs`), which completes P5 as a slice —
 /// but `elabExplicit`'s "other" arm (`app/mod.rs`) used to raise this
 /// exact message for the `@($t)`/`@$t` wrap that disables insertion, a
-/// DIFFERENT and still-unclaimed piece of work no P5 task actually did.
-/// Task 12 retargeted it to "later M4" rather than leave a completed
-/// slice's name on an open seam. A bare `"M4b-3 P5"` needle is
+/// DIFFERENT piece of work no P5 task actually did — it has since
+/// shipped in the M4b-3 close-out. Task 12 retargeted it to "later M4"
+/// rather than leave a completed slice's name on an open seam. A bare
+/// `"M4b-3 P5"` needle is
 /// deliberately NOT used here (unlike the P2/P2b-ii/P4 gates above):
 /// this plan's own doc comments legitimately cite "M4b-3 P5 task N" by
 /// the dozen as history throughout this crate, so the needle has to be
@@ -947,7 +948,8 @@ fn no_seam_points_at_the_retired_p5_implicit_lambda_label() {
     assert!(
         offenders.is_empty(),
         "elabExplicit's `@($t)`/`@$t` arm was retargeted from \"M4b-3 P5\" (complete) to \
-         \"later M4\" (unclaimed) by Task 12; stale label at {offenders:?}"
+         \"later M4\" by Task 12, and has since shipped in the M4b-3 close-out; stale label \
+         at {offenders:?}"
     );
 }
 

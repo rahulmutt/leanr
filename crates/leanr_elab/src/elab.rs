@@ -334,8 +334,13 @@ impl<'e> TermElabM<'e> {
             // an elaborator (`builtin::ascription::elab_paren`, which calls
             // `elab_term` with the flag back ON), so the flag is carried
             // through the parentheses here instead. `paren` is the only
-            // oracle macro leanr models as an elaborator. A loop, because
-            // nesting depth is the user's.
+            // oracle macro whose leanr elaborator re-enters `elab_term`
+            // on its inner term with the node's own expected type
+            // (`typeAscription`, `forall`, `fun` and `explicit` also
+            // carry oracle `builtin_macro`s that leanr dispatches as
+            // elaborators, but none of them thread the node's own
+            // `expected` straight through to an inner `elab_term`
+            // call). A loop, because nesting depth is the user's.
             let mut cur = elem.clone();
             while kinds.name(cur.kind()) == "Lean.Parser.Term.paren" {
                 cur = cur

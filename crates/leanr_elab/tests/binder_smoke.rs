@@ -766,16 +766,17 @@ fn implicit_lambda_does_not_fire_on_strict_implicit() {
 /// un-implemented seam (`` `(@($t)) ``/`` `(@$t) ``'s own fallback,
 /// `seam_audit.rs`'s `("@(Nat.succ Nat.zero)", "later M4")` case —
 /// "M4b-3 P5" at the time this test was written, retargeted by Task 12
-/// once P5 completed without that seam); the M4b-3 close-out has since
-/// implemented that arm that errors unconditionally, before the
-/// expected type — and therefore before `use_implicit_lambda` — is ever
-/// consulted. A mutation check confirmed that term's error is IDENTICAL
-/// whether or not `block_implicit_lambda` actually blocks the wrap, so
-/// it pinned the wrong seam.
+/// once P5 completed without that seam) that errored unconditionally,
+/// before the expected type — and therefore before
+/// `use_implicit_lambda` — was ever consulted (the M4b-3 close-out has
+/// since implemented that arm). A mutation check confirmed that term's
+/// error is IDENTICAL whether or not `block_implicit_lambda` actually
+/// blocks the wrap, so it pinned the wrong seam.
 ///
 /// `@Nat.zero`'s inner kind is plain `<ident>`, which `elab_explicit`
 /// already routes to `elab_atom` (a real, implemented path,
-/// `app/mod.rs:207`) — confirmed against the pinned `lean` binary:
+/// `app/mod.rs`'s `elab_explicit` `<ident>` arm) — confirmed against
+/// the pinned `lean` binary:
 /// `(@Nat.zero : {a : Type} -> Nat)` reports `Type mismatch: Nat.zero
 /// has type Nat ... but is expected to have type {a : Type} → Nat`,
 /// i.e. `@` disables the wrap and `Nat.zero`'s own (non-implicit) type
@@ -856,7 +857,7 @@ fn inst_binder_whose_type_is_not_a_class_is_rejected() {
 /// a function-typed instance binder whose non-instance parameter the body
 /// does not depend on is rejected. The third source fails on its SECOND
 /// parameter: the first (`a : Type`) has a forward dependency, so only a
-/// check that keeps walking after it finds `Nat`.
+/// check that keeps walking after it fails.
 #[test]
 fn parametric_inst_binder_without_forward_dependency_is_rejected() {
     for src in [

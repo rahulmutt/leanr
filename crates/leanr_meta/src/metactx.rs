@@ -1444,9 +1444,9 @@ impl<'e> MetaCtx<'e> {
     /// never a hard error, and diverging here would turn an ordinary
     /// binder into an elaboration failure.
     ///
-    /// Called from `push_local_decl`/`push_let_decl` (Task 4) and from
-    /// `get_instances` (Task 6), which resolves its goal's class name
-    /// through this.
+    /// Called from `push_local_decl`/`push_let_decl` and from
+    /// `get_instances`, which resolves its goal's class name through
+    /// this.
     ///
     /// **The swallow covers the two budget errors too, and they are not
     /// alike.** `StepBudgetExhausted` is SELF-LIMITING: `self.steps`
@@ -1464,7 +1464,7 @@ impl<'e> MetaCtx<'e> {
     /// oracle's own `catch _ => return none` avoids.
     ///
     /// `pub` since the M4b-3 close-out: `leanr_elab`'s binder-annotation
-    /// check (`builtin/binder/mod.rs`) calls it directly, as the
+    /// check (`builtin/binder/mod.rs`) also calls it directly, as the
     /// oracle's `elabBinderViews` calls `isClass?`.
     pub fn is_class(&mut self, ty: ExprId) -> Result<Option<NameId>, MetaError> {
         match self.is_class_quick(ty) {
