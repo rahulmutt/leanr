@@ -7,7 +7,8 @@
 //! `leanr_kernel`, which this crate does not change. The caller decides it
 //! at push time and `MetaCtx::install_local_instance_for` consumes it
 //! there. The oracle's only other elaborator-side reader,
-//! `withLocalInstancesImp` (`Lean/Meta/Basic.lean:1941`, reached from
+//! `withLocalInstancesImp` (`Lean/Meta/Basic.lean:1937`, whose
+//! `isImplementationDetail` test is `:1941`, reached from
 //! `Lean/Elab/Match.lean:826`), belongs to the match slice.
 
 use leanr_kernel::bank::names::NameRow;
