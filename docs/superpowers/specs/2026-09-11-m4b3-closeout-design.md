@@ -315,8 +315,9 @@ Four new query groups, each added by the commit that makes it pass:
 
 - `closeoutImplDetailQueries` — the `__` forms of `fun (… : Add Nat)`,
   `fun [… : Add Nat]`, `forall (… : Add Nat)`, `let … : Add Nat`, `have
-  … : Add Nat`, each with a body that synthesizes `Add Nat`, plus each
-  non-`__` twin not already in the corpus.
+  … : Add Nat`, each with a body that synthesizes `Add Nat`, plus the
+  non-`__` twins of the `fun`, `fun [·]` and `forall` forms (8 records).
+  `let`/`have` carry no twin — see § Amendment 1.
 - `closeoutBinderCheckQueries` — the accepted parametric instance
   binders, which the check must not reject: `forall [i : forall (a :
   Type), Add a], Nat`, `forall [i : forall [Add Nat], Add Nat], Nat`,
@@ -392,6 +393,7 @@ Still open after this slice, each with its owner:
 | `expandCDot?` inside `@(…)` | the parser slice that adds `·` |
 | `useImplicitLambda`'s `.postpone` arm | M4b-4 |
 | `get_instances` re-entrancy (latent) | first environment carrying matchers |
+| A `let`/`have`-bound local instance consumed through synthesis leaks an unabstracted `fvar` (`mk_let_expr` skips `elimMVarDeps`) | its own follow-up slice (§ Amendment 1) |
 
 ## Out of scope
 
@@ -401,3 +403,44 @@ Still open after this slice, each with its owner:
 - Macro-scope hygiene.
 - `with_assignable_synthetic_opaque`'s drop guard (P3 follow-up 4).
 - `lean-toolchain` bump.
+
+## Amendment 1 (2026-09-11, planning): the let-bound local-instance leak
+
+Found while building the plan's red list: the candidate records were
+dumped from the pinned oracle and appended to a scratch copy of the
+corpus on `main`. Four of them tripped `oracle_elab`'s leaked-`fvar`
+assertion: `let`/`have` binding a class-typed local, with a body whose
+instance argument the synthesis fixpoint fills in.
+
+**The divergence.** On leanr, `let i : Add Nat := instAddNat;
+Add.add Nat.zero Nat.zero` elaborates (through
+`elab_term_and_synthesize`) to a term whose instance argument is an
+unabstracted `fvar`; the oracle emits `bvar 0`. The same body under
+`fun (i : Add Nat) => …` is correct. It is pre-existing and not caused
+by anything in this spec.
+
+**Cause.** `MetaCtx::mk_let_expr` abstracts with a bare
+`abstract_fvars` and never runs `elim_mvar_deps`, unlike `mk_binding`
+(behind `mk_lambda`/`mk_forall`). The postponed instance metavariable is
+assigned the let-bound `fvar` after the `let` has closed. The
+elimMVarDeps slice deliberately refused let-declarations
+(`2026-09-09-elim-mvar-deps-design.md` § "Let-declarations: a refusal,
+not an arm"): the oracle's `mkAuxMVarType` ldecl arm needs a `nondep`
+bit that `leanr_kernel`'s `LocalDecl` does not carry.
+
+**Ruling (project owner, 2026-09-11): seam it here, fix it in its own
+slice.** In this slice:
+
+- `closeoutImplDetailQueries` drops the `let i`/`have i` twins. The
+  `let __i`/`have __i` records stay: once item 2 lands, `__i` is not a
+  local instance, synthesis picks the global `instAddNat`, and nothing
+  leaks.
+- `seam_audit.rs` gains a test pinning the current wrong answer (an
+  `fvar` instance argument). It follows the precedent of
+  `postponed_coe_under_a_binder_abstracts_via_elim_mvar_deps`, which
+  pinned its own wrong answer until the elimMVarDeps slice flipped it.
+- `mk_let_expr`'s doc records the gap and names that test.
+
+The follow-up slice must choose where the `nondep` bit lives: a
+`leanr_meta` side table, or a kernel `LocalDecl` field. The latter
+touches the TCB and must be flagged.
