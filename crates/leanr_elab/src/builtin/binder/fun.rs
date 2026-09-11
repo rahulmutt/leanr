@@ -440,7 +440,11 @@ pub fn elab_fun(
                     .map_err(ElabError::from)?;
                 residual = propagate_expected_type(elab, fvar, dom, residual)?;
                 elab.mctx
-                    .install_local_instance_for_last_pushed(fvar, dom)
+                    .install_local_instance_for_last_pushed(
+                        fvar,
+                        dom,
+                        leanr_meta::LocalDeclKind::Default,
+                    )
                     .map_err(ElabError::from)?;
                 fvars.push(fvar);
             }

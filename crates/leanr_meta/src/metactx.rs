@@ -21,6 +21,7 @@ use leanr_olean::{
 };
 
 use crate::instances::{ClassTable, InstanceTable};
+use crate::local_decl_kind::LocalDeclKind;
 use crate::local_instance::LocalInstanceStack;
 use crate::local_snapshot::LocalCtxSnapshot;
 use crate::{Config, LMVarId, LOption, MVarId, MetaError, MetavarContext, TransparencyMode};
@@ -709,13 +710,29 @@ impl<'e> MetaCtx<'e> {
         ty: ExprId,
         bi: BinderInfo,
     ) -> Result<ExprId, MetaError> {
+        self.push_local_decl_with_kind(name, ty, bi, LocalDeclKind::Default)
+    }
+
+    /// [`Self::push_local_decl`] with the declaration's [`LocalDeclKind`]
+    /// chosen by the caller. oracle: `withLocalDecl n bi type (kind :=
+    /// kind)`. Only the elaborator's user-binder sites pass anything but
+    /// `Default` (`leanr_elab`'s `builtin/binder/mod.rs`,
+    /// `push_user_binder`), because only the oracle's `.ofBinderName` sites
+    /// do.
+    pub fn push_local_decl_with_kind(
+        &mut self,
+        name: Option<NameId>,
+        ty: ExprId,
+        bi: BinderInfo,
+        kind: LocalDeclKind,
+    ) -> Result<ExprId, MetaError> {
         let (fvar, depth) = self.push_local_decl_inner(name, ty, bi)?;
         // oracle: `withLocalDeclImp` → `withNewFVar`
         // (`Basic.lean:1791`, `:1785-1789`) — a class-typed declaration
         // becomes a local instance. Keyed on the TYPE only; binder info
         // plays no part, so `fun (inst : Add N) => …` counts exactly as
         // `[inst : Add N]` does.
-        self.install_local_instance_for(fvar, ty, depth)?;
+        self.install_local_instance_for(fvar, ty, depth, kind)?;
         self.lctx_snapshot = None;
         Ok(fvar)
     }
@@ -777,10 +794,13 @@ impl<'e> MetaCtx<'e> {
     /// `install_local_instance_for` itself (this method's own callee),
     /// so it is no longer this method's job to remember — see that
     /// method's doc for why the fix sits there instead of here.
+    /// `kind` is the pushed declaration's [`LocalDeclKind`], which the
+    /// caller must pass again here because it is not stored.
     pub fn install_local_instance_for_last_pushed(
         &mut self,
         fvar: ExprId,
         ty: ExprId,
+        kind: LocalDeclKind,
     ) -> Result<(), MetaError> {
         debug_assert_eq!(
             self.local_names.len(),
@@ -793,7 +813,7 @@ impl<'e> MetaCtx<'e> {
             "fvar must be the most recently pushed local decl"
         );
         let depth = self.lctx.save().saturating_sub(1);
-        self.install_local_instance_for(fvar, ty, depth)
+        self.install_local_instance_for(fvar, ty, depth, kind)
     }
 
     /// Mint an ldecl fvar `(name : ty := value)` into the ambient `lctx`
@@ -808,6 +828,18 @@ impl<'e> MetaCtx<'e> {
         name: Option<NameId>,
         ty: ExprId,
         value: ExprId,
+    ) -> Result<ExprId, MetaError> {
+        self.push_let_decl_with_kind(name, ty, value, LocalDeclKind::Default)
+    }
+
+    /// [`Self::push_let_decl`] with a caller-chosen [`LocalDeclKind`];
+    /// oracle `withLetDecl … (kind := kind)`.
+    pub fn push_let_decl_with_kind(
+        &mut self,
+        name: Option<NameId>,
+        ty: ExprId,
+        value: ExprId,
+        kind: LocalDeclKind,
     ) -> Result<ExprId, MetaError> {
         debug_assert_eq!(
             self.local_names.len(),
@@ -833,41 +865,24 @@ impl<'e> MetaCtx<'e> {
         // oracle: `withLetDeclImp` (`Basic.lean:1905-1911`) routes
         // through the same `withNewFVar` as `push_local_decl` — a
         // let-bound instance counts too.
-        self.install_local_instance_for(fvar, ty, depth)?;
+        self.install_local_instance_for(fvar, ty, depth, kind)?;
         self.lctx_snapshot = None;
         Ok(fvar)
     }
 
     /// Install `fvar` as a local instance if its type is a class.
     ///
-    /// oracle: `withNewFVar` (`Basic.lean:1785-1789`). The oracle's
-    /// implementation-detail filter (`withNewLocalInstanceImp`,
-    /// `Meta/Basic.lean:1383-1388`) checks `localDecl.isImplementationDetail`
-    /// and skips the push when it holds. That filter is **genuinely
-    /// missing here, not vacuous**: leanr's `LocalDecl`
-    /// (`leanr_kernel/src/local_ctx.rs:37-43`) carries no kind field, but
-    /// the oracle's producer of an implementation-detail declaration is
-    /// not some internal minting leanr has no counterpart for — it is
-    /// `LocalDeclKind.ofBinderName` (`BindersUtil.lean:21-23`), which
-    /// classifies ANY **user-written** binder name beginning with `__`
-    /// as `.implDetail`. That is ordinary surface syntax leanr already
-    /// elaborates. Concretely, on the pinned binary
-    /// `fun __i : Foo Nat => (Foo.bar : Nat)` elaborates against the
-    /// GLOBAL instance (the `__i` local is filtered out) while
-    /// `fun i : Foo Nat => …` elaborates against the LOCAL one — but
-    /// `push_local_decl_inner` installs the local instance unconditionally
-    /// for both, so leanr emits a **silently different term than the
-    /// oracle for any `__`-prefixed binder whose type is a class**, with
-    /// no error. This predates M4b-3 P5 — `install_local_instance_for`
-    /// arrived with the local-instances PR (#43) — and the fix (an
-    /// `isImplementationDetail`-style test on the binder name inside this
-    /// method) is a `leanr_meta` BEHAVIOUR change, which this slice's
-    /// additive-only `leanr_meta` exception does not cover; it belongs to
-    /// a follow-up slice. SEAM — trigger for revisiting: any slice that
-    /// elaborates or generates `__`-prefixed binders under a class type
-    /// (the tactic framework and the match compiler are the most likely
-    /// first minters of such names) must close this before that path is
-    /// trustworthy.
+    /// oracle: `withNewFVar` (`Basic.lean:1785-1789`) then
+    /// `withNewLocalInstanceImp` (`Meta/Basic.lean:1383-1388`), which skips
+    /// the push when `localDecl.isImplementationDetail`. leanr's `LocalDecl`
+    /// (`leanr_kernel/src/local_ctx.rs`) carries no kind, so the kind
+    /// arrives as a parameter instead ([`LocalDeclKind`]). The oracle
+    /// produces `.implDetail` only at its `.ofBinderName` sites — user
+    /// binders whose name's root component starts with `__` — and
+    /// `leanr_elab` passes `ImplDetail` from exactly those
+    /// (`builtin/binder/mod.rs`'s `push_user_binder`). Before the M4b-3
+    /// close-out this filter was missing and `fun (__i : Foo Nat) => …`
+    /// elaborated against the local `__i` instead of the global instance.
     ///
     /// **`lctx_snapshot` correctness (fix round 2)**: this is the ONE
     /// place a NEW local instance is ever *pushed* onto `local_instances`
@@ -900,9 +915,16 @@ impl<'e> MetaCtx<'e> {
         fvar: ExprId,
         ty: ExprId,
         depth: usize,
+        kind: LocalDeclKind,
     ) -> Result<(), MetaError> {
+        // oracle order: `withNewFVar` tests `isClass?` first
+        // (`Basic.lean:1785-1789`), then `withNewLocalInstanceImp` skips
+        // an implementation detail (`:1383-1388`). Kept, so an `is_class`
+        // error still propagates for an `ImplDetail` declaration.
         if let Some(class_name) = self.is_class(ty)? {
-            self.local_instances.push(class_name, fvar, depth);
+            if kind == LocalDeclKind::Default {
+                self.local_instances.push(class_name, fvar, depth);
+            }
         }
         self.lctx_snapshot = None;
         Ok(())
@@ -1977,7 +1999,7 @@ mod tests {
             // NOW the domain is discovered to be class-typed (the
             // oracle's own `isClass? type` test, run AFTER propagation
             // per Finding 2) and installed.
-            ctx.install_local_instance_for_last_pushed(fvar, add_n)
+            ctx.install_local_instance_for_last_pushed(fvar, add_n, LocalDeclKind::Default)
                 .expect("install");
 
             // The memo must reflect the just-installed instance, not
@@ -2045,6 +2067,79 @@ mod tests {
 
             ctx.lctx_restore(cp);
             assert!(ctx.local_instances.entries().is_empty());
+        });
+    }
+
+    /// oracle: `withNewLocalInstanceImp` (`Meta/Basic.lean:1383-1388`)
+    /// skips the local-instance push for an implementation-detail
+    /// declaration. All three install paths honour the kind, and
+    /// `Default` still installs.
+    #[test]
+    fn an_impl_detail_class_typed_decl_installs_no_local_instance() {
+        with_class_ctx(|ctx, add| {
+            let add_n = class_app(ctx, add);
+            let val = const_named(ctx, "instAddN");
+            let cp = ctx.lctx_checkpoint();
+
+            ctx.push_local_decl_with_kind(
+                None,
+                add_n,
+                BinderInfo::InstImplicit,
+                LocalDeclKind::ImplDetail,
+            )
+            .expect("push");
+            assert!(ctx.local_instances.entries().is_empty(), "cdecl");
+
+            ctx.push_let_decl_with_kind(None, add_n, val, LocalDeclKind::ImplDetail)
+                .expect("push");
+            assert!(ctx.local_instances.entries().is_empty(), "ldecl");
+
+            let fvar = ctx
+                .push_local_decl_without_instance(None, add_n, BinderInfo::Default)
+                .expect("push");
+            ctx.install_local_instance_for_last_pushed(fvar, add_n, LocalDeclKind::ImplDetail)
+                .expect("install");
+            assert!(ctx.local_instances.entries().is_empty(), "deferred install");
+
+            ctx.push_local_decl_with_kind(
+                None,
+                add_n,
+                BinderInfo::InstImplicit,
+                LocalDeclKind::Default,
+            )
+            .expect("push");
+            assert_eq!(
+                ctx.local_instances.entries().len(),
+                1,
+                "Default still installs"
+            );
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// The kind belongs to the CALL SITE, not the name. The oracle's
+    /// `withLocalDecl` defaults to `.default` whatever the name is; only
+    /// `.ofBinderName` sites classify. `push_local_decl`/`push_let_decl`
+    /// are those `.default` sites (telescopes, eta arguments), so a
+    /// `__`-named class-typed declaration pushed through them MUST still
+    /// install. Guards against moving the name test into
+    /// `install_local_instance_for`.
+    #[test]
+    fn a_default_kind_push_installs_a_double_underscore_named_class_binder() {
+        with_class_ctx(|ctx, add| {
+            let add_n = class_app(ctx, add);
+            let val = const_named(ctx, "instAddN");
+            let base = Some(ctx.view.store);
+            let s = ctx.scratch.intern_str(base, "__i").expect("intern");
+            let name = ctx.scratch.name_str(base, None, s).expect("name");
+            let cp = ctx.lctx_checkpoint();
+
+            ctx.push_local_decl(Some(name), add_n, BinderInfo::InstImplicit)
+                .expect("push");
+            assert_eq!(ctx.local_instances.entries().len(), 1, "cdecl");
+            ctx.push_let_decl(Some(name), add_n, val).expect("push");
+            assert_eq!(ctx.local_instances.entries().len(), 2, "ldecl");
+            ctx.lctx_restore(cp);
         });
     }
 
