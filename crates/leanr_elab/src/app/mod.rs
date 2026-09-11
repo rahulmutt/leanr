@@ -23,7 +23,7 @@
 //! it. `tests/seam_audit.rs`'s `no_seam_points_at_the_retired_p2b_ii_label`
 //! gates that its message never comes back. **Also no longer a seam, as
 //! of M4b-3 P5**: the `fType` still-an-unassigned-mvar row (task 4 —
-//! `propagateExpectedType`, `builtin/binder.rs`, now pins a `fun`
+//! `propagateExpectedType`, `builtin/binder/fun.rs`, now pins a `fun`
 //! binder's domain from its ascription before `app/args.rs` can ever
 //! see an unassigned mvar there; what remains is a genuine
 //! `FunctionExpected`, `tests/seam_audit.rs`'s
@@ -462,7 +462,8 @@ fn elab_app_aux(
         found_named_args: Vec::new(),
     };
     let mut app = state::AppElab { ctx, st, elab };
-    // Bracket the whole loop (M4b-2's `binder.rs:217,226` idiom):
+    // Bracket the whole loop (M4b-2's `binder/forall.rs`'s
+    // `elab_binders_and_forall` idiom):
     // `args::add_eta_arg` pushes one fvar per eta-expanded parameter
     // into the ambient `lctx`, and `finalize`'s `mkLambdaFVars`
     // abstracts them back out — but only on the success path. Restoring

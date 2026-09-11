@@ -95,7 +95,7 @@ pub enum ElabError {
         f_type: ExprId,
     },
     /// oracle: `ensureType`'s "type expected, got …"
-    /// (`TermElabM.lean:1946-1949`). Raised from `binder.rs`'s
+    /// (`TermElabM.lean:1946-1949`). Raised from `binder/mod.rs`'s
     /// `elab_type` since M4b-3 P4; before that a non-type domain was
     /// (wrongly) a value-level `TypeMismatch` against `Sort ?u`.
     TypeExpected {

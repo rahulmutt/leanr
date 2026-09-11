@@ -38,7 +38,7 @@
 //! code now, exercised by `tests/oracle_elab.rs`'s `coe/*` records and
 //! `tests/synthetic_smoke.rs` rather than by this file. M4b-3 P5 task 4
 //! then closed the mvar-fType seam itself: `propagateExpectedType`
-//! (`builtin/binder.rs`) now pins a `fun` binder's domain from the
+//! (`builtin/binder/fun.rs`) now pins a `fun` binder's domain from the
 //! ascription BEFORE `app/args.rs` can ever see an unassigned mvar
 //! there, so what remains at that site is a genuine `FunctionExpected`
 //! (`over_application_reports_function_expected` above already covers
@@ -235,7 +235,7 @@ fn over_application_reports_function_expected() {
 /// proceeds. What used to remain was the case `coerceToFunction?`
 /// cannot help with either: `f`'s type still an unassigned mvar, not a
 /// concrete non-function type, so there was nothing yet for a `CoeFun`
-/// search to run against. `propagate_expected_type` (`builtin/binder.rs`)
+/// search to run against. `propagate_expected_type` (`builtin/binder/fun.rs`)
 /// now pins that mvar to `Nat -> Nat` before `f Nat.zero` is ever
 /// elaborated, so this site is reached with a concrete forall and the
 /// seam this test used to pin no longer exists.
@@ -1144,8 +1144,8 @@ fn no_seam_points_at_the_retired_p5_implicit_lambda_label() {
 ///     synchronous leaf elaborators invoked mid-telescope, so whatever
 ///     binder is open when a numeral or scientific literal is
 ///     elaborated is still open here too.
-///   * `builtin/binder.rs:439` (`is_def_eq(fvar_type, domain)`,
-///     `propagate_expected_type`) and `builtin/lit/mod.rs:88`
+///   * `builtin/binder/fun.rs`'s `propagate_expected_type`
+///     (`is_def_eq(fvar_type, domain)`) and `builtin/lit/mod.rs:88`
 ///     (`is_def_eq(e, ty_mvar)`, `mk_fresh_type_mvar_for`) — both run
 ///     mid-telescope, immediately after minting the fvar/mvar they
 ///     unify, in the same binder's own still-open scope. This is ALSO

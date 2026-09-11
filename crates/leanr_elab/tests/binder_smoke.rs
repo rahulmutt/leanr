@@ -562,7 +562,7 @@ fn fun_binder_domain_comes_from_the_expected_type() {
 /// type to `none` rather than keeping the stale one — once the
 /// telescope runs out of expected-type domains, propagation ITSELF
 /// must not error; the remaining binders' domains just stay mvars.
-/// (`builtin/binder.rs`'s own `#[cfg(test)]` module pins that half
+/// (`builtin/binder/fun.rs`'s own `#[cfg(test)]` module pins that half
 /// directly, in isolation from everything below.)
 ///
 /// The BRIEF's own version of this test asserted the ascription still

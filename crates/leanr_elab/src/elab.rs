@@ -162,7 +162,7 @@ impl<'e> TermElabM<'e> {
     /// later `assign_level` targets an id that was never `declare_level`-d
     /// (confirmed empirically: this was `elab_arrow`'s exact RED-phase
     /// failure, `assign_level: level metavariable .. was never
-    /// declared`, traced to this mismatch, not to `binder.rs` itself).
+    /// declared`, traced to this mismatch, not to `binder/forall.rs` itself).
     /// Minting under `base = Some(view.store)` from the start — matching
     /// `level.rs::fresh_level_mvar`'s own convention exactly — makes the
     /// mint and every later re-intern agree on the same persistent-backed
@@ -578,7 +578,7 @@ fn elab_implicit_lambda(
 ) -> Result<ExprId, ElabError> {
     // Bracket the telescope: restore `lctx` on EVERY exit path (Ok or
     // Err), the same idiom `elab_fun`'s own telescope uses
-    // (`builtin/binder.rs`).
+    // (`builtin/binder/fun.rs`).
     let checkpoint = elab.mctx.lctx_checkpoint();
     let result = (|| {
         let base = elab.view.store;
