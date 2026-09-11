@@ -562,7 +562,7 @@ fn fun_binder_domain_comes_from_the_expected_type() {
 /// type to `none` rather than keeping the stale one — once the
 /// telescope runs out of expected-type domains, propagation ITSELF
 /// must not error; the remaining binders' domains just stay mvars.
-/// (`builtin/binder.rs`'s own `#[cfg(test)]` module pins that half
+/// (`builtin/binder/fun.rs`'s own `#[cfg(test)]` module pins that half
 /// directly, in isolation from everything below.)
 ///
 /// The BRIEF's own version of this test asserted the ascription still
@@ -762,20 +762,21 @@ fn implicit_lambda_does_not_fire_on_strict_implicit() {
 ///
 /// Fix round 1, finding 1: the original draft used `@(Nat.succ
 /// Nat.zero)`, whose inner kind is `Lean.Parser.Term.paren` — that
-/// routes to `app::elab_explicit`'s `other` arm, a SEPARATE,
-/// pre-existing, un-implemented seam (`` `(@($t)) ``/`` `(@$t) ``'s own
-/// fallback, `seam_audit.rs`'s `("@(Nat.succ Nat.zero)", "later M4")`
-/// case — "M4b-3 P5" at the time this test was written, retargeted by
-/// Task 12 once P5 completed without that seam) that errors
-/// unconditionally, before the expected type — and
-/// therefore before `use_implicit_lambda` — is ever consulted. A
-/// mutation check confirmed that term's error is IDENTICAL whether or
-/// not `block_implicit_lambda` actually blocks the wrap, so it pinned
-/// the wrong seam.
+/// routes to `app::elab_explicit`'s `other` arm, at the time a SEPARATE,
+/// un-implemented seam (`` `(@($t)) ``/`` `(@$t) ``'s own fallback,
+/// `seam_audit.rs`'s `("@(Nat.succ Nat.zero)", "later M4")` case —
+/// "M4b-3 P5" at the time this test was written, retargeted by Task 12
+/// once P5 completed without that seam) that errored unconditionally,
+/// before the expected type — and therefore before
+/// `use_implicit_lambda` — was ever consulted (the M4b-3 close-out has
+/// since implemented that arm). A mutation check confirmed that term's
+/// error is IDENTICAL whether or not `block_implicit_lambda` actually
+/// blocks the wrap, so it pinned the wrong seam.
 ///
 /// `@Nat.zero`'s inner kind is plain `<ident>`, which `elab_explicit`
 /// already routes to `elab_atom` (a real, implemented path,
-/// `app/mod.rs:207`) — confirmed against the pinned `lean` binary:
+/// `app/mod.rs`'s `elab_explicit` `<ident>` arm) — confirmed against
+/// the pinned `lean` binary:
 /// `(@Nat.zero : {a : Type} -> Nat)` reports `Type mismatch: Nat.zero
 /// has type Nat ... but is expected to have type {a : Type} → Nat`,
 /// i.e. `@` disables the wrap and `Nat.zero`'s own (non-implicit) type
@@ -831,4 +832,79 @@ fn implicit_lambda_wrap_binder_does_not_capture_a_same_named_outer_binder() {
     // bvar 1 = the OUTER `fun`'s `a`, not the wrap's own (unused) fvar
     // at bvar 0.
     assert_eq!(j["b"]["b"], serde_json::json!({"k": "bvar", "i": 1}));
+}
+
+/// oracle: `elabBinderViews` (`Elab/Binders.lean:216-218`) — an
+/// instance-implicit binder whose type is not a class is rejected ("invalid
+/// binder annotation, type is not a class instance"). Each source was run
+/// on the pinned binary. `forall [i : _]` is included because an
+/// unassigned metavariable is "not a class" too.
+#[test]
+fn inst_binder_whose_type_is_not_a_class_is_rejected() {
+    for src in [
+        "forall [i : Nat], Nat",
+        "[i : Nat] -> Nat",
+        "forall [i : _], Nat",
+    ] {
+        match elab_result(src) {
+            Err(leanr_elab::ElabError::InvalidBinderAnnotation { .. }) => {}
+            other => panic!("{src}: expected InvalidBinderAnnotation, got {other:?}"),
+        }
+    }
+}
+
+/// oracle: `checkLocalInstanceParameters` (`Elab/Binders.lean:199-206`) —
+/// a function-typed instance binder whose non-instance parameter the body
+/// does not depend on is rejected. The third source fails on its SECOND
+/// parameter: the first (`a : Type`) has a forward dependency, so only a
+/// check that keeps walking after it fails.
+#[test]
+fn parametric_inst_binder_without_forward_dependency_is_rejected() {
+    for src in [
+        "forall [i : Nat -> Add Nat], Nat",
+        "forall [i : forall {a : Type}, Add Nat], Nat",
+        "forall [i : forall (a : Type), Nat -> Add a], Nat",
+    ] {
+        match elab_result(src) {
+            Err(leanr_elab::ElabError::InvalidParametricLocalInstance { .. }) => {}
+            other => panic!("{src}: expected InvalidParametricLocalInstance, got {other:?}"),
+        }
+    }
+}
+
+/// `check_local_instance_parameters`'s own pushed parameter (the `a` in
+/// `forall (a : Type), Add a`) must not escape into the OUTER `forall`'s
+/// body: it exists only to test forward dependency and is popped
+/// (`lctx_restore`) before `push_binder_group` pushes the outer `i`. Since
+/// the outer body's `a` was never bound by anything the elaborator keeps,
+/// it is an unknown identifier — confirmed against the pinned `lean`
+/// binary: `Unknown identifier 'a'`.
+#[test]
+fn checked_parameter_does_not_leak_past_the_check() {
+    match elab_result("forall [i : forall (a : Type), Add a], a") {
+        Err(leanr_elab::ElabError::UnknownIdent(_)) => {}
+        other => panic!("expected UnknownIdent, got {other:?}"),
+    }
+}
+
+/// `let`/`have`'s own binders go through `elabBinderViews` too
+/// (`elabLetDeclAux` → `elabBindersEx`, `Elab/Binders.lean:751`), so the
+/// instance-binder check applies. Run on the pinned binary: both
+/// non-class forms report "invalid binder annotation", the parametric one
+/// "invalid parametric local instance".
+#[test]
+fn let_and_have_own_inst_binders_run_the_annotation_check() {
+    for src in [
+        "let f [i : Nat] : Nat := Nat.zero; Nat.zero",
+        "have f [i : Nat] : Nat := Nat.zero; Nat.zero",
+    ] {
+        match elab_result(src) {
+            Err(leanr_elab::ElabError::InvalidBinderAnnotation { .. }) => {}
+            other => panic!("{src}: expected InvalidBinderAnnotation, got {other:?}"),
+        }
+    }
+    match elab_result("let f [i : Nat -> Add Nat] : Nat := Nat.zero; Nat.zero") {
+        Err(leanr_elab::ElabError::InvalidParametricLocalInstance { .. }) => {}
+        other => panic!("expected InvalidParametricLocalInstance, got {other:?}"),
+    }
 }

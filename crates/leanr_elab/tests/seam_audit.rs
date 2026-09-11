@@ -38,7 +38,7 @@
 //! code now, exercised by `tests/oracle_elab.rs`'s `coe/*` records and
 //! `tests/synthetic_smoke.rs` rather than by this file. M4b-3 P5 task 4
 //! then closed the mvar-fType seam itself: `propagateExpectedType`
-//! (`builtin/binder.rs`) now pins a `fun` binder's domain from the
+//! (`builtin/binder/fun.rs`) now pins a `fun` binder's domain from the
 //! ascription BEFORE `app/args.rs` can ever see an unassigned mvar
 //! there, so what remains at that site is a genuine `FunctionExpected`
 //! (`over_application_reports_function_expected` above already covers
@@ -138,7 +138,9 @@ fn elab_src(src: &str) -> Result<leanr_kernel::bank::ExprId, leanr_elab::ElabErr
 ///     since shipped (tasks 8-9) and are no longer deferred either.
 ///     Replaced with `@(..)`, the seam below — which itself later moved
 ///     from "M4b-3 P5" to "later M4" once implicit-lambda insertion
-///     shipped but the `@($t)`/`@$t` wrap disabling it did not.
+///     shipped but the `@($t)`/`@$t` wrap disabling it did not. The
+///     M4b-3 close-out then implemented the wrap and the case was
+///     removed.
 ///   * `("(Nat.succ : Nat -> Nat) Nat.zero Nat.zero", "P2")` — this
 ///     never reached P2. Its head is a `typeAscription`, so it stops one
 ///     step earlier, in `head.rs`, before any argument is processed.
@@ -159,13 +161,6 @@ fn deferred_constructs_are_named_seams() {
     let cases: &[(&str, &str)] = &[
         // (source, expected slice marker in the message)
         //
-        // `elabExplicit`'s `` `(@($t)) `` arm (`App.lean:2269`): `@` on
-        // a non-atom does NOT enter explicit mode, it disables
-        // implicit-lambda insertion. The insertion itself shipped in
-        // M4b-3 P5, but wrapping `@($t)`/`@$t` to elaborate with it
-        // disabled did not — no plan slice has claimed it, so the seam
-        // is "later M4", not "M4b-3 P5" (which is now complete).
-        ("@(Nat.succ Nat.zero)", "later M4"),
         // `elab_explicit`'s LVal arm: `@` on a projection head.
         ("@(Nat.zero).1", "M4b-4"),
         // `peel_head`'s `App.lean:2118` arm — an INVALID occurrence of
@@ -235,7 +230,7 @@ fn over_application_reports_function_expected() {
 /// proceeds. What used to remain was the case `coerceToFunction?`
 /// cannot help with either: `f`'s type still an unassigned mvar, not a
 /// concrete non-function type, so there was nothing yet for a `CoeFun`
-/// search to run against. `propagate_expected_type` (`builtin/binder.rs`)
+/// search to run against. `propagate_expected_type` (`builtin/binder/fun.rs`)
 /// now pins that mvar to `Nat -> Nat` before `f Nat.zero` is ever
 /// elaborated, so this site is reached with a concrete forall and the
 /// seam this test used to pin no longer exists.
@@ -690,10 +685,9 @@ fn literal_kinds_are_registered_not_deferred() {
 /// reason is that no non-rotting formulation exists. Live source
 /// legitimately names INCOMPLETE slices in exactly this position — that
 /// is the named-seam discipline itself (`elab.rs`'s `.postpone` seam
-/// and `app/mod.rs`'s LVal-on-`@` arm both name "M4b-4"; `app/mod.rs`'s
-/// `elabExplicit` "other" arm names "later M4" — none of these are
-/// "M4b-3 P5" any more, now that P5 is complete: this example set itself
-/// had to be rewritten by Task 12 when the two live seams it used to
+/// and `app/mod.rs`'s LVal-on-`@` arm both name "M4b-4"; none of these
+/// are "M4b-3 P5" any more, now that P5 is complete: this example set
+/// itself had to be rewritten by Task 12 when the two live seams it used to
 /// cite, `elab.rs`'s and `app/args.rs`'s own "M4b-3 P5", were closed or
 /// retargeted) — so telling an
 /// offender from a correct seam requires knowing which slices are done,
@@ -930,9 +924,10 @@ fn no_seam_points_at_the_retired_p5_optparam_autoparam_label() {
 /// in M4b-3 P5 (tasks 5-6, `elab.rs`), which completes P5 as a slice —
 /// but `elabExplicit`'s "other" arm (`app/mod.rs`) used to raise this
 /// exact message for the `@($t)`/`@$t` wrap that disables insertion, a
-/// DIFFERENT and still-unclaimed piece of work no P5 task actually did.
-/// Task 12 retargeted it to "later M4" rather than leave a completed
-/// slice's name on an open seam. A bare `"M4b-3 P5"` needle is
+/// DIFFERENT piece of work no P5 task actually did — it has since
+/// shipped in the M4b-3 close-out. Task 12 retargeted it to "later M4"
+/// rather than leave a completed slice's name on an open seam. A bare
+/// `"M4b-3 P5"` needle is
 /// deliberately NOT used here (unlike the P2/P2b-ii/P4 gates above):
 /// this plan's own doc comments legitimately cite "M4b-3 P5 task N" by
 /// the dozen as history throughout this crate, so the needle has to be
@@ -953,7 +948,8 @@ fn no_seam_points_at_the_retired_p5_implicit_lambda_label() {
     assert!(
         offenders.is_empty(),
         "elabExplicit's `@($t)`/`@$t` arm was retargeted from \"M4b-3 P5\" (complete) to \
-         \"later M4\" (unclaimed) by Task 12; stale label at {offenders:?}"
+         \"later M4\" by Task 12, and has since shipped in the M4b-3 close-out; stale label \
+         at {offenders:?}"
     );
 }
 
@@ -1144,8 +1140,8 @@ fn no_seam_points_at_the_retired_p5_implicit_lambda_label() {
 ///     synchronous leaf elaborators invoked mid-telescope, so whatever
 ///     binder is open when a numeral or scientific literal is
 ///     elaborated is still open here too.
-///   * `builtin/binder.rs:439` (`is_def_eq(fvar_type, domain)`,
-///     `propagate_expected_type`) and `builtin/lit/mod.rs:88`
+///   * `builtin/binder/fun.rs`'s `propagate_expected_type`
+///     (`is_def_eq(fvar_type, domain)`) and `builtin/lit/mod.rs:88`
 ///     (`is_def_eq(e, ty_mvar)`, `mk_fresh_type_mvar_for`) — both run
 ///     mid-telescope, immediately after minting the fvar/mvar they
 ///     unify, in the same binder's own still-open scope. This is ALSO
@@ -1468,4 +1464,64 @@ mod scoping_audit {
              does with no outer local-instance binder present"
         );
     }
+}
+
+/// KNOWN DIVERGENCE, pinned so it stays loud (M4b-3 close-out spec,
+/// § Amendment 1). A `let`/`have`-bound local instance whose use the
+/// synthesis fixpoint fills in leaks an UNABSTRACTED `fvar`:
+/// `MetaCtx::mk_let_expr` abstracts with a bare `abstract_fvars` and never
+/// runs `elim_mvar_deps`, unlike `mk_binding` behind `mk_lambda`/`mk_forall`,
+/// so the postponed instance mvar is assigned the let-bound fvar after the
+/// `let` has closed. The oracle emits `bvar 0` here; the `fun (i : Add Nat)`
+/// twin is correct on leanr (`closeout/impl-detail-fun-twin`).
+///
+/// This asserts the WRONG answer on purpose, following
+/// `postponed_coe_under_a_binder_abstracts_via_elim_mvar_deps`'s own
+/// history: it trips the day the gap closes. When it does, flip it to
+/// assert `bvar 0` and add the `closeout/impl-detail-let-twin` /
+/// `-have-twin` records the close-out had to leave out.
+#[test]
+fn a_let_bound_local_instance_consumed_by_synthesis_leaks_an_fvar() {
+    let j =
+        support::elab_and_synthesize("let i : Add Nat := instAddNat; Add.add Nat.zero Nat.zero")
+            .expect("elaborates and synthesizes");
+    assert_eq!(j["k"], "let");
+    // body = `@Add.add Nat <inst> Nat.zero Nat.zero`; `<inst>` is `b.f.f.a`.
+    let inst = &j["b"]["f"]["f"]["a"];
+    assert_eq!(
+        inst["k"], "fvar",
+        "the let-bound local instance no longer leaks — the gap in close-out spec \
+         § Amendment 1 is closed; flip this test to the oracle's `bvar 0` and add the \
+         let/have twin records. Got {inst}"
+    );
+}
+
+/// M4b-3 close-out: retired "later M4" seam messages. Each needle is one
+/// LINE of a message the close-out deleted (a textual scan is a floor: the
+/// retired wording never comes back), following
+/// `no_seam_points_at_the_retired_p5_optparam_autoparam_label`. Neither
+/// label named a slice, so `no_seam_message_names_a_completed_slice`'s
+/// needle list cannot cover them.
+#[test]
+fn no_seam_points_at_a_retired_closeout_label() {
+    let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    let needles = [
+        // `let_like.rs`'s `push_let_binders` guard (task 5).
+        "let: implicit/strict/instance binder in let/have",
+        // `app/mod.rs`'s `elab_explicit` fallback arm (task 6).
+        "does not enter explicit mode",
+    ];
+    let mut offenders = Vec::new();
+    for path in walk_rs_files(src_dir) {
+        let text = std::fs::read_to_string(&path).expect("readable source");
+        for (n, line) in text.lines().enumerate() {
+            if let Some(needle) = needles.iter().find(|needle| line.contains(**needle)) {
+                offenders.push(format!("{}:{} ({needle})", path.display(), n + 1));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the M4b-3 close-out retired these seams; stale label at {offenders:?}"
+    );
 }

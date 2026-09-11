@@ -1382,6 +1382,27 @@ reader does not have to re-derive it:
 explicit probes on this hazard, are unaffected by this determination
 and are not separately recorded here.
 
+## Amendment 10 (2026-09-11, post-P5): the close-out slice, and a correction to Amendment 9
+
+M4b-3's phases are complete. The inherited items from § Amendment 9
+item 5 get one close-out slice before M4b-4, specified in
+`docs/superpowers/specs/2026-09-11-m4b3-closeout-design.md`: the
+`__`-binder local-instance divergence, a binder-annotation acceptance
+gap found while scoping it, `let`/`have`'s own implicit/instance
+binder list, the `@($t)`/`@$t` wrap, and the `builtin/binder.rs` split.
+
+**Correction to Amendment 9 item 5.** Its last bullet prescribes the
+`__` fix as "a `Name.isImplementationDetail`-style test on the binder
+name inside `install_local_instance_for`". That fix is wrong. The oracle
+classifies a declaration as an implementation detail only where it
+passes `kind := .ofBinderName` — the user-binder sites
+`Binders.lean:221`, `:434` and `:805`, plus match and `do` — and every
+other `withLocalDecl` keeps `.default` whatever the name. A name test
+inside `install_local_instance_for` would also skip `leanr_meta`'s own
+telescope pushes and `forall_telescope_reducing` over a constant whose
+parameter is named `__x`. The close-out spec decides the kind at the
+elaborator's user-binder sites instead.
+
 ## What M4b-3 ships — and the stated non-shipping
 
 Like all of M4a and M4b so far, **M4b-3 does not ship independently
@@ -2307,6 +2328,9 @@ own slice ahead of P5 rather than folding it into P5's breadth (§
 Amendment 7): `MkBinding.elimMVarDeps`, spec
 `docs/superpowers/specs/2026-09-09-elim-mvar-deps-design.md`, plan
 `docs/superpowers/plans/2026-09-09-elim-mvar-deps.md`. That slice has
-landed. **P5 — binder and argument breadth — is next**, with no further
-prerequisite slice, and gets its own implementation plan, mirroring
-M4b-2's rhythm.
+landed. P5 — binder and argument breadth — shipped in #44 (§ Amendment
+9), completing M4b-3's phases.
+
+**Next is the M4b-3 close-out slice** (§ Amendment 10,
+`docs/superpowers/specs/2026-09-11-m4b3-closeout-design.md`), then
+M4b-4.

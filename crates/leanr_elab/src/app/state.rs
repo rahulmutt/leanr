@@ -538,7 +538,8 @@ impl<'a, 'e> AppElab<'a, 'e> {
     /// context); both call sites pass an already-instantiated `getFType`.
     ///
     /// The ambient `lctx` is restored on EVERY exit path (`Ok` or `Err`)
-    /// — `builtin/binder.rs:217,226`'s checkpoint/restore idiom — so the
+    /// — `builtin/binder/forall.rs`'s `elab_binders_and_forall`
+    /// checkpoint/restore idiom — so the
     /// telescope's fvars never outlive `k`.
     pub(crate) fn forall_telescope_reducing<R>(
         &mut self,

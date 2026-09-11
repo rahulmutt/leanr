@@ -58,7 +58,7 @@ pub fn main(app: &mut AppElab, kinds: &KindInterner) -> Result<ExprId, ElabError
             // pushFoundNamedArg binderName` (`App.lean:940-941`).
             // leanr's binder names carry NO macro scopes — they come
             // either from an `.olean` declaration's own binder names or
-            // from `builtin/binder.rs`'s surface-syntax identifiers,
+            // from `builtin/binder/mod.rs`'s surface-syntax identifiers,
             // neither of which goes through Lean's hygiene machinery — so
             // the guard is vacuously true here and scope stripping is
             // deliberately not implemented. An ANONYMOUS binder
@@ -139,7 +139,7 @@ fn synthesize_pending_and_normalize_fun_type(
     // Only the last changes control flow, so only it is ported.
     //
     // M4b-3 P5 task 4 closed the mvar-fType seam that used to sit here:
-    // `propagateExpectedType` (`builtin/binder.rs`) now pins a `fun`
+    // `propagateExpectedType` (`builtin/binder/fun.rs`) now pins a `fun`
     // binder's domain from the ascription BEFORE this point is ever
     // reached, so an `fType` still an unassigned mvar here is a genuine
     // "Function expected" — the oracle draws no distinction either

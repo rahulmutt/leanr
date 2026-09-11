@@ -214,7 +214,7 @@ impl<'e> TermElabM<'e> {
     /// change at every call site.
     ///
     /// Visibility, settled for all four functions in this module: every
-    /// caller is in-crate (`builtin/binder.rs`, `builtin/ascription.rs`,
+    /// caller is in-crate (`builtin/binder/mod.rs`, `builtin/ascription.rs`,
     /// `app/args.rs`, `elab.rs`, `synthetic/ladder.rs`), so all four are
     /// `pub(crate)`. Three were `pub` until the whole-branch fix wave —
     /// an external-API claim nothing was making use of.

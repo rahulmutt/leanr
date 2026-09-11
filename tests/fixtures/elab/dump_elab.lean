@@ -783,6 +783,76 @@ def p5ArgQueries : List (String × String) :=
   , ("p5/autoparam-supplied", "withTactic Nat.zero")
   ]
 
+/-- M4b-3 close-out: implementation-detail binders. The oracle gives a
+user-written binder whose name's root component starts with `__` the kind
+`.implDetail` (`LocalDeclKind.ofBinderName`, `Elab/BindersUtil.lean:21-25`),
+and `withNewLocalInstanceImp` (`Meta/Basic.lean:1383-1388`) never installs
+it as a local instance. Each `__` query below therefore elaborates against
+the GLOBAL `instAddNat`; each `-twin` against the local binder.
+
+`let`/`have` have no twin, deliberately: a let-bound local instance
+consumed through synthesis leaks an unabstracted fvar on leanr
+(`seam_audit.rs`'s
+`a_let_bound_local_instance_consumed_by_synthesis_leaks_an_fvar`; close-out
+spec § Amendment 1), which `oracle_elab`'s leaked-fvar assertion rejects. -/
+def closeoutImplDetailQueries : List (String × String) :=
+  [ ("closeout/impl-detail-fun",           "fun (__i : Add Nat) => (Add.add Nat.zero Nat.zero : Nat)")
+  , ("closeout/impl-detail-fun-twin",      "fun (i : Add Nat) => (Add.add Nat.zero Nat.zero : Nat)")
+  , ("closeout/impl-detail-fun-inst",      "fun [__i : Add Nat] => (Add.add Nat.zero Nat.zero : Nat)")
+  , ("closeout/impl-detail-fun-inst-twin", "fun [i : Add Nat] => (Add.add Nat.zero Nat.zero : Nat)")
+  , ("closeout/impl-detail-forall",        "forall (__i : Add Nat), Eq (Add.add Nat.zero Nat.zero) Nat.zero")
+  , ("closeout/impl-detail-forall-twin",   "forall (i : Add Nat), Eq (Add.add Nat.zero Nat.zero) Nat.zero")
+  , ("closeout/impl-detail-let",           "let __i : Add Nat := instAddNat; (Add.add Nat.zero Nat.zero : Nat)")
+  , ("closeout/impl-detail-have",          "have __i : Add Nat := instAddNat; (Add.add Nat.zero Nat.zero : Nat)")
+  ]
+
+/-- M4b-3 close-out: instance-binder forms the oracle ACCEPTS
+(`elabBinderViews`, `Elab/Binders.lean:216-219`;
+`checkLocalInstanceParameters`, `:199-206`). They pass on leanr before the
+check exists and are here to catch a check that over-rejects: a
+forward-dependent parameter, an instance-implicit parameter, a non-instance
+binder (never checked), the depArrow spelling, and `fun` (whose
+`elabFunBinderViews` runs no check at all). Rejected forms emit no record;
+`binder_smoke.rs` pins them. -/
+def closeoutBinderCheckQueries : List (String × String) :=
+  [ ("closeout/binder-check-forward-dep",   "forall [i : forall (a : Type), Add a], Nat")
+  , ("closeout/binder-check-inst-param",    "forall [i : forall [Add Nat], Add Nat], Nat")
+  , ("closeout/binder-check-explicit",      "forall (i : Nat -> Add Nat), Nat")
+  , ("closeout/binder-check-dep-arrow",     "[i : forall (a : Type), Add a] -> Nat")
+  , ("closeout/binder-check-fun-unchecked", "fun [i : Nat] => i")
+  ]
+
+/-- M4b-3 close-out: `let`/`have`'s OWN binder list with implicit,
+strict-implicit and instance binders (`elabLetDeclAux` →
+`elabBindersEx`, `Elab/Binders.lean:745`, `:751`). The value is
+abstracted over the binders, so `f`'s type carries their binder infos and
+the body's `f` gets its instance / implicit arguments inserted. -/
+def closeoutLetBinderQueries : List (String × String) :=
+  [ ("closeout/let-inst-named",       "let f [i : Add Nat] : Nat := Add.add Nat.zero Nat.zero; f")
+  , ("closeout/let-inst-anon",        "let f [Add Nat] : Nat := Add.add Nat.zero Nat.zero; f")
+  , ("closeout/let-inst-impl-detail", "let f [__i : Add Nat] : Nat := Add.add Nat.zero Nat.zero; f")
+  , ("closeout/let-implicit",         "let f {a : Type} (x : a) : a := x; f Nat.zero")
+  , ("closeout/let-strict",           "let f ⦃a : Type⦄ (x : a) : a := x; f")
+  , ("closeout/have-inst-named",      "have f [i : Add Nat] : Nat := Add.add Nat.zero Nat.zero; f")
+  , ("closeout/have-implicit",        "have f {a : Type} (x : a) : a := x; f Nat.zero")
+  ]
+
+/-- M4b-3 close-out: `@($t)` / `@$t` elaborate `t` with
+`implicitLambda := false` (`Elab/App.lean:2269-2270`). The flag covers
+`t` itself, not its subterms (`Elab/Term/TermElabM.lean:1876-1877`), but
+it survives macro expansion (`:1837`) and `paren` is a macro
+(`expandParen`, `Elab/BuiltinNotation.lean:410`), hence the nested-paren
+and subterm queries. `(fun (a : Type) => a : {a : Type} -> Type)` without
+the `@` is a type mismatch in the oracle; with it, it elaborates. -/
+def closeoutExplicitQueries : List (String × String) :=
+  [ ("closeout/explicit-paren",        "(@(fun (a : Type) => a) : {a : Type} -> Type)")
+  , ("closeout/explicit-nested-paren", "(@((fun (a : Type) => a)) : {a : Type} -> Type)")
+  , ("closeout/explicit-subterm",      "(@(fun (a : Type) => (Nat.zero : {b : Type} -> Nat)) : {a : Type} -> {b : Type} -> Nat)")
+  , ("closeout/explicit-no-expected",  "@(fun (a : Type) => a)")
+  , ("closeout/explicit-implicit-fun", "(@(fun {a : Type} => Nat.zero) : {a : Type} -> Nat)")
+  , ("closeout/explicit-app",          "@(Nat.succ Nat.zero)")
+  ]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -796,7 +866,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries ++ closeoutExplicitQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>

@@ -23,7 +23,7 @@
 //! it. `tests/seam_audit.rs`'s `no_seam_points_at_the_retired_p2b_ii_label`
 //! gates that its message never comes back. **Also no longer a seam, as
 //! of M4b-3 P5**: the `fType` still-an-unassigned-mvar row (task 4 —
-//! `propagateExpectedType`, `builtin/binder.rs`, now pins a `fun`
+//! `propagateExpectedType`, `builtin/binder/fun.rs`, now pins a `fun`
 //! binder's domain from its ascription before `app/args.rs` can ever
 //! see an unassigned mvar there; what remains is a genuine
 //! `FunctionExpected`, `tests/seam_audit.rs`'s
@@ -33,9 +33,9 @@
 //! `tests/oracle_elab.rs`'s `p5/*` records now that `Elab0.lean`
 //! declares `withDefault`/`withTactic`), and implicit-lambda insertion
 //! ITSELF (tasks 5-6 — `elab.rs`'s `use_implicit_lambda`/
-//! `elab_implicit_lambda`). What P5 did NOT close: the `@($t)`/`@$t`
-//! wrap here that elaborates with insertion explicitly disabled — see
-//! `elab_explicit`'s own doc comment, retargeted to "later M4" below.
+//! `elab_implicit_lambda`). The M4b-3 close-out then closed the
+//! `@($t)`/`@$t` wrap that elaborates with insertion explicitly disabled
+//! (`elab_explicit`).
 //!
 //! NOT in this plan, each a named seam (never a silent fall-through).
 //! `Where` is the site that raises it; every message below carries its
@@ -59,7 +59,7 @@
 //!   coercions (CoeT/CoeFun/CoeSort, mkCoe) ........... P4 SHIPPED — coe.rs, args.rs
 //!   optParam defaults / autoParam .................... P5 SHIPPED — args.rs
 //!   implicit-lambda insertion (the feature) .......... P5 SHIPPED — elab.rs
-//!   `@($t)`/`@$t` disabling implicit-lambda insertion . later M4  here (`elab_explicit`)
+//!   `@($t)`/`@$t` disabling implicit-lambda insertion . SHIPPED (close-out) — here, elab.rs
 //!   overload resolution (candidates > 1) ............. resolve_global slice  overload.rs
 //!   elabAsElim, RECURSOR heads only (partial!) ....... M4b-4 head.rs
 //!   dot notation, LVal machinery ..................... M4b-4 head.rs, here, dispatch.rs
@@ -188,16 +188,11 @@ pub fn elab_atom(
 /// | `(@$t)                     => elabTerm t expectedType? (implicitLambda := false)
 /// ```
 ///
-/// P1 implements the first family and NAMES the other two, because
-/// `@t` exists precisely to disable implicit-lambda insertion (P5's) —
-/// so routing it to `elab_atom` would not merely be incomplete, it
-/// would enter explicit mode the oracle never enters. Implicit-lambda
-/// insertion itself SHIPPED in M4b-3 P5 (`elab.rs`'s
-/// `use_implicit_lambda`/`elab_implicit_lambda`); actually WRAPPING
-/// `@($t)`/`@$t` to elaborate `t` with it disabled is a one-liner now
-/// that the feature exists, but no plan slice has claimed the change or
-/// added a corpus record for it, so it stays a named seam — retargeted
-/// below to "later M4" rather than the now-complete "M4b-3 P5".
+/// P1 implemented the first family; the M4b-3 close-out implemented the
+/// last two, which elaborate `t` through
+/// `TermElabM::elab_term_without_implicit_lambda`. `@t` exists precisely
+/// to disable implicit-lambda insertion, so routing it to `elab_atom`
+/// would enter explicit mode the oracle never enters.
 ///
 /// The `.field` forms are the LVal machinery (M4b-4); in leanr's tree
 /// a dotted name like `@Nat.succ` is a single `<ident>` TOKEN
@@ -221,13 +216,13 @@ pub fn elab_explicit(
              machinery is M4b-4"
                 .to_string(),
         )),
-        other => Err(ElabError::UnsupportedSyntax(format!(
-            "`@` applied to `{other}` does not enter explicit mode — it DISABLES \
-             implicit-lambda insertion (App.lean:2269-2270) — later M4 (the \
-             insertion itself already shipped; wrapping `@($t)`/`@$t` to \
-             elaborate with it disabled did not, and no plan slice has \
-             claimed it)"
-        ))),
+        // oracle: `` `(@($t)) `` / `` `(@$t) `` => `elabTerm t expectedType?
+        // (implicitLambda := false)` (`App.lean:2269-2270`). One arm for
+        // both: handed the `paren` node itself,
+        // `elab_term_without_implicit_lambda` carries the flag through the
+        // parentheses to `t`, which is what the `@($t)` arm does by matching
+        // `t` out of them.
+        _ => elab.elab_term_without_implicit_lambda(&inner, kinds, expected),
     }
 }
 
@@ -462,7 +457,8 @@ fn elab_app_aux(
         found_named_args: Vec::new(),
     };
     let mut app = state::AppElab { ctx, st, elab };
-    // Bracket the whole loop (M4b-2's `binder.rs:217,226` idiom):
+    // Bracket the whole loop (M4b-2's `binder/forall.rs`'s
+    // `elab_binders_and_forall` idiom):
     // `args::add_eta_arg` pushes one fvar per eta-expanded parameter
     // into the ambient `lctx`, and `finalize`'s `mkLambdaFVars`
     // abstracts them back out — but only on the success path. Restoring

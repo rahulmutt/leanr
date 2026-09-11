@@ -697,25 +697,45 @@ fn explicit_univ_list_uses_sep_args_not_every_child() {
 }
 
 /// oracle: `elabExplicit`'s `` `(@($t)) ``/`` `(@$t) `` arms
-/// (`App.lean:2269-2270`) do NOT enter explicit mode — they elaborate
-/// `t` with `implicitLambda := false`. Implicit-lambda insertion itself
-/// shipped in M4b-3 P5 (tasks 5-6), but wrapping `@($t)`/`@$t` to
-/// elaborate with it explicitly disabled did not: it is a one-liner now
-/// that insertion exists, yet no plan slice claimed it, so Task 12
-/// retargeted the seam from the now-complete "M4b-3 P5" to "later M4".
-/// Routing them to `elab_atom` would enter explicit mode the oracle
-/// never enters, so the seam must NAME its owner rather than fall
-/// through.
+/// (`App.lean:2269-2270`) do NOT enter explicit mode — they elaborate `t`
+/// with `implicitLambda := false`. Implemented by the M4b-3 close-out
+/// (`elab.rs`'s `elab_term_without_implicit_lambda`); the corpus records
+/// `closeout/explicit-*` pin the terms. This pins the retired seam's own
+/// example as a success.
 #[test]
-fn at_on_a_non_atom_names_the_later_m4_seam() {
-    match elab_src("@(Nat.succ Nat.zero)") {
-        Err(leanr_elab::ElabError::UnsupportedSyntax(m)) => {
-            assert!(
-                m.contains("later M4") && m.contains("implicit-lambda"),
-                "the `@t` seam must name its owner and say why, got {m:?}"
-            );
-        }
-        other => panic!("expected the later-M4 seam, got {other:?}"),
+fn at_on_a_parenthesised_term_elaborates_it() {
+    assert!(
+        elab_src("@(Nat.succ Nat.zero)").is_ok(),
+        "`@(t)` must elaborate `t`, not raise a seam"
+    );
+}
+
+/// `@0` is the `` `(@$t) `` arm with a non-`paren` `t`. Pinned binary:
+/// `(@0 : {a : Type} → Nat)` fails with "failed to synthesize instance of
+/// type class OfNat ({a : Type} → Nat) 0", while `(0 : {a : Type} → Nat)`
+/// elaborates to `fun {a : Type} => 0`. So the `@` really does switch off
+/// implicit-lambda insertion for a non-parenthesised term. The corpus
+/// cannot hold this — an oracle error emits no record.
+///
+/// "failed to synthesize" is `synthesizeInstMVarCore`'s `.none` arm, which
+/// is `ElabError::InstanceSynthesisFailed`. If leanr reports a different
+/// variant here, stop and compare against the oracle; do not widen the
+/// match.
+#[test]
+fn at_on_a_numeral_disables_implicit_lambda() {
+    match support::elab_and_synthesize("(@0 : {a : Type} -> Nat)") {
+        Err(leanr_elab::ElabError::InstanceSynthesisFailed { .. }) => {}
+        other => panic!("expected InstanceSynthesisFailed, got {other:?}"),
+    }
+}
+
+/// `@(e : T)` is the `` `(@$t) `` arm with a type ascription. Pinned
+/// binary: `(@(Nat.zero : Nat) : {a : Type} → Nat)` is a type mismatch.
+#[test]
+fn at_on_an_ascription_is_a_type_mismatch() {
+    match support::elab_result("(@(Nat.zero : Nat) : {a : Type} -> Nat)") {
+        Err(leanr_elab::ElabError::TypeMismatch { .. }) => {}
+        other => panic!("expected TypeMismatch, got {other:?}"),
     }
 }
 
@@ -723,8 +743,9 @@ fn at_on_a_non_atom_names_the_later_m4_seam() {
 /// (`App.lean:2118`) — in a FUNCTION position `@` on anything outside
 /// the seven `elabAtom` shapes is simply invalid; it is NOT the
 /// implicit-lambda-disabling form (that one is only reachable when the
-/// `@..` node is the whole term). Two different oracle arms, so two
-/// different seams.
+/// `@..` node is the whole term). Two different oracle arms; only this
+/// one is still a seam (the other is implemented by the M4b-3
+/// close-out).
 #[test]
 fn at_on_a_non_atom_head_is_an_invalid_occurrence() {
     match elab_src("@(Nat.succ) Nat.zero") {
@@ -736,6 +757,51 @@ fn at_on_a_non_atom_head_is_an_invalid_occurrence() {
         }
         other => panic!("expected the head-position `@` seam, got {other:?}"),
     }
+}
+
+/// Pins spec § Design 5's first bullet: "`false` skips
+/// `use_implicit_lambda` entirely, including its `.postpone` arm."
+/// oracle: `useImplicitLambda`'s local-identifier-with-mvar-type special
+/// case, `TermElabM.lean:1753-1778` (`return .postpone` at `:1778`),
+/// consulted by `elabTermAux`'s `| .postpone =>` dispatch arm
+/// (`:1843`) — but only when `elabTermAux` is called with
+/// `implicitLambda := true`; `elab_term_core`'s `false` path never
+/// calls `use_implicit_lambda` at all (`elab.rs`, above), so this local
+/// never reaches the postpone check in the first place.
+///
+/// `@(f)`'s inner `f` is exactly the shape `useImplicitLambda`'s
+/// special case exists for: a bare local identifier whose own type is
+/// still an unassigned metavariable (`fun f => ..` gives `f` no
+/// annotation). Confirmed against the pinned `lean` binary: `fun f =>
+/// (@(f) : {a : Type} -> Nat)` elaborates to `fun (f : {a : Type} →
+/// Nat) => f` — `f`'s mvar type unifies directly against the
+/// ascription's expected type, with no implicit-lambda wrapping and no
+/// postponement.
+///
+/// Without the guard this test exists to pin, a caller could
+/// reintroduce a `use_implicit_lambda` consultation into the `false`
+/// path (e.g. ahead of dispatch) and every other `leanr_elab` test
+/// still passes, because nothing else drives an `@`-disabled term
+/// through a local whose type is an unassigned mvar. Asserting on the
+/// JSON shape (not just `is_ok`) also rules out a version that
+/// succeeds for the wrong reason (e.g. an implicit lambda silently
+/// re-inserted around `f`).
+#[test]
+fn at_on_a_local_with_mvar_type_skips_the_postpone_arm() {
+    let j = support::elab_and_synthesize("(fun f => (@(f) : {a : Type} -> Nat))")
+        .unwrap_or_else(|e| panic!("expected Ok, got {e:?}"));
+    assert_eq!(
+        j["k"], "lam",
+        "must be `fun (f : {{a : Type}} -> Nat) => f`"
+    );
+    assert_eq!(
+        j["b"],
+        serde_json::json!({"k": "bvar", "i": 0}),
+        "the body must be plain `f` (a bvar into the outer binder) — an \
+         implicit lambda around it, or a postpone-arm error, would both \
+         show `use_implicit_lambda` was consulted for `f` despite the \
+         `false` (no-implicit-lambda) path"
+    );
 }
 
 /// Under `@`, `processImplicitArg` delegates to `processExplicitArg`
