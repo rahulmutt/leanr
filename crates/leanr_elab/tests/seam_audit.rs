@@ -1466,34 +1466,77 @@ mod scoping_audit {
     }
 }
 
-/// KNOWN DIVERGENCE, pinned so it stays loud (M4b-3 close-out spec,
-/// § Amendment 1). A `let`/`have`-bound local instance whose use the
-/// synthesis fixpoint fills in leaks an UNABSTRACTED `fvar`:
-/// `MetaCtx::mk_let_expr` abstracts with a bare `abstract_fvars` and never
-/// runs `elim_mvar_deps`, unlike `mk_binding` behind `mk_lambda`/`mk_forall`,
-/// so the postponed instance mvar is assigned the let-bound fvar after the
-/// `let` has closed. The oracle emits `bvar 0` here; the `fun (i : Add Nat)`
-/// twin is correct on leanr (`closeout/impl-detail-fun-twin`).
+/// A `let`/`have`-bound local instance consumed by an application in the
+/// body comes back ABSTRACTED: `bvar 0`, the oracle's answer for both forms
+/// (dumped against `leanprover/lean4:v4.33.0-rc1`).
 ///
-/// This asserts the WRONG answer on purpose, following
-/// `postponed_coe_under_a_binder_abstracts_via_elim_mvar_deps`'s own
-/// history: it trips the day the gap closes. When it does, flip it to
-/// assert `bvar 0` and add the `closeout/impl-detail-let-twin` /
-/// `-have-twin` records the close-out had to leave out.
+/// **History.** Until the fix this pinned the wrong answer, an unabstracted
+/// `fvar`, and its doc blamed `mk_let_expr` skipping `elim_mvar_deps`
+/// (close-out spec § Amendment 1). That diagnosis was wrong (§ Amendment
+/// 2): the instance is solved EAGERLY, so `?inst := i` is assigned before
+/// the `let` closes — it was just never substituted into the body, and a
+/// bare `abstract_fvars` cannot see through an assigned mvar. The oracle
+/// instantiates the body first (`elabTermEnsuringType body expectedType?
+/// >>= instantiateMVars`, `Elab/Binders.lean:824`); `elab_let_like` now
+/// does too. Deleting that call turns both rows back into `fvar`.
+///
+/// The genuine `elim_mvar_deps` gap — an mvar still UNASSIGNED when the
+/// `let` closes — is a different divergence, pinned by
+/// `a_coercion_postponed_under_a_let_leaks_an_fvar` below.
 #[test]
-fn a_let_bound_local_instance_consumed_by_synthesis_leaks_an_fvar() {
-    let j =
-        support::elab_and_synthesize("let i : Add Nat := instAddNat; Add.add Nat.zero Nat.zero")
-            .expect("elaborates and synthesizes");
-    assert_eq!(j["k"], "let");
-    // body = `@Add.add Nat <inst> Nat.zero Nat.zero`; `<inst>` is `b.f.f.a`.
-    let inst = &j["b"]["f"]["f"]["a"];
-    assert_eq!(
-        inst["k"], "fvar",
-        "the let-bound local instance no longer leaks — the gap in close-out spec \
-         § Amendment 1 is closed; flip this test to the oracle's `bvar 0` and add the \
-         let/have twin records. Got {inst}"
-    );
+fn a_let_bound_local_instance_consumed_by_an_application_abstracts_to_bvar_0() {
+    for src in [
+        "let i : Add Nat := instAddNat; Add.add Nat.zero Nat.zero",
+        "have i : Add Nat := instAddNat; Add.add Nat.zero Nat.zero",
+    ] {
+        let j = support::elab_and_synthesize(src).expect("elaborates and synthesizes");
+        assert_eq!(j["k"], "let", "{src}");
+        // body = `@Add.add Nat <inst> Nat.zero Nat.zero`; `<inst>` is `b.f.f.a`.
+        let inst = &j["b"]["f"]["f"]["a"];
+        assert_eq!(
+            *inst,
+            serde_json::json!({"k": "bvar", "i": 0}),
+            "`{src}`: the let-bound local instance must be abstracted to the oracle's \
+             `bvar 0`, not leak as an fvar — is `elab_let_like` still instantiating the \
+             body before `mk_let_expr`?"
+        );
+    }
+}
+
+/// KNOWN DIVERGENCE, pinned so it stays loud (close-out spec § Amendment 2).
+/// A `.coe` metavariable postponed inside a `let`/`have` body is still
+/// UNASSIGNED when the `let` closes, so instantiating the body does not
+/// help: `MetaCtx::mk_let_expr` abstracts with a bare `abstract_fvars` and
+/// never runs `elim_mvar_deps`, and the coercion resumed afterwards leaks
+/// the let-bound `fvar`. The oracle emits `pairW Nat (Wrapper.mk Nat
+/// (bvar 0)) Nat.zero` for both forms; the `fun (n : Nat)` twin is correct
+/// on leanr (`postponed_coe_under_a_binder_abstracts_via_elim_mvar_deps`,
+/// corpus record `coe/postponedThenResumedUnderBinder`).
+///
+/// Closing it needs `mkAuxMVarType`'s ldecl arms (`MetavarContext.lean:
+/// 1133-1156`) and `mkMVarApp`'s `isLet` test (`:1097`), which read a
+/// `nondep` bit leanr's local declarations do not carry — its own slice.
+///
+/// This asserts the WRONG answer on purpose: it trips the day the gap
+/// closes. When it does, flip it to `bvar 0` and add the let/have twins of
+/// `coe/postponedThenResumedUnderBinder` to the corpus.
+#[test]
+fn a_coercion_postponed_under_a_let_leaks_an_fvar() {
+    for src in [
+        "let n : Nat := Nat.zero; pairW n Nat.zero",
+        "have n : Nat := Nat.zero; pairW n Nat.zero",
+    ] {
+        let j = support::elab_and_synthesize(src).expect("elaborates and synthesizes");
+        assert_eq!(j["k"], "let", "{src}");
+        // body = `pairW Nat (Wrapper.mk Nat <n>) Nat.zero`; `<n>` is `b.f.a.a`.
+        let n = &j["b"]["f"]["a"]["a"];
+        assert_eq!(
+            n["k"], "fvar",
+            "`{src}`: the postponed coercion under a let no longer leaks — the gap in \
+             close-out spec § Amendment 2 is closed; flip this test to the oracle's \
+             `bvar 0` and add the let/have corpus twins. Got {n}"
+        );
+    }
 }
 
 /// M4b-3 close-out: retired "later M4" seam messages. Each needle is one
