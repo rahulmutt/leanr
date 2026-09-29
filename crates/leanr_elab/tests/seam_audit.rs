@@ -699,8 +699,9 @@ fn literal_kinds_are_registered_not_deferred() {
 /// It is deliberately NOT generalised to "any completed slice", and the
 /// reason is that no non-rotting formulation exists. Live source
 /// legitimately names INCOMPLETE slices in exactly this position — that
-/// is the named-seam discipline itself (`elab.rs`'s `.postpone` seam
-/// names "M4b-4a P2" and `app/mod.rs`'s `@.f` arm "M4b-4a P4"; none of these
+/// is the named-seam discipline itself (`app/mod.rs`'s `@.f` arm names
+/// "M4b-4a P4", and until M4b-4a P2 closed it `elab.rs`'s `.postpone` seam
+/// named "M4b-4a P2"; none of these
 /// are "M4b-3 P5" any more, now that P5 is complete: this example set
 /// itself had to be rewritten by Task 12 when the two live seams it used to
 /// cite, `elab.rs`'s and `app/args.rs`'s own "M4b-3 P5", were closed or
@@ -748,10 +749,17 @@ fn literal_kinds_are_registered_not_deferred() {
 /// was temporarily added to `app/lval.rs`: this test failed naming
 /// exactly that line, and passed again once it was removed (both runs
 /// in the task 7 report).
+///
+/// **`M4b-4a P2` was added by M4b-4a P2 task 5, and measured
+/// non-vacuous.** The needle first failed on a trailing `// M4b-4a P2`
+/// on `lib.rs`'s `mod postpone;` line (a live line, so not skipped);
+/// after removing it the test passed, and a live line
+/// `let _ = "M4b-4a P2";` temporarily added to `postpone.rs` made it
+/// fail naming that line, then pass again once removed.
 #[test]
 fn no_seam_message_names_a_completed_slice() {
     let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
-    let needles = ["M4b-3 P3", "M4b-3 P4", "M4b-3 P5", "M4b-4a P1"];
+    let needles = ["M4b-3 P3", "M4b-3 P4", "M4b-3 P5", "M4b-4a P1", "M4b-4a P2"];
     let mut offenders = Vec::new();
     for path in walk_rs_files(src_dir) {
         let text = std::fs::read_to_string(&path).expect("readable source");
@@ -766,7 +774,7 @@ fn no_seam_message_names_a_completed_slice() {
     }
     assert!(
         offenders.is_empty(),
-        "M4b-3 P3, P4, P5 and M4b-4a P1 are complete; live (non-comment) source \
+        "M4b-3 P3, P4, P5 and M4b-4a P1, P2 are complete; live (non-comment) source \
          claiming one at {offenders:?}"
     );
 }

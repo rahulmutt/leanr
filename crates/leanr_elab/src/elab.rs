@@ -428,7 +428,7 @@ impl<'e> TermElabM<'e> {
     /// Cost: `save_term_state` clones the three `Term.State` tables and
     /// the mctx assignment maps on EVERY caught elaboration, where the
     /// oracle's persistent structures make `saveState` O(1). Recorded in
-    /// the spec's § Landed as a known cost.
+    /// the spec's § Landed › P2 as the "Known cost" bullet.
     fn elab_using_elab_fns(
         &mut self,
         elem: &SynElem,

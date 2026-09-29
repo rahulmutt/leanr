@@ -112,9 +112,8 @@
 //!   `elab_implicit_lambda` — the *guard* was P1's, `block_implicit_lambda`).
 //!   The `@($t)`/`@$t` wrap that elaborates with insertion explicitly
 //!   disabled SHIPPED in the M4b-3 close-out (`app/mod.rs`'s
-//!   `elab_explicit`). Still deferred: `useImplicitLambda`'s `.postpone`
-//!   arm, a named `M4b-4a P2` seam (`elab.rs`'s
-//!   `UseImplicitLambda::Postpone`).
+//!   `elab_explicit`). `useImplicitLambda`'s `.postpone` arm SHIPPED in
+//!   M4b-4a P2 (`elab.rs`'s `UseImplicitLambda::Postpone`).
 //! - **overload resolution** (more than one candidate from
 //!   `elabAppFn`) — the slice that grows `resolve_global`, since it is
 //!   unreachable while only exact names resolve.
@@ -131,11 +130,13 @@
 //! - **dot notation / LVal machinery** — M4b-4a. P1 SHIPPED: `Term.proj`
 //!   index projections, structure fields and projection functions, the
 //!   resolution loop, `numImplicitParams` and `@` on projection heads
-//!   (`app/lval.rs`, `app/head.rs`). Still deferred, each a named seam:
-//!   postponement P2, generalized field notation (`.const`, `Function.f`)
-//!   P3, `pipeProj`/`dotIdent`/`namedPattern` P4, `choice` the
-//!   overloading slice, private field projections the slice that models
-//!   private names. The anonymous constructor `⟨⟩` — M4b-4b; `binop%` —
+//!   (`app/lval.rs`, `app/head.rs`). P2 SHIPPED term-level postponement
+//!   (`postpone.rs`; `resolveLValLoop`, `elabAppArgs` and
+//!   `useImplicitLambda` produce). Still deferred, each a named seam:
+//!   generalized field notation (`.const`, `Function.f`) P3,
+//!   `pipeProj`/`dotIdent`/`namedPattern` P4, `choice` the overloading
+//!   slice, private field projections the slice that models private
+//!   names. The anonymous constructor `⟨⟩` — M4b-4b; `binop%` —
 //!   the macro-expansion slice.
 //! - **macro expansion** — `dispatch` never expands a macro form; the
 //!   dispatch table only ever matches a syntax kind directly against a
@@ -158,68 +159,32 @@
 //! Recording the hole here is the alternative to either leaving it to
 //! be rediscovered or quietly asserting more coverage than exists.
 //!
-//! - **`SyntheticMVarKind::Postponed` has no producer anywhere in this
-//!   branch** (re-verified by grep over `src/` and `tests/` at the end
-//!   of P3: outside its own declaration at `synthetic/state.rs:58`,
-//!   every CODE occurrence of the variant is a match arm —
-//!   `synthetic/ladder.rs:264` and `synthetic/report.rs:106` — never a
-//!   construction site). So this is stronger than "no differential
-//!   coverage yet": `SavedContext`, `save_context` (zero callers),
-//!   `with_saved_context`, `resume_postponed`, and the `check_occurs`
-//!   accessor it uses for its assignment guard are UNREACHABLE from
-//!   every code path in this branch, not merely undiffable.
-//!
-//!   **This entry used to predict that the first producer arrives with
-//!   P3's `elabNum`. P3 landed and it did not — the prediction was
-//!   simply wrong, measured against the pinned source rather than
-//!   inferred.** `elabNumLit` (`BuiltinTerm.lean:210-229`) contains no
-//!   `tryPostpone*` call at all; the only thing it registers is a
-//!   `.typeClass` decl, through `mkInstMVar`. In the oracle the SOLE
-//!   producer of a `.postponed` decl is `postponeElabTermCore`
-//!   (`Term/TermElabM.lean:1449-1453`; the construction itself is
-//!   `:1452`). It has TWO call sites, both in that file — the public
-//!   `postponeElabTerm` at `:1608-1610`, and `elabUsingElabFnsAux`'s
-//!   `Exception.postpone` handler at `:1651`, which restores the saved
-//!   state and re-postpones. Note `elabUsingElabFnsAux` (`:1615`), NOT
-//!   its caller `elabUsingElabFns` (`:1663`), which only saves state and
-//!   delegates; the `Aux` one is the recursive walk over the registered
-//!   elaborators and is where the postpone handler lives. (The pin's own
-//!   docstring on `postponeElabTermCore`, `:1444-1448`, says the method
-//!   "is used only at `elabUsingElabFnsAux`" — it names the right
-//!   function but undercounts, since `postponeElabTerm` calls it too.)
-//!   leanr has no call site for either. So the path
-//!   stays dead code kept correct for whichever slice first postpones a
-//!   term elaboration — `resolveLValLoop`'s `tryPostponeIfMVar` (seamed
-//!   in M4b-4a P1, `app/lval.rs`) is still the most likely candidate,
-//!   and M4b-4a P2 owns it, but it is a candidate, not a schedule.
-//! - **`may_postpone` has exactly one production reader, and its
-//!   `false` branch is not yet reachable.** Writers in `src/`:
-//!   `elab.rs` (`TermElabM::new`) and `synthetic/state.rs`
-//!   (`without_postponing`, saving and restoring the flag). Since
-//!   M4b-4a P1 the one reader is `app/lval.rs`'s `resolve_lval_loop`
-//!   (oracle `tryPostponeIfMVar`, `App.lean:1680`): with the flag set it
-//!   raises the P2 postponement seam, and with it cleared it falls
-//!   through to `synthesizeSyntheticMVarsUsingDefault`. The flag is
-//!   cleared only inside `without_postponing`, which wraps the ladder's
-//!   rungs 2 and 4, and those rungs elaborate no terms until a postponed
-//!   elaboration exists to resume (`resume_postponed`, dead until
-//!   M4b-4a P2 produces one). So in practice every read sees `true`.
-//!   Combined with `postpone_on_error` being consumed only inside the
-//!   dead `resume_postponed` above, the ladder's rungs 2 (postponement
-//!   suppressed, errors postponed) and 4 (postponement suppressed,
-//!   errors not postponed) are today BEHAVIORALLY IDENTICAL to rung 1;
-//!   they become distinct once P2 resumes postponed terms and the
-//!   `may_postpone = false` branch of `resolve_lval_loop` is reached.
-//!
-//!   What CHANGED with P3: rung 3 is no longer a shape guard that could
-//!   only error or fall through, so the effective ladder that runs is
-//!   rung 1 → rung 3 (real default instances,
-//!   `synthetic/default_inst.rs`) → stuck report, and rung 3 is now the
-//!   rung that closes a bare numeral's `OfNat ?α (lit v)` goal. Rungs 2,
-//!   4 and 5 remain indistinguishable from rung 1. The five-rung
-//!   structure is correct for when producers make the other knobs
-//!   observable; recorded here so a reader does not assume five
-//!   distinct rungs run today.
+//! - **`SyntheticMVarKind::Postponed` producers (history).** Until
+//!   M4b-4a P2 the variant had no producer: M4b-3 P3's `elabNum` was
+//!   predicted to be the first and was not (`elabNumLit`,
+//!   `BuiltinTerm.lean:210-229`, contains no `tryPostpone*` call). In the
+//!   oracle the SOLE producer of a `.postponed` decl is
+//!   `postponeElabTermCore` (`Term/TermElabM.lean:1449-1453`), reached
+//!   from the public `postponeElabTerm` and from
+//!   `elabUsingElabFnsAux`'s `Exception.postpone` handler. Since
+//!   M4b-4a P2 leanr's `postpone_elab_term` (`postpone.rs`) is called
+//!   from `elab_using_elab_fns`'s catch and from `useImplicitLambda`'s
+//!   `.postpone` arm (`elab.rs`), so `save_context`, `with_saved_context`
+//!   and `resume_postponed` are live. The `p2/*` corpus records cover
+//!   resume end to end (`tests/postpone_smoke.rs` covers the mechanics).
+//! - **`may_postpone` readers (history).** Until M4b-4a P2 the flag's
+//!   one production reader could only see `true`. Now its readers are
+//!   the `try_postpone` family (`postpone.rs`: `try_postpone`,
+//!   `try_postpone_if_mvar`, `try_postpone_if_none_or_mvar`) and the
+//!   `.postpone` arm of `elab_term_core`. Writers are `TermElabM::new`
+//!   and `synthetic/state.rs`'s `without_postponing`, which wraps the
+//!   ladder's rungs 2 and 4. Those rungs are now behaviourally distinct
+//!   from rung 1, since they resume postponed terms with postponement
+//!   off: `resuming_does_not_catch_its_own_postpone` and
+//!   `p2/implicit-lambda-postpone` both depend on it. Rung 3 (real
+//!   default instances, `synthetic/default_inst.rs`) is what closes a
+//!   bare numeral's `OfNat ?α (lit v)` goal. Rung 5 (`report_stuck`) is
+//!   unchanged.
 //! - **`leanr_meta` cannot report a stuck typeclass goal; the
 //!   elaborator approximates it.**
 //!   `leanr_meta::error::MetaError` declares `IsDefEqStuck` (`error.rs:36`)
@@ -286,7 +251,7 @@ pub mod coe; // coercions
 pub mod dispatch;
 pub mod elab;
 pub mod error;
-mod postpone; // M4b-4a P2
+mod postpone;
 pub mod resolve; // Task 5
 pub mod synthetic; // M4b-3 P2a
 

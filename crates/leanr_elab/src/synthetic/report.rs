@@ -124,20 +124,19 @@ impl<'e> TermElabM<'e> {
             SyntheticMVarKind::Tactic { param_name } => Err(ElabError::UnsupportedSyntax(
                 super::state::tactic_seam_message(param_name.as_deref()),
             )),
-            // oracle: `| _ => unreachable!` (:316) — `.postponed` never
-            // reaches the reporter, because a postponed mvar that could
-            // not be resumed has already raised from `resume_postponed`.
+            // oracle: `| _ => unreachable!` (`SyntheticMVars.lean:316`),
+            // and it holds in leanr too. `ladder.rs`'s `resume_postponed`
+            // either assigns the mvar, answers "not ready", or propagates
+            // an error. At rung 4 (postponement off) no producer fires, so
+            // a postponed mvar can only still be pending here when its
+            // `check_occurs` guard failed, which needs a synthetic `sorry`
+            // inside the result, and leanr mints none.
             //
-            // The message names an INTERNAL INVARIANT, not a slice. It
-            // carried "M4b-3 P2a invariant" until this fix wave: under
+            // The message names an INTERNAL INVARIANT, not a slice: under
             // this crate's named-seam discipline an `UnsupportedSyntax`
-            // naming a slice reads as "that slice owes an
-            // implementation", and P2a is complete — it shipped the
-            // `resume_postponed` path that makes this arm unreachable,
-            // so it owes nothing here. Retargeting at a later slice
-            // would have been a second false claim. Same rewording, and
-            // the same reason, as `builtin::lit::inst_mvar_id` and
-            // `synthetic::default_inst::mvar_id_of` (task 8).
+            // naming a slice reads as "that slice owes an implementation".
+            // Same wording, and reason, as `builtin::lit::inst_mvar_id`
+            // and `synthetic::default_inst::mvar_id_of`.
             SyntheticMVarKind::Postponed { .. } => Err(ElabError::UnsupportedSyntax(
                 "internal invariant: a postponed mvar reached the stuck reporter \
                  (synthetic::report — not a deferred construct)"
