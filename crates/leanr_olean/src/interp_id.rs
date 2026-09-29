@@ -948,6 +948,71 @@ impl<'s> InterpId<'s> {
         Ok((proj_fn, ctor_name, num_params, index, from_class))
     }
 
+    /// `Lean.StructureInfo` — see `crate::StructureInfo`'s doc for the
+    /// layout and the private extension name.
+    fn structure_info(&mut self, r: &Raw) -> Result<crate::StructureInfo, OleanError> {
+        // `ctor` checks the exact field count, so `f[0..4]` is in range.
+        let (f, _) = ctor(r, 0, 4, "StructureInfo")?;
+        Ok(crate::StructureInfo {
+            struct_name: self.name_req(&f[0])?,
+            field_names: array(&f[1])?
+                .iter()
+                .map(|n| self.name_req(n))
+                .collect::<Result<_, _>>()?,
+            field_info: array(&f[2])?
+                .iter()
+                .map(|e| self.structure_field_info(e))
+                .collect::<Result<_, _>>()?,
+            parent_info: array(&f[3])?
+                .iter()
+                .map(|e| self.structure_parent_info(e))
+                .collect::<Result<_, _>>()?,
+        })
+    }
+
+    /// `Lean.StructureFieldInfo` (`Structure.lean:25-36`): 4 pointer
+    /// fields + `binderInfo` in the scalar tail. `BinderInfo`'s constructor
+    /// order is `default, implicit, strictImplicit, instImplicit`, the
+    /// same byte mapping `Expr`'s binder decode above uses.
+    fn structure_field_info(&mut self, r: &Raw) -> Result<crate::StructureFieldInfo, OleanError> {
+        let (f, s) = ctor(r, 0, 4, "StructureFieldInfo")?;
+        let field_name = self.name_req(&f[0])?;
+        let proj_fn = self.name_req(&f[1])?;
+        let subobject = self.opt_name(&f[2])?;
+        // `autoParam? : Option Expr` — deprecated (`Structure.lean:34-35`),
+        // shape-checked so a malformed entry is still a decode error, then
+        // dropped.
+        match &*f[3] {
+            RawValue::Scalar(0) => {}
+            RawValue::Ctor { tag: 1, fields, .. } if fields.len() == 1 => {}
+            _ => return Err(bad("StructureFieldInfo.autoParam?")),
+        }
+        let binder_info = match s.first().copied() {
+            Some(0) => BinderInfo::Default,
+            Some(1) => BinderInfo::Implicit,
+            Some(2) => BinderInfo::StrictImplicit,
+            Some(3) => BinderInfo::InstImplicit,
+            _ => return Err(bad("StructureFieldInfo.binderInfo")),
+        };
+        Ok(crate::StructureFieldInfo {
+            field_name,
+            proj_fn,
+            subobject,
+            binder_info,
+        })
+    }
+
+    /// `Lean.StructureParentInfo` (`Structure.lean:48-55`): 2 pointer
+    /// fields + `subobject : Bool` in the scalar tail.
+    fn structure_parent_info(&mut self, r: &Raw) -> Result<crate::StructureParentInfo, OleanError> {
+        let (f, s) = ctor(r, 0, 2, "StructureParentInfo")?;
+        Ok(crate::StructureParentInfo {
+            struct_name: self.name_req(&f[0])?,
+            proj_fn: self.name_req(&f[1])?,
+            subobject: boolean(s.first(), "StructureParentInfo.subobject")?,
+        })
+    }
+
     /// ModuleData (Environment.lean:109-129).
     pub(crate) fn module_data(&mut self, root: &Raw) -> Result<crate::ModuleData, OleanError> {
         let (f, s) = ctor(root, 0, 5, "ModuleData")?;
@@ -960,6 +1025,7 @@ impl<'s> InterpId<'s> {
         let mut instances = Vec::new();
         let mut default_instances = Vec::new();
         let mut projection_fns = Vec::new();
+        let mut structures = Vec::new();
         let mut classes = Vec::new();
         let mut coe_decls = Vec::new();
         for pair in array(&f[4])? {
@@ -1087,6 +1153,14 @@ impl<'s> InterpId<'s> {
                         coe_decls.push(self.name_req(e)?);
                     }
                 }
+                // Plain `registerPersistentEnvExtension` (`Structure.lean:87-92`):
+                // bare `StructureInfo` ctors, no scoped wrapper. PRIVATE, hence the
+                // mangled key — see `crate::StructureInfo`'s doc.
+                "_private.Lean.Structure.0.Lean.structureExt" => {
+                    for e in array(&pf[1])? {
+                        structures.push(self.structure_info(e)?);
+                    }
+                }
                 _ => continue,
             }
         }
@@ -1117,6 +1191,126 @@ impl<'s> InterpId<'s> {
             projection_fns,
             classes,
             coe_decls,
+            structures,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn ctor_raw(tag: u8, fields: Vec<Raw>, scalars: Vec<u8>) -> Raw {
+        Arc::new(RawValue::Ctor {
+            tag,
+            fields,
+            scalars,
+        })
+    }
+
+    fn scalar(v: u64) -> Raw {
+        Arc::new(RawValue::Scalar(v))
+    }
+
+    /// `Name.str anonymous s`.
+    fn name(s: &str) -> Raw {
+        ctor_raw(
+            1,
+            vec![scalar(0), Arc::new(RawValue::Str(s.to_string()))],
+            vec![],
+        )
+    }
+
+    fn arr(v: Vec<Raw>) -> Raw {
+        Arc::new(RawValue::Array(v))
+    }
+
+    fn field_info(auto: Raw, binder: Vec<u8>) -> Raw {
+        ctor_raw(0, vec![name("a"), name("S.a"), scalar(0), auto], binder)
+    }
+
+    fn parent_info(fields: usize, scalars: Vec<u8>) -> Raw {
+        let mut f = vec![name("P"), name("S.toP")];
+        f.truncate(fields);
+        ctor_raw(0, f, scalars)
+    }
+
+    fn structure(field_names: Raw, fi: Raw, pi: Raw) -> Raw {
+        ctor_raw(0, vec![name("S"), field_names, fi, pi], vec![])
+    }
+
+    /// The structureExt decoders reject every malformed shape with an
+    /// `OleanError`, never a panic and never a silent default. Each
+    /// `Err` case below is one guard; the `Ok` cases pin that the
+    /// well-formed twin passes, so a guard cannot pass by rejecting
+    /// everything.
+    #[test]
+    fn structure_decoders_reject_malformed_shapes() {
+        let mut st = Store::persistent();
+        let mut it = InterpId::new(&mut st);
+        let some_expr = ctor_raw(1, vec![scalar(0)], vec![]);
+
+        // Well-formed twins.
+        let fi = |it: &mut InterpId, r: &Raw| it.structure_field_info(r);
+        assert!(fi(&mut it, &field_info(scalar(0), vec![3])).is_ok());
+        assert!(fi(&mut it, &field_info(some_expr.clone(), vec![0])).is_ok());
+        assert!(it.structure_parent_info(&parent_info(2, vec![1])).is_ok());
+        assert!(it
+            .structure_info(&structure(
+                arr(vec![name("a")]),
+                arr(vec![field_info(scalar(0), vec![0])]),
+                arr(vec![parent_info(2, vec![0])]),
+            ))
+            .is_ok());
+
+        // StructureFieldInfo: binderInfo byte out of range / missing.
+        assert!(fi(&mut it, &field_info(scalar(0), vec![4])).is_err());
+        assert!(fi(&mut it, &field_info(scalar(0), vec![])).is_err());
+        // autoParam?: not an Option shape (bad scalar, bad tag, bad arity).
+        assert!(fi(&mut it, &field_info(scalar(1), vec![0])).is_err());
+        assert!(fi(
+            &mut it,
+            &field_info(ctor_raw(2, vec![scalar(0)], vec![]), vec![0])
+        )
+        .is_err());
+        assert!(fi(&mut it, &field_info(ctor_raw(1, vec![], vec![]), vec![0])).is_err());
+        // Wrong pointer-field arity.
+        let short = ctor_raw(0, vec![name("a"), name("S.a"), scalar(0)], vec![0]);
+        assert!(fi(&mut it, &short).is_err());
+        // Anonymous field name.
+        let anon = ctor_raw(
+            0,
+            vec![scalar(0), name("S.a"), scalar(0), scalar(0)],
+            vec![0],
+        );
+        assert!(fi(&mut it, &anon).is_err());
+
+        // StructureParentInfo: bad Bool byte, missing byte, wrong arity.
+        assert!(it.structure_parent_info(&parent_info(2, vec![2])).is_err());
+        assert!(it.structure_parent_info(&parent_info(2, vec![])).is_err());
+        assert!(it.structure_parent_info(&parent_info(1, vec![1])).is_err());
+
+        // StructureInfo: wrong arity, non-array field, malformed nested row.
+        assert!(it
+            .structure_info(&ctor_raw(0, vec![name("S")], vec![]))
+            .is_err());
+        assert!(it
+            .structure_info(&structure(scalar(0), arr(vec![]), arr(vec![])))
+            .is_err());
+        assert!(it
+            .structure_info(&structure(
+                arr(vec![]),
+                arr(vec![field_info(scalar(0), vec![9])]),
+                arr(vec![]),
+            ))
+            .is_err());
+        assert!(it
+            .structure_info(&structure(
+                arr(vec![]),
+                arr(vec![]),
+                arr(vec![parent_info(2, vec![7])]),
+            ))
+            .is_err());
     }
 }

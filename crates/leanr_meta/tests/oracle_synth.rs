@@ -71,6 +71,7 @@ fn oracle_synth_gate() {
         projection_fns,
         classes,
         coe_decls,
+        structures: _,
     } = replay_fixture("Synth0.olean");
 
     let queries =
@@ -159,6 +160,7 @@ fn oracle_synth_gate() {
                 projection_fns: &projection_fns,
                 classes: &classes,
                 coe_decls: &coe_decls,
+                structures: &[],
             },
         );
         // The local context the goal is asked in (local-instances
@@ -495,6 +497,7 @@ fn seam_excluded_mvar_goal_is_incompleteness_not_an_error() {
         projection_fns,
         classes,
         coe_decls,
+        structures: _,
     } = replay_fixture("Synth0.olean");
     let queries =
         std::fs::read_to_string(fixture("synth-queries.jsonl")).expect("committed queries");
@@ -530,6 +533,7 @@ fn seam_excluded_mvar_goal_is_incompleteness_not_an_error() {
                 projection_fns: &projection_fns,
                 classes: &classes,
                 coe_decls: &coe_decls,
+                structures: &[],
             },
         );
         ctx.mctx_mut().declare(
@@ -589,6 +593,7 @@ fn exc_record_stuck_synth_0_pins_leanrs_current_divergent_answer() {
         projection_fns,
         classes,
         coe_decls,
+        structures: _,
     } = replay_fixture("Synth0.olean");
     let queries =
         std::fs::read_to_string(fixture("synth-queries.jsonl")).expect("committed queries");
@@ -625,6 +630,7 @@ fn exc_record_stuck_synth_0_pins_leanrs_current_divergent_answer() {
                 projection_fns: &projection_fns,
                 classes: &classes,
                 coe_decls: &coe_decls,
+                structures: &[],
             },
         );
         ctx.mctx_mut().declare(

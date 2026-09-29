@@ -368,6 +368,7 @@ fn run_leanr_query(
             projection_fns,
             classes,
             coe_decls,
+            structures: &[],
         },
     );
     let synthd: Result<Option<leanr_kernel::bank::ExprId>, ()> = match ctx.synth_instance(goal) {

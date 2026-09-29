@@ -52,6 +52,7 @@ pub fn with_app_harness<R>(
         projection_fns,
         classes,
         coe_decls,
+        structures,
     } = replay_fixture_in("elab", "Elab0.olean");
     let snap = builtin::snapshot();
 
@@ -80,6 +81,7 @@ pub fn with_app_harness<R>(
             projection_fns: &projection_fns,
             classes: &classes,
             coe_decls: &coe_decls,
+            structures: &structures,
         },
     );
     let mut elab = TermElabM::new(mctx, view);
@@ -721,6 +723,22 @@ fn with_elab_harness<R>(
         &leanr_syntax::kind::KindInterner,
     ) -> R,
 ) -> R {
+    with_doctored_elab_harness(caller, src, |_| {}, k)
+}
+
+/// `with_elab_harness`, but `doctor` may rewrite the decoded
+/// `structureExt` rows first — standing in for a malformed `.olean`
+/// whose `StructureInfo` disagrees with the environment.
+fn with_doctored_elab_harness<R>(
+    caller: &str,
+    src: &str,
+    doctor: impl FnOnce(&mut Vec<leanr_olean::StructureInfo>),
+    k: impl FnOnce(
+        &mut leanr_elab::TermElabM,
+        &leanr_elab::dispatch::SynElem,
+        &leanr_syntax::kind::KindInterner,
+    ) -> R,
+) -> R {
     use leanr_elab::TermElabM;
     use leanr_kernel::bank::Store;
     use leanr_kernel::EnvView;
@@ -736,7 +754,9 @@ fn with_elab_harness<R>(
         projection_fns,
         classes,
         coe_decls,
+        mut structures,
     } = replay_fixture_in("elab", "Elab0.olean");
+    doctor(&mut structures);
     let snap = builtin::snapshot();
     let view: EnvView = env.view();
 
@@ -765,6 +785,7 @@ fn with_elab_harness<R>(
             projection_fns: &projection_fns,
             classes: &classes,
             coe_decls: &coe_decls,
+            structures: &structures,
         },
     );
     let mut elab = TermElabM::new(mctx, view);
@@ -803,6 +824,25 @@ pub fn elab_and_synthesize(src: &str) -> Result<serde_json::Value, leanr_elab::E
         let mut st = EncSt::default();
         Ok(encode_expr(elab.mctx.store(), Some(base), e, &mut st))
     })
+}
+
+/// `elab_and_synthesize` over `structureExt` rows rewritten by
+/// `doctor` (malformed-`.olean` guards no well-formed fixture reaches).
+pub fn elab_and_synthesize_doctored(
+    src: &str,
+    doctor: impl FnOnce(&mut Vec<leanr_olean::StructureInfo>),
+) -> Result<serde_json::Value, leanr_elab::ElabError> {
+    with_doctored_elab_harness(
+        "elab_and_synthesize_doctored",
+        src,
+        doctor,
+        |elab, term_elem, kinds| {
+            let e = elab.elab_term_and_synthesize(term_elem, kinds, None)?;
+            let base = elab.view.store;
+            let mut st = EncSt::default();
+            Ok(encode_expr(elab.mctx.store(), Some(base), e, &mut st))
+        },
+    )
 }
 
 /// Elaborate `src` through `elab_term_ensuring_type` then

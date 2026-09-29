@@ -69,10 +69,10 @@ use leanr_syntax::kind::KindInterner;
 use leanr_syntax::tree::SyntaxNode;
 
 /// oracle: `inductive Arg` (`Arg.lean:19-21`) — an argument is either
-/// unelaborated syntax or an already-elaborated `Expr`. The `Expr` arm
-/// has no P1 producer (it exists for dot-notation/`pipeProj` in M4b-4
-/// and for `binop%`), but the type carries it so later slices need not
-/// reshape the state machine.
+/// unelaborated syntax or an already-elaborated `Expr`. The `Expr` arm's
+/// first producer is dot notation's `(self := e)` argument
+/// (`lval.rs`'s `projFn` arm, M4b-4a P1); `pipeProj` (M4b-4a P4) and
+/// `binop%` (the macro-expansion slice) will add more.
 #[derive(Debug, Clone)]
 pub enum Arg {
     Stx(SynElem),
@@ -87,10 +87,9 @@ pub struct NamedArg {
     pub name: String,
     pub val: Arg,
     /// oracle: `NamedArg.numImplicitParams` — overrides the binder info
-    /// of the first N parameters to implicit. Only ever nonzero for
-    /// structure-projection expansion (`f.val`), which is M4b-4, so
-    /// every P1 producer sets 0. The field exists because
-    /// `process_explicit_arg` branches on it.
+    /// of the first N parameters to implicit. Only ever nonzero for the
+    /// `(self := e)` argument of structure-projection expansion (`f.val`,
+    /// `lval::elab_app_lvals`); every syntax-level producer sets 0.
     pub num_implicit_params: usize,
 }
 

@@ -30,6 +30,7 @@ mod loose_bvar;
 mod metactx;
 mod mk_binding;
 mod mvar_ctx;
+mod structure;
 mod synth;
 #[cfg(test)]
 mod test_support;

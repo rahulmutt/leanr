@@ -226,8 +226,8 @@ pub fn get_resulting_type(app: &mut AppElab) -> Result<Option<ExprId>, ElabError
             continue;
         } else if param_idx < num_implicit_params {
             // Simulates `processExplicitArg`'s `numImplicitParams`
-            // override from this point onward (structure projections,
-            // M4b-4 — no P1 producer, kept for fidelity).
+            // override from this point onward (structure projections'
+            // `(self := e)`, `lval::elab_app_lvals`).
             param_idx += 1;
             ty = body;
             continue;

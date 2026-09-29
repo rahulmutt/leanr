@@ -31,7 +31,7 @@ pub enum ElabError {
     /// (`Arg.lean:55-59`).
     DuplicateNamedArg(String),
     /// oracle: `mkConst`'s "too many explicit universe levels for
-    /// '{constName}'" (`Lean/Elab/Term/TermElabM.lean:2117-2126`).
+    /// '{constName}'" (`Lean/Elab/Term/TermElabM.lean:2128-2136`).
     /// Carries the head identifier's raw source text. Reachable only
     /// once `.{u, v}` explicit-universe syntax has a producer (M4b-3 P1
     /// task 8); the check itself lives in `app::head::elab_ident_head`
@@ -134,6 +134,74 @@ pub enum ElabError {
     /// arbitrary-precision, so a literal is never too WIDE to accept —
     /// only malformed.
     IllFormedLiteral(String),
+    /// oracle: `resolveLValAux`'s `fieldIdx` throws (`App.lean:1520-1551`,
+    /// `:1589-1591`, `:1601-1603`, `:1613-1616`) and `mkProjAndCheck`'s
+    /// `lean.projNonPropFromProp` (`:65-73`). Prose deferred (design spec
+    /// § Errors); `reason` identifies the throw site.
+    InvalidProjection {
+        e: ExprId,
+        e_type: ExprId,
+        reason: InvalidProjectionReason,
+    },
+    /// oracle: `resolveLValAux`'s `fieldName` throws (`App.lean:1578`,
+    /// `:1588`, `:1593-1600`, `:1609-1612`; the message itself is the
+    /// `throwInvalidFieldAt` helper, `:1619-1654`).
+    InvalidField {
+        e: ExprId,
+        e_type: ExprId,
+        field: String,
+        reason: InvalidFieldReason,
+    },
+    /// oracle: `elabAppFn`'s `` `(_) `` arm (`App.lean:2119`): "A
+    /// placeholder `_` cannot be used where a function is expected".
+    PlaceholderAsFunction,
+    /// An oracle `panic!`/`unreachable!` site (`mkBaseProjections`,
+    /// `App.lean:1703`, `:1708`): unreachable on a well-formed
+    /// environment, an error rather than a panic here because `.olean`
+    /// input is untrusted.
+    Internal(String),
+}
+
+/// Which `resolveLValAux` / `mkProjAndCheck` throw an
+/// `ElabError::InvalidProjection` stands for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InvalidProjectionReason {
+    /// `App.lean:1520-1521` — "Index must be greater than 0". Unreachable
+    /// from source: the `fieldIdx` token rejects `0`, so `(o).0` is a
+    /// parse error in both implementations.
+    IndexZero,
+    /// `App.lean:1546-1551` — "Index `idx` is invalid for this structure".
+    IndexOutOfRange { idx: usize, num_fields: usize },
+    /// `App.lean:1542-1545` — a one-constructor type with no fields.
+    NoFields,
+    /// `App.lean:1523-1527` — `matchConstStructure`'s `failK`: not a
+    /// one-constructor inductive type.
+    NotOneCtor,
+    /// `App.lean:1589-1591` — "Projections cannot be used on functions".
+    OnFunction,
+    /// `App.lean:1601-1603` — "Type of … is not known".
+    TypeUnknown,
+    /// `App.lean:1613-1616` — "Projection operates on types of the form
+    /// `C ...`".
+    NotConstApp,
+    /// `App.lean:1536-1539` — explicit universes on a projection of an
+    /// `inductive` (not `structure`) type.
+    ExplicitUnivsOnInductive,
+    /// `App.lean:68-72` — `lean.projNonPropFromProp`.
+    NonPropFromProp,
+}
+
+/// Which `resolveLValAux` throw an `ElabError::InvalidField` stands for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InvalidFieldReason {
+    /// `App.lean:1578`, `:1588` (`throwInvalidFieldAt`) — "The environment
+    /// does not contain `full_name`".
+    NotFound { full_name: String },
+    /// `App.lean:1593-1600` — "Type of … is not known; cannot resolve field".
+    TypeUnknown,
+    /// `App.lean:1609-1612` — "Field projection operates on types of the
+    /// form `C ...`".
+    NotConstApp,
 }
 
 impl From<MetaError> for ElabError {

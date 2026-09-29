@@ -1787,10 +1787,10 @@ fn omitted_auto_param_mints_a_reported_tactic_mvar() {
 /// mint time, still carrying `inst`) is what `with_mvar_context`
 /// reinstalls to find it.
 ///
-/// A bare identifier as an application HEAD that is itself a `fun` is
-/// unavailable here — `elabAppFn` is scoped to the identifier case only
-/// in this slice (M4b-1 P1; the general-term-in-function-position arm
-/// is M4b-4's LVal machinery) — so this cannot be written as
+/// A bare identifier as an application HEAD that is itself a `fun` was
+/// unavailable when this was written — `elabAppFn` was scoped to the
+/// identifier case only (M4b-1 P1; M4b-4a P1 has since ported the
+/// general-term-in-function-position arm) — so it was not written as
 /// `(fun [inst : Wrap Nat] => useWrap) Nat.zero`. Naming the
 /// intermediate value with `let` sidesteps that restriction; it is not
 /// load-bearing for what this test demonstrates; wrapping `useWrap`

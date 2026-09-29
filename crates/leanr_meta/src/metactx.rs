@@ -17,7 +17,7 @@ use leanr_kernel::{
 };
 use leanr_olean::{
     ClassEntry, DefaultInstanceEntry, EntryScope, InstanceEntry, MatcherEntry, ProjectionFnInfo,
-    ReducibilityEntry, ReducibilityStatus,
+    ReducibilityEntry, ReducibilityStatus, StructureInfo,
 };
 
 use crate::instances::{ClassTable, InstanceTable};
@@ -181,6 +181,8 @@ pub struct MetaCtx<'e> {
     /// The `@[coe_decl]` name set (`Meta/Coe.lean:21-29`), built once
     /// from `EnvExtensions::coe_decls`. Read by `coe.rs::expand_coe`.
     pub(crate) coe_decls: HashSet<NameId>,
+    /// Decoded `structureExt` rows (M4b-4a P1), see `crate::structure`.
+    pub(crate) structures: crate::structure::StructureTable,
     /// The `smartUnfolding` option (oracle default: true), consulted by
     /// `unfold_definition`'s app/const arms (task 7).
     pub(crate) smart_unfolding: bool,
@@ -309,6 +311,8 @@ pub struct EnvExtensions<'a> {
     /// Decoded `Lean.Meta.coeDeclAttr` entries (M4b-3 P4 task 2) — the
     /// `@[coe_decl]` name set `MetaCtx::is_coe_decl` answers from.
     pub coe_decls: &'a [NameId],
+    /// Decoded structureExt entries (M4b-4a P1) — see crate::structure.
+    pub structures: &'a [StructureInfo],
 }
 
 impl<'e> MetaCtx<'e> {
@@ -345,6 +349,7 @@ impl<'e> MetaCtx<'e> {
         let instances = InstanceTable::build(view, exts.instances, exts.default_instances);
         let classes = ClassTable::build(exts.classes);
         let coe_decls: HashSet<NameId> = exts.coe_decls.iter().copied().collect();
+        let structures = crate::structure::StructureTable::build(exts.structures);
         // oracle: `projectionFnInfoExt`'s own `NameMap` (`ProjFns.lean:30,
         // 37-59`) — the extension's own key IS `ProjectionFnInfo.projFn`
         // (see that struct's doc, `leanr_olean::ProjectionFnInfo`), so no
@@ -426,6 +431,7 @@ impl<'e> MetaCtx<'e> {
             instances,
             classes,
             coe_decls,
+            structures,
             smart_unfolding: true,
             can_unfold_override: false,
             nat_bin_ops,
@@ -1376,6 +1382,27 @@ impl<'e> MetaCtx<'e> {
     /// directly; the production reader is `coe.rs::expand_coe`.
     pub fn is_coe_decl(&self, name: NameId) -> bool {
         self.coe_decls.contains(&name)
+    }
+
+    /// `unfold_definition` (`whnf.rs`), exposed for `leanr_elab`'s
+    /// `resolveLValLoop` retry (`App.lean:1690`) — the M4b elab→meta
+    /// accessor precedent: additive, no new state, no behaviour change.
+    pub fn unfold_definition_pub(&mut self, e: ExprId) -> Result<Option<ExprId>, MetaError> {
+        self.unfold_definition(e)
+    }
+
+    /// oracle: `Expr.instantiate1` — substitute `val` for `#0` in `body`,
+    /// with NO beta step (unlike `instantiate_beta_rev_range`).
+    /// `consumeImplicits` (`App.lean:1665`) needs exactly this.
+    pub fn instantiate1(&mut self, body: ExprId, val: ExprId) -> Result<ExprId, MetaError> {
+        let out = leanr_kernel::instantiate(
+            self.scratch,
+            Some(self.view.store),
+            body,
+            val,
+            &mut self.guard,
+        )?;
+        Ok(out)
     }
 
     /// oracle: `Lean.occursCheck` (`Lean/Util/OccursCheck.lean:18-53`),

@@ -61,9 +61,14 @@
 //!   implicit-lambda insertion (the feature) .......... P5 SHIPPED — elab.rs
 //!   `@($t)`/`@$t` disabling implicit-lambda insertion . SHIPPED (close-out) — here, elab.rs
 //!   overload resolution (candidates > 1) ............. resolve_global slice  overload.rs
-//!   elabAsElim, RECURSOR heads only (partial!) ....... M4b-4 head.rs
-//!   dot notation, LVal machinery ..................... M4b-4 head.rs, here, dispatch.rs
-//!   numImplicitParams (structure projection) ......... M4b-4 args.rs
+//!   elabAsElim, RECURSOR heads only (partial!) ....... M4b-4c head.rs
+//!   dot notation: proj, fieldIdx, projFn/projIdx ..... P1 SHIPPED (M4b-4a) — lval.rs, head.rs, here
+//!   numImplicitParams (structure projection) ......... P1 SHIPPED (M4b-4a) — args.rs, lval.rs
+//!   postponement (tryPostponeIfMVar, .postpone) ...... M4b-4a P2 lval.rs, elab.rs
+//!   generalized field notation (.const, Function.f) .. M4b-4a P3 lval.rs
+//!   pipeProj / dotIdent / namedPattern heads, `@.f` .. M4b-4a P4 head.rs, here, dispatch.rs
+//!   `choice` heads ................................... overloading slice  head.rs
+//!   private field projections ........................ private-names slice  lval.rs
 //! ```
 //!
 //! **The `elabAsElim` row is a PARTIAL seam, and the only row in this
@@ -76,7 +81,7 @@
 //! (`Nat.casesOn`, `Nat.recOn`, `Nat.brecOn`) or an
 //! `@[elab_as_elim]`-tagged head is NOT — it still takes the ordinary
 //! path and still emits a term the oracle does not, with no seam. That
-//! is a known open divergence M4b-4 owns; `tests/seam_audit.rs`'s
+//! is a known open divergence M4b-4c owns; `tests/seam_audit.rs`'s
 //! `fixture_declares_no_undecoded_elab_attributes` is the source-text
 //! backstop keeping it out of the committed corpus in the meantime.
 //!
@@ -103,6 +108,7 @@ pub mod args;
 pub mod expand;
 pub mod finalize;
 pub mod head;
+pub mod lval;
 pub mod overload;
 pub mod propagate;
 pub mod state;
@@ -149,7 +155,8 @@ pub fn elab_app(
 
 /// oracle: `elabAtom` (`App.lean:2243-2244`) — a zero-argument
 /// application. This is what `ident`, `@`, `.{u}`, `choice`, `proj` and
-/// `dotIdent` all reduce to in the oracle; P1 routes the first three.
+/// `dotIdent` all reduce to in the oracle; leanr routes the first three
+/// and, since M4b-4a P1 task 5, `proj`.
 pub fn elab_atom(
     elab: &mut TermElabM,
     elem: &SynElem,
@@ -194,10 +201,15 @@ pub fn elab_atom(
 /// to disable implicit-lambda insertion, so routing it to `elab_atom`
 /// would enter explicit mode the oracle never enters.
 ///
-/// The `.field` forms are the LVal machinery (M4b-4); in leanr's tree
-/// a dotted name like `@Nat.succ` is a single `<ident>` TOKEN
-/// (`leanr_syntax::lex`'s `hierarchical_idents_are_one_token`), so only
-/// a genuine projection off a non-identifier base reaches that seam.
+/// Since M4b-4a P1 task 7 the projection forms (`@(e).1`, `@(e).f`,
+/// `@(e).f.{us}`) are `elab_atom` too, and reach `head::elab_app_fn`'s
+/// proj arm with `explicit := true`; only the `@.f` dot-identifier forms
+/// remain a seam (M4b-4a P4). The table has NO `@$(_).$_:fieldIdx.{us}`
+/// row, so `@(e).1.{us}` falls to the `` `(@$t) `` arm here, like any
+/// other term — see `explicit_head_shape`. In leanr's tree a dotted name
+/// like `@Nat.succ` is a single `<ident>` TOKEN
+/// (`leanr_syntax::lex`'s `hierarchical_idents_are_one_token`), so it is
+/// the ident row, never a projection.
 ///
 /// Note this passes the WHOLE `@..` node to `elab_atom`, exactly as the
 /// oracle passes `stx` (not `stx[1]`): `elabAppFn` is what strips the
@@ -209,21 +221,70 @@ pub fn elab_explicit(
     expected: Option<ExprId>,
 ) -> Result<ExprId, ElabError> {
     let inner = explicit_inner(elem)?;
-    match kinds.name(inner.kind()) {
-        "<ident>" | "Lean.Parser.Term.explicitUniv" => elab_atom(elab, elem, kinds, expected),
-        "Lean.Parser.Term.proj" | "Lean.Parser.Term.dotIdent" => Err(ElabError::UnsupportedSyntax(
-            "`@` on a projection / dot-identifier head — dot notation / LVal \
-             machinery is M4b-4"
-                .to_string(),
-        )),
+    match explicit_head_shape(&inner, kinds)? {
+        ExplicitHead::Atom => elab_atom(elab, elem, kinds, expected),
+        ExplicitHead::DotIdent => Err(dot_ident_seam()),
         // oracle: `` `(@($t)) `` / `` `(@$t) `` => `elabTerm t expectedType?
         // (implicitLambda := false)` (`App.lean:2269-2270`). One arm for
         // both: handed the `paren` node itself,
         // `elab_term_without_implicit_lambda` carries the flag through the
         // parentheses to `t`, which is what the `@($t)` arm does by matching
         // `t` out of them.
-        _ => elab.elab_term_without_implicit_lambda(&inner, kinds, expected),
+        ExplicitHead::Other => elab.elab_term_without_implicit_lambda(&inner, kinds, expected),
     }
+}
+
+/// Which of the oracle's `@` head rows the term after `@` matches. The
+/// rows are the same seven in `elabAppFn` (`App.lean:2110-2116`) and
+/// `elabExplicit` (`App.lean:2262-2268`):
+///
+/// ```text
+/// @$_:ident   @$_:ident.{us}                          -> Atom
+/// @$(_).$_:fieldIdx   @$(_).$_:ident   @$(_).$_:ident.{us} -> Atom
+/// @.$_:ident  @.$_:ident.{us}                          -> DotIdent
+/// ```
+///
+/// There is NO `@$(_).$_:fieldIdx.{us}` row, so `@(e).1.{us}` is
+/// `Other` (measured on the pinned oracle: `unexpected syntax` in a
+/// function position, and the `` `(@$t) `` arm's success in a term
+/// position — `lval_smoke.rs`'s
+/// `explicit_on_projection_heads_matches_the_oracle`).
+enum ExplicitHead {
+    Atom,
+    DotIdent,
+    Other,
+}
+
+fn explicit_head_shape(inner: &SynElem, kinds: &KindInterner) -> Result<ExplicitHead, ElabError> {
+    let (base, has_univs) = if kinds.name(inner.kind()) == "Lean.Parser.Term.explicitUniv" {
+        (explicit_univ_parts(inner)?.0, true)
+    } else {
+        (inner.clone(), false)
+    };
+    Ok(match kinds.name(base.kind()) {
+        "<ident>" => ExplicitHead::Atom,
+        "Lean.Parser.Term.dotIdent" => ExplicitHead::DotIdent,
+        "Lean.Parser.Term.proj" => {
+            let (_, field) = head::proj_parts(&base)?;
+            if has_univs && kinds.name(field.kind()) == "fieldIdx" {
+                ExplicitHead::Other
+            } else {
+                ExplicitHead::Atom
+            }
+        }
+        _ => ExplicitHead::Other,
+    })
+}
+
+/// `@.f` / `@.f.{us}` (`App.lean:2115-2116`, `:2267-2268`): accepted by
+/// the oracle, but `elabDottedIdent`'s `resolveDottedIdentFn` is
+/// M4b-4a P4's.
+fn dot_ident_seam() -> ElabError {
+    ElabError::UnsupportedSyntax(
+        "`@` on a dot-identifier head (`@.f`) needs `elabAppFn`'s dotIdent arm \
+         (App.lean:2106-2109) — M4b-4a P4"
+            .to_string(),
+    )
 }
 
 /// The single non-trivia child after the `@` atom of a
@@ -262,7 +323,7 @@ fn explicit_inner(elem: &SynElem) -> Result<SynElem, ElabError> {
 /// `Syntax.getSepArgs` (`$us,*` in `App.lean:2103`'s quotation pattern
 /// expands to `getSepArgs`, which takes `args[0], args[2], ..`), not a
 /// kind filter invented here.
-fn explicit_univ_parts(elem: &SynElem) -> Result<(SynElem, Vec<SynElem>), ElabError> {
+pub(crate) fn explicit_univ_parts(elem: &SynElem) -> Result<(SynElem, Vec<SynElem>), ElabError> {
     let node = elem.as_node().ok_or_else(|| {
         ElabError::IllFormedSyntax("`.{u}`: Term.explicitUniv is not a node".to_string())
     })?;
@@ -291,11 +352,17 @@ fn explicit_univ_parts(elem: &SynElem) -> Result<(SynElem, Vec<SynElem>), ElabEr
 /// what then matches `` `($id:ident.{$us,*}) `` — which is also the order
 /// leanr's tree has (`@List.{0}` parses as `explicit(explicitUniv(..))`).
 ///
-/// `@` applied to anything outside the seven `elabAtom` shapes is
-/// `App.lean:2118`'s `` `(@$_) => throwUnsupportedSyntax `` — an INVALID
-/// occurrence of `@` in a function position, NOT the implicit-lambda-
-/// disabling form (that one is only reachable when the `@..` node is the
-/// whole term, i.e. through `elab_explicit` above).
+/// `@` applied to anything outside the seven accepted shapes
+/// (`explicit_head_shape`) is `App.lean:2118`'s `` `(@$_) =>
+/// throwUnsupportedSyntax `` — an INVALID occurrence of `@` in a
+/// function position, NOT the implicit-lambda-disabling form (that one
+/// is only reachable when the `@..` node is the whole term, i.e. through
+/// `elab_explicit` above). That includes `@(e).1.{us}`, for which the
+/// oracle has no row. leanr reports it as `UnsupportedSyntax` citing
+/// `App.lean:2118`, the same mapping every other invalid `@` shape gets.
+/// Since M4b-4a P1 task 7 a projection after `@` is accepted and reaches
+/// `head::elab_app_fn`'s proj arm with `explicit := true`; `@.f` is
+/// M4b-4a P4's seam.
 fn peel_head(
     elab: &mut TermElabM,
     head: &SynElem,
@@ -306,19 +373,14 @@ fn peel_head(
     if kinds.name(cur.kind()) == "Lean.Parser.Term.explicit" {
         cur = explicit_inner(&cur)?;
         explicit = true;
-        match kinds.name(cur.kind()) {
-            "<ident>" | "Lean.Parser.Term.explicitUniv" => {}
-            "Lean.Parser.Term.proj" | "Lean.Parser.Term.dotIdent" => {
-                return Err(ElabError::UnsupportedSyntax(
-                    "`@` on a projection / dot-identifier head — dot notation / LVal \
-                     machinery is M4b-4"
-                        .to_string(),
-                ))
-            }
-            other => {
+        match explicit_head_shape(&cur, kinds)? {
+            ExplicitHead::Atom => {}
+            ExplicitHead::DotIdent => return Err(dot_ident_seam()),
+            ExplicitHead::Other => {
                 return Err(ElabError::UnsupportedSyntax(format!(
-                    "invalid occurrence of `@` in a function position (`{other}`) \
-                     — App.lean:2118"
+                    "invalid occurrence of `@` in a function position (`{}`) \
+                     — App.lean:2118",
+                    kinds.name(cur.kind())
                 )))
             }
         }
@@ -332,6 +394,20 @@ fn peel_head(
     Ok((cur, explicit, explicit_levels))
 }
 
+/// The arguments of one application, as `elabAppFn` threads them
+/// (`App.lean:2060-2061`: `namedArgs args expectedType? explicit
+/// ellipsis`). Grouped so the recursion in `head::elab_app_fn` and the
+/// LVal loop in `lval::elab_app_lvals` pass one value, not six.
+/// `stx` is `Context::stx` (the WHOLE application — see that field's doc).
+pub struct AppCall {
+    pub named_args: Vec<NamedArg>,
+    pub args: Vec<Arg>,
+    pub expected: Option<ExprId>,
+    pub explicit: bool,
+    pub ellipsis: bool,
+    pub stx: SynElem,
+}
+
 /// oracle: `elabAppAux` (`App.lean:2202-2217`) resolving the head, then
 /// `elabAppArgs` (`App.lean:1351-1394`) building the `Context`/`State`
 /// the loop runs over.
@@ -341,7 +417,9 @@ fn peel_head(
 /// form has, so stripping the wrapper (setting `explicit := true` /
 /// collecting the explicit level list) before `elab_app_fn` keeps
 /// `head.rs` about NAMES only. `elab_app_fn` still names any remaining
-/// non-`ident` head as an M4b-4 seam rather than mis-elaborating it.
+/// unported head (`pipeProj`/`dotIdent`/`namedPattern` — M4b-4a P4;
+/// `choice` — the overloading slice) as a named seam rather than
+/// mis-elaborating it.
 ///
 /// Task 7 adds the 8th parameter (`stx`, `Context::stx`'s own doc),
 /// crossing clippy's default `too_many_arguments` threshold (7). Same
@@ -363,13 +441,36 @@ fn elab_app_aux(
     stx: SynElem,
 ) -> Result<ExprId, ElabError> {
     let (head, explicit, explicit_levels) = peel_head(elab, head, kinds)?;
-    // `heed_elab_as_elim = !explicit && !ellipsis` — the oracle's own
-    // early-out at `App.lean:1399` (`if explicit || ellipsis then return
-    // none`), so `@Nat.rec` and `Nat.rec ..` take the ordinary path on
-    // BOTH sides. See `head::elab_app_fn`'s own doc comment.
-    let candidates =
-        head::elab_app_fn(elab, &head, kinds, &explicit_levels, !explicit && !ellipsis)?;
-    let f = overload::expect_single(candidates)?;
+    let call = AppCall {
+        named_args,
+        args,
+        expected,
+        explicit,
+        ellipsis,
+        stx,
+    };
+    let candidates = head::elab_app_fn(elab, &head, kinds, &explicit_levels, Vec::new(), call)?;
+    overload::expect_single(candidates)
+}
+
+/// oracle: `elabAppArgs` (`App.lean:1351-1394`), building the
+/// `Context`/`State` the loop runs over. Called from
+/// `lval::elab_app_lvals` (the oracle's `elabAppLVals` calls
+/// `elabAppArgs`), so it runs on the FINAL head, after any LVals.
+pub(crate) fn elab_app_args(
+    elab: &mut TermElabM,
+    f: ExprId,
+    call: AppCall,
+    kinds: &KindInterner,
+) -> Result<ExprId, ElabError> {
+    let AppCall {
+        named_args,
+        args,
+        expected,
+        explicit,
+        ellipsis,
+        stx,
+    } = call;
 
     // oracle: `elabAppArgs`'s first two lines — `let fType ← inferType f;
     // let fType ← instantiateMVars fType`.
@@ -397,9 +498,9 @@ fn elab_app_aux(
     // Fix round 1 splits that finding by what leanr can DECIDE:
     //   * `isRec` is a plain constant-kind test and leanr's environment
     //     carries `ConstantInfo::Rec`, so `head::elab_ident_head` now
-    //     raises a named M4b-4 seam for a genuine recursor head. The
+    //     raises a named M4b-4c seam for a genuine recursor head. The
     //     `explicit || ellipsis` early-out (`App.lean:1399`) is honoured
-    //     — `heed_elab_as_elim` below — so `@Nat.rec` and `Nat.rec ..`
+    //     — `head::elab_app_fn`'s `heed` — so `@Nat.rec` and `Nat.rec ..`
     //     still take the ordinary path, exactly as the oracle does;
     //   * the three `is*Recursor`s read `auxRecExt` and the tag reads
     //     `elabAsElim`, two extensions leanr does not decode. Those four
@@ -414,7 +515,7 @@ fn elab_app_aux(
     // eliminator-shaped name in `elab-queries.jsonl` — so the residual
     // divergence cannot be committed without the gate failing first.
     // The complete guard needs the extension decodes and `ElabElim`
-    // itself: M4b-4 owns it.
+    // itself: M4b-4c owns it.
     let ctx = Context {
         ellipsis,
         explicit,

@@ -113,12 +113,12 @@
 //!   The `@($t)`/`@$t` wrap that elaborates with insertion explicitly
 //!   disabled SHIPPED in the M4b-3 close-out (`app/mod.rs`'s
 //!   `elab_explicit`). Still deferred: `useImplicitLambda`'s `.postpone`
-//!   arm, a named `M4b-4` seam (`elab.rs`'s
+//!   arm, a named `M4b-4a P2` seam (`elab.rs`'s
 //!   `UseImplicitLambda::Postpone`).
 //! - **overload resolution** (more than one candidate from
 //!   `elabAppFn`) — the slice that grows `resolve_global`, since it is
 //!   unreachable while only exact names resolve.
-//! - **`elabAsElim`** — M4b-4, and the one deferral whose seam is
+//! - **`elabAsElim`** — M4b-4c, and the one deferral whose seam is
 //!   PARTIAL. `shouldElabAsElim` (`App.lean:1322-1328`) has five
 //!   disjuncts; `app::head` can decide only `isRec`
 //!   (`ConstantInfo::Rec`), so a genuine recursor head is seamed while
@@ -127,10 +127,16 @@
 //!   `auxRecExt`/`elabAsElim` tag extensions, which leanr does not
 //!   decode. Those cases still emit a term the oracle does not, with no
 //!   seam; `tests/seam_audit.rs`'s fixture-source gate is the backstop
-//!   until M4b-4 lands the decodes and `ElabElim`.
-//! - **dot notation / LVal machinery (`Term.proj`, `pipeProj`,
-//!   `dotIdent`, `namedPattern`, `choice`), `binop%`, anonymous
-//!   constructor `⟨⟩`** — M4b-4.
+//!   until M4b-4c lands the decodes and `ElabElim`.
+//! - **dot notation / LVal machinery** — M4b-4a. P1 SHIPPED: `Term.proj`
+//!   index projections, structure fields and projection functions, the
+//!   resolution loop, `numImplicitParams` and `@` on projection heads
+//!   (`app/lval.rs`, `app/head.rs`). Still deferred, each a named seam:
+//!   postponement P2, generalized field notation (`.const`, `Function.f`)
+//!   P3, `pipeProj`/`dotIdent`/`namedPattern` P4, `choice` the
+//!   overloading slice, private field projections the slice that models
+//!   private names. The anonymous constructor `⟨⟩` — M4b-4b; `binop%` —
+//!   the macro-expansion slice.
 //! - **macro expansion** — `dispatch` never expands a macro form; the
 //!   dispatch table only ever matches a syntax kind directly against a
 //!   registered elaborator. Deferred to the slice that first needs a
@@ -183,20 +189,27 @@
 //!   function but undercounts, since `postponeElabTerm` calls it too.)
 //!   leanr has no call site for either. So the path
 //!   stays dead code kept correct for whichever slice first postpones a
-//!   term elaboration — M4b-4's `resolveLValLoop` is still the most
-//!   likely candidate, but it is a candidate, not a schedule.
-//! - **`may_postpone` is written but never read in production code.**
-//!   Re-verified by grep at the end of P3: `elab.rs:86`
-//!   (`TermElabM::new`) and `synthetic/state.rs:306`/`:308`
-//!   (`without_postponing`, saving and restoring the flag) are its only
-//!   writers in `src/`; nothing in `src/` ever reads it back (the only
-//!   reads are `tests/synthetic_smoke.rs`'s own assertions on the
-//!   field). Combined with `postpone_on_error` being consumed only
-//!   inside the dead `resume_postponed` above, the ladder's rungs 2
-//!   (postponement suppressed, errors postponed) and 4 (postponement
-//!   suppressed, errors not postponed) are today BEHAVIORALLY IDENTICAL
-//!   to rung 1 — nothing downstream branches on `may_postpone` or
-//!   `postpone_on_error` yet.
+//!   term elaboration — `resolveLValLoop`'s `tryPostponeIfMVar` (seamed
+//!   in M4b-4a P1, `app/lval.rs`) is still the most likely candidate,
+//!   and M4b-4a P2 owns it, but it is a candidate, not a schedule.
+//! - **`may_postpone` has exactly one production reader, and its
+//!   `false` branch is not yet reachable.** Writers in `src/`:
+//!   `elab.rs` (`TermElabM::new`) and `synthetic/state.rs`
+//!   (`without_postponing`, saving and restoring the flag). Since
+//!   M4b-4a P1 the one reader is `app/lval.rs`'s `resolve_lval_loop`
+//!   (oracle `tryPostponeIfMVar`, `App.lean:1680`): with the flag set it
+//!   raises the P2 postponement seam, and with it cleared it falls
+//!   through to `synthesizeSyntheticMVarsUsingDefault`. The flag is
+//!   cleared only inside `without_postponing`, which wraps the ladder's
+//!   rungs 2 and 4, and those rungs elaborate no terms until a postponed
+//!   elaboration exists to resume (`resume_postponed`, dead until
+//!   M4b-4a P2 produces one). So in practice every read sees `true`.
+//!   Combined with `postpone_on_error` being consumed only inside the
+//!   dead `resume_postponed` above, the ladder's rungs 2 (postponement
+//!   suppressed, errors postponed) and 4 (postponement suppressed,
+//!   errors not postponed) are today BEHAVIORALLY IDENTICAL to rung 1;
+//!   they become distinct once P2 resumes postponed terms and the
+//!   `may_postpone = false` branch of `resolve_lval_loop` is reached.
 //!
 //!   What CHANGED with P3: rung 3 is no longer a shape guard that could
 //!   only error or fall through, so the effective ladder that runs is
@@ -277,4 +290,4 @@ pub mod resolve; // Task 5
 pub mod synthetic; // M4b-3 P2a
 
 pub use elab::TermElabM;
-pub use error::ElabError;
+pub use error::{ElabError, InvalidFieldReason, InvalidProjectionReason};

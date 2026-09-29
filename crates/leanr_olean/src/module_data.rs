@@ -356,6 +356,57 @@ pub struct ProjectionFnInfo {
     pub from_class: bool,
 }
 
+/// One decoded `structureExt` entry: oracle `Lean.StructureInfo`
+/// (`Structure.lean:60-67`, pinned toolchain v4.33.0-rc1):
+///
+/// ```text
+/// structure StructureInfo where
+///   structName : Name                       -- 0
+///   fieldNames : Array Name                 -- 1 (constructor order)
+///   fieldInfo  : Array StructureFieldInfo   -- 2 (sorted by Name.quickLt)
+///   parentInfo : Array StructureParentInfo  -- 3 (`extends` order)
+/// ```
+///
+/// `structureExt` (`Structure.lean:87-92`) is a plain
+/// `registerPersistentEnvExtension` exporting a bare, `StructureInfo.lt`-
+/// sorted array — no `ScopedEnvExtension.Entry` wrapper. It is declared
+/// `private`, so its entries are keyed by the mangled
+/// `_private.Lean.Structure.0.Lean.structureExt`. Every `structure` AND
+/// every `class` registers one.
+#[derive(Debug, Clone)]
+pub struct StructureInfo {
+    pub struct_name: NameId,
+    pub field_names: Vec<NameId>,
+    /// Decoded order, which is the oracle's `Name.quickLt` order.
+    /// `getPathToBaseStructure?` walks it with `firstM`, so it must
+    /// never be re-sorted.
+    pub field_info: Vec<StructureFieldInfo>,
+    pub parent_info: Vec<StructureParentInfo>,
+}
+
+/// oracle: `Lean.StructureFieldInfo` (`Structure.lean:25-36`). Four
+/// pointer fields (`fieldName`, `projFn`, `subobject?`, `autoParam?`)
+/// and one scalar byte (`binderInfo`, a 4-constructor enum packed into
+/// the scalar tail — the same mechanism as `ProjectionFnInfo.fromClass`).
+/// The deprecated `autoParam? : Option Expr` is shape-checked and dropped.
+#[derive(Debug, Clone)]
+pub struct StructureFieldInfo {
+    pub field_name: NameId,
+    pub proj_fn: NameId,
+    pub subobject: Option<NameId>,
+    pub binder_info: leanr_kernel::BinderInfo,
+}
+
+/// oracle: `Lean.StructureParentInfo` (`Structure.lean:48-55`). Two
+/// pointer fields (`structName`, `projFn`) and one scalar byte
+/// (`subobject : Bool`).
+#[derive(Debug, Clone)]
+pub struct StructureParentInfo {
+    pub struct_name: NameId,
+    pub subobject: bool,
+    pub proj_fn: NameId,
+}
+
 /// The decoded contents of one `.olean` module, decoded directly into
 /// term-bank ids (term-bank phase 3 — the Arc decode path this used to
 /// have a twin of is deleted, along with the differential gate that
@@ -407,6 +458,9 @@ pub struct ModuleData {
     /// (`Environment.lean:1855`). All other extension entries stay
     /// opaque.
     pub coe_decls: Vec<NameId>,
+    /// Typed decode of the structureExt entries (M4b-4a P1). All other
+    /// extension entries stay opaque.
+    pub structures: Vec<StructureInfo>,
 }
 
 impl ModuleData {
@@ -564,6 +618,7 @@ impl ModuleData {
             projection_fns: std::mem::take(&mut base.projection_fns),
             classes: std::mem::take(&mut base.classes),
             coe_decls: std::mem::take(&mut base.coe_decls),
+            structures: std::mem::take(&mut base.structures),
         })
     }
 }
@@ -960,5 +1015,52 @@ mod tests {
             to_mul.unwrap().from_class,
             "toMul must be flagged fromClass"
         );
+    }
+
+    /// `structureExt` decodes (M4b-4a P1). The extension is registered
+    /// under a PRIVATE name — `_private.Lean.Structure.0.Lean.structureExt`
+    /// (probed with `readModuleData` on `Elab0.olean`), since
+    /// `Structure.lean:87` declares it `private builtin_initialize`. The
+    /// full oracle comparison lives in `leanr_meta/tests/structures.rs`;
+    /// this pins the three shapes the decoder must get right.
+    #[test]
+    fn structure_info_decodes() {
+        let bytes = fixture("elab/Elab0.olean");
+        let mut env = Environment::default();
+        let md = ModuleData::parse(&bytes, env.store_mut()).expect("decode");
+        let st = env.store();
+        let render = |n: NameId| st.to_name(None, Some(n)).to_string();
+        let find = |s: &str| {
+            md.structures
+                .iter()
+                .find(|i| render(i.struct_name) == s)
+                .unwrap_or_else(|| {
+                    panic!("no StructureInfo for {s}; decoded {}", md.structures.len())
+                })
+        };
+        // Constructor order, subobject field first.
+        let s3 = find("S3");
+        let fields: Vec<String> = s3.field_names.iter().map(|&n| render(n)).collect();
+        assert_eq!(fields, ["toS2", "c"]);
+        let to_s2 = s3
+            .field_info
+            .iter()
+            .find(|f| render(f.field_name) == "toS2")
+            .unwrap();
+        assert_eq!(to_s2.subobject.map(render).as_deref(), Some("S2"));
+        assert_eq!(render(to_s2.proj_fn), "S3.toS2");
+        // Diamond: D2 is a non-subobject parent.
+        let d3 = find("D3");
+        let parents: Vec<(String, bool)> = d3
+            .parent_info
+            .iter()
+            .map(|p| (render(p.struct_name), p.subobject))
+            .collect();
+        assert_eq!(
+            parents,
+            [("D1".to_string(), true), ("D2".to_string(), false)]
+        );
+        // A class is a structure too, with an instImplicit-free field list.
+        assert!(md.structures.iter().any(|i| render(i.struct_name) == "Add"));
     }
 }

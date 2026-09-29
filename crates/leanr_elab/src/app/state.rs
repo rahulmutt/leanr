@@ -35,7 +35,8 @@ pub struct Context {
     /// producer) and `finalize`'s outParam branch.
     pub result_is_out_param_support: bool,
     /// oracle: `Context.numImplicitParams` — cached max over
-    /// `namedArgs`; only nonzero for structure projections (M4b-4).
+    /// `namedArgs`; only nonzero for the `(self := e)` argument a
+    /// structure projection function adds (`lval.rs`, M4b-4a P1).
     pub num_implicit_params: usize,
     /// The application's own syntax — the oracle's ambient `getRef`
     /// throughout `elabAppArgs` (every `TermElab` handler runs under

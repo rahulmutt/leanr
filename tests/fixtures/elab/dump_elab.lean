@@ -874,6 +874,79 @@ def nondepQueries : List (String × String) :=
   , ("nondep/let-rfl",  "let n : Nat := Nat.zero; (rfl : Eq n Nat.zero)")
   ]
 
+/-- M4b-4a P1 task 5: `projIdx` (one-constructor `inductive`,
+`App.lean:1533-1540`) and `elabAppFn`'s generic arm
+(`App.lean:2120-2138`). Every one checked against the pinned oracle.
+
+`generic-ellipsis` is the only record reaching the generic arm with no
+arguments and no LVals (`..` is stripped by `expandApp`), where the oracle
+returns `elabTerm f expectedType?` AS IS (`:2124-2132`) rather than
+re-applying it through `elabAppArgs`, which would fill `Nat.succ`'s
+explicit argument with `_`. A bare `(fun (x : Nat) => x)` does NOT reach
+that arm: a paren term is dispatched to `elabParen`, never `elabAppFn`. -/
+def lvalIdxQueries : List (String × String) :=
+  [ ("lval/idx-one-second",       "fun (o : One) => o.2")
+  , ("lval/idx-one-first",        "fun (o : One) => o.1")
+  , ("lval/generic-paren-head",   "(Nat.succ) Nat.zero")
+  , ("lval/generic-fun-head",     "(fun (x : Nat) => x) Nat.zero")
+  , ("lval/generic-ellipsis",     "(Nat.succ) ..")
+  ]
+
+/-- M4b-4a P1 task 6: `projFn` (`App.lean:1857-1872`) — structure
+fields by index and by name, inherited through subobjects
+(`mkBaseProjections`, `App.lean:1700-1710`), chained, with explicit
+universes (on the LAST component only, `App.lean:2071`), after
+`consumeImplicits`, and through `resolveLValLoop`'s unfold retry
+(`App.lean:1687-1694`). -/
+def lvalFnQueries : List (String × String) :=
+  [ ("lval/prod-fst-idx",        "fun (p : Prod Nat Nat) => p.1")
+  , ("lval/prod-snd-idx",        "fun (p : Prod Nat Nat) => p.2")
+  , ("lval/prod-fst-name",       "fun (p : Prod Nat Nat) => (p).fst")
+  , ("lval/prod-mk-idx",         "(Prod.mk Nat.zero Nat.zero).1")
+  , ("lval/subobject-idx",       "fun (s : S3) => s.1")
+  , ("lval/inherited-field",     "fun (s : S3) => (s).a")
+  , ("lval/idx-then-name",       "fun (s : S3) => (s).1.b")
+  , ("lval/chain-idx",           "fun (s : S3) => s.1.1.1")
+  , ("lval/dotted-field-token",  "fun (s : S3) => (s).toS2.toS1")
+  , ("lval/diamond-direct",      "fun (d : D3) => (d).z")
+  , ("lval/diamond-subobject",   "fun (d : D3) => (d).x")
+  -- NOT the plan's `(s).a`: on the non-structure `S3Alias` a field NAME
+  -- goes through `findMethod?` (`App.lean:1568`) before the unfold retry,
+  -- and that is P3's (leanr seams, never retries a seam — plan Review
+  -- Focus 2). A field INDEX fails `matchConstStructure` with a genuine
+  -- error, so it reaches the retry in P1.
+  , ("lval/unfold-alias-idx",    "fun (s : S3Alias) => (s).1.a")
+  , ("lval/poly-idx",            "fun (q : Poly Nat) => q.1")
+  , ("lval/poly-univ",           "fun (q : Poly Nat) => (q).val.{0}")
+  , ("lval/field-univ-partial",  "fun (p : Prod Nat Nat) => (p).fst.{0}")
+  , ("lval/consume-implicits",   "(@dflt).1")
+  , ("lval/dotted-field-univ",   "fun (p : Prod Type (Poly Nat)) => (p).snd.val.{0}")
+  -- `OfNat.ofNat : {α} → (n : Nat) → [self : OfNat α n] → α` has an
+  -- EXPLICIT structure parameter `n`. With no positional arguments the
+  -- `self`-dependency path (`App.lean:858-866`) would make it implicit
+  -- anyway; with one, only `(self := x)`'s `numImplicitParams`
+  -- (`App.lean:767-802`, `:1866`) keeps `Nat.zero` from filling `n`.
+  , ("lval/explicit-param-idx",  "fun (x : OfNat Nat Nat.zero) => x.1")
+  , ("lval/explicit-param-args", "fun (x : OfNat (Nat -> Nat) Nat.zero) => (x).ofNat Nat.zero")
+  -- `@` on a projection head (`App.lean:2112`/`:2264`): `elabExplicit`
+  -- hands the whole `@..` node to `elabAtom`, and `elabAppFn` strips the
+  -- `@` and re-enters on the `proj` with `explicit := true`.
+  , ("lval/explicit-proj",       "@(Prod.mk Nat.zero Nat.zero).1")
+  -- Parametric, universe-polymorphic chain `PD extends PC extends PB`:
+  -- `mkBaseProjections` (`App.lean:1700-1710`) applies each parent
+  -- projection to the value's type arguments at the TYPE's universe
+  -- levels, so dropping either changes the term.
+  , ("lval/param-chain-1",       "fun (x : PC Nat Nat) => (x).b")
+  , ("lval/param-chain-2",       "fun (x : PD Nat) => (x).b")
+  , ("lval/param-chain-univ",    "fun (x : PC.{1,0} Type Nat) => (x).b")
+  , ("lval/param-chain-args",    "fun (x : PD (Nat -> Nat)) => (x).b Nat.zero")
+  -- A guillemet-escaped field name is its unescaped component.
+  , ("lval/escaped-field",       "fun (s : S3) => (s).«a»")
+  -- `@` in FUNCTION position on a projection head (`App.lean:2112-2114`).
+  , ("lval/explicit-proj-fn",    "@(Prod.mk Nat.succ Nat.zero).fst Nat.zero")
+  , ("lval/explicit-proj-impl",  "fun (x : FI) => @(x).f Nat Nat.zero")
+  ]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -887,7 +960,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries ++ closeoutExplicitQueries ++ nondepQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries ++ closeoutExplicitQueries ++ nondepQueries ++ lvalIdxQueries ++ lvalFnQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>
