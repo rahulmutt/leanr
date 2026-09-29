@@ -219,6 +219,9 @@ run = [
   # (alongside Meta0.olean/Synth0.olean) — this task only re-runs the
   # dumper, matching how fixtures:regen-notation is split out.
   "sh -c 'cd tests/fixtures/elab && LEAN_PATH=$PWD lean --run dump_elab.lean > elab-queries.jsonl'",
+  # M4b-4a P1: oracle answers for the structure accessors
+  # (crates/leanr_meta/tests/structures.rs compares against these).
+  "sh -c 'cd tests/fixtures/elab && LEAN_PATH=$PWD lean --run dump_structs.lean > structures.jsonl'",
 ]
 
 [tasks."fixtures:regen-notation"]

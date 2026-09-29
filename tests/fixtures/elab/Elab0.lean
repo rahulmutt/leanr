@@ -638,3 +638,41 @@ instance instAddNat : Add Nat where
 def withDefault (n : Nat := Nat.zero) : Nat := n
 
 def withTactic (n : autoParam Nat p5AutoTac) : Nat := n
+
+-- === M4b-4a P1: structures and projections ===
+-- Subobject chain: `S3 extends S2 extends S1`. `(s).a` walks
+-- `S3.toS2`, `S2.toS1` (`mkBaseProjections`, App.lean:1700-1710).
+structure S1 where
+  a : Nat
+structure S2 extends S1 where
+  b : Nat
+structure S3 extends S2 where
+  c : Nat
+-- Diamond: `D2` shares `y` with `D1`, so it is a NON-subobject parent
+-- of `D3` (its `z` is copied into `D3` as a direct field). Exercises
+-- `getPathToBaseStructure?`'s parentInfo fallback (Structure.lean:338-356).
+structure D1 where
+  x : Nat
+  y : Nat
+structure D2 where
+  y : Nat
+  z : Nat
+structure D3 extends D1, D2 where
+  w : Nat
+-- One-constructor `inductive`, not `structure`: `.i` builds `Expr.proj`
+-- (`LValResolution.projIdx`, App.lean:1532-1540).
+inductive One where
+  | mk : Nat -> Nat -> One
+-- A `def` alias: field access needs `resolveLValLoop`'s
+-- `unfoldDefinition?` retry (App.lean:1687-1694).
+def S3Alias : Type := S3
+-- Universe-polymorphic structure, for `.{u}` on a field.
+structure Poly (α : Type u) where
+  val : α
+-- Implicit leading binder: `(@dflt).1` needs `consumeImplicits`
+-- (App.lean:1659-1676) before the projection resolves.
+def dflt {_α : Type} : Prod Nat Nat := Prod.mk Nat.zero Nat.zero
+-- A `Prop` with a data field: `.1` must be rejected by
+-- `mkProjAndCheck` (App.lean:65-73).
+inductive PBox : Prop where
+  | mk : Nat -> PBox
