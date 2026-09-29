@@ -244,3 +244,25 @@ fn a_resume_that_postpones_again_rolls_its_state_back() {
         assert_eq!(elab.pending_mvars, pending);
     });
 }
+
+/// Review Focus 5. oracle: `elabAppArgs` postpones on an mvar-typed
+/// head only when there is something to apply (`unless namedArgs.isEmpty
+/// && args.isEmpty`, `App.lean:1366`). A bare local of unknown type is
+/// elaborated as is.
+#[test]
+fn an_application_with_no_arguments_does_not_postpone_on_its_head_type() {
+    support::with_elab("fun x => x", |elab, term, kinds| {
+        elab.elab_term(term, kinds, None).unwrap();
+        assert!(postponed_ids(elab).is_empty());
+    });
+}
+
+/// ...and with an argument, it does: the body `f Nat.zero` is postponed
+/// whole.
+#[test]
+fn an_application_of_an_mvar_typed_head_is_postponed() {
+    support::with_elab("fun f => f Nat.zero", |elab, term, kinds| {
+        elab.elab_term(term, kinds, None).unwrap();
+        assert_eq!(postponed_ids(elab).len(), 1);
+    });
+}

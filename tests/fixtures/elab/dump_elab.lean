@@ -985,6 +985,16 @@ def p2Queries : List (String × String) :=
   -- pin `whnfR`: without it, `resolveLValLoop`'s `unfoldDefinition?`
   -- retry reaches `?m` anyway (postpone_smoke.rs pins `is_mvar_app`).
   , ("p2/lval-reducible-alias",    "(fun (x : outParam _) => x.1) (One.mk Nat.zero Nat.zero)")
+  -- `elabAppArgs`' `unless namedArgs.isEmpty && args.isEmpty do
+  -- tryPostponeIfMVar fType` (App.lean:1366-1367): `f : ?α` is applied
+  -- before the outer application assigns `?α := Nat → Nat`.
+  , ("p2/app-fn-applied",          "(fun f => f Nat.zero) Nat.succ")
+  , ("p2/app-fn-two-args",         "(fun f x => f x) Nat.succ Nat.zero")
+  -- Not recorded: `(fun x f => f x.1) (Prod.mk ..) Nat.succ`. `f : ?β' x`
+  -- after `elimMVarDeps`, and `?β' a =?= Nat → Nat` needs `numScopeArgs`
+  -- constant approximation (ExprDefEq.lean:1271-1278), which leanr_meta
+  -- lacks (fails identically without postponement:
+  -- `(fun (x : Nat) f => f) Nat.zero Nat.succ` is `StuckCoercion`).
   ]
 
 def emit (id src : String) (expJ : Json) : IO Unit :=

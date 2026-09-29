@@ -138,12 +138,12 @@ fn synthesize_pending_and_normalize_fun_type(
     // rendering leanr does not do), and the "Function expected" error.
     // Only the last changes control flow, so only it is ported.
     //
-    // M4b-3 P5 task 4 closed the mvar-fType seam that used to sit here:
-    // `propagateExpectedType` (`builtin/binder/fun.rs`) now pins a `fun`
-    // binder's domain from the ascription BEFORE this point is ever
-    // reached, so an `fType` still an unassigned mvar here is a genuine
-    // "Function expected" — the oracle draws no distinction either
-    // (`App.lean:395-411` falls straight through to it).
+    // An `fType` still an unassigned mvar here is reached only with
+    // postponement off: `elab_app_args` postpones it first while
+    // `may_postpone` holds (`App.lean:1366-1367`), and
+    // `propagateExpectedType` (`builtin/binder/fun.rs`) pins a `fun`
+    // binder's domain from an ascription before that. The oracle then
+    // falls straight through to "Function expected" (`App.lean:372-411`).
     let f_type = app.st.f_type;
     Err(ElabError::FunctionExpected {
         f: app.st.f,
