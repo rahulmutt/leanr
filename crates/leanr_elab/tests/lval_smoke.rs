@@ -120,11 +120,6 @@ fn placeholder_head_is_rejected() {
 
 #[test]
 fn p2_p3_p4_constructs_are_named_seams() {
-    // tryPostponeIfMVar (App.lean:1680) — P2 owns postponement. The
-    // oracle postpones, then (nothing ever pins `x`'s type) reports
-    // "Invalid projection: Type of x is not known; cannot resolve
-    // projection `1`"; leanr cannot postpone yet, so it seams.
-    assert!(seam("fun x => x.1").contains("M4b-4a P2"));
     // `.const` resolution via findMethod? — P3. The oracle elaborates
     // this to `Nat.zero.succ : Nat`.
     assert!(seam("(Nat.zero).succ").contains("M4b-4a P3"));
@@ -146,6 +141,42 @@ fn p2_p3_p4_constructs_are_named_seams() {
     let m = seam("fun (s : S3Alias) => (s).a");
     assert!(m.contains("M4b-4a P3"), "{m}");
     assert!(m.contains("`S3Alias`"), "{m}");
+}
+
+/// Review Focus 2: a postponed projection whose type never becomes
+/// known is reported at the last rung with the oracle's error — never
+/// as `ElabError::Postpone`, never as a seam. Each message is the
+/// pinned oracle's (`#check`, prelude file importing `Elab0`).
+#[test]
+fn postponed_projections_on_an_unknown_type_report_the_oracle_error() {
+    // "Invalid projection: Type of x is not known; cannot resolve projection `1`"
+    assert_eq!(
+        proj_reason("fun x => x.1"),
+        InvalidProjectionReason::TypeUnknown
+    );
+    // Same message, raised inside `(e :)`'s own `withSynthesize (postpone := .no)`.
+    assert_eq!(
+        proj_reason("fun x => (x.1 :)"),
+        InvalidProjectionReason::TypeUnknown
+    );
+    // Same message through a reducible alias (`outParam ?m`).
+    assert_eq!(
+        proj_reason("fun (x : outParam _) => x.1"),
+        InvalidProjectionReason::TypeUnknown
+    );
+    // "Invalid projection: Type of ?m.4 is not known; cannot resolve projection `1`"
+    assert_eq!(
+        proj_reason("(_ : _).1"),
+        InvalidProjectionReason::TypeUnknown
+    );
+    // "Invalid field notation: Type of x is not known; cannot resolve field `fst`"
+    match support::elab_and_synthesize("fun x => (x).fst") {
+        Err(ElabError::InvalidField {
+            reason: InvalidFieldReason::TypeUnknown,
+            ..
+        }) => {}
+        other => panic!("expected InvalidField TypeUnknown, got {other:?}"),
+    }
 }
 
 #[test]

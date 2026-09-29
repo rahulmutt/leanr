@@ -958,6 +958,33 @@ def p2Queries : List (String × String) :=
   -- elaborates `x` WITHOUT the implicit lambda (`:1853-1854`) and
   -- `ensureHasType` assigns `?α`. Result: `fun x => x`, no wrap.
   [ ("p2/implicit-lambda-postpone", "fun x => (x : {a : Type} -> Nat)")
+  -- `resolveLValLoop`'s `tryPostponeIfMVar eType` (App.lean:1680): `x`'s
+  -- type is `?α` until the application unifies it with `Prod Nat Nat`.
+  , ("p2/lval-idx-applied",        "(fun x => x.1) (Prod.mk Nat.zero Nat.zero)")
+  , ("p2/lval-name-applied",       "(fun x => (x).fst) (Prod.mk Nat.zero Nat.zero)")
+  -- The inner `x.1` is postponed, then the outer `.1` postpones on the
+  -- inner mvar's type: the catch RESTORES (dropping the inner mvar) and
+  -- postpones the whole `(x.1).1` (TermElabM.lean:1635-1651). Monomorphic
+  -- `S2`/`S1`, not nested `Prod`: leanr leaves `Prod.{max 0 0, 0}`
+  -- unnormalized for `Prod.mk (Prod.mk ..) ..` with or without
+  -- postponement (a pre-existing level gap, not P2's).
+  , ("p2/lval-chain",              "(fun x => (x.1).1) (S2.mk (S1.mk Nat.zero) Nat.zero)")
+  -- Postponed as an ARGUMENT, resumed under `x`'s binder (Review Focus 3).
+  -- In `lval-two-binders` `y`'s type is given: with both binder types
+  -- holes leanr fails `(fun x y => y) Nat.zero Nat.zero` too (a
+  -- pre-existing gap on `y`'s `?Y x` type, not P2's).
+  , ("p2/lval-in-arg",             "(fun x => Nat.succ x.1) (Prod.mk Nat.zero Nat.zero)")
+  , ("p2/lval-two-binders",        "(fun x (y : Prod Nat Nat) => Prod.mk x.2 y.1) (Prod.mk Nat.zero Nat.zero) (Prod.mk Nat.zero Nat.zero)")
+  -- `(e :)` drains its own postponements (`withSynthesize (postpone :=
+  -- .no)`, BuiltinNotation.lean:433-435) — Review Focus 4.
+  , ("p2/lval-nested-synthesize",  "((fun x => x.1) (Prod.mk Nat.zero Nat.zero) :)")
+  -- `outParam` is reducible: `isMVarApp (outParam ?m)` is true only
+  -- through `whnfR` (TermElabM.lean:1375-1376). Monomorphic `One`: with
+  -- `Prod Nat Nat` leanr leaves `outParam.{max 1 1}` unnormalized (the
+  -- same pre-existing level gap as `lval-chain`). This record does not
+  -- pin `whnfR`: without it, `resolveLValLoop`'s `unfoldDefinition?`
+  -- retry reaches `?m` anyway (postpone_smoke.rs pins `is_mvar_app`).
+  , ("p2/lval-reducible-alias",    "(fun (x : outParam _) => x.1) (One.mk Nat.zero Nat.zero)")
   ]
 
 def emit (id src : String) (expJ : Json) : IO Unit :=

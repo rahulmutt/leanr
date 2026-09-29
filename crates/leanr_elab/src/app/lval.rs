@@ -328,21 +328,13 @@ fn resolve_lval_loop(
     kinds: &KindInterner,
 ) -> Result<(ExprId, LValResolution), ElabError> {
     let (e, e_type) = consume_implicits(elab, lval.get_ref(), e, e_type, has_args)?;
-    // `tryPostponeIfMVar eType` then `if isMVarApp eType then
-    // synthesizeSyntheticMVarsUsingDefault` (`:1680-1683`). The first
-    // throws only when `mayPostpone`, and leanr cannot postpone yet, so
-    // it is the P2 seam. `may_postpone` is `false` only inside
-    // `without_postponing` (ladder rungs 2/4), which elaborates no term
-    // until P2 resumes postponed ones, so the `else` path below is
-    // unreachable today (see `lib.rs`).
+    // oracle: `tryPostponeIfMVar eType` (`App.lean:1680`), then, when
+    // postponement is off (ladder rungs 2 and 4, or a resume below
+    // them), `if (← isMVarApp eType) then
+    // synthesizeSyntheticMVarsUsingDefault` (`:1681-1683`) — try default
+    // instances to unblock the type before resolving.
+    elab.try_postpone_if_mvar(e_type)?;
     if elab.is_mvar_app(e_type)? {
-        if elab.may_postpone {
-            return Err(ElabError::UnsupportedSyntax(
-                "field notation on a term whose type is still a metavariable: the oracle \
-                 postpones (`tryPostponeIfMVar`, App.lean:1680) — M4b-4a P2"
-                    .to_string(),
-            ));
-        }
         elab.synthesize_synthetic_mvars_using_default(kinds)?;
     }
     let e_type = elab.mctx.instantiate_mvars(e_type)?;

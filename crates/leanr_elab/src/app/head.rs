@@ -156,10 +156,12 @@ pub fn elab_app_fn(
         // nothing to apply, the term is elaborated against the expected
         // type and returned AS IS — not re-applied through `elabAppArgs`.
         // Otherwise it is elaborated with no expected type and handed to
-        // `elabAppLVals`. The `catchPostpone`/`overloaded` distinction
-        // (`:2121-2129`, `:2137`) is P2's and the overloading slice's:
-        // leanr cannot postpone yet, and `overloaded` is always false
-        // until `choice` is routed.
+        // `elabAppLVals`. `catchPostpone := !overloaded` (`:2121`) is
+        // always `true` here, since `overloaded` is false until `choice`
+        // is routed (overloading slice), so `elab_term`'s catch applies.
+        // `observing`'s restore-and-rethrow of a postponement
+        // (`TermElabM.lean:586-589`) is subsumed by the enclosing
+        // `elab_term`'s own restore, which rolls back to an earlier state.
         _ => {
             if lvals.is_empty() && call.named_args.is_empty() && call.args.is_empty() {
                 Ok(vec![elab.elab_term(elem, kinds, call.expected)?])

@@ -122,16 +122,19 @@ fn postpone_elab_term_registers_a_synthetic_opaque_postponed_mvar() {
     });
 }
 
-/// oracle: `elabUsingElabFnsAux` (`TermElabM.lean:1635-1651`) catches
-/// `Exception.postpone` when `catchExPostpone` and registers the term
-/// as a `.postponed` synthetic mvar. The postponed syntax is `x` — the
-/// local whose implicit-lambda treatment is postponed — not the
-/// enclosing ascription.
+/// oracle: `elabTermAux`'s `.postpone` arm (`TermElabM.lean:1843-1850`)
+/// — with `mayPostpone` and `catchExPostpone`, it calls
+/// `postponeElabTerm` DIRECTLY, registering the term as a `.postponed`
+/// synthetic mvar. No `Exception.postpone` is thrown, so this does NOT
+/// exercise `elabUsingElabFnsAux`'s catch (`:1635-1651`); that catch is
+/// pinned by `a_postpone_discards_what_the_failed_attempt_registered`.
+/// The postponed syntax is `x` — the local whose implicit-lambda
+/// treatment is postponed — not the enclosing ascription.
 #[test]
-fn elab_term_catches_a_postpone_and_registers_the_term() {
+fn the_implicit_lambda_postpone_arm_registers_the_term() {
     support::with_elab("fun x => (x : {a : Type} -> Nat)", |elab, term, kinds| {
         elab.elab_term(term, kinds, None)
-            .expect("the catch turns the postponement into an mvar");
+            .expect("the `.postpone` arm turns the term into an mvar");
         let ids = postponed_ids(elab);
         assert_eq!(ids.len(), 1, "exactly the one postponed `x`");
         let decl = elab.synthetic_mvar_decl(ids[0]).unwrap();
@@ -202,5 +205,42 @@ fn a_failed_resume_under_postpone_on_error_rolls_its_state_back() {
             ),
             "{r:?}"
         );
+    });
+}
+
+/// oracle: the catch restores the saved state before postponing
+/// (`TermElabM.lean:1635-1651`). Elaborating `(x.1).1` postpones the
+/// inner `x.1` first (a registered mvar `?m`), then the outer `.1`
+/// postpones on `?m`'s unknown type; the restore drops `?m`, so exactly
+/// ONE postponed mvar — the whole `(x.1).1` — is pending.
+#[test]
+fn a_postpone_discards_what_the_failed_attempt_registered() {
+    support::with_elab("fun x => (x.1).1", |elab, term, kinds| {
+        elab.elab_term(term, kinds, None).unwrap();
+        let ids = postponed_ids(elab);
+        assert_eq!(ids.len(), 1, "the inner postponement is discarded");
+        let decl = elab.synthetic_mvar_decl(ids[0]).unwrap();
+        assert_eq!(
+            u32::from(decl.stx.text_range().len()),
+            "(x.1).1".len() as u32,
+            "the postponed syntax is the whole projection chain"
+        );
+    });
+}
+
+/// oracle: a resume that postpones again restores its saved state
+/// (`SyntheticMVars.lean:61-65`). `(_ : _).1`'s head registers two holes
+/// (the type and the value), THEN `.1` postpones on `?T`.
+#[test]
+fn a_resume_that_postpones_again_rolls_its_state_back() {
+    support::with_elab("(_ : _).1", |elab, term, kinds| {
+        elab.postpone_elab_term(term, None).unwrap();
+        let id = elab.pending_mvars[0];
+        let infos = elab.mvar_error_infos.len();
+        let pending = elab.pending_mvars.clone();
+        let r = elab.synthesize_synthetic_mvar(id, false, false, kinds);
+        assert!(matches!(r, Ok(false)), "{r:?}");
+        assert_eq!(elab.mvar_error_infos.len(), infos, "both holes rolled back");
+        assert_eq!(elab.pending_mvars, pending);
     });
 }
