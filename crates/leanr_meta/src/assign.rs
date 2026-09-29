@@ -2655,4 +2655,52 @@ mod tests {
             ctx.lctx_restore(cp);
         });
     }
+
+    /// Consumers 5/6/7 together: a `have` is a Miller-pattern argument.
+    /// `?m : Nat → Nat` is minted OUTSIDE the decl; `?m h =?= h` must
+    /// abstract `h` and assign `?m := fun _ : Nat => #0`. A genuine `let`
+    /// instead has its value substituted by `simpAssignmentArg`, the
+    /// argument is no longer an fvar, and the oracle answers `false`
+    /// (both answers measured on the oracle, v4.33.0-rc1).
+    #[test]
+    fn a_have_is_a_pattern_argument_and_a_let_is_not() {
+        use crate::test_support::{const_named, with_prelude0_ctx};
+        with_prelude0_ctx(|ctx| {
+            let nat = const_named(ctx, "Nat");
+            let zero = const_named(ctx, "Nat.zero");
+            let nat_to_nat = mk_forall(ctx, nat, nat);
+            let bvar0 = ctx
+                .scratch
+                .expr_bvar(Some(ctx.view.store), &leanr_kernel::Nat::from(0u64))
+                .expect("bvar");
+            let expected = ctx
+                .scratch
+                .expr_lam(
+                    Some(ctx.view.store),
+                    None,
+                    nat,
+                    bvar0,
+                    leanr_kernel::BinderInfo::Default,
+                )
+                .expect("lam");
+            for (nondep, want) in [(true, true), (false, false)] {
+                let cp = ctx.lctx_checkpoint();
+                let (m, mid) = fresh_mvar(ctx, nat_to_nat);
+                let x = ctx.push_let_decl(None, nat, zero, nondep).expect("decl");
+                let lhs = mk_app(ctx, m, x);
+                assert_eq!(
+                    ctx.is_def_eq(lhs, x).expect("defeq"),
+                    want,
+                    "nondep={nondep}"
+                );
+                if want {
+                    let got = ctx.instantiate_mvars(m).expect("instantiate");
+                    assert_eq!(got, expected, "?m := fun _ => #0");
+                } else {
+                    assert!(!ctx.mctx.is_assigned(mid), "a let leaves ?m alone");
+                }
+                ctx.lctx_restore(cp);
+            }
+        });
+    }
 }

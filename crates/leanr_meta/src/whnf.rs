@@ -2942,6 +2942,24 @@ mod tests {
         });
     }
 
+    /// oracle: `whnfEasyCases`'s fvar arm (`WHNF.lean:397-409`) follows
+    /// only a `.ldecl (nondep := false)`: with `zetaDelta` on, a genuine
+    /// `let` unfolds to its value and a `have` stays put.
+    #[test]
+    fn zeta_delta_follows_a_let_but_not_a_have() {
+        with_prelude0_ctx(|ctx| {
+            let nat = ctx.const_named("Nat");
+            let zero = ctx.const_named("Nat.zero");
+            assert!(ctx.cfg.zeta_delta, "zeta_delta defaults on");
+            let cp = ctx.lctx_checkpoint();
+            let h = ctx.push_let_decl(None, nat, zero, true).expect("have");
+            let l = ctx.push_let_decl(None, nat, zero, false).expect("let");
+            assert_eq!(ctx.whnf(h).expect("have"), h, "a have is opaque");
+            assert_eq!(ctx.whnf(l).expect("let"), zero, "a let unfolds");
+            ctx.lctx_restore(cp);
+        });
+    }
+
     #[test]
     fn zeta_reduces_used_let() {
         with_prelude0_ctx(|ctx| {
