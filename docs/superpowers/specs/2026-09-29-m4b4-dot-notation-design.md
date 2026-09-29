@@ -185,8 +185,9 @@ and both follow P1; P4 needs both.
 
 leanr has the **resume** side (`SyntheticMVarKind::Postponed`,
 `synthetic/ladder.rs`'s `resume_postponed`) but no producer:
-`may_postpone` is written and never read, and nothing throws or catches
-a postponement. P2 adds:
+`may_postpone`'s only reader is P1's seam in `resolve_lval_loop`, whose
+`false` branch nothing reaches yet, and nothing throws or catches a
+postponement. P2 adds:
 
 - a postpone outcome distinct from `ElabError` errors (the oracle's
   `Exception.internal postponeExceptionId`), so `.error`-only catch
@@ -377,7 +378,20 @@ planned one at a time after their predecessor merges.
   in a function position (the oracle's "unexpected syntax"), the
   `` `(@$t) `` arm in a term position (`lval_smoke.rs`'s
   `explicit_on_projection_heads_matches_the_oracle`).
-- Corpus: 25 records under `lval/`. Rejections: `tests/lval_smoke.rs`.
+- Corpus: 32 records under `lval/`, including a parametric,
+  universe-polymorphic subobject chain (`PD extends PC extends PB`,
+  `lval/param-chain-*`) that pins `mkBaseProjections`' reuse of the
+  type's arguments and levels, a guillemet-escaped field
+  (`lval/escaped-field`) and `@` on projection heads in function
+  position. Rejections: `tests/lval_smoke.rs`.
+- `elab_app_fn` rejects explicit universes on any head other than an
+  identifier, `proj` or `dotIdent` with `IllFormedSyntax` citing
+  `Parser/Term.lean:938-950`: the oracle's parser refuses those trees
+  (`checkStackTop isIdentOrDotIdentOrProj`, which leanr_syntax skips),
+  and every other arm would drop or overwrite the levels.
+- `find_field` carries a visited set, like `get_path_to_base_structure`:
+  a doctored `structureExt` subobject cycle is an error, not a stack
+  overflow (`lval_smoke.rs`).
 - Seams left, each naming its owner: postponement (P2), `.const` /
   `Function` (P3), `pipeProj` / `dotIdent` / `namedPattern` (P4),
   `choice` (overloading slice), private projections (private-names

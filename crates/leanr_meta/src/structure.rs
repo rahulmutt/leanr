@@ -61,14 +61,32 @@ impl<'e> MetaCtx<'e> {
             .collect()
     }
 
-    /// oracle: `findField?`.
+    /// oracle: `findField?`. The oracle recurses with no cycle guard: a
+    /// well-formed environment's subobject graph is acyclic. `structureExt`
+    /// rows are untrusted, so a doctored cycle (`S2.toS1.subobject := S2`)
+    /// would recurse until the stack overflows. `visited` cuts a revisit
+    /// off with `None`, as `path_go` below does. On acyclic data that is
+    /// no change: a structure revisited through a diamond was already
+    /// searched in full and yielded `None` the first time.
     pub fn find_field(&self, s: NameId, field: NameId) -> Option<NameId> {
+        self.find_field_go(s, field, &mut HashSet::new())
+    }
+
+    fn find_field_go(
+        &self,
+        s: NameId,
+        field: NameId,
+        visited: &mut HashSet<NameId>,
+    ) -> Option<NameId> {
+        if !visited.insert(s) {
+            return None;
+        }
         if self.get_structure_fields(s).contains(&field) {
             return Some(s);
         }
         self.get_structure_subobjects(s)
             .into_iter()
-            .find_map(|p| self.find_field(p, field))
+            .find_map(|p| self.find_field_go(p, field, visited))
     }
 
     /// oracle: `getPathToBaseStructure?` (`Structure.lean:338-354`).

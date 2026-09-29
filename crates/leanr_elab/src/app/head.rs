@@ -50,7 +50,32 @@ pub fn elab_app_fn(
     lvals: Vec<LVal>,
     call: AppCall,
 ) -> Result<Vec<ExprId>, ElabError> {
-    match (kinds.name(elem.kind()), elem) {
+    let kind = kinds.name(elem.kind());
+    // The oracle's parser admits `.{us}` only after an identifier, a
+    // `dotIdent` or a `proj` (`explicitUniv`'s `checkStackTop
+    // isIdentOrDotIdentOrProj`, `Parser/Term.lean:938-950`). leanr_syntax
+    // skips that check (`builtin/term.rs`'s `explicitUniv` registration),
+    // so `(f).{0} a`, `(fun x => x).{0} a` and `List.{0}.{1}` reach here
+    // with levels on a head that has no arm to take them. The oracle
+    // rejects all three at parse time ("unexpected token '.{'"). Every arm
+    // but those three would DROP the levels (or, for a nested
+    // `explicitUniv`, overwrite them), elaborating a term the oracle never
+    // sees. So: a tree the oracle's grammar cannot produce is
+    // `IllFormedSyntax`, the variant leanr uses for shapes the grammar
+    // rules out.
+    if !explicit_levels.is_empty()
+        && !matches!(
+            kind,
+            "<ident>" | "Lean.Parser.Term.proj" | "Lean.Parser.Term.dotIdent"
+        )
+    {
+        return Err(ElabError::IllFormedSyntax(format!(
+            "explicit universes `.{{..}}` after `{kind}`: the oracle's parser accepts them only \
+             after an identifier, `dotIdent` or `proj` (`explicitUniv`'s `checkStackTop \
+             isIdentOrDotIdentOrProj`, Parser/Term.lean:938-950)"
+        )));
+    }
+    match (kind, elem) {
         ("<ident>", leanr_syntax::tree::NodeOrToken::Token(tok)) => {
             // `elabAsElim?` runs inside `elabAppArgs` on the FINAL head
             // (`App.lean:1373`). With LVals pending, the identifier is not
@@ -83,17 +108,18 @@ pub fn elab_app_fn(
                     }]
                 }
                 // `elabFieldName` (`:2067-2074`): `field.identComponents` —
-                // ONE token, one LVal per component (plan § Review Focus 5).
+                // ONE token, one LVal per component (plan § Review Focus 5),
+                // each component unescaped (`«a»` is the field `a`).
                 _ => {
                     let text = field.to_string();
-                    let comps: Vec<&str> = text.trim().split('.').collect();
+                    let comps = ident_components(text.trim())?;
                     let last = comps.len() - 1;
                     comps
-                        .iter()
+                        .into_iter()
                         .enumerate()
                         .map(|(i, c)| LVal::FieldName {
                             r#ref: field.clone(),
-                            name: c.to_string(),
+                            name: c,
                             levels: if i == last {
                                 explicit_levels.to_vec()
                             } else {
@@ -375,6 +401,57 @@ pub(crate) fn mk_const(
     Ok(id)
 }
 
+/// The components of an identifier token's raw source text, with
+/// `«»` escapes stripped: `a.«b.c».d` is `["a", "b.c", "d"]`. The
+/// oracle's `Name` never carries the guillemets; they are syntax
+/// (`identFnAux`, `Parser/Basic.lean`; leanr_syntax's `ident_len` is the
+/// lexer side). The token was lexer-validated, but it is still parsed
+/// totally: an unterminated escape or an empty component is
+/// `IllFormedSyntax`, never a panic.
+pub(crate) fn ident_components(raw: &str) -> Result<Vec<String>, ElabError> {
+    let bad = || ElabError::IllFormedSyntax(format!("identifier `{raw}`"));
+    let mut comps = Vec::new();
+    let mut rest = raw;
+    loop {
+        let (comp, after) = if let Some(esc) = rest.strip_prefix('«') {
+            let end = esc.find('»').ok_or_else(bad)?;
+            (&esc[..end], &esc[end + '»'.len_utf8()..])
+        } else {
+            let end = rest.find('.').unwrap_or(rest.len());
+            if end == 0 {
+                return Err(bad());
+            }
+            (&rest[..end], &rest[end..])
+        };
+        comps.push(comp.to_string());
+        match after.strip_prefix('.') {
+            Some(next) => rest = next,
+            None if after.is_empty() => return Ok(comps),
+            None => return Err(bad()),
+        }
+    }
+}
+
+/// Intern `parts` as the hierarchical name `parts[0].parts[1]...`, each
+/// part ONE component whatever it contains (so an unescaped `«a.b»`
+/// stays a single component). Same store discipline as `intern_dotted`.
+pub(crate) fn intern_components(elab: &mut TermElabM, parts: &[&str]) -> Result<NameId, ElabError> {
+    let base = elab.view.store;
+    let mut id: Option<NameId> = None;
+    for part in parts {
+        let store = elab.mctx.store_mut();
+        let s = store
+            .intern_str(Some(base), part)
+            .map_err(leanr_meta::MetaError::from)?;
+        id = Some(
+            store
+                .name_str(Some(base), id, s)
+                .map_err(leanr_meta::MetaError::from)?,
+        );
+    }
+    id.ok_or_else(|| ElabError::IllFormedSyntax("empty name".to_string()))
+}
+
 /// Intern a (possibly dotted) identifier's raw source text as a
 /// `NameId` — the store has no direct "parse a `&str` into a `Name`"
 /// entry point (`Store::intern_name` only bridges FROM an already-built
@@ -397,21 +474,12 @@ pub(crate) fn mk_const(
 /// with `base = None` — is `EnvView::get_with`'s own documented
 /// misrouting hazard, which is how the divergence surfaced as an
 /// unrelated existing name (`Nat.brecOn.go`) rather than a clean miss).
+///
+/// Splits on every `.` and keeps `«»` verbatim; `ident_components` is
+/// the escape-aware splitter (used for field names).
 pub(crate) fn intern_dotted(elab: &mut TermElabM, raw: &str) -> Result<NameId, ElabError> {
-    let base = elab.view.store;
-    let mut id: Option<NameId> = None;
-    for part in raw.split('.') {
-        let store = elab.mctx.store_mut();
-        let s = store
-            .intern_str(Some(base), part)
-            .map_err(leanr_meta::MetaError::from)?;
-        id = Some(
-            store
-                .name_str(Some(base), id, s)
-                .map_err(leanr_meta::MetaError::from)?,
-        );
-    }
-    Ok(id.expect("ident node's text is never empty (parser-validated token)"))
+    let parts: Vec<&str> = raw.split('.').collect();
+    intern_components(elab, &parts)
 }
 
 #[cfg(test)]
@@ -450,6 +518,22 @@ mod tests {
         });
         env.admit_unchecked(ci).unwrap();
         env
+    }
+
+    /// `«»` escapes are stripped and an escaped component keeps its
+    /// dots; malformed text is an error, never a panic.
+    #[test]
+    fn ident_components_respects_guillemets() {
+        use super::ident_components;
+        assert_eq!(ident_components("a").unwrap(), ["a"]);
+        assert_eq!(ident_components("«a»").unwrap(), ["a"]);
+        assert_eq!(
+            ident_components("toS2.«b.c».d").unwrap(),
+            ["toS2", "b.c", "d"]
+        );
+        for bad in ["«a", "a..b", "a.", ".a", "«a»b"] {
+            assert!(ident_components(bad).is_err(), "{bad}");
+        }
     }
 
     /// The regression M4b-1's `builtin/ident.rs` carried, moved here

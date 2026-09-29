@@ -235,3 +235,59 @@ fn explicit_on_projection_heads_matches_the_oracle() {
     assert_eq!(ok("@(Prod.mk Nat.zero Nat.zero).fst.{0,0}"), want);
     assert_eq!(ok("@(Prod.mk Nat.zero Nat.zero).1.{0,0}"), want);
 }
+
+#[test]
+fn subobject_cycle_in_structure_ext_is_an_error_not_a_stack_overflow() {
+    // Malformed `structureExt`: every subobject field points back at its
+    // own structure (`S2.toS1.subobject := S2`, and likewise for every
+    // other structure with a parent). The oracle's `findField?` has no
+    // cycle guard; well-formed data is acyclic. leanr must report an
+    // error rather than recurse until the stack overflows (SIGABRT). Not
+    // an oracle case, since no well-formed `.olean` can produce it.
+    let r = support::elab_and_synthesize_doctored("fun (s : S2) => (s).zzz", |ss| {
+        for s in ss.iter_mut() {
+            let me = s.struct_name;
+            for f in s.field_info.iter_mut() {
+                if f.subobject.is_some() {
+                    f.subobject = Some(me);
+                }
+            }
+        }
+    });
+    // With the cycle cut, `zzz` is simply not a field of `S2`, so the
+    // lookup falls through to the `findMethod?` seam as it would on
+    // well-formed data.
+    match r {
+        Err(ElabError::UnsupportedSyntax(m)) => assert!(m.contains(".zzz"), "{m}"),
+        other => panic!("expected the P3 field-lookup seam, got {other:?}"),
+    }
+}
+
+/// Explicit universes on a head the oracle's PARSER rejects. `explicitUniv`
+/// is guarded by `checkStackTop isIdentOrDotIdentOrProj`
+/// (`Parser/Term.lean:938-950`), which leanr_syntax skips, so these parse
+/// in leanr. Oracle, one `#check` each on a prelude-mode scratch file
+/// importing `Elab0`:
+///
+/// ```text
+/// (Nat.succ).{0} Nat.zero                 -- error: unexpected token '.{'; expected command
+/// (fun (x : Nat) => x).{0} Nat.zero       -- error: unexpected token '.{'; expected command
+/// List.{0}.{1} Nat                        -- error: unexpected token '.{'; expected command
+/// ```
+///
+/// leanr must reject them too, not drop (or overwrite) the levels.
+#[test]
+fn explicit_universes_on_a_non_identifier_head_are_rejected() {
+    let wrong: Vec<String> = [
+        "(Nat.succ).{0} Nat.zero",
+        "(fun (x : Nat) => x).{0} Nat.zero",
+        "List.{0}.{1} Nat",
+    ]
+    .into_iter()
+    .filter_map(|src| match support::elab_and_synthesize(src) {
+        Err(ElabError::IllFormedSyntax(m)) if m.contains("Parser/Term.lean:938-950") => None,
+        other => Some(format!("{src}: expected IllFormedSyntax, got {other:?}")),
+    })
+    .collect();
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}

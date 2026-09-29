@@ -701,3 +701,16 @@ structure Bi where
   {imp : Nat}
   [inst : Add Nat]
   dflt : Nat
+
+-- Parametric, universe-polymorphic subobject chain: `PD extends PC
+-- extends PB`, with PC instantiating PB at its own `α` and PD
+-- instantiating PC at `α` and `Nat`. `(x).b` on a `PD` walks
+-- `PD.toPC`, `PC.toPB`, each applied to the structure value's own type
+-- arguments and universe levels (`mkBaseProjections`,
+-- App.lean:1700-1710), so dropping either is observable.
+structure PB (α : Type u) where b : α
+structure PC (α : Type u) (β : Type v) extends PB α where c : β
+structure PD (α : Type u) extends PC α Nat where d : Nat
+
+-- A field whose type is an implicit-binder function, for `@(x).f`.
+structure FI where f : {α : Type} → α → α

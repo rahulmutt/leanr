@@ -361,8 +361,8 @@ impl<'e> TermElabM<'e> {
             // oracle: this is where a real elaborator would postpone
             // (`Exception.postpone`, caught by `withSynthesize`'s
             // `catchPostpone`) and retry once the local's type is known.
-            // leanr has no term-level postponement (`lib.rs`:
-            // `may_postpone` is written but never read, and
+            // leanr has no term-level postponement (`lib.rs`: the only
+            // `may_postpone` reader is `resolve_lval_loop`, and
             // `postpone_elab_term` has no call site) — a named seam
             // rather than a silent fall-through to `dispatch::dispatch`,
             // which would elaborate a DIFFERENT term than the oracle.
@@ -371,7 +371,7 @@ impl<'e> TermElabM<'e> {
                     "implicit lambda postponement: the term is a local whose type is an \
                      unassigned metavariable application, which the oracle postpones \
                      (TermElabM.lean:1753-1778). leanr has no term-level postponement \
-                     (`may_postpone` is written but never read) — M4b-4a P2"
+                     (no elaborator postpones, and none resumes a postponed term) — M4b-4a P2"
                         .to_string(),
                 ));
             }
@@ -442,10 +442,11 @@ enum UseImplicitLambda {
     Yes(ExprId),
     /// `stx` is a local identifier whose type is still an mvar
     /// application (`:1753-1778`). Needs term-level postponement, which
-    /// leanr does not have (`lib.rs`: `may_postpone` is written, never
-    /// read) — `elab_term`'s dispatch (M4b-3 P5 Task 6) reports this as
-    /// a named `UnsupportedSyntax` seam owned by M4b-4a P2 rather than
-    /// falling through to a different term.
+    /// leanr does not have (`lib.rs`: no elaborator postpones a term;
+    /// `may_postpone`'s only reader is `resolve_lval_loop`) —
+    /// `elab_term`'s dispatch (M4b-3 P5 Task 6) reports this as a named
+    /// `UnsupportedSyntax` seam owned by M4b-4a P2 rather than falling
+    /// through to a different term.
     Postpone,
 }
 

@@ -192,18 +192,24 @@
 //!   term elaboration — `resolveLValLoop`'s `tryPostponeIfMVar` (seamed
 //!   in M4b-4a P1, `app/lval.rs`) is still the most likely candidate,
 //!   and M4b-4a P2 owns it, but it is a candidate, not a schedule.
-//! - **`may_postpone` is written but never read in production code.**
-//!   Re-verified by grep at the end of P3: `elab.rs:86`
-//!   (`TermElabM::new`) and `synthetic/state.rs:306`/`:308`
-//!   (`without_postponing`, saving and restoring the flag) are its only
-//!   writers in `src/`; nothing in `src/` ever reads it back (the only
-//!   reads are `tests/synthetic_smoke.rs`'s own assertions on the
-//!   field). Combined with `postpone_on_error` being consumed only
-//!   inside the dead `resume_postponed` above, the ladder's rungs 2
-//!   (postponement suppressed, errors postponed) and 4 (postponement
-//!   suppressed, errors not postponed) are today BEHAVIORALLY IDENTICAL
-//!   to rung 1 — nothing downstream branches on `may_postpone` or
-//!   `postpone_on_error` yet.
+//! - **`may_postpone` has exactly one production reader, and its
+//!   `false` branch is not yet reachable.** Writers in `src/`:
+//!   `elab.rs` (`TermElabM::new`) and `synthetic/state.rs`
+//!   (`without_postponing`, saving and restoring the flag). Since
+//!   M4b-4a P1 the one reader is `app/lval.rs`'s `resolve_lval_loop`
+//!   (oracle `tryPostponeIfMVar`, `App.lean:1680`): with the flag set it
+//!   raises the P2 postponement seam, and with it cleared it falls
+//!   through to `synthesizeSyntheticMVarsUsingDefault`. The flag is
+//!   cleared only inside `without_postponing`, which wraps the ladder's
+//!   rungs 2 and 4, and those rungs elaborate no terms until a postponed
+//!   elaboration exists to resume (`resume_postponed`, dead until
+//!   M4b-4a P2 produces one). So in practice every read sees `true`.
+//!   Combined with `postpone_on_error` being consumed only inside the
+//!   dead `resume_postponed` above, the ladder's rungs 2 (postponement
+//!   suppressed, errors postponed) and 4 (postponement suppressed,
+//!   errors not postponed) are today BEHAVIORALLY IDENTICAL to rung 1;
+//!   they become distinct once P2 resumes postponed terms and the
+//!   `may_postpone = false` branch of `resolve_lval_loop` is reached.
 //!
 //!   What CHANGED with P3: rung 3 is no longer a shape guard that could
 //!   only error or fall through, so the effective ladder that runs is

@@ -246,7 +246,7 @@ fn resolve_lval_aux(
         // `:1552-1578`.
         (Node::Const { name: Some(s), .. }, LVal::FieldName { name, levels, .. }) => {
             // `Name.mkSimple fieldName`: `name` is one component.
-            let field = crate::app::head::intern_dotted(elab, name)?;
+            let field = crate::app::head::intern_components(elab, &[name])?;
             if elab.mctx.is_structure(s) {
                 if let Some(base) = elab.mctx.find_field(s, field) {
                     return Ok(LValResolution::ProjFn {
@@ -270,7 +270,7 @@ fn resolve_lval_aux(
         // `:1580-1588`.
         (Node::Forall { .. }, LVal::FieldName { name, .. }) => {
             let full = format!("Function.{name}");
-            let full_id = crate::app::head::intern_dotted(elab, &full)?;
+            let full_id = crate::app::head::intern_components(elab, &["Function", name])?;
             if elab.view.get(full_id).is_some() {
                 return Err(ElabError::UnsupportedSyntax(format!(
                     "`.{name}` on a function resolves to `{full}` (App.lean:1581-1583) — M4b-4a P3"
@@ -326,7 +326,11 @@ fn resolve_lval_loop(
     let (e, e_type) = consume_implicits(elab, lval.get_ref(), e, e_type, has_args)?;
     // `tryPostponeIfMVar eType` then `if isMVarApp eType then
     // synthesizeSyntheticMVarsUsingDefault` (`:1680-1683`). The first
-    // throws only when `mayPostpone`, and leanr cannot postpone yet.
+    // throws only when `mayPostpone`, and leanr cannot postpone yet, so
+    // it is the P2 seam. `may_postpone` is `false` only inside
+    // `without_postponing` (ladder rungs 2/4), which elaborates no term
+    // until P2 resumes postponed ones, so the `else` path below is
+    // unreachable today (see `lib.rs`).
     // `is_mvar_app` is leanr's documented approximation of `isMVarApp`
     // (instantiate + spine walk, no `whnfR`; see its doc in `elab.rs`);
     // P2 owns making it exact.

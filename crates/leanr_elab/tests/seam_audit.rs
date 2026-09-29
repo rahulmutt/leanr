@@ -864,8 +864,8 @@ fn postponed_coe_under_a_binder_abstracts_via_elim_mvar_deps() {
 /// with no arguments), reached via the same classifier path — so P1's
 /// "no corpus term reaches it" is no longer a safe assumption.
 ///
-/// leanr has no term-level postponement (`lib.rs`: `may_postpone` is
-/// written, never read), so this must be a NAMED SEAM — an error the
+/// leanr has no term-level postponement (`lib.rs`: no elaborator
+/// postpones a term), so this must be a NAMED SEAM — an error the
 /// caller can see — and never a silently different term.
 #[test]
 fn implicit_lambda_postpone_is_a_named_seam() {

@@ -932,6 +932,19 @@ def lvalFnQueries : List (String × String) :=
   -- hands the whole `@..` node to `elabAtom`, and `elabAppFn` strips the
   -- `@` and re-enters on the `proj` with `explicit := true`.
   , ("lval/explicit-proj",       "@(Prod.mk Nat.zero Nat.zero).1")
+  -- Parametric, universe-polymorphic chain `PD extends PC extends PB`:
+  -- `mkBaseProjections` (`App.lean:1700-1710`) applies each parent
+  -- projection to the value's type arguments at the TYPE's universe
+  -- levels, so dropping either changes the term.
+  , ("lval/param-chain-1",       "fun (x : PC Nat Nat) => (x).b")
+  , ("lval/param-chain-2",       "fun (x : PD Nat) => (x).b")
+  , ("lval/param-chain-univ",    "fun (x : PC.{1,0} Type Nat) => (x).b")
+  , ("lval/param-chain-args",    "fun (x : PD (Nat -> Nat)) => (x).b Nat.zero")
+  -- A guillemet-escaped field name is its unescaped component.
+  , ("lval/escaped-field",       "fun (s : S3) => (s).«a»")
+  -- `@` in FUNCTION position on a projection head (`App.lean:2112-2114`).
+  , ("lval/explicit-proj-fn",    "@(Prod.mk Nat.succ Nat.zero).fst Nat.zero")
+  , ("lval/explicit-proj-impl",  "fun (x : FI) => @(x).f Nat Nat.zero")
   ]
 
 def emit (id src : String) (expJ : Json) : IO Unit :=
