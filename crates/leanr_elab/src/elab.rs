@@ -560,7 +560,7 @@ fn local_ident_of(
 /// elab→meta accessor precedent this slice's own
 /// `push_local_decl_without_instance` /
 /// `install_local_instance_for_last_pushed` follow).
-fn is_mvar_app(elab: &mut TermElabM, e: ExprId) -> Result<bool, ElabError> {
+pub(crate) fn is_mvar_app(elab: &mut TermElabM, e: ExprId) -> Result<bool, ElabError> {
     let e = elab.mctx.instantiate_mvars(e)?;
     let base = elab.view.store;
     let mut cur = e;

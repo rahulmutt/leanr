@@ -874,6 +874,24 @@ def nondepQueries : List (String × String) :=
   , ("nondep/let-rfl",  "let n : Nat := Nat.zero; (rfl : Eq n Nat.zero)")
   ]
 
+/-- M4b-4a P1 task 5: `projIdx` (one-constructor `inductive`,
+`App.lean:1533-1540`) and `elabAppFn`'s generic arm
+(`App.lean:2120-2138`). Every one checked against the pinned oracle.
+
+`generic-ellipsis` is the only record reaching the generic arm with no
+arguments and no LVals (`..` is stripped by `expandApp`), where the oracle
+returns `elabTerm f expectedType?` AS IS (`:2124-2132`) rather than
+re-applying it through `elabAppArgs`, which would fill `Nat.succ`'s
+explicit argument with `_`. A bare `(fun (x : Nat) => x)` does NOT reach
+that arm: a paren term is dispatched to `elabParen`, never `elabAppFn`. -/
+def lvalIdxQueries : List (String × String) :=
+  [ ("lval/idx-one-second",       "fun (o : One) => o.2")
+  , ("lval/idx-one-first",        "fun (o : One) => o.1")
+  , ("lval/generic-paren-head",   "(Nat.succ) Nat.zero")
+  , ("lval/generic-fun-head",     "(fun (x : Nat) => x) Nat.zero")
+  , ("lval/generic-ellipsis",     "(Nat.succ) ..")
+  ]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -887,7 +905,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries ++ closeoutExplicitQueries ++ nondepQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries ++ closeoutExplicitQueries ++ nondepQueries ++ lvalIdxQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>

@@ -150,7 +150,8 @@ pub fn elab_app(
 
 /// oracle: `elabAtom` (`App.lean:2243-2244`) — a zero-argument
 /// application. This is what `ident`, `@`, `.{u}`, `choice`, `proj` and
-/// `dotIdent` all reduce to in the oracle; P1 routes the first three.
+/// `dotIdent` all reduce to in the oracle; leanr routes the first three
+/// and, since M4b-4a P1 task 5, `proj`.
 pub fn elab_atom(
     elab: &mut TermElabM,
     elem: &SynElem,
@@ -263,7 +264,7 @@ fn explicit_inner(elem: &SynElem) -> Result<SynElem, ElabError> {
 /// `Syntax.getSepArgs` (`$us,*` in `App.lean:2103`'s quotation pattern
 /// expands to `getSepArgs`, which takes `args[0], args[2], ..`), not a
 /// kind filter invented here.
-fn explicit_univ_parts(elem: &SynElem) -> Result<(SynElem, Vec<SynElem>), ElabError> {
+pub(crate) fn explicit_univ_parts(elem: &SynElem) -> Result<(SynElem, Vec<SynElem>), ElabError> {
     let node = elem.as_node().ok_or_else(|| {
         ElabError::IllFormedSyntax("`.{u}`: Term.explicitUniv is not a node".to_string())
     })?;

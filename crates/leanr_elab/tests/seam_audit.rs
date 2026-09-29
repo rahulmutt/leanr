@@ -167,17 +167,14 @@ fn deferred_constructs_are_named_seams() {
         // `@` in a function position, which is `throwUnsupportedSyntax`
         // in the oracle too, so the citation is the owner.
         ("@(Nat.succ Nat.zero) Nat.zero", "App.lean:2118"),
-        // `head.rs`'s two arms. A projection or dot-identifier head is
-        // the dot-notation/LVal subsystem...
-        ("(Nat.zero).1 Nat.zero", "M4b-4"),
-        (".succ Nat.zero", "M4b-4"),
-        // ...while a general term in function position is `elabAppFn`'s
-        // generic branch (`App.lean:2120-2138`), which succeeds in the
-        // oracle. Task 9 split these: one message for both named the
-        // wrong owner for the second.
-        ("(Nat.succ) Nat.zero", "M4b-4"),
-        ("(fun (x : Nat) => x) Nat.zero", "M4b-4"),
-        ("(Nat.succ : Nat -> Nat) Nat.zero Nat.zero", "M4b-4"),
+        // `head.rs`'s still-unported `elabAppFn` arm: a dot-identifier
+        // head. (M4b-4a P1 task 5 ported the proj and generic arms: the
+        // `(Nat.zero).1 Nat.zero`, `(Nat.succ) Nat.zero`,
+        // `(fun (x : Nat) => x) Nat.zero` and ascribed-head cases that
+        // used to sit here now elaborate or raise an oracle error — see
+        // `lval_smoke.rs`, the `lval/*` corpus records and
+        // `over_application_through_a_general_head_reports_function_expected`.)
+        (".succ Nat.zero", "M4b-4a P4"),
         // `elab_ident_head`'s PARTIAL `shouldElabAsElim` guard (fix
         // round 1). A genuine recursor — `ConstantInfo::Rec`, the one
         // disjunct of `App.lean:1322-1328` that leanr's environment can
@@ -214,6 +211,20 @@ fn deferred_constructs_are_named_seams() {
 #[test]
 fn over_application_reports_function_expected() {
     let err = elab_src("Nat.zero Nat.zero").expect_err("Nat is not a function");
+    assert!(
+        matches!(err, leanr_elab::ElabError::FunctionExpected { .. }),
+        "got {err:?}"
+    );
+}
+
+/// The generic `elabAppFn` arm (`App.lean:2133-2138`) elaborates the
+/// ascribed head, then `elabAppArgs` over-applies it. The pinned oracle
+/// (`#check (Nat.succ : Nat -> Nat) Nat.zero Nat.zero`) reports:
+/// "Function expected at Nat.zero.succ but this term has type Nat".
+#[test]
+fn over_application_through_a_general_head_reports_function_expected() {
+    let err =
+        elab_src("(Nat.succ : Nat -> Nat) Nat.zero Nat.zero").expect_err("Nat is not a function");
     assert!(
         matches!(err, leanr_elab::ElabError::FunctionExpected { .. }),
         "got {err:?}"
@@ -277,15 +288,18 @@ fn elab_as_elim_guard_honours_the_explicit_and_ellipsis_early_out() {
 ///
 /// Asserted here rather than left to the table's doc comment because
 /// the failure mode this guards is a kind being *registered* by
-/// accident: `Term.proj` and friends alias to `elabAtom` in the oracle
-/// (`App.lean:2247-2248`, `:2273-2274`), so routing them to
+/// accident: `Term.pipeProj` and friends alias to `elabAtom` in the
+/// oracle (`App.lean:2247-2248`, `:2273`), so routing them to
 /// `app::elab_atom` looks correct and is not — their real work is
-/// `elabAppFn`'s LVal arms, which M4b-4 owns.
+/// `elabAppFn`'s still-unported LVal arms, which M4b-4a P4 owns.
+/// (`Term.proj` was routed by M4b-4a P1 task 5, with its arm.)
 #[test]
 fn unregistered_kinds_are_named_by_kind() {
     let cases: &[(&str, &str)] = &[
-        // M4b-4, the LVal / dot-notation family.
-        ("Nat.zero.1", "Lean.Parser.Term.proj"),
+        // M4b-4a P4, the rest of the LVal / dot-notation family.
+        // (`Term.proj` is registered since M4b-4a P1 task 5;
+        // `Nat.zero.1` is `InvalidProjection NotOneCtor`, pinned in
+        // `lval_smoke.rs`.)
         ("Nat.zero |>.1", "Lean.Parser.Term.pipeProj"),
         ("x@Nat.zero", "Lean.Parser.Term.namedPattern"),
         // The literals that are not leaves used to be listed here.

@@ -128,9 +128,11 @@
 //!   decode. Those cases still emit a term the oracle does not, with no
 //!   seam; `tests/seam_audit.rs`'s fixture-source gate is the backstop
 //!   until M4b-4 lands the decodes and `ElabElim`.
-//! - **dot notation / LVal machinery (`Term.proj`, `pipeProj`,
-//!   `dotIdent`, `namedPattern`, `choice`), `binop%`, anonymous
-//!   constructor `⟨⟩`** — M4b-4.
+//! - **dot notation / LVal machinery** — M4b-4a, in progress: `Term.proj`
+//!   index projections and the resolution loop landed in P1 (`app/lval.rs`);
+//!   structure projection functions are P1 task 6, generalized field
+//!   notation P3, `pipeProj`/`dotIdent`/`namedPattern` P4, `choice` the
+//!   overloading slice. `binop%` and the anonymous constructor `⟨⟩` — M4b-4.
 //! - **macro expansion** — `dispatch` never expands a macro form; the
 //!   dispatch table only ever matches a syntax kind directly against a
 //!   registered elaborator. Deferred to the slice that first needs a
@@ -277,4 +279,4 @@ pub mod resolve; // Task 5
 pub mod synthetic; // M4b-3 P2a
 
 pub use elab::TermElabM;
-pub use error::ElabError;
+pub use error::{ElabError, InvalidFieldReason, InvalidProjectionReason};

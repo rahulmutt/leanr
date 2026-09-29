@@ -98,6 +98,7 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
         "Lean.Parser.Term.app" => Some("app"),
         "Lean.Parser.Term.explicit" => Some("explicit"),
         "Lean.Parser.Term.explicitUniv" => Some("explicitUniv"),
+        "Lean.Parser.Term.proj" => Some("proj"),
         _ => None,
     }
 }
@@ -156,8 +157,8 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 /// (`app/mod.rs`'s `elab_explicit`):
 /// ```text
 ///   letI / haveI / let_fun / let_delayed / let_tmp / letrec  later slice (own oracle tier each)
-///   Term.proj / pipeProj / dotIdent ............ M4b-4 (LVal machinery)
-///   Term.namedPattern / choice ................. M4b-4 (same elabAppFn arms)
+///   Term.pipeProj / dotIdent / namedPattern .... M4b-4a P4 (same elabAppFn arms)
+///   choice ..................................... overloading slice
 ///   elabAsElim (recursor heads seamed; aux
 ///     recursors + @[elab_as_elim] still open) .. M4b-4
 ///   binop%, anonymous constructor ⟨⟩ ........... M4b-4
@@ -170,20 +171,16 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 /// slice) rather than from this table's catch-all; `app/mod.rs`'s own
 /// module doc is the site-by-site index.
 ///
-/// `Term.proj`, `Term.pipeProj`, `Term.dotIdent`, `Term.namedPattern`
-/// and `choice` are deliberately NOT routed, even though the oracle
-/// aliases four of them straight to `elabAtom`
-/// (`App.lean:2247-2248`, `:2273-2274`; `elabPipeProj` at `:2250-2258`
-/// desugars to `elabAppAux`) — which `app::elab_atom` already
-/// implements. Routing them would be wrong, not merely early:
-/// `elabAtom`'s work for these kinds happens inside `elabAppFn`, whose
-/// field/fieldIdx/dotIdent arms (`App.lean:2084-2109`) build an `LVal`
-/// list that `elabAppLVals`/`resolveLValAux` then resolves — the
-/// dot-notation subsystem M4b-4 owns. Sending them to `elab_atom`
-/// today would reach `app::head::elab_app_fn` with a non-ident head
-/// and produce that module's M4b-4 seam anyway, one indirection later.
-/// As whole terms they land on this table's catch-all instead, named by
-/// their kind.
+/// `Term.proj` IS routed, as of M4b-4a P1 task 5: `elabProj := elabAtom`
+/// (`App.lean:2274`), and `app::head::elab_app_fn`'s proj arm builds the
+/// `LVal` list `app::lval` resolves. `Term.pipeProj`, `Term.dotIdent`,
+/// `Term.namedPattern` and `choice` are still deliberately NOT routed,
+/// even though the oracle aliases three of them straight to `elabAtom`
+/// (`App.lean:2247-2248`, `:2273`; `elabPipeProj` at `:2250-2258`
+/// desugars to `elabAppAux`): their `elabAppFn` arms (`App.lean:2062-2065`,
+/// `:2085-2100`, `:2106-2109`) are unported, so routing them would only
+/// reach `app::head::elab_app_fn`'s seam one indirection later. As whole
+/// terms they land on this table's catch-all instead, named by their kind.
 ///
 /// `num`/`char`/`scientific` are all registered above as of tasks 6-7,
 /// and none of them is a LEAF: each elaborates through an application
@@ -243,6 +240,12 @@ pub fn dispatch(
         // head carries an explicit universe list; `app::peel_head` strips
         // the `.{us}` suffix exactly as `elabAppFn` does (`App.lean:2103`).
         ("Lean.Parser.Term.explicitUniv", NodeOrToken::Node(_)) => {
+            crate::app::elab_atom(elab, elem, kinds, expected)
+        }
+        // oracle: `@[builtin_term_elab proj] elabProj := elabAtom`
+        // (`App.lean:2274`) — a zero-argument application whose head carries
+        // the LVal; `app::head::elab_app_fn`'s proj arm peels it.
+        ("Lean.Parser.Term.proj", NodeOrToken::Node(_)) => {
             crate::app::elab_atom(elab, elem, kinds, expected)
         }
         ("Lean.Parser.Term.prop", NodeOrToken::Node(node)) => {

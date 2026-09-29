@@ -21,7 +21,7 @@ use leanr_syntax::kind::KindInterner;
 
 use crate::app::lval::LVal;
 use crate::app::AppCall;
-use crate::dispatch::SynElem;
+use crate::dispatch::{non_trivia_children, SynElem};
 use crate::elab::TermElabM;
 use crate::error::ElabError;
 use crate::resolve::resolve_global;
@@ -62,44 +62,128 @@ pub fn elab_app_fn(
                 elab, f, lvals, call, kinds,
             )?])
         }
-        // Task 9's seam audit split this from the catch-all below: the
-        // two are DIFFERENT oracle arms with different owners, and one
-        // message for both named the wrong one. `(f) a`, `(fun x => x) a`
-        // and `(f : T) a` reach no LVal machinery at all in the oracle
-        // (verified against the pinned oracle: `(Nat.succ) Nat.zero` and
-        // `(fun (x : Nat) => x) Nat.zero` both elaborate cleanly there),
-        // so calling them "dot notation" pointed a reader at M4b-4's
-        // `resolveLValAux` for a construct that never touches it.
+        // oracle: `` `($(e).$idx:fieldIdx) `` / `` `($(e).$field:ident) ``
+        // and their `.{us}` forms (`App.lean:2084-2097`). The explicit levels
+        // peeled off a `.{us}` wrapper belong to the FIELD (the last
+        // component), never to `e`.
+        ("Lean.Parser.Term.proj", _) => {
+            let (base, field) = proj_parts(elem)?;
+            let mut new: Vec<LVal> = match kinds.name(field.kind()) {
+                // `elabFieldIdx` (`:2075-2078`).
+                "fieldIdx" => {
+                    let text = field.to_string();
+                    let idx = text
+                        .trim()
+                        .parse::<usize>()
+                        .map_err(|_| ElabError::IllFormedSyntax(format!("fieldIdx `{text}`")))?;
+                    vec![LVal::FieldIdx {
+                        r#ref: field.clone(),
+                        idx,
+                        levels: explicit_levels.to_vec(),
+                    }]
+                }
+                // `elabFieldName` (`:2067-2074`): `field.identComponents` —
+                // ONE token, one LVal per component (plan § Review Focus 5).
+                _ => {
+                    let text = field.to_string();
+                    let comps: Vec<&str> = text.trim().split('.').collect();
+                    let last = comps.len() - 1;
+                    comps
+                        .iter()
+                        .enumerate()
+                        .map(|(i, c)| LVal::FieldName {
+                            r#ref: field.clone(),
+                            name: c.to_string(),
+                            levels: if i == last {
+                                explicit_levels.to_vec()
+                            } else {
+                                Vec::new()
+                            },
+                        })
+                        .collect()
+                }
+            };
+            new.extend(lvals);
+            elab_app_fn(elab, &base, kinds, &[], new, call)
+        }
+        // oracle: `` `($id:ident.{$us,*}) `` (`App.lean:2103-2105`) and the
+        // proj `.{us}` arms (`:2087-2090`, `:2094-2097`), reached by
+        // recursion — a `.{us}` on a proj's own base, e.g. `o.1.{0}.2`.
+        // `app::peel_head` strips a top-level wrapper before this runs.
+        ("Lean.Parser.Term.explicitUniv", _) => {
+            let (inner, lvls) = crate::app::explicit_univ_parts(elem)?;
+            let levels = elab_explicit_univs(elab, &lvls, kinds)?;
+            elab_app_fn(elab, &inner, kinds, &levels, lvals, call)
+        }
+        // oracle: `` `(_) `` (`App.lean:2119`).
+        ("Lean.Parser.Term.hole", _) => Err(ElabError::PlaceholderAsFunction),
+        ("choice", _) => Err(ElabError::UnsupportedSyntax(
+            "application head `choice` needs `elabAppFn`'s `choiceKind` fan-out \
+             (App.lean:2062-2065) — the overloading slice (resolve_global)"
+                .to_string(),
+        )),
         (other, _) if is_lval_head(other) => Err(ElabError::UnsupportedSyntax(format!(
-            "application head `{other}` needs the dot-notation / LVal machinery \
-             (`elabAppFn`'s field/fieldIdx/dotIdent arms, App.lean:2067-2109, and its \
-             `choiceKind` fan-out at :2062-2065) — M4b-4"
+            "application head `{other}` needs `elabAppFn`'s pipeProj/dotIdent/namedPattern \
+             arms (App.lean:2084-2100, :2106-2109) — M4b-4a P4"
         ))),
-        (other, _) => Err(ElabError::UnsupportedSyntax(format!(
-            "application head `{other}` is a general term in function position — the \
-             oracle takes `elabAppFn`'s generic branch (App.lean:2120-2138: `elabTerm f \
-             none` then `elabAppLVals`), which succeeds; M4b-3 P1 scopes `elabAppFn` to \
-             its ident case (design spec § P1), so the rest of `elabAppFn` is deferred \
-             with the LVal machinery to M4b-4"
-        ))),
+        // oracle: `elabAppFn`'s generic arm (`App.lean:2120-2138`). With
+        // nothing to apply, the term is elaborated against the expected
+        // type and returned AS IS — not re-applied through `elabAppArgs`.
+        // Otherwise it is elaborated with no expected type and handed to
+        // `elabAppLVals`. The `catchPostpone`/`overloaded` distinction
+        // (`:2121-2129`, `:2137`) is P2's and the overloading slice's:
+        // leanr cannot postpone yet, and `overloaded` is always false
+        // until `choice` is routed.
+        _ => {
+            if lvals.is_empty() && call.named_args.is_empty() && call.args.is_empty() {
+                Ok(vec![elab.elab_term(elem, kinds, call.expected)?])
+            } else {
+                let f = elab.elab_term(elem, kinds, None)?;
+                Ok(vec![crate::app::lval::elab_app_lvals(
+                    elab, f, lvals, call, kinds,
+                )?])
+            }
+        }
     }
 }
 
-/// The application-head kinds whose oracle arm is the LVal / dot-notation
-/// subsystem: `elabAppFn`'s `` `($(e).$field:ident) ``/`` `($e |>.$..) ``/
-/// `` `($(e).$idx:fieldIdx) `` arms (`App.lean:2084-2097`), its
-/// `` `(.$id:ident) `` arms (`:2106-2109`), the `namedPattern` arm
-/// (`:2098-2100`, an outright error outside pattern position), and the
-/// `choiceKind` fan-out (`:2062-2065`). None of them is routed by
-/// `dispatch` either — see that module's deferral table.
+/// `(base, field)` of a `Lean.Parser.Term.proj` node. Layout (confirmed
+/// by a throwaway parse probe, never landed — same precedent as
+/// `expand.rs`'s recorded shapes):
+///
+/// ```text
+/// (Nat.zero).1:                 (s).toS2.toS1:
+///   [0] Term.paren "(Nat.zero)"   [0] Term.paren "(s)"
+///   [1] <atom> "."                [1] <atom> "."
+///   [2] fieldIdx "1"              [2] <ident> "toS2.toS1"   <- ONE token
+///         [0] <atom> "1"
+/// ```
+///
+/// A `.{us}` suffix wraps the whole proj (`o.1.{0}` is
+/// `explicitUniv(proj(o, 1), ..)`), so it never appears here.
+fn proj_parts(elem: &SynElem) -> Result<(SynElem, SynElem), ElabError> {
+    let node = elem
+        .as_node()
+        .ok_or_else(|| ElabError::IllFormedSyntax("proj: Term.proj is not a node".to_string()))?;
+    let ch = non_trivia_children(node);
+    match (ch.first(), ch.get(2)) {
+        (Some(base), Some(field)) if ch.len() == 3 => Ok((base.clone(), field.clone())),
+        _ => Err(ElabError::IllFormedSyntax(
+            "proj: expected `[base, \".\", field]`".to_string(),
+        )),
+    }
+}
+
+/// The application-head kinds whose oracle arm is still unported:
+/// `elabAppFn`'s `` `($e |>.$..) `` arms (`App.lean:2085`, `:2088`,
+/// `:2092`, `:2095`), its `` `(.$id:ident) `` arms (`:2106-2109`) and
+/// the `namedPattern` arm (`:2098-2100`, an outright error outside
+/// pattern position). `choice` has its own arm above; `Term.proj` is
+/// ported.
 fn is_lval_head(kind: &str) -> bool {
     matches!(
         kind,
-        "Lean.Parser.Term.proj"
-            | "Lean.Parser.Term.pipeProj"
-            | "Lean.Parser.Term.dotIdent"
-            | "Lean.Parser.Term.namedPattern"
-            | "choice"
+        "Lean.Parser.Term.pipeProj" | "Lean.Parser.Term.dotIdent" | "Lean.Parser.Term.namedPattern"
     )
 }
 
