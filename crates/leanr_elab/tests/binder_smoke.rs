@@ -908,3 +908,30 @@ fn let_and_have_own_inst_binders_run_the_annotation_check() {
         other => panic!("expected InvalidParametricLocalInstance, got {other:?}"),
     }
 }
+
+/// A `have`-bound variable is OPAQUE: the oracle never zeta-delta
+/// expands a `nondep` let-declaration (`WHNF.lean:397-409` matches only
+/// `.ldecl (nondep := false)`), so `n` is not definitionally `Nat.zero`
+/// and `rfl` does not typecheck. Measured on the pinned binary: "Type
+/// mismatch ... has type Eq ?m ?m but is expected to have type
+/// Eq n Nat.zero". leanr reports the same rejection as `StuckCoercion`:
+/// the expected type is mvar-free but the got type `Eq ?m ?m` is not, so
+/// the coercion is postponed and then fails to resolve at synthesis time.
+/// The test therefore runs the real entry point (`elab_and_synthesize`);
+/// `elab_result` never synthesizes and would accept the pending coercion.
+///
+/// The `let` twin MUST still elaborate (corpus record `nondep/let-rfl`),
+/// so this pins the fix without over-correcting into "no let value is
+/// ever followed".
+#[test]
+fn a_have_bound_variable_is_opaque_to_defeq() {
+    let err = support::elab_and_synthesize("have n : Nat := Nat.zero; (rfl : Eq n Nat.zero)")
+        .expect_err("the oracle rejects this; leanr must too");
+    assert!(
+        matches!(err, leanr_elab::ElabError::StuckCoercion { .. }),
+        "expected a stuck coercion, got {err:?}"
+    );
+
+    support::elab_and_synthesize("let n : Nat := Nat.zero; (rfl : Eq n Nat.zero)")
+        .expect("a genuine `let` stays transparent");
+}

@@ -262,21 +262,17 @@ impl<'e> MetaCtx<'e> {
                 // elaborator context this crate does not have yet —
                 // seam, see module doc).
                 //
-                // This crate's own `LocalDecl`
-                // (`leanr_kernel::local_ctx`, ported from the KERNEL's
-                // `local_ctx.h`, not the elaborator's `Lean.LocalDecl`)
-                // carries NO `nondep` bit at all, so it cannot
-                // distinguish a `have` from a `let` the way the oracle
-                // does. The result is an OVER-APPROXIMATION: under
-                // `cfg.zeta_delta`, this follows the value of EVERY
-                // let-bound fvar, including ones the oracle would have
-                // left alone as a `have`. This is sound for defeq
-                // (unfolding a "have" value can only do more reduction
-                // work than the oracle, never produce a definitionally
-                // wrong answer) but is a real, documented divergence,
-                // not merely a renamed case of the same gap.
+                // A `have` (`nondep := true`) is never followed, so the
+                // decl's `LocalEntry` row must say the let is genuine.
+                // Before the nondep slice this followed every let-bound
+                // fvar, which made `have n := Nat.zero;
+                // (rfl : Eq n Nat.zero)` elaborate here and fail on the
+                // oracle.
                 Node::FVar { id } => {
+                    let genuine_let =
+                        id.is_some_and(|i| self.local_entry(i).is_some_and(|e| !e.nondep));
                     let followed = id
+                        .filter(|_| genuine_let)
                         .and_then(|i| self.lctx.get(i))
                         .and_then(|d| d.value)
                         .filter(|_| self.cfg.zeta_delta);

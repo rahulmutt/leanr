@@ -26,11 +26,10 @@ use crate::LocalDeclKind;
 /// The attributes of one local declaration, positionally parallel to
 /// `LocalContext`'s own decl list.
 ///
-/// `id` and `nondep` have no non-test reader until the nondep slice's
-/// later tasks (`whnf`'s zeta-delta, `get_value`, `mk_aux_mvar_type`)
-/// consume them through `MetaCtx::local_entry`/`LocalCtxSnapshot::entry`.
+/// `whnf`'s zeta-delta reads `nondep` through `MetaCtx::local_entry`; the
+/// later tasks (`get_value`, `mk_aux_mvar_type`) read it through
+/// `LocalCtxSnapshot::entry` as well.
 #[derive(Clone)]
-#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) struct LocalEntry {
     /// The `Expr::fvar` `push_local_decl` returned.
     pub fvar: ExprId,

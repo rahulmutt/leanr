@@ -998,7 +998,6 @@ impl<'e> MetaCtx<'e> {
     /// the ambient context. Reverse scan, the same idiom
     /// `lctx_lookup_by_name` uses: contexts are binder-depth-sized, and a
     /// hash index would be a second structure to hold in lockstep.
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn local_entry(&self, id: NameId) -> Option<&LocalEntry> {
         self.local_names.iter().rev().find(|e| e.id == id)
     }
