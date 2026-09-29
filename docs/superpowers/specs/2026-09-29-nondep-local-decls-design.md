@@ -192,17 +192,24 @@ exported `lift_loose_bvars`.
   `reduceLocalContext` on the same argument). **Flagged as a TCB edit**
   per AGENTS.md; user-approved 2026-09-29.
 
-**A pre-existing approximation this makes fixable, also user-approved
-for this slice.** `whnf`'s `zeta_unused` branch uses
-`loose_bvar_range() == 0` where the oracle uses `!body.hasLooseBVar 0`.
-leanr's is STRICTER — it requires a fully closed body — so leanr
-under-reduces a `let` whose body mentions an outer binder but not the
-let variable. Measured: elaboration cannot produce such a term
-(`elabLetDeclAux` passes `usedLetOnly := false`, so the oracle keeps
-unused lets anyway, and binders are instantiated with fvars before
-whnf), so no corpus record should move. It is fixed here because the
-exact helper makes it one line, and it is tested by a hand-built term
-rather than through elaboration (§ Verification).
+**A claimed approximation in `whnf`, WITHDRAWN before implementation.**
+An earlier draft of this spec claimed `whnf`'s `zeta_unused` branch
+used `loose_bvar_range() == 0` where the oracle used the singular
+`!body.hasLooseBVar 0`, and the project owner approved fixing it here.
+That claim was wrong, and the fix is withdrawn. The oracle's `whnfCore`
+reads `cfg.zetaUnused && !b.hasLooseBVars` (`WHNF.lean:661`) — the
+PLURAL predicate, `looseBVarRange > 0` (`Lean/Expr.lean:1312-1313`) —
+and `consumeUnusedLet` (`:639-642`) tests the same plural predicate and
+performs no lowering, which is sound precisely because the body is
+closed. leanr's `whnf.rs:343` is `loose_bvar_range() == 0` and its
+`consume_unused_let` does not lower: both are already exact.
+
+The lesson is the standing one (`leanr-oracle-citations-unverified`): the
+singular/plural distinction was inferred from the helper's name and not
+read. The exact `has_loose_bvar` helper below is still required — the
+oracle's `mkAuxMVarType` ldecl arm really does use the SINGULAR
+`e.hasLooseBVar 0` (`MetavarContext.lean:1138`), which leanr cannot
+express today.
 
 ### 5. The gap-2 fix itself
 
@@ -273,10 +280,10 @@ local-context field, so these carry the rest:
 - `leanr_meta`: `local_decl_depends_on` ignores a nondep decl's value
   under the flag and counts it without.
 - `leanr_meta`: consumers 5, 6 and 7, each with a `have` and a `let`.
-- `leanr_meta`: `has_loose_bvar` against hand-built terms including the
-  `range > 0` but `!hasLooseBVar 0` case; and `whnf_core` on a
-  hand-built `LetE` whose body's only loose bvar is index 1, which is
-  the `zeta_unused` discriminator elaboration cannot produce.
+- `leanr_meta`: `has_loose_bvar` against hand-built terms, including the
+  case that motivates it — a term whose packed range is nonzero while
+  bvar 0 is NOT loose. (There is no `zeta_unused` test: that fix was
+  withdrawn, § Design 4.)
 - `leanr_meta`: rows survive `lctx_restore`, `install_lctx` and
   `reduced`; a `__`-named binder's stored kind still suppresses the
   local-instance install (the close-out's behaviour, now read from
