@@ -40,7 +40,8 @@ pub struct SavedContext {
 /// oracle: `inductive SyntheticMVarKind` (`TermElabM.lean:65-92`).
 ///
 /// **All four variants exist from P2a**, even though P2a produced only
-/// `TypeClass` and `Postponed`: the oracle's control flow branches on
+/// `TypeClass` (`Postponed` had no producer until M4b-4a P2's
+/// `postpone_elab_term`): the oracle's control flow branches on
 /// the kind in places far from where it is set, and a missing variant is
 /// a silent fidelity hole where a missing *arm* is a named seam. M4b-3
 /// P4 shipped the `Coe` producer (`coe.rs`'s `mk_coe`) and its two

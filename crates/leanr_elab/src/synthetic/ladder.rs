@@ -441,9 +441,12 @@ impl<'e> TermElabM<'e> {
     /// - The elaboration is `resume_elab_term` (catch OFF): a term that
     ///   postpones again is "not ready yet", never a fresh mvar.
     /// - `saveState` is taken inside the mvar's context (the caller,
-    ///   `synthesize_synthetic_mvar`, installs it). EVERY non-success
-    ///   restores it: a postponement (`:61-65`) and, under
-    ///   `postponeOnError`, an error (`:68-71`).
+    ///   `synthesize_synthetic_mvar`, installs it). A postponement
+    ///   restores it (`:62-65`), and so, under `postponeOnError`, does an
+    ///   oracle error (`:68-71`, [`ElabError::is_oracle_error`]). Any
+    ///   other internal exception is rethrown unrestored (`:66-67`); so is
+    ///   a leanr seam or `Meta`/`Internal` failure, which is never
+    ///   treated as an oracle error.
     /// - Without `postponeOnError` the oracle logs the error and reports
     ///   the mvar done (`:72-74`). leanr has no message log, so the error
     ///   propagates (the same narrowing `synthesize_pending_inst_mvar`
@@ -485,7 +488,10 @@ impl<'e> TermElabM<'e> {
                 self.restore_term_state(saved);
                 Ok(false)
             }
-            Err(_) if postpone_on_error => {
+            // oracle: only `.error` is caught under `postponeOnError`
+            // (`:68-71`); every other `.internal` is rethrown (`:66-67`),
+            // and so is a leanr seam/budget failure.
+            Err(e) if postpone_on_error && e.is_oracle_error() => {
                 self.restore_term_state(saved);
                 Ok(false)
             }

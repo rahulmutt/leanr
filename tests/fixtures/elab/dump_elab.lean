@@ -948,9 +948,12 @@ def lvalFnQueries : List (String × String) :=
   ]
 
 /- M4b-4a P2: term-level postponement. Every record here elaborates
-only because a subterm is POSTPONED (`Exception.postpone`, caught by
-`elabUsingElabFnsAux`, TermElabM.lean:1635-1651) and RESUMED by the
-fixpoint once its type is known. -/
+only because a subterm is POSTPONED and RESUMED by the fixpoint once its
+type is known. The postponement is registered either by
+`elabUsingElabFnsAux`'s catch of `Exception.postpone`
+(TermElabM.lean:1635-1651) or, for `p2/implicit-lambda-postpone`, by
+`elabTermAux`'s `.postpone` arm calling `postponeElabTerm` directly
+(`:1843-1850`). -/
 def p2Queries : List (String × String) :=
   -- `useImplicitLambda` returns `.postpone` for `x` (a local of type
   -- `?α`, expected `{a : Type} → Nat`, TermElabM.lean:1753-1778). The
@@ -977,6 +980,10 @@ def p2Queries : List (String × String) :=
   , ("p2/lval-two-binders",        "(fun x (y : Prod Nat Nat) => Prod.mk x.2 y.1) (Prod.mk Nat.zero Nat.zero) (Prod.mk Nat.zero Nat.zero)")
   -- `(e :)` drains its own postponements (`withSynthesize (postpone :=
   -- .no)`, BuiltinNotation.lean:433-435) — Review Focus 4.
+  -- TWO postponements, both resumed: `x.2` (outer binder) and `y.1`
+  -- (inner binder), each waiting for its own application to assign
+  -- its binder type. Restores the coverage `lval-two-binders` lost.
+  , ("p2/lval-two-postponements",  "(fun x => (fun y => Prod.mk x.2 y.1) (Prod.mk Nat.zero Nat.zero)) (Prod.mk Nat.zero Nat.zero)")
   , ("p2/lval-nested-synthesize",  "((fun x => x.1) (Prod.mk Nat.zero Nat.zero) :)")
   -- `outParam` is reducible: `isMVarApp (outParam ?m)` is true only
   -- through `whnfR` (TermElabM.lean:1375-1376). Monomorphic `One`: with

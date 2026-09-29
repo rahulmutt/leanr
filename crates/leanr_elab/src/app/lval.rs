@@ -302,22 +302,6 @@ fn resolve_lval_aux(
     }
 }
 
-/// Which errors `resolveLValLoop`'s `catch` retries (`App.lean:1688-1694`:
-/// `.error` retries, `.internal` rethrows). Named seams are NOT oracle
-/// errors — retrying one would report an error for a path leanr never
-/// ran (plan § Review Focus 2) — and `Meta` errors are leanr's
-/// internal/budget failures. `Postpone` is the oracle's internal
-/// `postponeExceptionId`, which the `.internal` arm rethrows.
-fn is_retryable(e: &ElabError) -> bool {
-    !matches!(
-        e,
-        ElabError::UnsupportedSyntax(_)
-            | ElabError::Meta(_)
-            | ElabError::Internal(_)
-            | ElabError::Postpone
-    )
-}
-
 /// oracle: `resolveLValLoop` (`App.lean:1678-1694`).
 fn resolve_lval_loop(
     elab: &mut TermElabM,
@@ -340,7 +324,9 @@ fn resolve_lval_loop(
     let e_type = elab.mctx.instantiate_mvars(e_type)?;
     match resolve_lval_aux(elab, e, e_type, lval) {
         Ok(r) => Ok((e, r)),
-        Err(err) if is_retryable(&err) => match elab.mctx.unfold_definition_pub(e_type)? {
+        // oracle: the `catch` retries `.error` only and rethrows `.internal`
+        // (`App.lean:1688-1694`); see `ElabError::is_oracle_error`.
+        Err(err) if err.is_oracle_error() => match elab.mctx.unfold_definition_pub(e_type)? {
             Some(t) => resolve_lval_loop(elab, lval, e, t, has_args, kinds),
             None => Err(err),
         },
@@ -548,7 +534,7 @@ mod tests {
     /// exceptions (`App.lean:1688-1694`). A postponement is internal.
     #[test]
     fn postpone_is_not_retryable() {
-        assert!(!is_retryable(&ElabError::Postpone));
-        assert!(is_retryable(&ElabError::PlaceholderAsFunction));
+        assert!(!ElabError::Postpone.is_oracle_error());
+        assert!(ElabError::PlaceholderAsFunction.is_oracle_error());
     }
 }

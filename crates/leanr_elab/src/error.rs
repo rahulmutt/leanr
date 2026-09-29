@@ -170,12 +170,36 @@ pub enum ElabError {
     /// Caught in exactly two places: `elab.rs`'s `elab_using_elab_fns`
     /// (`elabUsingElabFnsAux`, `TermElabM.lean:1615-1661`) and
     /// `synthetic/ladder.rs`'s `resume_postponed`
-    /// (`SyntheticMVars.lean:61-66`). A catch site that retries or
-    /// swallows ERRORS must let it through: `app/lval.rs`'s
-    /// `is_retryable` (`App.lean:1688-1694`). `commit_when` and
-    /// `with_synthesize_impl` restore and rethrow every `Err`, which is
+    /// (`SyntheticMVars.lean:62-65`). A catch site that retries or
+    /// swallows ERRORS must let it through: see
+    /// [`ElabError::is_oracle_error`], used by `app/lval.rs`'s
+    /// `resolve_lval_loop` (`App.lean:1688-1694`) and `resume_postponed`.
+    /// `commit_when` restores and rethrows every `Err`;
+    /// `with_synthesize_impl` rethrows every `Err` after merging the
+    /// caller's pending mvars back (its `finally`, no state restore) —
     /// the oracle's treatment of it too.
     Postpone,
+}
+
+impl ElabError {
+    /// Whether this error stands for an oracle `Exception.error` — the
+    /// kind a `catch | ex@(.error ..)` arm handles (retries, swallows,
+    /// or postpones on). `false` for the oracle's `.internal` exceptions
+    /// (`Postpone` is `postponeExceptionId`) and for leanr's own
+    /// failures that have no oracle `.error` counterpart: a named seam
+    /// (`UnsupportedSyntax`, "this path was never run") and
+    /// `Meta`/`Internal` (budget and internal failures). Handling one of
+    /// those as an oracle error would report an outcome for a path leanr
+    /// never ran, so every such catch rethrows them.
+    pub fn is_oracle_error(&self) -> bool {
+        !matches!(
+            self,
+            ElabError::UnsupportedSyntax(_)
+                | ElabError::Meta(_)
+                | ElabError::Internal(_)
+                | ElabError::Postpone
+        )
+    }
 }
 
 /// Which `resolveLValAux` / `mkProjAndCheck` throw an

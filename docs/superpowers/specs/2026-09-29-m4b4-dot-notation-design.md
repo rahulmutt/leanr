@@ -422,7 +422,7 @@ planned one at a time after their predecessor merges.
   retry runs. The unfold retry itself is covered in P1 through a field
   index, by `lval/unfold-alias-idx`.
 - Known approximation carried forward: `is_mvar_app` has no `whnfR`
-  (P2 owns making it exact).
+  (P2 owns making it exact) (closed in P2).
 - Every stale `M4b-4` seam message was retargeted to its owner (P2, P3,
   P4, `M4b-4c` for `elabAsElim`, `M4b-4b` for `⟨⟩`, the match /
   macro-expansion / overloading slices); `seam_audit.rs`'s
@@ -434,13 +434,17 @@ planned one at a time after their predecessor merges.
 - `ElabError::Postpone` (internal exception, never reaches a caller of
   `elab_term_and_synthesize`); `postpone.rs`; `elab_using_elab_fns` (catch
   with state and `lctx` restore); `resume_elab_term` / `resume_postponed`
-  (catch off, restore on postpone and on `postponeOnError`).
+  (catch off; restore on a postponement and, under `postponeOnError`, on
+  an oracle error only — a seam or `Meta`/`Internal` failure propagates,
+  `ElabError::is_oracle_error`, shared with `resolve_lval_loop`).
 - Producers: `useImplicitLambda` `.postpone`, `resolveLValLoop`, and
   `elabAppArgs`. The last was missing from the spec;
   `(fun f => f Nat.zero) Nat.succ` had been a silent `FunctionExpected`.
 - `is_mvar_app` is exact (`whnf_r` is `pub`).
-- Corpus: 10 `p2/*` records. Rejections: `lval_smoke.rs`, `app_smoke.rs`.
-  Mechanics: `postpone_smoke.rs`.
+- Corpus: 11 `p2/*` records, including `p2/lval-two-postponements`
+  (two postponements resumed, restoring the coverage the
+  `p2/lval-two-binders` source swap lost). Rejections: `lval_smoke.rs`,
+  `app_smoke.rs`. Mechanics: `postpone_smoke.rs`.
 - **Known cost:** `elab_using_elab_fns` clones the `Term.State` tables and
   mctx assignment maps on every caught elaboration, where the oracle's
   `saveState` is O(1). The owner is whichever slice first measures
@@ -450,28 +454,35 @@ planned one at a time after their predecessor merges.
   `M4b-4a P2` needle, measured non-vacuous. `tryPostponeIfNoneOrMVar` has
   no production caller until P4.
 - Open follow-ups:
-- Pre-existing, independent of postponement: unnormalized `max 0 0`
-  universe levels in nested `Prod.mk`. This forced swapping the source of
-  the `p2/lval-chain` and `p2/lval-reducible-alias` corpus records.
-- Pre-existing: `StuckCoercion` when applying a lambda whose later binder
-  type is a hole, e.g. `(fun x y => y) Nat.zero Nat.zero` (forced the
-  `p2/lval-two-binders` source swap) and `(fun (x : Nat) f => f) Nat.zero
-  Nat.succ`. Root cause: leanr has no `numScopeArgs` constant
-  approximation (`Meta/ExprDefEq.lean:1271-1278`, `processConstApprox`).
-- The same gap blocks the corpus record the plan wanted,
-  `p2/app-fn-after-lval`: `(fun x f => f x.1) (Prod.mk Nat.zero Nat.zero)
-  Nat.succ` gives `FunctionExpected` while the oracle accepts it. The
-  record was dropped, so nothing tests the lval producer feeding an
-  mvar-typed app head.
-- `(fun f x => Nat.succ x.1) Nat.succ (Prod.mk Nat.zero Nat.zero)` gives
-  `InvalidProjection{TypeUnknown}` while the oracle accepts it. Probed:
-  annotating only `f : Nat -> Nat` still fails, annotating `x : Prod Nat
-  Nat` passes, so `x`'s type is a scope-dependent mvar (`?γ f`) resumed as
-  `?γ Nat.succ =?= Prod Nat Nat`. Consistent with the `numScopeArgs` gap;
-  not confirmed by a fix.
-- `p2/lval-reducible-alias` and the `fun (x : outParam _) => x.1`
-  rejection do not pin `whnfR`; only `postpone_smoke.rs`'s
-  `is_mvar_app_sees_through_reducible_definitions` does.
-- Two-postponement coverage was lost with the `p2/lval-two-binders` swap.
-  `(fun x => (fun y => Prod.mk x.2 y.1) q) p`-style terms were reported to
-  match the oracle; no records added.
+  - Pre-existing, independent of postponement: unnormalized `max 0 0`
+    universe levels in nested `Prod.mk`. This forced swapping the source of
+    the `p2/lval-chain` and `p2/lval-reducible-alias` corpus records.
+  - Pre-existing: `StuckCoercion` when applying a lambda whose later binder
+    type is a hole, e.g. `(fun x y => y) Nat.zero Nat.zero` (forced the
+    `p2/lval-two-binders` source swap) and `(fun (x : Nat) f => f) Nat.zero
+    Nat.succ`. Root cause: leanr has no `numScopeArgs` constant
+    approximation (`Meta/ExprDefEq.lean:1271-1278`, `processConstApprox`).
+  - The same gap blocks the corpus record the plan wanted,
+    `p2/app-fn-after-lval`: `(fun x f => f x.1) (Prod.mk Nat.zero Nat.zero)
+    Nat.succ` gives `FunctionExpected` while the oracle accepts it. The
+    record was dropped, so nothing tests the lval producer feeding an
+    mvar-typed app head.
+  - `(fun f x => Nat.succ x.1) Nat.succ (Prod.mk Nat.zero Nat.zero)` gives
+    `InvalidProjection{TypeUnknown}` while the oracle accepts it. Probed:
+    annotating only `f : Nat -> Nat` still fails, annotating `x : Prod Nat
+    Nat` passes, so `x`'s type is a scope-dependent mvar (`?γ f`) resumed as
+    `?γ Nat.succ =?= Prod Nat Nat`. Consistent with the `numScopeArgs` gap;
+    not confirmed by a fix.
+  - `p2/lval-reducible-alias` and the `fun (x : outParam _) => x.1`
+    rejection do not pin `whnfR`; only `postpone_smoke.rs`'s
+    `is_mvar_app_sees_through_reducible_definitions` does.
+  - `(fun x => Prod.fst x) (Prod.mk Nat.zero Nat.zero)` gives
+    `Meta(DepthBudgetExhausted)` while the oracle accepts it. It already
+    fails on main (71bfe59), so it is not a P2 regression.
+  - `elab.rs`'s implicit-lambda wrap passes `catch_ex_postpone` on to
+    `elab_using_elab_fns`; hard-coding `true` there survives every test.
+    The only reachable case needs a postponed term whose type later becomes
+    an implicit forall while it still postpones. It is unpinned.
+  - For P4: dotted identifiers on a local (`x.succ`, `x.fst`) give
+    `UnknownIdent` while the oracle accepts them. This predates the branch;
+    P4 owns the local field split.

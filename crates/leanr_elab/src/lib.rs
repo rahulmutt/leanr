@@ -154,10 +154,12 @@
 //!
 //! ## Recorded coverage gaps
 //!
-//! Three things below ARE built — none is a named seam — but each has
-//! a known hole in what the corpus can currently prove about it.
-//! Recording the hole here is the alternative to either leaving it to
-//! be rediscovered or quietly asserting more coverage than exists.
+//! Each thing below IS built — none is a named seam. The first two
+//! entries are closed history (the hole they recorded closed in M4b-4a
+//! P2) and are kept for the record; the last still has a known hole in
+//! what the corpus can currently prove about it. Recording the hole
+//! here is the alternative to either leaving it to be rediscovered or
+//! quietly asserting more coverage than exists.
 //!
 //! - **`SyntheticMVarKind::Postponed` producers (history).** Until
 //!   M4b-4a P2 the variant had no producer: M4b-3 P3's `elabNum` was
@@ -183,8 +185,9 @@
 //!   off: `resuming_does_not_catch_its_own_postpone` and
 //!   `p2/implicit-lambda-postpone` both depend on it. Rung 3 (real
 //!   default instances, `synthetic/default_inst.rs`) is what closes a
-//!   bare numeral's `OfNat ?α (lit v)` goal. Rung 5 (`report_stuck`) is
-//!   unchanged.
+//!   bare numeral's `OfNat ?α (lit v)` goal. Rung 5 (tactics) and the
+//!   stuck report that follows it (`report_stuck_synthetic_mvars`, only
+//!   under `postpone == .no`) are unchanged.
 //! - **`leanr_meta` cannot report a stuck typeclass goal; the
 //!   elaborator approximates it.**
 //!   `leanr_meta::error::MetaError` declares `IsDefEqStuck` (`error.rs:36`)

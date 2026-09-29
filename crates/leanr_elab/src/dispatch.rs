@@ -202,7 +202,7 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 /// analogue of the above, are named seams inside `elab_level` itself —
 /// see `builtin::sort`'s own module doc — rather than this table, since
 /// they are not term-position kinds `dispatch` ever sees directly.)
-pub fn dispatch(
+pub(crate) fn dispatch(
     elab: &mut TermElabM,
     elem: &SynElem,
     kinds: &KindInterner,
