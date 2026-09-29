@@ -865,3 +865,18 @@ pub fn elab_result(src: &str) -> Result<leanr_kernel::bank::ExprId, leanr_elab::
             })
     })
 }
+
+/// Replay `Elab0`, parse `src`, and hand `k` a fresh `TermElabM` with
+/// the parsed term — for tests that drive the elaborator step by step
+/// (elaborate, then inspect `pending_mvars`, then run one fixpoint
+/// step) rather than through a single entry point.
+pub fn with_elab<R>(
+    src: &str,
+    k: impl FnOnce(
+        &mut leanr_elab::TermElabM,
+        &leanr_elab::dispatch::SynElem,
+        &leanr_syntax::kind::KindInterner,
+    ) -> R,
+) -> R {
+    with_elab_harness("with_elab", src, k)
+}

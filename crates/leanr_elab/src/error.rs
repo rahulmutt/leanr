@@ -160,6 +160,22 @@ pub enum ElabError {
     /// environment, an error rather than a panic here because `.olean`
     /// input is untrusted.
     Internal(String),
+    /// oracle: `Exception.internal postponeExceptionId`
+    /// (`Elab/Exception.lean:15`, thrown by `throwPostpone`, `:22-23`) —
+    /// "not ready yet: retry once more is known". An internal exception,
+    /// never a user-facing error. Raised only while `may_postpone` holds,
+    /// by the `try_postpone` family (`postpone.rs`) and `elab.rs`'s
+    /// `useImplicitLambda` `.postpone` arm.
+    ///
+    /// Caught in exactly two places: `elab.rs`'s `elab_using_elab_fns`
+    /// (`elabUsingElabFnsAux`, `TermElabM.lean:1615-1661`) and
+    /// `synthetic/ladder.rs`'s `resume_postponed`
+    /// (`SyntheticMVars.lean:61-66`). A catch site that retries or
+    /// swallows ERRORS must let it through: `app/lval.rs`'s
+    /// `is_retryable` (`App.lean:1688-1694`). `commit_when` and
+    /// `with_synthesize_impl` restore and rethrow every `Err`, which is
+    /// the oracle's treatment of it too.
+    Postpone,
 }
 
 /// Which `resolveLValAux` / `mkProjAndCheck` throw an

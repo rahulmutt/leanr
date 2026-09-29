@@ -306,11 +306,15 @@ fn resolve_lval_aux(
 /// `.error` retries, `.internal` rethrows). Named seams are NOT oracle
 /// errors — retrying one would report an error for a path leanr never
 /// ran (plan § Review Focus 2) — and `Meta` errors are leanr's
-/// internal/budget failures.
+/// internal/budget failures. `Postpone` is the oracle's internal
+/// `postponeExceptionId`, which the `.internal` arm rethrows.
 fn is_retryable(e: &ElabError) -> bool {
     !matches!(
         e,
-        ElabError::UnsupportedSyntax(_) | ElabError::Meta(_) | ElabError::Internal(_)
+        ElabError::UnsupportedSyntax(_)
+            | ElabError::Meta(_)
+            | ElabError::Internal(_)
+            | ElabError::Postpone
     )
 }
 
@@ -331,10 +335,7 @@ fn resolve_lval_loop(
     // `without_postponing` (ladder rungs 2/4), which elaborates no term
     // until P2 resumes postponed ones, so the `else` path below is
     // unreachable today (see `lib.rs`).
-    // `is_mvar_app` is leanr's documented approximation of `isMVarApp`
-    // (instantiate + spine walk, no `whnfR`; see its doc in `elab.rs`);
-    // P2 owns making it exact.
-    if crate::elab::is_mvar_app(elab, e_type)? {
+    if elab.is_mvar_app(e_type)? {
         if elab.may_postpone {
             return Err(ElabError::UnsupportedSyntax(
                 "field notation on a term whose type is still a metavariable: the oracle \
@@ -545,4 +546,17 @@ pub fn elab_app_lvals(
         }
     }
     crate::app::elab_app_args(elab, f, call, kinds)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `resolveLValLoop` retries on `.error` only and rethrows internal
+    /// exceptions (`App.lean:1688-1694`). A postponement is internal.
+    #[test]
+    fn postpone_is_not_retryable() {
+        assert!(!is_retryable(&ElabError::Postpone));
+        assert!(is_retryable(&ElabError::PlaceholderAsFunction));
+    }
 }

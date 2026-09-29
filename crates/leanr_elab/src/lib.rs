@@ -286,6 +286,7 @@ pub mod coe; // coercions
 pub mod dispatch;
 pub mod elab;
 pub mod error;
+mod postpone; // M4b-4a P2
 pub mod resolve; // Task 5
 pub mod synthetic; // M4b-3 P2a
 

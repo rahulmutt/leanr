@@ -294,6 +294,20 @@ impl<'e> TermElabM<'e> {
         Ok((mvar_id, id))
     }
 
+    /// oracle: `mkFreshTypeMVar` (`Meta/Basic.lean:880-882`) — a fresh
+    /// level mvar `u`, then a fresh NATURAL mvar of type `Sort u`. Also
+    /// `mkFreshExprMVarImpl`'s `none` arm (`:872-875`), which builds the
+    /// same type before minting the requested mvar of it.
+    pub fn mk_fresh_type_mvar(&mut self) -> Result<ExprId, ElabError> {
+        let u = self.mk_fresh_level_mvar()?;
+        let sort = self
+            .mctx
+            .store_mut()
+            .expr_sort(None, u)
+            .map_err(leanr_meta::MetaError::from)?;
+        self.mk_fresh_expr_mvar(sort)
+    }
+
     pub fn elab_term(
         &mut self,
         elem: &SynElem,
@@ -470,7 +484,7 @@ enum UseImplicitLambda {
 /// exactly that shape — an aux mvar applied to binder fvars — as the
 /// type of an as-yet-untyped `fun` binder, so "no corpus term reaches
 /// it" stopped being a safe assumption once P5 multiplied binder
-/// producers on top. `local_ident_of`/`is_mvar_app` below are the
+/// producers on top. `local_ident_of` below and `TermElabM::is_mvar_app` (`postpone.rs`) are the
 /// `isLocalIdent?`/`isMVarApp` transliterations; `elab_term`'s dispatch
 /// turns the `.postpone` result into a named seam, since leanr has no
 /// term-level postponement to actually resume it with.
@@ -512,7 +526,7 @@ fn use_implicit_lambda(
     // fvars the wrap introduces are not in the local's mvar scope.
     if let Some(x) = local_ident_of(elab, elem, kinds)? {
         let x_ty = elab.mctx.infer_type(x)?;
-        if is_mvar_app(elab, x_ty)? {
+        if elab.is_mvar_app(x_ty)? {
             return Ok(UseImplicitLambda::Postpone);
         }
     }
@@ -543,35 +557,6 @@ fn local_ident_of(
     };
     let name = crate::app::head::intern_dotted(elab, tok.text())?;
     Ok(elab.mctx.lctx_lookup_by_name(name))
-}
-
-/// oracle: `isMVarApp` (`TermElabM.lean:1375`) — `(← whnfR
-/// e).getAppFn.isMVar`, a REDUCIBLE-transparency whnf then a spine walk.
-/// This is the looser (pre-Task-4) `instantiate_mvars` + spine-walk
-/// shape `app/state.rs`'s `f_type_is_mvar_after_instantiation` used
-/// (`2b0e402`, deleted by Task 4): the one shape this task's own arm can
-/// manufacture — an aux mvar applied to binder fvars, never itself
-/// reducible to something else — does not need the extra `whnf` to
-/// expose an `MVar` head, so the distinction is not drawn here. That is
-/// also the only option available: `leanr_meta::MetaCtx::whnf_r` is
-/// `pub(crate)` to that crate, not `pub`, so `leanr_elab` cannot call it
-/// without a new accessor — the crate boundary forces this, not merely
-/// a design preference. A caller that genuinely needed the
-/// REDUCIBLE-only distinction would have to add one (the same
-/// elab→meta accessor precedent this slice's own
-/// `push_local_decl_without_instance` /
-/// `install_local_instance_for_last_pushed` follow).
-pub(crate) fn is_mvar_app(elab: &mut TermElabM, e: ExprId) -> Result<bool, ElabError> {
-    let e = elab.mctx.instantiate_mvars(e)?;
-    let base = elab.view.store;
-    let mut cur = e;
-    while let Node::App { f, .. } = elab.mctx.store().expr_node(Some(base), cur) {
-        cur = f;
-    }
-    Ok(matches!(
-        elab.mctx.store().expr_node(Some(base), cur),
-        Node::MVar { .. }
-    ))
 }
 
 /// oracle: `elabImplicitLambda` (`TermElabM.lean:1806-1820`) — peel

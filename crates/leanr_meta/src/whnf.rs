@@ -1886,10 +1886,11 @@ impl<'e> MetaCtx<'e> {
     }
 
     /// oracle: `whnfR` (`Basic.lean:2113-2114`) — `withTransparency
-    /// .reducible <| whnf e`. Composed here rather than exported: its
-    /// only consumers are in-crate (`coe.rs`'s `isTypeApp?` and
-    /// `coerceCollectingNames?`'s `whnfR expectedType`).
-    pub(crate) fn whnf_r(&mut self, e: ExprId) -> Result<ExprId, MetaError> {
+    /// .reducible <| whnf e`. In-crate consumers: `coe.rs`'s `isTypeApp?`
+    /// and `coerceCollectingNames?`. `pub` since M4b-4a P2 for
+    /// `leanr_elab`'s `isMVarApp` (`TermElabM.lean:1375-1376`) — the
+    /// elab→meta accessor precedent: additive, no behaviour change.
+    pub fn whnf_r(&mut self, e: ExprId) -> Result<ExprId, MetaError> {
         self.with_transparency(TransparencyMode::Reducible, |ctx| ctx.whnf(e))
     }
 
