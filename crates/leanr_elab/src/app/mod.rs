@@ -103,6 +103,7 @@ pub mod args;
 pub mod expand;
 pub mod finalize;
 pub mod head;
+pub mod lval;
 pub mod overload;
 pub mod propagate;
 pub mod state;
@@ -332,6 +333,20 @@ fn peel_head(
     Ok((cur, explicit, explicit_levels))
 }
 
+/// The arguments of one application, as `elabAppFn` threads them
+/// (`App.lean:2060-2061`: `namedArgs args expectedType? explicit
+/// ellipsis`). Grouped so the recursion in `head::elab_app_fn` and the
+/// LVal loop in `lval::elab_app_lvals` pass one value, not six.
+/// `stx` is `Context::stx` (the WHOLE application — see that field's doc).
+pub struct AppCall {
+    pub named_args: Vec<NamedArg>,
+    pub args: Vec<Arg>,
+    pub expected: Option<ExprId>,
+    pub explicit: bool,
+    pub ellipsis: bool,
+    pub stx: SynElem,
+}
+
 /// oracle: `elabAppAux` (`App.lean:2202-2217`) resolving the head, then
 /// `elabAppArgs` (`App.lean:1351-1394`) building the `Context`/`State`
 /// the loop runs over.
@@ -363,13 +378,36 @@ fn elab_app_aux(
     stx: SynElem,
 ) -> Result<ExprId, ElabError> {
     let (head, explicit, explicit_levels) = peel_head(elab, head, kinds)?;
-    // `heed_elab_as_elim = !explicit && !ellipsis` — the oracle's own
-    // early-out at `App.lean:1399` (`if explicit || ellipsis then return
-    // none`), so `@Nat.rec` and `Nat.rec ..` take the ordinary path on
-    // BOTH sides. See `head::elab_app_fn`'s own doc comment.
-    let candidates =
-        head::elab_app_fn(elab, &head, kinds, &explicit_levels, !explicit && !ellipsis)?;
-    let f = overload::expect_single(candidates)?;
+    let call = AppCall {
+        named_args,
+        args,
+        expected,
+        explicit,
+        ellipsis,
+        stx,
+    };
+    let candidates = head::elab_app_fn(elab, &head, kinds, &explicit_levels, Vec::new(), call)?;
+    overload::expect_single(candidates)
+}
+
+/// oracle: `elabAppArgs` (`App.lean:1351-1394`), building the
+/// `Context`/`State` the loop runs over. Called from
+/// `lval::elab_app_lvals` (the oracle's `elabAppLVals` calls
+/// `elabAppArgs`), so it runs on the FINAL head, after any LVals.
+pub(crate) fn elab_app_args(
+    elab: &mut TermElabM,
+    f: ExprId,
+    call: AppCall,
+    kinds: &KindInterner,
+) -> Result<ExprId, ElabError> {
+    let AppCall {
+        named_args,
+        args,
+        expected,
+        explicit,
+        ellipsis,
+        stx,
+    } = call;
 
     // oracle: `elabAppArgs`'s first two lines — `let fType ← inferType f;
     // let fType ← instantiateMVars fType`.

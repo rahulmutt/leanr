@@ -10,42 +10,58 @@
 //! by `ElabAppArgs.main` like any other application's. Keeping a
 //! separate leaf path would diverge on every polymorphic constant.
 //!
-//! Returns a Vec because the oracle's `elabAppFn` returns a candidate
-//! ARRAY (overloaded names). Exactly-one is the only P1 shape; see
-//! `overload.rs`.
+//! `elab_app_fn` now returns FINISHED candidates, as the oracle's
+//! `elabAppFn` does: it owns the call into `elabAppArgs` (via
+//! `lval::elab_app_lvals`) and threads the pending LVal list. A Vec
+//! because the oracle returns a candidate ARRAY (overloaded names).
+//! Exactly-one is the only P1 shape; see `overload.rs`.
 
 use leanr_kernel::bank::{ExprId, LevelId, NameId};
 use leanr_syntax::kind::KindInterner;
 
+use crate::app::lval::LVal;
+use crate::app::AppCall;
 use crate::dispatch::SynElem;
 use crate::elab::TermElabM;
 use crate::error::ElabError;
 use crate::resolve::resolve_global;
 
-/// `heed_elab_as_elim` is the oracle's own two-line gate at the top of
-/// `elabAsElim?` (`App.lean:1398-1399`): `unless (← read).heedElabAsElim
-/// do return none` followed by `if explicit || ellipsis then return
-/// none`. leanr never turns the reader field off (`withoutElabAsElim`,
-/// `TermElabM.lean:733`, has no leanr counterpart — nothing in this
-/// crate suppresses the branch), so the caller computes this as
-/// `!explicit && !ellipsis`, which is exactly the second line. Threaded
-/// rather than read off `AppElab` because `elab_app_fn` runs BEFORE the
-/// `Context`/`State` exist — `elab_app_aux` needs the head's type to
+/// Oracle `elabAppFn` (`App.lean:2060-2139`): returns FINISHED
+/// candidates (the oracle's `TermElabResult` array), because it threads
+/// `lvals` and itself calls `elabAppLVals`, which calls `elabAppArgs`
+/// (`lval::elab_app_lvals` -> `elab_app_args`).
+///
+/// The recursor guard (`heed` in the ident arm) is the oracle's own
+/// two-line gate at the top of `elabAsElim?` (`App.lean:1398-1399`):
+/// `unless (← read).heedElabAsElim do return none` followed by `if
+/// explicit || ellipsis then return none`. leanr never turns the reader
+/// field off (`withoutElabAsElim`, `TermElabM.lean:733`, has no leanr
+/// counterpart — nothing in this crate suppresses the branch), so it is
+/// `!explicit && !ellipsis`, which is exactly the second line, and
+/// additionally off while LVals are pending. Computed here rather than
+/// read off `AppElab` because `elab_app_fn` runs BEFORE the
+/// `Context`/`State` exist — `elab_app_args` needs the head's type to
 /// build them.
 pub fn elab_app_fn(
     elab: &mut TermElabM,
     elem: &SynElem,
     kinds: &KindInterner,
     explicit_levels: &[LevelId],
-    heed_elab_as_elim: bool,
+    lvals: Vec<LVal>,
+    call: AppCall,
 ) -> Result<Vec<ExprId>, ElabError> {
     match (kinds.name(elem.kind()), elem) {
-        ("<ident>", leanr_syntax::tree::NodeOrToken::Token(tok)) => Ok(vec![elab_ident_head(
-            elab,
-            tok.text(),
-            explicit_levels,
-            heed_elab_as_elim,
-        )?]),
+        ("<ident>", leanr_syntax::tree::NodeOrToken::Token(tok)) => {
+            // `elabAsElim?` runs inside `elabAppArgs` on the FINAL head
+            // (`App.lean:1373`). With LVals pending, the identifier is not
+            // that head — `resolveLVal` consumes it first — so the recursor
+            // guard must not fire (plan § Review Focus 1).
+            let heed = !call.explicit && !call.ellipsis && lvals.is_empty();
+            let f = elab_ident_head(elab, tok.text(), explicit_levels, heed)?;
+            Ok(vec![crate::app::lval::elab_app_lvals(
+                elab, f, lvals, call, kinds,
+            )?])
+        }
         // Task 9's seam audit split this from the catch-all below: the
         // two are DIFFERENT oracle arms with different owners, and one
         // message for both named the wrong one. `(f) a`, `(fun x => x) a`
@@ -205,11 +221,26 @@ fn elab_ident_head(
         )));
     }
 
+    mk_const(elab, cname, explicit_levels, raw)
+}
+
+/// oracle: `mkConst` (`TermElabM.lean:2117-2126`). `display` is the
+/// identifier's source text, used only in the `TooManyUniverseLevels` error.
+pub(crate) fn mk_const(
+    elab: &mut TermElabM,
+    cname: NameId,
+    explicit_levels: &[LevelId],
+    display: &str,
+) -> Result<ExprId, ElabError> {
+    let info = elab
+        .view
+        .get(cname)
+        .expect("resolve_global only returns names EnvView::get resolves");
     let n_params = info.constant_val().level_params.len();
     // oracle: `mkConst` errors when the user wrote MORE explicit levels
     // than the constant has parameters, rather than truncating.
     if explicit_levels.len() > n_params {
-        return Err(ElabError::TooManyUniverseLevels(raw.to_string()));
+        return Err(ElabError::TooManyUniverseLevels(display.to_string()));
     }
     let mut levels = Vec::with_capacity(n_params);
     levels.extend_from_slice(explicit_levels);
