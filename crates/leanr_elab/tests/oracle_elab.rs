@@ -240,7 +240,11 @@ fn oracle_elab_gate() {
     // closeout/have-* records.
     // 154 -> 160 (M4b-3 close-out task 6): the six closeout/explicit-*
     // records.
-    const CORPUS_FLOOR: usize = 160;
+    // 160 -> 208 (M4b-4a P2 final review): every record added since
+    // close-out task 6 and never folded into the floor (the nondep
+    // slice, M4b-4a P1's `lval/*`, P2's `p2/*`), including
+    // `p2/lval-two-postponements`.
+    const CORPUS_FLOOR: usize = 208;
     assert!(
         replayed >= CORPUS_FLOOR,
         "corpus shrank: replayed {replayed} records, floor is {CORPUS_FLOOR}. \

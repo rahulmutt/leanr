@@ -294,13 +294,27 @@ impl<'e> TermElabM<'e> {
         Ok((mvar_id, id))
     }
 
+    /// oracle: `mkFreshTypeMVar` (`Meta/Basic.lean:880-882`) — a fresh
+    /// level mvar `u`, then a fresh NATURAL mvar of type `Sort u`. Also
+    /// `mkFreshExprMVarImpl`'s `none` arm (`:872-875`), which builds the
+    /// same type before minting the requested mvar of it.
+    pub fn mk_fresh_type_mvar(&mut self) -> Result<ExprId, ElabError> {
+        let u = self.mk_fresh_level_mvar()?;
+        let sort = self
+            .mctx
+            .store_mut()
+            .expr_sort(None, u)
+            .map_err(leanr_meta::MetaError::from)?;
+        self.mk_fresh_expr_mvar(sort)
+    }
+
     pub fn elab_term(
         &mut self,
         elem: &SynElem,
         kinds: &KindInterner,
         expected: Option<ExprId>,
     ) -> Result<ExprId, ElabError> {
-        self.elab_term_core(elem, kinds, expected, true)
+        self.elab_term_core(elem, kinds, expected, true, true)
     }
 
     /// oracle: `elabTerm stx expectedType? (implicitLambda := false)`
@@ -315,15 +329,30 @@ impl<'e> TermElabM<'e> {
         kinds: &KindInterner,
         expected: Option<ExprId>,
     ) -> Result<ExprId, ElabError> {
-        self.elab_term_core(elem, kinds, expected, false)
+        self.elab_term_core(elem, kinds, expected, true, false)
     }
 
-    /// oracle: `elabTermAux` (`TermElabM.lean:1823`).
+    /// oracle: `resumeElabTerm` (`SyntheticMVars.lean:23-26`) —
+    /// `elabTerm stx expectedType? (catchExPostpone := false)`, so a
+    /// resumed term that postpones again throws to `resume_postponed`
+    /// instead of minting a second postponed mvar. The `errToSorry`
+    /// narrowing there is not modelled (leanr has no `errToSorry`).
+    pub(crate) fn resume_elab_term(
+        &mut self,
+        elem: &SynElem,
+        kinds: &KindInterner,
+        expected: ExprId,
+    ) -> Result<ExprId, ElabError> {
+        self.elab_term_core(elem, kinds, Some(expected), false, true)
+    }
+
+    /// oracle: `elabTermAux` (`TermElabM.lean:1823-1856`).
     fn elab_term_core(
         &mut self,
         elem: &SynElem,
         kinds: &KindInterner,
         expected: Option<ExprId>,
+        catch_ex_postpone: bool,
         implicit_lambda: bool,
     ) -> Result<ExprId, ElabError> {
         if !implicit_lambda {
@@ -350,34 +379,76 @@ impl<'e> TermElabM<'e> {
                         ElabError::IllFormedSyntax("paren: no inner term".to_string())
                     })?;
             }
-            return dispatch::dispatch(self, &cur, kinds, expected);
+            return self.elab_using_elab_fns(&cur, kinds, expected, catch_ex_postpone);
         }
-        // oracle: `elabTermAux`'s own dispatch — `useImplicitLambda`
-        // runs BEFORE `elabUsingElabFns` (`TermElabM.lean:1839-1841`),
-        // and its `.yes` result short-circuits dispatch entirely rather
-        // than falling through to it.
+        // oracle: `useImplicitLambda` runs BEFORE `elabUsingElabFns`
+        // (`:1839-1841`); `.yes` short-circuits dispatch entirely.
         match use_implicit_lambda(self, elem, kinds, expected)? {
-            UseImplicitLambda::Yes(ty) => return elab_implicit_lambda(self, elem, kinds, ty),
-            // oracle: this is where a real elaborator would postpone
-            // (`Exception.postpone`, caught by `withSynthesize`'s
-            // `catchPostpone`) and retry once the local's type is known.
-            // leanr has no term-level postponement (`lib.rs`: the only
-            // `may_postpone` reader is `resolve_lval_loop`, and
-            // `postpone_elab_term` has no call site) — a named seam
-            // rather than a silent fall-through to `dispatch::dispatch`,
-            // which would elaborate a DIFFERENT term than the oracle.
-            UseImplicitLambda::Postpone => {
-                return Err(ElabError::UnsupportedSyntax(
-                    "implicit lambda postponement: the term is a local whose type is an \
-                     unassigned metavariable application, which the oracle postpones \
-                     (TermElabM.lean:1753-1778). leanr has no term-level postponement \
-                     (no elaborator postpones, and none resumes a postponed term) — M4b-4a P2"
-                        .to_string(),
-                ));
+            UseImplicitLambda::Yes(ty) => {
+                elab_implicit_lambda(self, elem, kinds, catch_ex_postpone, ty)
             }
-            UseImplicitLambda::No => {}
+            UseImplicitLambda::No => {
+                self.elab_using_elab_fns(elem, kinds, expected, catch_ex_postpone)
+            }
+            // oracle: `:1843-1854` — postpone if we still may; once we
+            // may not, elaborate WITHOUT implicit lambdas. With the catch
+            // off (a resume), the postponement is thrown to the resumer.
+            UseImplicitLambda::Postpone => {
+                if self.may_postpone {
+                    if catch_ex_postpone {
+                        self.postpone_elab_term(elem, expected)
+                    } else {
+                        Err(ElabError::Postpone)
+                    }
+                } else {
+                    self.elab_using_elab_fns(elem, kinds, expected, catch_ex_postpone)
+                }
+            }
         }
-        dispatch::dispatch(self, elem, kinds, expected)
+    }
+
+    /// oracle: `elabUsingElabFns` (`TermElabM.lean:1663-1668`), which
+    /// saves the state, and `elabUsingElabFnsAux`'s postpone handler
+    /// (`:1635-1651`): on `Exception.postpone`, with `catchExPostpone`,
+    /// RESTORE the saved state — discarding whatever the failed attempt
+    /// registered (the oracle's own example: in `((f.x a1).x a2).x a3`
+    /// the inner postponed mvars are dead once the outer one is
+    /// postponed) — then `postponeElabTermCore`.
+    ///
+    /// leanr has one elaborator per kind, so the oracle's walk over
+    /// several `elabFns` (and its `unsupportedSyntax` fall-through) has
+    /// no counterpart.
+    ///
+    /// The `lctx` is restored too. The oracle gets that for free: its
+    /// local context is a reader field, never part of the saved state.
+    /// leanr's `lctx` lives in `MetaCtx`, and every telescope bracket
+    /// already restores on `Err`, so this is the same guarantee made
+    /// explicit at the one place a postponement is swallowed.
+    ///
+    /// Cost: `save_term_state` clones the three `Term.State` tables and
+    /// the mctx assignment maps on EVERY caught elaboration, where the
+    /// oracle's persistent structures make `saveState` O(1). Recorded in
+    /// the spec's § Landed › P2 as the "Known cost" bullet.
+    fn elab_using_elab_fns(
+        &mut self,
+        elem: &SynElem,
+        kinds: &KindInterner,
+        expected: Option<ExprId>,
+        catch_ex_postpone: bool,
+    ) -> Result<ExprId, ElabError> {
+        if !catch_ex_postpone {
+            return dispatch::dispatch(self, elem, kinds, expected);
+        }
+        let saved = self.save_term_state();
+        let lctx = self.mctx.lctx_checkpoint();
+        match dispatch::dispatch(self, elem, kinds, expected) {
+            Err(ElabError::Postpone) => {
+                self.restore_term_state(saved);
+                self.mctx.lctx_restore(lctx);
+                self.postpone_elab_term(elem, expected)
+            }
+            other => other,
+        }
     }
 
     /// oracle: `elabTermEnsuringType` = `elabTerm` then `ensureHasType`
@@ -441,12 +512,9 @@ enum UseImplicitLambda {
     No,
     Yes(ExprId),
     /// `stx` is a local identifier whose type is still an mvar
-    /// application (`:1753-1778`). Needs term-level postponement, which
-    /// leanr does not have (`lib.rs`: no elaborator postpones a term;
-    /// `may_postpone`'s only reader is `resolve_lval_loop`) —
-    /// `elab_term`'s dispatch (M4b-3 P5 Task 6) reports this as a named
-    /// `UnsupportedSyntax` seam owned by M4b-4a P2 rather than falling
-    /// through to a different term.
+    /// application (`:1753-1778`). `elab_term_core` handles it:
+    /// postpone, throw to the resumer, or (with postponement off)
+    /// elaborate without the wrap, `TermElabM.lean:1843-1854`.
     Postpone,
 }
 
@@ -470,10 +538,11 @@ enum UseImplicitLambda {
 /// exactly that shape — an aux mvar applied to binder fvars — as the
 /// type of an as-yet-untyped `fun` binder, so "no corpus term reaches
 /// it" stopped being a safe assumption once P5 multiplied binder
-/// producers on top. `local_ident_of`/`is_mvar_app` below are the
-/// `isLocalIdent?`/`isMVarApp` transliterations; `elab_term`'s dispatch
-/// turns the `.postpone` result into a named seam, since leanr has no
-/// term-level postponement to actually resume it with.
+/// producers on top. `local_ident_of` below and `TermElabM::is_mvar_app` (`postpone.rs`) are the
+/// `isLocalIdent?`/`isMVarApp` transliterations. `elab_term_core`
+/// handles the `.postpone` result: postpone, throw to the resumer, or
+/// (with postponement off) elaborate without the wrap,
+/// `TermElabM.lean:1843-1854`.
 ///
 /// `hasNoImplicitLambdaAnnotation` (`:1706-1707`, an `annotation?
 /// \`noImplicitLambda` on the expected type) is likewise not modelled:
@@ -512,7 +581,7 @@ fn use_implicit_lambda(
     // fvars the wrap introduces are not in the local's mvar scope.
     if let Some(x) = local_ident_of(elab, elem, kinds)? {
         let x_ty = elab.mctx.infer_type(x)?;
-        if is_mvar_app(elab, x_ty)? {
+        if elab.is_mvar_app(x_ty)? {
             return Ok(UseImplicitLambda::Postpone);
         }
     }
@@ -543,35 +612,6 @@ fn local_ident_of(
     };
     let name = crate::app::head::intern_dotted(elab, tok.text())?;
     Ok(elab.mctx.lctx_lookup_by_name(name))
-}
-
-/// oracle: `isMVarApp` (`TermElabM.lean:1375`) — `(← whnfR
-/// e).getAppFn.isMVar`, a REDUCIBLE-transparency whnf then a spine walk.
-/// This is the looser (pre-Task-4) `instantiate_mvars` + spine-walk
-/// shape `app/state.rs`'s `f_type_is_mvar_after_instantiation` used
-/// (`2b0e402`, deleted by Task 4): the one shape this task's own arm can
-/// manufacture — an aux mvar applied to binder fvars, never itself
-/// reducible to something else — does not need the extra `whnf` to
-/// expose an `MVar` head, so the distinction is not drawn here. That is
-/// also the only option available: `leanr_meta::MetaCtx::whnf_r` is
-/// `pub(crate)` to that crate, not `pub`, so `leanr_elab` cannot call it
-/// without a new accessor — the crate boundary forces this, not merely
-/// a design preference. A caller that genuinely needed the
-/// REDUCIBLE-only distinction would have to add one (the same
-/// elab→meta accessor precedent this slice's own
-/// `push_local_decl_without_instance` /
-/// `install_local_instance_for_last_pushed` follow).
-pub(crate) fn is_mvar_app(elab: &mut TermElabM, e: ExprId) -> Result<bool, ElabError> {
-    let e = elab.mctx.instantiate_mvars(e)?;
-    let base = elab.view.store;
-    let mut cur = e;
-    while let Node::App { f, .. } = elab.mctx.store().expr_node(Some(base), cur) {
-        cur = f;
-    }
-    Ok(matches!(
-        elab.mctx.store().expr_node(Some(base), cur),
-        Node::MVar { .. }
-    ))
 }
 
 /// oracle: `elabImplicitLambda` (`TermElabM.lean:1806-1820`) — peel
@@ -606,16 +646,9 @@ pub(crate) fn is_mvar_app(elab: &mut TermElabM, e: ExprId) -> Result<bool, ElabE
 /// elaborator runs (`elabTermAux`, `:1839-1841`) — which is why it
 /// lives here in `elab_term` rather than inside a leaf.
 ///
-/// Two further, deliberate divergences from `elabImplicitLambdaAux`
+/// One further, deliberate divergence from `elabImplicitLambdaAux`
 /// (`:1796-1804`), added to this comment's own unmodelled-arms list
-/// alongside `use_implicit_lambda`'s `.postpone` and
-/// `hasNoImplicitLambdaAnnotation`:
-///   * the oracle elaborates the residual body with `elabUsingElabFns
-///     stx expectedType catchExPostpone` (`:1797`) THEN a separate
-///     `ensureHasType` (`:1799`); this calls `elab_term_ensuring_type`
-///     (`elab_term` then `ensure_has_type`) instead, which is the same
-///     two steps in the same order — reviewer-verified behaviourally
-///     equivalent, not merely assumed so.
+/// alongside `use_implicit_lambda`'s `hasNoImplicitLambdaAnnotation`:
 ///   * `decorateErrorMessageWithLambdaImplicitVars` (`:1781-1792`,
 ///     wired in via the `try/catch` at `:1798,1803-1804`) augments a
 ///     FAILED elaboration's error MESSAGE with the introduced implicit
@@ -627,6 +660,7 @@ fn elab_implicit_lambda(
     elab: &mut TermElabM,
     elem: &SynElem,
     kinds: &KindInterner,
+    catch_ex_postpone: bool,
     mut ty: ExprId,
 ) -> Result<ExprId, ElabError> {
     // Bracket the telescope: restore `lctx` on EVERY exit path (Ok or
@@ -684,7 +718,13 @@ fn elab_implicit_lambda(
         }
         // oracle: `elabImplicitLambdaAux` — elaborate against the
         // RESIDUAL type, then wrap.
-        let e = elab.elab_term_ensuring_type(elem, kinds, Some(ty))?;
+        // oracle: `elabImplicitLambdaAux` (`:1796-1799`) —
+        // `elabUsingElabFns stx expectedType catchExPostpone`, then
+        // `ensureHasType`. The catch flag is the caller's: a resumed
+        // term's postponement must reach `resume_postponed` even from
+        // inside the wrap.
+        let body = elab.elab_using_elab_fns(elem, kinds, Some(ty), catch_ex_postpone)?;
+        let e = elab.ensure_has_type(elem, Some(ty), body)?;
         elab.mctx.mk_lambda(&fvars, e).map_err(ElabError::from)
     })();
     elab.mctx.lctx_restore(checkpoint);

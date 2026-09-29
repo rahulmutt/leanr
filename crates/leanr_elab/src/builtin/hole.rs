@@ -56,17 +56,8 @@ pub fn elab_hole(
 ) -> Result<ExprId, ElabError> {
     let ty = match expected {
         Some(t) => t,
-        None => {
-            // `mkFreshTypeMVar`: a fresh level mvar, then a fresh expr
-            // mvar of type `Sort` that level.
-            let u = elab.mk_fresh_level_mvar()?;
-            let sort = elab
-                .mctx
-                .store_mut()
-                .expr_sort(None, u)
-                .map_err(leanr_meta::MetaError::from)?;
-            elab.mk_fresh_expr_mvar(sort)?
-        }
+        // `mkFreshTypeMVar`: a fresh level mvar, then an expr mvar of `Sort` it.
+        None => elab.mk_fresh_type_mvar()?,
     };
     let (mvar, mvar_id) = elab.mk_fresh_expr_mvar_of_kind(ty, MVarKind::Natural)?;
     // oracle: `elabHole`'s `registerMVarErrorHoleInfo mvar.mvarId! stx`

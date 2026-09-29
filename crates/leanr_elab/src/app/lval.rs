@@ -302,18 +302,6 @@ fn resolve_lval_aux(
     }
 }
 
-/// Which errors `resolveLValLoop`'s `catch` retries (`App.lean:1688-1694`:
-/// `.error` retries, `.internal` rethrows). Named seams are NOT oracle
-/// errors — retrying one would report an error for a path leanr never
-/// ran (plan § Review Focus 2) — and `Meta` errors are leanr's
-/// internal/budget failures.
-fn is_retryable(e: &ElabError) -> bool {
-    !matches!(
-        e,
-        ElabError::UnsupportedSyntax(_) | ElabError::Meta(_) | ElabError::Internal(_)
-    )
-}
-
 /// oracle: `resolveLValLoop` (`App.lean:1678-1694`).
 fn resolve_lval_loop(
     elab: &mut TermElabM,
@@ -324,30 +312,21 @@ fn resolve_lval_loop(
     kinds: &KindInterner,
 ) -> Result<(ExprId, LValResolution), ElabError> {
     let (e, e_type) = consume_implicits(elab, lval.get_ref(), e, e_type, has_args)?;
-    // `tryPostponeIfMVar eType` then `if isMVarApp eType then
-    // synthesizeSyntheticMVarsUsingDefault` (`:1680-1683`). The first
-    // throws only when `mayPostpone`, and leanr cannot postpone yet, so
-    // it is the P2 seam. `may_postpone` is `false` only inside
-    // `without_postponing` (ladder rungs 2/4), which elaborates no term
-    // until P2 resumes postponed ones, so the `else` path below is
-    // unreachable today (see `lib.rs`).
-    // `is_mvar_app` is leanr's documented approximation of `isMVarApp`
-    // (instantiate + spine walk, no `whnfR`; see its doc in `elab.rs`);
-    // P2 owns making it exact.
-    if crate::elab::is_mvar_app(elab, e_type)? {
-        if elab.may_postpone {
-            return Err(ElabError::UnsupportedSyntax(
-                "field notation on a term whose type is still a metavariable: the oracle \
-                 postpones (`tryPostponeIfMVar`, App.lean:1680) — M4b-4a P2"
-                    .to_string(),
-            ));
-        }
+    // oracle: `tryPostponeIfMVar eType` (`App.lean:1680`), then, when
+    // postponement is off (ladder rungs 2 and 4, or a resume below
+    // them), `if (← isMVarApp eType) then
+    // synthesizeSyntheticMVarsUsingDefault` (`:1681-1683`) — try default
+    // instances to unblock the type before resolving.
+    elab.try_postpone_if_mvar(e_type)?;
+    if elab.is_mvar_app(e_type)? {
         elab.synthesize_synthetic_mvars_using_default(kinds)?;
     }
     let e_type = elab.mctx.instantiate_mvars(e_type)?;
     match resolve_lval_aux(elab, e, e_type, lval) {
         Ok(r) => Ok((e, r)),
-        Err(err) if is_retryable(&err) => match elab.mctx.unfold_definition_pub(e_type)? {
+        // oracle: the `catch` retries `.error` only and rethrows `.internal`
+        // (`App.lean:1688-1694`); see `ElabError::is_oracle_error`.
+        Err(err) if err.is_oracle_error() => match elab.mctx.unfold_definition_pub(e_type)? {
             Some(t) => resolve_lval_loop(elab, lval, e, t, has_args, kinds),
             None => Err(err),
         },
@@ -545,4 +524,17 @@ pub fn elab_app_lvals(
         }
     }
     crate::app::elab_app_args(elab, f, call, kinds)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `resolveLValLoop` retries on `.error` only and rethrows internal
+    /// exceptions (`App.lean:1688-1694`). A postponement is internal.
+    #[test]
+    fn postpone_is_not_retryable() {
+        assert!(!ElabError::Postpone.is_oracle_error());
+        assert!(ElabError::PlaceholderAsFunction.is_oracle_error());
+    }
 }

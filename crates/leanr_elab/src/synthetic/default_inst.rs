@@ -100,33 +100,15 @@ impl<'e> TermElabM<'e> {
     /// because an instance goal is solved by SYNTHESIS, never by
     /// re-elaborating syntax.
     ///
-    /// It is kept rather than deleted, and the reason is the public
-    /// signature, not a forward bet on its own. `kinds` is part of this
-    /// method's contract (design spec § P3; `ladder.rs`'s rung 3 and
+    /// It is kept because `kinds` is part of this method's contract
+    /// (design spec § P3; `ladder.rs`'s rung 3 and
     /// `synthesize_using_default_loop` both pass the interner they
-    /// already hold), and it is there for the ladder's convention that
-    /// every fixpoint entry point takes the interner rather than storing
-    /// it (`SyntheticMVarDecl`'s own doc, which cites `TermElabM`'s
-    /// module doc for the underlying rule). Dropping it from the private
-    /// helpers alone would leave that public parameter with NO consumer
-    /// at all — a `_kinds` on the crate's API surface, which is a louder
-    /// falsehood than a threaded-but-unread argument, and would have to
-    /// be re-threaded through this exact cycle if a future `.postponed`
-    /// arm ever lands inside `synthesize_pending_inst_mvar_committed`,
-    /// since that WOULD re-elaborate syntax. **P5 did not land one
-    /// there** — its own postponement work (M4b-3 P5 task 6, the
-    /// `useImplicitLambda` third-result finding) dispatches through a
-    /// different mechanism, `elab.rs`'s `UseImplicitLambda::Postpone`,
-    /// to a named `UnsupportedSyntax` seam owned by M4b-4a P2, not through
-    /// this fixpoint's `.typeClass` walk. (M4b-3 P4 shipped the `.coe`
-    /// producer and its two consumer arms, but neither lands here: this
-    /// rung's own walk skips every non-`.typeClass` kind by construction
-    /// — see the oracle citation on `synthesize_some_using_default_prio`
-    /// above — so the `.coe` half of this speculation resolved without
-    /// touching this function.) So this parameter's `.postponed`
-    /// justification is STILL speculative, unclaimed by any landed
-    /// slice — recorded as a deliberate call, so a future reader does
-    /// not have to re-derive it or wonder whether P5 already closed it.
+    /// already hold) and every fixpoint entry point takes the interner
+    /// rather than storing it (`SyntheticMVarDecl`'s own doc). M4b-4a
+    /// P2's postponement producer went through `elab_using_elab_fns`,
+    /// not this fixpoint, and this rung's walk still skips every
+    /// non-`.typeClass` kind, so the parameter's justification stays
+    /// the ladder convention alone.
     pub fn synthesize_using_default(&mut self, kinds: &KindInterner) -> Result<bool, ElabError> {
         // oracle: "Recall that `prioSet` is stored in descending order".
         // `MetaCtx::default_instance_priorities` guarantees that

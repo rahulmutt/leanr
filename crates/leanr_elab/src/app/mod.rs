@@ -64,7 +64,6 @@
 //!   elabAsElim, RECURSOR heads only (partial!) ....... M4b-4c head.rs
 //!   dot notation: proj, fieldIdx, projFn/projIdx ..... P1 SHIPPED (M4b-4a) — lval.rs, head.rs, here
 //!   numImplicitParams (structure projection) ......... P1 SHIPPED (M4b-4a) — args.rs, lval.rs
-//!   postponement (tryPostponeIfMVar, .postpone) ...... M4b-4a P2 lval.rs, elab.rs
 //!   generalized field notation (.const, Function.f) .. M4b-4a P3 lval.rs
 //!   pipeProj / dotIdent / namedPattern heads, `@.f` .. M4b-4a P4 head.rs, here, dispatch.rs
 //!   `choice` heads ................................... overloading slice  head.rs
@@ -476,6 +475,15 @@ pub(crate) fn elab_app_args(
     // let fType ← instantiateMVars fType`.
     let f_type = elab.mctx.infer_type(f)?;
     let f_type = elab.mctx.instantiate_mvars(f_type)?;
+    // oracle: `unless namedArgs.isEmpty && args.isEmpty do
+    // tryPostponeIfMVar fType` (`App.lean:1366-1367`) — an mvar-typed
+    // head with something to apply waits for its type. With
+    // postponement off it falls through to `main`, whose
+    // `synthesize_pending_and_normalize_fun_type` reports
+    // `FunctionExpected`.
+    if !(named_args.is_empty() && args.is_empty()) {
+        elab.try_postpone_if_mvar(f_type)?;
+    }
 
     // oracle: `App.lean:1373`'s `if let some elimInfo ← elabAsElim? then
     // .. ElabElim.main ..` branch, which diverts the WHOLE application

@@ -831,6 +831,19 @@ fn explicit_mode_consumes_implicit_params_positionally() {
     }
 }
 
+/// Nothing ever pins `f`'s type: postponed, resumed at rung 4 without
+/// postponement, and reported. `#check fun f => f Nat.zero` on the
+/// pinned oracle: "Function expected at f but this term has type ?m.1".
+/// A regression pin: it passes before and after the postponement
+/// producer, and fails if `Postpone` escapes the public entry point.
+#[test]
+fn an_unpinned_function_head_is_reported_after_postponement() {
+    match support::elab_and_synthesize("fun f => f Nat.zero") {
+        Err(leanr_elab::ElabError::FunctionExpected { .. }) => {}
+        other => panic!("expected FunctionExpected, got {other:?}"),
+    }
+}
+
 /// oracle: `useImplicitLambda` (`TermElabM.lean:1743-1779`) fires only
 /// when the whnf'd expected type is a `forallE` whose binder info is
 /// IMPLICIT or INST-IMPLICIT — `unless c.isImplicit || c.isInstImplicit
