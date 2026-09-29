@@ -190,6 +190,7 @@ pub(crate) fn with_prelude0_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
             projection_fns: &projection_fns,
             classes: &classes,
             coe_decls: &coe_decls,
+            structures: &[],
         },
     );
     f(&mut ctx)
@@ -240,6 +241,7 @@ pub(crate) fn with_instances_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
             projection_fns: &projection_fns,
             classes: &classes,
             coe_decls: &coe_decls,
+            structures: &[],
         },
     );
     f(&mut ctx)
@@ -396,6 +398,7 @@ pub(crate) fn with_synth0_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
             projection_fns: &projection_fns,
             classes: &classes,
             coe_decls: &coe_decls,
+            structures: &[],
         },
     );
     f(&mut ctx)
@@ -444,6 +447,7 @@ pub(crate) fn with_cyclic_instances_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) ->
             projection_fns: &projection_fns,
             classes: &classes,
             coe_decls: &coe_decls,
+            structures: &[],
         },
     );
     f(&mut ctx)
@@ -659,6 +663,7 @@ pub(crate) fn with_matcher_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
             projection_fns: &projection_fns,
             classes: &classes,
             coe_decls: &coe_decls,
+            structures: &[],
         },
     );
     f(&mut ctx)

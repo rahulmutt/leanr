@@ -32,7 +32,7 @@ use leanr_kernel::{BinderInfo, ConstantInfo, Environment, Nat};
 use leanr_meta::TransparencyMode;
 use leanr_olean::{
     ClassEntry, DefaultInstanceEntry, InstanceEntry, MatcherEntry, ModuleData, ProjectionFnInfo,
-    ReducibilityEntry,
+    ReducibilityEntry, StructureInfo,
 };
 use serde_json::{json, Value};
 
@@ -53,6 +53,7 @@ pub struct Replayed {
     pub projection_fns: Vec<ProjectionFnInfo>,
     pub classes: Vec<ClassEntry>,
     pub coe_decls: Vec<NameId>,
+    pub structures: Vec<StructureInfo>,
 }
 
 /// Decode `tests/fixtures/<subdir>/<name>`, assert it is import-free
@@ -80,6 +81,7 @@ pub fn replay_fixture_in(subdir: &str, name: &str) -> Replayed {
         projection_fns: md.projection_fns,
         classes: md.classes,
         coe_decls: md.coe_decls,
+        structures: md.structures,
     }
 }
 

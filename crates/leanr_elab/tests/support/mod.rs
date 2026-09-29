@@ -52,6 +52,7 @@ pub fn with_app_harness<R>(
         projection_fns,
         classes,
         coe_decls,
+        structures,
     } = replay_fixture_in("elab", "Elab0.olean");
     let snap = builtin::snapshot();
 
@@ -80,6 +81,7 @@ pub fn with_app_harness<R>(
             projection_fns: &projection_fns,
             classes: &classes,
             coe_decls: &coe_decls,
+            structures: &structures,
         },
     );
     let mut elab = TermElabM::new(mctx, view);
@@ -736,6 +738,7 @@ fn with_elab_harness<R>(
         projection_fns,
         classes,
         coe_decls,
+        structures,
     } = replay_fixture_in("elab", "Elab0.olean");
     let snap = builtin::snapshot();
     let view: EnvView = env.view();
@@ -765,6 +768,7 @@ fn with_elab_harness<R>(
             projection_fns: &projection_fns,
             classes: &classes,
             coe_decls: &coe_decls,
+            structures: &structures,
         },
     );
     let mut elab = TermElabM::new(mctx, view);

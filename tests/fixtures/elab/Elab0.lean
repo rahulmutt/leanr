@@ -676,3 +676,26 @@ def dflt {_α : Type} : Prod Nat Nat := Prod.mk Nat.zero Nat.zero
 -- `mkProjAndCheck` (App.lean:65-73).
 inductive PBox : Prop where
   | mk : Nat -> PBox
+
+-- Order-sensitive `getPathToBaseStructure?`: `E` is a fieldless base
+-- reachable from `Q` two ways. `OB` overlaps `OA` (shared `a`), so it is a
+-- NON-subobject parent of `Q`, and it precedes the subobject parent `OC`
+-- in `extends` order. Subobject fields are tried first (`Q.toOC`), the
+-- parentInfo fallback would take `Q.toOB` first, so the two loop orders
+-- give different paths to `E` (Structure.lean:348-354).
+structure OE where
+structure OA where
+  a : Nat
+structure OB extends OA, OE where
+  b : Nat
+structure OC extends OE where
+  c : Nat
+structure OQ extends OA, OB, OC where
+  q : Nat
+
+-- Every `BinderInfo` spelling of a structure field, so the `fieldInfo`
+-- binder-info decode is observable (structures.rs compares implicit, instImplicit, default).
+structure Bi where
+  {imp : Nat}
+  [inst : Add Nat]
+  dflt : Nat

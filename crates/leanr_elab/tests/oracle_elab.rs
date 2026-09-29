@@ -35,6 +35,7 @@ fn oracle_elab_gate() {
         projection_fns,
         classes,
         coe_decls,
+        structures,
     } = replay_fixture_in("elab", "Elab0.olean");
     let snap = builtin::snapshot();
 
@@ -100,6 +101,7 @@ fn oracle_elab_gate() {
                 projection_fns: &projection_fns,
                 classes: &classes,
                 coe_decls: &coe_decls,
+                structures: &structures,
             },
         );
         let mut elab = TermElabM::new(mctx, view);
