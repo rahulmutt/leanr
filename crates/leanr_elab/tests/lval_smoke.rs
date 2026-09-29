@@ -138,4 +138,42 @@ fn p2_p3_p4_constructs_are_named_seams() {
     let m = seam("fun (s : S3Alias) => (s).zzz");
     assert!(m.contains("M4b-4a P3"), "{m}");
     assert!(m.contains("`S3Alias`"), "{m}");
+    // The same holds for a field `S3` DOES have: the oracle's
+    // `findMethod?` on `S3Alias` fails, retries, and elaborates this to
+    // `S1.a (S2.toS1 (S3.toS2 s))`; leanr must seam on `S3Alias` rather
+    // than retry. (The corpus reaches the unfold retry through a field
+    // INDEX instead: `lval/unfold-alias-idx`.)
+    let m = seam("fun (s : S3Alias) => (s).a");
+    assert!(m.contains("M4b-4a P3"), "{m}");
+    assert!(m.contains("`S3Alias`"), "{m}");
+}
+
+#[test]
+fn projection_function_rejections_match_the_oracle() {
+    // "too many explicit universe levels for `Poly.val`"
+    assert!(matches!(
+        support::elab_and_synthesize("fun (q : Poly Nat) => (q).val.{0, 0}"),
+        Err(ElabError::TooManyUniverseLevels(_))
+    ));
+    // Review Focus 3 — "Argument `self` was already set" (`addNamedArg`,
+    // Arg.lean:56-59, called at App.lean:1868).
+    match support::elab_and_synthesize("fun (s : S3) => (s).a (self := s)") {
+        Err(ElabError::DuplicateNamedArg(n)) => assert_eq!(n, "self"),
+        other => panic!("expected DuplicateNamedArg(self), got {other:?}"),
+    }
+}
+
+#[test]
+fn recursor_head_with_a_projection_is_not_an_eliminator() {
+    // Review Focus 1: `Nat.rec.1` resolves the LVal on `Nat.rec`'s type —
+    // consumeImplicits fills `motive`, the next binder is explicit, so
+    // `.forallE` + fieldIdx = OnFunction. It must NOT hit the
+    // `elabAsElim` recursor seam. Oracle: "Invalid projection:
+    // Projections cannot be used on functions, and `@Nat.rec ?m.1` has
+    // function type `(zero : ?m.1 Nat.zero) → (succ : …) → (t : Nat) →
+    // ?m.1 t`".
+    assert_eq!(
+        proj_reason("Nat.rec.1"),
+        InvalidProjectionReason::OnFunction
+    );
 }

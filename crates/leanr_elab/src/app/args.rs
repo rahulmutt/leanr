@@ -368,11 +368,13 @@ fn process_explicit_arg(
     binder_name: Option<NameId>,
 ) -> Result<bool, ElabError> {
     if app.param_idx() < app.ctx.num_implicit_params {
-        // Only reachable via structure-projection expansion (M4b-4),
-        // which is the sole producer of `num_implicit_params > 0`.
-        return Err(ElabError::UnsupportedSyntax(
-            "numImplicitParams override (structure projection) — M4b-4".to_string(),
-        ));
+        // oracle: `processExplicitArg`'s first branch (`App.lean:767-802`)
+        // — the structure's own parameters are implicit when projecting
+        // via `(self := s)` (`lval::elab_app_lvals`, the sole producer of
+        // `num_implicit_params > 0`), so `p.1` is `@Prod.fst Nat Nat p`,
+        // not `fun α β => …` (issue #1851 in the oracle's own comment).
+        add_implicit_arg(app)?;
+        return Ok(true);
     }
     if let Some(arg) = app.st.args.first().cloned() {
         // oracle: `App.lean:803-806` — `propagateExpectedType arg` runs

@@ -87,10 +87,9 @@ pub struct NamedArg {
     pub name: String,
     pub val: Arg,
     /// oracle: `NamedArg.numImplicitParams` — overrides the binder info
-    /// of the first N parameters to implicit. Only ever nonzero for
-    /// structure-projection expansion (`f.val`), which is M4b-4, so
-    /// every P1 producer sets 0. The field exists because
-    /// `process_explicit_arg` branches on it.
+    /// of the first N parameters to implicit. Only ever nonzero for the
+    /// `(self := e)` argument of structure-projection expansion (`f.val`,
+    /// `lval::elab_app_lvals`); every syntax-level producer sets 0.
     pub num_implicit_params: usize,
 }
 

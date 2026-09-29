@@ -8,6 +8,7 @@ use leanr_kernel::{BinderInfo, ConstantInfo, Nat};
 use leanr_meta::{MVarId, MVarKind, MetaError};
 use leanr_syntax::kind::KindInterner;
 
+use crate::app::expand::{Arg, NamedArg};
 use crate::app::AppCall;
 use crate::dispatch::SynElem;
 use crate::elab::TermElabM;
@@ -45,9 +46,6 @@ impl LVal {
 /// needs `auxDeclToFullName`, which has no leanr producer (the
 /// `let rec` slice).
 enum LValResolution {
-    /// Task 6 consumes the fields (`mkBaseProjections` + the projection
-    /// function application); until then this arm is a named seam.
-    #[allow(dead_code)]
     ProjFn {
         base: NameId,
         struct_name: NameId,
@@ -392,33 +390,146 @@ fn mk_proj_and_check(
     Ok(r)
 }
 
+/// oracle: `mkBaseProjections` (`App.lean:1700-1710`): walk
+/// `getPathToBaseStructure?`, applying each parent projection to the
+/// structure value's own type arguments — with the universe levels of
+/// that TYPE's head constant, reused as is (no fresh level mvars, no
+/// `mkConst`). The oracle `panic!`s on both failure paths; untrusted
+/// `.olean` input can reach them here, so they are `Internal` errors.
+fn mk_base_projections(
+    elab: &mut TermElabM,
+    base_struct: NameId,
+    struct_name: NameId,
+    mut e: ExprId,
+) -> Result<ExprId, ElabError> {
+    let Some(path) = elab
+        .mctx
+        .get_path_to_base_structure(base_struct, struct_name)
+    else {
+        return Err(ElabError::Internal(
+            "Failed to access field in parent structure (App.lean:1703)".to_string(),
+        ));
+    };
+    let base = elab.view.store;
+    for proj_fn in path {
+        let ty = elab.mctx.infer_type(e)?;
+        let ty = elab.mctx.whnf(ty)?;
+        let Node::Const { levels, .. } = node(elab, app_fn(elab, ty)) else {
+            return Err(ElabError::Internal(
+                "Type of structure value cannot be reduced to a constant application \
+                 (App.lean:1708)"
+                    .to_string(),
+            ));
+        };
+        let mut f = elab
+            .mctx
+            .store_mut()
+            .expr_const(Some(base), Some(proj_fn), levels)
+            .map_err(MetaError::from)?;
+        for p in app_args(elab, ty) {
+            f = mk_app(elab, f, p)?;
+        }
+        e = mk_app(elab, f, e)?;
+    }
+    Ok(e)
+}
+
 /// oracle: `elabAppLVals` / `elabAppLValsAux` (`App.lean:1843-1897`).
-/// Matches the oracle's control flow: `projIdx` does `loop f lvals`,
-/// and the empty list ends in `elabAppArgs f namedArgs args …`.
+/// Matches the oracle's control flow: `projIdx` and a non-final
+/// `projFn` do `loop f lvals`; a FINAL `projFn` ends in `elabAppArgs
+/// projFn (namedArgs + self) args …` (`:1867-1869`), consuming the
+/// outer call; the empty list ends in `elabAppArgs f namedArgs args …`.
 pub fn elab_app_lvals(
     elab: &mut TermElabM,
     mut f: ExprId,
     lvals: Vec<LVal>,
-    call: AppCall,
+    mut call: AppCall,
     kinds: &KindInterner,
 ) -> Result<ExprId, ElabError> {
     // `hasArgs` reads the OUTER application's arguments on every
     // iteration (`:1850`), not the ones a non-final step passes on.
     let has_args = !call.named_args.is_empty() || !call.args.is_empty();
-    for lval in lvals {
+    let n = lvals.len();
+    for (i, lval) in lvals.into_iter().enumerate() {
+        let last = i + 1 == n;
         let (e, res) = resolve_lval(elab, f, &lval, has_args, kinds)?;
-        f = match res {
+        match res {
             LValResolution::ProjIdx { struct_name, idx } => {
-                mk_proj_and_check(elab, struct_name, idx, e)?
+                f = mk_proj_and_check(elab, struct_name, idx, e)?;
             }
-            LValResolution::ProjFn { .. } => {
-                return Err(ElabError::UnsupportedSyntax(
-                    "structure projection function (`LValResolution.projFn`, \
-                     App.lean:1857-1872) — M4b-4a P1 task 6"
-                        .to_string(),
-                ))
+            LValResolution::ProjFn {
+                base,
+                struct_name,
+                field,
+                levels,
+            } => {
+                let e = mk_base_projections(elab, base, struct_name, e)?;
+                // `getFieldInfo?` after `findField?` (`:1859`,
+                // `unreachable!`): only malformed `structureExt` data can
+                // make it miss.
+                let Some(proj_fn_name) = elab.mctx.get_field_info(base, field).map(|i| i.proj_fn)
+                else {
+                    return Err(ElabError::Internal(format!(
+                        "structure `{}` has no field info for `{}` (App.lean:1859)",
+                        render(elab, base),
+                        render(elab, field)
+                    )));
+                };
+                let proj_name = render(elab, proj_fn_name);
+                // `isInaccessiblePrivateName` (`:1860-1861`). leanr does
+                // not model private-name accessibility (module scoping of
+                // `_private` names), so a private projection is a seam,
+                // not a guess.
+                if proj_name.starts_with("_private.") {
+                    return Err(ElabError::UnsupportedSyntax(format!(
+                        "private field projection `{proj_name}` (`isInaccessiblePrivateName`, \
+                         App.lean:1860-1861) — the slice that models private names"
+                    )));
+                }
+                // `mkConst info.projFn levels` (`:1862`).
+                let proj_fn = crate::app::head::mk_const(elab, proj_fn_name, &levels, &proj_name)?;
+                // `getConstInfoInduct baseStructName` (`:1864`).
+                let num_params = match elab.view.get(base) {
+                    Some(ConstantInfo::Induct(ind)) => ind.num_params.to_usize(),
+                    _ => None,
+                };
+                let Some(num_params) = num_params else {
+                    return Err(ElabError::Internal(format!(
+                        "structure `{}` is not an inductive (App.lean:1864)",
+                        render(elab, base)
+                    )));
+                };
+                // `:1865-1866`: the structure's own parameters are
+                // implicit for `self` (`processExplicitArg`'s
+                // `numImplicitParams` branch, `App.lean:767-802`).
+                let self_arg = NamedArg {
+                    name: "self".to_string(),
+                    val: Arg::Expr(e),
+                    num_implicit_params: num_params,
+                };
+                if last {
+                    // `addNamedArg namedArgs namedArg` (`:1868`,
+                    // `Arg.lean:56-59`): a user-written `(self := …)` is
+                    // a duplicate (plan § Review Focus 3).
+                    if call.named_args.iter().any(|na| na.name == "self") {
+                        return Err(ElabError::DuplicateNamedArg("self".to_string()));
+                    }
+                    call.named_args.push(self_arg);
+                    return crate::app::elab_app_args(elab, proj_fn, call, kinds);
+                }
+                // Non-final (`:1871-1872`): `self` alone, no expected
+                // type, `explicit := false`, `ellipsis := false`.
+                let step = AppCall {
+                    named_args: vec![self_arg],
+                    args: Vec::new(),
+                    expected: None,
+                    explicit: false,
+                    ellipsis: false,
+                    stx: call.stx.clone(),
+                };
+                f = crate::app::elab_app_args(elab, proj_fn, step, kinds)?;
             }
-        };
+        }
     }
     crate::app::elab_app_args(elab, f, call, kinds)
 }
