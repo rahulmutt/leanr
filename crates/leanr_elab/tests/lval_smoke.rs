@@ -159,6 +159,18 @@ fn postponed_projections_on_an_unknown_type_report_the_oracle_error() {
         proj_reason("fun x => (x.1 :)"),
         InvalidProjectionReason::TypeUnknown
     );
+    // Discriminates `(e :)` draining its OWN postponements: the later `(x : Prod Nat Nat)`
+    // would fix `x`'s type, but `(x.1 :)` runs `withSynthesize (postpone := .no)` first, so it
+    // must fail inside its scope rather than leak to the enclosing fixpoint.
+    // "Invalid projection: Type of\n  x\nis not known; cannot resolve projection `1`"
+    assert_eq!(
+        proj_reason("fun x => Prod.mk (x.1 :) (x : Prod Nat Nat)"),
+        InvalidProjectionReason::TypeUnknown
+    );
+    // Control: without the ascription the projection postpones and the later
+    // ascription resolves it (the oracle accepts this too).
+    support::elab_and_synthesize("fun x => Prod.mk x.1 (x : Prod Nat Nat)")
+        .expect("the oracle accepts the un-ascribed control");
     // Same message through a reducible alias (`outParam ?m`).
     assert_eq!(
         proj_reason("fun (x : outParam _) => x.1"),
