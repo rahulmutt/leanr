@@ -78,7 +78,7 @@
 //! top, so leanr can no longer assume no corpus term reaches it. The
 //! second half — leanr still has no term-level postponement — has not
 //! closed, so M4b-3 P5 Task 6 models the arm explicitly and reports it
-//! as a named `M4b-4` seam (`elab.rs`'s `UseImplicitLambda::Postpone`
+//! as a named `M4b-4a P2` seam (`elab.rs`'s `UseImplicitLambda::Postpone`
 //! dispatch) rather than leaving it an unexamined assumption.
 //! `implicit_lambda_postpone_is_a_named_seam` below asserts it.
 //!
@@ -161,8 +161,12 @@ fn deferred_constructs_are_named_seams() {
     let cases: &[(&str, &str)] = &[
         // (source, expected slice marker in the message)
         //
-        // `elab_explicit`'s LVal arm: `@` on a projection head.
-        ("@(Nat.zero).1", "M4b-4"),
+        // `elab_explicit`'s `dotIdent` arm: `@` on a dot-identifier head,
+        // still M4b-4a P4's. (`@` on a PROJECTION head shipped in M4b-4a
+        // P1 task 7 — the `lval/explicit-proj` corpus record; the
+        // `@(Nat.zero).1` case that used to sit here now raises the
+        // oracle's own `InvalidProjection`.)
+        ("@.succ", "M4b-4a P4"),
         // `peel_head`'s `App.lean:2118` arm — an INVALID occurrence of
         // `@` in a function position, which is `throwUnsupportedSyntax`
         // in the oracle too, so the citation is the owner.
@@ -190,9 +194,9 @@ fn deferred_constructs_are_named_seams() {
         // oracle, with no seam — their four disjuncts read `auxRecExt` /
         // the `elabAsElim` tag, extensions leanr does not decode.
         // `fixture_declares_no_undecoded_elab_attributes` below is the
-        // backstop for those; M4b-4 owns the real fix.
-        ("Nat.rec", "M4b-4"),
-        ("List.rec", "M4b-4"),
+        // backstop for those; M4b-4c owns the real fix.
+        ("Nat.rec", "M4b-4c"),
+        ("List.rec", "M4b-4c"),
     ];
     for (src, marker) in cases {
         match elab_src(src) {
@@ -261,8 +265,9 @@ fn mvar_function_type_is_closed_by_propagation() {
 /// the oracle succeeds.
 ///
 /// Measured against the pinned oracle rather than reasoned about, since
-/// this is the whole justification for threading `heed_elab_as_elim`
-/// instead of testing the constant kind unconditionally:
+/// this is the whole justification for computing `head::elab_app_fn`'s
+/// `heed` (passed down to `elab_ident_head`) instead of testing the
+/// constant kind unconditionally:
 /// ```text
 /// @Nat.rec    -> {"k":"const","n":"Nat.rec","us":[{"k":"lmvar","i":0}]}
 /// Nat.rec ..  -> Nat.rec ?m ?m ?m ?m
@@ -364,7 +369,7 @@ fn unregistered_kinds_are_named_by_kind() {
 ///     tag extension.
 ///
 /// Neither is detectable at runtime today, so both are kept out of the
-/// committed corpus by source text instead. M4b-4 decodes `auxRecExt`
+/// committed corpus by source text instead. M4b-4c decodes `auxRecExt`
 /// and builds `ElabElim`; until then this gate is the whole defence.
 ///
 /// Both halves are TEXT gates over committed fixture files, deliberately
@@ -383,7 +388,7 @@ fn fixture_declares_no_undecoded_elab_attributes() {
             !src.contains(attr),
             "Elab0.lean declares `@[{attr}]`, whose extension leanr does not decode: \
              elabAppArgs' control flow would diverge silently. Decode the extension \
-             (M4b-4 owns elab_as_elim) before adding such a declaration."
+             (M4b-4c owns elab_as_elim) before adding such a declaration."
         );
     }
 
@@ -409,7 +414,7 @@ fn fixture_declares_no_undecoded_elab_attributes() {
                  `shouldElabAsElim` (App.lean:1322-1328) is true for recursors and \
                  auxiliary recursors WITHOUT any attribute, and the oracle then diverts \
                  the whole application to ElabElim — leanr takes the ordinary path and \
-                 emits a different Expr. M4b-4 owns elabAsElim; do not add such a query \
+                 emits a different Expr. M4b-4c owns elabAsElim; do not add such a query \
                  before it lands."
             );
         }
@@ -699,7 +704,7 @@ fn literal_kinds_are_registered_not_deferred() {
 /// reason is that no non-rotting formulation exists. Live source
 /// legitimately names INCOMPLETE slices in exactly this position — that
 /// is the named-seam discipline itself (`elab.rs`'s `.postpone` seam
-/// and `app/mod.rs`'s LVal-on-`@` arm both name "M4b-4"; none of these
+/// names "M4b-4a P2" and `app/mod.rs`'s `@.f` arm "M4b-4a P4"; none of these
 /// are "M4b-3 P5" any more, now that P5 is complete: this example set
 /// itself had to be rewritten by Task 12 when the two live seams it used to
 /// cite, `elab.rs`'s and `app/args.rs`'s own "M4b-3 P5", were closed or
@@ -740,10 +745,17 @@ fn literal_kinds_are_registered_not_deferred() {
 /// (`grep -rn 'M4b-3 P5' crates/leanr_elab/src` returned exactly one
 /// non-comment hit before the fix), not on this test having caught it
 /// itself.
+///
+/// **`M4b-4a P1` was added by M4b-4a P1 task 7, and measured
+/// non-vacuous.** After the task's sweep retargeted every live seam
+/// message off the bare "M4b-4" label, a live line `let _ = "M4b-4a P1";`
+/// was temporarily added to `app/lval.rs`: this test failed naming
+/// exactly that line, and passed again once it was removed (both runs
+/// in the task 7 report).
 #[test]
 fn no_seam_message_names_a_completed_slice() {
     let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
-    let needles = ["M4b-3 P3", "M4b-3 P4", "M4b-3 P5"];
+    let needles = ["M4b-3 P3", "M4b-3 P4", "M4b-3 P5", "M4b-4a P1"];
     let mut offenders = Vec::new();
     for path in walk_rs_files(src_dir) {
         let text = std::fs::read_to_string(&path).expect("readable source");
@@ -758,8 +770,8 @@ fn no_seam_message_names_a_completed_slice() {
     }
     assert!(
         offenders.is_empty(),
-        "M4b-3 P3, P4 and P5 are complete; live (non-comment) source claiming one at \
-         {offenders:?}"
+        "M4b-3 P3, P4, P5 and M4b-4a P1 are complete; live (non-comment) source \
+         claiming one at {offenders:?}"
     );
 }
 
@@ -866,7 +878,7 @@ fn implicit_lambda_postpone_is_a_named_seam() {
         other => panic!("expected a named seam for {src:?}, got {other:?}"),
     };
     assert!(
-        msg.contains("implicit lambda postponement") && msg.contains("M4b-4"),
+        msg.contains("implicit lambda postponement") && msg.contains("M4b-4a P2"),
         "seam must name the postponement gap and its owning slice: {msg}"
     );
 }

@@ -154,14 +154,24 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 /// in `elab.rs` (tasks 5-6), so neither is deferred either. Reconciled
 /// an EIGHTH time by the M4b-3 close-out: the `@($t)`/`@$t` wrap that
 /// elaborates with insertion explicitly disabled landed too
-/// (`app/mod.rs`'s `elab_explicit`):
+/// (`app/mod.rs`'s `elab_explicit`). Reconciled a NINTH time by M4b-4a
+/// P1: `Term.proj` (index projections, structure fields, projection
+/// functions, `numImplicitParams`) and `@` on a projection head landed
+/// (`app/lval.rs`, `app/head.rs`), so dot notation's P1 half is no
+/// longer deferred; what remains of it is split by owner below:
 /// ```text
 ///   letI / haveI / let_fun / let_delayed / let_tmp / letrec  later slice (own oracle tier each)
 ///   Term.pipeProj / dotIdent / namedPattern .... M4b-4a P4 (same elabAppFn arms)
+///   field notation on an mvar-typed term
+///     (postponement) ........................... M4b-4a P2
+///   generalized field notation (.const,
+///     Function.f) .............................. M4b-4a P3
+///   private field projections (no fixture) ..... the slice that models private names
 ///   choice ..................................... overloading slice
 ///   elabAsElim (recursor heads seamed; aux
-///     recursors + @[elab_as_elim] still open) .. M4b-4
-///   binop%, anonymous constructor ⟨⟩ ........... M4b-4
+///     recursors + @[elab_as_elim] still open) .. M4b-4c
+///   anonymous constructor ⟨⟩ ................... M4b-4b
+///   binop% ..................................... the macro-expansion slice
 ///   macro expansion in dispatch ................ first macro-form slice
 ///   open / alias / export / _root_ resolution .. later slice
 /// ```

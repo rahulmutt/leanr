@@ -928,6 +928,10 @@ def lvalFnQueries : List (String × String) :=
   -- (`App.lean:767-802`, `:1866`) keeps `Nat.zero` from filling `n`.
   , ("lval/explicit-param-idx",  "fun (x : OfNat Nat Nat.zero) => x.1")
   , ("lval/explicit-param-args", "fun (x : OfNat (Nat -> Nat) Nat.zero) => (x).ofNat Nat.zero")
+  -- `@` on a projection head (`App.lean:2112`/`:2264`): `elabExplicit`
+  -- hands the whole `@..` node to `elabAtom`, and `elabAppFn` strips the
+  -- `@` and re-enters on the `proj` with `explicit := true`.
+  , ("lval/explicit-proj",       "@(Prod.mk Nat.zero Nat.zero).1")
   ]
 
 def emit (id src : String) (expJ : Json) : IO Unit :=

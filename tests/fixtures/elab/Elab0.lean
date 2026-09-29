@@ -650,7 +650,7 @@ structure S3 extends S2 where
   c : Nat
 -- Diamond: `D2` shares `y` with `D1`, so it is a NON-subobject parent
 -- of `D3` (its `z` is copied into `D3` as a direct field). Exercises
--- `getPathToBaseStructure?`'s parentInfo fallback (Structure.lean:338-356).
+-- `getPathToBaseStructure?`'s parentInfo fallback (Structure.lean:338-354).
 structure D1 where
   x : Nat
   y : Nat
@@ -693,8 +693,10 @@ structure OC extends OE where
 structure OQ extends OA, OB, OC where
   q : Nat
 
--- Every `BinderInfo` spelling of a structure field, so the `fieldInfo`
--- binder-info decode is observable (structures.rs compares implicit, instImplicit, default).
+-- Every `BinderInfo` spelling Lean accepts on a structure field
+-- (implicit, instImplicit, default), so the `fieldInfo` binder-info
+-- decode is observable (structures.rs compares all three).
+-- `strictImplicit` is NOT exercised: Lean rejects `⦃x : α⦄` on fields.
 structure Bi where
   {imp : Nat}
   [inst : Add Nat]

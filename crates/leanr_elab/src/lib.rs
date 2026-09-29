@@ -113,12 +113,12 @@
 //!   The `@($t)`/`@$t` wrap that elaborates with insertion explicitly
 //!   disabled SHIPPED in the M4b-3 close-out (`app/mod.rs`'s
 //!   `elab_explicit`). Still deferred: `useImplicitLambda`'s `.postpone`
-//!   arm, a named `M4b-4` seam (`elab.rs`'s
+//!   arm, a named `M4b-4a P2` seam (`elab.rs`'s
 //!   `UseImplicitLambda::Postpone`).
 //! - **overload resolution** (more than one candidate from
 //!   `elabAppFn`) — the slice that grows `resolve_global`, since it is
 //!   unreachable while only exact names resolve.
-//! - **`elabAsElim`** — M4b-4, and the one deferral whose seam is
+//! - **`elabAsElim`** — M4b-4c, and the one deferral whose seam is
 //!   PARTIAL. `shouldElabAsElim` (`App.lean:1322-1328`) has five
 //!   disjuncts; `app::head` can decide only `isRec`
 //!   (`ConstantInfo::Rec`), so a genuine recursor head is seamed while
@@ -127,12 +127,16 @@
 //!   `auxRecExt`/`elabAsElim` tag extensions, which leanr does not
 //!   decode. Those cases still emit a term the oracle does not, with no
 //!   seam; `tests/seam_audit.rs`'s fixture-source gate is the backstop
-//!   until M4b-4 lands the decodes and `ElabElim`.
-//! - **dot notation / LVal machinery** — M4b-4a, in progress: `Term.proj`
-//!   index projections and the resolution loop landed in P1 (`app/lval.rs`);
-//!   structure projection functions are P1 task 6, generalized field
-//!   notation P3, `pipeProj`/`dotIdent`/`namedPattern` P4, `choice` the
-//!   overloading slice. `binop%` and the anonymous constructor `⟨⟩` — M4b-4.
+//!   until M4b-4c lands the decodes and `ElabElim`.
+//! - **dot notation / LVal machinery** — M4b-4a. P1 SHIPPED: `Term.proj`
+//!   index projections, structure fields and projection functions, the
+//!   resolution loop, `numImplicitParams` and `@` on projection heads
+//!   (`app/lval.rs`, `app/head.rs`). Still deferred, each a named seam:
+//!   postponement P2, generalized field notation (`.const`, `Function.f`)
+//!   P3, `pipeProj`/`dotIdent`/`namedPattern` P4, `choice` the
+//!   overloading slice, private field projections the slice that models
+//!   private names. The anonymous constructor `⟨⟩` — M4b-4b; `binop%` —
+//!   the macro-expansion slice.
 //! - **macro expansion** — `dispatch` never expands a macro form; the
 //!   dispatch table only ever matches a syntax kind directly against a
 //!   registered elaborator. Deferred to the slice that first needs a
@@ -185,8 +189,9 @@
 //!   function but undercounts, since `postponeElabTerm` calls it too.)
 //!   leanr has no call site for either. So the path
 //!   stays dead code kept correct for whichever slice first postpones a
-//!   term elaboration — M4b-4's `resolveLValLoop` is still the most
-//!   likely candidate, but it is a candidate, not a schedule.
+//!   term elaboration — `resolveLValLoop`'s `tryPostponeIfMVar` (seamed
+//!   in M4b-4a P1, `app/lval.rs`) is still the most likely candidate,
+//!   and M4b-4a P2 owns it, but it is a candidate, not a schedule.
 //! - **`may_postpone` is written but never read in production code.**
 //!   Re-verified by grep at the end of P3: `elab.rs:86`
 //!   (`TermElabM::new`) and `synthetic/state.rs:306`/`:308`

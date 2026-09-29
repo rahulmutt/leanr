@@ -197,3 +197,41 @@ fn projection_function_missing_from_the_environment_is_an_error_not_a_panic() {
         other => panic!("expected Internal (unknown projFn), got {other:?}"),
     }
 }
+
+/// `@` on a projection head. The oracle's `@` patterns in FUNCTION
+/// position (`elabAppFn`, `App.lean:2110-2118`) accept `@$(_).$_:fieldIdx`,
+/// `@$(_).$_:ident` and `@$(_).$_:ident.{$_us,*}` — but there is NO
+/// `@$(_).$_:fieldIdx.{us}` row, so `@(e).1.{us} a` falls to
+/// `` `(@$_) => throwUnsupportedSyntax `` (`:2118`). Oracle, one `#check`
+/// each on a prelude-mode scratch file importing `Elab0`:
+///
+/// ```text
+/// @(Prod.mk Nat.succ Nat.zero).fst Nat.zero         -- @Prod.fst.{0, 0} (Nat → Nat) Nat (…) Nat.zero : Nat
+/// @(Prod.mk Nat.succ Nat.zero).1 Nat.zero           -- same
+/// @(Prod.mk Nat.succ Nat.zero).fst.{0,0} Nat.zero   -- same
+/// @(Prod.mk Nat.succ Nat.zero).1.{0,0} Nat.zero     -- error: unexpected syntax
+/// ```
+///
+/// In TERM position (`elabExplicit`, `App.lean:2260-2271`) the same
+/// missing row routes `@(e).1.{us}` to the `` `(@$t) `` arm instead —
+/// `elabTerm t (implicitLambda := false)` — which elaborates, so there
+/// the oracle gives `@Prod.fst.{0, 0} Nat Nat (…)` for all four forms.
+#[test]
+fn explicit_on_projection_heads_matches_the_oracle() {
+    let ok =
+        |src: &str| support::elab_and_synthesize(src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+    // Function position.
+    let want = ok("@(Prod.mk Nat.succ Nat.zero).fst Nat.zero");
+    assert_eq!(ok("@(Prod.mk Nat.succ Nat.zero).1 Nat.zero"), want);
+    assert_eq!(ok("@(Prod.mk Nat.succ Nat.zero).fst.{0,0} Nat.zero"), want);
+    // leanr maps the oracle's `throwUnsupportedSyntax` here exactly as it
+    // maps every other `App.lean:2118` shape (`peel_head`'s
+    // invalid-`@` arm; `app_smoke.rs`, `seam_audit.rs`).
+    let m = seam("@(Prod.mk Nat.succ Nat.zero).1.{0,0} Nat.zero");
+    assert!(m.contains("App.lean:2118"), "{m}");
+    // Term position.
+    let want = ok("@(Prod.mk Nat.zero Nat.zero).1");
+    assert_eq!(ok("@(Prod.mk Nat.zero Nat.zero).fst"), want);
+    assert_eq!(ok("@(Prod.mk Nat.zero Nat.zero).fst.{0,0}"), want);
+    assert_eq!(ok("@(Prod.mk Nat.zero Nat.zero).1.{0,0}"), want);
+}

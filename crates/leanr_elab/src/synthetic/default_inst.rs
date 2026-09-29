@@ -117,7 +117,7 @@ impl<'e> TermElabM<'e> {
     /// there** — its own postponement work (M4b-3 P5 task 6, the
     /// `useImplicitLambda` third-result finding) dispatches through a
     /// different mechanism, `elab.rs`'s `UseImplicitLambda::Postpone`,
-    /// to a named `UnsupportedSyntax` seam owned by M4b-4, not through
+    /// to a named `UnsupportedSyntax` seam owned by M4b-4a P2, not through
     /// this fixpoint's `.typeClass` walk. (M4b-3 P4 shipped the `.coe`
     /// producer and its two consumer arms, but neither lands here: this
     /// rung's own walk skips every non-`.typeClass` kind by construction

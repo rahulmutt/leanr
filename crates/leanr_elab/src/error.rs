@@ -31,7 +31,7 @@ pub enum ElabError {
     /// (`Arg.lean:55-59`).
     DuplicateNamedArg(String),
     /// oracle: `mkConst`'s "too many explicit universe levels for
-    /// '{constName}'" (`Lean/Elab/Term/TermElabM.lean:2117-2126`).
+    /// '{constName}'" (`Lean/Elab/Term/TermElabM.lean:2128-2136`).
     /// Carries the head identifier's raw source text. Reachable only
     /// once `.{u, v}` explicit-universe syntax has a producer (M4b-3 P1
     /// task 8); the check itself lives in `app::head::elab_ident_head`

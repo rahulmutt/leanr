@@ -306,7 +306,7 @@ pub fn elab_fun(
         .ok_or_else(|| ElabError::UnsupportedSyntax("fun: body node".into()))?;
     let basic_kind = kinds.name(basic.kind());
     if basic_kind != "Lean.Parser.Term.basicFun" {
-        // The `matchAlts` (pattern-matching `fun`) arm → match slice (M4b-4).
+        // The `matchAlts` (pattern-matching `fun`) arm → the match slice.
         return Err(ElabError::UnsupportedSyntax(format!("fun: {basic_kind}")));
     }
     let bch = non_trivia_children(basic);

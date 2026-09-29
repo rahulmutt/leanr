@@ -53,7 +53,7 @@ rejected.
 
 ## Scope
 
-**In.** Everything `elabAppFn` (`App.lean:2060-2139`) does for the
+**In.** Everything `elabAppFn` (`App.lean:2060-2138`) does for the
 field, fieldIdx, pipeProj, dotIdent, `@`-prefixed, `_` and generic
 arms; the LVal resolution machinery (`App.lean:1435-1897`);
 `resolveDottedIdentFn` (`App.lean:1985-2058`); the field split in
@@ -356,3 +356,42 @@ addition to `dump_elab.lean`), never hand-computed.
 
 Implementation plan for **P1** via the writing-plans skill; P2–P4 are
 planned one at a time after their predecessor merges.
+
+## Landed
+
+### P1 — structures and projections (PR #<n>)
+
+- `structureExt` decoded (`leanr_olean`: `StructureInfo`, keyed by the
+  private `_private.Lean.Structure.0.Lean.structureExt`); `leanr_meta`
+  structure accessors, checked against `tests/fixtures/elab/structures.jsonl`
+  (oracle-dumped by `dump_structs.lean`).
+- `app/lval.rs`: `consumeImplicits`, `resolveLValLoop` (default-instance
+  unblock, unfold retry that never retries a seam), `resolveLValAux`'s
+  fieldIdx / structure-field / forall / mvar / other arms,
+  `mkProjAndCheck`, `mkBaseProjections`, `elabAppLValsAux` for
+  `projIdx` / `projFn`; `numImplicitParams`; `elabAppFn`'s proj,
+  explicitUniv, hole and generic arms; `@` on projections.
+- `@` on projections follows the oracle's rows exactly (`App.lean:2110-2116`,
+  `:2262-2268`): `@(e).1`, `@(e).f` and `@(e).f.{us}` are accepted, and
+  `@(e).1.{us}` has no row — `UnsupportedSyntax` citing `App.lean:2118`
+  in a function position (the oracle's "unexpected syntax"), the
+  `` `(@$t) `` arm in a term position (`lval_smoke.rs`'s
+  `explicit_on_projection_heads_matches_the_oracle`).
+- Corpus: 25 records under `lval/`. Rejections: `tests/lval_smoke.rs`.
+- Seams left, each naming its owner: postponement (P2), `.const` /
+  `Function` (P3), `pipeProj` / `dotIdent` / `namedPattern` (P4),
+  `choice` (overloading slice), private projections (private-names
+  slice), `LocalRec` (`let rec` slice).
+- Field-name access through a `def` alias is P3's to flip to success:
+  `fun (s : S3Alias) => (s).a` is pinned as a P3 seam in
+  `lval_smoke.rs` (ruling R8), where the oracle elaborates it to
+  `S1.a (S2.toS1 (S3.toS2 s))` after `findMethod?` fails and the unfold
+  retry runs. The unfold retry itself is covered in P1 through a field
+  index, by `lval/unfold-alias-idx`.
+- Known approximation carried forward: `is_mvar_app` has no `whnfR`
+  (P2 owns making it exact).
+- Every stale `M4b-4` seam message was retargeted to its owner (P2, P3,
+  P4, `M4b-4c` for `elabAsElim`, `M4b-4b` for `⟨⟩`, the match /
+  macro-expansion / overloading slices); `seam_audit.rs`'s
+  `no_seam_message_names_a_completed_slice` now carries an `M4b-4a P1`
+  needle, measured non-vacuous.

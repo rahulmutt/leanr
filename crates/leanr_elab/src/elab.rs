@@ -371,7 +371,7 @@ impl<'e> TermElabM<'e> {
                     "implicit lambda postponement: the term is a local whose type is an \
                      unassigned metavariable application, which the oracle postpones \
                      (TermElabM.lean:1753-1778). leanr has no term-level postponement \
-                     (`may_postpone` is written but never read) — M4b-4"
+                     (`may_postpone` is written but never read) — M4b-4a P2"
                         .to_string(),
                 ));
             }
@@ -444,7 +444,7 @@ enum UseImplicitLambda {
     /// application (`:1753-1778`). Needs term-level postponement, which
     /// leanr does not have (`lib.rs`: `may_postpone` is written, never
     /// read) — `elab_term`'s dispatch (M4b-3 P5 Task 6) reports this as
-    /// a named `UnsupportedSyntax` seam owned by M4b-4 rather than
+    /// a named `UnsupportedSyntax` seam owned by M4b-4a P2 rather than
     /// falling through to a different term.
     Postpone,
 }

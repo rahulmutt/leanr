@@ -8,7 +8,8 @@
 //! search), `export`ed aliases, `_root_`-qualified names, local
 //! variables/section variables in scope, and dot-notation
 //! (`.foo`/`Struct.foo` via the expected type). None of that exists
-//! yet — M4b-3/M4b-4 own `open`/alias/export/`_root_`/dot-notation.
+//! yet — the slice that grows `resolve_global` owns `open`/alias/export/
+//! `_root_`, and M4b-4a P4 owns `.foo` dot-identifier resolution.
 //! The committed corpus stays fully-qualified so it never needs any of
 //! that; when `open` lands, its own task adds a test exercising the
 //! `AmbiguousIdent` branch below (kept wired now, unreachable until

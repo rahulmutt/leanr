@@ -396,7 +396,7 @@ fn process_explicit_arg(
     // oracle: `App.lean:810-825` — inside a PATTERN, `..` fills even an
     // optParam/autoParam parameter with an implicit mvar. `inPattern` is
     // `Term.Context`'s flag, set only by the match/pattern elaborator
-    // (M4b-4); no P1 entry point can set it, so this arm is inert rather
+    // (the match slice); no P1 entry point can set it, so this arm is inert rather
     // than omitted, and the plain-ellipsis arm below is what `..` takes.
 
     // oracle: the `optParam`/`autoParam` default-filling arms

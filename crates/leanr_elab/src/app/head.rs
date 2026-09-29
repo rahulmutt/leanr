@@ -1,7 +1,7 @@
 //! `elabAppFn`: resolve the application head to a candidate list.
 //! Oracle: `App.lean`'s `elabAppFn` ident case, which for a bare
 //! identifier reduces to `resolveName`/`mkConsts`/`mkConst`
-//! (`Lean/Elab/Term/TermElabM.lean:2117-2126`, `:2145`, `:2170`).
+//! (`Lean/Elab/Term/TermElabM.lean:2128-2136`, `:2145`, `:2170`).
 //!
 //! This file is where M4b-1's `builtin/ident.rs` went. That module was
 //! a SIMPLIFICATION, not a layer: `elabIdent := elabAtom`
@@ -26,7 +26,7 @@ use crate::elab::TermElabM;
 use crate::error::ElabError;
 use crate::resolve::resolve_global;
 
-/// Oracle `elabAppFn` (`App.lean:2060-2139`): returns FINISHED
+/// Oracle `elabAppFn` (`App.lean:2060-2138`): returns FINISHED
 /// candidates (the oracle's `TermElabResult` array), because it threads
 /// `lvals` and itself calls `elabAppLVals`, which calls `elabAppArgs`
 /// (`lval::elab_app_lvals` -> `elab_app_args`).
@@ -161,7 +161,7 @@ pub fn elab_app_fn(
 ///
 /// A `.{us}` suffix wraps the whole proj (`o.1.{0}` is
 /// `explicitUniv(proj(o, 1), ..)`), so it never appears here.
-fn proj_parts(elem: &SynElem) -> Result<(SynElem, SynElem), ElabError> {
+pub(crate) fn proj_parts(elem: &SynElem) -> Result<(SynElem, SynElem), ElabError> {
     let node = elem
         .as_node()
         .ok_or_else(|| ElabError::IllFormedSyntax("proj: Term.proj is not a node".to_string()))?;
@@ -210,8 +210,8 @@ pub(super) fn elab_explicit_univs(
 /// The former `builtin::ident::elab_ident`, plus `explicit_levels`
 /// (Task 8's `.{u}`): oracle `mkConst` creates fresh universe mvars only
 /// for the levelParams NOT covered by explicit levels
-/// (`TermElabM.lean:2117-2126`) — "Create an `Expr.const` using the
-/// given name and explicit levels. Remark: fresh universe metavariables
+/// (`TermElabM.lean:2128-2136`, docstring `:2121-2127`) — "Create an
+/// `Expr.const` using the given name and explicit levels. Remark: fresh universe metavariables
 /// are created if the constant has more universe parameters than
 /// `explicitLevels`". Task 8's `.{u, v}` suffix (`app::mod`'s
 /// `peel_head` -> `elab_explicit_univs`) is the only producer of a
@@ -282,7 +282,7 @@ fn elab_ident_head(
     // carrying `@[elab_as_elim]`. Those take the ordinary path here and
     // emit a term the oracle does not. `tests/seam_audit.rs`'s
     // `fixture_declares_no_undecoded_elab_attributes` is the backstop
-    // that keeps such a query out of the committed corpus; M4b-4 owns
+    // that keeps such a query out of the committed corpus; M4b-4c owns
     // the `auxRecExt` decode and `ElabElim` itself.
     //
     // Measured, not assumed (Task 9, pinned oracle via `dump_elab.lean`'s
@@ -293,7 +293,7 @@ fn elab_ident_head(
     // This guard is also an OVER-approximation in one direction the
     // oracle is finer about: `elabAsElim?` (`App.lean:1402-1420`) falls
     // back to the standard elaborator when the motive has ALREADY been
-    // supplied, which needs `getElabElimInfo`'s `motivePos` — M4b-4
+    // supplied, which needs `getElabElimInfo`'s `motivePos` — M4b-4c
     // machinery. So `Nat.rec (motive := ..) ..` is seamed here where the
     // oracle would elaborate it normally. A named error is the safe
     // direction of that trade; a wrong `Expr` is not.
@@ -301,14 +301,14 @@ fn elab_ident_head(
         return Err(ElabError::UnsupportedSyntax(format!(
             "`{raw}` is a recursor — the oracle elaborates eliminator-headed \
              applications with `ElabElim.main` (`shouldElabAsElim`, App.lean:1322-1328; \
-             diverted at :1373), which needs `motivePos` — M4b-4"
+             diverted at :1373), which needs `motivePos` — M4b-4c"
         )));
     }
 
     mk_const(elab, cname, explicit_levels, raw)
 }
 
-/// oracle: `mkConst` (`TermElabM.lean:2117-2126`). `display` is the
+/// oracle: `mkConst` (`TermElabM.lean:2128-2136`). `display` is the
 /// identifier's source text, used only in the `TooManyUniverseLevels` error.
 ///
 /// Precondition: `cname` is declared. Both callers establish it —
