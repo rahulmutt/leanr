@@ -458,7 +458,8 @@ pub struct ModuleData {
     /// (`Environment.lean:1855`). All other extension entries stay
     /// opaque.
     pub coe_decls: Vec<NameId>,
-    /// Typed decode of the structureExt entries (M4b-4a P1). All other extension entries stay opaque.
+    /// Typed decode of the structureExt entries (M4b-4a P1). All other
+    /// extension entries stay opaque.
     pub structures: Vec<StructureInfo>,
 }
 

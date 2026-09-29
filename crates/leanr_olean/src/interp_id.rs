@@ -1195,3 +1195,122 @@ impl<'s> InterpId<'s> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn ctor_raw(tag: u8, fields: Vec<Raw>, scalars: Vec<u8>) -> Raw {
+        Arc::new(RawValue::Ctor {
+            tag,
+            fields,
+            scalars,
+        })
+    }
+
+    fn scalar(v: u64) -> Raw {
+        Arc::new(RawValue::Scalar(v))
+    }
+
+    /// `Name.str anonymous s`.
+    fn name(s: &str) -> Raw {
+        ctor_raw(
+            1,
+            vec![scalar(0), Arc::new(RawValue::Str(s.to_string()))],
+            vec![],
+        )
+    }
+
+    fn arr(v: Vec<Raw>) -> Raw {
+        Arc::new(RawValue::Array(v))
+    }
+
+    fn field_info(auto: Raw, binder: Vec<u8>) -> Raw {
+        ctor_raw(0, vec![name("a"), name("S.a"), scalar(0), auto], binder)
+    }
+
+    fn parent_info(fields: usize, scalars: Vec<u8>) -> Raw {
+        let mut f = vec![name("P"), name("S.toP")];
+        f.truncate(fields);
+        ctor_raw(0, f, scalars)
+    }
+
+    fn structure(field_names: Raw, fi: Raw, pi: Raw) -> Raw {
+        ctor_raw(0, vec![name("S"), field_names, fi, pi], vec![])
+    }
+
+    /// The structureExt decoders reject every malformed shape with an
+    /// `OleanError`, never a panic and never a silent default. Each
+    /// `Err` case below is one guard; the `Ok` cases pin that the
+    /// well-formed twin passes, so a guard cannot pass by rejecting
+    /// everything.
+    #[test]
+    fn structure_decoders_reject_malformed_shapes() {
+        let mut st = Store::persistent();
+        let mut it = InterpId::new(&mut st);
+        let some_expr = ctor_raw(1, vec![scalar(0)], vec![]);
+
+        // Well-formed twins.
+        let fi = |it: &mut InterpId, r: &Raw| it.structure_field_info(r);
+        assert!(fi(&mut it, &field_info(scalar(0), vec![3])).is_ok());
+        assert!(fi(&mut it, &field_info(some_expr.clone(), vec![0])).is_ok());
+        assert!(it.structure_parent_info(&parent_info(2, vec![1])).is_ok());
+        assert!(it
+            .structure_info(&structure(
+                arr(vec![name("a")]),
+                arr(vec![field_info(scalar(0), vec![0])]),
+                arr(vec![parent_info(2, vec![0])]),
+            ))
+            .is_ok());
+
+        // StructureFieldInfo: binderInfo byte out of range / missing.
+        assert!(fi(&mut it, &field_info(scalar(0), vec![4])).is_err());
+        assert!(fi(&mut it, &field_info(scalar(0), vec![])).is_err());
+        // autoParam?: not an Option shape (bad scalar, bad tag, bad arity).
+        assert!(fi(&mut it, &field_info(scalar(1), vec![0])).is_err());
+        assert!(fi(
+            &mut it,
+            &field_info(ctor_raw(2, vec![scalar(0)], vec![]), vec![0])
+        )
+        .is_err());
+        assert!(fi(&mut it, &field_info(ctor_raw(1, vec![], vec![]), vec![0])).is_err());
+        // Wrong pointer-field arity.
+        let short = ctor_raw(0, vec![name("a"), name("S.a"), scalar(0)], vec![0]);
+        assert!(fi(&mut it, &short).is_err());
+        // Anonymous field name.
+        let anon = ctor_raw(
+            0,
+            vec![scalar(0), name("S.a"), scalar(0), scalar(0)],
+            vec![0],
+        );
+        assert!(fi(&mut it, &anon).is_err());
+
+        // StructureParentInfo: bad Bool byte, missing byte, wrong arity.
+        assert!(it.structure_parent_info(&parent_info(2, vec![2])).is_err());
+        assert!(it.structure_parent_info(&parent_info(2, vec![])).is_err());
+        assert!(it.structure_parent_info(&parent_info(1, vec![1])).is_err());
+
+        // StructureInfo: wrong arity, non-array field, malformed nested row.
+        assert!(it
+            .structure_info(&ctor_raw(0, vec![name("S")], vec![]))
+            .is_err());
+        assert!(it
+            .structure_info(&structure(scalar(0), arr(vec![]), arr(vec![])))
+            .is_err());
+        assert!(it
+            .structure_info(&structure(
+                arr(vec![]),
+                arr(vec![field_info(scalar(0), vec![9])]),
+                arr(vec![]),
+            ))
+            .is_err());
+        assert!(it
+            .structure_info(&structure(
+                arr(vec![]),
+                arr(vec![]),
+                arr(vec![parent_info(2, vec![7])]),
+            ))
+            .is_err());
+    }
+}

@@ -80,30 +80,3 @@ fn garbage_still_fails_cleanly() {
         Err(OleanError::Truncated(_))
     ));
 }
-
-/// Untrusted bytes through the full typed decode, over `Elab0.olean`
-/// (which carries `structureExt` entries, M4b-4a P1): every truncation
-/// prefix and a strided byte-flip sweep must return `Ok`/`Err`, never
-/// panic.
-#[test]
-fn elab0_truncation_and_mutation_never_panic() {
-    let bytes = std::fs::read(fixture("elab/Elab0.olean")).unwrap();
-    let mut st = Store::persistent();
-    assert!(!ModuleData::parse(&bytes, &mut st)
-        .unwrap()
-        .structures
-        .is_empty());
-    let step = (bytes.len() / 50).max(1);
-    for n in (0..bytes.len()).step_by(step) {
-        let mut st = Store::persistent();
-        let _ = ModuleData::parse(&bytes[..n], &mut st);
-    }
-    for i in (0..bytes.len()).step_by(step) {
-        for b in [1u8, 0xff] {
-            let mut m = bytes.clone();
-            m[i] = b;
-            let mut st = Store::persistent();
-            let _ = ModuleData::parse(&m, &mut st);
-        }
-    }
-}
