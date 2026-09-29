@@ -855,6 +855,25 @@ def closeoutExplicitQueries : List (String × String) :=
   , ("closeout/explicit-app",          "@(Nat.succ Nat.zero)")
   ]
 
+/-- The nondep slice (spec `2026-09-29-nondep-local-decls-design.md`).
+
+`*-coe`: a `.coe` metavariable postponed inside a `let`/`have` body is
+still UNASSIGNED when the binder closes, so `mk_let_expr` must run
+`elim_mvar_deps` (`mkLetFVars` → `mkBinding` → `abstractRange`) or the
+resumed coercion leaks the let-bound fvar. The `fun` twin of these is
+`coe/postponedThenResumedUnderBinder`.
+
+`let-rfl` guards the other direction: `whnf` still zeta-delta expands a
+GENUINE let, so `rfl` typechecks here. Its `have` twin is rejected by
+the oracle and is pinned by `binder_smoke.rs`'s
+`a_have_bound_variable_is_opaque_to_defeq` instead — a rejected term
+emits no record. -/
+def nondepQueries : List (String × String) :=
+  [ ("nondep/let-coe",  "let n : Nat := Nat.zero; pairW n Nat.zero")
+  , ("nondep/have-coe", "have n : Nat := Nat.zero; pairW n Nat.zero")
+  , ("nondep/let-rfl",  "let n : Nat := Nat.zero; (rfl : Eq n Nat.zero)")
+  ]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -868,7 +887,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries ++ closeoutExplicitQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries ++ closeoutExplicitQueries ++ nondepQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>

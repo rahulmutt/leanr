@@ -1136,16 +1136,14 @@ impl<'e> MetaCtx<'e> {
     /// capability the crate already exercises (`expr_let` +
     /// `abstract_fvars`), adds no state, changes no existing path.
     ///
-    /// **Known gap (M4b-3 close-out spec, § Amendment 2).** Unlike
-    /// `mk_binding`, this does not run `elim_mvar_deps` over `body`, so an
-    /// UNASSIGNED metavariable whose context holds `fvar` and which is
-    /// assigned AFTER this call leaks `fvar` unabstracted. (An ASSIGNED one
-    /// is the caller's to instantiate first, as the oracle's
-    /// `elabLetDeclAux` does.) It is reachable today: a coercion postponed
-    /// inside a `let`/`have` body (`leanr_elab`'s `seam_audit.rs`,
-    /// `a_coercion_postponed_under_a_let_leaks_an_fvar`). Closing it needs
-    /// `mkAuxMVarType`'s ldecl arms, which need a `nondep` bit `LocalDecl`
-    /// does not carry — its own slice.
+    /// Like `mk_binding`, it runs `elim_mvar_deps` over `body` first, so
+    /// an UNASSIGNED metavariable whose context holds `fvar` (a `.coe`
+    /// postponed inside a `let`/`have` body) is abstracted rather than
+    /// leaking `fvar` once it is assigned later (`leanr_elab`'s
+    /// `seam_audit.rs`, `a_coercion_postponed_under_a_let_abstracts_to_bvar_0`;
+    /// corpus `nondep/let-coe`, `nondep/have-coe`). What remains is scope:
+    /// this abstracts exactly ONE fvar, the shape `elabLetDeclAux` needs,
+    /// not a telescope.
     pub fn mk_let_expr(
         &mut self,
         fvar: ExprId,
@@ -1169,6 +1167,10 @@ impl<'e> MetaCtx<'e> {
                 ))
             }
         };
+        // oracle: `mkBinding` opens with `abstractRange xs xs.size e`
+        // (`MetavarContext.lean:1313`), and `abstractRange` (`:1274-1277`)
+        // is `elimMVarDeps` then `Expr.abstractRange`.
+        let body = self.elim_mvar_deps(std::slice::from_ref(&fvar), body)?;
         let body = abstract_fvars(
             self.scratch,
             Some(self.view.store),
