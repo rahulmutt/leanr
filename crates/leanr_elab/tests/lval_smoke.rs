@@ -169,11 +169,31 @@ fn recursor_head_with_a_projection_is_not_an_eliminator() {
     // consumeImplicits fills `motive`, the next binder is explicit, so
     // `.forallE` + fieldIdx = OnFunction. It must NOT hit the
     // `elabAsElim` recursor seam. Oracle: "Invalid projection:
-    // Projections cannot be used on functions, and `@Nat.rec ?m.1` has
+    // Projections cannot be used on functions, and `@Nat.rec.{?u.1} ?m.1` has
     // function type `(zero : ?m.1 Nat.zero) → (succ : …) → (t : Nat) →
     // ?m.1 t`".
     assert_eq!(
         proj_reason("Nat.rec.1"),
         InvalidProjectionReason::OnFunction
     );
+}
+
+#[test]
+fn projection_function_missing_from_the_environment_is_an_error_not_a_panic() {
+    // Malformed `structureExt`: every `projFn` renamed to its bare field
+    // name (`a`, `b`, …), which no fixture declares as a constant. The
+    // oracle's `mkConst` (App.lean:1862) throws "unknown constant";
+    // leanr must not reach `mk_const`'s `expect`. Not an oracle case —
+    // no well-formed `.olean` can produce it.
+    let r = support::elab_and_synthesize_doctored("fun (p : Prod Nat Nat) => p.1", |ss| {
+        for s in ss.iter_mut() {
+            for f in s.field_info.iter_mut() {
+                f.proj_fn = f.field_name;
+            }
+        }
+    });
+    match r {
+        Err(ElabError::Internal(m)) => assert!(m.contains("App.lean:1862"), "{m}"),
+        other => panic!("expected Internal (unknown projFn), got {other:?}"),
+    }
 }

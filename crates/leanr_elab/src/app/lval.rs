@@ -486,7 +486,16 @@ pub fn elab_app_lvals(
                          App.lean:1860-1861) — the slice that models private names"
                     )));
                 }
-                // `mkConst info.projFn levels` (`:1862`).
+                // `mkConst info.projFn levels` (`:1862`). `projFn` is
+                // decoded from `structureExt` and never checked against
+                // the environment, so a missing constant is the oracle's
+                // "unknown constant" — not `mk_const`'s `expect`.
+                if elab.view.get(proj_fn_name).is_none() {
+                    return Err(ElabError::Internal(format!(
+                        "unknown constant `{proj_name}`, the projection function \
+                         `structureExt` names for this field (App.lean:1862)"
+                    )));
+                }
                 let proj_fn = crate::app::head::mk_const(elab, proj_fn_name, &levels, &proj_name)?;
                 // `getConstInfoInduct baseStructName` (`:1864`).
                 let num_params = match elab.view.get(base) {

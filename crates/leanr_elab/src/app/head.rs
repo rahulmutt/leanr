@@ -310,6 +310,10 @@ fn elab_ident_head(
 
 /// oracle: `mkConst` (`TermElabM.lean:2117-2126`). `display` is the
 /// identifier's source text, used only in the `TooManyUniverseLevels` error.
+///
+/// Precondition: `cname` is declared. Both callers establish it —
+/// `elab_ident_head` via `resolve_global`, `lval::elab_app_lvals` by
+/// checking the `structureExt`-decoded `projFn` against the environment.
 pub(crate) fn mk_const(
     elab: &mut TermElabM,
     cname: NameId,
@@ -319,7 +323,7 @@ pub(crate) fn mk_const(
     let info = elab
         .view
         .get(cname)
-        .expect("resolve_global only returns names EnvView::get resolves");
+        .expect("mk_const callers pass only declared names (resolve_global / checked projFn)");
     let n_params = info.constant_val().level_params.len();
     // oracle: `mkConst` errors when the user wrote MORE explicit levels
     // than the constant has parameters, rather than truncating.
