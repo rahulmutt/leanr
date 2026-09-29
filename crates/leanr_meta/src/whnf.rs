@@ -269,13 +269,13 @@ impl<'e> MetaCtx<'e> {
                 // (rfl : Eq n Nat.zero)` elaborate here and fail on the
                 // oracle.
                 Node::FVar { id } => {
-                    let genuine_let =
-                        id.is_some_and(|i| self.local_entry(i).is_some_and(|e| !e.nondep));
+                    // The config bit and the value lookup are cheap; the
+                    // `local_entry` row scan is O(depth), so it runs last.
                     let followed = id
-                        .filter(|_| genuine_let)
-                        .and_then(|i| self.lctx.get(i))
-                        .and_then(|d| d.value)
-                        .filter(|_| self.cfg.zeta_delta);
+                        .filter(|_| self.cfg.zeta_delta)
+                        .and_then(|i| self.lctx.get(i).and_then(|d| d.value).map(|v| (i, v)))
+                        .filter(|&(i, _)| self.local_entry(i).is_some_and(|e| !e.nondep))
+                        .map(|(_, v)| v);
                     match followed {
                         Some(v) => v,
                         None => return Ok(EasyOrHard::Easy(e)),
@@ -2948,8 +2948,8 @@ mod tests {
     #[test]
     fn zeta_delta_follows_a_let_but_not_a_have() {
         with_prelude0_ctx(|ctx| {
-            let nat = ctx.const_named("Nat");
-            let zero = ctx.const_named("Nat.zero");
+            let nat = ctx.const_named("N");
+            let zero = ctx.const_named("N.zero");
             assert!(ctx.cfg.zeta_delta, "zeta_delta defaults on");
             let cp = ctx.lctx_checkpoint();
             let h = ctx.push_let_decl(None, nat, zero, true).expect("have");

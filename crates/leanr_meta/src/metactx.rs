@@ -1072,10 +1072,23 @@ impl<'e> MetaCtx<'e> {
                     // Refuse rather than silently building a `lam`/`forallE`
                     // that drops the ldecl's value on the floor — a wrong
                     // `ExprId`, not a named seam.
+                    //
+                    // SEAM (a `have`): the oracle's `mkBinding` runs with
+                    // `generalizeNondepLet := true` (the API default), and
+                    // its ldecl arm (`MetavarContext.lean:1330-1332`) then
+                    // abstracts a nondep ldecl as a `.default` binder like
+                    // a cdecl. That is out of this slice's scope, so a `have` is refused
+                    // too — under its own message, so one reaching here is
+                    // recognisable as the seam rather than a genuine let.
                     if decl.value.is_some() {
-                        return Err(MetaError::Infer(
-                            "mk_binding: let-decl fvar in a cdecl telescope".into(),
-                        ));
+                        let have = self.local_entry(id).is_some_and(|e| e.nondep);
+                        return Err(MetaError::Infer(if have {
+                            "mk_binding: have-decl (nondep) fvar in a cdecl telescope \
+                             (SEAM: oracle generalizes it to a default binder)"
+                                .into()
+                        } else {
+                            "mk_binding: let-decl fvar in a cdecl telescope".into()
+                        }));
                     }
                     (decl.binder_name, decl.ty, decl.binder_info)
                 }
@@ -2371,6 +2384,26 @@ mod tests {
             let err = ctx.mk_forall(std::slice::from_ref(&fvar), fvar);
             ctx.lctx_restore(checkpoint);
             assert!(err.is_err(), "expected Err for an ldecl fvar, got {err:?}");
+        });
+    }
+
+    /// A `have` is refused too (behaviour unchanged, the oracle would
+    /// generalize it), but under its own message so the seam is
+    /// recognisable; a genuine `let` keeps the old message.
+    #[test]
+    fn mk_binding_names_a_refused_have_as_the_seam() {
+        with_prelude0_ctx(|ctx| {
+            let nat = const_named(ctx, "Nat");
+            for (nondep, needle) in [(true, "have-decl (nondep)"), (false, "let-decl")] {
+                let checkpoint = ctx.lctx_checkpoint();
+                let fvar = ctx
+                    .push_let_decl(None, nat, nat, nondep)
+                    .expect("push_let_decl");
+                let err = ctx.mk_forall(std::slice::from_ref(&fvar), fvar);
+                ctx.lctx_restore(checkpoint);
+                let msg = format!("{:?}", err.expect_err("refused"));
+                assert!(msg.contains(needle), "nondep={nondep}: {msg}");
+            }
         });
     }
 

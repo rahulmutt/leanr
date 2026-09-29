@@ -7,13 +7,18 @@
 //! loose index is `>= 1`, which is the case the oracle's
 //! `mkAuxMVarType` unused-let arm turns on (`MetavarContext.lean:1138`).
 //! `loose_bvar_range_exact` is `pub(crate)` to `leanr_kernel`, so the only
-//! fast path available here is the public saturating accessor, sound in
-//! one direction: a range of `0` proves the term closed.
+//! fast path available here is the public saturating accessor. It is
+//! exact below the cap, so there `range <= idx` proves bvar `idx` is
+//! not loose; a saturated range proves nothing.
 
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::ExprId;
 
 use crate::{MetaCtx, MetaError};
+
+/// `leanr_kernel`'s private `expr.rs::LOOSE_BVAR_SAT`: the packed range's
+/// cap, at and above which `loose_bvar_range` is no longer exact.
+const LOOSE_BVAR_SAT: u32 = (1 << 20) - 1;
 
 impl MetaCtx<'_> {
     /// oracle: `Expr.hasLooseBVar e bvarIdx` (`Lean/Expr.lean:1330`).
@@ -22,7 +27,12 @@ impl MetaCtx<'_> {
     /// shape `depends_on` (`mk_binding.rs`) uses, with the recursion
     /// re-entering here so every level steps and guards.
     pub(crate) fn has_loose_bvar(&mut self, e: ExprId, idx: u32) -> Result<bool, MetaError> {
-        if self.data(e).loose_bvar_range() == 0 {
+        // Below the saturation cap the range is exact, so `range <= idx`
+        // proves no loose bvar reaches `idx` (range `0`, a closed term,
+        // is the `idx = 0` corner of it). A saturated range bounds
+        // nothing and must be walked.
+        let range = self.data(e).loose_bvar_range();
+        if range < LOOSE_BVAR_SAT && range <= idx {
             return Ok(false);
         }
         self.step()?;
@@ -126,6 +136,38 @@ mod tests {
             let zero = ctx.scratch.level_zero(None).expect("level");
             let sort0 = ctx.scratch.expr_sort(None, zero).expect("Sort 0");
             assert!(!ctx.has_loose_bvar(sort0, 0).expect("has_loose_bvar"));
+        });
+    }
+
+    /// A saturated range bounds nothing, so it must never prune: `#SAT`
+    /// packs range `SAT` (capped, not `SAT + 1`), and `SAT <= SAT` would
+    /// wrongly answer `false` for the very index the term holds. Also
+    /// pins the mirrored constant against the kernel's own packing.
+    #[test]
+    fn has_loose_bvar_never_prunes_on_a_saturated_range() {
+        with_ctx(|ctx| {
+            let sat = super::LOOSE_BVAR_SAT;
+            let b = ctx
+                .scratch
+                .expr_bvar(None, &Nat::from(u64::from(sat)))
+                .expect("bvar SAT");
+            assert_eq!(ctx.data(b).loose_bvar_range(), sat, "kernel caps here");
+            assert!(ctx.has_loose_bvar(b, sat).expect("has_loose_bvar"));
+            assert!(!ctx.has_loose_bvar(b, sat + 1).expect("has_loose_bvar"));
+        });
+    }
+
+    /// The exact-range prune: `#1` has range 2, so any index `>= 2` is
+    /// answered without a walk (and correctly).
+    #[test]
+    fn has_loose_bvar_prunes_an_index_at_or_above_the_range() {
+        with_ctx(|ctx| {
+            let b1 = ctx
+                .scratch
+                .expr_bvar(None, &Nat::from(1u64))
+                .expect("bvar 1");
+            assert!(!ctx.has_loose_bvar(b1, 2).expect("has_loose_bvar"));
+            assert!(!ctx.has_loose_bvar(b1, 7).expect("has_loose_bvar"));
         });
     }
 }
