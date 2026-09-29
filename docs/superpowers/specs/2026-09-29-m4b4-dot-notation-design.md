@@ -429,7 +429,7 @@ planned one at a time after their predecessor merges.
   `no_seam_message_names_a_completed_slice` now carries an `M4b-4a P1`
   needle, measured non-vacuous.
 
-### P2 — term-level postponement (PR #<n>)
+### P2 — term-level postponement (PR #50)
 
 - `ElabError::Postpone` (internal exception, never reaches a caller of
   `elab_term_and_synthesize`); `postpone.rs`; `elab_using_elab_fns` (catch
