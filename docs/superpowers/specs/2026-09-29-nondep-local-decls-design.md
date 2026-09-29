@@ -343,3 +343,110 @@ before the fix lands.
 ## Next step
 
 Implementation plan via the writing-plans skill, then M4b-4.
+
+## Landed
+
+Measured against `main` (merge-base `1ca8fd1`), branch `nondep-local-decls`,
+commits `676d027..b5a1a1d`:
+
+- Elaboration corpus 162 → 165, additions only (`git diff --numstat`:
+  `3 0` on `elab-queries.jsonl`; `dump_elab.lean` `20 1` is the query
+  list). Synthesis corpus and `tests/fixtures/meta`: byte-identical.
+  `lean-toolchain` unbumped.
+- `leanr_kernel`: `subst.rs | 240 +` and `lib.rs | 2 +-` only
+  (`lower_loose_bvars`, its arms and tests, and the export).
+- `leanr_meta`/`leanr_elab`: the `LocalEntry` rows, the eight consumers,
+  and `has_loose_bvar`, as in § Design.
+- Gate: `mise run lint && mise run test && mise run scan:secrets` and
+  `mise run meta:fast` pass. `mise run ci` fails only at `lint:deps`
+  (pre-existing advisories, ruling R7 below).
+
+### Mutations (each applied, run, watched go red, reverted)
+
+| Mutation | Result | Killed by |
+|---|---|---|
+| `lower_go`'s `>=` to `>` (Task 1) | red | both `lower_loose_bvars` tests |
+| Store `nondep: false` in `push_let_decl_with_kind` | red | both `local_entries_*` tests |
+| Store `Default` for every kind (push path) | red | the stored-kind and `__`-binder install tests, and `oracle_elab_gate` |
+| Same, in `install_local_instance_for_last_pushed` | red | the same two tests; `closeout/impl-detail-fun` and `-fun-inst` |
+| Invert the `nondep` test in `whnf`'s fvar arm | red | `binder_smoke`'s `have … rfl` rejection test |
+| Invert it in `simp_assignment_arg_aux` | red | its own test only |
+| Invert it in `check_assignment_scope_body` | red | its own test only |
+| Invert it in `mk_lambda_fvars_with_let_deps` | red | its own test only |
+| Drop `isLet` from `mk_mvar_app` (and: treat a `have` as a `let`) | red | `mk_mvar_app_skips_a_let_but_applies_a_have` |
+| Drop `generalizeNondepLet` | red | the depends-on test and `collect_forward_deps_honours_the_rows_nondep` |
+| `collect_forward_deps` always passes `nondep = false` (added, ruling R4) | red | `collect_forward_deps_honours_the_rows_nondep` |
+| `lift` where the drop arm wants `lower` | red | `drops_an_unused_let_and_lowers` (after ruling R5) |
+| `has_loose_bvar` as `range > 0` | red | Task 2's index-one test; Task 8's drop and opaque-unused tests |
+| Drop the `has_loose_bvar` condition in the let arm | red | the same two Task 8 tests |
+| nondep treated as false in the have arm | red | `turns_a_have_into_a_forall` |
+| Lift only the body, not the whole `letE` | red | `lifts_a_used_let_under_a_forall_when_opaque` |
+| syntheticOpaque treated as non-opaque; opaque-unused arm skipped; no lift in the opaque-used arm | red | the two opaque tests |
+| Drop `elim_mvar_deps` from `mk_let_expr` | red | `nondep/let-coe` and `nondep/have-coe`; `a_coercion_postponed_under_a_let_abstracts_to_bvar_0` |
+
+The spec's `zeta_unused` row is **withdrawn**: § Design 4's premise was
+false (`consume_unused_let` performs no lowering; its branch requires a
+closed body), so Task 5 was never dispatched and no test names it.
+
+### Rulings made during execution
+
+- **R1**: Task 2's test cites `mkAuxMVarType`'s unused-let arm
+  (`MetavarContext.lean:1138`), not the withdrawn whnf claim.
+- **R2**: `push_local_decl_without_instance` gained a `kind` parameter
+  instead of a `_with_kind` twin.
+- **R3**: the "store `Default`" mutation was also run on the deferred
+  (`elab_fun`) path; it died, so no extra test was needed.
+- **R4**: `local_decl_depends_on(ty, value, nondep, pf,
+  generalize_nondep_let)` takes the oracle's shape; the caller passes
+  the row's `nondep` and the literal `true` (oracle default, `:1037`).
+- **R5**: Task 8's drop-unused-let test was strengthened (context
+  `[c, l := Sort 0]`, `?m : c`, exact result `∀ c, #0`); the plan's
+  closed-type test could not tell `lift` from `lower`.
+- **R6**: push, PR and merge happen after the final whole-branch review.
+- **R7**: the per-task gate excludes `lint:deps`, because `cargo deny`
+  fails on the base commit with two unrelated advisories: RUSTSEC-2026-0285
+  (rustls 0.23.41) and RUSTSEC-2026-0308 (salsa 0.23.0, via
+  `leanr_query`). They block GitHub CI regardless of this slice and are
+  handled in a separate commit/PR.
+- **R8**: `have n := Nat.zero; (rfl : Eq n Nat.zero)` is pinned as
+  `ElabError::StuckCoercion`, where the oracle throws "Type mismatch"
+  eagerly. leanr postpones a coercion when the got-type has mvars; that
+  divergence is pre-existing and out of scope. A future
+  coercion-postponement fix flips the test's `matches!`.
+- **R9**: `elim_mvar` passes `decl.kind`; the oracle passes
+  `newMVarKind` (`syntheticOpaque` when `!isAssignable`, `:1195`). The
+  two agree only because leanr has no mctx depth, so every mvar is
+  assignable.
+
+### Measurement finding (Task 4)
+
+The plan's Step 1 probe (`support::elab_result`) was non-discriminating:
+`elab_result` never synthesizes, so a postponed coercion is accepted
+before AND after the `whnf` fix. Defeq did fail correctly. The real
+evidence is the stashed-fix RED under `elab_and_synthesize` (term
+accepted), GREEN with the fix.
+
+### Other variants that differed from the plan
+
+- Task 8 abstracts the type per arm as the oracle does (not eagerly up
+  front): `abstract_range_aux` can mint mvars, so the drop arm, which
+  abstracts nothing, must not. The oracle's elimApp caller is at
+  `:1245-1246`, not `:1219-1221`.
+- Task 9's seam test was renamed to
+  `a_coercion_postponed_under_a_let_abstracts_to_bvar_0`; the leak pin
+  is gone.
+
+### Seams discovered or still open
+
+| Seam | Owner |
+|---|---|
+| R8: eager oracle "Type mismatch" vs leanr's `StuckCoercion` | a coercion-postponement slice |
+| R9: `elim_mvar` must compute `newMVarKind` once leanr gains mctx depth (`withNewMCtxDepth`), or the ldecl arms take the non-opaque branch for a non-assignable mvar | the slice adding mctx depth |
+| `mk_aux_mvar_type`'s mvar arm does not mint a fresh binder name for an anonymous mvar user name (oracle `:1162`); pre-existing | first anonymous-mvar producer |
+| "Genuine let" predicate repeated in `assign.rs`, `whnf.rs`, `mk_binding.rs`, with an inconsistent missing-row fallback (`mk_binding.rs` treats it as a let, the others do not); an `is_genuine_let` helper would unify | cleanup |
+| `check_assignment`'s let branch returns false where the oracle's `checkFVar` recurses into the value | pre-existing |
+| Deferred minors: `lower_go`'s silent saturation when `s < d`; untested bignum/`LetE`/`MData`/`Proj` arms of `lower_go` and `has_loose_bvar`; no ldecl-arm test with a beta-redex type; no `mk_let_expr` unit test for an unassigned mvar; push paths not transactional if `fvar_id_of` fails | cleanup |
+
+Still open as § Seams and deferrals above: `withLocalInstances` reading
+the stored kind, the `mk_binding` cdecl-telescope ldecl refusal, and the
+remaining oracle channels.
