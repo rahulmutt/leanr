@@ -793,10 +793,20 @@ impl<'e> MetaCtx<'e> {
     fn simp_assignment_arg_aux(&mut self, e: ExprId) -> Result<ExprId, MetaError> {
         match self.node(e) {
             Node::MData { expr, .. } => self.simp_assignment_arg_aux(expr),
-            Node::FVar { id: Some(id) } => match self.lctx.get(id).and_then(|d| d.value) {
-                Some(v) => self.simp_assignment_arg_aux(v),
-                None => Ok(e),
-            },
+            // oracle: `FVarId.getValue?` has `allowNondep := false`
+            // (`Meta/Basic.lean:1044`), so a `have` is never expanded.
+            Node::FVar { id: Some(id) } => {
+                let genuine_let = self.local_entry(id).is_some_and(|e| !e.nondep);
+                match self
+                    .lctx
+                    .get(id)
+                    .and_then(|d| d.value)
+                    .filter(|_| genuine_let)
+                {
+                    Some(v) => self.simp_assignment_arg_aux(v),
+                    None => Ok(e),
+                }
+            }
             _ => Ok(e),
         }
     }
@@ -860,7 +870,11 @@ impl<'e> MetaCtx<'e> {
     ) -> Result<Option<ExprId>, MetaError> {
         for &x in xs {
             if let Node::FVar { id: Some(id) } = self.node(x) {
-                if self.lctx.get(id).and_then(|d| d.value).is_some() {
+                // oracle: `hasLetDeclsInBetween` uses `LocalDecl.isLet`,
+                // false for a nondep ldecl (`LocalContext.lean:106-109`).
+                if self.lctx.get(id).and_then(|d| d.value).is_some()
+                    && self.local_entry(id).is_some_and(|e| !e.nondep)
+                {
                     return Ok(None); // SEAM (doc comment above).
                 }
             }
@@ -1028,7 +1042,11 @@ impl<'e> MetaCtx<'e> {
                 if in_mvar_lctx {
                     return Ok(true);
                 }
-                let is_let = self.lctx.get(fid).and_then(|d| d.value).is_some();
+                // oracle: `checkFVar` matches `.ldecl (nondep := false)`
+                // only; a `have` is "locally a cdecl" and falls through
+                // to the `fvars.contains` test (`ExprDefEq.lean:851-877`).
+                let is_let = self.lctx.get(fid).and_then(|d| d.value).is_some()
+                    && self.local_entry(fid).is_some_and(|e| !e.nondep);
                 if is_let {
                     // Doc comment above: defensively unreachable.
                     return Ok(false);
@@ -2573,6 +2591,68 @@ mod tests {
             );
             ctx.lctx_restore(cp);
             assert!(ctx.local_instances.entries().is_empty());
+        });
+    }
+
+    /// oracle: `simpAssignmentArgAux` expands a let-bound argument through
+    /// `FVarId.getValue?`, whose `allowNondep` defaults to FALSE
+    /// (`Meta/Basic.lean:1044`), so a `have`-bound argument is left alone.
+    #[test]
+    fn simp_assignment_arg_aux_expands_a_let_but_not_a_have() {
+        use crate::test_support::{const_named, with_prelude0_ctx};
+        with_prelude0_ctx(|ctx| {
+            let nat = const_named(ctx, "Nat");
+            let zero = const_named(ctx, "Nat.zero");
+            let cp = ctx.lctx_checkpoint();
+            let l = ctx.push_let_decl(None, nat, zero, false).expect("let");
+            let h = ctx.push_let_decl(None, nat, zero, true).expect("have");
+            assert_eq!(ctx.simp_assignment_arg_aux(l).expect("let"), zero);
+            assert_eq!(ctx.simp_assignment_arg_aux(h).expect("have"), h);
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// oracle: `checkFVar` matches `.ldecl (nondep := false)`; a `have` is
+    /// "locally a cdecl", judged by membership in the abstracted fvars
+    /// (`ExprDefEq.lean:851-877`). A genuine let instead recurses into its
+    /// value; leanr's quick check returns `false` for it (defensive), so
+    /// it is out of scope even when listed in `fvars`. The mvar is minted
+    /// BEFORE the decls so neither is in its lctx.
+    #[test]
+    fn check_assignment_scope_body_treats_a_have_as_a_cdecl() {
+        use crate::test_support::{const_named, with_prelude0_ctx};
+        with_prelude0_ctx(|ctx| {
+            let nat = const_named(ctx, "Nat");
+            let zero = const_named(ctx, "Nat.zero");
+            let cp = ctx.lctx_checkpoint();
+            let (_m, mid) = fresh_mvar(ctx, nat);
+            let h = ctx.push_let_decl(None, nat, zero, true).expect("have");
+            let l = ctx.push_let_decl(None, nat, zero, false).expect("let");
+            assert!(!ctx.check_assignment_scope_body(mid, &[], h).expect("h"));
+            assert!(ctx.check_assignment_scope_body(mid, &[h], h).expect("h"));
+            assert!(!ctx.check_assignment_scope_body(mid, &[l], l).expect("l"));
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// oracle: `hasLetDeclsInBetween` uses `LocalDecl.isLet`, false for a
+    /// nondep ldecl (`LocalContext.lean:106-109`): a `have` among `xs`
+    /// must not trigger the let-dependency seam; a genuine `let` does.
+    #[test]
+    fn mk_lambda_fvars_with_let_deps_seams_on_let_not_have() {
+        use crate::test_support::{const_named, with_prelude0_ctx};
+        with_prelude0_ctx(|ctx| {
+            let nat = const_named(ctx, "Nat");
+            let zero = const_named(ctx, "Nat.zero");
+            let cp = ctx.lctx_checkpoint();
+            let x = fresh_fvar(ctx, nat, "x");
+            let h = ctx.push_let_decl(None, nat, zero, true).expect("have");
+            let l = ctx.push_let_decl(None, nat, zero, false).expect("let");
+            let with_have = ctx.mk_lambda_fvars_with_let_deps(&[x, h], zero);
+            assert!(with_have.expect("have").is_some(), "have is not a let");
+            let with_let = ctx.mk_lambda_fvars_with_let_deps(&[x, l], zero);
+            assert!(with_let.expect("let").is_none(), "genuine let seams");
+            ctx.lctx_restore(cp);
         });
     }
 }
