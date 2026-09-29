@@ -438,9 +438,18 @@ impl<'e> TermElabM<'e> {
     /// re-elaborate the postponed syntax under its saved context, ensure
     /// it has the mvar's type, and assign.
     ///
-    /// The oracle's `occursCheck` guard before assigning is preserved:
-    /// a resumed result may mention `mvarId` itself when it contains
-    /// synthetic `sorry`s.
+    /// - The elaboration is `resume_elab_term` (catch OFF): a term that
+    ///   postpones again is "not ready yet", never a fresh mvar.
+    /// - `saveState` is taken inside the mvar's context (the caller,
+    ///   `synthesize_synthetic_mvar`, installs it). EVERY non-success
+    ///   restores it: a postponement (`:61-65`) and, under
+    ///   `postponeOnError`, an error (`:68-71`).
+    /// - Without `postponeOnError` the oracle logs the error and reports
+    ///   the mvar done (`:72-74`). leanr has no message log, so the error
+    ///   propagates (the same narrowing `synthesize_pending_inst_mvar`
+    ///   records).
+    /// - The `occursCheck` guard (`:56-60`) is kept: a result containing
+    ///   `mvar_id` itself is "not ready", not an error.
     fn resume_postponed(
         &mut self,
         ctx: &SavedContext,
@@ -449,39 +458,35 @@ impl<'e> TermElabM<'e> {
         postpone_on_error: bool,
         kinds: &KindInterner,
     ) -> Result<bool, ElabError> {
-        let expected = self
-            .mctx
-            .mctx()
-            .decl(mvar_id)
-            .expect("postponed mvar is declared")
-            .ty;
-        let expected = self.mctx.instantiate_mvars(expected)?;
+        let saved = self.save_term_state();
         let stx = stx.clone();
         let result = self.with_saved_context(ctx, |elab| {
-            elab.elab_term_ensuring_type(&stx, kinds, Some(expected))
+            let expected = elab
+                .mctx
+                .mctx()
+                .decl(mvar_id)
+                .expect("postponed mvar is declared")
+                .ty;
+            let expected = elab.mctx.instantiate_mvars(expected)?;
+            let e = elab.resume_elab_term(&stx, kinds, expected)?;
+            // oracle: `:51-54` — the postponing method never saw the
+            // result, so its type is checked here.
+            let e = elab.ensure_has_type(&stx, Some(expected), e)?;
+            if elab.mctx.check_occurs(mvar_id, e)? {
+                elab.mctx.mctx_mut().assign(mvar_id, e)?;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
         });
         match result {
-            Ok(e) => {
-                // oracle: :56-58 — `occursCheck` guards the assignment:
-                // a resumed result may mention `mvarId` itself when it
-                // contains synthetic `sorry`s, and assigning through
-                // that would build a cyclic `ExprId`. `false` here is
-                // "not ready" (`Ok(false)`), matching
-                // `synthesizeSyntheticMVar`'s "try again later" contract
-                // — NOT an error.
-                if self.mctx.check_occurs(mvar_id, e)? {
-                    self.mctx.mctx_mut().assign(mvar_id, e)?;
-                    Ok(true)
-                } else {
-                    Ok(false)
-                }
+            Ok(done) => Ok(done),
+            Err(ElabError::Postpone) => {
+                self.restore_term_state(saved);
+                Ok(false)
             }
-            // oracle: :68-74 — on an ERROR, `postponeOnError` decides
-            // between "restore and try again later" (`false`) and "log
-            // it and consider the mvar done" (`true`). leanr has no
-            // message log, so the `true` branch propagates.
-            Err(e) if postpone_on_error => {
-                let _ = e;
+            Err(_) if postpone_on_error => {
+                self.restore_term_state(saved);
                 Ok(false)
             }
             Err(e) => Err(e),

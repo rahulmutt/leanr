@@ -68,19 +68,15 @@
 //!
 //! **The implicit-lambda `.postpone` arm** (`useImplicitLambda`'s third
 //! result, `TermElabM.lean:1753-1778`) used to be a fourth unreachable
-//! row here too — P1 wrote it off because it needs `isLocalIdent?` and
-//! `isMVarApp` machinery P1 deliberately did not have, AND both of its
-//! continuations need the postponement ladder P1 deliberately does not
-//! have. `elimMVarDeps` (PR #42) closed the first half of that
-//! reasoning: an unassigned `fun` binder's type is now exactly an aux
-//! mvar applied to binder fvars — an mvar APPLICATION, the shape
-//! `isMVarApp` tests for — and M4b-3 P5 multiplies binder producers on
-//! top, so leanr can no longer assume no corpus term reaches it. The
-//! second half — leanr still has no term-level postponement — has not
-//! closed, so M4b-3 P5 Task 6 models the arm explicitly and reports it
-//! as a named `M4b-4a P2` seam (`elab.rs`'s `UseImplicitLambda::Postpone`
-//! dispatch) rather than leaving it an unexamined assumption.
-//! `implicit_lambda_postpone_is_a_named_seam` below asserts it.
+//! row here. `elimMVarDeps` (PR #42) made it reachable — an untyped
+//! `fun` binder's type is an mvar application, the shape `isMVarApp`
+//! tests for — so M4b-3 P5 Task 6 modelled the arm as a named
+//! `M4b-4a P2` seam. M4b-4a P2 closed it: `elab.rs`'s `elab_term_core`
+//! now postpones the term (or, with postponement off, elaborates it
+//! without the wrap) and the synthesis fixpoint resumes it.
+//! `implicit_lambda_postpone_is_no_longer_a_seam` below pins that it
+//! elaborates; the corpus record `p2/implicit-lambda-postpone`
+//! (`tests/oracle_elab.rs`) pins the term.
 //!
 //! **`mod scoping_audit` below is a different kind of section: an
 //! AUDIT, not a seam list.** M4b-3 P5 Task 7 (design spec § Amendment
@@ -92,7 +88,7 @@
 mod support;
 
 use leanr_syntax::{builtin, parse_term};
-use support::{elab_and_synthesize, elab_result};
+use support::elab_and_synthesize;
 
 /// Elaborate `src` through the same construction `oracle_elab.rs` uses
 /// — replay `Elab0.olean`, parse with leanr's own parser, dispatch the
@@ -853,33 +849,17 @@ fn postponed_coe_under_a_binder_abstracts_via_elim_mvar_deps() {
     );
 }
 
-/// M4b-3 P5 Task 6. `useImplicitLambda`'s `.postpone` arm
-/// (`TermElabM.lean:1753-1778`) fires when the term is a local
-/// identifier whose type is an mvar APPLICATION — `is_mvar_app`'s spine
-/// walk classifies a bare (zero-argument) mvar the same way, since it is
-/// the degenerate case of the same spine walk. PR #42 (elimMVarDeps)
-/// manufactures aux-mvar applications over binder fvars as the type of
-/// an as-yet-untyped `fun` binder; the shape THIS test commits is the
-/// simpler bare-mvar case (`x`'s type is a fresh anonymous type mvar
-/// with no arguments), reached via the same classifier path — so P1's
-/// "no corpus term reaches it" is no longer a safe assumption.
-///
-/// leanr has no term-level postponement (`lib.rs`: no elaborator
-/// postpones a term), so this must be a NAMED SEAM — an error the
-/// caller can see — and never a silently different term.
+/// M4b-3 P5 Task 6 seamed `useImplicitLambda`'s `.postpone` arm
+/// (`TermElabM.lean:1753-1778`); M4b-4a P2 closed it. The same source
+/// now ELABORATES — the success shape is the corpus record
+/// `p2/implicit-lambda-postpone` — so what stays pinned here is that it
+/// is no longer a seam.
 #[test]
-fn implicit_lambda_postpone_is_a_named_seam() {
-    // A binder-bound local whose type is an unassigned mvar, used where
-    // an implicit forall is expected.
+fn implicit_lambda_postpone_is_no_longer_a_seam() {
     let src = "fun x => (x : {a : Type} -> Nat)";
-    let e = elab_result(src);
-    let msg = match e {
-        Err(leanr_elab::ElabError::UnsupportedSyntax(m)) => m,
-        other => panic!("expected a named seam for {src:?}, got {other:?}"),
-    };
     assert!(
-        msg.contains("implicit lambda postponement") && msg.contains("M4b-4a P2"),
-        "seam must name the postponement gap and its owning slice: {msg}"
+        elab_and_synthesize(src).is_ok(),
+        "{src:?} must elaborate since M4b-4a P2"
     );
 }
 

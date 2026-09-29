@@ -131,9 +131,10 @@ pub struct MVarErrorInfo {
 /// oracle: `structure Term.SavedState` (`TermElabM.lean:206-209`) —
 /// `Meta.SavedState × Term.State`, restricted to the `Term.State` fields
 /// leanr models. Produced by [`TermElabM::save_term_state`] and consumed
-/// by [`TermElabM::restore_term_state`]; private, because
-/// [`TermElabM::commit_when`] is the only bracket that needs one.
-struct SavedTermState {
+/// by [`TermElabM::restore_term_state`]. Crate-visible since M4b-4a P2:
+/// besides [`TermElabM::commit_when`], `elab.rs`'s `elab_using_elab_fns`
+/// and `ladder.rs`'s `resume_postponed` restore one.
+pub(crate) struct SavedTermState {
     meta: MetaSnapshot,
     pending_mvars: Vec<MVarId>,
     synthetic_mvars: HashMap<MVarId, SyntheticMVarDecl>,
@@ -254,7 +255,8 @@ impl<'e> TermElabM<'e> {
     /// `synthesizeInstMVarCore`. Rolling back only the mctx would leave
     /// a rejected default instance's subgoals pending forever, and the
     /// ladder would then report them stuck. So the elaborator's three
-    /// tables are snapshotted too.
+    /// tables are snapshotted too. `elab.rs`'s `elab_using_elab_fns` and
+    /// `ladder.rs`'s `resume_postponed` use the same pair since M4b-4a P2.
     ///
     /// `level_names` is NOT snapshotted: it is scoped by
     /// `with_saved_context` alone and no path below `f` touches it.
@@ -315,7 +317,7 @@ impl<'e> TermElabM<'e> {
     /// oracle: `Term.saveState` (`TermElabM.lean:417-418`), restricted to
     /// the `Term.State` fields leanr models. See [`TermElabM::commit_when`]
     /// for what is deliberately left out.
-    fn save_term_state(&self) -> SavedTermState {
+    pub(crate) fn save_term_state(&self) -> SavedTermState {
         SavedTermState {
             meta: self.mctx.checkpoint(),
             pending_mvars: self.pending_mvars.clone(),
@@ -325,7 +327,7 @@ impl<'e> TermElabM<'e> {
     }
 
     /// oracle: `Term.SavedState.restore` (`TermElabM.lean:420-427`).
-    fn restore_term_state(&mut self, saved: SavedTermState) {
+    pub(crate) fn restore_term_state(&mut self, saved: SavedTermState) {
         self.mctx.rollback(saved.meta);
         self.pending_mvars = saved.pending_mvars;
         self.synthetic_mvars = saved.synthetic_mvars;

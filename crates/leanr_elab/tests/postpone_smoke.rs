@@ -121,3 +121,86 @@ fn postpone_elab_term_registers_a_synthetic_opaque_postponed_mvar() {
         assert_eq!(postponed_ids(elab), vec![id]);
     });
 }
+
+/// oracle: `elabUsingElabFnsAux` (`TermElabM.lean:1635-1651`) catches
+/// `Exception.postpone` when `catchExPostpone` and registers the term
+/// as a `.postponed` synthetic mvar. The postponed syntax is `x` — the
+/// local whose implicit-lambda treatment is postponed — not the
+/// enclosing ascription.
+#[test]
+fn elab_term_catches_a_postpone_and_registers_the_term() {
+    support::with_elab("fun x => (x : {a : Type} -> Nat)", |elab, term, kinds| {
+        elab.elab_term(term, kinds, None)
+            .expect("the catch turns the postponement into an mvar");
+        let ids = postponed_ids(elab);
+        assert_eq!(ids.len(), 1, "exactly the one postponed `x`");
+        let decl = elab.synthetic_mvar_decl(ids[0]).unwrap();
+        assert_eq!(kinds.name(decl.stx.kind()), "<ident>");
+    });
+}
+
+/// oracle: `.postpone` with `mayPostpone == false` elaborates WITHOUT
+/// implicit lambdas (`TermElabM.lean:1853-1854`) — no postponement.
+#[test]
+fn without_postponing_the_implicit_lambda_arm_elaborates_directly() {
+    support::with_elab("fun x => (x : {a : Type} -> Nat)", |elab, term, kinds| {
+        elab.without_postponing(|e| e.elab_term(term, kinds, None))
+            .expect("elaborates without the wrap");
+        assert!(postponed_ids(elab).is_empty());
+    });
+}
+
+/// Review Focus 1. oracle: `resumeElabTerm` elaborates with
+/// `catchExPostpone := false` (`SyntheticMVars.lean:23-26`), and
+/// `resumePostponed` turns a postponement into "not ready yet"
+/// (`:61-65`). At rung 1 `x`'s type is still unknown, so the resume
+/// postpones again: the step makes NO progress and the SAME mvar stays
+/// pending. Catching it instead would assign the old mvar to a fresh
+/// one — "progress" the fixpoint would chase forever.
+#[test]
+fn resuming_does_not_catch_its_own_postpone() {
+    support::with_elab("fun x => (x : {a : Type} -> Nat)", |elab, term, kinds| {
+        elab.elab_term(term, kinds, None).unwrap();
+        let before = postponed_ids(elab);
+        let progressed = elab
+            .synthesize_synthetic_mvars_step(false, false, kinds)
+            .unwrap();
+        assert!(!progressed, "a re-postponed resume is not progress");
+        assert_eq!(postponed_ids(elab), before);
+    });
+}
+
+/// oracle: `resumePostponed`'s `.error` arm with `postponeOnError`
+/// restores the saved state (`SyntheticMVars.lean:68-71`). `(_ : Nat).1`
+/// registers a hole (`registerMVarErrorHoleInfo`,
+/// `BuiltinTerm.lean:67`), then fails: `#check (_ : Nat).1` on the
+/// pinned oracle reports "Invalid projection: Projections extract
+/// constructor fields for one-constructor inductive types. The
+/// expression ?m.1 has type `Nat` which is not a one-constructor
+/// inductive type."
+#[test]
+fn a_failed_resume_under_postpone_on_error_rolls_its_state_back() {
+    support::with_elab("(_ : Nat).1", |elab, term, kinds| {
+        elab.postpone_elab_term(term, None).unwrap();
+        let id = elab.pending_mvars[0];
+        let infos = elab.mvar_error_infos.len();
+        let r = elab.without_postponing(|e| e.synthesize_synthetic_mvar(id, true, false, kinds));
+        assert!(matches!(r, Ok(false)), "{r:?}");
+        assert_eq!(
+            elab.mvar_error_infos.len(),
+            infos,
+            "the hole's registration is rolled back"
+        );
+        let r = elab.without_postponing(|e| e.synthesize_synthetic_mvar(id, false, false, kinds));
+        assert!(
+            matches!(
+                r,
+                Err(ElabError::InvalidProjection {
+                    reason: leanr_elab::InvalidProjectionReason::NotOneCtor,
+                    ..
+                })
+            ),
+            "{r:?}"
+        );
+    });
+}

@@ -947,6 +947,19 @@ def lvalFnQueries : List (String × String) :=
   , ("lval/explicit-proj-impl",  "fun (x : FI) => @(x).f Nat Nat.zero")
   ]
 
+/- M4b-4a P2: term-level postponement. Every record here elaborates
+only because a subterm is POSTPONED (`Exception.postpone`, caught by
+`elabUsingElabFnsAux`, TermElabM.lean:1635-1651) and RESUMED by the
+fixpoint once its type is known. -/
+def p2Queries : List (String × String) :=
+  -- `useImplicitLambda` returns `.postpone` for `x` (a local of type
+  -- `?α`, expected `{a : Type} → Nat`, TermElabM.lean:1753-1778). The
+  -- resume at rung 1 postpones again; rung 2's `withoutPostponing`
+  -- elaborates `x` WITHOUT the implicit lambda (`:1853-1854`) and
+  -- `ensureHasType` assigns `?α`. Result: `fun x => x`, no wrap.
+  [ ("p2/implicit-lambda-postpone", "fun x => (x : {a : Type} -> Nat)")
+  ]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -960,7 +973,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries ++ closeoutExplicitQueries ++ nondepQueries ++ lvalIdxQueries ++ lvalFnQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries ++ closeoutExplicitQueries ++ nondepQueries ++ lvalIdxQueries ++ lvalFnQueries ++ p2Queries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>
