@@ -948,6 +948,71 @@ impl<'s> InterpId<'s> {
         Ok((proj_fn, ctor_name, num_params, index, from_class))
     }
 
+    /// `Lean.StructureInfo` — see `crate::StructureInfo`'s doc for the
+    /// layout and the private extension name.
+    fn structure_info(&mut self, r: &Raw) -> Result<crate::StructureInfo, OleanError> {
+        // `ctor` checks the exact field count, so `f[0..4]` is in range.
+        let (f, _) = ctor(r, 0, 4, "StructureInfo")?;
+        Ok(crate::StructureInfo {
+            struct_name: self.name_req(&f[0])?,
+            field_names: array(&f[1])?
+                .iter()
+                .map(|n| self.name_req(n))
+                .collect::<Result<_, _>>()?,
+            field_info: array(&f[2])?
+                .iter()
+                .map(|e| self.structure_field_info(e))
+                .collect::<Result<_, _>>()?,
+            parent_info: array(&f[3])?
+                .iter()
+                .map(|e| self.structure_parent_info(e))
+                .collect::<Result<_, _>>()?,
+        })
+    }
+
+    /// `Lean.StructureFieldInfo` (`Structure.lean:25-36`): 4 pointer
+    /// fields + `binderInfo` in the scalar tail. `BinderInfo`'s constructor
+    /// order is `default, implicit, strictImplicit, instImplicit`, the
+    /// same byte mapping `Expr`'s binder decode above uses.
+    fn structure_field_info(&mut self, r: &Raw) -> Result<crate::StructureFieldInfo, OleanError> {
+        let (f, s) = ctor(r, 0, 4, "StructureFieldInfo")?;
+        let field_name = self.name_req(&f[0])?;
+        let proj_fn = self.name_req(&f[1])?;
+        let subobject = self.opt_name(&f[2])?;
+        // `autoParam? : Option Expr` — deprecated (`Structure.lean:34-35`),
+        // shape-checked so a malformed entry is still a decode error, then
+        // dropped.
+        match &*f[3] {
+            RawValue::Scalar(0) => {}
+            RawValue::Ctor { tag: 1, fields, .. } if fields.len() == 1 => {}
+            _ => return Err(bad("StructureFieldInfo.autoParam?")),
+        }
+        let binder_info = match s.first().copied() {
+            Some(0) => BinderInfo::Default,
+            Some(1) => BinderInfo::Implicit,
+            Some(2) => BinderInfo::StrictImplicit,
+            Some(3) => BinderInfo::InstImplicit,
+            _ => return Err(bad("StructureFieldInfo.binderInfo")),
+        };
+        Ok(crate::StructureFieldInfo {
+            field_name,
+            proj_fn,
+            subobject,
+            binder_info,
+        })
+    }
+
+    /// `Lean.StructureParentInfo` (`Structure.lean:48-55`): 2 pointer
+    /// fields + `subobject : Bool` in the scalar tail.
+    fn structure_parent_info(&mut self, r: &Raw) -> Result<crate::StructureParentInfo, OleanError> {
+        let (f, s) = ctor(r, 0, 2, "StructureParentInfo")?;
+        Ok(crate::StructureParentInfo {
+            struct_name: self.name_req(&f[0])?,
+            proj_fn: self.name_req(&f[1])?,
+            subobject: boolean(s.first(), "StructureParentInfo.subobject")?,
+        })
+    }
+
     /// ModuleData (Environment.lean:109-129).
     pub(crate) fn module_data(&mut self, root: &Raw) -> Result<crate::ModuleData, OleanError> {
         let (f, s) = ctor(root, 0, 5, "ModuleData")?;
@@ -960,6 +1025,7 @@ impl<'s> InterpId<'s> {
         let mut instances = Vec::new();
         let mut default_instances = Vec::new();
         let mut projection_fns = Vec::new();
+        let mut structures = Vec::new();
         let mut classes = Vec::new();
         let mut coe_decls = Vec::new();
         for pair in array(&f[4])? {
@@ -1087,6 +1153,14 @@ impl<'s> InterpId<'s> {
                         coe_decls.push(self.name_req(e)?);
                     }
                 }
+                // Plain `registerPersistentEnvExtension` (`Structure.lean:87-92`):
+                // bare `StructureInfo` ctors, no scoped wrapper. PRIVATE, hence the
+                // mangled key — see `crate::StructureInfo`'s doc.
+                "_private.Lean.Structure.0.Lean.structureExt" => {
+                    for e in array(&pf[1])? {
+                        structures.push(self.structure_info(e)?);
+                    }
+                }
                 _ => continue,
             }
         }
@@ -1117,6 +1191,7 @@ impl<'s> InterpId<'s> {
             projection_fns,
             classes,
             coe_decls,
+            structures,
         })
     }
 }
