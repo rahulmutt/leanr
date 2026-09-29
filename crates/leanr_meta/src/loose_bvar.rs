@@ -15,9 +15,6 @@ use leanr_kernel::bank::ExprId;
 
 use crate::{MetaCtx, MetaError};
 
-// No caller until Task 8 (`mk_aux_mvar_type`'s unused-let arm); `expect`
-// fails the build once it has one, forcing this line's removal.
-#[cfg_attr(not(test), expect(dead_code))]
 impl MetaCtx<'_> {
     /// oracle: `Expr.hasLooseBVar e bvarIdx` (`Lean/Expr.lean:1330`).
     ///
