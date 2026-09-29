@@ -5,4 +5,4 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-salsa = "0.23"
+salsa = "0.28"
