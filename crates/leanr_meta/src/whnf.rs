@@ -1589,7 +1589,7 @@ impl<'e> MetaCtx<'e> {
         body: ExprId,
         non_dep: bool,
     ) -> Result<Option<ExprId>, MetaError> {
-        let fvar = self.push_let_decl(decl_name, ty, value)?;
+        let fvar = self.push_let_decl(decl_name, ty, value, non_dep)?;
         let inst_body = instantiate(
             self.scratch,
             Some(self.view.store),

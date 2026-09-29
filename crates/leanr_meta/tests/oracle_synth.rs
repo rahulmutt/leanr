@@ -196,7 +196,10 @@ fn oracle_synth_gate() {
                     .unwrap_or_else(|e| panic!("{id}: push_local_decl: {e:?}")),
                 Some(v) => {
                     let value = decode_expr(ctx.store_mut(), base, v, &mut fv, &mut mv);
-                    ctx.push_let_decl(Some(name), ty, value)
+                    // The corpus's fvar spec carries no `nondep` bit
+                    // (`dump_synth.lean`'s `fvars` schema), so every
+                    // corpus ldecl is a `let`.
+                    ctx.push_let_decl(Some(name), ty, value, false)
                         .unwrap_or_else(|e| panic!("{id}: push_let_decl: {e:?}"))
                 }
             };

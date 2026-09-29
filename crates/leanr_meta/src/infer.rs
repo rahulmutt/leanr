@@ -699,7 +699,7 @@ impl<'e> MetaCtx<'e> {
                     ty,
                     value,
                     body,
-                    ..
+                    non_dep,
                 } => {
                     let t = instantiate_rev(
                         self.scratch,
@@ -715,7 +715,7 @@ impl<'e> MetaCtx<'e> {
                         &fvars,
                         &mut self.guard,
                     )?;
-                    let fvar = self.push_let_decl(decl_name, t, v)?;
+                    let fvar = self.push_let_decl(decl_name, t, v, non_dep)?;
                     fvars.push(fvar);
                     e = body;
                 }

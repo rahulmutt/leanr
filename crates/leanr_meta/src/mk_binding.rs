@@ -197,7 +197,7 @@ impl<'e> MetaCtx<'e> {
             .iter()
             .filter_map(|f| self.fvar_id_of(*f))
             .collect();
-        let entries: Vec<ExprId> = lctx.entries().iter().map(|(_, f)| *f).collect();
+        let entries: Vec<ExprId> = lctx.entries().iter().map(|e| e.fvar).collect();
         // oracle `getLocalDeclWithSmallestIdx` (`:1052`): start at the
         // earliest declaration that is being reverted. Everything before it
         // is declared earlier than anything reverted, so it cannot depend
@@ -1177,7 +1177,7 @@ mod tests {
 
             let cp = ctx.lctx_checkpoint();
             let v = ctx
-                .push_let_decl(None, sort0, sort0)
+                .push_let_decl(None, sort0, sort0, false)
                 .expect("push_let_decl");
             let snap = ctx.current_lctx();
             ctx.lctx_restore(cp);

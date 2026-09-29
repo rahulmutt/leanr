@@ -17,6 +17,7 @@ use std::sync::Arc;
 use leanr_kernel::bank::{ExprId, NameId};
 use leanr_kernel::LocalContext;
 
+use crate::local_entry::LocalEntry;
 use crate::local_instance::LocalInstance;
 
 /// A copy of the ambient local context plus `MetaCtx::local_names`.
@@ -27,7 +28,7 @@ use crate::local_instance::LocalInstance;
 /// scope, not one per metavariable.
 pub struct LocalCtxSnapshot {
     lctx: LocalContext,
-    local_names: Vec<(Option<NameId>, ExprId)>,
+    local_names: Vec<LocalEntry>,
     /// oracle: `MetavarDecl.localInstances` (`MetavarContext.lean:320`),
     /// which sits beside `MetavarDecl.lctx` (`:309`) for exactly this
     /// reason — `MVarId.withContext` reinstalls the two together
@@ -46,7 +47,7 @@ pub struct LocalCtxSnapshot {
 impl LocalCtxSnapshot {
     pub(crate) fn new(
         lctx: LocalContext,
-        local_names: Vec<(Option<NameId>, ExprId)>,
+        local_names: Vec<LocalEntry>,
         local_instances: Vec<LocalInstance>,
     ) -> Self {
         debug_assert_eq!(
@@ -67,7 +68,7 @@ impl LocalCtxSnapshot {
         debug_assert!(
             local_instances.iter().all(|li| local_names
                 .get(li.at_depth)
-                .is_some_and(|(_, f)| *f == li.fvar)),
+                .is_some_and(|e| e.fvar == li.fvar)),
             "a local instance's at_depth must index its own declaration"
         );
         // `LocalInstanceStack::truncate_to` pops from the back and stops
@@ -119,8 +120,7 @@ impl LocalCtxSnapshot {
     /// sparse and has no lockstep invariant, but travels with the other
     /// two because installing a context without its instances is exactly
     /// the divergence this slice exists to close.
-    #[allow(clippy::type_complexity)]
-    pub(crate) fn parts(&self) -> (&LocalContext, &[(Option<NameId>, ExprId)], &[LocalInstance]) {
+    pub(crate) fn parts(&self) -> (&LocalContext, &[LocalEntry], &[LocalInstance]) {
         (&self.lctx, &self.local_names, &self.local_instances)
     }
 
@@ -138,16 +138,22 @@ impl LocalCtxSnapshot {
         &self.local_instances
     }
 
-    /// The declared fvars in DECLARATION ORDER, paired with their user
-    /// names — the enumeration `collect_forward_deps`
+    /// The declared fvars' rows in DECLARATION ORDER — the enumeration `collect_forward_deps`
     /// (`MetavarContext.lean:1037-1062`) needs and that
     /// `leanr_kernel::LocalContext` does not expose (its `decls`/`index`
     /// are module-private; the public surface is `get(fvar_id)` by id and
     /// `save`/`restore` by count). Positionally parallel to the
     /// `LocalContext`'s own decl list, by this struct's lockstep
     /// invariant, so an index into this slice is an index into that list.
-    pub(crate) fn entries(&self) -> &[(Option<NameId>, ExprId)] {
+    pub(crate) fn entries(&self) -> &[LocalEntry] {
         &self.local_names
+    }
+
+    /// The attribute row for `id` in THIS context — a metavariable's own,
+    /// not the ambient one. `mk_aux_mvar_type` and `mk_mvar_app` read it.
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub(crate) fn entry(&self, id: NameId) -> Option<&LocalEntry> {
+        self.local_names.iter().rev().find(|e| e.id == id)
     }
 
     /// oracle: `reduceLocalContext` (`MetavarContext.lean:1065-1067`) —
@@ -209,13 +215,13 @@ impl LocalCtxSnapshot {
         // its own declaration in `lctx.decls`" (`local_instance.rs`),
         // is stale the moment anything in front of it is erased.
         let mut new_depth: Vec<Option<usize>> = Vec::with_capacity(self.local_names.len());
-        let mut local_names: Vec<(Option<NameId>, ExprId)> = Vec::new();
-        for (name, fvar) in &self.local_names {
-            if erased(*fvar) {
+        let mut local_names: Vec<LocalEntry> = Vec::new();
+        for entry in &self.local_names {
+            if erased(entry.fvar) {
                 new_depth.push(None);
             } else {
                 new_depth.push(Some(local_names.len()));
-                local_names.push((*name, *fvar));
+                local_names.push(entry.clone());
             }
         }
         // An instance whose declaration was erased must go too. This is
@@ -308,17 +314,13 @@ mod tests {
                 "lctx lost the erased fvar"
             );
             assert!(
-                reduced.entries().iter().all(|(_, f)| *f != b),
+                reduced.entries().iter().all(|e| e.fvar != b),
                 "local_names lost the erased fvar too — dropping it from lctx \
                  alone leaves the two halves out of lockstep, which \
                  LocalCtxSnapshot::new debug_asserts against"
             );
             assert_eq!(
-                reduced
-                    .entries()
-                    .iter()
-                    .map(|(_, f)| *f)
-                    .collect::<Vec<_>>(),
+                reduced.entries().iter().map(|e| e.fvar).collect::<Vec<_>>(),
                 vec![a, c],
                 "declaration order is preserved for the survivors"
             );

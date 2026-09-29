@@ -434,14 +434,16 @@ pub fn elab_fun(
                 // this push, and scope-checking keys on that recorded
                 // lctx, not on whatever is ambient when the assignment
                 // happens).
+                // The kind is stored at push time: the deferred install
+                // below reads it back from the declaration's row.
+                let kind = user_binder_kind(elab, view.name);
                 let fvar = elab
                     .mctx
-                    .push_local_decl_without_instance(view.name, dom, view.bi)
+                    .push_local_decl_without_instance(view.name, dom, view.bi, kind)
                     .map_err(ElabError::from)?;
                 residual = propagate_expected_type(elab, fvar, dom, residual)?;
-                let kind = user_binder_kind(elab, view.name);
                 elab.mctx
-                    .install_local_instance_for_last_pushed(fvar, dom, kind)
+                    .install_local_instance_for_last_pushed(fvar, dom)
                     .map_err(ElabError::from)?;
                 fvars.push(fvar);
             }

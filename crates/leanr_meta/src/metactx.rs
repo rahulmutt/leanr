@@ -22,6 +22,7 @@ use leanr_olean::{
 
 use crate::instances::{ClassTable, InstanceTable};
 use crate::local_decl_kind::LocalDeclKind;
+use crate::local_entry::LocalEntry;
 use crate::local_instance::LocalInstanceStack;
 use crate::local_snapshot::LocalCtxSnapshot;
 use crate::{Config, LMVarId, LOption, MVarId, MetaError, MetavarContext, TransparencyMode};
@@ -79,7 +80,13 @@ pub struct MetaCtx<'e> {
     /// `lctx.save()`'s own return value) doubles as this field's
     /// truncation point with no second
     /// checkpoint API. See `lctx_lookup_by_name` (the reader) below.
-    pub(crate) local_names: Vec<(Option<NameId>, ExprId)>,
+    ///
+    /// Each row is a [`LocalEntry`]: beyond the `(name, fvar)` pair it
+    /// always held, it now carries the declaration's fvar id, its
+    /// `nondep` bit and its [`LocalDeclKind`] — the `Lean.LocalDecl`
+    /// attributes the kernel's `LocalDecl` does not model. Read them via
+    /// `local_entry`.
+    pub(crate) local_names: Vec<LocalEntry>,
     /// The local instances in scope — oracle: `Meta.Context.localInstances`
     /// (`Basic.lean`), stored per metavariable as
     /// `MetavarDecl.localInstances` (`MetavarContext.lean:320`).
@@ -675,6 +682,7 @@ impl<'e> MetaCtx<'e> {
         name: Option<NameId>,
         ty: ExprId,
         bi: BinderInfo,
+        kind: LocalDeclKind,
     ) -> Result<(ExprId, usize), MetaError> {
         debug_assert_eq!(
             self.local_names.len(),
@@ -690,10 +698,21 @@ impl<'e> MetaCtx<'e> {
             ty,
             bi,
         )?;
-        // Task 3 addition: record `(name, fvar)` in `local_names` too —
-        // see that field's own doc comment. One entry per call, matching
-        // `lctx.decls`'s own growth exactly (including `None` names).
-        self.local_names.push((name, fvar));
+        let id = self
+            .fvar_id_of(fvar)
+            .ok_or_else(|| MetaError::Infer("push_local_decl: fresh fvar has no id".into()))?;
+        // Record the row in `local_names` too — see that field's own doc
+        // comment. One entry per call, matching `lctx.decls`'s own growth
+        // exactly (including `None` names).
+        self.local_names.push(LocalEntry {
+            fvar,
+            name,
+            id,
+            // A cdecl is never nondep: the bit exists only on an ldecl
+            // (`LocalDecl.isNondep`, `LocalContext.lean:227-229`).
+            nondep: false,
+            kind,
+        });
         Ok((fvar, depth))
     }
 
@@ -726,7 +745,7 @@ impl<'e> MetaCtx<'e> {
         bi: BinderInfo,
         kind: LocalDeclKind,
     ) -> Result<ExprId, MetaError> {
-        let (fvar, depth) = self.push_local_decl_inner(name, ty, bi)?;
+        let (fvar, depth) = self.push_local_decl_inner(name, ty, bi, kind)?;
         // oracle: `withLocalDeclImp` → `withNewFVar`
         // (`Basic.lean:1791`, `:1785-1789`) — a class-typed declaration
         // becomes a local instance. Keyed on the TYPE only; binder info
@@ -759,13 +778,18 @@ impl<'e> MetaCtx<'e> {
     /// mint-and-install in one call via the same shared
     /// `push_local_decl_inner`, byte-for-byte the same sequence of
     /// operations as before this split.
+    ///
+    /// `kind` is the declaration's [`LocalDeclKind`]. It is STORED here,
+    /// at push time, because `install_local_instance_for_last_pushed`
+    /// reads it back from the row rather than taking it as a parameter.
     pub fn push_local_decl_without_instance(
         &mut self,
         name: Option<NameId>,
         ty: ExprId,
         bi: BinderInfo,
+        kind: LocalDeclKind,
     ) -> Result<ExprId, MetaError> {
-        let (fvar, _depth) = self.push_local_decl_inner(name, ty, bi)?;
+        let (fvar, _depth) = self.push_local_decl_inner(name, ty, bi, kind)?;
         self.lctx_snapshot = None;
         Ok(fvar)
     }
@@ -794,13 +818,14 @@ impl<'e> MetaCtx<'e> {
     /// `install_local_instance_for` itself (this method's own callee),
     /// so it is no longer this method's job to remember — see that
     /// method's doc for why the fix sits there instead of here.
-    /// `kind` is the pushed declaration's [`LocalDeclKind`], which the
-    /// caller must pass again here because it is not stored.
+    /// The declaration's [`LocalDeclKind`] is read from its row, where
+    /// `push_local_decl_without_instance` stored it; the `debug_assert`
+    /// that `fvar` is the most recently pushed declaration is what makes
+    /// `local_names.last()` the right row.
     pub fn install_local_instance_for_last_pushed(
         &mut self,
         fvar: ExprId,
         ty: ExprId,
-        kind: LocalDeclKind,
     ) -> Result<(), MetaError> {
         debug_assert_eq!(
             self.local_names.len(),
@@ -808,10 +833,14 @@ impl<'e> MetaCtx<'e> {
             "local_names/lctx lockstep invariant violated"
         );
         debug_assert_eq!(
-            self.local_names.last().map(|(_, f)| *f),
+            self.local_names.last().map(|e| e.fvar),
             Some(fvar),
             "fvar must be the most recently pushed local decl"
         );
+        let kind = self
+            .local_names
+            .last()
+            .map_or(LocalDeclKind::Default, |e| e.kind);
         let depth = self.lctx.save().saturating_sub(1);
         self.install_local_instance_for(fvar, ty, depth, kind)
     }
@@ -823,22 +852,28 @@ impl<'e> MetaCtx<'e> {
     /// declaration half. The caller brackets with `lctx_checkpoint`/
     /// `lctx_restore`. Additive + behavior-neutral: no new state, no
     /// existing path changed.
+    ///
+    /// `non_dep` is the oracle's `withLetDecl … (nondep := …)`: `true`
+    /// for a `have`, `false` for a `let`. It is recorded in the
+    /// declaration's [`LocalEntry`] row.
     pub fn push_let_decl(
         &mut self,
         name: Option<NameId>,
         ty: ExprId,
         value: ExprId,
+        non_dep: bool,
     ) -> Result<ExprId, MetaError> {
-        self.push_let_decl_with_kind(name, ty, value, LocalDeclKind::Default)
+        self.push_let_decl_with_kind(name, ty, value, non_dep, LocalDeclKind::Default)
     }
 
     /// [`Self::push_let_decl`] with a caller-chosen [`LocalDeclKind`];
-    /// oracle `withLetDecl … (kind := kind)`.
+    /// oracle `withLetDecl … (nondep := non_dep) (kind := kind)`.
     pub fn push_let_decl_with_kind(
         &mut self,
         name: Option<NameId>,
         ty: ExprId,
         value: ExprId,
+        non_dep: bool,
         kind: LocalDeclKind,
     ) -> Result<ExprId, MetaError> {
         debug_assert_eq!(
@@ -861,7 +896,16 @@ impl<'e> MetaCtx<'e> {
         // per call, matching `lctx.decls`'s own growth exactly, so a body
         // occurrence of the binder name resolves via
         // `lctx_lookup_by_name`.
-        self.local_names.push((name, fvar));
+        let id = self
+            .fvar_id_of(fvar)
+            .ok_or_else(|| MetaError::Infer("push_let_decl: fresh fvar has no id".into()))?;
+        self.local_names.push(LocalEntry {
+            fvar,
+            name,
+            id,
+            nondep: non_dep,
+            kind,
+        });
         // oracle: `withLetDeclImp` (`Basic.lean:1905-1911`) routes
         // through the same `withNewFVar` as `push_local_decl` — a
         // let-bound instance counts too.
@@ -946,8 +990,17 @@ impl<'e> MetaCtx<'e> {
         self.local_names
             .iter()
             .rev()
-            .find(|(n, _)| *n == Some(name))
-            .map(|(_, fvar)| *fvar)
+            .find(|e| e.name == Some(name))
+            .map(|e| e.fvar)
+    }
+
+    /// The attribute row for `id`, or `None` if `id` is not declared in
+    /// the ambient context. Reverse scan, the same idiom
+    /// `lctx_lookup_by_name` uses: contexts are binder-depth-sized, and a
+    /// hash index would be a second structure to hold in lockstep.
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub(crate) fn local_entry(&self, id: NameId) -> Option<&LocalEntry> {
+        self.local_names.iter().rev().find(|e| e.id == id)
     }
 
     /// Shared telescope-abstraction loop backing `mk_forall`/`mk_lambda`
@@ -1870,7 +1923,9 @@ mod tests {
             let nat = const_named(ctx, "Nat");
             for want_non_dep in [false, true] {
                 let checkpoint = ctx.lctx_checkpoint();
-                let fvar = ctx.push_let_decl(None, nat, nat).expect("push_let_decl");
+                let fvar = ctx
+                    .push_let_decl(None, nat, nat, want_non_dep)
+                    .expect("push_let_decl");
                 assert!(matches!(ctx.node(fvar), Node::FVar { .. }));
                 // body = the fvar itself → `let x : Nat := Nat; x`
                 // (a `LetE` whose body is `bvar 0`).
@@ -1997,7 +2052,12 @@ mod tests {
             // (an elided binder's domain starts as a fresh mvar; `n`
             // stands in for "not yet Add N" here).
             let fvar = ctx
-                .push_local_decl_without_instance(None, n, BinderInfo::Default)
+                .push_local_decl_without_instance(
+                    None,
+                    n,
+                    BinderInfo::Default,
+                    LocalDeclKind::Default,
+                )
                 .expect("push");
 
             // Anything on `propagate_expected_type`'s own path that
@@ -2014,7 +2074,7 @@ mod tests {
             // NOW the domain is discovered to be class-typed (the
             // oracle's own `isClass? type` test, run AFTER propagation
             // per Finding 2) and installed.
-            ctx.install_local_instance_for_last_pushed(fvar, add_n, LocalDeclKind::Default)
+            ctx.install_local_instance_for_last_pushed(fvar, add_n)
                 .expect("install");
 
             // The memo must reflect the just-installed instance, not
@@ -2059,7 +2119,7 @@ mod tests {
             let n = const_named(ctx, "N");
             let val = const_named(ctx, "instAddN");
             let cp = ctx.lctx_checkpoint();
-            ctx.push_let_decl(None, add_n, val).expect("push");
+            ctx.push_let_decl(None, add_n, val, false).expect("push");
             assert_eq!(ctx.local_instances.entries().len(), 1);
 
             // Same discriminator as `push_local_decl`'s own test above:
@@ -2105,14 +2165,19 @@ mod tests {
             .expect("push");
             assert!(ctx.local_instances.entries().is_empty(), "cdecl");
 
-            ctx.push_let_decl_with_kind(None, add_n, val, LocalDeclKind::ImplDetail)
+            ctx.push_let_decl_with_kind(None, add_n, val, false, LocalDeclKind::ImplDetail)
                 .expect("push");
             assert!(ctx.local_instances.entries().is_empty(), "ldecl");
 
             let fvar = ctx
-                .push_local_decl_without_instance(None, add_n, BinderInfo::Default)
+                .push_local_decl_without_instance(
+                    None,
+                    add_n,
+                    BinderInfo::Default,
+                    LocalDeclKind::ImplDetail,
+                )
                 .expect("push");
-            ctx.install_local_instance_for_last_pushed(fvar, add_n, LocalDeclKind::ImplDetail)
+            ctx.install_local_instance_for_last_pushed(fvar, add_n)
                 .expect("install");
             assert!(ctx.local_instances.entries().is_empty(), "deferred install");
 
@@ -2152,8 +2217,136 @@ mod tests {
             ctx.push_local_decl(Some(name), add_n, BinderInfo::InstImplicit)
                 .expect("push");
             assert_eq!(ctx.local_instances.entries().len(), 1, "cdecl");
-            ctx.push_let_decl(Some(name), add_n, val).expect("push");
+            ctx.push_let_decl(Some(name), add_n, val, false)
+                .expect("push");
             assert_eq!(ctx.local_instances.entries().len(), 2, "ldecl");
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// The fvar id behind an `Expr::fvar` — test-local shorthand for
+    /// the three `LocalEntry` tests below.
+    fn fvar_id(ctx: &MetaCtx, e: ExprId) -> NameId {
+        match ctx.node(e) {
+            Node::FVar { id: Some(id) } => id,
+            other => panic!("expected fvar, got {other:?}"),
+        }
+    }
+
+    /// The rows carry `nondep` and the kind, and they survive every
+    /// operation that moves a local context: restore truncates them,
+    /// `install_lctx` swaps them, `reduced` filters them.
+    #[test]
+    fn local_entries_record_nondep_and_kind() {
+        with_class_ctx(|ctx, add| {
+            let add_n = class_app(ctx, add);
+            let cp = ctx.lctx_checkpoint();
+            let c = ctx
+                .push_local_decl(None, add_n, BinderInfo::Default)
+                .expect("cdecl");
+            let l = ctx.push_let_decl(None, add_n, c, false).expect("let");
+            let h = ctx.push_let_decl(None, add_n, c, true).expect("have");
+
+            let (cid, lid, hid) = (fvar_id(ctx, c), fvar_id(ctx, l), fvar_id(ctx, h));
+            assert!(
+                !ctx.local_entry(cid).expect("row").nondep,
+                "a cdecl is never nondep"
+            );
+            assert!(
+                !ctx.local_entry(lid).expect("row").nondep,
+                "`let` is nondep=false"
+            );
+            assert!(
+                ctx.local_entry(hid).expect("row").nondep,
+                "`have` is nondep=true"
+            );
+            assert_eq!(ctx.local_entry(hid).expect("row").fvar, h);
+            assert_eq!(
+                ctx.local_entry(hid).expect("row").kind,
+                LocalDeclKind::Default
+            );
+
+            ctx.lctx_restore(cp);
+            assert!(ctx.local_entry(hid).is_none(), "restore drops the rows");
+        });
+    }
+
+    /// A snapshot carries the same rows, `reduced` filters them, and
+    /// `install_lctx` puts them back.
+    #[test]
+    fn local_entries_round_trip_through_a_snapshot() {
+        with_class_ctx(|ctx, add| {
+            let add_n = class_app(ctx, add);
+            let cp = ctx.lctx_checkpoint();
+            let c = ctx
+                .push_local_decl(None, add_n, BinderInfo::Default)
+                .expect("cdecl");
+            let h = ctx.push_let_decl(None, add_n, c, true).expect("have");
+            let snap = ctx.current_lctx();
+            let hid = fvar_id(ctx, h);
+            assert!(snap.entry(hid).expect("snapshot row").nondep);
+
+            // `reduced` filters the rows along with `lctx`: the erased
+            // cdecl's row goes, the surviving `have`'s row keeps its bit.
+            let cid = fvar_id(ctx, c);
+            let reduced = snap.reduced(&[(c, cid)], |e| ctx.fvar_id_of(e));
+            assert!(reduced.entry(cid).is_none(), "the erased row is gone");
+            assert!(reduced.entry(hid).expect("surviving row").nondep);
+
+            ctx.lctx_restore(cp);
+            assert!(ctx.local_entry(hid).is_none());
+            let _previous = ctx.install_lctx(snap);
+            assert!(ctx.local_entry(hid).expect("reinstalled row").nondep);
+        });
+    }
+
+    /// The close-out's behaviour, now read from storage rather than from a
+    /// parameter: an `ImplDetail` declaration installs no local instance,
+    /// and its stored kind says so — on the eager push and on the
+    /// deferred push-then-install path alike.
+    #[test]
+    fn a_stored_impl_detail_kind_still_suppresses_the_instance_install() {
+        with_class_ctx(|ctx, add| {
+            let add_n = class_app(ctx, add);
+            let cp = ctx.lctx_checkpoint();
+            let before = ctx.local_instances.entries().len();
+            let f = ctx
+                .push_local_decl_with_kind(
+                    None,
+                    add_n,
+                    BinderInfo::Default,
+                    LocalDeclKind::ImplDetail,
+                )
+                .expect("push");
+            assert_eq!(
+                ctx.local_entry(fvar_id(ctx, f)).expect("row").kind,
+                LocalDeclKind::ImplDetail
+            );
+            assert_eq!(
+                ctx.local_instances.entries().len(),
+                before,
+                "no instance installed"
+            );
+
+            let g = ctx
+                .push_local_decl_without_instance(
+                    None,
+                    add_n,
+                    BinderInfo::Default,
+                    LocalDeclKind::ImplDetail,
+                )
+                .expect("push");
+            assert_eq!(
+                ctx.local_entry(fvar_id(ctx, g)).expect("row").kind,
+                LocalDeclKind::ImplDetail
+            );
+            ctx.install_local_instance_for_last_pushed(g, add_n)
+                .expect("install");
+            assert_eq!(
+                ctx.local_instances.entries().len(),
+                before,
+                "the deferred install reads the stored kind"
+            );
             ctx.lctx_restore(cp);
         });
     }
@@ -2171,7 +2364,9 @@ mod tests {
         with_prelude0_ctx(|ctx| {
             let nat = const_named(ctx, "Nat");
             let checkpoint = ctx.lctx_checkpoint();
-            let fvar = ctx.push_let_decl(None, nat, nat).expect("push_let_decl");
+            let fvar = ctx
+                .push_let_decl(None, nat, nat, false)
+                .expect("push_let_decl");
             let err = ctx.mk_forall(std::slice::from_ref(&fvar), fvar);
             ctx.lctx_restore(checkpoint);
             assert!(err.is_err(), "expected Err for an ldecl fvar, got {err:?}");

@@ -237,7 +237,7 @@ impl<'e> MetaCtx<'e> {
                     let t = self.transform_visit(t, pre, cache)?;
                     let v = instantiate_rev(self.scratch, base, value, &fvars, &mut self.guard)?;
                     let v = self.transform_visit(v, pre, cache)?;
-                    let x = self.push_let_decl(decl_name, t, v)?;
+                    let x = self.push_let_decl(decl_name, t, v, non_dep)?;
                     fvars.push(x);
                     lets.push((x, non_dep));
                     cur = body;

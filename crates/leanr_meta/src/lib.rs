@@ -23,6 +23,7 @@ mod instances;
 mod lazy_delta;
 mod level;
 mod local_decl_kind;
+mod local_entry;
 mod local_instance;
 mod local_snapshot;
 mod loose_bvar;
