@@ -360,7 +360,7 @@ planned one at a time after their predecessor merges.
 
 ## Landed
 
-### P1 — structures and projections (PR #<n>)
+### P1 — structures and projections (PR #49)
 
 - `structureExt` decoded (`leanr_olean`: `StructureInfo`, keyed by the
   private `_private.Lean.Structure.0.Lean.structureExt`); `leanr_meta`
