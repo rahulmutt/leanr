@@ -262,24 +262,20 @@ impl<'e> MetaCtx<'e> {
                 // elaborator context this crate does not have yet —
                 // seam, see module doc).
                 //
-                // This crate's own `LocalDecl`
-                // (`leanr_kernel::local_ctx`, ported from the KERNEL's
-                // `local_ctx.h`, not the elaborator's `Lean.LocalDecl`)
-                // carries NO `nondep` bit at all, so it cannot
-                // distinguish a `have` from a `let` the way the oracle
-                // does. The result is an OVER-APPROXIMATION: under
-                // `cfg.zeta_delta`, this follows the value of EVERY
-                // let-bound fvar, including ones the oracle would have
-                // left alone as a `have`. This is sound for defeq
-                // (unfolding a "have" value can only do more reduction
-                // work than the oracle, never produce a definitionally
-                // wrong answer) but is a real, documented divergence,
-                // not merely a renamed case of the same gap.
+                // A `have` (`nondep := true`) is never followed, so the
+                // decl's `LocalEntry` row must say the let is genuine.
+                // Before the nondep slice this followed every let-bound
+                // fvar, which made `have n := Nat.zero;
+                // (rfl : Eq n Nat.zero)` elaborate here and fail on the
+                // oracle.
                 Node::FVar { id } => {
+                    // The config bit and the value lookup are cheap; the
+                    // `local_entry` row scan is O(depth), so it runs last.
                     let followed = id
-                        .and_then(|i| self.lctx.get(i))
-                        .and_then(|d| d.value)
-                        .filter(|_| self.cfg.zeta_delta);
+                        .filter(|_| self.cfg.zeta_delta)
+                        .and_then(|i| self.lctx.get(i).and_then(|d| d.value).map(|v| (i, v)))
+                        .filter(|&(i, _)| self.local_entry(i).is_some_and(|e| !e.nondep))
+                        .map(|(_, v)| v);
                     match followed {
                         Some(v) => v,
                         None => return Ok(EasyOrHard::Easy(e)),
@@ -1589,7 +1585,7 @@ impl<'e> MetaCtx<'e> {
         body: ExprId,
         non_dep: bool,
     ) -> Result<Option<ExprId>, MetaError> {
-        let fvar = self.push_let_decl(decl_name, ty, value)?;
+        let fvar = self.push_let_decl(decl_name, ty, value, non_dep)?;
         let inst_body = instantiate(
             self.scratch,
             Some(self.view.store),
@@ -2943,6 +2939,24 @@ mod tests {
                 .expect("lam");
             let app = ctx.mk_app_spine(lam, &[zero]).expect("app");
             assert_eq!(ctx.whnf_core(app).expect("whnf_core"), zero);
+        });
+    }
+
+    /// oracle: `whnfEasyCases`'s fvar arm (`WHNF.lean:397-409`) follows
+    /// only a `.ldecl (nondep := false)`: with `zetaDelta` on, a genuine
+    /// `let` unfolds to its value and a `have` stays put.
+    #[test]
+    fn zeta_delta_follows_a_let_but_not_a_have() {
+        with_prelude0_ctx(|ctx| {
+            let nat = ctx.const_named("N");
+            let zero = ctx.const_named("N.zero");
+            assert!(ctx.cfg.zeta_delta, "zeta_delta defaults on");
+            let cp = ctx.lctx_checkpoint();
+            let h = ctx.push_let_decl(None, nat, zero, true).expect("have");
+            let l = ctx.push_let_decl(None, nat, zero, false).expect("let");
+            assert_eq!(ctx.whnf(h).expect("have"), h, "a have is opaque");
+            assert_eq!(ctx.whnf(l).expect("let"), zero, "a let unfolds");
+            ctx.lctx_restore(cp);
         });
     }
 

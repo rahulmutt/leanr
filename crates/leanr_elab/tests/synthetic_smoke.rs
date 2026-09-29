@@ -1251,7 +1251,7 @@ fn a_synthetic_mvar_resumes_under_its_own_local_context() {
         let a = app
             .elab
             .mctx
-            .push_let_decl(None, type_sort, nat)
+            .push_let_decl(None, type_sort, nat, false)
             .expect("let decl");
 
         // `Wrap` — the fixture class `wrap_of_nat`/`wrap_of_fresh_mvar`

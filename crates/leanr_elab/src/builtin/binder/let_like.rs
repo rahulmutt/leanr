@@ -279,7 +279,7 @@ pub fn elab_let_like(
     // discipline.
     let cp_let = elab.mctx.lctx_checkpoint();
     let result = (|| {
-        let fvar = push_user_let_decl(elab, name, ty, value)?;
+        let fvar = push_user_let_decl(elab, name, ty, value, non_dep)?;
         // oracle: `elabTermEnsuringType body expectedType? >>=
         // instantiateMVars` (`Binders.lean:824`). An instance solved
         // eagerly in the body is an ASSIGNED mvar here, and `mk_let_expr`'s

@@ -1482,7 +1482,7 @@ mod scoping_audit {
 ///
 /// The genuine `elim_mvar_deps` gap — an mvar still UNASSIGNED when the
 /// `let` closes — is a different divergence, pinned by
-/// `a_coercion_postponed_under_a_let_leaks_an_fvar` below.
+/// `a_coercion_postponed_under_a_let_abstracts_to_bvar_0` below.
 #[test]
 fn a_let_bound_local_instance_consumed_by_an_application_abstracts_to_bvar_0() {
     for src in [
@@ -1503,25 +1503,19 @@ fn a_let_bound_local_instance_consumed_by_an_application_abstracts_to_bvar_0() {
     }
 }
 
-/// KNOWN DIVERGENCE, pinned so it stays loud (close-out spec § Amendment 2).
-/// A `.coe` metavariable postponed inside a `let`/`have` body is still
-/// UNASSIGNED when the `let` closes, so instantiating the body does not
-/// help: `MetaCtx::mk_let_expr` abstracts with a bare `abstract_fvars` and
-/// never runs `elim_mvar_deps`, and the coercion resumed afterwards leaks
-/// the let-bound `fvar`. The oracle emits `pairW Nat (Wrapper.mk Nat
-/// (bvar 0)) Nat.zero` for both forms; the `fun (n : Nat)` twin is correct
-/// on leanr (`postponed_coe_under_a_binder_abstracts_via_elim_mvar_deps`,
-/// corpus record `coe/postponedThenResumedUnderBinder`).
+/// A `.coe` metavariable postponed inside a `let`/`have` body and
+/// resumed after the binder closed comes back ABSTRACTED — `bvar 0`,
+/// the oracle's answer for both forms. Until the nondep slice this
+/// pinned the wrong answer (an unabstracted `fvar`), because
+/// `mk_let_expr` abstracted with a bare `abstract_fvars` and
+/// `mkAuxMVarType`'s ldecl arms had no `nondep` bit to read.
 ///
-/// Closing it needs `mkAuxMVarType`'s ldecl arms (`MetavarContext.lean:
-/// 1133-1156`) and `mkMVarApp`'s `isLet` test (`:1097`), which read a
-/// `nondep` bit leanr's local declarations do not carry — its own slice.
-///
-/// This asserts the WRONG answer on purpose: it trips the day the gap
-/// closes. When it does, flip it to `bvar 0` and add the let/have twins of
-/// `coe/postponedThenResumedUnderBinder` to the corpus.
+/// The corpus carries the same two queries (`nondep/let-coe`,
+/// `nondep/have-coe`); this test keeps the oracle's answer inline, so a
+/// regeneration cannot silently move the target — the same posture as
+/// `postponed_coe_under_a_binder_abstracts_via_elim_mvar_deps`.
 #[test]
-fn a_coercion_postponed_under_a_let_leaks_an_fvar() {
+fn a_coercion_postponed_under_a_let_abstracts_to_bvar_0() {
     for src in [
         "let n : Nat := Nat.zero; pairW n Nat.zero",
         "have n : Nat := Nat.zero; pairW n Nat.zero",
@@ -1531,10 +1525,9 @@ fn a_coercion_postponed_under_a_let_leaks_an_fvar() {
         // body = `pairW Nat (Wrapper.mk Nat <n>) Nat.zero`; `<n>` is `b.f.a.a`.
         let n = &j["b"]["f"]["a"]["a"];
         assert_eq!(
-            n["k"], "fvar",
-            "`{src}`: the postponed coercion under a let no longer leaks — the gap in \
-             close-out spec § Amendment 2 is closed; flip this test to the oracle's \
-             `bvar 0` and add the let/have corpus twins. Got {n}"
+            *n,
+            serde_json::json!({"k": "bvar", "i": 0}),
+            "`{src}`: the let-bound variable must come back abstracted. Got {n}"
         );
     }
 }

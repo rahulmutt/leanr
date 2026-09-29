@@ -228,16 +228,18 @@ fn push_user_binder(
 
 /// Push a user-written let-declaration with its `.ofBinderName` kind
 /// (oracle `elabLetDeclAux`, `Binders.lean:805-808`). See
-/// [`user_binder_kind`].
+/// [`user_binder_kind`]. `non_dep` is `true` for a `have`, `false` for a
+/// `let` — the oracle's `withLetDecl … (nondep := config.nondep)`.
 fn push_user_let_decl(
     elab: &mut TermElabM,
     name: Option<NameId>,
     ty: ExprId,
     value: ExprId,
+    non_dep: bool,
 ) -> Result<ExprId, ElabError> {
     let kind = user_binder_kind(elab, name);
     elab.mctx
-        .push_let_decl_with_kind(name, ty, value, kind)
+        .push_let_decl_with_kind(name, ty, value, non_dep, kind)
         .map_err(ElabError::from)
 }
 

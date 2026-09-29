@@ -543,6 +543,202 @@ fn lift_go(
 }
 
 // ---------------------------------------------------------------------
+// lower_loose_bvars — oracle: `Lean.Expr.lowerLooseBVars`
+// (`Lean/Expr.lean:1357`, an `opaque` over the C++ kernel's
+// `lower_loose_bvars`). The C++ sources do not ship with the toolchain,
+// so this cites the Lean-level declaration rather than a line in
+// expr.cpp (contrast `lift_loose_bvars` above, whose expr.cpp citation
+// predates that discovery).
+// ---------------------------------------------------------------------
+
+/// Lowers every loose bvar `>= s` by `d`. The exact inverse of
+/// [`lift_loose_bvars`], and deliberately its structural twin: same
+/// `VisitCache`, same `RecGuard`, same `loose_bvar_range_exact` skip,
+/// same rebuild-only-when-a-child-changed discipline.
+///
+/// A bvar below `s` is untouched. A loose bvar in `s..s+d` cannot occur
+/// in a well-formed call: the oracle's own `lowerLooseBVars` is only
+/// invoked where the caller has just proven those indices absent (e.g.
+/// `mkAuxMVarType`'s unused-let arm, guarded by `!e.hasLooseBVar 0`), so
+/// this saturates at 0 rather than inventing an error path the oracle
+/// does not have.
+///
+/// Additive and TCB-neutral: no caller inside `tc.rs`; the type checker
+/// gains no behavior. Added for `leanr_meta`'s `mk_aux_mvar_type` ldecl
+/// arms, which cannot be written without it (design spec, Design 4).
+pub fn lower_loose_bvars(
+    st: &mut Store,
+    base: Option<&Store>,
+    e: ExprId,
+    s: u32,
+    d: u32,
+    g: &mut RecGuard,
+) -> Result<ExprId, KernelError> {
+    if d == 0 {
+        return Ok(e);
+    }
+    lower_go(st, base, e, s, 0, d, g, &mut VisitCache::new())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_go(
+    st: &mut Store,
+    base: Option<&Store>,
+    e: ExprId,
+    s: u32,
+    offset: u32,
+    d: u32,
+    g: &mut RecGuard,
+    cache: &mut VisitCache,
+) -> Result<ExprId, KernelError> {
+    let s1 = match s.checked_add(offset) {
+        Some(v) => v,
+        None => return Ok(e),
+    };
+    if let Some(range) = st.expr_data(base, e).loose_bvar_range_exact() {
+        if (range as u64) <= (s1 as u64) {
+            return Ok(e);
+        }
+    }
+    // Visit cache (see `VisitCache`).
+    let key = (e, offset);
+    if let Some(&r) = cache.get(&key) {
+        return Ok(r);
+    }
+    let r = match st.expr_node(base, e) {
+        node @ (Node::BVar { .. } | Node::BVarBig { .. }) => {
+            let idx = bvar_index_nat(st, base, node);
+            let s1_big = BigUint::from(s1);
+            if idx.0 >= s1_big {
+                // Exact bignum subtraction, never an `as` cast (mirror of
+                // `lift_go`'s exact add); saturates at 0, see the doc above.
+                let d_big = BigUint::from(d);
+                let lowered = if idx.0 >= d_big {
+                    &idx.0 - &d_big
+                } else {
+                    BigUint::from(0u32)
+                };
+                st.expr_bvar(base, &Nat(lowered))?
+            } else {
+                e
+            }
+        }
+        Node::FVar { .. }
+        | Node::MVar { .. }
+        | Node::Sort { .. }
+        | Node::Const { .. }
+        | Node::LitNat { .. }
+        | Node::LitStr { .. } => e,
+        Node::App { f, arg } => {
+            let (f2, arg2) = g.enter(|g| {
+                Ok((
+                    lower_go(st, base, f, s, offset, d, g, cache)?,
+                    lower_go(st, base, arg, s, offset, d, g, cache)?,
+                ))
+            })?;
+            if f2 == f && arg2 == arg {
+                e
+            } else {
+                st.expr_app(base, f2, arg2)?
+            }
+        }
+        Node::Lam {
+            binder_name,
+            binder_type,
+            body,
+            binder_info,
+        } => {
+            let (bt2, bd2) = g.enter(|g| {
+                Ok((
+                    lower_go(st, base, binder_type, s, offset, d, g, cache)?,
+                    lower_go(st, base, body, s, offset + 1, d, g, cache)?,
+                ))
+            })?;
+            if bt2 == binder_type && bd2 == body {
+                e
+            } else {
+                st.expr_lam(base, binder_name, bt2, bd2, binder_info)?
+            }
+        }
+        Node::Forall {
+            binder_name,
+            binder_type,
+            body,
+            binder_info,
+        } => {
+            let (bt2, bd2) = g.enter(|g| {
+                Ok((
+                    lower_go(st, base, binder_type, s, offset, d, g, cache)?,
+                    lower_go(st, base, body, s, offset + 1, d, g, cache)?,
+                ))
+            })?;
+            if bt2 == binder_type && bd2 == body {
+                e
+            } else {
+                st.expr_forall(base, binder_name, bt2, bd2, binder_info)?
+            }
+        }
+        Node::LetE {
+            decl_name,
+            ty,
+            value,
+            body,
+            non_dep,
+        } => {
+            let (t2, v2, b2) = g.enter(|g| {
+                Ok((
+                    lower_go(st, base, ty, s, offset, d, g, cache)?,
+                    lower_go(st, base, value, s, offset, d, g, cache)?,
+                    lower_go(st, base, body, s, offset + 1, d, g, cache)?,
+                ))
+            })?;
+            if t2 == ty && v2 == value && b2 == body {
+                e
+            } else {
+                st.expr_let(base, decl_name, t2, v2, b2, non_dep)?
+            }
+        }
+        Node::MData { data, expr } => {
+            let expr2 = g.enter(|g| lower_go(st, base, expr, s, offset, d, g, cache))?;
+            if expr2 == expr {
+                e
+            } else {
+                st.expr_mdata(base, data, expr2)?
+            }
+        }
+        node @ (Node::Proj { .. } | Node::ProjBig { .. }) => {
+            let (type_name, structure) = match node {
+                Node::Proj {
+                    type_name,
+                    structure,
+                    ..
+                }
+                | Node::ProjBig {
+                    type_name,
+                    structure,
+                    ..
+                } => (type_name, structure),
+                _ => unreachable!(),
+            };
+            let structure2 = g.enter(|g| lower_go(st, base, structure, s, offset, d, g, cache))?;
+            if structure2 == structure {
+                e
+            } else {
+                let idx_nat = match node {
+                    Node::Proj { idx, .. } => Nat::from(idx as u64),
+                    Node::ProjBig { idx, .. } => st.nat_at(base, idx).clone(),
+                    _ => unreachable!(),
+                };
+                st.expr_proj(base, type_name, &idx_nat, structure2)?
+            }
+        }
+    };
+    // Memoize this node's rewrite.
+    cache.insert(key, r);
+    Ok(r)
+}
+
+// ---------------------------------------------------------------------
 // abstract_fvars — oracle: abstract.cpp:12-27 (`abstract`).
 // ---------------------------------------------------------------------
 
@@ -1070,6 +1266,50 @@ mod tests {
     // matches — the interning invariant makes id equality the exact
     // id-space analog of Arc pointer equality for "was this rewritten").
     // ------------------------------------------------------------------
+
+    /// `lowerLooseBVars e 1 1` (oracle: `Lean/Expr.lean:1357`) drops every
+    /// loose bvar `>= 1` by one and leaves bvar 0 alone.
+    #[test]
+    fn lower_loose_bvars_lowers_only_at_or_above_the_cutoff() {
+        let mut st = Store::persistent();
+        let mut g = RecGuard::new();
+        let b0 = st.expr_bvar(None, &Nat::from(0u64)).unwrap();
+        let b1 = st.expr_bvar(None, &Nat::from(1u64)).unwrap();
+        let b2 = st.expr_bvar(None, &Nat::from(2u64)).unwrap();
+        let app = st.expr_app(None, b1, b2).unwrap();
+        let app = st.expr_app(None, app, b0).unwrap();
+
+        let out = lower_loose_bvars(&mut st, None, app, 1, 1, &mut g).unwrap();
+
+        // `#1 #2 #0` becomes `#0 #1 #0`.
+        let expect_f = st.expr_app(None, b0, b1).unwrap();
+        let expect = st.expr_app(None, expect_f, b0).unwrap();
+        assert_eq!(out, expect);
+    }
+
+    /// A binder shifts the cutoff, exactly as `lift_go`'s `offset + 1` does.
+    #[test]
+    fn lower_loose_bvars_shifts_the_cutoff_under_a_binder() {
+        let mut st = Store::persistent();
+        let mut g = RecGuard::new();
+        let sort = {
+            let z = st.level_zero(None).unwrap();
+            st.expr_sort(None, z).unwrap()
+        };
+        let b2 = st.expr_bvar(None, &Nat::from(2u64)).unwrap();
+        let lam = st
+            .expr_lam(None, None, sort, b2, BinderInfo::Default)
+            .unwrap();
+
+        let out = lower_loose_bvars(&mut st, None, lam, 1, 1, &mut g).unwrap();
+
+        // Under one binder the cutoff is 2, so `#2` is loose and becomes `#1`.
+        let b1 = st.expr_bvar(None, &Nat::from(1u64)).unwrap();
+        let expect = st
+            .expr_lam(None, None, sort, b1, BinderInfo::Default)
+            .unwrap();
+        assert_eq!(out, expect);
+    }
 
     #[test]
     fn instantiate_hits_only_index_zero_at_top() {

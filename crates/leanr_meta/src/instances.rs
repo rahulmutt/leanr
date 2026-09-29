@@ -1536,7 +1536,7 @@ mod tests {
             let cp = ctx.lctx_checkpoint();
             let order = ctx.instimplicit_binder_positions(ty).expect("telescope");
             assert_eq!(order, vec![1], "binder 1 is the instance-implicit one");
-            let pushed: Vec<ExprId> = ctx.local_names[cp..].iter().map(|(_, f)| *f).collect();
+            let pushed: Vec<ExprId> = ctx.local_names[cp..].iter().map(|e| e.fvar).collect();
             assert_eq!(pushed.len(), 2, "both binders were opened");
             for (i, fvar) in pushed.into_iter().enumerate() {
                 let Node::FVar { id: Some(id) } = ctx.node(fvar) else {

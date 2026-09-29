@@ -33,7 +33,7 @@ use crate::{MetaCtx, MetaError};
 
 /// oracle: `MkBinding.State.cache` (`:956-960`). Scoped to one
 /// `elim_mvar_deps` call and reset again inside `elim_mvar` before
-/// `mk_aux_mvar_type` (`:1205`, "we must reset the cache because
+/// `mk_aux_mvar_type` (`:1204`, "we must reset the cache because
 /// `toRevert` may not be equal to `xs`"), which is why it is a
 /// threaded parameter rather than a `MetaCtx` field: its lifetime is a
 /// matter of type here, not of discipline.
@@ -125,26 +125,24 @@ impl<'e> MetaCtx<'e> {
         }
     }
 
-    /// oracle: `findLocalDeclDependsOn` (`:744`) / `localDeclDependsOn`
+    /// oracle: `findLocalDeclDependsOn` (`:744-753`) / `localDeclDependsOn`
     /// (`:767`) — does a local declaration depend on any fvar in `pf`?
-    /// Its type always counts; its value counts when it has one.
-    ///
-    /// The oracle's `generalizeNondepLet` parameter is NOT modelled:
-    /// leanr's `LocalDecl` carries no `nondep` bit at all
-    /// (`leanr_kernel/src/local_ctx.rs:37-43` — `mk_let_binding` takes
-    /// it as a caller argument instead), so there is nothing to branch
-    /// on. This is the same missing bit that makes `mk_aux_mvar_type`
-    /// refuse an ldecl in `to_revert`; see that function's doc.
+    /// Its type always counts. Its value counts when it has one, EXCEPT
+    /// when `generalize_nondep_let && nondep`: a nondep ldecl (`have`) is
+    /// then a cdecl for dependency purposes and only its type decides
+    /// (oracle `:748-749`).
     pub(crate) fn local_decl_depends_on(
         &mut self,
         ty: ExprId,
         value: Option<ExprId>,
+        nondep: bool,
         pf: &[NameId],
+        generalize_nondep_let: bool,
     ) -> Result<bool, MetaError> {
         if self.depends_on(ty, pf)? {
             return Ok(true);
         }
-        match value {
+        match value.filter(|_| !(generalize_nondep_let && nondep)) {
             Some(v) => self.depends_on(v, pf),
             None => Ok(false),
         }
@@ -197,7 +195,7 @@ impl<'e> MetaCtx<'e> {
             .iter()
             .filter_map(|f| self.fvar_id_of(*f))
             .collect();
-        let entries: Vec<ExprId> = lctx.entries().iter().map(|(_, f)| *f).collect();
+        let entries: Vec<ExprId> = lctx.entries().iter().map(|e| e.fvar).collect();
         // oracle `getLocalDeclWithSmallestIdx` (`:1052`): start at the
         // earliest declaration that is being reverted. Everything before it
         // is declared earlier than anything reverted, so it cannot depend
@@ -225,7 +223,11 @@ impl<'e> MetaCtx<'e> {
                 continue;
             };
             let (ty, value) = (decl.ty, decl.value);
-            if self.local_decl_depends_on(ty, value, &collected_ids)? {
+            let nondep = lctx.entry(id).is_some_and(|e| e.nondep);
+            // `generalizeNondepLet := true`, the oracle default at
+            // `collectForwardDeps` (`:1037`); leanr has no caller
+            // passing `false`.
+            if self.local_decl_depends_on(ty, value, nondep, &collected_ids, true)? {
                 collected.push(fvar);
                 collected_ids.push(id);
             }
@@ -258,16 +260,29 @@ impl<'e> MetaCtx<'e> {
 
     /// oracle: `mkMVarApp` (`:1090-1097`) — `mvar` applied to `xs`, first
     /// declared innermost, so that after abstraction the arguments read
-    /// `?new #(n-1) … #0`.
-    ///
-    /// The oracle's two kind branches (`:1094-1097`) differ only in
-    /// whether a LET-bound fvar is applied. Under this port's ldecl
-    /// refusal (see `mk_aux_mvar_type`) `xs` never contains one, so the
-    /// branches coincide and the `syntheticOpaque` form — apply
-    /// everything — is the one written.
-    pub(crate) fn mk_mvar_app(&mut self, mvar: ExprId, xs: &[ExprId]) -> Result<ExprId, MetaError> {
+    /// `?new #(n-1) … #0`. A genuine let-bound fvar is skipped unless
+    /// `kind` is syntheticOpaque (see the loop body).
+    pub(crate) fn mk_mvar_app(
+        &mut self,
+        mvar: ExprId,
+        xs: &[ExprId],
+        lctx: &LocalCtxSnapshot,
+        kind: crate::MVarKind,
+    ) -> Result<ExprId, MetaError> {
         let mut e = mvar;
         for x in xs {
+            // oracle `:1094-1097`: a syntheticOpaque metavariable applies
+            // every fvar; otherwise a genuine let-bound one is skipped.
+            // `LocalDecl.isLet` is FALSE for a nondep ldecl, so a `have`
+            // is applied like a cdecl.
+            let is_let = kind != crate::MVarKind::SyntheticOpaque
+                && self.fvar_id_of(*x).is_some_and(|id| {
+                    lctx.lctx().get(id).is_some_and(|d| d.value.is_some())
+                        && lctx.entry(id).is_some_and(|en| !en.nondep)
+                });
+            if is_let {
+                continue;
+            }
             e = self.scratch.expr_app(Some(self.view.store), e, *x)?;
         }
         Ok(e)
@@ -318,7 +333,7 @@ impl<'e> MetaCtx<'e> {
     /// are the oracle's:
     ///
     /// 1. **The cache is the caller's.** The only reset in `MkBinding`
-    ///    is `withFreshCache do mkAuxMVarType …` (`:1205`), so every
+    ///    is `withFreshCache do mkAuxMVarType …` (`:1204`), so every
     ///    abstraction site inside one `mkAuxMVarType` shares one cache.
     ///    A fresh cache per site would re-elaborate a NESTED shared
     ///    subterm and mint a second auxiliary metavariable for it.
@@ -645,7 +660,7 @@ impl<'e> MetaCtx<'e> {
 
         let to_revert = self.collect_forward_deps(&mvar_lctx, to_revert)?;
         let new_lctx = self.reduce_local_context(&mvar_lctx, &to_revert)?;
-        // oracle `:1205`, `withFreshCache do mkAuxMVarType …` — ONE
+        // oracle `:1204`, `withFreshCache do mkAuxMVarType …` — ONE
         // fresh cache, spanning the whole of `mk_aux_mvar_type`, because
         // the entries the caller's cache holds were computed for `xs`
         // and everything below eliminates over `to_revert`, which may
@@ -656,9 +671,20 @@ impl<'e> MetaCtx<'e> {
         // binder type; wider (the caller's) would reuse rewrites keyed
         // to the wrong variable set.
         let mut aux_cache = ElimCache::default();
-        let new_ty = self.mk_aux_mvar_type_with(&mvar_lctx, &to_revert, decl_ty, &mut aux_cache)?;
+        // `used_let_only` is the literal `true`: leanr reaches `elim_mvar`
+        // only through `elim_app`'s unassigned arm, where the oracle
+        // passes `usedLetOnly := true` (`:1245-1246`). Its `false` caller
+        // is `revert`, which has no leanr producer.
+        let new_ty = self.mk_aux_mvar_type_with(
+            &mvar_lctx,
+            &to_revert,
+            decl_ty,
+            kind,
+            true,
+            &mut aux_cache,
+        )?;
         let (new_mvar, new_id) = self.mk_aux_mvar_at(new_lctx, new_ty, kind)?;
-        let result = self.mk_mvar_app(new_mvar, &to_revert)?;
+        let result = self.mk_mvar_app(new_mvar, &to_revert, &mvar_lctx, kind)?;
 
         if kind != crate::MVarKind::SyntheticOpaque {
             // oracle `:1214-1215`.
@@ -685,46 +711,53 @@ impl<'e> MetaCtx<'e> {
         Ok((out, to_revert))
     }
 
-    /// oracle: `mkAuxMVarType` (`:1123-1168`) — the type of the auxiliary
+    /// oracle: `mkAuxMVarType` (`:1123-1167`) — the type of the auxiliary
     /// metavariable `elim_mvar` mints: the original's type abstracted
-    /// over `xs` and wrapped in one `forall` per reverted entry,
-    /// innermost last.
+    /// over `xs` and wrapped in one binder per reverted entry, innermost
+    /// last.
     ///
-    /// **Let-declarations are REFUSED, not handled.** The oracle branches
-    /// on `LocalDecl.ldecl (nondep := …)` (`:1131-1160`) and leanr's
-    /// `LocalDecl` carries no `nondep` bit at all
-    /// (`leanr_kernel/src/local_ctx.rs:37-43`; leanr's `mk_let_expr` takes
-    /// it as a caller argument, `metactx.rs:925-930`), so both
-    /// ldecl arms have no input. Writing one would be guessing, and a
-    /// wrong `ExprId` is
-    /// worse than a named refusal — the same judgement, for the same
-    /// reason, as `mk_binding`'s existing
-    /// `"let-decl fvar in a cdecl telescope"` (`metactx.rs:862-866`).
+    /// Four arms, in the oracle's order:
     ///
-    /// The METAVARIABLE arm (`:1157-1163`) is transcribed: `xs` may carry
-    /// a metavariable as a "may dependency" once `collect_forward_deps`
-    /// has run, and the oracle wraps it in a `forall` over the
-    /// metavariable's own type with `binderInfoForMVars` (default
-    /// `.implicit`).
+    /// - **cdecl** (`:1129-1132`): `forall` with the decl's binder info.
+    /// - **`have`**, an ldecl with `nondep := true` (`:1133-1136`): a
+    ///   plain `forall` with `BinderInfo::Default`; the value is dropped.
+    ///   The per-declaration `nondep` bit is the row `LocalCtxSnapshot::
+    ///   entry` carries.
+    /// - **genuine `let`**, `nondep := false` (`:1137-1156`): kept as a
+    ///   `letE` (`nondep := false`, `:1142`) when `!used_let_only` or the
+    ///   accumulated type uses it (`e.hasLooseBVar 0`, `:1138`); for a
+    ///   syntheticOpaque `kind` that `letE` is then lifted WHOLE by one
+    ///   and put under a `forall` (`:1143-1147`, the file's "Gruesome
+    ///   details"). An unused one becomes a `forall` for a
+    ///   syntheticOpaque `kind` (`:1150-1154`) and is otherwise dropped,
+    ///   the accumulated type lowered by one (`:1155-1156`). The two
+    ///   syntheticOpaque sub-arms keep the binder because `mk_mvar_app`
+    ///   applies every fvar for that kind.
+    /// - **metavariable** (`:1157-1163`): `xs` may carry one as a "may
+    ///   dependency" once `collect_forward_deps` has run; the oracle
+    ///   wraps it in a `forall` over its own type with
+    ///   `binderInfoForMVars` (default `.implicit`).
     ///
-    /// The oracle's `kind` and `usedLetOnly` parameters are absent here
-    /// because every arm that reads them is an ldecl arm (`:1140-1157`),
-    /// and those refuse. Adding parameters no branch can consult would be
-    /// surface without a producer.
+    /// Every arm that abstracts a binder type runs `headBeta` BEFORE
+    /// `abstract_range_aux`, as the oracle does. The unused-let drop arm
+    /// (`:1155-1156`) abstracts NOTHING — no type, no value — and must
+    /// not: `abstract_range_aux` runs `elim`, which can mint auxiliary
+    /// metavariables, so computing an unused binder type there would be
+    /// an observable divergence.
     ///
-    /// Both abstractions below go through `abstract_range_aux`, this
-    /// port's `abstractRangeAux` (`:1165-1167`): eliminate metavariable
+    /// Every abstraction goes through `abstract_range_aux`, this port's
+    /// `abstractRangeAux` (`:1165-1167`): eliminate metavariable
     /// dependencies over the whole of `xs` FIRST, then abstract the
     /// prefix. They SHARE one cache — the oracle's `withFreshCache`
-    /// (`:1205`) wraps this whole function, not each abstraction inside
-    /// it. This entry point supplies that one fresh cache; `elim_mvar`
-    /// calls `mk_aux_mvar_type_with` and supplies its own, for the same
-    /// single-reset scope.
+    /// (`:1204`) wraps this whole function, not each abstraction inside
+    /// it. `elim_mvar` calls `mk_aux_mvar_type_with` and supplies that
+    /// one fresh cache.
+    ///
     /// Test-only: production reaches the same code through
     /// `mk_aux_mvar_type_with`, which supplies the caller's cache
-    /// (`elim_mvar`, `:638`). This wrapper exists so the tests below can
+    /// (`elim_mvar`). This wrapper exists so the tests below can
     /// exercise `mkAuxMVarType` on its own with the `withFreshCache`
-    /// scope the oracle gives it at `:1205`. `#[cfg(test)]` rather than
+    /// scope the oracle gives it at `:1204`. `#[cfg(test)]` rather than
     /// `#[allow(dead_code)]`: it states the fact instead of hiding it.
     #[cfg(test)]
     pub(crate) fn mk_aux_mvar_type(
@@ -732,12 +765,14 @@ impl<'e> MetaCtx<'e> {
         lctx: &LocalCtxSnapshot,
         xs: &[ExprId],
         ty: ExprId,
+        kind: crate::MVarKind,
+        used_let_only: bool,
     ) -> Result<ExprId, MetaError> {
         let mut cache = ElimCache::default();
-        self.mk_aux_mvar_type_with(lctx, xs, ty, &mut cache)
+        self.mk_aux_mvar_type_with(lctx, xs, ty, kind, used_let_only, &mut cache)
     }
 
-    /// `mk_aux_mvar_type` with the `withFreshCache` scope (`:1205`)
+    /// `mk_aux_mvar_type` with the `withFreshCache` scope (`:1204`)
     /// chosen by the caller. Same body; the split exists only so that
     /// `elim_mvar` can own the reset, which is where the oracle puts it.
     fn mk_aux_mvar_type_with(
@@ -745,8 +780,11 @@ impl<'e> MetaCtx<'e> {
         lctx: &LocalCtxSnapshot,
         xs: &[ExprId],
         ty: ExprId,
+        kind: crate::MVarKind,
+        used_let_only: bool,
         cache: &mut ElimCache,
     ) -> Result<ExprId, MetaError> {
+        let is_opaque = kind == crate::MVarKind::SyntheticOpaque;
         let mut e = self.abstract_range_aux(xs, xs.len(), ty, cache)?;
         for i in (0..xs.len()).rev() {
             let x = xs[i];
@@ -757,23 +795,32 @@ impl<'e> MetaCtx<'e> {
                             "mk_aux_mvar_type: fvar not declared in the mvar's context".into(),
                         )
                     })?;
-                    if decl.value.is_some() {
-                        return Err(MetaError::Infer(
-                            "mk_aux_mvar_type: let-decl fvar in to_revert (leanr's LocalDecl \
-                             carries no `nondep` bit, so the oracle's ldecl arms have no input)"
-                                .into(),
-                        ));
+                    let (name, dty, dbi, dval) =
+                        (decl.binder_name, decl.ty, decl.binder_info, decl.value);
+                    match dval {
+                        // oracle `:1129-1132` (cdecl arm): `let type :=
+                        // type.headBeta` before `abstractRangeAux` (below).
+                        None => (name, self.head_beta(dty)?, dbi),
+                        // oracle `:1133-1136`: a `have` is a cdecl here,
+                        // with `.default` binder info.
+                        Some(_) if lctx.entry(id).is_some_and(|en| en.nondep) => (
+                            name,
+                            self.head_beta(dty)?,
+                            leanr_kernel::BinderInfo::Default,
+                        ),
+                        Some(value) => {
+                            e = self.mk_aux_let_arm(
+                                xs,
+                                i,
+                                (name, dty, value),
+                                e,
+                                is_opaque,
+                                used_let_only,
+                                cache,
+                            )?;
+                            continue;
+                        }
                     }
-                    // oracle `:1130-1131` (cdecl arm): `let type :=
-                    // type.headBeta` before `abstractRangeAux`. An
-                    // earlier controller ruling parked this on the
-                    // (factually wrong) grounds that leanr has no
-                    // `headBeta`; `head_beta` exists (`whnf.rs:1789`)
-                    // and is `pub(crate)`. Applied BEFORE the
-                    // abstraction below, matching the oracle's
-                    // placement.
-                    let ty = self.head_beta(decl.ty)?;
-                    (decl.binder_name, ty, decl.binder_info)
                 }
                 None => {
                     // oracle `:1157-1163` — a "may dependency" metavariable.
@@ -804,6 +851,67 @@ impl<'e> MetaCtx<'e> {
             )?;
         }
         Ok(e)
+    }
+
+    /// oracle `:1137-1156` — `mkAuxMVarType`'s genuine-let arm
+    /// (`LocalDecl.ldecl (nondep := false)`) for the reverted entry at
+    /// position `i`, with `e` the type accumulated so far.
+    #[allow(clippy::too_many_arguments)]
+    fn mk_aux_let_arm(
+        &mut self,
+        xs: &[ExprId],
+        i: usize,
+        (name, ty, value): (Option<NameId>, ExprId, ExprId),
+        e: ExprId,
+        is_opaque: bool,
+        used_let_only: bool,
+        cache: &mut ElimCache,
+    ) -> Result<ExprId, MetaError> {
+        let st = Some(self.view.store);
+        if !used_let_only || self.has_loose_bvar(e, 0)? {
+            // `:1139-1142`: type (headBeta first), then value, abstracted
+            // over the prefix; the `letE` built with `nondep := false`.
+            let ty = self.head_beta(ty)?;
+            let ty = self.abstract_range_aux(xs, i, ty, cache)?;
+            let value = self.abstract_range_aux(xs, i, value, cache)?;
+            let built = self.scratch.expr_let(st, name, ty, value, e, false)?;
+            if !is_opaque {
+                return Ok(built);
+            }
+            // `:1143-1147` ("Gruesome details"): the WHOLE `letE` — value
+            // included — is lifted, then bound by a `forall` over the
+            // same (already abstracted) type.
+            let lifted =
+                leanr_kernel::lift_loose_bvars(self.scratch, st, built, 0, 1, &mut self.guard)?;
+            return Ok(self.scratch.expr_forall(
+                st,
+                name,
+                ty,
+                lifted,
+                leanr_kernel::BinderInfo::Default,
+            )?);
+        }
+        if is_opaque {
+            // `:1150-1154`: unused, but kept as a binder.
+            let ty = self.head_beta(ty)?;
+            let ty = self.abstract_range_aux(xs, i, ty, cache)?;
+            return Ok(self.scratch.expr_forall(
+                st,
+                name,
+                ty,
+                e,
+                leanr_kernel::BinderInfo::Default,
+            )?);
+        }
+        // `:1155-1156`: dropped; nothing is abstracted.
+        Ok(leanr_kernel::lower_loose_bvars(
+            self.scratch,
+            st,
+            e,
+            1,
+            1,
+            &mut self.guard,
+        )?)
     }
 }
 
@@ -907,15 +1015,13 @@ mod tests {
         });
     }
 
-    /// Final-review fix wave, item 4: `local_decl_depends_on`'s VALUE
-    /// branch (`:147-148`) had no direct test — every existing caller
-    /// reaches it only through `collect_forward_deps`'s corpus-shaped
-    /// fixtures, none of which isolate a let-decl whose TYPE is clean
-    /// but whose VALUE alone carries the dependency. Measured: mutating
-    /// that branch to `Ok(false)` left the entire workspace suite green;
-    /// this is the test that splits on it.
+    /// oracle: `findLocalDeclDependsOn` (`MetavarContext.lean:744-753`).
+    /// The VALUE is ignored exactly when `generalizeNondepLet && nondep`
+    /// (a nondep ldecl is a cdecl for dependency purposes); in every
+    /// other cell a value carrying the dependency counts. The type is
+    /// clean throughout, so only the value branch can answer.
     #[test]
-    fn local_decl_depends_on_sees_a_dependency_carried_only_by_the_value() {
+    fn local_decl_depends_on_ignores_a_value_only_when_generalizing_a_nondep() {
         with_ctx(|ctx| {
             let base = Some(ctx.view.store);
             let zero = ctx.scratch.level_zero(base).expect("level");
@@ -924,26 +1030,54 @@ mod tests {
             let cp = ctx.lctx_checkpoint();
             let a = fresh_fvar(ctx, sort0, "a");
             let ia = fvar_id(ctx, a);
-
-            // The TYPE is `Sort 0` — mentions nothing, so
-            // `local_decl_depends_on`'s first check (the type) must
-            // return false and fall through to the value. The VALUE is
-            // `a` itself.
             assert!(
                 !ctx.depends_on(sort0, &[ia]).expect("depends_on"),
                 "the type must NOT depend on `a`, or this test would not \
                  discriminate the value branch at all"
             );
+            let mut cell = |nondep: bool, flag: bool| {
+                ctx.local_decl_depends_on(sort0, Some(a), nondep, &[ia], flag)
+                    .expect("local_decl_depends_on")
+            };
+            assert!(!cell(true, true), "nondep + generalize: value ignored");
+            assert!(cell(true, false), "nondep, not generalizing: value counts");
+            assert!(cell(false, true), "a genuine let: value counts");
             assert!(
-                ctx.local_decl_depends_on(sort0, Some(a), &[ia])
-                    .expect("local_decl_depends_on"),
-                "the VALUE mentions `a`; a let-decl with a clean type and \
-                 a dependent value must still be judged dependent — \
-                 oracle `findLocalDeclDependsOn`/`localDeclDependsOn` \
-                 (`:744`, `:767`) checks the value whenever one is \
-                 present"
+                cell(false, false),
+                "a genuine let, not generalizing: value counts"
             );
             ctx.lctx_restore(cp);
+        });
+    }
+
+    /// The CALLER of `local_decl_depends_on`: `collect_forward_deps`
+    /// must pass the row's `nondep` (oracle default
+    /// `generalizeNondepLet := true`, `:1037`). A `have` whose value
+    /// alone mentions the reverted `a` stays out; a `let` with the same
+    /// value joins.
+    #[test]
+    fn collect_forward_deps_honours_the_rows_nondep() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            let h = ctx.push_let_decl(None, sort0, a, true).expect("have");
+            let l = ctx.push_let_decl(None, sort0, a, false).expect("let");
+            let snap = ctx.current_lctx();
+            ctx.lctx_restore(cp);
+
+            let closed = ctx
+                .collect_forward_deps(&snap, vec![a])
+                .expect("collect_forward_deps");
+            assert_eq!(
+                closed,
+                vec![a, l],
+                "the let's value depends on `a`; the have's is ignored"
+            );
+            assert!(!closed.contains(&h));
         });
     }
 
@@ -1084,9 +1218,12 @@ mod tests {
             let a = fresh_fvar(ctx, sort0, "a");
             let b = fresh_fvar(ctx, sort0, "b");
             let (m, _) = fresh_mvar(ctx, sort0);
+            let snap = ctx.current_lctx();
             ctx.lctx_restore(cp);
 
-            let app = ctx.mk_mvar_app(m, &[a, b]).expect("mk_mvar_app");
+            let app = ctx
+                .mk_mvar_app(m, &[a, b], &snap, crate::MVarKind::Natural)
+                .expect("mk_mvar_app");
             // Expect `((m a) b)`: the LAST-declared fvar is the OUTERMOST
             // argument.
             match ctx.node(app) {
@@ -1105,6 +1242,49 @@ mod tests {
         });
     }
 
+    /// oracle: `mkMVarApp` (`:1090-1097`) — a genuine let-bound fvar is
+    /// NOT applied to the auxiliary metavariable; a `have` IS, because
+    /// `LocalDecl.isLet` is false for a nondep ldecl.
+    #[test]
+    fn mk_mvar_app_skips_a_let_but_applies_a_have() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+            let cp = ctx.lctx_checkpoint();
+            let l = ctx.push_let_decl(None, sort0, sort0, false).expect("let");
+            let h = ctx.push_let_decl(None, sort0, sort0, true).expect("have");
+            let (m, _) = fresh_mvar(ctx, sort0);
+            let snap = ctx.current_lctx();
+            ctx.lctx_restore(cp);
+
+            let app = ctx
+                .mk_mvar_app(m, &[l, h], &snap, crate::MVarKind::Natural)
+                .expect("mk_mvar_app");
+            // Only the `have` is applied: `?m h`.
+            let expected = ctx
+                .scratch
+                .expr_app(Some(ctx.view.store), m, h)
+                .expect("app");
+            assert_eq!(app, expected, "the let is skipped, the have applied");
+
+            // A syntheticOpaque metavariable applies EVERYTHING (`:1096`):
+            // `?m l h`.
+            let opaque = ctx
+                .mk_mvar_app(m, &[l, h], &snap, crate::MVarKind::SyntheticOpaque)
+                .expect("mk_mvar_app");
+            let ml = ctx
+                .scratch
+                .expr_app(Some(ctx.view.store), m, l)
+                .expect("app");
+            let expected = ctx
+                .scratch
+                .expr_app(Some(ctx.view.store), ml, h)
+                .expect("app");
+            assert_eq!(opaque, expected, "syntheticOpaque applies the let too");
+        });
+    }
+
     /// TDD RED/GREEN for plan task 8. `?m : Sort 0` reverted over
     /// `[a : Sort 0]` gets the type `∀ (a : Sort 0), Sort 0`.
     #[test]
@@ -1120,7 +1300,7 @@ mod tests {
             ctx.lctx_restore(cp);
 
             let ty = ctx
-                .mk_aux_mvar_type(&snap, &[a], sort0)
+                .mk_aux_mvar_type(&snap, &[a], sort0, crate::MVarKind::Natural, true)
                 .expect("mk_aux_mvar_type");
             match ctx.node(ty) {
                 Node::Forall {
@@ -1151,7 +1331,7 @@ mod tests {
 
             // The metavariable's own type IS the fvar.
             let ty = ctx
-                .mk_aux_mvar_type(&snap, &[a], a)
+                .mk_aux_mvar_type(&snap, &[a], a, crate::MVarKind::Natural, true)
                 .expect("mk_aux_mvar_type");
             match ctx.node(ty) {
                 Node::Forall { body, .. } => assert!(
@@ -1165,30 +1345,219 @@ mod tests {
         });
     }
 
-    /// A let-declaration in `to_revert` is REFUSED, not guessed at:
-    /// leanr's LocalDecl carries no `nondep` bit, so the oracle's two
-    /// ldecl arms have no input.
+    /// The binder name `mk_aux_mvar_type` reads for an fvar out of `snap`.
+    fn binder_name_of(
+        ctx: &crate::MetaCtx,
+        snap: &crate::local_snapshot::LocalCtxSnapshot,
+        x: leanr_kernel::bank::ExprId,
+    ) -> Option<leanr_kernel::bank::NameId> {
+        snap.lctx()
+            .get(fvar_id(ctx, x))
+            .expect("declared in snap")
+            .binder_name
+    }
+
+    fn bvar(ctx: &mut crate::MetaCtx, i: u64) -> leanr_kernel::bank::ExprId {
+        ctx.scratch
+            .expr_bvar(Some(ctx.view.store), &leanr_kernel::Nat::from(i))
+            .expect("bvar")
+    }
+
+    /// oracle `:1133-1136`: a `have` (nondep ldecl) in `to_revert`
+    /// becomes a plain `forall` with `BinderInfo::Default` — it is a
+    /// cdecl here, its value dropped. Kills "nondep treated as false":
+    /// the unused genuine-let arm would lower instead and leave `Sort 0`.
     #[test]
-    fn mk_aux_mvar_type_refuses_a_let_decl_in_to_revert() {
+    fn mk_aux_mvar_type_turns_a_have_into_a_forall() {
         with_ctx(|ctx| {
             let base = Some(ctx.view.store);
             let zero = ctx.scratch.level_zero(base).expect("level");
             let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
-
             let cp = ctx.lctx_checkpoint();
-            let v = ctx
-                .push_let_decl(None, sort0, sort0)
-                .expect("push_let_decl");
+            let h = ctx.push_let_decl(None, sort0, sort0, true).expect("have");
             let snap = ctx.current_lctx();
             ctx.lctx_restore(cp);
 
-            let err = ctx
-                .mk_aux_mvar_type(&snap, &[v], sort0)
-                .expect_err("a let-decl in to_revert is refused");
-            assert!(
-                format!("{err:?}").contains("let-decl"),
-                "the refusal names itself: {err:?}"
+            let out = ctx
+                .mk_aux_mvar_type(&snap, &[h], sort0, crate::MVarKind::Natural, true)
+                .expect("mk_aux_mvar_type");
+            let n = binder_name_of(ctx, &snap, h);
+            let expected = ctx
+                .scratch
+                .expr_forall(
+                    Some(ctx.view.store),
+                    n,
+                    sort0,
+                    sort0,
+                    leanr_kernel::BinderInfo::Default,
+                )
+                .expect("forall");
+            assert_eq!(out, expected, "a have reverts as `∀ (h : Sort 0), Sort 0`");
+        });
+    }
+
+    /// oracle `:1138-1148`, non-syntheticOpaque: a genuine `let` whose
+    /// binder the accumulated type USES becomes a `letE` (with
+    /// `nondep := false`, `:1142`). `?m : l` over `[l := Sort 0]` gets
+    /// `let l : Sort 0 := Sort 0; #0`.
+    #[test]
+    fn mk_aux_mvar_type_keeps_a_used_let_as_a_let() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+            let cp = ctx.lctx_checkpoint();
+            let l = ctx.push_let_decl(None, sort0, sort0, false).expect("let");
+            let snap = ctx.current_lctx();
+            ctx.lctx_restore(cp);
+
+            // The mvar's type mentions `l`, so after abstraction the
+            // accumulated `e` has `#0` loose.
+            let out = ctx
+                .mk_aux_mvar_type(&snap, &[l], l, crate::MVarKind::Natural, true)
+                .expect("mk_aux_mvar_type");
+            let n = binder_name_of(ctx, &snap, l);
+            let b0 = bvar(ctx, 0);
+            let expected = ctx
+                .scratch
+                .expr_let(Some(ctx.view.store), n, sort0, sort0, b0, false)
+                .expect("let");
+            assert_eq!(out, expected, "oracle :1142 builds the letE with `false`");
+        });
+    }
+
+    /// oracle `:1155-1156`, non-syntheticOpaque: an UNUSED genuine let is
+    /// dropped and the accumulated type LOWERED by one. Controller
+    /// ruling R5: the type must carry a loose bvar ABOVE the let's, or
+    /// lower/lift are both the identity. `[c : Sort 0, l := Sort 0]` with
+    /// `?m : c` abstracts to `#1` (`c`) under `l`'s `#0`; dropping `l`
+    /// must lower it to `#0` under `∀ c`.
+    ///
+    /// Kills: lift instead of lower (`#2`); dropping the
+    /// `has_loose_bvar` condition (a `letE` survives); and
+    /// `has_loose_bvar(e, 0)` weakened to `loose_bvar_range() > 0`
+    /// (`#1` has range 2, so a `letE` survives).
+    #[test]
+    fn mk_aux_mvar_type_drops_an_unused_let_and_lowers() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+            let cp = ctx.lctx_checkpoint();
+            let c = fresh_fvar(ctx, sort0, "c");
+            let l = ctx.push_let_decl(None, sort0, sort0, false).expect("let");
+            let snap = ctx.current_lctx();
+            ctx.lctx_restore(cp);
+
+            // The type mentions `c` but NOT `l`.
+            let out = ctx
+                .mk_aux_mvar_type(&snap, &[c, l], c, crate::MVarKind::Natural, true)
+                .expect("mk_aux_mvar_type");
+            let n = binder_name_of(ctx, &snap, c);
+            let b0 = bvar(ctx, 0);
+            let expected = ctx
+                .scratch
+                .expr_forall(
+                    Some(ctx.view.store),
+                    n,
+                    sort0,
+                    b0,
+                    leanr_kernel::BinderInfo::Default,
+                )
+                .expect("forall");
+            assert_eq!(
+                out, expected,
+                "the unused let leaves no binder and `c`'s #1 is lowered to #0"
             );
+        });
+    }
+
+    /// oracle `:1143-1147`, syntheticOpaque: a USED genuine let becomes
+    /// `∀ (l : T), (let l : T := v; e)↑`, the WHOLE `letE` lifted by one
+    /// (the file's "Gruesome details"). `[c : Sort 0, l : Sort 0 := c]`
+    /// with `?m : c l`: `e = #1 #0`, `v = #0` (`c`, abstracted over the
+    /// prefix `[c]`). Lifting the whole `letE` moves `v` to `#1` and the
+    /// body's `c` to `#2`; lifting only the body would leave `v` at `#0`.
+    #[test]
+    fn mk_aux_mvar_type_lifts_a_used_let_under_a_forall_when_opaque() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+            let cp = ctx.lctx_checkpoint();
+            let c = fresh_fvar(ctx, sort0, "c");
+            let l = ctx.push_let_decl(None, sort0, c, false).expect("let");
+            let snap = ctx.current_lctx();
+            ctx.lctx_restore(cp);
+
+            let ty = ctx
+                .scratch
+                .expr_app(Some(ctx.view.store), c, l)
+                .expect("app");
+            let out = ctx
+                .mk_aux_mvar_type(&snap, &[c, l], ty, crate::MVarKind::SyntheticOpaque, true)
+                .expect("mk_aux_mvar_type");
+
+            let st = Some(ctx.view.store);
+            let nc = binder_name_of(ctx, &snap, c);
+            let nl = binder_name_of(ctx, &snap, l);
+            let b0 = bvar(ctx, 0);
+            let b1 = bvar(ctx, 1);
+            let b2 = bvar(ctx, 2);
+            let body = ctx.scratch.expr_app(st, b2, b0).expect("app");
+            let let_e = ctx
+                .scratch
+                .expr_let(st, nl, sort0, b1, body, false)
+                .expect("let");
+            let inner = ctx
+                .scratch
+                .expr_forall(st, nl, sort0, let_e, leanr_kernel::BinderInfo::Default)
+                .expect("forall");
+            let expected = ctx
+                .scratch
+                .expr_forall(st, nc, sort0, inner, leanr_kernel::BinderInfo::Default)
+                .expect("forall");
+            assert_eq!(
+                out, expected,
+                "∀ c, ∀ (l : Sort 0), let l : Sort 0 := #1; #2 #0"
+            );
+        });
+    }
+
+    /// oracle `:1150-1154`, syntheticOpaque: an UNUSED genuine let is
+    /// neither dropped nor lowered — it becomes a plain `forall`, so the
+    /// auxiliary's arity matches `mk_mvar_app`, which applies every fvar
+    /// for a syntheticOpaque kind. `[c, l := Sort 0]`, `?m : c` gives
+    /// `∀ c, ∀ (l : Sort 0), #1`.
+    #[test]
+    fn mk_aux_mvar_type_turns_an_unused_let_into_a_forall_when_opaque() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+            let cp = ctx.lctx_checkpoint();
+            let c = fresh_fvar(ctx, sort0, "c");
+            let l = ctx.push_let_decl(None, sort0, sort0, false).expect("let");
+            let snap = ctx.current_lctx();
+            ctx.lctx_restore(cp);
+
+            let out = ctx
+                .mk_aux_mvar_type(&snap, &[c, l], c, crate::MVarKind::SyntheticOpaque, true)
+                .expect("mk_aux_mvar_type");
+
+            let st = Some(ctx.view.store);
+            let nc = binder_name_of(ctx, &snap, c);
+            let nl = binder_name_of(ctx, &snap, l);
+            let b1 = bvar(ctx, 1);
+            let inner = ctx
+                .scratch
+                .expr_forall(st, nl, sort0, b1, leanr_kernel::BinderInfo::Default)
+                .expect("forall");
+            let expected = ctx
+                .scratch
+                .expr_forall(st, nc, sort0, inner, leanr_kernel::BinderInfo::Default)
+                .expect("forall");
+            assert_eq!(out, expected, "∀ c, ∀ (l : Sort 0), #1");
         });
     }
 
@@ -1221,7 +1590,7 @@ mod tests {
             ctx.lctx_restore(cp);
 
             let ty = ctx
-                .mk_aux_mvar_type(&snap, &[a, b], sort0)
+                .mk_aux_mvar_type(&snap, &[a, b], sort0, crate::MVarKind::Natural, true)
                 .expect("mk_aux_mvar_type");
             // Outer forall: binds `a`, whose type must be the UNABSTRACTED
             // `Sort 0` — nothing precedes `a` in `to_revert`.
@@ -1311,7 +1680,7 @@ mod tests {
 
             let snap = ctx.current_lctx();
             let ty = ctx
-                .mk_aux_mvar_type(&snap, &[m], sort0)
+                .mk_aux_mvar_type(&snap, &[m], sort0, crate::MVarKind::Natural, true)
                 .expect("mk_aux_mvar_type");
             match ctx.node(ty) {
                 Node::Forall {
@@ -1827,7 +2196,7 @@ mod tests {
         });
     }
     /// Fix round 1 (task 9 review, Important 3), retargeted in fix
-    /// round 2: the `withFreshCache` SCOPE, oracle `:1205`. The reset
+    /// round 2: the `withFreshCache` SCOPE, oracle `:1204`. The reset
     /// wraps the whole of `mkAuxMVarType`, not each abstraction inside
     /// it, and the difference is observable rather than merely a matter
     /// of recomputation.
@@ -1917,7 +2286,7 @@ mod tests {
                 crate::MVarId(hy),
                 "ONE auxiliary metavariable for the NESTED shared `?o`: the \
                  oracle's `withFreshCache` wraps the whole of `mkAuxMVarType` \
-                 (`:1205`), so both sites share a cache, and a nested occurrence \
+                 (`:1204`), so both sites share a cache, and a nested occurrence \
                  is reached through the cached entry"
             );
             ctx.lctx_restore(cp);
