@@ -25,6 +25,7 @@ mod level;
 mod local_decl_kind;
 mod local_instance;
 mod local_snapshot;
+mod loose_bvar;
 mod metactx;
 mod mk_binding;
 mod mvar_ctx;
