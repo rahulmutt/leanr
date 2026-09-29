@@ -151,7 +151,6 @@ impl LocalCtxSnapshot {
 
     /// The attribute row for `id` in THIS context — a metavariable's own,
     /// not the ambient one. `mk_aux_mvar_type` and `mk_mvar_app` read it.
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn entry(&self, id: NameId) -> Option<&LocalEntry> {
         self.local_names.iter().rev().find(|e| e.id == id)
     }

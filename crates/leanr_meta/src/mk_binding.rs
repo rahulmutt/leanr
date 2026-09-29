@@ -125,26 +125,24 @@ impl<'e> MetaCtx<'e> {
         }
     }
 
-    /// oracle: `findLocalDeclDependsOn` (`:744`) / `localDeclDependsOn`
+    /// oracle: `findLocalDeclDependsOn` (`:744-753`) / `localDeclDependsOn`
     /// (`:767`) — does a local declaration depend on any fvar in `pf`?
-    /// Its type always counts; its value counts when it has one.
-    ///
-    /// The oracle's `generalizeNondepLet` parameter is NOT modelled:
-    /// leanr's `LocalDecl` carries no `nondep` bit at all
-    /// (`leanr_kernel/src/local_ctx.rs:37-43` — `mk_let_binding` takes
-    /// it as a caller argument instead), so there is nothing to branch
-    /// on. This is the same missing bit that makes `mk_aux_mvar_type`
-    /// refuse an ldecl in `to_revert`; see that function's doc.
+    /// Its type always counts. Its value counts when it has one, EXCEPT
+    /// when `generalize_nondep_let && nondep`: a nondep ldecl (`have`) is
+    /// then a cdecl for dependency purposes and only its type decides
+    /// (oracle `:748-749`).
     pub(crate) fn local_decl_depends_on(
         &mut self,
         ty: ExprId,
         value: Option<ExprId>,
+        nondep: bool,
         pf: &[NameId],
+        generalize_nondep_let: bool,
     ) -> Result<bool, MetaError> {
         if self.depends_on(ty, pf)? {
             return Ok(true);
         }
-        match value {
+        match value.filter(|_| !(generalize_nondep_let && nondep)) {
             Some(v) => self.depends_on(v, pf),
             None => Ok(false),
         }
@@ -225,7 +223,11 @@ impl<'e> MetaCtx<'e> {
                 continue;
             };
             let (ty, value) = (decl.ty, decl.value);
-            if self.local_decl_depends_on(ty, value, &collected_ids)? {
+            let nondep = lctx.entry(id).is_some_and(|e| e.nondep);
+            // `generalizeNondepLet := true`, the oracle default at
+            // `collectForwardDeps` (`:1037`); leanr has no caller
+            // passing `false`.
+            if self.local_decl_depends_on(ty, value, nondep, &collected_ids, true)? {
                 collected.push(fvar);
                 collected_ids.push(id);
             }
@@ -258,16 +260,29 @@ impl<'e> MetaCtx<'e> {
 
     /// oracle: `mkMVarApp` (`:1090-1097`) — `mvar` applied to `xs`, first
     /// declared innermost, so that after abstraction the arguments read
-    /// `?new #(n-1) … #0`.
-    ///
-    /// The oracle's two kind branches (`:1094-1097`) differ only in
-    /// whether a LET-bound fvar is applied. Under this port's ldecl
-    /// refusal (see `mk_aux_mvar_type`) `xs` never contains one, so the
-    /// branches coincide and the `syntheticOpaque` form — apply
-    /// everything — is the one written.
-    pub(crate) fn mk_mvar_app(&mut self, mvar: ExprId, xs: &[ExprId]) -> Result<ExprId, MetaError> {
+    /// `?new #(n-1) … #0`. A genuine let-bound fvar is skipped unless
+    /// `kind` is syntheticOpaque (see the loop body).
+    pub(crate) fn mk_mvar_app(
+        &mut self,
+        mvar: ExprId,
+        xs: &[ExprId],
+        lctx: &LocalCtxSnapshot,
+        kind: crate::MVarKind,
+    ) -> Result<ExprId, MetaError> {
         let mut e = mvar;
         for x in xs {
+            // oracle `:1094-1097`: a syntheticOpaque metavariable applies
+            // every fvar; otherwise a genuine let-bound one is skipped.
+            // `LocalDecl.isLet` is FALSE for a nondep ldecl, so a `have`
+            // is applied like a cdecl.
+            let is_let = kind != crate::MVarKind::SyntheticOpaque
+                && self.fvar_id_of(*x).is_some_and(|id| {
+                    lctx.lctx().get(id).is_some_and(|d| d.value.is_some())
+                        && lctx.entry(id).is_some_and(|en| !en.nondep)
+                });
+            if is_let {
+                continue;
+            }
             e = self.scratch.expr_app(Some(self.view.store), e, *x)?;
         }
         Ok(e)
@@ -658,7 +673,7 @@ impl<'e> MetaCtx<'e> {
         let mut aux_cache = ElimCache::default();
         let new_ty = self.mk_aux_mvar_type_with(&mvar_lctx, &to_revert, decl_ty, &mut aux_cache)?;
         let (new_mvar, new_id) = self.mk_aux_mvar_at(new_lctx, new_ty, kind)?;
-        let result = self.mk_mvar_app(new_mvar, &to_revert)?;
+        let result = self.mk_mvar_app(new_mvar, &to_revert, &mvar_lctx, kind)?;
 
         if kind != crate::MVarKind::SyntheticOpaque {
             // oracle `:1214-1215`.
@@ -907,15 +922,13 @@ mod tests {
         });
     }
 
-    /// Final-review fix wave, item 4: `local_decl_depends_on`'s VALUE
-    /// branch (`:147-148`) had no direct test — every existing caller
-    /// reaches it only through `collect_forward_deps`'s corpus-shaped
-    /// fixtures, none of which isolate a let-decl whose TYPE is clean
-    /// but whose VALUE alone carries the dependency. Measured: mutating
-    /// that branch to `Ok(false)` left the entire workspace suite green;
-    /// this is the test that splits on it.
+    /// oracle: `findLocalDeclDependsOn` (`MetavarContext.lean:744-753`).
+    /// The VALUE is ignored exactly when `generalizeNondepLet && nondep`
+    /// (a nondep ldecl is a cdecl for dependency purposes); in every
+    /// other cell a value carrying the dependency counts. The type is
+    /// clean throughout, so only the value branch can answer.
     #[test]
-    fn local_decl_depends_on_sees_a_dependency_carried_only_by_the_value() {
+    fn local_decl_depends_on_ignores_a_value_only_when_generalizing_a_nondep() {
         with_ctx(|ctx| {
             let base = Some(ctx.view.store);
             let zero = ctx.scratch.level_zero(base).expect("level");
@@ -924,26 +937,54 @@ mod tests {
             let cp = ctx.lctx_checkpoint();
             let a = fresh_fvar(ctx, sort0, "a");
             let ia = fvar_id(ctx, a);
-
-            // The TYPE is `Sort 0` — mentions nothing, so
-            // `local_decl_depends_on`'s first check (the type) must
-            // return false and fall through to the value. The VALUE is
-            // `a` itself.
             assert!(
                 !ctx.depends_on(sort0, &[ia]).expect("depends_on"),
                 "the type must NOT depend on `a`, or this test would not \
                  discriminate the value branch at all"
             );
+            let mut cell = |nondep: bool, flag: bool| {
+                ctx.local_decl_depends_on(sort0, Some(a), nondep, &[ia], flag)
+                    .expect("local_decl_depends_on")
+            };
+            assert!(!cell(true, true), "nondep + generalize: value ignored");
+            assert!(cell(true, false), "nondep, not generalizing: value counts");
+            assert!(cell(false, true), "a genuine let: value counts");
             assert!(
-                ctx.local_decl_depends_on(sort0, Some(a), &[ia])
-                    .expect("local_decl_depends_on"),
-                "the VALUE mentions `a`; a let-decl with a clean type and \
-                 a dependent value must still be judged dependent — \
-                 oracle `findLocalDeclDependsOn`/`localDeclDependsOn` \
-                 (`:744`, `:767`) checks the value whenever one is \
-                 present"
+                cell(false, false),
+                "a genuine let, not generalizing: value counts"
             );
             ctx.lctx_restore(cp);
+        });
+    }
+
+    /// The CALLER of `local_decl_depends_on`: `collect_forward_deps`
+    /// must pass the row's `nondep` (oracle default
+    /// `generalizeNondepLet := true`, `:1037`). A `have` whose value
+    /// alone mentions the reverted `a` stays out; a `let` with the same
+    /// value joins.
+    #[test]
+    fn collect_forward_deps_honours_the_rows_nondep() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            let h = ctx.push_let_decl(None, sort0, a, true).expect("have");
+            let l = ctx.push_let_decl(None, sort0, a, false).expect("let");
+            let snap = ctx.current_lctx();
+            ctx.lctx_restore(cp);
+
+            let closed = ctx
+                .collect_forward_deps(&snap, vec![a])
+                .expect("collect_forward_deps");
+            assert_eq!(
+                closed,
+                vec![a, l],
+                "the let's value depends on `a`; the have's is ignored"
+            );
+            assert!(!closed.contains(&h));
         });
     }
 
@@ -1084,9 +1125,12 @@ mod tests {
             let a = fresh_fvar(ctx, sort0, "a");
             let b = fresh_fvar(ctx, sort0, "b");
             let (m, _) = fresh_mvar(ctx, sort0);
+            let snap = ctx.current_lctx();
             ctx.lctx_restore(cp);
 
-            let app = ctx.mk_mvar_app(m, &[a, b]).expect("mk_mvar_app");
+            let app = ctx
+                .mk_mvar_app(m, &[a, b], &snap, crate::MVarKind::Natural)
+                .expect("mk_mvar_app");
             // Expect `((m a) b)`: the LAST-declared fvar is the OUTERMOST
             // argument.
             match ctx.node(app) {
@@ -1102,6 +1146,49 @@ mod tests {
                 }
                 other => panic!("expected App, got {other:?}"),
             }
+        });
+    }
+
+    /// oracle: `mkMVarApp` (`:1090-1097`) — a genuine let-bound fvar is
+    /// NOT applied to the auxiliary metavariable; a `have` IS, because
+    /// `LocalDecl.isLet` is false for a nondep ldecl.
+    #[test]
+    fn mk_mvar_app_skips_a_let_but_applies_a_have() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+            let cp = ctx.lctx_checkpoint();
+            let l = ctx.push_let_decl(None, sort0, sort0, false).expect("let");
+            let h = ctx.push_let_decl(None, sort0, sort0, true).expect("have");
+            let (m, _) = fresh_mvar(ctx, sort0);
+            let snap = ctx.current_lctx();
+            ctx.lctx_restore(cp);
+
+            let app = ctx
+                .mk_mvar_app(m, &[l, h], &snap, crate::MVarKind::Natural)
+                .expect("mk_mvar_app");
+            // Only the `have` is applied: `?m h`.
+            let expected = ctx
+                .scratch
+                .expr_app(Some(ctx.view.store), m, h)
+                .expect("app");
+            assert_eq!(app, expected, "the let is skipped, the have applied");
+
+            // A syntheticOpaque metavariable applies EVERYTHING (`:1096`):
+            // `?m l h`.
+            let opaque = ctx
+                .mk_mvar_app(m, &[l, h], &snap, crate::MVarKind::SyntheticOpaque)
+                .expect("mk_mvar_app");
+            let ml = ctx
+                .scratch
+                .expr_app(Some(ctx.view.store), m, l)
+                .expect("app");
+            let expected = ctx
+                .scratch
+                .expr_app(Some(ctx.view.store), ml, h)
+                .expect("app");
+            assert_eq!(opaque, expected, "syntheticOpaque applies the let too");
         });
     }
 
