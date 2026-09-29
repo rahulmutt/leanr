@@ -2247,9 +2247,9 @@ mod tests {
         }
     }
 
-    /// The rows carry `nondep` and the kind, and they survive every
-    /// operation that moves a local context: restore truncates them,
-    /// `install_lctx` swaps them, `reduced` filters them.
+    /// The rows carry `nondep` and the kind, and `lctx_restore` truncates
+    /// them. `install_lctx` and `reduced` are covered by
+    /// `local_entries_round_trip_through_a_snapshot` below.
     #[test]
     fn local_entries_record_nondep_and_kind() {
         with_class_ctx(|ctx, add| {

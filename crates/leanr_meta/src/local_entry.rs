@@ -26,9 +26,12 @@ use crate::LocalDeclKind;
 /// The attributes of one local declaration, positionally parallel to
 /// `LocalContext`'s own decl list.
 ///
-/// `whnf`'s zeta-delta reads `nondep` through `MetaCtx::local_entry`; the
-/// later tasks (`get_value`, `mk_aux_mvar_type`) read it through
-/// `LocalCtxSnapshot::entry` as well.
+/// `nondep` readers: against the AMBIENT context, through
+/// `MetaCtx::local_entry`, `whnf`'s zeta-delta, and `assign.rs`'s
+/// `simp_assignment_arg_aux`, `mk_lambda_fvars_with_let_deps` and
+/// `check_assignment_scope_body`; against a metavariable's OWN context,
+/// through `LocalCtxSnapshot::entry`, `collect_forward_deps`,
+/// `mk_mvar_app` and `mk_aux_mvar_type_with` (`mk_binding.rs`).
 #[derive(Clone)]
 pub(crate) struct LocalEntry {
     /// The `Expr::fvar` `push_local_decl` returned.

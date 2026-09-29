@@ -848,21 +848,28 @@ impl<'e> MetaCtx<'e> {
     // mkLambdaFVarsWithLetDeps
     // ===================================================================
 
-    /// oracle: `mkLambdaFVarsWithLetDeps` (ExprDefEq.lean:549-...). The
-    /// let-DEPENDENCY collection (`addLetDeps`/`hasLetDeclsInBetween`)
-    /// needs to enumerate `LocalContext` decls POSITIONALLY between two
-    /// fvars — an API this crate's `LocalContext` (`leanr_kernel`,
-    /// untouched per this task's own constraint) does not expose at
-    /// all. Every fvar this module's own machinery ever mints
-    /// (`is_def_eq_binding_shallow`'s telescope, `defeq.rs`) is a plain
-    /// `mk_local_decl`, never `mk_let_decl` — the scenario
-    /// `hasLetDeclsInBetween` exists to detect cannot arise via any
-    /// path this task builds. Defensively (not just by construction):
-    /// if any `xs` entry itself somehow carries a `value` (would only
-    /// happen if that invariant were violated elsewhere), that is
-    /// treated as the named seam below rather than silently
-    /// mis-abstracted. SEAM: plan 4 / M4b for real let-dependency
-    /// abstraction.
+    /// oracle: `mkLambdaFVarsWithLetDeps` (ExprDefEq.lean:549-554).
+    ///
+    /// What reaches `xs`: `process_assignment`'s pattern args, and
+    /// `assign_const`'s `forall_bounded_telescope` cdecls. A `have`
+    /// (`nondep := true`) reaches `xs` deliberately: `simpAssignmentArg`
+    /// leaves it alone (`getValue?`'s `allowNondep := false`), so it is a
+    /// Miller-pattern argument, and it is lambda-abstracted like a cdecl
+    /// — the oracle's `mkLambdaFVars` runs with `generalizeNondepLet :=
+    /// true` (`MetavarContext.lean:1330-1332`). A genuine let
+    /// (`nondep := false`) does not reach `xs` from `process_assignment`,
+    /// because `simp_assignment_arg` substitutes its value first.
+    ///
+    /// SEAM: the let-DEPENDENCY collection (`hasLetDeclsInBetween`/
+    /// `addLetDeps`, :559-640) looks at genuine lets declared
+    /// POSITIONALLY between `xs[0]` and `xs.back` and adds the ones `v`
+    /// uses as `let` binders. leanr does not port it. It is harmless
+    /// today only because `check_assignment_scope` already rejects any
+    /// genuine-let fvar in `v` that the mvar cannot see (see the
+    /// `checkFVar` seam there), so such an assignment fails before it
+    /// gets here. The guard below refuses a genuine let that is itself
+    /// an `xs` entry, rather than abstracting it as a lambda and dropping
+    /// its value.
     fn mk_lambda_fvars_with_let_deps(
         &mut self,
         xs: &[ExprId],
@@ -887,8 +894,9 @@ impl<'e> MetaCtx<'e> {
     /// `pub use subst::{...}` list omits it) — `infer.rs`'s
     /// `rebuild_forall` hit the identical gap for `mk_pi` and wrote its
     /// own fold; this mirrors that exact idiom for `Lam` instead of
-    /// `Forall`, minus the let-binder branch (unreachable here, see
-    /// this function's only caller's doc comment).
+    /// `Forall`, minus the let-binder branch: its only caller refuses a
+    /// genuine let, and a `have` is abstracted as a lambda (the oracle's
+    /// `generalizeNondepLet := true`).
     fn mk_lambda_over_fvars(&mut self, xs: &[ExprId], body: ExprId) -> Result<ExprId, MetaError> {
         let mut r = body;
         let mut i = xs.len();
@@ -984,12 +992,23 @@ impl<'e> MetaCtx<'e> {
     /// either one of the abstracted pattern `fvars`, or already visible
     /// in `mvar_id`'s own declared local context (`mvar_decl.lctx`) —
     /// anything else is a real, oracle-agreeing out-of-scope rejection
-    /// (`throwOutOfScopeFVar`, :870 — not an approximation gap; the ONE
-    /// rescue for a bare out-of-scope fvar, `checkFVar`'s non-dep-let
-    /// value-follow, :864-870, is excluded defensively below since this
-    /// crate's own machinery never mints a let-bound fvar, matching
-    /// `mk_lambda_fvars_with_let_deps`'s own reasoning). `mvar_id == id`
-    /// (the metavariable being assigned occurring directly in `v`) is
+    /// (`throwOutOfScopeFVar`, :878 — not an approximation gap).
+    ///
+    /// SEAM (live): the ONE rescue for an out-of-scope fvar is
+    /// `checkFVar`'s arm for a GENUINE let (`.ldecl (nondep := false)`,
+    /// :873), which recurses into the let's value. leanr answers `false`
+    /// instead. Let and `have` elaboration do mint let-bound fvars, so
+    /// this is reachable. `?m =?= l`, with `l` a genuine `let l :=
+    /// Nat.zero` and `?m` minted outside it, is `true` on the oracle
+    /// (`?m := Nat.zero`) whatever `zetaDelta` says, since `checkFVar`
+    /// is not gated by it. Here the quick check fails; with `zeta_delta`
+    /// on (the default) a later zeta-delta unfold of `l` still reaches
+    /// `?m := N.zero`, but with it off the answer is `false`. Pinned by
+    /// `check_fvar_seam_shows_only_with_zeta_delta_off`. A `have`
+    /// (`nondep := true`) is "locally a cdecl" and takes the
+    /// `fvars.contains` test, as the oracle does.
+    ///
+    /// `mvar_id == id` (the metavariable being assigned occurring directly in `v`) is
     /// the ONE non-approximated `MVar` case (:1113: `if mvarId' ==
     /// mvarId then return false`). Every OTHER metavariable met is
     /// SEAM: `isSubPrefixOf` (:1114) — this crate's `LocalContext`
@@ -1044,11 +1063,12 @@ impl<'e> MetaCtx<'e> {
                 }
                 // oracle: `checkFVar` matches `.ldecl (nondep := false)`
                 // only; a `have` is "locally a cdecl" and falls through
-                // to the `fvars.contains` test (`ExprDefEq.lean:851-877`).
+                // to the `fvars.contains` test (`ExprDefEq.lean:851-878`).
                 let is_let = self.lctx.get(fid).and_then(|d| d.value).is_some()
                     && self.local_entry(fid).is_some_and(|e| !e.nondep);
                 if is_let {
-                    // Doc comment above: defensively unreachable.
+                    // SEAM (doc comment above): the oracle recurses into
+                    // the let's value; leanr refuses.
                     return Ok(false);
                 }
                 Ok(fvars.contains(&e))
@@ -2614,9 +2634,10 @@ mod tests {
 
     /// oracle: `checkFVar` matches `.ldecl (nondep := false)`; a `have` is
     /// "locally a cdecl", judged by membership in the abstracted fvars
-    /// (`ExprDefEq.lean:851-877`). A genuine let instead recurses into its
-    /// value; leanr's quick check returns `false` for it (defensive), so
-    /// it is out of scope even when listed in `fvars`. The mvar is minted
+    /// (`ExprDefEq.lean:851-878`). A genuine let instead recurses into its
+    /// value; leanr's quick check returns `false` for it (the live
+    /// `checkFVar` seam), so it is out of scope even when listed in
+    /// `fvars`. The mvar is minted
     /// BEFORE the decls so neither is in its lctx.
     #[test]
     fn check_assignment_scope_body_treats_a_have_as_a_cdecl() {
@@ -2657,17 +2678,18 @@ mod tests {
     }
 
     /// Consumers 5/6/7 together: a `have` is a Miller-pattern argument.
-    /// `?m : Nat → Nat` is minted OUTSIDE the decl; `?m h =?= h` must
-    /// abstract `h` and assign `?m := fun _ : Nat => #0`. A genuine `let`
+    /// `?m : N → N` is minted OUTSIDE the decl; `?m h =?= h` must
+    /// abstract `h` and assign `?m := fun _ : N => #0`. A genuine `let`
     /// instead has its value substituted by `simpAssignmentArg`, the
     /// argument is no longer an fvar, and the oracle answers `false`
-    /// (both answers measured on the oracle, v4.33.0-rc1).
+    /// (both answers measured on the oracle, v4.33.0-rc1, over `Nat`;
+    /// `Prelude0`'s `N` is used here because it has no `Nat`).
     #[test]
     fn a_have_is_a_pattern_argument_and_a_let_is_not() {
         use crate::test_support::{const_named, with_prelude0_ctx};
         with_prelude0_ctx(|ctx| {
-            let nat = const_named(ctx, "Nat");
-            let zero = const_named(ctx, "Nat.zero");
+            let nat = const_named(ctx, "N");
+            let zero = crate::test_support::const_dotted(ctx, "N", "zero");
             let nat_to_nat = mk_forall(ctx, nat, nat);
             let bvar0 = ctx
                 .scratch
@@ -2698,6 +2720,36 @@ mod tests {
                     assert_eq!(got, expected, "?m := fun _ => #0");
                 } else {
                     assert!(!ctx.mctx.is_assigned(mid), "a let leaves ?m alone");
+                }
+                ctx.lctx_restore(cp);
+            }
+        });
+    }
+
+    /// SEAM pin (see `check_assignment_scope`'s doc): `?m =?= l` for a
+    /// genuine let `l` outside `?m`'s context. Oracle (measured,
+    /// v4.33.0-rc1, over `Nat`): `true`, `?m := Nat.zero`, with
+    /// `zetaDelta` on AND off. leanr agrees only with it on; with it off
+    /// the quick check's refusal is final. Flip the `false` half when
+    /// `checkFVar`'s value-follow is ported.
+    #[test]
+    fn check_fvar_seam_shows_only_with_zeta_delta_off() {
+        use crate::test_support::{const_dotted, const_named, with_prelude0_ctx};
+        with_prelude0_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let zero = const_dotted(ctx, "N", "zero");
+            for (zeta_delta, want) in [(true, true), (false, false)] {
+                ctx.cfg.zeta_delta = zeta_delta;
+                let cp = ctx.lctx_checkpoint();
+                let (m, mid) = fresh_mvar(ctx, n);
+                let l = ctx.push_let_decl(None, n, zero, false).expect("let");
+                assert_eq!(
+                    ctx.is_def_eq(m, l).expect("defeq"),
+                    want,
+                    "zeta_delta={zeta_delta}"
+                );
+                if want {
+                    assert_eq!(ctx.mctx.assignment(mid), Some(zero));
                 }
                 ctx.lctx_restore(cp);
             }
