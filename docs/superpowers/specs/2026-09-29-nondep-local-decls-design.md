@@ -346,8 +346,9 @@ Implementation plan via the writing-plans skill, then M4b-4.
 
 ## Landed
 
-Measured against `main` (merge-base `1ca8fd1`), branch `nondep-local-decls`,
-commits `676d027..b5a1a1d`:
+Measured against `main` (merge-base `08e90ac` after the rebase onto the
+deps fix, ruling R10), branch `nondep-local-decls`, commits
+`1d44aa2..HEAD`:
 
 - Elaboration corpus 162 → 165, additions only (`git diff --numstat`:
   `3 0` on `elab-queries.jsonl`; `dump_elab.lean` `20 1` is the query
@@ -357,9 +358,10 @@ commits `676d027..b5a1a1d`:
   (`lower_loose_bvars`, its arms and tests, and the export).
 - `leanr_meta`/`leanr_elab`: the `LocalEntry` rows, the eight consumers,
   and `has_loose_bvar`, as in § Design.
-- Gate: `mise run lint && mise run test && mise run scan:secrets` and
-  `mise run meta:fast` pass. `mise run ci` fails only at `lint:deps`
-  (pre-existing advisories, ruling R7 below).
+- Gate: per task, `mise run lint && mise run test && mise run
+  scan:secrets` and `mise run meta:fast` (ruling R7). After the rebase
+  onto the deps fix (R10), the full `mise run ci`, `lint:deps` included,
+  passes.
 
 ### Mutations (each applied, run, watched go red, reverted)
 
@@ -377,7 +379,11 @@ commits `676d027..b5a1a1d`:
 | Drop `generalizeNondepLet` | red | the depends-on test and `collect_forward_deps_honours_the_rows_nondep` |
 | `collect_forward_deps` always passes `nondep = false` (added, ruling R4) | red | `collect_forward_deps_honours_the_rows_nondep` |
 | `lift` where the drop arm wants `lower` | red | `drops_an_unused_let_and_lowers` (after ruling R5) |
-| `has_loose_bvar` as `range > 0` | red | Task 2's index-one test; Task 8's drop and opaque-unused tests |
+| `has_loose_bvar` as `range > 0` | red | Task 2's index-one and `has_loose_bvar_shifts_under_a_binder` tests; Task 8's drop and opaque-unused tests |
+| `has_loose_bvar` prunes on `range <= idx` without the saturation guard (final fix) | red | `has_loose_bvar_never_prunes_on_a_saturated_range` |
+| Invert the `nondep` test at any one of the three `assign.rs` sites (final fix) | red | `a_have_is_a_pattern_argument_and_a_let_is_not` (each site) |
+| Invert the `nondep` test in `whnf`'s fvar arm (final fix) | red | `zeta_delta_follows_a_let_but_not_a_have` |
+| Report a refused `have` in `mk_binding` under the let message (final fix) | red | `mk_binding_names_a_refused_have_as_the_seam` |
 | Drop the `has_loose_bvar` condition in the let arm | red | the same two Task 8 tests |
 | nondep treated as false in the have arm | red | `turns_a_have_into_a_forall` |
 | Lift only the body, not the whole `letE` | red | `lifts_a_used_let_under_a_forall_when_opaque` |
@@ -417,6 +423,13 @@ closed body), so Task 5 was never dispatched and no test names it.
   `newMVarKind` (`syntheticOpaque` when `!isAssignable`, `:1195`). The
   two agree only because leanr has no mctx depth, so every mvar is
   assignable.
+- **R10**: the R7 advisories were fixed on a separate branch off `main`
+  (`cargo update -p rustls`; salsa 0.23 → 0.28.5 in `leanr_query`),
+  merged first as PR #47 (`08e90ac`), and this branch was rebased onto
+  it. A `deny.toml` ignore would have silenced a security advisory.
+- **R11**: the final fix wave covers the review's Important 1 and 2 and
+  minors 4-6. Minor 3 is parked (see the seams table): changing it
+  risks moving corpora for no observable gain.
 
 ### Measurement finding (Task 4)
 
@@ -444,9 +457,11 @@ accepted), GREEN with the fix.
 | R9: `elim_mvar` must compute `newMVarKind` once leanr gains mctx depth (`withNewMCtxDepth`), or the ldecl arms take the non-opaque branch for a non-assignable mvar | the slice adding mctx depth |
 | `mk_aux_mvar_type`'s mvar arm does not mint a fresh binder name for an anonymous mvar user name (oracle `:1162`); pre-existing | first anonymous-mvar producer |
 | "Genuine let" predicate repeated in `assign.rs`, `whnf.rs`, `mk_binding.rs`, with an inconsistent missing-row fallback (`mk_binding.rs` treats it as a let, the others do not); an `is_genuine_let` helper would unify | cleanup |
-| `check_assignment`'s let branch returns false where the oracle's `checkFVar` recurses into the value | pre-existing |
+| `check_assignment`'s genuine-let branch returns false where the oracle's `checkFVar` recurses into the value (`ExprDefEq.lean:873`). Reachable: `?m =?= l`, `l` a genuine `let l := Nat.zero` outside `?m`'s context, is `true` (`?m := Nat.zero`) on the oracle with `zetaDelta` on or off; leanr reaches the same answer only with `zeta_delta` on (a later unfold of `l`) and answers `false` with it off. Pinned by `check_fvar_seam_shows_only_with_zeta_delta_off` | pre-existing; the slice porting `checkAssignmentAux` |
+| `mk_binding` (`metactx.rs`) refuses a `have` in a cdecl telescope, where the oracle's `mkBinding` (`generalizeNondepLet := true`, `MetavarContext.lean:1330-1332`) builds a `.default` binder. Behaviour unchanged; the refusal now names a `have` separately so one reaching it is recognisable | the slice that needs ldecl telescopes in `mk_binding` |
+| Minor 3, parked (R11): `transform_let` runs `elim_mvar_deps` once per let (via `mk_let_expr`); the oracle runs it once over all the fvars. Same instantiated terms, different aux-mvar count and ids | a later cleanup, if an aux-mvar id ever becomes observable |
 | Deferred minors: `lower_go`'s silent saturation when `s < d`; untested bignum/`LetE`/`MData`/`Proj` arms of `lower_go` and `has_loose_bvar`; no ldecl-arm test with a beta-redex type; no `mk_let_expr` unit test for an unassigned mvar; push paths not transactional if `fvar_id_of` fails | cleanup |
 
 Still open as § Seams and deferrals above: `withLocalInstances` reading
-the stored kind, the `mk_binding` cdecl-telescope ldecl refusal, and the
-remaining oracle channels.
+the stored kind, the `mk_binding` cdecl-telescope ldecl refusal (its
+`have` case is in the table above), and the remaining oracle channels.
