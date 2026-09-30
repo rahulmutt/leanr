@@ -98,10 +98,30 @@ pub fn elab_app_fn(
         }
         // oracle: `` `($e |>.$idx:fieldIdx) `` / `` `($e |>.$field:ident) ``
         // and their `.{us}` forms (`App.lean:2085-2097`), the same
-        // `elabFieldIdx` / `elabFieldName` as a projection. The trailing
-        // arguments were taken off by `app::elab_pipe_proj`.
+        // `elabFieldIdx` / `elabFieldName` as a projection.
+        //
+        // These patterns have no `$args*`, so they match only a pipeProj
+        // with NO trailing arguments. `elabPipeProj` (`App.lean:2250-2258`)
+        // rebuilds the node it was handed without its arguments before
+        // calling `elabAppAux`, so the outermost pipeProj always matches;
+        // leanr instead leaves the node intact and `app::elab_pipe_proj`
+        // passes it as `call.stx`, so `elem == call.stx` identifies it and
+        // its arguments are already in `call`. Any OTHER pipeProj that
+        // still carries arguments, e.g. the inner `s |>.addTo Nat.zero` that
+        // is the base of `s |>.addTo Nat.zero |>.succ`, matches none of the
+        // patterns and falls to the generic arm (`:2120-2138`): it is
+        // elaborated whole, through `elabPipeProj` again, and the pending
+        // lvals are applied to the result.
+        //
+        // `explicit_levels` is always empty here: the check at the top of
+        // this function rejects `.{us}` peeled off any head but an
+        // identifier, `proj` or `dotIdent`. A pipeProj's own `.{us}` is
+        // its child [3], read below.
         ("Lean.Parser.Term.pipeProj", _) => {
-            let (base, field, lvls) = pipe_proj_parts(elem)?;
+            let (base, field, lvls, has_args) = pipe_proj_parts(elem)?;
+            if has_args && *elem != call.stx {
+                return elab_app_fn_generic(elab, elem, kinds, lvals, call);
+            }
             let levels = elab_explicit_univs(elab, &lvls, kinds)?;
             let mut new = field_lvals(&field, kinds, &levels)?;
             new.extend(lvals);
@@ -168,16 +188,26 @@ pub fn elab_app_fn(
         // `observing`'s restore-and-rethrow of a postponement
         // (`TermElabM.lean:586-589`) is subsumed by the enclosing
         // `elab_term`'s own restore, which rolls back to an earlier state.
-        _ => {
-            if lvals.is_empty() && call.named_args.is_empty() && call.args.is_empty() {
-                Ok(vec![elab.elab_term(elem, kinds, call.expected)?])
-            } else {
-                let f = elab.elab_term(elem, kinds, None)?;
-                Ok(vec![crate::app::lval::elab_app_lvals(
-                    elab, f, lvals, call, kinds,
-                )?])
-            }
-        }
+        _ => elab_app_fn_generic(elab, elem, kinds, lvals, call),
+    }
+}
+
+/// `elabAppFn`'s generic arm (`App.lean:2120-2138`); see the `_` arm of
+/// `elab_app_fn`, which documents it.
+fn elab_app_fn_generic(
+    elab: &mut TermElabM,
+    elem: &SynElem,
+    kinds: &KindInterner,
+    lvals: Vec<LVal>,
+    call: AppCall,
+) -> Result<Vec<ExprId>, ElabError> {
+    if lvals.is_empty() && call.named_args.is_empty() && call.args.is_empty() {
+        Ok(vec![elab.elab_term(elem, kinds, call.expected)?])
+    } else {
+        let f = elab.elab_term(elem, kinds, None)?;
+        Ok(vec![crate::app::lval::elab_app_lvals(
+            elab, f, lvals, call, kinds,
+        )?])
     }
 }
 
@@ -238,9 +268,9 @@ fn field_lvals(
 ///   [4] null: `many argument` (`app::elab_pipe_proj` takes it apart)
 /// ```
 ///
-/// Returns `e`, the field and the level syntax (separators dropped, as
-/// `app::explicit_univ_parts` does).
-fn pipe_proj_parts(elem: &SynElem) -> Result<(SynElem, SynElem, Vec<SynElem>), ElabError> {
+/// Returns `e`, the field, the level syntax (separators dropped, as
+/// `app::explicit_univ_parts` does) and whether [4] holds any argument.
+fn pipe_proj_parts(elem: &SynElem) -> Result<(SynElem, SynElem, Vec<SynElem>, bool), ElabError> {
     let bad = |what: &str| ElabError::IllFormedSyntax(format!("pipeProj: {what}"));
     let node = elem.as_node().ok_or_else(|| bad("not a node"))?;
     let ch = non_trivia_children(node);
@@ -256,7 +286,11 @@ fn pipe_proj_parts(elem: &SynElem) -> Result<(SynElem, SynElem, Vec<SynElem>), E
         None if sch.is_empty() => Vec::new(),
         None => return Err(bad("malformed `.{..}` suffix")),
     };
-    Ok((ch[0].clone(), ch[2].clone(), lvls))
+    let args = ch[4]
+        .as_node()
+        .ok_or_else(|| bad("argument list is not a node"))?;
+    let has_args = !non_trivia_children(args).is_empty();
+    Ok((ch[0].clone(), ch[2].clone(), lvls, has_args))
 }
 
 /// `(base, field)` of a `Lean.Parser.Term.proj` node. Layout (confirmed
@@ -417,7 +451,7 @@ fn elab_app_fn_id(
             // — a different elaborator producing a different term.
             //
             // P1 can decide only the FIRST of those five disjuncts. `isRec` is
-            // `isRecCore` (`MonadEnv.lean:35-36`), a plain constant-kind test,
+            // `isRecCore` (`MonadEnv.lean:36-37`), a plain constant-kind test,
             // and leanr's environment carries `ConstantInfo::Rec(RecursorVal)`
             // already. The three `is*Recursor` predicates are
             // `isAuxRecursorWithSuffix` (`AuxRecursor.lean:39-51`), which reads
@@ -705,15 +739,17 @@ mod tests {
     /// `intern_prefixes` mints a SCRATCH-region `NameId` for any name not
     /// already interned in the persistent store, which is exactly what
     /// happens for a genuinely unknown/typo'd identifier. Against the
-    /// pre-fix `resolve_global_name` (which re-derived the error text via
+    /// pre-fix `resolve_global` (M4b-1; P4 replaced it with
+    /// `resolve_global_name`), which re-derived the error text via
     /// `view.store.to_name(None, Some(name))`, `view.store` being the
-    /// PERSISTENT store, on a SCRATCH-region `name`) this test either
+    /// PERSISTENT store, on a SCRATCH-region `name`, this test either
     /// panicked in `name_row`'s `.expect(..)` or — as observed then,
     /// since the persistent pool from `env_with_foo` is non-empty —
     /// silently returned the WRONG identifier text (a row from the
-    /// persistent pool, not "Bar"). Post-fix, `resolve_global_name` takes the
-    /// display text verbatim from the token's real source text, so this
-    /// passes without touching the store at all for the error path.
+    /// persistent pool, not "Bar"). Post-fix, the resolver (today
+    /// `resolve_global_name`) takes the display text verbatim from the
+    /// token's real source text, so this passes without touching the store
+    /// at all for the error path.
     #[test]
     fn unknown_ident_via_real_scratch_pipeline() {
         let env = env_with_foo();

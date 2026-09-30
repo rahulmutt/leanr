@@ -181,8 +181,11 @@ pub fn elab_atom(
 /// oracle: `elabPipeProj` (`App.lean:2250-2258`). `$e |>.$f$[.{us}]? args*`
 /// is `elabAppAux` on `$e |>.$f$[.{us}]?` with the trailing arguments
 /// expanded (`expandArgs`); `head::elab_app_fn`'s pipeProj arm then reads
-/// only `e`, `f` and the levels. `universeConstraintsCheckpoint` is not
-/// per-call, as for `elab_app`.
+/// only `e`, `f` and the levels. The node is passed on intact as `stx`
+/// rather than rebuilt without its arguments, and the pipeProj arm uses
+/// `stx` to tell this node from a nested pipeProj that still carries its
+/// own arguments. `universeConstraintsCheckpoint` is not per-call, as for
+/// `elab_app`.
 pub fn elab_pipe_proj(
     elab: &mut TermElabM,
     node: &SyntaxNode,

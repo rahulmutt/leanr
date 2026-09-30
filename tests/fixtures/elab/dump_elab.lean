@@ -1081,6 +1081,12 @@ def p4Queries : List (String × String) :=
   , ("p4/dot-univ-prefix",      "(.mk.{0} Nat.zero Nat.zero : Prod Nat Nat)")
   , ("p4/dot-partial",          "(.mk : Nat -> Nat -> Prod Nat Nat)")
   , ("p4/dot-nested",           "(.mk .zero .zero : Prod Nat Nat)")
+  -- A `|>.` with arguments as the base of another `|>.`: `elabAppFn`'s
+  -- pipeProj patterns (App.lean:2085-2097) have no `$args*`, so the inner
+  -- node takes the generic arm (:2120-2138) and keeps its arguments.
+  , ("p4/pipe-nested-args",     "fun (s : S1) => s |>.addTo Nat.zero |>.succ")
+  , ("p4/pipe-nested-named",    "fun (s : S1) => s |>.addTo (n := Nat.zero) |>.succ")
+  , ("p4/pipe-nested-deep",     "fun (s : S1) => s |>.addTo Nat.zero |>.succ |>.succ")
   ]
 
 def emit (id src : String) (expJ : Json) : IO Unit :=

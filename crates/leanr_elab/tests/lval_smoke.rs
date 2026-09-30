@@ -611,6 +611,24 @@ fn pipe_projection_and_named_pattern_rejections_match_the_oracle() {
     ));
 }
 
+/// An inner `|>.` with arguments keeps them when it is the base of an
+/// outer `|>.`: `elabAppFn`'s pipeProj patterns (App.lean:2085-2097) have
+/// no `$args*`, so the inner node takes the generic arm (:2120-2138) and is
+/// elaborated whole. Dropping its argument would leave `S1.addTo · s :
+/// Nat → Nat` and silently accept `Function.twice`. "Invalid field
+/// `twice`: The environment does not contain `Nat.twice`, so it is not
+/// possible to project the field `twice` from an expression S1.addTo
+/// Nat.zero s of type `Nat`"
+#[test]
+fn nested_pipe_projection_keeps_the_inner_arguments() {
+    assert_eq!(
+        field_reason("fun (s : S1) => s |>.addTo Nat.zero |>.twice"),
+        InvalidFieldReason::NotFound {
+            full_name: "Nat.twice".to_string()
+        }
+    );
+}
+
 /// A whole term: `elabNamedPatternErr` (BuiltinTerm.lean:443-444).
 /// "`<identifier>@<term>` is a named pattern and can only be used in
 /// pattern matching contexts"

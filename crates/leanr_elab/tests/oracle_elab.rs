@@ -249,7 +249,8 @@ fn oracle_elab_gate() {
     // 234 -> 249 (M4b-4a P4 task 1): the 15 p4/local-* and p4/global-* records.
     // 249 -> 259 (M4b-4a P4 task 2): the 10 p4/pipe-* records.
     // 259 -> 273 (M4b-4a P4 task 3): the 14 p4/dot-* records.
-    const CORPUS_FLOOR: usize = 273;
+    // 273 -> 276 (M4b-4a P4 final fix): p4/pipe-nested-args, p4/pipe-nested-named, p4/pipe-nested-deep.
+    const CORPUS_FLOOR: usize = 276;
     assert!(
         replayed >= CORPUS_FLOOR,
         "corpus shrank: replayed {replayed} records, floor is {CORPUS_FLOOR}. \
