@@ -42,8 +42,9 @@ impl LVal {
 }
 
 /// oracle: `LValResolution` (`App.lean:1435-1447`). `projFn`/`projIdx`
-/// since P1, `const` since P3; `localRec` needs `auxDeclToFullName`,
-/// which has no leanr producer (the `let rec` slice).
+/// since P1, `const` since P3; `localRec` is the only unported arm: it
+/// needs `auxDeclToFullName`, which has no leanr producer (the `let rec`
+/// slice).
 enum LValResolution {
     ProjFn {
         base: NameId,
