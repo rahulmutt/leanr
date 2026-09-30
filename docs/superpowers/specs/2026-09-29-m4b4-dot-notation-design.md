@@ -564,3 +564,16 @@ planned one at a time after their predecessor merges.
     `App.lean:1712-1726`, `:1764-1776`); unverified and untouched.
   - Mutation I (the named-eta `Vec::insert` path) dies by panic, so the
     oracle gate does not list which records diverge.
+  - Initialising `add_lval_arg`'s `unusable` empty instead of from the
+    user's named-arg names (`lval.rs:611`) survives every test. The
+    observable case is `def T.f (t : Nat) {t : T}` with `(x).f (t := 1)`:
+    the oracle gives `UnusableLValParameter`, and the mutant would push a
+    duplicate named argument and fail differently.
+  - `type_matches_base_name`'s `TransparencyMode::Instances` versus
+    `Reducible` is not discriminated (`lval.rs:534`, `:547`). Only Default
+    versus Instances is (the `S1Df` test). Discriminating it needs an alias
+    that is instance-reducible but not reducible.
+  - After a whnf continuation, `NoLValParameter.f` holds `mkAppN f xs`,
+    which references rolled-back telescope mvars (`lval.rs:744`). The
+    oracle only prints `f.getAppFn.eta`. Whoever ports the error prose
+    should render `app_fn(f)`.

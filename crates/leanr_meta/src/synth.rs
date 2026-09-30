@@ -2651,7 +2651,7 @@ impl<'e> MetaCtx<'e> {
     /// SYNTACTIC `forallE` binders only, minting each mvar with the
     /// binder's name as its `userName` and `.synthetic` kind for an
     /// inst-implicit binder (`:1727-1730`). `addLValArg` reads both
-    /// (`App.lean:1751-1755`) and does its own `whnf` (`:1782`).
+    /// (`App.lean:1751`, `:1756-1757`) and does its own `whnf` (`:1782`).
     #[allow(clippy::type_complexity)]
     pub fn forall_meta_telescope(
         &mut self,
@@ -3535,12 +3535,27 @@ mod tests {
     /// worker `:1717-1743`): one mvar per syntactic binder, named after
     /// the binder (`mkFreshExprMVar d k n`, `:1730`), `.synthetic` for an
     /// inst-implicit binder (`:1729`). `addLValArg` reads both
-    /// (`App.lean:1754-1755`).
+    /// (`App.lean:1751`, `:1756-1757`).
     #[test]
     fn forall_meta_telescope_names_its_mvars_and_kinds_inst_implicit_synthetic() {
         with_instances_ctx(|ctx| {
             let ty = three_binder_test_type(ctx);
-            let (mvars, bis, _) = ctx.forall_meta_telescope(ty).expect("telescope runs");
+            let (mvars, bis, tbody) = ctx.forall_meta_telescope(ty).expect("telescope runs");
+            // Substitution: the dependent binders `[Add #0]` and `#1 -> #2`
+            // are instantiated with the earlier mvars, per binder and in
+            // the final body.
+            let decl_ty = |ctx: &MetaCtx, m: ExprId| {
+                let Node::MVar { id: Some(n) } = ctx.node(m) else {
+                    panic!("expected an mvar")
+                };
+                ctx.mctx().decl(MVarId(n)).unwrap().ty
+            };
+            let add = const_named(ctx, "Add");
+            let base0 = Some(ctx.view.store);
+            let add_m0 = ctx.scratch.expr_app(base0, add, mvars[0]).unwrap();
+            assert_eq!(decl_ty(ctx, mvars[1]), add_m0, "[Add ?m0]");
+            assert_eq!(decl_ty(ctx, mvars[2]), mvars[0], "?m0 domain");
+            assert_eq!(tbody, mvars[0], "body is ?m0");
             assert_eq!(
                 bis,
                 vec![
