@@ -15,7 +15,7 @@ use leanr_kernel::bank::ExprId;
 use leanr_meta::MVarKind;
 
 use crate::dispatch::SynElem;
-use crate::elab::TermElabM;
+use crate::elab::{TermElabM, TermTarget};
 use crate::error::ElabError;
 use crate::synthetic::SyntheticMVarKind;
 
@@ -79,13 +79,32 @@ impl<'e> TermElabM<'e> {
         stx: &SynElem,
         expected: Option<ExprId>,
     ) -> Result<ExprId, ElabError> {
+        self.postpone_elab_target(&TermTarget::Stx(stx.clone()), expected)
+    }
+
+    /// `postpone_elab_term` over a [`TermTarget`]: a postponed flatten
+    /// tail records its start in `tail_from`, so the resume re-enters the
+    /// tail and not the whole `⟨…⟩` (`synthetic/ladder.rs`'s
+    /// `resume_postponed`).
+    pub(crate) fn postpone_elab_target(
+        &mut self,
+        target: &TermTarget,
+        expected: Option<ExprId>,
+    ) -> Result<ExprId, ElabError> {
         let ty = match expected {
             Some(t) => t,
             None => self.mk_fresh_type_mvar()?,
         };
         let (mvar, mvar_id) = self.mk_fresh_expr_mvar_of_kind(ty, MVarKind::SyntheticOpaque)?;
         let ctx = self.save_context();
-        self.register_synthetic_mvar(stx.clone(), mvar_id, SyntheticMVarKind::Postponed { ctx });
+        self.register_synthetic_mvar(
+            target.ref_elem(),
+            mvar_id,
+            SyntheticMVarKind::Postponed {
+                ctx,
+                tail_from: target.tail_from(),
+            },
+        );
         Ok(mvar)
     }
 }

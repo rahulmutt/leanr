@@ -808,3 +808,45 @@ end P3
 -- `polyZero.val.{0}` puts the explicit level on the FIELD (`mkConsts`,
 -- TermElabM.lean:2148), not on `polyZero`, which has no level params.
 def polyZero : Poly Nat := Poly.mk Nat.zero
+
+-- M4b-4b: the anonymous constructor `⟨…⟩` (design spec
+-- 2026-09-30-m4b4b-anonymous-constructor-design.md § Fixture).
+-- `And`/`Exists`/`True` are Prop-valued single-constructor types
+-- (`Exists` is not a structure); `Empty` has no constructors; `ImpI`'s
+-- implicit field is not counted by `⟨⟩`; `T3` has three explicit fields
+-- (nested InsufficientFields); `PrivMk`'s constructor is private;
+-- `sameAs` forces its first argument to postpone.
+structure And (a b : Prop) : Prop where
+  intro ::
+  left : a
+  right : b
+
+inductive Exists {α : Sort u} (p : α → Prop) : Prop where
+  | intro (w : α) (h : p w) : Exists p
+
+inductive True : Prop where
+  | intro : True
+
+inductive Empty : Type
+
+inductive ImpI : Type where
+  | mk {n : Nat} (x : Nat) : ImpI
+
+structure T3 where
+  a : Nat
+  b : Nat
+  c : Nat
+
+structure PrivMk where
+  private mk ::
+  x : Nat
+
+def sameAs {α : Type} (a b : α) : α := b
+
+-- A self-referential single-constructor type with ONE explicit field:
+-- `k = 1`, so `⟨x, y⟩`'s flatten tail starts where it began and never
+-- shrinks. The oracle stops at `maxRecDepth` (`elabTerm`'s
+-- `withIncRecDepth`); leanr's tail-depth guard is pinned by
+-- `anon_ctor_smoke.rs`.
+inductive AnonLoop : Type where
+  | mk : AnonLoop → AnonLoop

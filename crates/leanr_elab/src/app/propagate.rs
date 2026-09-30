@@ -31,6 +31,9 @@ use crate::error::ElabError;
 pub fn should_propagate_expected_type_for(arg: &Arg, kinds: &KindInterner) -> bool {
     match arg {
         Arg::Expr(_) => false,
+        // The synthesized tail node's kind is `anonymousCtor`, which is
+        // none of the three excluded kinds.
+        Arg::AnonCtorTail { .. } => true,
         Arg::Stx(elem) => {
             let k = kinds.name(elem.kind());
             k != "Lean.Parser.Term.hole"

@@ -102,6 +102,7 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
         "Lean.Parser.Term.pipeProj" => Some("pipeProj"),
         "Lean.Parser.Term.namedPattern" => Some("namedPattern"),
         "Lean.Parser.Term.dotIdent" => Some("dotIdent"),
+        "Lean.Parser.Term.anonymousCtor" => Some("anonymousCtor"),
         _ => None,
     }
 }
@@ -176,7 +177,7 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 ///   choice ..................................... overloading slice
 ///   elabAsElim (recursor heads seamed; aux
 ///     recursors + @[elab_as_elim] still open) .. M4b-4c
-///   anonymous constructor ⟨⟩ ................... M4b-4b
+///   anonymous constructor ⟨⟩ (term position) ... M4b-4b SHIPPED — builtin/anon_ctor.rs; pattern position: the match slice
 ///   binop% ..................................... the macro-expansion slice
 ///   macro expansion in dispatch ................ first macro-form slice
 ///   open / alias / export / _root_ resolution .. later slice
@@ -278,6 +279,11 @@ pub(crate) fn dispatch(
         // too; measured, the error below is the one a whole term gets.
         ("Lean.Parser.Term.namedPattern", NodeOrToken::Node(_)) => {
             Err(ElabError::NamedPatternOutsidePattern { as_function: false })
+        }
+        // oracle: `@[builtin_term_elab anonymousCtor] elabAnonymousCtor`
+        // (`BuiltinNotation.lean:43-102`).
+        ("Lean.Parser.Term.anonymousCtor", NodeOrToken::Node(node)) => {
+            crate::builtin::anon_ctor::elab_anon_ctor(elab, node, 0, kinds, expected)
         }
         ("Lean.Parser.Term.prop", NodeOrToken::Node(node)) => {
             crate::builtin::sort::elab_prop(elab, node, kinds)

@@ -180,8 +180,10 @@ pub enum ElabError {
     /// (`:792-799`) rethrows before any elaborator `catch` arm runs, so
     /// no catch site handles it ([`ElabError::is_oracle_error`] is
     /// `false`). leanr
-    /// counts only the recursion that can run away on its own
-    /// (`addLValArg.go`, `App.lean:1749`) against the oracle's
+    /// counts only the recursions that can run away on their own
+    /// (`addLValArg.go`, `App.lean:1749`, and the anonymous-constructor
+    /// flatten tail, `elab.rs`'s `dispatch_target` / `anon_tail_depth`)
+    /// against the oracle's
     /// `defaultMaxRecDepth` (512, `Init/Prelude.lean:4836`); the oracle
     /// counts from the ambient depth, so the exact cut-off differs,
     /// never whether one exists.
@@ -210,6 +212,10 @@ pub enum ElabError {
         id: String,
         reason: InvalidDottedIdentReason,
     },
+    /// oracle: `elabAnonymousCtor`'s throws
+    /// (`Lean/Elab/BuiltinNotation.lean:43-102`). Prose deferred (design
+    /// spec 2026-09-30-m4b4b § Errors).
+    InvalidAnonymousCtor(AnonCtorError),
     /// An oracle `panic!`/`unreachable!` site (`mkBaseProjections`,
     /// `App.lean:1703`, `:1708`): unreachable on a well-formed
     /// environment, an error rather than a panic here because `.olean`
@@ -324,8 +330,37 @@ pub enum InvalidDottedIdentReason {
     UnknownConstant { full_name: String },
 }
 
+/// Which `elabAnonymousCtor` throw an `ElabError::InvalidAnonymousCtor`
+/// stands for. `ctor` is the constructor's rendered name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnonCtorError {
+    /// `BuiltinNotation.lean:47-48`, thrown at `:54` (an mvar head after
+    /// `whnf`) and `:101` (no expected type).
+    ExpectedTypeUnknown,
+    /// `:56-57` — `matchConstInduct`'s failure continuation.
+    NotInductive { ty: ExprId },
+    /// `:98`.
+    NoCtors { ty: ExprId },
+    /// `:99-100`.
+    MultipleCtors { ty: ExprId },
+    /// `:77-82`. The oracle logs this under `errToSorry` and pads with
+    /// labeled `sorry`s; leanr has no `errToSorry` and throws.
+    InsufficientFields {
+        ctor: String,
+        explicit: usize,
+        provided: usize,
+    },
+    /// `:89-91`.
+    NoExplicitFields { ctor: String, provided: usize },
+}
+
 impl From<MetaError> for ElabError {
     fn from(e: MetaError) -> Self {
         ElabError::Meta(e)
     }
 }
+
+/// oracle: `defaultMaxRecDepth` (512, `Init/Prelude.lean:4836`), the
+/// limit `withIncRecDepth` checks. leanr counts only the recursions that
+/// can run away on their own (see [`ElabError::MaxRecDepth`]).
+pub(crate) const MAX_REC_DEPTH: usize = 512;

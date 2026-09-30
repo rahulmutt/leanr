@@ -246,16 +246,23 @@ fn extract_fun_binder_views(
                         bi: BinderInfo::InstImplicit,
                     }])
                 }
-                _ => Err(ElabError::UnsupportedSyntax(format!(
-                    "fun: unsupported binder kind {kind}"
-                ))),
+                _ => Err(unsupported_binder_kind(kind)),
             }
         }
-        _ => Err(ElabError::UnsupportedSyntax(format!(
-            "fun: unsupported binder kind {}",
-            kinds.name(item.kind())
-        ))),
+        _ => Err(unsupported_binder_kind(kinds.name(item.kind()))),
     }
+}
+
+/// The seam for a binder kind this slice does not handle. Pattern-position
+/// `⟨⟩` is the match slice's (the oracle expands it to a `match`), so the
+/// message names that owner.
+fn unsupported_binder_kind(kind: &str) -> ElabError {
+    let owner = if kind == "Lean.Parser.Term.anonymousCtor" {
+        " (pattern-position `⟨⟩` belongs to the match slice)"
+    } else {
+        ""
+    };
+    ElabError::UnsupportedSyntax(format!("fun: unsupported binder kind {kind}{owner}"))
 }
 
 /// oracle: `elabFun` (Binders.lean:678) → `elabFunBinders`, `basicFun`

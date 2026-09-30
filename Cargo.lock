@@ -870,6 +870,7 @@ dependencies = [
  "leanr_olean",
  "leanr_syntax",
  "serde_json",
+ "stacker",
 ]
 
 [[package]]

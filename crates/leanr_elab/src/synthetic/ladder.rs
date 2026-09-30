@@ -148,8 +148,8 @@ impl<'e> TermElabM<'e> {
         // its type and payload no longer resolve.
         self.with_mvar_local_context(mvar_id, |elab| match decl.kind {
             SyntheticMVarKind::TypeClass => elab.synthesize_pending_inst_mvar(mvar_id),
-            SyntheticMVarKind::Postponed { ref ctx } => {
-                elab.resume_postponed(ctx, &decl.stx, mvar_id, postpone_on_error, kinds)
+            SyntheticMVarKind::Postponed { ref ctx, tail_from } => {
+                elab.resume_postponed(ctx, &decl.stx, tail_from, mvar_id, postpone_on_error, kinds)
             }
             SyntheticMVarKind::Coe { expected_type, e } => {
                 elab.synthesize_coe_mvar(mvar_id, expected_type, e)
@@ -438,7 +438,7 @@ impl<'e> TermElabM<'e> {
     /// re-elaborate the postponed syntax under its saved context, ensure
     /// it has the mvar's type, and assign.
     ///
-    /// - The elaboration is `resume_elab_term` (catch OFF): a term that
+    /// - The elaboration is `resume_elab_target` (catch OFF): a term that
     ///   postpones again is "not ready yet", never a fresh mvar.
     /// - `saveState` is taken inside the mvar's context (the caller,
     ///   `synthesize_synthetic_mvar`, installs it). A postponement
@@ -457,6 +457,7 @@ impl<'e> TermElabM<'e> {
         &mut self,
         ctx: &SavedContext,
         stx: &SynElem,
+        tail_from: Option<usize>,
         mvar_id: MVarId,
         postpone_on_error: bool,
         kinds: &KindInterner,
@@ -471,7 +472,8 @@ impl<'e> TermElabM<'e> {
                 .expect("postponed mvar is declared")
                 .ty;
             let expected = elab.mctx.instantiate_mvars(expected)?;
-            let e = elab.resume_elab_term(&stx, kinds, expected)?;
+            let target = crate::elab::TermTarget::from_parts(&stx, tail_from)?;
+            let e = elab.resume_elab_target(&target, kinds, expected)?;
             // oracle: `:51-54` — the postponing method never saw the
             // result, so its type is checked here.
             let e = elab.ensure_has_type(&stx, Some(expected), e)?;

@@ -71,12 +71,12 @@ enum LValResolution {
     },
 }
 
-pub(super) fn node(elab: &TermElabM, e: ExprId) -> Node {
+pub(crate) fn node(elab: &TermElabM, e: ExprId) -> Node {
     elab.mctx.store().expr_node(Some(elab.view.store), e)
 }
 
 /// oracle: `Expr.getAppFn`.
-pub(super) fn app_fn(elab: &TermElabM, mut e: ExprId) -> ExprId {
+pub(crate) fn app_fn(elab: &TermElabM, mut e: ExprId) -> ExprId {
     while let Node::App { f, .. } = node(elab, e) {
         e = f;
     }
@@ -94,7 +94,7 @@ fn app_args(elab: &TermElabM, mut e: ExprId) -> Vec<ExprId> {
     out
 }
 
-pub(super) fn render(elab: &TermElabM, n: NameId) -> String {
+pub(crate) fn render(elab: &TermElabM, n: NameId) -> String {
     elab.mctx
         .store()
         .to_name(Some(elab.view.store), Some(n))
@@ -687,7 +687,7 @@ fn add_lval_arg_go(
 ) -> Result<LValInsert, ElabError> {
     // `withIncRecDepth` (`:1749`) against `defaultMaxRecDepth`
     // (`Init/Prelude.lean:4836`); see `ElabError::MaxRecDepth`.
-    const MAX_REC_DEPTH: usize = 512;
+    use crate::error::MAX_REC_DEPTH;
     loop {
         // `:1751`.
         let (xs, bis, f_type2) = elab.mctx.forall_meta_telescope(f_type)?;

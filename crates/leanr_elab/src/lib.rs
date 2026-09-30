@@ -136,8 +136,9 @@
 //!   notation and P4 SHIPPED `pipeProj`/`dotIdent`/`namedPattern`
 //!   (`app/head.rs`, `app/dot_ident.rs`). Still deferred, each a named
 //!   seam: `choice` the overloading slice, private field projections the slice that models private
-//!   names. The anonymous constructor `⟨⟩` — M4b-4b; `binop%` —
-//!   the macro-expansion slice.
+//!   names. `binop%` — the macro-expansion slice. The anonymous
+//!   constructor `⟨⟩` is elaborated by `builtin::anon_ctor` (M4b-4b); its
+//!   pattern position is left to the match slice.
 //! - **macro expansion** — `dispatch` never expands a macro form; the
 //!   dispatch table only ever matches a syntax kind directly against a
 //!   registered elaborator. Deferred to the slice that first needs a
@@ -259,4 +260,6 @@ pub mod resolve; // Task 5
 pub mod synthetic; // M4b-3 P2a
 
 pub use elab::TermElabM;
-pub use error::{ElabError, InvalidDottedIdentReason, InvalidFieldReason, InvalidProjectionReason};
+pub use error::{
+    AnonCtorError, ElabError, InvalidDottedIdentReason, InvalidFieldReason, InvalidProjectionReason,
+};

@@ -7,6 +7,7 @@
 //! identifier is a ZERO-ARGUMENT APPLICATION in the oracle
 //! (`elabIdent := elabAtom`, `App.lean:2246`), so its constant
 //! resolution belongs to `crate::app::head`, not to a leaf module.
+pub mod anon_ctor;
 pub mod ascription;
 pub mod binder;
 pub mod hole;
