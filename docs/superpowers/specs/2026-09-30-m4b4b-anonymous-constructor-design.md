@@ -274,7 +274,7 @@ PR #TBD. Branch `m4b4b-anonymous-constructor`, measured against `main`
 
 - Elaboration corpus 276 → 293, additions only (`git diff --numstat`:
   `17 0` on `elab-queries.jsonl`). That is the 16 `anon/*` records of
-  § Testing and the plan, plus `anon/flatK1` (`(⟨Nat.zero, Nat.zero⟩ :
+  § Testing and the plan plus `anon/flatK1` (17 `anon/*` in all) (`(⟨Nat.zero, Nat.zero⟩ :
   PB (Prod Nat Nat))`, k = 1, added in Task 3). `structures.jsonl` +3
   rows (`And`, `T3`, `PrivMk`). Elab0 also gained `AnonLoop` (below).
 - `leanr_meta`, `leanr_syntax`, `leanr_olean` and `leanr_kernel` are
@@ -297,7 +297,7 @@ PR #TBD. Branch `m4b4b-anonymous-constructor`, measured against `main`
   `instantiate_mvars_body`. **This is an open seam, for follow-up in
   `leanr_meta`.**
 - **`(⟨⟩ : Eq Nat.zero Nat.zero)` is `StuckCoercion`, not
-  `TypeMismatch`** (§ Evidence, § Testing). The oracle's `mkCoe`
+  `TypeMismatch`** (§ Testing names the variant; § Evidence says "Type mismatch", the oracle's prose). The oracle's `mkCoe`
   postpones because the type still holds an mvar, so the stuck-coercion
   reporter prints the mismatch, with the same "Type mismatch" text.
   leanr's faithful counterpart is `ElabError::StuckCoercion`, and the
@@ -319,7 +319,7 @@ PR #TBD. Branch `m4b4b-anonymous-constructor`, measured against `main`
 | M2: the ladder resumes with `from_parts(&stx, None)` | red | `anon/tailPostponed`, `tailUnderBinder` |
 | M3: push `from` (recurse with `from` unchanged) | red | `anon/flat1`, `flat2`, `tailPostponed`, `tailUnderBinder`; the nested-tail smoke test. **Equivalent on `anon/flatK1`**: with k = 1, `from + k - 1` is `from`. |
 | M4: postponement records `tail_from: None` | red | same as M2 |
-| M5: `propagate.rs`'s `AnonCtorTail` arm → `false` | **survives** | Probably output-equivalent: without propagation the tail postpones on `?β` and resumes to the same term. Only postponement order and mvar numbering differ, and the encoder observes neither. Kept because it is the oracle's classification. |
+| M5: `propagate.rs`'s `AnonCtorTail` arm → `false` | **survives** | Re-run after `anon/flatK1` landed (the arm is consulted only when the tail is the first explicit arg, k = 1): `oracle_elab` and `anon_ctor_smoke` stay green (14 + 1 passed), so `flatK1` does not go red either. Output-equivalent: without propagation the tail postpones on `?β` and resumes to the same term. Only postponement order and mvar numbering differ, and the encoder observes neither. Kept because it is the oracle's classification. |
 | M6: the tail's ref in `args.rs` → `app.ctx.stx` | **survives** | Changes error positions only (the ref of a postponed `.coe`, the node `ensure_has_type` reports against). **Coverage gap:** no test pins error positions. |
 | M7: tails skip the implicit lambda | red | `a_tail_against_an_implicit_forall_gets_the_implicit_lambda` (Task 3, uses `FI`) |
 | Remove the tail-depth guard | red (stack overflow, SIGABRT) | `a_tail_that_never_shrinks_hits_max_rec_depth` |

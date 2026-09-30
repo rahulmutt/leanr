@@ -140,9 +140,10 @@ fn insufficient_fields_in_the_nested_tail() {
 #[test]
 fn a_tail_whose_type_never_resolves_reports_expected_type_unknown() {
     // "Invalid `⟨...⟩` notation: The expected type of this term could not
-    // be determined", at the OUTER `⟨` column: the tail postponed on
-    // `?β`, nothing solved it, and the final resume runs with
-    // postponement off.
+    // be determined": the tail postponed on `?β`, nothing solved it, and
+    // the final resume runs with postponement off. Only the variant is
+    // asserted; the error position is not (spec § Landed, error-positions
+    // seam).
     assert_eq!(
         anon_err("(⟨Nat.zero, Nat.zero, Nat.zero⟩ : Prod Nat _)"),
         AnonCtorError::ExpectedTypeUnknown
@@ -171,7 +172,7 @@ fn a_resumed_tail_reports_its_own_error() {
 fn pattern_position_anonymous_constructor_stays_a_seam() {
     match support::elab_and_synthesize("fun ⟨a, b⟩ => a") {
         Err(ElabError::UnsupportedSyntax(m)) => {
-            assert!(m.contains("unsupported binder kind"), "{m}")
+            assert!(m.contains("belongs to the match slice"), "{m}")
         }
         other => panic!("expected the pattern-position seam, got {other:?}"),
     }

@@ -180,8 +180,10 @@ pub enum ElabError {
     /// (`:792-799`) rethrows before any elaborator `catch` arm runs, so
     /// no catch site handles it ([`ElabError::is_oracle_error`] is
     /// `false`). leanr
-    /// counts only the recursion that can run away on its own
-    /// (`addLValArg.go`, `App.lean:1749`) against the oracle's
+    /// counts only the recursions that can run away on their own
+    /// (`addLValArg.go`, `App.lean:1749`, and the anonymous-constructor
+    /// flatten tail, `elab.rs`'s `dispatch_target` / `anon_tail_depth`)
+    /// against the oracle's
     /// `defaultMaxRecDepth` (512, `Init/Prelude.lean:4836`); the oracle
     /// counts from the ambient depth, so the exact cut-off differs,
     /// never whether one exists.
