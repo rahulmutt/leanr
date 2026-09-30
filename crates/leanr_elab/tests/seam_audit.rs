@@ -762,9 +762,12 @@ fn literal_kinds_are_registered_not_deferred() {
 /// **`M4b-4a P4` was added by M4b-4a P4 task 4, and measured
 /// non-vacuous.** After the doc rows (`dispatch.rs`, `app/mod.rs`,
 /// `lib.rs`) were reworded to "P4 SHIPPED", a live line
-/// `let _ = "M4b-4a P4";` temporarily added to `app/dot_ident.rs` made
-/// this test fail naming that line, and it passed again once removed
-/// (both runs in the task 4 report).
+/// `const _NEEDLE: &str = "M4b-4a P4";` temporarily added to
+/// `app/dot_ident.rs` made this test fail naming that line, and it passed
+/// again once removed (both runs in the task 4 report). The `const` was the
+/// shape used, not the `let _ =` the P2/P3 paragraphs quote: `dot_ident.rs`
+/// has no function body at the end of the file, and a module-level `let`
+/// does not compile.
 #[test]
 fn no_seam_message_names_a_completed_slice() {
     let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
