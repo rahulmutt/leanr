@@ -99,6 +99,9 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
         "Lean.Parser.Term.explicit" => Some("explicit"),
         "Lean.Parser.Term.explicitUniv" => Some("explicitUniv"),
         "Lean.Parser.Term.proj" => Some("proj"),
+        "Lean.Parser.Term.pipeProj" => Some("pipeProj"),
+        "Lean.Parser.Term.namedPattern" => Some("namedPattern"),
+        "Lean.Parser.Term.dotIdent" => Some("dotIdent"),
         _ => None,
     }
 }
@@ -127,7 +130,7 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 /// The three in `app/` carry a slice owner in the message rather than
 /// the bare kind, since each corresponds to a specific oracle arm; see
 /// `app/mod.rs`'s module doc for the index and `tests/seam_audit.rs`
-/// for the gate. `resolve.rs`'s `resolve_global` still inspects no
+/// for the gate. `resolve.rs`'s `resolve_global_name` still inspects no
 /// syntax at all.
 ///
 /// Deferred (each hits `UnsupportedSyntax` until its slice lands).
@@ -160,10 +163,13 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 /// (`app/lval.rs`, `app/head.rs`), so dot notation's P1 half is no
 /// longer deferred. Reconciled a TENTH time by M4b-4a P2: field notation
 /// on an mvar-typed term (postponement) landed (`postpone.rs`), so it is
-/// gone from the list. What remains is split by owner below:
+/// gone from the list. Reconciled an ELEVENTH time by M4b-4a P4:
+/// `Term.pipeProj`, `Term.dotIdent` and `Term.namedPattern` are routed
+/// (`app/head.rs`, `app/dot_ident.rs`), so dot notation is no longer
+/// deferred. What remains is split by owner below:
 /// ```text
 ///   letI / haveI / let_fun / let_delayed / let_tmp / letrec  later slice (own oracle tier each)
-///   Term.pipeProj / dotIdent / namedPattern .... M4b-4a P4 (same elabAppFn arms)
+///   Term.pipeProj / dotIdent / namedPattern .... P4 SHIPPED (M4b-4a) — app/head.rs, app/dot_ident.rs
 ///   generalized field notation (.const,
 ///     Function.f) .............................. P3 SHIPPED (M4b-4a) — lval.rs
 ///   private field projections (no fixture) ..... the slice that models private names
@@ -183,14 +189,13 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 ///
 /// `Term.proj` IS routed, as of M4b-4a P1 task 5: `elabProj := elabAtom`
 /// (`App.lean:2274`), and `app::head::elab_app_fn`'s proj arm builds the
-/// `LVal` list `app::lval` resolves. `Term.pipeProj`, `Term.dotIdent`,
-/// `Term.namedPattern` and `choice` are still deliberately NOT routed,
-/// even though the oracle aliases three of them straight to `elabAtom`
-/// (`App.lean:2247-2248`, `:2273`; `elabPipeProj` at `:2250-2258`
-/// desugars to `elabAppAux`): their `elabAppFn` arms (`App.lean:2062-2065`,
-/// `:2085-2100`, `:2106-2109`) are unported, so routing them would only
-/// reach `app::head::elab_app_fn`'s seam one indirection later. As whole
-/// terms they land on this table's catch-all instead, named by their kind.
+/// `LVal` list `app::lval` resolves. `Term.pipeProj`, `Term.dotIdent` and
+/// `Term.namedPattern` are routed as of M4b-4a P4 (`elabAtom` aliases at
+/// `App.lean:2247-2248`, `:2273`; `elabPipeProj` at `:2250-2258`
+/// desugars to `elabAppAux`), through `app::head::elab_app_fn`'s arms
+/// (`App.lean:2062-2065`, `:2085-2100`, `:2106-2109`). Only `choice`
+/// remains unrouted in this family: as a whole term it lands on this
+/// table's catch-all, named by its kind.
 ///
 /// `num`/`char`/`scientific` are all registered above as of tasks 6-7,
 /// and none of them is a LEAF: each elaborates through an application
@@ -257,6 +262,22 @@ pub(crate) fn dispatch(
         // the LVal; `app::head::elab_app_fn`'s proj arm peels it.
         ("Lean.Parser.Term.proj", NodeOrToken::Node(_)) => {
             crate::app::elab_atom(elab, elem, kinds, expected)
+        }
+        // oracle: `@[builtin_term_elab pipeProj] elabPipeProj`
+        // (`App.lean:2250-2258`).
+        ("Lean.Parser.Term.pipeProj", NodeOrToken::Node(node)) => {
+            crate::app::elab_pipe_proj(elab, node, kinds, expected)
+        }
+        // oracle: `@[builtin_term_elab dotIdent] elabDotIdent := elabAtom`
+        // (`App.lean:2248`).
+        ("Lean.Parser.Term.dotIdent", NodeOrToken::Node(_)) => {
+            crate::app::elab_atom(elab, elem, kinds, expected)
+        }
+        // oracle: `elabNamedPatternErr` (`BuiltinTerm.lean:443-444`).
+        // `elabNamedPattern := elabAtom` (`App.lean:2247`) is registered
+        // too; measured, the error below is the one a whole term gets.
+        ("Lean.Parser.Term.namedPattern", NodeOrToken::Node(_)) => {
+            Err(ElabError::NamedPatternOutsidePattern { as_function: false })
         }
         ("Lean.Parser.Term.prop", NodeOrToken::Node(node)) => {
             crate::builtin::sort::elab_prop(elab, node, kinds)

@@ -157,25 +157,13 @@ fn deferred_constructs_are_named_seams() {
     let cases: &[(&str, &str)] = &[
         // (source, expected slice marker in the message)
         //
-        // `elab_explicit`'s `dotIdent` arm: `@` on a dot-identifier head,
-        // still M4b-4a P4's. (`@` on a PROJECTION head shipped in M4b-4a
-        // P1 task 7 — the `lval/explicit-proj` corpus record; the
-        // `@(Nat.zero).1` case that used to sit here now raises the
-        // oracle's own `InvalidProjection`.)
-        ("@.succ", "M4b-4a P4"),
+        // `.succ Nat.zero` and `@.succ`, which used to sit here, are
+        // `InvalidDottedIdent { NoExpectedType }` since M4b-4a P4 (`lval_smoke.rs`).
         // `peel_head`'s `App.lean:2118` arm — an INVALID occurrence of
         // `@` in a function position, which is `throwUnsupportedSyntax`
         // in the oracle too, so the citation is the owner.
         ("@(Nat.succ Nat.zero) Nat.zero", "App.lean:2118"),
-        // `head.rs`'s still-unported `elabAppFn` arm: a dot-identifier
-        // head. (M4b-4a P1 task 5 ported the proj and generic arms: the
-        // `(Nat.zero).1 Nat.zero`, `(Nat.succ) Nat.zero`,
-        // `(fun (x : Nat) => x) Nat.zero` and ascribed-head cases that
-        // used to sit here now elaborate or raise an oracle error — see
-        // `lval_smoke.rs`, the `lval/*` corpus records and
-        // `over_application_through_a_general_head_reports_function_expected`.)
-        (".succ Nat.zero", "M4b-4a P4"),
-        // `elab_ident_head`'s PARTIAL `shouldElabAsElim` guard (fix
+        // `elab_app_fn_id`'s PARTIAL `shouldElabAsElim` guard (fix
         // round 1). A genuine recursor — `ConstantInfo::Rec`, the one
         // disjunct of `App.lean:1322-1328` that leanr's environment can
         // decide — is seamed rather than elaborated the ordinary way.
@@ -193,6 +181,14 @@ fn deferred_constructs_are_named_seams() {
         // backstop for those; M4b-4c owns the real fix.
         ("Nat.rec", "M4b-4c"),
         ("List.rec", "M4b-4c"),
+        // The same guard on a dot-identifier head (M4b-4a P4): `.rec`
+        // resolves to `Nat.rec`, and the oracle's `elabAppArgs` diverts it
+        // to `ElabElim.main` just the same (measured: `@Nat.rec (fun x =>
+        // Nat) ..`). Without the guard leanr elaborated it the ordinary way.
+        (
+            "(.rec Nat.zero (fun (a : Nat) (b : Nat) => Nat.zero) Nat.zero : Nat)",
+            "M4b-4c",
+        ),
     ];
     for (src, marker) in cases {
         match elab_src(src) {
@@ -261,8 +257,8 @@ fn mvar_function_type_is_closed_by_propagation() {
 /// the oracle succeeds.
 ///
 /// Measured against the pinned oracle rather than reasoned about, since
-/// this is the whole justification for computing `head::elab_app_fn`'s
-/// `heed` (passed down to `elab_ident_head`) instead of testing the
+/// this is the whole justification for computing `head::elab_app_fn_id`'s
+/// `heed` instead of testing the
 /// constant kind unconditionally:
 /// ```text
 /// @Nat.rec    -> {"k":"const","n":"Nat.rec","us":[{"k":"lmvar","i":0}]}
@@ -289,20 +285,19 @@ fn elab_as_elim_guard_honours_the_explicit_and_ellipsis_early_out() {
 ///
 /// Asserted here rather than left to the table's doc comment because
 /// the failure mode this guards is a kind being *registered* by
-/// accident: `Term.pipeProj` and friends alias to `elabAtom` in the
-/// oracle (`App.lean:2247-2248`, `:2273`), so routing them to
-/// `app::elab_atom` looks correct and is not — their real work is
-/// `elabAppFn`'s still-unported LVal arms, which M4b-4a P4 owns.
-/// (`Term.proj` was routed by M4b-4a P1 task 5, with its arm.)
+/// accident: several kinds alias to `elabAtom` in the oracle
+/// (`App.lean:2247-2248`, `:2273`), so routing them to `app::elab_atom`
+/// looks correct and is not. `Term.anonymousCtor` has no elaborator yet:
+/// M4b-4b owns it. (`Term.proj`, `Term.pipeProj`, `Term.dotIdent` and
+/// `Term.namedPattern` were routed by M4b-4a P1 and P4, with their arms.)
 #[test]
 fn unregistered_kinds_are_named_by_kind() {
     let cases: &[(&str, &str)] = &[
-        // M4b-4a P4, the rest of the LVal / dot-notation family.
-        // (`Term.proj` is registered since M4b-4a P1 task 5;
-        // `Nat.zero.1` is `InvalidProjection NotOneCtor`, pinned in
-        // `lval_smoke.rs`.)
-        ("Nat.zero |>.1", "Lean.Parser.Term.pipeProj"),
-        ("x@Nat.zero", "Lean.Parser.Term.namedPattern"),
+        // M4b-4b: the anonymous constructor is parsed (`leanr_syntax`
+        // `term.rs`) and deliberately unrouted. (`Term.pipeProj`,
+        // `Term.dotIdent` and `Term.namedPattern` are registered since
+        // M4b-4a P4, `Term.proj` since P1 task 5.)
+        ("⟨Nat.zero, Nat.zero⟩", "Lean.Parser.Term.anonymousCtor"),
         // The literals that are not leaves used to be listed here.
         // `num` left with task 6 and `char`/`scientific` with task 7 —
         // all three are registered kinds now (`@OfNat.ofNat.{u}` plus
@@ -350,7 +345,7 @@ fn unregistered_kinds_are_named_by_kind() {
 ///     type) while leanr emitted `const Nat.rec [?u]` — a live, silent
 ///     divergence, not a hypothetical one.
 ///
-/// `head::elab_ident_head` now seams the ONE disjunct leanr's
+/// `head::elab_app_fn_id` now seams the ONE disjunct leanr's
 /// environment can decide (`isRec`, i.e. `ConstantInfo::Rec`) — see
 /// `deferred_constructs_are_named_seams`'s `Nat.rec` case. That guard is
 /// partial by construction, so what is left open, and what this gate
@@ -699,8 +694,8 @@ fn literal_kinds_are_registered_not_deferred() {
 /// It is deliberately NOT generalised to "any completed slice", and the
 /// reason is that no non-rotting formulation exists. Live source
 /// legitimately names INCOMPLETE slices in exactly this position — that
-/// is the named-seam discipline itself (`app/mod.rs`'s `@.f` arm names
-/// "M4b-4a P4", and until M4b-4a P2 closed it `elab.rs`'s `.postpone` seam
+/// is the named-seam discipline itself (`app/head.rs`'s recursor guard names
+/// "M4b-4c", and until M4b-4a P2 closed it `elab.rs`'s `.postpone` seam
 /// named "M4b-4a P2"; none of these
 /// are "M4b-3 P5" any more, now that P5 is complete: this example set
 /// itself had to be rewritten by Task 12 when the two live seams it used to
@@ -763,6 +758,16 @@ fn literal_kinds_are_registered_not_deferred() {
 /// temporarily added to `app/lval.rs` made this test fail naming that
 /// line, and it passed again once removed (both runs in the task 5
 /// report).
+///
+/// **`M4b-4a P4` was added by M4b-4a P4 task 4, and measured
+/// non-vacuous.** After the doc rows (`dispatch.rs`, `app/mod.rs`,
+/// `lib.rs`) were reworded to "P4 SHIPPED", a live line
+/// `const _NEEDLE: &str = "M4b-4a P4";` temporarily added to
+/// `app/dot_ident.rs` made this test fail naming that line, and it passed
+/// again once removed (both runs in the task 4 report). The `const` was the
+/// shape used, not the `let _ =` the P2/P3 paragraphs quote: `dot_ident.rs`
+/// has no function body at the end of the file, and a module-level `let`
+/// does not compile.
 #[test]
 fn no_seam_message_names_a_completed_slice() {
     let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
@@ -773,6 +778,7 @@ fn no_seam_message_names_a_completed_slice() {
         "M4b-4a P1",
         "M4b-4a P2",
         "M4b-4a P3",
+        "M4b-4a P4",
     ];
     let mut offenders = Vec::new();
     for path in walk_rs_files(src_dir) {
@@ -788,7 +794,7 @@ fn no_seam_message_names_a_completed_slice() {
     }
     assert!(
         offenders.is_empty(),
-        "M4b-3 P3, P4, P5 and M4b-4a P1, P2, P3 are complete; live (non-comment) source \
+        "M4b-3 P3, P4, P5 and M4b-4a P1, P2, P3, P4 are complete; live (non-comment) source \
          claiming one at {offenders:?}"
     );
 }

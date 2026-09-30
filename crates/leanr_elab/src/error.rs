@@ -34,7 +34,7 @@ pub enum ElabError {
     /// '{constName}'" (`Lean/Elab/Term/TermElabM.lean:2128-2136`).
     /// Carries the head identifier's raw source text. Reachable only
     /// once `.{u, v}` explicit-universe syntax has a producer (M4b-3 P1
-    /// task 8); the check itself lives in `app::head::elab_ident_head`
+    /// task 8); the check itself lives in `app::head::elab_app_fn_id`
     /// from task 4 on, so the arm can never be silently skipped.
     TooManyUniverseLevels(String),
     /// A syntax node whose shape contradicts the grammar (missing child,
@@ -189,6 +189,27 @@ pub enum ElabError {
     /// oracle: `elabAppFn`'s `` `(_) `` arm (`App.lean:2119`): "A
     /// placeholder `_` cannot be used where a function is expected".
     PlaceholderAsFunction,
+    /// oracle: `throwInvalidExplicitUniversesForLocal`
+    /// (`TermElabM.lean:2160-2161`), from `resolveName`'s `processLocal`
+    /// (`:2172-2179`): explicit universes on an identifier that resolves
+    /// to a local with no fields left over, e.g. `x.{0}`. With fields
+    /// (`x.val.{0}`) the levels belong to the last field instead.
+    InvalidExplicitUniversesForLocal(ExprId),
+    /// A named pattern `x@p` outside a pattern. Two oracle throw sites,
+    /// both measured: `elabNamedPatternErr` (`BuiltinTerm.lean:443-444`)
+    /// answers for a whole term (`as_function: false`), and `elabAppFn`'s
+    /// arm (`App.lean:2098-2100`) for an application head
+    /// (`as_function: true`).
+    NamedPatternOutsidePattern {
+        as_function: bool,
+    },
+    /// oracle: `resolveDottedIdentFn`'s throws (`App.lean:1985-2058`);
+    /// `id` is the identifier after the dot, as written. Prose deferred
+    /// (design spec § Errors).
+    InvalidDottedIdent {
+        id: String,
+        reason: InvalidDottedIdentReason,
+    },
     /// An oracle `panic!`/`unreachable!` site (`mkBaseProjections`,
     /// `App.lean:1703`, `:1708`): unreachable on a well-formed
     /// environment, an error rather than a panic here because `.olean`
@@ -283,6 +304,24 @@ pub enum InvalidFieldReason {
     /// `App.lean:1609-1612` — "Field projection operates on types of the
     /// form `C ...`".
     NotConstApp,
+}
+
+/// Which `resolveDottedIdentFn` throw an `ElabError::InvalidDottedIdent`
+/// stands for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InvalidDottedIdentReason {
+    /// `App.lean:1986-1987` — "The name `id` must be atomic".
+    NotAtomic,
+    /// `throwNoExpectedType` (`App.lean:1997-2007`), thrown with no
+    /// expected type (`:1989-1990`) or with an mvar-headed one (`:2044-2045`).
+    NoExpectedType,
+    /// `App.lean:2041-2042` — "Not supported on type universe".
+    Sort,
+    /// `App.lean:2046-2048` — "is not of the form `C ...` or `... → C ...`".
+    NotConstApp,
+    /// `App.lean:2038-2040` — `throwUnknownIdentifierAt` "Unknown constant
+    /// `full_name`", the last one tried after every `unfoldDefinition?` step.
+    UnknownConstant { full_name: String },
 }
 
 impl From<MetaError> for ElabError {

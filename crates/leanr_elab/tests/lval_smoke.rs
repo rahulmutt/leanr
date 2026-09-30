@@ -7,7 +7,9 @@
 
 mod support;
 
-use leanr_elab::{ElabError, InvalidFieldReason, InvalidProjectionReason};
+use leanr_elab::{
+    ElabError, InvalidDottedIdentReason, InvalidFieldReason, InvalidProjectionReason,
+};
 
 fn proj_reason(src: &str) -> InvalidProjectionReason {
     match support::elab_and_synthesize(src) {
@@ -501,4 +503,243 @@ fn self_reproducing_coe_fun_hits_max_rec_depth() {
         support::elab_and_synthesize("fun (s : S1) => (s).loop"),
         Err(ElabError::MaxRecDepth)
     ));
+}
+
+/// M4b-4a P4: the field split in identifiers (`resolveName`,
+/// TermElabM.lean:2170-2192; `elabAppFnResolutions`, App.lean:1926-1950).
+/// Each message is the pinned oracle's (plan § Measured oracle behaviour).
+#[test]
+fn identifier_field_split_rejections_match_the_oracle() {
+    // A field that is neither a structure field nor a method. The base
+    // `Nat.zero`'s type is the constant `Nat`, so the structure arm
+    // answers (App.lean:1578), not the suffix arm. "Invalid field `foo`:
+    // The environment does not contain `Nat.foo`"
+    for src in [
+        "fun (x : Nat) => x.foo",
+        "Nat.zero.foo",
+        "fun (p : Prod Nat Nat) => p.fst.foo",
+    ] {
+        match support::elab_and_synthesize(src) {
+            Err(ElabError::InvalidField {
+                reason: InvalidFieldReason::NotFound { full_name },
+                ..
+            }) => assert_eq!(full_name, "Nat.foo", "{src}"),
+            other => panic!("{src}: expected InvalidField NotFound, got {other:?}"),
+        }
+    }
+    // Review Focus 3: `c ++ suffix` (App.lean:1584-1586, :1606-1608) fires
+    // only for a CONSTANT base, and `suffix?` is ALL the split-off fields
+    // (`toName fields`, :1946-1950). `Nat : Type` takes the catch-all arm,
+    // `Nat.succ : Nat → Nat` and `Nat.rec` the function arm. `Nat.rec.foo`
+    // also shows the recursor guard stays off when fields follow (the
+    // head `elabAppArgs` sees is not `Nat.rec`). "Unknown constant `…`"
+    for (src, name) in [
+        ("Nat.foo", "Nat.foo"),
+        ("Nat.foo.bar", "Nat.foo.bar"),
+        ("Nat.succ.foo", "Nat.succ.foo"),
+        ("Nat.rec.foo", "Nat.rec.foo"),
+    ] {
+        match support::elab_and_synthesize(src) {
+            Err(ElabError::UnknownIdent(s)) => assert_eq!(s, name, "{src}"),
+            other => panic!("{src}: expected UnknownIdent({name}), got {other:?}"),
+        }
+    }
+    // Review Focus 3: an fvar base never takes the suffix arm; the second
+    // field carries no suffix. "… does not contain `Function.foo`",
+    // "… does not contain `Function.succ` … from an expression @S1.imp s"
+    for (src, full) in [
+        ("fun (f : Nat -> Nat) => f.foo", "Function.foo"),
+        ("fun (s : S1) => s.imp.succ", "Function.succ"),
+    ] {
+        assert_eq!(
+            field_reason(src),
+            InvalidFieldReason::NotFound {
+                full_name: full.to_string()
+            },
+            "{src}"
+        );
+    }
+    // Review Focus 2: `processLocal` (TermElabM.lean:2172-2179). "invalid
+    // use of explicit universe parameters, `x` is a local variable"
+    assert!(matches!(
+        support::elab_and_synthesize("fun (x : Nat) => x.{0}"),
+        Err(ElabError::InvalidExplicitUniversesForLocal(_))
+    ));
+    // Review Focus 2: levels go to the last field (`mkConsts`,
+    // TermElabM.lean:2148). "too many explicit universe levels for
+    // `Nat.succ`" / "… for `polyZero`" / "… for `Poly.val`"
+    for src in [
+        "Nat.zero.succ.{0}",
+        "polyZero.{0}",
+        "fun (x : Poly Nat) => x.val.{0,0}",
+    ] {
+        assert!(
+            matches!(
+                support::elab_and_synthesize(src),
+                Err(ElabError::TooManyUniverseLevels(_))
+            ),
+            "{src}"
+        );
+    }
+}
+
+/// M4b-4a P4: `e |>.f args` (`elabPipeProj`, App.lean:2250-2258, into
+/// `elabAppFn`'s pipeProj arms, :2085-2097) and named patterns outside a
+/// pattern.
+#[test]
+fn pipe_projection_and_named_pattern_rejections_match_the_oracle() {
+    // "Invalid projection: Index `3` is invalid for this structure; it
+    // must be between 1 and 2"
+    assert_eq!(
+        proj_reason("fun (p : Prod Nat Nat) => p |>.3"),
+        InvalidProjectionReason::IndexOutOfRange {
+            idx: 3,
+            num_fields: 2
+        }
+    );
+    // Postponed, then resumed with postponement off. "Invalid
+    // projection: Type of x is not known; cannot resolve projection `1`"
+    assert_eq!(
+        proj_reason("fun x => x |>.1"),
+        InvalidProjectionReason::TypeUnknown
+    );
+    // The `.{us}` of `$e |>.$f.{us}` (`:2094-2097`) reaches `Nat.succ`.
+    // "too many explicit universe levels for `Nat.succ`"
+    assert!(matches!(
+        support::elab_and_synthesize("fun (x : Nat) => x |>.succ.{0}"),
+        Err(ElabError::TooManyUniverseLevels(_))
+    ));
+}
+
+/// An inner `|>.` with arguments keeps them when it is the base of an
+/// outer `|>.`: `elabAppFn`'s pipeProj patterns (App.lean:2085-2097) have
+/// no `$args*`, so the inner node takes the generic arm (:2120-2138) and is
+/// elaborated whole. Dropping its argument would leave `S1.addTo · s :
+/// Nat → Nat` and silently accept `Function.twice`. "Invalid field
+/// `twice`: The environment does not contain `Nat.twice`, so it is not
+/// possible to project the field `twice` from an expression S1.addTo
+/// Nat.zero s of type `Nat`"
+#[test]
+fn nested_pipe_projection_keeps_the_inner_arguments() {
+    assert_eq!(
+        field_reason("fun (s : S1) => s |>.addTo Nat.zero |>.twice"),
+        InvalidFieldReason::NotFound {
+            full_name: "Nat.twice".to_string()
+        }
+    );
+}
+
+/// A whole term: `elabNamedPatternErr` (BuiltinTerm.lean:443-444).
+/// "`<identifier>@<term>` is a named pattern and can only be used in
+/// pattern matching contexts"
+#[test]
+fn named_pattern_as_a_term_is_rejected() {
+    assert!(matches!(
+        support::elab_and_synthesize("fun (x : Nat) => x@Nat.zero"),
+        Err(ElabError::NamedPatternOutsidePattern { as_function: false })
+    ));
+}
+
+/// The application-head site is checked in its own test so neither
+/// assertion can mask the other.
+#[test]
+fn named_pattern_as_a_function_is_rejected() {
+    // An application head: `elabAppFn` (App.lean:2098-2100). "Expected a
+    // function, but found the named pattern x@Nat.succ"
+    assert!(matches!(
+        support::elab_and_synthesize("fun (x : Nat) => x@Nat.succ Nat.zero"),
+        Err(ElabError::NamedPatternOutsidePattern { as_function: true })
+    ));
+}
+
+fn dotted_reason(src: &str) -> InvalidDottedIdentReason {
+    match support::elab_and_synthesize(src) {
+        Err(ElabError::InvalidDottedIdent { reason, .. }) => reason,
+        other => panic!("{src}: expected InvalidDottedIdent, got {other:?}"),
+    }
+}
+
+/// M4b-4a P4: `resolveDottedIdentFn` (App.lean:1985-2058). Each message is
+/// the pinned oracle's (plan § Measured oracle behaviour).
+#[test]
+fn dot_identifier_rejections_match_the_oracle() {
+    // `:1986-1987`: "The name `a.b` must be atomic"
+    assert_eq!(
+        dotted_reason("(.a.b : Nat)"),
+        InvalidDottedIdentReason::NotAtomic
+    );
+    // `:2041-2042`: "Not supported on type universe"
+    assert_eq!(
+        dotted_reason("(.foo : Type)"),
+        InvalidDottedIdentReason::Sort
+    );
+    // `:2046-2048`: "The expected type of `.foo` α is not of the form `C ...`"
+    assert_eq!(
+        dotted_reason("fun (α : Type) (f : α -> Nat) => f .foo"),
+        InvalidDottedIdentReason::NotConstApp
+    );
+    // `:2038-2040`, with the `unfoldDefinition?` retry (`:2050-2057`)
+    // throwing the LAST failure: the oracle logs "Unknown constant
+    // `NatAlias.foo`", then throws "Unknown constant `Nat.foo`" (and
+    // `S3Alias.zero` → `S3.zero`).
+    for (src, full) in [
+        ("Nat.succ .foo", "Nat.foo"),
+        ("(.foo : NatAlias)", "Nat.foo"),
+        ("(.zero : S3Alias)", "S3.zero"),
+        ("(.zero : Prod Nat Nat)", "Prod.zero"),
+    ] {
+        assert_eq!(
+            dotted_reason(src),
+            InvalidDottedIdentReason::UnknownConstant {
+                full_name: full.to_string()
+            },
+            "{src}"
+        );
+    }
+    // `mkConst resolvedName explicitUnivs` (`:2033`): "too many explicit
+    // universe levels for `Nat.zero`"
+    assert!(matches!(
+        support::elab_and_synthesize("(.zero.{0} : Nat)"),
+        Err(ElabError::TooManyUniverseLevels(_))
+    ));
+}
+
+/// Review Focus 5: a `.c` whose expected type never becomes known. Every
+/// case postpones (`tryPostponeIfNoneOrMVar`, App.lean:1988) and is resumed
+/// by `resumePostponed` against its postponement mvar's TYPE
+/// (`SyntheticMVars.lean:38`, `:51`) — an unassigned mvar even when the
+/// original expected type was none (`postponeElabTermCore`,
+/// `TermElabM.lean:1451`). So each throws at `:2044-2045`, never at
+/// `:1989-1990`. `@.succ` is `elabAppFn`'s `@.$id` arm (`:2115`), formerly
+/// a P4 seam; `(fun x => x) .zero` resumes against the still-unassigned
+/// `?α`. Oracle: "The expected type of `.zero` could not be determined".
+/// All cases are checked before asserting, so no case masks another.
+#[test]
+fn dot_identifier_without_an_expected_type_is_rejected() {
+    let wrong: Vec<String> = [".zero", "@.succ", ".succ Nat.zero", "(fun x => x) .zero"]
+        .into_iter()
+        .filter_map(|src| match support::elab_and_synthesize(src) {
+            Err(ElabError::InvalidDottedIdent {
+                reason: InvalidDottedIdentReason::NoExpectedType,
+                ..
+            }) => None,
+            other => Some(format!("{src}: {other:?}")),
+        })
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "expected NoExpectedType:\n{}",
+        wrong.join("\n")
+    );
+}
+
+/// Review Focus 4: `withForallBody` (App.lean:2009-2015) enters
+/// `(y : Nat) → Nat` with a local `y` and must drop it afterwards; the
+/// next argument's `y` is then unknown. Oracle: "Unknown identifier `y`".
+#[test]
+fn dot_identifier_telescope_does_not_leak_its_binders() {
+    match support::elab_and_synthesize("(fun (g : (y : Nat) -> Nat) (n : Nat) => n) .succ y") {
+        Err(ElabError::UnknownIdent(s)) => assert_eq!(s, "y"),
+        other => panic!("expected UnknownIdent(y), got {other:?}"),
+    }
 }

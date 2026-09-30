@@ -24,21 +24,22 @@ use crate::app::AppCall;
 use crate::dispatch::{non_trivia_children, SynElem};
 use crate::elab::TermElabM;
 use crate::error::ElabError;
-use crate::resolve::resolve_global;
+use crate::resolve::{resolve_global_name, resolve_local_name};
 
 /// Oracle `elabAppFn` (`App.lean:2060-2138`): returns FINISHED
 /// candidates (the oracle's `TermElabResult` array), because it threads
 /// `lvals` and itself calls `elabAppLVals`, which calls `elabAppArgs`
 /// (`lval::elab_app_lvals` -> `elab_app_args`).
 ///
-/// The recursor guard (`heed` in the ident arm) is the oracle's own
+/// The recursor guard (`heed` in `elab_app_fn_id`) is the oracle's own
 /// two-line gate at the top of `elabAsElim?` (`App.lean:1398-1399`):
 /// `unless (← read).heedElabAsElim do return none` followed by `if
 /// explicit || ellipsis then return none`. leanr never turns the reader
 /// field off (`withoutElabAsElim`, `TermElabM.lean:733`, has no leanr
 /// counterpart — nothing in this crate suppresses the branch), so it is
 /// `!explicit && !ellipsis`, which is exactly the second line, and
-/// additionally off while LVals are pending. Computed here rather than
+/// additionally off while LVals are pending or fields were split off the
+/// identifier. Computed in `elab_app_fn_id` rather than
 /// read off `AppElab` because `elab_app_fn` runs BEFORE the
 /// `Context`/`State` exist — `elab_app_args` needs the head's type to
 /// build them.
@@ -76,61 +77,90 @@ pub fn elab_app_fn(
         )));
     }
     match (kind, elem) {
-        ("<ident>", leanr_syntax::tree::NodeOrToken::Token(tok)) => {
-            // `elabAsElim?` runs inside `elabAppArgs` on the FINAL head
-            // (`App.lean:1373`). With LVals pending, the identifier is not
-            // that head — `resolveLVal` consumes it first — so the recursor
-            // guard must not fire (plan § Review Focus 1).
-            let heed = !call.explicit && !call.ellipsis && lvals.is_empty();
-            let f = elab_ident_head(elab, tok.text(), explicit_levels, heed)?;
-            Ok(vec![crate::app::lval::elab_app_lvals(
-                elab, f, lvals, call, kinds,
-            )?])
-        }
+        ("<ident>", leanr_syntax::tree::NodeOrToken::Token(tok)) => Ok(vec![elab_app_fn_id(
+            elab,
+            elem,
+            tok.text(),
+            explicit_levels,
+            lvals,
+            call,
+            kinds,
+        )?]),
         // oracle: `` `($(e).$idx:fieldIdx) `` / `` `($(e).$field:ident) ``
         // and their `.{us}` forms (`App.lean:2084-2097`). The explicit levels
         // peeled off a `.{us}` wrapper belong to the FIELD (the last
         // component), never to `e`.
         ("Lean.Parser.Term.proj", _) => {
             let (base, field) = proj_parts(elem)?;
-            let mut new: Vec<LVal> = match kinds.name(field.kind()) {
-                // `elabFieldIdx` (`:2075-2078`).
-                "fieldIdx" => {
-                    let text = field.to_string();
-                    let idx = text
-                        .trim()
-                        .parse::<usize>()
-                        .map_err(|_| ElabError::IllFormedSyntax(format!("fieldIdx `{text}`")))?;
-                    vec![LVal::FieldIdx {
-                        r#ref: field.clone(),
-                        idx,
-                        levels: explicit_levels.to_vec(),
-                    }]
-                }
-                // `elabFieldName` (`:2067-2074`): `field.identComponents` —
-                // ONE token, one LVal per component (plan § Review Focus 5),
-                // each component unescaped (`«a»` is the field `a`).
-                _ => {
-                    let text = field.to_string();
-                    let comps = ident_components(text.trim())?;
-                    let last = comps.len() - 1;
-                    comps
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, c)| LVal::FieldName {
-                            r#ref: field.clone(),
-                            name: c,
-                            levels: if i == last {
-                                explicit_levels.to_vec()
-                            } else {
-                                Vec::new()
-                            },
-                        })
-                        .collect()
-                }
-            };
+            let mut new = field_lvals(&field, kinds, explicit_levels)?;
             new.extend(lvals);
             elab_app_fn(elab, &base, kinds, &[], new, call)
+        }
+        // oracle: `` `($e |>.$idx:fieldIdx) `` / `` `($e |>.$field:ident) ``
+        // and their `.{us}` forms (`App.lean:2085-2097`), the same
+        // `elabFieldIdx` / `elabFieldName` as a projection.
+        //
+        // These patterns have no `$args*`, so they match only a pipeProj
+        // with NO trailing arguments. `elabPipeProj` (`App.lean:2250-2258`)
+        // rebuilds the node it was handed without its arguments before
+        // calling `elabAppAux`, so the outermost pipeProj always matches;
+        // leanr instead leaves the node intact and `app::elab_pipe_proj`
+        // passes it as `call.stx`, so `elem == call.stx` identifies it and
+        // its arguments are already in `call`. Any OTHER pipeProj that
+        // still carries arguments, e.g. the inner `s |>.addTo Nat.zero` that
+        // is the base of `s |>.addTo Nat.zero |>.succ`, matches none of the
+        // patterns and falls to the generic arm (`:2120-2138`): it is
+        // elaborated whole, through `elabPipeProj` again, and the pending
+        // lvals are applied to the result.
+        //
+        // `explicit_levels` is always empty here: the check at the top of
+        // this function rejects `.{us}` peeled off any head but an
+        // identifier, `proj` or `dotIdent`. A pipeProj's own `.{us}` is
+        // its child [3], read below.
+        ("Lean.Parser.Term.pipeProj", _) => {
+            let (base, field, lvls, has_args) = pipe_proj_parts(elem)?;
+            if has_args && *elem != call.stx {
+                return elab_app_fn_generic(elab, elem, kinds, lvals, call);
+            }
+            let levels = elab_explicit_univs(elab, &lvls, kinds)?;
+            let mut new = field_lvals(&field, kinds, &levels)?;
+            new.extend(lvals);
+            elab_app_fn(elab, &base, kinds, &[], new, call)
+        }
+        // oracle: `` `($_:ident@$_:term) `` (`App.lean:2098-2100`).
+        ("Lean.Parser.Term.namedPattern", _) => {
+            Err(ElabError::NamedPatternOutsidePattern { as_function: true })
+        }
+        // oracle: `` `(.$id:ident) `` / `` `(.$id:ident.{$us,*}) ``
+        // (`App.lean:2106-2109`) → `elabDottedIdent` (`:2079-2082`):
+        // `resolveDottedIdentFn`, then `elabAppFnResolutions` with no
+        // fields. `.{us}` arrive as `explicit_levels` (`app::peel_head`).
+        ("Lean.Parser.Term.dotIdent", _) => {
+            let raw = dot_ident_text(elem)?;
+            let f = crate::app::dot_ident::resolve_dotted_ident_fn(
+                elab,
+                &raw,
+                explicit_levels,
+                call.expected,
+            )?;
+            // `elabAppArgs`' `elabAsElim?` sees this head exactly as it sees
+            // an identifier's (`App.lean:1373`), so `elab_app_fn_id`'s
+            // partial recursor guard applies here too: `(.rec .. : Nat)`
+            // resolves to `Nat.rec`, which the oracle elaborates with
+            // `ElabElim.main`.
+            let heed = !call.explicit && !call.ellipsis && lvals.is_empty();
+            if heed {
+                if let leanr_kernel::bank::terms::Node::Const { name: Some(c), .. } =
+                    crate::app::lval::node(elab, f)
+                {
+                    if matches!(elab.view.get(c), Some(leanr_kernel::ConstantInfo::Rec(_))) {
+                        return Err(recursor_head_seam(&format!(".{raw}")));
+                    }
+                }
+            }
+            Ok(vec![crate::app::lval::elab_app_lvals(
+                elab, f, lvals, call, kinds,
+            )?])
         }
         // oracle: `` `($id:ident.{$us,*}) `` (`App.lean:2103-2105`) and the
         // proj `.{us}` arms (`:2087-2090`, `:2094-2097`), reached by
@@ -145,13 +175,9 @@ pub fn elab_app_fn(
         ("Lean.Parser.Term.hole", _) => Err(ElabError::PlaceholderAsFunction),
         ("choice", _) => Err(ElabError::UnsupportedSyntax(
             "application head `choice` needs `elabAppFn`'s `choiceKind` fan-out \
-             (App.lean:2062-2065) — the overloading slice (resolve_global)"
+             (App.lean:2062-2065) — the overloading slice (resolve_global_name)"
                 .to_string(),
         )),
-        (other, _) if is_lval_head(other) => Err(ElabError::UnsupportedSyntax(format!(
-            "application head `{other}` needs `elabAppFn`'s pipeProj/dotIdent/namedPattern \
-             arms (App.lean:2084-2100, :2106-2109) — M4b-4a P4"
-        ))),
         // oracle: `elabAppFn`'s generic arm (`App.lean:2120-2138`). With
         // nothing to apply, the term is elaborated against the expected
         // type and returned AS IS — not re-applied through `elabAppArgs`.
@@ -162,17 +188,109 @@ pub fn elab_app_fn(
         // `observing`'s restore-and-rethrow of a postponement
         // (`TermElabM.lean:586-589`) is subsumed by the enclosing
         // `elab_term`'s own restore, which rolls back to an earlier state.
-        _ => {
-            if lvals.is_empty() && call.named_args.is_empty() && call.args.is_empty() {
-                Ok(vec![elab.elab_term(elem, kinds, call.expected)?])
-            } else {
-                let f = elab.elab_term(elem, kinds, None)?;
-                Ok(vec![crate::app::lval::elab_app_lvals(
-                    elab, f, lvals, call, kinds,
-                )?])
-            }
-        }
+        _ => elab_app_fn_generic(elab, elem, kinds, lvals, call),
     }
+}
+
+/// `elabAppFn`'s generic arm (`App.lean:2120-2138`); see the `_` arm of
+/// `elab_app_fn`, which documents it.
+fn elab_app_fn_generic(
+    elab: &mut TermElabM,
+    elem: &SynElem,
+    kinds: &KindInterner,
+    lvals: Vec<LVal>,
+    call: AppCall,
+) -> Result<Vec<ExprId>, ElabError> {
+    if lvals.is_empty() && call.named_args.is_empty() && call.args.is_empty() {
+        Ok(vec![elab.elab_term(elem, kinds, call.expected)?])
+    } else {
+        let f = elab.elab_term(elem, kinds, None)?;
+        Ok(vec![crate::app::lval::elab_app_lvals(
+            elab, f, lvals, call, kinds,
+        )?])
+    }
+}
+
+/// oracle: `elabFieldIdx` / `elabFieldName` (`App.lean:2067-2078`): the
+/// LVals a `.field` suffix contributes. Shared by `Term.proj` and
+/// `Term.pipeProj`. `levels` go to the LAST component; `suffix? := none`,
+/// since a projection's field "can't be part of a composite name" (`:2072`).
+fn field_lvals(
+    field: &SynElem,
+    kinds: &KindInterner,
+    levels: &[LevelId],
+) -> Result<Vec<LVal>, ElabError> {
+    Ok(match kinds.name(field.kind()) {
+        // `elabFieldIdx` (`:2075-2078`).
+        "fieldIdx" => {
+            let text = field.to_string();
+            let idx = text
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| ElabError::IllFormedSyntax(format!("fieldIdx `{text}`")))?;
+            vec![LVal::FieldIdx {
+                r#ref: field.clone(),
+                idx,
+                levels: levels.to_vec(),
+            }]
+        }
+        // `elabFieldName` (`:2067-2074`): `field.identComponents` —
+        // ONE token, one LVal per component (M4b-4a P1 plan § Review
+        // Focus 5), each component unescaped (`«a»` is the field `a`).
+        _ => {
+            let text = field.to_string();
+            let comps = ident_components(text.trim())?;
+            let last = comps.len() - 1;
+            comps
+                .into_iter()
+                .enumerate()
+                .map(|(i, c)| LVal::FieldName {
+                    r#ref: field.clone(),
+                    name: c,
+                    levels: if i == last {
+                        levels.to_vec()
+                    } else {
+                        Vec::new()
+                    },
+                    suffix: None,
+                })
+                .collect()
+        }
+    })
+}
+
+/// `Term.pipeProj`'s children (`term_app.rs`'s `register_pipe_proj`;
+/// confirmed with `leanr parse --dump` while planning):
+///
+/// ```text
+///   [0] e   [1] "|>."   [2] field: fieldIdx node | <ident> token
+///   [3] null: `optional explicitUnivSuffix`, empty or [".{", levels, "}"]
+///   [4] null: `many argument` (`app::elab_pipe_proj` takes it apart)
+/// ```
+///
+/// Returns `e`, the field, the level syntax (separators dropped, as
+/// `app::explicit_univ_parts` does) and whether [4] holds any argument.
+fn pipe_proj_parts(elem: &SynElem) -> Result<(SynElem, SynElem, Vec<SynElem>, bool), ElabError> {
+    let bad = |what: &str| ElabError::IllFormedSyntax(format!("pipeProj: {what}"));
+    let node = elem.as_node().ok_or_else(|| bad("not a node"))?;
+    let ch = non_trivia_children(node);
+    if ch.len() != 5 {
+        return Err(bad("expected `[e, \"|>.\", field, univs, args]`"));
+    }
+    let suffix = ch[3]
+        .as_node()
+        .ok_or_else(|| bad("univ suffix is not a node"))?;
+    let sch = non_trivia_children(suffix);
+    let lvls = match sch.get(1).and_then(|el| el.as_node()) {
+        Some(list) => non_trivia_children(list).into_iter().step_by(2).collect(),
+        None if sch.is_empty() => Vec::new(),
+        None => return Err(bad("malformed `.{..}` suffix")),
+    };
+    let args = ch[4]
+        .as_node()
+        .ok_or_else(|| bad("argument list is not a node"))?;
+    let has_args = !non_trivia_children(args).is_empty();
+    Ok((ch[0].clone(), ch[2].clone(), lvls, has_args))
 }
 
 /// `(base, field)` of a `Lean.Parser.Term.proj` node. Layout (confirmed
@@ -202,17 +320,25 @@ pub(crate) fn proj_parts(elem: &SynElem) -> Result<(SynElem, SynElem), ElabError
     }
 }
 
-/// The application-head kinds whose oracle arm is still unported:
-/// `elabAppFn`'s `` `($e |>.$..) `` arms (`App.lean:2085`, `:2088`,
-/// `:2092`, `:2095`), its `` `(.$id:ident) `` arms (`:2106-2109`) and
-/// the `namedPattern` arm (`:2098-2100`, an outright error outside
-/// pattern position). `choice` has its own arm above; `Term.proj` is
-/// ported.
-fn is_lval_head(kind: &str) -> bool {
-    matches!(
-        kind,
-        "Lean.Parser.Term.pipeProj" | "Lean.Parser.Term.dotIdent" | "Lean.Parser.Term.namedPattern"
-    )
+/// The recursor half of `shouldElabAsElim` (`App.lean:1322-1328`), seamed:
+/// see `elab_app_fn_id`'s guard.
+fn recursor_head_seam(raw: &str) -> ElabError {
+    ElabError::UnsupportedSyntax(format!(
+        "`{raw}` is a recursor — the oracle elaborates eliminator-headed \
+         applications with `ElabElim.main` (`shouldElabAsElim`, App.lean:1322-1328; \
+         diverted at :1373), which needs `motivePos` — M4b-4c"
+    ))
+}
+
+/// `Term.dotIdent`'s identifier: children `[".", <ident>]`
+/// (`term_app.rs`'s `register_dot_ident`).
+fn dot_ident_text(elem: &SynElem) -> Result<String, ElabError> {
+    let bad = || ElabError::IllFormedSyntax("dotIdent: expected `[\".\", ident]`".to_string());
+    let node = elem.as_node().ok_or_else(bad)?;
+    match non_trivia_children(node).get(1) {
+        Some(leanr_syntax::tree::NodeOrToken::Token(t)) => Ok(t.text().to_string()),
+        _ => Err(bad()),
+    }
 }
 
 /// oracle: `elabExplicitUnivs` (`App.lean:1899-1900`) —
@@ -235,6 +361,11 @@ pub(super) fn elab_explicit_univs(
         .collect()
 }
 
+/// oracle: `elabAppFnId` (`App.lean:1952-1958`): `resolveName'`
+/// (`TermElabM.lean:2201-2208`) over `resolveName` (`:2170-2192`), then
+/// `elabAppFnResolutions` (`App.lean:1926-1950`), which turns the
+/// split-off field components into `LVal`s in front of the pending ones.
+///
 /// The former `builtin::ident::elab_ident`, plus `explicit_levels`
 /// (Task 8's `.{u}`): oracle `mkConst` creates fresh universe mvars only
 /// for the levelParams NOT covered by explicit levels
@@ -249,98 +380,143 @@ pub(super) fn elab_explicit_univs(
 /// `raw` is the identifier's raw source text — a single lexer token that
 /// already includes every `.`-separated component (`leanr_syntax::lex`'s
 /// `hierarchical_idents_are_one_token`), so a dotted name like
-/// `Nat.succ` arrives here as ONE string, split by `intern_dotted` below
-/// exactly the way every other dotted-name builder in this workspace
+/// `Nat.succ` arrives here as ONE string, split below exactly the way
+/// `intern_dotted` and every other dotted-name builder in this workspace
 /// does (`leanr_meta`'s own `intern_dotted`/`dotted_name` test helpers,
 /// `pub(crate)`/test-only there and so not reusable from this crate).
-fn elab_ident_head(
+fn elab_app_fn_id(
     elab: &mut TermElabM,
+    elem: &SynElem,
     raw: &str,
     explicit_levels: &[LevelId],
-    heed_elab_as_elim: bool,
+    lvals: Vec<LVal>,
+    call: AppCall,
+    kinds: &KindInterner,
 ) -> Result<ExprId, ElabError> {
-    let name = intern_dotted(elab, raw)?;
+    // `intern_dotted`'s convention (split on every `.`, `«»` kept), so a
+    // single-component prefix is the same `NameId` a binder of that text
+    // has (plan § Decisions).
+    let parts: Vec<&str> = raw.split('.').collect();
+    let prefixes = intern_prefixes(elab, &parts)?;
+    // `resolveName`: every local prefix before any global (`:2180-2181`).
+    //
     // M4b-2 (binders): a local variable shadows a same-named global
-    // constant, and must be checked FIRST — oracle: `elabIdent` consults
-    // the local context before falling back to `resolveGlobalConst`.
-    // `MetaCtx::lctx_lookup_by_name` (leanr_meta, additive/TCB-neutral,
-    // mirroring the oracle's own `LocalContext.findFromUserName?`) is a
-    // no-op (`None`) whenever `lctx` is empty — every query that never
-    // enters a binder falls straight through to `resolve_global` exactly
-    // as before this existed. Bypasses `resolve_global`/fresh-level-mvar
-    // minting entirely on a hit: an fvar carries no separate
+    // constant, and must be checked FIRST. `MetaCtx::lctx_lookup_by_name`
+    // (leanr_meta, additive/TCB-neutral, mirroring the oracle's own
+    // `LocalContext.findFromUserName?`) is a no-op (`None`) whenever
+    // `lctx` is empty — every query that never enters a binder falls
+    // straight through to `resolve_global_name`. A local hit bypasses
+    // fresh-level-mvar minting entirely: an fvar carries no separate
     // `levelParams` the way a global constant does.
-    if let Some(fvar) = elab.mctx.lctx_lookup_by_name(name) {
-        return Ok(fvar);
-    }
-    // `raw` (the identifier's own source text) doubles as `resolve_global`'s
-    // error-message `display` — see that function's own doc comment for why
-    // `name` itself (frequently a SCRATCH-region id here, minted by
-    // `intern_dotted` just above for any identifier not already interned in
-    // the persistent store) cannot safely be re-rendered through
-    // `view.store` alone.
-    let cname = resolve_global(&elab.view, name, raw)?;
-
-    let info = elab
-        .view
-        .get(cname)
-        .expect("resolve_global only returns names EnvView::get resolves");
-
-    // oracle: `shouldElabAsElim` (`App.lean:1322-1328`) is
-    //   `isRec declName || isCasesOnRecursor env declName
-    //    || isBRecOnRecursor env declName || isRecOnRecursor env declName
-    //    || elabAsElim.hasTag env declName`
-    // and when it holds, `elabAppArgs` (`App.lean:1373`) diverts the
-    // WHOLE application to `ElabElim.main` instead of `ElabAppArgs.main`
-    // — a different elaborator producing a different term.
-    //
-    // P1 can decide only the FIRST of those five disjuncts. `isRec` is
-    // `isRecCore` (`MonadEnv.lean:35-36`), a plain constant-kind test,
-    // and leanr's environment carries `ConstantInfo::Rec(RecursorVal)`
-    // already. The three `is*Recursor` predicates are
-    // `isAuxRecursorWithSuffix` (`AuxRecursor.lean:39-51`), which reads
-    // the `auxRecExt` tag extension, and the last is the `elabAsElim`
-    // tag extension — neither is decoded anywhere in leanr. So this
-    // guard is PARTIAL BY CONSTRUCTION, and deliberately so: seaming
-    // what P1 can detect is strictly better than emitting a knowingly
-    // different term for all five cases.
-    //
-    // STILL DIVERGENT, with no seam: `Nat.casesOn`, `Nat.recOn`,
-    // `Nat.brecOn` (and every other aux recursor), plus anything
-    // carrying `@[elab_as_elim]`. Those take the ordinary path here and
-    // emit a term the oracle does not. `tests/seam_audit.rs`'s
-    // `fixture_declares_no_undecoded_elab_attributes` is the backstop
-    // that keeps such a query out of the committed corpus; M4b-4c owns
-    // the `auxRecExt` decode and `ElabElim` itself.
-    //
-    // Measured, not assumed (Task 9, pinned oracle via `dump_elab.lean`'s
-    // own entry point): `Nat.rec` elaborates to a bare `?m` there — the
-    // branch postpones on the missing expected type — where leanr
-    // emitted `const Nat.rec [?u]`.
-    //
-    // This guard is also an OVER-approximation in one direction the
-    // oracle is finer about: `elabAsElim?` (`App.lean:1402-1420`) falls
-    // back to the standard elaborator when the motive has ALREADY been
-    // supplied, which needs `getElabElimInfo`'s `motivePos` — M4b-4c
-    // machinery. So `Nat.rec (motive := ..) ..` is seamed here where the
-    // oracle would elaborate it normally. A named error is the safe
-    // direction of that trade; a wrong `Expr` is not.
-    if heed_elab_as_elim && matches!(info, leanr_kernel::ConstantInfo::Rec(_)) {
-        return Err(ElabError::UnsupportedSyntax(format!(
-            "`{raw}` is a recursor — the oracle elaborates eliminator-headed \
-             applications with `ElabElim.main` (`shouldElabAsElim`, App.lean:1322-1328; \
-             diverted at :1373), which needs `motivePos` — M4b-4c"
-        )));
-    }
-
-    mk_const(elab, cname, explicit_levels, raw)
+    let (f, n_fields, proj_levels) =
+        if let Some((fvar, n_fields)) = resolve_local_name(&elab.mctx, &prefixes) {
+            // `processLocal` (`:2172-2179`).
+            if n_fields == 0 && !explicit_levels.is_empty() {
+                return Err(ElabError::InvalidExplicitUniversesForLocal(fvar));
+            }
+            (fvar, n_fields, explicit_levels.to_vec())
+        } else {
+            // `raw` (the identifier's own source text) doubles as the
+            // error-message `display` — see `resolve_global_name`'s doc
+            // for why a prefix (frequently a SCRATCH-region id, minted by
+            // `intern_prefixes` just above for any name not already
+            // interned in the persistent store) cannot safely be
+            // re-rendered through `view.store` alone.
+            let (cname, n_fields) = resolve_global_name(&elab.view, &prefixes, raw)?;
+            // `mkConsts` (`:2145-2158`): with fields, the explicit levels
+            // belong to the last field and the constant gets fresh ones.
+            let (const_levels, proj_levels): (&[LevelId], &[LevelId]) = if n_fields == 0 {
+                (explicit_levels, &[])
+            } else {
+                (&[], explicit_levels)
+            };
+            // `elabAsElim?` runs inside `elabAppArgs` on the FINAL head
+            // (`App.lean:1373`). With LVals pending, or fields split off,
+            // the constant is not that head — `resolveLVal` consumes it
+            // first — so the recursor guard must not fire (M4b-4a P1 plan
+            // § Review Focus 1). Otherwise the guard is the oracle's own
+            // two-line gate at the top of `elabAsElim?` (see
+            // `elab_app_fn`'s doc).
+            let heed = !call.explicit && !call.ellipsis && lvals.is_empty() && n_fields == 0;
+            let info = elab
+                .view
+                .get(cname)
+                .expect("resolve_global_name only returns names EnvView::get resolves");
+            // oracle: `shouldElabAsElim` (`App.lean:1322-1328`) is
+            //   `isRec declName || isCasesOnRecursor env declName
+            //    || isBRecOnRecursor env declName || isRecOnRecursor env declName
+            //    || elabAsElim.hasTag env declName`
+            // and when it holds, `elabAppArgs` (`App.lean:1373`) diverts the
+            // WHOLE application to `ElabElim.main` instead of `ElabAppArgs.main`
+            // — a different elaborator producing a different term.
+            //
+            // P1 can decide only the FIRST of those five disjuncts. `isRec` is
+            // `isRecCore` (`MonadEnv.lean:36-37`), a plain constant-kind test,
+            // and leanr's environment carries `ConstantInfo::Rec(RecursorVal)`
+            // already. The three `is*Recursor` predicates are
+            // `isAuxRecursorWithSuffix` (`AuxRecursor.lean:39-51`), which reads
+            // the `auxRecExt` tag extension, and the last is the `elabAsElim`
+            // tag extension — neither is decoded anywhere in leanr. So this
+            // guard is PARTIAL BY CONSTRUCTION, and deliberately so: seaming
+            // what P1 can detect is strictly better than emitting a knowingly
+            // different term for all five cases.
+            //
+            // STILL DIVERGENT, with no seam: `Nat.casesOn`, `Nat.recOn`,
+            // `Nat.brecOn` (and every other aux recursor), plus anything
+            // carrying `@[elab_as_elim]`. Those take the ordinary path here and
+            // emit a term the oracle does not. `tests/seam_audit.rs`'s
+            // `fixture_declares_no_undecoded_elab_attributes` is the backstop
+            // that keeps such a query out of the committed corpus; M4b-4c owns
+            // the `auxRecExt` decode and `ElabElim` itself.
+            //
+            // Measured, not assumed (Task 9, pinned oracle via `dump_elab.lean`'s
+            // own entry point): `Nat.rec` elaborates to a bare `?m` there — the
+            // branch postpones on the missing expected type — where leanr
+            // emitted `const Nat.rec [?u]`.
+            //
+            // This guard is also an OVER-approximation in one direction the
+            // oracle is finer about: `elabAsElim?` (`App.lean:1402-1420`) falls
+            // back to the standard elaborator when the motive has ALREADY been
+            // supplied, which needs `getElabElimInfo`'s `motivePos` — M4b-4c
+            // machinery. So `Nat.rec (motive := ..) ..` is seamed here where the
+            // oracle would elaborate it normally. A named error is the safe
+            // direction of that trade; a wrong `Expr` is not.
+            if heed && matches!(info, leanr_kernel::ConstantInfo::Rec(_)) {
+                return Err(recursor_head_seam(raw));
+            }
+            let display = parts[..parts.len() - n_fields].join(".");
+            (
+                mk_const(elab, cname, const_levels, &display)?,
+                n_fields,
+                proj_levels.to_vec(),
+            )
+        };
+    // `elabAppFnResolutions` (`:1933-1938`).
+    let fields = &parts[parts.len() - n_fields..];
+    let suffix = (!fields.is_empty()).then(|| fields.join("."));
+    let mut all: Vec<LVal> = fields
+        .iter()
+        .enumerate()
+        .map(|(i, c)| LVal::FieldName {
+            r#ref: elem.clone(),
+            name: (*c).to_string(),
+            levels: if i + 1 == n_fields {
+                proj_levels.clone()
+            } else {
+                Vec::new()
+            },
+            suffix: if i == 0 { suffix.clone() } else { None },
+        })
+        .collect();
+    all.extend(lvals);
+    crate::app::lval::elab_app_lvals(elab, f, all, call, kinds)
 }
 
 /// oracle: `mkConst` (`TermElabM.lean:2128-2136`). `display` is the
 /// identifier's source text, used only in the `TooManyUniverseLevels` error.
 ///
 /// Precondition: `cname` is declared. Both callers establish it —
-/// `elab_ident_head` via `resolve_global`, `lval::elab_app_lvals` by
+/// `elab_app_fn_id` via `resolve_global_name`, `lval::elab_app_lvals` by
 /// checking the `structureExt`-decoded `projFn` against the environment.
 pub(crate) fn mk_const(
     elab: &mut TermElabM,
@@ -351,7 +527,7 @@ pub(crate) fn mk_const(
     let info = elab
         .view
         .get(cname)
-        .expect("mk_const callers pass only declared names (resolve_global / checked projFn)");
+        .expect("mk_const callers pass only declared names (resolve_global_name / checked projFn)");
     let n_params = info.constant_val().level_params.len();
     // oracle: `mkConst` errors when the user wrote MORE explicit levels
     // than the constant has parameters, rather than truncating.
@@ -364,7 +540,7 @@ pub(crate) fn mk_const(
         levels.push(elab.mk_fresh_level_mvar()?);
     }
     // `base = Some(elab.view.store)` from here on: `cname` is a
-    // PERSISTENT-region `NameId` (`resolve_global` only ever returns a
+    // PERSISTENT-region `NameId` (`resolve_global_name` only ever returns a
     // name `EnvView::get` resolved, and every constant in `env.constants`
     // is persistent-region by construction — `Environment::admit_unchecked`
     // /decode never inserts a scratch id there). `Store::expr_const`'s
@@ -434,24 +610,40 @@ pub(crate) fn ident_components(raw: &str) -> Result<Vec<String>, ElabError> {
     }
 }
 
-/// Intern `parts` as the hierarchical name `parts[0].parts[1]...`, each
-/// part ONE component whatever it contains (so an unescaped `«a.b»`
-/// stays a single component). Same store discipline as `intern_dotted`.
-pub(crate) fn intern_components(elab: &mut TermElabM, parts: &[&str]) -> Result<NameId, ElabError> {
+/// Intern every prefix of a dotted name: `prefixes[k]` is the name of
+/// `parts[..=k]`. Same store discipline as `intern_components` (below),
+/// which is the last element. `resolve::resolve_local_name` /
+/// `resolve_global_name` need every prefix, and chaining `name_str`
+/// mints them all anyway.
+pub(crate) fn intern_prefixes(
+    elab: &mut TermElabM,
+    parts: &[&str],
+) -> Result<Vec<NameId>, ElabError> {
     let base = elab.view.store;
+    let mut prefixes = Vec::with_capacity(parts.len());
     let mut id: Option<NameId> = None;
     for part in parts {
         let store = elab.mctx.store_mut();
         let s = store
             .intern_str(Some(base), part)
             .map_err(leanr_meta::MetaError::from)?;
-        id = Some(
-            store
-                .name_str(Some(base), id, s)
-                .map_err(leanr_meta::MetaError::from)?,
-        );
+        let n = store
+            .name_str(Some(base), id, s)
+            .map_err(leanr_meta::MetaError::from)?;
+        prefixes.push(n);
+        id = Some(n);
     }
-    id.ok_or_else(|| ElabError::IllFormedSyntax("empty name".to_string()))
+    Ok(prefixes)
+}
+
+/// Intern `parts` as the hierarchical name `parts[0].parts[1]...`, each
+/// part ONE component whatever it contains (so an unescaped `«a.b»`
+/// stays a single component). Same store discipline as `intern_dotted`.
+pub(crate) fn intern_components(elab: &mut TermElabM, parts: &[&str]) -> Result<NameId, ElabError> {
+    intern_prefixes(elab, parts)?
+        .last()
+        .copied()
+        .ok_or_else(|| ElabError::IllFormedSyntax("empty name".to_string()))
 }
 
 /// Intern a (possibly dotted) identifier's raw source text as a
@@ -462,7 +654,7 @@ pub(crate) fn intern_components(elab: &mut TermElabM, parts: &[&str]) -> Result<
 /// `intern_dotted`/`dotted_name` (private test helpers there) do.
 ///
 /// `base = Some(elab.view.store)`, not `None`: this has to find the
-/// SAME `NameId` `resolve_global`/`EnvView::get` will look up against
+/// SAME `NameId` `resolve_global_name`/`EnvView::get` will look up against
 /// the PERSISTENT store, not mint an unrelated fresh row in the
 /// elaborator's own SCRATCH store (`elab.mctx.store_mut()`) — a global
 /// like `Nat` is already interned in the persistent bank (every
@@ -539,23 +731,25 @@ mod tests {
     }
 
     /// The regression M4b-1's `builtin/ident.rs` carried, moved here
-    /// with the code it guards (M4b-3 P1 task 4): `elab_ident_head`'s
-    /// OWN pipeline (`intern_dotted` then `resolve_global`) on an
+    /// with the code it guards (M4b-3 P1 task 4): `elab_app_fn_id`'s
+    /// OWN pipeline (`intern_prefixes` then `resolve_global_name`) on an
     /// identifier NOT declared in `env` — unlike `resolve::tests::
     /// unknown_ident_when_not_declared`, which mints the unknown name
     /// directly in the PERSISTENT store and so never reproduces the bug:
-    /// `intern_dotted` mints a SCRATCH-region `NameId` for any name not
+    /// `intern_prefixes` mints a SCRATCH-region `NameId` for any name not
     /// already interned in the persistent store, which is exactly what
     /// happens for a genuinely unknown/typo'd identifier. Against the
-    /// pre-fix `resolve_global` (which re-derived the error text via
+    /// pre-fix `resolve_global` (M4b-1; P4 replaced it with
+    /// `resolve_global_name`), which re-derived the error text via
     /// `view.store.to_name(None, Some(name))`, `view.store` being the
-    /// PERSISTENT store, on a SCRATCH-region `name`) this test either
+    /// PERSISTENT store, on a SCRATCH-region `name`, this test either
     /// panicked in `name_row`'s `.expect(..)` or — as observed then,
     /// since the persistent pool from `env_with_foo` is non-empty —
     /// silently returned the WRONG identifier text (a row from the
-    /// persistent pool, not "Bar"). Post-fix, `resolve_global` takes the
-    /// display text verbatim from the token's real source text, so this
-    /// passes without touching the store at all for the error path.
+    /// persistent pool, not "Bar"). Post-fix, the resolver (today
+    /// `resolve_global_name`) takes the display text verbatim from the
+    /// token's real source text, so this passes without touching the store
+    /// at all for the error path.
     #[test]
     fn unknown_ident_via_real_scratch_pipeline() {
         let env = env_with_foo();
@@ -576,13 +770,20 @@ mod tests {
             "parse errors: {:?}",
             parsed.errors
         );
-        let root = parsed.tree.root();
-        let tok = match root.first_child_or_token() {
-            Some(NodeOrToken::Token(t)) => t,
-            other => panic!("expected a bare ident token, got {other:?}"),
+        let elem = parsed.tree.root().first_child_or_token().expect("a term");
+        assert!(
+            matches!(elem, NodeOrToken::Token(_)),
+            "expected a bare ident token"
+        );
+        let call = crate::app::AppCall {
+            named_args: Vec::new(),
+            args: Vec::new(),
+            expected: None,
+            explicit: false,
+            ellipsis: false,
+            stx: elem.clone(),
         };
-
-        match super::elab_ident_head(&mut elab, tok.text(), &[], true) {
+        match super::elab_app_fn(&mut elab, &elem, &parsed.tree.kinds, &[], Vec::new(), call) {
             Err(crate::ElabError::UnknownIdent(s)) => assert_eq!(s, "Bar"),
             other => panic!("expected UnknownIdent(\"Bar\"), got {other:?}"),
         }

@@ -417,6 +417,53 @@ planned one at a time after their predecessor merges.
    (`add_lval_arg_go`). The recursive form overflowed the debug-build Rust
    stack at depth ~385, before the 512 cap.
 
+**P4 amendments (found while planning, measured)**
+
+1. **`resolveDottedIdentFn`'s local-context candidate is not ported**
+   (`App.lean:2034-2037`). It resolves `fullName = C ++ id`, which always has
+   two or more components, and oracle locals are atomic
+   (`ensureAtomicBinderName`, `Binders.lean:188-191`: "invalid binder name
+   `x.a`, it must be atomic"). Only an auxiliary `let rec`/`where`
+   declaration could match, and leanr's local context holds none. Owned by
+   the `let rec`/`where` slice, on the P3 `AmbiguousField` precedent; its
+   `throwInvalidExplicitUniversesForLocal` (`:2035-2036`) goes with it.
+2. **New variant `InvalidExplicitUniversesForLocal`**
+   (`TermElabM.lean:2160-2161`), raised by `resolveName`'s `processLocal`
+   (`:2172-2179`). leanr silently dropped the levels on
+   `fun (x : Nat) => x.{0}`; the oracle rejects it. A silent
+   over-acceptance, closed by P4.
+3. **New variant `NamedPatternOutsidePattern { as_function }`**, with the
+   oracle's two throw sites: `x@Nat.zero` gets `elabNamedPatternErr`'s
+   message (`BuiltinTerm.lean:443-444`; `elabNamedPattern := elabAtom`,
+   `App.lean:2247`, is registered too but is not the one that answers), and
+   `x@Nat.succ Nat.zero` gets `elabAppFn`'s "Expected a function, but found
+   the named pattern" (`App.lean:2098-2100`).
+4. **`LVal::FieldName.suffix` is the rejoined field text
+   (`Option<String>`); `fullRef` is not added.** `suffix?` only feeds the
+   unknown-constant error `c ++ suffix` (`App.lean:1584-1586`,
+   `:1606-1608`), whose leanr form is `UnknownIdent(String)`; `fullRef` is
+   only the error position.
+5. **Reserved names are a named follow-up, not a seam.** The oracle's
+   `realizeGlobalName` (`TermElabM.lean:2190`) realizes reserved names on
+   demand: `pick.eq_1` elaborates to the equation lemma. leanr splits it
+   into `pick` plus a field `eq_1` and reports `UnknownIdent("pick.eq_1")`.
+   Reject-only. Owner: the slice that grows `resolve_global_name`.
+6. **`whnfCoreUnfoldingAnnotations` is ported but nothing observable
+   depends on it.** An annotated expected type it would unfold
+   (`optParam Nat Nat.zero`) fails as a namespace (`optParam.zero`) and
+   reaches the same constant through the `unfoldDefinition?` retry. Only the
+   oracle's logged intermediate errors differ, and leanr has no log.
+7. **`resolveLocalName`'s longest-prefix order is not observable.** With
+   single-component local names only one prefix can match. The loop is
+   ported as the oracle writes it.
+8. **The escape convention is `intern_dotted`'s** (decision, not oracle
+   behaviour): split on every `.` and keep `«»` verbatim. Binder names are
+   interned whole as one component, so unescaping only the identifier side
+   would break `fun («x» : Nat) => «x»`, which works today. Consequence:
+   the oracle accepts `fun («x» : Nat) => x.succ`, `Nat.«zero».succ` and
+   `fun (s : S2) => s.«toS1».a`, and leanr rejects them (reject-only,
+   recorded under § Landed › P4).
+
 ## Landed
 
 ### P1 — structures and projections (PR #49)
@@ -577,3 +624,60 @@ planned one at a time after their predecessor merges.
     which references rolled-back telescope mvars (`lval.rs:744`). The
     oracle only prints `f.getAppFn.eta`. Whoever ports the error prose
     should render `app_fn(f)`.
+
+### P4 — identifier forms (PR #52)
+
+- What landed: `resolve_local_name` / `resolve_global_name` (replacing
+  `resolve_global`; two callers in `builtin/lit/mod.rs` pass a single prefix,
+  `resolve_global_name(&view, &[cname], name)`, which keeps them
+  exact-name), `elab_app_fn_id` with `suffix`, the two `c ++ suffix` arms of
+  `resolve_lval_aux`, `pipeProj`, `namedPattern`, `resolve_dotted_ident_fn`
+  (`app/dot_ident.rs`) with `withForallBody` and
+  `whnfCoreUnfoldingAnnotations`, and `@.c`. One addition beyond the plan:
+  the recursor guard (`elabAsElim?`, `App.lean:1373`, `:1399-1401`) also
+  covers a dot-identifier head, so `(.rec … : Nat)` raises the M4b-4c seam,
+  pinned by a `seam_audit` case. Whoever owns M4b-4c must lift it together
+  with `elab_app_fn_id`'s guard.
+- Nested `|>.` with arguments (final-review fix): `elabAppFn`'s pipeProj
+  patterns (`App.lean:2085-2097`) have no `$args*`, and `elabPipeProj`
+  (`:2250-2258`) strips the arguments only from the node it was handed. So
+  an inner `|>.` that still carries arguments, the base of an outer `|>.`,
+  takes the generic arm (`:2120-2138`) and is elaborated whole. leanr's
+  pipeProj arm now does the same for any pipeProj with arguments other than
+  `call.stx`. Before the fix, `s |>.addTo Nat.zero |>.succ` was wrongly
+  rejected and `s |>.addTo Nat.zero |>.twice` was silently accepted as
+  `Function.twice`. Pinned by `p4/pipe-nested-args`, `p4/pipe-nested-named`,
+  `p4/pipe-nested-deep` and `lval_smoke`'s
+  `nested_pipe_projection_keeps_the_inner_arguments`.
+- Corpus: 42 `p4/*` records, 276 in total. No corpus term was dropped under
+  the `numScopeArgs` decision. Every plan mutation discriminates except the
+  three survivors listed under the follow-ups below (U, R′ and probe S′),
+  which the plan predicted or the controller ruled on; tasks 2 and 3 split
+  tests so no assertion masked another.
+- Rejections live in `lval_smoke.rs`.
+- The P2 note is closed: "For P4: dotted identifiers on a local … give
+  `UnknownIdent`" no longer holds (`p4/local-*`).
+- The `seam_audit` needle `M4b-4a P4` was added and measured non-vacuous.
+  After this slice no seam in the crate names M4b-4a.
+- Open follow-ups:
+  - Escape-convention divergences (amendment 8), all reject-only:
+    `fun («x» : Nat) => x.succ`, `Nat.«zero».succ`,
+    `fun (s : S2) => s.«toS1».a`.
+  - `pick.eq_1` (reserved names, amendment 5).
+  - leanr lacks `ensureAtomicBinderName` (`Binders.lean:188-191`):
+    `fun (x.a : Nat) => …` is accepted by leanr and rejected by the oracle,
+    a pre-existing binder-slice gap.
+  - Unpinned code (every test survives the mutation): U
+    (`whnf_core_unfolding_annotations` reduced to plain `whnf_core`, amendment
+    6) and R′ (only the `:1988` `tryPostponeIfNoneOrMVar` call deleted; the
+    `:1989-1990` arm still answers), both predicted by the plan. Probe S′ also
+    survives: the `:1989-1990` arm (no expected type with postponement
+    disabled) is reached by no test, because every test postpones and then
+    resumes against an mvar type.
+  - The `_private.` dot-ident seam in `dot_ident.rs`
+    (`isInaccessiblePrivateName`, `App.lean:2024`) has no test (no private
+    fixture). Being `UnsupportedSyntax`, it skips `go`'s unfold retry, whereas
+    the oracle's error would retry. Owner: the slice that models private
+    names.
+  - No term was dropped under § Decisions. The only mutations that failed to
+    discriminate are U, R′ and probe S′ above.

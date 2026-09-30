@@ -115,7 +115,7 @@
 //!   `elab_explicit`). `useImplicitLambda`'s `.postpone` arm SHIPPED in
 //!   M4b-4a P2 (`elab.rs`'s `UseImplicitLambda::Postpone`).
 //! - **overload resolution** (more than one candidate from
-//!   `elabAppFn`) — the slice that grows `resolve_global`, since it is
+//!   `elabAppFn`) — the slice that grows `resolve_global_name`, since it is
 //!   unreachable while only exact names resolve.
 //! - **`elabAsElim`** — M4b-4c, and the one deferral whose seam is
 //!   PARTIAL. `shouldElabAsElim` (`App.lean:1322-1328`) has five
@@ -132,10 +132,10 @@
 //!   resolution loop, `numImplicitParams` and `@` on projection heads
 //!   (`app/lval.rs`, `app/head.rs`). P2 SHIPPED term-level postponement
 //!   (`postpone.rs`; `resolveLValLoop`, `elabAppArgs` and
-//!   `useImplicitLambda` produce). Still deferred, each a named seam:
-//!   generalized field notation (`.const`, `Function.f`) P3,
-//!   `pipeProj`/`dotIdent`/`namedPattern` P4, `choice` the overloading
-//!   slice, private field projections the slice that models private
+//!   `useImplicitLambda` produce). P3 SHIPPED generalized field
+//!   notation and P4 SHIPPED `pipeProj`/`dotIdent`/`namedPattern`
+//!   (`app/head.rs`, `app/dot_ident.rs`). Still deferred, each a named
+//!   seam: `choice` the overloading slice, private field projections the slice that models private
 //!   names. The anonymous constructor `⟨⟩` — M4b-4b; `binop%` —
 //!   the macro-expansion slice.
 //! - **macro expansion** — `dispatch` never expands a macro form; the
@@ -143,8 +143,8 @@
 //!   registered elaborator. Deferred to the slice that first needs a
 //!   macro form.
 //! - **`open`/alias/`export`/`_root_` resolution** — `resolve.rs`'s
-//!   `resolve_global` only resolves a global constant declared under
-//!   the name exactly as written; namespace-prefix search, exported
+//!   `resolve_global_name` only resolves a global constant declared under
+//!   the name (or a prefix of it) exactly as written; namespace-prefix search, exported
 //!   aliases, and root-qualification are a later slice.
 //!
 //! See `dispatch.rs`'s doc comment for the kind-by-kind deferral table,
@@ -259,4 +259,4 @@ pub mod resolve; // Task 5
 pub mod synthetic; // M4b-3 P2a
 
 pub use elab::TermElabM;
-pub use error::{ElabError, InvalidFieldReason, InvalidProjectionReason};
+pub use error::{ElabError, InvalidDottedIdentReason, InvalidFieldReason, InvalidProjectionReason};

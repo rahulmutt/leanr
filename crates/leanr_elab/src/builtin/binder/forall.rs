@@ -63,7 +63,7 @@ pub(crate) fn elab_binders_and_forall(
     // `leanr_meta`'s own `local_names` field doc) also truncates the
     // by-user-name index in lockstep, so this single checkpoint now
     // covers both id-based (`lctx`) and name-based (`lctx_lookup_by_name`,
-    // consulted by `app::head::elab_ident_head`) lookups — no second
+    // consulted by `app::head::elab_app_fn_id`) lookups — no second
     // checkpoint needed.
     let checkpoint = elab.mctx.lctx_checkpoint();
     let result = (|| {

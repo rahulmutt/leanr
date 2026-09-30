@@ -658,9 +658,11 @@ pub fn visit_order_of_default_walk(
     leanr_elab::synthetic::default_walk_log_take()
 }
 
-/// The `ExprId` of a fixture constant with no universe arguments,
-/// resolved by dotted source name exactly as `app::head::elab_ident_head`
-/// does. Panics if the fixture does not declare it — a test helper's
+/// The `ExprId` of a fixture constant with no universe arguments, looked
+/// up by its WHOLE dotted source name: every component is interned and
+/// the resulting name must be declared. Unlike `app::head::elab_app_fn_id`
+/// there is no local lookup, no namespace or prefix search and no field
+/// split, so `"Nat.zero.succ"` panics rather than resolving. Panics if the fixture does not declare it — a test helper's
 /// contract, not elaborator code.
 pub fn fixture_const(
     app: &mut leanr_elab::app::state::AppElab,

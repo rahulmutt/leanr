@@ -1,7 +1,7 @@
 //! The overload shape guard. Oracle: `elabAppAux` (`App.lean:2202-2217`)
 //! takes `candidates`, and with more than one runs `getSuccesses` /
 //! ambiguity reporting / `mergeFailures`. That machinery is unreachable
-//! while `resolve_global` resolves only exact names (no `open`, no
+//! while `resolve_global_name` resolves only exact names (no `open`, no
 //! aliases, no `_root_`, no `choice` nodes), so it is NOT built
 //! speculatively — the shape is asserted instead.
 
@@ -17,7 +17,7 @@ pub fn expect_single(candidates: Vec<ExprId>) -> Result<ExprId, ElabError> {
         )),
         n => Err(ElabError::UnsupportedSyntax(format!(
             "overloaded application ({n} candidates) requires namespace/alias \
-             resolution — the slice that grows resolve_global owns this"
+             resolution — the slice that grows resolve_global_name owns this"
         ))),
     }
 }

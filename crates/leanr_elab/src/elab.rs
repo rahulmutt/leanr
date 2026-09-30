@@ -19,7 +19,7 @@ pub struct TermElabM<'e> {
     /// The environment view `mctx` was itself built over, held a second
     /// time here: `MetaCtx::view` is `pub(crate)` to `leanr_meta` (no
     /// accessor — `grep -rn "pub fn " crates/leanr_meta/src/metactx.rs`
-    /// confirms it), so `resolve_global` (design spec's named-seam
+    /// confirms it), so `resolve_global_name` (design spec's named-seam
     /// global-constant resolution, `resolve.rs`) has no way to reach a
     /// `&EnvView` through `mctx` at all. `EnvView<'e>` is `Copy`
     /// (`tc.rs`'s own derive), so the caller's `view` local — already
@@ -134,7 +134,7 @@ impl<'e> TermElabM<'e> {
     /// mints a globally-fresh `LMVarId`, declares it in the `mctx`, and
     /// returns the `LevelId` of `Level.mvar` referencing it. One fresh
     /// mvar per universe parameter is exactly what
-    /// `app::head::elab_ident_head` needs
+    /// `app::head::elab_app_fn_id` needs
     /// for `mkConst` (design spec's "Universe metavariables in the
     /// output"). Reachable capability surface is entirely public
     /// (`MetaCtx::store_mut`/`mctx_mut`, `MetavarContext::declare_level`,
@@ -594,11 +594,9 @@ fn use_implicit_lambda(
 /// other result, including a leftover suffix or no match at all, is
 /// `none`). leanr's identifier tokens already carry a whole dotted name
 /// as one token (`app/head.rs`'s own `hierarchical_idents_are_one_token`
-/// note) and this crate has no field-projection resolution to produce a
-/// leftover suffix, so "found in the local context under this exact
-/// name" is the whole test: `MetaCtx::lctx_lookup_by_name` is the
-/// oracle's `LocalContext.findFromUserName?`, the lookup
-/// `resolveLocalName` itself is built from.
+/// note) and `resolve::resolve_local_name` is `resolveLocalName`,
+/// leftover fields and all; a result with fields is not a local
+/// identifier.
 fn local_ident_of(
     elab: &mut TermElabM,
     elem: &SynElem,
@@ -610,8 +608,14 @@ fn local_ident_of(
     let leanr_syntax::tree::NodeOrToken::Token(tok) = elem else {
         return Ok(None);
     };
-    let name = crate::app::head::intern_dotted(elab, tok.text())?;
-    Ok(elab.mctx.lctx_lookup_by_name(name))
+    let parts: Vec<&str> = tok.text().split('.').collect();
+    let prefixes = crate::app::head::intern_prefixes(elab, &parts)?;
+    Ok(
+        match crate::resolve::resolve_local_name(&elab.mctx, &prefixes) {
+            Some((fvar, 0)) => Some(fvar),
+            _ => None,
+        },
+    )
 }
 
 /// oracle: `elabImplicitLambda` (`TermElabM.lean:1806-1820`) — peel
