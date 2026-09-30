@@ -259,4 +259,4 @@ pub mod resolve; // Task 5
 pub mod synthetic; // M4b-3 P2a
 
 pub use elab::TermElabM;
-pub use error::{ElabError, InvalidFieldReason, InvalidProjectionReason};
+pub use error::{ElabError, InvalidDottedIdentReason, InvalidFieldReason, InvalidProjectionReason};

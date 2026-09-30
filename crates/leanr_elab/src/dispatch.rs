@@ -101,6 +101,7 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
         "Lean.Parser.Term.proj" => Some("proj"),
         "Lean.Parser.Term.pipeProj" => Some("pipeProj"),
         "Lean.Parser.Term.namedPattern" => Some("namedPattern"),
+        "Lean.Parser.Term.dotIdent" => Some("dotIdent"),
         _ => None,
     }
 }
@@ -264,6 +265,11 @@ pub(crate) fn dispatch(
         // (`App.lean:2250-2258`).
         ("Lean.Parser.Term.pipeProj", NodeOrToken::Node(node)) => {
             crate::app::elab_pipe_proj(elab, node, kinds, expected)
+        }
+        // oracle: `@[builtin_term_elab dotIdent] elabDotIdent := elabAtom`
+        // (`App.lean:2248`).
+        ("Lean.Parser.Term.dotIdent", NodeOrToken::Node(_)) => {
+            crate::app::elab_atom(elab, elem, kinds, expected)
         }
         // oracle: `elabNamedPatternErr` (`BuiltinTerm.lean:443-444`).
         // `elabNamedPattern := elabAtom` (`App.lean:2247`) is registered

@@ -111,6 +111,37 @@ pub fn elab_app_fn(
         ("Lean.Parser.Term.namedPattern", _) => {
             Err(ElabError::NamedPatternOutsidePattern { as_function: true })
         }
+        // oracle: `` `(.$id:ident) `` / `` `(.$id:ident.{$us,*}) ``
+        // (`App.lean:2106-2109`) → `elabDottedIdent` (`:2079-2082`):
+        // `resolveDottedIdentFn`, then `elabAppFnResolutions` with no
+        // fields. `.{us}` arrive as `explicit_levels` (`app::peel_head`).
+        ("Lean.Parser.Term.dotIdent", _) => {
+            let raw = dot_ident_text(elem)?;
+            let f = crate::app::dot_ident::resolve_dotted_ident_fn(
+                elab,
+                &raw,
+                explicit_levels,
+                call.expected,
+            )?;
+            // `elabAppArgs`' `elabAsElim?` sees this head exactly as it sees
+            // an identifier's (`App.lean:1373`), so `elab_app_fn_id`'s
+            // partial recursor guard applies here too: `(.rec .. : Nat)`
+            // resolves to `Nat.rec`, which the oracle elaborates with
+            // `ElabElim.main`.
+            let heed = !call.explicit && !call.ellipsis && lvals.is_empty();
+            if heed {
+                if let leanr_kernel::bank::terms::Node::Const { name: Some(c), .. } =
+                    crate::app::lval::node(elab, f)
+                {
+                    if matches!(elab.view.get(c), Some(leanr_kernel::ConstantInfo::Rec(_))) {
+                        return Err(recursor_head_seam(&format!(".{raw}")));
+                    }
+                }
+            }
+            Ok(vec![crate::app::lval::elab_app_lvals(
+                elab, f, lvals, call, kinds,
+            )?])
+        }
         // oracle: `` `($id:ident.{$us,*}) `` (`App.lean:2103-2105`) and the
         // proj `.{us}` arms (`:2087-2090`, `:2094-2097`), reached by
         // recursion — a `.{us}` on a proj's own base, e.g. `o.1.{0}.2`.
@@ -127,10 +158,6 @@ pub fn elab_app_fn(
              (App.lean:2062-2065) — the overloading slice (resolve_global_name)"
                 .to_string(),
         )),
-        (other, _) if is_lval_head(other) => Err(ElabError::UnsupportedSyntax(format!(
-            "application head `{other}` needs `elabAppFn`'s dotIdent arm \
-             (App.lean:2106-2109) — M4b-4a P4"
-        ))),
         // oracle: `elabAppFn`'s generic arm (`App.lean:2120-2138`). With
         // nothing to apply, the term is elaborated against the expected
         // type and returned AS IS — not re-applied through `elabAppArgs`.
@@ -259,12 +286,25 @@ pub(crate) fn proj_parts(elem: &SynElem) -> Result<(SynElem, SynElem), ElabError
     }
 }
 
-/// The application-head kind whose oracle arm is still unported:
-/// `elabAppFn`'s `` `(.$id:ident) `` arms (`App.lean:2106-2109`).
-/// `choice` has its own arm above; `proj`, `pipeProj` and `namedPattern`
-/// are ported.
-fn is_lval_head(kind: &str) -> bool {
-    matches!(kind, "Lean.Parser.Term.dotIdent")
+/// The recursor half of `shouldElabAsElim` (`App.lean:1322-1328`), seamed:
+/// see `elab_app_fn_id`'s guard.
+fn recursor_head_seam(raw: &str) -> ElabError {
+    ElabError::UnsupportedSyntax(format!(
+        "`{raw}` is a recursor — the oracle elaborates eliminator-headed \
+         applications with `ElabElim.main` (`shouldElabAsElim`, App.lean:1322-1328; \
+         diverted at :1373), which needs `motivePos` — M4b-4c"
+    ))
+}
+
+/// `Term.dotIdent`'s identifier: children `[".", <ident>]`
+/// (`term_app.rs`'s `register_dot_ident`).
+fn dot_ident_text(elem: &SynElem) -> Result<String, ElabError> {
+    let bad = || ElabError::IllFormedSyntax("dotIdent: expected `[\".\", ident]`".to_string());
+    let node = elem.as_node().ok_or_else(bad)?;
+    match non_trivia_children(node).get(1) {
+        Some(leanr_syntax::tree::NodeOrToken::Token(t)) => Ok(t.text().to_string()),
+        _ => Err(bad()),
+    }
 }
 
 /// oracle: `elabExplicitUnivs` (`App.lean:1899-1900`) —
@@ -408,11 +448,7 @@ fn elab_app_fn_id(
             // oracle would elaborate it normally. A named error is the safe
             // direction of that trade; a wrong `Expr` is not.
             if heed && matches!(info, leanr_kernel::ConstantInfo::Rec(_)) {
-                return Err(ElabError::UnsupportedSyntax(format!(
-                    "`{raw}` is a recursor — the oracle elaborates eliminator-headed \
-                     applications with `ElabElim.main` (`shouldElabAsElim`, App.lean:1322-1328; \
-                     diverted at :1373), which needs `motivePos` — M4b-4c"
-                )));
+                return Err(recursor_head_seam(raw));
             }
             let display = parts[..parts.len() - n_fields].join(".");
             (

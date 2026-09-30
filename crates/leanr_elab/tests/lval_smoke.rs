@@ -7,7 +7,9 @@
 
 mod support;
 
-use leanr_elab::{ElabError, InvalidFieldReason, InvalidProjectionReason};
+use leanr_elab::{
+    ElabError, InvalidDottedIdentReason, InvalidFieldReason, InvalidProjectionReason,
+};
 
 fn proj_reason(src: &str) -> InvalidProjectionReason {
     match support::elab_and_synthesize(src) {
@@ -630,4 +632,79 @@ fn named_pattern_as_a_function_is_rejected() {
         support::elab_and_synthesize("fun (x : Nat) => x@Nat.succ Nat.zero"),
         Err(ElabError::NamedPatternOutsidePattern { as_function: true })
     ));
+}
+
+fn dotted_reason(src: &str) -> InvalidDottedIdentReason {
+    match support::elab_and_synthesize(src) {
+        Err(ElabError::InvalidDottedIdent { reason, .. }) => reason,
+        other => panic!("{src}: expected InvalidDottedIdent, got {other:?}"),
+    }
+}
+
+/// M4b-4a P4: `resolveDottedIdentFn` (App.lean:1985-2058). Each message is
+/// the pinned oracle's (plan § Measured oracle behaviour).
+#[test]
+fn dot_identifier_rejections_match_the_oracle() {
+    // `:1986-1987`: "The name `a.b` must be atomic"
+    assert_eq!(
+        dotted_reason("(.a.b : Nat)"),
+        InvalidDottedIdentReason::NotAtomic
+    );
+    // Review Focus 5. `:1988-1990`: postponed, then resumed with no
+    // expected type. `@.succ` is `elabAppFn`'s `@.$id` arm (:2115),
+    // formerly a P4 seam. `(fun x => x) .zero` resumes against the
+    // still-unassigned `?α` and throws at `:2044-2045`. "The expected type
+    // of `.zero` could not be determined"
+    for src in [".zero", "@.succ", ".succ Nat.zero", "(fun x => x) .zero"] {
+        assert_eq!(
+            dotted_reason(src),
+            InvalidDottedIdentReason::NoExpectedType,
+            "{src}"
+        );
+    }
+    // `:2041-2042`: "Not supported on type universe"
+    assert_eq!(
+        dotted_reason("(.foo : Type)"),
+        InvalidDottedIdentReason::Sort
+    );
+    // `:2046-2048`: "The expected type of `.foo` α is not of the form `C ...`"
+    assert_eq!(
+        dotted_reason("fun (α : Type) (f : α -> Nat) => f .foo"),
+        InvalidDottedIdentReason::NotConstApp
+    );
+    // `:2038-2040`, with the `unfoldDefinition?` retry (`:2050-2057`)
+    // throwing the LAST failure: the oracle logs "Unknown constant
+    // `NatAlias.foo`", then throws "Unknown constant `Nat.foo`" (and
+    // `S3Alias.zero` → `S3.zero`).
+    for (src, full) in [
+        ("Nat.succ .foo", "Nat.foo"),
+        ("(.foo : NatAlias)", "Nat.foo"),
+        ("(.zero : S3Alias)", "S3.zero"),
+        ("(.zero : Prod Nat Nat)", "Prod.zero"),
+    ] {
+        assert_eq!(
+            dotted_reason(src),
+            InvalidDottedIdentReason::UnknownConstant {
+                full_name: full.to_string()
+            },
+            "{src}"
+        );
+    }
+    // `mkConst resolvedName explicitUnivs` (`:2033`): "too many explicit
+    // universe levels for `Nat.zero`"
+    assert!(matches!(
+        support::elab_and_synthesize("(.zero.{0} : Nat)"),
+        Err(ElabError::TooManyUniverseLevels(_))
+    ));
+}
+
+/// Review Focus 4: `withForallBody` (App.lean:2009-2015) enters
+/// `(y : Nat) → Nat` with a local `y` and must drop it afterwards; the
+/// next argument's `y` is then unknown. Oracle: "Unknown identifier `y`".
+#[test]
+fn dot_identifier_telescope_does_not_leak_its_binders() {
+    match support::elab_and_synthesize("(fun (g : (y : Nat) -> Nat) (n : Nat) => n) .succ y") {
+        Err(ElabError::UnknownIdent(s)) => assert_eq!(s, "y"),
+        other => panic!("expected UnknownIdent(y), got {other:?}"),
+    }
 }

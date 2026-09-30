@@ -157,24 +157,12 @@ fn deferred_constructs_are_named_seams() {
     let cases: &[(&str, &str)] = &[
         // (source, expected slice marker in the message)
         //
-        // `elab_explicit`'s `dotIdent` arm: `@` on a dot-identifier head,
-        // still M4b-4a P4's. (`@` on a PROJECTION head shipped in M4b-4a
-        // P1 task 7 — the `lval/explicit-proj` corpus record; the
-        // `@(Nat.zero).1` case that used to sit here now raises the
-        // oracle's own `InvalidProjection`.)
-        ("@.succ", "M4b-4a P4"),
+        // `.succ Nat.zero` and `@.succ`, which used to sit here, are
+        // `InvalidDottedIdent { NoExpectedType }` since M4b-4a P4 (`lval_smoke.rs`).
         // `peel_head`'s `App.lean:2118` arm — an INVALID occurrence of
         // `@` in a function position, which is `throwUnsupportedSyntax`
         // in the oracle too, so the citation is the owner.
         ("@(Nat.succ Nat.zero) Nat.zero", "App.lean:2118"),
-        // `head.rs`'s still-unported `elabAppFn` arm: a dot-identifier
-        // head. (M4b-4a P1 task 5 ported the proj and generic arms: the
-        // `(Nat.zero).1 Nat.zero`, `(Nat.succ) Nat.zero`,
-        // `(fun (x : Nat) => x) Nat.zero` and ascribed-head cases that
-        // used to sit here now elaborate or raise an oracle error — see
-        // `lval_smoke.rs`, the `lval/*` corpus records and
-        // `over_application_through_a_general_head_reports_function_expected`.)
-        (".succ Nat.zero", "M4b-4a P4"),
         // `elab_app_fn_id`'s PARTIAL `shouldElabAsElim` guard (fix
         // round 1). A genuine recursor — `ConstantInfo::Rec`, the one
         // disjunct of `App.lean:1322-1328` that leanr's environment can
@@ -193,6 +181,14 @@ fn deferred_constructs_are_named_seams() {
         // backstop for those; M4b-4c owns the real fix.
         ("Nat.rec", "M4b-4c"),
         ("List.rec", "M4b-4c"),
+        // The same guard on a dot-identifier head (M4b-4a P4): `.rec`
+        // resolves to `Nat.rec`, and the oracle's `elabAppArgs` diverts it
+        // to `ElabElim.main` just the same (measured: `@Nat.rec (fun x =>
+        // Nat) ..`). Without the guard leanr elaborated it the ordinary way.
+        (
+            "(.rec Nat.zero (fun (a : Nat) (b : Nat) => Nat.zero) Nat.zero : Nat)",
+            "M4b-4c",
+        ),
     ];
     for (src, marker) in cases {
         match elab_src(src) {

@@ -203,6 +203,13 @@ pub enum ElabError {
     NamedPatternOutsidePattern {
         as_function: bool,
     },
+    /// oracle: `resolveDottedIdentFn`'s throws (`App.lean:1985-2058`);
+    /// `id` is the identifier after the dot, as written. Prose deferred
+    /// (design spec § Errors).
+    InvalidDottedIdent {
+        id: String,
+        reason: InvalidDottedIdentReason,
+    },
     /// An oracle `panic!`/`unreachable!` site (`mkBaseProjections`,
     /// `App.lean:1703`, `:1708`): unreachable on a well-formed
     /// environment, an error rather than a panic here because `.olean`
@@ -297,6 +304,24 @@ pub enum InvalidFieldReason {
     /// `App.lean:1609-1612` — "Field projection operates on types of the
     /// form `C ...`".
     NotConstApp,
+}
+
+/// Which `resolveDottedIdentFn` throw an `ElabError::InvalidDottedIdent`
+/// stands for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InvalidDottedIdentReason {
+    /// `App.lean:1986-1987` — "The name `id` must be atomic".
+    NotAtomic,
+    /// `throwNoExpectedType` (`App.lean:1997-2007`), thrown with no
+    /// expected type (`:1989-1990`) or with an mvar-headed one (`:2044-2045`).
+    NoExpectedType,
+    /// `App.lean:2041-2042` — "Not supported on type universe".
+    Sort,
+    /// `App.lean:2046-2048` — "is not of the form `C ...` or `... → C ...`".
+    NotConstApp,
+    /// `App.lean:2038-2040` — `throwUnknownIdentifierAt` "Unknown constant
+    /// `full_name`", the last one tried after every `unfoldDefinition?` step.
+    UnknownConstant { full_name: String },
 }
 
 impl From<MetaError> for ElabError {

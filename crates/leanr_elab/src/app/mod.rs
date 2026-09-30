@@ -104,6 +104,7 @@
 //! in it are unreachable from fixture source.
 
 pub mod args;
+pub mod dot_ident;
 pub mod expand;
 pub mod finalize;
 pub mod head;
@@ -154,8 +155,8 @@ pub fn elab_app(
 
 /// oracle: `elabAtom` (`App.lean:2243-2244`) — a zero-argument
 /// application. This is what `ident`, `@`, `.{u}`, `choice`, `proj` and
-/// `dotIdent` all reduce to in the oracle; leanr routes the first three
-/// and, since M4b-4a P1 task 5, `proj`.
+/// `dotIdent` all reduce to in the oracle; leanr routes the first three,
+/// `proj` (since M4b-4a P1) and `dotIdent` (since P4).
 pub fn elab_atom(
     elab: &mut TermElabM,
     elem: &SynElem,
@@ -233,8 +234,9 @@ pub fn elab_pipe_proj(
 ///
 /// Since M4b-4a P1 task 7 the projection forms (`@(e).1`, `@(e).f`,
 /// `@(e).f.{us}`) are `elab_atom` too, and reach `head::elab_app_fn`'s
-/// proj arm with `explicit := true`; only the `@.f` dot-identifier forms
-/// remain a seam (M4b-4a P4). The table has NO `@$(_).$_:fieldIdx.{us}`
+/// proj arm with `explicit := true`; since M4b-4a P4 so are the `@.f` /
+/// `@.f.{us}` dot-identifier forms, which reach its dotIdent arm. The
+/// table has NO `@$(_).$_:fieldIdx.{us}`
 /// row, so `@(e).1.{us}` falls to the `` `(@$t) `` arm here, like any
 /// other term — see `explicit_head_shape`. In leanr's tree a dotted name
 /// like `@Nat.succ` is a single `<ident>` TOKEN
@@ -253,7 +255,6 @@ pub fn elab_explicit(
     let inner = explicit_inner(elem)?;
     match explicit_head_shape(&inner, kinds)? {
         ExplicitHead::Atom => elab_atom(elab, elem, kinds, expected),
-        ExplicitHead::DotIdent => Err(dot_ident_seam()),
         // oracle: `` `(@($t)) `` / `` `(@$t) `` => `elabTerm t expectedType?
         // (implicitLambda := false)` (`App.lean:2269-2270`). One arm for
         // both: handed the `paren` node itself,
@@ -271,7 +272,7 @@ pub fn elab_explicit(
 /// ```text
 /// @$_:ident   @$_:ident.{us}                          -> Atom
 /// @$(_).$_:fieldIdx   @$(_).$_:ident   @$(_).$_:ident.{us} -> Atom
-/// @.$_:ident  @.$_:ident.{us}                          -> DotIdent
+/// @.$_:ident  @.$_:ident.{us}                          -> Atom
 /// ```
 ///
 /// There is NO `@$(_).$_:fieldIdx.{us}` row, so `@(e).1.{us}` is
@@ -281,7 +282,6 @@ pub fn elab_explicit(
 /// `explicit_on_projection_heads_matches_the_oracle`).
 enum ExplicitHead {
     Atom,
-    DotIdent,
     Other,
 }
 
@@ -292,8 +292,7 @@ fn explicit_head_shape(inner: &SynElem, kinds: &KindInterner) -> Result<Explicit
         (inner.clone(), false)
     };
     Ok(match kinds.name(base.kind()) {
-        "<ident>" => ExplicitHead::Atom,
-        "Lean.Parser.Term.dotIdent" => ExplicitHead::DotIdent,
+        "<ident>" | "Lean.Parser.Term.dotIdent" => ExplicitHead::Atom,
         "Lean.Parser.Term.proj" => {
             let (_, field) = head::proj_parts(&base)?;
             if has_univs && kinds.name(field.kind()) == "fieldIdx" {
@@ -304,17 +303,6 @@ fn explicit_head_shape(inner: &SynElem, kinds: &KindInterner) -> Result<Explicit
         }
         _ => ExplicitHead::Other,
     })
-}
-
-/// `@.f` / `@.f.{us}` (`App.lean:2115-2116`, `:2267-2268`): accepted by
-/// the oracle, but `elabDottedIdent`'s `resolveDottedIdentFn` is
-/// M4b-4a P4's.
-fn dot_ident_seam() -> ElabError {
-    ElabError::UnsupportedSyntax(
-        "`@` on a dot-identifier head (`@.f`) needs `elabAppFn`'s dotIdent arm \
-         (App.lean:2106-2109) — M4b-4a P4"
-            .to_string(),
-    )
 }
 
 /// The single non-trivia child after the `@` atom of a
@@ -391,8 +379,9 @@ pub(crate) fn explicit_univ_parts(elem: &SynElem) -> Result<(SynElem, Vec<SynEle
 /// oracle has no row. leanr reports it as `UnsupportedSyntax` citing
 /// `App.lean:2118`, the same mapping every other invalid `@` shape gets.
 /// Since M4b-4a P1 task 7 a projection after `@` is accepted and reaches
-/// `head::elab_app_fn`'s proj arm with `explicit := true`; `@.f` is
-/// M4b-4a P4's seam.
+/// `head::elab_app_fn`'s proj arm with `explicit := true`; since M4b-4a
+/// P4 `@.f` (`App.lean:2115-2116`) is an `elabAtom` shape like the others
+/// and reaches its dotIdent arm.
 fn peel_head(
     elab: &mut TermElabM,
     head: &SynElem,
@@ -405,7 +394,6 @@ fn peel_head(
         explicit = true;
         match explicit_head_shape(&cur, kinds)? {
             ExplicitHead::Atom => {}
-            ExplicitHead::DotIdent => return Err(dot_ident_seam()),
             ExplicitHead::Other => {
                 return Err(ElabError::UnsupportedSyntax(format!(
                     "invalid occurrence of `@` in a function position (`{}`) \

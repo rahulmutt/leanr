@@ -1067,6 +1067,20 @@ def p4Queries : List (String × String) :=
   , ("p4/pipe-chain",           "fun (p : Prod Nat Nat) => p |>.1 |>.succ")
   , ("p4/pipe-fields",          "fun (p : Prod Nat Nat) => p |>.fst.succ")
   , ("p4/pipe-postponed",       "(fun x => x |>.1) (Prod.mk Nat.zero Nat.zero)")
+  , ("p4/dot-ascribed",         "(.zero : Nat)")
+  , ("p4/dot-arg",              "Nat.succ .zero")
+  , ("p4/dot-pi",               "Function.twice .succ Nat.zero")
+  , ("p4/dot-pi-ascribed",      "(.succ : Nat -> Nat)")
+  , ("p4/dot-unfold",           "(.zero : NatAlias)")
+  , ("p4/dot-pi-unfold",        "(.succ : Nat -> NatAlias)")
+  , ("p4/dot-optparam",         "withDefault .zero")
+  , ("p4/dot-postponed",        "Eq .zero Nat.zero")
+  , ("p4/dot-args",             "(.mk Nat.zero Nat.zero : Prod Nat Nat)")
+  , ("p4/dot-explicit",         "(@.mk Nat Nat Nat.zero Nat.zero : Prod Nat Nat)")
+  , ("p4/dot-univs",            "(.mk.{0,0} Nat.zero Nat.zero : Prod Nat Nat)")
+  , ("p4/dot-univ-prefix",      "(.mk.{0} Nat.zero Nat.zero : Prod Nat Nat)")
+  , ("p4/dot-partial",          "(.mk : Nat -> Nat -> Prod Nat Nat)")
+  , ("p4/dot-nested",           "(.mk .zero .zero : Prod Nat Nat)")
   ]
 
 def emit (id src : String) (expJ : Json) : IO Unit :=
