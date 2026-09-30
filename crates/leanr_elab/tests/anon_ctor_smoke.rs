@@ -84,16 +84,16 @@ fn no_explicit_fields() {
 /// and `⟨⟩` becomes a bare `Eq.refl` whose explicit `a` stays unapplied:
 /// the app elaborator's type mismatch, NOT `InsufficientFields`. This
 /// is the test that catches "count from 0 instead of numParams".
-/// Oracle: "Type mismatch\n  @Eq.refl ?m.2\nhas type\n  ∀ (a : ?m.2), …".
-/// leanr reaches that message through the stuck-coercion reporter
-/// (`StuckCoercion`: the type still holds an mvar, so the coercion is
-/// postponed, then reported as a mismatch); `TypeMismatch` is the
-/// immediate-failure twin. Either is the app elaborator's rejection.
+/// Oracle: "Type mismatch\n  Eq.refl\nhas type\n  ∀ (a : ?m.3), Eq a a\n
+/// but is expected to have type\n  Eq Nat.zero Nat.zero". The oracle's
+/// `mkCoe` postpones here (the type still holds an mvar), so the
+/// mismatch is reported by the stuck-coercion path; leanr's faithful
+/// counterpart is `StuckCoercion`, not the immediate `TypeMismatch`.
 #[test]
 fn eq_counts_fields_after_its_promoted_parameters() {
     match support::elab_and_synthesize("(⟨⟩ : Eq Nat.zero Nat.zero)") {
-        Err(ElabError::TypeMismatch { .. } | ElabError::StuckCoercion { .. }) => {}
-        other => panic!("expected a type mismatch, got {other:?}"),
+        Err(ElabError::StuckCoercion { .. }) => {}
+        other => panic!("expected a stuck-coercion type mismatch, got {other:?}"),
     }
 }
 
@@ -120,4 +120,45 @@ fn separators_and_trivia_are_not_arguments() {
     support::elab_and_synthesize("(⟨Nat.zero /- c -/ ,   Nat.zero⟩ : Prod Nat Nat)")
         .expect("two arguments");
     support::elab_and_synthesize("(⟨⟩ : PUnit)").expect("zero arguments");
+}
+
+#[test]
+fn insufficient_fields_in_the_nested_tail() {
+    // "Insufficient number of fields for `⟨...⟩` constructor: Constructor
+    // `T3.mk` has 3 explicit field, but only 2 were provided" — raised by
+    // the synthesized tail `⟨Nat.zero, Nat.zero⟩ : T3`.
+    assert_eq!(
+        anon_err("(⟨Nat.zero, Nat.zero, Nat.zero⟩ : Prod Nat T3)"),
+        AnonCtorError::InsufficientFields {
+            ctor: "T3.mk".to_string(),
+            explicit: 3,
+            provided: 2
+        }
+    );
+}
+
+#[test]
+fn a_tail_whose_type_never_resolves_reports_expected_type_unknown() {
+    // "Invalid `⟨...⟩` notation: The expected type of this term could not
+    // be determined", at the OUTER `⟨` column: the tail postponed on
+    // `?β`, nothing solved it, and the final resume runs with
+    // postponement off.
+    assert_eq!(
+        anon_err("(⟨Nat.zero, Nat.zero, Nat.zero⟩ : Prod Nat _)"),
+        AnonCtorError::ExpectedTypeUnknown
+    );
+}
+
+/// Review Focus 2: an error inside a RESUMED tail is the oracle's error,
+/// not swallowed and not a seam. Oracle: "Invalid `⟨...⟩` notation: The
+/// expected type `Nat → Nat` is not an inductive type".
+#[test]
+fn a_resumed_tail_reports_its_own_error() {
+    assert!(matches!(
+        anon_err(
+            "sameAs (⟨Nat.zero, Nat.zero, Nat.zero⟩ : Prod Nat _) \
+             (Prod.mk Nat.zero (fun x : Nat => x))"
+        ),
+        AnonCtorError::NotInductive { .. }
+    ));
 }

@@ -10,9 +10,55 @@ use leanr_kernel::bank::{ExprId, LevelId, NameId};
 use leanr_kernel::{BinderInfo, EnvView, Nat};
 use leanr_meta::{LMVarId, MVarDecl, MVarId, MVarKind, MetaCtx};
 use leanr_syntax::kind::KindInterner;
+use leanr_syntax::tree::{NodeOrToken, SyntaxNode};
 
 use crate::dispatch::{self, SynElem};
 use crate::error::ElabError;
+
+/// What `elab_term_core` elaborates: a real syntax element, or the
+/// anonymous constructor's flatten TAIL — `args[from..]` of the outer
+/// `⟨…⟩` node, the oracle's synthesized `⟨$[$extra],*⟩`
+/// (`BuiltinNotation.lean:93-96`). The tail's ref is the outer node: the
+/// synthesized node has kind `anonymousCtor` and `SourceInfo.fromRef` the
+/// outer node, so implicit-lambda blocking, postponement refs, and
+/// `report.rs`'s range ordering all see what the oracle's see (design
+/// spec 2026-09-30-m4b4b § The tail form). The macro-expansion slice's
+/// synthesized syntax grows here.
+#[derive(Debug, Clone)]
+pub(crate) enum TermTarget {
+    Stx(SynElem),
+    AnonCtorTail { node: SyntaxNode, from: usize },
+}
+
+impl TermTarget {
+    pub(crate) fn ref_elem(&self) -> SynElem {
+        match self {
+            TermTarget::Stx(e) => e.clone(),
+            TermTarget::AnonCtorTail { node, .. } => NodeOrToken::Node(node.clone()),
+        }
+    }
+
+    pub(crate) fn tail_from(&self) -> Option<usize> {
+        match self {
+            TermTarget::Stx(_) => None,
+            TermTarget::AnonCtorTail { from, .. } => Some(*from),
+        }
+    }
+
+    /// Rebuild a target from a postponed mvar's `(stx, tail_from)`.
+    pub(crate) fn from_parts(stx: &SynElem, tail_from: Option<usize>) -> Result<Self, ElabError> {
+        match (tail_from, stx) {
+            (None, _) => Ok(TermTarget::Stx(stx.clone())),
+            (Some(from), NodeOrToken::Node(node)) => Ok(TermTarget::AnonCtorTail {
+                node: node.clone(),
+                from,
+            }),
+            (Some(_), NodeOrToken::Token(_)) => Err(ElabError::Internal(
+                "a postponed anonymous-constructor tail whose ref is a token".to_string(),
+            )),
+        }
+    }
+}
 
 pub struct TermElabM<'e> {
     pub mctx: MetaCtx<'e>,
@@ -314,7 +360,7 @@ impl<'e> TermElabM<'e> {
         kinds: &KindInterner,
         expected: Option<ExprId>,
     ) -> Result<ExprId, ElabError> {
-        self.elab_term_core(elem, kinds, expected, true, true)
+        self.elab_term_core(&TermTarget::Stx(elem.clone()), kinds, expected, true, true)
     }
 
     /// oracle: `elabTerm stx expectedType? (implicitLambda := false)`
@@ -329,7 +375,18 @@ impl<'e> TermElabM<'e> {
         kinds: &KindInterner,
         expected: Option<ExprId>,
     ) -> Result<ExprId, ElabError> {
-        self.elab_term_core(elem, kinds, expected, true, false)
+        self.elab_term_core(&TermTarget::Stx(elem.clone()), kinds, expected, true, false)
+    }
+
+    /// `elab_term` over a [`TermTarget`] — the anonymous constructor's
+    /// flatten tail (`app/args.rs`'s `elab_and_add_new_arg`).
+    pub(crate) fn elab_target(
+        &mut self,
+        target: &TermTarget,
+        kinds: &KindInterner,
+        expected: Option<ExprId>,
+    ) -> Result<ExprId, ElabError> {
+        self.elab_term_core(target, kinds, expected, true, true)
     }
 
     /// oracle: `resumeElabTerm` (`SyntheticMVars.lean:23-26`) —
@@ -337,19 +394,21 @@ impl<'e> TermElabM<'e> {
     /// resumed term that postpones again throws to `resume_postponed`
     /// instead of minting a second postponed mvar. The `errToSorry`
     /// narrowing there is not modelled (leanr has no `errToSorry`).
-    pub(crate) fn resume_elab_term(
+    /// Over a [`TermTarget`], so a postponed flatten tail resumes as the
+    /// tail (`resume_postponed`).
+    pub(crate) fn resume_elab_target(
         &mut self,
-        elem: &SynElem,
+        target: &TermTarget,
         kinds: &KindInterner,
         expected: ExprId,
     ) -> Result<ExprId, ElabError> {
-        self.elab_term_core(elem, kinds, Some(expected), false, true)
+        self.elab_term_core(target, kinds, Some(expected), false, true)
     }
 
     /// oracle: `elabTermAux` (`TermElabM.lean:1823-1856`).
     fn elab_term_core(
         &mut self,
-        elem: &SynElem,
+        target: &TermTarget,
         kinds: &KindInterner,
         expected: Option<ExprId>,
         catch_ex_postpone: bool,
@@ -369,7 +428,11 @@ impl<'e> TermElabM<'e> {
             // carry oracle `builtin_macro`s that leanr dispatches as
             // elaborators, but none of them thread the node's own
             // `expected` straight through to an inner `elab_term`
-            // call). A loop, because nesting depth is the user's.
+            // call). A loop, because nesting depth is the user's. A
+            // flatten tail is an `anonymousCtor`, never a `paren`.
+            let TermTarget::Stx(elem) = target else {
+                return self.elab_using_elab_fns(target, kinds, expected, catch_ex_postpone);
+            };
             let mut cur = elem.clone();
             while kinds.name(cur.kind()) == "Lean.Parser.Term.paren" {
                 cur = cur
@@ -379,16 +442,21 @@ impl<'e> TermElabM<'e> {
                         ElabError::IllFormedSyntax("paren: no inner term".to_string())
                     })?;
             }
-            return self.elab_using_elab_fns(&cur, kinds, expected, catch_ex_postpone);
+            return self.elab_using_elab_fns(
+                &TermTarget::Stx(cur),
+                kinds,
+                expected,
+                catch_ex_postpone,
+            );
         }
         // oracle: `useImplicitLambda` runs BEFORE `elabUsingElabFns`
         // (`:1839-1841`); `.yes` short-circuits dispatch entirely.
-        match use_implicit_lambda(self, elem, kinds, expected)? {
+        match use_implicit_lambda(self, &target.ref_elem(), kinds, expected)? {
             UseImplicitLambda::Yes(ty) => {
-                elab_implicit_lambda(self, elem, kinds, catch_ex_postpone, ty)
+                elab_implicit_lambda(self, target, kinds, catch_ex_postpone, ty)
             }
             UseImplicitLambda::No => {
-                self.elab_using_elab_fns(elem, kinds, expected, catch_ex_postpone)
+                self.elab_using_elab_fns(target, kinds, expected, catch_ex_postpone)
             }
             // oracle: `:1843-1854` — postpone if we still may; once we
             // may not, elaborate WITHOUT implicit lambdas. With the catch
@@ -396,12 +464,12 @@ impl<'e> TermElabM<'e> {
             UseImplicitLambda::Postpone => {
                 if self.may_postpone {
                     if catch_ex_postpone {
-                        self.postpone_elab_term(elem, expected)
+                        self.postpone_elab_target(target, expected)
                     } else {
                         Err(ElabError::Postpone)
                     }
                 } else {
-                    self.elab_using_elab_fns(elem, kinds, expected, catch_ex_postpone)
+                    self.elab_using_elab_fns(target, kinds, expected, catch_ex_postpone)
                 }
             }
         }
@@ -431,23 +499,40 @@ impl<'e> TermElabM<'e> {
     /// the spec's § Landed › P2 as the "Known cost" bullet.
     fn elab_using_elab_fns(
         &mut self,
-        elem: &SynElem,
+        target: &TermTarget,
         kinds: &KindInterner,
         expected: Option<ExprId>,
         catch_ex_postpone: bool,
     ) -> Result<ExprId, ElabError> {
         if !catch_ex_postpone {
-            return dispatch::dispatch(self, elem, kinds, expected);
+            return self.dispatch_target(target, kinds, expected);
         }
         let saved = self.save_term_state();
         let lctx = self.mctx.lctx_checkpoint();
-        match dispatch::dispatch(self, elem, kinds, expected) {
+        match self.dispatch_target(target, kinds, expected) {
             Err(ElabError::Postpone) => {
                 self.restore_term_state(saved);
                 self.mctx.lctx_restore(lctx);
-                self.postpone_elab_term(elem, expected)
+                self.postpone_elab_target(target, expected)
             }
             other => other,
+        }
+    }
+
+    /// The single elaborator a target's kind selects: `dispatch` for real
+    /// syntax, `elab_anon_ctor` for a flatten tail (whose synthesized
+    /// node's kind is `anonymousCtor`).
+    fn dispatch_target(
+        &mut self,
+        target: &TermTarget,
+        kinds: &KindInterner,
+        expected: Option<ExprId>,
+    ) -> Result<ExprId, ElabError> {
+        match target {
+            TermTarget::Stx(elem) => dispatch::dispatch(self, elem, kinds, expected),
+            TermTarget::AnonCtorTail { node, from } => {
+                crate::builtin::anon_ctor::elab_anon_ctor(self, node, *from, kinds, expected)
+            }
         }
     }
 
@@ -662,7 +747,7 @@ fn local_ident_of(
 ///     here without that extra prose.
 fn elab_implicit_lambda(
     elab: &mut TermElabM,
-    elem: &SynElem,
+    target: &TermTarget,
     kinds: &KindInterner,
     catch_ex_postpone: bool,
     mut ty: ExprId,
@@ -727,8 +812,8 @@ fn elab_implicit_lambda(
         // `ensureHasType`. The catch flag is the caller's: a resumed
         // term's postponement must reach `resume_postponed` even from
         // inside the wrap.
-        let body = elab.elab_using_elab_fns(elem, kinds, Some(ty), catch_ex_postpone)?;
-        let e = elab.ensure_has_type(elem, Some(ty), body)?;
+        let body = elab.elab_using_elab_fns(target, kinds, Some(ty), catch_ex_postpone)?;
+        let e = elab.ensure_has_type(&target.ref_elem(), Some(ty), body)?;
         elab.mctx.mk_lambda(&fvars, e).map_err(ElabError::from)
     })();
     elab.mctx.lctx_restore(checkpoint);

@@ -69,9 +69,21 @@ pub struct SavedContext {
 #[derive(Debug, Clone)]
 pub enum SyntheticMVarKind {
     TypeClass,
-    Coe { expected_type: ExprId, e: ExprId },
-    Tactic { param_name: Option<String> },
-    Postponed { ctx: SavedContext },
+    Coe {
+        expected_type: ExprId,
+        e: ExprId,
+    },
+    Tactic {
+        param_name: Option<String>,
+    },
+    /// `tail_from` is `Some(i)` when the postponed term is an anonymous
+    /// constructor's flatten tail (`args[i..]` of the node in the decl's
+    /// `stx`), so the resume re-enters the TAIL, not the whole `⟨…⟩`
+    /// (`elab.rs`'s `TermTarget`).
+    Postponed {
+        ctx: SavedContext,
+        tail_from: Option<usize>,
+    },
 }
 
 /// Shared wording for the `.tactic` seam, so `ladder.rs`'s rung-5 arm

@@ -77,6 +77,14 @@ use leanr_syntax::tree::SyntaxNode;
 pub enum Arg {
     Stx(SynElem),
     Expr(ExprId),
+    /// The anonymous constructor's flatten tail: `args[from..]` of the
+    /// `anonymousCtor` `node`, the oracle's synthesized
+    /// `⟨$[$extra],*⟩` (`BuiltinNotation.lean:93-96`). Elaborated through
+    /// `elab.rs`'s `TermTarget::AnonCtorTail`.
+    AnonCtorTail {
+        node: SyntaxNode,
+        from: usize,
+    },
 }
 
 /// oracle: `structure NamedArg` (`Arg.lean:34-45`).

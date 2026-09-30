@@ -95,7 +95,7 @@ pub(crate) fn elab_anon_ctor(
             AnonCtorError::NotInductive { ty },
         ));
     };
-    // `:59`, `:98-99`.
+    // `:59`, `:98-100`.
     let ctor = match ctors.as_slice() {
         [c] => *c,
         [] => {
@@ -151,10 +151,14 @@ pub(crate) fn elab_anon_ctor(
             },
         ));
     } else {
-        return Err(ElabError::UnsupportedSyntax(
-            "`⟨…⟩` with more arguments than explicit fields (flattening) — M4b-4b task 2"
-                .to_string(),
-        ));
+        // `:93-96`: the first `k - 1` arguments stay, the rest become
+        // one nested `⟨…⟩` — the same node, a later start.
+        let mut v: Vec<Arg> = args[..k - 1].iter().cloned().map(Arg::Stx).collect();
+        v.push(Arg::AnonCtorTail {
+            node: node.clone(),
+            from: from + k - 1,
+        });
+        v
     };
     // `:97`: `elabTerm newStx expectedType?` — the ORIGINAL expected
     // type, not its `whnf`.

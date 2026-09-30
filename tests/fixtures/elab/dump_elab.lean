@@ -1107,6 +1107,17 @@ def anonQueries : List (String × String) :=
   , ("anon/trivia",          "(⟨Nat.zero /- c -/ ,   Nat.zero⟩ : Prod Nat Nat)")
   ]
 
+-- M4b-4b task 2: flattening (`BuiltinNotation.lean:92-96`), including a
+-- tail that postpones on `?β` and resumes as the tail
+-- (`anon/tailPostponed`), and the same under a binder whose fvar the
+-- resumed tail must see through its saved context.
+def anonTailQueries : List (String × String) :=
+  [ ("anon/flat1",            "(⟨Nat.zero, Nat.zero, Nat.zero⟩ : Prod Nat (Prod Nat Nat))")
+  , ("anon/flat2",            "(⟨True.intro, True.intro, True.intro, True.intro⟩ : And True (And True (And True True)))")
+  , ("anon/tailPostponed",    "sameAs (⟨Nat.zero, Nat.zero, Nat.zero⟩ : Prod Nat _) (Prod.mk Nat.zero (Prod.mk Nat.zero Nat.zero))")
+  , ("anon/tailUnderBinder",  "fun (n : Nat) => sameAs (⟨n, n, n⟩ : Prod Nat _) (Prod.mk n (Prod.mk n n))")
+  ]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -1120,7 +1131,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries ++ closeoutExplicitQueries ++ nondepQueries ++ lvalIdxQueries ++ lvalFnQueries ++ p2Queries ++ p3Queries ++ p4Queries ++ anonQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries ++ closeoutExplicitQueries ++ nondepQueries ++ lvalIdxQueries ++ lvalFnQueries ++ p2Queries ++ p3Queries ++ p4Queries ++ anonQueries ++ anonTailQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>

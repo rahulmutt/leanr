@@ -14,6 +14,7 @@ use leanr_kernel::bank::{ExprId, NameId};
 use leanr_kernel::BinderInfo;
 use leanr_meta::{MVarId, MVarKind};
 use leanr_syntax::kind::KindInterner;
+use leanr_syntax::tree::NodeOrToken;
 
 use crate::app::expand::{Arg, NamedArg};
 use crate::app::state::AppElab;
@@ -1034,13 +1035,21 @@ fn elab_and_add_new_arg(
     // syntax of its own (`expand.rs`'s `Arg` doc: no P1 producer), so it
     // falls back to the whole application's `stx` — the same ref
     // `synthesize_app_inst_mvars` registers its mvars under.
+    // A flatten tail's ref is the outer `⟨…⟩` node (`elab.rs`'s
+    // `TermTarget`).
     let stx = match &arg {
         Arg::Stx(elem) => elem.clone(),
+        Arg::AnonCtorTail { node, .. } => NodeOrToken::Node(node.clone()),
         Arg::Expr(_) => app.ctx.stx.clone(),
     };
     let val = match arg {
         Arg::Expr(e) => e,
         Arg::Stx(elem) => app.elab.elab_term(&elem, kinds, Some(expected))?,
+        Arg::AnonCtorTail { node, from } => app.elab.elab_target(
+            &crate::elab::TermTarget::AnonCtorTail { node, from },
+            kinds,
+            Some(expected),
+        )?,
     };
     // oracle: `ensureArgType` = `ensureHasType expectedType arg none f`
     // (`App.lean:54-62`); its `errToSorry` recovery arm is error
