@@ -18,12 +18,17 @@ use crate::MetaCtx;
 #[derive(Default)]
 pub(crate) struct StructureTable {
     by_name: HashMap<NameId, StructureInfo>,
+    /// oracle: `structureResolutionExt` (Structure.lean:421-422), "a mere
+    /// cache". Sound because `structureExt` rows never change while a
+    /// `MetaCtx` lives.
+    resolution_orders: HashMap<NameId, Vec<NameId>>,
 }
 
 impl StructureTable {
     pub(crate) fn build(entries: &[StructureInfo]) -> Self {
         StructureTable {
             by_name: entries.iter().map(|i| (i.struct_name, i.clone())).collect(),
+            resolution_orders: HashMap::new(),
         }
     }
 }
@@ -59,6 +64,53 @@ impl<'e> MetaCtx<'e> {
             .iter()
             .filter_map(|&f| self.get_field_info(s, f)?.subobject)
             .collect()
+    }
+
+    /// oracle: `getStructureResolutionOrder` (`Structure.lean:512-514`) --
+    /// `computeStructureResolutionOrder structName (relaxed := true)`
+    /// (`:452-460`), the C3 merge (`mergeStructureResolutionOrders`,
+    /// `:462-492`) memoized as the oracle memoizes it. `None` only for a
+    /// parent cycle, which well-formed data never has and the oracle
+    /// would recurse on forever; see `find_field`'s doc.
+    pub fn get_structure_resolution_order(&mut self, s: NameId) -> Option<Vec<NameId>> {
+        self.resolution_order_go(s, &mut HashSet::new())
+    }
+
+    fn resolution_order_go(
+        &mut self,
+        s: NameId,
+        in_progress: &mut HashSet<NameId>,
+    ) -> Option<Vec<NameId>> {
+        if let Some(o) = self.structures.resolution_orders.get(&s) {
+            return Some(o.clone());
+        }
+        if !in_progress.insert(s) {
+            return None;
+        }
+        // `getStructureParentInfo env structName |>.map (·.structName)`:
+        // empty for a non-structure.
+        let parent_names: Vec<NameId> = self.get_structure_info(s).map_or_else(Vec::new, |i| {
+            i.parent_info.iter().map(|p| p.struct_name).collect()
+        });
+        let mut res_orders: Vec<Vec<NameId>> = Vec::with_capacity(parent_names.len() + 1);
+        // `parentResOrders.insertIdx 0 parentNames |>.filter (!·.isEmpty)`.
+        res_orders.push(parent_names.clone());
+        for &p in &parent_names {
+            res_orders.push(self.resolution_order_go(p, in_progress)?);
+        }
+        res_orders.retain(|o| !o.is_empty());
+        let mut order = vec![s];
+        while !res_orders.is_empty() {
+            let name = select_parent(&res_orders);
+            order.push(name);
+            for o in res_orders.iter_mut() {
+                o.retain(|&n| n != name);
+            }
+            res_orders.retain(|o| !o.is_empty());
+        }
+        in_progress.remove(&s);
+        self.structures.resolution_orders.insert(s, order.clone());
+        Some(order)
     }
 
     /// oracle: `findField?`. The oracle recurses with no cycle guard: a
@@ -134,4 +186,26 @@ impl<'e> MetaCtx<'e> {
         }
         false
     }
+}
+
+/// oracle: `mergeStructureResolutionOrders.selectParent`
+/// (`Structure.lean:494-505`), relaxed: for `n' = 0, 1, ...`, ignore the
+/// last `n'` orders and take the first head that appears in no other
+/// considered order's TAIL. Every order is nonempty (caller invariant).
+/// The `good` flag only feeds the strict mode's conflict report, which
+/// `getStructureResolutionOrder` never asks for.
+fn select_parent(res_orders: &[Vec<NameId>]) -> NameId {
+    for n_skip in 0..res_orders.len() {
+        let hi = res_orders.len() - n_skip;
+        for i in 0..hi {
+            let parent = res_orders[i][0];
+            let consistent = |o: &Vec<NameId>| o[1..].iter().all(|&n| n != parent);
+            if res_orders[..i].iter().all(consistent)
+                && res_orders[i + 1..hi].iter().all(consistent)
+            {
+                return parent;
+            }
+        }
+    }
+    res_orders[0][0]
 }

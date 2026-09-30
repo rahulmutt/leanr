@@ -690,7 +690,7 @@ impl<'e> MetaCtx<'e> {
     /// general form.
     pub(crate) fn mk_aux_mvar(&mut self, ty: ExprId) -> Result<(ExprId, MVarId), MetaError> {
         let lctx = self.current_lctx();
-        self.mk_aux_mvar_at(lctx, ty, MVarKind::Natural)
+        self.mk_aux_mvar_at(lctx, ty, MVarKind::Natural, None)
     }
 
     /// `mk_aux_mvar` with the local context and kind chosen by the
@@ -706,11 +706,16 @@ impl<'e> MetaCtx<'e> {
     /// per the M4b accessor precedent; behavior-neutral for
     /// `mk_aux_mvar`, whose two tests above pin the ambient/`Natural`
     /// pair it had before.
+    ///
+    /// `user_name` is `forall_meta_telescope`'s binder name
+    /// (`mkFreshExprMVar d k n`, `Meta/Basic.lean:1730`); every other
+    /// caller passes `None`.
     pub(crate) fn mk_aux_mvar_at(
         &mut self,
         lctx: std::sync::Arc<crate::LocalCtxSnapshot>,
         ty: ExprId,
         kind: MVarKind,
+        user_name: Option<leanr_kernel::bank::NameId>,
     ) -> Result<(ExprId, MVarId), MetaError> {
         let idx = self.expr_mvar_gen;
         self.expr_mvar_gen += 1;
@@ -723,7 +728,7 @@ impl<'e> MetaCtx<'e> {
         self.mctx.declare(
             id,
             MVarDecl {
-                user_name: None,
+                user_name,
                 ty,
                 lctx,
                 kind,
@@ -2535,7 +2540,12 @@ mod tests {
             let _a = fresh_fvar(ctx, sort0, "a");
             // Ambient context now has one decl; mint at the EMPTY one.
             let (_, id) = ctx
-                .mk_aux_mvar_at(LocalCtxSnapshot::empty(), sort0, MVarKind::SyntheticOpaque)
+                .mk_aux_mvar_at(
+                    LocalCtxSnapshot::empty(),
+                    sort0,
+                    MVarKind::SyntheticOpaque,
+                    None,
+                )
                 .expect("mk_aux_mvar_at");
 
             let decl = ctx.mctx().decl(id).expect("declared");

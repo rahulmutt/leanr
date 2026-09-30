@@ -683,7 +683,7 @@ impl<'e> MetaCtx<'e> {
             true,
             &mut aux_cache,
         )?;
-        let (new_mvar, new_id) = self.mk_aux_mvar_at(new_lctx, new_ty, kind)?;
+        let (new_mvar, new_id) = self.mk_aux_mvar_at(new_lctx, new_ty, kind, None)?;
         let result = self.mk_mvar_app(new_mvar, &to_revert, &mvar_lctx, kind)?;
 
         if kind != crate::MVarKind::SyntheticOpaque {
@@ -1742,7 +1742,7 @@ mod tests {
             let b = fresh_fvar(ctx, sort0, "b");
             let lctx = ctx.current_lctx();
             let (m, mid) = ctx
-                .mk_aux_mvar_at(lctx, sort0, crate::MVarKind::SyntheticOpaque)
+                .mk_aux_mvar_at(lctx, sort0, crate::MVarKind::SyntheticOpaque, None)
                 .expect("opaque mvar under the binder");
 
             let out = ctx.elim_mvar_deps(&[a], m).expect("elim_mvar_deps");
@@ -1810,7 +1810,7 @@ mod tests {
             let a = fresh_fvar(ctx, sort0, "a");
             let lctx = ctx.current_lctx();
             let (m, mid) = ctx
-                .mk_aux_mvar_at(lctx, sort0, crate::MVarKind::Synthetic)
+                .mk_aux_mvar_at(lctx, sort0, crate::MVarKind::Synthetic, None)
                 .expect("synthetic mvar under the binder");
 
             let _ = ctx.elim_mvar_deps(&[a], m).expect("elim_mvar_deps");
@@ -2093,7 +2093,7 @@ mod tests {
             // needs to touch it at all.
             let lctx_with_a = ctx.current_lctx();
             let (o, _oid) = ctx
-                .mk_aux_mvar_at(lctx_with_a, sort0, crate::MVarKind::SyntheticOpaque)
+                .mk_aux_mvar_at(lctx_with_a, sort0, crate::MVarKind::SyntheticOpaque, None)
                 .expect("?o under `a`");
 
             // `x` is the lambda's own fresh binder; only its scope is
@@ -2159,7 +2159,7 @@ mod tests {
             let a = fresh_fvar(ctx, sort0, "a");
             let lctx = ctx.current_lctx();
             let (m, mid) = ctx
-                .mk_aux_mvar_at(lctx, sort0, crate::MVarKind::SyntheticOpaque)
+                .mk_aux_mvar_at(lctx, sort0, crate::MVarKind::SyntheticOpaque, None)
                 .expect("opaque mvar under the binder");
             let (_, pending) = ctx.mk_aux_mvar(sort0).expect("the pending mvar");
             // `z` is minted AFTER `?m`, so it is not in `?m`'s context
@@ -2234,7 +2234,7 @@ mod tests {
             let a = fresh_fvar(ctx, sort0, "a");
             let lctx_a = ctx.current_lctx();
             let (o, _oid) = ctx
-                .mk_aux_mvar_at(lctx_a, sort0, crate::MVarKind::SyntheticOpaque)
+                .mk_aux_mvar_at(lctx_a, sort0, crate::MVarKind::SyntheticOpaque, None)
                 .expect("`?o` under `a`");
             let g_o = ctx.scratch.expr_app(base, g, o).expect("`g ?o`");
             let f_o = ctx.scratch.expr_app(base, f, o).expect("`f ?o`");
@@ -2244,7 +2244,7 @@ mod tests {
             let b = fresh_fvar(ctx, g_o, "b");
             let lctx_ab = ctx.current_lctx();
             let (m, _mid) = ctx
-                .mk_aux_mvar_at(lctx_ab, f_o, crate::MVarKind::Natural)
+                .mk_aux_mvar_at(lctx_ab, f_o, crate::MVarKind::Natural, None)
                 .expect("`?m : f ?o` under `a`, `b`");
 
             let out = ctx.elim_mvar_deps(&[a, b], m).expect("elim_mvar_deps");
@@ -2316,12 +2316,12 @@ mod tests {
             let a = fresh_fvar(ctx, sort0, "a");
             let lctx_a = ctx.current_lctx();
             let (o, oid) = ctx
-                .mk_aux_mvar_at(lctx_a, sort0, crate::MVarKind::SyntheticOpaque)
+                .mk_aux_mvar_at(lctx_a, sort0, crate::MVarKind::SyntheticOpaque, None)
                 .expect("`?o` under `a`");
             let b = fresh_fvar(ctx, o, "b");
             let lctx_ab = ctx.current_lctx();
             let (m, _mid) = ctx
-                .mk_aux_mvar_at(lctx_ab, o, crate::MVarKind::Natural)
+                .mk_aux_mvar_at(lctx_ab, o, crate::MVarKind::Natural, None)
                 .expect("`?m : ?o` under `a`, `b`");
 
             let out = ctx.elim_mvar_deps(&[a, b], m).expect("elim_mvar_deps");

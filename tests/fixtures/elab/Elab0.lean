@@ -692,6 +692,16 @@ structure OC extends OE where
   c : Nat
 structure OQ extends OA, OB, OC where
   q : Nat
+-- Resolution-order case where the parent list's head is NOT selectable
+-- but a non-parent ancestor's head is (Structure.lean:494-505): after
+-- `CA`, `CP` is in the tail of `CQ`'s order `[CQ, CP]`, yet `CX` (an
+-- ancestor of `CA` only) heads an order and is in no tail. First-head
+-- selection gives `[.., CP, ..]`; C3 gives `[.., CX, ..]`.
+structure CX where
+structure CA extends CX where
+structure CP where
+structure CQ extends CP where
+structure CD extends CA, CP, CQ where
 
 -- Every `BinderInfo` spelling Lean accepts on a structure field
 -- (implicit, instImplicit, default), so the `fieldInfo` binder-info

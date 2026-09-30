@@ -5,7 +5,7 @@
 
 mod support;
 
-use leanr_kernel::bank::Store;
+use leanr_kernel::bank::{NameId, Store};
 use leanr_meta::{Config, EnvExtensions, MetaCtx};
 use serde_json::Value;
 use support::*;
@@ -57,7 +57,7 @@ fn structure_accessors_match_the_oracle_dump() {
         probes.push((s.to_string(), sid, finds, paths, rec.clone()));
     }
     let nat = name("Nat");
-    let ctx = MetaCtx::new(
+    let mut ctx = MetaCtx::new(
         view,
         &mut scratch,
         Config::default(),
@@ -66,7 +66,7 @@ fn structure_accessors_match_the_oracle_dump() {
             ..Default::default()
         },
     );
-    let render = |n| name_to_string(ctx.store(), base, Some(n));
+    let render = |ctx: &MetaCtx, n| name_to_string(ctx.store(), base, Some(n));
     assert!(
         probes.len() >= 20,
         "expected every Elab0 structure, got {}",
@@ -77,7 +77,7 @@ fn structure_accessors_match_the_oracle_dump() {
         let fields: Vec<String> = ctx
             .get_structure_fields(sid)
             .iter()
-            .map(|&n| render(n))
+            .map(|&n| render(&ctx, n))
             .collect();
         let want: Vec<String> = rec["fields"]
             .as_array()
@@ -92,8 +92,8 @@ fn structure_accessors_match_the_oracle_dump() {
             .iter()
             .map(|fi| {
                 serde_json::json!({
-            "f": render(fi.field_name), "proj": render(fi.proj_fn),
-            "sub": fi.subobject.map(render), "bi": bi_str(fi.binder_info)})
+            "f": render(&ctx, fi.field_name), "proj": render(&ctx, fi.proj_fn),
+            "sub": fi.subobject.map(|n| render(&ctx, n)), "bi": bi_str(fi.binder_info)})
             })
             .collect();
         assert_eq!(
@@ -106,23 +106,42 @@ fn structure_accessors_match_the_oracle_dump() {
             .iter()
             .map(|p| {
                 serde_json::json!({
-            "s": render(p.struct_name), "sub": p.subobject, "proj": render(p.proj_fn)})
+            "s": render(&ctx, p.struct_name), "sub": p.subobject, "proj": render(&ctx, p.proj_fn)})
             })
             .collect();
         assert_eq!(Value::Array(got_parents), rec["parents"], "{s}: parentInfo");
+        // `getStructureResolutionOrder` (Structure.lean:512-514), relaxed C3.
+        let want_order: Vec<String> = rec["order"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap().to_string())
+            .collect();
+        let got_order: Vec<String> = ctx
+            .get_structure_resolution_order(sid)
+            .expect("well-formed fixture: no parent cycle")
+            .into_iter()
+            .map(|n| render(&ctx, n))
+            .collect();
+        assert_eq!(got_order, want_order, "{s}: resolution order");
         for (f, want) in finds {
             assert_eq!(
-                ctx.find_field(sid, f).map(render),
+                ctx.find_field(sid, f).map(|n| render(&ctx, n)),
                 want,
                 "{s}: findField? {}",
-                render(f)
+                render(&ctx, f)
             );
         }
         for (b, want) in paths {
             let got = ctx
                 .get_path_to_base_structure(b, sid)
-                .map(|p| p.into_iter().map(render).collect::<Vec<_>>());
-            assert_eq!(got, want, "{s}: getPathToBaseStructure? {}", render(b));
+                .map(|p| p.into_iter().map(|n| render(&ctx, n)).collect::<Vec<_>>());
+            assert_eq!(
+                got,
+                want,
+                "{s}: getPathToBaseStructure? {}",
+                render(&ctx, b)
+            );
         }
     }
     // A non-structure answers "no" without panicking (the oracle's
@@ -130,6 +149,8 @@ fn structure_accessors_match_the_oracle_dump() {
     assert!(!ctx.is_structure(nat));
     assert!(ctx.get_structure_fields(nat).is_empty());
     assert!(ctx.find_field(nat, nat).is_none());
+    // A non-structure's order is itself (`getStructureParentInfo` is empty).
+    assert_eq!(ctx.get_structure_resolution_order(nat), Some(vec![nat]));
     assert!(ctx.get_path_to_base_structure(nat, nat).is_some()); // base == s: `[]`, as the oracle
 }
 
@@ -142,4 +163,49 @@ fn bi_str(bi: leanr_kernel::BinderInfo) -> &'static str {
         StrictImplicit => "strictImplicit",
         InstImplicit => "instImplicit",
     }
+}
+
+/// Review Focus 1: `computeStructureResolutionOrder` recurses over
+/// `parentInfo` with no guard (Structure.lean:452-460); well-formed
+/// data is acyclic, `.olean` rows are untrusted. With every `extends`
+/// edge doubled back (`S2`'s parents gain `S3`, ...) the order of `S3`
+/// must be `None`, not a stack overflow. A structure with neither
+/// parents nor children (`Add`) is unaffected.
+#[test]
+fn resolution_order_of_a_parent_cycle_is_none() {
+    let mut r = replay_fixture_in("elab", "Elab0.olean");
+    let edges: Vec<(NameId, NameId, NameId)> = r
+        .structures
+        .iter()
+        .flat_map(|s| {
+            s.parent_info
+                .iter()
+                .map(move |p| (p.struct_name, s.struct_name, p.proj_fn))
+        })
+        .collect();
+    for (parent, child, proj_fn) in edges {
+        if let Some(p) = r.structures.iter_mut().find(|s| s.struct_name == parent) {
+            p.parent_info.push(leanr_olean::StructureParentInfo {
+                struct_name: child,
+                subobject: false,
+                proj_fn,
+            });
+        }
+    }
+    let view = r.env.view();
+    let mut scratch = Store::scratch();
+    let base = Some(view.store);
+    let s3 = decode_name(&mut scratch, base, "S3");
+    let add = decode_name(&mut scratch, base, "Add");
+    let mut ctx = MetaCtx::new(
+        view,
+        &mut scratch,
+        Config::default(),
+        EnvExtensions {
+            structures: &r.structures,
+            ..Default::default()
+        },
+    );
+    assert_eq!(ctx.get_structure_resolution_order(s3), None);
+    assert_eq!(ctx.get_structure_resolution_order(add), Some(vec![add]));
 }
