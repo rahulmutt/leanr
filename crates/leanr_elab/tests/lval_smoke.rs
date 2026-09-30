@@ -607,13 +607,23 @@ fn pipe_projection_and_named_pattern_rejections_match_the_oracle() {
         support::elab_and_synthesize("fun (x : Nat) => x |>.succ.{0}"),
         Err(ElabError::TooManyUniverseLevels(_))
     ));
-    // A whole term: `elabNamedPatternErr` (BuiltinTerm.lean:443-444).
-    // "`<identifier>@<term>` is a named pattern and can only be used in
-    // pattern matching contexts"
+}
+
+/// A whole term: `elabNamedPatternErr` (BuiltinTerm.lean:443-444).
+/// "`<identifier>@<term>` is a named pattern and can only be used in
+/// pattern matching contexts"
+#[test]
+fn named_pattern_as_a_term_is_rejected() {
     assert!(matches!(
         support::elab_and_synthesize("fun (x : Nat) => x@Nat.zero"),
         Err(ElabError::NamedPatternOutsidePattern { as_function: false })
     ));
+}
+
+/// The application-head site is checked in its own test so neither
+/// assertion can mask the other.
+#[test]
+fn named_pattern_as_a_function_is_rejected() {
     // An application head: `elabAppFn` (App.lean:2098-2100). "Expected a
     // function, but found the named pattern x@Nat.succ"
     assert!(matches!(
