@@ -625,7 +625,7 @@ planned one at a time after their predecessor merges.
     oracle only prints `f.getAppFn.eta`. Whoever ports the error prose
     should render `app_fn(f)`.
 
-### P4 — identifier forms (PR #<n>)
+### P4 — identifier forms (PR #52)
 
 - What landed: `resolve_local_name` / `resolve_global_name` (replacing
   `resolve_global`; two callers in `builtin/lit/mod.rs` pass a single prefix,
