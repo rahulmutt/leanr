@@ -71,12 +71,12 @@ enum LValResolution {
     },
 }
 
-pub(super) fn node(elab: &TermElabM, e: ExprId) -> Node {
+pub(crate) fn node(elab: &TermElabM, e: ExprId) -> Node {
     elab.mctx.store().expr_node(Some(elab.view.store), e)
 }
 
 /// oracle: `Expr.getAppFn`.
-pub(super) fn app_fn(elab: &TermElabM, mut e: ExprId) -> ExprId {
+pub(crate) fn app_fn(elab: &TermElabM, mut e: ExprId) -> ExprId {
     while let Node::App { f, .. } = node(elab, e) {
         e = f;
     }
@@ -94,7 +94,7 @@ fn app_args(elab: &TermElabM, mut e: ExprId) -> Vec<ExprId> {
     out
 }
 
-pub(super) fn render(elab: &TermElabM, n: NameId) -> String {
+pub(crate) fn render(elab: &TermElabM, n: NameId) -> String {
     elab.mctx
         .store()
         .to_name(Some(elab.view.store), Some(n))

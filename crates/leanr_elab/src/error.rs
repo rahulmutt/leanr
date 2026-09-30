@@ -210,6 +210,10 @@ pub enum ElabError {
         id: String,
         reason: InvalidDottedIdentReason,
     },
+    /// oracle: `elabAnonymousCtor`'s throws
+    /// (`Lean/Elab/BuiltinNotation.lean:43-102`). Prose deferred (design
+    /// spec 2026-09-30-m4b4b § Errors).
+    InvalidAnonymousCtor(AnonCtorError),
     /// An oracle `panic!`/`unreachable!` site (`mkBaseProjections`,
     /// `App.lean:1703`, `:1708`): unreachable on a well-formed
     /// environment, an error rather than a panic here because `.olean`
@@ -322,6 +326,30 @@ pub enum InvalidDottedIdentReason {
     /// `App.lean:2038-2040` — `throwUnknownIdentifierAt` "Unknown constant
     /// `full_name`", the last one tried after every `unfoldDefinition?` step.
     UnknownConstant { full_name: String },
+}
+
+/// Which `elabAnonymousCtor` throw an `ElabError::InvalidAnonymousCtor`
+/// stands for. `ctor` is the constructor's rendered name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnonCtorError {
+    /// `BuiltinNotation.lean:47-48`, thrown at `:54` (an mvar head after
+    /// `whnf`) and `:101` (no expected type).
+    ExpectedTypeUnknown,
+    /// `:56-57` — `matchConstInduct`'s failure continuation.
+    NotInductive { ty: ExprId },
+    /// `:98`.
+    NoCtors { ty: ExprId },
+    /// `:99-100`.
+    MultipleCtors { ty: ExprId },
+    /// `:77-82`. The oracle logs this under `errToSorry` and pads with
+    /// labeled `sorry`s; leanr has no `errToSorry` and throws.
+    InsufficientFields {
+        ctor: String,
+        explicit: usize,
+        provided: usize,
+    },
+    /// `:89-91`.
+    NoExplicitFields { ctor: String, provided: usize },
 }
 
 impl From<MetaError> for ElabError {

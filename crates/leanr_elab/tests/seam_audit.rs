@@ -293,11 +293,6 @@ fn elab_as_elim_guard_honours_the_explicit_and_ellipsis_early_out() {
 #[test]
 fn unregistered_kinds_are_named_by_kind() {
     let cases: &[(&str, &str)] = &[
-        // M4b-4b: the anonymous constructor is parsed (`leanr_syntax`
-        // `term.rs`) and deliberately unrouted. (`Term.pipeProj`,
-        // `Term.dotIdent` and `Term.namedPattern` are registered since
-        // M4b-4a P4, `Term.proj` since P1 task 5.)
-        ("⟨Nat.zero, Nat.zero⟩", "Lean.Parser.Term.anonymousCtor"),
         // The literals that are not leaves used to be listed here.
         // `num` left with task 6 and `char`/`scientific` with task 7 —
         // all three are registered kinds now (`@OfNat.ofNat.{u}` plus
