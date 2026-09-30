@@ -289,20 +289,19 @@ fn elab_as_elim_guard_honours_the_explicit_and_ellipsis_early_out() {
 ///
 /// Asserted here rather than left to the table's doc comment because
 /// the failure mode this guards is a kind being *registered* by
-/// accident: `Term.pipeProj` and friends alias to `elabAtom` in the
-/// oracle (`App.lean:2247-2248`, `:2273`), so routing them to
-/// `app::elab_atom` looks correct and is not — their real work is
-/// `elabAppFn`'s still-unported LVal arms, which M4b-4a P4 owns.
-/// (`Term.proj` was routed by M4b-4a P1 task 5, with its arm.)
+/// accident: several kinds alias to `elabAtom` in the oracle
+/// (`App.lean:2247-2248`, `:2273`), so routing them to `app::elab_atom`
+/// looks correct and is not. `Term.anonymousCtor` has no elaborator yet:
+/// M4b-4b owns it. (`Term.proj`, `Term.pipeProj`, `Term.dotIdent` and
+/// `Term.namedPattern` were routed by M4b-4a P1 and P4, with their arms.)
 #[test]
 fn unregistered_kinds_are_named_by_kind() {
     let cases: &[(&str, &str)] = &[
-        // M4b-4a P4, the rest of the LVal / dot-notation family.
-        // (`Term.proj` is registered since M4b-4a P1 task 5;
-        // `Nat.zero.1` is `InvalidProjection NotOneCtor`, pinned in
-        // `lval_smoke.rs`.)
-        ("Nat.zero |>.1", "Lean.Parser.Term.pipeProj"),
-        ("x@Nat.zero", "Lean.Parser.Term.namedPattern"),
+        // M4b-4b: the anonymous constructor is parsed (`leanr_syntax`
+        // `term.rs`) and deliberately unrouted. (`Term.pipeProj`,
+        // `Term.dotIdent` and `Term.namedPattern` are registered since
+        // M4b-4a P4, `Term.proj` since P1 task 5.)
+        ("⟨Nat.zero, Nat.zero⟩", "Lean.Parser.Term.anonymousCtor"),
         // The literals that are not leaves used to be listed here.
         // `num` left with task 6 and `char`/`scientific` with task 7 —
         // all three are registered kinds now (`@OfNat.ofNat.{u}` plus

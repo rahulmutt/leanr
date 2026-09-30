@@ -580,3 +580,44 @@ fn identifier_field_split_rejections_match_the_oracle() {
         );
     }
 }
+
+/// M4b-4a P4: `e |>.f args` (`elabPipeProj`, App.lean:2250-2258, into
+/// `elabAppFn`'s pipeProj arms, :2085-2097) and named patterns outside a
+/// pattern.
+#[test]
+fn pipe_projection_and_named_pattern_rejections_match_the_oracle() {
+    // "Invalid projection: Index `3` is invalid for this structure; it
+    // must be between 1 and 2"
+    assert_eq!(
+        proj_reason("fun (p : Prod Nat Nat) => p |>.3"),
+        InvalidProjectionReason::IndexOutOfRange {
+            idx: 3,
+            num_fields: 2
+        }
+    );
+    // Postponed, then resumed with postponement off. "Invalid
+    // projection: Type of x is not known; cannot resolve projection `1`"
+    assert_eq!(
+        proj_reason("fun x => x |>.1"),
+        InvalidProjectionReason::TypeUnknown
+    );
+    // The `.{us}` of `$e |>.$f.{us}` (`:2094-2097`) reaches `Nat.succ`.
+    // "too many explicit universe levels for `Nat.succ`"
+    assert!(matches!(
+        support::elab_and_synthesize("fun (x : Nat) => x |>.succ.{0}"),
+        Err(ElabError::TooManyUniverseLevels(_))
+    ));
+    // A whole term: `elabNamedPatternErr` (BuiltinTerm.lean:443-444).
+    // "`<identifier>@<term>` is a named pattern and can only be used in
+    // pattern matching contexts"
+    assert!(matches!(
+        support::elab_and_synthesize("fun (x : Nat) => x@Nat.zero"),
+        Err(ElabError::NamedPatternOutsidePattern { as_function: false })
+    ));
+    // An application head: `elabAppFn` (App.lean:2098-2100). "Expected a
+    // function, but found the named pattern x@Nat.succ"
+    assert!(matches!(
+        support::elab_and_synthesize("fun (x : Nat) => x@Nat.succ Nat.zero"),
+        Err(ElabError::NamedPatternOutsidePattern { as_function: true })
+    ));
+}

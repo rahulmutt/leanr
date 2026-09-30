@@ -99,6 +99,8 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
         "Lean.Parser.Term.explicit" => Some("explicit"),
         "Lean.Parser.Term.explicitUniv" => Some("explicitUniv"),
         "Lean.Parser.Term.proj" => Some("proj"),
+        "Lean.Parser.Term.pipeProj" => Some("pipeProj"),
+        "Lean.Parser.Term.namedPattern" => Some("namedPattern"),
         _ => None,
     }
 }
@@ -257,6 +259,17 @@ pub(crate) fn dispatch(
         // the LVal; `app::head::elab_app_fn`'s proj arm peels it.
         ("Lean.Parser.Term.proj", NodeOrToken::Node(_)) => {
             crate::app::elab_atom(elab, elem, kinds, expected)
+        }
+        // oracle: `@[builtin_term_elab pipeProj] elabPipeProj`
+        // (`App.lean:2250-2258`).
+        ("Lean.Parser.Term.pipeProj", NodeOrToken::Node(node)) => {
+            crate::app::elab_pipe_proj(elab, node, kinds, expected)
+        }
+        // oracle: `elabNamedPatternErr` (`BuiltinTerm.lean:443-444`).
+        // `elabNamedPattern := elabAtom` (`App.lean:2247`) is registered
+        // too; measured, the error below is the one a whole term gets.
+        ("Lean.Parser.Term.namedPattern", NodeOrToken::Node(_)) => {
+            Err(ElabError::NamedPatternOutsidePattern { as_function: false })
         }
         ("Lean.Parser.Term.prop", NodeOrToken::Node(node)) => {
             crate::builtin::sort::elab_prop(elab, node, kinds)

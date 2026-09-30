@@ -177,6 +177,37 @@ pub fn elab_atom(
     )
 }
 
+/// oracle: `elabPipeProj` (`App.lean:2250-2258`). `$e |>.$f$[.{us}]? args*`
+/// is `elabAppAux` on `$e |>.$f$[.{us}]?` with the trailing arguments
+/// expanded (`expandArgs`); `head::elab_app_fn`'s pipeProj arm then reads
+/// only `e`, `f` and the levels. `universeConstraintsCheckpoint` is not
+/// per-call, as for `elab_app`.
+pub fn elab_pipe_proj(
+    elab: &mut TermElabM,
+    node: &SyntaxNode,
+    kinds: &KindInterner,
+    expected: Option<ExprId>,
+) -> Result<ExprId, ElabError> {
+    let ch = non_trivia_children(node);
+    let args_node = ch
+        .get(4)
+        .and_then(|el| el.as_node())
+        .ok_or_else(|| ElabError::IllFormedSyntax("pipeProj: no argument list".to_string()))?;
+    let items = non_trivia_children(args_node);
+    let (named_args, args, ellipsis) = expand::expand_args(&items, kinds)?;
+    let elem = SynElem::Node(node.clone());
+    elab_app_aux(
+        elab,
+        &elem,
+        kinds,
+        named_args,
+        args,
+        ellipsis,
+        expected,
+        elem.clone(),
+    )
+}
+
 /// oracle: `elabExplicit` (`App.lean:2260-2271`), the `@`-in-TERM-
 /// position elaborator. It is a pure shape dispatch over seven
 /// `elabAtom` forms and two `elabTerm .. (implicitLambda := false)`

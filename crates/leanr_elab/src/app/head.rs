@@ -96,6 +96,21 @@ pub fn elab_app_fn(
             new.extend(lvals);
             elab_app_fn(elab, &base, kinds, &[], new, call)
         }
+        // oracle: `` `($e |>.$idx:fieldIdx) `` / `` `($e |>.$field:ident) ``
+        // and their `.{us}` forms (`App.lean:2085-2097`), the same
+        // `elabFieldIdx` / `elabFieldName` as a projection. The trailing
+        // arguments were taken off by `app::elab_pipe_proj`.
+        ("Lean.Parser.Term.pipeProj", _) => {
+            let (base, field, lvls) = pipe_proj_parts(elem)?;
+            let levels = elab_explicit_univs(elab, &lvls, kinds)?;
+            let mut new = field_lvals(&field, kinds, &levels)?;
+            new.extend(lvals);
+            elab_app_fn(elab, &base, kinds, &[], new, call)
+        }
+        // oracle: `` `($_:ident@$_:term) `` (`App.lean:2098-2100`).
+        ("Lean.Parser.Term.namedPattern", _) => {
+            Err(ElabError::NamedPatternOutsidePattern { as_function: true })
+        }
         // oracle: `` `($id:ident.{$us,*}) `` (`App.lean:2103-2105`) and the
         // proj `.{us}` arms (`:2087-2090`, `:2094-2097`), reached by
         // recursion — a `.{us}` on a proj's own base, e.g. `o.1.{0}.2`.
@@ -113,8 +128,8 @@ pub fn elab_app_fn(
                 .to_string(),
         )),
         (other, _) if is_lval_head(other) => Err(ElabError::UnsupportedSyntax(format!(
-            "application head `{other}` needs `elabAppFn`'s pipeProj/dotIdent/namedPattern \
-             arms (App.lean:2084-2100, :2106-2109) — M4b-4a P4"
+            "application head `{other}` needs `elabAppFn`'s dotIdent arm \
+             (App.lean:2106-2109) — M4b-4a P4"
         ))),
         // oracle: `elabAppFn`'s generic arm (`App.lean:2120-2138`). With
         // nothing to apply, the term is elaborated against the expected
@@ -187,6 +202,36 @@ fn field_lvals(
     })
 }
 
+/// `Term.pipeProj`'s children (`term_app.rs`'s `register_pipe_proj`;
+/// confirmed with `leanr parse --dump` while planning):
+///
+/// ```text
+///   [0] e   [1] "|>."   [2] field: fieldIdx node | <ident> token
+///   [3] null: `optional explicitUnivSuffix`, empty or [".{", levels, "}"]
+///   [4] null: `many argument` (`app::elab_pipe_proj` takes it apart)
+/// ```
+///
+/// Returns `e`, the field and the level syntax (separators dropped, as
+/// `app::explicit_univ_parts` does).
+fn pipe_proj_parts(elem: &SynElem) -> Result<(SynElem, SynElem, Vec<SynElem>), ElabError> {
+    let bad = |what: &str| ElabError::IllFormedSyntax(format!("pipeProj: {what}"));
+    let node = elem.as_node().ok_or_else(|| bad("not a node"))?;
+    let ch = non_trivia_children(node);
+    if ch.len() != 5 {
+        return Err(bad("expected `[e, \"|>.\", field, univs, args]`"));
+    }
+    let suffix = ch[3]
+        .as_node()
+        .ok_or_else(|| bad("univ suffix is not a node"))?;
+    let sch = non_trivia_children(suffix);
+    let lvls = match sch.get(1).and_then(|el| el.as_node()) {
+        Some(list) => non_trivia_children(list).into_iter().step_by(2).collect(),
+        None if sch.is_empty() => Vec::new(),
+        None => return Err(bad("malformed `.{..}` suffix")),
+    };
+    Ok((ch[0].clone(), ch[2].clone(), lvls))
+}
+
 /// `(base, field)` of a `Lean.Parser.Term.proj` node. Layout (confirmed
 /// by a throwaway parse probe, never landed — same precedent as
 /// `expand.rs`'s recorded shapes):
@@ -214,17 +259,12 @@ pub(crate) fn proj_parts(elem: &SynElem) -> Result<(SynElem, SynElem), ElabError
     }
 }
 
-/// The application-head kinds whose oracle arm is still unported:
-/// `elabAppFn`'s `` `($e |>.$..) `` arms (`App.lean:2085`, `:2088`,
-/// `:2092`, `:2095`), its `` `(.$id:ident) `` arms (`:2106-2109`) and
-/// the `namedPattern` arm (`:2098-2100`, an outright error outside
-/// pattern position). `choice` has its own arm above; `Term.proj` is
-/// ported.
+/// The application-head kind whose oracle arm is still unported:
+/// `elabAppFn`'s `` `(.$id:ident) `` arms (`App.lean:2106-2109`).
+/// `choice` has its own arm above; `proj`, `pipeProj` and `namedPattern`
+/// are ported.
 fn is_lval_head(kind: &str) -> bool {
-    matches!(
-        kind,
-        "Lean.Parser.Term.pipeProj" | "Lean.Parser.Term.dotIdent" | "Lean.Parser.Term.namedPattern"
-    )
+    matches!(kind, "Lean.Parser.Term.dotIdent")
 }
 
 /// oracle: `elabExplicitUnivs` (`App.lean:1899-1900`) —

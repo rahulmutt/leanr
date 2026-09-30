@@ -1057,6 +1057,16 @@ def p4Queries : List (String × String) :=
   , ("p4/global-function",      "Nat.succ.twice")
   , ("p4/global-field-plain",   "polyZero.val")
   , ("p4/global-univ-last",     "polyZero.val.{0}")
+  , ("p4/pipe-idx",             "fun (p : Prod Nat Nat) => p |>.2")
+  , ("p4/pipe-idx-univ",        "fun (p : Prod Nat Nat) => p |>.1.{0}")
+  , ("p4/pipe-args",            "fun (s : S1) => s |>.addTo Nat.zero")
+  , ("p4/pipe-named",           "fun (s : S1) => s |>.addTo (n := Nat.zero)")
+  , ("p4/pipe-eta",             "fun (s : S1) => s |>.addTo")
+  , ("p4/pipe-global",          "Nat.zero |>.succ")
+  , ("p4/pipe-univ",            "fun (x : Poly Nat) => x |>.val.{0}")
+  , ("p4/pipe-chain",           "fun (p : Prod Nat Nat) => p |>.1 |>.succ")
+  , ("p4/pipe-fields",          "fun (p : Prod Nat Nat) => p |>.fst.succ")
+  , ("p4/pipe-postponed",       "(fun x => x |>.1) (Prod.mk Nat.zero Nat.zero)")
   ]
 
 def emit (id src : String) (expJ : Json) : IO Unit :=

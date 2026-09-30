@@ -195,6 +195,14 @@ pub enum ElabError {
     /// to a local with no fields left over, e.g. `x.{0}`. With fields
     /// (`x.val.{0}`) the levels belong to the last field instead.
     InvalidExplicitUniversesForLocal(ExprId),
+    /// A named pattern `x@p` outside a pattern. Two oracle throw sites,
+    /// both measured: `elabNamedPatternErr` (`BuiltinTerm.lean:443-444`)
+    /// answers for a whole term (`as_function: false`), and `elabAppFn`'s
+    /// arm (`App.lean:2098-2100`) for an application head
+    /// (`as_function: true`).
+    NamedPatternOutsidePattern {
+        as_function: bool,
+    },
     /// An oracle `panic!`/`unreachable!` site (`mkBaseProjections`,
     /// `App.lean:1703`, `:1708`): unreachable on a well-formed
     /// environment, an error rather than a panic here because `.olean`
