@@ -269,7 +269,7 @@ One plan, one PR. Tasks, in order:
 
 ## Landed
 
-PR #TBD. Branch `m4b4b-anonymous-constructor`, measured against `main`
+PR #53. Branch `m4b4b-anonymous-constructor`, measured against `main`
 (`6dcee4e`).
 
 - Elaboration corpus 276 → 293, additions only (`git diff --numstat`:
