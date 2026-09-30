@@ -650,18 +650,6 @@ fn dot_identifier_rejections_match_the_oracle() {
         dotted_reason("(.a.b : Nat)"),
         InvalidDottedIdentReason::NotAtomic
     );
-    // Review Focus 5. `:1988-1990`: postponed, then resumed with no
-    // expected type. `@.succ` is `elabAppFn`'s `@.$id` arm (:2115),
-    // formerly a P4 seam. `(fun x => x) .zero` resumes against the
-    // still-unassigned `?α` and throws at `:2044-2045`. "The expected type
-    // of `.zero` could not be determined"
-    for src in [".zero", "@.succ", ".succ Nat.zero", "(fun x => x) .zero"] {
-        assert_eq!(
-            dotted_reason(src),
-            InvalidDottedIdentReason::NoExpectedType,
-            "{src}"
-        );
-    }
     // `:2041-2042`: "Not supported on type universe"
     assert_eq!(
         dotted_reason("(.foo : Type)"),
@@ -696,6 +684,35 @@ fn dot_identifier_rejections_match_the_oracle() {
         support::elab_and_synthesize("(.zero.{0} : Nat)"),
         Err(ElabError::TooManyUniverseLevels(_))
     ));
+}
+
+/// Review Focus 5: a `.c` whose expected type never becomes known. Every
+/// case postpones (`tryPostponeIfNoneOrMVar`, App.lean:1988) and is resumed
+/// by `resumePostponed` against its postponement mvar's TYPE
+/// (`SyntheticMVars.lean:38`, `:51`) — an unassigned mvar even when the
+/// original expected type was none (`postponeElabTermCore`,
+/// `TermElabM.lean:1451`). So each throws at `:2044-2045`, never at
+/// `:1989-1990`. `@.succ` is `elabAppFn`'s `@.$id` arm (`:2115`), formerly
+/// a P4 seam; `(fun x => x) .zero` resumes against the still-unassigned
+/// `?α`. Oracle: "The expected type of `.zero` could not be determined".
+/// All cases are checked before asserting, so no case masks another.
+#[test]
+fn dot_identifier_without_an_expected_type_is_rejected() {
+    let wrong: Vec<String> = [".zero", "@.succ", ".succ Nat.zero", "(fun x => x) .zero"]
+        .into_iter()
+        .filter_map(|src| match support::elab_and_synthesize(src) {
+            Err(ElabError::InvalidDottedIdent {
+                reason: InvalidDottedIdentReason::NoExpectedType,
+                ..
+            }) => None,
+            other => Some(format!("{src}: {other:?}")),
+        })
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "expected NoExpectedType:\n{}",
+        wrong.join("\n")
+    );
 }
 
 /// Review Focus 4: `withForallBody` (App.lean:2009-2015) enters
