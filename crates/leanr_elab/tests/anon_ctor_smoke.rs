@@ -162,3 +162,61 @@ fn a_resumed_tail_reports_its_own_error() {
         AnonCtorError::NotInductive { .. }
     ));
 }
+
+/// `⟨⟩` in a pattern position belongs to the match slice (later M4):
+/// `fun ⟨a, b⟩ => …` expands to a `match` in the oracle and never reaches
+/// the term elaborator. leanr must keep it a named seam, never route it
+/// through `builtin::anon_ctor`.
+#[test]
+fn pattern_position_anonymous_constructor_stays_a_seam() {
+    match support::elab_and_synthesize("fun ⟨a, b⟩ => a") {
+        Err(ElabError::UnsupportedSyntax(m)) => {
+            assert!(m.contains("unsupported binder kind"), "{m}")
+        }
+        other => panic!("expected the pattern-position seam, got {other:?}"),
+    }
+}
+
+/// `AnonLoop.mk : AnonLoop → AnonLoop` has ONE explicit field, so the
+/// flatten tail of `⟨x, y⟩` starts where it began (`from + k - 1 =
+/// from`) and never shrinks. The oracle stops at `elabTerm`'s
+/// `withIncRecDepth`: "maximum recursion depth has been reached". leanr's
+/// tail-depth guard must turn that into `MaxRecDepth`, not a stack
+/// overflow (Global Constraint: never panic).
+#[test]
+fn a_tail_that_never_shrinks_hits_max_rec_depth() {
+    match support::elab_and_synthesize("(⟨Nat.zero, Nat.zero⟩ : AnonLoop)") {
+        Err(ElabError::MaxRecDepth) => {}
+        other => panic!("expected MaxRecDepth, got {other:?}"),
+    }
+}
+
+/// A flatten tail gets the implicit lambda like any other `elabTerm`.
+/// `FI.mk` has one explicit field `f : {α : Type} → α → α`, so ALL of
+/// `⟨Nat.zero, Nat.zero⟩` is the tail, elaborated against that implicit
+/// forall. The oracle introduces `α` first and reports the arrow under
+/// it: "Invalid `⟨...⟩` notation: The expected type `α✝ → α✝` is not an
+/// inductive type". A tail that skipped the implicit lambda would report
+/// the implicit forall `{α : Type} → α → α` itself.
+#[test]
+fn a_tail_against_an_implicit_forall_gets_the_implicit_lambda() {
+    let ty = support::with_elab("(⟨Nat.zero, Nat.zero⟩ : FI)", |elab, stx, kinds| match elab
+        .elab_term_and_synthesize(stx, kinds, None)
+    {
+        Err(ElabError::InvalidAnonymousCtor(AnonCtorError::NotInductive { ty })) => {
+            let base = elab.view.store;
+            let mut st = support::EncSt::default();
+            support::encode_expr(elab.mctx.store(), Some(base), ty, &mut st)
+        }
+        other => panic!("expected NotInductive, got {other:?}"),
+    });
+    assert_eq!(ty["k"], "pi", "{ty}");
+    assert_eq!(
+        ty["bi"], "d",
+        "the arrow `α → α`, not the implicit forall: {ty}"
+    );
+    assert_eq!(
+        ty["t"]["k"], "fvar",
+        "`α` is the implicit lambda's local: {ty}"
+    );
+}

@@ -687,7 +687,7 @@ fn add_lval_arg_go(
 ) -> Result<LValInsert, ElabError> {
     // `withIncRecDepth` (`:1749`) against `defaultMaxRecDepth`
     // (`Init/Prelude.lean:4836`); see `ElabError::MaxRecDepth`.
-    const MAX_REC_DEPTH: usize = 512;
+    use crate::error::MAX_REC_DEPTH;
     loop {
         // `:1751`.
         let (xs, bis, f_type2) = elab.mctx.forall_meta_telescope(f_type)?;

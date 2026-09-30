@@ -842,3 +842,11 @@ structure PrivMk where
   x : Nat
 
 def sameAs {α : Type} (a b : α) : α := b
+
+-- A self-referential single-constructor type with ONE explicit field:
+-- `k = 1`, so `⟨x, y⟩`'s flatten tail starts where it began and never
+-- shrinks. The oracle stops at `maxRecDepth` (`elabTerm`'s
+-- `withIncRecDepth`); leanr's tail-depth guard is pinned by
+-- `anon_ctor_smoke.rs`.
+inductive AnonLoop : Type where
+  | mk : AnonLoop → AnonLoop

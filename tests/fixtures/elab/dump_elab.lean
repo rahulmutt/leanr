@@ -1116,6 +1116,7 @@ def anonTailQueries : List (String × String) :=
   , ("anon/flat2",            "(⟨True.intro, True.intro, True.intro, True.intro⟩ : And True (And True (And True True)))")
   , ("anon/tailPostponed",    "sameAs (⟨Nat.zero, Nat.zero, Nat.zero⟩ : Prod Nat _) (Prod.mk Nat.zero (Prod.mk Nat.zero Nat.zero))")
   , ("anon/tailUnderBinder",  "fun (n : Nat) => sameAs (⟨n, n, n⟩ : Prod Nat _) (Prod.mk n (Prod.mk n n))")
+  , ("anon/flatK1",           "(⟨Nat.zero, Nat.zero⟩ : PB (Prod Nat Nat))")
   ]
 
 def emit (id src : String) (expJ : Json) : IO Unit :=

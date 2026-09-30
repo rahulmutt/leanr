@@ -357,3 +357,8 @@ impl From<MetaError> for ElabError {
         ElabError::Meta(e)
     }
 }
+
+/// oracle: `defaultMaxRecDepth` (512, `Init/Prelude.lean:4836`), the
+/// limit `withIncRecDepth` checks. leanr counts only the recursions that
+/// can run away on their own (see [`ElabError::MaxRecDepth`]).
+pub(crate) const MAX_REC_DEPTH: usize = 512;

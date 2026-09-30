@@ -287,12 +287,15 @@ fn elab_as_elim_guard_honours_the_explicit_and_ellipsis_early_out() {
 /// the failure mode this guards is a kind being *registered* by
 /// accident: several kinds alias to `elabAtom` in the oracle
 /// (`App.lean:2247-2248`, `:2273`), so routing them to `app::elab_atom`
-/// looks correct and is not. `Term.anonymousCtor` has no elaborator yet:
-/// M4b-4b owns it. (`Term.proj`, `Term.pipeProj`, `Term.dotIdent` and
-/// `Term.namedPattern` were routed by M4b-4a P1 and P4, with their arms.)
+/// looks correct and is not. `Term.match` is the remaining pinned case:
+/// it belongs to the match slice (later M4). `Term.anonymousCtor` has
+/// been registered since M4b-4b (see `anonymous_constructor_is_registered`
+/// below), and `Term.proj`, `Term.pipeProj`, `Term.dotIdent` and
+/// `Term.namedPattern` were routed by M4b-4a P1 and P4, with their arms.
 #[test]
 fn unregistered_kinds_are_named_by_kind() {
     let cases: &[(&str, &str)] = &[
+        ("match Nat.zero with | x => x", "Lean.Parser.Term.match"),
         // The literals that are not leaves used to be listed here.
         // `num` left with task 6 and `char`/`scientific` with task 7 —
         // all three are registered kinds now (`@OfNat.ofNat.{u}` plus
@@ -312,6 +315,14 @@ fn unregistered_kinds_are_named_by_kind() {
             other => panic!("{src}: expected UnsupportedSyntax({kind}), got {other:?}"),
         }
     }
+}
+
+#[test]
+fn anonymous_constructor_is_registered() {
+    assert_eq!(
+        leanr_elab::dispatch::elaborator_name_for("Lean.Parser.Term.anonymousCtor"),
+        Some("anonymousCtor")
+    );
 }
 
 /// The `@[elab_as_elim]` and `@[elab_without_expected_type]` attributes
@@ -774,6 +785,7 @@ fn no_seam_message_names_a_completed_slice() {
         "M4b-4a P2",
         "M4b-4a P3",
         "M4b-4a P4",
+        "M4b-4b",
     ];
     let mut offenders = Vec::new();
     for path in walk_rs_files(src_dir) {
@@ -789,7 +801,7 @@ fn no_seam_message_names_a_completed_slice() {
     }
     assert!(
         offenders.is_empty(),
-        "M4b-3 P3, P4, P5 and M4b-4a P1, P2, P3, P4 are complete; live (non-comment) source \
+        "M4b-3 P3, P4, P5, M4b-4a P1–P4 and M4b-4b are complete; live (non-comment) source \
          claiming one at {offenders:?}"
     );
 }

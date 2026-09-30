@@ -1,5 +1,5 @@
 //! `(e)` / `(e : T)` — oracle: `expandParen`/`elabTypeAscription`
-//! (`Lean/Elab/BuiltinNotation.lean:410-434`), read directly from the
+//! (`Lean/Elab/BuiltinNotation.lean:410-436`), read directly from the
 //! pinned toolchain source before transcribing (never guessed).
 //!
 //! **`paren` never reaches a term elaborator in real Lean.**

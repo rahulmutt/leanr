@@ -98,7 +98,7 @@ Control flow, with oracle lines from `BuiltinNotation.lean`:
 3. `:55-57`: the head must be `Const` naming an inductive, otherwise
    `NotInductive { ty }`. Structures, classes and non-structure
    inductives (`Exists`) all pass.
-4. `:59`, `:98-99`: zero constructors raises `NoCtors { ty }`. More than
+4. `:59`, `:98-100`: zero constructors raises `NoCtors { ty }`. More than
    one raises `MultipleCtors { ty }`.
 5. `:61-62`: a constructor name starting with `_private.` raises
    `UnsupportedSyntax`, naming the private-names slice. This is the
@@ -266,3 +266,112 @@ One plan, one PR. Tasks, in order:
 3. The elaborator and dispatch arm.
 4. Errors and smoke tests.
 5. The audit and the mutation sweep.
+
+## Landed
+
+PR #TBD. Branch `m4b4b-anonymous-constructor`, measured against `main`
+(`6dcee4e`).
+
+- Elaboration corpus 276 → 293, additions only (`git diff --numstat`:
+  `17 0` on `elab-queries.jsonl`). That is the 16 `anon/*` records of
+  § Testing and the plan, plus `anon/flatK1` (`(⟨Nat.zero, Nat.zero⟩ :
+  PB (Prod Nat Nat))`, k = 1, added in Task 3). `structures.jsonl` +3
+  rows (`And`, `T3`, `PrivMk`). Elab0 also gained `AnonLoop` (below).
+- `leanr_meta`, `leanr_syntax`, `leanr_olean` and `leanr_kernel` are
+  untouched. `leanr_elab` gained a `stacker` dependency (already in the
+  lockfile through `leanr_kernel` and `leanr_meta`).
+- Gate: `mise run ci` green.
+
+### Corrections to the sections above
+
+- **`anon/flat2` source.** The record keeps its id, but its source is
+  `(⟨True.intro, True.intro, True.intro, True.intro⟩ : And True (And
+  True (And True True)))`, not the three-deep `Prod` of § Evidence.
+  This works around a pre-existing `leanr_meta` level-normalization
+  gap. For `Prod Nat (Prod Nat (Prod Nat Nat))`, even a bare type with
+  no `⟨⟩` in it, leanr produces `Prod.{0, max 0 0}` (and `max 0 (max 0
+  0)` at the outermost level) where the oracle produces `Prod.{0, 0}`.
+  The suspected cause is unverified: `instantiate_level_mvars`
+  (`leanr_meta/src/level.rs`) rebuilds `Max` without simplifying it,
+  and its output now reaches the output term through
+  `instantiate_mvars_body`. **This is an open seam, for follow-up in
+  `leanr_meta`.**
+- **`(⟨⟩ : Eq Nat.zero Nat.zero)` is `StuckCoercion`, not
+  `TypeMismatch`** (§ Evidence, § Testing). The oracle's `mkCoe`
+  postpones because the type still holds an mvar, so the stuck-coercion
+  reporter prints the mismatch, with the same "Type mismatch" text.
+  leanr's faithful counterpart is `ElabError::StuckCoercion`, and the
+  smoke test pins that. It is still not `InsufficientFields`.
+- **Mutation table.** The `k = 0` check placed before `n < k` is killed
+  by `anon/punit` (and `anon/unitAlias`), not by the `True` / `Prod`
+  smoke tests.
+- § Architecture step 4's `:98-99` now reads `:98-100`.
+
+### Mutations (each applied, run, watched go red, reverted)
+
+| Mutation | Result | Killed by |
+|---|---|---|
+| Drop `i >= num_params &&` (count from 0) | red | `eq_counts_fields_after_its_promoted_parameters` |
+| Drop `&& binder_info == Default` (count every binder) | red | `anon/implicitField` (corpus only) |
+| `whnf(expected)` → `expected` | red | `anon/unitAlias`, plus `nestedExplicit` and `nestedPostponed` (corpus only) |
+| Move the `k == 0` branch ahead of `n < k` / `n == k` | red | `anon/punit`, `anon/unitAlias` |
+| M1: `from + k - 1` → `from + k` | red | `anon/flat1`, `flat2`, `tailPostponed`, `tailUnderBinder`; `insufficient_fields_in_the_nested_tail` |
+| M2: the ladder resumes with `from_parts(&stx, None)` | red | `anon/tailPostponed`, `tailUnderBinder` |
+| M3: push `from` (recurse with `from` unchanged) | red | `anon/flat1`, `flat2`, `tailPostponed`, `tailUnderBinder`; the nested-tail smoke test. **Equivalent on `anon/flatK1`**: with k = 1, `from + k - 1` is `from`. |
+| M4: postponement records `tail_from: None` | red | same as M2 |
+| M5: `propagate.rs`'s `AnonCtorTail` arm → `false` | **survives** | Probably output-equivalent: without propagation the tail postpones on `?β` and resumes to the same term. Only postponement order and mvar numbering differ, and the encoder observes neither. Kept because it is the oracle's classification. |
+| M6: the tail's ref in `args.rs` → `app.ctx.stx` | **survives** | Changes error positions only (the ref of a postponed `.coe`, the node `ensure_has_type` reports against). **Coverage gap:** no test pins error positions. |
+| M7: tails skip the implicit lambda | red | `a_tail_against_an_implicit_forall_gets_the_implicit_lambda` (Task 3, uses `FI`) |
+| Remove the tail-depth guard | red (stack overflow, SIGABRT) | `a_tail_that_never_shrinks_hits_max_rec_depth` |
+| Add `M4b-4b` back to a live seam string | red | `no_seam_message_names_a_completed_slice` |
+
+### Recursion guard
+
+With k = 1 the flatten tail starts where it began. So on a
+self-referential single-constructor type (`inductive AnonLoop | mk :
+AnonLoop → AnonLoop`), `(⟨x, y⟩ : AnonLoop)` re-enters the tail
+forever. The oracle stops with "maximum recursion depth has been
+reached", because every `elabTerm` runs under `withIncRecDepth`
+(`elabTermAux`, `TermElabM.lean:1825`).
+
+leanr counts only the tail re-entries (`TermElabM::anon_tail_depth`,
+around `dispatch_target`'s tail arm) against `defaultMaxRecDepth` (512,
+`Init/Prelude.lean:4836`, now the crate-wide `error::MAX_REC_DEPTH`
+that `app/lval.rs` also uses). It returns `ElabError::MaxRecDepth` when
+the count is reached. This is an approximation of the oracle's global
+rec depth: the oracle spends several levels per tail and counts from
+the ambient depth, so the exact cut-off differs, but a cut-off always
+exists.
+
+A tail level costs about 10 KiB of stack in a debug build. 512 levels
+do not fit on libtest's 2 MiB thread (128 fit, 256 overflow), so the
+call is wrapped in `stacker::maybe_grow`, following the
+`MetaCtx::guarded` / `guard.rs` idiom.
+
+### Seam audit
+
+- `unregistered_kinds_are_named_by_kind` now pins `("match Nat.zero
+  with | x => x", "Lean.Parser.Term.match")`. The source parses, the
+  seam is the bare kind name, and the test passes, so it was kept.
+  `match` belongs to the match slice.
+- `anonymous_constructor_is_registered` pins
+  `elaborator_name_for("Lean.Parser.Term.anonymousCtor") ==
+  Some("anonymousCtor")`.
+
+### Seams left open
+
+- **Pattern position** (match slice, later M4). `fun ⟨a, b⟩ => a`
+  raises `UnsupportedSyntax("fun: unsupported binder kind
+  Lean.Parser.Term.anonymousCtor")`, pinned by
+  `pattern_position_anonymous_constructor_stays_a_seam`. It never
+  reaches `builtin::anon_ctor`.
+- **Private names.** Any `_private.` constructor is the crate-wide
+  private-names seam. The oracle accepts one from its own module.
+- **`errToSorry` narrowing.** `InsufficientFields` throws, where the
+  oracle logs it and pads the arguments with labeled `sorry`s. The same
+  applies to `resumeElabTerm`'s `errToSorry` flag.
+- **`TermTarget` is the growth point for the macro-expansion slice.**
+  Synthesized syntax that leanr cannot build as a real node is carried
+  as a target variant, as the flatten tail is.
+- **`Prod.{0, max 0 0}`** level normalization in `leanr_meta` (above).
+- **Error positions** are unpinned (M6).

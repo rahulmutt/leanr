@@ -9,6 +9,7 @@ repository.workspace = true
 leanr_kernel = { path = "../leanr_kernel" }
 leanr_meta = { path = "../leanr_meta" }
 leanr_syntax = { path = "../leanr_syntax" }
+stacker = "0.1"
 
 [dev-dependencies]
 leanr_olean = { path = "../leanr_olean" }

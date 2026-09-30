@@ -60,6 +60,12 @@ impl TermTarget {
     }
 }
 
+/// Stack-growth constants for [`TermElabM::dispatch_target`]'s tail
+/// guard — the same values as `leanr_meta`'s `metactx.rs` and
+/// `leanr_kernel`'s `tc.rs` (private there, so restated).
+const RED_ZONE: usize = 128 * 1024;
+const STACK_CHUNK: usize = 4 * 1024 * 1024;
+
 pub struct TermElabM<'e> {
     pub mctx: MetaCtx<'e>,
     /// The environment view `mctx` was itself built over, held a second
@@ -115,6 +121,16 @@ pub struct TermElabM<'e> {
     /// to `true`, matching `Context.mayPostpone : Bool := true`'s own
     /// default (`TermElabM.lean:303`).
     pub may_postpone: bool,
+    /// How many anonymous-constructor flatten tails are currently being
+    /// elaborated inside one another ([`TermElabM::dispatch_target`]).
+    /// oracle: every `elabTerm` runs under `withIncRecDepth`
+    /// (`elabTermAux`, `TermElabM.lean:1825`), so a tail that never
+    /// shrinks — `k = 1` on a self-referential type, `⟨x, y⟩ : AnonLoop`
+    /// — stops at `maxRecDepth`. leanr approximates that global depth by
+    /// counting only the tail re-entries, the one recursion here that
+    /// can run away on its own; the oracle counts from the ambient
+    /// depth, so the exact cut-off differs, never whether one exists.
+    anon_tail_depth: usize,
 }
 
 impl<'e> TermElabM<'e> {
@@ -130,6 +146,7 @@ impl<'e> TermElabM<'e> {
             synthetic_mvars: HashMap::new(),
             mvar_error_infos: Vec::new(),
             may_postpone: true,
+            anon_tail_depth: 0,
         }
     }
 
@@ -531,7 +548,22 @@ impl<'e> TermElabM<'e> {
         match target {
             TermTarget::Stx(elem) => dispatch::dispatch(self, elem, kinds, expected),
             TermTarget::AnonCtorTail { node, from } => {
-                crate::builtin::anon_ctor::elab_anon_ctor(self, node, *from, kinds, expected)
+                // See `anon_tail_depth`. The depth guard + stack growth
+                // idiom of `leanr_meta`'s `MetaCtx::guarded` and
+                // `leanr_kernel`'s `guard.rs`: one tail level costs ~10 KiB
+                // of stack in a debug build, so 512 levels do not fit on
+                // libtest's 2 MiB thread without growing it. Decremented
+                // on every exit path: nothing between the increment and
+                // the decrement returns.
+                if self.anon_tail_depth + 1 >= crate::error::MAX_REC_DEPTH {
+                    return Err(ElabError::MaxRecDepth);
+                }
+                self.anon_tail_depth += 1;
+                let result = stacker::maybe_grow(RED_ZONE, STACK_CHUNK, || {
+                    crate::builtin::anon_ctor::elab_anon_ctor(self, node, *from, kinds, expected)
+                });
+                self.anon_tail_depth -= 1;
+                result
             }
         }
     }
