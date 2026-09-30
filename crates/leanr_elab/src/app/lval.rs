@@ -908,4 +908,12 @@ mod tests {
         assert!(!ElabError::Postpone.is_oracle_error());
         assert!(ElabError::PlaceholderAsFunction.is_oracle_error());
     }
+
+    /// `MaxRecDepth` is a runtime exception (`Exception.isRuntime`,
+    /// `CoreM.lean:783-784`): `Core.tryCatch` (`:792-799`) rethrows it
+    /// past `resolveLValLoop`'s retry and `postponeOnError`.
+    #[test]
+    fn max_rec_depth_is_not_catchable() {
+        assert!(!ElabError::MaxRecDepth.is_oracle_error());
+    }
 }
