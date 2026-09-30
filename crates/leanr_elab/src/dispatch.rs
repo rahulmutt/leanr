@@ -165,7 +165,7 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 ///   letI / haveI / let_fun / let_delayed / let_tmp / letrec  later slice (own oracle tier each)
 ///   Term.pipeProj / dotIdent / namedPattern .... M4b-4a P4 (same elabAppFn arms)
 ///   generalized field notation (.const,
-///     Function.f) .............................. M4b-4a P3
+///     Function.f) .............................. P3 SHIPPED (M4b-4a) — lval.rs
 ///   private field projections (no fixture) ..... the slice that models private names
 ///   choice ..................................... overloading slice
 ///   elabAsElim (recursor heads seamed; aux

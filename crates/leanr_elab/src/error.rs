@@ -152,6 +152,40 @@ pub enum ElabError {
         field: String,
         reason: InvalidFieldReason,
     },
+    /// oracle: `addLValArg.throwUnusableParameter` (`App.lean:1811-1829`,
+    /// thrown at `:1772`): a parameter of the base type exists but can be
+    /// passed neither positionally nor by name. `allow_named` is false
+    /// once a `CoeFun` coercion has disabled named insertion (`:1785`).
+    /// `f` is the function the user named (`fPreCoercion?.getD f`): the
+    /// oracle's `funMsg` (`:1796-1809`) mentions both it and the coerced
+    /// function, but its prose is deferred (design spec § Errors) and
+    /// the head the user wrote is the one worth carrying.
+    UnusableLValParameter {
+        f: ExprId,
+        param: String,
+        allow_named: bool,
+    },
+    /// oracle: `addLValArg`'s final throw (`App.lean:1792-1794`): "Function
+    /// … does not have a usable parameter of type `base` …". `f` as for
+    /// `UnusableLValParameter`: the function the user named, before any
+    /// `CoeFun` coercion.
+    NoLValParameter {
+        f: ExprId,
+        base: String,
+    },
+    /// oracle: `throwMaxRecDepthAt` (`Exception.lean:225-226`), reached
+    /// from `withIncRecDepth` (`:245-249`). Built as an `.error` (tagged
+    /// `runtime.maxRecDepth`), but a runtime exception
+    /// (`Exception.isRuntime`, `CoreM.lean:783-784`) that `Core.tryCatch`
+    /// (`:792-799`) rethrows before any elaborator `catch` arm runs, so
+    /// no catch site handles it ([`ElabError::is_oracle_error`] is
+    /// `false`). leanr
+    /// counts only the recursion that can run away on its own
+    /// (`addLValArg.go`, `App.lean:1749`) against the oracle's
+    /// `defaultMaxRecDepth` (512, `Init/Prelude.lean:4836`); the oracle
+    /// counts from the ambient depth, so the exact cut-off differs,
+    /// never whether one exists.
+    MaxRecDepth,
     /// oracle: `elabAppFn`'s `` `(_) `` arm (`App.lean:2119`): "A
     /// placeholder `_` cannot be used where a function is expected".
     PlaceholderAsFunction,
@@ -191,6 +225,12 @@ impl ElabError {
     /// `Meta`/`Internal` (budget and internal failures). Handling one of
     /// those as an oracle error would report an outcome for a path leanr
     /// never ran, so every such catch rethrows them.
+    ///
+    /// Also `false` for the oracle's runtime exceptions (`MaxRecDepth`):
+    /// `Exception.isRuntime` (`CoreM.lean:783-784`) exceptions are an
+    /// `.error` by construction, but `Core.tryCatch` (`:792-799`)
+    /// rethrows them before any `catch` arm runs, so no catch site may
+    /// handle them.
     pub fn is_oracle_error(&self) -> bool {
         !matches!(
             self,
@@ -198,6 +238,7 @@ impl ElabError {
                 | ElabError::Meta(_)
                 | ElabError::Internal(_)
                 | ElabError::Postpone
+                | ElabError::MaxRecDepth
         )
     }
 }

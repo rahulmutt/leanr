@@ -756,10 +756,24 @@ fn literal_kinds_are_registered_not_deferred() {
 /// after removing it the test passed, and a live line
 /// `let _ = "M4b-4a P2";` temporarily added to `postpone.rs` made it
 /// fail naming that line, then pass again once removed.
+///
+/// **`M4b-4a P3` was added by M4b-4a P3 task 5, and measured
+/// non-vacuous.** After the two doc rows (`dispatch.rs`, `app/mod.rs`)
+/// were reworded to "P3 SHIPPED", a live line `let _ = "M4b-4a P3";`
+/// temporarily added to `app/lval.rs` made this test fail naming that
+/// line, and it passed again once removed (both runs in the task 5
+/// report).
 #[test]
 fn no_seam_message_names_a_completed_slice() {
     let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
-    let needles = ["M4b-3 P3", "M4b-3 P4", "M4b-3 P5", "M4b-4a P1", "M4b-4a P2"];
+    let needles = [
+        "M4b-3 P3",
+        "M4b-3 P4",
+        "M4b-3 P5",
+        "M4b-4a P1",
+        "M4b-4a P2",
+        "M4b-4a P3",
+    ];
     let mut offenders = Vec::new();
     for path in walk_rs_files(src_dir) {
         let text = std::fs::read_to_string(&path).expect("readable source");
@@ -774,7 +788,7 @@ fn no_seam_message_names_a_completed_slice() {
     }
     assert!(
         offenders.is_empty(),
-        "M4b-3 P3, P4, P5 and M4b-4a P1, P2 are complete; live (non-comment) source \
+        "M4b-3 P3, P4, P5 and M4b-4a P1, P2, P3 are complete; live (non-comment) source \
          claiming one at {offenders:?}"
     );
 }

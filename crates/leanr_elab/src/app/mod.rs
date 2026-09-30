@@ -64,7 +64,7 @@
 //!   elabAsElim, RECURSOR heads only (partial!) ....... M4b-4c head.rs
 //!   dot notation: proj, fieldIdx, projFn/projIdx ..... P1 SHIPPED (M4b-4a) — lval.rs, head.rs, here
 //!   numImplicitParams (structure projection) ......... P1 SHIPPED (M4b-4a) — args.rs, lval.rs
-//!   generalized field notation (.const, Function.f) .. M4b-4a P3 lval.rs
+//!   generalized field notation (.const, Function.f) .. P3 SHIPPED (M4b-4a) — lval.rs
 //!   pipeProj / dotIdent / namedPattern heads, `@.f` .. M4b-4a P4 head.rs, here, dispatch.rs
 //!   `choice` heads ................................... overloading slice  head.rs
 //!   private field projections ........................ private-names slice  lval.rs

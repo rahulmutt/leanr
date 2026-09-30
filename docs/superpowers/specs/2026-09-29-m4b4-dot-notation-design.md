@@ -377,6 +377,46 @@ planned one at a time after their predecessor merges.
   needs `MetaCtx::whnf_r` widened from `pub(crate)` to `pub`, an additive
   change covered by the elab-to-meta accessor precedent.
 
+**P3 amendments (found while planning, measured)**
+
+1. **`AmbiguousField` is not added.** `findMethod?` throws it only when
+   `resolveGlobalName` returns two or more candidates (`App.lean:1466-1468`).
+   leanr resolves exact names only, so there is never more than one
+   candidate; the variant would be dead code with no test. It belongs to the
+   owner of the seam "`findMethod?` candidate resolution uses exact names
+   only" (the `open`/alias slice), which adds it together with the
+   resolution that can reach it.
+2. **An extra `leanr_meta` accessor: `forall_meta_telescope`** (non-reducing,
+   `Meta/Basic.lean:1752-1753`), outside the structure-accessor table.
+   `addLValArg` needs it (`App.lean:1751`) and reads each mvar's `userName`
+   (`:1756-1757`). leanr's only telescope,
+   `forall_meta_telescope_reducing`, mints anonymous `Natural` mvars: it
+   would reduce (wrong, `:1782` does the `whnf` itself) and lose the names.
+   Minting goes through a generalized `mk_aux_mvar_at` that also takes a
+   `user_name`. Additive, under the M4b elab-to-meta accessor precedent.
+3. **A new error variant, `MaxRecDepth`**, for `addLValArg.go`'s
+   `withIncRecDepth` (`App.lean:1749`; `Exception.lean:226`). Measured:
+   `CoeFun Loop (fun _ => {u : Nat} -> Loop)` makes the oracle report
+   "maximum recursion depth has been reached".
+4. **`findMethod?` on a private structure name is a seam.** The oracle
+   applies `privateToUserName` (`App.lean:1456`). leanr models no private
+   names (P1's `isInaccessiblePrivateName` seam, same owner). The fixture
+   has no private structure.
+5. **The C3 merge carries a cycle guard.**
+   `computeStructureResolutionOrder` recurses over `parentInfo` with no
+   guard (`Structure.lean:462-470`). `structureExt` rows are untrusted, so a
+   doctored parent cycle returns `None` rather than overflowing the stack,
+   matching P1's `find_field` and `get_path_to_base_structure`.
+6. **`MaxRecDepth` is not an oracle error for catch purposes.**
+   `ElabError::is_oracle_error` excludes it: the oracle's `Core.tryCatch`
+   (`CoreM.lean:792-799`) rethrows runtime exceptions
+   (`Exception.isRuntime`, `:783-784`) before any catch arm. This
+   supersedes the plan constraint "every new error variant is an oracle
+   error".
+7. **`addLValArg.go`'s two tail recursions are a loop in leanr**
+   (`add_lval_arg_go`). The recursive form overflowed the debug-build Rust
+   stack at depth ~385, before the 512 cap.
+
 ## Landed
 
 ### P1 — structures and projections (PR #49)
@@ -486,3 +526,54 @@ planned one at a time after their predecessor merges.
   - For P4: dotted identifiers on a local (`x.succ`, `x.fst`) give
     `UnknownIdent` while the oracle accepts them. This predates the branch;
     P4 owns the local field split.
+
+### P3 — generalized field notation (PR #51)
+
+- What landed: the C3 structure resolution order (with the cycle guard),
+  `forall_meta_telescope` (`leanr_meta`), `find_method`, the
+  `LValResolution::Const` arms (`.const` heads and `Function.f`),
+  `type_matches_base_name`, and `add_lval_arg` with both continuations
+  (`whnf` and `CoeFun`) and the 512 depth cap (`MaxRecDepth`, a loop in
+  `add_lval_arg_go`, not catchable). `localRec` is the only unported
+  `LValResolution` arm.
+- Corpus: 26 `p3/*` records (the plan said 25; `p3/explicit-unusable-name`,
+  `fun (s : S1) => @(s).bad Nat.zero`, was added on a controller ruling
+  because mutation J survived `p3/explicit-positional`); 234 records in
+  total. Extra fixture declarations beyond the plan: `CX/CA/CP/CQ/CD` (C3
+  relaxed-path fixture: mutation B survived the plan's fixture) and
+  `FnJ`/`S1.viaFnJ` (two-coercion fixture: the pre-coercion-head mutation is
+  equivalent on single-coercion input).
+- Rejections live in `lval_smoke.rs`.
+- The P1 debt is closed: `fun (s : S3Alias) => (s).a` is `p3/alias-field`,
+  and the `S3Alias` `.zzz` rejection now names `S3.zzz`.
+- No corpus record was dropped under the `numScopeArgs` decision.
+- Open follow-ups:
+  - `self_reproducing_coe_fun_hits_max_rec_depth` has thin stack headroom in
+    debug: it passes at 1.5 MiB and overflows at 1.25 MiB (default test
+    thread 2 MiB). Some recursion over the ~1000-deep coerced term is
+    unguarded; `infer`, `instantiate_mvars` and kernel subst are
+    stacker-guarded, so the location is not yet found. Not attributed to
+    `leanr_meta`.
+  - No end-to-end test observes `MaxRecDepth`'s non-catchability (only the
+    unit assertion `max_rec_depth_is_not_catchable`): no current path lets
+    it reach a catch site with an observable difference.
+  - `findMethod?` candidate resolution is exact-name only, so
+    `AmbiguousField` is absent (amendment 1) and private structure names are
+    unmodelled (amendment 4); both belong to their named owner slices.
+  - Elab0.lean's Task 1 comments carry drifted oracle cites (for example
+    `App.lean:1712-1726`, `:1764-1776`); unverified and untouched.
+  - Mutation I (the named-eta `Vec::insert` path) dies by panic, so the
+    oracle gate does not list which records diverge.
+  - Initialising `add_lval_arg`'s `unusable` empty instead of from the
+    user's named-arg names (`lval.rs:611`) survives every test. The
+    observable case is `def T.f (t : Nat) {t : T}` with `(x).f (t := 1)`:
+    the oracle gives `UnusableLValParameter`, and the mutant would push a
+    duplicate named argument and fail differently.
+  - `type_matches_base_name`'s `TransparencyMode::Instances` versus
+    `Reducible` is not discriminated (`lval.rs:534`, `:547`). Only Default
+    versus Instances is (the `S1Df` test). Discriminating it needs an alias
+    that is instance-reducible but not reducible.
+  - After a whnf continuation, `NoLValParameter.f` holds `mkAppN f xs`,
+    which references rolled-back telescope mvars (`lval.rs:744`). The
+    oracle only prints `f.getAppFn.eta`. Whoever ports the error prose
+    should render `app_fn(f)`.

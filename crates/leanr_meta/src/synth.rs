@@ -386,7 +386,7 @@ use leanr_kernel::{BinderInfo, Nat, MAX_REC_DEPTH};
 
 use crate::instances::Instance;
 use crate::metactx::MetaSnapshot;
-use crate::{LMVarId, MVarId, MetaCtx, MetaError, TransparencyMode};
+use crate::{LMVarId, MVarId, MVarKind, MetaCtx, MetaError, TransparencyMode};
 
 /// Stack-growth constants for [`KeyNormalizer`]'s own depth guard --
 /// restated from `metactx.rs::{RED_ZONE,STACK_CHUNK}` (private there),
@@ -2646,6 +2646,45 @@ impl<'e> MetaCtx<'e> {
         Ok((mvars, bis, body))
     }
 
+    /// oracle: `forallMetaTelescope` (`Lean/Meta/Basic.lean:1752-1753`) --
+    /// `forallMetaTelescopeReducingAux` with `reducing := false`: peel the
+    /// SYNTACTIC `forallE` binders only, minting each mvar with the
+    /// binder's name as its `userName` and `.synthetic` kind for an
+    /// inst-implicit binder (`:1727-1730`). `addLValArg` reads both
+    /// (`App.lean:1751`, `:1756-1757`) and does its own `whnf` (`:1782`).
+    #[allow(clippy::type_complexity)]
+    pub fn forall_meta_telescope(
+        &mut self,
+        ty: ExprId,
+    ) -> Result<(Vec<ExprId>, Vec<BinderInfo>, ExprId), MetaError> {
+        let base = Some(self.view.store);
+        let mut cur = ty;
+        let mut mvars: Vec<ExprId> = Vec::new();
+        let mut bis: Vec<BinderInfo> = Vec::new();
+        while let Node::Forall {
+            binder_name,
+            binder_type,
+            body,
+            binder_info,
+        } = self.node(cur)
+        {
+            self.step()?;
+            let d = instantiate_rev(self.scratch, base, binder_type, &mvars, &mut self.guard)?;
+            let kind = if binder_info == BinderInfo::InstImplicit {
+                MVarKind::Synthetic
+            } else {
+                MVarKind::Natural
+            };
+            let lctx = self.current_lctx();
+            let (m, _) = self.mk_aux_mvar_at(lctx, d, kind, binder_name)?;
+            mvars.push(m);
+            bis.push(binder_info);
+            cur = body;
+        }
+        let body = instantiate_rev(self.scratch, base, cur, &mvars, &mut self.guard)?;
+        Ok((mvars, bis, body))
+    }
+
     /// **HARD REQUIREMENT 1 (universe-level refresh).** oracle:
     /// `getInstances`'s `val := e.val.updateConst! (← us.mapM (fun _ =>
     /// mkFreshLevelMVar))` (`SynthInstance.lean:222-226`). See
@@ -2907,7 +2946,6 @@ mod tests {
         const_named, fresh_fvar, fresh_mvar, fresh_mvar_of_kind, parse_goal, render_expr,
         render_name, with_ctx, with_cyclic_instances_ctx, with_instances_ctx,
     };
-    use crate::MVarKind;
     use leanr_kernel::bank::ExprId;
 
     /// Build `Type` (`Sort (succ Level.zero)`) as an mvar's type -- the
@@ -3490,6 +3528,69 @@ mod tests {
                 !matches!(ctx.node(body), Node::Forall { .. }),
                 "the body is fully peeled"
             );
+        });
+    }
+
+    /// oracle: `forallMetaTelescope` (`Lean/Meta/Basic.lean:1752-1753`,
+    /// worker `:1717-1743`): one mvar per syntactic binder, named after
+    /// the binder (`mkFreshExprMVar d k n`, `:1730`), `.synthetic` for an
+    /// inst-implicit binder (`:1729`). `addLValArg` reads both
+    /// (`App.lean:1751`, `:1756-1757`).
+    #[test]
+    fn forall_meta_telescope_names_its_mvars_and_kinds_inst_implicit_synthetic() {
+        with_instances_ctx(|ctx| {
+            let ty = three_binder_test_type(ctx);
+            let (mvars, bis, tbody) = ctx.forall_meta_telescope(ty).expect("telescope runs");
+            // Substitution: the dependent binders `[Add #0]` and `#1 -> #2`
+            // are instantiated with the earlier mvars, per binder and in
+            // the final body.
+            let decl_ty = |ctx: &MetaCtx, m: ExprId| {
+                let Node::MVar { id: Some(n) } = ctx.node(m) else {
+                    panic!("expected an mvar")
+                };
+                ctx.mctx().decl(MVarId(n)).unwrap().ty
+            };
+            let add = const_named(ctx, "Add");
+            let base0 = Some(ctx.view.store);
+            let add_m0 = ctx.scratch.expr_app(base0, add, mvars[0]).unwrap();
+            assert_eq!(decl_ty(ctx, mvars[1]), add_m0, "[Add ?m0]");
+            assert_eq!(decl_ty(ctx, mvars[2]), mvars[0], "?m0 domain");
+            assert_eq!(tbody, mvars[0], "body is ?m0");
+            assert_eq!(
+                bis,
+                vec![
+                    BinderInfo::Implicit,
+                    BinderInfo::InstImplicit,
+                    BinderInfo::Default
+                ]
+            );
+            let kinds: Vec<MVarKind> = mvars
+                .iter()
+                .map(|&m| match ctx.node(m) {
+                    Node::MVar { id: Some(n) } => ctx.mctx().decl(MVarId(n)).unwrap().kind,
+                    o => panic!("expected an mvar, got {o:?}"),
+                })
+                .collect();
+            assert_eq!(
+                kinds,
+                vec![MVarKind::Natural, MVarKind::Synthetic, MVarKind::Natural]
+            );
+            // A NAMED binder: `(x : Prop) -> Prop`.
+            let base = Some(ctx.view.store);
+            let xs = ctx.scratch.intern_str(base, "x").unwrap();
+            let x = ctx.scratch.name_str(base, None, xs).unwrap();
+            let zero = ctx.scratch.level_zero(base).unwrap();
+            let prop = ctx.scratch.expr_sort(base, zero).unwrap();
+            let named = ctx
+                .scratch
+                .expr_forall(base, Some(x), prop, prop, BinderInfo::Default)
+                .unwrap();
+            let (mvars, _, body) = ctx.forall_meta_telescope(named).expect("telescope runs");
+            let Node::MVar { id: Some(n) } = ctx.node(mvars[0]) else {
+                panic!("expected an mvar")
+            };
+            assert_eq!(ctx.mctx().decl(MVarId(n)).unwrap().user_name, Some(x));
+            assert_eq!(body, prop);
         });
     }
 

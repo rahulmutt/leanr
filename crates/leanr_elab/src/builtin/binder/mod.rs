@@ -18,7 +18,7 @@ use crate::elab::TermElabM;
 use crate::error::ElabError;
 
 mod forall;
-mod fun;
+pub(crate) mod fun;
 mod let_like;
 
 pub use forall::{elab_arrow, elab_dep_arrow, elab_forall};
