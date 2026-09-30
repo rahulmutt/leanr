@@ -71,8 +71,8 @@ use leanr_syntax::tree::SyntaxNode;
 /// oracle: `inductive Arg` (`Arg.lean:19-21`) — an argument is either
 /// unelaborated syntax or an already-elaborated `Expr`. The `Expr` arm's
 /// first producer is dot notation's `(self := e)` argument
-/// (`lval.rs`'s `projFn` arm, M4b-4a P1); `pipeProj` (M4b-4a P4) and
-/// `binop%` (the macro-expansion slice) will add more.
+/// (`lval.rs`'s `projFn` arm, M4b-4a P1); `binop%` (the macro-expansion
+/// slice) will add more.
 #[derive(Debug, Clone)]
 pub enum Arg {
     Stx(SynElem),

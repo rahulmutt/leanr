@@ -638,9 +638,22 @@ planned one at a time after their predecessor merges.
   covers a dot-identifier head, so `(.rec … : Nat)` raises the M4b-4c seam,
   pinned by a `seam_audit` case. Whoever owns M4b-4c must lift it together
   with `elab_app_fn_id`'s guard.
-- Corpus: 39 `p4/*` records, 273 in total. No corpus term was dropped under
-  the `numScopeArgs` decision, and every plan mutation was made to
-  discriminate (tasks 2 and 3 split tests so no assertion masked another).
+- Nested `|>.` with arguments (final-review fix): `elabAppFn`'s pipeProj
+  patterns (`App.lean:2085-2097`) have no `$args*`, and `elabPipeProj`
+  (`:2250-2258`) strips the arguments only from the node it was handed. So
+  an inner `|>.` that still carries arguments, the base of an outer `|>.`,
+  takes the generic arm (`:2120-2138`) and is elaborated whole. leanr's
+  pipeProj arm now does the same for any pipeProj with arguments other than
+  `call.stx`. Before the fix, `s |>.addTo Nat.zero |>.succ` was wrongly
+  rejected and `s |>.addTo Nat.zero |>.twice` was silently accepted as
+  `Function.twice`. Pinned by `p4/pipe-nested-args`, `p4/pipe-nested-named`,
+  `p4/pipe-nested-deep` and `lval_smoke`'s
+  `nested_pipe_projection_keeps_the_inner_arguments`.
+- Corpus: 42 `p4/*` records, 276 in total. No corpus term was dropped under
+  the `numScopeArgs` decision. Every plan mutation discriminates except the
+  three survivors listed under the follow-ups below (U, R′ and probe S′),
+  which the plan predicted or the controller ruled on; tasks 2 and 3 split
+  tests so no assertion masked another.
 - Rejections live in `lval_smoke.rs`.
 - The P2 note is closed: "For P4: dotted identifiers on a local … give
   `UnknownIdent`" no longer holds (`p4/local-*`).
@@ -662,9 +675,9 @@ planned one at a time after their predecessor merges.
     disabled) is reached by no test, because every test postpones and then
     resumes against an mvar type.
   - The `_private.` dot-ident seam in `dot_ident.rs`
-    (`isInaccessiblePrivateName`, `App.lean:2025`) has no test (no private
+    (`isInaccessiblePrivateName`, `App.lean:2024`) has no test (no private
     fixture). Being `UnsupportedSyntax`, it skips `go`'s unfold retry, whereas
     the oracle's error would retry. Owner: the slice that models private
     names.
-  - No term was dropped under § Decisions and no mutation failed to
-    discriminate.
+  - No term was dropped under § Decisions. The only mutations that failed to
+    discriminate are U, R′ and probe S′ above.

@@ -407,7 +407,7 @@ fn resolve_lval_aux(
         (Node::MVar { .. }, LVal::FieldIdx { .. }) => {
             Err(proj_err(InvalidProjectionReason::TypeUnknown))
         }
-        // `:1605-1615`: `c ++ suffix` (`:1607-1608`) first, as above.
+        // `:1605-1616`: `c ++ suffix` (`:1607-1608`) first, as above.
         (_, LVal::FieldName { name, suffix, .. }) => {
             if let (Node::Const { name: Some(c), .. }, Some(suffix)) =
                 (node(elab, app_fn(elab, e)), suffix)
