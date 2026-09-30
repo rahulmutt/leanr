@@ -1004,6 +1004,34 @@ def p2Queries : List (String × String) :=
   -- `(fun (x : Nat) f => f) Nat.zero Nat.succ` is `StuckCoercion`).
   ]
 
+-- M4b-4a P3: generalized field notation (`findMethod?`, `addLValArg`,
+-- App.lean:1453-1477, :1735-1829). Every source was run on the pinned
+-- oracle while planning (plan § Measured oracle behaviour).
+def p3Queries : List (String × String) :=
+  [ ("p3/nat-succ",            "(Nat.zero).succ")
+  , ("p3/nat-succ-chain",      "(Nat.zero).succ.succ")
+  , ("p3/alias-field",         "fun (s : S3Alias) => (s).a")
+  , ("p3/inherited-method",    "fun (s : S3) => (s).get")
+  , ("p3/diamond-method",      "fun (d : D3) => (d).zz")
+  , ("p3/c3-first",            "fun (q : OQ) => (q).m")
+  , ("p3/c3-nonsubobject",     "fun (q : OQ) => (q).n")
+  , ("p3/c3-order",            "fun (q : OQ) => (q).k")
+  , ("p3/c3-deep",             "fun (q : OQ) => (q).e")
+  , ("p3/param-base",          "fun (x : PD Nat) => (x).get")
+  , ("p3/param-base-univ",     "fun (x : PD Nat) => (x).get.{0}")
+  , ("p3/function-arg",        "(Nat.succ).twice Nat.zero")
+  , ("p3/function-partial",    "fun (f : Nat -> Nat) => (f).twice")
+  , ("p3/positional",          "fun (s : S1) => (s).addTo Nat.zero")
+  , ("p3/named-eta",           "fun (s : S1) => (s).addTo")
+  , ("p3/named-with-named",    "fun (s : S1) => (s).addTo (n := Nat.zero)")
+  , ("p3/implicit-named",      "fun (s : S1) => (s).imp Nat.zero")
+  , ("p3/explicit-positional", "fun (s : S1) => @(s).imp Nat.zero")
+  , ("p3/reducible-param",     "fun (s : S1) => (s).ab")
+  , ("p3/proj-then-method",    "fun (p : Prod Nat Nat) => (p).1.succ")
+  , ("p3/method-then-method",  "fun (s : S1) => (s).get.succ")
+  , ("p3/field-then-method",   "fun (s : S2) => (s).toS1.get")
+  ]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -1017,7 +1045,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries ++ closeoutExplicitQueries ++ nondepQueries ++ lvalIdxQueries ++ lvalFnQueries ++ p2Queries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries ++ closeoutExplicitQueries ++ nondepQueries ++ lvalIdxQueries ++ lvalFnQueries ++ p2Queries ++ p3Queries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>

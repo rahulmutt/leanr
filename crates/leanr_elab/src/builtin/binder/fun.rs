@@ -38,7 +38,7 @@ use crate::error::ElabError;
 /// this), and none is needed: `Node::MData`/`Node::App`/`Node::Const`
 /// are already public kernel API, so this stays self-contained in
 /// `leanr_elab` — no `leanr_meta` addition, and so no ledger amendment.
-fn cleanup_annotations(elab: &TermElabM, e: ExprId) -> ExprId {
+pub(crate) fn cleanup_annotations(elab: &TermElabM, e: ExprId) -> ExprId {
     let base = Some(elab.view.store);
     let mut cur = e;
     loop {

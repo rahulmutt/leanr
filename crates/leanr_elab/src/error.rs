@@ -152,6 +152,27 @@ pub enum ElabError {
         field: String,
         reason: InvalidFieldReason,
     },
+    /// oracle: `addLValArg.throwUnusableParameter` (`App.lean:1811-1829`,
+    /// thrown at `:1772`): a parameter of the base type exists but can be
+    /// passed neither positionally nor by name. `allow_named` is false
+    /// once a `CoeFun` coercion has disabled named insertion (`:1785`).
+    /// `f` is the function the user named (`fPreCoercion?.getD f`): the
+    /// oracle's `funMsg` (`:1796-1809`) mentions both it and the coerced
+    /// function, but its prose is deferred (design spec § Errors) and
+    /// the head the user wrote is the one worth carrying.
+    UnusableLValParameter {
+        f: ExprId,
+        param: String,
+        allow_named: bool,
+    },
+    /// oracle: `addLValArg`'s final throw (`App.lean:1792-1794`): "Function
+    /// … does not have a usable parameter of type `base` …". `f` as for
+    /// `UnusableLValParameter`: the function the user named, before any
+    /// `CoeFun` coercion.
+    NoLValParameter {
+        f: ExprId,
+        base: String,
+    },
     /// oracle: `elabAppFn`'s `` `(_) `` arm (`App.lean:2119`): "A
     /// placeholder `_` cannot be used where a function is expected".
     PlaceholderAsFunction,

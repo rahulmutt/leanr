@@ -5,7 +5,7 @@
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, LevelId, NameId};
 use leanr_kernel::{BinderInfo, ConstantInfo, Nat};
-use leanr_meta::{MVarId, MVarKind, MetaError};
+use leanr_meta::{MVarId, MVarKind, MetaError, TransparencyMode};
 use leanr_syntax::kind::KindInterner;
 
 use crate::app::expand::{Arg, NamedArg};
@@ -41,10 +41,9 @@ impl LVal {
     }
 }
 
-/// oracle: `LValResolution` (`App.lean:1435-1447`). P1 ports the two
-/// arms that need no namespace search; `const` is P3's and `localRec`
-/// needs `auxDeclToFullName`, which has no leanr producer (the
-/// `let rec` slice).
+/// oracle: `LValResolution` (`App.lean:1435-1447`). `projFn`/`projIdx`
+/// since P1, `const` since P3; `localRec` needs `auxDeclToFullName`,
+/// which has no leanr producer (the `let rec` slice).
 enum LValResolution {
     ProjFn {
         base: NameId,
@@ -55,6 +54,13 @@ enum LValResolution {
     ProjIdx {
         struct_name: NameId,
         idx: usize,
+    },
+    /// `App.lean:1441-1444`.
+    Const {
+        base: NameId,
+        struct_name: NameId,
+        const_name: NameId,
+        levels: Vec<LevelId>,
     },
 }
 
@@ -184,6 +190,74 @@ fn match_const_structure(elab: &TermElabM, s: NameId) -> Option<usize> {
     c.num_fields.to_usize()
 }
 
+/// oracle: `findMethod?` (`App.lean:1453-1477`): try `S.f`, then each
+/// namespace after `S` in `S`'s resolution order (a non-structure's is
+/// `[S]`). `resolveGlobalName` with `currNamespace := .anonymous` is
+/// exact-name lookup in leanr (spec § Seams after P4: `open`/aliases are
+/// the `open`/alias slice's), so a candidate list is empty or a
+/// singleton and the ambiguity throw (`:1466-1468`) cannot arise; see
+/// plan § Spec deviations 1.
+fn find_method(
+    elab: &mut TermElabM,
+    struct_name: NameId,
+    field: &str,
+) -> Result<Option<(NameId, NameId)>, ElabError> {
+    if let Some(r) = find_method_in(elab, struct_name, field)? {
+        return Ok(Some(r));
+    }
+    // `:1473`.
+    let order = if elab.mctx.is_structure(struct_name) {
+        elab.mctx
+            .get_structure_resolution_order(struct_name)
+            .ok_or_else(|| {
+                ElabError::Internal(format!(
+                    "structure `{}` has cyclic parents in `structureExt` \
+                     (getStructureResolutionOrder, Structure.lean:512)",
+                    render(elab, struct_name)
+                ))
+            })?
+    } else {
+        vec![struct_name]
+    };
+    // `resolutionOrder[1...resolutionOrder.size]` (`:1474`).
+    for &ns in order.iter().skip(1) {
+        if let Some(r) = find_method_in(elab, ns, field)? {
+            return Ok(Some(r));
+        }
+    }
+    Ok(None)
+}
+
+/// `findMethod?`'s local `find?` (`App.lean:1455-1468`).
+fn find_method_in(
+    elab: &mut TermElabM,
+    s: NameId,
+    field: &str,
+) -> Result<Option<(NameId, NameId)>, ElabError> {
+    let s_str = render(elab, s);
+    // `privateToUserName structName'` (`:1456`): leanr models no private
+    // names (plan § Spec deviations 4).
+    if s_str.starts_with("_private.") {
+        return Err(ElabError::UnsupportedSyntax(format!(
+            "`.{field}` on the private structure `{s_str}` (`privateToUserName`, \
+             App.lean:1456) — the slice that models private names"
+        )));
+    }
+    // `structName' ++ fieldName`: one string component under `s`'s own
+    // `NameId`, no render/parse round trip. `base = Some(view store)` so
+    // a declared name dedups to its persistent id (as in
+    // `head::intern_components`).
+    let base = elab.view.store;
+    let store = elab.mctx.store_mut();
+    let f = store
+        .intern_str(Some(base), field)
+        .map_err(MetaError::from)?;
+    let full = store
+        .name_str(Some(base), Some(s), f)
+        .map_err(MetaError::from)?;
+    Ok(elab.view.get(full).is_some().then_some((s, full)))
+}
+
 /// oracle: `resolveLValAux` (`App.lean:1517-1616`), P1's arms.
 fn resolve_lval_aux(
     elab: &mut TermElabM,
@@ -261,20 +335,34 @@ fn resolve_lval_aux(
             // (`LValResolution.localRec`). leanr's local context never
             // holds an aux decl (no `let rec` / `where` producer), so
             // the oracle's loop finds nothing here too — nothing to port.
-            Err(ElabError::UnsupportedSyntax(format!(
-                "`.{name}` on `{}` needs generalized field notation \
-                 (`findMethod?`, App.lean:1453-1477 / :1568-1569) — M4b-4a P3",
-                render(elab, s)
-            )))
+            // `:1568-1569`.
+            if let Some((base, const_name)) = find_method(elab, s, name)? {
+                return Ok(LValResolution::Const {
+                    base,
+                    struct_name: s,
+                    const_name,
+                    levels: levels.clone(),
+                });
+            }
+            // `throwInvalidFieldAt ref fieldName fullName` (`:1578`); the
+            // exporting-scope `declHint` retry (`:1570-1577`) is prose.
+            let full_name = format!("{}.{name}", render(elab, s));
+            Err(field_err(name, InvalidFieldReason::NotFound { full_name }))
         }
         // `:1580-1588`.
-        (Node::Forall { .. }, LVal::FieldName { name, .. }) => {
+        (Node::Forall { .. }, LVal::FieldName { name, levels, .. }) => {
             let full = format!("Function.{name}");
             let full_id = crate::app::head::intern_components(elab, &["Function", name])?;
             if elab.view.get(full_id).is_some() {
-                return Err(ElabError::UnsupportedSyntax(format!(
-                    "`.{name}` on a function resolves to `{full}` (App.lean:1581-1583) — M4b-4a P3"
-                )));
+                // `LValResolution.const `Function `Function fullName
+                // levels` (`:1583`).
+                let function = crate::app::head::intern_components(elab, &["Function"])?;
+                return Ok(LValResolution::Const {
+                    base: function,
+                    struct_name: function,
+                    const_name: full_id,
+                    levels: levels.clone(),
+                });
             }
             // `:1584-1586`'s `c ++ suffix` sub-arm needs `suffix?`, which
             // only P4 produces; with `suffix? = none` it is `:1588`.
@@ -417,11 +505,214 @@ fn mk_base_projections(
     Ok(e)
 }
 
+/// oracle: `typeMatchesBaseName` (`App.lean:1712-1725`), under
+/// `withReducibleAndInstances` (`TransparencyMode::Instances`). The
+/// oracle's recursion on `type'` (`:1724`) is the loop: each round
+/// re-runs the whole body, `cleanupAnnotations` (`:1716`) included.
+fn type_matches_base_name(
+    elab: &mut TermElabM,
+    ty: ExprId,
+    base_name: NameId,
+) -> Result<bool, ElabError> {
+    let store = elab.view.store;
+    // `Expr.isAppOf baseName` (`Expr.lean:1138-1141`).
+    let is_app_of = |m: &leanr_meta::MetaCtx, e: ExprId| {
+        let mut e = e;
+        while let Node::App { f, .. } = m.store().expr_node(Some(store), e) {
+            e = f;
+        }
+        matches!(
+            m.store().expr_node(Some(store), e),
+            Node::Const { name: Some(n), .. } if n == base_name
+        )
+    };
+    // `:1714-1715`.
+    if render(elab, base_name) == "Function" {
+        let w = elab
+            .mctx
+            .with_transparency(TransparencyMode::Instances, |m| m.whnf(ty))?;
+        return Ok(matches!(node(elab, w), Node::Forall { .. }));
+    }
+    let mut cur = ty;
+    loop {
+        // `:1716`.
+        let cleaned = crate::builtin::binder::fun::cleanup_annotations(elab, cur);
+        if is_app_of(&elab.mctx, cleaned) {
+            return Ok(true);
+        }
+        // `:1719-1725`: `Err(true)` = matched after `whnfCore`,
+        // `Ok(None)` = no unfolding (false), `Ok(Some(t'))` = recurse.
+        let step = elab.mctx.with_transparency(
+            TransparencyMode::Instances,
+            |m| -> Result<Result<Option<ExprId>, bool>, MetaError> {
+                let t = m.whnf_core(cur)?;
+                if is_app_of(m, t) {
+                    return Ok(Err(true));
+                }
+                Ok(Ok(m.unfold_definition_pub(t)?))
+            },
+        )?;
+        match step {
+            Err(matched) => return Ok(matched),
+            Ok(None) => return Ok(false),
+            Ok(Some(t)) => cur = t,
+        }
+    }
+}
+
+/// Where `add_lval_arg_go` decided `e` goes. The oracle returns the
+/// updated arrays from inside `go`; deciding inside the rollback scope
+/// and editing outside it is the same (`e` and the args predate the
+/// checkpoint).
+enum LValInsert {
+    Positional(usize),
+    Named(String),
+}
+
+/// `addLValArg`'s fixed parameters, threaded through `go`.
+struct AddLValArg<'a> {
+    base_name: NameId,
+    explicit: bool,
+    args: &'a [Arg],
+}
+
+/// oracle: `addLValArg` (`App.lean:1735-1737`): find the first
+/// parameter whose type is `base_name …` and insert `e` there —
+/// positionally when the parameter is explicit (or `explicit`) and
+/// `args` is long enough, else as `(x := e)` unless a parameter of the
+/// same name came earlier. Runs under `withoutModifyingState` (`:1737`):
+/// the telescope's mvars and any assignment made while matching are
+/// rolled back (`MetaCtx::checkpoint`/`rollback`; declarations stay, as
+/// the snapshot's doc says, and nothing refers to them).
+fn add_lval_arg(
+    elab: &mut TermElabM,
+    base_name: NameId,
+    e: ExprId,
+    args: Vec<Arg>,
+    named_args: Vec<NamedArg>,
+    f: ExprId,
+    explicit: bool,
+) -> Result<(Vec<Arg>, Vec<NamedArg>), ElabError> {
+    let snap = elab.mctx.checkpoint();
+    let r = elab
+        .mctx
+        .infer_type(f)
+        .map_err(ElabError::from)
+        .and_then(|f_type| {
+            // `go none f (← inferType f) 0 namedArgs (namedArgs.map
+            // (·.name)) true` (`:1737`).
+            let names: Vec<String> = named_args.iter().map(|na| na.name.clone()).collect();
+            let st = AddLValArg {
+                base_name,
+                explicit,
+                args: &args,
+            };
+            add_lval_arg_go(elab, &st, None, f, f_type, 0, names.clone(), names, true, 0)
+        });
+    elab.mctx.rollback(snap);
+    let mut args = args;
+    let mut named_args = named_args;
+    match r? {
+        // `args.insertIdx argIdx (Arg.expr e)` (`:1767`).
+        LValInsert::Positional(idx) => args.insert(idx, Arg::Expr(e)),
+        // `namedArgs.push { name := xDecl.userName, val := Arg.expr e }`
+        // (`:1774`): `numImplicitParams` keeps its default, 0.
+        LValInsert::Named(name) => named_args.push(NamedArg {
+            name,
+            val: Arg::Expr(e),
+            num_implicit_params: 0,
+        }),
+    }
+    Ok((args, named_args))
+}
+
+/// oracle: `addLValArg.go` (`App.lean:1749-1794`), the telescope walk.
+/// `remaining` / `unusable` are the oracle's `remainingNamedArgs` (by
+/// name: only names are read) and `unusableNamedArgs`. The oracle
+/// compares `Name`s, leanr rendered strings: an anonymous binder renders
+/// as `""`, which no user-written named argument can equal, as no user
+/// can write `.anonymous`.
+#[allow(clippy::too_many_arguments)]
+fn add_lval_arg_go(
+    elab: &mut TermElabM,
+    st: &AddLValArg<'_>,
+    f_pre_coercion: Option<ExprId>,
+    f: ExprId,
+    f_type: ExprId,
+    mut arg_idx: usize,
+    mut remaining: Vec<String>,
+    mut unusable: Vec<String>,
+    allow_named: bool,
+    depth: usize,
+) -> Result<LValInsert, ElabError> {
+    // `:1751`.
+    let (xs, bis, _f_type2) = elab.mctx.forall_meta_telescope(f_type)?;
+    for (&x, &bi) in xs.iter().zip(bis.iter()) {
+        // `x.mvarId!.getDecl` (`:1756`).
+        let Node::MVar { id: Some(xid) } = node(elab, x) else {
+            return Err(ElabError::Internal(
+                "forall_meta_telescope minted a non-mvar".into(),
+            ));
+        };
+        let Some((user_name, x_ty)) = elab
+            .mctx
+            .mctx()
+            .decl(MVarId(xid))
+            .map(|d| (d.user_name, d.ty))
+        else {
+            return Err(ElabError::Internal(
+                "forall_meta_telescope mvar is undeclared".into(),
+            ));
+        };
+        let user_name = user_name.map(|n| render(elab, n)).unwrap_or_default();
+        // `explicit || bInfo.isExplicit` (`:1765`, `:1776`);
+        // `BinderInfo.isExplicit` is `.default` only (`Expr.lean:92-96`).
+        let is_explicit = st.explicit || bi == BinderInfo::Default;
+        // `:1757-1759`: a user-written named argument accounts for this
+        // parameter — no type test, no `argIdx` advance, no push.
+        if let Some(i) = remaining.iter().position(|n| *n == user_name) {
+            remaining.remove(i);
+            continue;
+        }
+        // `:1761`.
+        if type_matches_base_name(elab, x_ty, st.base_name)? {
+            // `:1765-1767`.
+            if arg_idx <= st.args.len() && is_explicit {
+                return Ok(LValInsert::Positional(arg_idx));
+            }
+            // `:1771-1774`.
+            if !allow_named || unusable.contains(&user_name) {
+                return Err(ElabError::UnusableLValParameter {
+                    f: f_pre_coercion.unwrap_or(f),
+                    param: user_name,
+                    allow_named,
+                });
+            }
+            return Ok(LValInsert::Named(user_name));
+        }
+        // `:1776-1778`.
+        if is_explicit {
+            arg_idx += 1;
+        }
+        unusable.push(user_name);
+    }
+    // Task 4: the `whnf` and `coerceToFunction?` continuations
+    // (`:1781-1785`) go here, recursing with `depth + 1`.
+    let _ = depth;
+    // `:1792-1794`.
+    Err(ElabError::NoLValParameter {
+        f: f_pre_coercion.unwrap_or(f),
+        base: render(elab, st.base_name),
+    })
+}
+
 /// oracle: `elabAppLVals` / `elabAppLValsAux` (`App.lean:1843-1897`).
 /// Matches the oracle's control flow: `projIdx` and a non-final
-/// `projFn` do `loop f lvals`; a FINAL `projFn` ends in `elabAppArgs
-/// projFn (namedArgs + self) args …` (`:1867-1869`), consuming the
-/// outer call; the empty list ends in `elabAppArgs f namedArgs args …`.
+/// `projFn` / `const` do `loop f lvals`; a FINAL `projFn` ends in
+/// `elabAppArgs projFn (namedArgs + self) args …` (`:1867-1869`) and a
+/// final `const` in `elabAppArgs constFn` over `addLValArg`'s arrays
+/// (`:1877-1879`), consuming the outer call; the empty list ends in
+/// `elabAppArgs f namedArgs args …`.
 pub fn elab_app_lvals(
     elab: &mut TermElabM,
     mut f: ExprId,
@@ -520,6 +811,46 @@ pub fn elab_app_lvals(
                     stx: call.stx.clone(),
                 };
                 f = crate::app::elab_app_args(elab, proj_fn, step, kinds)?;
+            }
+            // `App.lean:1873-1883`.
+            LValResolution::Const {
+                base,
+                struct_name,
+                const_name,
+                levels,
+            } => {
+                let e = if base != struct_name {
+                    mk_base_projections(elab, base, struct_name, e)?
+                } else {
+                    e
+                };
+                let display = render(elab, const_name);
+                // `mkConst constName levels` (`:1875`). `find_method` and
+                // the `Function` arm only return declared constants.
+                let const_fn = crate::app::head::mk_const(elab, const_name, &levels, &display)?;
+                if last {
+                    // `:1878-1879`.
+                    let args = std::mem::take(&mut call.args);
+                    let named = std::mem::take(&mut call.named_args);
+                    let (args, named) =
+                        add_lval_arg(elab, base, e, args, named, const_fn, call.explicit)?;
+                    call.args = args;
+                    call.named_args = named;
+                    return crate::app::elab_app_args(elab, const_fn, call, kinds);
+                }
+                // Non-final (`:1881-1883`): no outer arguments, `explicit
+                // := false`, no expected type.
+                let (args, named_args) =
+                    add_lval_arg(elab, base, e, Vec::new(), Vec::new(), const_fn, false)?;
+                let step = AppCall {
+                    named_args,
+                    args,
+                    expected: None,
+                    explicit: false,
+                    ellipsis: false,
+                    stx: call.stx.clone(),
+                };
+                f = crate::app::elab_app_args(elab, const_fn, step, kinds)?;
             }
         }
     }

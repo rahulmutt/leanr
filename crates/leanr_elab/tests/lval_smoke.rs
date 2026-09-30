@@ -16,6 +16,13 @@ fn proj_reason(src: &str) -> InvalidProjectionReason {
     }
 }
 
+fn field_reason(src: &str) -> InvalidFieldReason {
+    match support::elab_and_synthesize(src) {
+        Err(ElabError::InvalidField { reason, .. }) => reason,
+        other => panic!("{src}: expected InvalidField, got {other:?}"),
+    }
+}
+
 fn seam(src: &str) -> String {
     match support::elab_and_synthesize(src) {
         Err(ElabError::UnsupportedSyntax(m)) => m,
@@ -119,28 +126,21 @@ fn placeholder_head_is_rejected() {
 }
 
 #[test]
-fn p2_p3_p4_constructs_are_named_seams() {
-    // `.const` resolution via findMethod? — P3. The oracle elaborates
-    // this to `Nat.zero.succ : Nat`.
-    assert!(seam("(Nat.zero).succ").contains("M4b-4a P3"));
-    // Review Focus 2: a seam is NOT retried through `unfoldDefinition?`
-    // — S3Alias must seam, never report S3's InvalidField. The oracle
-    // (which has `findMethod?`) retries and reports "Invalid field
+fn alias_field_retry_reports_the_unfolded_type() {
+    // Review Focus 4: the unfold retry reaches field NAMES now. The
+    // oracle's `findMethod?` on `S3Alias` finds nothing, `resolveLValLoop`
+    // retries on the unfolded `S3` (App.lean:1688-1692), which also has
+    // no `zzz`, and the LAST error is the one reported: "Invalid field
     // `zzz`: The environment does not contain `S3.zzz` … of type `S3`".
-    // The seam must name `S3Alias`: were it retried, the unfolded `S3`
-    // would ALSO seam P3, so the P3 marker alone cannot tell the two
-    // apart (controller ruling R1).
-    let m = seam("fun (s : S3Alias) => (s).zzz");
-    assert!(m.contains("M4b-4a P3"), "{m}");
-    assert!(m.contains("`S3Alias`"), "{m}");
-    // The same holds for a field `S3` DOES have: the oracle's
-    // `findMethod?` on `S3Alias` fails, retries, and elaborates this to
-    // `S1.a (S2.toS1 (S3.toS2 s))`; leanr must seam on `S3Alias` rather
-    // than retry. (The corpus reaches the unfold retry through a field
-    // INDEX instead: `lval/unfold-alias-idx`.)
-    let m = seam("fun (s : S3Alias) => (s).a");
-    assert!(m.contains("M4b-4a P3"), "{m}");
-    assert!(m.contains("`S3Alias`"), "{m}");
+    // (`(Nat.zero).succ` and `(s).a` on `S3Alias`, the P1 seams this
+    // test used to pin, are corpus records now: `p3/nat-succ`,
+    // `p3/alias-field`.)
+    assert_eq!(
+        field_reason("fun (s : S3Alias) => (s).zzz"),
+        InvalidFieldReason::NotFound {
+            full_name: "S3.zzz".to_string()
+        }
+    );
 }
 
 /// Review Focus 2: a postponed projection whose type never becomes
@@ -297,12 +297,16 @@ fn subobject_cycle_in_structure_ext_is_an_error_not_a_stack_overflow() {
             }
         }
     });
-    // With the cycle cut, `zzz` is simply not a field of `S2`, so the
-    // lookup falls through to the `findMethod?` seam as it would on
-    // well-formed data.
+    // With the cycle cut, `zzz` is not a field of `S2`, and `findMethod?`
+    // finds no `S2.zzz`: the oracle's error on well-formed data.
     match r {
-        Err(ElabError::UnsupportedSyntax(m)) => assert!(m.contains(".zzz"), "{m}"),
-        other => panic!("expected the P3 field-lookup seam, got {other:?}"),
+        Err(ElabError::InvalidField {
+            reason: InvalidFieldReason::NotFound { full_name },
+            ..
+        }) => {
+            assert_eq!(full_name, "S2.zzz")
+        }
+        other => panic!("expected InvalidField NotFound, got {other:?}"),
     }
 }
 
@@ -333,4 +337,134 @@ fn explicit_universes_on_a_non_identifier_head_are_rejected() {
     })
     .collect();
     assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// M4b-4a P3 rejections. Each message is the pinned oracle's (`#check`
+/// on a prelude file importing `Elab0`, re-run for this test).
+#[test]
+fn generalized_field_notation_rejections_match_the_oracle() {
+    // "Invalid field `foo`: The environment does not contain `Nat.foo`,
+    // so it is not possible to project the field `foo` from an
+    // expression Nat.zero of type `Nat`"
+    assert_eq!(
+        field_reason("(Nat.zero).foo"),
+        InvalidFieldReason::NotFound {
+            full_name: "Nat.foo".to_string()
+        }
+    );
+    // "… does not contain `S2.zzz` … of type `S2`"
+    assert_eq!(
+        field_reason("fun (s : S2) => (s).zzz"),
+        InvalidFieldReason::NotFound {
+            full_name: "S2.zzz".to_string()
+        }
+    );
+    // A non-final `Const` step feeds the next lval: `S1.get s : Nat`,
+    // so `.twice` looks in `Nat`, not `Function`. "… does not contain
+    // `Nat.twice` … from an expression S1.get s of type `Nat`"
+    assert_eq!(
+        field_reason("fun (s : S1) => (s).get.twice"),
+        InvalidFieldReason::NotFound {
+            full_name: "Nat.twice".to_string()
+        }
+    );
+    // "Invalid field notation: `S1.bad` has a parameter with expected
+    // type S1 but it cannot be used. Note: The parameter `s` cannot be
+    // referred to by name because that function has a preceding
+    // parameter of the same name"
+    match support::elab_and_synthesize("fun (s : S1) => (s).bad") {
+        Err(ElabError::UnusableLValParameter {
+            param, allow_named, ..
+        }) => {
+            assert_eq!(param, "s");
+            assert!(allow_named);
+        }
+        other => panic!("expected UnusableLValParameter, got {other:?}"),
+    }
+    // "Invalid field notation: Function `S1.none` does not have a usable
+    // parameter of type `S1` for which to substitute `s`" — and the same
+    // message, `S1.addTo` / `S1.df` in place of `S1.none`, for the next
+    // two.
+    // Review Focus 3: `(s := s)` consumes the only `S1` parameter
+    // (`remainingNamedArgs`, App.lean:1757-1759).
+    // Review Focus 5: `S1Df` is a `def`, invisible at
+    // `withReducibleAndInstances` (App.lean:1713).
+    for src in [
+        "fun (s : S1) => (s).none",
+        "fun (s : S1) => (s).addTo (s := s)",
+        "fun (s : S1) => (s).df",
+    ] {
+        match support::elab_and_synthesize(src) {
+            Err(ElabError::NoLValParameter { base, .. }) => assert_eq!(base, "S1", "{src}"),
+            other => panic!("{src}: expected NoLValParameter, got {other:?}"),
+        }
+    }
+    // The non-final `Const` step runs `addLValArg` with `explicit :=
+    // false` (App.lean:1881): `s` fills `{s : S1}` by name, leaving
+    // `@S1.imp s : Nat → Nat`, so `.succ` looks in `Function`. "… does
+    // not contain `Function.succ` … from an expression @S1.imp s of
+    // type `Nat → Nat`"
+    assert_eq!(
+        field_reason("fun (s : S1) => (s).imp.succ"),
+        InvalidFieldReason::NotFound {
+            full_name: "Function.succ".to_string()
+        }
+    );
+    // "too many explicit universe levels for `Nat.succ`" — `mkConst
+    // constName levels` (App.lean:1875).
+    assert!(matches!(
+        support::elab_and_synthesize("(Nat.zero).succ.{0}"),
+        Err(ElabError::TooManyUniverseLevels(_))
+    ));
+}
+
+/// Review Focus 1: `findMethod?` computes `S`'s resolution order when
+/// `S.f` misses (App.lean:1472-1476). A doctored `parent_info` cycle
+/// must surface as an error, not a stack overflow.
+#[test]
+fn parent_cycle_in_structure_ext_is_an_error_not_a_stack_overflow() {
+    // Double every `extends` edge back (Task 2's meta test does the
+    // same): `S3`'s order recurses S3 → S2 → S3. `find_field` walks
+    // `field_info` subobjects, which are untouched, so `zzz` still
+    // misses there and the lookup reaches `findMethod?`'s order.
+    let r = support::elab_and_synthesize_doctored("fun (s : S3) => (s).zzz", |ss| {
+        let edges: Vec<_> = ss
+            .iter()
+            .flat_map(|s| {
+                s.parent_info
+                    .iter()
+                    .map(move |p| (p.struct_name, s.struct_name, p.proj_fn))
+            })
+            .collect();
+        for (parent, child, proj_fn) in edges {
+            if let Some(p) = ss.iter_mut().find(|s| s.struct_name == parent) {
+                p.parent_info.push(leanr_olean::StructureParentInfo {
+                    struct_name: child,
+                    subobject: false,
+                    proj_fn,
+                });
+            }
+        }
+    });
+    match r {
+        Err(ElabError::Internal(m)) => assert!(m.contains("cyclic parents"), "{m}"),
+        other => panic!("expected Internal (cyclic parents), got {other:?}"),
+    }
+}
+
+/// `explicit || bInfo.isExplicit` (App.lean:1765, :1776): under `@`,
+/// an implicit parameter is a positional slot. `@(s).bad Nat.zero`
+/// skips `(s : Nat)` (slot 0, pushing `s` onto `unusableNamedArgs`),
+/// then inserts `s` POSITIONALLY at slot 1 into `{s : S1}`. Without the
+/// `explicit ||` the implicit `{s : S1}` could only be filled by name,
+/// and the name `s` is taken: `UnusableLValParameter`. (`p3/explicit-
+/// positional` cannot tell the two apart: on `S1.imp` the named and
+/// the positional insertion elaborate to the same term.) Oracle:
+/// `fun s => @S1.bad Nat.zero s : S1 → Nat`.
+#[test]
+fn explicit_mode_fills_an_implicit_lval_parameter_positionally() {
+    let got = support::elab_and_synthesize("fun (s : S1) => @(s).bad Nat.zero")
+        .unwrap_or_else(|e| panic!("expected success, got {e:?}"));
+    let want = support::elab_and_synthesize("fun (s : S1) => @S1.bad Nat.zero s").unwrap();
+    assert_eq!(got, want);
 }
