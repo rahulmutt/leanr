@@ -714,3 +714,73 @@ structure PD (α : Type u) extends PC α Nat where d : Nat
 
 -- A field whose type is an implicit-binder function, for `@(x).f`.
 structure FI where f : {α : Type} → α → α
+-- === M4b-4a P3: generalized field notation ===
+-- Namespace methods reached by `findMethod?` (App.lean:1453-1477), each
+-- in a namespace of the fixture's P1 structures. Bodies are irrelevant;
+-- the linter is off because most parameters exist only to be the lval
+-- target.
+section P3
+set_option linter.unusedVariables false
+-- `S3`'s resolution order is `[S3, S2, S1]`: `(s).get` on an `S3` finds
+-- `S1.get` last and needs `mkBaseProjections` (App.lean:1874).
+def S1.get (s : S1) : Nat := s.a
+-- The `S1` parameter is SECOND: positional insertion at index 1 when an
+-- argument is given, the named `(s := e)` fallback when none is
+-- (App.lean:1764-1776).
+def S1.addTo (n : Nat) (s : S1) : Nat := n
+-- An implicit `S1` parameter: named insertion unless `@` is used.
+def S1.imp {s : S1} (n : Nat) : Nat := n
+-- A preceding parameter already called `s`: the `S1` one is unusable
+-- (App.lean:1771-1772, `throwUnusableParameter`).
+def S1.bad (s : Nat) {s : S1} : Nat := Nat.zero
+-- No `S1` parameter at all (App.lean:1792).
+def S1.none (n : Nat) : Nat := n
+-- `typeMatchesBaseName` runs `withReducibleAndInstances`
+-- (App.lean:1712-1726): the `abbrev` alias matches, the `def` does not.
+abbrev S1Ab : Type := S1
+def S1Df : Type := S1
+def S1.ab (s : S1Ab) : Nat := Nat.zero
+def S1.df (s : S1Df) : Nat := Nat.zero
+-- A method whose TYPE is a `def` alias of a pi: `forallMetaTelescope`
+-- finds no binder, the `whnf` continuation (App.lean:1782-1783) does.
+def S1Fn : Type := S1 → Nat
+def S1.viaDef : S1Fn := S1.a
+-- An explicit `Nat` first, THEN the alias: after the first telescope
+-- `argIdx = 1 > args.size = 0`, and only `allowNamed ||` (App.lean:1781)
+-- keeps the walk going into the `whnf` continuation.
+def S1Fn3 : Type := (s : S1) → Nat
+def S1.viaDef3 (n : Nat) : S1Fn3 := fun _ => n
+-- `D2` is a NON-subobject parent of `D3`: `(d).zz` goes through the
+-- `D3.toD2` parent projection.
+def D2.zz (d : D2) : Nat := d.z
+-- `OQ`'s C3 resolution order is `[OQ, OA, OB, OC, OE]` (structures.jsonl).
+-- `OC.k` vs `OE.k` separates C3 from a DFS over `extends` (which visits
+-- `OE` through `OB` before `OC`).
+def OA.m (x : OA) : Nat := Nat.zero
+def OB.n (x : OB) : Nat := Nat.zero
+def OC.k (x : OC) : Nat := Nat.zero
+def OE.k (x : OE) : Nat := Nat.zero
+def OE.e (x : OE) : Nat := Nat.zero
+-- Parametric base: `(x).get` on `PD Nat` walks `PD.toPC`, `PC.toPB`.
+def PB.get {α : Type u} (x : PB α) : α := x.b
+-- `Function` namespace for pi-typed terms (App.lean:1580-1583).
+def Function.twice (f : Nat → Nat) (x : Nat) : Nat := f (f x)
+-- `coerceToFunction?` continuation (App.lean:1784-1785): `S1.viaFn : FnS`
+-- is not a function until `CoeFun` makes it `S1 → Nat`.
+structure FnS where
+  f : S1 → Nat
+instance instCoeFunFnS : CoeFun FnS (fun _ => S1 → Nat) := ⟨FnS.f⟩
+def S1.viaFn : FnS := FnS.mk S1.a
+-- Same, but the coerced parameter is implicit, and after a coercion
+-- named insertion is disabled (`allowNamed := false`).
+structure FnI where
+  f : {s : S1} → Nat
+instance instCoeFunFnI : CoeFun FnI (fun _ => {s : S1} → Nat) := ⟨FnI.f⟩
+def S1.viaFnI : FnI := FnI.mk (fun {s} => s.a)
+-- A carrier that coerces to a function returning itself: `addLValArg.go`
+-- recurses until `withIncRecDepth` stops it (App.lean:1749).
+structure Loop where
+  f : {u : Nat} → Loop
+instance instCoeFunLoop : CoeFun Loop (fun _ => {u : Nat} → Loop) := ⟨Loop.f⟩
+axiom S1.loop : Loop
+end P3
