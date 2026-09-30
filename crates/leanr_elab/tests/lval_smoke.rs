@@ -502,3 +502,81 @@ fn self_reproducing_coe_fun_hits_max_rec_depth() {
         Err(ElabError::MaxRecDepth)
     ));
 }
+
+/// M4b-4a P4: the field split in identifiers (`resolveName`,
+/// TermElabM.lean:2170-2192; `elabAppFnResolutions`, App.lean:1926-1950).
+/// Each message is the pinned oracle's (plan § Measured oracle behaviour).
+#[test]
+fn identifier_field_split_rejections_match_the_oracle() {
+    // A field that is neither a structure field nor a method. The base
+    // `Nat.zero`'s type is the constant `Nat`, so the structure arm
+    // answers (App.lean:1578), not the suffix arm. "Invalid field `foo`:
+    // The environment does not contain `Nat.foo`"
+    for src in [
+        "fun (x : Nat) => x.foo",
+        "Nat.zero.foo",
+        "fun (p : Prod Nat Nat) => p.fst.foo",
+    ] {
+        match support::elab_and_synthesize(src) {
+            Err(ElabError::InvalidField {
+                reason: InvalidFieldReason::NotFound { full_name },
+                ..
+            }) => assert_eq!(full_name, "Nat.foo", "{src}"),
+            other => panic!("{src}: expected InvalidField NotFound, got {other:?}"),
+        }
+    }
+    // Review Focus 3: `c ++ suffix` (App.lean:1584-1586, :1606-1608) fires
+    // only for a CONSTANT base, and `suffix?` is ALL the split-off fields
+    // (`toName fields`, :1946-1950). `Nat : Type` takes the catch-all arm,
+    // `Nat.succ : Nat → Nat` and `Nat.rec` the function arm. `Nat.rec.foo`
+    // also shows the recursor guard stays off when fields follow (the
+    // head `elabAppArgs` sees is not `Nat.rec`). "Unknown constant `…`"
+    for (src, name) in [
+        ("Nat.foo", "Nat.foo"),
+        ("Nat.foo.bar", "Nat.foo.bar"),
+        ("Nat.succ.foo", "Nat.succ.foo"),
+        ("Nat.rec.foo", "Nat.rec.foo"),
+    ] {
+        match support::elab_and_synthesize(src) {
+            Err(ElabError::UnknownIdent(s)) => assert_eq!(s, name, "{src}"),
+            other => panic!("{src}: expected UnknownIdent({name}), got {other:?}"),
+        }
+    }
+    // Review Focus 3: an fvar base never takes the suffix arm; the second
+    // field carries no suffix. "… does not contain `Function.foo`",
+    // "… does not contain `Function.succ` … from an expression @S1.imp s"
+    for (src, full) in [
+        ("fun (f : Nat -> Nat) => f.foo", "Function.foo"),
+        ("fun (s : S1) => s.imp.succ", "Function.succ"),
+    ] {
+        assert_eq!(
+            field_reason(src),
+            InvalidFieldReason::NotFound {
+                full_name: full.to_string()
+            },
+            "{src}"
+        );
+    }
+    // Review Focus 2: `processLocal` (TermElabM.lean:2172-2179). "invalid
+    // use of explicit universe parameters, `x` is a local variable"
+    assert!(matches!(
+        support::elab_and_synthesize("fun (x : Nat) => x.{0}"),
+        Err(ElabError::InvalidExplicitUniversesForLocal(_))
+    ));
+    // Review Focus 2: levels go to the last field (`mkConsts`,
+    // TermElabM.lean:2148). "too many explicit universe levels for
+    // `Nat.succ`" / "… for `polyZero`" / "… for `Poly.val`"
+    for src in [
+        "Nat.zero.succ.{0}",
+        "polyZero.{0}",
+        "fun (x : Poly Nat) => x.val.{0,0}",
+    ] {
+        assert!(
+            matches!(
+                support::elab_and_synthesize(src),
+                Err(ElabError::TooManyUniverseLevels(_))
+            ),
+            "{src}"
+        );
+    }
+}

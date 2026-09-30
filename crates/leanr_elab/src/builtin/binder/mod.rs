@@ -134,7 +134,7 @@ pub(crate) fn extract_binder_group(
     // (Task 3 reconciliation): a binder name must intern to the exact
     // same `NameId` a later bare-identifier occurrence of the same text
     // resolves to (`app::head::intern_dotted`'s own convention, which
-    // this mirrors) — the local-scope lookup `app::head::elab_ident_head`
+    // this mirrors) — the local-scope lookup `app::head::elab_app_fn_id`
     // performs (Task 3 addition, `elab.rs`) is a plain `NameId` equality check,
     // so a base mismatch here would silently make `(a : Type), a` fail
     // to find its own binder whenever `a`'s string already happens to

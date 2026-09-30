@@ -1036,6 +1036,29 @@ def p3Queries : List (String × String) :=
   , ("p3/explicit-unusable-name", "fun (s : S1) => @(s).bad Nat.zero")
   ]
 
+-- M4b-4a P4: identifier forms (`resolveName`'s field split,
+-- TermElabM.lean:2170-2192; `elabAppFnResolutions`, App.lean:1926-1950;
+-- `pipeProj`, App.lean:2085-2097, :2250-2258; `resolveDottedIdentFn`,
+-- App.lean:1985-2058). Every source was run through this file's own
+-- entry point while planning (plan § Measured oracle behaviour).
+def p4Queries : List (String × String) :=
+  [ ("p4/local-field",          "fun (p : Prod Nat Nat) => p.fst")
+  , ("p4/local-field-chain",    "fun (p : Prod Nat Nat) => p.fst.succ")
+  , ("p4/local-inherited",      "fun (s : S3) => s.a")
+  , ("p4/local-method",         "fun (x : Nat) => x.succ")
+  , ("p4/local-method-arg",     "fun (s : S1) => s.addTo Nat.zero")
+  , ("p4/local-method-eta",     "fun (s : S1) => s.addTo")
+  , ("p4/local-univ-last",      "fun (x : Poly Nat) => x.val.{0}")
+  , ("p4/local-alias",          "fun (x : S3Alias) => x.a")
+  , ("p4/local-function",       "fun (f : Nat -> Nat) => f.twice")
+  , ("p4/local-shadows-global", "fun (Nat : Nat) => Nat.succ")
+  , ("p4/global-field",         "Nat.zero.succ")
+  , ("p4/global-field-chain",   "Nat.zero.succ.succ")
+  , ("p4/global-function",      "Nat.succ.twice")
+  , ("p4/global-field-plain",   "polyZero.val")
+  , ("p4/global-univ-last",     "polyZero.val.{0}")
+  ]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -1049,7 +1072,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries ++ closeoutExplicitQueries ++ nondepQueries ++ lvalIdxQueries ++ lvalFnQueries ++ p2Queries ++ p3Queries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries ++ closeoutExplicitQueries ++ nondepQueries ++ lvalIdxQueries ++ lvalFnQueries ++ p2Queries ++ p3Queries ++ p4Queries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>

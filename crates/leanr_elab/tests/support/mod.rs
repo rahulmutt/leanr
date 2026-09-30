@@ -659,7 +659,7 @@ pub fn visit_order_of_default_walk(
 }
 
 /// The `ExprId` of a fixture constant with no universe arguments,
-/// resolved by dotted source name exactly as `app::head::elab_ident_head`
+/// resolved by dotted source name exactly as `app::head::elab_app_fn_id`
 /// does. Panics if the fixture does not declare it — a test helper's
 /// contract, not elaborator code.
 pub fn fixture_const(

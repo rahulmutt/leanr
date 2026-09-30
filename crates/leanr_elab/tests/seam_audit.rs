@@ -175,7 +175,7 @@ fn deferred_constructs_are_named_seams() {
         // `lval_smoke.rs`, the `lval/*` corpus records and
         // `over_application_through_a_general_head_reports_function_expected`.)
         (".succ Nat.zero", "M4b-4a P4"),
-        // `elab_ident_head`'s PARTIAL `shouldElabAsElim` guard (fix
+        // `elab_app_fn_id`'s PARTIAL `shouldElabAsElim` guard (fix
         // round 1). A genuine recursor — `ConstantInfo::Rec`, the one
         // disjunct of `App.lean:1322-1328` that leanr's environment can
         // decide — is seamed rather than elaborated the ordinary way.
@@ -261,8 +261,8 @@ fn mvar_function_type_is_closed_by_propagation() {
 /// the oracle succeeds.
 ///
 /// Measured against the pinned oracle rather than reasoned about, since
-/// this is the whole justification for computing `head::elab_app_fn`'s
-/// `heed` (passed down to `elab_ident_head`) instead of testing the
+/// this is the whole justification for computing `head::elab_app_fn_id`'s
+/// `heed` instead of testing the
 /// constant kind unconditionally:
 /// ```text
 /// @Nat.rec    -> {"k":"const","n":"Nat.rec","us":[{"k":"lmvar","i":0}]}
@@ -350,7 +350,7 @@ fn unregistered_kinds_are_named_by_kind() {
 ///     type) while leanr emitted `const Nat.rec [?u]` — a live, silent
 ///     divergence, not a hypothetical one.
 ///
-/// `head::elab_ident_head` now seams the ONE disjunct leanr's
+/// `head::elab_app_fn_id` now seams the ONE disjunct leanr's
 /// environment can decide (`isRec`, i.e. `ConstantInfo::Rec`) — see
 /// `deferred_constructs_are_named_seams`'s `Nat.rec` case. That guard is
 /// partial by construction, so what is left open, and what this gate

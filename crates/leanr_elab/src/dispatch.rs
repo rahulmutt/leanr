@@ -127,7 +127,7 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 /// The three in `app/` carry a slice owner in the message rather than
 /// the bare kind, since each corresponds to a specific oracle arm; see
 /// `app/mod.rs`'s module doc for the index and `tests/seam_audit.rs`
-/// for the gate. `resolve.rs`'s `resolve_global` still inspects no
+/// for the gate. `resolve.rs`'s `resolve_global_name` still inspects no
 /// syntax at all.
 ///
 /// Deferred (each hits `UnsupportedSyntax` until its slice lands).

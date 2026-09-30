@@ -60,7 +60,7 @@
 //!   optParam defaults / autoParam .................... P5 SHIPPED — args.rs
 //!   implicit-lambda insertion (the feature) .......... P5 SHIPPED — elab.rs
 //!   `@($t)`/`@$t` disabling implicit-lambda insertion . SHIPPED (close-out) — here, elab.rs
-//!   overload resolution (candidates > 1) ............. resolve_global slice  overload.rs
+//!   overload resolution (candidates > 1) ............. resolve_global_name slice  overload.rs
 //!   elabAsElim, RECURSOR heads only (partial!) ....... M4b-4c head.rs
 //!   dot notation: proj, fieldIdx, projFn/projIdx ..... P1 SHIPPED (M4b-4a) — lval.rs, head.rs, here
 //!   numImplicitParams (structure projection) ......... P1 SHIPPED (M4b-4a) — args.rs, lval.rs
@@ -72,7 +72,7 @@
 //!
 //! **The `elabAsElim` row is a PARTIAL seam, and the only row in this
 //! table that does not cover its own construct.** `shouldElabAsElim`
-//! (`App.lean:1322-1328`) has five disjuncts; `head::elab_ident_head`
+//! (`App.lean:1322-1328`) has five disjuncts; `head::elab_app_fn_id`
 //! can decide exactly one of them (`isRec`, i.e. `ConstantInfo::Rec`),
 //! because the other four read the `auxRecExt` / `elabAsElim` tag
 //! extensions, which leanr does not decode. So a genuine recursor head
@@ -505,10 +505,10 @@ pub(crate) fn elab_app_args(
     //
     // Fix round 1 splits that finding by what leanr can DECIDE:
     //   * `isRec` is a plain constant-kind test and leanr's environment
-    //     carries `ConstantInfo::Rec`, so `head::elab_ident_head` now
+    //     carries `ConstantInfo::Rec`, so `head::elab_app_fn_id` now
     //     raises a named M4b-4c seam for a genuine recursor head. The
     //     `explicit || ellipsis` early-out (`App.lean:1399`) is honoured
-    //     — `head::elab_app_fn`'s `heed` — so `@Nat.rec` and `Nat.rec ..`
+    //     — `head::elab_app_fn_id`'s `heed` — so `@Nat.rec` and `Nat.rec ..`
     //     still take the ordinary path, exactly as the oracle does;
     //   * the three `is*Recursor`s read `auxRecExt` and the tag reads
     //     `elabAsElim`, two extensions leanr does not decode. Those four

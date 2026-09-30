@@ -115,7 +115,7 @@
 //!   `elab_explicit`). `useImplicitLambda`'s `.postpone` arm SHIPPED in
 //!   M4b-4a P2 (`elab.rs`'s `UseImplicitLambda::Postpone`).
 //! - **overload resolution** (more than one candidate from
-//!   `elabAppFn`) — the slice that grows `resolve_global`, since it is
+//!   `elabAppFn`) — the slice that grows `resolve_global_name`, since it is
 //!   unreachable while only exact names resolve.
 //! - **`elabAsElim`** — M4b-4c, and the one deferral whose seam is
 //!   PARTIAL. `shouldElabAsElim` (`App.lean:1322-1328`) has five
@@ -143,8 +143,8 @@
 //!   registered elaborator. Deferred to the slice that first needs a
 //!   macro form.
 //! - **`open`/alias/`export`/`_root_` resolution** — `resolve.rs`'s
-//!   `resolve_global` only resolves a global constant declared under
-//!   the name exactly as written; namespace-prefix search, exported
+//!   `resolve_global_name` only resolves a global constant declared under
+//!   the name (or a prefix of it) exactly as written; namespace-prefix search, exported
 //!   aliases, and root-qualification are a later slice.
 //!
 //! See `dispatch.rs`'s doc comment for the kind-by-kind deferral table,

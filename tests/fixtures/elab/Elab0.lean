@@ -802,3 +802,9 @@ structure Loop where
 instance instCoeFunLoop : CoeFun Loop (fun _ => {u : Nat} → Loop) := ⟨Loop.f⟩
 axiom S1.loop : Loop
 end P3
+
+-- === M4b-4a P4: identifier forms ===
+-- A GLOBAL constant of a universe-polymorphic structure type:
+-- `polyZero.val.{0}` puts the explicit level on the FIELD (`mkConsts`,
+-- TermElabM.lean:2148), not on `polyZero`, which has no level params.
+def polyZero : Poly Nat := Poly.mk Nat.zero

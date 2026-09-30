@@ -14,16 +14,19 @@ use crate::dispatch::SynElem;
 use crate::elab::TermElabM;
 use crate::error::{ElabError, InvalidFieldReason, InvalidProjectionReason};
 
-/// oracle: `inductive LVal` (`TermElabM.lean:662-666`). The
-/// `suffix?`/`fullRef` fields of `fieldName` only feed the
-/// unknown-name error of an identifier-embedded field, which is P4's
-/// (`resolveName`'s field split); they are added there.
+/// oracle: `inductive LVal` (`TermElabM.lean:662-666`).
 #[derive(Debug, Clone)]
 pub enum LVal {
     FieldName {
         r#ref: SynElem,
         name: String,
         levels: Vec<LevelId>,
+        /// oracle: `suffix?` — `some` only on the FIRST field split off an
+        /// identifier (`elabAppFnResolutions`, `App.lean:1936`), holding
+        /// ALL the split-off fields rejoined (`toName fields`, `:1946-1950`).
+        /// Read only by the `c ++ suffix` unknown-constant arms of
+        /// `resolve_lval_aux`. `fullRef` (the error position) is not ported.
+        suffix: Option<String>,
     },
     FieldIdx {
         r#ref: SynElem,
@@ -351,7 +354,15 @@ fn resolve_lval_aux(
             Err(field_err(name, InvalidFieldReason::NotFound { full_name }))
         }
         // `:1580-1588`.
-        (Node::Forall { .. }, LVal::FieldName { name, levels, .. }) => {
+        (
+            Node::Forall { .. },
+            LVal::FieldName {
+                name,
+                levels,
+                suffix,
+                ..
+            },
+        ) => {
             let full = format!("Function.{name}");
             let full_id = crate::app::head::intern_components(elab, &["Function", name])?;
             if elab.view.get(full_id).is_some() {
@@ -365,8 +376,17 @@ fn resolve_lval_aux(
                     levels: levels.clone(),
                 });
             }
-            // `:1584-1586`'s `c ++ suffix` sub-arm needs `suffix?`, which
-            // only P4 produces; with `suffix? = none` it is `:1588`.
+            // `:1584-1586`: a field split off an identifier whose base is a
+            // constant names the constant `c ++ suffix`.
+            if let (Node::Const { name: Some(c), .. }, Some(suffix)) =
+                (node(elab, app_fn(elab, e)), suffix)
+            {
+                return Err(ElabError::UnknownIdent(format!(
+                    "{}.{suffix}",
+                    render(elab, c)
+                )));
+            }
+            // `:1588`.
             Err(field_err(
                 name,
                 InvalidFieldReason::NotFound { full_name: full },
@@ -384,9 +404,18 @@ fn resolve_lval_aux(
         (Node::MVar { .. }, LVal::FieldIdx { .. }) => {
             Err(proj_err(InvalidProjectionReason::TypeUnknown))
         }
-        // `:1605-1616`. The `c ++ suffix` sub-arm (`:1607-1608`) needs
-        // `suffix?`, which only P4 produces.
-        (_, LVal::FieldName { name, .. }) => Err(field_err(name, InvalidFieldReason::NotConstApp)),
+        // `:1605-1615`: `c ++ suffix` (`:1607-1608`) first, as above.
+        (_, LVal::FieldName { name, suffix, .. }) => {
+            if let (Node::Const { name: Some(c), .. }, Some(suffix)) =
+                (node(elab, app_fn(elab, e)), suffix)
+            {
+                return Err(ElabError::UnknownIdent(format!(
+                    "{}.{suffix}",
+                    render(elab, c)
+                )));
+            }
+            Err(field_err(name, InvalidFieldReason::NotConstApp))
+        }
         (_, LVal::FieldIdx { .. }) => Err(proj_err(InvalidProjectionReason::NotConstApp)),
     }
 }

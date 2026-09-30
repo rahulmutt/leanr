@@ -34,7 +34,7 @@ pub enum ElabError {
     /// '{constName}'" (`Lean/Elab/Term/TermElabM.lean:2128-2136`).
     /// Carries the head identifier's raw source text. Reachable only
     /// once `.{u, v}` explicit-universe syntax has a producer (M4b-3 P1
-    /// task 8); the check itself lives in `app::head::elab_ident_head`
+    /// task 8); the check itself lives in `app::head::elab_app_fn_id`
     /// from task 4 on, so the arm can never be silently skipped.
     TooManyUniverseLevels(String),
     /// A syntax node whose shape contradicts the grammar (missing child,
@@ -189,6 +189,12 @@ pub enum ElabError {
     /// oracle: `elabAppFn`'s `` `(_) `` arm (`App.lean:2119`): "A
     /// placeholder `_` cannot be used where a function is expected".
     PlaceholderAsFunction,
+    /// oracle: `throwInvalidExplicitUniversesForLocal`
+    /// (`TermElabM.lean:2160-2161`), from `resolveName`'s `processLocal`
+    /// (`:2172-2179`): explicit universes on an identifier that resolves
+    /// to a local with no fields left over, e.g. `x.{0}`. With fields
+    /// (`x.val.{0}`) the levels belong to the last field instead.
+    InvalidExplicitUniversesForLocal(ExprId),
     /// An oracle `panic!`/`unreachable!` site (`mkBaseProjections`,
     /// `App.lean:1703`, `:1708`): unreachable on a well-formed
     /// environment, an error rather than a panic here because `.olean`

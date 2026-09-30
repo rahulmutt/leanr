@@ -246,7 +246,8 @@ fn oracle_elab_gate() {
     // `p2/lval-two-postponements`.
     // 208 -> 230 (M4b-4a P3 task 3): the 22 p3/* records.
     // 230 -> 234 (M4b-4a P3 task 4): p3/whnf-continuation, p3/coe-fun, p3/whnf-then-named, p3/explicit-unusable-name.
-    const CORPUS_FLOOR: usize = 234;
+    // 234 -> 249 (M4b-4a P4 task 1): the 15 p4/local-* and p4/global-* records.
+    const CORPUS_FLOOR: usize = 249;
     assert!(
         replayed >= CORPUS_FLOOR,
         "corpus shrank: replayed {replayed} records, floor is {CORPUS_FLOOR}. \

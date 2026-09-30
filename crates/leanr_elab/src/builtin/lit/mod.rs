@@ -94,7 +94,7 @@ pub(crate) fn mk_fresh_type_mvar_for(
 /// `OfNat.{u}`, `OfNat.ofNat.{u}`, `OfScientific.{u}`.
 ///
 /// `base = Some(view.store)` for the const row (matching
-/// `app::head::elab_ident_head`, which is the only other site that
+/// `app::head::elab_app_fn_id`, which is the only other site that
 /// builds a constant), `None` for the level list (matching that same
 /// site: `intern_level_list`'s `base` is dedup-only and never routes a
 /// child id, so `None` merely skips the persistent-side dedup lookup).
@@ -103,7 +103,8 @@ pub(crate) fn mk_fresh_type_mvar_for(
 /// This helper (and its sibling [`const_no_levels`]) routes a
 /// HARD-CODED name — `"OfNat"`, `"OfNat.ofNat"`, `"OfScientific"`,
 /// `"OfScientific.ofScientific"`, `"Char.ofNat"`, `"Bool.true"`,
-/// `"Bool.false"` — through `resolve::resolve_global`, i.e. through
+/// `"Bool.false"` — through `resolve::resolve_global_name` (with the
+/// whole name as the only prefix, so never a field split), i.e. through
 /// USER-VISIBLE name resolution. The oracle does not: `elabNumLit`
 /// (`BuiltinTerm.lean:226`) writes
 ///
@@ -115,15 +116,15 @@ pub(crate) fn mk_fresh_type_mvar_for(
 /// `BuiltinTerm.lean` itself is compiled, so the elaborator holds an
 /// ABSOLUTE `Name` that no user syntax can redirect.
 ///
-/// The two agree today only because `resolve_global` performs no
+/// The two agree today only because `resolve_global_name` performs no
 /// namespace, `open`, alias or `_root_` search — its candidate set is
-/// `{name}` or `{}` (its own doc). When that search lands — deferred as
+/// `{name}` or `{}` per prefix (its own doc). When that search lands — deferred as
 /// a later slice at `lib.rs`'s deferral ledger, the
 /// "`open`/alias/`export`/`_root_` resolution" row — a user-`open`ed
 /// namespace containing its own `OfNat` could shadow the elaborator's
 /// constant and silently retarget a numeral's `OfNat` application.
 /// That slice must decide the strategy (most likely: bypass
-/// `resolve_global` here in favour of an absolute lookup, matching the
+/// `resolve_global_name` here in favour of an absolute lookup, matching the
 /// oracle's compile-time-resolved name); this comment is the record
 /// that the decision is owed, not the decision.
 pub(crate) fn const_with_level(
@@ -132,7 +133,8 @@ pub(crate) fn const_with_level(
     u: LevelId,
 ) -> Result<ExprId, ElabError> {
     let cname = crate::app::head::intern_dotted(elab, name)?;
-    let resolved = crate::resolve::resolve_global(&elab.view, cname, name)?;
+    // One prefix, the whole name: exact lookup, never a field split.
+    let (resolved, _) = crate::resolve::resolve_global_name(&elab.view, &[cname], name)?;
     let base = elab.view.store;
     let levels = elab
         .mctx
@@ -152,7 +154,8 @@ pub(crate) fn const_with_level(
 /// otherwise identical to.
 pub(crate) fn const_no_levels(elab: &mut TermElabM, name: &str) -> Result<ExprId, ElabError> {
     let cname = crate::app::head::intern_dotted(elab, name)?;
-    let resolved = crate::resolve::resolve_global(&elab.view, cname, name)?;
+    // One prefix, the whole name: exact lookup, never a field split.
+    let (resolved, _) = crate::resolve::resolve_global_name(&elab.view, &[cname], name)?;
     let base = elab.view.store;
     let levels = elab
         .mctx
