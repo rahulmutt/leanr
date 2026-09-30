@@ -694,8 +694,8 @@ fn literal_kinds_are_registered_not_deferred() {
 /// It is deliberately NOT generalised to "any completed slice", and the
 /// reason is that no non-rotting formulation exists. Live source
 /// legitimately names INCOMPLETE slices in exactly this position — that
-/// is the named-seam discipline itself (`app/mod.rs`'s `@.f` arm names
-/// "M4b-4a P4", and until M4b-4a P2 closed it `elab.rs`'s `.postpone` seam
+/// is the named-seam discipline itself (`app/head.rs`'s recursor guard names
+/// "M4b-4c", and until M4b-4a P2 closed it `elab.rs`'s `.postpone` seam
 /// named "M4b-4a P2"; none of these
 /// are "M4b-3 P5" any more, now that P5 is complete: this example set
 /// itself had to be rewritten by Task 12 when the two live seams it used to
@@ -758,6 +758,13 @@ fn literal_kinds_are_registered_not_deferred() {
 /// temporarily added to `app/lval.rs` made this test fail naming that
 /// line, and it passed again once removed (both runs in the task 5
 /// report).
+///
+/// **`M4b-4a P4` was added by M4b-4a P4 task 4, and measured
+/// non-vacuous.** After the doc rows (`dispatch.rs`, `app/mod.rs`,
+/// `lib.rs`) were reworded to "P4 SHIPPED", a live line
+/// `let _ = "M4b-4a P4";` temporarily added to `app/dot_ident.rs` made
+/// this test fail naming that line, and it passed again once removed
+/// (both runs in the task 4 report).
 #[test]
 fn no_seam_message_names_a_completed_slice() {
     let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
@@ -768,6 +775,7 @@ fn no_seam_message_names_a_completed_slice() {
         "M4b-4a P1",
         "M4b-4a P2",
         "M4b-4a P3",
+        "M4b-4a P4",
     ];
     let mut offenders = Vec::new();
     for path in walk_rs_files(src_dir) {
@@ -783,7 +791,7 @@ fn no_seam_message_names_a_completed_slice() {
     }
     assert!(
         offenders.is_empty(),
-        "M4b-3 P3, P4, P5 and M4b-4a P1, P2, P3 are complete; live (non-comment) source \
+        "M4b-3 P3, P4, P5 and M4b-4a P1, P2, P3, P4 are complete; live (non-comment) source \
          claiming one at {offenders:?}"
     );
 }

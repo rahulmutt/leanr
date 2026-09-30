@@ -163,10 +163,13 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 /// (`app/lval.rs`, `app/head.rs`), so dot notation's P1 half is no
 /// longer deferred. Reconciled a TENTH time by M4b-4a P2: field notation
 /// on an mvar-typed term (postponement) landed (`postpone.rs`), so it is
-/// gone from the list. What remains is split by owner below:
+/// gone from the list. Reconciled an ELEVENTH time by M4b-4a P4:
+/// `Term.pipeProj`, `Term.dotIdent` and `Term.namedPattern` are routed
+/// (`app/head.rs`, `app/dot_ident.rs`), so dot notation is no longer
+/// deferred. What remains is split by owner below:
 /// ```text
 ///   letI / haveI / let_fun / let_delayed / let_tmp / letrec  later slice (own oracle tier each)
-///   Term.pipeProj / dotIdent / namedPattern .... M4b-4a P4 (same elabAppFn arms)
+///   Term.pipeProj / dotIdent / namedPattern .... P4 SHIPPED (M4b-4a) — app/head.rs, app/dot_ident.rs
 ///   generalized field notation (.const,
 ///     Function.f) .............................. P3 SHIPPED (M4b-4a) — lval.rs
 ///   private field projections (no fixture) ..... the slice that models private names
@@ -186,14 +189,13 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 ///
 /// `Term.proj` IS routed, as of M4b-4a P1 task 5: `elabProj := elabAtom`
 /// (`App.lean:2274`), and `app::head::elab_app_fn`'s proj arm builds the
-/// `LVal` list `app::lval` resolves. `Term.pipeProj`, `Term.dotIdent`,
-/// `Term.namedPattern` and `choice` are still deliberately NOT routed,
-/// even though the oracle aliases three of them straight to `elabAtom`
-/// (`App.lean:2247-2248`, `:2273`; `elabPipeProj` at `:2250-2258`
-/// desugars to `elabAppAux`): their `elabAppFn` arms (`App.lean:2062-2065`,
-/// `:2085-2100`, `:2106-2109`) are unported, so routing them would only
-/// reach `app::head::elab_app_fn`'s seam one indirection later. As whole
-/// terms they land on this table's catch-all instead, named by their kind.
+/// `LVal` list `app::lval` resolves. `Term.pipeProj`, `Term.dotIdent` and
+/// `Term.namedPattern` are routed as of M4b-4a P4 (`elabAtom` aliases at
+/// `App.lean:2247-2248`, `:2273`; `elabPipeProj` at `:2250-2258`
+/// desugars to `elabAppAux`), through `app::head::elab_app_fn`'s arms
+/// (`App.lean:2062-2065`, `:2085-2100`, `:2106-2109`). Only `choice`
+/// remains unrouted in this family: as a whole term it lands on this
+/// table's catch-all, named by its kind.
 ///
 /// `num`/`char`/`scientific` are all registered above as of tasks 6-7,
 /// and none of them is a LEAF: each elaborates through an application

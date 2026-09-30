@@ -65,7 +65,7 @@
 //!   dot notation: proj, fieldIdx, projFn/projIdx ..... P1 SHIPPED (M4b-4a) — lval.rs, head.rs, here
 //!   numImplicitParams (structure projection) ......... P1 SHIPPED (M4b-4a) — args.rs, lval.rs
 //!   generalized field notation (.const, Function.f) .. P3 SHIPPED (M4b-4a) — lval.rs
-//!   pipeProj / dotIdent / namedPattern heads, `@.f` .. M4b-4a P4 head.rs, here, dispatch.rs
+//!   pipeProj / dotIdent / namedPattern heads, `@.f` .. P4 SHIPPED (M4b-4a) — head.rs, dot_ident.rs
 //!   `choice` heads ................................... overloading slice  head.rs
 //!   private field projections ........................ private-names slice  lval.rs
 //! ```
@@ -435,8 +435,7 @@ pub struct AppCall {
 /// form has, so stripping the wrapper (setting `explicit := true` /
 /// collecting the explicit level list) before `elab_app_fn` keeps
 /// `head.rs` about NAMES only. `elab_app_fn` still names any remaining
-/// unported head (`pipeProj`/`dotIdent`/`namedPattern` — M4b-4a P4;
-/// `choice` — the overloading slice) as a named seam rather than
+/// unported head (`choice` — the overloading slice) as a named seam rather than
 /// mis-elaborating it.
 ///
 /// Task 7 adds the 8th parameter (`stx`, `Context::stx`'s own doc),

@@ -132,10 +132,10 @@
 //!   resolution loop, `numImplicitParams` and `@` on projection heads
 //!   (`app/lval.rs`, `app/head.rs`). P2 SHIPPED term-level postponement
 //!   (`postpone.rs`; `resolveLValLoop`, `elabAppArgs` and
-//!   `useImplicitLambda` produce). Still deferred, each a named seam:
-//!   generalized field notation (`.const`, `Function.f`) P3,
-//!   `pipeProj`/`dotIdent`/`namedPattern` P4, `choice` the overloading
-//!   slice, private field projections the slice that models private
+//!   `useImplicitLambda` produce). P3 SHIPPED generalized field
+//!   notation and P4 SHIPPED `pipeProj`/`dotIdent`/`namedPattern`
+//!   (`app/head.rs`, `app/dot_ident.rs`). Still deferred, each a named
+//!   seam: `choice` the overloading slice, private field projections the slice that models private
 //!   names. The anonymous constructor `⟨⟩` — M4b-4b; `binop%` —
 //!   the macro-expansion slice.
 //! - **macro expansion** — `dispatch` never expands a macro form; the

@@ -1,6 +1,9 @@
 //! M4b-4a: the LVal machinery — dot notation's field and index
 //! projections. Oracle: `Lean/Elab/App.lean:1435-1897` (pinned
 //! v4.33.0-rc1). Design: docs/superpowers/specs/2026-09-29-m4b4-dot-notation-design.md.
+//!
+//! P4 added `LVal::FieldName::suffix` and the two `c ++ suffix`
+//! unknown-constant arms of `resolve_lval_aux`.
 
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, LevelId, NameId};
