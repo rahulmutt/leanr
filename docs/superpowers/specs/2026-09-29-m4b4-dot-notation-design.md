@@ -527,7 +527,7 @@ planned one at a time after their predecessor merges.
     `UnknownIdent` while the oracle accepts them. This predates the branch;
     P4 owns the local field split.
 
-### P3 — generalized field notation (PR #<n>)
+### P3 — generalized field notation (PR #51)
 
 - What landed: the C3 structure resolution order (with the cycle guard),
   `forall_meta_telescope` (`leanr_meta`), `find_method`, the
