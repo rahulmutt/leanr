@@ -452,19 +452,53 @@ fn parent_cycle_in_structure_ext_is_an_error_not_a_stack_overflow() {
     }
 }
 
-/// `explicit || bInfo.isExplicit` (App.lean:1765, :1776): under `@`,
-/// an implicit parameter is a positional slot. `@(s).bad Nat.zero`
-/// skips `(s : Nat)` (slot 0, pushing `s` onto `unusableNamedArgs`),
-/// then inserts `s` POSITIONALLY at slot 1 into `{s : S1}`. Without the
-/// `explicit ||` the implicit `{s : S1}` could only be filled by name,
-/// and the name `s` is taken: `UnusableLValParameter`. (`p3/explicit-
-/// positional` cannot tell the two apart: on `S1.imp` the named and
-/// the positional insertion elaborate to the same term.) Oracle:
-/// `fun s => @S1.bad Nat.zero s : S1 → Nat`.
+/// `addLValArg` after a `CoeFun` coercion (App.lean:1784-1785):
+/// `allowNamed := false`. The error carries `fPreCoercion?.getD f`
+/// (`:1785`): the head the user named, never a coerced one.
+/// `(s).viaFnI`: "Invalid field notation: `FnI.f` (coerced from
+/// `S1.viaFnI`) has a parameter with expected type S1 but it cannot be
+/// used. Note: Field notation cannot refer to parameter `s` by name
+/// because that constant was coerced to a function".
+/// `(s).viaFnJ` coerces twice (`FnJ` to `{n : Nat} → FnI`, then `FnI`):
+/// the same message with "(coerced from `S1.viaFnJ`)" — the head as of
+/// the FIRST coercion, not the `@FnJ.g S1.viaFnJ` the second starts from.
 #[test]
-fn explicit_mode_fills_an_implicit_lval_parameter_positionally() {
-    let got = support::elab_and_synthesize("fun (s : S1) => @(s).bad Nat.zero")
-        .unwrap_or_else(|e| panic!("expected success, got {e:?}"));
-    let want = support::elab_and_synthesize("fun (s : S1) => @S1.bad Nat.zero s").unwrap();
-    assert_eq!(got, want);
+fn coerced_implicit_lval_parameter_is_unusable() {
+    for (src, head) in [
+        ("fun (s : S1) => (s).viaFnI", "S1.viaFnI"),
+        ("fun (s : S1) => (s).viaFnJ", "S1.viaFnJ"),
+    ] {
+        support::with_elab(src, |elab, term, kinds| {
+            match elab.elab_term_and_synthesize(term, kinds, None) {
+                Err(ElabError::UnusableLValParameter {
+                    f,
+                    param,
+                    allow_named,
+                }) => {
+                    assert_eq!(param, "s", "{src}");
+                    assert!(!allow_named, "{src}");
+                    let base = elab.view.store;
+                    let mut st = support::EncSt::default();
+                    let f_json = support::encode_expr(elab.mctx.store(), Some(base), f, &mut st);
+                    assert_eq!(
+                        f_json,
+                        serde_json::json!({"k": "const", "n": head, "us": []}),
+                        "{src}: the error must name the pre-coercion head"
+                    );
+                }
+                other => panic!("{src}: expected UnusableLValParameter, got {other:?}"),
+            }
+        });
+    }
+}
+
+/// Review Focus 2: `Loop` coerces to `{u : Nat} → Loop` forever;
+/// `addLValArg.go`'s `withIncRecDepth` (App.lean:1749) stops it.
+/// "maximum recursion depth has been reached"
+#[test]
+fn self_reproducing_coe_fun_hits_max_rec_depth() {
+    assert!(matches!(
+        support::elab_and_synthesize("fun (s : S1) => (s).loop"),
+        Err(ElabError::MaxRecDepth)
+    ));
 }

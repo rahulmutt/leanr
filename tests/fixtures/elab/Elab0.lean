@@ -787,6 +787,14 @@ structure FnI where
   f : {s : S1} → Nat
 instance instCoeFunFnI : CoeFun FnI (fun _ => {s : S1} → Nat) := ⟨FnI.f⟩
 def S1.viaFnI : FnI := FnI.mk (fun {s} => s.a)
+-- Two coercions: `FnJ` coerces to `{n : Nat} → FnI`, whose result
+-- coerces again. The error names `fPreCoercion?.getD f` (App.lean:1785)
+-- as of the FIRST coercion, `S1.viaFnJ` — not the once-coerced
+-- `@FnJ.g S1.viaFnJ` the second coercion starts from.
+structure FnJ where
+  g : {n : Nat} → FnI
+instance instCoeFunFnJ : CoeFun FnJ (fun _ => {n : Nat} → FnI) := ⟨FnJ.g⟩
+def S1.viaFnJ : FnJ := FnJ.mk S1.viaFnI
 -- A carrier that coerces to a function returning itself: `addLValArg.go`
 -- recurses until `withIncRecDepth` stops it (App.lean:1749).
 structure Loop where

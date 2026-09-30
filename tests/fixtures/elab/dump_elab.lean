@@ -1030,6 +1030,10 @@ def p3Queries : List (String × String) :=
   , ("p3/proj-then-method",    "fun (p : Prod Nat Nat) => (p).1.succ")
   , ("p3/method-then-method",  "fun (s : S1) => (s).get.succ")
   , ("p3/field-then-method",   "fun (s : S2) => (s).toS1.get")
+  , ("p3/whnf-continuation",   "fun (s : S1) => (s).viaDef")
+  , ("p3/coe-fun",             "fun (s : S1) => (s).viaFn")
+  , ("p3/whnf-then-named",     "fun (s : S1) => (s).viaDef3")
+  , ("p3/explicit-unusable-name", "fun (s : S1) => @(s).bad Nat.zero")
   ]
 
 def emit (id src : String) (expJ : Json) : IO Unit :=

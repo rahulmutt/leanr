@@ -173,6 +173,14 @@ pub enum ElabError {
         f: ExprId,
         base: String,
     },
+    /// oracle: `throwMaxRecDepthAt` (`Exception.lean:225-226`), reached
+    /// from `withIncRecDepth` (`:245-249`) — an ordinary `.error`. leanr
+    /// counts only the recursion that can run away on its own
+    /// (`addLValArg.go`, `App.lean:1749`) against the oracle's
+    /// `defaultMaxRecDepth` (512, `Init/Prelude.lean:4836`); the oracle
+    /// counts from the ambient depth, so the exact cut-off differs,
+    /// never whether one exists.
+    MaxRecDepth,
     /// oracle: `elabAppFn`'s `` `(_) `` arm (`App.lean:2119`): "A
     /// placeholder `_` cannot be used where a function is expected".
     PlaceholderAsFunction,

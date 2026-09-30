@@ -632,78 +632,118 @@ fn add_lval_arg(
 /// compares `Name`s, leanr rendered strings: an anonymous binder renders
 /// as `""`, which no user-written named argument can equal, as no user
 /// can write `.anonymous`.
+///
+/// Both of the oracle's recursive calls (`:1783`, `:1785`) are tail
+/// calls, so each is one more round of the outer loop here, with
+/// `depth` counting the rounds `withIncRecDepth` (`:1749`) would. A
+/// Rust recursion would spend ~2.8 KiB of stack per round in a debug
+/// build, and a self-reproducing `CoeFun` (the `Loop` fixture)
+/// overflows a 2 MiB test thread at round ~385, before the cap.
 #[allow(clippy::too_many_arguments)]
 fn add_lval_arg_go(
     elab: &mut TermElabM,
     st: &AddLValArg<'_>,
-    f_pre_coercion: Option<ExprId>,
-    f: ExprId,
-    f_type: ExprId,
+    mut f_pre_coercion: Option<ExprId>,
+    mut f: ExprId,
+    mut f_type: ExprId,
     mut arg_idx: usize,
     mut remaining: Vec<String>,
     mut unusable: Vec<String>,
-    allow_named: bool,
-    depth: usize,
+    mut allow_named: bool,
+    mut depth: usize,
 ) -> Result<LValInsert, ElabError> {
-    // `:1751`.
-    let (xs, bis, _f_type2) = elab.mctx.forall_meta_telescope(f_type)?;
-    for (&x, &bi) in xs.iter().zip(bis.iter()) {
-        // `x.mvarId!.getDecl` (`:1756`).
-        let Node::MVar { id: Some(xid) } = node(elab, x) else {
-            return Err(ElabError::Internal(
-                "forall_meta_telescope minted a non-mvar".into(),
-            ));
-        };
-        let Some((user_name, x_ty)) = elab
-            .mctx
-            .mctx()
-            .decl(MVarId(xid))
-            .map(|d| (d.user_name, d.ty))
-        else {
-            return Err(ElabError::Internal(
-                "forall_meta_telescope mvar is undeclared".into(),
-            ));
-        };
-        let user_name = user_name.map(|n| render(elab, n)).unwrap_or_default();
-        // `explicit || bInfo.isExplicit` (`:1765`, `:1776`);
-        // `BinderInfo.isExplicit` is `.default` only (`Expr.lean:92-96`).
-        let is_explicit = st.explicit || bi == BinderInfo::Default;
-        // `:1757-1759`: a user-written named argument accounts for this
-        // parameter — no type test, no `argIdx` advance, no push.
-        if let Some(i) = remaining.iter().position(|n| *n == user_name) {
-            remaining.remove(i);
-            continue;
-        }
-        // `:1761`.
-        if type_matches_base_name(elab, x_ty, st.base_name)? {
-            // `:1765-1767`.
-            if arg_idx <= st.args.len() && is_explicit {
-                return Ok(LValInsert::Positional(arg_idx));
+    // `withIncRecDepth` (`:1749`) against `defaultMaxRecDepth`
+    // (`Init/Prelude.lean:4836`); see `ElabError::MaxRecDepth`.
+    const MAX_REC_DEPTH: usize = 512;
+    loop {
+        // `:1751`.
+        let (xs, bis, f_type2) = elab.mctx.forall_meta_telescope(f_type)?;
+        for (&x, &bi) in xs.iter().zip(bis.iter()) {
+            // `x.mvarId!.getDecl` (`:1756`).
+            let Node::MVar { id: Some(xid) } = node(elab, x) else {
+                return Err(ElabError::Internal(
+                    "forall_meta_telescope minted a non-mvar".into(),
+                ));
+            };
+            let Some((user_name, x_ty)) = elab
+                .mctx
+                .mctx()
+                .decl(MVarId(xid))
+                .map(|d| (d.user_name, d.ty))
+            else {
+                return Err(ElabError::Internal(
+                    "forall_meta_telescope mvar is undeclared".into(),
+                ));
+            };
+            let user_name = user_name.map(|n| render(elab, n)).unwrap_or_default();
+            // `explicit || bInfo.isExplicit` (`:1765`, `:1776`);
+            // `BinderInfo.isExplicit` is `.default` only (`Expr.lean:92-96`).
+            let is_explicit = st.explicit || bi == BinderInfo::Default;
+            // `:1757-1759`: a user-written named argument accounts for this
+            // parameter — no type test, no `argIdx` advance, no push.
+            if let Some(i) = remaining.iter().position(|n| *n == user_name) {
+                remaining.remove(i);
+                continue;
             }
-            // `:1771-1774`.
-            if !allow_named || unusable.contains(&user_name) {
-                return Err(ElabError::UnusableLValParameter {
-                    f: f_pre_coercion.unwrap_or(f),
-                    param: user_name,
-                    allow_named,
-                });
+            // `:1761`.
+            if type_matches_base_name(elab, x_ty, st.base_name)? {
+                // `:1765-1767`.
+                if arg_idx <= st.args.len() && is_explicit {
+                    return Ok(LValInsert::Positional(arg_idx));
+                }
+                // `:1771-1774`.
+                if !allow_named || unusable.contains(&user_name) {
+                    return Err(ElabError::UnusableLValParameter {
+                        f: f_pre_coercion.unwrap_or(f),
+                        param: user_name,
+                        allow_named,
+                    });
+                }
+                return Ok(LValInsert::Named(user_name));
             }
-            return Ok(LValInsert::Named(user_name));
+            // `:1776-1778`.
+            if is_explicit {
+                arg_idx += 1;
+            }
+            unusable.push(user_name);
         }
-        // `:1776-1778`.
-        if is_explicit {
-            arg_idx += 1;
+        // `if allowNamed || argIdx ≤ args.size then` (`:1781`): without
+        // named insertion the value must still fit positionally.
+        if allow_named || arg_idx <= st.args.len() {
+            let f_app = xs.iter().try_fold(f, |acc, &x| mk_app(elab, acc, x))?;
+            // Ambient transparency, as `:1782` (no `withReducible…` here).
+            let w = elab.mctx.whnf(f_type2)?;
+            if matches!(node(elab, w), Node::Forall { .. }) {
+                if depth + 1 >= MAX_REC_DEPTH {
+                    return Err(ElabError::MaxRecDepth);
+                }
+                // `:1782-1783`: `go fPreCoercion? (mkAppN f xs) fType' …
+                // allowNamed`.
+                f = f_app;
+                f_type = w;
+                depth += 1;
+                continue;
+            }
+            if let Some(f2) = elab.mctx.coerce_to_function(f_app)? {
+                if depth + 1 >= MAX_REC_DEPTH {
+                    return Err(ElabError::MaxRecDepth);
+                }
+                // `:1784-1785`: `go (fPreCoercion?.getD f) f' (← inferType
+                // f') … false` — named insertion off from here on.
+                f_pre_coercion = Some(f_pre_coercion.unwrap_or(f));
+                f_type = elab.mctx.infer_type(f2)?;
+                f = f2;
+                allow_named = false;
+                depth += 1;
+                continue;
+            }
         }
-        unusable.push(user_name);
+        // `:1792-1794`.
+        return Err(ElabError::NoLValParameter {
+            f: f_pre_coercion.unwrap_or(f),
+            base: render(elab, st.base_name),
+        });
     }
-    // Task 4: the `whnf` and `coerceToFunction?` continuations
-    // (`:1781-1785`) go here, recursing with `depth + 1`.
-    let _ = depth;
-    // `:1792-1794`.
-    Err(ElabError::NoLValParameter {
-        f: f_pre_coercion.unwrap_or(f),
-        base: render(elab, st.base_name),
-    })
 }
 
 /// oracle: `elabAppLVals` / `elabAppLValsAux` (`App.lean:1843-1897`).
