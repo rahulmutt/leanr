@@ -745,11 +745,41 @@ fn with_doctored_elab_harness<R>(
         &leanr_syntax::kind::KindInterner,
     ) -> R,
 ) -> R {
+    use leanr_syntax::{builtin, parse_term};
+
+    let snap = builtin::snapshot();
+    let parsed = parse_term(src, &snap);
+    assert!(
+        parsed.errors.is_empty(),
+        "{caller}: leanr parse errors for {src:?}: {:?}",
+        parsed.errors
+    );
+    let term_elem: leanr_elab::dispatch::SynElem = parsed
+        .tree
+        .root()
+        .first_child_or_token()
+        .unwrap_or_else(|| panic!("{caller}: no term child for {src:?}"));
+    with_doctored_elab_env(doctor, |elab| k(elab, &term_elem, &parsed.tree.kinds))
+}
+
+/// Replay `Elab0` and hand `k` a fresh `TermElabM` over it, with no
+/// syntax — for gates that drive a `TermElabM` entry point directly
+/// (`elim_info_oracle.rs`).
+pub fn with_elab_env<R>(k: impl FnOnce(&mut leanr_elab::TermElabM) -> R) -> R {
+    with_doctored_elab_env(|_| {}, k)
+}
+
+/// The `TermElabM` construction behind `with_elab_env` and
+/// `with_doctored_elab_harness`: replay `Elab0`, let `doctor` rewrite
+/// the decoded `structureExt` rows, build a scratch `Store` + `MetaCtx`.
+fn with_doctored_elab_env<R>(
+    doctor: impl FnOnce(&mut Vec<leanr_olean::StructureInfo>),
+    k: impl FnOnce(&mut leanr_elab::TermElabM) -> R,
+) -> R {
     use leanr_elab::TermElabM;
     use leanr_kernel::bank::Store;
     use leanr_kernel::EnvView;
     use leanr_meta::{Config, EnvExtensions, MetaCtx};
-    use leanr_syntax::{builtin, parse_term};
 
     let Replayed {
         env,
@@ -765,20 +795,7 @@ fn with_doctored_elab_harness<R>(
         mut structures,
     } = replay_fixture_in("elab", "Elab0.olean");
     doctor(&mut structures);
-    let snap = builtin::snapshot();
     let view: EnvView = env.view();
-
-    let parsed = parse_term(src, &snap);
-    assert!(
-        parsed.errors.is_empty(),
-        "{caller}: leanr parse errors for {src:?}: {:?}",
-        parsed.errors
-    );
-    let term_elem: leanr_elab::dispatch::SynElem = parsed
-        .tree
-        .root()
-        .first_child_or_token()
-        .unwrap_or_else(|| panic!("{caller}: no term child for {src:?}"));
 
     let mut scratch = Store::scratch();
     let mctx = MetaCtx::new(
@@ -799,7 +816,32 @@ fn with_doctored_elab_harness<R>(
         },
     );
     let mut elab = TermElabM::new(mctx, view);
-    k(&mut elab, &term_elem, &parsed.tree.kinds)
+    k(&mut elab)
+}
+
+/// The `NameId` of a name printed by `Name.toString (escape := false)`
+/// (the oracle dumps' `"n"` field). Like `decode_name`, but an all-digit
+/// component is a `Name.num` (`_private.Elab0.0.PrivMk.mk`): with
+/// `decode_name` such a name would not resolve.
+pub fn name_id(elab: &mut leanr_elab::TermElabM, s: &str) -> leanr_kernel::bank::NameId {
+    let base = Some(elab.view.store);
+    let store = elab.mctx.store_mut();
+    let mut id: Option<leanr_kernel::bank::NameId> = None;
+    for part in s.split('.') {
+        id = Some(match part.parse::<u64>() {
+            Ok(n) => {
+                let nid = store
+                    .intern_nat(base, &leanr_kernel::Nat::from(n))
+                    .expect("intern nat");
+                store.name_num(base, id, nid).expect("name")
+            }
+            Err(_) => {
+                let sid = store.intern_str(base, part).expect("intern");
+                store.name_str(base, id, sid).expect("name")
+            }
+        });
+    }
+    id.expect("name_id: empty name")
 }
 
 /// Elaborate `src` through `elab_term` ALONE — no fixpoint, no

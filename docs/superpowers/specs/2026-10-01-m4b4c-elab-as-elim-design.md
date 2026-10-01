@@ -454,3 +454,25 @@ P2 depends on P1. Each plan gets its own PR, merged on green CI
 
 (Filled in as each plan merges: corrections, mutations run, seams left
 open.)
+
+### P1 (in progress)
+
+- **`get_elab_elim_info` KNOWN_GAPS** (`crates/leanr_elab/tests/elim_info_oracle.rs`):
+  `lcAny`, `lcErased`, `lcVoid`. They are unsafe axioms, and replay
+  admits no unsafe constants (`leanr_kernel/src/decl.rs:202`), so leanr
+  does not know these constants. The oracle answers "unexpected
+  eliminator resulting type" for all three. The gate asserts that each
+  one still diverges. All other 875 records agree, including every
+  eliminator named in the plan.
+- **Mutations on `get_elab_elim_info`**:
+  - Dropping the first-order disjunct is killed by the gate. Three
+    records diverge: `Eq.subst'` loses majors 2 and 4 (the plan said
+    0 and 2), `Eq.ndrec` loses 1 and 5, and `CoeFun.coe` loses 2.
+  - Skipping the reverse closure is killed by the gate, with 106
+    divergences.
+  - Dropping the `motive_args.is_empty()` check is killed by the gate,
+    with 163 divergences, and by the unit test.
+  - Running the closure left to right **survives the gate**, because no
+    Elab0 declaration depends on it. It is killed by the unit test
+    `elim_info::tests::closure_runs_right_to_left`, a hand-built
+    eliminator.
