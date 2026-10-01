@@ -86,7 +86,7 @@ hook + table + harness (leanr_elab) → **P3** op elaborator
     (`Basic.lean:971-972`)
   - `isReadOnlyOrSyntheticOpaque` (`Basic.lean:979-985`)
   - `isLevelMVarAssignable`: `decl.depth >= mctx.levelAssignDepth`
-    (`MetavarContext.lean:470-474`)
+    (`MetavarContext.lean:471-474`)
   - `isMVarWithGreaterDepth` (`Lean/Meta/LevelDefEq.lean:93`)
 - `isDefEqStuckEx : Bool := false` (`Basic.lean:134`), thrown via
   `Meta.throwIsDefEqStuck` (`Basic.lean:622-623`) at three sites:
@@ -449,7 +449,7 @@ Spec corrections:
   `isEtaUnassignedMVar` are not ported (`config.rs:128-129`); the slow
   `checkAssignment` mvar arm (ExprDefEq.lean:901) is not ported.
 - The oracle's `withNewMCtxDepthImp` restores the whole mctx
-  (Basic.lean:1973-1978), which the spec text did not state.
+  (Basic.lean:1974-1980), which the spec text did not state.
 - Proof irrelevance is ported in the both-unassignable (`None, None`) arm
   of `assign.rs` (ExprDefEq.lean:1949-1956); oracle-faithful false -> true
   only.
@@ -457,6 +457,11 @@ Spec corrections:
   `StepBudgetExhausted`, `Kernel(BankExhausted)`, `Kernel(DeepRecursion)`)
   instead of mapping every error to `false` as the spec said: the oracle's
   `catch _` does not catch runtime exceptions.
+- Final-review fixes: the `(None, None)` arm in `assign.rs` returns `false`
+  before proof irrelevance when either head mvar is undeclared (else
+  `infer_type` errs "unknown metavariable", order-dependent vs depth 0);
+  `is_def_eq_guarded` also rethrows `Unsupported` (named seam) and `MVar`
+  (caller bug), since leanr gaps/bugs are not oracle exceptions.
 - `is_def_eq` now rolls back when `process_postponed` errs (defeq.rs); the
   new level stuck throw plus the swallowing guard made the previous
   skip-rollback path routinely reachable.

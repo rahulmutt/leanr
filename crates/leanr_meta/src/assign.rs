@@ -131,6 +131,17 @@ impl<'e> MetaCtx<'e> {
                 // oracle: ExprDefEq.lean:1949-1956 — both sides
                 // unassignable (read-only depth, or syntheticOpaque):
                 // proof irrelevance first, then `isDefEqStuckEx`.
+                // leanr guard (no oracle analogue): an UNDECLARED mvar head
+                // makes `infer_type` fail ("unknown metavariable"), which
+                // would turn the old order-independent `false` into an
+                // order-dependent `Err`; answer `false` as before.
+                let undeclared = |this: &Self, f: ExprId| {
+                    matches!(this.node(f), Node::MVar { id: Some(i) }
+                        if this.mctx.decl(MVarId(i)).is_none())
+                };
+                if undeclared(self, t_fn) || undeclared(self, s_fn) {
+                    return Ok(Some(false));
+                }
                 if let Some(b) = self.is_def_eq_proof_irrel(t, s)? {
                     return Ok(Some(b));
                 }
@@ -2868,6 +2879,26 @@ mod tests {
             });
             // Flag off outside: unaffected.
             assert!(!ctx.cfg().is_def_eq_stuck_ex);
+        });
+    }
+
+    #[test]
+    fn undeclared_mvar_vs_rigid_is_false_in_both_orders() {
+        // An undeclared mvar head must not reach `infer_type` (which
+        // errs "unknown metavariable"): the answer is `false` in both
+        // argument orders, flag on or off.
+        with_n_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let sid = ctx.scratch.intern_str(base, "ghost").expect("intern");
+            let n = ctx.scratch.name_str(base, None, sid).expect("name");
+            let ghost = ctx.scratch.expr_mvar(base, Some(n)).expect("mvar");
+            let zero = mk_const(ctx, "N.zero");
+            assert_eq!(ctx.is_def_eq(ghost, zero), Ok(false));
+            assert_eq!(ctx.is_def_eq(zero, ghost), Ok(false));
+            assert_eq!(
+                ctx.with_def_eq_stuck_ex(|ctx| ctx.is_def_eq(ghost, zero)),
+                Ok(false)
+            );
         });
     }
 

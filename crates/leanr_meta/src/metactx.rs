@@ -530,7 +530,7 @@ impl<'e> MetaCtx<'e> {
         r
     }
 
-    /// oracle: `withNewMCtxDepthImp` (`Lean/Meta/Basic.lean:1973-1978`):
+    /// oracle: `withNewMCtxDepthImp` (`Lean/Meta/Basic.lean:1974-1980`):
     /// `incDepth`, clear `postponed`, run, then restore the WHOLE saved
     /// mctx and `postponed` in a `finally`. Restoring the whole mctx
     /// discards every assignment made inside, including to inner mvars,
@@ -1981,6 +1981,9 @@ impl<'e> MetaCtx<'e> {
     /// does not catch runtime exceptions, so resource exhaustion
     /// (maxRecDepth <-> `DepthBudgetExhausted`, heartbeats <->
     /// `StepBudgetExhausted`, `Kernel(BankExhausted | DeepRecursion)`) propagates.
+    /// So do `Unsupported` (a named leanr seam, NOT a negative verdict) and
+    /// `MVar` (a caller bug): leanr gaps and bugs are not oracle exceptions,
+    /// so folding them into `false` would make them unattributable.
     pub fn is_def_eq_guarded(&mut self, t: ExprId, s: ExprId) -> Result<bool, MetaError> {
         let r = self.is_def_eq(t, s);
         Self::guard_def_eq_result(r)
@@ -1993,6 +1996,8 @@ impl<'e> MetaCtx<'e> {
             Err(
                 e @ (MetaError::DepthBudgetExhausted
                 | MetaError::StepBudgetExhausted
+                | MetaError::Unsupported(_)
+                | MetaError::MVar(_)
                 | MetaError::Kernel(
                     leanr_kernel::KernelError::BankExhausted
                     | leanr_kernel::KernelError::DeepRecursion,
@@ -3206,7 +3211,7 @@ mod tests {
     // oracle: `addExprMVarDecl`/`addLevelMVarDecl` stamp `depth :=
     // mctx.depth` (MetavarContext.lean:813, :834); `incDepth` (:932-936);
     // `withNewMCtxDepthImp` restores the whole saved mctx and `postponed`
-    // (Basic.lean:1973-1978).
+    // (Basic.lean:1974-1980).
 
     fn declare_level_named(ctx: &mut MetaCtx, s: &str) -> crate::LMVarId {
         let sid = ctx.scratch.intern_str(None, s).unwrap();
@@ -3310,7 +3315,8 @@ mod tests {
         use leanr_kernel::KernelError;
         for (e, propagates) in [
             (MetaError::IsDefEqStuck, false),
-            (MetaError::Unsupported("x".into()), false),
+            (MetaError::Unsupported("x".into()), true),
+            (MetaError::MVar("x".into()), true),
             (MetaError::Infer("x".into()), false),
             (MetaError::DepthBudgetExhausted, true),
             (MetaError::StepBudgetExhausted, true),

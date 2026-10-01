@@ -139,9 +139,10 @@ fn step_merges_new_pending_before_still_unsolved() {
 /// metavariable"), via `SynthInstance.lean:978`'s `withNewMCtxDepth`
 /// making an OUTER-scope mvar read-only for the whole search.
 ///
-/// `leanr_meta` still has no MCtx-depth / read-only-mvar model — that
-/// gap and its owner are unchanged. What changed is that the
-/// ELABORATOR no longer depends on it for this decision:
+/// `leanr_meta` now has the MCtx-depth / read-only-mvar model, but
+/// `synth_instance` is not yet on it (owner: the synthesis-onto-depth
+/// follow-up). What changed is that the ELABORATOR does not depend on
+/// it for this decision:
 /// `TermElabM::try_synth_instance` (`synthetic/ladder.rs`) reconstructs
 /// `trySynthInstance`'s `.undef` from the goal type, so a goal that
 /// still mentions an unassigned expr mvar is "not ready" instead of

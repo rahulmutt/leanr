@@ -1064,6 +1064,31 @@ mod tests {
     }
 
     #[test]
+    fn stuck_level_pair_without_a_bare_mvar_is_false_not_stuck() {
+        // `max ?u ?v =?= 1` with ?u ?v read-only: reaches the stuck tail
+        // (no assignable mvar) but neither side is a bare mvar, so
+        // LevelDefEq.lean:167-173 answers `false`, not `isDefEqStuck`.
+        with_ctx(|ctx| {
+            let z = ctx.scratch.level_zero(None).unwrap();
+            let one = ctx.scratch.level_succ(None, z).unwrap();
+            let (_, u) = lmvar(ctx, "?u");
+            let (_, v) = lmvar(ctx, "?v");
+            let m = ctx.scratch.level_max(None, u, v).unwrap();
+            ctx.with_new_mctx_depth(false, |ctx| {
+                assert_eq!(ctx.is_level_def_eq(m, one), Ok(false));
+                assert_eq!(
+                    ctx.with_def_eq_stuck_ex(|ctx| ctx.is_level_def_eq(m, one)),
+                    Ok(false)
+                );
+                assert_eq!(
+                    ctx.with_def_eq_stuck_ex(|ctx| ctx.is_level_def_eq(one, m)),
+                    Ok(false)
+                );
+            });
+        });
+    }
+
+    #[test]
     fn postponed_recheck_that_turns_stuck_rolls_back_is_def_eq() {
         // `(Sort ?r -> Sort ?a -> Sort ?b) =?= (Sort (max ?a ?b) -> Sort 1 -> Sort 1)`
         // with `?r` read-only. The first domain postpones `?r =?= max ?a ?b`;

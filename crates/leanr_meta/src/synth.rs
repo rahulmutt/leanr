@@ -87,40 +87,38 @@
 //!
 //! # `normalize_goal_key` / `mkTableKey`
 //!
-//! oracle: `mkTableKey` (:196-199) delegates to the `MkTableKey`
-//! namespace's `normExpr`/`normLevel` (:92-160), run over a `StateM`
-//! threading one `MkTableKey.State { nextIdx, lmap, emap, mctx }`
-//! (:98-102) -- ONE `nextIdx` counter shared by BOTH maps, so a goal's
-//! canonical key numbers EVERY metavariable (level or expr) it mentions,
-//! in a single first-occurrence order across the whole interleaved walk
-//! (the module doc a few lines above `MkTableKey`, :78-90, gives the
-//! worked example: `f ?m ?m ?n` normalizes to `f _tc.0 _tc.0 _tc.1`,
-//! same mvar reusing its FIRST index on every later occurrence). Both
-//! `normLevel`/`normExpr` gate renaming on assignability, but via TWO
-//! DIFFERENT oracle functions that must not be conflated with each
-//! other or with `assign.rs`'s own check of a similar name:
-//! `normLevel`'s inline check (`getLevelDepth mvarId != mctx.depth`,
+//! oracle: `mkTableKey` (:196-199) delegates to the `MkTableKey` namespace's
+//! `normExpr`/`normLevel` (:92-160), run over a `StateM` threading one
+//! `MkTableKey.State { nextIdx, lmap, emap, mctx }` (:98-102) -- ONE
+//! `nextIdx` counter shared by BOTH maps, so a goal's canonical key numbers
+//! EVERY metavariable (level or expr) it mentions, in a single
+//! first-occurrence order across the whole interleaved walk (the module doc a
+//! few lines above `MkTableKey`, :78-90, gives the worked example: `f ?m ?m
+//! ?n` normalizes to `f _tc.0 _tc.0 _tc.1`, same mvar reusing its FIRST index
+//! on every later occurrence). Both `normLevel`/`normExpr` gate renaming on
+//! assignability, but via TWO DIFFERENT oracle functions that must not be
+//! conflated with each other or with `assign.rs`'s own check of a similar
+//! name: `normLevel`'s inline check (`getLevelDepth mvarId != mctx.depth`,
 //! :119) and `normExpr`'s call to the PUBLIC `MVarId.isAssignable`
 //! (`MetavarContext.lean:483-486`: `decl.depth == mctx.depth`) are both
-//! DEPTH-ONLY. Neither is `ExprDefEq.lean:1731-1733`'s PRIVATE
-//! `isAssignable` (`isReadOnlyOrSyntheticOpaque`) -- the different
-//! function `assign.rs::unassigned_mvar_id` correctly transcribes, for a
-//! DIFFERENT purpose (occurs-check-time assignment safety during
-//! unification, not table keying). Under the real oracle, a
-//! `MVarKind.syntheticOpaque` mvar IS renamed by `mkTableKey`: kind plays
-//! no role in `MVarId.isAssignable` at all, only depth does. This crate
-//! has per-mvar depth bookkeeping (side maps in `mvar_ctx.rs`, added by
-//! macro/binop% P1), but these table-key walks do NOT consult it yet
-//! (synthesis is still on rollback rather than `withNewMCtxDepth`), so
-//! under the old flat-depth collapse, which they still apply, `decl.depth == mctx.depth` /
-//! `getLevelDepth mvarId != mctx.depth` are always (respectively)
-//! true/false for any DECLARED mvar -- both walks below collapse the
-//! check to "always assignable" for every declared mvar, KIND INCLUDED:
-//! `norm_expr_body`'s mvar arm does not special-case
-//! `MVarKind::SyntheticOpaque` (it IS renamed, same as any other
+//! DEPTH-ONLY. Neither is `ExprDefEq.lean:1731-1733`'s PRIVATE `isAssignable`
+//! (`isReadOnlyOrSyntheticOpaque`) -- the different function
+//! `assign.rs::unassigned_mvar_id` correctly transcribes, for a DIFFERENT
+//! purpose (occurs-check-time assignment safety during unification, not table
+//! keying). Under the real oracle, a `MVarKind.syntheticOpaque` mvar IS
+//! renamed by `mkTableKey`: kind plays no role in `MVarId.isAssignable` at
+//! all, only depth does. This crate has per-mvar depth bookkeeping (side maps
+//! in `mvar_ctx.rs`, added by macro/binop% P1), but these table-key walks do
+//! NOT consult it yet (synthesis is still on rollback rather than
+//! `withNewMCtxDepth`), so under the old flat-depth collapse, which they
+//! still apply, `decl.depth == mctx.depth` / `getLevelDepth mvarId !=
+//! mctx.depth` are always (respectively) true/false for any DECLARED mvar --
+//! both walks below collapse the check to "always assignable" for every
+//! declared mvar, KIND INCLUDED: `norm_expr_body`'s mvar arm does not
+//! special-case `MVarKind::SyntheticOpaque` (it IS renamed, same as any other
 //! declared mvar), deliberately NOT mirroring
-//! `assign.rs::unassigned_mvar_id`'s kind check, because that check
-//! answers a different oracle question than this one does.
+//! `assign.rs::unassigned_mvar_id`'s kind check, because that check answers a
+//! different oracle question than this one does.
 //!
 //! `mkTableKey`'s own doc (:195) states it "assumes `e` does not contain
 //! assigned metavariables" -- callers (`mkTableKeyFor`, :262-266) run
@@ -1684,15 +1682,15 @@ impl<'e> MetaCtx<'e> {
     ///
     /// `leanr_meta` now has an mctx-depth model and throws
     /// `MetaError::IsDefEqStuck` at two ported sites under
-    /// `with_def_eq_stuck_ex`, but `synth_instance` does not yet run
-    /// under `with_new_mctx_depth` / `isDefEqStuckEx` (a follow-up of
-    /// the macro/binop% P1 slice). Its `synth_instance` therefore treats the caller's
-    /// `?a` as an ordinary assignable mvar and answers `Wrap ?a` with
-    /// whichever candidate it reaches first — silently choosing the
-    /// class's type parameter for the caller. That is a WRONG ANSWER,
-    /// not merely a missing postponement: with `Wrap Nat`/`Wrap Unit`
-    /// both in scope it picks `instWrapUnit` and then `(useWrap
-    /// Nat.zero : Nat)` fails to typecheck its own explicit argument.
+    /// `with_def_eq_stuck_ex`, but `synth_instance` does not yet run under
+    /// `with_new_mctx_depth` / `isDefEqStuckEx` (a follow-up of the
+    /// macro/binop% P1 slice). Its `synth_instance` therefore treats the
+    /// caller's `?a` as an ordinary assignable mvar and answers `Wrap ?a`
+    /// with whichever candidate it reaches first — silently choosing the
+    /// class's type parameter for the caller. That is a WRONG ANSWER, not
+    /// merely a missing postponement: with `Wrap Nat`/`Wrap Unit` both in
+    /// scope it picks `instWrapUnit` and then `(useWrap Nat.zero : Nat)`
+    /// fails to typecheck its own explicit argument.
     ///
     /// So the stuck condition is reconstructed here, from the goal type,
     /// on the elaborator side of the seam:
@@ -1777,9 +1775,10 @@ impl<'e> MetaCtx<'e> {
     /// other reason. `has_expr_mvar` alone is the right predicate.
     ///
     /// The `MetaError::IsDefEqStuck` arm below is kept live: it is the
-    /// channel this function should be reading once `synth_instance`
-    /// runs on the depth model (which now exists), at which point the syntactic pre-test becomes redundant
-    /// for residues 2 and 3 and can be deleted rather than rewritten.
+    /// channel this function should be reading once `synth_instance` runs on
+    /// the depth model (which now exists), at which point the syntactic
+    /// pre-test becomes redundant for residues 2 and 3 and can be deleted
+    /// rather than rewritten.
     ///
     /// Precondition: `ty` is already `instantiate_mvars`-ed (the oracle's
     /// own `let type ← instantiateMVars type`, `SynthInstance.lean:967`).

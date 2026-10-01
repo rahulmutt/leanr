@@ -101,7 +101,7 @@
     // oracle: `addExprMVarDecl`/`addLevelMVarDecl` stamp `depth :=
     // mctx.depth` (MetavarContext.lean:813, :834); `incDepth` (:932-936);
     // `withNewMCtxDepthImp` restores the whole saved mctx and `postponed`
-    // (Basic.lean:1973-1978).
+    // (Basic.lean:1974-1980).
 
     fn declare_level_named(ctx: &mut MetaCtx, s: &str) -> crate::LMVarId {
         let sid = ctx.scratch.intern_str(None, s).unwrap();
@@ -258,7 +258,7 @@ Fix every other `level_decls` use (`contains` → `contains_key`; grep
 
     /// oracle: `LMVarId.isReadOnly` (Basic.lean:1000-1001),
     /// `depth < levelAssignDepth` — the negation of
-    /// `isLevelMVarAssignable` (MetavarContext.lean:470-474).
+    /// `isLevelMVarAssignable` (MetavarContext.lean:471-474).
     pub fn is_level_mvar_read_only(&self, id: LMVarId) -> bool {
         self.level_mvar_depth(id) < self.level_assign_depth
     }
@@ -280,7 +280,7 @@ Fix every other `level_decls` use (`contains` → `contains_key`; grep
 - [ ] **Step 4: Implement `with_new_mctx_depth` in `metactx.rs`** (next to `with_full_approx_def_eq`)
 
 ```rust
-    /// oracle: `withNewMCtxDepthImp` (`Lean/Meta/Basic.lean:1973-1978`):
+    /// oracle: `withNewMCtxDepthImp` (`Lean/Meta/Basic.lean:1974-1980`):
     /// `incDepth`, clear `postponed`, run, then restore the WHOLE saved
     /// mctx and `postponed` in a `finally`. Restoring the whole mctx
     /// discards every assignment made inside, including to inner mvars,
@@ -494,7 +494,7 @@ git commit -m "leanr_meta: isReadOnlyOrSyntheticOpaque depth arm at the three as
 Oracle (open each line before citing):
 - `solve` (LevelDefEq.lean:101-116): `if (← mvarId.isReadOnly) then return .undef` (`:104-105`); `else if (← isMVarWithGreaterDepth v mvarId) then assignLevelMVar v.mvarId! u; return .true` (`:106-110`), where `isMVarWithGreaterDepth v m` = `v` is `.mvar m'` with `depth m' > depth m` (`:93-96`).
 - `decAux?` `isReadOnly` (DecLevel.lean): grep `isReadOnly` there and cite the exact line.
-- `hasAssignableLevelMVar` (HasAssignableMVar.lean:17-21) uses `isLevelMVarAssignable` (MetavarContext.lean:470-474).
+- `hasAssignableLevelMVar` (HasAssignableMVar.lean:17-21) uses `isLevelMVarAssignable` (MetavarContext.lean:471-474).
 - Not gated, faithfully: `tryApproxSelfMax`/`tryApproxMaxMax` (LevelDefEq.lean:39-73) and `solveSelfMax` (`:32-37`) call `assignLevelMVar` with no read-only check. Do **not** add one to `try_approx_self_max`/`try_approx_max_max`/`solve_self_max`.
 
 - [ ] **Step 1: Write the failing tests** (append to `level.rs` `mod tests`)
@@ -609,7 +609,7 @@ In `solve`, replace the two SEAM blocks:
 In `dec_level`: `let is_read_only = ctx.mctx.is_level_mvar_read_only(mvar_id);` with the DecLevel.lean citation you opened.
 
 In `has_assignable_level_mvar`:
-`LevelRow::MVar(name) => Ok(name.is_some_and(|n| !ctx.mctx.is_level_mvar_read_only(LMVarId(n))))`. Update its doc so it says the depth gate is now real (`isLevelMVarAssignable`, MetavarContext.lean:470-474).
+`LevelRow::MVar(name) => Ok(name.is_some_and(|n| !ctx.mctx.is_level_mvar_read_only(LMVarId(n))))`. Update its doc so it says the depth gate is now real (`isLevelMVarAssignable`, MetavarContext.lean:471-474).
 
 Rewrite the module doc § "Depth / read-only seam" to cite the ported sites, and to say the approx helpers are ungated just as in the oracle. If `dec_level`/`has_assignable_level_mvar` are private and the test can't reach them, the test module is a child of the file, so private items are visible. No visibility change is needed.
 
@@ -900,7 +900,7 @@ Under `## Landed` add `### P1 (PR #N): mctx depth + isDefEqStuckEx` with:
 - spec corrections:
   - only **two** of the three stuck sites are ported. `unstuckMVar` (ExprDefEq.lean:1985-2020) sits inside the unported `isDefEqOnFailure`.
   - the expression depth sites are `unassigned_mvar_id`, `is_def_eq_singleton` and `ensure_type`. `isAbstractedUnassignedMVar` / `isEtaUnassignedMVar` are not ported (`config.rs:128-129`). The slow `checkAssignment` mvar arm (`:901`) is not ported.
-  - the oracle's `withNewMCtxDepthImp` restores the whole mctx (Basic.lean:1973-1978), which the spec text did not state.
+  - the oracle's `withNewMCtxDepthImp` restores the whole mctx (Basic.lean:1974-1980), which the spec text did not state.
   - the proof-irrelevance port in the both-unassignable branch.
 - open follow-ups:
   - synthesis onto real depth + `isDefEqStuckEx`
