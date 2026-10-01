@@ -467,12 +467,16 @@ is green.
 
 **Spec corrections** (the spec text above is the plan-time design):
 
-- **The "union over the import closure" is not P1 code.** No production
-  caller builds a `MetaCtx` across modules. Every caller is a test
-  harness replaying one import-free fixture, and `EnvExtensions` takes
-  plain slices, exactly as for `coe_decls`. The spec's mutation "skip
-  the union" has nothing to mutate in P1. It belongs to whichever slice
-  first builds a multi-module `MetaCtx`.
+- **The "union over the import closure" has no production caller in
+  P1.** The only code that builds a multi-module closure and unions
+  `aux_recs` / `elab_as_elim` by `extend` is
+  `crates/leanr_meta/tests/synth_sweep.rs:609-624`, and that sweep is
+  `#[ignore]`d, so no CI gate covers the union. Every other caller is a
+  test harness replaying one import-free fixture, and `EnvExtensions`
+  takes plain slices, exactly as for `coe_decls`. The spec's mutation
+  "skip the union" therefore has nothing CI-visible to mutate in P1.
+  Follow-up: gate the import-closure union (it belongs to whichever
+  slice first builds a production multi-module `MetaCtx`).
 - **No dedicated malformed-bytes test.** The new decode arms go through
   `name_req`, the same checked path every name decode uses, and
   `crates/leanr_olean/fuzz/fuzz_targets/module_data.rs` already fuzzes
@@ -548,3 +552,17 @@ throws; no `elim.jsonl` name reaches it, and it is a caller precondition.
 suffix; the `aux_recs` golden does not assert the `quickLt` order; the
 `_` rule is only unit-tested for `casesOn`; `ProjBig` saturates at
 `u64::MAX`; the `kabstract` fvar fast path has no `mdata` test.
+
+**Oracle-corpus gaps and follow-ups for P2** (first caller with fvar/mvar
+patterns):
+
+- The `kabstract` oracle corpus lacks spec § Testing P1's "fvar pattern"
+  and "mvar-instantiating match" rows. Both are covered only by unit
+  tests in `crates/leanr_meta/src/kabstract.rs` (the mvar expectation is
+  quoted from a planning-time oracle run). P2 should add both as oracle
+  records, plus an `mdata`-wrapped fvar test for the fast path.
+- `crates/leanr_meta/tests/aux_recursor_oracle.rs` uses `decode_name`,
+  which has no numeric name components, so the `_private.Elab0.0.*`
+  records resolve to a different `NameId` (vacuous today: the oracle
+  says false for all three). Switch to the Num-aware `name_id` from
+  `crates/leanr_elab/tests/support/mod.rs`.

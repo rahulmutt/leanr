@@ -176,7 +176,9 @@ fn deferred_constructs_are_named_seams() {
         // `Nat.casesOn`, `Nat.brecOn` and `@[elab_as_elim]` still take
         // the ordinary path and still emit a different term than the
         // oracle, with no seam — their four disjuncts read `auxRecExt` /
-        // the `elabAsElim` tag, extensions leanr does not decode.
+        // the `elabAsElim` tag. Both are decoded (M4b-4c P1:
+        // `ModuleData::aux_recs` / `elab_as_elim`, `MetaCtx` predicates),
+        // but the elaborator does not consult them until P2.
         // `fixture_declares_no_undecoded_elab_attributes` below is the
         // backstop for those; M4b-4c owns the real fix.
         ("Nat.rec", "M4b-4c"),
@@ -359,15 +361,16 @@ fn anonymous_constructor_is_registered() {
 ///
 ///   * **aux recursors** — `Nat.casesOn`, `Nat.recOn`, `Nat.brecOn` and
 ///     friends. `isAuxRecursorWithSuffix` (`AuxRecursor.lean:39-51`)
-///     reads the `auxRecExt` tag extension, which leanr does not decode,
-///     so these still take the ordinary path and still emit a different
-///     term than the oracle, with NO seam;
+///     reads the `auxRecExt` tag extension, which M4b-4c P1 decodes
+///     (`ModuleData::aux_recs`) but the elaborator does not consult until
+///     P2, so these still take the ordinary path and still emit a
+///     different term than the oracle, with NO seam;
 ///   * **`@[elab_as_elim]` declarations** — same, via the `elabAsElim`
-///     tag extension.
+///     tag extension (`ModuleData::elab_as_elim`).
 ///
-/// Neither is detectable at runtime today, so both are kept out of the
-/// committed corpus by source text instead. M4b-4c P1 decoded
-/// `elab_as_elim` (the fixture now declares tagged eliminators, so only
+/// Neither is consulted at runtime today, so both are kept out of the
+/// committed corpus by source text instead. M4b-4c P1 decoded both
+/// extensions (the fixture now declares tagged eliminators, so only
 /// the QUERY corpus is banned from using them); P2 builds `ElabElim` and
 /// lifts the query ban.
 ///

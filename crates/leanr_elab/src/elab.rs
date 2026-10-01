@@ -148,10 +148,9 @@ impl<'e> TermElabM<'e> {
     /// universe-polymorphic default instance, leaving its levels as
     /// rigid params that cannot unify with the goal's.
     ///
-    /// A missing declaration yields the empty parameter list, and the
-    /// caller's `infer_type` then raises the real "unknown constant".
-    /// Unreachable by construction — every name here came out of the
-    /// environment's own default-instance table (for the default-instance caller).
+    /// Caller precondition: `name` must be in the environment. Unlike
+    /// the oracle's `getConstInfo` (which throws "unknown constant"), a
+    /// missing name silently yields an empty level list.
     pub(crate) fn mk_const_with_fresh_mvar_levels_of(
         &mut self,
         name: NameId,

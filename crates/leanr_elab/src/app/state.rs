@@ -13,6 +13,7 @@ use leanr_kernel::BinderInfo;
 use leanr_meta::MVarId;
 
 use crate::app::expand::{Arg, NamedArg};
+use crate::app::lval;
 use crate::dispatch::SynElem;
 use crate::elab::TermElabM;
 use crate::error::ElabError;
@@ -573,10 +574,6 @@ pub(crate) fn open_forall_telescope_reducing(
     elab: &mut TermElabM<'_>,
     ty: ExprId,
 ) -> Result<(Vec<TelescopeBinder>, ExprId), ElabError> {
-    let node = |elab: &TermElabM<'_>, e: ExprId| {
-        let base = elab.view.store;
-        elab.mctx.store().expr_node(Some(base), e)
-    };
     let mut binders: Vec<TelescopeBinder> = Vec::new();
     let mut cur = ty;
     loop {
@@ -586,13 +583,13 @@ pub(crate) fn open_forall_telescope_reducing(
         // Reducing an already-`forall` type is a no-op, so this
         // guard is a cost decision, not a semantic one — but it
         // keeps the walk shaped like the oracle's.
-        let reduced = if matches!(node(elab, cur), Node::Forall { .. }) {
+        let reduced = if matches!(lval::node(elab, cur), Node::Forall { .. }) {
             cur
         } else {
             // Same as `AppElab::whnf_forall`: keep the whnf result only
             // if it is a `forall`.
             let r = elab.mctx.whnf(cur)?;
-            if matches!(node(elab, r), Node::Forall { .. }) {
+            if matches!(lval::node(elab, r), Node::Forall { .. }) {
                 r
             } else {
                 cur
@@ -603,7 +600,7 @@ pub(crate) fn open_forall_telescope_reducing(
             binder_type,
             body,
             binder_info,
-        } = node(elab, reduced)
+        } = lval::node(elab, reduced)
         else {
             return Ok((binders, cur));
         };
