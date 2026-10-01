@@ -1799,7 +1799,7 @@ impl<'e> MetaCtx<'e> {
         match self.synth_instance(ty) {
             Ok(Some(val)) => Ok(LOption::Some(val)),
             Ok(None) => Ok(LOption::None),
-            Err(MetaError::IsDefEqStuck(_)) => Ok(LOption::Undef),
+            Err(MetaError::IsDefEqStuck) => Ok(LOption::Undef),
             Err(e) => Err(e),
         }
     }

@@ -162,6 +162,11 @@ pub struct Config {
     /// divergence — TC synthesis running on a `syntheticOpaque` mvar the
     /// oracle refuses.
     pub assign_synthetic_opaque: bool,
+    /// oracle: Basic.lean:134 (default false); in the cache key
+    /// (Basic.lean:206). When set, a defeq query that is stuck on an
+    /// unassignable mvar throws [`crate::MetaError::IsDefEqStuck`]
+    /// instead of answering `false`.
+    pub is_def_eq_stuck_ex: bool,
 }
 
 /// Breaks the build when `Config` changes size — i.e. when a field is
@@ -170,7 +175,7 @@ pub struct Config {
 /// `cache_key`, then update this constant. See the module doc for the
 /// two Lean bugs this guards against.
 const ASSERT_CONFIG_SIZE: () = assert!(
-    std::mem::size_of::<Config>() == 16,
+    std::mem::size_of::<Config>() == 17,
     "Config changed size: a field was added or removed. Decide whether \
      it is semantically relevant to definitional equality and therefore \
      belongs in Config::cache_key, then update this assertion. A field \
@@ -201,6 +206,8 @@ impl Default for Config {
             // Oracle default: Basic.lean:145,
             // `assignSyntheticOpaque : Bool := false`.
             assign_synthetic_opaque: false,
+            // Oracle default: Basic.lean:134, `isDefEqStuckEx : Bool := false`.
+            is_def_eq_stuck_ex: false,
         }
     }
 }
@@ -240,6 +247,8 @@ mod tests {
         // Basic.lean:145, `assignSyntheticOpaque : Bool := false` —
         // ordinary unification must not assign a syntheticOpaque mvar.
         assert!(!c.assign_synthetic_opaque);
+        // Basic.lean:134, `isDefEqStuckEx : Bool := false`.
+        assert!(!c.is_def_eq_stuck_ex);
     }
 
     // Plan-2 additions match the oracle defaults (Basic.lean): iota,
@@ -250,6 +259,16 @@ mod tests {
         assert!(c.iota);
         assert!(c.zeta_unused);
         assert!(c.zeta_have);
+    }
+
+    #[test]
+    fn stuck_ex_flag_is_in_the_cache_key() {
+        let a = Config::default();
+        let b = Config {
+            is_def_eq_stuck_ex: true,
+            ..a
+        };
+        assert_ne!(a.cache_key(), b.cache_key());
     }
 
     #[test]

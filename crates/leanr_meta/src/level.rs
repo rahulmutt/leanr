@@ -17,19 +17,14 @@
 //! deliberately ungated, exactly as in the oracle (LevelDefEq.lean:
 //! 32-73 call `assignLevelMVar` with no read-only check).
 //!
-//! # `isDefEqStuckEx` seam
+//! # `isDefEqStuckEx`
 //!
-//! `Config.isDefEqStuckEx` (Basic.lean:134, default `false`) is set
-//! `true` in exactly one place in the oracle: `SynthInstance.lean:963`,
-//! typeclass search (`withConfig (fun config => { config with
-//! isDefEqStuckEx := true, .. })`), out of scope this plan (plan 4). So
-//! at tier 1 the flag is always `false`, and every `if
-//! cfg.isDefEqStuckEx && .. then throwIsDefEqStuck else <else>` in this
-//! module collapses to its `<else>` branch unconditionally — this is
-//! why `config.rs`'s own doc comment says the flag deliberately has no
-//! `Config` field here at all (a typed error variant, `MetaError::
-//! IsDefEqStuck`, is reserved for the EXPR-level stuck condition,
-//! ExprDefEq.lean, a different call site entirely).
+//! `Config.isDefEqStuckEx` (Basic.lean:134, default `false`) is ported
+//! as `Config::is_def_eq_stuck_ex`. Two oracle throw sites are ported:
+//! the stuck tail of `isLevelDefEqAux` below (LevelDefEq.lean:167-173)
+//! and the `(None, None)` arm of `assign.rs` (ExprDefEq.lean:1949-1956).
+//! The flag is set only by `MetaCtx::with_def_eq_stuck_ex`; synthesis's
+//! own setting (SynthInstance.lean:963) stays a follow-up.
 //!
 //! # Id-native discipline
 //!
@@ -152,10 +147,18 @@ impl<'e> MetaCtx<'e> {
             let assignable =
                 ctx.has_assignable_level_mvar(lhs)? || ctx.has_assignable_level_mvar(rhs)?;
             if !assignable {
-                // SEAM: `isDefEqStuckEx` (module doc) — always `false`
-                // at tier 1, so this always takes the oracle's `else
-                // return false` branch; `throwIsDefEqStuck` is never
-                // reached here.
+                // oracle: LevelDefEq.lean:167-173.
+                let lhs_mvar = matches!(
+                    *ctx.scratch.level_row(Some(ctx.view.store), lhs),
+                    LevelRow::MVar(_)
+                );
+                let rhs_mvar = matches!(
+                    *ctx.scratch.level_row(Some(ctx.view.store), rhs),
+                    LevelRow::MVar(_)
+                );
+                if ctx.cfg.is_def_eq_stuck_ex && (lhs_mvar || rhs_mvar) {
+                    return Err(MetaError::IsDefEqStuck);
+                }
                 Ok(false)
             } else {
                 ctx.postponed.push((lhs, rhs));
@@ -1035,6 +1038,28 @@ mod tests {
                 assert!(!ctx.mctx.is_level_assigned(id));
             });
             assert!(ctx.dec_level(u, true).unwrap().is_some());
+        });
+    }
+
+    #[test]
+    fn read_only_level_mvar_throws_stuck_only_under_the_flag() {
+        with_ctx(|ctx| {
+            let z = ctx.scratch.level_zero(None).unwrap();
+            let one = ctx.scratch.level_succ(None, z).unwrap();
+            let (_, u) = lmvar(ctx, "?u");
+            ctx.with_new_mctx_depth(false, |ctx| {
+                assert_eq!(ctx.is_level_def_eq(u, one), Ok(false));
+                assert_eq!(ctx.is_level_def_eq(one, u), Ok(false));
+                assert_eq!(
+                    ctx.with_def_eq_stuck_ex(|ctx| ctx.is_level_def_eq(u, one)),
+                    Err(crate::MetaError::IsDefEqStuck)
+                );
+                assert_eq!(
+                    ctx.with_def_eq_stuck_ex(|ctx| ctx.is_level_def_eq(one, u)),
+                    Err(crate::MetaError::IsDefEqStuck)
+                );
+            });
+            assert!(!ctx.cfg().is_def_eq_stuck_ex);
         });
     }
 }

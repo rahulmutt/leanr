@@ -128,10 +128,15 @@ impl<'e> MetaCtx<'e> {
             (Some(_), None) => Ok(Some(self.process_assignment_prime(t, s)?)),
             (None, Some(_)) => Ok(Some(self.process_assignment_prime(s, t)?)),
             (None, None) => {
-                // oracle: proof-irrelevance then `isDefEqStuckEx`
-                // (:1922-1926) — both already-cited seams (task 6;
-                // `level.rs`'s module doc on `isDefEqStuckEx`). Never a
-                // silent `true`.
+                // oracle: ExprDefEq.lean:1949-1956 — both sides
+                // unassignable (read-only depth, or syntheticOpaque):
+                // proof irrelevance first, then `isDefEqStuckEx`.
+                if let Some(b) = self.is_def_eq_proof_irrel(t, s)? {
+                    return Ok(Some(b));
+                }
+                if self.cfg.is_def_eq_stuck_ex {
+                    return Err(MetaError::IsDefEqStuck);
+                }
                 Ok(Some(false))
             }
             (Some(_), Some(_)) => self.is_def_eq_mvar_mvar(t, s),
@@ -2835,6 +2840,55 @@ mod tests {
                 }
                 ctx.lctx_restore(cp);
             }
+        });
+    }
+
+    // ---- isDefEqStuckEx (macro/binop% P1, Task 4) ----
+    // oracle ExprDefEq.lean:1949-1956.
+
+    #[test]
+    fn read_only_vs_rigid_throws_stuck_only_under_the_flag() {
+        with_n_ctx(|ctx| {
+            // `?m : Sort 0` vs `N.zero : Sort 0`: the terms' type is
+            // `Sort 0`, which is not a Prop, so proof irrelevance does
+            // not apply and the stuck branch is exercised.
+            let ty = n_type(ctx);
+            let (m_expr, _) = fresh_mvar(ctx, ty);
+            let zero = mk_const(ctx, "N.zero");
+            ctx.with_new_mctx_depth(false, |ctx| {
+                assert_eq!(ctx.is_def_eq(m_expr, zero), Ok(false));
+                assert_eq!(
+                    ctx.with_def_eq_stuck_ex(|ctx| ctx.is_def_eq(m_expr, zero)),
+                    Err(crate::MetaError::IsDefEqStuck)
+                );
+                assert_eq!(
+                    ctx.with_def_eq_stuck_ex(|ctx| ctx.is_def_eq_guarded(m_expr, zero)),
+                    Ok(false)
+                );
+            });
+            // Flag off outside: unaffected.
+            assert!(!ctx.cfg().is_def_eq_stuck_ex);
+        });
+    }
+
+    #[test]
+    fn both_unassignable_props_are_closed_by_proof_irrelevance() {
+        // `?p =?= ?q`, both syntheticOpaque, both of type `P : Prop`:
+        // the oracle returns `.true` by proof irrelevance before the
+        // stuck test.
+        with_n_ctx(|ctx| {
+            let prop = n_type(ctx); // Sort 0
+            let p_ty = fresh_fvar(ctx, prop, "P");
+            let (p, _) =
+                crate::test_support::fresh_mvar_of_kind(ctx, p_ty, MVarKind::SyntheticOpaque);
+            let (q, _) =
+                crate::test_support::fresh_mvar_of_kind(ctx, p_ty, MVarKind::SyntheticOpaque);
+            assert_eq!(ctx.is_def_eq(p, q), Ok(true));
+            // Also under the flag: proof irrelevance wins over the throw.
+            assert_eq!(
+                ctx.with_def_eq_stuck_ex(|ctx| ctx.is_def_eq(p, q)),
+                Ok(true)
+            );
         });
     }
 }

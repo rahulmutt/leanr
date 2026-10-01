@@ -1964,6 +1964,39 @@ impl<'e> MetaCtx<'e> {
         self.cfg.assign_synthetic_opaque = saved;
         r
     }
+
+    /// oracle: `withConfig (fun c => { c with isDefEqStuckEx := true })`
+    /// (SynthInstance.lean:963's setting). Restores the whole config, as
+    /// `withConfig` does.
+    pub fn with_def_eq_stuck_ex<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let saved = self.cfg;
+        self.cfg.is_def_eq_stuck_ex = true;
+        let r = f(self);
+        self.cfg = saved;
+        r
+    }
+
+    /// oracle: `isDefEqGuarded` / `isExprDefEqGuarded` (Basic.lean:2513-2518):
+    /// `try isExprDefEq a b catch _ => return false`. `Core.tryCatch`
+    /// does not catch runtime exceptions, so resource exhaustion
+    /// (maxRecDepth <-> `DepthBudgetExhausted`, heartbeats <->
+    /// `StepBudgetExhausted`, `Kernel(BankExhausted)`) propagates.
+    pub fn is_def_eq_guarded(&mut self, t: ExprId, s: ExprId) -> Result<bool, MetaError> {
+        let r = self.is_def_eq(t, s);
+        Self::guard_def_eq_result(r)
+    }
+
+    pub(crate) fn guard_def_eq_result(r: Result<bool, MetaError>) -> Result<bool, MetaError> {
+        match r {
+            Ok(b) => Ok(b),
+            Err(
+                e @ (MetaError::DepthBudgetExhausted
+                | MetaError::StepBudgetExhausted
+                | MetaError::Kernel(leanr_kernel::KernelError::BankExhausted)),
+            ) => Err(e),
+            Err(_) => Ok(false),
+        }
+    }
 }
 
 /// A save point for `checkpointDefEq` (oracle Basic.lean:2438). Holds
@@ -3265,6 +3298,35 @@ mod tests {
             assert!(ctx.mctx.is_read_only(crate::MVarId(n)));
             assert_eq!(ctx.mctx.level_mvar_depth(crate::LMVarId(n)), 0);
             assert!(!ctx.mctx.is_level_mvar_read_only(crate::LMVarId(n)));
+        });
+    }
+
+    #[test]
+    fn is_def_eq_guarded_rethrows_resource_exhaustion_only() {
+        use leanr_kernel::KernelError;
+        for (e, propagates) in [
+            (MetaError::IsDefEqStuck, false),
+            (MetaError::Unsupported("x".into()), false),
+            (MetaError::Infer("x".into()), false),
+            (MetaError::DepthBudgetExhausted, true),
+            (MetaError::StepBudgetExhausted, true),
+            (MetaError::Kernel(KernelError::BankExhausted), true),
+        ] {
+            assert_eq!(
+                MetaCtx::guard_def_eq_result(Err(e.clone())).is_err(),
+                propagates,
+                "{e:?}"
+            );
+        }
+        assert_eq!(MetaCtx::guard_def_eq_result(Ok(true)), Ok(true));
+    }
+
+    #[test]
+    fn with_def_eq_stuck_ex_restores_the_whole_config() {
+        with_ctx(|ctx| {
+            assert!(!ctx.cfg().is_def_eq_stuck_ex);
+            ctx.with_def_eq_stuck_ex(|c| assert!(c.cfg().is_def_eq_stuck_ex));
+            assert!(!ctx.cfg().is_def_eq_stuck_ex);
         });
     }
 }
