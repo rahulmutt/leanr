@@ -1028,6 +1028,8 @@ impl<'s> InterpId<'s> {
         let mut structures = Vec::new();
         let mut classes = Vec::new();
         let mut coe_decls = Vec::new();
+        let mut aux_recs = Vec::new();
+        let mut elab_as_elim = Vec::new();
         for pair in array(&f[4])? {
             let (pf, _) = ctor(pair, 0, 2, "ModuleData.entries pair")?;
             let ext_name = self.name(&pf[0])?;
@@ -1153,6 +1155,24 @@ impl<'s> InterpId<'s> {
                         coe_decls.push(self.name_req(e)?);
                     }
                 }
+                // TagDeclarationExtension (`mkTagDeclarationExtension`,
+                // EnvExtension.lean:92-102; `auxRecExt`, AuxRecursor.lean:26):
+                // a bare `Array Name`, the same wire shape as the tag
+                // attribute just above.
+                "Lean.auxRecExt" => {
+                    for e in array(&pf[1])? {
+                        aux_recs.push(self.name_req(e)?);
+                    }
+                }
+                // TagAttribute, same posture as `Lean.Meta.coeDeclAttr`
+                // above. Key = the `builtin_initialize`d constant
+                // `Lean.Elab.Term.elabAsElim` (App.lean:1123), confirmed with
+                // `readModuleData` (M4b-4c spec § Evidence).
+                "Lean.Elab.Term.elabAsElim" => {
+                    for e in array(&pf[1])? {
+                        elab_as_elim.push(self.name_req(e)?);
+                    }
+                }
                 // Plain `registerPersistentEnvExtension` (`Structure.lean:87-92`):
                 // bare `StructureInfo` ctors, no scoped wrapper. PRIVATE, hence the
                 // mangled key — see `crate::StructureInfo`'s doc.
@@ -1191,6 +1211,8 @@ impl<'s> InterpId<'s> {
             projection_fns,
             classes,
             coe_decls,
+            aux_recs,
+            elab_as_elim,
             structures,
         })
     }
