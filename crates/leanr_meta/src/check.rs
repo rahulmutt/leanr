@@ -176,8 +176,7 @@ impl<'e> MetaCtx<'e> {
     /// in `get_level`, which stays untouched for its other callers. Without
     /// it a binder type `?a : ?T` would be reported ill-typed. Not
     /// assignable (synthetic opaque while `assign_synthetic_opaque` is off,
-    /// or undeclared) throws `type expected` (`:171-172`). The depth half
-    /// of `isReadOnlyOrSyntheticOpaque` is the crate's single-depth seam.
+    /// or undeclared) throws `type expected` (`:171-172`).
     fn ensure_type(&mut self, t: ExprId) -> Result<(), MetaError> {
         let tt = self.infer_type(t)?;
         // oracle: `getLevel` whnfs with `whnfD` (`InferType.lean:166`), i.e.
@@ -187,12 +186,16 @@ impl<'e> MetaCtx<'e> {
             Node::Sort { .. } => Ok(()),
             Node::MVar { id: Some(id) } => {
                 let mid = MVarId(id);
-                let assignable = match self.mctx.decl(mid) {
-                    Some(d) => {
-                        !(d.kind == MVarKind::SyntheticOpaque && !self.cfg.assign_synthetic_opaque)
-                    }
-                    None => false,
-                };
+                // oracle: `isReadOnlyOrSyntheticOpaque` (Basic.lean:979-985):
+                // the depth arm (`:981-982`), then the kind arm (`:985`).
+                let assignable = !self.mctx.is_read_only(mid)
+                    && match self.mctx.decl(mid) {
+                        Some(d) => {
+                            !(d.kind == MVarKind::SyntheticOpaque
+                                && !self.cfg.assign_synthetic_opaque)
+                        }
+                        None => false,
+                    };
                 if !assignable {
                     return Err(MetaError::Infer("type expected".into()));
                 }
@@ -276,6 +279,25 @@ mod tests {
                 .unwrap();
             assert!(ctx.is_type_correct(lam).unwrap());
             assert!(ctx.mctx().is_assigned(t_id), "?T := Sort ?u");
+        });
+    }
+
+    /// An `?a : ?T` minted OUTSIDE `with_new_mctx_depth` is read-only
+    /// inside it, so `ensureType ?a` throws `type expected`
+    /// (InferType.lean:170-172) and leaves `?T` unassigned.
+    #[test]
+    fn ensure_type_refuses_outer_type_mvar_inside_new_depth() {
+        with_meta0_ctx(|ctx| {
+            let n = c(ctx, "N");
+            let ty = ctx.infer_type(n).unwrap();
+            let (t, t_id) = fresh_mvar(ctx, ty);
+            let (a, _) = fresh_mvar(ctx, t);
+            let r = ctx.with_new_mctx_depth(false, |ctx| ctx.ensure_type(a));
+            assert!(matches!(r, Err(crate::MetaError::Infer(_))), "{r:?}");
+            assert!(!ctx.mctx().is_assigned(t_id));
+            // Positive control outside the scope.
+            ctx.ensure_type(a).unwrap();
+            assert!(ctx.mctx().is_assigned(t_id));
         });
     }
 

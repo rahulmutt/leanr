@@ -56,14 +56,15 @@
 //! unchanged — see the task-5 report for this same argument restated
 //! for a human reviewer.
 //!
-//! # Depth / read-only seam (repeats `level.rs`'s own posture)
+//! # Depth / read-only
 //!
-//! Every `isReadOnly`/`isMVarWithGreaterDepth`/`isSubPrefixOf`-shaped
-//! oracle check below collapses to its tier-1 answer (all declared
-//! mvars mutually assignable and mutually visible, single flat mctx
-//! depth) — named at each site, never silently dropped. `MVarKind::
-//! SyntheticOpaque` is the one REAL (non-seamed) non-assignability
-//! reason this crate does track (`mvar_ctx.rs`'s own doc comment).
+//! Metavariable-context depth is modelled (`mvar_ctx.rs`, macro/binop%
+//! P1). `isReadOnlyOrSyntheticOpaque` is ported at `unassigned_mvar_id`,
+//! `is_def_eq_singleton` and `ensure_type`. Still seamed: the
+//! `isSubPrefixOf` arm of `CheckAssignmentQuick` (`:1075`) and the slow
+//! `checkAssignment` mvar arm (ExprDefEq.lean:901), which leanr does not
+//! port. `elimMVar`'s depth-dependent `newMVarKind`
+//! (MetavarContext.lean:1187, :1195) is nondep R9, out of scope.
 
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::ExprId;
@@ -154,10 +155,12 @@ impl<'e> MetaCtx<'e> {
                     return None;
                 }
                 match self.mctx.decl(mid) {
-                    // oracle: `isAssignable`'s `isReadOnlyOrSyntheticOpaque`
-                    // (ExprDefEq.lean:1731-1733; the `syntheticOpaque` arm
-                    // is `Basic.lean:985`), now gated by
-                    // `Config.assignSyntheticOpaque` (M4b-3 P3 task 4):
+                    // oracle: `isAssignable` -> `isReadOnlyOrSyntheticOpaque`
+                    // (ExprDefEq.lean:1731-1733; Basic.lean:979-985): the
+                    // depth arm (`:981-982`) first ...
+                    Some(_) if self.mctx.is_read_only(mid) => None,
+                    // ... then the `syntheticOpaque` arm (`:985`), gated by
+                    // `Config.assignSyntheticOpaque`:
                     // `withAssignableSyntheticOpaque` flips it so a
                     // default instance can assign an opaque outParam.
                     Some(d)
@@ -1649,8 +1652,13 @@ mod tests {
         let mut base = Store::persistent();
         let z = base.level_zero(None).expect("level zero");
         let sort0 = base.expr_sort(None, z).expect("sort 0");
+        // `N.f : Sort 0 -> Sort 0`: the one APPLICABLE head (every other
+        // axiom here is a bare `Sort 0`), for the depth tests.
+        let sort0_to_sort0 = base
+            .expr_forall(None, None, sort0, sort0, leanr_kernel::BinderInfo::Default)
+            .expect("forall");
         let mut consts = HashMap::new();
-        for name in ["N.zero", "N.succ"] {
+        for name in ["N.zero", "N.succ", "N.f"] {
             let mut id: Option<NameId> = None;
             for part in name.split('.') {
                 let sid = base.intern_str(None, part).expect("intern");
@@ -1661,7 +1669,7 @@ mod tests {
                 val: ConstantVal {
                     name: nid,
                     level_params: vec![],
-                    ty: sort0,
+                    ty: if name == "N.f" { sort0_to_sort0 } else { sort0 },
                 },
                 is_unsafe: false,
             });
@@ -1857,6 +1865,59 @@ mod tests {
             let zero = mk_const(ctx, "N.zero");
             assert!(ctx.is_def_eq(m_expr, zero).unwrap());
             assert_eq!(ctx.mctx.assignment(m_id), Some(zero));
+        });
+    }
+
+    // ---- mctx depth (macro/binop% P1, Task 2) ----
+    // oracle: `isAssignable` -> `isReadOnlyOrSyntheticOpaque`
+    // (ExprDefEq.lean:1731-1733; Basic.lean:979-985).
+
+    #[test]
+    fn outer_mvar_is_not_assigned_inside_a_new_depth() {
+        with_n_ctx(|ctx| {
+            let ty = n_type(ctx);
+            let (m_expr, m_id) = fresh_mvar(ctx, ty);
+            let zero = mk_const(ctx, "N.zero");
+            let inside = ctx.with_new_mctx_depth(false, |ctx| {
+                let r = ctx.is_def_eq(m_expr, zero).unwrap();
+                assert!(!ctx.mctx.is_assigned(m_id));
+                r
+            });
+            assert!(!inside, "outer ?m is read-only at depth 1");
+            // Same query OUTSIDE must not be answered by a cached in-scope
+            // `false`.
+            assert!(ctx.is_def_eq(m_expr, zero).unwrap());
+            assert_eq!(ctx.mctx.assignment(m_id), Some(zero));
+        });
+    }
+
+    #[test]
+    fn inner_mvar_is_assigned_inside_a_new_depth() {
+        with_n_ctx(|ctx| {
+            let ty = n_type(ctx);
+            let zero = mk_const(ctx, "N.zero");
+            ctx.with_new_mctx_depth(false, |ctx| {
+                let (m_expr, m_id) = fresh_mvar(ctx, ty);
+                assert!(ctx.is_def_eq(m_expr, zero).unwrap());
+                assert_eq!(ctx.mctx.assignment(m_id), Some(zero));
+            });
+        });
+    }
+
+    #[test]
+    fn outer_mvar_under_an_application_is_read_only_inside_a_new_depth() {
+        // `N.f ?m =?= N.f N.zero`: the args path reaches `?m =?=
+        // N.zero` -- the `BitVec n =?= BitVec ?m` shape from the spec.
+        with_n_ctx(|ctx| {
+            let ty = n_type(ctx);
+            let (m_expr, m_id) = fresh_mvar(ctx, ty);
+            let zero = mk_const(ctx, "N.zero");
+            let f = mk_const(ctx, "N.f");
+            let lhs = mk_app(ctx, f, m_expr);
+            let rhs = mk_app(ctx, f, zero);
+            assert!(!ctx.with_new_mctx_depth(false, |ctx| ctx.is_def_eq(lhs, rhs).unwrap()));
+            assert!(!ctx.mctx.is_assigned(m_id));
+            assert!(ctx.is_def_eq(lhs, rhs).unwrap());
         });
     }
 
