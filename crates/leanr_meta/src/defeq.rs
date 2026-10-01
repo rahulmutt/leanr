@@ -99,7 +99,16 @@ impl<'e> MetaCtx<'e> {
         let saved_postponed = std::mem::take(&mut self.postponed);
         match self.is_def_eq_core(t, s) {
             Ok(true) => {
-                if self.process_postponed()? {
+                // oracle: `checkpointDefEq`'s `catch ex => s.restore; throw ex`
+                // (Basic.lean:2463-2465) also covers `processPostponed`.
+                let ok = match self.process_postponed() {
+                    Ok(b) => b,
+                    Err(e) => {
+                        self.rollback(snap);
+                        return Err(e);
+                    }
+                };
+                if ok {
                     // merge saved + newly-postponed (level.rs's real
                     // `process_postponed`, task 4).
                     let mut merged = saved_postponed;

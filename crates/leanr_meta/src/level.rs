@@ -1062,4 +1062,39 @@ mod tests {
             assert!(!ctx.cfg().is_def_eq_stuck_ex);
         });
     }
+
+    #[test]
+    fn postponed_recheck_that_turns_stuck_rolls_back_is_def_eq() {
+        // `(Sort ?r -> Sort ?a -> Sort ?b) =?= (Sort (max ?a ?b) -> Sort 1 -> Sort 1)`
+        // with `?r` read-only. The first domain postpones `?r =?= max ?a ?b`;
+        // the rest assigns `?a`, `?b := 1`; the recheck then has nothing
+        // assignable and, under the flag, throws stuck. oracle:
+        // `checkpointDefEq` restores on any exception (Basic.lean:2463-2465).
+        with_ctx(|ctx| {
+            let z = ctx.scratch.level_zero(None).unwrap();
+            let one = ctx.scratch.level_succ(None, z).unwrap();
+            let (r_id, r) = lmvar(ctx, "?r");
+            ctx.with_new_mctx_depth(false, |ctx| {
+                let (a_id, a) = lmvar(ctx, "?a");
+                let (b_id, b) = lmvar(ctx, "?b");
+                let mx = ctx.scratch.level_max(None, a, b).unwrap();
+                let mut sort = |l| ctx.scratch.expr_sort(None, l).unwrap();
+                let (sr, sa, sb, smx, s1) = (sort(r), sort(a), sort(b), sort(mx), sort(one));
+                let bi = leanr_kernel::BinderInfo::Default;
+                let mut pi = |d, b| ctx.scratch.expr_forall(None, None, d, b, bi).unwrap();
+                let inner_l = pi(sa, sb);
+                let lhs = pi(sr, inner_l);
+                let inner_r = pi(s1, s1);
+                let rhs = pi(smx, inner_r);
+                let pre = vec![(z, one)];
+                ctx.postponed = pre.clone();
+                let res = ctx.with_def_eq_stuck_ex(|ctx| ctx.is_def_eq_guarded(lhs, rhs));
+                assert_eq!(res, Ok(false));
+                assert!(!ctx.mctx.is_level_assigned(a_id));
+                assert!(!ctx.mctx.is_level_assigned(b_id));
+                assert!(!ctx.mctx.is_level_assigned(r_id));
+                assert_eq!(ctx.postponed, pre);
+            });
+        });
+    }
 }

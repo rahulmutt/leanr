@@ -23,7 +23,7 @@
 //! # A deliberate subset of the oracle's fields
 //!
 //! The oracle's `Config`/`toKey` covers 19 fields; this `Config` covers
-//! 16. That gap is intentional, not an oversight: `offset_cnstrs` and
+//! 17. That gap is intentional, not an oversight: `offset_cnstrs` and
 //! `eta_struct` arrive with the features that consult them, and
 //! `ASSERT_CONFIG_SIZE` forces
 //! the cache-key decision at that point rather than letting a field
@@ -32,9 +32,7 @@
 //! together with `withAssignableSyntheticOpaque`, the scope that turns
 //! it on — see that field's own doc for which of this crate's
 //! `syntheticOpaque` checks consult it, and which deliberately do not).
-//! `isDefEqStuckEx` is spec-mandated
-//! to become a typed error variant rather than a bool field, so it is
-//! not tracked here at all.
+//! `isDefEqStuckEx` is tracked (`is_def_eq_stuck_ex`, in the key).
 
 use std::hash::{Hash, Hasher};
 

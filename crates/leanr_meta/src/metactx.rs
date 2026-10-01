@@ -1980,19 +1980,23 @@ impl<'e> MetaCtx<'e> {
     /// `try isExprDefEq a b catch _ => return false`. `Core.tryCatch`
     /// does not catch runtime exceptions, so resource exhaustion
     /// (maxRecDepth <-> `DepthBudgetExhausted`, heartbeats <->
-    /// `StepBudgetExhausted`, `Kernel(BankExhausted)`) propagates.
+    /// `StepBudgetExhausted`, `Kernel(BankExhausted | DeepRecursion)`) propagates.
     pub fn is_def_eq_guarded(&mut self, t: ExprId, s: ExprId) -> Result<bool, MetaError> {
         let r = self.is_def_eq(t, s);
         Self::guard_def_eq_result(r)
     }
 
+    /// The `catch _ => false` of [`Self::is_def_eq_guarded`], minus runtime exceptions.
     pub(crate) fn guard_def_eq_result(r: Result<bool, MetaError>) -> Result<bool, MetaError> {
         match r {
             Ok(b) => Ok(b),
             Err(
                 e @ (MetaError::DepthBudgetExhausted
                 | MetaError::StepBudgetExhausted
-                | MetaError::Kernel(leanr_kernel::KernelError::BankExhausted)),
+                | MetaError::Kernel(
+                    leanr_kernel::KernelError::BankExhausted
+                    | leanr_kernel::KernelError::DeepRecursion,
+                )),
             ) => Err(e),
             Err(_) => Ok(false),
         }
@@ -3311,6 +3315,7 @@ mod tests {
             (MetaError::DepthBudgetExhausted, true),
             (MetaError::StepBudgetExhausted, true),
             (MetaError::Kernel(KernelError::BankExhausted), true),
+            (MetaError::Kernel(KernelError::DeepRecursion), true),
         ] {
             assert_eq!(
                 MetaCtx::guard_def_eq_result(Err(e.clone())).is_err(),
