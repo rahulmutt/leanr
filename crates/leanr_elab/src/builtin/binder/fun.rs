@@ -14,9 +14,11 @@ use super::{
     elab_type, extract_inst_binder_layout, fresh_type_mvar, intern_binder_name,
     intern_fun_binder_ident, user_binder_kind,
 };
+use crate::app::head::intern_prefixes;
 use crate::dispatch::{non_trivia_children, SynElem};
 use crate::elab::TermElabM;
 use crate::error::ElabError;
+use crate::resolve::resolve_global_name;
 
 /// oracle: `Expr.cleanupAnnotations` (`Lean/Expr.lean:1754-1756`; the
 /// definition itself — `:1748` is inside its docstring) —
@@ -133,41 +135,85 @@ struct FunBinderView {
     bi: BinderInfo,
 }
 
-/// Move of the old `extract_fun_binder`'s `typeAscription` arm: a
-/// parenthesised single-name binder `(x : T)`, which the grammar parses
-/// as a `Term.typeAscription` node (probe-confirmed), NOT an
-/// `explicitBinder`. Named seams (→ `UnsupportedSyntax`): a leading
-/// child that is not a lone ident (`(x y : T)` / `(f a : T)`), and a
-/// paren binder with no type slot.
-fn extract_paren_fun_binder(
-    elab: &mut TermElabM,
-    n: &SyntaxNode,
-    kinds: &KindInterner,
-) -> Result<(NameId, SynElem), ElabError> {
-    let tch = non_trivia_children(n);
-    let name_tok = tch
-        .get(1)
-        .and_then(|el| el.as_token())
-        .filter(|t| kinds.name(t.kind()) == "<ident>")
-        .ok_or_else(|| {
-            ElabError::UnsupportedSyntax("fun: paren binder is not a single ident (M4b-3)".into())
-        })?;
-    let name = intern_binder_name(elab, name_tok.text())?;
-    let ty_null = tch
-        .get(3)
-        .and_then(|el| el.as_node())
-        .ok_or_else(|| ElabError::UnsupportedSyntax("fun: binder type slot".into()))?;
-    let ty_elem = non_trivia_children(ty_null)
-        .into_iter()
-        .next()
-        .ok_or_else(|| {
-            ElabError::UnsupportedSyntax("fun: paren binder without a type (M4b-3)".into())
-        })?;
-    Ok((name, ty_elem))
+/// One element of a `getFunBinderIds?` split: the binder name (`None`
+/// for `_`) and, for an ident, its raw text.
+struct FunBinderId {
+    name: Option<NameId>,
+    raw: Option<String>,
 }
 
-/// oracle: `toBinderViews` (`Binders.lean:140-166`), restricted to the
-/// four `funBinder` alternatives (`Parser/Term.lean:379-381`). (Verified
+/// oracle: `getFunBinderIds?` (`Lean/Elab/Binders.lean:320-345`): split
+/// `x₁ … xₙ` into its elements when the head and every argument is an
+/// ident or a `_` hole (`None` = anonymous, as for `{_}`), else `None`
+/// (the caller's pattern fallback). A lone ident or `_` is a 1-element
+/// split. Each element is returned with its raw ident text, which the
+/// `paren` arm's global-name gate needs.
+fn fun_binder_ids(
+    elab: &mut TermElabM,
+    term: &SynElem,
+    kinds: &KindInterner,
+) -> Result<Option<Vec<FunBinderId>>, ElabError> {
+    let elems: Vec<SynElem> = match term {
+        NodeOrToken::Node(n) if kinds.name(n.kind()) == "Lean.Parser.Term.app" => {
+            let ch = non_trivia_children(n);
+            let (Some(head), Some(NodeOrToken::Node(args))) = (ch.first(), ch.get(1)) else {
+                return Ok(None);
+            };
+            std::iter::once(head.clone())
+                .chain(non_trivia_children(args))
+                .collect()
+        }
+        _ => vec![term.clone()],
+    };
+    let mut ids = Vec::with_capacity(elems.len());
+    for el in &elems {
+        match el {
+            NodeOrToken::Token(tok) if kinds.name(tok.kind()) == "<ident>" => {
+                let name = intern_binder_name(elab, tok.text())?;
+                ids.push(FunBinderId {
+                    name: Some(name),
+                    raw: Some(tok.text().to_string()),
+                });
+            }
+            NodeOrToken::Node(n) if kinds.name(n.kind()) == "Lean.Parser.Term.hole" => {
+                ids.push(FunBinderId {
+                    name: None,
+                    raw: None,
+                });
+            }
+            _ => return Ok(None),
+        }
+    }
+    Ok(Some(ids))
+}
+
+/// oracle: `Macro.resolveGlobalName ident.getId` is non-empty — the
+/// `paren` arm's gate (`Binders.lean:384`). Same prefix split and
+/// resolution as an applied ident (`app::head::elab_app_fn_id`), so a
+/// dotted ident whose longest declared prefix is a constant counts.
+fn names_a_global(elab: &mut TermElabM, raw: &str) -> Result<bool, ElabError> {
+    let parts: Vec<&str> = raw.split('.').collect();
+    let prefixes = intern_prefixes(elab, &parts)?;
+    match resolve_global_name(&elab.view, &prefixes, raw) {
+        Ok(_) | Err(ElabError::AmbiguousIdent(_)) => Ok(true),
+        Err(ElabError::UnknownIdent(_)) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// `processAsPattern` (`Binders.lean:365-370`): the binder becomes a
+/// `match` on a fresh major — the match slice's, so a named seam. Every
+/// binder kind `expandFunBinders` does not list lands here too
+/// (`:406`), pattern-position `⟨⟩` included.
+fn pattern_binder_seam(kind: &str) -> ElabError {
+    ElabError::UnsupportedSyntax(format!(
+        "fun: pattern binder {kind} (`processAsPattern` belongs to the match slice)"
+    ))
+}
+
+/// oracle: `expandFunBinders` (`Binders.lean:360-406`) then
+/// `toBinderViews` (`Binders.lean:140-166`), over the four `funBinder`
+/// alternatives (`Parser/Term.lean:379-381`). (Verified
 /// against the pinned toolchain — a plan-inherited citation once pointed
 /// at `:436-455`, which is inside the unrelated `elabFunBinderViews`.)
 ///
@@ -192,15 +238,60 @@ fn extract_fun_binder_views(
         NodeOrToken::Node(n) => {
             let kind = kinds.name(n.kind());
             match kind {
-                // Parenthesised binder `(x : T)` — the `termParser
-                // maxPrec` alternative, parsed as a typeAscription.
+                // `fun _ => …`: `expandFunBinders` passes the hole
+                // through (`:373`) and `toBinderViews` binds it
+                // (`:142-144`) with an elided type.
+                "Lean.Parser.Term.hole" => Ok(vec![FunBinderView {
+                    name: None,
+                    ty: None,
+                    bi: BinderInfo::Default,
+                }]),
+                // `(a b : T)`, `(_ : T)`, `(x :)` — children
+                // `["(", term, ":", optional(T), ")"]`. Every split
+                // element shares `T`; an absent `T` is a hole
+                // (`:390-394`). No global-name gate on this arm.
                 "Lean.Parser.Term.typeAscription" => {
-                    let (name, ty) = extract_paren_fun_binder(elab, n, kinds)?;
-                    Ok(vec![FunBinderView {
-                        name: Some(name),
-                        ty: Some(ty),
-                        bi: BinderInfo::Default,
-                    }])
+                    let tch = non_trivia_children(n);
+                    let term = tch.get(1).ok_or_else(|| {
+                        ElabError::UnsupportedSyntax("fun: ascription binder term".into())
+                    })?;
+                    let ty_null = tch.get(3).and_then(|el| el.as_node()).ok_or_else(|| {
+                        ElabError::UnsupportedSyntax("fun: binder type slot".into())
+                    })?;
+                    let ty = non_trivia_children(ty_null).into_iter().next();
+                    let ids = fun_binder_ids(elab, term, kinds)?
+                        .ok_or_else(|| pattern_binder_seam(kind))?;
+                    Ok(ids
+                        .into_iter()
+                        .map(|id| FunBinderView {
+                            name: id.name,
+                            ty: ty.clone(),
+                            bi: BinderInfo::Default,
+                        })
+                        .collect())
+                }
+                // `(x y)` / `(x)` — children `["(", term, ")"]`.
+                // Hole-typed binders, but only if NO ident names a
+                // global constant; otherwise a pattern (`:377-388`).
+                "Lean.Parser.Term.paren" => {
+                    let term = non_trivia_children(n).into_iter().nth(1).ok_or_else(|| {
+                        ElabError::UnsupportedSyntax("fun: paren binder term".into())
+                    })?;
+                    let ids = fun_binder_ids(elab, &term, kinds)?
+                        .ok_or_else(|| pattern_binder_seam(kind))?;
+                    for raw in ids.iter().filter_map(|id| id.raw.as_deref()) {
+                        if names_a_global(elab, raw)? {
+                            return Err(pattern_binder_seam(kind));
+                        }
+                    }
+                    Ok(ids
+                        .into_iter()
+                        .map(|id| FunBinderView {
+                            name: id.name,
+                            ty: None,
+                            bi: BinderInfo::Default,
+                        })
+                        .collect())
                 }
                 // `{a b : T}` / `{a b}` and `⦃a b : T⦄` / `⦃a b⦄`.
                 "Lean.Parser.Term.implicitBinder" | "Lean.Parser.Term.strictImplicitBinder" => {
@@ -246,23 +337,11 @@ fn extract_fun_binder_views(
                         bi: BinderInfo::InstImplicit,
                     }])
                 }
-                _ => Err(unsupported_binder_kind(kind)),
+                _ => Err(pattern_binder_seam(kind)),
             }
         }
-        _ => Err(unsupported_binder_kind(kinds.name(item.kind()))),
+        _ => Err(pattern_binder_seam(kinds.name(item.kind()))),
     }
-}
-
-/// The seam for a binder kind this slice does not handle. Pattern-position
-/// `⟨⟩` is the match slice's (the oracle expands it to a `match`), so the
-/// message names that owner.
-fn unsupported_binder_kind(kind: &str) -> ElabError {
-    let owner = if kind == "Lean.Parser.Term.anonymousCtor" {
-        " (pattern-position `⟨⟩` belongs to the match slice)"
-    } else {
-        ""
-    };
-    ElabError::UnsupportedSyntax(format!("fun: unsupported binder kind {kind}{owner}"))
 }
 
 /// oracle: `elabFun` (Binders.lean:678) → `elabFunBinders`, `basicFun`
@@ -294,8 +373,8 @@ fn unsupported_binder_kind(kind: &str) -> ElabError {
 /// `optType`-supplied) gets unified against the running residual's
 /// forall domain, and the FINAL residual — never an `optType`, which
 /// leaves nothing for the body per the macro above — is the body's own
-/// expected type. Named seams: the `matchAlts` (pattern) arm and the
-/// funBinder forms `extract_fun_binder_views` rejects.
+/// expected type. Named seams: the `matchAlts` (pattern) arm and every
+/// pattern binder (`pattern_binder_seam`).
 ///
 /// `Term.fun` children: `[("λ"|"fun"), (basicFun | matchAlts)]`.
 /// `Term.basicFun` children: `[binderList(null), optType(null),
