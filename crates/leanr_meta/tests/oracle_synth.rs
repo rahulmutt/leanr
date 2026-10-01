@@ -71,6 +71,8 @@ fn oracle_synth_gate() {
         projection_fns,
         classes,
         coe_decls,
+        aux_recs,
+        elab_as_elim,
         structures: _,
     } = replay_fixture("Synth0.olean");
 
@@ -160,6 +162,8 @@ fn oracle_synth_gate() {
                 projection_fns: &projection_fns,
                 classes: &classes,
                 coe_decls: &coe_decls,
+                aux_recs: &aux_recs,
+                elab_as_elim: &elab_as_elim,
                 structures: &[],
             },
         );
@@ -497,6 +501,8 @@ fn seam_excluded_mvar_goal_is_incompleteness_not_an_error() {
         projection_fns,
         classes,
         coe_decls,
+        aux_recs,
+        elab_as_elim,
         structures: _,
     } = replay_fixture("Synth0.olean");
     let queries =
@@ -533,6 +539,8 @@ fn seam_excluded_mvar_goal_is_incompleteness_not_an_error() {
                 projection_fns: &projection_fns,
                 classes: &classes,
                 coe_decls: &coe_decls,
+                aux_recs: &aux_recs,
+                elab_as_elim: &elab_as_elim,
                 structures: &[],
             },
         );
@@ -593,6 +601,8 @@ fn exc_record_stuck_synth_0_pins_leanrs_current_divergent_answer() {
         projection_fns,
         classes,
         coe_decls,
+        aux_recs,
+        elab_as_elim,
         structures: _,
     } = replay_fixture("Synth0.olean");
     let queries =
@@ -630,6 +640,8 @@ fn exc_record_stuck_synth_0_pins_leanrs_current_divergent_answer() {
                 projection_fns: &projection_fns,
                 classes: &classes,
                 coe_decls: &coe_decls,
+                aux_recs: &aux_recs,
+                elab_as_elim: &elab_as_elim,
                 structures: &[],
             },
         );

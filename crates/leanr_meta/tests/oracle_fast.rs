@@ -94,6 +94,8 @@ fn oracle_fast_gate() {
         projection_fns,
         classes,
         coe_decls,
+        aux_recs,
+        elab_as_elim,
         structures: _,
     } = replay_fixture("Meta0.olean");
 
@@ -153,6 +155,8 @@ fn oracle_fast_gate() {
                     projection_fns: &projection_fns,
                     classes: &classes,
                     coe_decls: &coe_decls,
+                    aux_recs: &aux_recs,
+                    elab_as_elim: &elab_as_elim,
                     structures: &[],
                 },
             );
@@ -306,6 +310,8 @@ fn oracle_fast_gate() {
                     projection_fns: &projection_fns,
                     classes: &classes,
                     coe_decls: &coe_decls,
+                    aux_recs: &aux_recs,
+                    elab_as_elim: &elab_as_elim,
                     structures: &[],
                 },
             );
@@ -342,6 +348,8 @@ fn oracle_fast_gate() {
                 projection_fns: &projection_fns,
                 classes: &classes,
                 coe_decls: &coe_decls,
+                aux_recs: &aux_recs,
+                elab_as_elim: &elab_as_elim,
                 structures: &[],
             },
         );

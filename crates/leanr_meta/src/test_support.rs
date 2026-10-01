@@ -172,6 +172,8 @@ pub(crate) fn with_prelude0_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
     let projection_fns = md.projection_fns;
     let classes = md.classes;
     let coe_decls = md.coe_decls;
+    let aux_recs = md.aux_recs;
+    let elab_as_elim = md.elab_as_elim;
     let constants: HashMap<NameId, ConstantInfo> =
         md.constants.into_iter().map(|c| (c.name(), c)).collect();
     leanr_kernel::replay(&mut env, constants).expect("Prelude0 replays");
@@ -190,6 +192,8 @@ pub(crate) fn with_prelude0_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
             projection_fns: &projection_fns,
             classes: &classes,
             coe_decls: &coe_decls,
+            aux_recs: &aux_recs,
+            elab_as_elim: &elab_as_elim,
             structures: &[],
         },
     );
@@ -223,6 +227,8 @@ pub(crate) fn with_instances_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
     let projection_fns = md.projection_fns;
     let classes = md.classes;
     let coe_decls = md.coe_decls;
+    let aux_recs = md.aux_recs;
+    let elab_as_elim = md.elab_as_elim;
     let constants: HashMap<NameId, ConstantInfo> =
         md.constants.into_iter().map(|c| (c.name(), c)).collect();
     leanr_kernel::replay(&mut env, constants).expect("Instances.olean replays");
@@ -241,6 +247,8 @@ pub(crate) fn with_instances_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
             projection_fns: &projection_fns,
             classes: &classes,
             coe_decls: &coe_decls,
+            aux_recs: &aux_recs,
+            elab_as_elim: &elab_as_elim,
             structures: &[],
         },
     );
@@ -380,6 +388,8 @@ pub(crate) fn with_synth0_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
     let projection_fns = md.projection_fns;
     let classes = md.classes;
     let coe_decls = md.coe_decls;
+    let aux_recs = md.aux_recs;
+    let elab_as_elim = md.elab_as_elim;
     let constants: HashMap<NameId, ConstantInfo> =
         md.constants.into_iter().map(|c| (c.name(), c)).collect();
     leanr_kernel::replay(&mut env, constants).expect("Synth0.olean replays");
@@ -398,6 +408,8 @@ pub(crate) fn with_synth0_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
             projection_fns: &projection_fns,
             classes: &classes,
             coe_decls: &coe_decls,
+            aux_recs: &aux_recs,
+            elab_as_elim: &elab_as_elim,
             structures: &[],
         },
     );
@@ -429,6 +441,8 @@ pub(crate) fn with_cyclic_instances_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) ->
     let projection_fns = md.projection_fns;
     let classes = md.classes;
     let coe_decls = md.coe_decls;
+    let aux_recs = md.aux_recs;
+    let elab_as_elim = md.elab_as_elim;
     let constants: HashMap<NameId, ConstantInfo> =
         md.constants.into_iter().map(|c| (c.name(), c)).collect();
     leanr_kernel::replay(&mut env, constants).expect("InstancesCyclic.olean replays");
@@ -447,6 +461,8 @@ pub(crate) fn with_cyclic_instances_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) ->
             projection_fns: &projection_fns,
             classes: &classes,
             coe_decls: &coe_decls,
+            aux_recs: &aux_recs,
+            elab_as_elim: &elab_as_elim,
             structures: &[],
         },
     );
@@ -645,6 +661,8 @@ pub(crate) fn with_matcher_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
     let projection_fns = md.projection_fns;
     let classes = md.classes;
     let coe_decls = md.coe_decls;
+    let aux_recs = md.aux_recs;
+    let elab_as_elim = md.elab_as_elim;
     let constants: HashMap<NameId, ConstantInfo> =
         md.constants.into_iter().map(|c| (c.name(), c)).collect();
     leanr_kernel::replay(&mut env, constants).expect("Matcher.olean replays");
@@ -663,6 +681,8 @@ pub(crate) fn with_matcher_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
             projection_fns: &projection_fns,
             classes: &classes,
             coe_decls: &coe_decls,
+            aux_recs: &aux_recs,
+            elab_as_elim: &elab_as_elim,
             structures: &[],
         },
     );

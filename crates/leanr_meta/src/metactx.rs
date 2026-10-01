@@ -181,6 +181,14 @@ pub struct MetaCtx<'e> {
     /// The `@[coe_decl]` name set (`Meta/Coe.lean:21-29`), built once
     /// from `EnvExtensions::coe_decls`. Read by `coe.rs::expand_coe`.
     pub(crate) coe_decls: HashSet<NameId>,
+    /// `Lean.auxRecExt` entries (M4b-4c P1), from `EnvExtensions::aux_recs`.
+    pub(crate) aux_recs: HashSet<NameId>,
+    /// `Lean.Elab.Term.elabAsElim` tag entries (M4b-4c P1), from
+    /// `EnvExtensions::elab_as_elim`.
+    pub(crate) elab_as_elim: HashSet<NameId>,
+    /// `Eq.ndrec`, `Eq.ndrec_symm`, `Eq.ndrecOn`: hard-coded by
+    /// `isAuxRecursor`.
+    pub(crate) aux_rec_builtins: [NameId; 3],
     /// Decoded `structureExt` rows (M4b-4a P1), see `crate::structure`.
     pub(crate) structures: crate::structure::StructureTable,
     /// The `smartUnfolding` option (oracle default: true), consulted by
@@ -313,6 +321,12 @@ pub struct EnvExtensions<'a> {
     pub coe_decls: &'a [NameId],
     /// Decoded structureExt entries (M4b-4a P1) — see crate::structure.
     pub structures: &'a [StructureInfo],
+    /// Decoded `Lean.auxRecExt` entries (M4b-4c P1) — the set
+    /// `MetaCtx::is_aux_recursor` answers from.
+    pub aux_recs: &'a [NameId],
+    /// Decoded `Lean.Elab.Term.elabAsElim` entries (M4b-4c P1) — the set
+    /// `MetaCtx::has_elab_as_elim_tag` answers from.
+    pub elab_as_elim: &'a [NameId],
 }
 
 impl<'e> MetaCtx<'e> {
@@ -349,6 +363,13 @@ impl<'e> MetaCtx<'e> {
         let instances = InstanceTable::build(view, exts.instances, exts.default_instances);
         let classes = ClassTable::build(exts.classes);
         let coe_decls: HashSet<NameId> = exts.coe_decls.iter().copied().collect();
+        let aux_recs: HashSet<NameId> = exts.aux_recs.iter().copied().collect();
+        let elab_as_elim: HashSet<NameId> = exts.elab_as_elim.iter().copied().collect();
+        let aux_rec_builtins = [
+            mk_name2(scratch, Some(view.store), "Eq", "ndrec"),
+            mk_name2(scratch, Some(view.store), "Eq", "ndrec_symm"),
+            mk_name2(scratch, Some(view.store), "Eq", "ndrecOn"),
+        ];
         let structures = crate::structure::StructureTable::build(exts.structures);
         // oracle: `projectionFnInfoExt`'s own `NameMap` (`ProjFns.lean:30,
         // 37-59`) — the extension's own key IS `ProjectionFnInfo.projFn`
@@ -431,6 +452,9 @@ impl<'e> MetaCtx<'e> {
             instances,
             classes,
             coe_decls,
+            aux_recs,
+            elab_as_elim,
+            aux_rec_builtins,
             structures,
             smart_unfolding: true,
             can_unfold_override: false,
@@ -1375,6 +1399,50 @@ impl<'e> MetaCtx<'e> {
     /// producer, not dead API.
     pub fn has_out_params(&self, class_name: NameId) -> bool {
         matches!(self.get_out_param_positions(class_name), Some(p) if !p.is_empty())
+    }
+
+    /// oracle: `isAuxRecursor` (`AuxRecursor.lean:31-36`) — tagged in
+    /// `auxRecExt`, or one of the three `Eq.ndrec*` the oracle names
+    /// outright.
+    pub fn is_aux_recursor(&self, n: NameId) -> bool {
+        self.aux_recs.contains(&n) || self.aux_rec_builtins.contains(&n)
+    }
+
+    /// oracle: `isAuxRecursorWithSuffix` (`AuxRecursor.lean:39-42`):
+    /// `.str _ s` with `s == suffix || s.startsWith s!"{suffix}_"`, and an
+    /// aux recursor.
+    fn is_aux_recursor_with_suffix(&self, n: NameId, suffix: &str) -> bool {
+        let base = Some(self.view.store);
+        let s = match self.scratch.name_row(base, n) {
+            leanr_kernel::bank::names::NameRow::Str { part, .. } => {
+                self.scratch.str_at(base, *part)
+            }
+            leanr_kernel::bank::names::NameRow::Num { .. } => return false,
+        };
+        let matches = s == suffix
+            || s.strip_prefix(suffix)
+                .is_some_and(|rest| rest.starts_with('_'));
+        matches && self.is_aux_recursor(n)
+    }
+
+    /// oracle: `isCasesOnRecursor` (`AuxRecursor.lean:44-45`).
+    pub fn is_cases_on_recursor(&self, n: NameId) -> bool {
+        self.is_aux_recursor_with_suffix(n, "casesOn")
+    }
+
+    /// oracle: `isRecOnRecursor` (`AuxRecursor.lean:47-48`).
+    pub fn is_rec_on_recursor(&self, n: NameId) -> bool {
+        self.is_aux_recursor_with_suffix(n, "recOn")
+    }
+
+    /// oracle: `isBRecOnRecursor` (`AuxRecursor.lean:50-51`).
+    pub fn is_brec_on_recursor(&self, n: NameId) -> bool {
+        self.is_aux_recursor_with_suffix(n, "brecOn")
+    }
+
+    /// oracle: `elabAsElim.hasTag env declName` (`App.lean:1328`).
+    pub fn has_elab_as_elim_tag(&self, n: NameId) -> bool {
+        self.elab_as_elim.contains(&n)
     }
 
     /// oracle: `isCoeDecl` (`Meta/Coe.lean:28-29`) — `coeDeclAttr.hasTag

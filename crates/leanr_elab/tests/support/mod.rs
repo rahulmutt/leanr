@@ -52,6 +52,8 @@ pub fn with_app_harness<R>(
         projection_fns,
         classes,
         coe_decls,
+        aux_recs,
+        elab_as_elim,
         structures,
     } = replay_fixture_in("elab", "Elab0.olean");
     let snap = builtin::snapshot();
@@ -81,6 +83,8 @@ pub fn with_app_harness<R>(
             projection_fns: &projection_fns,
             classes: &classes,
             coe_decls: &coe_decls,
+            aux_recs: &aux_recs,
+            elab_as_elim: &elab_as_elim,
             structures: &structures,
         },
     );
@@ -756,6 +760,8 @@ fn with_doctored_elab_harness<R>(
         projection_fns,
         classes,
         coe_decls,
+        aux_recs,
+        elab_as_elim,
         mut structures,
     } = replay_fixture_in("elab", "Elab0.olean");
     doctor(&mut structures);
@@ -787,6 +793,8 @@ fn with_doctored_elab_harness<R>(
             projection_fns: &projection_fns,
             classes: &classes,
             coe_decls: &coe_decls,
+            aux_recs: &aux_recs,
+            elab_as_elim: &elab_as_elim,
             structures: &structures,
         },
     );
