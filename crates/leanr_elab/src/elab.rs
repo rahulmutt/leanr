@@ -186,7 +186,12 @@ impl<'e> TermElabM<'e> {
         Ok(self.mctx.mk_const_with_fresh_mvar_levels(raw)?)
     }
 
-    pub fn new(mctx: MetaCtx<'e>, view: EnvView<'e>) -> Self {
+    /// Installs the elaborator's config (`crate::config::set_elab_config`)
+    /// on `mctx` for this `TermElabM`'s lifetime: oracle
+    /// `TermElabM.run`'s `withConfig setElabConfig`
+    /// (`Elab/Term/TermElabM.lean:2226-2227`).
+    pub fn new(mut mctx: MetaCtx<'e>, view: EnvView<'e>) -> Self {
+        mctx.set_config(crate::config::set_elab_config(mctx.cfg()));
         TermElabM {
             mctx,
             view,
