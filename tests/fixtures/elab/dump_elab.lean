@@ -1135,10 +1135,13 @@ def anonTailQueries : List (String × String) :=
 -- `elim/namedMotive`/`elim/explicitAt` without the `(ih : Nat)`
 -- annotation: `ih`'s binder type then comes from a redex nested under the
 -- minor's arrow, which `instantiateBetaRevRange` must beta (it closed a
--- silent leanr divergence). `elim/eqRecTwoDiscrs` (two
--- discriminants) replaced `elim/ndrec`, whose standard-path `Eq.ndrec`
--- needs the oracle's `setElabConfig` foApprox, which leanr's `TermElabM`
--- does not model yet (follow-up).
+-- silent leanr divergence).
+-- `elim/eqRecTwoDiscrs` exercises two discriminants. `elim/ndrec` and
+-- `elim/ndrecExpected` take the standard app path (`Eq.ndrec` is not an
+-- eliminator) and need `setElabConfig`'s foApprox: with
+-- `foApprox := false` the oracle rejects them ("Application type
+-- mismatch" / "Type mismatch"). The bare form unifies at the argument,
+-- the ascribed form at the expected type.
 def elimQueries : List (String × String) :=
   [ ("elim/rec",           "fun (n : Nat) => (Nat.rec Nat.zero (fun hb1 ih => Nat.succ ih) n : Nat)")
   , ("elim/casesOn",       "fun (n : Nat) => (Nat.casesOn n Nat.zero (fun m => m) : Nat)")
@@ -1165,6 +1168,8 @@ def elimQueries : List (String × String) :=
   , ("elim/argPos",        "fun (n : Nat) => Nat.succ (Nat.rec Nat.zero (fun hb17 ih => ih) n)")
   , ("elim/univ",          "fun (n : Nat) => (Nat.rec.{1} Nat.zero (fun hb18 ih => ih) n : Nat)")
   , ("elim/listRec",       "fun (l : List Nat) => (List.rec Nat.zero (fun hb19 hb20 ih => ih) l : Nat)")
+  , ("elim/ndrec",         "fun (a : Nat) (p : Eq a a) (h : Eq a a) => Eq.ndrec p h")
+  , ("elim/ndrecExpected", "fun (a : Nat) (b : Nat) (h : Eq a b) (p : Eq a a) => (Eq.ndrec p h : Eq a b)")
   , ("elim/eqRecTwoDiscrs", "fun (a : Nat) (b : Nat) (h : Eq a b) (p : Eq a a) => (Eq.rec p h : Eq a b)")
   , ("elim/letDiscr",      "fun (n : (let x := Nat.zero; Nat)) => (Nat.rec Nat.zero (fun hb21 ih => ih) n : Nat)")
   , ("elim/letDiscrUsed",  "fun (n : (let x := Nat; x)) => (Nat.rec Nat.zero (fun hb22 ih => ih) n : Nat)")
