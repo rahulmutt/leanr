@@ -1270,35 +1270,14 @@ impl<'e> MetaCtx<'e> {
     /// the oracle leaves alone hands the argument elaborator a DIFFERENT
     /// term.
     ///
-    /// **Named limitation — nested redexes are not reduced.** The oracle's
-    /// `visit` walks the whole tree and betas any bvar-headed application
-    /// it finds; this uses `head_beta`, which fires only at the term's own
-    /// head. So for a lambda-carrying `args`, leanr reduces the head redex
-    /// the oracle's docstring names (`motive n` with
-    /// `motive := fun x => f m = f x` becomes `f m = f n`) but leaves a
-    /// redex sitting under a constructor — e.g. `Foo (motive n)` — as
-    /// `Foo ((fun x => ..) n)` where the oracle would produce
-    /// `Foo (f m = f n)`. The two terms are defeq, so no unification
-    /// verdict changes, but the SHAPE difference IS observable in the
-    /// elaborated term: the under-reduced type is the expected type an
-    /// argument is elaborated against, and a `fun` argument's binder
-    /// takes its domain from it. Reproducer (M4b-4c P2, measured against
-    /// the pinned oracle): `fun (n : Nat) => Nat.rec (motive := fun _ =>
-    /// Nat) Nat.zero (fun _ ih => ih) n` — the minor's type `(n : Nat) →
-    /// motive n → motive (n+1)` keeps `(fun _ => Nat) n` under the arrow,
-    /// so leanr gives `ih` the binder type `(fun _ => Nat) n` where the
-    /// oracle gives `Nat`. This is the only remaining divergence from the
-    /// oracle here (executable: `known_divergence_nested_redex_under_arrow_is_not_reduced`
-    /// in `leanr_elab/tests/elim_smoke.rs`, which must flip when this is
-    /// ported); it can only ever UNDER-reduce, and closing it means
-    /// porting `visit`'s traversal — which needs a bvar-offset walk this
-    /// crate has no other caller for.
+    /// The `visit` arm is `infer.rs`'s `instantiate_beta_rev`, the one
+    /// transcription of the oracle's traversal: it walks the WHOLE term and
+    /// betas every bvar-headed application it substitutes into, including a
+    /// redex nested under a binder or constructor (a recursor minor's type
+    /// `(n : Nat) → motive n → ..`), not only the term's own head.
     ///
-    /// Additive + behavior-neutral, and the reason it lives HERE rather than
-    /// in `leanr_elab`: the substitution half (`instantiate_rev`) is public
-    /// kernel API the elaborator could call itself, but the beta half
-    /// (`head_beta`, `whnf.rs:1767`) is `pub(crate)` to this crate. Exposes
-    /// no new capability, adds no state, changes no existing path.
+    /// It lives HERE rather than in `leanr_elab` because the traversal and
+    /// its `beta_rev` are `pub(crate)` to this crate.
     pub fn instantiate_beta_rev_range(
         &mut self,
         e: ExprId,
@@ -1315,20 +1294,19 @@ impl<'e> MetaCtx<'e> {
             return Ok(e);
         }
         // oracle: `args.any (·.consumeMData.isLambda) start stop`.
-        let any_lambda = args.iter().any(|&a| self.consume_mdata_is_lambda(a));
-        let inst = leanr_kernel::instantiate_rev(
-            self.scratch,
-            Some(self.view.store),
-            e,
-            args,
-            &mut self.guard,
-        )?;
-        if any_lambda {
-            self.head_beta(inst)
+        if args.iter().any(|&a| self.consume_mdata_is_lambda(a)) {
+            // oracle: `visit e 0 |>.run`.
+            self.instantiate_beta_rev(e, args)
         } else {
             // oracle's own comment: "If there are no lambdas, then
             // `instantiateRevRange` suffices."
-            Ok(inst)
+            Ok(leanr_kernel::instantiate_rev(
+                self.scratch,
+                Some(self.view.store),
+                e,
+                args,
+                &mut self.guard,
+            )?)
         }
     }
 
@@ -2641,9 +2619,7 @@ mod tests {
     /// function is not just `instantiateRevRange`: a loose bvar in HEAD
     /// position substituted by a lambda argument produces a redex that
     /// must be reduced (`InferType.lean`'s own docstring example, `motive
-    /// n` with `motive := fun x => ..`). `head_beta` covers exactly this
-    /// head-position case — see `instantiate_beta_rev_range`'s named
-    /// limitation for the nested-redex case it does not.
+    /// n` with `motive := fun x => ..`).
     #[test]
     fn instantiate_beta_rev_range_betas_a_lambda_substituted_at_the_head() {
         with_prelude0_ctx(|ctx| {
@@ -2663,6 +2639,43 @@ mod tests {
                 .instantiate_beta_rev_range(e, &[id_lam])
                 .expect("instantiate_beta_rev_range");
             assert_eq!(out, nat, "`(fun _ => #0) Nat` must beta-reduce to `Nat`");
+        });
+    }
+
+    /// The oracle's `visit` walks the WHOLE term, so a bvar-headed redex
+    /// NESTED under a binder is reduced too, not only one at the head
+    /// (`InferType.lean:72-91`). This is the shape of a recursor minor's
+    /// type, `(n : Nat) → motive n → ..`: `Nat → #1 Nat` (the `#1` is the
+    /// substituted bvar, seen from under the arrow's binder) with `#0 :=
+    /// fun _ => Nat` must become `Nat → Nat`, not `Nat → (fun _ => Nat)
+    /// Nat`.
+    #[test]
+    fn instantiate_beta_rev_range_betas_a_redex_nested_under_a_binder() {
+        with_prelude0_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let nat = const_named(ctx, "Nat");
+            let bvar1 = ctx
+                .scratch
+                .expr_bvar(base, &leanr_kernel::Nat::from(1u64))
+                .expect("bvar");
+            // `fun (_ : Nat) => Nat` — a constant motive.
+            let k_lam = ctx
+                .scratch
+                .expr_lam(base, None, nat, nat, BinderInfo::Default)
+                .expect("lam");
+            let redex = ctx.scratch.expr_app(base, bvar1, nat).expect("app");
+            let e = ctx
+                .scratch
+                .expr_forall(base, None, nat, redex, BinderInfo::Default)
+                .expect("forall");
+            let want = ctx
+                .scratch
+                .expr_forall(base, None, nat, nat, BinderInfo::Default)
+                .expect("forall");
+            let out = ctx
+                .instantiate_beta_rev_range(e, &[k_lam])
+                .expect("instantiate_beta_rev_range");
+            assert_eq!(out, want, "the redex under the arrow must be reduced");
         });
     }
 

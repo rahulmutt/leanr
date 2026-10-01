@@ -677,21 +677,35 @@ the `recursor_head_seam` helper both called. Full
   branch: route it through the real `check`.
 - `trace[Elab.app.elab_as_elim]` is not modelled.
 - `numScopeArgs`: no query hit that gap.
-- `fun.rs` `expandFunBinders` (`_`, multi-ident), `instantiate_beta_rev_range`
-  nested redexes (HIGH), and `setElabConfig` (above).
+- `fun.rs` `expandFunBinders` (`_`, multi-ident) and `setElabConfig`
+  (above). The `instantiate_beta_rev_range` nested-redex gap (was HIGH) is
+  closed; see the follow-up note below.
 - Fixture/record follow-ups from the final review: a `preElim2`-style
   fixture eliminator with an explicit binder before an explicit motive
   (kills the gate's pre-motive survivors); a two-extra-argument
   over-application record (targets the `revert_args` order survivor); an
   `[inst]`-binder eliminator record (exercises `ElimElab`'s inst-implicit
-  path); a `check_proj` test. The `instantiate_beta_rev_range`
-  nested-redex gap now has an executable known-divergence test,
-  `known_divergence_nested_redex_under_arrow_is_not_reduced`
-  (`leanr_elab/tests/elim_smoke.rs`), which must flip into a corpus
-  record when `instantiateBetaRevRange` is fully ported.
+  path); a `check_proj` test.
 - Deferred minors: stale `usedLetOnly := false` mentions in the
   `transform.rs` docs; `check_proj` and telescope-arm tests; the
   `seam_audit` `"M4b-4c"` needle forbids future M4b-4c-labelled seams by
   design.
 
 M4b-4 is complete.
+
+### Follow-up: `instantiateBetaRevRange` nested redexes (closed)
+
+`MetaCtx::instantiate_beta_rev_range` substituted and then ran
+`head_beta`, so a bvar-headed redex nested under a binder survived. The
+full port of the oracle's `visit` (`InferType.lean:72-91`) already existed,
+private to `infer.rs` (`instantiate_beta_rev`, used by `infer_app_type`).
+The P2 doc's claim that no such walk existed was wrong.
+`instantiate_beta_rev_range` keeps the oracle's two short-circuits and now
+delegates its any-lambda arm to that port, so `leanr_meta` has one
+transcription. The known-divergence test in `elim_smoke.rs` became two
+corpus records, `elim/namedMotiveBareIh` and `elim/explicitAtBareIh`
+(`CORPUS_FLOOR` 329 -> 331), whose oracle `exp` equals their annotated
+twins'. No existing record moved. Mutation: restoring
+`instantiate_rev` + `head_beta` turns the new
+`instantiate_beta_rev_range_betas_a_redex_nested_under_a_binder` unit
+test and both records red.

@@ -1131,9 +1131,11 @@ def anonTailQueries : List (String × String) :=
 -- fresh named binders (`hbN`) and `(a b : T)` groups as `(a : T) (b : T)`,
 -- because leanr's `fun` elaborator (`builtin/binder/fun.rs`) does not yet
 -- accept `_` hole binders or multi-ident paren groups -- a recorded
--- follow-up. `elim/namedMotive` and `elim/explicitAt` annotate
--- `(ih : Nat)` so they do not depend on `instantiate_beta_rev_range`'s
--- nested-redex gap (also a follow-up). `elim/eqRecTwoDiscrs` (two
+-- follow-up. `elim/namedMotiveBareIh` and `elim/explicitAtBareIh` are
+-- `elim/namedMotive`/`elim/explicitAt` without the `(ih : Nat)`
+-- annotation: `ih`'s binder type then comes from a redex nested under the
+-- minor's arrow, which `instantiateBetaRevRange` must beta (it closed a
+-- silent leanr divergence). `elim/eqRecTwoDiscrs` (two
 -- discriminants) replaced `elim/ndrec`, whose standard-path `Eq.ndrec`
 -- needs the oracle's `setElabConfig` foApprox, which leanr's `TermElabM`
 -- does not model yet (follow-up).
@@ -1144,6 +1146,8 @@ def elimQueries : List (String × String) :=
   , ("elim/brecOn",        "fun (n : Nat) => (Nat.brecOn n (fun hb3 hb4 => Nat.zero) : Nat)")
   , ("elim/namedMotive",   "fun (n : Nat) => Nat.rec (motive := fun hb5 => Nat) Nat.zero (fun hb6 (ih : Nat) => ih) n")
   , ("elim/explicitAt",    "fun (n : Nat) => @Nat.rec (fun hb7 => Nat) Nat.zero (fun hb8 (ih : Nat) => ih) n")
+  , ("elim/namedMotiveBareIh", "fun (n : Nat) => Nat.rec (motive := fun hb32 => Nat) Nat.zero (fun hb33 ih => ih) n")
+  , ("elim/explicitAtBareIh",  "fun (n : Nat) => @Nat.rec (fun hb34 => Nat) Nat.zero (fun hb35 ih => ih) n")
   , ("elim/ellipsis",      "Nat.rec ..")
   , ("elim/hRec",          "fun (h : False) => (h.rec : Nat)")
   , ("elim/hRecArg",       "fun (h : False) => Nat.succ h.rec")
