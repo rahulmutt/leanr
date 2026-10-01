@@ -74,21 +74,21 @@ fn motive_supplied(
     let (xs, _) = open_forall_telescope_reducing(elab, f_type)?;
     let mut named: Vec<&str> = named_args.iter().map(|n| n.name.as_str()).collect();
     let mut args = args;
-    let Some(pre) = xs.get(..info.motive_pos) else {
-        // oracle: `unreachable!` (`:1415`); `.olean` input is untrusted.
+    // oracle: `let some x := xs[elimInfo.motivePos]? | unreachable!` (`:1415`);
+    // `.olean` input is untrusted, so this is an error, not a panic.
+    let Some(x) = xs.get(info.motive_pos) else {
         return Err(ElabError::Internal(
             "elabAsElim?: motivePos past the telescope".into(),
         ));
     };
-    for x in pre {
-        let user = binder_user_name(elab, x.name);
+    for p in &xs[..info.motive_pos] {
+        let user = binder_user_name(elab, p.name);
         if named.contains(&user.as_str()) {
             named.retain(|n| *n != user);
-        } else if x.bi == BinderInfo::Default {
+        } else if p.bi == BinderInfo::Default {
             args = args.get(1..).unwrap_or(&[]);
         }
     }
-    let x = &xs[info.motive_pos];
     let user = binder_user_name(elab, x.name);
     if named.contains(&user.as_str()) {
         return Ok(true);
