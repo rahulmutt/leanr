@@ -62,8 +62,10 @@ mod tests {
         assert_eq!(set_elab_config(input), expected);
     }
 
-    /// `TermElabM::new` installs the elab config, and a field-scoped
-    /// helper restores to it rather than to `Config::default()`.
+    /// `TermElabM::new` installs the elab config. A single-field scope
+    /// (`with_transparency`) leaves it intact; the whole-cfg scope
+    /// (`with_full_approx_def_eq`) restores it, not `Config::default()`
+    /// (which would flip `fo_approx`/`ctx_approx` to false).
     #[test]
     fn term_elab_m_new_applies_elab_config() {
         let env = Environment::default();
@@ -80,6 +82,8 @@ mod tests {
         assert_eq!(elab.mctx.cfg(), want);
         elab.mctx
             .with_transparency(TransparencyMode::Reducible, |_| ());
+        assert_eq!(elab.mctx.cfg(), want);
+        elab.mctx.with_full_approx_def_eq(|_| ());
         assert_eq!(elab.mctx.cfg(), want);
     }
 }
