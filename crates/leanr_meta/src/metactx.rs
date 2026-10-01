@@ -1288,7 +1288,9 @@ impl<'e> MetaCtx<'e> {
     /// motive n → motive (n+1)` keeps `(fun _ => Nat) n` under the arrow,
     /// so leanr gives `ih` the binder type `(fun _ => Nat) n` where the
     /// oracle gives `Nat`. This is the only remaining divergence from the
-    /// oracle here; it can only ever UNDER-reduce, and closing it means
+    /// oracle here (executable: `known_divergence_nested_redex_under_arrow_is_not_reduced`
+    /// in `leanr_elab/tests/elim_smoke.rs`, which must flip when this is
+    /// ported); it can only ever UNDER-reduce, and closing it means
     /// porting `visit`'s traversal — which needs a bvar-offset walk this
     /// crate has no other caller for.
     ///

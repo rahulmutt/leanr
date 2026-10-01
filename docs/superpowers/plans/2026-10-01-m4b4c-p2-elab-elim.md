@@ -68,13 +68,13 @@ shows the house style for oracle dumpers and gates.
   they are committed. Earlier citations have been off by 1-2 lines.
   The ranges this plan uses were opened while writing it:
   - `ElabElim`: `App.lean:1140-1319`
-  - `mkMotive`: `:1164-1172`
-  - `revertArgs`: `:1178-1190`
-  - `finalize`: `:1196-1245`
-  - `getNextArg?`: `:1252-1265`
-  - `elabArg`: `:1272-1277`
-  - `mkImplicitArg`: `:1285-1289`
-  - `main`: `:1292-1317`
+  - `mkMotive`: `:1167-1173`
+  - `revertArgs`: `:1179-1190`
+  - `finalize`: `:1196-1240`
+  - `getNextArg?`: `:1247-1260`
+  - `elabArg`: `:1267-1272`
+  - `mkImplicitArg`: `:1280-1284`
+  - `main`: `:1286-1317`
   - `shouldElabAsElim`: `:1322-1328`
   - diversion: `:1373-1383`
   - `elabAsElim?`: `:1397-1431`
@@ -149,8 +149,11 @@ Record these under the spec's § Landed › P2 (Task 7):
 - **`kabstract` fvar/mvar oracle records stay deferred.** The P1
   follow-up asked for them. The elab corpus now pins the fvar fast
   path end to end (every `elim/*` query with a bound major). No P2
-  caller passes an mvar pattern: discriminants are `instantiateMVars`'d
-  and fully assigned by `finalize`. Task 1 adds the `mdata` fast-path
+  caller passes an mvar pattern in the common case (discriminants are
+  `instantiateMVars`'d and assigned by `finalize`), but two paths do:
+  `revert_args` passes a postponed synthetic mvar to `kabstract`
+  (exercised trivially by `elim/overPostponed`), and `mk_motive` would
+  for a `_` major. Task 1 adds the `mdata` fast-path
   unit test. The mvar record stays a follow-up.
 
 ## File map

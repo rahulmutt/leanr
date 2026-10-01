@@ -21,14 +21,20 @@ impl<'e> MetaCtx<'e> {
     }
 
     /// oracle: `isTypeCorrect`, `try check e; true catch _ => false`
-    /// (`Check.lean:365-370`). Only oracle-shaped failures are folded into
-    /// `false`: `MetaError::Check` (check's own throws) and
+    /// (`Check.lean:365-370`). `MetaError::Check` (check's own throws) and
     /// `MetaError::Infer` (inference failures inside it, including
-    /// `getLevel`'s "type expected" and unknown constants). Budget
-    /// exhaustion, named seams (`Unsupported`), `IsDefEqStuck` and invariant
-    /// violations PROPAGATE: folding them would turn "leanr cannot answer"
-    /// into a confident "ill-typed". There is no rollback: mvar assignments
-    /// made by `isDefEq` inside `check` persist, as in the oracle.
+    /// `getLevel`'s "type expected" and unknown constants) are folded into
+    /// `false`. NOTE: several leanr-internal invariant failures are also
+    /// raised as `MetaError::Infer` (e.g. `metactx.rs` and `infer.rs`
+    /// internal-state checks), so those are folded into `false` too; they
+    /// cannot be told apart from oracle-shaped inference failures without
+    /// re-varianting existing errors, which would change existing callers.
+    /// Budget exhaustion, named seams (`Unsupported`) and other variants
+    /// PROPAGATE: folding them would turn "leanr cannot answer" into a
+    /// confident "ill-typed". `IsDefEqStuck` also propagates, which DIVERGES
+    /// from the oracle (its `catch _` catches it and answers `false`);
+    /// unreachable today. There is no rollback: mvar assignments made by
+    /// `isDefEq` inside `check` persist, as in the oracle.
     pub fn is_type_correct(&mut self, e: ExprId) -> Result<bool, MetaError> {
         match self.check(e) {
             Ok(()) => Ok(true),
@@ -174,7 +180,9 @@ impl<'e> MetaCtx<'e> {
     /// of `isReadOnlyOrSyntheticOpaque` is the crate's single-depth seam.
     fn ensure_type(&mut self, t: ExprId) -> Result<(), MetaError> {
         let tt = self.infer_type(t)?;
-        let w = self.whnf(tt)?;
+        // oracle: `getLevel` whnfs with `whnfD` (`InferType.lean:166`), i.e.
+        // at default transparency even though `check` runs under `.all`.
+        let w = self.with_transparency(TransparencyMode::Default, |ctx| ctx.whnf(tt))?;
         match self.node(w) {
             Node::Sort { .. } => Ok(()),
             Node::MVar { id: Some(id) } => {

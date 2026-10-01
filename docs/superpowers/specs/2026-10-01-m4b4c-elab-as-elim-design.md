@@ -571,7 +571,9 @@ patterns):
 
 P2 ports `ElabElim` (`App.lean:1140-1319`), the `elabAsElim?` gate
 (`App.lean:1397-1431`) and the diversion in `elab_app_args`
-(`App.lean:1373-1383`), and removes the three recursor seams. Full
+(`App.lean:1373-1383`), and removes the three recursor seams: the dotIdent arm's `heed`
+block in `head.rs`'s `elab_app_fn`, `elab_app_fn_id`'s `heed` guard, and
+the `recursor_head_seam` helper both called. Full
 `mise run ci` is green. The elab corpus grows by 36 records (27 `elim/*`,
 9 `elimErr/*`), `CORPUS_FLOOR` 276 -> 329, and no existing record moved.
 **M4b-4 is complete.**
@@ -605,8 +607,10 @@ P2 ports `ElabElim` (`App.lean:1140-1319`), the `elabAsElim?` gate
   arguments" (no motive yet).
 - **`kabstract` fvar/mvar oracle records stay deferred.** The fvar fast
   path is pinned end to end by every `elim/*` query with a bound major.
-  No P2 caller passes an mvar pattern. The `mdata` fast path has a unit
-  test.
+  Two P2 paths do pass an mvar pattern: `revert_args` hands a
+  postponed synthetic mvar to `kabstract` (exercised only trivially, by
+  `elim/overPostponed`), and `mk_motive` would for a `_` major. The
+  `mdata` fast path has a unit test.
 
 **Deviations found during execution (controller rulings):**
 
@@ -675,6 +679,16 @@ P2 ports `ElabElim` (`App.lean:1140-1319`), the `elabAsElim?` gate
 - `numScopeArgs`: no query hit that gap.
 - `fun.rs` `expandFunBinders` (`_`, multi-ident), `instantiate_beta_rev_range`
   nested redexes (HIGH), and `setElabConfig` (above).
+- Fixture/record follow-ups from the final review: a `preElim2`-style
+  fixture eliminator with an explicit binder before an explicit motive
+  (kills the gate's pre-motive survivors); a two-extra-argument
+  over-application record (targets the `revert_args` order survivor); an
+  `[inst]`-binder eliminator record (exercises `ElimElab`'s inst-implicit
+  path); a `check_proj` test. The `instantiate_beta_rev_range`
+  nested-redex gap now has an executable known-divergence test,
+  `known_divergence_nested_redex_under_arrow_is_not_reduced`
+  (`leanr_elab/tests/elim_smoke.rs`), which must flip into a corpus
+  record when `instantiateBetaRevRange` is fully ported.
 - Deferred minors: stale `usedLetOnly := false` mentions in the
   `transform.rs` docs; `check_proj` and telescope-arm tests; the
   `seam_audit` `"M4b-4c"` needle forbids future M4b-4c-labelled seams by

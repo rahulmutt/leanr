@@ -1,5 +1,5 @@
 mod support;
-use support::{name_id, with_elab};
+use support::{elab_and_synthesize, fixture_in, name_id, with_elab};
 
 use leanr_elab::app::elim::elab_as_elim_info;
 use leanr_elab::app::expand::{expand_app, Arg, NamedArg};
@@ -55,7 +55,7 @@ fn a_supplied_motive_takes_the_standard_path() {
         "named motive"
     );
     // `False.rec`'s motive is EXPLICIT: a positional `_` counts as missing,
-    // any other positional is the motive (App.lean:1422-1430).
+    // any other positional is the motive (App.lean:1421-1431).
     assert!(gate("False.rec", "False.rec _ h"), "positional hole");
     assert!(
         !gate("False.rec", "False.rec (fun _ => Nat) h"),
@@ -143,4 +143,41 @@ fn a_resumed_eliminator_without_expected_type_is_an_oracle_error() {
             "{hard:?}"
         );
     });
+}
+
+/// KNOWN DIVERGENCE (executable record of the `instantiate_beta_rev_range`
+/// nested-redex gap, `metactx.rs`; spec § Landed follow-ups). The minor's
+/// type keeps `(fun _x => Nat) n` under its arrow, so leanr elaborates the
+/// unannotated `ih` with binder type `(fun _x => Nat) n`, where the oracle
+/// (whose `instantiateBetaRevRange` betas nested redexes) gives `Nat`.
+///
+/// The oracle's encoding of this exact source was dumped with a scratch
+/// copy of `dump_elab.lean` and is byte-identical to the committed
+/// `elim/namedMotive` record's `exp` (that record annotates `(ih : Nat)`
+/// so it does not hit the gap; the canonical encoder erases binder names).
+/// So the expectation is read from that record, not written by hand.
+///
+/// This test must FLIP when `instantiateBetaRevRange` is fully ported: at
+/// that point replace it with a corpus record in `dump_elab.lean` and
+/// delete it.
+#[test]
+fn known_divergence_nested_redex_under_arrow_is_not_reduced() {
+    let src = "fun (n : Nat) => Nat.rec (motive := fun _x => Nat) Nat.zero (fun _k ih => ih) n";
+    let corpus = std::fs::read_to_string(fixture_in("elab", "elab-queries.jsonl")).unwrap();
+    let oracle = corpus
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .find(|q| q["id"] == "elim/namedMotive")
+        .expect("elim/namedMotive record")["exp"]
+        .clone();
+    // Control: the annotated spelling (the corpus record's own source) matches,
+    // so the difference below is the nested redex and nothing else.
+    let control =
+        "fun (n : Nat) => Nat.rec (motive := fun _x => Nat) Nat.zero (fun _k (ih : Nat) => ih) n";
+    assert_eq!(elab_and_synthesize(control).expect("control"), oracle);
+    let ours = elab_and_synthesize(src).expect("leanr elaborates it, wrongly");
+    assert_ne!(
+        ours, oracle,
+        "the nested-redex gap is closed: turn this into a corpus record"
+    );
 }
