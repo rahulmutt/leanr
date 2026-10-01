@@ -147,7 +147,7 @@ of the change. A full corpus rerun shows no existing record changes.
 
 ## Landed
 
-PR #TBD-PR.
+PR #57.
 
 - Commits: `197bf12` (`set_elab_config`, `MetaCtx::set_config`, wiring in
   `TermElabM::new`, `assign.rs` SEAM note) and `ce98fe7` (corpus records
