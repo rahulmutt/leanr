@@ -6,8 +6,6 @@
 //! § Error handling & edge cases). Same posture as
 //! `KernelError::BankExhausted`.
 
-use leanr_kernel::bank::ExprId;
-
 /// A Meta-level failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MetaError {
@@ -36,9 +34,9 @@ pub enum MetaError {
     /// `isDefEqStuck`: the query is not decidable yet but may become so
     /// once more mvars are assigned. NOT a negative verdict — collapsing
     /// it to `false` loses the "not yet" and changes search results.
-    /// oracle: `throwIsDefEqStuck` (Basic.lean), the channel synthesis
-    /// (plan 4) reads. The payload is the blocking term.
-    IsDefEqStuck(ExprId),
+    /// oracle: `Exception.internal isDefEqStuckExceptionId`
+    /// (Basic.lean:33, :622-623), the channel synthesis reads.
+    IsDefEqStuck,
     /// A NAMED SEAM was reached: an oracle code path this crate has not
     /// transcribed yet met a term shaped so that no answer can be given
     /// without it. NOT a negative verdict and NOT a budget exhaustion —

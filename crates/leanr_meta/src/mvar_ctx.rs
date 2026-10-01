@@ -9,7 +9,7 @@
 //! must not grow the machinery for assigning them (AGENTS.md: the TCB
 //! stays minimal).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use leanr_kernel::bank::{ExprId, LevelId, NameId};
@@ -85,10 +85,20 @@ pub struct DelayedMVarAssignment {
 #[derive(Default)]
 pub struct MetavarContext {
     decls: HashMap<MVarId, MVarDecl>,
+    /// oracle: `MetavarDecl.depth` (MetavarContext.lean:251-256), kept as
+    /// a side map stamped by [`Self::declare`] so `MVarDecl` literals stay
+    /// depth-agnostic (`addExprMVarDecl` stamps `depth := mctx.depth`,
+    /// :813).
+    expr_depths: HashMap<MVarId, u32>,
     assignments: HashMap<MVarId, ExprId>,
-    level_decls: HashSet<LMVarId>,
+    /// oracle: `lDecls` with `LevelMetavarDecl.depth` (:834).
+    level_decls: HashMap<LMVarId, u32>,
     level_assignments: HashMap<LMVarId, LevelId>,
     d_assignment: HashMap<MVarId, DelayedMVarAssignment>,
+    /// oracle: `MetavarContext.depth` (:352-353).
+    depth: u32,
+    /// oracle: `MetavarContext.levelAssignDepth` (:354-355).
+    level_assign_depth: u32,
 }
 
 impl MetavarContext {
@@ -99,6 +109,7 @@ impl MetavarContext {
     /// Declare `id`. Returns the previous declaration if there was one
     /// (callers minting fresh ids should never see `Some`).
     pub fn declare(&mut self, id: MVarId, decl: MVarDecl) -> Option<MVarDecl> {
+        self.expr_depths.insert(id, self.depth);
         self.decls.insert(id, decl)
     }
 
@@ -147,7 +158,53 @@ impl MetavarContext {
     /// so unlike `declare` there is nothing else to store. oracle:
     /// fresh `lDepth` entry in `MetavarContext`.
     pub fn declare_level(&mut self, id: LMVarId) {
-        self.level_decls.insert(id);
+        self.level_decls.insert(id, self.depth);
+    }
+
+    pub fn depth(&self) -> u32 {
+        self.depth
+    }
+
+    pub fn level_assign_depth(&self) -> u32 {
+        self.level_assign_depth
+    }
+
+    pub fn expr_mvar_depth(&self, id: MVarId) -> Option<u32> {
+        self.expr_depths.get(&id).copied()
+    }
+
+    /// Undeclared level mvars count as created at depth 0. The oracle's
+    /// `getLevelDecl` would panic; leanr meets undeclared level mvars in
+    /// decoded/test terms, and depth 0 keeps depth-0 behaviour identical.
+    pub fn level_mvar_depth(&self, id: LMVarId) -> u32 {
+        self.level_decls.get(&id).copied().unwrap_or(0)
+    }
+
+    /// oracle: `MVarId.isReadOnly` (Basic.lean:971-972),
+    /// `decl.depth != mctx.depth`. Undeclared -> read-only (the oracle
+    /// panics; leanr's callers already treat undeclared as unassignable).
+    pub fn is_read_only(&self, id: MVarId) -> bool {
+        self.expr_mvar_depth(id) != Some(self.depth)
+    }
+
+    /// oracle: `LMVarId.isReadOnly` (Basic.lean:1000-1001),
+    /// `depth < levelAssignDepth` -- the negation of
+    /// `isLevelMVarAssignable` (MetavarContext.lean:471-474).
+    pub fn is_level_mvar_read_only(&self, id: LMVarId) -> bool {
+        self.level_mvar_depth(id) < self.level_assign_depth
+    }
+
+    /// oracle: `incDepth` (MetavarContext.lean:932-936).
+    pub(crate) fn inc_depth(&mut self, allow_level_assignments: bool) {
+        self.depth += 1;
+        if !allow_level_assignments {
+            self.level_assign_depth = self.depth;
+        }
+    }
+
+    pub(crate) fn set_depths(&mut self, depth: u32, level_assign_depth: u32) {
+        self.depth = depth;
+        self.level_assign_depth = level_assign_depth;
     }
 
     pub fn is_level_assigned(&self, id: LMVarId) -> bool {
@@ -164,7 +221,7 @@ impl MetavarContext {
     /// (`!u.occurs v`) is the caller's obligation in `level.rs`, not
     /// here — callers differ in what they do on a positive result.
     pub fn assign_level(&mut self, id: LMVarId, val: LevelId) -> Result<(), MetaError> {
-        if !self.level_decls.contains(&id) {
+        if !self.level_decls.contains_key(&id) {
             return Err(MetaError::MVar(format!(
                 "assign_level: level metavariable {id:?} was never declared"
             )));

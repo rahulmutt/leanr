@@ -6,31 +6,25 @@
 //! (`isListLevelDefEqAux` :2347-2349, `processPostponedStep`/
 //! `processPostponed` :2388-2422), toolchain leanprover/lean4:v4.33.0-rc1.
 //!
-//! # Depth / read-only seam (repeats at every site it applies)
+//! # Depth / read-only sites
 //!
-//! `isMVarWithGreaterDepth` and `mvarId.isReadOnly` (LevelDefEq.lean:
-//! 104-118) depend on `MetavarContext`'s per-mvar `depth` vs. the
-//! context's own `levelAssignDepth`/`depth` — machinery this crate does
-//! not model (tier 1 has a single, flat mctx depth; every declared
-//! level mvar is assignable and none is ever "read-only"). Depth
-//! arrives with typeclass synthesis / `withNewMCtxDepth` (plan 4). Every
-//! site below that would branch on it instead hard-codes the tier-1
-//! answer (`isReadOnly` := `false`, "greater depth" := unreachable) with
-//! its own citation, rather than silently dropping the branch.
+//! The mctx depth model (`MetavarContext::depth`/`level_assign_depth`)
+//! is wired into: `solve`'s `mvarId.isReadOnly` and
+//! `isMVarWithGreaterDepth` arms (LevelDefEq.lean:104-110), `decAux?`'s
+//! `isReadOnly` (DecLevel.lean:29), and `hasAssignableLevelMVar`
+//! (`isLevelMVarAssignable`, MetavarContext.lean:471-474).
+//! `try_approx_self_max`/`try_approx_max_max`/`solve_self_max` are
+//! deliberately ungated, exactly as in the oracle (LevelDefEq.lean:
+//! 32-73 call `assignLevelMVar` with no read-only check).
 //!
-//! # `isDefEqStuckEx` seam
+//! # `isDefEqStuckEx`
 //!
-//! `Config.isDefEqStuckEx` (Basic.lean:134, default `false`) is set
-//! `true` in exactly one place in the oracle: `SynthInstance.lean:963`,
-//! typeclass search (`withConfig (fun config => { config with
-//! isDefEqStuckEx := true, .. })`), out of scope this plan (plan 4). So
-//! at tier 1 the flag is always `false`, and every `if
-//! cfg.isDefEqStuckEx && .. then throwIsDefEqStuck else <else>` in this
-//! module collapses to its `<else>` branch unconditionally — this is
-//! why `config.rs`'s own doc comment says the flag deliberately has no
-//! `Config` field here at all (a typed error variant, `MetaError::
-//! IsDefEqStuck`, is reserved for the EXPR-level stuck condition,
-//! ExprDefEq.lean, a different call site entirely).
+//! `Config.isDefEqStuckEx` (Basic.lean:134, default `false`) is ported
+//! as `Config::is_def_eq_stuck_ex`. Two oracle throw sites are ported:
+//! the stuck tail of `isLevelDefEqAux` below (LevelDefEq.lean:167-173)
+//! and the `(None, None)` arm of `assign.rs` (ExprDefEq.lean:1949-1956).
+//! The flag is set only by `MetaCtx::with_def_eq_stuck_ex`; synthesis's
+//! own setting (SynthInstance.lean:963) stays a follow-up.
 //!
 //! # Id-native discipline
 //!
@@ -153,10 +147,18 @@ impl<'e> MetaCtx<'e> {
             let assignable =
                 ctx.has_assignable_level_mvar(lhs)? || ctx.has_assignable_level_mvar(rhs)?;
             if !assignable {
-                // SEAM: `isDefEqStuckEx` (module doc) — always `false`
-                // at tier 1, so this always takes the oracle's `else
-                // return false` branch; `throwIsDefEqStuck` is never
-                // reached here.
+                // oracle: LevelDefEq.lean:167-173.
+                let lhs_mvar = matches!(
+                    *ctx.scratch.level_row(Some(ctx.view.store), lhs),
+                    LevelRow::MVar(_)
+                );
+                let rhs_mvar = matches!(
+                    *ctx.scratch.level_row(Some(ctx.view.store), rhs),
+                    LevelRow::MVar(_)
+                );
+                if ctx.cfg.is_def_eq_stuck_ex && (lhs_mvar || rhs_mvar) {
+                    return Err(MetaError::IsDefEqStuck);
+                }
                 Ok(false)
             } else {
                 ctx.postponed.push((lhs, rhs));
@@ -181,19 +183,25 @@ impl<'e> MetaCtx<'e> {
                 // anonymous EXPR mvars), so it behaves as permanently
                 // read-only from this crate's point of view — same
                 // verdict (`undef`) the oracle's `isReadOnly` check
-                // below reaches, for a tier-1-specific reason.
+                // below reaches, because it has no declaration to read a depth from.
                 return Ok(None);
             };
             let mvar_id = LMVarId(n);
-            // SEAM: `mvarId.isReadOnly` (:104, module doc) — always
-            // `false` at tier 1.
-            let is_read_only = false;
-            if is_read_only {
+            // oracle: `mvarId.isReadOnly` (LevelDefEq.lean:104-105;
+            // Basic.lean:1000-1001).
+            if self.mctx.is_level_mvar_read_only(mvar_id) {
                 return Ok(None);
             }
-            // SEAM: `isMVarWithGreaterDepth` (:107-108, :96-99, module
-            // doc) — unreachable at tier 1 (a single flat mctx depth
-            // means no mvar is ever "greater depth" than another).
+            // oracle: `isMVarWithGreaterDepth v mvarId` (:106-110, :93-96)
+            // — reachable when `levelAssignDepth < depth` (TC synthesis's
+            // `allowLevelAssignments := true`).
+            if let LevelRow::MVar(Some(vn)) = v_row {
+                let v_id = LMVarId(vn);
+                if self.mctx.level_mvar_depth(v_id) > self.mctx.level_mvar_depth(mvar_id) {
+                    self.mctx.assign_level(v_id, u)?;
+                    return Ok(Some(true));
+                }
+            }
             if !self.level_occurs(u, v)? {
                 self.mctx.assign_level(mvar_id, v)?;
                 return Ok(Some(true));
@@ -481,17 +489,16 @@ impl<'e> MetaCtx<'e> {
                         // Anonymous mvar: unassignable/unfindable in this
                         // crate's `MetavarContext` (the same convention
                         // `solve`'s mvar-left arm documents) — behaves like
-                        // the oracle's `isReadOnly` branch (`none`), for a
-                        // different, tier-1-specific reason.
+                        // the oracle's `isReadOnly` branch (`none`), because
+                        // there is no declaration to read a depth from.
                         return Ok(None);
                     };
                     let mvar_id = LMVarId(n);
                     if let Some(assigned) = ctx.mctx.level_assignment(mvar_id) {
                         return ctx.dec_level(assigned, can_assign_mvars);
                     }
-                    // SEAM: `mvarId.isReadOnly` (module doc) — always
-                    // `false` at tier 1.
-                    let is_read_only = false;
+                    // oracle: `mvarId.isReadOnly` (DecLevel.lean:29).
+                    let is_read_only = ctx.mctx.is_level_mvar_read_only(mvar_id);
                     if is_read_only || !can_assign_mvars {
                         return Ok(None);
                     }
@@ -684,24 +691,19 @@ impl<'e> MetaCtx<'e> {
 
     /// oracle: `hasAssignableLevelMVar` (HasAssignableMVar.lean:17-21).
     /// Skips the oracle's `lvl.hasMVar` cached-bit early-exit shortcuts
-    /// (this crate decodes without retaining that cache, same posture
-    /// as every other "no single oracle line" traversal in
-    /// `leanr_kernel::Level`) — a pure performance difference, not a
-    /// semantic one. `isLevelMVarAssignable` (MetavarContext.lean:
-    /// 471-474, depth-gated) collapses to simply "is a named mvar" at
-    /// tier 1: this is always called on an ALREADY
-    /// `instantiate_level_mvars`-d level (its only call site,
-    /// `is_level_def_eq_aux`'s stuck/postpone tail, runs it on `lhs`/
-    /// `rhs` right after that instantiate+normalize pass), so any
-    /// surviving `.mvar` node is, by construction, unassigned — combined
-    /// with the tier-1 depth collapse (module doc), "assignable" reduces
-    /// to `name.is_some()` (the anonymous-mvar convention this module
-    /// uses throughout).
+    /// (a pure performance difference). The depth gate is real:
+    /// `isLevelMVarAssignable` (MetavarContext.lean:471-474,
+    /// `decl.depth >= levelAssignDepth`) is `!is_level_mvar_read_only`.
+    /// Always called on an already-instantiated level, so any surviving
+    /// `.mvar` is unassigned; anonymous mvars stay unassignable (module
+    /// convention).
     fn has_assignable_level_mvar(&mut self, l: LevelId) -> Result<bool, MetaError> {
         self.guarded(
             |ctx| match *ctx.scratch.level_row(Some(ctx.view.store), l) {
                 LevelRow::Zero | LevelRow::Param(_) => Ok(false),
-                LevelRow::MVar(name) => Ok(name.is_some()),
+                LevelRow::MVar(name) => {
+                    Ok(name.is_some_and(|n| !ctx.mctx.is_level_mvar_read_only(LMVarId(n))))
+                }
                 LevelRow::Succ(a) => ctx.has_assignable_level_mvar(a),
                 LevelRow::Max(a, b) | LevelRow::IMax(a, b) => {
                     Ok(ctx.has_assignable_level_mvar(a)? || ctx.has_assignable_level_mvar(b)?)
@@ -946,6 +948,178 @@ mod tests {
                 ctx.get_dec_level(p).is_err(),
                 "a proposition's level is 0 and cannot be decremented"
             );
+        });
+    }
+
+    // ---- mctx depth (macro/binop% P1, Task 3) ----
+
+    fn lmvar(ctx: &mut crate::MetaCtx, s: &str) -> (crate::LMVarId, leanr_kernel::bank::LevelId) {
+        let sid = ctx.scratch.intern_str(None, s).unwrap();
+        let n = ctx.scratch.name_str(None, None, sid).unwrap();
+        let id = crate::LMVarId(n);
+        ctx.mctx.declare_level(id);
+        (id, ctx.scratch.level_mvar(None, Some(n)).unwrap())
+    }
+
+    #[test]
+    fn outer_level_mvar_is_read_only_inside_a_new_depth() {
+        with_ctx(|ctx| {
+            let z = ctx.scratch.level_zero(None).unwrap();
+            let one = ctx.scratch.level_succ(None, z).unwrap();
+            let (id, u) = lmvar(ctx, "?u");
+            let inside = ctx.with_new_mctx_depth(false, |ctx| {
+                let r = ctx.is_level_def_eq(u, one).unwrap();
+                assert!(!ctx.mctx.is_level_assigned(id));
+                r
+            });
+            assert!(!inside);
+            assert!(ctx.is_level_def_eq(u, one).unwrap());
+        });
+    }
+
+    #[test]
+    fn allow_level_assignments_lets_an_outer_level_mvar_be_assigned() {
+        with_ctx(|ctx| {
+            let z = ctx.scratch.level_zero(None).unwrap();
+            let (id, u) = lmvar(ctx, "?u");
+            ctx.with_new_mctx_depth(true, |ctx| {
+                assert!(ctx.is_level_def_eq(u, z).unwrap());
+                assert_eq!(ctx.mctx.level_assignment(id), Some(z));
+            });
+        });
+    }
+
+    #[test]
+    fn greater_depth_level_mvar_is_assigned_to_the_shallower_one() {
+        // oracle LevelDefEq.lean:106-110: `?u =?= ?v` with depth ?v > depth
+        // ?u assigns `?v := ?u` (not `?u := ?v`, which the plain
+        // `!u.occurs v` arm would do).
+        with_ctx(|ctx| {
+            let (u_id, u) = lmvar(ctx, "?u");
+            ctx.with_new_mctx_depth(true, |ctx| {
+                let (v_id, v) = lmvar(ctx, "?v");
+                assert!(ctx.is_level_def_eq(u, v).unwrap());
+                assert_eq!(ctx.mctx.level_assignment(v_id), Some(u));
+                assert!(!ctx.mctx.is_level_assigned(u_id));
+            });
+        });
+    }
+
+    #[test]
+    fn equal_depth_level_mvars_assign_the_left_one() {
+        // oracle LevelDefEq.lean:111-113: at equal depth the greater-depth
+        // arm does not fire and `!u.occurs v` assigns `?u := ?v`.
+        with_ctx(|ctx| {
+            let (u_id, u) = lmvar(ctx, "?u");
+            let (v_id, v) = lmvar(ctx, "?v");
+            assert!(ctx.is_level_def_eq(u, v).unwrap());
+            assert_eq!(ctx.mctx.level_assignment(u_id), Some(v));
+            assert!(!ctx.mctx.is_level_assigned(v_id));
+        });
+    }
+
+    #[test]
+    fn has_assignable_level_mvar_respects_depth() {
+        with_ctx(|ctx| {
+            let (_, u) = lmvar(ctx, "?u");
+            assert!(ctx.has_assignable_level_mvar(u).unwrap());
+            ctx.with_new_mctx_depth(false, |ctx| {
+                assert!(!ctx.has_assignable_level_mvar(u).unwrap());
+            });
+        });
+    }
+
+    #[test]
+    fn dec_level_does_not_assign_a_read_only_level_mvar() {
+        with_ctx(|ctx| {
+            let (id, u) = lmvar(ctx, "?u");
+            ctx.with_new_mctx_depth(false, |ctx| {
+                assert_eq!(ctx.dec_level(u, true).unwrap(), None);
+                assert!(!ctx.mctx.is_level_assigned(id));
+            });
+            assert!(ctx.dec_level(u, true).unwrap().is_some());
+        });
+    }
+
+    #[test]
+    fn read_only_level_mvar_throws_stuck_only_under_the_flag() {
+        with_ctx(|ctx| {
+            let z = ctx.scratch.level_zero(None).unwrap();
+            let one = ctx.scratch.level_succ(None, z).unwrap();
+            let (_, u) = lmvar(ctx, "?u");
+            ctx.with_new_mctx_depth(false, |ctx| {
+                assert_eq!(ctx.is_level_def_eq(u, one), Ok(false));
+                assert_eq!(ctx.is_level_def_eq(one, u), Ok(false));
+                assert_eq!(
+                    ctx.with_def_eq_stuck_ex(|ctx| ctx.is_level_def_eq(u, one)),
+                    Err(crate::MetaError::IsDefEqStuck)
+                );
+                assert_eq!(
+                    ctx.with_def_eq_stuck_ex(|ctx| ctx.is_level_def_eq(one, u)),
+                    Err(crate::MetaError::IsDefEqStuck)
+                );
+            });
+            assert!(!ctx.cfg().is_def_eq_stuck_ex);
+        });
+    }
+
+    #[test]
+    fn stuck_level_pair_without_a_bare_mvar_is_false_not_stuck() {
+        // `max ?u ?v =?= 1` with ?u ?v read-only: reaches the stuck tail
+        // (no assignable mvar) but neither side is a bare mvar, so
+        // LevelDefEq.lean:167-173 answers `false`, not `isDefEqStuck`.
+        with_ctx(|ctx| {
+            let z = ctx.scratch.level_zero(None).unwrap();
+            let one = ctx.scratch.level_succ(None, z).unwrap();
+            let (_, u) = lmvar(ctx, "?u");
+            let (_, v) = lmvar(ctx, "?v");
+            let m = ctx.scratch.level_max(None, u, v).unwrap();
+            ctx.with_new_mctx_depth(false, |ctx| {
+                assert_eq!(ctx.is_level_def_eq(m, one), Ok(false));
+                assert_eq!(
+                    ctx.with_def_eq_stuck_ex(|ctx| ctx.is_level_def_eq(m, one)),
+                    Ok(false)
+                );
+                assert_eq!(
+                    ctx.with_def_eq_stuck_ex(|ctx| ctx.is_level_def_eq(one, m)),
+                    Ok(false)
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn postponed_recheck_that_turns_stuck_rolls_back_is_def_eq() {
+        // `(Sort ?r -> Sort ?a -> Sort ?b) =?= (Sort (max ?a ?b) -> Sort 1 -> Sort 1)`
+        // with `?r` read-only. The first domain postpones `?r =?= max ?a ?b`;
+        // the rest assigns `?a`, `?b := 1`; the recheck then has nothing
+        // assignable and, under the flag, throws stuck. oracle:
+        // `checkpointDefEq` restores on any exception (Basic.lean:2463-2465).
+        with_ctx(|ctx| {
+            let z = ctx.scratch.level_zero(None).unwrap();
+            let one = ctx.scratch.level_succ(None, z).unwrap();
+            let (r_id, r) = lmvar(ctx, "?r");
+            ctx.with_new_mctx_depth(false, |ctx| {
+                let (a_id, a) = lmvar(ctx, "?a");
+                let (b_id, b) = lmvar(ctx, "?b");
+                let mx = ctx.scratch.level_max(None, a, b).unwrap();
+                let mut sort = |l| ctx.scratch.expr_sort(None, l).unwrap();
+                let (sr, sa, sb, smx, s1) = (sort(r), sort(a), sort(b), sort(mx), sort(one));
+                let bi = leanr_kernel::BinderInfo::Default;
+                let mut pi = |d, b| ctx.scratch.expr_forall(None, None, d, b, bi).unwrap();
+                let inner_l = pi(sa, sb);
+                let lhs = pi(sr, inner_l);
+                let inner_r = pi(s1, s1);
+                let rhs = pi(smx, inner_r);
+                let pre = vec![(z, one)];
+                ctx.postponed = pre.clone();
+                let res = ctx.with_def_eq_stuck_ex(|ctx| ctx.is_def_eq_guarded(lhs, rhs));
+                assert_eq!(res, Ok(false));
+                assert!(!ctx.mctx.is_level_assigned(a_id));
+                assert!(!ctx.mctx.is_level_assigned(b_id));
+                assert!(!ctx.mctx.is_level_assigned(r_id));
+                assert_eq!(ctx.postponed, pre);
+            });
         });
     }
 }

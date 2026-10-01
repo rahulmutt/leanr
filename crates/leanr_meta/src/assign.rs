@@ -56,14 +56,15 @@
 //! unchanged — see the task-5 report for this same argument restated
 //! for a human reviewer.
 //!
-//! # Depth / read-only seam (repeats `level.rs`'s own posture)
+//! # Depth / read-only
 //!
-//! Every `isReadOnly`/`isMVarWithGreaterDepth`/`isSubPrefixOf`-shaped
-//! oracle check below collapses to its tier-1 answer (all declared
-//! mvars mutually assignable and mutually visible, single flat mctx
-//! depth) — named at each site, never silently dropped. `MVarKind::
-//! SyntheticOpaque` is the one REAL (non-seamed) non-assignability
-//! reason this crate does track (`mvar_ctx.rs`'s own doc comment).
+//! Metavariable-context depth is modelled (`mvar_ctx.rs`, macro/binop%
+//! P1). `isReadOnlyOrSyntheticOpaque` is ported at `unassigned_mvar_id`,
+//! `is_def_eq_singleton` and `ensure_type`. Still seamed: the
+//! `isSubPrefixOf` arm of `CheckAssignmentQuick` (`:1075`) and the slow
+//! `checkAssignment` mvar arm (ExprDefEq.lean:901), which leanr does not
+//! port. `elimMVar`'s depth-dependent `newMVarKind`
+//! (MetavarContext.lean:1187, :1195) is nondep R9, out of scope.
 
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::ExprId;
@@ -127,10 +128,26 @@ impl<'e> MetaCtx<'e> {
             (Some(_), None) => Ok(Some(self.process_assignment_prime(t, s)?)),
             (None, Some(_)) => Ok(Some(self.process_assignment_prime(s, t)?)),
             (None, None) => {
-                // oracle: proof-irrelevance then `isDefEqStuckEx`
-                // (:1922-1926) — both already-cited seams (task 6;
-                // `level.rs`'s module doc on `isDefEqStuckEx`). Never a
-                // silent `true`.
+                // oracle: ExprDefEq.lean:1949-1956 — both sides
+                // unassignable (read-only depth, or syntheticOpaque):
+                // proof irrelevance first, then `isDefEqStuckEx`.
+                // leanr guard (no oracle analogue): an UNDECLARED mvar head
+                // makes `infer_type` fail ("unknown metavariable"), which
+                // would turn the old order-independent `false` into an
+                // order-dependent `Err`; answer `false` as before.
+                let undeclared = |this: &Self, f: ExprId| {
+                    matches!(this.node(f), Node::MVar { id: Some(i) }
+                        if this.mctx.decl(MVarId(i)).is_none())
+                };
+                if undeclared(self, t_fn) || undeclared(self, s_fn) {
+                    return Ok(Some(false));
+                }
+                if let Some(b) = self.is_def_eq_proof_irrel(t, s)? {
+                    return Ok(Some(b));
+                }
+                if self.cfg.is_def_eq_stuck_ex {
+                    return Err(MetaError::IsDefEqStuck);
+                }
                 Ok(Some(false))
             }
             (Some(_), Some(_)) => self.is_def_eq_mvar_mvar(t, s),
@@ -154,10 +171,12 @@ impl<'e> MetaCtx<'e> {
                     return None;
                 }
                 match self.mctx.decl(mid) {
-                    // oracle: `isAssignable`'s `isReadOnlyOrSyntheticOpaque`
-                    // (ExprDefEq.lean:1731-1733; the `syntheticOpaque` arm
-                    // is `Basic.lean:985`), now gated by
-                    // `Config.assignSyntheticOpaque` (M4b-3 P3 task 4):
+                    // oracle: `isAssignable` -> `isReadOnlyOrSyntheticOpaque`
+                    // (ExprDefEq.lean:1731-1733; Basic.lean:979-985): the
+                    // depth arm (`:981-982`) first ...
+                    Some(_) if self.mctx.is_read_only(mid) => None,
+                    // ... then the `syntheticOpaque` arm (`:985`), gated by
+                    // `Config.assignSyntheticOpaque`:
                     // `withAssignableSyntheticOpaque` flips it so a
                     // default instance can assign an opaque outParam.
                     Some(d)
@@ -1023,8 +1042,8 @@ impl<'e> MetaCtx<'e> {
     /// mvarId then return false`). Every OTHER metavariable met is
     /// SEAM: `isSubPrefixOf` (:1114) — this crate's `LocalContext`
     /// exposes no positional/enumeration API to port that lctx-subset
-    /// check faithfully; at tier 1 (same posture as `level.rs`'s
-    /// single-mctx-depth seam), every declared mvar is treated as
+    /// check faithfully; at tier 1 (the `isSubPrefixOf` seam is
+    /// independent of the mctx-depth model), every declared mvar is treated as
     /// mutually visible. `ctxApprox`'s rescue does NOT belong here at
     /// all (task 7 finding): this function transcribes
     /// `CheckAssignmentQuick.check`, which the oracle's own
@@ -1649,8 +1668,13 @@ mod tests {
         let mut base = Store::persistent();
         let z = base.level_zero(None).expect("level zero");
         let sort0 = base.expr_sort(None, z).expect("sort 0");
+        // `N.f : Sort 0 -> Sort 0`: the one APPLICABLE head (every other
+        // axiom here is a bare `Sort 0`), for the depth tests.
+        let sort0_to_sort0 = base
+            .expr_forall(None, None, sort0, sort0, leanr_kernel::BinderInfo::Default)
+            .expect("forall");
         let mut consts = HashMap::new();
-        for name in ["N.zero", "N.succ"] {
+        for name in ["N.zero", "N.succ", "N.f"] {
             let mut id: Option<NameId> = None;
             for part in name.split('.') {
                 let sid = base.intern_str(None, part).expect("intern");
@@ -1661,7 +1685,7 @@ mod tests {
                 val: ConstantVal {
                     name: nid,
                     level_params: vec![],
-                    ty: sort0,
+                    ty: if name == "N.f" { sort0_to_sort0 } else { sort0 },
                 },
                 is_unsafe: false,
             });
@@ -1857,6 +1881,59 @@ mod tests {
             let zero = mk_const(ctx, "N.zero");
             assert!(ctx.is_def_eq(m_expr, zero).unwrap());
             assert_eq!(ctx.mctx.assignment(m_id), Some(zero));
+        });
+    }
+
+    // ---- mctx depth (macro/binop% P1, Task 2) ----
+    // oracle: `isAssignable` -> `isReadOnlyOrSyntheticOpaque`
+    // (ExprDefEq.lean:1731-1733; Basic.lean:979-985).
+
+    #[test]
+    fn outer_mvar_is_not_assigned_inside_a_new_depth() {
+        with_n_ctx(|ctx| {
+            let ty = n_type(ctx);
+            let (m_expr, m_id) = fresh_mvar(ctx, ty);
+            let zero = mk_const(ctx, "N.zero");
+            let inside = ctx.with_new_mctx_depth(false, |ctx| {
+                let r = ctx.is_def_eq(m_expr, zero).unwrap();
+                assert!(!ctx.mctx.is_assigned(m_id));
+                r
+            });
+            assert!(!inside, "outer ?m is read-only at depth 1");
+            // Same query OUTSIDE must not be answered by a cached in-scope
+            // `false`.
+            assert!(ctx.is_def_eq(m_expr, zero).unwrap());
+            assert_eq!(ctx.mctx.assignment(m_id), Some(zero));
+        });
+    }
+
+    #[test]
+    fn inner_mvar_is_assigned_inside_a_new_depth() {
+        with_n_ctx(|ctx| {
+            let ty = n_type(ctx);
+            let zero = mk_const(ctx, "N.zero");
+            ctx.with_new_mctx_depth(false, |ctx| {
+                let (m_expr, m_id) = fresh_mvar(ctx, ty);
+                assert!(ctx.is_def_eq(m_expr, zero).unwrap());
+                assert_eq!(ctx.mctx.assignment(m_id), Some(zero));
+            });
+        });
+    }
+
+    #[test]
+    fn outer_mvar_under_an_application_is_read_only_inside_a_new_depth() {
+        // `N.f ?m =?= N.f N.zero`: the args path reaches `?m =?=
+        // N.zero` -- the `BitVec n =?= BitVec ?m` shape from the spec.
+        with_n_ctx(|ctx| {
+            let ty = n_type(ctx);
+            let (m_expr, m_id) = fresh_mvar(ctx, ty);
+            let zero = mk_const(ctx, "N.zero");
+            let f = mk_const(ctx, "N.f");
+            let lhs = mk_app(ctx, f, m_expr);
+            let rhs = mk_app(ctx, f, zero);
+            assert!(!ctx.with_new_mctx_depth(false, |ctx| ctx.is_def_eq(lhs, rhs).unwrap()));
+            assert!(!ctx.mctx.is_assigned(m_id));
+            assert!(ctx.is_def_eq(lhs, rhs).unwrap());
         });
     }
 
@@ -2774,6 +2851,75 @@ mod tests {
                 }
                 ctx.lctx_restore(cp);
             }
+        });
+    }
+
+    // ---- isDefEqStuckEx (macro/binop% P1, Task 4) ----
+    // oracle ExprDefEq.lean:1949-1956.
+
+    #[test]
+    fn read_only_vs_rigid_throws_stuck_only_under_the_flag() {
+        with_n_ctx(|ctx| {
+            // `?m : Sort 0` vs `N.zero : Sort 0`: the terms' type is
+            // `Sort 0`, which is not a Prop, so proof irrelevance does
+            // not apply and the stuck branch is exercised.
+            let ty = n_type(ctx);
+            let (m_expr, _) = fresh_mvar(ctx, ty);
+            let zero = mk_const(ctx, "N.zero");
+            ctx.with_new_mctx_depth(false, |ctx| {
+                assert_eq!(ctx.is_def_eq(m_expr, zero), Ok(false));
+                assert_eq!(
+                    ctx.with_def_eq_stuck_ex(|ctx| ctx.is_def_eq(m_expr, zero)),
+                    Err(crate::MetaError::IsDefEqStuck)
+                );
+                assert_eq!(
+                    ctx.with_def_eq_stuck_ex(|ctx| ctx.is_def_eq_guarded(m_expr, zero)),
+                    Ok(false)
+                );
+            });
+            // Flag off outside: unaffected.
+            assert!(!ctx.cfg().is_def_eq_stuck_ex);
+        });
+    }
+
+    #[test]
+    fn undeclared_mvar_vs_rigid_is_false_in_both_orders() {
+        // An undeclared mvar head must not reach `infer_type` (which
+        // errs "unknown metavariable"): the answer is `false` in both
+        // argument orders, flag on or off.
+        with_n_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let sid = ctx.scratch.intern_str(base, "ghost").expect("intern");
+            let n = ctx.scratch.name_str(base, None, sid).expect("name");
+            let ghost = ctx.scratch.expr_mvar(base, Some(n)).expect("mvar");
+            let zero = mk_const(ctx, "N.zero");
+            assert_eq!(ctx.is_def_eq(ghost, zero), Ok(false));
+            assert_eq!(ctx.is_def_eq(zero, ghost), Ok(false));
+            assert_eq!(
+                ctx.with_def_eq_stuck_ex(|ctx| ctx.is_def_eq(ghost, zero)),
+                Ok(false)
+            );
+        });
+    }
+
+    #[test]
+    fn both_unassignable_props_are_closed_by_proof_irrelevance() {
+        // `?p =?= ?q`, both syntheticOpaque, both of type `P : Prop`:
+        // the oracle returns `.true` by proof irrelevance before the
+        // stuck test.
+        with_n_ctx(|ctx| {
+            let prop = n_type(ctx); // Sort 0
+            let p_ty = fresh_fvar(ctx, prop, "P");
+            let (p, _) =
+                crate::test_support::fresh_mvar_of_kind(ctx, p_ty, MVarKind::SyntheticOpaque);
+            let (q, _) =
+                crate::test_support::fresh_mvar_of_kind(ctx, p_ty, MVarKind::SyntheticOpaque);
+            assert_eq!(ctx.is_def_eq(p, q), Ok(true));
+            // Also under the flag: proof irrelevance wins over the throw.
+            assert_eq!(
+                ctx.with_def_eq_stuck_ex(|ctx| ctx.is_def_eq(p, q)),
+                Ok(true)
+            );
         });
     }
 }

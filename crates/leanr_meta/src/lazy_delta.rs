@@ -494,11 +494,14 @@ impl<'e> MetaCtx<'e> {
         // singleton-structure assignment the oracle permits — an
         // observable wrong answer, not a missing capability. Inert at
         // the default `false`.
-        let assignable = matches!(
-            self.mctx.decl(mvar_id),
-            Some(d) if d.kind != MVarKind::SyntheticOpaque
-                || self.cfg.assign_synthetic_opaque
-        );
+        // The read-only (depth) arm is `Basic.lean:981-982`; the kind arm
+        // is `:985`.
+        let assignable = !self.mctx.is_read_only(mvar_id)
+            && matches!(
+                self.mctx.decl(mvar_id),
+                Some(d) if d.kind != MVarKind::SyntheticOpaque
+                    || self.cfg.assign_synthetic_opaque
+            );
         if !assignable {
             return Ok(false);
         }
@@ -1159,6 +1162,45 @@ mod tests {
             );
             assert!(ctx.mctx().is_assigned(m_id));
             assert!(!ctx.cfg.assign_synthetic_opaque, "scope restored");
+        });
+    }
+
+    /// Depth half of `isAssignable` at `is_def_eq_singleton`: an mvar
+    /// minted OUTSIDE `with_new_mctx_depth` is read-only inside it.
+    /// oracle: `isReadOnlyOrSyntheticOpaque` (Basic.lean:979-985).
+    #[test]
+    fn outer_mvar_is_read_only_at_is_def_eq_singleton() {
+        use crate::test_support::{const_dotted, const_named, fresh_mvar, with_instances_ctx};
+        use leanr_kernel::bank::terms::Node;
+
+        with_instances_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let add = const_named(ctx, "Add");
+            let add_n = ctx.mk_app_spine(add, &[n]).expect("Add N");
+            let (m_expr, m_id) = fresh_mvar(ctx, add_n);
+            let add_add = const_dotted(ctx, "Add", "add");
+            let inst_add_n = const_named(ctx, "instAddN");
+            let v = ctx
+                .mk_app_spine(add_add, &[n, inst_add_n])
+                .expect("Add.add N instAddN");
+            let add_name = match ctx.node(add) {
+                Node::Const { name: Some(nm), .. } => nm,
+                _ => panic!("Add is not a bare const"),
+            };
+            let base = Some(ctx.view.store);
+            let proj = ctx
+                .scratch
+                .expr_proj(base, Some(add_name), &Nat::from(0u64), m_expr)
+                .expect("proj");
+
+            let inside = ctx.with_new_mctx_depth(false, |ctx| {
+                ctx.is_def_eq_proj(proj, v).expect("is_def_eq_proj")
+            });
+            assert!(!inside, "outer ?m is read-only at depth 1");
+            assert!(!ctx.mctx().is_assigned(m_id));
+            // Positive control: outside the scope it assigns.
+            assert!(ctx.is_def_eq_proj(proj, v).expect("is_def_eq_proj"));
+            assert!(ctx.mctx().is_assigned(m_id));
         });
     }
 }
