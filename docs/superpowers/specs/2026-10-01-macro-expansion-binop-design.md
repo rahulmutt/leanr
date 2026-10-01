@@ -418,7 +418,7 @@ A surviving mutation gets a killing row.
 
 (Filled in as each plan merges: corrections, mutations run, seams left.)
 
-### P1 (PR #TBD): mctx depth + isDefEqStuckEx
+### P1 (PR #59): mctx depth + isDefEqStuckEx
 
 Commits: 9169b3f (T1 depth bookkeeping + `with_new_mctx_depth`), e10c074
 (T2 expr read-only arm at three sites), 0e7e64a (T3 level read-only +
