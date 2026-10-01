@@ -646,8 +646,6 @@ pub(crate) struct TelescopeBinder {
     /// the telescope.
     pub ty: ExprId,
     /// oracle: `xDecl.binderInfo`.
-    // Read by the `ElimElab` gate (M4b-4c P2 Task 5).
-    #[allow(dead_code)]
     pub bi: BinderInfo,
 }
 
