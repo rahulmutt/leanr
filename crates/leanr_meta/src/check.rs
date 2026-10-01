@@ -11,7 +11,7 @@ use leanr_kernel::bank::{ExprId, LevelsId, NameId};
 use leanr_kernel::instantiate_rev;
 
 use crate::transparency::TransparencyMode;
-use crate::{MetaCtx, MetaError};
+use crate::{MVarId, MVarKind, MetaCtx, MetaError};
 
 impl<'e> MetaCtx<'e> {
     /// oracle: `check e (transparency := .all)` (`Check.lean:331-338`).
@@ -163,10 +163,37 @@ impl<'e> MetaCtx<'e> {
         self.check_aux(b, seen)
     }
 
-    /// oracle: `ensureType` (`Check.lean:22-23`): `getLevel`, whose
-    /// "type expected" is `MetaError::Infer`.
+    /// oracle: `ensureType` (`Check.lean:22-23`): `discard <| getLevel e`.
+    /// `getLevel`'s assignable-mvar arm (`InferType.lean:169-175`: the type
+    /// of `t` whnfs to an unassigned, assignable `?m`, so assign
+    /// `?m := Sort ?u` with a fresh level mvar) is ported HERE rather than
+    /// in `get_level`, which stays untouched for its other callers. Without
+    /// it a binder type `?a : ?T` would be reported ill-typed. Not
+    /// assignable (synthetic opaque while `assign_synthetic_opaque` is off,
+    /// or undeclared) throws `type expected` (`:171-172`). The depth half
+    /// of `isReadOnlyOrSyntheticOpaque` is the crate's single-depth seam.
     fn ensure_type(&mut self, t: ExprId) -> Result<(), MetaError> {
-        self.get_level(t).map(|_| ())
+        let tt = self.infer_type(t)?;
+        let w = self.whnf(tt)?;
+        match self.node(w) {
+            Node::Sort { .. } => Ok(()),
+            Node::MVar { id: Some(id) } => {
+                let mid = MVarId(id);
+                let assignable = match self.mctx.decl(mid) {
+                    Some(d) => {
+                        !(d.kind == MVarKind::SyntheticOpaque && !self.cfg.assign_synthetic_opaque)
+                    }
+                    None => false,
+                };
+                if !assignable {
+                    return Err(MetaError::Infer("type expected".into()));
+                }
+                let (_, lvl) = self.fresh_level_mvar()?;
+                let sort = self.scratch.expr_sort(Some(self.view.store), lvl)?;
+                self.mctx.assign(mid, sort)
+            }
+            _ => Err(MetaError::Infer("type expected".into())),
+        }
     }
 
     /// oracle: `checkConstant` (`Check.lean:25-28`). A missing constant is
@@ -217,6 +244,32 @@ impl<'e> MetaCtx<'e> {
 #[cfg(test)]
 mod tests {
     use crate::test_support::{app, c, fresh_mvar, with_meta0_ctx};
+    use leanr_kernel::BinderInfo;
+
+    /// `fun (x : ?a) => x` with `?a : ?T`: `ensureType ?a` reaches
+    /// `getLevel`'s assignable-mvar arm, which assigns `?T := Sort ?u`.
+    /// Plain `get_level` would throw `type expected` and `is_type_correct`
+    /// would fold that into `false`.
+    #[test]
+    fn binder_type_mvar_with_mvar_type_is_type_correct_and_assigns_sort() {
+        with_meta0_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let n = c(ctx, "N");
+            let ty = ctx.infer_type(n).unwrap();
+            let (t, t_id) = fresh_mvar(ctx, ty);
+            let (a, _) = fresh_mvar(ctx, t);
+            let b0 = ctx
+                .scratch
+                .expr_bvar(base, &leanr_kernel::Nat::from(0u64))
+                .unwrap();
+            let lam = ctx
+                .scratch
+                .expr_lam(base, None, a, b0, BinderInfo::Default)
+                .unwrap();
+            assert!(ctx.is_type_correct(lam).unwrap());
+            assert!(ctx.mctx().is_assigned(t_id), "?T := Sort ?u");
+        });
+    }
 
     /// `N.succ N` — `infer_type` answers `N` (it never checks the
     /// argument), `check` rejects it: `N : Type`, not `N`.
