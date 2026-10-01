@@ -222,6 +222,10 @@ run = [
   # M4b-4a P1: oracle answers for the structure accessors
   # (crates/leanr_meta/tests/structures.rs compares against these).
   "sh -c 'cd tests/fixtures/elab && LEAN_PATH=$PWD lean --run dump_structs.lean > structures.jsonl'",
+  # M4b-4c P1: oracle shouldElabAsElim predicates + getElabElimInfo per
+  # constant (crates/leanr_meta/tests/aux_recursor_oracle.rs,
+  # crates/leanr_elab/tests/elim_info_oracle.rs).
+  "sh -c 'cd tests/fixtures/elab && LEAN_PATH=$PWD lean --run dump_elim.lean > elim.jsonl'",
 ]
 
 [tasks."fixtures:regen-notation"]

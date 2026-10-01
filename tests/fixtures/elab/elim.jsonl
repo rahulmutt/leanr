@@ -1,0 +1,878 @@
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Add","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Add.add","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,2],"motive":1},"n":"Add.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Add.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Add.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Add.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Add.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Add.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Add.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,3],"motive":1},"n":"Add.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,2],"motive":1},"n":"Add.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"And","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,1,3],"motive":2},"n":"And.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"And.intro","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"And.intro._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"And.left","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,4],"motive":2},"n":"And.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,3],"motive":2},"n":"And.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"And.right","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"AnonLoop","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"AnonLoop.below","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":true,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"AnonLoop.brecOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"AnonLoop.brecOn.eq","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"AnonLoop.brecOn.go","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"AnonLoop.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"AnonLoop.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"AnonLoop.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"AnonLoop.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"AnonLoop.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"AnonLoop.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"AnonLoop.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"AnonLoop.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Bi","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"Bi.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Bi.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Bi.dflt","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Bi.imp","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Bi.inst","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Bi.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Bi.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Bi.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Bi.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Bi.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"Bi.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"Bi.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Big","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"Big.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Big.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Big.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Big.ofInt","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Big.ofInt.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"Big.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"Big.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Bool","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"Bool.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Bool.false","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Bool.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Bool.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[3],"motive":0},"n":"Bool.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"Bool.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Bool.true","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CA","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"CA.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CA.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CA.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CA.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CA.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CA.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CA.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"CA.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"CA.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CA.toCX","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CD","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"CD.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CD.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CD.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CD.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CD.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CD.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CD.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"CD.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"CD.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CD.toCA","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CD.toCP","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CD.toCQ","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CP","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"CP.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CP.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CP.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CP.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CP.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CP.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"CP.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"CP.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CP.toCtorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CQ","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"CQ.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CQ.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CQ.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CQ.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CQ.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CQ.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CQ.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"CQ.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"CQ.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CQ.toCP","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CX","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"CX.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CX.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CX.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CX.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CX.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CX.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"CX.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"CX.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CX.toCtorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Carrier","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"Carrier.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Carrier.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Carrier.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Carrier.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Carrier.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Carrier.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Carrier.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"Carrier.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"Carrier.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Carrier.ty","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Cell","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Char","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Char.ofNat","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Coe","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,1,3],"motive":2},"n":"Coe.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Coe.coe","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Coe.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Coe.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Coe.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Coe.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Coe.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Coe.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,4],"motive":2},"n":"Coe.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,3],"motive":2},"n":"Coe.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeDep","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,1,2,4],"motive":3},"n":"CoeDep.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeDep.coe","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeDep.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeDep.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeDep.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeDep.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeDep.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeDep.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,2,5],"motive":3},"n":"CoeDep.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,2,4],"motive":3},"n":"CoeDep.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeFun","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,1,3],"motive":2},"n":"CoeFun.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,2,3],"motive":1},"n":"CoeFun.coe","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeFun.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeFun.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeFun.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeFun.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeFun.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeFun.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,4],"motive":2},"n":"CoeFun.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,3],"motive":2},"n":"CoeFun.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeHTC","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,1,3],"motive":2},"n":"CoeHTC.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeHTC.coe","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeHTC.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeHTC.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeHTC.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeHTC.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeHTC.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeHTC.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,4],"motive":2},"n":"CoeHTC.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,3],"motive":2},"n":"CoeHTC.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeHTCT","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,1,3],"motive":2},"n":"CoeHTCT.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeHTCT.coe","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeHTCT.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeHTCT.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeHTCT.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeHTCT.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeHTCT.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeHTCT.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,4],"motive":2},"n":"CoeHTCT.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,3],"motive":2},"n":"CoeHTCT.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeHead","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,1,3],"motive":2},"n":"CoeHead.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeHead.coe","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeHead.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeHead.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeHead.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeHead.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeHead.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeHead.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,4],"motive":2},"n":"CoeHead.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,3],"motive":2},"n":"CoeHead.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeOTC","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,1,3],"motive":2},"n":"CoeOTC.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeOTC.coe","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeOTC.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeOTC.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeOTC.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeOTC.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeOTC.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeOTC.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,4],"motive":2},"n":"CoeOTC.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,3],"motive":2},"n":"CoeOTC.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeOut","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,1,3],"motive":2},"n":"CoeOut.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeOut.coe","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeOut.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeOut.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeOut.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeOut.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeOut.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeOut.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,4],"motive":2},"n":"CoeOut.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,3],"motive":2},"n":"CoeOut.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeSort","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,1,3],"motive":2},"n":"CoeSort.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeSort.coe","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeSort.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeSort.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeSort.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeSort.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeSort.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeSort.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,4],"motive":2},"n":"CoeSort.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,3],"motive":2},"n":"CoeSort.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeT","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,1,2,4],"motive":3},"n":"CoeT.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeT.coe","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeT.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeT.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeT.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeT.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeT.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeT.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,2,5],"motive":3},"n":"CoeT.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,2,4],"motive":3},"n":"CoeT.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeTC","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,1,3],"motive":2},"n":"CoeTC.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeTC.coe","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeTC.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeTC.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeTC.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeTC.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeTC.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeTC.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,4],"motive":2},"n":"CoeTC.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,3],"motive":2},"n":"CoeTC.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeTail","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,1,3],"motive":2},"n":"CoeTail.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeTail.coe","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeTail.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeTail.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeTail.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeTail.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeTail.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"CoeTail.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,4],"motive":2},"n":"CoeTail.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,3],"motive":2},"n":"CoeTail.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D1","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"D1.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D1.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D1.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D1.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D1.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D1.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D1.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"D1.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"D1.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D1.x","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D1.y","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D2","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"D2.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D2.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D2.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D2.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D2.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D2.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D2.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"D2.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"D2.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D2.y","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D2.z","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D2.zz","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D3","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"D3.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D3.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D3.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D3.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D3.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D3.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D3.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"D3.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"D3.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D3.toD1","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D3.toD2","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D3.w","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"D3.z","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Dflt","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,2],"motive":1},"n":"Dflt.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Dflt.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Dflt.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Dflt.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Dflt.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Dflt.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Dflt.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,3],"motive":1},"n":"Dflt.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,2],"motive":1},"n":"Dflt.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Dflt.val","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Empty","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"Empty.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Empty.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Empty.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Empty.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"Empty.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"Empty.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Eq","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,1,3,4],"motive":2},"n":"Eq.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,4,5],"motive":2},"n":"Eq.ndrec","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,4,5],"motive":2},"n":"Eq.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,3,4],"motive":2},"n":"Eq.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Eq.refl","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,2,3,4],"motive":1},"n":"Eq.subst'","rec":false,"recOn":false,"tag":true}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Exists","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,1,3],"motive":2},"n":"Exists.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Exists.intro","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,4],"motive":2},"n":"Exists.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,3],"motive":2},"n":"Exists.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FI","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"FI.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FI.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FI.f","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FI.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FI.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FI.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FI.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FI.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"FI.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"FI.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"False","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"False.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"False.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"False.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Fn","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"Fn.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Fn.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Fn.f","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Fn.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Fn.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Fn.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Fn.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Fn.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"Fn.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"Fn.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FnI","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"FnI.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FnI.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FnI.f","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FnI.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FnI.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FnI.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FnI.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FnI.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"FnI.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"FnI.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FnJ","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"FnJ.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FnJ.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FnJ.g","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FnJ.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FnJ.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FnJ.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FnJ.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FnJ.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"FnJ.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"FnJ.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FnS","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"FnS.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FnS.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FnS.f","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FnS.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FnS.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FnS.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FnS.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"FnS.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"FnS.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"FnS.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Fresh","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,2],"motive":1},"n":"Fresh.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Fresh.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Fresh.fresh","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Fresh.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Fresh.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Fresh.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Fresh.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Fresh.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,3],"motive":1},"n":"Fresh.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,2],"motive":1},"n":"Fresh.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Function.twice","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Get","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,1,2,4],"motive":3},"n":"Get.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Get.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Get.get","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Get.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Get.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Get.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Get.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Get.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,2,5],"motive":3},"n":"Get.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,2,4],"motive":3},"n":"Get.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"HEq","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,1,3,4,5],"motive":2},"n":"HEq.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,4,5,6],"motive":2},"n":"HEq.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,3,4,5],"motive":2},"n":"HEq.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"HEq.refl","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"ImpI","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"ImpI.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"ImpI.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"ImpI.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"ImpI.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"ImpI.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"ImpI.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"ImpI.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"ImpI.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Int","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"Int.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Int.negSucc","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Int.negSucc.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Int.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Int.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Int.ofNat","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Int.ofNat.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[3],"motive":0},"n":"Int.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"Int.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Lean.Internal.coeM","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Lean.Syntax","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"List","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"List.below","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":true,"casesOn":false,"info":{"majors":[0,2],"motive":1},"n":"List.brecOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"List.brecOn.eq","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"List.brecOn.go","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,2],"motive":1},"n":"List.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"List.cons","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"List.cons.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"List.nil","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"List.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"List.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,4],"motive":1},"n":"List.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,2],"motive":1},"n":"List.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Loop","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Loop.below","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":true,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"Loop.brecOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Loop.brecOn.eq","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Loop.brecOn.go","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"Loop.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Loop.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Loop.f","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Loop.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Loop.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Loop.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Loop.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Loop.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"Loop.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"Loop.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Nat","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Nat.below","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":true,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"Nat.brecOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Nat.brecOn.eq","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Nat.brecOn.go","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"Nat.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Nat.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Nat.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[3],"motive":0},"n":"Nat.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"Nat.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Nat.succ","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Nat.succ.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Nat.zero","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"NatAlias","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"NoInst","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,2],"motive":1},"n":"NoInst.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"NoInst.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"NoInst.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"NoInst.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"NoInst.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"NoInst.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"NoInst.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"NoInst.nope","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,3],"motive":1},"n":"NoInst.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,2],"motive":1},"n":"NoInst.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OA","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OA.a","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"OA.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OA.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OA.m","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OA.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OA.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OA.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OA.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OA.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"OA.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"OA.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OB","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OB.b","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"OB.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OB.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OB.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OB.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OB.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OB.n","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OB.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OB.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"OB.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"OB.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OB.toOA","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OB.toOE","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OC","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OC.c","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"OC.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OC.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OC.k","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OC.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OC.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OC.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OC.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OC.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"OC.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"OC.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OC.toOE","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OE","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"OE.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OE.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OE.e","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OE.k","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OE.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OE.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OE.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OE.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"OE.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"OE.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OE.toCtorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OQ","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OQ.b","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"OQ.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OQ.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OQ.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OQ.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OQ.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OQ.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OQ.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OQ.q","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"OQ.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"OQ.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OQ.toOA","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OQ.toOB","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OQ.toOC","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OfNat","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,1,3],"motive":2},"n":"OfNat.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OfNat.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OfNat.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OfNat.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OfNat.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OfNat.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OfNat.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OfNat.ofNat","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,4],"motive":2},"n":"OfNat.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,3],"motive":2},"n":"OfNat.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OfScientific","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,2],"motive":1},"n":"OfScientific.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OfScientific.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OfScientific.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OfScientific.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OfScientific.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OfScientific.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OfScientific.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"OfScientific.ofScientific","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,3],"motive":1},"n":"OfScientific.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,2],"motive":1},"n":"OfScientific.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"One","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"One.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"One.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"One.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"One.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"One.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"One.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"One.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"One.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PB","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PB.b","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,2],"motive":1},"n":"PB.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PB.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PB.get","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PB.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PB.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PB.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PB.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PB.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,3],"motive":1},"n":"PB.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,2],"motive":1},"n":"PB.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PBox","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"PBox.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PBox.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"PBox.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"PBox.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PC","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PC.c","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,1,3],"motive":2},"n":"PC.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PC.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PC.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PC.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PC.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PC.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PC.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,4],"motive":2},"n":"PC.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,3],"motive":2},"n":"PC.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PC.toPB","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PD","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,2],"motive":1},"n":"PD.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PD.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PD.d","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PD.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PD.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PD.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PD.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PD.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,3],"motive":1},"n":"PD.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,2],"motive":1},"n":"PD.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PD.toPC","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PProd","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,1,3],"motive":2},"n":"PProd.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PProd.fst","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PProd.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PProd.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PProd.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PProd.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PProd.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,4],"motive":2},"n":"PProd.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,3],"motive":2},"n":"PProd.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PProd.snd","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PUnit","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"PUnit.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"PUnit.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"PUnit.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PUnit.unit","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Pair","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,1,3],"motive":2},"n":"Pair.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Pair.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Pair.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Pair.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Pair.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Pair.mk2","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Pair.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Pair.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,4],"motive":2},"n":"Pair.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,3],"motive":2},"n":"Pair.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Poly","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,2],"motive":1},"n":"Poly.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Poly.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Poly.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Poly.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Poly.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Poly.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Poly.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,3],"motive":1},"n":"Poly.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,2],"motive":1},"n":"Poly.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Poly.val","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PrivMk","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"PrivMk.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PrivMk.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PrivMk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PrivMk.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"PrivMk.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"PrivMk.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"PrivMk.x","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Prod","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,1,3],"motive":2},"n":"Prod.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Prod.fst","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Prod.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Prod.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Prod.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Prod.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Prod.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,4],"motive":2},"n":"Prod.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,1,3],"motive":2},"n":"Prod.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Prod.snd","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S1","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S1.a","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S1.ab","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S1.addTo","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S1.bad","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"S1.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S1.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S1.df","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S1.get","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S1.imp","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S1.loop","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S1.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S1.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S1.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S1.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S1.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S1.none","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"S1.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"S1.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S1.viaDef","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S1.viaDef3","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S1.viaFn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S1.viaFnI","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S1.viaFnJ","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S1Ab","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S1Df","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S1Fn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S1Fn3","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S2","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S2.b","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"S2.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S2.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S2.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S2.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S2.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S2.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S2.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"S2.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"S2.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S2.toS1","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S3","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S3.c","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"S3.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S3.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S3.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S3.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S3.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S3.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S3.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"S3.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"S3.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S3.toS2","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S3Alias","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Seed","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,2],"motive":1},"n":"Seed.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Seed.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Seed.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Seed.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Seed.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Seed.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Seed.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,3],"motive":1},"n":"Seed.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,2],"motive":1},"n":"Seed.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Seed.seed","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"String","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"T3","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"T3.a","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"T3.b","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"T3.c","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"T3.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"T3.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"T3.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"T3.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"T3.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"T3.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"T3.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"T3.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"T3.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Tag","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"Tag.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Tag.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Tag.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Tag.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Tag.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Tag.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Tag.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Tag.raw","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"Tag.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"Tag.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"True","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"True.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"True.intro","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"True.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"True.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Unit","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Unit.unit","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Wrap","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,2],"motive":1},"n":"Wrap.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Wrap.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Wrap.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Wrap.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Wrap.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Wrap.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Wrap.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,3],"motive":1},"n":"Wrap.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,2],"motive":1},"n":"Wrap.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Wrap.wrap","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Wrapper","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,2],"motive":1},"n":"Wrapper.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Wrapper.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Wrapper.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Wrapper.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Wrapper.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Wrapper.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Wrapper.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,3],"motive":1},"n":"Wrapper.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,2],"motive":1},"n":"Wrapper.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Wrapper.val","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"_private.Elab0.0.PrivMk.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"_private.Elab0.0.PrivMk.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"_private.Elab0.0.PrivMk.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"autoParam","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"cast","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"cell","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"dep","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"dflt","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"dpair","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"dpick","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"eq_of_heq","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"getFst","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"heq_of_eq","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"id","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instAddNat","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeFunFn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeFunFnI","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeFunFnJ","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeFunFnS","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeFunLoop","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeHTC","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeHTCOfCoeHeadOfCoeOTC","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeHTCOfCoeOTC","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeHTCT","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeHTCTOfCoeHTC","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeHTCTOfCoeTailOfCoeHTC","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeIntBig","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeNatInt","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeNatWrapper","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeOTC","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeOTCOfCoeOut","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeOTCOfCoeTC","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeOutOfCoeFun","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeOutOfCoeSort","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeSortCarrier","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeT","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeTC","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeTCOfCoe","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeTCOfCoe_1","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeTOfCoeDep","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeTOfCoeHTCT","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instDfltNat","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instDfltUnit","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instFreshSeed","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instGetCellNat","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instOfNatNat","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instOfNatTag","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instOfScientificTag","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instPairNatNat","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instPairNatUnit","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instSeedPUnit","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instWrapNat","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instWrapUnit","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"lcAny","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"lcErased","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"lcVoid","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[3],"motive":0},"n":"natElim","rec":false,"recOn":false,"tag":true}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"optParam","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"outParam","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"p5AutoTac","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"pairW","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"pick","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"polyZero","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"rfl","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"sameAs","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"semiOutParam","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"takesInt","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"useFresh","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"useNoInst","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"usePair","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"useWrap","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"withDefault","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"withTactic","rec":false,"recOn":false,"tag":false}
