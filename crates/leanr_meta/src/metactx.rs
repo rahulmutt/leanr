@@ -530,6 +530,37 @@ impl<'e> MetaCtx<'e> {
         r
     }
 
+    /// oracle: `withNewMCtxDepthImp` (`Lean/Meta/Basic.lean:1973-1978`):
+    /// `incDepth`, clear `postponed`, run, then restore the WHOLE saved
+    /// mctx and `postponed` in a `finally`. Restoring the whole mctx
+    /// discards every assignment made inside, including to inner mvars,
+    /// so a caller that needs an inner result must instantiate it inside
+    /// the scope. leanr's `checkpoint`/`rollback` restores assignments
+    /// and `postponed`; declarations made inside persist harmlessly
+    /// (`snapshot_assignments`' own doc). `f` returns rather than
+    /// unwinds, so save/run/restore covers the `Err` path too (same
+    /// panic caveat as `with_assignable_synthetic_opaque`).
+    ///
+    /// The transient defeq cache is cleared on entry and on exit: an
+    /// answer computed while outer mvars are read-only must never answer
+    /// the same query outside the scope. That only changes performance.
+    pub fn with_new_mctx_depth<R>(
+        &mut self,
+        allow_level_assignments: bool,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let snap = self.checkpoint();
+        let (depth, level_assign_depth) = (self.mctx.depth(), self.mctx.level_assign_depth());
+        self.mctx.inc_depth(allow_level_assignments);
+        self.postponed.clear();
+        self.defeq_cache_transient.clear();
+        let r = f(self);
+        self.rollback(snap);
+        self.mctx.set_depths(depth, level_assign_depth);
+        self.defeq_cache_transient.clear();
+        r
+    }
+
     /// oracle: `mkArrow` (`Lean/Meta/Basic.lean`, `mkForall _ .default d b`
     /// with a fresh user name) — a NON-dependent `forallE`. The binder
     /// name is `None`: the only consumer is the TYPE of `coerceToFunction?`'s
@@ -3131,6 +3162,109 @@ mod tests {
                  restore's `truncate_to` pops it and `get_instances` \
                  silently stops offering it"
             );
+        });
+    }
+
+    // ---- mctx depth (macro/binop% P1, Task 1) ----
+    // oracle: `addExprMVarDecl`/`addLevelMVarDecl` stamp `depth :=
+    // mctx.depth` (MetavarContext.lean:813, :834); `incDepth` (:932-936);
+    // `withNewMCtxDepthImp` restores the whole saved mctx and `postponed`
+    // (Basic.lean:1973-1978).
+
+    fn declare_level_named(ctx: &mut MetaCtx, s: &str) -> crate::LMVarId {
+        let sid = ctx.scratch.intern_str(None, s).unwrap();
+        let n = ctx.scratch.name_str(None, None, sid).unwrap();
+        let id = crate::LMVarId(n);
+        ctx.mctx.declare_level(id);
+        id
+    }
+
+    #[test]
+    fn declarations_are_stamped_with_the_current_depth() {
+        with_ctx(|ctx| {
+            let z = ctx.scratch.level_zero(None).unwrap();
+            let ty = ctx.scratch.expr_sort(None, z).unwrap();
+            let (_, outer) = fresh_mvar(ctx, ty);
+            let lo = declare_level_named(ctx, "lo");
+            assert_eq!(ctx.mctx.depth(), 0);
+            assert_eq!(ctx.mctx.expr_mvar_depth(outer), Some(0));
+            ctx.with_new_mctx_depth(false, |ctx| {
+                assert_eq!(ctx.mctx.depth(), 1);
+                assert_eq!(ctx.mctx.level_assign_depth(), 1);
+                let (_, inner) = fresh_mvar(ctx, ty);
+                let li = declare_level_named(ctx, "li");
+                assert_eq!(ctx.mctx.expr_mvar_depth(inner), Some(1));
+                assert_eq!(ctx.mctx.level_mvar_depth(li), 1);
+                assert!(ctx.mctx.is_read_only(outer));
+                assert!(!ctx.mctx.is_read_only(inner));
+                assert!(ctx.mctx.is_level_mvar_read_only(lo));
+                assert!(!ctx.mctx.is_level_mvar_read_only(li));
+            });
+            assert_eq!(ctx.mctx.depth(), 0);
+            assert!(!ctx.mctx.is_read_only(outer));
+            assert!(!ctx.mctx.is_level_mvar_read_only(lo));
+        });
+    }
+
+    #[test]
+    fn allow_level_assignments_keeps_the_level_assign_depth() {
+        with_ctx(|ctx| {
+            let lo = declare_level_named(ctx, "lo");
+            ctx.with_new_mctx_depth(true, |ctx| {
+                assert_eq!(ctx.mctx.depth(), 1);
+                assert_eq!(ctx.mctx.level_assign_depth(), 0);
+                assert!(!ctx.mctx.is_level_mvar_read_only(lo));
+            });
+        });
+    }
+
+    #[test]
+    fn nested_scopes_restore_the_intermediate_depth() {
+        with_ctx(|ctx| {
+            ctx.with_new_mctx_depth(false, |ctx| {
+                ctx.with_new_mctx_depth(true, |ctx| {
+                    assert_eq!(ctx.mctx.depth(), 2);
+                    assert_eq!(ctx.mctx.level_assign_depth(), 1);
+                });
+                assert_eq!(ctx.mctx.depth(), 1);
+                assert_eq!(ctx.mctx.level_assign_depth(), 1);
+            });
+            assert_eq!((ctx.mctx.depth(), ctx.mctx.level_assign_depth()), (0, 0));
+        });
+    }
+
+    #[test]
+    fn scope_discards_assignments_and_restores_postponed_even_on_err() {
+        with_ctx(|ctx| {
+            let z = ctx.scratch.level_zero(None).unwrap();
+            let ty = ctx.scratch.expr_sort(None, z).unwrap();
+            let (_, m) = fresh_mvar(ctx, ty);
+            ctx.postponed.push((z, z));
+            let r: Result<(), MetaError> = ctx.with_new_mctx_depth(false, |ctx| {
+                assert!(
+                    ctx.postponed.is_empty(),
+                    "oracle clears `postponed` on entry"
+                );
+                // Assigning an outer mvar directly (bypassing isDefEq) is
+                // still discarded on exit: the oracle restores `saved.mctx`.
+                ctx.mctx.assign(m, ty).unwrap();
+                Err(MetaError::Unsupported("boom".into()))
+            });
+            assert!(r.is_err());
+            assert!(!ctx.mctx.is_assigned(m));
+            assert_eq!(ctx.postponed, vec![(z, z)]);
+            assert_eq!(ctx.mctx.depth(), 0);
+        });
+    }
+
+    #[test]
+    fn undeclared_expr_mvar_is_read_only_and_undeclared_level_is_depth_zero() {
+        with_ctx(|ctx| {
+            let sid = ctx.scratch.intern_str(None, "ghost").unwrap();
+            let n = ctx.scratch.name_str(None, None, sid).unwrap();
+            assert!(ctx.mctx.is_read_only(crate::MVarId(n)));
+            assert_eq!(ctx.mctx.level_mvar_depth(crate::LMVarId(n)), 0);
+            assert!(!ctx.mctx.is_level_mvar_read_only(crate::LMVarId(n)));
         });
     }
 }
