@@ -169,7 +169,11 @@ impl<'e> MetaCtx<'e> {
     /// for why this matters. `subst` follows `instantiate_rev`'s own
     /// convention (innermost-first: `subst[subst.len()-1]` replaces
     /// `#0`).
-    fn instantiate_beta_rev(&mut self, e: ExprId, subst: &[ExprId]) -> Result<ExprId, MetaError> {
+    pub(crate) fn instantiate_beta_rev(
+        &mut self,
+        e: ExprId,
+        subst: &[ExprId],
+    ) -> Result<ExprId, MetaError> {
         if subst.is_empty() {
             return Ok(e);
         }

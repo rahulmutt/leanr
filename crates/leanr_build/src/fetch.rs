@@ -183,7 +183,7 @@ fn ensure_git(name: &str, url: &str, rev: &str, pkg_cache: &Path) -> Result<(), 
         ))
     };
     validate_package_name(name).map_err(manifest_action)?;
-    validate_git_url(url).map_err(&ferr)?;
+    validate_git_url(url).map_err(ferr)?;
     validate_rev(rev).map_err(manifest_action)?;
     let dest = pkg_cache.join(rev);
     if dest.is_dir() {
