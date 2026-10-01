@@ -639,7 +639,8 @@ the `recursor_head_seam` helper both called. Full
   `Elab/Config.lean:61-62`: `foApprox`/`ctxApprox` true), and leanr's
   `TermElabM` runs under `Config::default()`. **Follow-up:** model
   `setElabConfig` (a global change; needs a full corpus rerun). The new
-  record is a two-discriminant `Eq.rec`.
+  record is a two-discriminant `Eq.rec`. **Closed** by `2026-10-01-set-elab-config-design.md` (`elim/ndrec`
+  reinstated).
 
 **Mutations run** (each applied, suite run, reverted):
 
@@ -677,8 +678,8 @@ the `recursor_head_seam` helper both called. Full
   branch: route it through the real `check`.
 - `trace[Elab.app.elab_as_elim]` is not modelled.
 - `numScopeArgs`: no query hit that gap.
-- `fun.rs` `expandFunBinders` (`_`, multi-ident) and `setElabConfig`
-  (above). The `instantiate_beta_rev_range` nested-redex gap (was HIGH) is
+- `fun.rs` `expandFunBinders` (`_`, multi-ident). (`setElabConfig` is
+  closed; see its own spec.) The `instantiate_beta_rev_range` nested-redex gap (was HIGH) is
   closed; see the follow-up note below.
 - Fixture/record follow-ups from the final review: a `preElim2`-style
   fixture eliminator with an explicit binder before an explicit motive

@@ -277,7 +277,8 @@ fn oracle_elab_gate() {
     // 273 -> 276 (M4b-4a P4 final fix): p4/pipe-nested-args, p4/pipe-nested-named, p4/pipe-nested-deep.
     // 276 -> 329 (M4b-4c P2): M4b-4b's 17 anon/* records, never folded in, plus the 36 elim/* and elimErr/* records.
     // 329 -> 331 (instantiateBetaRevRange nested redexes): elim/namedMotiveBareIh, elim/explicitAtBareIh.
-    const CORPUS_FLOOR: usize = 331;
+    // 331 -> 333 (setElabConfig foApprox): elim/ndrec, elim/ndrecExpected.
+    const CORPUS_FLOOR: usize = 333;
     assert!(
         replayed >= CORPUS_FLOOR,
         "corpus shrank: replayed {replayed} records, floor is {CORPUS_FLOOR}. \

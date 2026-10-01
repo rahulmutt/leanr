@@ -1116,6 +1116,12 @@ impl<'e> MetaCtx<'e> {
             // acknowledged-thin, here meaning NOT reachable at all
             // rather than merely narrow; see the task report for the
             // full reasoning).
+            // Since `setElabConfig`
+            // (docs/superpowers/specs/2026-10-01-set-elab-config-design.md)
+            // `ctx_approx` is ON during elaboration, as in the oracle, and
+            // still inert here. That spec's probe found no corpus record
+            // and no candidate term whose oracle result depends on
+            // `ctxApprox`; port `checkAssignmentAux` when one appears.
             Node::App { f, arg } => Ok(self.check_assignment_scope(mvar_id, fvars, f)?
                 && self.check_assignment_scope(mvar_id, fvars, arg)?),
             Node::Lam {

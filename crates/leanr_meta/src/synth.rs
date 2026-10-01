@@ -2165,10 +2165,11 @@ impl<'e> MetaCtx<'e> {
         //    could succeed here, admitting a candidate the oracle
         //    rejects. Fixed here.
         //  - `ctxApprox := true` -- set for fidelity to the wrapper, but
-        //    it is presently a NO-OP in this crate: no call site reads
-        //    `cfg.ctx_approx` anywhere (`grep` confirms the only
-        //    occurrences are `config.rs`'s own declaration/default/
-        //    tests). The plan-3 ctxApprox rescue lives in the oracle's
+        //    it is presently a NO-OP in this crate: nothing reads
+        //    `cfg.ctx_approx` (`grep -rn ctx_approx crates/` shows it
+        //    is only written -- here, `with_full_approx_def_eq`, and
+        //    `leanr_elab`'s `set_elab_config` -- and declared/defaulted
+        //    in `config.rs`). The plan-3 ctxApprox rescue lives in the oracle's
         //    slow term-rewriting path, which this crate has not built;
         //    a naive graft of it onto the bool-result path was reverted
         //    as unsound (plan-3 notes). Setting the flag here does not

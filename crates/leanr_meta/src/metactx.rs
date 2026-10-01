@@ -477,6 +477,16 @@ impl<'e> MetaCtx<'e> {
         self.cfg
     }
 
+    /// Replace the whole config. Additive accessor for `leanr_elab`:
+    /// `TermElabM::new` installs `setElabConfig` with it, the setter half
+    /// of the oracle's `withConfig setElabConfig`
+    /// (`Elab/Term/TermElabM.lean:2226-2227`). The defeq cache key covers
+    /// the whole `Config` (`config.rs` module doc), so a switch cannot
+    /// leak cached results across configs.
+    pub fn set_config(&mut self, cfg: Config) {
+        self.cfg = cfg;
+    }
+
     pub fn set_transparency(&mut self, t: TransparencyMode) {
         self.cfg.transparency = t;
     }
