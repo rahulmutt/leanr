@@ -874,3 +874,11 @@ inductive False : Prop
     (z : motive Nat.zero) (s : (n : Nat) → motive n → motive (Nat.succ n))
     (n : Nat) : motive n :=
   @Nat.rec motive z s n
+
+-- An explicit binder BEFORE the motive. It is the only shape that
+-- reaches `finalize` with no motive yet ("insufficient number of
+-- arguments", App.lean:1199-1200): `(preElim : Nat)` runs out of
+-- positionals at `k`. An axiom, because a tagged `theorem`/`def` needs
+-- a body, and `@[elab_as_elim]` accepts an axiom (measured).
+@[elab_as_elim] axiom preElim (k : Nat) {motive : Nat → Prop}
+    (z : motive Nat.zero) (n : Nat) : motive n

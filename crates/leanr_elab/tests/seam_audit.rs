@@ -397,7 +397,7 @@ fn fixture_declares_no_undecoded_elab_attributes() {
     assert!(
         src.contains("@[elab_as_elim]"),
         "M4b-4c P1 fixture: Elab0.lean must declare the tagged eliminators \
-         (`Eq.subst'`, `natElim`) that elim.jsonl and P2's corpus use"
+         (`Eq.subst'`, `natElim`, `preElim`) that elim.jsonl and P2's corpus use"
     );
 
     // Until M4b-4c P2 lands `ElabElim`, an eliminator-HEADED query takes the

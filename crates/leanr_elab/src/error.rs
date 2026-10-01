@@ -339,7 +339,7 @@ pub enum InvalidDottedIdentReason {
 
 /// Which eliminator-elaborator throw an `ElabError::Eliminator` stands
 /// for. Line citations are `Lean/Elab/App.lean`, v4.33.0-rc1.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EliminatorErrorReason {
     /// `App.lean:1012-1013`: the telescope's body is not an application
     /// of a telescope fvar to at least one argument.
@@ -354,16 +354,66 @@ pub enum EliminatorErrorReason {
     /// `get_elab_elim_expr_info` on an expression whose type mentions an
     /// ambient local.
     UnexpectedEliminatorType,
+    /// `App.lean:1376`, `:1378`: no expected type, or an mvar-headed one.
+    NoExpectedType,
+    /// `App.lean:1199-1200`: `finalize` reached with no motive yet (an
+    /// explicit binder before the motive ran out of positionals).
+    InsufficientArgs,
+    /// `App.lean:1207`: as `InsufficientArgs`, expected type on later lines.
+    InsufficientArgsExpectedType,
+    /// `App.lean:1197-1198`: named arguments no binder consumed.
+    UnusedNamedArgs(Vec<String>),
+    /// `App.lean:1224`: after generalizing over-applied arguments the
+    /// expected type is type incorrect (type on later lines).
+    OverAppTypeIncorrect,
+    /// `App.lean:1234`: the synthesized motive is not type correct.
+    MotiveNotTypeCorrect,
+    /// `App.lean:1236`: the synthesized motive is invalid.
+    InvalidMotive,
+    /// `App.lean:1229`: a target type that is not an application of the
+    /// motive.
+    MotiveNotHead,
 }
 
 impl EliminatorErrorReason {
     /// The first line of the oracle's `throwError` text.
-    pub fn oracle_first_line(self) -> &'static str {
+    pub fn oracle_first_line(&self) -> String {
+        let p = "failed to elaborate eliminator, ";
         match self {
-            Self::UnexpectedResultingType => "unexpected eliminator resulting type",
-            Self::UnexpectedMotiveArity => "unexpected number of arguments at motive type",
-            Self::MotiveResultNotSort => "motive result type must be a sort",
-            Self::UnexpectedEliminatorType => "unexpected eliminator type",
+            Self::UnexpectedResultingType => "unexpected eliminator resulting type".to_string(),
+            Self::UnexpectedMotiveArity => {
+                "unexpected number of arguments at motive type".to_string()
+            }
+            Self::MotiveResultNotSort => "motive result type must be a sort".to_string(),
+            Self::UnexpectedEliminatorType => "unexpected eliminator type".to_string(),
+            Self::NoExpectedType => format!("{p}expected type is not available"),
+            Self::InsufficientArgs => format!("{p}insufficient number of arguments"),
+            Self::InsufficientArgsExpectedType => {
+                format!("{p}insufficient number of arguments, expected type:")
+            }
+            Self::UnusedNamedArgs(names) => {
+                format!("{p}unused named arguments: [{}]", names.join(", "))
+            }
+            Self::OverAppTypeIncorrect => format!(
+                "{p}after generalizing over-applied arguments, expected type is type incorrect:"
+            ),
+            Self::MotiveNotTypeCorrect => format!("{p}motive is not type correct:"),
+            Self::InvalidMotive => format!("{p}invalid motive"),
+            Self::MotiveNotHead => {
+                "Internal error, eliminator target type isn't an application of the motive"
+                    .to_string()
+            }
+        }
+    }
+}
+
+impl ElabError {
+    /// The oracle's first error line, for the variants the corpus gate
+    /// compares (`Eliminator`); `None` for every other variant.
+    pub fn oracle_first_line(&self) -> Option<String> {
+        match self {
+            Self::Eliminator { reason } => Some(reason.oracle_first_line()),
+            _ => None,
         }
     }
 }
@@ -402,3 +452,26 @@ impl From<MetaError> for ElabError {
 /// limit `withIncRecDepth` checks. leanr counts only the recursions that
 /// can run away on their own (see [`ElabError::MaxRecDepth`]).
 pub(crate) const MAX_REC_DEPTH: usize = 512;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn eliminator_first_lines_are_the_oracles() {
+        use EliminatorErrorReason as R;
+        assert_eq!(
+            R::UnusedNamedArgs(vec!["foo".into(), "bar".into()]).oracle_first_line(),
+            "failed to elaborate eliminator, unused named arguments: [foo, bar]"
+        );
+        assert_eq!(
+            ElabError::Eliminator {
+                reason: R::InvalidMotive
+            }
+            .oracle_first_line()
+            .as_deref(),
+            Some("failed to elaborate eliminator, invalid motive")
+        );
+        assert_eq!(ElabError::Postpone.oracle_first_line(), None);
+    }
+}

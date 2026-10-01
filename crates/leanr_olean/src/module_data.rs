@@ -1040,7 +1040,14 @@ mod tests {
 
         let mut tagged: Vec<String> = md.elab_as_elim.iter().map(|n| render(*n)).collect();
         tagged.sort();
-        assert_eq!(tagged, vec!["Eq.subst'".to_string(), "natElim".to_string()]);
+        assert_eq!(
+            tagged,
+            vec![
+                "Eq.subst'".to_string(),
+                "natElim".to_string(),
+                "preElim".to_string()
+            ]
+        );
 
         let bytes = fixture("Sample.olean");
         let mut env = Environment::default();
