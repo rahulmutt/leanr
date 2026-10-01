@@ -318,6 +318,31 @@ def approxMvarQueries : List (Name × Nat × Expr × (Expr → Expr) × Expr) :=
       mkApp (mkConst `N.succ) (mkApp (mkConst `N.succ) (mkConst `N.zero)))
   ]
 
+/-- M4b-4c P1: `kabstract e p` (`.all`) queries over Meta0, run at
+`default` transparency only (ElabElim's ambient setting). Oracle results
+when written (pp form; `#i` = loose bvar):
+  kconst  `N.succ two`, p `two`                -> `N.succ #0`
+  khead   `N.succ (redId one)`, p `one`        -> `N.succ (redId #0)`:
+          `redId one` IS defeq to `one` but its head is `redId` with 1
+          arg (p's head is `N.succ`, 1 arg, so the head-symbol filter
+          skips it) and its child `one` is abstracted instead
+  kdelta  `N.succ (redId N.zero)`, p `one`     -> `#0` (defeq via delta)
+  kbinder `fun x => N.succ one`, p `one`       -> `fun x => N.succ #1`
+  kloose  `fun x => N.succ x`, p `one`         -> unchanged (loose bvar)
+  kfn     `one`, p `N.succ`                    -> `#0 N.zero`
+  klet    `let y := one; N.succ one`, p `one`  -> `let y := #0; N.succ #1`
+  kmulti  `P.mk one one`, p `one`              -> `P.mk #0 #0` -/
+def kabstractQueries : List (Name × Nat × Expr × Expr) :=
+  [ (`kconst, 0, mkApp (mkConst `N.succ) (mkConst `two), mkConst `two)
+  , (`khead, 0, mkApp (mkConst `N.succ) (mkApp (mkConst `redId) one), one)
+  , (`kdelta, 0, mkApp (mkConst `N.succ) (mkApp (mkConst `redId) (mkConst `N.zero)), one)
+  , (`kbinder, 0, mkLambda `x .default (mkConst `N) (mkApp (mkConst `N.succ) one), one)
+  , (`kloose, 0, mkLambda `x .default (mkConst `N) (mkApp (mkConst `N.succ) (.bvar 0)), one)
+  , (`kfn, 0, one, mkConst `N.succ)
+  , (`klet, 0, mkLet `y (mkConst `N) one (mkApp (mkConst `N.succ) one), one)
+  , (`kmulti, 0, mkApp2 (mkConst `P.mk) one one, one)
+  ]
+
 /-- The two config profiles (spec § Config profiles). `default` leaves
 approximations at their oracle defaults; `approx` turns the four
 false-defaulting flags on (`univApprox` is already true). -/
@@ -428,6 +453,14 @@ unsafe def main : IO Unit := do
               | none => #[]
             pure (eqR, assignArr, aJ, bJ)
           emitDefeqMvar s!"{name}/defeq_mvar/{i}" trName prof aJ bJ eqR assignArr
+    for (name, i, e, p) in kabstractQueries do
+      let r ← kabstract e p
+      let (inJ, st1) := (encExpr e).run {}
+      let (pJ, st2) := (encExpr p).run st1
+      let outJ := (encExpr r).run' st2
+      IO.println <| (Json.mkObj
+        [("id", s!"{name}/kabstract/{i}"), ("q", "kabstract"), ("tr", "default"),
+         ("in", inJ), ("p", pJ), ("out", outJ)]).compress
     -- Constant loop: NOT filtered to "module Meta0" — Meta0 is
     -- import-free, so the environment here IS exactly Meta0's own
     -- constants and nothing else; a module filter would be a no-op.
