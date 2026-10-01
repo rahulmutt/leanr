@@ -147,4 +147,19 @@ of the change. A full corpus rerun shows no existing record changes.
 
 ## Landed
 
-(filled in when the PR merges)
+PR #TBD-PR.
+
+- Commits: `197bf12` (`set_elab_config`, `MetaCtx::set_config`, wiring in
+  `TermElabM::new`, `assign.rs` SEAM note) and `ce98fe7` (corpus records
+  `elim/ndrec`, `elim/ndrecExpected`; `CORPUS_FLOOR` 331 -> 333).
+- Mutation 1 (delete the `mctx.set_config` line in `TermElabM::new`): the
+  oracle corpus diverges on both new records:
+  `elim/ndrec: leanr errored: StuckCoercion { expected: ExprId(2147483699), got: ExprId(2147483662) }`,
+  `elim/ndrecExpected: leanr errored: StuckCoercion { expected: ExprId(2147483686), got: ExprId(2147483736) }`;
+  `config::tests::term_elab_m_new_applies_elab_config` also fails.
+- Mutation 2 (`set_elab_config` with `fo_approx: false`, `ctx_approx: true`,
+  `const_approx: false`, `quasi_pattern_approx: false`, i.e. `ctx_approx`
+  alone on): the same two divergence lines, identical;
+  `set_elab_config_sets_the_four_approx_fields_and_nothing_else` also fails.
+- Open seam: `ctx_approx` is inert today; port `checkAssignmentAux` when a
+  dependent term appears.
