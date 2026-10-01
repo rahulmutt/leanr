@@ -213,15 +213,19 @@ fn a_failed_resume_under_postpone_on_error_rolls_its_state_back() {
 /// exception is rethrown (`:66-67`). A leanr seam is not an oracle
 /// error (`ElabError::is_oracle_error`): swallowing it as "not ready
 /// yet" would let the ladder report an outcome for a path leanr never
-/// ran. `Nat.rec` reaches the M4b-4c `elabAsElim` seam.
+/// ran. `match` is an unregistered kind, so `dispatch` names it as an
+/// `UnsupportedSyntax` seam (`seam_audit.rs`'s
+/// `unregistered_kinds_are_named_by_kind`).
 #[test]
 fn a_seam_in_a_resumed_term_propagates_under_postpone_on_error() {
-    support::with_elab("Nat.rec", |elab, term, kinds| {
+    support::with_elab("match Nat.zero with | x => x", |elab, term, kinds| {
         elab.postpone_elab_term(term, None).unwrap();
         let id = elab.pending_mvars[0];
         let r = elab.without_postponing(|e| e.synthesize_synthetic_mvar(id, true, false, kinds));
         match r {
-            Err(ElabError::UnsupportedSyntax(m)) => assert!(m.contains("M4b-4c"), "{m}"),
+            Err(ElabError::UnsupportedSyntax(m)) => {
+                assert!(m.contains("Lean.Parser.Term.match"), "{m}")
+            }
             other => panic!("a seam must propagate, not become \"not ready\": {other:?}"),
         }
     });

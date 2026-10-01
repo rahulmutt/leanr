@@ -3,6 +3,8 @@ use support::{name_id, with_elab};
 
 use leanr_elab::app::elim::elab_as_elim_info;
 use leanr_elab::app::expand::{expand_app, Arg, NamedArg};
+use leanr_elab::error::EliminatorErrorReason;
+use leanr_elab::ElabError;
 
 /// Expand `term` if it is an application node; a bare identifier is an
 /// application with no arguments.
@@ -110,5 +112,35 @@ fn a_local_head_is_not_gated() {
         assert!(elab_as_elim_info(elab, x, &named, &args, false, e, kinds)
             .unwrap()
             .is_none());
+    });
+}
+
+/// The oracle behavior that replaced the old M4b-4c recursor seam.
+/// `Nat.rec`, postponed with no expected type and resumed, is an ORACLE
+/// error (`App.lean:1376`, "expected type is not available"):
+/// `resumePostponed` swallows it under `postponeOnError`
+/// (`SyntheticMVars.lean:68-71`). Without that flag the oracle logs it
+/// (`:73`); leanr, which does not log-and-continue, propagates it.
+#[test]
+fn a_resumed_eliminator_without_expected_type_is_an_oracle_error() {
+    with_elab("Nat.rec", |elab, term, kinds| {
+        elab.postpone_elab_term(term, None).unwrap();
+        let id = elab.pending_mvars[0];
+        let soft = elab.without_postponing(|e| e.synthesize_synthetic_mvar(id, true, false, kinds));
+        assert!(
+            matches!(soft, Ok(false)),
+            "postponeOnError swallows an oracle error: {soft:?}"
+        );
+        let hard =
+            elab.without_postponing(|e| e.synthesize_synthetic_mvar(id, false, false, kinds));
+        assert!(
+            matches!(
+                hard,
+                Err(ElabError::Eliminator {
+                    reason: EliminatorErrorReason::NoExpectedType
+                })
+            ),
+            "{hard:?}"
+        );
     });
 }

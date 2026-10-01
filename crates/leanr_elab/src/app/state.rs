@@ -567,8 +567,6 @@ pub(crate) fn open_forall_telescope_reducing(
 /// oracle: `forallTelescope` (non-reducing): walks syntactic `forallE`s
 /// only and never calls `whnf`. Same lctx contract as
 /// [`open_forall_telescope_reducing`] (the caller restores).
-// Consumed by `ElimElab` (M4b-4c P2 Task 6).
-#[allow(dead_code)]
 pub(crate) fn open_forall_telescope(
     elab: &mut TermElabM<'_>,
     ty: ExprId,

@@ -117,16 +117,10 @@
 //! - **overload resolution** (more than one candidate from
 //!   `elabAppFn`) — the slice that grows `resolve_global_name`, since it is
 //!   unreachable while only exact names resolve.
-//! - **`elabAsElim`** — M4b-4c, and the one deferral whose seam is
-//!   PARTIAL. `shouldElabAsElim` (`App.lean:1322-1328`) has five
-//!   disjuncts; `app::head` can decide only `isRec`
-//!   (`ConstantInfo::Rec`), so a genuine recursor head is seamed while
-//!   an aux-recursor head (`Nat.casesOn`, `Nat.recOn`, `Nat.brecOn`) or
-//!   an `@[elab_as_elim]` head is not — the other four read the
-//!   `auxRecExt`/`elabAsElim` tag extensions, which leanr does not
-//!   decode. Those cases still emit a term the oracle does not, with no
-//!   seam; `tests/seam_audit.rs`'s fixture-source gate is the backstop
-//!   until M4b-4c lands the decodes and `ElabElim`.
+//! - **`elabAsElim`** — SHIPPED in M4b-4c P2 (`app/elim.rs`): every
+//!   `shouldElabAsElim` head (`App.lean:1322-1328`) is diverted to
+//!   `ElimElab` by `app::elab_app_args`, exactly as `App.lean:1373-1383`
+//!   does.
 //! - **dot notation / LVal machinery** — M4b-4a. P1 SHIPPED: `Term.proj`
 //!   index projections, structure fields and projection functions, the
 //!   resolution loop, `numImplicitParams` and `@` on projection heads

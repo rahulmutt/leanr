@@ -52,7 +52,11 @@ binder-info d/i/s/c) is unchanged from `dump_defeq.lean`.
 
 Record shape: `{"id":<string>,"src":<string>,"exp":<canonical Expr>}`
 (no `q`/`tr`/`in`/`out` fields — those are `dump_defeq.lean`'s meta-
-query shape, not this one's).
+query shape, not this one's). M4b-4c P2 adds a second shape for a query
+the oracle REJECTS: `{"id":<string>,"src":<string>,"err":<string>}`,
+where `err` is the first line of the first logged message (or, if
+nothing was logged, of the thrown exception). Only `elimErrQueries`
+emit it; a query there that elaborates is reported on stderr.
 
 Boilerplate reconciliation: the `Lean.enableInitializersExecution`-
 before-import pitfall and `Core.Context`/`Core.State`/`MetaM.toIO`
@@ -1119,6 +1123,69 @@ def anonTailQueries : List (String × String) :=
   , ("anon/flatK1",           "(⟨Nat.zero, Nat.zero⟩ : PB (Prod Nat Nat))")
   ]
 
+-- M4b-4c P2: eliminator-headed applications (`ElabElim`). Each row was
+-- run on the pinned oracle at plan time. Spec § Evidence lists the
+-- terms these exercise.
+--
+-- Binder spelling (M4b-4c P2 Task 6 ruling): `_` binders are written as
+-- fresh named binders (`hbN`) and `(a b : T)` groups as `(a : T) (b : T)`,
+-- because leanr's `fun` elaborator (`builtin/binder/fun.rs`) does not yet
+-- accept `_` hole binders or multi-ident paren groups -- a recorded
+-- follow-up. `elim/namedMotive` and `elim/explicitAt` annotate
+-- `(ih : Nat)` so they do not depend on `instantiate_beta_rev_range`'s
+-- nested-redex gap (also a follow-up). `elim/eqRecTwoDiscrs` (two
+-- discriminants) replaced `elim/ndrec`, whose standard-path `Eq.ndrec`
+-- needs the oracle's `setElabConfig` foApprox, which leanr's `TermElabM`
+-- does not model yet (follow-up).
+def elimQueries : List (String × String) :=
+  [ ("elim/rec",           "fun (n : Nat) => (Nat.rec Nat.zero (fun hb1 ih => Nat.succ ih) n : Nat)")
+  , ("elim/casesOn",       "fun (n : Nat) => (Nat.casesOn n Nat.zero (fun m => m) : Nat)")
+  , ("elim/recOn",         "fun (n : Nat) => (Nat.recOn n Nat.zero (fun hb2 ih => ih) : Nat)")
+  , ("elim/brecOn",        "fun (n : Nat) => (Nat.brecOn n (fun hb3 hb4 => Nat.zero) : Nat)")
+  , ("elim/namedMotive",   "fun (n : Nat) => Nat.rec (motive := fun hb5 => Nat) Nat.zero (fun hb6 (ih : Nat) => ih) n")
+  , ("elim/explicitAt",    "fun (n : Nat) => @Nat.rec (fun hb7 => Nat) Nat.zero (fun hb8 (ih : Nat) => ih) n")
+  , ("elim/ellipsis",      "Nat.rec ..")
+  , ("elim/hRec",          "fun (h : False) => (h.rec : Nat)")
+  , ("elim/hRecArg",       "fun (h : False) => Nat.succ h.rec")
+  , ("elim/falseRecHole",  "fun (h : False) => (False.rec _ h : Nat)")
+  , ("elim/falseRecMotive","fun (h : False) => (False.rec (fun hb9 => Nat) h : Nat)")
+  , ("elim/subst",         "fun (a : Nat) (b : Nat) (h : Eq a b) (p : Eq a a) => (Eq.subst' h p : Eq a b)")
+  , ("elim/natElimUnder",  "(natElim Nat.zero (fun hb10 ih => ih) : Nat → Nat)")
+  , ("elim/natElimNamedMajor", "fun (m : Nat) => (natElim (n := m) Nat.zero (fun hb11 ih => ih) : Nat)")
+  , ("elim/preElim",       "fun (n : Nat) (z : Eq Nat.zero Nat.zero) => (preElim Nat.zero z n : Eq n n)")
+  , ("elim/dotRec",        "fun (n : Nat) => (.rec Nat.zero (fun hb12 ih => ih) n : Nat)")
+  , ("elim/overApp",       "fun (n : Nat) => (Nat.rec (fun m => m) (fun hb13 ih m => ih m) n Nat.zero : Nat)")
+  , ("elim/overAppDep",    "fun (n : Nat) => (Nat.rec (fun m => Eq.refl m) (fun hb14 ih m => ih m) n Nat.zero : Eq Nat.zero Nat.zero)")
+  , ("elim/overPostponed", "fun (n : Nat) => (Nat.rec (fun m => m) (fun hb15 ih m => ih m) n (sameAs Nat.zero Nat.zero) : Nat)")
+  , ("elim/postponed",     "fun (n : Nat) => sameAs (Nat.rec Nat.zero (fun hb16 ih => ih) n) n")
+  , ("elim/argPos",        "fun (n : Nat) => Nat.succ (Nat.rec Nat.zero (fun hb17 ih => ih) n)")
+  , ("elim/univ",          "fun (n : Nat) => (Nat.rec.{1} Nat.zero (fun hb18 ih => ih) n : Nat)")
+  , ("elim/listRec",       "fun (l : List Nat) => (List.rec Nat.zero (fun hb19 hb20 ih => ih) l : Nat)")
+  , ("elim/eqRecTwoDiscrs", "fun (a : Nat) (b : Nat) (h : Eq a b) (p : Eq a a) => (Eq.rec p h : Eq a b)")
+  , ("elim/letDiscr",      "fun (n : (let x := Nat.zero; Nat)) => (Nat.rec Nat.zero (fun hb21 ih => ih) n : Nat)")
+  , ("elim/letDiscrUsed",  "fun (n : (let x := Nat; x)) => (Nat.rec Nat.zero (fun hb22 ih => ih) n : Nat)")
+  , ("elim/letOver",       "fun (n : Nat) (m : (let x := Nat.zero; Nat)) => (Nat.rec (fun k => k) (fun hb23 ih k => ih k) n m : Nat)")
+  ]
+
+-- M4b-4c P2: queries the oracle REJECTS. Emitted as `{"id","src","err"}`,
+-- where `err` is the first line of the first logged message. The oracle
+-- logs through `errToSorry` and then aborts with an internal exception,
+-- so the thrown exception's own text is only the fallback.
+def elimErrQueries : List (String × String) :=
+  [ ("elimErr/noExpected",          "fun (n : Nat) => Nat.rec Nat.zero (fun hb24 ih => ih) n")
+  , ("elimErr/mvarExpected",        "fun (n : Nat) => (Nat.rec Nat.zero (fun hb25 ih => ih) n : _)")
+  , ("elimErr/insufficient",        "(preElim : Nat)")
+  , ("elimErr/insufficientExpected","fun (h : False) => (False.rec : Nat)")
+  , ("elimErr/insufficientDomain",  "(natElim Nat.zero (fun hb26 ih => ih) : Bool → Nat)")
+  , ("elimErr/unusedNamed",         "fun (n : Nat) => (Nat.rec (foo := Nat.zero) Nat.zero (fun hb27 ih => ih) n : Nat)")
+  , ("elimErr/overAppIncorrect",    "fun (n : Nat) (p : Eq Nat.zero Nat.zero) => (Nat.rec (fun hb28 => p) (fun hb29 ih hb30 => ih Nat.zero) n Nat.zero : Eq p p)")
+  , ("elimErr/motiveIncorrect",     "fun (n : Nat) (p : Eq n n) => (Nat.rec p (fun hb31 ih => ih) n : Eq p p)")
+  , ("elimErr/invalidMotive",       "fun (a : Nat) (b : Nat) (h : Eq a b) (p : Eq a a) => (Eq.subst' h p : Nat)")
+  ]
+
+def emitErr (id src err : String) : IO Unit :=
+  IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("err", err)]
+
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
@@ -1132,7 +1199,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries ++ closeoutExplicitQueries ++ nondepQueries ++ lvalIdxQueries ++ lvalFnQueries ++ p2Queries ++ p3Queries ++ p4Queries ++ anonQueries ++ anonTailQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries ++ closeoutExplicitQueries ++ nondepQueries ++ lvalIdxQueries ++ lvalFnQueries ++ p2Queries ++ p3Queries ++ p4Queries ++ anonQueries ++ anonTailQueries ++ elimQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>
@@ -1151,4 +1218,23 @@ unsafe def main : IO Unit := do
         catch ex =>
           let msg ← ex.toMessageData.toString
           IO.eprintln s!"dump_elab: elaboration failed for {id}: {msg}"
+    for (id, src) in elimErrQueries do
+      match Lean.Parser.runParserCategory env `term src with
+      | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
+      | .ok stx =>
+        Core.resetMessageLog
+        let thrown ← try
+            discard <| (do
+              let e ← Lean.Elab.Term.elabTerm stx none
+              Lean.Elab.Term.synthesizeSyntheticMVarsNoPostponing
+              instantiateMVars e).run'
+            pure none
+          catch ex => pure (some (← ex.toMessageData.toString))
+        let logged ← (← Core.getMessageLog).toList.mapM (·.data.toString)
+        let first := fun (m : String) => (m.splitOn "\n").headD ""
+        match logged.head?, thrown with
+        | some m, _    => emitErr id src (first m)
+        | none, some m => emitErr id src (first m)
+        | none, none   => IO.eprintln s!"dump_elab: {id} was expected to fail but elaborated"
+        Core.resetMessageLog
   discard <| go.toIO coreCtx coreState

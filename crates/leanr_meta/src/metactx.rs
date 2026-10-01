@@ -1279,12 +1279,18 @@ impl<'e> MetaCtx<'e> {
     /// redex sitting under a constructor — e.g. `Foo (motive n)` — as
     /// `Foo ((fun x => ..) n)` where the oracle would produce
     /// `Foo (f m = f n)`. The two terms are defeq, so no unification
-    /// verdict changes; what can differ is the SHAPE of a type reported in
-    /// a message, and any future syntactic test run on the result. This is
-    /// the only remaining divergence from the oracle here, it can only ever
-    /// UNDER-reduce (never emit a term the oracle would not), and closing
-    /// it means porting `visit`'s traversal — which needs a bvar-offset
-    /// walk this crate has no other caller for.
+    /// verdict changes, but the SHAPE difference IS observable in the
+    /// elaborated term: the under-reduced type is the expected type an
+    /// argument is elaborated against, and a `fun` argument's binder
+    /// takes its domain from it. Reproducer (M4b-4c P2, measured against
+    /// the pinned oracle): `fun (n : Nat) => Nat.rec (motive := fun _ =>
+    /// Nat) Nat.zero (fun _ ih => ih) n` — the minor's type `(n : Nat) →
+    /// motive n → motive (n+1)` keeps `(fun _ => Nat) n` under the arrow,
+    /// so leanr gives `ih` the binder type `(fun _ => Nat) n` where the
+    /// oracle gives `Nat`. This is the only remaining divergence from the
+    /// oracle here; it can only ever UNDER-reduce, and closing it means
+    /// porting `visit`'s traversal — which needs a bvar-offset walk this
+    /// crate has no other caller for.
     ///
     /// Additive + behavior-neutral, and the reason it lives HERE rather than
     /// in `leanr_elab`: the substitution half (`instantiate_rev`) is public
