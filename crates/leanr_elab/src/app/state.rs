@@ -184,12 +184,7 @@ impl<'a, 'e> AppElab<'a, 'e> {
     /// `main'` walk needs the SAME `whnfForall` the oracle calls at
     /// `App.lean:458`.
     pub(crate) fn whnf_forall(&mut self, e: ExprId) -> Result<ExprId, ElabError> {
-        let r = self.elab.mctx.whnf(e)?;
-        if matches!(self.node(r), Node::Forall { .. }) {
-            Ok(r)
-        } else {
-            Ok(e)
-        }
+        whnf_forall(self.elab, e)
     }
 
     /// oracle: `getParamName` (`App.lean:251-255`). Valid only when
@@ -463,17 +458,9 @@ impl<'a, 'e> AppElab<'a, 'e> {
     /// synthesis error PROPAGATES here — the oracle's `unless (←
     /// synthesizeInstMVarCore mvarId)` has no surrounding `try`.
     pub fn synthesize_app_inst_mvars(&mut self, stx: &SynElem) -> Result<(), ElabError> {
-        let app_expr = self.st.f;
-        for mvar_id in std::mem::take(&mut self.st.inst_mvars) {
-            if self.elab.synthesize_inst_mvar_core(mvar_id)? {
-                continue;
-            }
-            self.elab
-                .register_synthetic_mvar(stx.clone(), mvar_id, SyntheticMVarKind::TypeClass);
-            self.elab
-                .register_mvar_error_implicit_arg_info(mvar_id, stx.clone(), app_expr);
-        }
-        Ok(())
+        let inst_mvars = std::mem::take(&mut self.st.inst_mvars);
+        self.elab
+            .synthesize_app_inst_mvars_of(inst_mvars, self.st.f, stx)
     }
 
     /// `Expr.hasLooseBVars` — read straight off the packed per-node
@@ -574,6 +561,37 @@ pub(crate) fn open_forall_telescope_reducing(
     elab: &mut TermElabM<'_>,
     ty: ExprId,
 ) -> Result<(Vec<TelescopeBinder>, ExprId), ElabError> {
+    open_forall_telescope_core(elab, ty, true)
+}
+
+/// oracle: `forallTelescope` (non-reducing): walks syntactic `forallE`s
+/// only and never calls `whnf`. Same lctx contract as
+/// [`open_forall_telescope_reducing`] (the caller restores).
+// Consumed by `ElimElab` (M4b-4c P2 Task 6).
+#[allow(dead_code)]
+pub(crate) fn open_forall_telescope(
+    elab: &mut TermElabM<'_>,
+    ty: ExprId,
+) -> Result<(Vec<TelescopeBinder>, ExprId), ElabError> {
+    open_forall_telescope_core(elab, ty, false)
+}
+
+/// oracle: `whnfForall` (`Lean/Meta/Basic.lean`) — WHNF, but keep the
+/// ORIGINAL term if the reduct is not a forall.
+pub(crate) fn whnf_forall(elab: &mut TermElabM<'_>, e: ExprId) -> Result<ExprId, ElabError> {
+    let r = elab.mctx.whnf(e)?;
+    if matches!(lval::node(elab, r), Node::Forall { .. }) {
+        Ok(r)
+    } else {
+        Ok(e)
+    }
+}
+
+fn open_forall_telescope_core(
+    elab: &mut TermElabM<'_>,
+    ty: ExprId,
+    reducing: bool,
+) -> Result<(Vec<TelescopeBinder>, ExprId), ElabError> {
     let mut binders: Vec<TelescopeBinder> = Vec::new();
     let mut cur = ty;
     loop {
@@ -583,17 +601,10 @@ pub(crate) fn open_forall_telescope_reducing(
         // Reducing an already-`forall` type is a no-op, so this
         // guard is a cost decision, not a semantic one — but it
         // keeps the walk shaped like the oracle's.
-        let reduced = if matches!(lval::node(elab, cur), Node::Forall { .. }) {
+        let reduced = if !reducing || matches!(lval::node(elab, cur), Node::Forall { .. }) {
             cur
         } else {
-            // Same as `AppElab::whnf_forall`: keep the whnf result only
-            // if it is a `forall`.
-            let r = elab.mctx.whnf(cur)?;
-            if matches!(lval::node(elab, r), Node::Forall { .. }) {
-                r
-            } else {
-                cur
-            }
+            whnf_forall(elab, cur)?
         };
         let Node::Forall {
             binder_name,
@@ -615,6 +626,7 @@ pub(crate) fn open_forall_telescope_reducing(
             name: binder_name,
             fvar,
             ty: binder_type,
+            bi: binder_info,
         });
     }
 }
@@ -633,4 +645,31 @@ pub(crate) struct TelescopeBinder {
     /// oracle: `xDecl.type` == `inferType xs[i]`, closed with respect to
     /// the telescope.
     pub ty: ExprId,
+    /// oracle: `xDecl.binderInfo`.
+    // Read by the `ElimElab` gate (M4b-4c P2 Task 5).
+    #[allow(dead_code)]
+    pub bi: BinderInfo,
+}
+
+impl TermElabM<'_> {
+    /// oracle: `Term.synthesizeAppInstMVars` (`App.lean:75-79`) — the
+    /// COMMITTING pass over `inst_mvars`. Each mvar that is still not
+    /// ready is registered as a pending `.typeClass` synthetic mvar with
+    /// an `MVarErrorInfo` attributing it to `app`. A genuine synthesis
+    /// error PROPAGATES (no surrounding `try`).
+    pub(crate) fn synthesize_app_inst_mvars_of(
+        &mut self,
+        inst_mvars: Vec<MVarId>,
+        app: ExprId,
+        stx: &SynElem,
+    ) -> Result<(), ElabError> {
+        for mvar_id in inst_mvars {
+            if self.synthesize_inst_mvar_core(mvar_id)? {
+                continue;
+            }
+            self.register_synthetic_mvar(stx.clone(), mvar_id, SyntheticMVarKind::TypeClass);
+            self.register_mvar_error_implicit_arg_info(mvar_id, stx.clone(), app);
+        }
+        Ok(())
+    }
 }
