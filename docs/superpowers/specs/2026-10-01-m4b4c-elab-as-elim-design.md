@@ -566,3 +566,118 @@ patterns):
   records resolve to a different `NameId` (vacuous today: the oracle
   says false for all three). Switch to the Num-aware `name_id` from
   `crates/leanr_elab/tests/support/mod.rs`.
+
+### P2 (PR #55): ElabElim
+
+P2 ports `ElabElim` (`App.lean:1140-1319`), the `elabAsElim?` gate
+(`App.lean:1397-1431`) and the diversion in `elab_app_args`
+(`App.lean:1373-1383`), and removes the three recursor seams. Full
+`mise run ci` is green. The elab corpus grows by 36 records (27 `elim/*`,
+9 `elimErr/*`), `CORPUS_FLOOR` 276 -> 329, and no existing record moved.
+**M4b-4 is complete.**
+
+**Spec corrections found while planning:**
+
+- **`elab_app_fn_id`'s `heed` is deleted, not kept.** `heedElabAsElim` is
+  a `TermElabM` reader field that only the `induction` tactic clears
+  (`Tactic/Induction.lean:806`), so in term elaboration it is always
+  `true`. The leanr `heed` also tested `lvals.is_empty() && n_fields ==
+  0`, which only placed the seam, and would have sent `h.rec` down the
+  ordinary path. The gate lives entirely in `elab_app_args`, on the final
+  head.
+- **No `registerMVarArgName` table.** Its only reader is the oracle's
+  error prose, which leanr defers (`args.rs`'s `mk_inst_mvar` is the
+  precedent). `save_arg_info` is documented and left out.
+- **`mkFreshBinderName` need not match byte for byte.** The canonical
+  encoder erases binder names.
+- **`isTypeCorrect` needed a real `Meta.check`** (`Check.lean:288-338`,
+  `:365-370`). `assign.rs`'s `is_type_correct` was an `infer_type` proxy,
+  and both `elimErr/motiveIncorrect` and `elimErr/overAppIncorrect` are
+  well-typed under `infer_type`. Task 2 ports `check` in
+  `leanr_meta/src/check.rs`. The old proxy keeps its behavior as
+  `infer_type_succeeds`.
+- **The elab corpus had no error records.** `dump_elab.lean` now has an
+  `err` record kind for an `elimErrQueries` list only, carrying the first
+  line of the first logged message (the oracle logs through `errToSorry`
+  then aborts with `internal exception #3`).
+- **New fixture declaration `preElim`**, an `@[elab_as_elim]` axiom with an
+  explicit binder before the motive, for "insufficient number of
+  arguments" (no motive yet).
+- **`kabstract` fvar/mvar oracle records stay deferred.** The fvar fast
+  path is pinned end to end by every `elim/*` query with a bound major.
+  No P2 caller passes an mvar pattern. The `mdata` fast path has a unit
+  test.
+
+**Deviations found during execution (controller rulings):**
+
+- **T6-A/B: query sources respelled.** leanr's `fun` has two gaps in
+  `builtin/binder/fun.rs`: `_` hole binders
+  (`unsupported_binder_kind`) and multi-ident paren groups `(a b : T)`
+  (`extract_paren_fun_binder`). The plan's queries used both, 22 records
+  diverged, and none of the pre-existing corpus used either. The queries
+  now spell `_` as a fresh name and split `(a b : T)`; the canonical
+  encoder erases binder names, so `exp` is unchanged. **Follow-up:** port
+  `expandFunBinders` for both forms in `fun.rs`.
+- **T6-C: `elim/namedMotive` / `elim/explicitAt` annotate `ih`.** These
+  are standard-path controls (motive supplied). Original query
+  `fun (n : Nat) => Nat.rec (motive := fun _ => Nat) Nat.zero (fun _ ih
+  => ih) n` gives `ih : (fun _ => Nat) x` in leanr and `ih : Nat` in the
+  oracle: `MetaCtx::instantiate_beta_rev_range` uses `head_beta`, not the
+  oracle's nested `visit`, so a nested redex survives into a propagated
+  binder type. This is a **silent wrong term with no seam**. **Follow-up,
+  ranked HIGH:** port the full `instantiateBetaRevRange`. The reproducer
+  is in the `metactx.rs` doc, whose false "unobservable" claim was fixed
+  (doc-only).
+- **T6-D: `elim/ndrec` dropped, `elim/eqRecTwoDiscrs` added.** `Eq.ndrec`
+  is not an eliminator (`elab_as_elim_info` answers `None`); the oracle
+  solves `?m.6 ?m.5 =?= Eq a a` by `foApprox`. The oracle's `TermElabM.run`
+  is `withConfig setElabConfig` (`TermElabM.lean:2227`,
+  `Elab/Config.lean:61-62`: `foApprox`/`ctxApprox` true), and leanr's
+  `TermElabM` runs under `Config::default()`. **Follow-up:** model
+  `setElabConfig` (a global change; needs a full corpus rerun). The new
+  record is a two-discriminant `Eq.rec`.
+
+**Mutations run** (each applied, suite run, reverted):
+
+- `Meta.check` (T2): `check_app` -> `Ok(())`, let-value defeq check
+  disabled, level-count check disabled, `ensure_type` -> plain
+  `get_level`. All killed (`ill_typed_application_is_rejected_where_infer_type_succeeds`,
+  `check_keeps_defeq_assignments`, `let_value_type_mismatch_is_rejected`,
+  `wrong_universe_count_is_rejected`,
+  `binder_type_mvar_with_mvar_type_is_type_correct_and_assigns_sort`).
+  Not mutation-tested: `check_proj` and the forall/lambda telescope arms
+  (no test exercises them).
+- Gate (T5, `elim_smoke.rs`): drop each of the five `shouldElabAsElim`
+  disjuncts, invert `!= hole`, drop `explicit || ellipsis`. All killed.
+  **Survivors:** the pre-motive `bi == Default` arm and the named-arg
+  erase. They only matter for an explicit motive after a pre-motive
+  binder, and no fixture eliminator has one. A fix round also replaced an
+  unchecked `xs[motive_pos]` with `xs.get`.
+- `ElimElab` (T6, real corpus): `mk_motive` folds left (killed by
+  `elim/eqRecTwoDiscrs`), `Undef` at motive -> `finalize` (`elim/hRec`,
+  `elim/hRecArg`, `elimErr/insufficientExpected`), `is_type_correct` ->
+  `infer_type().is_ok()` (`elimErr/motiveIncorrect`,
+  `elimErr/overAppIncorrect`), `transform_used_let_only` -> identity
+  (`elim/letDiscr`, `elim/letOver`), drop the mvar-headed-expected check
+  (`elimErr/mvarExpected`, `elimErr/noExpected`). **Survivors:** removing
+  `with_full_approx_def_eq`, and `revert_args` elaborating L->R. The
+  inst-implicit path of `ElimElab` (`mk_implicit_arg` synthetic,
+  `inst_mvars` push, `synthesize_app_inst_mvars_of`) is unexercised: no
+  fixture eliminator has an inst-implicit binder.
+
+**Open seams and follow-ups:**
+
+- `@[elab_without_expected_type]` stays banned (`seam_audit.rs`).
+- `kabstract` mvar-pattern oracle records (above).
+- The `infer_type_succeeds` proxy in `assign.rs`'s `quasiPatternApprox`
+  branch: route it through the real `check`.
+- `trace[Elab.app.elab_as_elim]` is not modelled.
+- `numScopeArgs`: no query hit that gap.
+- `fun.rs` `expandFunBinders` (`_`, multi-ident), `instantiate_beta_rev_range`
+  nested redexes (HIGH), and `setElabConfig` (above).
+- Deferred minors: stale `usedLetOnly := false` mentions in the
+  `transform.rs` docs; `check_proj` and telescope-arm tests; the
+  `seam_audit` `"M4b-4c"` needle forbids future M4b-4c-labelled seams by
+  design.
+
+M4b-4 is complete.

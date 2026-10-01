@@ -338,7 +338,7 @@ Record these under the spec's § Landed › P2 (Task 7):
 ```rust
 struct TransformSt {
     cache: Cache,
-    /// oracle: `transform`'s `usedLetOnly` argument (`Transform.lean:179`),
+    /// oracle: `transform`'s `usedLetOnly` argument (`Transform.lean:183`),
     /// forwarded to every `mkLetFVars` / `mkLambdaFVars` / `mkForallFVars`
     /// of the rebuild. Only the `letE` rebuild can observe it: a lambda or
     /// forall telescope binds no let-decls.
@@ -1287,7 +1287,7 @@ enum NextArg {
 }
 
 impl ElimElab<'_, '_> {
-    /// oracle: `ElabElim.main` (`App.lean:1292-1317`). The oracle
+    /// oracle: `ElabElim.main` (`App.lean:1286-1317`). The oracle
     /// recurses through `addArgAndContinue`; this loops.
     pub(crate) fn main(mut self, kinds: &KindInterner) -> Result<ExprId, ElabError> {
         loop {
@@ -1301,7 +1301,7 @@ impl ElimElab<'_, '_> {
                     // `elabAsElim?` guarantees this is a positional `_`.
                     NextArg::Some(a) => self.elab_arg(a, binder_type, kinds)?,
                     // `.undef`: the explicit motive is missing; treated as
-                    // implicit so `h.rec` works (`App.lean:1304-1307`).
+                    // implicit so `h.rec` works (`App.lean:1301-1305`).
                     NextArg::None | NextArg::Undef => self.mk_implicit_arg(binder_type, binder_info)?,
                 };
                 self.motive = Some(m);
@@ -1341,7 +1341,7 @@ impl ElimElab<'_, '_> {
         }
     }
 
-    /// oracle: `getNextArg?` (`App.lean:1252-1265`).
+    /// oracle: `getNextArg?` (`App.lean:1247-1260`).
     fn get_next_arg(&mut self, binder_name: Option<NameId>, bi: BinderInfo) -> NextArg {
         let user = binder_user_name(self.elab, binder_name);
         if let Some(na) = self.named_args.iter().find(|n| n.name == user).cloned() {
@@ -1359,7 +1359,7 @@ impl ElimElab<'_, '_> {
         }
     }
 
-    /// oracle: `elabArg` (`App.lean:1272-1277`): the RAW binder type, no
+    /// oracle: `elabArg` (`App.lean:1267-1272`): the RAW binder type, no
     /// `consumeTypeAnnotations` (unlike `AppElab::get_arg_expected_type`).
     fn elab_arg(&mut self, arg: Arg, expected: ExprId, kinds: &KindInterner) -> Result<ExprId, ElabError> {
         match arg {
@@ -1379,7 +1379,7 @@ impl ElimElab<'_, '_> {
         }
     }
 
-    /// oracle: `mkImplicitArg` (`App.lean:1285-1289`).
+    /// oracle: `mkImplicitArg` (`App.lean:1280-1284`).
     fn mk_implicit_arg(&mut self, ty: ExprId, bi: BinderInfo) -> Result<ExprId, ElabError> {
         let inst = bi == BinderInfo::InstImplicit;
         let kind = if inst { MVarKind::Synthetic } else { MVarKind::Natural };
@@ -1397,7 +1397,7 @@ impl ElimElab<'_, '_> {
 
 ```rust
 impl ElimElab<'_, '_> {
-    /// oracle: `finalize` (`App.lean:1196-1245`).
+    /// oracle: `finalize` (`App.lean:1196-1240`).
     fn finalize(mut self, kinds: &KindInterner) -> Result<ExprId, ElabError> {
         if !self.named_args.is_empty() {
             let names = self.named_args.iter().map(|n| n.name.clone()).collect();
@@ -1458,7 +1458,7 @@ impl ElimElab<'_, '_> {
         Ok(self.elab.mctx.mk_lambda(&xs, result)?)
     }
 
-    /// oracle: `revertArgs` (`App.lean:1178-1190`). `foldrM`: the
+    /// oracle: `revertArgs` (`App.lean:1179-1190`). `foldrM`: the
     /// arguments are ELABORATED right to left.
     fn revert_args(&mut self, f: ExprId, expected: ExprId, kinds: &KindInterner) -> Result<(ExprId, ExprId), ElabError> {
         let args = std::mem::take(&mut self.args);
@@ -1491,7 +1491,7 @@ impl ElimElab<'_, '_> {
         Ok((mk_app_n(self.elab, f, &vals)?, expected))
     }
 
-    /// oracle: `mkMotive` (`App.lean:1164-1172`), `foldrM` from the right.
+    /// oracle: `mkMotive` (`App.lean:1167-1173`), `foldrM` from the right.
     fn mk_motive(&mut self, discrs: &[ExprId], expected: ExprId) -> Result<ExprId, ElabError> {
         let mut motive = expected;
         for &discr in discrs.iter().rev() {
