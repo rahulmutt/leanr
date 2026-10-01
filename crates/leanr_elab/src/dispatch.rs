@@ -175,8 +175,7 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 ///     Function.f) .............................. P3 SHIPPED (M4b-4a) — lval.rs
 ///   private field projections (no fixture) ..... the slice that models private names
 ///   choice ..................................... overloading slice
-///   elabAsElim (recursor heads seamed; aux
-///     recursors + @[elab_as_elim] still open) .. M4b-4c
+///   elabAsElim / ElabElim ...................... M4b-4c SHIPPED — app/elim.rs
 ///   anonymous constructor ⟨⟩ (term position) ... M4b-4b SHIPPED — builtin/anon_ctor.rs; pattern position: the match slice
 ///   binop% ..................................... the macro-expansion slice
 ///   macro expansion in dispatch ................ first macro-form slice

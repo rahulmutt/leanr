@@ -894,7 +894,7 @@ impl<'e> MetaCtx<'e> {
     /// the name via `self.scratch.to_name(Some(self.view.store), ..)`
     /// instead — the region-correct bridge — rather than calling
     /// `EnvView::get_with` directly.
-    fn env_get(&self, name: Option<NameId>) -> Result<&'e ConstantInfo, MetaError> {
+    pub(crate) fn env_get(&self, name: Option<NameId>) -> Result<&'e ConstantInfo, MetaError> {
         match name {
             Some(n) => self.view.get(n).ok_or_else(|| {
                 let nm = self.scratch.to_name(Some(self.view.store), Some(n));

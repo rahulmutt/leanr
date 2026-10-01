@@ -4,7 +4,7 @@
 //! Scope (design spec § Amendment 5 item 4): `Meta.transform`
 //! (`:179-187`) over `transformWithCache` (`:97-176`) with `post` fixed at
 //! its default (`fun e => .done e`) and every flag at its default
-//! (`usedLetOnly := false`, `skipConstInApp := false`; `transform` does
+//! (`usedLetOnly := false`, except via `transform_used_let_only`; `skipConstInApp := false`; `transform` does
 //! not expose `skipInstances`). `betaReduce`, `zetaReduce`,
 //! `unfoldDeclsFrom` and the rest of that file have no consumer in M4b-3
 //! and are not ported. The cache (`checkCache` on `ExprStructEq`,
@@ -37,6 +37,15 @@ pub type Pre<'a, 'e> =
 
 type Cache = HashMap<ExprId, ExprId>;
 
+struct TransformSt {
+    cache: Cache,
+    /// oracle: `transform`'s `usedLetOnly` argument (`Transform.lean:183`),
+    /// forwarded to every `mkLetFVars` / `mkLambdaFVars` / `mkForallFVars`
+    /// of the rebuild. Only the `letE` rebuild can observe it: a lambda or
+    /// forall telescope binds no let-decls.
+    used_let_only: bool,
+}
+
 impl<'e> MetaCtx<'e> {
     /// oracle: `Meta.transform` (`Transform.lean:179-187`) with `post`
     /// at its default and `usedLetOnly := false`, `skipConstInApp :=
@@ -45,8 +54,23 @@ impl<'e> MetaCtx<'e> {
     /// loose bound variables: binders are opened with real local
     /// declarations, so any `MetaM` method is safe inside `pre`.
     pub fn transform(&mut self, input: ExprId, pre: Pre<'_, 'e>) -> Result<ExprId, MetaError> {
-        let mut cache: Cache = HashMap::new();
-        self.transform_visit(input, pre, &mut cache)
+        let mut st = TransformSt {
+            cache: HashMap::new(),
+            used_let_only: false,
+        };
+        self.transform_visit(input, pre, &mut st)
+    }
+
+    /// oracle: `Meta.transform (usedLetOnly := true)` with the default
+    /// `pre`/`post`: lets whose variable the rebuilt body does not
+    /// mention are dropped (`mkLetFVars (usedLetOnly := true)`).
+    pub fn transform_used_let_only(&mut self, input: ExprId) -> Result<ExprId, MetaError> {
+        let mut st = TransformSt {
+            cache: HashMap::new(),
+            used_let_only: true,
+        };
+        let mut pre = |_: &mut MetaCtx<'e>, _| Ok(TransformStep::Continue(None));
+        self.transform_visit(input, &mut pre, &mut st)
     }
 
     /// oracle: `visit` (`:109-172`) — `checkCache`, then `pre`, then
@@ -56,21 +80,21 @@ impl<'e> MetaCtx<'e> {
         &mut self,
         e: ExprId,
         pre: Pre<'_, 'e>,
-        cache: &mut Cache,
+        st: &mut TransformSt,
     ) -> Result<ExprId, MetaError> {
-        if let Some(&r) = cache.get(&e) {
+        if let Some(&r) = st.cache.get(&e) {
             return Ok(r);
         }
         self.step()?;
         let r = match pre(self, e)? {
             TransformStep::Done(r) => r,
-            TransformStep::Visit(e2) => self.transform_visit(e2, pre, cache)?,
+            TransformStep::Visit(e2) => self.transform_visit(e2, pre, st)?,
             TransformStep::Continue(e2) => {
                 let e = e2.unwrap_or(e);
-                self.transform_children(e, pre, cache)?
+                self.transform_children(e, pre, st)?
             }
         };
-        cache.insert(e, r);
+        st.cache.insert(e, r);
         Ok(r)
     }
 
@@ -79,25 +103,25 @@ impl<'e> MetaCtx<'e> {
         &mut self,
         e: ExprId,
         pre: Pre<'_, 'e>,
-        cache: &mut Cache,
+        st: &mut TransformSt,
     ) -> Result<ExprId, MetaError> {
         let base = Some(self.view.store);
         match self.node(e) {
             Node::Forall { .. } => {
                 let cp = self.lctx_checkpoint();
-                let r = self.transform_forall(e, pre, cache);
+                let r = self.transform_forall(e, pre, st);
                 self.lctx_restore(cp);
                 r
             }
             Node::Lam { .. } => {
                 let cp = self.lctx_checkpoint();
-                let r = self.transform_lambda(e, pre, cache);
+                let r = self.transform_lambda(e, pre, st);
                 self.lctx_restore(cp);
                 r
             }
             Node::LetE { .. } => {
                 let cp = self.lctx_checkpoint();
-                let r = self.transform_let(e, pre, cache);
+                let r = self.transform_let(e, pre, st);
                 self.lctx_restore(cp);
                 r
             }
@@ -106,15 +130,15 @@ impl<'e> MetaCtx<'e> {
             Node::App { .. } => {
                 let f = self.get_app_fn(e);
                 let args = self.get_app_args(e);
-                let mut r = self.transform_visit(f, pre, cache)?;
+                let mut r = self.transform_visit(f, pre, st)?;
                 for a in args {
-                    let a2 = self.transform_visit(a, pre, cache)?;
+                    let a2 = self.transform_visit(a, pre, st)?;
                     r = self.scratch.expr_app(base, r, a2)?;
                 }
                 Ok(r)
             }
             Node::MData { data, expr } => {
-                let b = self.transform_visit(expr, pre, cache)?;
+                let b = self.transform_visit(expr, pre, st)?;
                 Ok(self.scratch.expr_mdata(base, data, b)?)
             }
             Node::Proj {
@@ -122,7 +146,7 @@ impl<'e> MetaCtx<'e> {
                 idx,
                 structure,
             } => {
-                let b = self.transform_visit(structure, pre, cache)?;
+                let b = self.transform_visit(structure, pre, st)?;
                 Ok(self
                     .scratch
                     .expr_proj(base, type_name, &Nat::from(idx as u64), b)?)
@@ -133,7 +157,7 @@ impl<'e> MetaCtx<'e> {
                 structure,
             } => {
                 let n = self.scratch.nat_at(base, idx).clone();
-                let b = self.transform_visit(structure, pre, cache)?;
+                let b = self.transform_visit(structure, pre, st)?;
                 Ok(self.scratch.expr_proj(base, type_name, &n, b)?)
             }
             _ => Ok(e),
@@ -147,7 +171,7 @@ impl<'e> MetaCtx<'e> {
         &mut self,
         e: ExprId,
         pre: Pre<'_, 'e>,
-        cache: &mut Cache,
+        st: &mut TransformSt,
     ) -> Result<ExprId, MetaError> {
         let base = Some(self.view.store);
         let mut fvars: Vec<ExprId> = Vec::new();
@@ -162,14 +186,14 @@ impl<'e> MetaCtx<'e> {
                 } => {
                     let d =
                         instantiate_rev(self.scratch, base, binder_type, &fvars, &mut self.guard)?;
-                    let d = self.transform_visit(d, pre, cache)?;
+                    let d = self.transform_visit(d, pre, st)?;
                     let x = self.push_local_decl(binder_name, d, binder_info)?;
                     fvars.push(x);
                     cur = body;
                 }
                 _ => {
                     let b = instantiate_rev(self.scratch, base, cur, &fvars, &mut self.guard)?;
-                    let b = self.transform_visit(b, pre, cache)?;
+                    let b = self.transform_visit(b, pre, st)?;
                     return self.mk_lambda(&fvars, b);
                 }
             }
@@ -181,7 +205,7 @@ impl<'e> MetaCtx<'e> {
         &mut self,
         e: ExprId,
         pre: Pre<'_, 'e>,
-        cache: &mut Cache,
+        st: &mut TransformSt,
     ) -> Result<ExprId, MetaError> {
         let base = Some(self.view.store);
         let mut fvars: Vec<ExprId> = Vec::new();
@@ -196,14 +220,14 @@ impl<'e> MetaCtx<'e> {
                 } => {
                     let d =
                         instantiate_rev(self.scratch, base, binder_type, &fvars, &mut self.guard)?;
-                    let d = self.transform_visit(d, pre, cache)?;
+                    let d = self.transform_visit(d, pre, st)?;
                     let x = self.push_local_decl(binder_name, d, binder_info)?;
                     fvars.push(x);
                     cur = body;
                 }
                 _ => {
                     let b = instantiate_rev(self.scratch, base, cur, &fvars, &mut self.guard)?;
-                    let b = self.transform_visit(b, pre, cache)?;
+                    let b = self.transform_visit(b, pre, st)?;
                     return self.mk_forall(&fvars, b);
                 }
             }
@@ -218,7 +242,7 @@ impl<'e> MetaCtx<'e> {
         &mut self,
         e: ExprId,
         pre: Pre<'_, 'e>,
-        cache: &mut Cache,
+        st: &mut TransformSt,
     ) -> Result<ExprId, MetaError> {
         let base = Some(self.view.store);
         let mut fvars: Vec<ExprId> = Vec::new();
@@ -234,9 +258,9 @@ impl<'e> MetaCtx<'e> {
                     non_dep,
                 } => {
                     let t = instantiate_rev(self.scratch, base, ty, &fvars, &mut self.guard)?;
-                    let t = self.transform_visit(t, pre, cache)?;
+                    let t = self.transform_visit(t, pre, st)?;
                     let v = instantiate_rev(self.scratch, base, value, &fvars, &mut self.guard)?;
-                    let v = self.transform_visit(v, pre, cache)?;
+                    let v = self.transform_visit(v, pre, st)?;
                     let x = self.push_let_decl(decl_name, t, v, non_dep)?;
                     fvars.push(x);
                     lets.push((x, non_dep));
@@ -244,9 +268,19 @@ impl<'e> MetaCtx<'e> {
                 }
                 _ => {
                     let b = instantiate_rev(self.scratch, base, cur, &fvars, &mut self.guard)?;
-                    let mut b = self.transform_visit(b, pre, cache)?;
+                    let mut b = self.transform_visit(b, pre, st)?;
                     for (x, non_dep) in lets.iter().rev() {
-                        b = self.mk_let_expr(*x, b, *non_dep)?;
+                        let rebuilt = self.mk_let_expr(*x, b, *non_dep)?;
+                        // oracle: `mkLetFVars (usedLetOnly := true)` keeps a let
+                        // only if the abstracted body mentions it (`hasLooseBVar 0`).
+                        if st.used_let_only {
+                            if let Node::LetE { body, .. } = self.node(rebuilt) {
+                                if !self.has_loose_bvar(body, 0)? {
+                                    continue;
+                                }
+                            }
+                        }
+                        b = rebuilt;
                     }
                     return Ok(b);
                 }
@@ -398,6 +432,38 @@ mod tests {
             })
             .expect("transform");
             assert_eq!(visits_of_zero, 1);
+        });
+    }
+
+    /// oracle: `transform (usedLetOnly := true)` rebuilds lets with
+    /// `mkLetFVars (usedLetOnly := true)`, which drops a let whose
+    /// variable the body does not mention (measured end to end:
+    /// `elim/letDiscr` vs `elim/letDiscrUsed`).
+    #[test]
+    fn used_let_only_drops_unused_lets_and_keeps_used_ones() {
+        use crate::test_support::{bvar, c, with_meta0_ctx};
+        with_meta0_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let n = c(ctx, "N");
+            let zero = c(ctx, "N.zero");
+            let succ = c(ctx, "N.succ");
+            // let y : N := N.zero; N
+            let unused = ctx.scratch.expr_let(base, None, n, zero, n, false).unwrap();
+            assert_eq!(ctx.transform_used_let_only(unused).unwrap(), n);
+            let mut noop = |_: &mut MetaCtx, _| Ok(TransformStep::Continue(None));
+            assert_eq!(
+                ctx.transform(unused, &mut noop).unwrap(),
+                unused,
+                "flag off: kept"
+            );
+            // let y : N := N.zero; N.succ y
+            let b0 = bvar(ctx, 0);
+            let body = ctx.scratch.expr_app(base, succ, b0).unwrap();
+            let used = ctx
+                .scratch
+                .expr_let(base, None, n, zero, body, false)
+                .unwrap();
+            assert_eq!(ctx.transform_used_let_only(used).unwrap(), used);
         });
     }
 }

@@ -12,6 +12,28 @@ use leanr_meta::{Config, EnvExtensions, MetaCtx};
 use serde_json::Value;
 use support::*;
 
+/// Like `decode_name`, but an all-digit component is a `Name.num`
+/// (`_private.Elab0.0.PrivMk.mk`), which `decode_name` cannot resolve.
+/// Same logic as `leanr_elab`'s `tests/support/mod.rs::name_id`.
+fn name_id(scratch: &mut Store, base: Option<&Store>, s: &str) -> leanr_kernel::bank::NameId {
+    let mut id: Option<leanr_kernel::bank::NameId> = None;
+    for part in s.split('.') {
+        id = Some(match part.parse::<u64>() {
+            Ok(n) => {
+                let nid = scratch
+                    .intern_nat(base, &leanr_kernel::Nat::from(n))
+                    .expect("intern nat");
+                scratch.name_num(base, id, nid).expect("name")
+            }
+            Err(_) => {
+                let sid = scratch.intern_str(base, part).expect("intern");
+                scratch.name_str(base, id, sid).expect("name")
+            }
+        });
+    }
+    id.expect("name_id: empty name")
+}
+
 #[test]
 fn aux_recursor_predicates_match_the_oracle_dump() {
     let r = replay_fixture_in("elab", "Elab0.olean");
@@ -25,7 +47,7 @@ fn aux_recursor_predicates_match_the_oracle_dump() {
         .collect();
     let ids: Vec<_> = recs
         .iter()
-        .map(|rec| decode_name(&mut scratch, base, rec["n"].as_str().unwrap()))
+        .map(|rec| name_id(&mut scratch, base, rec["n"].as_str().unwrap()))
         .collect();
     let ctx = MetaCtx::new(
         view,

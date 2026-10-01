@@ -866,6 +866,7 @@
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"pairW","rec":false,"recOn":false,"tag":false}
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"pick","rec":false,"recOn":false,"tag":false}
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"polyZero","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[3],"motive":1},"n":"preElim","rec":false,"recOn":false,"tag":true}
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"rfl","rec":false,"recOn":false,"tag":false}
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"sameAs","rec":false,"recOn":false,"tag":false}
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"semiOutParam","rec":false,"recOn":false,"tag":false}

@@ -503,6 +503,23 @@ impl<'e> MetaCtx<'e> {
         r
     }
 
+    /// oracle: `fullApproxDefEq` (`Basic.lean:2094-2105`): `withConfig`
+    /// setting `foApprox`, `ctxApprox`, `quasiPatternApprox` and
+    /// `constApprox`. Additive. The defeq cache key is derived from the
+    /// whole `Config` (`config.rs` module doc), so results computed
+    /// under the scope never leak into the default-config cache. The
+    /// whole config is restored, as `withConfig` (a `withReader`) does.
+    pub fn with_full_approx_def_eq<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let saved = self.cfg;
+        self.cfg.fo_approx = true;
+        self.cfg.ctx_approx = true;
+        self.cfg.quasi_pattern_approx = true;
+        self.cfg.const_approx = true;
+        let r = f(self);
+        self.cfg = saved;
+        r
+    }
+
     /// oracle: `mkArrow` (`Lean/Meta/Basic.lean`, `mkForall _ .default d b`
     /// with a fresh user name) — a NON-dependent `forallE`. The binder
     /// name is `None`: the only consumer is the TYPE of `coerceToFunction?`'s
@@ -1262,12 +1279,20 @@ impl<'e> MetaCtx<'e> {
     /// redex sitting under a constructor — e.g. `Foo (motive n)` — as
     /// `Foo ((fun x => ..) n)` where the oracle would produce
     /// `Foo (f m = f n)`. The two terms are defeq, so no unification
-    /// verdict changes; what can differ is the SHAPE of a type reported in
-    /// a message, and any future syntactic test run on the result. This is
-    /// the only remaining divergence from the oracle here, it can only ever
-    /// UNDER-reduce (never emit a term the oracle would not), and closing
-    /// it means porting `visit`'s traversal — which needs a bvar-offset
-    /// walk this crate has no other caller for.
+    /// verdict changes, but the SHAPE difference IS observable in the
+    /// elaborated term: the under-reduced type is the expected type an
+    /// argument is elaborated against, and a `fun` argument's binder
+    /// takes its domain from it. Reproducer (M4b-4c P2, measured against
+    /// the pinned oracle): `fun (n : Nat) => Nat.rec (motive := fun _ =>
+    /// Nat) Nat.zero (fun _ ih => ih) n` — the minor's type `(n : Nat) →
+    /// motive n → motive (n+1)` keeps `(fun _ => Nat) n` under the arrow,
+    /// so leanr gives `ih` the binder type `(fun _ => Nat) n` where the
+    /// oracle gives `Nat`. This is the only remaining divergence from the
+    /// oracle here (executable: `known_divergence_nested_redex_under_arrow_is_not_reduced`
+    /// in `leanr_elab/tests/elim_smoke.rs`, which must flip when this is
+    /// ported); it can only ever UNDER-reduce, and closing it means
+    /// porting `visit`'s traversal — which needs a bvar-offset walk this
+    /// crate has no other caller for.
     ///
     /// Additive + behavior-neutral, and the reason it lives HERE rather than
     /// in `leanr_elab`: the substitution half (`instantiate_rev`) is public
@@ -1956,6 +1981,38 @@ mod tests {
         with_instances_ctx, with_prelude0_ctx,
     };
     use crate::MetaError;
+
+    #[test]
+    fn full_approx_enables_const_approx_and_restores() {
+        use crate::test_support::{app, c, with_meta0_ctx};
+        with_meta0_ctx(|ctx| {
+            let n = c(ctx, "N");
+            let base = Some(ctx.view.store);
+            let n_to_n = ctx
+                .scratch
+                .expr_forall(base, None, n, n, leanr_kernel::BinderInfo::Default)
+                .unwrap();
+            let zero = c(ctx, "N.zero");
+            let succ = c(ctx, "N.succ");
+            let one = app(ctx, succ, zero);
+            let two = app(ctx, succ, one);
+
+            let (m1, _) = fresh_mvar(ctx, n_to_n);
+            let lhs1 = app(ctx, m1, zero);
+            assert!(
+                !ctx.is_def_eq(lhs1, two).unwrap(),
+                "default config: no constApprox"
+            );
+
+            let (m2, _) = fresh_mvar(ctx, n_to_n);
+            let lhs2 = app(ctx, m2, zero);
+            let before = ctx.cfg();
+            assert!(ctx
+                .with_full_approx_def_eq(|ctx| ctx.is_def_eq(lhs2, two))
+                .unwrap());
+            assert_eq!(ctx.cfg(), before, "the scope restores the config");
+        });
+    }
 
     /// TDD RED for the checkpoint/push/restore + `mk_forall` accessors
     /// (M4b-2 plan1 task 1): declares a local `(x : Nat)`, checks the

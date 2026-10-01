@@ -412,7 +412,7 @@ impl<'e> MetaCtx<'e> {
             _ => false,
         });
         if has_ctx_locals {
-            if self.is_type_correct(lam)? {
+            if self.infer_type_succeeds(lam)? {
                 self.check_types_and_assign(mvar, lam)
             } else {
                 self.use_fo_approx(mvar, &args, args.len(), v)
@@ -661,7 +661,12 @@ impl<'e> MetaCtx<'e> {
     /// mirrors the oracle's own blanket `catch _ => false` by folding
     /// EVERY `infer_type` error (not just "genuinely ill-typed" ones)
     /// into `false`.
-    fn is_type_correct(&mut self, e: ExprId) -> Result<bool, MetaError> {
+    ///
+    /// Renamed from `is_type_correct` in M4b-4c P2, when the real port landed
+    /// (`check.rs`). Behaviour unchanged. Follow-up: route this
+    /// `quasiPatternApprox` caller through `MetaCtx::is_type_correct`; that
+    /// is a behaviour change and needs its own oracle check.
+    fn infer_type_succeeds(&mut self, e: ExprId) -> Result<bool, MetaError> {
         Ok(self.infer_type(e).is_ok())
     }
 

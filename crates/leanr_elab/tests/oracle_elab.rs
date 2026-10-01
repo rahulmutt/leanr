@@ -120,6 +120,27 @@ fn oracle_elab_gate() {
         // branch never runs.
         let got = elab.elab_term_and_synthesize(&term_elem, &parsed.tree.kinds, None);
 
+        // M4b-4c P2: an `err` record is a query the ORACLE rejects. leanr
+        // must reject it too, with the same first line. Only errors with
+        // an `oracle_first_line` can match, which today is
+        // `ElabError::Eliminator`.
+        if let Some(want) = q.get("err").and_then(|v| v.as_str()) {
+            match got {
+                Err(e) => {
+                    let line = e.oracle_first_line();
+                    if line.as_deref() != Some(want) {
+                        failures.push(format!(
+                            "{id}: leanr error {e:?} (first line {line:?}); oracle {want:?}"
+                        ));
+                    }
+                }
+                Ok(_) => failures.push(format!(
+                    "{id}: leanr elaborated; oracle errors with {want:?}"
+                )),
+            }
+            continue;
+        }
+
         match got {
             Ok(g) => {
                 // `base = Some(view.store)` (Task 5 reconciliation,
@@ -254,7 +275,8 @@ fn oracle_elab_gate() {
     // 249 -> 259 (M4b-4a P4 task 2): the 10 p4/pipe-* records.
     // 259 -> 273 (M4b-4a P4 task 3): the 14 p4/dot-* records.
     // 273 -> 276 (M4b-4a P4 final fix): p4/pipe-nested-args, p4/pipe-nested-named, p4/pipe-nested-deep.
-    const CORPUS_FLOOR: usize = 276;
+    // 276 -> 329 (M4b-4c P2): M4b-4b's 17 anon/* records, never folded in, plus the 36 elim/* and elimErr/* records.
+    const CORPUS_FLOOR: usize = 329;
     assert!(
         replayed >= CORPUS_FLOOR,
         "corpus shrank: replayed {replayed} records, floor is {CORPUS_FLOOR}. \

@@ -163,34 +163,6 @@ fn deferred_constructs_are_named_seams() {
         // `@` in a function position, which is `throwUnsupportedSyntax`
         // in the oracle too, so the citation is the owner.
         ("@(Nat.succ Nat.zero) Nat.zero", "App.lean:2118"),
-        // `elab_app_fn_id`'s PARTIAL `shouldElabAsElim` guard (fix
-        // round 1). A genuine recursor — `ConstantInfo::Rec`, the one
-        // disjunct of `App.lean:1322-1328` that leanr's environment can
-        // decide — is seamed rather than elaborated the ordinary way.
-        // Measured before and after: the pinned oracle emits a bare `?m`
-        // for both of these (the `elabAsElim` branch postpones on the
-        // missing expected type), where leanr used to emit
-        // `const Nat.rec [?u]`.
-        //
-        // NOT covered, and deliberately not claimed to be: `Nat.recOn`,
-        // `Nat.casesOn`, `Nat.brecOn` and `@[elab_as_elim]` still take
-        // the ordinary path and still emit a different term than the
-        // oracle, with no seam — their four disjuncts read `auxRecExt` /
-        // the `elabAsElim` tag. Both are decoded (M4b-4c P1:
-        // `ModuleData::aux_recs` / `elab_as_elim`, `MetaCtx` predicates),
-        // but the elaborator does not consult them until P2.
-        // `fixture_declares_no_undecoded_elab_attributes` below is the
-        // backstop for those; M4b-4c owns the real fix.
-        ("Nat.rec", "M4b-4c"),
-        ("List.rec", "M4b-4c"),
-        // The same guard on a dot-identifier head (M4b-4a P4): `.rec`
-        // resolves to `Nat.rec`, and the oracle's `elabAppArgs` diverts it
-        // to `ElabElim.main` just the same (measured: `@Nat.rec (fun x =>
-        // Nat) ..`). Without the guard leanr elaborated it the ordinary way.
-        (
-            "(.rec Nat.zero (fun (a : Nat) (b : Nat) => Nat.zero) Nat.zero : Nat)",
-            "M4b-4c",
-        ),
     ];
     for (src, marker) in cases {
         match elab_src(src) {
@@ -259,9 +231,9 @@ fn mvar_function_type_is_closed_by_propagation() {
 /// the oracle succeeds.
 ///
 /// Measured against the pinned oracle rather than reasoned about, since
-/// this is the whole justification for computing `head::elab_app_fn_id`'s
-/// `heed` instead of testing the
-/// constant kind unconditionally:
+/// this is the whole justification for `app/elim.rs`'s
+/// `elab_as_elim_info` returning `None` on `explicit || ellipsis` before
+/// it consults `should_elab_as_elim`:
 /// ```text
 /// @Nat.rec    -> {"k":"const","n":"Nat.rec","us":[{"k":"lmvar","i":0}]}
 /// Nat.rec ..  -> Nat.rec ?m ?m ?m ?m
@@ -327,58 +299,22 @@ fn anonymous_constructor_is_registered() {
     );
 }
 
-/// The `@[elab_as_elim]` and `@[elab_without_expected_type]` attributes
-/// change `elabAppArgs`'s control flow (`App.lean:1373`, `:1330-1333`),
-/// and leanr decodes NEITHER extension — so neither can be a runtime
-/// check. This test is the fixture-source gate that keeps them inert,
-/// and it fails the moment someone reaches for one, which is exactly
-/// when a real guard (and an extension decode) becomes necessary.
+/// The `@[elab_without_expected_type]` attribute changes `elabAppArgs`'s
+/// control flow (`propagateExpectedTypeFor`, `App.lean:1330-1333`), and
+/// leanr does not decode its extension, so it cannot be a runtime check.
+/// `hasElabWithoutExpectedType` (`App.lean:31-32`) is one `TagAttribute`
+/// lookup, so this fixture-source gate is complete for it: it fails the
+/// moment someone declares one, which is exactly when the decode becomes
+/// necessary.
 ///
-/// It gates TWO things, because the plan's premise — "inert only
-/// because no declaration in the hermetic fixture carries the
-/// attribute" — is true for `elab_without_expected_type` and FALSE for
-/// `elab_as_elim`:
-///
-///   * `hasElabWithoutExpectedType` (`App.lean:31-32`) really is one
-///     `TagAttribute` lookup, so the source check is complete for it;
-///   * `shouldElabAsElim` (`App.lean:1322-1328`) is
-///     `isRec || isCasesOnRecursor || isBRecOnRecursor ||
-///     isRecOnRecursor || elabAsElim.hasTag` — the attribute is only the
-///     LAST of five triggers. `Elab0.lean` declares two inductives, so
-///     the fixture environment already contains `Nat.rec`, `Nat.recOn`,
-///     `Nat.casesOn`, `List.rec`, ... for which that predicate is TRUE
-///     without any attribute. Measured against the pinned oracle through
-///     `dump_elab.lean`'s own entry point, `Nat.rec` elaborated to a
-///     bare `?m` there (the branch postpones on the missing expected
-///     type) while leanr emitted `const Nat.rec [?u]` — a live, silent
-///     divergence, not a hypothetical one.
-///
-/// `head::elab_app_fn_id` now seams the ONE disjunct leanr's
-/// environment can decide (`isRec`, i.e. `ConstantInfo::Rec`) — see
-/// `deferred_constructs_are_named_seams`'s `Nat.rec` case. That guard is
-/// partial by construction, so what is left open, and what this gate
-/// exists to backstop, is precisely:
-///
-///   * **aux recursors** — `Nat.casesOn`, `Nat.recOn`, `Nat.brecOn` and
-///     friends. `isAuxRecursorWithSuffix` (`AuxRecursor.lean:39-51`)
-///     reads the `auxRecExt` tag extension, which M4b-4c P1 decodes
-///     (`ModuleData::aux_recs`) but the elaborator does not consult until
-///     P2, so these still take the ordinary path and still emit a
-///     different term than the oracle, with NO seam;
-///   * **`@[elab_as_elim]` declarations** — same, via the `elabAsElim`
-///     tag extension (`ModuleData::elab_as_elim`).
-///
-/// Neither is consulted at runtime today, so both are kept out of the
-/// committed corpus by source text instead. M4b-4c P1 decoded both
-/// extensions (the fixture now declares tagged eliminators, so only
-/// the QUERY corpus is banned from using them); P2 builds `ElabElim` and
-/// lifts the query ban.
-///
-/// Both halves are TEXT gates over committed fixture files, deliberately
-/// so: they must fail on the SOURCE a contributor writes, before the
-/// oracle is even consulted, since the corpus dumper silently drops any
-/// query whose oracle side errors and would therefore hide the first
-/// half of a divergence rather than report it.
+/// `@[elab_as_elim]` is NOT gated any more. M4b-4c P1 decoded both the
+/// `auxRecExt` and `elabAsElim` extensions, and M4b-4c P2's `ElabElim`
+/// (`app/elim.rs`) now routes every `shouldElabAsElim`
+/// (`App.lean:1322-1328`) head, so the old query-corpus ban on
+/// eliminator-headed sources is lifted and the `elim/*` / `elimErr/*`
+/// records exercise them. Only the still-undecoded attribute stays
+/// banned; the `@[elab_as_elim]` presence assertion keeps the tagged
+/// fixture eliminators those records use from silently disappearing.
 #[test]
 fn fixture_declares_no_undecoded_elab_attributes() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/elab");
@@ -397,39 +333,8 @@ fn fixture_declares_no_undecoded_elab_attributes() {
     assert!(
         src.contains("@[elab_as_elim]"),
         "M4b-4c P1 fixture: Elab0.lean must declare the tagged eliminators \
-         (`Eq.subst'`, `natElim`) that elim.jsonl and P2's corpus use"
+         (`Eq.subst'`, `natElim`, `preElim`) that elim.jsonl and P2's corpus use"
     );
-
-    // Until M4b-4c P2 lands `ElabElim`, an eliminator-HEADED query takes the
-    // ordinary path and emits a term the oracle does not. Matched on the
-    // dotted SUFFIX for recursors (see `isAuxRecursor`, AuxRecursor.lean:31-37)
-    // and on the bare name for the two tagged fixture declarations.
-    let queries = std::fs::read_to_string(format!("{dir}/elab-queries.jsonl"))
-        .expect("committed elab corpus");
-    for line in queries.lines().filter(|l| !l.trim().is_empty()) {
-        let q: serde_json::Value = serde_json::from_str(line).expect("committed JSONL is valid");
-        let (id, src) = (
-            q["id"].as_str().expect("id"),
-            q["src"].as_str().expect("src"),
-        );
-        for elim in [
-            ".rec",
-            ".recOn",
-            ".casesOn",
-            ".brecOn",
-            ".ndrec",
-            ".ndrecOn",
-            "Eq.subst'",
-            "natElim",
-        ] {
-            assert!(
-                !src.contains(elim),
-                "{id}: query {src:?} uses an eliminator head (`{elim}`). \
-                 `shouldElabAsElim` (App.lean:1322-1328) diverts it to ElabElim, \
-                 which leanr gains in M4b-4c P2; do not add such a query before then."
-            );
-        }
-    }
 }
 
 /// Recursively collect every `.rs` file under `dir`.
@@ -714,9 +619,9 @@ fn literal_kinds_are_registered_not_deferred() {
 /// It is deliberately NOT generalised to "any completed slice", and the
 /// reason is that no non-rotting formulation exists. Live source
 /// legitimately names INCOMPLETE slices in exactly this position — that
-/// is the named-seam discipline itself (`app/head.rs`'s recursor guard names
-/// "M4b-4c", and until M4b-4a P2 closed it `elab.rs`'s `.postpone` seam
-/// named "M4b-4a P2"; none of these
+/// is the named-seam discipline itself (until M4b-4c P2 removed it,
+/// `app/head.rs`'s recursor guard named "M4b-4c", and until M4b-4a P2
+/// closed it `elab.rs`'s `.postpone` seam named "M4b-4a P2"; none of these
 /// are "M4b-3 P5" any more, now that P5 is complete: this example set
 /// itself had to be rewritten by Task 12 when the two live seams it used to
 /// cite, `elab.rs`'s and `app/args.rs`'s own "M4b-3 P5", were closed or
@@ -800,6 +705,7 @@ fn no_seam_message_names_a_completed_slice() {
         "M4b-4a P3",
         "M4b-4a P4",
         "M4b-4b",
+        "M4b-4c",
     ];
     let mut offenders = Vec::new();
     for path in walk_rs_files(src_dir) {
@@ -815,7 +721,7 @@ fn no_seam_message_names_a_completed_slice() {
     }
     assert!(
         offenders.is_empty(),
-        "M4b-3 P3, P4, P5, M4b-4a P1–P4 and M4b-4b are complete; live (non-comment) source \
+        "M4b-3 P3, P4, P5, M4b-4a P1–P4, M4b-4b and M4b-4c are complete; live (non-comment) source \
          claiming one at {offenders:?}"
     );
 }

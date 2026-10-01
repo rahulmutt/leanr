@@ -151,7 +151,7 @@ impl<'e> TermElabM<'e> {
     /// Caller precondition: `name` must be in the environment. Unlike
     /// the oracle's `getConstInfo` (which throws "unknown constant"), a
     /// missing name silently yields an empty level list.
-    pub(crate) fn mk_const_with_fresh_mvar_levels_of(
+    pub fn mk_const_with_fresh_mvar_levels_of(
         &mut self,
         name: NameId,
     ) -> Result<ExprId, ElabError> {

@@ -14,6 +14,7 @@ mod assign;
 #[cfg(test)]
 mod aux_recursor;
 mod cache;
+mod check;
 mod coe;
 mod config;
 mod defeq;
