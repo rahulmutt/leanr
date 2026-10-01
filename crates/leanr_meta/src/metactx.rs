@@ -503,6 +503,23 @@ impl<'e> MetaCtx<'e> {
         r
     }
 
+    /// oracle: `fullApproxDefEq` (`Basic.lean:2094-2105`): `withConfig`
+    /// setting `foApprox`, `ctxApprox`, `quasiPatternApprox` and
+    /// `constApprox`. Additive. The defeq cache key is derived from the
+    /// whole `Config` (`config.rs` module doc), so results computed
+    /// under the scope never leak into the default-config cache. The
+    /// whole config is restored, as `withConfig` (a `withReader`) does.
+    pub fn with_full_approx_def_eq<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let saved = self.cfg;
+        self.cfg.fo_approx = true;
+        self.cfg.ctx_approx = true;
+        self.cfg.quasi_pattern_approx = true;
+        self.cfg.const_approx = true;
+        let r = f(self);
+        self.cfg = saved;
+        r
+    }
+
     /// oracle: `mkArrow` (`Lean/Meta/Basic.lean`, `mkForall _ .default d b`
     /// with a fresh user name) — a NON-dependent `forallE`. The binder
     /// name is `None`: the only consumer is the TYPE of `coerceToFunction?`'s
@@ -1956,6 +1973,38 @@ mod tests {
         with_instances_ctx, with_prelude0_ctx,
     };
     use crate::MetaError;
+
+    #[test]
+    fn full_approx_enables_const_approx_and_restores() {
+        use crate::test_support::{app, c, with_meta0_ctx};
+        with_meta0_ctx(|ctx| {
+            let n = c(ctx, "N");
+            let base = Some(ctx.view.store);
+            let n_to_n = ctx
+                .scratch
+                .expr_forall(base, None, n, n, leanr_kernel::BinderInfo::Default)
+                .unwrap();
+            let zero = c(ctx, "N.zero");
+            let succ = c(ctx, "N.succ");
+            let one = app(ctx, succ, zero);
+            let two = app(ctx, succ, one);
+
+            let (m1, _) = fresh_mvar(ctx, n_to_n);
+            let lhs1 = app(ctx, m1, zero);
+            assert!(
+                !ctx.is_def_eq(lhs1, two).unwrap(),
+                "default config: no constApprox"
+            );
+
+            let (m2, _) = fresh_mvar(ctx, n_to_n);
+            let lhs2 = app(ctx, m2, zero);
+            let before = ctx.cfg();
+            assert!(ctx
+                .with_full_approx_def_eq(|ctx| ctx.is_def_eq(lhs2, two))
+                .unwrap());
+            assert_eq!(ctx.cfg(), before, "the scope restores the config");
+        });
+    }
 
     /// TDD RED for the checkpoint/push/restore + `mk_forall` accessors
     /// (M4b-2 plan1 task 1): declares a local `(x : Nat)`, checks the

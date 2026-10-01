@@ -191,4 +191,27 @@ mod tests {
             assert_eq!(r, app(ctx, succ, b0));
         });
     }
+
+    /// P1 follow-up: the fvar fast path is `abstract`, which keeps an
+    /// `mdata` wrapper, so `N.succ (mdata x)` gives `N.succ (mdata #0)`.
+    /// The general path would have abstracted the whole `mdata x` to `#0`.
+    #[test]
+    fn kabstract_fvar_fast_path_keeps_mdata() {
+        with_meta0_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let n = c(ctx, "N");
+            let x = fresh_fvar(ctx, n, "x");
+            let kv = ctx
+                .scratch
+                .intern_kvmap(base, &leanr_kernel::KVMap::default())
+                .unwrap();
+            let md_x = ctx.scratch.expr_mdata(base, kv, x).unwrap();
+            let succ = c(ctx, "N.succ");
+            let e = app(ctx, succ, md_x);
+            let r = ctx.kabstract(e, x).unwrap();
+            let b0 = bvar(ctx, 0);
+            let md_b0 = ctx.scratch.expr_mdata(base, kv, b0).unwrap();
+            assert_eq!(r, app(ctx, succ, md_b0));
+        });
+    }
 }
