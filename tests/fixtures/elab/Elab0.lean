@@ -850,3 +850,27 @@ def sameAs {α : Type} (a b : α) : α := b
 -- `anon_ctor_smoke.rs`.
 inductive AnonLoop : Type where
   | mk : AnonLoop → AnonLoop
+
+-- === M4b-4c: eliminators (elabAsElim) ===
+--
+-- `False`: an EXPLICIT-motive recursor (`False.rec (motive) (t)`), the
+-- only shape where `elabAsElim?`'s "positional `_` counts as missing"
+-- rule (App.lean:1424-1429) is reachable — `Nat.rec`'s motive is
+-- implicit, so `Nat.rec _ …` puts the `_` in the `zero` minor instead
+-- (oracle-measured, spec § Evidence). A Prop inductive: `auxRecExt`
+-- gets `False.casesOn`/`False.recOn` and NO `False.brecOn`.
+inductive False : Prop
+
+-- Tagged eliminators. `Eq.subst'` makes `getElabElimExprInfo`'s
+-- first-order rule observable: oracle `majorsPos = [0,2,3,4]`, where `α`
+-- and `a` are majors only because `h : Eq a b` is first-order and
+-- mentions `b`. `natElim` has an implicit motive and is used under-
+-- applied in P2. `noncomputable`: the code generator rejects `Nat.rec`.
+@[elab_as_elim] theorem Eq.subst' {α : Sort u} {motive : α → Prop} {a b : α}
+    (h : Eq a b) (m : motive a) : motive b :=
+  @Eq.rec α a (fun x _ => motive x) m b h
+
+@[elab_as_elim] noncomputable def natElim {motive : Nat → Sort u}
+    (z : motive Nat.zero) (s : (n : Nat) → motive n → motive (Nat.succ n))
+    (n : Nat) : motive n :=
+  @Nat.rec motive z s n
