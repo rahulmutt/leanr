@@ -1123,15 +1123,34 @@ def anonTailQueries : List (String × String) :=
   , ("anon/flatK1",           "(⟨Nat.zero, Nat.zero⟩ : PB (Prod Nat Nat))")
   ]
 
+-- `expandFunBinders` (`Lean/Elab/Binders.lean:360-406`): `_` hole
+-- binders, `(a b : T)` / `(_ : T)` / `(x :)` type-ascription groups, and
+-- `(x y)` / `(x)` paren groups (hole-typed, taken as binders only when no
+-- ident resolves to a global constant). The pattern fallback
+-- (`processAsPattern`, a `match`) belongs to the match slice and has no
+-- record here.
+def funExpandQueries : List (String × String) :=
+  [ ("funx/hole",           "(fun _ x => x : Nat → Nat → Nat)")
+  , ("funx/holeElided",     "fun _ (x : Nat) => x")
+  , ("funx/ascGroup",       "fun (a b : Nat) => a")
+  , ("funx/ascGroupSecond", "fun (a b : Nat) => b")
+  , ("funx/ascGroupHole",   "fun (_ b : Nat) => b")
+  , ("funx/ascHole",        "fun (_ : Nat) => Nat.zero")
+  , ("funx/ascGroupDep",    "fun (α β : Type) (x : α) (y : β) => x")
+  , ("funx/ascNoType",      "(fun (x :) => x : Nat → Nat)")
+  , ("funx/parenGroup",     "(fun (x y) => y : Nat → Bool → Bool)")
+  , ("funx/parenSingle",    "(fun (x) => x : Nat → Nat)")
+  , ("funx/parenHole",      "(fun (_) => Nat.zero : Bool → Nat)")
+  , ("funx/mixed",          "fun {a} (b c : a) _ => b")
+  ]
+
 -- M4b-4c P2: eliminator-headed applications (`ElabElim`). Each row was
 -- run on the pinned oracle at plan time. Spec § Evidence lists the
 -- terms these exercise.
 --
--- Binder spelling (M4b-4c P2 Task 6 ruling): `_` binders are written as
--- fresh named binders (`hbN`) and `(a b : T)` groups as `(a : T) (b : T)`,
--- because leanr's `fun` elaborator (`builtin/binder/fun.rs`) does not yet
--- accept `_` hole binders or multi-ident paren groups -- a recorded
--- follow-up. `elim/namedMotiveBareIh` and `elim/explicitAtBareIh` are
+-- Binder spelling: these use `_` hole binders and `(a b : T)` groups as
+-- originally planned. (M4b-4c P2 had respelled them, `hbN` and
+-- `(a : T) (b : T)`, until `fun.rs` ported `expandFunBinders`.) `elim/namedMotiveBareIh` and `elim/explicitAtBareIh` are
 -- `elim/namedMotive`/`elim/explicitAt` without the `(ih : Nat)`
 -- annotation: `ih`'s binder type then comes from a redex nested under the
 -- minor's arrow, which `instantiateBetaRevRange` must beta (it closed a
@@ -1143,37 +1162,37 @@ def anonTailQueries : List (String × String) :=
 -- mismatch" / "Type mismatch"). The bare form unifies at the argument,
 -- the ascribed form at the expected type.
 def elimQueries : List (String × String) :=
-  [ ("elim/rec",           "fun (n : Nat) => (Nat.rec Nat.zero (fun hb1 ih => Nat.succ ih) n : Nat)")
+  [ ("elim/rec",           "fun (n : Nat) => (Nat.rec Nat.zero (fun _ ih => Nat.succ ih) n : Nat)")
   , ("elim/casesOn",       "fun (n : Nat) => (Nat.casesOn n Nat.zero (fun m => m) : Nat)")
-  , ("elim/recOn",         "fun (n : Nat) => (Nat.recOn n Nat.zero (fun hb2 ih => ih) : Nat)")
-  , ("elim/brecOn",        "fun (n : Nat) => (Nat.brecOn n (fun hb3 hb4 => Nat.zero) : Nat)")
-  , ("elim/namedMotive",   "fun (n : Nat) => Nat.rec (motive := fun hb5 => Nat) Nat.zero (fun hb6 (ih : Nat) => ih) n")
-  , ("elim/explicitAt",    "fun (n : Nat) => @Nat.rec (fun hb7 => Nat) Nat.zero (fun hb8 (ih : Nat) => ih) n")
-  , ("elim/namedMotiveBareIh", "fun (n : Nat) => Nat.rec (motive := fun hb32 => Nat) Nat.zero (fun hb33 ih => ih) n")
-  , ("elim/explicitAtBareIh",  "fun (n : Nat) => @Nat.rec (fun hb34 => Nat) Nat.zero (fun hb35 ih => ih) n")
+  , ("elim/recOn",         "fun (n : Nat) => (Nat.recOn n Nat.zero (fun _ ih => ih) : Nat)")
+  , ("elim/brecOn",        "fun (n : Nat) => (Nat.brecOn n (fun _ _ => Nat.zero) : Nat)")
+  , ("elim/namedMotive",   "fun (n : Nat) => Nat.rec (motive := fun _ => Nat) Nat.zero (fun _ (ih : Nat) => ih) n")
+  , ("elim/explicitAt",    "fun (n : Nat) => @Nat.rec (fun _ => Nat) Nat.zero (fun _ (ih : Nat) => ih) n")
+  , ("elim/namedMotiveBareIh", "fun (n : Nat) => Nat.rec (motive := fun _ => Nat) Nat.zero (fun _ ih => ih) n")
+  , ("elim/explicitAtBareIh",  "fun (n : Nat) => @Nat.rec (fun _ => Nat) Nat.zero (fun _ ih => ih) n")
   , ("elim/ellipsis",      "Nat.rec ..")
   , ("elim/hRec",          "fun (h : False) => (h.rec : Nat)")
   , ("elim/hRecArg",       "fun (h : False) => Nat.succ h.rec")
   , ("elim/falseRecHole",  "fun (h : False) => (False.rec _ h : Nat)")
-  , ("elim/falseRecMotive","fun (h : False) => (False.rec (fun hb9 => Nat) h : Nat)")
-  , ("elim/subst",         "fun (a : Nat) (b : Nat) (h : Eq a b) (p : Eq a a) => (Eq.subst' h p : Eq a b)")
-  , ("elim/natElimUnder",  "(natElim Nat.zero (fun hb10 ih => ih) : Nat → Nat)")
-  , ("elim/natElimNamedMajor", "fun (m : Nat) => (natElim (n := m) Nat.zero (fun hb11 ih => ih) : Nat)")
+  , ("elim/falseRecMotive","fun (h : False) => (False.rec (fun _ => Nat) h : Nat)")
+  , ("elim/subst",         "fun (a b : Nat) (h : Eq a b) (p : Eq a a) => (Eq.subst' h p : Eq a b)")
+  , ("elim/natElimUnder",  "(natElim Nat.zero (fun _ ih => ih) : Nat → Nat)")
+  , ("elim/natElimNamedMajor", "fun (m : Nat) => (natElim (n := m) Nat.zero (fun _ ih => ih) : Nat)")
   , ("elim/preElim",       "fun (n : Nat) (z : Eq Nat.zero Nat.zero) => (preElim Nat.zero z n : Eq n n)")
-  , ("elim/dotRec",        "fun (n : Nat) => (.rec Nat.zero (fun hb12 ih => ih) n : Nat)")
-  , ("elim/overApp",       "fun (n : Nat) => (Nat.rec (fun m => m) (fun hb13 ih m => ih m) n Nat.zero : Nat)")
-  , ("elim/overAppDep",    "fun (n : Nat) => (Nat.rec (fun m => Eq.refl m) (fun hb14 ih m => ih m) n Nat.zero : Eq Nat.zero Nat.zero)")
-  , ("elim/overPostponed", "fun (n : Nat) => (Nat.rec (fun m => m) (fun hb15 ih m => ih m) n (sameAs Nat.zero Nat.zero) : Nat)")
-  , ("elim/postponed",     "fun (n : Nat) => sameAs (Nat.rec Nat.zero (fun hb16 ih => ih) n) n")
-  , ("elim/argPos",        "fun (n : Nat) => Nat.succ (Nat.rec Nat.zero (fun hb17 ih => ih) n)")
-  , ("elim/univ",          "fun (n : Nat) => (Nat.rec.{1} Nat.zero (fun hb18 ih => ih) n : Nat)")
-  , ("elim/listRec",       "fun (l : List Nat) => (List.rec Nat.zero (fun hb19 hb20 ih => ih) l : Nat)")
+  , ("elim/dotRec",        "fun (n : Nat) => (.rec Nat.zero (fun _ ih => ih) n : Nat)")
+  , ("elim/overApp",       "fun (n : Nat) => (Nat.rec (fun m => m) (fun _ ih m => ih m) n Nat.zero : Nat)")
+  , ("elim/overAppDep",    "fun (n : Nat) => (Nat.rec (fun m => Eq.refl m) (fun _ ih m => ih m) n Nat.zero : Eq Nat.zero Nat.zero)")
+  , ("elim/overPostponed", "fun (n : Nat) => (Nat.rec (fun m => m) (fun _ ih m => ih m) n (sameAs Nat.zero Nat.zero) : Nat)")
+  , ("elim/postponed",     "fun (n : Nat) => sameAs (Nat.rec Nat.zero (fun _ ih => ih) n) n")
+  , ("elim/argPos",        "fun (n : Nat) => Nat.succ (Nat.rec Nat.zero (fun _ ih => ih) n)")
+  , ("elim/univ",          "fun (n : Nat) => (Nat.rec.{1} Nat.zero (fun _ ih => ih) n : Nat)")
+  , ("elim/listRec",       "fun (l : List Nat) => (List.rec Nat.zero (fun _ _ ih => ih) l : Nat)")
   , ("elim/ndrec",         "fun (a : Nat) (p : Eq a a) (h : Eq a a) => Eq.ndrec p h")
-  , ("elim/ndrecExpected", "fun (a : Nat) (b : Nat) (h : Eq a b) (p : Eq a a) => (Eq.ndrec p h : Eq a b)")
-  , ("elim/eqRecTwoDiscrs", "fun (a : Nat) (b : Nat) (h : Eq a b) (p : Eq a a) => (Eq.rec p h : Eq a b)")
-  , ("elim/letDiscr",      "fun (n : (let x := Nat.zero; Nat)) => (Nat.rec Nat.zero (fun hb21 ih => ih) n : Nat)")
-  , ("elim/letDiscrUsed",  "fun (n : (let x := Nat; x)) => (Nat.rec Nat.zero (fun hb22 ih => ih) n : Nat)")
-  , ("elim/letOver",       "fun (n : Nat) (m : (let x := Nat.zero; Nat)) => (Nat.rec (fun k => k) (fun hb23 ih k => ih k) n m : Nat)")
+  , ("elim/ndrecExpected", "fun (a b : Nat) (h : Eq a b) (p : Eq a a) => (Eq.ndrec p h : Eq a b)")
+  , ("elim/eqRecTwoDiscrs", "fun (a b : Nat) (h : Eq a b) (p : Eq a a) => (Eq.rec p h : Eq a b)")
+  , ("elim/letDiscr",      "fun (n : (let x := Nat.zero; Nat)) => (Nat.rec Nat.zero (fun _ ih => ih) n : Nat)")
+  , ("elim/letDiscrUsed",  "fun (n : (let x := Nat; x)) => (Nat.rec Nat.zero (fun _ ih => ih) n : Nat)")
+  , ("elim/letOver",       "fun (n : Nat) (m : (let x := Nat.zero; Nat)) => (Nat.rec (fun k => k) (fun _ ih k => ih k) n m : Nat)")
   ]
 
 -- M4b-4c P2: queries the oracle REJECTS. Emitted as `{"id","src","err"}`,
@@ -1181,15 +1200,15 @@ def elimQueries : List (String × String) :=
 -- logs through `errToSorry` and then aborts with an internal exception,
 -- so the thrown exception's own text is only the fallback.
 def elimErrQueries : List (String × String) :=
-  [ ("elimErr/noExpected",          "fun (n : Nat) => Nat.rec Nat.zero (fun hb24 ih => ih) n")
-  , ("elimErr/mvarExpected",        "fun (n : Nat) => (Nat.rec Nat.zero (fun hb25 ih => ih) n : _)")
+  [ ("elimErr/noExpected",          "fun (n : Nat) => Nat.rec Nat.zero (fun _ ih => ih) n")
+  , ("elimErr/mvarExpected",        "fun (n : Nat) => (Nat.rec Nat.zero (fun _ ih => ih) n : _)")
   , ("elimErr/insufficient",        "(preElim : Nat)")
   , ("elimErr/insufficientExpected","fun (h : False) => (False.rec : Nat)")
-  , ("elimErr/insufficientDomain",  "(natElim Nat.zero (fun hb26 ih => ih) : Bool → Nat)")
-  , ("elimErr/unusedNamed",         "fun (n : Nat) => (Nat.rec (foo := Nat.zero) Nat.zero (fun hb27 ih => ih) n : Nat)")
-  , ("elimErr/overAppIncorrect",    "fun (n : Nat) (p : Eq Nat.zero Nat.zero) => (Nat.rec (fun hb28 => p) (fun hb29 ih hb30 => ih Nat.zero) n Nat.zero : Eq p p)")
-  , ("elimErr/motiveIncorrect",     "fun (n : Nat) (p : Eq n n) => (Nat.rec p (fun hb31 ih => ih) n : Eq p p)")
-  , ("elimErr/invalidMotive",       "fun (a : Nat) (b : Nat) (h : Eq a b) (p : Eq a a) => (Eq.subst' h p : Nat)")
+  , ("elimErr/insufficientDomain",  "(natElim Nat.zero (fun _ ih => ih) : Bool → Nat)")
+  , ("elimErr/unusedNamed",         "fun (n : Nat) => (Nat.rec (foo := Nat.zero) Nat.zero (fun _ ih => ih) n : Nat)")
+  , ("elimErr/overAppIncorrect",    "fun (n : Nat) (p : Eq Nat.zero Nat.zero) => (Nat.rec (fun _ => p) (fun _ ih _ => ih Nat.zero) n Nat.zero : Eq p p)")
+  , ("elimErr/motiveIncorrect",     "fun (n : Nat) (p : Eq n n) => (Nat.rec p (fun _ ih => ih) n : Eq p p)")
+  , ("elimErr/invalidMotive",       "fun (a b : Nat) (h : Eq a b) (p : Eq a a) => (Eq.subst' h p : Nat)")
   ]
 
 def emitErr (id src err : String) : IO Unit :=
@@ -1208,7 +1227,7 @@ unsafe def main : IO Unit := do
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries ++ closeoutExplicitQueries ++ nondepQueries ++ lvalIdxQueries ++ lvalFnQueries ++ p2Queries ++ p3Queries ++ p4Queries ++ anonQueries ++ anonTailQueries ++ elimQueries do
+    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries ++ closeoutExplicitQueries ++ nondepQueries ++ lvalIdxQueries ++ lvalFnQueries ++ p2Queries ++ p3Queries ++ p4Queries ++ anonQueries ++ anonTailQueries ++ funExpandQueries ++ elimQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>

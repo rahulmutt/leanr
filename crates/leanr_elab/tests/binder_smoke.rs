@@ -941,3 +941,42 @@ fn a_have_bound_variable_is_opaque_to_defeq() {
     support::elab_and_synthesize("let n : Nat := Nat.zero; (rfl : Eq n Nat.zero)")
         .expect("a genuine `let` stays transparent");
 }
+
+/// oracle: `expandFunBinders`' `paren` arm (`Binders.lean:375-388`) takes
+/// `(x …)` as binders only when no ident resolves to a global constant;
+/// `(Nat)` resolves, so the oracle elaborates it as a `match` pattern
+/// (probed: `fun x => match x with | Nat => sorry`). That is the match
+/// slice's, so leanr must keep the seam rather than bind a local `Nat`.
+#[test]
+fn fun_paren_binder_naming_a_global_is_a_pattern_seam() {
+    match elab_result("(fun (Nat) => Nat.zero : Nat → Nat)") {
+        Err(leanr_elab::ElabError::UnsupportedSyntax(msg)) => {
+            assert!(msg.contains("match slice"), "got {msg:?}");
+        }
+        other => panic!("expected the pattern seam, got {other:?}"),
+    }
+}
+
+/// `getFunBinderIds?` (`Binders.lean:320-345`) fails on a non-ident,
+/// non-`_` element, so `(x 1)` is a pattern too.
+#[test]
+fn fun_paren_binder_with_a_non_ident_element_is_a_pattern_seam() {
+    match elab_result("(fun (x 1) => x : Nat → Nat → Nat)") {
+        Err(leanr_elab::ElabError::UnsupportedSyntax(msg)) => {
+            assert!(msg.contains("match slice"), "got {msg:?}");
+        }
+        other => panic!("expected the pattern seam, got {other:?}"),
+    }
+}
+
+/// The `typeAscription` arm (`Binders.lean:389-394`) has the same
+/// fallback when the ascribed term is not an ident/`_` application.
+#[test]
+fn fun_ascribed_non_ident_binder_is_a_pattern_seam() {
+    match elab_result("fun ((x) : Nat) => x") {
+        Err(leanr_elab::ElabError::UnsupportedSyntax(msg)) => {
+            assert!(msg.contains("match slice"), "got {msg:?}");
+        }
+        other => panic!("expected the pattern seam, got {other:?}"),
+    }
+}

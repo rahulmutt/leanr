@@ -621,7 +621,10 @@ the `recursor_head_seam` helper both called. Full
   diverged, and none of the pre-existing corpus used either. The queries
   now spell `_` as a fresh name and split `(a b : T)`; the canonical
   encoder erases binder names, so `exp` is unchanged. **Follow-up:** port
-  `expandFunBinders` for both forms in `fun.rs`.
+  `expandFunBinders` for both forms in `fun.rs`. **Closed:** `fun.rs`
+  now ports `expandFunBinders` (`_`, `typeAscription` and `paren`
+  groups) and the queries are back to their original spelling; see
+  § Follow-up: `expandFunBinders` below.
 - **T6-C: `elim/namedMotive` / `elim/explicitAt` annotate `ih`.** These
   are standard-path controls (motive supplied). Original query
   `fun (n : Nat) => Nat.rec (motive := fun _ => Nat) Nat.zero (fun _ ih
@@ -678,8 +681,8 @@ the `recursor_head_seam` helper both called. Full
   branch: route it through the real `check`.
 - `trace[Elab.app.elab_as_elim]` is not modelled.
 - `numScopeArgs`: no query hit that gap.
-- `fun.rs` `expandFunBinders` (`_`, multi-ident). (`setElabConfig` is
-  closed; see its own spec.) The `instantiate_beta_rev_range` nested-redex gap (was HIGH) is
+- `fun.rs` `expandFunBinders` (`_`, multi-ident): closed, see below.
+  (`setElabConfig` is closed; see its own spec.) The `instantiate_beta_rev_range` nested-redex gap (was HIGH) is
   closed; see the follow-up note below.
 - Fixture/record follow-ups from the final review: a `preElim2`-style
   fixture eliminator with an explicit binder before an explicit motive
@@ -710,3 +713,31 @@ twins'. No existing record moved. Mutation: restoring
 `instantiate_rev` + `head_beta` turns the new
 `instantiate_beta_rev_range_betas_a_redex_nested_under_a_binder` unit
 test and both records red.
+
+### Follow-up: `expandFunBinders` (closed)
+
+`fun.rs` rejected `fun _ x` (hole binders) and `(a b : T)` / `(x y)`
+groups, so the P2 queries had been respelled. `extract_fun_binder_views`
+now ports `expandFunBinders` (`Binders.lean:360-406`, pinned
+v4.33.0-rc1) with `getFunBinderIds?` (`:320-345`):
+
+- `hole`: one `Default` binder, anonymous (the oracle mints a
+  macro-scoped name; the canonical encoder erases binder names).
+- `typeAscription`: each ident/`_` element of `x₁ … xₙ` binds with the
+  shared type; `(x :)` gets a hole type. No global-name gate.
+- `paren`: the same split with hole types, only when no ident resolves
+  as a global (`resolve_global_name`); `(Nat)` is a pattern.
+- Every pattern fallback, and every unlisted binder kind
+  (`processAsPattern`), is the `pattern_binder_seam`, owned by the match
+  slice.
+
+Corpus: 12 `funx/*` records; the 31 respelled `elim*` sources restored
+(`exp`/`err` byte-identical); `CORPUS_FLOOR` 333 -> 345. Mutations run,
+each killed: drop the global gate; type only the first split ident;
+error on an absent ascription type; accept a non-ident element as a
+hole; bind only the first paren element.
+
+Open seam: `ensureAtomicBinderName` is not ported. The oracle rejects
+`fun (a.b : Nat) => …` ("invalid binder name `a.b`, it must be atomic",
+probed), and leanr binds `a.b` as one component. This predates this
+change (single-ident binders had it too).
