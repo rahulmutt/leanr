@@ -28,6 +28,11 @@ pub enum MetaError {
     /// constant, non-forall function type). Incompleteness, never
     /// unsoundness — the kernel is the checker.
     Infer(String),
+    /// oracle: a `throwError` raised by `Meta.check` itself (`Check.lean`:
+    /// let-type mismatch, incorrect number of universe levels, function
+    /// expected, application type mismatch, invalid projection).
+    /// `isTypeCorrect` folds it (and `Infer`) into `false`.
+    Check(String),
     /// `isDefEqStuck`: the query is not decidable yet but may become so
     /// once more mvars are assigned. NOT a negative verdict — collapsing
     /// it to `false` loses the "not yet" and changes search results.
