@@ -542,6 +542,9 @@ impl<'a, 'e> AppElab<'a, 'e> {
     /// — `builtin/binder/forall.rs`'s `elab_binders_and_forall`
     /// checkpoint/restore idiom — so the
     /// telescope's fvars never outlive `k`.
+    ///
+    /// The walk itself now lives in [`open_forall_telescope_reducing`],
+    /// shared with `app/elim_info.rs`.
     pub(crate) fn forall_telescope_reducing<R>(
         &mut self,
         ty: ExprId,
@@ -549,48 +552,73 @@ impl<'a, 'e> AppElab<'a, 'e> {
     ) -> Result<R, ElabError> {
         let checkpoint = self.elab.mctx.lctx_checkpoint();
         let result = (|| {
-            let mut binders: Vec<TelescopeBinder> = Vec::new();
-            let mut cur = ty;
-            loop {
-                // oracle: `process` recurses straight into `b` while the
-                // type is already a `forall` (`Basic.lean:1460-1468`) and
-                // reaches `whnf` only on the `_` arm (`:1474-1481`).
-                // Reducing an already-`forall` type is a no-op, so this
-                // guard is a cost decision, not a semantic one — but it
-                // keeps the walk shaped like the oracle's.
-                let reduced = if matches!(self.node(cur), Node::Forall { .. }) {
-                    cur
-                } else {
-                    self.whnf_forall(cur)?
-                };
-                let Node::Forall {
-                    binder_name,
-                    binder_type,
-                    body,
-                    binder_info,
-                } = self.node(reduced)
-                else {
-                    break;
-                };
-                let fvar = self
-                    .elab
-                    .mctx
-                    .push_local_decl(binder_name, binder_type, binder_info)
-                    .map_err(ElabError::from)?;
-                cur = self
-                    .elab
-                    .mctx
-                    .instantiate_beta_rev_range(body, std::slice::from_ref(&fvar))?;
-                binders.push(TelescopeBinder {
-                    name: binder_name,
-                    fvar,
-                    ty: binder_type,
-                });
-            }
+            let (binders, _body) = open_forall_telescope_reducing(self.elab, ty)?;
             k(self, &binders)
         })();
         self.elab.mctx.lctx_restore(checkpoint);
         result
+    }
+}
+
+/// The telescope walk behind [`AppElab::forall_telescope_reducing`]:
+/// oracle `forallTelescopeReducing` with `whnfType := false`
+/// (`Basic.lean:1453-1488`, `process`).
+///
+/// Pushes one local decl per binder into the ambient `lctx` and does NOT
+/// restore it — the caller brackets the call with
+/// `lctx_checkpoint`/`lctx_restore`. Returns the binders and the
+/// telescope's body: instantiated, and not whnf'd unless reducing exposed
+/// another `forall` (oracle `k fvars type`, `Basic.lean:1474-1485`).
+pub(crate) fn open_forall_telescope_reducing(
+    elab: &mut TermElabM<'_>,
+    ty: ExprId,
+) -> Result<(Vec<TelescopeBinder>, ExprId), ElabError> {
+    let node = |elab: &TermElabM<'_>, e: ExprId| {
+        let base = elab.view.store;
+        elab.mctx.store().expr_node(Some(base), e)
+    };
+    let mut binders: Vec<TelescopeBinder> = Vec::new();
+    let mut cur = ty;
+    loop {
+        // oracle: `process` recurses straight into `b` while the
+        // type is already a `forall` (`Basic.lean:1460-1468`) and
+        // reaches `whnf` only on the `_` arm (`:1474-1481`).
+        // Reducing an already-`forall` type is a no-op, so this
+        // guard is a cost decision, not a semantic one — but it
+        // keeps the walk shaped like the oracle's.
+        let reduced = if matches!(node(elab, cur), Node::Forall { .. }) {
+            cur
+        } else {
+            // Same as `AppElab::whnf_forall`: keep the whnf result only
+            // if it is a `forall`.
+            let r = elab.mctx.whnf(cur)?;
+            if matches!(node(elab, r), Node::Forall { .. }) {
+                r
+            } else {
+                cur
+            }
+        };
+        let Node::Forall {
+            binder_name,
+            binder_type,
+            body,
+            binder_info,
+        } = node(elab, reduced)
+        else {
+            return Ok((binders, cur));
+        };
+        let fvar = elab
+            .mctx
+            .push_local_decl(binder_name, binder_type, binder_info)
+            .map_err(ElabError::from)?;
+        cur = elab
+            .mctx
+            .instantiate_beta_rev_range(body, std::slice::from_ref(&fvar))?;
+        binders.push(TelescopeBinder {
+            name: binder_name,
+            fvar,
+            ty: binder_type,
+        });
     }
 }
 
