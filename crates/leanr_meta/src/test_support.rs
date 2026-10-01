@@ -416,6 +416,75 @@ pub(crate) fn with_synth0_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
     f(&mut ctx)
 }
 
+/// Replay `meta/Meta0.olean` (import-free, prelude-mode) into a fresh
+/// `Environment`; same shape as [`with_synth0_ctx`].
+pub(crate) fn with_meta0_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
+    let bytes = std::fs::read(fixture_path("meta/Meta0.olean")).expect("Meta0.olean fixture");
+    let mut env = Environment::default();
+    let md = ModuleData::parse(&bytes, env.store_mut()).expect("Meta0.olean decodes");
+    assert!(
+        md.imports.is_empty(),
+        "Meta0.olean must be import-free (prelude-mode fixture) — \
+         with_meta0_ctx replays it into an empty Environment with no \
+         dependency loading"
+    );
+    let reducibility = md.reducibility;
+    let matchers = md.matchers;
+    let instances = md.instances;
+    let default_instances = md.default_instances;
+    let projection_fns = md.projection_fns;
+    let classes = md.classes;
+    let coe_decls = md.coe_decls;
+    let aux_recs = md.aux_recs;
+    let elab_as_elim = md.elab_as_elim;
+    let constants: HashMap<NameId, ConstantInfo> =
+        md.constants.into_iter().map(|c| (c.name(), c)).collect();
+    leanr_kernel::replay(&mut env, constants).expect("Meta0.olean replays");
+
+    let view = env.view();
+    let mut scratch = Store::scratch();
+    let mut ctx = MetaCtx::new(
+        view,
+        &mut scratch,
+        Config::default(),
+        EnvExtensions {
+            reducibility: &reducibility,
+            matchers: &matchers,
+            instances: &instances,
+            default_instances: &default_instances,
+            projection_fns: &projection_fns,
+            classes: &classes,
+            coe_decls: &coe_decls,
+            aux_recs: &aux_recs,
+            elab_as_elim: &elab_as_elim,
+            structures: &[],
+        },
+    );
+    f(&mut ctx)
+}
+
+/// `Expr.const` for a possibly dotted name (`"N.succ"`), level-filled like
+/// [`const_named`].
+pub(crate) fn c(ctx: &mut MetaCtx, name: &str) -> ExprId {
+    let base = Some(ctx.view.store);
+    let mut n = None;
+    for part in name.split('.') {
+        let s = ctx.scratch.intern_str(base, part).expect("intern");
+        n = Some(ctx.scratch.name_str(base, n, s).expect("name"));
+    }
+    const_expr_for(ctx, n.expect("non-empty name"))
+}
+
+pub(crate) fn app(ctx: &mut MetaCtx, f: ExprId, a: ExprId) -> ExprId {
+    let base = Some(ctx.view.store);
+    ctx.scratch.expr_app(base, f, a).expect("app")
+}
+
+pub(crate) fn bvar(ctx: &mut MetaCtx, i: u64) -> ExprId {
+    let base = Some(ctx.view.store);
+    ctx.scratch.expr_bvar(base, &Nat::from(i)).expect("bvar")
+}
+
 /// Replay `InstancesCyclic.olean` (task B5's own fixture: a CYCLIC
 /// instance graph — `instAofB {a} [B a] : A a` and `instBofA {a} [A a] :
 /// B a`, with no base instance for either class, so `A N` is genuinely
