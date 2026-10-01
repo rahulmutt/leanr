@@ -128,8 +128,9 @@ fn step_merges_new_pending_before_still_unsolved() {
 /// next rung.
 ///
 /// UN-IGNORED by M4b-3 P3 task 2. It was ignored through P2a because
-/// `MetaError::IsDefEqStuck` is constructed nowhere in `leanr_meta/src`
-/// (still true) and `synth_instance(Wrap ?m)` therefore answered
+/// `synth_instance` never runs under a new mctx depth with
+/// `isDefEqStuckEx` (`MetaError::IsDefEqStuck` is now constructible, but
+/// only under `with_def_eq_stuck_ex`, which synthesis does not set), and `synth_instance(Wrap ?m)` therefore answered
 /// `Ok(Some(..))` — it treated the CALLER's `?m` as assignable and chose
 /// the class's type parameter on the caller's behalf. The real oracle
 /// reports this stuck (verified against the pinned v4.33.0-rc1
@@ -974,10 +975,10 @@ fn a_nat_literal_infers_as_the_fixture_nat() {
 /// `StuckSyntheticMVar` under the real entry point — exactly the
 /// oracle's own behavior for that source text (re-confirmed against
 /// v4.33.0-rc1 during Task 7's investigation). It cannot pass today:
-/// `leanr_meta` declares `MetaError::IsDefEqStuck` but constructs it
-/// NOWHERE (`synth.rs:1636-1650` names the missing mctx-depth /
-/// read-only-mvar model as a later `leanr_meta` plan's own scope, out
-/// of reach here), so `synth_instance(Wrap ?m)` solves eagerly from the
+/// `synth_instance` does not yet run under a new mctx depth with
+/// `isDefEqStuckEx` (`leanr_meta` can now construct
+/// `MetaError::IsDefEqStuck`, but only under `with_def_eq_stuck_ex`;
+/// wiring synthesis onto it is a follow-up of macro/binop% P1), so `synth_instance(Wrap ?m)` solves eagerly from the
 /// sole candidate instead of refusing — the ladder's stuck report is
 /// unreachable from any typeclass goal today. That exact scenario is
 /// already recorded, `#[ignore]`d with this same evidenced reason, as

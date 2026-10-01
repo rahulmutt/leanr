@@ -189,7 +189,7 @@ impl MetavarContext {
 
     /// oracle: `LMVarId.isReadOnly` (Basic.lean:1000-1001),
     /// `depth < levelAssignDepth` -- the negation of
-    /// `isLevelMVarAssignable` (MetavarContext.lean:470-474).
+    /// `isLevelMVarAssignable` (MetavarContext.lean:471-474).
     pub fn is_level_mvar_read_only(&self, id: LMVarId) -> bool {
         self.level_mvar_depth(id) < self.level_assign_depth
     }

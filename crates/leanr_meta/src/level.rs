@@ -183,7 +183,7 @@ impl<'e> MetaCtx<'e> {
                 // anonymous EXPR mvars), so it behaves as permanently
                 // read-only from this crate's point of view — same
                 // verdict (`undef`) the oracle's `isReadOnly` check
-                // below reaches, for a tier-1-specific reason.
+                // below reaches, because it has no declaration to read a depth from.
                 return Ok(None);
             };
             let mvar_id = LMVarId(n);
@@ -489,8 +489,8 @@ impl<'e> MetaCtx<'e> {
                         // Anonymous mvar: unassignable/unfindable in this
                         // crate's `MetavarContext` (the same convention
                         // `solve`'s mvar-left arm documents) — behaves like
-                        // the oracle's `isReadOnly` branch (`none`), for a
-                        // different, tier-1-specific reason.
+                        // the oracle's `isReadOnly` branch (`none`), because
+                        // there is no declaration to read a depth from.
                         return Ok(None);
                     };
                     let mvar_id = LMVarId(n);

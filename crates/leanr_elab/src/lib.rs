@@ -185,19 +185,19 @@
 //!   under `postpone == .no`) are unchanged.
 //! - **`leanr_meta` cannot report a stuck typeclass goal; the
 //!   elaborator approximates it.**
-//!   `leanr_meta::error::MetaError` declares `IsDefEqStuck` (`error.rs:36`)
-//!   but constructs it nowhere (re-verified at the end of P3 — the only
-//!   CODE occurrences are the declaration and `synthetic/ladder.rs:179`'s
-//!   match arm; several files, this one included, also name it in prose,
-//!   which a raw grep will show and which is not a construction site);
+//!   `leanr_meta::error::MetaError` declares `IsDefEqStuck` (`error.rs:39`).
+//!   As of macro/binop% P1 it is constructed at two ported defeq sites, only
+//!   under `with_def_eq_stuck_ex`, which `synth_instance` does not yet use,
+//!   so synthesis still never reports stuck (the elab-side consumer is
+//!   `synthetic/ladder.rs:179`'s match arm);
 //!   `synth.rs`'s `synth_instance_main` (the private body
 //!   behind the public `synth_instance`) documents `isDefEqStuckEx`
 //!   (`Meta/Basic.lean` in the pinned oracle) as a named seam in its
 //!   inline `Config`-divergence list at `synth.rs:1638-1650` — cited as
 //!   `:1636-1650` until P3 task 4's own additions to `synth.rs` shifted
 //!   it two lines — because
-//!   tier-1 `leanr_meta` has no mctx-depth / read-only-mvar model with
-//!   which to DECIDE stuck-vs-assignable. The consequence, measured
+//!   `synth_instance` does not yet run under `with_new_mctx_depth` with
+//!   `isDefEqStuckEx` set (the depth model itself now exists). The consequence, measured
 //!   rather than assumed and UNCHANGED: `MetaCtx::synth_instance(Wrap ?m)`
 //!   called directly still *succeeds*, assigning `?m` from whichever
 //!   candidate the search reaches first, where the pinned oracle refuses

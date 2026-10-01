@@ -33,7 +33,8 @@ impl<'e> MetaCtx<'e> {
     /// PROPAGATE: folding them would turn "leanr cannot answer" into a
     /// confident "ill-typed". `IsDefEqStuck` also propagates, which DIVERGES
     /// from the oracle (its `catch _` catches it and answers `false`);
-    /// unreachable today. There is no rollback: mvar assignments made by
+    /// reachable only under `with_def_eq_stuck_ex` (the two ported
+    /// sites throw it only when `Config::is_def_eq_stuck_ex` is set). There is no rollback: mvar assignments made by
     /// `isDefEq` inside `check` persist, as in the oracle.
     pub fn is_type_correct(&mut self, e: ExprId) -> Result<bool, MetaError> {
         match self.check(e) {
@@ -176,7 +177,7 @@ impl<'e> MetaCtx<'e> {
     /// in `get_level`, which stays untouched for its other callers. Without
     /// it a binder type `?a : ?T` would be reported ill-typed. Not
     /// assignable (synthetic opaque while `assign_synthetic_opaque` is off,
-    /// or undeclared) throws `type expected` (`:171-172`).
+    /// or undeclared) throws `type expected` (read-only test `:170`, `throwTypeExpected` `:171`).
     fn ensure_type(&mut self, t: ExprId) -> Result<(), MetaError> {
         let tt = self.infer_type(t)?;
         // oracle: `getLevel` whnfs with `whnfD` (`InferType.lean:166`), i.e.

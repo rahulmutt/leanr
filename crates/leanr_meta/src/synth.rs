@@ -109,11 +109,10 @@
 //! unification, not table keying). Under the real oracle, a
 //! `MVarKind.syntheticOpaque` mvar IS renamed by `mkTableKey`: kind plays
 //! no role in `MVarId.isAssignable` at all, only depth does. This crate
-//! has no per-mvar depth model whatsoever (`MVarDecl`, `mvar_ctx.rs`,
-//! carries no depth field; `level.rs`/`assign.rs`'s own module docs
-//! record every such collapse as the standing tier-1 seam: "every
-//! declared mvar is mutually assignable, single flat mctx depth"), so
-//! under that collapse `decl.depth == mctx.depth` /
+//! has per-mvar depth bookkeeping (side maps in `mvar_ctx.rs`, added by
+//! macro/binop% P1), but these table-key walks do NOT consult it yet
+//! (synthesis is still on rollback rather than `withNewMCtxDepth`), so
+//! under the old flat-depth collapse, which they still apply, `decl.depth == mctx.depth` /
 //! `getLevelDepth mvarId != mctx.depth` are always (respectively)
 //! true/false for any DECLARED mvar -- both walks below collapse the
 //! check to "always assignable" for every declared mvar, KIND INCLUDED:
@@ -611,8 +610,8 @@ impl<'a, 'e> KeyNormalizer<'a, 'e> {
                 // == mctx.depth`), a different function from
                 // `assign.rs::unassigned_mvar_id`'s `isReadOnlyOrSyntheticOpaque`
                 // check (see this module's own doc for why the two must not
-                // be conflated). Under this crate's flat-depth collapse
-                // (no per-mvar depth model at all, `mvar_ctx.rs`) that
+                // be conflated). Under the flat-depth collapse this walk still
+                // applies (it does not consult `mvar_ctx.rs`'s depth maps) that
                 // depth check is always true for any DECLARED mvar,
                 // `MVarKind` included -- a syntheticOpaque mvar IS renamed
                 // here, matching the real `mkTableKey`. `None` (no
@@ -1683,11 +1682,11 @@ impl<'e> MetaCtx<'e> {
     /// answer is "ask me again once you have assigned `?a`", not
     /// "`instWrapNat`".
     ///
-    /// `leanr_meta` has no mctx-depth / read-only-mvar model and
-    /// constructs `MetaError::IsDefEqStuck` nowhere (this crate's
-    /// deferral ledger in `lib.rs` records that gap, whose owner is a
-    /// later `leanr_meta` slice; `leanr_meta/src` is behavior-frozen for
-    /// M4b-3 P3). Its `synth_instance` therefore treats the caller's
+    /// `leanr_meta` now has an mctx-depth model and throws
+    /// `MetaError::IsDefEqStuck` at two ported sites under
+    /// `with_def_eq_stuck_ex`, but `synth_instance` does not yet run
+    /// under `with_new_mctx_depth` / `isDefEqStuckEx` (a follow-up of
+    /// the macro/binop% P1 slice). Its `synth_instance` therefore treats the caller's
     /// `?a` as an ordinary assignable mvar and answers `Wrap ?a` with
     /// whichever candidate it reaches first — silently choosing the
     /// class's type parameter for the caller. That is a WRONG ANSWER,
@@ -1778,8 +1777,8 @@ impl<'e> MetaCtx<'e> {
     /// other reason. `has_expr_mvar` alone is the right predicate.
     ///
     /// The `MetaError::IsDefEqStuck` arm below is kept live: it is the
-    /// channel this function should be reading once the depth model
-    /// exists, at which point the syntactic pre-test becomes redundant
+    /// channel this function should be reading once `synth_instance`
+    /// runs on the depth model (which now exists), at which point the syntactic pre-test becomes redundant
     /// for residues 2 and 3 and can be deleted rather than rewritten.
     ///
     /// Precondition: `ty` is already `instantiate_mvars`-ed (the oracle's
@@ -2176,23 +2175,16 @@ impl<'e> MetaCtx<'e> {
         //    resurrect that graft -- it just matches the field to the
         //    oracle's wrapper for the day a real consultation site
         //    lands.
-        //  - `isDefEqStuckEx := true` -- NAMED SEAM, not settable: this
-        //    crate has no `Config` field for it at all
-        //    (`config.rs`'s own doc: "spec-mandated to become a typed
-        //    error variant..., so it is not tracked here"), and every
-        //    site that would branch on it (`level.rs`, `assign.rs`) has
-        //    the `false` case hard-coded into the control flow itself,
-        //    not gated through a field this function could flip.
-        //    Actually wiring it through requires those sites to grow a
-        //    real `MetaError::IsDefEqStuck`-throwing branch, which is
-        //    out of this task's scope (`synth.rs`/`instances.rs`(doc)/
-        //    `config.rs` only). Owner M4b, citing
-        //    `SynthInstance.lean:958-968` and `level.rs`'s own
-        //    `isDefEqStuckEx` seam doc.
+        //  - `isDefEqStuckEx := true` -- NAMED SEAM, not set here: the
+        //    `Config` field (`is_def_eq_stuck_ex`) and the two ported
+        //    throw sites (`level.rs`, `assign.rs`) now exist, but this
+        //    driver does not yet flip the field (nor run under a new
+        //    mctx depth), because synthesis is still on rollback.
+        //    Follow-up of the macro/binop% P1 slice, citing
+        //    `SynthInstance.lean:958-968`.
         //  - `withNewMCtxDepth (allowLevelAssignments := true)` -- NAMED
-        //    SEAM, no mechanism in this crate at all: there is no
-        //    mctx-depth model at tier 1 (per `level.rs`'s own "Depth /
-        //    read-only seam"), so this driver's `checkpoint`/`rollback`
+        //    SEAM, not used here: the mctx-depth mechanism now exists
+        //    (`with_new_mctx_depth`), but this driver's `checkpoint`/`rollback`
         //    pair in `synth_instance_preprocessed` stands in for the
         //    wrapper's SCOPE without reproducing its READ-ONLY-ness:
         //    an mvar minted by the caller stays assignable inside the

@@ -417,3 +417,61 @@ A surviving mutation gets a killing row.
 ## Landed
 
 (Filled in as each plan merges: corrections, mutations run, seams left.)
+
+### P1 (PR #TBD): mctx depth + isDefEqStuckEx
+
+Commits: 9169b3f (T1 depth bookkeeping + `with_new_mctx_depth`), e10c074
+(T2 expr read-only arm at three sites), 0e7e64a (T3 level read-only +
+`isMVarWithGreaterDepth`), 9363a7c (T4 `isDefEqStuckEx`, proof irrelevance,
+`is_def_eq_guarded`), aa24e35 (T4 fix: `is_def_eq` rollback, guard rethrow).
+
+Mutations run (all killed unless noted):
+- T1: (a) drop rollback; (b) drop set_depths; (c) always set
+  level_assign_depth; (d) stamp 0 in declare; (e) drop postponed.clear().
+- T2: (a) delete assign.rs read-only arm; (b) delete lazy_delta.rs
+  read-only half; (c) delete check.rs read-only half; (d) delete the two
+  `defeq_cache_transient.clear()` in `with_new_mctx_depth` -- SURVIVES
+  (the transient cache is already cleared per top-level `is_def_eq`,
+  defeq.rs:97; kept as insurance for nested callers).
+- T3: (a) solve read-only -> false; (b) remove greater-depth block;
+  (c) `>` -> `>=`; (d) dec_level read-only -> false; (e)
+  has_assignable back to `is_some`.
+- T4: (a) drop expr stuck throw; (b) drop level throw; (c) drop rhs
+  `is_mvar`; (d) drop proof-irrel call; (e) guard rethrow arm -> Ok(false);
+  (f) no cfg restore; (g) cache_key ignoring the field.
+- T4 fix: remove the rollback on the `process_postponed` Err path.
+
+Spec corrections:
+- Only **two** of the three stuck sites are ported. `unstuckMVar`
+  (ExprDefEq.lean:1985-2020) sits inside the unported `isDefEqOnFailure`.
+- The expression depth sites are `unassigned_mvar_id`,
+  `is_def_eq_singleton` and `ensure_type`. `isAbstractedUnassignedMVar` /
+  `isEtaUnassignedMVar` are not ported (`config.rs:128-129`); the slow
+  `checkAssignment` mvar arm (ExprDefEq.lean:901) is not ported.
+- The oracle's `withNewMCtxDepthImp` restores the whole mctx
+  (Basic.lean:1973-1978), which the spec text did not state.
+- Proof irrelevance is ported in the both-unassignable (`None, None`) arm
+  of `assign.rs` (ExprDefEq.lean:1949-1956); oracle-faithful false -> true
+  only.
+- `is_def_eq_guarded` rethrows resource exhaustion (`DepthBudgetExhausted`,
+  `StepBudgetExhausted`, `Kernel(BankExhausted)`, `Kernel(DeepRecursion)`)
+  instead of mapping every error to `false` as the spec said: the oracle's
+  `catch _` does not catch runtime exceptions.
+- `is_def_eq` now rolls back when `process_postponed` errs (defeq.rs); the
+  new level stuck throw plus the swallowing guard made the previous
+  skip-rollback path routinely reachable.
+- Depth is stored as side maps in `mvar_ctx.rs`, not as an `MVarDecl`
+  field (semantics identical; avoids touching every `MVarDecl` literal).
+
+Open follow-ups:
+- Synthesis onto real depth + `isDefEqStuckEx` (`synth_instance` still on
+  rollback; `SynthInstance.lean:958-978`).
+- `discr_path` read-only arm.
+- Nondep R9 (`MetavarContext.lean:1187`, `:1195`).
+- `unstuckMVar` (with `isDefEqOnFailure`).
+- Declarations made inside a scope persist after rollback with their inner
+  depth stamp (the oracle drops them); unreachable unless an inner mvar
+  leaks.
+- Minor: no test where neither level side is an mvar under the stuck flag;
+  the `with_new_mctx_depth` Err-path test does not cover level assignment
+  discard.

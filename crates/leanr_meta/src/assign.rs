@@ -1031,8 +1031,8 @@ impl<'e> MetaCtx<'e> {
     /// mvarId then return false`). Every OTHER metavariable met is
     /// SEAM: `isSubPrefixOf` (:1114) — this crate's `LocalContext`
     /// exposes no positional/enumeration API to port that lctx-subset
-    /// check faithfully; at tier 1 (same posture as `level.rs`'s
-    /// single-mctx-depth seam), every declared mvar is treated as
+    /// check faithfully; at tier 1 (the `isSubPrefixOf` seam is
+    /// independent of the mctx-depth model), every declared mvar is treated as
     /// mutually visible. `ctxApprox`'s rescue does NOT belong here at
     /// all (task 7 finding): this function transcribes
     /// `CheckAssignmentQuick.check`, which the oracle's own
