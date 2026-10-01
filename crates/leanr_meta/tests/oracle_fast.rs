@@ -94,6 +94,8 @@ fn oracle_fast_gate() {
         projection_fns,
         classes,
         coe_decls,
+        aux_recs,
+        elab_as_elim,
         structures: _,
     } = replay_fixture("Meta0.olean");
 
@@ -153,6 +155,8 @@ fn oracle_fast_gate() {
                     projection_fns: &projection_fns,
                     classes: &classes,
                     coe_decls: &coe_decls,
+                    aux_recs: &aux_recs,
+                    elab_as_elim: &elab_as_elim,
                     structures: &[],
                 },
             );
@@ -306,6 +310,8 @@ fn oracle_fast_gate() {
                     projection_fns: &projection_fns,
                     classes: &classes,
                     coe_decls: &coe_decls,
+                    aux_recs: &aux_recs,
+                    elab_as_elim: &elab_as_elim,
                     structures: &[],
                 },
             );
@@ -321,6 +327,49 @@ fn oracle_fast_gate() {
                 Err(e) => {
                     failures.push(format!("{id} (tr={tr},prof={prof}): leanr errored: {e:?}"))
                 }
+            }
+            continue;
+        }
+
+        // M4b-4c P1: `kabstract` records carry `in`/`p`/`out`.
+        if kind == "kabstract" {
+            let mut scratch = Store::scratch();
+            let mut fv = HashMap::new();
+            let mut mv = HashMap::new();
+            let e = decode_expr(&mut scratch, base, &q["in"], &mut fv, &mut mv);
+            let p = decode_expr(&mut scratch, base, &q["p"], &mut fv, &mut mv);
+            let mut ctx = MetaCtx::new(
+                view,
+                &mut scratch,
+                Config::default(),
+                EnvExtensions {
+                    reducibility: &reducibility,
+                    matchers: &matchers,
+                    instances: &instances,
+                    default_instances: &default_instances,
+                    projection_fns: &projection_fns,
+                    classes: &classes,
+                    coe_decls: &coe_decls,
+                    structures: &[],
+                    aux_recs: &aux_recs,
+                    elab_as_elim: &elab_as_elim,
+                },
+            );
+            ctx.set_transparency(transparency_of(tr));
+            let got = match ctx.kabstract(e, p) {
+                Ok(r) => r,
+                Err(err) => {
+                    failures.push(format!("{id}: leanr errored: {err:?}"));
+                    continue;
+                }
+            };
+            drop(ctx);
+            let mut est = EncSt::default();
+            encode_expr(&scratch, base, e, &mut est);
+            encode_expr(&scratch, base, p, &mut est);
+            let got_j = encode_expr(&scratch, base, got, &mut est);
+            if got_j != q["out"] {
+                failures.push(format!("{id}: leanr={got_j} oracle={}", q["out"]));
             }
             continue;
         }
@@ -342,6 +391,8 @@ fn oracle_fast_gate() {
                 projection_fns: &projection_fns,
                 classes: &classes,
                 coe_decls: &coe_decls,
+                aux_recs: &aux_recs,
+                elab_as_elim: &elab_as_elim,
                 structures: &[],
             },
         );

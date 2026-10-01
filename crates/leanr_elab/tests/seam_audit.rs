@@ -176,7 +176,9 @@ fn deferred_constructs_are_named_seams() {
         // `Nat.casesOn`, `Nat.brecOn` and `@[elab_as_elim]` still take
         // the ordinary path and still emit a different term than the
         // oracle, with no seam — their four disjuncts read `auxRecExt` /
-        // the `elabAsElim` tag, extensions leanr does not decode.
+        // the `elabAsElim` tag. Both are decoded (M4b-4c P1:
+        // `ModuleData::aux_recs` / `elab_as_elim`, `MetaCtx` predicates),
+        // but the elaborator does not consult them until P2.
         // `fixture_declares_no_undecoded_elab_attributes` below is the
         // backstop for those; M4b-4c owns the real fix.
         ("Nat.rec", "M4b-4c"),
@@ -359,15 +361,18 @@ fn anonymous_constructor_is_registered() {
 ///
 ///   * **aux recursors** — `Nat.casesOn`, `Nat.recOn`, `Nat.brecOn` and
 ///     friends. `isAuxRecursorWithSuffix` (`AuxRecursor.lean:39-51`)
-///     reads the `auxRecExt` tag extension, which leanr does not decode,
-///     so these still take the ordinary path and still emit a different
-///     term than the oracle, with NO seam;
+///     reads the `auxRecExt` tag extension, which M4b-4c P1 decodes
+///     (`ModuleData::aux_recs`) but the elaborator does not consult until
+///     P2, so these still take the ordinary path and still emit a
+///     different term than the oracle, with NO seam;
 ///   * **`@[elab_as_elim]` declarations** — same, via the `elabAsElim`
-///     tag extension.
+///     tag extension (`ModuleData::elab_as_elim`).
 ///
-/// Neither is detectable at runtime today, so both are kept out of the
-/// committed corpus by source text instead. M4b-4c decodes `auxRecExt`
-/// and builds `ElabElim`; until then this gate is the whole defence.
+/// Neither is consulted at runtime today, so both are kept out of the
+/// committed corpus by source text instead. M4b-4c P1 decoded both
+/// extensions (the fixture now declares tagged eliminators, so only
+/// the QUERY corpus is banned from using them); P2 builds `ElabElim` and
+/// lifts the query ban.
 ///
 /// Both halves are TEXT gates over committed fixture files, deliberately
 /// so: they must fail on the SOURCE a contributor writes, before the
@@ -380,20 +385,25 @@ fn fixture_declares_no_undecoded_elab_attributes() {
 
     let src =
         std::fs::read_to_string(format!("{dir}/Elab0.lean")).expect("committed fixture source");
-    for attr in ["elab_as_elim", "elab_without_expected_type"] {
-        assert!(
-            !src.contains(attr),
-            "Elab0.lean declares `@[{attr}]`, whose extension leanr does not decode: \
-             elabAppArgs' control flow would diverge silently. Decode the extension \
-             (M4b-4c owns elab_as_elim) before adding such a declaration."
-        );
-    }
+    // `elab_as_elim` is decoded since M4b-4c P1 (`ModuleData::elab_as_elim`)
+    // and tagged declarations exist in the fixture; P2 routes them. Only
+    // the still-undecoded attribute stays banned at the source level.
+    assert!(
+        !src.contains("elab_without_expected_type"),
+        "Elab0.lean declares `@[elab_without_expected_type]`, whose extension leanr does \
+         not decode: elabAppArgs' control flow would diverge silently. Decode the \
+         extension before adding such a declaration."
+    );
+    assert!(
+        src.contains("@[elab_as_elim]"),
+        "M4b-4c P1 fixture: Elab0.lean must declare the tagged eliminators \
+         (`Eq.subst'`, `natElim`) that elim.jsonl and P2's corpus use"
+    );
 
-    // The non-attribute half of `shouldElabAsElim`. Matched on the
-    // dotted SUFFIX so an unrelated identifier that merely contains the
-    // text (`Nat.record`, a local named `rec`) does not trip it: every
-    // trigger is a name component, and `Eq.ndrec`/`Eq.ndrecOn` are
-    // named outright by `isAuxRecursor` (`AuxRecursor.lean:30-36`).
+    // Until M4b-4c P2 lands `ElabElim`, an eliminator-HEADED query takes the
+    // ordinary path and emits a term the oracle does not. Matched on the
+    // dotted SUFFIX for recursors (see `isAuxRecursor`, AuxRecursor.lean:31-37)
+    // and on the bare name for the two tagged fixture declarations.
     let queries = std::fs::read_to_string(format!("{dir}/elab-queries.jsonl"))
         .expect("committed elab corpus");
     for line in queries.lines().filter(|l| !l.trim().is_empty()) {
@@ -403,16 +413,20 @@ fn fixture_declares_no_undecoded_elab_attributes() {
             q["src"].as_str().expect("src"),
         );
         for elim in [
-            ".rec", ".recOn", ".casesOn", ".brecOn", ".ndrec", ".ndrecOn",
+            ".rec",
+            ".recOn",
+            ".casesOn",
+            ".brecOn",
+            ".ndrec",
+            ".ndrecOn",
+            "Eq.subst'",
+            "natElim",
         ] {
             assert!(
                 !src.contains(elim),
-                "{id}: query {src:?} has an eliminator-shaped name (`{elim}`). \
-                 `shouldElabAsElim` (App.lean:1322-1328) is true for recursors and \
-                 auxiliary recursors WITHOUT any attribute, and the oracle then diverts \
-                 the whole application to ElabElim — leanr takes the ordinary path and \
-                 emits a different Expr. M4b-4c owns elabAsElim; do not add such a query \
-                 before it lands."
+                "{id}: query {src:?} uses an eliminator head (`{elim}`). \
+                 `shouldElabAsElim` (App.lean:1322-1328) diverts it to ElabElim, \
+                 which leanr gains in M4b-4c P2; do not add such a query before then."
             );
         }
     }

@@ -105,6 +105,7 @@
 
 pub mod args;
 pub mod dot_ident;
+pub mod elim_info;
 pub mod expand;
 pub mod finalize;
 pub mod head;

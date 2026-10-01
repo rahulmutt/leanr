@@ -11,6 +11,8 @@
 //! spec: docs/superpowers/specs/2026-07-20-m4a-meta-core-design.md
 
 mod assign;
+#[cfg(test)]
+mod aux_recursor;
 mod cache;
 mod coe;
 mod config;
@@ -18,8 +20,10 @@ mod defeq;
 mod discr_path;
 pub mod discr_tree;
 mod error;
+mod head_index;
 mod infer;
 mod instances;
+mod kabstract;
 mod lazy_delta;
 mod level;
 mod local_decl_kind;

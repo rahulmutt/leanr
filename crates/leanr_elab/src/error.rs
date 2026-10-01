@@ -216,6 +216,13 @@ pub enum ElabError {
     /// (`Lean/Elab/BuiltinNotation.lean:43-102`). Prose deferred (design
     /// spec 2026-09-30-m4b4b § Errors).
     InvalidAnonymousCtor(AnonCtorError),
+    /// oracle: the eliminator elaborator's throws — `getElabElimExprInfo`
+    /// (`App.lean:1006-1050`) from M4b-4c P1; `ElabElim` (`:1140-1319`)
+    /// from P2. Prose deferred; `oracle_first_line` is what the oracle
+    /// gate compares.
+    Eliminator {
+        reason: EliminatorErrorReason,
+    },
     /// An oracle `panic!`/`unreachable!` site (`mkBaseProjections`,
     /// `App.lean:1703`, `:1708`): unreachable on a well-formed
     /// environment, an error rather than a panic here because `.olean`
@@ -328,6 +335,37 @@ pub enum InvalidDottedIdentReason {
     /// `App.lean:2038-2040` — `throwUnknownIdentifierAt` "Unknown constant
     /// `full_name`", the last one tried after every `unfoldDefinition?` step.
     UnknownConstant { full_name: String },
+}
+
+/// Which eliminator-elaborator throw an `ElabError::Eliminator` stands
+/// for. Line citations are `Lean/Elab/App.lean`, v4.33.0-rc1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EliminatorErrorReason {
+    /// `App.lean:1012-1013`: the telescope's body is not an application
+    /// of a telescope fvar to at least one argument.
+    UnexpectedResultingType,
+    /// `App.lean:1016-1017`.
+    UnexpectedMotiveArity,
+    /// `App.lean:1018-1019`.
+    MotiveResultNotSort,
+    /// `App.lean:1020-1021`: the motive is an fvar bound outside the
+    /// eliminator's own telescope. Unreachable from `get_elab_elim_info`
+    /// (a constant's type is closed); reachable from
+    /// `get_elab_elim_expr_info` on an expression whose type mentions an
+    /// ambient local.
+    UnexpectedEliminatorType,
+}
+
+impl EliminatorErrorReason {
+    /// The first line of the oracle's `throwError` text.
+    pub fn oracle_first_line(self) -> &'static str {
+        match self {
+            Self::UnexpectedResultingType => "unexpected eliminator resulting type",
+            Self::UnexpectedMotiveArity => "unexpected number of arguments at motive type",
+            Self::MotiveResultNotSort => "motive result type must be a sort",
+            Self::UnexpectedEliminatorType => "unexpected eliminator type",
+        }
+    }
 }
 
 /// Which `elabAnonymousCtor` throw an `ElabError::InvalidAnonymousCtor`

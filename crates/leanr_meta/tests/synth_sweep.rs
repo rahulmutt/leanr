@@ -348,6 +348,8 @@ fn run_leanr_query(
     projection_fns: &[ProjectionFnInfo],
     classes: &[ClassEntry],
     coe_decls: &[NameId],
+    aux_recs: &[NameId],
+    elab_as_elim: &[NameId],
     goal_json: &Value,
 ) -> LeanrAns {
     let view = env.view();
@@ -369,6 +371,8 @@ fn run_leanr_query(
             classes,
             coe_decls,
             structures: &[],
+            aux_recs,
+            elab_as_elim,
         },
     );
     let synthd: Result<Option<leanr_kernel::bank::ExprId>, ()> = match ctx.synth_instance(goal) {
@@ -602,6 +606,8 @@ fn synth_sweep_ratchet() {
     let mut projection_fns: Vec<ProjectionFnInfo> = Vec::new();
     let mut classes: Vec<ClassEntry> = Vec::new();
     let mut coe_decls: Vec<NameId> = Vec::new();
+    let mut aux_recs: Vec<NameId> = Vec::new();
+    let mut elab_as_elim: Vec<NameId> = Vec::new();
     for (_, md) in modules {
         for ci in md.constants {
             constants.entry(ci.name()).or_insert(ci);
@@ -613,6 +619,8 @@ fn synth_sweep_ratchet() {
         projection_fns.extend(md.projection_fns);
         classes.extend(md.classes);
         coe_decls.extend(md.coe_decls);
+        aux_recs.extend(md.aux_recs);
+        elab_as_elim.extend(md.elab_as_elim);
     }
     let all_ids: Vec<NameId> = constants.keys().copied().collect();
     leanr_kernel::replay(&mut env, constants).unwrap_or_else(|e| panic!("replay failed: {e}"));
@@ -752,6 +760,8 @@ fn synth_sweep_ratchet() {
                 &projection_fns,
                 &classes,
                 &coe_decls,
+                &aux_recs,
+                &elab_as_elim,
                 &r.goal,
             );
             // Loud, per-query: a `GoalMismatch` means this query's `val`

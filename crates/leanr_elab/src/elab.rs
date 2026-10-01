@@ -134,6 +134,58 @@ pub struct TermElabM<'e> {
 }
 
 impl<'e> TermElabM<'e> {
+    /// oracle: `mkConstWithFreshMVarLevels declName` (`Lean/Meta/Basic.lean:910-912`);
+    /// extracted from the default-instance candidate builder (`synthetic/default_inst.rs`,
+    /// oracle `:157`) so `app/elim_info.rs` shares it.
+    ///
+    /// Two steps, because `MetaCtx::mk_const_with_fresh_mvar_levels`
+    /// takes an already-built `Expr.const` and REFRESHES the levels it
+    /// carries (that method's own doc records the deliberate signature
+    /// difference from the oracle's name-taking version): build the
+    /// constant at its declared level PARAMS first — the oracle's
+    /// `mkConstWithLevelParams` — then refresh. Building it at the empty
+    /// level list instead would silently no-op the refresh for every
+    /// universe-polymorphic default instance, leaving its levels as
+    /// rigid params that cannot unify with the goal's.
+    ///
+    /// Caller precondition: `name` must be in the environment. Unlike
+    /// the oracle's `getConstInfo` (which throws "unknown constant"), a
+    /// missing name silently yields an empty level list.
+    pub(crate) fn mk_const_with_fresh_mvar_levels_of(
+        &mut self,
+        name: NameId,
+    ) -> Result<ExprId, ElabError> {
+        let base = self.view.store;
+        let params: Vec<NameId> = self
+            .view
+            .get(name)
+            .map(|info| info.constant_val().level_params.clone())
+            .unwrap_or_default();
+        let mut levels = Vec::with_capacity(params.len());
+        for p in params {
+            levels.push(
+                self.mctx
+                    .store_mut()
+                    .level_param(Some(base), Some(p))
+                    .map_err(leanr_meta::MetaError::from)?,
+            );
+        }
+        // `intern_level_list`'s `base` is dedup-only and never resolves a
+        // child id, so `None` is safe for a mixed-region list — the same
+        // reasoning `app/head.rs`'s `mk_const` records at length.
+        let levels = self
+            .mctx
+            .store_mut()
+            .intern_level_list(None, &levels)
+            .map_err(leanr_meta::MetaError::from)?;
+        let raw = self
+            .mctx
+            .store_mut()
+            .expr_const(Some(base), Some(name), levels)
+            .map_err(leanr_meta::MetaError::from)?;
+        Ok(self.mctx.mk_const_with_fresh_mvar_levels(raw)?)
+    }
+
     pub fn new(mctx: MetaCtx<'e>, view: EnvView<'e>) -> Self {
         TermElabM {
             mctx,

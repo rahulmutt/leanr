@@ -84,7 +84,7 @@ pub(crate) fn app_fn(elab: &TermElabM, mut e: ExprId) -> ExprId {
 }
 
 /// oracle: `Expr.getAppArgs`, application order.
-fn app_args(elab: &TermElabM, mut e: ExprId) -> Vec<ExprId> {
+pub(crate) fn app_args(elab: &TermElabM, mut e: ExprId) -> Vec<ExprId> {
     let mut out = Vec::new();
     while let Node::App { f, arg } = node(elab, e) {
         out.push(arg);

@@ -458,6 +458,20 @@ pub struct ModuleData {
     /// (`Environment.lean:1855`). All other extension entries stay
     /// opaque.
     pub coe_decls: Vec<NameId>,
+    /// Typed decode of `Lean.auxRecExt` (M4b-4c P1): the auxiliary
+    /// recursors (`casesOn`, `recOn`, `brecOn`, `binductionOn`, `below`, …)
+    /// this module declared. A `TagDeclarationExtension`
+    /// (`EnvExtension.lean:92-102`): a bare `Name.quickLt`-sorted
+    /// `Array Name`, module-local (`addImportedFn := fun _ => {}`), so a
+    /// multi-module consumer unions them. All other extension entries stay
+    /// opaque.
+    pub aux_recs: Vec<NameId>,
+    /// Typed decode of `Lean.Elab.Term.elabAsElim` (M4b-4c P1): the
+    /// declarations tagged `@[elab_as_elim]`. A `registerTagAttribute`
+    /// extension named after its `builtin_initialize`d constant, same wire
+    /// shape as `coe_decls` above (private declarations filtered out at
+    /// the exported level, `Attributes.lean:192`).
+    pub elab_as_elim: Vec<NameId>,
     /// Typed decode of the structureExt entries (M4b-4a P1). All other
     /// extension entries stay opaque.
     pub structures: Vec<StructureInfo>,
@@ -618,6 +632,8 @@ impl ModuleData {
             projection_fns: std::mem::take(&mut base.projection_fns),
             classes: std::mem::take(&mut base.classes),
             coe_decls: std::mem::take(&mut base.coe_decls),
+            aux_recs: std::mem::take(&mut base.aux_recs),
+            elab_as_elim: std::mem::take(&mut base.elab_as_elim),
             structures: std::mem::take(&mut base.structures),
         })
     }
@@ -988,6 +1004,48 @@ mod tests {
         let mut env = Environment::default();
         let md = ModuleData::parse(&bytes, env.store_mut()).expect("decode");
         assert!(md.coe_decls.is_empty(), "Sample.olean tags nothing");
+    }
+
+    /// `Lean.auxRecExt` (`AuxRecursor.lean:26`, a `TagDeclarationExtension`,
+    /// `EnvExtension.lean:92-102`) and `Lean.Elab.Term.elabAsElim`
+    /// (`App.lean:1123`, a `registerTagAttribute`, `Attributes.lean:180-201`)
+    /// both export a bare, `Name.quickLt`-sorted `Array Name` holding ONLY
+    /// the module's own declarations. Wire names confirmed with
+    /// `readModuleData` on a compiled module (M4b-4c spec § Evidence).
+    #[test]
+    fn aux_recursor_and_elab_as_elim_tags_decode() {
+        let bytes = fixture("elab/Elab0.olean");
+        let mut env = Environment::default();
+        let md = ModuleData::parse(&bytes, env.store_mut()).expect("decode");
+        let render = |n: NameId| env.store().to_name(None, Some(n)).to_string();
+
+        let aux: Vec<String> = md.aux_recs.iter().map(|n| render(*n)).collect();
+        for want in [
+            "Nat.casesOn",
+            "Nat.recOn",
+            "Nat.brecOn",
+            "False.casesOn",
+            "False.recOn",
+        ] {
+            assert!(
+                aux.iter().any(|a| a == want),
+                "auxRecExt lacks {want}: {aux:?}"
+            );
+        }
+        // A Prop inductive gets no `brecOn`; `Nat.rec` is a genuine
+        // recursor, not an AUX one.
+        for absent in ["False.brecOn", "Nat.rec"] {
+            assert!(!aux.iter().any(|a| a == absent), "auxRecExt has {absent}");
+        }
+
+        let mut tagged: Vec<String> = md.elab_as_elim.iter().map(|n| render(*n)).collect();
+        tagged.sort();
+        assert_eq!(tagged, vec!["Eq.subst'".to_string(), "natElim".to_string()]);
+
+        let bytes = fixture("Sample.olean");
+        let mut env = Environment::default();
+        let md = ModuleData::parse(&bytes, env.store_mut()).expect("decode");
+        assert!(md.elab_as_elim.is_empty(), "Sample.olean tags nothing");
     }
 
     /// `Lean.projectionFnInfoExt` decodes: `Semigroup.toMul` is a class

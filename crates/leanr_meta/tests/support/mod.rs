@@ -53,6 +53,8 @@ pub struct Replayed {
     pub projection_fns: Vec<ProjectionFnInfo>,
     pub classes: Vec<ClassEntry>,
     pub coe_decls: Vec<NameId>,
+    pub aux_recs: Vec<NameId>,
+    pub elab_as_elim: Vec<NameId>,
     pub structures: Vec<StructureInfo>,
 }
 
@@ -81,6 +83,8 @@ pub fn replay_fixture_in(subdir: &str, name: &str) -> Replayed {
         projection_fns: md.projection_fns,
         classes: md.classes,
         coe_decls: md.coe_decls,
+        aux_recs: md.aux_recs,
+        elab_as_elim: md.elab_as_elim,
         structures: md.structures,
     }
 }
