@@ -192,7 +192,7 @@ Record these under the spec's § Landed when P1 merges (Task 9):
 
     // Until M4b-4c P2 lands `ElabElim`, an eliminator-HEADED query takes the
     // ordinary path and emits a term the oracle does not. Matched on the
-    // dotted SUFFIX for recursors (see `isAuxRecursor`, AuxRecursor.lean:29-36)
+    // dotted SUFFIX for recursors (see `isAuxRecursor`, AuxRecursor.lean:31-37)
     // and on the bare name for the two tagged fixture declarations.
     let queries = std::fs::read_to_string(format!("{dir}/elab-queries.jsonl"))
         .expect("committed elab corpus");
@@ -234,7 +234,7 @@ Record these under the spec's § Landed when P1 merges (Task 9):
 --
 -- `False`: an EXPLICIT-motive recursor (`False.rec (motive) (t)`), the
 -- only shape where `elabAsElim?`'s "positional `_` counts as missing"
--- rule (App.lean:1424-1429) is reachable — `Nat.rec`'s motive is
+-- rule (App.lean:1425-1430) is reachable — `Nat.rec`'s motive is
 -- implicit, so `Nat.rec _ …` puts the `_` in the `zero` minor instead
 -- (oracle-measured, spec § Evidence). A Prop inductive: `auxRecExt`
 -- gets `False.casesOn`/`False.recOn` and NO `False.brecOn`.
@@ -469,7 +469,7 @@ git commit -m "M4b-4c P1: decode auxRecExt and the elab_as_elim tag extension"
 
 ```rust
 //! M4b-4c P1: the `shouldElabAsElim` environment predicates
-//! (`AuxRecursor.lean:28-51`; `App.lean:1322-1328`). Oracle-gated over the
+//! (`AuxRecursor.lean:31-51`; `App.lean:1322-1328`). Oracle-gated over the
 //! whole Elab0 fixture by `tests/aux_recursor_oracle.rs`; these pin the
 //! suffix rules and the `Eq.ndrec*` hard-codes on synthetic names, which
 //! no fixture declares.
@@ -535,7 +535,7 @@ fn aux_recursor_suffix_rules() {
     assert!(ctx.is_rec_on_recursor(rec_on) && !ctx.is_rec_on_recursor(cases));
     assert!(ctx.is_brec_on_recursor(brec_on) && !ctx.is_brec_on_recursor(rec_on));
     assert!(ctx.is_aux_recursor(below) && !ctx.is_cases_on_recursor(below));
-    // Hard-coded in `isAuxRecursor` (AuxRecursor.lean:33-36), untagged.
+    // Hard-coded in `isAuxRecursor` (AuxRecursor.lean:35-37), untagged.
     for n in [ndrec, ndrec_symm, ndrec_on] {
         assert!(ctx.is_aux_recursor(n));
     }
@@ -582,7 +582,7 @@ fn aux_recursor_suffix_rules() {
   Predicates, next to `is_coe_decl`:
 
 ```rust
-    /// oracle: `isAuxRecursor` (`AuxRecursor.lean:31-36`) — tagged in
+    /// oracle: `isAuxRecursor` (`AuxRecursor.lean:31-37`) — tagged in
     /// `auxRecExt`, or one of the three `Eq.ndrec*` the oracle names
     /// outright.
     pub fn is_aux_recursor(&self, n: NameId) -> bool {
@@ -692,7 +692,7 @@ git commit -m "M4b-4c P1: MetaCtx aux-recursor and elab_as_elim predicates"
 
 ```lean
 /- M4b-4c P1: per-constant oracle answers for the `shouldElabAsElim`
-predicates (`App.lean:1322-1328`, `AuxRecursor.lean:28-51`) and for
+predicates (`App.lean:1322-1328`, `AuxRecursor.lean:31-51`) and for
 `getElabElimInfo` (`App.lean:1006-1053`), over EVERY constant of `Elab0`.
 `info` is `{"err": …}` with the message's FIRST line when the oracle
 throws (most constants are not eliminators: "unexpected eliminator

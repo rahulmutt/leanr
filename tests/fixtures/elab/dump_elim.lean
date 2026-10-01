@@ -1,5 +1,5 @@
 /- M4b-4c P1: per-constant oracle answers for the `shouldElabAsElim`
-predicates (`App.lean:1322-1328`, `AuxRecursor.lean:28-51`) and for
+predicates (`App.lean:1322-1328`, `AuxRecursor.lean:31-51`) and for
 `getElabElimInfo` (`App.lean:1006-1053`), over EVERY constant of `Elab0`.
 `info` is `{"err": …}` with the message's FIRST line when the oracle
 throws (most constants are not eliminators: "unexpected eliminator

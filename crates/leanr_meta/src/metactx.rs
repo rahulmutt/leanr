@@ -1401,7 +1401,7 @@ impl<'e> MetaCtx<'e> {
         matches!(self.get_out_param_positions(class_name), Some(p) if !p.is_empty())
     }
 
-    /// oracle: `isAuxRecursor` (`AuxRecursor.lean:31-36`) — tagged in
+    /// oracle: `isAuxRecursor` (`AuxRecursor.lean:31-37`) — tagged in
     /// `auxRecExt`, or one of the three `Eq.ndrec*` the oracle names
     /// outright.
     pub fn is_aux_recursor(&self, n: NameId) -> bool {

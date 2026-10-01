@@ -9,7 +9,7 @@ M4b-4b (`⟨⟩`) shipped as #53. This spec covers **M4b-4c**, the last
 piece. When it lands, M4b-4 is complete.
 
 On `main` @ `198e73e`, `elabAppArgs`' eliminator branch is a **partial
-seam** (`crates/leanr_elab/src/app/mod.rs:509-547`):
+seam** (`crates/leanr_elab/src/app/mod.rs:510-548`):
 
 - `isRec` heads raise a named M4b-4c seam (`app/head.rs`,
   `recursor_head_seam`). The guard sits in two places that both have to
@@ -33,7 +33,7 @@ while writing this spec:
   - `elabAsElim` attribute: `:1123-1138`
   - `ElabElim`: `:1140-1319`
   - `shouldElabAsElim`: `:1322-1328`
-  - `elabAppArgs` diversion: `:1373-1385`
+  - `elabAppArgs` diversion: `:1373-1383`
   - `elabAsElim?`: `:1397-1431`
 - `src/lean/Lean/AuxRecursor.lean:20-51`
 - `src/lean/Lean/Meta/KAbstract.lean`
@@ -231,7 +231,7 @@ is missing or a positional `_`.
 ### P2 — the diversion in `elab_app_args`
 
 This goes at the oracle's point, after `try_postpone_if_mvar(f_type)`,
-and replaces the comment block at `app/mod.rs:509-547`. When the gate
+and replaces the comment block at `app/mod.rs:510-548`. When the gate
 returns `Some(info)`:
 
 1. `try_postpone_if_none_or_mvar(expected)`.
@@ -415,12 +415,12 @@ use them wait for P2. To keep that safe, P1 changes
 
 Seam bookkeeping (P2):
 
-- `seam_audit.rs`'s recursor rows (`:167-190`) flip to success.
+- `seam_audit.rs`'s recursor rows (`:166-190`) flip to success.
 - `fixture_declares_no_undecoded_elab_attributes` drops the
   eliminator-name query loop. That includes the `Eq.subst'` and
   `natElim` entries P1 added. The `elab_without_expected_type` source
   ban stays.
-- `postpone_smoke.rs:216` asserts the oracle's postponed `?m` instead of
+- `postpone_smoke.rs:216-224` asserts the oracle's postponed `?m` instead of
   the seam.
 - The `app/mod.rs` dispatch table and the `dispatch.rs:178` row lose
   "partial".
@@ -455,24 +455,96 @@ P2 depends on P1. Each plan gets its own PR, merged on green CI
 (Filled in as each plan merges: corrections, mutations run, seams left
 open.)
 
-### P1 (in progress)
+### P1 (PR #54): eliminator substrate
 
-- **`get_elab_elim_info` KNOWN_GAPS** (`crates/leanr_elab/tests/elim_info_oracle.rs`):
-  `lcAny`, `lcErased`, `lcVoid`. They are unsafe axioms, and replay
-  admits no unsafe constants (`leanr_kernel/src/decl.rs:202`), so leanr
-  does not know these constants. The oracle answers "unexpected
-  eliminator resulting type" for all three. The gate asserts that each
-  one still diverges. All other 875 records agree, including every
-  eliminator named in the plan.
-- **Mutations on `get_elab_elim_info`**:
-  - Dropping the first-order disjunct is killed by the gate. Three
-    records diverge: `Eq.subst'` loses majors 2 and 4 (the plan said
-    0 and 2), `Eq.ndrec` loses 1 and 5, and `CoeFun.coe` loses 2.
-  - Skipping the reverse closure is killed by the gate, with 106
-    divergences.
-  - Dropping the `motive_args.is_empty()` check is killed by the gate,
-    with 163 divergences, and by the unit test.
-  - Running the closure left to right **survives the gate**, because no
-    Elab0 declaration depends on it. It is killed by the unit test
-    `elim_info::tests::closure_runs_right_to_left`, a hand-built
-    eliminator.
+P1 adds the decodes, the predicates, `kabstract` and
+`get_elab_elim_info`. It changes **no elaborator-visible behavior**: the
+elab corpus (`elab-queries.jsonl`, `structures.jsonl`) is untouched and
+byte-identical, the `Task 7` refactors regenerate identical fixtures,
+and the recursor seams in `app/mod.rs` and `app/head.rs` are unchanged.
+P2 still owns the gate, the diversion and `ElabElim`. Full `mise run ci`
+is green.
+
+**Spec corrections** (the spec text above is the plan-time design):
+
+- **The "union over the import closure" is not P1 code.** No production
+  caller builds a `MetaCtx` across modules. Every caller is a test
+  harness replaying one import-free fixture, and `EnvExtensions` takes
+  plain slices, exactly as for `coe_decls`. The spec's mutation "skip
+  the union" has nothing to mutate in P1. It belongs to whichever slice
+  first builds a multi-module `MetaCtx`.
+- **No dedicated malformed-bytes test.** The new decode arms go through
+  `name_req`, the same checked path every name decode uses, and
+  `crates/leanr_olean/fuzz/fuzz_targets/module_data.rs` already fuzzes
+  `ModuleData::parse` end to end.
+- **The `ElabElimInfo` goldens cover every constant**, not only the six
+  the spec lists: 878 records, of which 651 are oracle errors. This
+  also pins the "not an eliminator" error path.
+- **Measured `majors_pos`, oracle-dumped:** `Eq.subst'` = `[0,2,3,4]`
+  (`α` and `a` enter through the first-order rule), `Nat.rec` = `[3]`,
+  `Nat.casesOn` = `[1]`, `False.rec` = `[1]`, `Eq.ndrec` = `[0,1,4,5]`.
+- **Naming.** The fields are `aux_recs` / `elab_as_elim: Vec<NameId>`,
+  not the spec's `*_entries: Vec<Name>`, matching the `coe_decls`
+  convention of the sibling decodes.
+- **`HeadIndex` is a new module** (`leanr_meta/src/head_index.rs`):
+  `discr_path.rs` has no equivalent to extract.
+- **Plan correction, Task 6 `khead`.** The plan's record (`N.succ
+  (N.succ one)` against `two`) did not discriminate the head-filter
+  mutation: `headNumArgs` already excludes the candidate. The controller
+  replaced it with `e = N.succ (redId one)`, `p = one`; the oracle
+  answers `N.succ (redId #0)`, and without the head filter `redId one`
+  (one argument, reducible, defeq) is abstracted too, giving `N.succ #0`.
+- **Plan correction, Task 8.** `Eq.subst'` loses majors 2 and 4 (not 0
+  and 2) when the first-order disjunct is dropped.
+
+**`KNOWN_GAPS`** (`crates/leanr_elab/tests/elim_info_oracle.rs`): `lcAny`,
+`lcErased`, `lcVoid`. They are unsafe axioms, and replay skips unsafe
+constants (`crates/leanr_kernel/src/replay.rs:93`), so leanr does not
+know them. The oracle answers "unexpected eliminator resulting type" for
+all three; the gate asserts each still diverges. The other 875 records
+agree. Related minor gap: `mk_const_with_fresh_mvar_levels_of` yields
+empty levels for a missing constant where the oracle's `getConstInfo`
+throws; no `elim.jsonl` name reaches it, and it is a caller precondition.
+
+**Mutations run** (each applied, suite run, reverted):
+
+- Decodes (T2): rename the `elabAsElim` key, rename the `auxRecExt` key.
+  Both killed by the module-data golden.
+- Predicates (T3): drop the `_` prefix arm, drop `&& is_aux_recursor`,
+  drop the builtin `Eq.ndrec*` set. All killed by
+  `aux_recursor_suffix_rules` (distinct assertions: `cases_1`,
+  `untagged_cases`, `ndrec`).
+- Predicates against the oracle corpus (T4): `aux_recs -> &[]` (304
+  divergences), `elab_as_elim -> &[]` (2), drop the builtins (1), suffix
+  exact-match only (150) are killed. **Corpus survivors, unit-killed:**
+  drop `&& is_aux_recursor` and drop the `startsWith "{suffix}_"` arm
+  survive the oracle corpus (Elab0 has no untagged `casesOn`/`recOn`/
+  `brecOn` and no `casesOn_*` names) and are killed by T3's unit test.
+- `kabstract` (T5): swapping the `app` visit order is killed by
+  `kabstract_mvar_pattern_first_match_wins`. Disabling the fvar fast path
+  survives: **equivalent except under `mdata` (untested)**, where the
+  general path abstracts the whole `mdata x` to `#0` and `abstract` keeps
+  the `mdata`.
+- `kabstract` against the oracle (T6): delete the head-index check
+  (`khead` red), delete the head-index and arg-count checks (red), `lam`
+  body at `offset` instead of `offset+1` (`kbinder` red), `letE` body
+  likewise (`klet` red), `is_def_eq` replaced by `==` (`kdelta` red).
+- `get_elab_elim_info` (T8): dropping the first-order disjunct is killed
+  by the gate (3 divergences: `Eq.subst'` loses 2 and 4, `Eq.ndrec` loses
+  1 and 5, `CoeFun.coe` loses 2). Skipping the reverse closure is killed
+  by the gate (106) and by `closure_runs_right_to_left`. Dropping the
+  `motive_args.is_empty()` check is killed by the gate (163) and by the
+  unit test. Running the closure left to right **survives the gate**
+  (no Elab0 declaration depends on the order) and is killed by the
+  hand-built unit test `closure_runs_right_to_left`.
+- T7 (behavior-neutral refactors) has no mutations: the elab corpus
+  stays green with byte-identical regenerated fixtures.
+- Not run in P1, by correction above: "skip the union over the import
+  closure". The gate-side mutations (`hole`-kind check, `mk_motive` fold
+  order, `Undef` at the motive) belong to P2.
+
+**Deferred minors** (not blocking): `seam_audit.rs` matches
+`@[elab_as_elim]` by substring and bans `.rec` by substring rather than
+suffix; the `aux_recs` golden does not assert the `quickLt` order; the
+`_` rule is only unit-tested for `casesOn`; `ProjBig` saturates at
+`u64::MAX`; the `kabstract` fvar fast path has no `mdata` test.

@@ -399,7 +399,7 @@ fn fixture_declares_no_undecoded_elab_attributes() {
 
     // Until M4b-4c P2 lands `ElabElim`, an eliminator-HEADED query takes the
     // ordinary path and emits a term the oracle does not. Matched on the
-    // dotted SUFFIX for recursors (see `isAuxRecursor`, AuxRecursor.lean:29-36)
+    // dotted SUFFIX for recursors (see `isAuxRecursor`, AuxRecursor.lean:31-37)
     // and on the bare name for the two tagged fixture declarations.
     let queries = std::fs::read_to_string(format!("{dir}/elab-queries.jsonl"))
         .expect("committed elab corpus");

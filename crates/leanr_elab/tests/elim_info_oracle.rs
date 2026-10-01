@@ -19,7 +19,7 @@ use serde_json::Value;
 const KNOWN_GAPS: &[(&str, &str)] = &[
     (
         "lcAny",
-        "unsafe axiom: replay admits no unsafe constants (leanr_kernel decl.rs:202), \
+        "unsafe axiom: replay admits no unsafe constants (leanr_kernel replay.rs:93), \
          so the constant is unknown to leanr",
     ),
     ("lcErased", "unsafe axiom: see lcAny"),

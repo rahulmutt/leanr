@@ -74,7 +74,7 @@ fn aux_recursor_suffix_rules() {
     assert!(ctx.is_rec_on_recursor(rec_on) && !ctx.is_rec_on_recursor(cases));
     assert!(ctx.is_brec_on_recursor(brec_on) && !ctx.is_brec_on_recursor(rec_on));
     assert!(ctx.is_aux_recursor(below) && !ctx.is_cases_on_recursor(below));
-    // Hard-coded in `isAuxRecursor` (AuxRecursor.lean:33-36), untagged.
+    // Hard-coded in `isAuxRecursor` (AuxRecursor.lean:35-37), untagged.
     for n in [ndrec, ndrec_symm, ndrec_on] {
         assert!(ctx.is_aux_recursor(n));
     }

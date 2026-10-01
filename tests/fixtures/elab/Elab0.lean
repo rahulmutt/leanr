@@ -855,7 +855,7 @@ inductive AnonLoop : Type where
 --
 -- `False`: an EXPLICIT-motive recursor (`False.rec (motive) (t)`), the
 -- only shape where `elabAsElim?`'s "positional `_` counts as missing"
--- rule (App.lean:1424-1429) is reachable — `Nat.rec`'s motive is
+-- rule (App.lean:1425-1430) is reachable — `Nat.rec`'s motive is
 -- implicit, so `Nat.rec _ …` puts the `_` in the `zero` minor instead
 -- (oracle-measured, spec § Evidence). A Prop inductive: `auxRecExt`
 -- gets `False.casesOn`/`False.recOn` and NO `False.brecOn`.
