@@ -14,3 +14,5 @@ stacker = "0.1"
 [dev-dependencies]
 leanr_olean = { path = "../leanr_olean" }
 serde_json = "1"
+# Assembles ElabOp.olean's imported grammar for tests/oracle_op.rs (M3b2a machinery).
+leanr_grammar = { path = "../leanr_grammar" }

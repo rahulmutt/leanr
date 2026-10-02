@@ -865,6 +865,7 @@ dependencies = [
 name = "leanr_elab"
 version = "0.1.0"
 dependencies = [
+ "leanr_grammar",
  "leanr_kernel",
  "leanr_meta",
  "leanr_olean",
