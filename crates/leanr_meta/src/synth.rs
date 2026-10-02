@@ -1679,20 +1679,12 @@ impl<'e> MetaCtx<'e> {
     /// answer is "ask me again once you have assigned `?a`", not
     /// "`instWrapNat`".
     ///
-    /// `leanr_meta` now has an mctx-depth model and throws
-    /// `MetaError::IsDefEqStuck` at two ported sites under
-    /// `with_def_eq_stuck_ex`, but `synth_instance` does not yet run under
-    /// `with_new_mctx_depth` / `isDefEqStuckEx` (a follow-up of the
-    /// macro/binop% P1 slice). Its `synth_instance` therefore treats the
-    /// caller's `?a` as an ordinary assignable mvar and answers `Wrap ?a`
-    /// with whichever candidate it reaches first — silently choosing the
-    /// class's type parameter for the caller. That is a WRONG ANSWER, not
-    /// merely a missing postponement: with `Wrap Nat`/`Wrap Unit` both in
-    /// scope it picks `instWrapUnit` and then `(useWrap Nat.zero : Nat)`
-    /// fails to typecheck its own explicit argument.
+    /// `synth_instance` now runs the search under `with_new_mctx_depth` with
+    /// `isDefEqStuckEx := true`, so it reports this condition itself as
+    /// `MetaError::IsDefEqStuck`. The syntactic pre-test below still runs
+    /// first, is redundant with that, and is deleted in a later task.
     ///
-    /// So the stuck condition is reconstructed here, from the goal type,
-    /// on the elaborator side of the seam:
+    /// The pre-test reconstructs the stuck condition from the goal type:
     ///
     /// - **Exact in the safe direction.** Every site that can throw
     ///   `isDefEqStuck` under this config — the non-assignable/
@@ -1773,11 +1765,8 @@ impl<'e> MetaCtx<'e> {
     /// stuck throw needs a level mvar that is non-assignable for some
     /// other reason. `has_expr_mvar` alone is the right predicate.
     ///
-    /// The `MetaError::IsDefEqStuck` arm below is kept live: it is the
-    /// channel this function should be reading once `synth_instance` runs on
-    /// the depth model (which now exists), at which point the syntactic
-    /// pre-test becomes redundant for residues 2 and 3 and can be deleted
-    /// rather than rewritten.
+    /// The `MetaError::IsDefEqStuck` arm below is the live channel: it
+    /// maps the search's own stuck error to `.undef`.
     ///
     /// Precondition: `ty` is already `instantiate_mvars`-ed (the oracle's
     /// own `let type ← instantiateMVars type`, `SynthInstance.lean:967`).
