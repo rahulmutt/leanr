@@ -182,3 +182,50 @@ fn oracle_op_gate() {
         "op corpus shrank: {replayed} < {CORPUS_FLOOR}"
     );
 }
+
+/// Until P3, every op-family notation, and the literal form, stops at a
+/// seam named by the LITERAL kind.
+#[test]
+fn op_notations_stop_at_the_literal_kind_seam() {
+    let r = support::replay_fixture_in("elab", "ElabOp.olean");
+    let snap = elab_op_grammar();
+    let mut cases: Vec<(String, String)> = golden()
+        .iter()
+        .filter(|g| g["exp"] != "Lean.Parser.Term.app")
+        .map(|g| {
+            (
+                format!("fun (a b : Nat) => {}", g["src"].as_str().unwrap()),
+                g["exp"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    cases.push((
+        "fun (a b : Nat) => binop% HAdd.hAdd a b".into(),
+        "Lean.Parser.Term.binop".into(),
+    ));
+    cases.push((
+        "fun (a : Nat) => unop% Neg.neg a".into(),
+        "Lean.Parser.Term.unop".into(),
+    ));
+    for (src, kind) in cases {
+        match support::elab_src_in(&r, &src, &snap) {
+            Err(leanr_elab::ElabError::UnsupportedSyntax(m)) => assert_eq!(m, kind, "{src}"),
+            other => panic!("{src}: expected UnsupportedSyntax({kind}), got {other:?}"),
+        }
+    }
+}
+
+/// The App rows elaborate end to end on Prop operands (the corpus pins
+/// the terms; this pins that every App row reaches the elaborator).
+#[test]
+fn app_notations_elaborate() {
+    let r = support::replay_fixture_in("elab", "ElabOp.olean");
+    let snap = elab_op_grammar();
+    for g in golden()
+        .iter()
+        .filter(|g| g["exp"] == "Lean.Parser.Term.app")
+    {
+        let src = format!("fun (a b : Prop) => {}", g["src"].as_str().unwrap());
+        support::elab_src_in(&r, &src, &snap).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+    }
+}

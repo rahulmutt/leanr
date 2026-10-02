@@ -511,3 +511,59 @@ Open follow-ups:
 - Minor: no test where neither level side is an mvar under the stuck flag;
   the `with_new_mctx_depth` Err-path test does not cover level assignment
   discard.
+
+### P2 (PR #NN): expansion hook, Init table, ElabOp harness
+
+Commits: 496f202 (ElabOp + golden), 169c1c5 (table + expand), 68c62a6
+(hook + App + gate), the commit titled "op seam + postponement contract
+tests, docs, spec Landed (macro/binop% P2 T4)" (seams, postponement, docs).
+
+Mutations run (all reverted):
+- T1: (a) the `parse_whole` span assertion, KILLED (a scratch test on
+  `a ⊕⊕ b` fails with it, passes without). (b) delete `end Lean` from
+  `gen_elab_op.sh`: the golden becomes `Lean.Iff`; the regen's own Init
+  diff caught it (the plan predicted it would not); `oracle_op.rs` stays
+  green. (c) empty `KNOWN_PARSE_DIVERGENCES`: KILLED by
+  `golden_sources_parse_to_the_oracle_kind`.
+- T2: (a) delete the `∧` row, (b) swap a head to `HSub`, (c) `^`
+  `RightAct`->`BinOp`, (d) bogus `+++` row: all KILLED by
+  `table_matches_oracle_expansions`. (e) swapped operands, (f) prefix
+  reads `[operand,_]`: KILLED by `expand_reads_operands_in_order`.
+- T3: (a) delete the hook, (b) no paren-strip recursion, (d) resolve `f`
+  lexically first, (e) reversed args, (g) span assertion removed: all
+  KILLED by `oracle_op_gate`. (c) hook only in the `No` arm SURVIVED the
+  plan's 18 records; added `op/implicit-lambda-bare` (corpus is 19, floor
+  19), then KILLED. (f) not expressible: an `Expansion` is not a `SynElem`.
+- T4: (a) `"binop%"` in the Op arm: KILLED by
+  `op_notations_stop_at_the_literal_kind_seam`. (b) `BinRel`'s
+  `syntax_kind` mapped to `binop`: KILLED (`table_matches_oracle_expansions`,
+  `expand_reads_operands_in_order`, the seam test). (c) `tail_from` returns
+  `Some(0)` for `Expanded`: KILLED. (d) `ref_elem` returns the first arg:
+  KILLED. "Store the expanded target instead of the original on
+  postpone" cannot be written, since the postponed record has no field for
+  an `Expansion`.
+
+Spec corrections:
+- Harness: separate generated `ElabOp` fixture (Decision 3 amended
+  2026-10-02); expansion golden file + regen-time diff against real
+  Init instead of decoding toolchain oleans in CI.
+- The hook needs no recursion guard: an `Expansion` is never re-expanded.
+  The VM slice owns `withIncRecDepth`.
+- The hook also runs on the `implicitLambda := false` path, after paren
+  stripping (`@(t)`).
+- `f` is carried as the global's name and resolved at elaboration
+  (`elab_app_expanded`), not at expansion, which keeps `expand` pure.
+- 29 kinds, not 28: `<->` is its own `Iff` kind.
+- Both corpus gates assert the parsed term spans the whole source.
+
+Open follow-ups:
+- leanr_syntax parses `a >= b` / `a <= b` as the low-priority
+  `«term_>=_»`/`«term_<=_»`; the oracle gives `«term_≥_»`/`«term_≤_»`.
+  This is unobservable after expansion (`KNOWN_PARSE_DIVERGENCES` in
+  `oracle_op.rs`).
+- P3: the op elaborator, plus corpus records for the 24 op rows.
+- Whole-notation postponement of an `Expanded` target is unreachable in
+  P2 (App heads are consts with known types; no record postpones the
+  notation), so only the white-box bookkeeping test covers it. P3's
+  `binop%` elaborator should add a corpus record that postpones a whole
+  expansion.

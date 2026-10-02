@@ -1071,3 +1071,39 @@ fn is_lambda_with_implicit(elem: &SynElem, kinds: &KindInterner) -> bool {
         )
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A postponed `Expanded` target stores its ORIGINAL node and no tail,
+    /// so the resume rebuilds `Stx(node)` and goes back through the hook
+    /// (`synthetic/ladder.rs`'s `from_parts`). An `Expansion` itself is
+    /// never stored: `SyntheticMVarKind::Postponed` has no field for one.
+    #[test]
+    fn expanded_target_postpones_as_its_original_node() {
+        let snap = leanr_syntax::builtin::snapshot();
+        let parsed = leanr_syntax::parse_term("Nat.succ Nat.zero", &snap);
+        let node = parsed.tree.root().first_child_or_token().unwrap();
+        // A one-argument expansion whose argument differs from the ref,
+        // so a `ref_elem` that returned an argument would be caught.
+        let arg = match &node {
+            NodeOrToken::Node(n) => n.first_child_or_token().unwrap(),
+            NodeOrToken::Token(_) => panic!("application parses to a node"),
+        };
+        assert_ne!(arg, node);
+        let target = TermTarget::Expanded {
+            r#ref: node.clone(),
+            exp: crate::macros::Expansion::App {
+                f: "And",
+                args: vec![arg],
+            },
+        };
+        assert_eq!(target.ref_elem(), node);
+        assert_eq!(target.tail_from(), None);
+        match TermTarget::from_parts(&target.ref_elem(), target.tail_from()).unwrap() {
+            TermTarget::Stx(e) => assert_eq!(e, node),
+            other => panic!("resume must rebuild real syntax, got {other:?}"),
+        }
+    }
+}

@@ -130,13 +130,13 @@
 //!   notation and P4 SHIPPED `pipeProj`/`dotIdent`/`namedPattern`
 //!   (`app/head.rs`, `app/dot_ident.rs`). Still deferred, each a named
 //!   seam: `choice` the overloading slice, private field projections the slice that models private
-//!   names. `binop%` — the macro-expansion slice. The anonymous
+//!   names. `binop%` and its family — macro/binop% P3. The anonymous
 //!   constructor `⟨⟩` is elaborated by `builtin::anon_ctor` (M4b-4b); its
 //!   pattern position is left to the match slice.
-//! - **macro expansion** — `dispatch` never expands a macro form; the
-//!   dispatch table only ever matches a syntax kind directly against a
-//!   registered elaborator. Deferred to the slice that first needs a
-//!   macro form.
+//! - **macro expansion** — `elab_term_core` expands Init notations
+//!   through the hand-ported table (`macros/`) before dispatch, as
+//!   `elabTermAux` does. Other macro forms stay `UnsupportedSyntax`
+//!   until the VM slice.
 //! - **`open`/alias/`export`/`_root_` resolution** — `resolve.rs`'s
 //!   `resolve_global_name` only resolves a global constant declared under
 //!   the name (or a prefix of it) exactly as written; namespace-prefix search, exported

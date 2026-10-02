@@ -1164,3 +1164,60 @@ pub fn run_elab_corpus(
     );
     replayed
 }
+
+/// Elaborate `src` against an already-replayed environment, with the
+/// same entry point `run_elab_corpus` uses (`elab_term_and_synthesize`,
+/// `expected := None`), and discard the term. For tests that only care
+/// whether, and how, elaboration fails. Not shared with
+/// `run_elab_corpus`: that one needs the `TermElabM` alive after the
+/// call to encode the answer, so it cannot hand it off to a helper that
+/// returns only the result.
+pub fn elab_src_in(
+    r: &Replayed,
+    src: &str,
+    snap: &leanr_syntax::grammar::GrammarSnapshot,
+) -> Result<(), leanr_elab::ElabError> {
+    use leanr_elab::TermElabM;
+    use leanr_kernel::bank::Store;
+    use leanr_meta::{Config, EnvExtensions, MetaCtx};
+
+    let parsed = leanr_syntax::parse_term(src, snap);
+    assert!(
+        parsed.errors.is_empty(),
+        "leanr parse errors for {src:?}: {:?}",
+        parsed.errors
+    );
+    let term_elem: leanr_elab::dispatch::SynElem = parsed
+        .tree
+        .root()
+        .first_child_or_token()
+        .unwrap_or_else(|| panic!("parse_term produced no term child for {src:?}"));
+    let range = term_elem.text_range();
+    assert_eq!(
+        (usize::from(range.start()), usize::from(range.end())),
+        (0, src.trim_end().len()),
+        "the parsed term does not span the whole source {src:?}"
+    );
+    let view = r.env.view();
+    let mut scratch = Store::scratch();
+    let mctx = MetaCtx::new(
+        view,
+        &mut scratch,
+        Config::default(),
+        EnvExtensions {
+            reducibility: &r.reducibility,
+            matchers: &r.matchers,
+            instances: &r.instances,
+            default_instances: &r.default_instances,
+            projection_fns: &r.projection_fns,
+            classes: &r.classes,
+            coe_decls: &r.coe_decls,
+            aux_recs: &r.aux_recs,
+            elab_as_elim: &r.elab_as_elim,
+            structures: &r.structures,
+        },
+    );
+    let mut elab = TermElabM::new(mctx, view);
+    elab.elab_term_and_synthesize(&term_elem, &parsed.tree.kinds, None)
+        .map(|_| ())
+}
