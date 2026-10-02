@@ -50,3 +50,19 @@ def F.mk (n : Nat) : F n := (0 : Nat)
 instance : Add (F n) := ⟨fun a _ => a⟩
 instance : HAdd (F n) Z Z := ⟨fun _ z => z⟩
 instance (x : F n) : CoeT (F n) x Z := ⟨⟨0⟩⟩
+-- Closed operands for the depth/stuck rows (macro/binop% P3 T3): spelled
+-- without `fun` binders so no pending instance goal outlives a binder
+-- (leanr_meta's `processAssignment` lacks `elimMVarDeps`; see the P3 spec).
+def vx : V 3 := V.mk
+def k0 : Nat := Nat.zero
+def fx : F 3 := F.mk 3
+def z0 : Z := ⟨Nat.zero⟩
+-- Mutation-killing rows (macro/binop% P3 T3). `MArr` HAS the homogeneous
+-- `HMul (MArr α) (MArr α) (MArr α)` (via `Mul`), so `applyCoe` reaches the
+-- leaves and `hasHeterogeneousDefaultInstances` decides `2`'s fate.
+structure MArr (α : Type) where
+  x : α
+instance [Mul α] : Mul (MArr α) := ⟨fun a _ => a⟩
+@[default_instance high] instance [Mul α] : HMul α (MArr α) (MArr α) := ⟨fun a as => ⟨a * as.x⟩⟩
+-- A `leftact%` whose lhs is itself an op tree that needs its own coercion.
+instance : SMul Z Z := ⟨fun _ a => a⟩

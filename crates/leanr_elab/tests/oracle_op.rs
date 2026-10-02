@@ -5,13 +5,10 @@
 
 mod support;
 
-use std::sync::Arc;
-
 use leanr_elab::dispatch::SynElem;
-use leanr_kernel::bank::Store;
-use leanr_olean::ModuleData;
 use leanr_syntax::grammar::GrammarSnapshot;
 use leanr_syntax::{parse_term, ParseResult};
+use support::elab_op_grammar;
 
 /// leanr's parser picks a different kind than the oracle for these
 /// sources. `(priority := low)` on `>=`/`<=` (`Init/Notation.lean:370-371`)
@@ -22,16 +19,6 @@ use leanr_syntax::{parse_term, ParseResult};
 /// to update, not silently.
 const KNOWN_PARSE_DIVERGENCES: &[(&str, &str)] =
     &[("a >= b", "«term_>=_»"), ("a <= b", "«term_<=_»")];
-
-fn elab_op_grammar() -> GrammarSnapshot {
-    let bytes =
-        std::fs::read(support::fixture_in("elab", "ElabOp.olean")).expect("committed ElabOp.olean");
-    let mut st = Store::persistent();
-    let md = ModuleData::parse(&bytes, &mut st).expect("decode ElabOp.olean");
-    assert!(md.imports.is_empty(), "ElabOp must stay import-free");
-    let name = Arc::new(leanr_kernel::Name::Anonymous); // display-only
-    leanr_grammar::assemble(&[(name, md)], &st).snapshot
-}
 
 fn golden() -> Vec<serde_json::Value> {
     std::fs::read_to_string(support::fixture_in("elab", "op-expansions.jsonl"))
@@ -176,22 +163,27 @@ fn oracle_op_gate() {
     // 0 -> 19 (macro/binop% P2 T3): the op/* App-notation records (the
     // brief's 18 plus op/implicit-lambda-bare, which the hook-placement
     // mutation needed: op/implicit-lambda's paren re-enters `elab_term`).
-    const CORPUS_FLOOR: usize = 19;
+    // 19 -> 54 (P3 T3): the binop/unop/act/lazy rows, the depth/stuck rows,
+    // and the unknown-head err row; 54 -> 57: three mutation-killing rows
+    // (op/hetero-default-homog, op/homog-literal-pow, op/smul-op-lhs).
+    const CORPUS_FLOOR: usize = 57;
     assert!(
         replayed >= CORPUS_FLOOR,
         "op corpus shrank: {replayed} < {CORPUS_FLOOR}"
     );
 }
 
-/// Until P3, every op-family notation, and the literal form, stops at a
-/// seam named by the LITERAL kind.
+/// Until P3 T4, every `binrel%`-family notation, and the literal form,
+/// stops at a seam named by the LITERAL kind (`builtin/op/rel.rs`).
 #[test]
-fn op_notations_stop_at_the_literal_kind_seam() {
+fn rel_notations_stop_at_the_literal_kind_seam() {
     let r = support::replay_fixture_in("elab", "ElabOp.olean");
     let snap = elab_op_grammar();
     let mut cases: Vec<(String, String)> = golden()
         .iter()
-        .filter(|g| g["exp"] != "Lean.Parser.Term.app")
+        .filter(|g| {
+            g["exp"] == "Lean.Parser.Term.binrel" || g["exp"] == "Lean.Parser.Term.binrel_no_prop"
+        })
         .map(|g| {
             (
                 format!("fun (a b : Nat) => {}", g["src"].as_str().unwrap()),
@@ -199,19 +191,64 @@ fn op_notations_stop_at_the_literal_kind_seam() {
             )
         })
         .collect();
+    assert!(!cases.is_empty(), "the golden file has binrel rows");
     cases.push((
-        "fun (a b : Nat) => binop% HAdd.hAdd a b".into(),
-        "Lean.Parser.Term.binop".into(),
-    ));
-    cases.push((
-        "fun (a : Nat) => unop% Neg.neg a".into(),
-        "Lean.Parser.Term.unop".into(),
+        "fun (a b : Nat) => binrel% LT.lt a b".into(),
+        "Lean.Parser.Term.binrel".into(),
     ));
     for (src, kind) in cases {
         match support::elab_src_in(&r, &src, &snap) {
             Err(leanr_elab::ElabError::UnsupportedSyntax(m)) => assert_eq!(m, kind, "{src}"),
             other => panic!("{src}: expected UnsupportedSyntax({kind}), got {other:?}"),
         }
+    }
+}
+
+/// Every non-rel op notation reaches the elaborator: each golden source
+/// elaborates over `Z` operands (the corpus pins the terms).
+#[test]
+fn non_rel_op_notations_elaborate() {
+    let r = support::replay_fixture_in("elab", "ElabOp.olean");
+    let snap = elab_op_grammar();
+    let mut n = 0;
+    for g in golden().iter().filter(|g| {
+        let k = g["exp"].as_str().unwrap();
+        k != "Lean.Parser.Term.app" && !k.contains("binrel")
+    }) {
+        // `•` is `SMul Nat Z`; `^` is `HPow Z Nat Z`.
+        let binders = match g["exp"].as_str().unwrap() {
+            "Lean.Parser.Term.leftact" => "(a : Nat) (b : Z)",
+            "Lean.Parser.Term.rightact" => "(a : Z) (b : Nat)",
+            _ => "(a b : Z)",
+        };
+        let src = format!("fun {binders} => {}", g["src"].as_str().unwrap());
+        support::elab_src_in(&r, &src, &snap).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+        n += 1;
+    }
+    assert!(n > 0, "the golden file has non-rel op rows");
+}
+
+/// Review Focus #1: a 300-operand left-nested chain. One recursion per
+/// operator in `to_tree`, `analyze`, `apply_coe` and `to_expr_core`.
+#[test]
+fn long_chain_elaborates() {
+    let r = support::replay_fixture_in("elab", "ElabOp.olean");
+    let snap = elab_op_grammar();
+    let src = format!("fun (a : Nat) => {}", vec!["a"; 300].join(" + "));
+    support::elab_src_in(&r, &src, &snap).unwrap_or_else(|e| panic!("{e:?}"));
+}
+
+/// Review Focus #3: a cdot paren operand is a LEAF (Extra.lean:201-203), so
+/// it reaches the existing cdot seam rather than being recursed into.
+#[test]
+fn cdot_paren_operand_is_the_cdot_seam() {
+    let r = support::replay_fixture_in("elab", "ElabOp.olean");
+    let snap = elab_op_grammar();
+    match support::elab_src_in(&r, "fun (a : Nat) => (· + 1) + a", &snap) {
+        Err(leanr_elab::ElabError::UnsupportedSyntax(k)) => {
+            assert!(k.contains("cdot"), "{k}")
+        }
+        other => panic!("expected the cdot seam, got {other:?}"),
     }
 }
 
@@ -259,6 +296,13 @@ fn elab_op_has_the_test_support_suffix() {
         "Z.ofNat",
         "V.mk",
         "F.mk",
+        // the closed operands of the depth/stuck rows (P3 T3)
+        "vx",
+        "k0",
+        "fx",
+        "z0",
+        // the mutation-killing rows' types (P3 T3)
+        "fun (a : MArr Nat) => a",
     ] {
         support::elab_src_in(&r, src, &snap).unwrap_or_else(|e| panic!("{src}: {e:?}"));
     }

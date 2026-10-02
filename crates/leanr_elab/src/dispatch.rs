@@ -177,7 +177,8 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 ///   choice ..................................... overloading slice
 ///   elabAsElim / ElabElim ...................... M4b-4c SHIPPED — app/elim.rs
 ///   anonymous constructor ⟨⟩ (term position) ... M4b-4b SHIPPED — builtin/anon_ctor.rs; pattern position: the match slice
-///   binop% family (literal and expanded) ....... macro/binop% P3 — named by the literal kind
+///   binop% family (literal and expanded) ....... macro/binop% P3 SHIPPED — builtin/op/
+///   binrel% / binrel_no_prop% ................... P3 T4 — rel.rs seam
 ///   macro expansion in dispatch ................ P2 SHIPPED (macro/binop%) — macros/, elab.rs
 ///   remaining Init notations (×, ∘, ::, <$>, <|, …) table extension — some need an Expansion shape beyond App/Op
 ///   Mathlib (non-Init) notations ............... the VM slice — UnsupportedSyntax(kind)
@@ -321,6 +322,21 @@ pub(crate) fn dispatch(
         }
         ("Lean.Parser.Term.have", NodeOrToken::Node(node)) => {
             crate::builtin::binder::elab_let_like(elab, node, kinds, expected, true)
+        }
+        // oracle: `@[builtin_term_elab binop|binop_lazy|leftact|rightact|unop]
+        // elabOp` and `binrel|binrel_no_prop` (`Extra.lean:478-482`,
+        // `:564-566`) — macro/binop% P3, `builtin::op`.
+        (k, NodeOrToken::Node(_))
+            if crate::macros::OpKind::ALL
+                .iter()
+                .any(|o| o.syntax_kind() == k) =>
+        {
+            match crate::builtin::op::OpView::from_literal(elem, kinds)? {
+                Some(view) => crate::builtin::op::elab_op_view(elab, &view, kinds, expected),
+                None => Err(ElabError::Internal(format!(
+                    "{k}: an op kind with no op view"
+                ))),
+            }
         }
         (other, _) => Err(ElabError::UnsupportedSyntax(other.to_string())),
     }

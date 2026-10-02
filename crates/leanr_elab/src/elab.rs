@@ -72,10 +72,10 @@ impl TermTarget {
 }
 
 /// Stack-growth constants for [`TermElabM::dispatch_target`]'s tail
-/// guard — the same values as `leanr_meta`'s `metactx.rs` and
+/// guard and `builtin::op::grow` — the same values as `leanr_meta`'s `metactx.rs` and
 /// `leanr_kernel`'s `tc.rs` (private there, so restated).
-const RED_ZONE: usize = 128 * 1024;
-const STACK_CHUNK: usize = 4 * 1024 * 1024;
+pub(crate) const RED_ZONE: usize = 128 * 1024;
+pub(crate) const STACK_CHUNK: usize = 4 * 1024 * 1024;
 
 pub struct TermElabM<'e> {
     pub mctx: MetaCtx<'e>,
@@ -652,7 +652,7 @@ impl<'e> TermElabM<'e> {
     /// The single elaborator a target's kind selects: `dispatch` for real
     /// syntax, `elab_anon_ctor` for a flatten tail (whose synthesized
     /// node's kind is `anonymousCtor`), the application elaborator or the
-    /// op seam for an expansion.
+    /// op elaborator for an expansion.
     fn dispatch_target(
         &mut self,
         target: &TermTarget,
@@ -683,11 +683,13 @@ impl<'e> TermElabM<'e> {
                 crate::macros::Expansion::App { f, args } => {
                     crate::app::elab_app_expanded(self, f, args, r#ref, kinds, expected)
                 }
-                // P3 owns the op elaborator. Until then an expansion stops
-                // where a literal `binop% f a b` already does, named by the
-                // literal form's kind (dispatch's catch-all).
-                crate::macros::Expansion::Op { kind, .. } => {
-                    Err(ElabError::UnsupportedSyntax(kind.syntax_kind().to_string()))
+                // macro/binop% P3: the op elaborator (`builtin::op`), the
+                // same one a literal `binop% f a b` reaches from `dispatch`.
+                crate::macros::Expansion::Op { .. } => {
+                    let view = crate::builtin::op::OpView::from_expansion(r#ref, exp).ok_or_else(
+                        || ElabError::Internal("an Op expansion has no op view".into()),
+                    )?;
+                    crate::builtin::op::elab_op_view(self, &view, kinds, expected)
                 }
             },
         }

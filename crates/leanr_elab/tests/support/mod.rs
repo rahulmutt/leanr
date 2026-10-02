@@ -1180,3 +1180,62 @@ pub fn elab_src_in(
         elab.elab_term_and_synthesize(term, kinds, None).map(|_| ())
     })
 }
+
+/// The grammar of the generated `ElabOp` fixture (macro/binop% P2): the
+/// builtin grammar plus ElabOp's own notations. Shared by `oracle_op.rs`
+/// and `op_helpers.rs`.
+pub fn elab_op_grammar() -> leanr_syntax::grammar::GrammarSnapshot {
+    let bytes = std::fs::read(fixture_in("elab", "ElabOp.olean")).expect("committed ElabOp.olean");
+    let mut st = leanr_kernel::bank::Store::persistent();
+    let md = leanr_olean::ModuleData::parse(&bytes, &mut st).expect("decode ElabOp.olean");
+    assert!(md.imports.is_empty(), "ElabOp must stay import-free");
+    let name = std::sync::Arc::new(leanr_kernel::Name::Anonymous); // display-only
+    leanr_grammar::assemble(&[(name, md)], &st).snapshot
+}
+
+/// `f a`, built directly in the elaborator's scratch store.
+pub fn mk_app(
+    elab: &mut leanr_elab::TermElabM,
+    f: leanr_kernel::bank::ExprId,
+    a: leanr_kernel::bank::ExprId,
+) -> leanr_kernel::bank::ExprId {
+    let base = elab.view.store;
+    elab.mctx
+        .store_mut()
+        .expr_app(Some(base), f, a)
+        .expect("expr_app")
+}
+
+/// The `NameId` of a `Node::Const`; panics on any other node.
+pub fn const_name(
+    elab: &leanr_elab::TermElabM,
+    c: leanr_kernel::bank::ExprId,
+) -> leanr_kernel::bank::NameId {
+    match elab.mctx.store().expr_node(Some(elab.view.store), c) {
+        leanr_kernel::bank::terms::Node::Const { name: Some(n), .. } => n,
+        other => panic!("const_name: not a named constant: {other:?}"),
+    }
+}
+
+/// A fresh natural mvar whose type is a sort (`mkFreshTypeMVar`).
+pub fn fresh_type_mvar(elab: &mut leanr_elab::TermElabM) -> leanr_kernel::bank::ExprId {
+    elab.mk_fresh_type_mvar().expect("mk_fresh_type_mvar")
+}
+
+/// Elaborate the type `src` (builtin grammar) with this `elab`.
+pub fn parse_type(elab: &mut leanr_elab::TermElabM, src: &str) -> leanr_kernel::bank::ExprId {
+    let snap = leanr_syntax::builtin::snapshot();
+    let parsed = leanr_syntax::parse_term(src, &snap);
+    assert!(
+        parsed.errors.is_empty(),
+        "parse_type: {src:?}: {:?}",
+        parsed.errors
+    );
+    let elem: leanr_elab::dispatch::SynElem = parsed
+        .tree
+        .root()
+        .first_child_or_token()
+        .unwrap_or_else(|| panic!("parse_type: no term child for {src:?}"));
+    elab.elab_term(&elem, &parsed.tree.kinds, None)
+        .unwrap_or_else(|e| panic!("parse_type: {src:?}: {e:?}"))
+}
