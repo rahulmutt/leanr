@@ -377,7 +377,15 @@ Mutations (each applied, run, reverted):
   (g) "keep what the outer ctx has" branch deleted:
   `check_mvar_restriction_keeps_what_the_outer_ctx_has`. All KILLED. The
   `check_fvar` pin flipped as planned (now
-  `check_fvar_follows_a_genuine_let_value_in_both_zeta_modes`).
+  `check_fvar_follows_a_genuine_let_value_in_both_zeta_modes`). Those two
+  killers of (f) and (g) were added by the controller during T2 review: the
+  brief's tests put the assigned mvar in an EMPTY ctx, where neither
+  mutation is observable. Both put the assigned `?o` in a non-empty ctx
+  `{a}`. `check_mvar_subtracts_fvars_before_the_sub_prefix_test` has the
+  inner mvar in `{a, y}` with `fvars = [y]`, which is a sub-prefix only
+  once `y` is subtracted, so the inner mvar stays unassigned.
+  `check_mvar_restriction_keeps_what_the_outer_ctx_has` has the inner mvar
+  in `{a, x}`, and the restriction keeps `a` and drops `x`.
 - T3: (a) swap reverted to raw abstraction: KILLED by
   `process_assignment_eliminates_mvar_deps_on_the_pattern_fvars`. (b)
   quick-check arm (5) skipped with the swap in place: KILLED by
@@ -399,13 +407,34 @@ depend on the binder shape (see the eta seam below).
 
 **`checkApp` / `assignToConstFun` coverage.** Mutation (i) (`rescuable`
 always false) survives `oracle_op`, `oracle_elab` and `seam_audit`. The
-oracle was probed with candidates c1-c4 (the plan's list), each
-elaborated with `ctxApprox` on and with
-`withConfig (fun c => { c with ctxApprox := false })`: the outputs are
-byte-identical, so none of them is `ctxApprox`-dependent.
-`checkApp`/`assignToConstFun` has unit coverage
-(`check_app_rescues_an_out_of_scope_mvar_app`) and no differential
-record. Mutation (i) survives the corpus. Candidates tried: c1-c4.
+oracle was probed against ElabOp, with each query run twice: as the dumper
+runs it, and with the `elabTerm` + `synthesizeSyntheticMVarsNoPostponing`
+block wrapped in `withConfig (fun c => { c with ctxApprox := false })`
+inside `.run'`. The queries were the plan's candidates c1-c4, the controls
+`op/binder-F-hole`, `op/depth`, `meta/beta-lt`,
+`op/postponed-binop-operand` and `meta/at-hadd-V` (rows that take this
+slice's `checkMVar` restriction), and four extra guesses:
+`fun (n : Nat) (x : V n) => (V.mk : V _) + x`,
+`(fun (g : Nat → Nat) => g 0) (fun k => k + 1)`,
+`fun (a : Nat) => (fun x => x + a) 1` and
+`fun (n : Nat) (x : F n) => (F.mk _ : F _) + x`.
+
+Two results:
+- The off-switch takes effect. `(← getConfig).ctxApprox` was read back
+  inside the block, both after `elabTerm` and after the synthesis fixpoint.
+  It was `false` for every query in the off-run and `true` in the on-run.
+- The answers do not change. The on and off outputs are byte-identical for
+  every query, controls included, and neither run elaborated with errors.
+  Not even the controls are `ctxApprox`-dependent at the oracle's level.
+  The likely reason, not verified: when the restriction is refused,
+  `isDefEqQuickMVarMVar` succeeds with the opposite assignment direction.
+  Also, instance synthesis forces `ctxApprox := true` whatever the
+  setting (`SynthInstance.lean:964`).
+
+So `checkApp`/`assignToConstFun` has unit coverage
+(`check_app_rescues_an_out_of_scope_mvar_app`) and no differential record.
+Mutation (i) survives the corpus. Candidates tried: c1-c4, plus the
+controls and the four extra queries above.
 
 Deviations from this spec:
 - `is_sub_prefix_of` takes `except: &[NameId]`, not `&[ExprId]`: the
