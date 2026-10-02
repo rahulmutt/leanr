@@ -1315,6 +1315,13 @@ def opQueries : List (String × String) :=
   , ("meta/beta-add",       "(fun a => a + 2) z0")
   , ("meta/beta-beq",       "(fun a => BEq.beq a 2) z0")
   , ("op/rel-lt-beta",      "(fun a => a < 2) z0")
+  -- eta slice: `mkLambdaFVarsWithLetDeps` eta-reduces (`etaReduce :=
+  -- true`, ExprDefEq.lean:551,554). `?f a =?= g a` with `a` outside
+  -- `?f`'s ctx is a Miller pattern: `?f := g`, not `fun a => g a`.
+  , ("meta/eta-congrFun'",  "fun (g : Nat → Nat) => (congrFun' _ : ∀ (a : Nat), g a = g a)")
+  , ("meta/eta-congrFun",   "fun (g : Nat → Nat) => (congrFun _ : ∀ (a : Nat), g a = g a)")
+  , ("meta/eta-partial",    "fun (g : Nat → Nat → Nat) => (congrFun' _ : ∀ (a : Nat), g 0 a = g 0 a)")
+  , ("meta/eta-blocked",    "fun (g : Nat → Nat → Nat) => (congrFun' _ : ∀ (a : Nat), g a a = g a a)")
   -- mutation-killing rows: `2` stays uncoerced behind a HOMOGENEOUS
   -- instance (`op/hetero-default` never reaches the leaves: no
   -- `HMul (Arr Nat)³`); a regular `binop%` whose max has no homogeneous

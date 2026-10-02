@@ -1130,6 +1130,7 @@ impl<'e> MetaCtx<'e> {
     fn mk_binding(
         &mut self,
         is_lambda: bool,
+        eta_reduce: bool,
         fvars: &[ExprId],
         body: ExprId,
     ) -> Result<ExprId, MetaError> {
@@ -1196,8 +1197,7 @@ impl<'e> MetaCtx<'e> {
             // calls it rather than inlining its two halves.
             let ty2 = self.abstract_range(fvars, i, ty)?;
             r = if is_lambda {
-                self.scratch
-                    .expr_lam(Some(self.view.store), binder_name, ty2, r, binder_info)?
+                self.mk_lambda_prime(binder_name, binder_info, ty2, r, eta_reduce)?
             } else {
                 self.scratch
                     .expr_forall(Some(self.view.store), binder_name, ty2, r, binder_info)?
@@ -1206,24 +1206,66 @@ impl<'e> MetaCtx<'e> {
         Ok(r)
     }
 
+    /// oracle: `mkLambda'` (`MetavarContext.lean:1281-1291`). With
+    /// `eta_reduce`, a body `.app f (.bvar 0)` whose `f` has no loose
+    /// `#0` becomes `f` lowered by one instead of `fun x => f x`.
+    fn mk_lambda_prime(
+        &mut self,
+        binder_name: Option<NameId>,
+        binder_info: leanr_kernel::BinderInfo,
+        ty: ExprId,
+        body: ExprId,
+        eta_reduce: bool,
+    ) -> Result<ExprId, MetaError> {
+        if eta_reduce {
+            if let Node::App { f, arg } = self.node(body) {
+                if matches!(self.node(arg), Node::BVar { idx: 0 }) && !self.has_loose_bvar(f, 0)? {
+                    return Ok(leanr_kernel::lower_loose_bvars(
+                        self.scratch,
+                        Some(self.view.store),
+                        f,
+                        1,
+                        1,
+                        &mut self.guard,
+                    )?);
+                }
+            }
+        }
+        Ok(self
+            .scratch
+            .expr_lam(Some(self.view.store), binder_name, ty, body, binder_info)?)
+    }
+
     /// oracle: `mkForallFVars`. Abstract `body` over the telescope
     /// `fvars` (each an fvar declared in `self.lctx`) and wrap in nested
     /// `forallE`, innermost fvar last. A `have` is generalized to a
     /// binder over its type; a genuine let is refused. See `mk_binding`
     /// for the shared implementation.
     pub fn mk_forall(&mut self, fvars: &[ExprId], body: ExprId) -> Result<ExprId, MetaError> {
-        self.mk_binding(false, fvars, body)
+        self.mk_binding(false, false, fvars, body)
     }
 
-    /// oracle: `mkLambdaFVars` (without `etaReduce`; see the eta SEAM on
-    /// `mk_lambda_fvars_with_let_deps`). Abstract `body` over the
+    /// oracle: `mkLambdaFVars` (`etaReduce := false`; `mk_lambda_eta`
+    /// is the `true` twin). Abstract `body` over the
     /// telescope `fvars` (each an fvar declared in `self.lctx`) and wrap
     /// in nested `lam`, innermost fvar last. A `have` is generalized to a
     /// `.default` binder over its type; a genuine let is refused. The
     /// `mk_forall` twin — see `mk_binding` for the shared
     /// implementation.
     pub fn mk_lambda(&mut self, fvars: &[ExprId], body: ExprId) -> Result<ExprId, MetaError> {
-        self.mk_binding(true, fvars, body)
+        self.mk_binding(true, false, fvars, body)
+    }
+
+    /// oracle: `mkLambdaFVars xs e (etaReduce := true)`: [`Self::mk_lambda`]
+    /// with `mkLambda'`'s per-binder eta step. Only
+    /// `mk_lambda_fvars_with_let_deps` (`ExprDefEq.lean:551,554`) asks
+    /// for it.
+    pub(crate) fn mk_lambda_eta(
+        &mut self,
+        fvars: &[ExprId],
+        body: ExprId,
+    ) -> Result<ExprId, MetaError> {
+        self.mk_binding(true, true, fvars, body)
     }
 
     /// oracle: `mkLetFVars #[fvar] body (usedLetOnly := false)
@@ -2626,6 +2668,50 @@ mod tests {
                     assert!(msg.contains("let-decl"), "{msg}");
                 }
             }
+        });
+    }
+
+    /// oracle: `mkLambda'` (`MetavarContext.lean:1281-1291`), applied per
+    /// binder innermost-first by `mkBinding` (`:1322`). `etaReduce` turns
+    /// a `.app f (.bvar 0)` body with `#0` not loose in `f` into `f`
+    /// lowered by one; anything else is a plain `lam`. `mk_lambda`
+    /// (`etaReduce := false`) never reduces.
+    #[test]
+    fn mk_lambda_eta_reduces_per_binder_as_mk_lambda_prime() {
+        use crate::test_support::{app, fresh_fvar};
+        with_prelude0_ctx(|ctx| {
+            let nat = const_named(ctx, "Nat");
+            let cp = ctx.lctx_checkpoint();
+            let g = fresh_fvar(ctx, nat, "g");
+            let x = fresh_fvar(ctx, nat, "x");
+            let y = fresh_fvar(ctx, nat, "y");
+            let is_lam = |ctx: &mut MetaCtx, e| matches!(ctx.node(e), Node::Lam { .. });
+
+            // `fun x => g x` ~> `g`; without the flag it stays a lam.
+            let gx = app(ctx, g, x);
+            assert_eq!(ctx.mk_lambda_eta(&[x], gx).expect("eta"), g);
+            let plain = ctx.mk_lambda(&[x], gx).expect("plain");
+            assert!(is_lam(ctx, plain), "mk_lambda never eta-reduces");
+
+            // `fun x => g x x`: `#0` is loose in `f = g #0`, kept.
+            let gxx = app(ctx, gx, x);
+            let r = ctx.mk_lambda_eta(&[x], gxx).expect("kept");
+            assert!(is_lam(ctx, r), "loose #0 in the head blocks eta");
+
+            // `fun x y => g x y` ~> `fun x => g x` ~> `g`: every binder.
+            let gxy = app(ctx, gx, y);
+            assert_eq!(ctx.mk_lambda_eta(&[x, y], gxy).expect("eta2"), g);
+
+            // `fun x y => g y x`: inner body `g #0 #1` ends in `#1`, kept;
+            // the outer body is then a lam, not an app, kept too.
+            let gy = app(ctx, g, y);
+            let gyx = app(ctx, gy, x);
+            let r = ctx.mk_lambda_eta(&[x, y], gyx).expect("kept2");
+            match ctx.node(r) {
+                Node::Lam { body, .. } => assert!(is_lam(ctx, body), "inner lam kept"),
+                other => panic!("expected a lam, got {other:?}"),
+            }
+            ctx.lctx_restore(cp);
         });
     }
 

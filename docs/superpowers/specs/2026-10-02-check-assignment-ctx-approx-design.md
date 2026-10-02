@@ -471,7 +471,7 @@ Final-review fix pass:
   and type were both `Nat`, so (m) was unobservable.
 
 Open follow-ups:
-- **P1 — Eta SEAM.** The oracle's `mkLambdaFVarsWithLetDeps` passes
+- ~~**P1 — Eta SEAM.** The oracle's `mkLambdaFVarsWithLetDeps` passes
   `etaReduce := true` (`ExprDefEq.lean:551,554`), and `mkLambda'`
   (`MetavarContext.lean:1281-1291`) reduces a `.app f (.bvar 0)` body.
   leanr's `mk_binding` does not eta-reduce. This is more than "equal up to
@@ -488,6 +488,48 @@ Open follow-ups:
   either. No corpus record shows it yet. Port sketch: an `eta_reduce`
   flag on `mk_binding`, used only by `mk_lambda_fvars_with_let_deps`; the
   cost is re-checking the corpus. Documented on
-  `mk_lambda_fvars_with_let_deps` (`assign.rs`).
+  `mk_lambda_fvars_with_let_deps` (`assign.rs`).~~ CLOSED (§ Landed › Eta follow-up).
 - `checkApp`/`assignToConstFun`: no differential record (above).
 - P3 T3 (d) remains unobservable (above).
+
+### Eta follow-up (branch `eta-reduce-seam`)
+
+Closes P1 above. `MetaCtx::mk_binding` takes an `eta_reduce` flag. Its
+lambda arm is a port of `mkLambda'` (`MetavarContext.lean:1281-1291`),
+applied to each binder from the innermost out: a body
+`.app f (.bvar 0)` whose `f` has no loose `#0` becomes `f` lowered by
+one. `mk_lambda`/`mk_forall` pass `false`. The new `mk_lambda_eta`
+passes `true`, and its only caller is `mk_lambda_fvars_with_let_deps`
+(`ExprDefEq.lean:551,554`).
+
+**Corpus** (`op-queries.jsonl`, `CORPUS_FLOOR` 90 -> 94):
+`meta/eta-congrFun'`, `meta/eta-congrFun`, `meta/eta-partial`, and the
+control `meta/eta-blocked`. Each has the shape
+`fun (g : …) => (congrFun' _ : ∀ (a : Nat), g a = g a)`. `?f`/`?g` are
+minted outside `∀ a`, so `?f a =?= g a` is a Miller pattern, and the
+oracle assigns `?f := g`. Before the fix, leanr built
+`fun a => g a` and diverged on the first three. The control
+(`g a a`, where `#0` is loose in the head) matches either way. The
+binder is spelled `(a : Nat)` because leanr does not yet handle the
+bare-ident `∀ a,` binder (`expandForall`).
+
+Mutations (each applied, run, reverted):
+- (i) `mk_lambda_fvars_with_let_deps` back to `mk_lambda`: KILLED by
+  `oracle_op_gate` (3 records),
+  `process_assignment_eta_reduces_the_pattern_lambda`, and
+  `process_assignment_eliminates_mvar_deps_on_the_pattern_fvars`. The
+  last now asserts `?m := ?i'` exactly, not a shape-agnostic check.
+- (ii) the `has_loose_bvar(f, 0)` test dropped: KILLED by
+  `oracle_op_gate` (`meta/eta-blocked`, "unexpected bound variable")
+  and `mk_lambda_eta_reduces_per_binder_as_mk_lambda_prime`.
+- (iii) only the innermost binder reduced: KILLED by
+  `mk_lambda_eta_reduces_per_binder_as_mk_lambda_prime` alone. It
+  survives the corpus, because no record has a multi-argument pattern
+  (`?f a b`), and Prelude has no `{f : α → β → γ}` lemma that would
+  produce one.
+
+Full `mise run ci` is green, and no pre-existing record changed answer.
+
+Open: `synth.rs`'s `try_resolve` pi-goal SEAM (`SynthInstance.lean:361`)
+also calls `mkLambdaFVars … (etaReduce := true)`. Whoever ports
+pi-shaped synthesis goals should use `mk_lambda_eta`.
