@@ -397,8 +397,11 @@ These are verbatim ports.
 
 ### Errors
 
-No new `ElabError` variants are added. The existing `UnknownConstant`,
-`TypeMismatch` and coercion errors are reused.
+One new `ElabError` variant, `UnknownConstant(String)`, is added for
+`throwUnknownConstantAt` (oracle first line ``Unknown constant `f` ``).
+*(Corrected 2026-10-02: leanr's only `UnknownConstant` is a reason inside
+`InvalidDottedIdent`, not a top-level variant.)* `TypeMismatch` and the
+coercion errors are reused.
 
 ### Testing
 
@@ -417,11 +420,18 @@ distinguishable:
 | `(p == q)`, `p q : Prop` | `binrel_no_prop` → `Bool` |
 | `a <\|> b` | lazy `fun _ => b` |
 | `BitVec n` vs `BitVec ?m`-shaped row | output depends on P1's depth |
-| a row whose whole `binop%` expansion postpones and resumes | P2 Landed seam: postponement of an `Expanded` target |
 | `binop% NoSuch a b` | err row |
 
 Every one of the 24 op table rows also gets at least one corpus record
 (P2 § Landed › Open follow-ups); the rows above double as some of them.
+
+*(Corrected 2026-10-02, while writing the P3 plan.)* No `binop%` row can
+postpone a WHOLE expansion, in the oracle or in leanr. `useImplicitLambda`
+postpones only a bare local identifier (`TermElabM.lean:1753-1778`),
+`elabOp` never throws `postpone`, and its leaves catch their own
+(`elabTerm` with `catchExPostpone := true`). P2's white-box test therefore
+stays the only coverage of an `Expanded` target being postponed. Notation
+in an mvar-expected argument position (`id (a + b)`) is covered instead.
 
 #### Test-support suffix in ElabOp *(added 2026-10-02; the user chose this option)*
 
