@@ -236,6 +236,7 @@ run = [
   "sh -c 'cd tests/fixtures/elab && LEAN_PATH=$PWD lean --run dump_op_expansions.lean ElabOp > op-expansions.jsonl'",
   # The drift guard: ElabOp's copy must expand exactly as the real Init does.
   "sh -c 'cd tests/fixtures/elab && LEAN_PATH=$PWD lean --run dump_op_expansions.lean Init | diff op-expansions.jsonl -'",
+  "sh -c 'cd tests/fixtures/elab && LEAN_PATH=$PWD lean --run dump_elab.lean ElabOp > op-queries.jsonl'",
 ]
 
 [tasks."fixtures:regen-notation"]

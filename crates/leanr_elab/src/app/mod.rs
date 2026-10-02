@@ -172,6 +172,38 @@ pub fn elab_atom(
     )
 }
 
+/// A table expansion's `f $args*` (`macros::Expansion::App`), as
+/// `elabApp` sees it: `elabAppFn`'s ident arm (`App.lean:2102`) →
+/// `elabAppFnId` (`:1952`). The quotation pre-resolved `f` to a global,
+/// and its macro scopes keep a same-named local from capturing it, so
+/// `f` goes straight to `mkConst` with fresh levels and never through
+/// `resolve_local_name`: `fun (And : Nat) => True ∧ False` is the global
+/// `And`. No fields, so no LVals. `stx` is the notation node, which is
+/// `Context::stx` (the ambient ref).
+pub(crate) fn elab_app_expanded(
+    elab: &mut TermElabM,
+    f: &str,
+    args: &[SynElem],
+    stx: &SynElem,
+    kinds: &KindInterner,
+    expected: Option<ExprId>,
+) -> Result<ExprId, ElabError> {
+    let name = head::intern_dotted(elab, f)?;
+    if elab.view.get(name).is_none() {
+        return Err(ElabError::UnknownIdent(f.to_string()));
+    }
+    let f = head::mk_const(elab, name, &[], f)?;
+    let call = AppCall {
+        named_args: Vec::new(),
+        args: args.iter().cloned().map(Arg::Stx).collect(),
+        expected,
+        explicit: false,
+        ellipsis: false,
+        stx: stx.clone(),
+    };
+    lval::elab_app_lvals(elab, f, Vec::new(), call, kinds)
+}
+
 /// oracle: `elabPipeProj` (`App.lean:2250-2258`). `$e |>.$f$[.{us}]? args*`
 /// is `elabAppAux` on `$e |>.$f$[.{us}]?` with the trailing arguments
 /// expanded (`expandArgs`); `head::elab_app_fn`'s pipeProj arm then reads

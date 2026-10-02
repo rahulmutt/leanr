@@ -1211,23 +1211,62 @@ def elimErrQueries : List (String × String) :=
   , ("elimErr/invalidMotive",       "fun (a b : Nat) (h : Eq a b) (p : Eq a a) => (Eq.subst' h p : Nat)")
   ]
 
+/-- macro/binop% P2: notations whose Init expansion is a plain
+application (`∧ ∨ ¬ ↔ <->`), elaborated against `ElabOp`
+(`lean --run dump_elab.lean ElabOp`). The `binop%`-family rows' records
+land in P3. Every query here was checked against the oracle on
+2026-10-02. -/
+def opQueries : List (String × String) :=
+  [ ("op/and",              "True ∧ False")
+  , ("op/and-ascii",        "True /\\ False")
+  , ("op/or",               "True ∨ False")
+  , ("op/or-ascii",         "True \\/ False")
+  , ("op/not",              "¬ True")
+  , ("op/iff",              "True ↔ False")
+  , ("op/iff-ascii",        "True <-> False")
+  -- precedence: `∧` (35) binds tighter than `∨` (30)
+  , ("op/prec",             "True ∧ False ∨ True")
+  , ("op/nested-paren",     "¬ (True ∧ False) ∨ True")
+  , ("op/under-binder",     "fun (p q : Prop) => p ∧ q → q ∧ p")
+  , ("op/iff-of-and",       "fun (p q : Prop) => p ∧ q ↔ q ∧ p")
+  , ("op/not-local",        "fun (p : Prop) => ¬ p")
+  -- hygiene: the expansion's `And` is the global, not the local
+  , ("op/hygiene",          "fun (And : Nat) => True ∧ False")
+  -- implicit-lambda position: the wrap runs, then the expansion inside it
+  , ("op/implicit-lambda",  "fun (g : ({α : Type} → Prop) → Prop) => g (True ∧ False)")
+  -- … with no paren around the notation: `g (t)` above reaches the
+  -- wrap as a `paren`, whose elaborator re-enters `elab_term` inside it,
+  -- so only this one has the wrap dispatch the expansion directly
+  , ("op/implicit-lambda-bare", "(True ∧ False : {α : Type} → Prop)")
+  -- `@(t)`: elabTerm t (implicitLambda := false); the hook must still run
+  , ("op/explicit-paren",   "@(True ∧ False)")
+  -- an operand postponed (lval on an mvar-typed local) and resumed
+  , ("op/postponed-operand", "(fun x => x.1 ∧ True) (PProd.mk True True)")
+  , ("op/as-arg",           "And True (True ∨ False)")
+  , ("op/ascribed",         "(True ∧ False : Prop)") ]
+
 def emitErr (id src err : String) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("err", err)]
 
 def emit (id src : String) (expJ : Json) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("exp", expJ)]
 
-unsafe def main : IO Unit := do
+unsafe def main (args : List String) : IO Unit := do
+  -- `lean --run dump_elab.lean` → Elab0's corpus; `… ElabOp` → the op corpus.
+  let (mod, queries, errQueries) : Name × List (String × String) × List (String × String) :=
+    match args with
+    | ["ElabOp"] => (`ElabOp, opQueries, [])
+    | _ => (`Elab0, strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries ++ closeoutExplicitQueries ++ nondepQueries ++ lvalIdxQueries ++ lvalFnQueries ++ p2Queries ++ p3Queries ++ p4Queries ++ anonQueries ++ anonTailQueries ++ funExpandQueries ++ elimQueries, elimErrQueries)
   -- Must run before any `importModules (loadExts := true)` or the
   -- import throws internally (dump_syntax_elab.lean's module doc, same
   -- pitfall, confirmed here empirically by `dump_defeq.lean`).
   Lean.enableInitializersExecution
   Lean.initSearchPath (← Lean.findSysroot)
-  let env ← Lean.importModules #[{ module := `Elab0 }] {} (trustLevel := 0) (loadExts := true)
+  let env ← Lean.importModules #[{ module := mod }] {} (trustLevel := 0) (loadExts := true)
   let coreCtx : Core.Context := { fileName := "<dump_elab>", fileMap := default }
   let coreState : Core.State := { env }
   let go : MetaM Unit := do
-    for (id, src) in strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries ++ closeoutExplicitQueries ++ nondepQueries ++ lvalIdxQueries ++ lvalFnQueries ++ p2Queries ++ p3Queries ++ p4Queries ++ anonQueries ++ anonTailQueries ++ funExpandQueries ++ elimQueries do
+    for (id, src) in queries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>
@@ -1246,7 +1285,7 @@ unsafe def main : IO Unit := do
         catch ex =>
           let msg ← ex.toMessageData.toString
           IO.eprintln s!"dump_elab: elaboration failed for {id}: {msg}"
-    for (id, src) in elimErrQueries do
+    for (id, src) in errQueries do
       match Lean.Parser.runParserCategory env `term src with
       | .error msg => IO.eprintln s!"dump_elab: parse error for {id}: {msg}"
       | .ok stx =>

@@ -167,3 +167,18 @@ fn non_table_kinds_do_not_expand() {
         );
     }
 }
+
+/// The op corpus: notations elaborated end to end against ElabOp.
+#[test]
+fn oracle_op_gate() {
+    let replayed = support::run_elab_corpus("ElabOp.olean", "op-queries.jsonl", &elab_op_grammar());
+    // Raise deliberately when records are added (`wc -l op-queries.jsonl`).
+    // 0 -> 19 (macro/binop% P2 T3): the op/* App-notation records (the
+    // brief's 18 plus op/implicit-lambda-bare, which the hook-placement
+    // mutation needed: op/implicit-lambda's paren re-enters `elab_term`).
+    const CORPUS_FLOOR: usize = 19;
+    assert!(
+        replayed >= CORPUS_FLOOR,
+        "op corpus shrank: {replayed} < {CORPUS_FLOOR}"
+    );
+}
