@@ -51,9 +51,15 @@ Every citation below was opened against that toolchain's
    `binop_lazy%`, `binrel%`, `binrel_no_prop%`, `unop%`, `leftact%`
    and `rightact%`. `show`, `suffices`, `by` and cdot functions are out
    of scope.
-3. **Harness: Init declarations copied verbatim into Elab0.** The
-   corpus stays hermetic. A kind-guard test ties the table to the real
-   Init olean.
+3. **Harness: a separate `ElabOp` fixture generated from real Init.**
+   *(Amended 2026-10-02, while writing the P2 plan; the user chose this
+   option.)* The original decision was to copy Init declarations
+   verbatim into Elab0, and it does not work. In prelude mode, `infixl`
+   and `macro_rules` need the whole quotation/macro machinery
+   (`ParserDescr`, `Syntax`, `MacroM`, and the `TSyntax`/
+   `SyntaxNodeKinds` coercions in `Init/Notation.lean:105-108`). The
+   corpus stays hermetic, and the ElabOp fixture and its golden file
+   tie the table to real Init (§ Harness).
 4. **Approach A: three plans, with real mctx depth.** The op
    elaborator's `analyze` runs its type comparison under
    `withNewMCtxDepth` + `isDefEqStuckEx`. A rollback stand-in would
@@ -230,26 +236,51 @@ one and a later `macro_rules`), the row encodes the one
 `expandMacroImpl?` picks: the most recently declared. Exact kind names
 come from the kind-guard test, not from this table.
 
+*(Added 2026-10-02, from probing.)* `Iff` has a second notation,
+`<->` (`Init/Core.lean:196`), with its own kind `«term_<->_»`, so the
+App rows number five and the table has 29 kinds. The oracle parses
+`a >= b`/`a <= b` as `«term_≥_»`/`«term_≤_»`, because the ASCII forms are
+`(priority := low)`. leanr's parser picks `«term_>=_»`/`«term_<=_»`.
+Both rows of each pair expand to the same head, so elaboration cannot
+observe the difference. The parser divergence is a `leanr_syntax`
+follow-up.
+
 ### Harness
 
-- `Elab0.lean` gains the `Init/Prelude` and `Init/Notation`/`Init/Core`
-  declarations the corpus needs, copied verbatim in the scaffold's
-  existing style:
-  - the `H*`/homogeneous operator classes and the `instH*` default
-    instances
-  - `LE`, `LT`, `BEq`, `Ne`, `bne`, `Not`, `And`, `Or` and `Iff`,
-    where they are not already present
-  - the `infixl`/`notation` **and** `macro_rules` lines
+*(Rewritten 2026-10-02 per amended Decision 3. Every claim below was
+probed against v4.33.0-rc1 while writing the P2 plan.)*
 
-  The oracle side therefore really expands to `binop%`.
-- `oracle_elab.rs` parses with the snapshot plus Elab0's imported
-  parser overlay, using the M3b2a machinery. Existing records must
-  parse identically under the overlay, and that is checked.
-- **Kind-guard test.** It decodes only `Init/Notation.olean` and
-  `Init/Core.olean` from the pinned toolchain (their own
-  `parserExtension` entries, not the import closure). It asserts that
-  every table kind exists there under the same name. This guards
-  against the table and Elab0's copy drifting from real Init.
+- **`tests/fixtures/elab/ElabOp.lean`** is a new prelude-mode, import-free
+  fixture. Elab0 and its records are untouched. A committed script,
+  `gen_elab_op.sh`, generates ElabOp from the pinned toolchain's own
+  sources:
+  - whole-file `Init/Prelude.lean`, `Init/Coe.lean` and
+    `Init/Notation.lean`, with only the `module`/`prelude`/`import`
+    lines removed and the `public`/`meta` modifiers dropped;
+  - an `end Lean` line, because `Init/Notation.lean:592` opens
+    `namespace Lean` and never closes it. Without it, the appended
+    `Iff` becomes `Lean.Iff` and its notation kind becomes
+    `Lean.«term_↔_»`;
+  - the `Iff`, `bne` and `Ne` excerpts from `Init/Core.lean`
+    (`:188-197`, `:772-777`, `:875-880`).
+
+  The oracle side therefore expands with Init's real `macro_rules`. The
+  olean is ~7.8 MB. leanr replays it in ~5.4 s (debug build), and
+  `leanr_grammar::assemble` folds its grammar with 7 skips, none of them
+  a term operator.
+- **Its own corpus.** `dump_elab.lean ElabOp` writes `op-queries.jsonl`.
+  A gate in `oracle_op.rs` parses with ElabOp's assembled grammar and
+  shares the replay loop with `oracle_elab.rs`. Both gates assert that
+  the parsed term covers the whole source: `parse_term` silently stops at
+  an unknown token, so for example `a ⊕⊕ b` yields `<ident>` with no error.
+- **Kind and expansion guard.** `dump_op_expansions.lean` runs every
+  table notation through `expandMacroImpl?`. It records the source
+  kind, the expansion kind, the pre-resolved head and the arity in
+  `op-expansions.jsonl`. The regen task runs it against ElabOp and
+  against the real `Init` and diffs the two. A Rust test then holds
+  the table to the golden file in both directions. This replaces the
+  toolchain-olean decode: CI has no Lean, and the regen-time diff
+  catches the same drift.
 
 ### Testing
 
