@@ -906,6 +906,14 @@ impl<'e> MetaCtx<'e> {
     /// an `xs` entry, rather than abstracting it as a lambda and dropping
     /// its value.
     ///
+    /// SEAM (etaReduce): the oracle calls `mkLambdaFVars xs v (etaReduce
+    /// := true)` (`ExprDefEq.lean:551,554`, v4.33.0-rc1), and `mkLambda'`
+    /// (`MetavarContext.lean:1281-1290`) turns `fun x => f x` (x not free
+    /// in `f`) into `f`. leanr's `mk_lambda`/`mk_binding` does not
+    /// eta-reduce, so the assignment is eta-expanded (`?m := fun x => f x`
+    /// where the oracle assigns `?m := f`). Equivalent up to eta; not
+    /// ported here.
+    ///
     /// elimMVarDeps runs here through `mk_lambda`, closing macro/binop%
     /// § Landed › P3's TOP PRIORITY gap.
     pub(crate) fn mk_lambda_fvars_with_let_deps(
@@ -2604,9 +2612,13 @@ mod tests {
             let m_val = ctx.mctx.assignment(mid).expect("?m assigned");
             let m_val = ctx.instantiate_mvars(m_val).unwrap();
             assert!(!ctx.data(m_val).has_fvar(), "no fvar leaks into ?m's value");
-            let Node::Lam { body, .. } = ctx.node(m_val) else {
-                panic!("?m := fun x => ..")
-            };
+            // Shape-agnostic: the oracle eta-reduces (`?m := ?i'`), leanr
+            // does not (`?m := fun x => ?i' x`); see the SEAM (etaReduce)
+            // note on `mk_lambda_fvars_with_let_deps`.
+            let mut body = m_val;
+            while let Node::Lam { body: b, .. } = ctx.node(body) {
+                body = b;
+            }
             let head = ctx.get_app_fn(body);
             let Node::MVar { id: Some(aux) } = ctx.node(head) else {
                 panic!("body head is an mvar")
