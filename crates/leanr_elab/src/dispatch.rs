@@ -177,8 +177,10 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 ///   choice ..................................... overloading slice
 ///   elabAsElim / ElabElim ...................... M4b-4c SHIPPED — app/elim.rs
 ///   anonymous constructor ⟨⟩ (term position) ... M4b-4b SHIPPED — builtin/anon_ctor.rs; pattern position: the match slice
-///   binop% ..................................... the macro-expansion slice
-///   macro expansion in dispatch ................ first macro-form slice
+///   binop% family (literal and expanded) ....... macro/binop% P3 — named by the literal kind
+///   macro expansion in dispatch ................ P2 SHIPPED (macro/binop%) — macros/, elab.rs
+///   remaining Init notations (×, ∘, ::, <$>, <|, …) table extension — some need an Expansion shape beyond App/Op
+///   Mathlib (non-Init) notations ............... the VM slice — UnsupportedSyntax(kind)
 ///   open / alias / export / _root_ resolution .. later slice
 /// ```
 /// The application arms above are registered, so the `M4b-3` seams in

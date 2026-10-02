@@ -1,0 +1,31 @@
+{"arity":2,"exp":"Lean.Parser.Term.binop","f":"HOr.hOr","kind":"«term_|||_»","src":"a ||| b"}
+{"arity":2,"exp":"Lean.Parser.Term.binop","f":"HXor.hXor","kind":"«term_^^^_»","src":"a ^^^ b"}
+{"arity":2,"exp":"Lean.Parser.Term.binop","f":"HAnd.hAnd","kind":"«term_&&&_»","src":"a &&& b"}
+{"arity":2,"exp":"Lean.Parser.Term.binop","f":"HAdd.hAdd","kind":"«term_+_»","src":"a + b"}
+{"arity":2,"exp":"Lean.Parser.Term.binop","f":"HSub.hSub","kind":"«term_-_»","src":"a - b"}
+{"arity":2,"exp":"Lean.Parser.Term.binop","f":"HMul.hMul","kind":"«term_*_»","src":"a * b"}
+{"arity":2,"exp":"Lean.Parser.Term.binop","f":"HDiv.hDiv","kind":"«term_/_»","src":"a / b"}
+{"arity":2,"exp":"Lean.Parser.Term.binop","f":"HMod.hMod","kind":"«term_%_»","src":"a % b"}
+{"arity":2,"exp":"Lean.Parser.Term.rightact","f":"HPow.hPow","kind":"«term_^_»","src":"a ^ b"}
+{"arity":2,"exp":"Lean.Parser.Term.binop","f":"HAppend.hAppend","kind":"«term_++_»","src":"a ++ b"}
+{"arity":1,"exp":"Lean.Parser.Term.unop","f":"Neg.neg","kind":"«term-_»","src":"- a"}
+{"arity":2,"exp":"Lean.Parser.Term.leftact","f":"HSMul.hSMul","kind":"«term_•_»","src":"a • b"}
+{"arity":2,"exp":"Lean.Parser.Term.binrel","f":"GE.ge","kind":"«term_≥_»","src":"a >= b"}
+{"arity":2,"exp":"Lean.Parser.Term.binrel","f":"LE.le","kind":"«term_≤_»","src":"a <= b"}
+{"arity":2,"exp":"Lean.Parser.Term.binrel","f":"LE.le","kind":"«term_≤_»","src":"a ≤ b"}
+{"arity":2,"exp":"Lean.Parser.Term.binrel","f":"LT.lt","kind":"«term_<_»","src":"a < b"}
+{"arity":2,"exp":"Lean.Parser.Term.binrel","f":"GT.gt","kind":"«term_>_»","src":"a > b"}
+{"arity":2,"exp":"Lean.Parser.Term.binrel","f":"GE.ge","kind":"«term_≥_»","src":"a ≥ b"}
+{"arity":2,"exp":"Lean.Parser.Term.binrel","f":"Eq","kind":"«term_=_»","src":"a = b"}
+{"arity":2,"exp":"Lean.Parser.Term.binrel_no_prop","f":"BEq.beq","kind":"«term_==_»","src":"a == b"}
+{"arity":2,"exp":"Lean.Parser.Term.binop_lazy","f":"HOrElse.hOrElse","kind":"«term_<|>_»","src":"a <|> b"}
+{"arity":2,"exp":"Lean.Parser.Term.binop_lazy","f":"HAndThen.hAndThen","kind":"«term_>>_»","src":"a >> b"}
+{"arity":2,"exp":"Lean.Parser.Term.binrel_no_prop","f":"bne","kind":"«term_!=_»","src":"a != b"}
+{"arity":2,"exp":"Lean.Parser.Term.binrel","f":"Ne","kind":"«term_≠_»","src":"a ≠ b"}
+{"arity":2,"exp":"Lean.Parser.Term.app","f":"And","kind":"«term_∧_»","src":"a ∧ b"}
+{"arity":2,"exp":"Lean.Parser.Term.app","f":"Or","kind":"«term_∨_»","src":"a ∨ b"}
+{"arity":1,"exp":"Lean.Parser.Term.app","f":"Not","kind":"«term¬_»","src":"¬ a"}
+{"arity":2,"exp":"Lean.Parser.Term.app","f":"Iff","kind":"«term_↔_»","src":"a ↔ b"}
+{"arity":2,"exp":"Lean.Parser.Term.app","f":"Iff","kind":"«term_<->_»","src":"a <-> b"}
+{"arity":2,"exp":"Lean.Parser.Term.binrel","f":"GE.ge","kind":"«term_>=_»","src":"a >= b"}
+{"arity":2,"exp":"Lean.Parser.Term.binrel","f":"LE.le","kind":"«term_<=_»","src":"a <= b"}

@@ -209,7 +209,7 @@ run = [
   "sh -c 'cd tests/fixtures/syntax/import && for f in ImportOverload ImportScopedOpen ImportScopedNs; do LEAN_PATH=$PWD lean --run ../dump_syntax_elab.lean $f.lean > $f.stx.jsonl; done'",
   "sh -c 'cd tests/fixtures/syntax/import && lean Init.lean -o Init.olean'",
 ]
-depends_post = ["fixtures:regen-notation", "fixtures:regen-elab"]
+depends_post = ["fixtures:regen-notation", "fixtures:regen-elab", "fixtures:regen-elab-op"]
 
 [tasks."fixtures:regen-elab"]
 description = "Regenerate the M4b-1 leaf-elaboration oracle corpus (dump_elab.lean parses each term source, elaborates via Lean.Elab.Term.elabTerm, and dumps the canonical Expr). Needs the elan toolchain; never runs in CI."
@@ -226,6 +226,17 @@ run = [
   # constant (crates/leanr_meta/tests/aux_recursor_oracle.rs,
   # crates/leanr_elab/tests/elim_info_oracle.rs).
   "sh -c 'cd tests/fixtures/elab && LEAN_PATH=$PWD lean --run dump_elim.lean > elim.jsonl'",
+]
+
+[tasks."fixtures:regen-elab-op"]
+description = "Regenerate the macro/binop% ElabOp fixture (gen_elab_op.sh from the pinned toolchain's Init sources), its expansion golden file (diffed against the real Init), and its corpus. Needs the elan toolchain; never runs in CI."
+depends = ["elan:bootstrap"]
+run = [
+  "sh -c 'cd tests/fixtures/elab && ./gen_elab_op.sh > ElabOp.lean && lean ElabOp.lean -o ElabOp.olean'",
+  "sh -c 'cd tests/fixtures/elab && LEAN_PATH=$PWD lean --run dump_op_expansions.lean ElabOp > op-expansions.jsonl'",
+  # The drift guard: ElabOp's copy must expand exactly as the real Init does.
+  "sh -c 'cd tests/fixtures/elab && LEAN_PATH=$PWD lean --run dump_op_expansions.lean Init | diff op-expansions.jsonl -'",
+  "sh -c 'cd tests/fixtures/elab && LEAN_PATH=$PWD lean --run dump_elab.lean ElabOp > op-queries.jsonl'",
 ]
 
 [tasks."fixtures:regen-notation"]

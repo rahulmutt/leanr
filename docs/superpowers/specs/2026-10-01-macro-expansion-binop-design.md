@@ -51,9 +51,15 @@ Every citation below was opened against that toolchain's
    `binop_lazy%`, `binrel%`, `binrel_no_prop%`, `unop%`, `leftact%`
    and `rightact%`. `show`, `suffices`, `by` and cdot functions are out
    of scope.
-3. **Harness: Init declarations copied verbatim into Elab0.** The
-   corpus stays hermetic. A kind-guard test ties the table to the real
-   Init olean.
+3. **Harness: a separate `ElabOp` fixture generated from real Init.**
+   *(Amended 2026-10-02, while writing the P2 plan; the user chose this
+   option.)* The original decision was to copy Init declarations
+   verbatim into Elab0, and it does not work. In prelude mode, `infixl`
+   and `macro_rules` need the whole quotation/macro machinery
+   (`ParserDescr`, `Syntax`, `MacroM`, and the `TSyntax`/
+   `SyntaxNodeKinds` coercions in `Init/Notation.lean:105-108`). The
+   corpus stays hermetic, and the ElabOp fixture and its golden file
+   tie the table to real Init (§ Harness).
 4. **Approach A: three plans, with real mctx depth.** The op
    elaborator's `analyze` runs its type comparison under
    `withNewMCtxDepth` + `isDefEqStuckEx`. A rollback stand-in would
@@ -230,26 +236,51 @@ one and a later `macro_rules`), the row encodes the one
 `expandMacroImpl?` picks: the most recently declared. Exact kind names
 come from the kind-guard test, not from this table.
 
+*(Added 2026-10-02, from probing.)* `Iff` has a second notation,
+`<->` (`Init/Core.lean:196`), with its own kind `«term_<->_»`, so the
+App rows number five and the table has 29 kinds. The oracle parses
+`a >= b`/`a <= b` as `«term_≥_»`/`«term_≤_»`, because the ASCII forms are
+`(priority := low)`. leanr's parser picks `«term_>=_»`/`«term_<=_»`.
+Both rows of each pair expand to the same head, so elaboration cannot
+observe the difference. The parser divergence is a `leanr_syntax`
+follow-up.
+
 ### Harness
 
-- `Elab0.lean` gains the `Init/Prelude` and `Init/Notation`/`Init/Core`
-  declarations the corpus needs, copied verbatim in the scaffold's
-  existing style:
-  - the `H*`/homogeneous operator classes and the `instH*` default
-    instances
-  - `LE`, `LT`, `BEq`, `Ne`, `bne`, `Not`, `And`, `Or` and `Iff`,
-    where they are not already present
-  - the `infixl`/`notation` **and** `macro_rules` lines
+*(Rewritten 2026-10-02 per amended Decision 3. Every claim below was
+probed against v4.33.0-rc1 while writing the P2 plan.)*
 
-  The oracle side therefore really expands to `binop%`.
-- `oracle_elab.rs` parses with the snapshot plus Elab0's imported
-  parser overlay, using the M3b2a machinery. Existing records must
-  parse identically under the overlay, and that is checked.
-- **Kind-guard test.** It decodes only `Init/Notation.olean` and
-  `Init/Core.olean` from the pinned toolchain (their own
-  `parserExtension` entries, not the import closure). It asserts that
-  every table kind exists there under the same name. This guards
-  against the table and Elab0's copy drifting from real Init.
+- **`tests/fixtures/elab/ElabOp.lean`** is a new prelude-mode, import-free
+  fixture. Elab0 and its records are untouched. A committed script,
+  `gen_elab_op.sh`, generates ElabOp from the pinned toolchain's own
+  sources:
+  - whole-file `Init/Prelude.lean`, `Init/Coe.lean` and
+    `Init/Notation.lean`, with only the `module`/`prelude`/`import`
+    lines removed and the `public`/`meta` modifiers dropped;
+  - an `end Lean` line, because `Init/Notation.lean:592` opens
+    `namespace Lean` and never closes it. Without it, the appended
+    `Iff` becomes `Lean.Iff` and its notation kind becomes
+    `Lean.«term_↔_»`;
+  - the `Iff`, `bne` and `Ne` excerpts from `Init/Core.lean`
+    (`:188-197`, `:772-777`, `:875-880`).
+
+  The oracle side therefore expands with Init's real `macro_rules`. The
+  olean is ~7.8 MB. leanr replays it in ~5.4 s (debug build), and
+  `leanr_grammar::assemble` folds its grammar with 7 skips, none of them
+  a term operator.
+- **Its own corpus.** `dump_elab.lean ElabOp` writes `op-queries.jsonl`.
+  A gate in `oracle_op.rs` parses with ElabOp's assembled grammar and
+  shares the replay loop with `oracle_elab.rs`. Both gates assert that
+  the parsed term covers the whole source: `parse_term` silently stops at
+  an unknown token, so for example `a ⊕⊕ b` yields `<ident>` with no error.
+- **Kind and expansion guard.** `dump_op_expansions.lean` runs every
+  table notation through `expandMacroImpl?`. It records the source
+  kind, the expansion kind, the pre-resolved head and the arity in
+  `op-expansions.jsonl`. The regen task runs it against ElabOp and
+  against the real `Init` and diffs the two. A Rust test then holds
+  the table to the golden file in both directions. This replaces the
+  toolchain-olean decode: CI has no Lean, and the regen-time diff
+  catches the same drift.
 
 ### Testing
 
@@ -480,3 +511,65 @@ Open follow-ups:
 - Minor: no test where neither level side is an mvar under the stuck flag;
   the `with_new_mctx_depth` Err-path test does not cover level assignment
   discard.
+
+### P2 (PR #60): expansion hook, Init table, ElabOp harness
+
+Commits: 496f202 (ElabOp + golden), 169c1c5 (table + expand), 68c62a6
+(hook + App + gate), 1b308e3 (op seam + postponement contract tests,
+docs, spec Landed; T4), c80dc69 (`with_record_elab` dedupe), and the
+commit titled "leanr_elab: final-review fixes (macro/binop% P2)".
+
+Mutations run (all reverted):
+- T1: (a) the `parse_whole` span assertion, KILLED (a scratch test on
+  `a ⊕⊕ b` fails with it, passes without). (b) delete `end Lean` from
+  `gen_elab_op.sh`: the golden becomes `Lean.Iff`; the regen's own Init
+  diff caught it (the plan predicted it would not); `oracle_op.rs` stays
+  green. (c) empty `KNOWN_PARSE_DIVERGENCES`: KILLED by
+  `golden_sources_parse_to_the_oracle_kind`.
+- T2: (a) delete the `∧` row, (b) swap a head to `HSub`, (c) `^`
+  `RightAct`->`BinOp`, (d) bogus `+++` row: all KILLED by
+  `table_matches_oracle_expansions`. (e) swapped operands, (f) prefix
+  reads `[operand,_]`: KILLED by `expand_reads_operands_in_order`.
+- T3: (a) delete the hook, (b) no paren-strip recursion, (d) resolve `f`
+  lexically first, (e) reversed args, (g) span assertion removed: all
+  KILLED by `oracle_op_gate`. (c) hook only in the `No` arm SURVIVED the
+  plan's 18 records; added `op/implicit-lambda-bare` (corpus is 19, floor
+  19), then KILLED. (f) not expressible: an `Expansion` is not a `SynElem`.
+- T4: (a) `"binop%"` in the Op arm: KILLED by
+  `op_notations_stop_at_the_literal_kind_seam`. (b) `BinRel`'s
+  `syntax_kind` mapped to `binop`: KILLED (`table_matches_oracle_expansions`,
+  `expand_reads_operands_in_order`, the seam test). (c) `tail_from` returns
+  `Some(0)` for `Expanded`: KILLED. (d) `ref_elem` returns the first arg:
+  KILLED. "Store the expanded target instead of the original on
+  postpone" cannot be written, since the postponed record has no field for
+  an `Expansion`.
+
+Spec corrections:
+- Harness: separate generated `ElabOp` fixture (Decision 3 amended
+  2026-10-02); expansion golden file + regen-time diff against real
+  Init instead of decoding toolchain oleans in CI.
+- The hook needs no recursion guard: an `Expansion` is never re-expanded.
+  The VM slice owns `withIncRecDepth`.
+- The hook also runs on the `implicitLambda := false` path, after paren
+  stripping (`@(t)`).
+- `f` is carried as the global's name and resolved at elaboration
+  (`elab_app_expanded`), not at expansion, which keeps `expand` pure.
+- 29 kinds, not 28: `<->` is its own `Iff` kind.
+- Both corpus gates assert the parsed term spans the whole source.
+
+Open follow-ups:
+- leanr_syntax parses `a >= b` / `a <= b` as the low-priority
+  `«term_>=_»`/`«term_<=_»`; the oracle gives `«term_≥_»`/`«term_≤_»`.
+  This is unobservable after expansion (`KNOWN_PARSE_DIVERGENCES` in
+  `oracle_op.rs`).
+- Remaining Init notations (`×`, `×'`, `∘`, `∣`, `<<<`, `>>>`, `~~~`,
+  `⁻¹`, `≍`, `&&`, `||`, `!`, `∈`, `::`, `<$>`, `>>=`) have no table row;
+  shapes `Expansion` cannot express (`∉` nested notation, `<*>`/`<*`/`*>`
+  synthesizing `fun`, `<|`, `|>`, `$`, `{x // p}`, `without_expected_type`,
+  `max_prec`) need a new shape. All raise `UnsupportedSyntax(kind)`.
+- P3: the op elaborator, plus corpus records for the 24 op rows.
+- Whole-notation postponement of an `Expanded` target is unreachable in
+  P2 (App heads are consts with known types; no record postpones the
+  notation), so only the white-box bookkeeping test covers it. P3's
+  `binop%` elaborator should add a corpus record that postpones a whole
+  expansion.

@@ -932,3 +932,242 @@ pub fn with_elab<R>(
 ) -> R {
     with_elab_harness("with_elab", src, k)
 }
+
+/// Parse `src` with leanr's own parser, assert it parses cleanly and the
+/// term spans the WHOLE source (`parse_term` stops silently at an unknown
+/// token), build a fresh `TermElabM` over `r`'s environment, and run `k`
+/// on it. The one place the per-record elaboration setup lives; shared by
+/// `run_elab_corpus` and `elab_src_in`.
+///
+/// The `KindInterner` handed to `k` is the parsed tree's own, never a
+/// separately held snapshot handle. The term is the root's
+/// `first_child_or_token`, not `first_child`: a bare identifier is an
+/// unwrapped leaf token (`crate::dispatch`'s module doc).
+pub fn with_record_elab<R>(
+    r: &Replayed,
+    src: &str,
+    snap: &leanr_syntax::grammar::GrammarSnapshot,
+    k: impl FnOnce(
+        &mut leanr_elab::TermElabM,
+        &leanr_elab::dispatch::SynElem,
+        &leanr_syntax::kind::KindInterner,
+    ) -> R,
+) -> R {
+    use leanr_elab::TermElabM;
+    use leanr_kernel::bank::Store;
+    use leanr_meta::{Config, EnvExtensions, MetaCtx};
+
+    let parsed = leanr_syntax::parse_term(src, snap);
+    assert!(
+        parsed.errors.is_empty(),
+        "leanr parse errors for {src:?}: {:?}",
+        parsed.errors
+    );
+    let term_elem: leanr_elab::dispatch::SynElem = parsed
+        .tree
+        .root()
+        .first_child_or_token()
+        .unwrap_or_else(|| panic!("parse_term produced no term child for {src:?}"));
+    let range = term_elem.text_range();
+    assert_eq!(
+        (usize::from(range.start()), usize::from(range.end())),
+        (0, src.trim_end().len()),
+        "the parsed term does not span the whole source {src:?} \
+         (`parse_term` stops silently at an unknown token)"
+    );
+    let view = r.env.view();
+    let mut scratch = Store::scratch();
+    let mctx = MetaCtx::new(
+        view,
+        &mut scratch,
+        Config::default(),
+        EnvExtensions {
+            reducibility: &r.reducibility,
+            matchers: &r.matchers,
+            instances: &r.instances,
+            default_instances: &r.default_instances,
+            projection_fns: &r.projection_fns,
+            classes: &r.classes,
+            coe_decls: &r.coe_decls,
+            aux_recs: &r.aux_recs,
+            elab_as_elim: &r.elab_as_elim,
+            structures: &r.structures,
+        },
+    );
+    let mut elab = TermElabM::new(mctx, view);
+    k(&mut elab, &term_elem, &parsed.tree.kinds)
+}
+
+/// Replay `tests/fixtures/elab/<fixture>`, then elaborate every
+/// `{id, src, exp|err}` record of `<queries>` against it, parsing with
+/// `snap`. Panics listing every divergence. Returns the number of records
+/// replayed, for the caller's floor.
+pub fn run_elab_corpus(
+    fixture: &str,
+    queries: &str,
+    snap: &leanr_syntax::grammar::GrammarSnapshot,
+) -> usize {
+    use leanr_kernel::EnvView;
+
+    let r = replay_fixture_in("elab", fixture);
+
+    let queries = std::fs::read_to_string(fixture_in("elab", queries))
+        .unwrap_or_else(|e| panic!("committed elab corpus {queries}: {e}"));
+    let mut failures = Vec::new();
+    // Fix 2 of the M4b-3 P4 whole-branch fix wave: the WHOLE-CLASS
+    // detector for an unabstracted `fvar` leaking into a closed-term
+    // answer. See the assertion below.
+    let mut leaked_fvars = Vec::new();
+    let mut replayed = 0usize;
+    for line in queries.lines().filter(|l| !l.trim().is_empty()) {
+        replayed += 1;
+        let q: serde_json::Value = serde_json::from_str(line).expect("committed JSONL is valid");
+        let id = q["id"].as_str().expect("id field");
+        let src = q["src"].as_str().expect("src field");
+
+        // Fresh EnvView/Store/MetaCtx per query: queries never share
+        // state with each other. `with_record_elab` parses `src`,
+        // asserts it spans the whole source, and builds the `TermElabM`.
+        let view: EnvView = r.env.view();
+        with_record_elab(&r, src, snap, |elab, term_elem, kinds| {
+            // The pinned entry point, matching `dump_elab.lean`'s own module
+            // doc (M4b-3 P2a task 9): `TermElabM::elab_term_and_synthesize`
+            // (`elab.rs`) — `elab_term`, then
+            // `synthesize_synthetic_mvars_no_postponing`, then
+            // `instantiate_mvars` internally — mirroring the oracle's own
+            // `elabTermAndSynthesize` (`SyntheticMVars.lean:696-698`).
+            // `expected := None`: the committed corpus carries no
+            // expected-type field, so the inner `elab_term`'s `is_def_eq`
+            // branch never runs.
+            let got = elab.elab_term_and_synthesize(term_elem, kinds, None);
+
+            // M4b-4c P2: an `err` record is a query the ORACLE rejects. leanr
+            // must reject it too, with the same first line. Only errors with
+            // an `oracle_first_line` can match, which today is
+            // `ElabError::Eliminator`.
+            if let Some(want) = q.get("err").and_then(|v| v.as_str()) {
+                match got {
+                    Err(e) => {
+                        let line = e.oracle_first_line();
+                        if line.as_deref() != Some(want) {
+                            failures.push(format!(
+                                "{id}: leanr error {e:?} (first line {line:?}); oracle {want:?}"
+                            ));
+                        }
+                    }
+                    Ok(_) => failures.push(format!(
+                        "{id}: leanr elaborated; oracle errors with {want:?}"
+                    )),
+                }
+                return;
+            }
+
+            match got {
+                Ok(g) => {
+                    // `base = Some(view.store)` (Task 5 reconciliation,
+                    // mirroring `oracle_fast.rs`'s own `let base =
+                    // Some(view.store);`): `g` can now embed a
+                    // PERSISTENT-region `NameId` (`ident`'s resolved global
+                    // constant name), which `elab.mctx.store()` — the
+                    // elaborator's own SCRATCH store — cannot resolve on its
+                    // own; `encode_expr`'s internal `to_name` needs the
+                    // persistent store as a fallback base, exactly like
+                    // every kernel-side `Store` method with a `base`
+                    // parameter.
+                    let mut st = EncSt::default();
+                    let got_json = encode_expr(elab.mctx.store(), Some(view.store), g, &mut st);
+                    // EVERY term this corpus elaborates is CLOSED — the
+                    // queries are standalone terms with no ambient local
+                    // context (`replay_fixture_in` installs an environment,
+                    // never an `lctx`), so after `elab_term_and_synthesize`'s
+                    // internal `instantiate_mvars` the finished `Expr` must
+                    // contain no `fvar` NODE AT ALL. `EncSt` is fresh per
+                    // record and `encode_expr` interns every `Node::FVar` it
+                    // walks into `st.fvars`, so a non-empty map is an exact
+                    // "this term leaked a free variable" answer, not a
+                    // heuristic.
+                    //
+                    // WHY THIS GUARDS A REAL CLASS, not a hypothetical.
+                    // Every corpus query is a CLOSED term (no ambient
+                    // `lctx` — see above), so an `fvar` in a finished answer
+                    // is a bug, full stop: it means some subterm's free
+                    // variable never got abstracted before its binder
+                    // closed. `MetaCtx::mk_binding`
+                    // (`leanr_meta/src/metactx.rs`) runs the oracle's
+                    // `elimMVarDeps` (`MetavarContext.lean`,
+                    // `leanr_meta/src/mk_binding.rs`'s port) over the body
+                    // and over each binder type before abstracting, at the
+                    // oracle's own two insertion points — an unassigned
+                    // metavariable whose own local context holds the fvars
+                    // being abstracted is rewritten to a fresh metavariable
+                    // APPLIED to them, so it abstracts like any other
+                    // argument instead of leaking. Before that port landed
+                    // (the `elimMVarDeps` slice), a postponed synthetic mvar
+                    // registered under a binder and resumed by the fixpoint
+                    // AFTER that binder closed had its value spliced in
+                    // unabstracted: leanr emitted an `fvar` where the oracle
+                    // emits a `bvar`, a WRONG `ExprId` with NO error — silent
+                    // divergence, which this repo's cardinal rule forbids.
+                    // `seam_audit.rs`'s
+                    // `postponed_coe_under_a_binder_abstracts_via_elim_mvar_deps`
+                    // pins that one shape by hand; this assertion turns the
+                    // whole class loud across the corpus: any future
+                    // regression fails HERE, named, instead of quietly
+                    // shifting bytes.
+                    //
+                    // PLACEMENT: deliberately here, in the record replay,
+                    // and NOT inside the shared `elab_and_synthesize`
+                    // helper (it lives in this corpus runner) — a corpus regression should fail loudly at the
+                    // corpus, not inside a shared helper other tests also
+                    // call for unrelated shapes.
+                    if !st.fvars.is_empty() {
+                        leaked_fvars.push(format!("{id}: {got_json}"));
+                    }
+                    if got_json != q["exp"] {
+                        failures.push(format!("{id}: leanr={got_json} oracle={}", q["exp"]));
+                    }
+                }
+                Err(e) => failures.push(format!("{id}: leanr errored: {e:?}")),
+            }
+        });
+    }
+    // Asserted BEFORE the byte-comparison below: a leaked `fvar` also
+    // shows up there as an ordinary divergence, and this message is the
+    // one that says which class it belongs to.
+    assert!(
+        leaked_fvars.is_empty(),
+        "{} record(s) finished with an UNABSTRACTED `fvar` in the term. Every \
+         corpus query is a closed term, so an `fvar` in an answer is a bug: \
+         `MetaCtx::mk_binding` (`leanr_meta/src/metactx.rs`) runs \
+         `elim_mvar_deps` (`leanr_meta/src/mk_binding.rs`, the oracle's \
+         `MkBinding.elimMVarDeps`) over the body and over each binder type \
+         before abstracting, and `seam_audit.rs`'s \
+         `postponed_coe_under_a_binder_abstracts_via_elim_mvar_deps` pins the \
+         shape that used to leak. Do NOT relax this assertion and do NOT edit \
+         the corpus — track down why a metavariable's value is reaching this \
+         point unabstracted; a new record that trips this is a real \
+         regression, not a known gap. Offenders:\n{}",
+        leaked_fvars.len(),
+        leaked_fvars.join("\n")
+    );
+    assert!(
+        failures.is_empty(),
+        "{} divergences:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    replayed
+}
+
+/// Elaborate `src` against an already-replayed environment, with the
+/// same entry point `run_elab_corpus` uses, and discard the term. For
+/// tests that only care whether, and how, elaboration fails.
+pub fn elab_src_in(
+    r: &Replayed,
+    src: &str,
+    snap: &leanr_syntax::grammar::GrammarSnapshot,
+) -> Result<(), leanr_elab::ElabError> {
+    with_record_elab(r, src, snap, |elab, term, kinds| {
+        elab.elab_term_and_synthesize(term, kinds, None).map(|_| ())
+    })
+}

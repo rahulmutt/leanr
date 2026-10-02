@@ -22,12 +22,22 @@ use crate::error::ElabError;
 /// synthesized node has kind `anonymousCtor` and `SourceInfo.fromRef` the
 /// outer node, so implicit-lambda blocking, postponement refs, and
 /// `report.rs`'s range ordering all see what the oracle's see (design
-/// spec 2026-09-30-m4b4b § The tail form). The macro-expansion slice's
-/// synthesized syntax grows here.
+/// spec 2026-09-30-m4b4b § The tail form). `Expanded` is a notation node
+/// after macro expansion (macro/binop% P2, `macros/`): `r#ref` is the
+/// notation node itself, matching the expanded syntax's
+/// `SourceInfo.fromRef`, so postponement stores the ORIGINAL node and a
+/// resume re-expands it (`from_parts` → `Stx` → the hook).
 #[derive(Debug, Clone)]
 pub(crate) enum TermTarget {
     Stx(SynElem),
-    AnonCtorTail { node: SyntaxNode, from: usize },
+    AnonCtorTail {
+        node: SyntaxNode,
+        from: usize,
+    },
+    Expanded {
+        r#ref: SynElem,
+        exp: crate::macros::Expansion,
+    },
 }
 
 impl TermTarget {
@@ -35,12 +45,13 @@ impl TermTarget {
         match self {
             TermTarget::Stx(e) => e.clone(),
             TermTarget::AnonCtorTail { node, .. } => NodeOrToken::Node(node.clone()),
+            TermTarget::Expanded { r#ref, .. } => r#ref.clone(),
         }
     }
 
     pub(crate) fn tail_from(&self) -> Option<usize> {
         match self {
-            TermTarget::Stx(_) => None,
+            TermTarget::Stx(_) | TermTarget::Expanded { .. } => None,
             TermTarget::AnonCtorTail { from, .. } => Some(*from),
         }
     }
@@ -488,6 +499,27 @@ impl<'e> TermElabM<'e> {
         catch_ex_postpone: bool,
         implicit_lambda: bool,
     ) -> Result<ExprId, ElabError> {
+        // oracle: `expandMacroImpl?` runs FIRST (`TermElabM.lean:1831-1837`),
+        // before `useImplicitLambda` (`:1839`), and the expansion is
+        // elaborated with the SAME flags (`:1837`). Only real syntax
+        // expands: an `Expansion` is never a table key, so this cannot
+        // loop and needs no depth guard. The VM slice, whose macros can
+        // loop, owns `withIncRecDepth` (`:1825`) here.
+        if let TermTarget::Stx(elem) = target {
+            if let Some(exp) = crate::macros::expand(elem, kinds)? {
+                let expanded = TermTarget::Expanded {
+                    r#ref: elem.clone(),
+                    exp,
+                };
+                return self.elab_term_core(
+                    &expanded,
+                    kinds,
+                    expected,
+                    catch_ex_postpone,
+                    implicit_lambda,
+                );
+            }
+        }
         if !implicit_lambda {
             // oracle: a macro's expansion is elaborated with the SAME
             // `implicitLambda` flag (`TermElabM.lean:1837`), and
@@ -503,7 +535,8 @@ impl<'e> TermElabM<'e> {
             // elaborators, but none of them thread the node's own
             // `expected` straight through to an inner `elab_term`
             // call). A loop, because nesting depth is the user's. A
-            // flatten tail is an `anonymousCtor`, never a `paren`.
+            // flatten tail is an `anonymousCtor`, never a `paren`; an
+            // `Expanded` target is already past the hook.
             let TermTarget::Stx(elem) = target else {
                 return self.elab_using_elab_fns(target, kinds, expected, catch_ex_postpone);
             };
@@ -515,6 +548,19 @@ impl<'e> TermElabM<'e> {
                     .ok_or_else(|| {
                         ElabError::IllFormedSyntax("paren: no inner term".to_string())
                     })?;
+            }
+            // The inner term of a stripped paren goes back through the
+            // hook: in the oracle `paren` is itself a macro, so its
+            // expansion `t` re-enters `elabTermAux` macro step first.
+            // `@(True ∧ False)` reaches here.
+            if cur != *elem {
+                return self.elab_term_core(
+                    &TermTarget::Stx(cur),
+                    kinds,
+                    expected,
+                    catch_ex_postpone,
+                    false,
+                );
             }
             return self.elab_using_elab_fns(
                 &TermTarget::Stx(cur),
@@ -595,7 +641,8 @@ impl<'e> TermElabM<'e> {
 
     /// The single elaborator a target's kind selects: `dispatch` for real
     /// syntax, `elab_anon_ctor` for a flatten tail (whose synthesized
-    /// node's kind is `anonymousCtor`).
+    /// node's kind is `anonymousCtor`), the application elaborator or the
+    /// op seam for an expansion.
     fn dispatch_target(
         &mut self,
         target: &TermTarget,
@@ -622,6 +669,17 @@ impl<'e> TermElabM<'e> {
                 self.anon_tail_depth -= 1;
                 result
             }
+            TermTarget::Expanded { r#ref, exp } => match exp {
+                crate::macros::Expansion::App { f, args } => {
+                    crate::app::elab_app_expanded(self, f, args, r#ref, kinds, expected)
+                }
+                // P3 owns the op elaborator. Until then an expansion stops
+                // where a literal `binop% f a b` already does, named by the
+                // literal form's kind (dispatch's catch-all).
+                crate::macros::Expansion::Op { kind, .. } => {
+                    Err(ElabError::UnsupportedSyntax(kind.syntax_kind().to_string()))
+                }
+            },
         }
     }
 
@@ -1013,4 +1071,40 @@ fn is_lambda_with_implicit(elem: &SynElem, kinds: &KindInterner) -> bool {
             "Lean.Parser.Term.implicitBinder" | "Lean.Parser.Term.instBinder"
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A postponed `Expanded` target stores its ORIGINAL node and no tail,
+    /// so the resume rebuilds `Stx(node)` and goes back through the hook
+    /// (`synthetic/ladder.rs`'s `from_parts`). An `Expansion` itself is
+    /// never stored: `SyntheticMVarKind::Postponed` has no field for one.
+    #[test]
+    fn expanded_target_postpones_as_its_original_node() {
+        let snap = leanr_syntax::builtin::snapshot();
+        let parsed = leanr_syntax::parse_term("Nat.succ Nat.zero", &snap);
+        let node = parsed.tree.root().first_child_or_token().unwrap();
+        // A one-argument expansion whose argument differs from the ref,
+        // so a `ref_elem` that returned an argument would be caught.
+        let arg = match &node {
+            NodeOrToken::Node(n) => n.first_child_or_token().unwrap(),
+            NodeOrToken::Token(_) => panic!("application parses to a node"),
+        };
+        assert_ne!(arg, node);
+        let target = TermTarget::Expanded {
+            r#ref: node.clone(),
+            exp: crate::macros::Expansion::App {
+                f: "And",
+                args: vec![arg],
+            },
+        };
+        assert_eq!(target.ref_elem(), node);
+        assert_eq!(target.tail_from(), None);
+        match TermTarget::from_parts(&target.ref_elem(), target.tail_from()).unwrap() {
+            TermTarget::Stx(e) => assert_eq!(e, node),
+            other => panic!("resume must rebuild real syntax, got {other:?}"),
+        }
+    }
 }
