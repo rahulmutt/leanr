@@ -340,7 +340,7 @@ without the slow path behind it.
 
 ## Landed
 
-PR #TBD (branch `check-assignment-ctx-approx`), four tasks:
+PR #62 (branch `check-assignment-ctx-approx`), four tasks:
 T1 7959a10, T2 ddb6840, T3 eee69ad + 62262c2, T4 (corpus rows and this
 close-out). Oracle pin unchanged (`leanprover/lean4:v4.33.0-rc1`).
 
