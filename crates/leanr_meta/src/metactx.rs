@@ -1992,18 +1992,8 @@ impl<'e> MetaCtx<'e> {
     /// The `catch _ => false` of [`Self::is_def_eq_guarded`], minus runtime exceptions.
     pub(crate) fn guard_def_eq_result(r: Result<bool, MetaError>) -> Result<bool, MetaError> {
         match r {
-            Ok(b) => Ok(b),
-            Err(
-                e @ (MetaError::DepthBudgetExhausted
-                | MetaError::StepBudgetExhausted
-                | MetaError::Unsupported(_)
-                | MetaError::MVar(_)
-                | MetaError::Kernel(
-                    leanr_kernel::KernelError::BankExhausted
-                    | leanr_kernel::KernelError::DeepRecursion,
-                )),
-            ) => Err(e),
-            Err(_) => Ok(false),
+            Err(e) if e.is_oracle_catchable() => Ok(false),
+            other => other,
         }
     }
 }

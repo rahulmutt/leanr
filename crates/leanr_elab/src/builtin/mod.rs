@@ -12,4 +12,5 @@ pub mod ascription;
 pub mod binder;
 pub mod hole;
 pub mod lit;
+pub mod op;
 pub mod sort;

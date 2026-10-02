@@ -1243,7 +1243,122 @@ def opQueries : List (String × String) :=
   -- an operand postponed (lval on an mvar-typed local) and resumed
   , ("op/postponed-operand", "(fun x => x.1 ∧ True) (PProd.mk True True)")
   , ("op/as-arg",           "And True (True ∨ False)")
-  , ("op/ascribed",         "(True ∧ False : Prop)") ]
+  , ("op/ascribed",         "(True ∧ False : Prop)")
+  -- macro/binop% P3 T3: the `binop%` elaborator (Extra.lean:154-482).
+  -- `a + b * c`: one tree through the nested expansion
+  , ("op/add-mul",          "fun (a b c : Nat) => a + b * c")
+  -- leaf coercion to the max type, both orders
+  , ("op/coe-left",         "fun (n : Nat) (z : Z) => n + z")
+  , ("op/coe-right",        "fun (n : Nat) (z : Z) => z + n")
+  -- unknown `0` becomes `(0 : Z)`, not `↑(0 : Nat)` (Extra.lean:286-287)
+  , ("op/unknown-numeral",  "fun (n : Nat) (z : Z) => (n + 0) + z")
+  -- `2` stays uncoerced; `has_homogeneous_instance` is false (no `HMul Arr³`).
+  -- `op/hetero-default-homog` is the row that exercises
+  -- `has_heterogeneous_default_instances`
+  , ("op/hetero-default",   "fun (a : Arr Nat) => 2 * a")
+  -- `rightact%` leaves the exponent a leaf, outside the analysis
+  , ("op/rightact-pow",     "fun (n : Nat) (z : Z) => z ^ n")
+  , ("op/rightact-pow-lit", "fun (z : Z) => z ^ 2")
+  -- uncomparable `Nat`/`U`: plain elaboration through `HAdd Nat U U`
+  , ("op/uncomparable",     "fun (n : Nat) (u : U) => n + u")
+  -- depth/stuck rows are over CLOSED constants (`vx`, `k0`, `fx`, `z0`
+  -- in the test-support suffix), not `fun` binders: under a binder the
+  -- uncomparable path leaves an `HAdd` goal pending past the binder, and
+  -- leanr_meta's `processAssignment` lacks `elimMVarDeps` (P3 spec known gap).
+  -- depth: `V 3 =?= V ?m` must NOT assign the outer `?m` -> uncomparable ->
+  -- `k0` stays `Nat` (instHAddVNat); without depth `k0` is coerced to `V 3`
+  , ("op/depth",            "vx + (V.mk : V _) + k0")
+  , ("op/depth-mid",        "vx + k0 + (V.mk : V _)")
+  -- isDefEqStuckEx: `F 3 =?= F ?m` would succeed by unfolding `F`; stuck
+  -- -> uncomparable -> `fx`, `F.mk _` stay `F 3` (instHAddFZ)
+  , ("op/stuck",            "fx + F.mk _ + z0")
+  -- … and with no mvar the same types ARE comparable: `x` is coerced
+  , ("op/coe-unfold",       "fun (n : Nat) (x : F n) (z : Z) => x + z")
+  -- binop_lazy%: the rhs is `fun _ : Unit => b`
+  , ("op/lazy-orelse",      "fun (a b : Z) => a <|> b")
+  , ("op/lazy-andthen",     "fun (a b : Z) => a >> b")
+  -- the remaining binop rows of the table
+  , ("op/lor",              "fun (a b : Z) => a ||| b")
+  , ("op/xor",              "fun (a b : Z) => a ^^^ b")
+  , ("op/land",             "fun (a b : Z) => a &&& b")
+  , ("op/sub",              "fun (a b : Z) => a - b")
+  , ("op/div",              "fun (a b : Z) => a / b")
+  , ("op/mod",              "fun (a b : Z) => a % b")
+  , ("op/append",           "fun (a b : Z) => a ++ b")
+  -- unop%, and a coerced operand under it
+  , ("op/neg",              "fun (a : Z) => -a")
+  , ("op/neg-coe",          "fun (n : Nat) (z : Z) => -n + z")
+  -- leftact%: the lhs is a leaf
+  , ("op/smul",             "fun (n : Nat) (a : Z) => n • a")
+  -- the literal forms, and a literal head that is a LOCAL (resolveId?)
+  , ("op/literal-binop",    "fun (a b : Nat) => binop% HAdd.hAdd a b")
+  , ("op/literal-unop",     "fun (a : Z) => unop% Neg.neg a")
+  , ("op/literal-local-head", "fun (f : Nat → Nat → Nat) (a b : Nat) => binop% f a b")
+  -- the expected type seeds `max`
+  , ("op/expected",         "fun (n : Nat) => (n + 1 : Z)")
+  , ("op/nested-coe",       "fun (n : Nat) (z : Z) => n * n + z")
+  -- hygiene: a local named like the head's namespace does not capture it
+  , ("op/hygiene-op",       "fun (HAdd : Nat) (a b : Nat) => a + b")
+  , ("op/numerals",         "2 + 3")
+  -- an mvar expected type (the argument of `id`) and a beta-redex argument
+  , ("op/id-arg",           "fun (a b : Nat) => id (a + b)")
+  , ("op/beta-arg",         "fun (z : Z) => (fun x => x) (z + 1)")
+  -- a leaf that postpones (lval on an mvar-typed local) and resumes in
+  -- `toTree`'s `synthesizeSyntheticMVars (postpone := .yes)`
+  , ("op/postponed-binop-operand", "(fun x => x.1 + 0) (PProd.mk 1 2)")
+  -- mutation-killing rows: `2` stays uncoerced behind a HOMOGENEOUS
+  -- instance (`op/hetero-default` never reaches the leaves: no
+  -- `HMul (Arr Nat)³`); a regular `binop%` whose max has no homogeneous
+  -- instance (`HPow Z Z Z`) elaborates its sides separately; a `leftact%`
+  -- lhs is a LEAF, so `n + z` gets its own analysis (coerce `n`)
+  , ("op/hetero-default-homog", "fun (a : MArr Nat) => 2 * a")
+  , ("op/homog-literal-pow", "fun (n : Nat) (z : Z) => binop% HPow.hPow z n")
+  , ("op/smul-op-lhs",      "fun (n : Nat) (z a : Z) => (n + z) • a")
+  -- macro/binop% P3 T4: `binrel%`/`binrel_no_prop%` (Extra.lean:497-562)
+  -- coercion at the relation, `isPred := true`
+  , ("op/eq-coe",           "fun (n : Nat) (z : Z) => n = z")
+  , ("op/lt-coe",           "fun (n : Nat) (z : Z) => n < z")
+  -- the rest of the relation rows of the table
+  , ("op/ge",               "fun (a b : Z) => a ≥ b")
+  , ("op/ge-ascii",         "fun (a b : Z) => a >= b")
+  , ("op/le",               "fun (a b : Z) => a ≤ b")
+  , ("op/le-ascii",         "fun (a b : Z) => a <= b")
+  , ("op/gt",               "fun (a b : Z) => a > b")
+  , ("op/beq-coe",          "fun (n : Nat) (z : Z) => n == z")
+  , ("op/bne-coe",          "fun (n : Nat) (z : Z) => n != z")
+  , ("op/ne-coe",           "fun (n : Nat) (z : Z) => n ≠ z")
+  -- binrel_no_prop%: a `Prop` max type becomes `Bool` (decide)
+  , ("op/beq-prop",         "True == False")
+  , ("op/bne-prop",         "True != False")
+  , ("op/beq-prop-bool",    "fun (b : Bool) => True == b")
+  -- the uncomparable path's `toBoolIfNecessary` (no row above reaches it)
+  , ("op/beq-uncomparable-prop", "fun (n : Nat) (u : U) => (binop% PU n u) == True")
+  -- uncomparable operands: plain elaboration + `ensureHasType`
+  , ("op/rel-uncomparable", "fun (n : Nat) (u : U) => (n + u) = u")
+  -- an op tree under a relation, and an unknown numeral side
+  , ("op/rel-nested",       "fun (n : Nat) (z : Z) => n + n < z")
+  , ("op/rel-numeral",      "fun (z : Z) => 2 < z")
+  , ("op/rel-id-arg",       "fun (a b : Nat) => id (a < b)")
+  -- a KNOWN expected type, which the analysis must ignore (`analyze tree none`)
+  , ("op/rel-expected",     "fun (n : Nat) (z : Z) => (n = z : Prop)")
+  -- `withSynthesizeLight` (Extra.lean:499-528): no default instance inside the
+  -- relation, so `2 : ?α` waits for the postponed `x.1` (fixed by the
+  -- argument) instead of becoming `Nat`. The `x.1` spelling, not
+  -- `(fun a => a < 2) z0`: leanr fails that op-free (`DepthBudgetExhausted`
+  -- on `(fun a => LT.lt a 2) z0`, a pre-existing leanr_meta gap).
+  , ("op/rel-no-default",   "(fun x => x.1 < 2) (PProd.mk z0 z0)")
+  -- Review Focus #5: relation operands are LEAVES of the outer tree
+  , ("op/rel-of-rels",      "fun (a b : Nat) => (a < b) = (b < a)")
+  -- ... and only a coercing inner relation tells: as a binop subtree,
+  -- `LT.lt` has no homogeneous instance, so `n` would go uncoerced
+  , ("op/rel-of-coe-rels",  "fun (n : Nat) (z : Z) => (n < z) = (z < n)")
+  -- the same through literal `binrel%` operands (`toTree.go`'s literal arm)
+  , ("op/rel-of-literal-rels", "fun (n : Nat) (z : Z) => (binrel% LT.lt n z) = (binrel% LT.lt z n)") ]
+
+/-- macro/binop% P3: op queries the ORACLE rejects (`{"id","src","err"}`). -/
+def opErrQueries : List (String × String) :=
+  [ ("op/unknown-binop",    "fun (a b : Nat) => binop% NoSuch a b")
+  , ("op/unknown-binrel",   "fun (a b : Nat) => binrel% NoSuch a b") ]
 
 def emitErr (id src err : String) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("err", err)]
@@ -1255,7 +1370,7 @@ unsafe def main (args : List String) : IO Unit := do
   -- `lean --run dump_elab.lean` → Elab0's corpus; `… ElabOp` → the op corpus.
   let (mod, queries, errQueries) : Name × List (String × String) × List (String × String) :=
     match args with
-    | ["ElabOp"] => (`ElabOp, opQueries, [])
+    | ["ElabOp"] => (`ElabOp, opQueries, opErrQueries)
     | _ => (`Elab0, strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries ++ closeoutExplicitQueries ++ nondepQueries ++ lvalIdxQueries ++ lvalFnQueries ++ p2Queries ++ p3Queries ++ p4Queries ++ anonQueries ++ anonTailQueries ++ funExpandQueries ++ elimQueries, elimErrQueries)
   -- Must run before any `importModules (loadExts := true)` or the
   -- import throws internally (dump_syntax_elab.lean's module doc, same

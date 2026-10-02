@@ -695,6 +695,7 @@ mod tests {
             explicit: false,
             ellipsis: false,
             stx: elem.clone(),
+            result_is_out_param_support: true,
         };
         match super::elab_app_fn(&mut elab, &elem, &parsed.tree.kinds, &[], Vec::new(), call) {
             Err(crate::ElabError::UnknownIdent(s)) => assert_eq!(s, "Bar"),

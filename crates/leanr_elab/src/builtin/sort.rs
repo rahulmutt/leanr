@@ -70,6 +70,12 @@ pub fn elab_prop(
     _node: &SyntaxNode,
     _kinds: &KindInterner,
 ) -> Result<ExprId, ElabError> {
+    mk_prop(elab)
+}
+
+/// `mkSort Level.zero`: `Prop`. Shared with `binrel_no_prop%`'s `Prop`
+/// tests (`builtin::op::rel`).
+pub(crate) fn mk_prop(elab: &mut TermElabM) -> Result<ExprId, ElabError> {
     let store = elab.mctx.store_mut();
     let zero = store
         .level_zero(None)

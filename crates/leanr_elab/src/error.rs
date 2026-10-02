@@ -12,6 +12,9 @@ pub enum ElabError {
     /// M4b slices; until then their kinds arrive here, never silently.
     UnsupportedSyntax(String),
     UnknownIdent(String),
+    /// oracle: `throwUnknownConstantAt` — the `binop%` family's head did not
+    /// resolve (`Extra.lean:216`, `:223`, `:554`).
+    UnknownConstant(String),
     AmbiguousIdent(String),
     /// `ensureHasType`'s mismatch: `mkCoe`'s `.none` answer and its
     /// caught `MetaError::CoeExpansionMismatch` both land here
@@ -413,6 +416,7 @@ impl ElabError {
     pub fn oracle_first_line(&self) -> Option<String> {
         match self {
             Self::Eliminator { reason } => Some(reason.oracle_first_line()),
+            Self::UnknownConstant(n) => Some(format!("Unknown constant `{n}`")),
             _ => None,
         }
     }
@@ -456,6 +460,18 @@ pub(crate) const MAX_REC_DEPTH: usize = 512;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_constant_first_line_is_the_oracles() {
+        // oracle: `throwUnknownConstantAt` (probed 2026-10-02 against
+        // ElabOp: `binop% NoSuch a b` -> "Unknown constant `NoSuch`").
+        assert_eq!(
+            ElabError::UnknownConstant("NoSuch".into())
+                .oracle_first_line()
+                .as_deref(),
+            Some("Unknown constant `NoSuch`")
+        );
+    }
 
     #[test]
     fn eliminator_first_lines_are_the_oracles() {

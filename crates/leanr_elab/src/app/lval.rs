@@ -882,6 +882,7 @@ pub fn elab_app_lvals(
                     explicit: false,
                     ellipsis: false,
                     stx: call.stx.clone(),
+                    result_is_out_param_support: true,
                 };
                 f = crate::app::elab_app_args(elab, proj_fn, step, kinds)?;
             }
@@ -922,6 +923,7 @@ pub fn elab_app_lvals(
                     explicit: false,
                     ellipsis: false,
                     stx: call.stx.clone(),
+                    result_is_out_param_support: true,
                 };
                 f = crate::app::elab_app_args(elab, const_fn, step, kinds)?;
             }

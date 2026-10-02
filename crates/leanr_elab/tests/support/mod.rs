@@ -1062,6 +1062,18 @@ pub fn run_elab_corpus(
                 return;
             }
 
+            // The dumper (`dump_elab.lean`) only catches THROWN errors; a
+            // LOGGED one becomes `sorryAx` in an apparently successful
+            // record (errToSorry). Such a record pins an oracle error as a
+            // term (macro/binop% P3). Checked BEFORE leanr's result is
+            // looked at: when leanr also errors, the record would otherwise
+            // read as an ordinary divergence (P3 T4, the T1 mutation rerun).
+            assert!(
+                !q["exp"].to_string().contains("\"sorryAx\""),
+                "{id}: the oracle record contains sorryAx -- the \
+                 query is an oracle ERROR; move it to the err queries"
+            );
+
             match got {
                 Ok(g) => {
                     // `base = Some(view.store)` (Task 5 reconciliation,
@@ -1170,4 +1182,63 @@ pub fn elab_src_in(
     with_record_elab(r, src, snap, |elab, term, kinds| {
         elab.elab_term_and_synthesize(term, kinds, None).map(|_| ())
     })
+}
+
+/// The grammar of the generated `ElabOp` fixture (macro/binop% P2): the
+/// builtin grammar plus ElabOp's own notations. Shared by `oracle_op.rs`
+/// and `op_helpers.rs`.
+pub fn elab_op_grammar() -> leanr_syntax::grammar::GrammarSnapshot {
+    let bytes = std::fs::read(fixture_in("elab", "ElabOp.olean")).expect("committed ElabOp.olean");
+    let mut st = leanr_kernel::bank::Store::persistent();
+    let md = leanr_olean::ModuleData::parse(&bytes, &mut st).expect("decode ElabOp.olean");
+    assert!(md.imports.is_empty(), "ElabOp must stay import-free");
+    let name = std::sync::Arc::new(leanr_kernel::Name::Anonymous); // display-only
+    leanr_grammar::assemble(&[(name, md)], &st).snapshot
+}
+
+/// `f a`, built directly in the elaborator's scratch store.
+pub fn mk_app(
+    elab: &mut leanr_elab::TermElabM,
+    f: leanr_kernel::bank::ExprId,
+    a: leanr_kernel::bank::ExprId,
+) -> leanr_kernel::bank::ExprId {
+    let base = elab.view.store;
+    elab.mctx
+        .store_mut()
+        .expr_app(Some(base), f, a)
+        .expect("expr_app")
+}
+
+/// The `NameId` of a `Node::Const`; panics on any other node.
+pub fn const_name(
+    elab: &leanr_elab::TermElabM,
+    c: leanr_kernel::bank::ExprId,
+) -> leanr_kernel::bank::NameId {
+    match elab.mctx.store().expr_node(Some(elab.view.store), c) {
+        leanr_kernel::bank::terms::Node::Const { name: Some(n), .. } => n,
+        other => panic!("const_name: not a named constant: {other:?}"),
+    }
+}
+
+/// A fresh natural mvar whose type is a sort (`mkFreshTypeMVar`).
+pub fn fresh_type_mvar(elab: &mut leanr_elab::TermElabM) -> leanr_kernel::bank::ExprId {
+    elab.mk_fresh_type_mvar().expect("mk_fresh_type_mvar")
+}
+
+/// Elaborate the type `src` (builtin grammar) with this `elab`.
+pub fn parse_type(elab: &mut leanr_elab::TermElabM, src: &str) -> leanr_kernel::bank::ExprId {
+    let snap = leanr_syntax::builtin::snapshot();
+    let parsed = leanr_syntax::parse_term(src, &snap);
+    assert!(
+        parsed.errors.is_empty(),
+        "parse_type: {src:?}: {:?}",
+        parsed.errors
+    );
+    let elem: leanr_elab::dispatch::SynElem = parsed
+        .tree
+        .root()
+        .first_child_or_token()
+        .unwrap_or_else(|| panic!("parse_type: no term child for {src:?}"));
+    elab.elab_term(&elem, &parsed.tree.kinds, None)
+        .unwrap_or_else(|e| panic!("parse_type: {src:?}: {e:?}"))
 }
