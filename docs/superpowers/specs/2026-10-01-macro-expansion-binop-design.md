@@ -300,7 +300,7 @@ Mutations to run:
 - store the expanded target instead of the original on postpone, if
   that is observable; otherwise record that it is not
 
-Until P3 lands, an op-kind expansion reaches a named `UnsupportedSyntax`
+**Superseded: P3 landed (see § Landed › P3).** Until P3 landed, an op-kind expansion reached a named `UnsupportedSyntax`
 seam (`binop%` and the rest), so the order, hygiene, literal and
 postponement rows above are spelled with `App` notations where possible,
 and the rest move to P3.
@@ -332,16 +332,16 @@ macro-expansion stack used for error positions.
 
 - An `Op` view: `process_bin_op` / `process_un_op`.
   - `f` is resolved, throwing `UnknownConstant` if it does not resolve
-    (`:213`, `:220`).
+    (`:216`, `:223`).
   - `leftact` forces the left operand to a leaf, and `rightact` forces
-    the right one (`:215-216`).
+    the right one (`:217-219`).
 - A `paren` whose body has no `·`: recurse into the body. A `paren`
   whose body has a `·`: a leaf (`:201-205`). That reaches leanr's
   existing cdot seam, so there is no new behaviour.
 - Anything else: try the P2 hook. An expansion yields
-  `MacroExpansion { nested: go(expanded) }` (`:207-211`). This is what
+  `MacroExpansion { nested: go(expanded) }` (`:208-212`). This is what
   makes `a + b * c` one tree.
-- Otherwise a leaf: `elab_term(s, None)` (`:224-227`).
+- Otherwise a leaf: `elab_term(s, None)` (`:226-229`).
 
 `to_tree` ends with `synthesize_synthetic_mvars(postpone = yes)`
 (`:191`).
@@ -412,7 +412,7 @@ distinguishable:
 |---|---|
 | `a + b * c : Nat` | homogeneous, one tree |
 | `n + z`, `z + n` (`n : Nat`, `z : Z`) | leaf coercion to the max type, both orders |
-| `(n + 0) + z` | unknown `0` resolves to `Z`, not `↑(0 : Nat)` (oracle comment `:281-284`) |
+| `(n + 0) + z` | unknown `0` resolves to `Z`, not `↑(0 : Nat)` (oracle comment `:285-287`) |
 | `2 * a` (`a : Arr Nat`) | uncoerced `2`, reaching `has_homogeneous_instance = false` *(corrected: `op/hetero-default-homog`, over `MArr`, is the row that exercises `has_heterogeneous_default_instances`)* |
 | `z ^ n` (`z : Z`, `n : Nat`) | `rightact` leaves the exponent alone |
 | `n + u` (`u : U`, no coercion either way) | uncomparable: fallback to plain elaboration |
@@ -621,12 +621,14 @@ Open follow-ups:
   shapes `Expansion` cannot express (`∉` nested notation, `<*>`/`<*`/`*>`
   synthesizing `fun`, `<|`, `|>`, `$`, `{x // p}`, `without_expected_type`,
   `max_prec`) need a new shape. All raise `UnsupportedSyntax(kind)`.
-- P3: the op elaborator, plus corpus records for the 24 op rows.
-- Whole-notation postponement of an `Expanded` target is unreachable in
+- ~~P3: the op elaborator, plus corpus records for the 24 op rows.~~ DONE:
+  see § Landed › P3.
+- ~~Whole-notation postponement of an `Expanded` target is unreachable in
   P2 (App heads are consts with known types; no record postpones the
   notation), so only the white-box bookkeeping test covers it. P3's
   `binop%` elaborator should add a corpus record that postpones a whole
-  expansion.
+  expansion.~~ SUPERSEDED: unreachable, so no such record; see § Landed › P3
+  (spec corrections).
 
 ### P3: the op elaborator (`builtin/op/`)
 
@@ -701,6 +703,16 @@ Spec corrections:
   with a P2 row).
 
 Open follow-ups (owner suggestion in brackets):
+- **TOP PRIORITY, reachable from plain `+` notation (final-review probe,
+  2026-10-02).** The elimMVarDeps gap below is NOT confined to explicit `@`:
+  ordinary `binop%` notation hits it. Against ElabOp,
+  `fun (n : Nat) (x : F n) => x + F.mk _` returns a SILENTLY WRONG `Ok` in
+  leanr: `F.mk (?m n x)` with an unassigned mvar, and `instHAdd Nat
+  instAddNat` as the instance, where the oracle gives `F.mk n` with
+  `@instHAdd (F n) (instAddF n)`. And
+  `fun (n : Nat) (x : F n) (z : Z) => x + F.mk _ + z` is
+  `Err(InstanceSynthesisFailed)` in leanr where the oracle elaborates it
+  (`@HAdd.hAdd (F n) Z Z (instHAddFZ n) (x + F.mk n) z`).
 - leanr_meta elimMVarDeps gap [a leanr_meta slice]: `assign.rs`
   `mk_lambda_fvars_with_let_deps` -> `mk_lambda_over_fvars` uses raw
   `abstract_fvars` with no `elimMVarDeps` (oracle `mkLambdaFVars`,

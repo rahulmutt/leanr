@@ -46,7 +46,7 @@ impl OpKind {
 
     /// `binrel%`/`binrel_no_prop%`: elaborated by `elabBinRelCore`, and a
     /// LEAF inside another op's tree (`toTree.go` matches only the other
-    /// five, `Extra.lean:193-198`).
+    /// five, `Extra.lean:196-200`).
     pub fn is_rel(self) -> bool {
         matches!(self, OpKind::BinRel | OpKind::BinRelNoProp)
     }

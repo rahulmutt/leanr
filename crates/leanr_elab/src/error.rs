@@ -13,7 +13,7 @@ pub enum ElabError {
     UnsupportedSyntax(String),
     UnknownIdent(String),
     /// oracle: `throwUnknownConstantAt` — the `binop%` family's head did not
-    /// resolve (`Extra.lean:213`, `:220`, `:562`).
+    /// resolve (`Extra.lean:216`, `:223`, `:554`).
     UnknownConstant(String),
     AmbiguousIdent(String),
     /// `ensureHasType`'s mismatch: `mkCoe`'s `.none` answer and its

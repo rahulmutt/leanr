@@ -214,6 +214,7 @@ fn paren_inner(s: &SynElem) -> Result<SynElem, ElabError> {
 /// same (empty) macro scopes as its enclosing paren, so any `cdot` node
 /// matches.
 fn has_cdot(e: &SynElem, kinds: &KindInterner) -> bool {
+    // No `grow`: the search stops at parens, so it is bounded, with tiny frames.
     match kinds.name(e.kind()) {
         "Lean.Parser.Term.paren" | "Lean.Parser.Term.typeAscription" | "Lean.Parser.Term.tuple" => {
             false

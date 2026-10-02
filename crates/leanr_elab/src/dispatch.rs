@@ -103,6 +103,15 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
         "Lean.Parser.Term.namedPattern" => Some("namedPattern"),
         "Lean.Parser.Term.dotIdent" => Some("dotIdent"),
         "Lean.Parser.Term.anonymousCtor" => Some("anonymousCtor"),
+        // macro/binop% P3: `elabOp` serves the first five, `elabBinRelCore`
+        // the last two (`Extra.lean:478-482`, `:564-566`).
+        "Lean.Parser.Term.binop" => Some("binop"),
+        "Lean.Parser.Term.binop_lazy" => Some("binop_lazy"),
+        "Lean.Parser.Term.unop" => Some("unop"),
+        "Lean.Parser.Term.leftact" => Some("leftact"),
+        "Lean.Parser.Term.rightact" => Some("rightact"),
+        "Lean.Parser.Term.binrel" => Some("binrel"),
+        "Lean.Parser.Term.binrel_no_prop" => Some("binrel_no_prop"),
         _ => None,
     }
 }

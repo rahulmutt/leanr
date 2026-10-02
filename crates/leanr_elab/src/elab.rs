@@ -175,6 +175,10 @@ impl<'e> TermElabM<'e> {
     /// `builtin::op`'s `mk_app_m` refreshes the levels itself, INSIDE a
     /// `with_new_mctx_depth` scope, so the fresh level mvars are assignable
     /// there.
+    ///
+    /// Caller precondition: `name` must be in the environment. Unlike the
+    /// oracle's `getConstInfo` (which throws "unknown constant"), a missing
+    /// name silently yields an empty level list.
     pub(crate) fn mk_const_with_level_params(&mut self, name: NameId) -> Result<ExprId, ElabError> {
         let base = self.view.store;
         let params: Vec<NameId> = self

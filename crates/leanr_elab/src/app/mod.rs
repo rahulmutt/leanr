@@ -455,8 +455,8 @@ pub struct AppCall {
     pub ellipsis: bool,
     pub stx: SynElem,
     /// oracle: `elabAppArgs`' `resultIsOutParamSupport` parameter (default
-    /// `true`). Only the `binop%` family passes `false` (`Extra.lean:321`,
-    /// `:324`, `:550`).
+    /// `true`). Only the `binop%` family passes `false` (`Extra.lean:320`,
+    /// `:323`, `:544`).
     pub result_is_out_param_support: bool,
 }
 

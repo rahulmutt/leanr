@@ -20,7 +20,9 @@
 //!
 //! Not modelled: info trees (the oracle's `Tree.term` payload and
 //! `withTermInfoContext'`), and the trace classes. `withRef` is not
-//! modelled either: leanr's errors carry no positions yet.
+//! modelled either: leanr's errors carry no positions yet. Also not
+//! modelled: `resolveId?`'s `checkDeprecated` (`TermElabM.lean:2221`);
+//! it only logs a warning.
 
 pub mod analyze;
 mod rel;

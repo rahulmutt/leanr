@@ -390,7 +390,7 @@ impl MetaError {
 
 ```rust
     /// oracle: `throwUnknownConstantAt` — the `binop%` family's head did not
-    /// resolve (`Extra.lean:213`, `:220`, `:562`).
+    /// resolve (`Extra.lean:216`, `:223`, `:554`).
     UnknownConstant(String),
 ```
 
@@ -453,7 +453,7 @@ impl OpKind {
 
     /// `binrel%`/`binrel_no_prop%`: elaborated by `elabBinRelCore`, and a
     /// LEAF inside another op's tree (`toTree.go` matches only the other
-    /// five, `Extra.lean:193-198`).
+    /// five, `Extra.lean:196-200`).
     pub fn is_rel(self) -> bool {
         matches!(self, OpKind::BinRel | OpKind::BinRelNoProp)
     }
@@ -537,7 +537,7 @@ git commit -m "leanr_elab: UnknownConstant, AppCall out-param flag, catchable Me
   -- leaf coercion to the max type, both orders
   , ("op/coe-left",         "fun (n : Nat) (z : Z) => n + z")
   , ("op/coe-right",        "fun (n : Nat) (z : Z) => z + n")
-  -- unknown `0` becomes `(0 : Z)`, not `↑(0 : Nat)` (Extra.lean:281-284)
+  -- unknown `0` becomes `(0 : Z)`, not `↑(0 : Nat)` (Extra.lean:285-287)
   , ("op/unknown-numeral",  "fun (n : Nat) (z : Z) => (n + 0) + z")
   -- `has_heterogeneous_default_instances`: `2` stays uncoerced, then `Nat`
   , ("op/hetero-default",   "fun (a : Arr Nat) => 2 * a")
@@ -917,7 +917,7 @@ pub(crate) fn elab_op_view(
 
 /// `processBinOp`/`processUnOp`'s
 /// `let some f ← resolveId? f | throwUnknownConstantAt f f.getId`
-/// (`Extra.lean:213`, `:220`, `:562`). A table head is the quotation's
+/// (`Extra.lean:216`, `:223`, `:554`). A table head is the quotation's
 /// pre-resolved global: `mkConst` with fresh levels, never a local.
 pub(crate) fn resolve_head(elab: &mut TermElabM, head: &OpHead) -> Result<ExprId, ElabError> {
     match head {
@@ -1050,7 +1050,7 @@ fn go(elab: &mut TermElabM, s: &SynElem, kinds: &KindInterner) -> Result<Tree, E
             go(elab, &inner, kinds)
         };
     }
-    // `expandMacroImpl?` (`:207-211`): an op expansion continues the tree;
+    // `expandMacroImpl?` (`:208-212`): an op expansion continues the tree;
     // anything else it expands to (an `App`, or `binrel%`) is a LEAF of the
     // expanded syntax, which is what `go s'` on it does in the oracle.
     match crate::macros::expand(s, kinds)? {
@@ -1082,7 +1082,7 @@ fn process_view(elab: &mut TermElabM, view: &OpView, kinds: &KindInterner) -> Re
             return Err(ElabError::Internal("process_view on a binrel".into()))
         }
     };
-    // `leftact`/`rightact`: that side is a leaf (`:215-216`).
+    // `leftact`/`rightact`: that side is a leaf (`:217-219`).
     let lhs = if kind == BinOpKind::LeftAct {
         process_leaf(elab, TermTarget::Stx(view.args[0].clone()), &view.args[0], kinds)?
     } else {
@@ -1096,7 +1096,7 @@ fn process_view(elab: &mut TermElabM, view: &OpView, kinds: &KindInterner) -> Re
     Ok(Tree::BinOp { r#ref, kind, f, lhs: Box::new(lhs), rhs: Box::new(rhs) })
 }
 
-/// oracle: `processLeaf` (`:224-227`): `elabTerm s none`.
+/// oracle: `processLeaf` (`:226-229`): `elabTerm s none`.
 fn process_leaf(
     elab: &mut TermElabM,
     target: TermTarget,

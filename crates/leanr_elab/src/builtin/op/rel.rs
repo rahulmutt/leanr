@@ -46,8 +46,8 @@ pub(crate) fn elab_bin_rel_core(
             r#ref: view.r#ref.clone(),
             kind: BinOpKind::Regular,
             f,
-            lhs: Box::new(lhs.clone()),
-            rhs: Box::new(rhs.clone()),
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
         };
         let r = analyze(elab, &tree, None)?;
         match r.max {
@@ -63,8 +63,14 @@ pub(crate) fn elab_bin_rel_core(
             }
             _ => {
                 // `:536-544`: the default strategy + `toBoolIfNecessary`.
-                let l = to_expr_core(elab, &lhs, kinds)?;
-                let r = to_expr_core(elab, &rhs, kinds)?;
+                // Borrow the operands back out of `tree` (moved into it above).
+                let Tree::BinOp { lhs, rhs, .. } = &tree else {
+                    return Err(ElabError::Internal(
+                        "binrel: the tree built above is not a BinOp".into(),
+                    ));
+                };
+                let l = to_expr_core(elab, lhs, kinds)?;
+                let r = to_expr_core(elab, rhs, kinds)?;
                 let l = to_bool_if_necessary(elab, no_prop, &lhs_stx, l)?;
                 let r = to_bool_if_necessary(elab, no_prop, &rhs_stx, r)?;
                 let l_ty = elab.mctx.infer_type(l)?;
