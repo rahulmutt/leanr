@@ -27,9 +27,10 @@ use crate::LocalDeclKind;
 /// `LocalContext`'s own decl list.
 ///
 /// `nondep` readers: against the AMBIENT context, through
-/// `MetaCtx::local_entry`, `whnf`'s zeta-delta, and `assign.rs`'s
-/// `simp_assignment_arg_aux`, `mk_lambda_fvars_with_let_deps` and
-/// `check_assignment_scope_body`; against a metavariable's OWN context,
+/// `MetaCtx::local_entry`, `whnf`'s zeta-delta, `assign.rs`'s
+/// `simp_assignment_arg_aux` and `mk_lambda_fvars_with_let_deps`, and
+/// `check_assignment.rs`'s `check_assignment_scope_body` and
+/// `ca_check_fvar`; against a metavariable's OWN context,
 /// through `LocalCtxSnapshot::entry`, `collect_forward_deps`,
 /// `mk_mvar_app` and `mk_aux_mvar_type_with` (`mk_binding.rs`).
 #[derive(Clone)]

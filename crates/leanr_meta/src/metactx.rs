@@ -1091,10 +1091,16 @@ impl<'e> MetaCtx<'e> {
     }
 
     /// Shared telescope-abstraction loop backing `mk_forall`/`mk_lambda`
-    /// (oracles `mkForallFVars`/`mkLambdaFVars`, the cdecl case). Abstracts
-    /// `body` over the telescope `fvars` (each an fvar declared in
-    /// `self.lctx`, no let value in this plan) and wraps in nested
-    /// `forallE`/`lam` (per `is_lambda`), innermost fvar last. Transcribed
+    /// (oracles `mkForallFVars`/`mkLambdaFVars` with the API default
+    /// `generalizeNondepLet := true`). Abstracts `body` over the
+    /// telescope `fvars` (each an fvar declared in `self.lctx`) and wraps
+    /// in nested `forallE`/`lam` (per `is_lambda`), innermost fvar last.
+    /// A cdecl becomes a binder over its type with its own binder info; a
+    /// `have` (nondep ldecl) is generalized to a `.default` binder over
+    /// its TYPE, its value dropped (`MetavarContext.lean:1330-1332`); a
+    /// genuine let (`nondep := false`) is refused with an error, since
+    /// emitting the oracle's `letE` (`:1333-1336`) is not ported here.
+    /// Transcribed
     /// from `infer.rs::rebuild_forall`'s `None`-value branch (infer.rs:802),
     /// the crate's own oracle-verified abstraction loop, since the kernel's
     /// `mk_pi`/`mk_lambda` are not re-exported from `leanr_kernel`.
@@ -1150,35 +1156,30 @@ impl<'e> MetaCtx<'e> {
                     let decl = self.lctx.get(id).ok_or_else(|| {
                         MetaError::Infer("mk_binding: telescope fvar not declared".into())
                     })?;
-                    // The kernel's own rebuild twin (`subst.rs::mk_binding`,
-                    // fn at :1020) has a `Some(value)` branch that emits
-                    // `expr_let` for an ldecl entry (subst.rs:1038-1040).
-                    // This accessor has no such branch — deliberately: it
-                    // is `mkForallFVars`/`mkLambdaFVars`'s cdecl-only case
-                    // (see this fn's own doc), and a `letI`/`letrec`/mixed
-                    // telescope is a later slice's problem, not this one's.
-                    // Refuse rather than silently building a `lam`/`forallE`
-                    // that drops the ldecl's value on the floor — a wrong
-                    // `ExprId`, not a named seam.
+                    // A `have` (nondep ldecl): the oracle's `mkBinding`
+                    // runs with `generalizeNondepLet := true` (the API
+                    // default), and its ldecl arm
+                    // (`MetavarContext.lean:1330-1332`) abstracts a nondep
+                    // ldecl as a `.default` binder over its TYPE, like a
+                    // cdecl; the value is dropped, as in the oracle.
                     //
-                    // SEAM (a `have`): the oracle's `mkBinding` runs with
-                    // `generalizeNondepLet := true` (the API default), and
-                    // its ldecl arm (`MetavarContext.lean:1330-1332`) then
-                    // abstracts a nondep ldecl as a `.default` binder like
-                    // a cdecl. That is out of this slice's scope, so a `have` is refused
-                    // too — under its own message, so one reaching here is
-                    // recognisable as the seam rather than a genuine let.
+                    // A genuine let (`nondep := false`): the oracle emits a
+                    // `letE` (`:1333-1336`), as does the kernel's rebuild
+                    // twin (`subst.rs::mk_binding`'s `Some(value)` branch).
+                    // That arm is not ported here, so refuse rather than
+                    // build a `lam`/`forallE` that silently drops the let's
+                    // value — a wrong `ExprId`, not a named seam.
                     if decl.value.is_some() {
                         let have = self.local_entry(id).is_some_and(|e| e.nondep);
-                        return Err(MetaError::Infer(if have {
-                            "mk_binding: have-decl (nondep) fvar in a cdecl telescope \
-                             (SEAM: oracle generalizes it to a default binder)"
-                                .into()
-                        } else {
-                            "mk_binding: let-decl fvar in a cdecl telescope".into()
-                        }));
+                        if !have {
+                            return Err(MetaError::Infer(
+                                "mk_binding: let-decl fvar in a cdecl telescope".into(),
+                            ));
+                        }
+                        (decl.binder_name, decl.ty, leanr_kernel::BinderInfo::Default)
+                    } else {
+                        (decl.binder_name, decl.ty, decl.binder_info)
                     }
-                    (decl.binder_name, decl.ty, decl.binder_info)
                 }
                 _ => {
                     return Err(MetaError::Infer(
@@ -1205,21 +1206,22 @@ impl<'e> MetaCtx<'e> {
         Ok(r)
     }
 
-    /// oracle: `mkForallFVars` (the cdecl case). Abstract `body` over the
-    /// telescope `fvars` (each an fvar declared in `self.lctx`, no let
-    /// value in this plan) and wrap in nested `forallE`, innermost fvar
-    /// last. See `mk_binding` for the shared implementation.
+    /// oracle: `mkForallFVars`. Abstract `body` over the telescope
+    /// `fvars` (each an fvar declared in `self.lctx`) and wrap in nested
+    /// `forallE`, innermost fvar last. A `have` is generalized to a
+    /// binder over its type; a genuine let is refused. See `mk_binding`
+    /// for the shared implementation.
     pub fn mk_forall(&mut self, fvars: &[ExprId], body: ExprId) -> Result<ExprId, MetaError> {
         self.mk_binding(false, fvars, body)
     }
 
-    /// oracle: `mkLambdaFVars` (the cdecl case). Abstract `body` over the
-    /// telescope `fvars` (each an fvar declared in `self.lctx`, no let
-    /// value in this plan) and wrap in nested `lam`, innermost fvar last.
-    /// The `mk_forall` twin — see `mk_binding` for the shared
-    /// implementation. Additive + behavior-neutral: exposes capability the
-    /// crate already exercises (`expr_lam` + `abstract_fvars`), adds no
-    /// state, changes no existing path.
+    /// oracle: `mkLambdaFVars` (without `etaReduce`; see the eta SEAM on
+    /// `mk_lambda_fvars_with_let_deps`). Abstract `body` over the
+    /// telescope `fvars` (each an fvar declared in `self.lctx`) and wrap
+    /// in nested `lam`, innermost fvar last. A `have` is generalized to a
+    /// `.default` binder over its type; a genuine let is refused. The
+    /// `mk_forall` twin — see `mk_binding` for the shared
+    /// implementation.
     pub fn mk_lambda(&mut self, fvars: &[ExprId], body: ExprId) -> Result<ExprId, MetaError> {
         self.mk_binding(true, fvars, body)
     }
@@ -2590,22 +2592,39 @@ mod tests {
         });
     }
 
-    /// A `have` is refused too (behaviour unchanged, the oracle would
-    /// generalize it), but under its own message so the seam is
-    /// recognisable; a genuine `let` keeps the old message.
+    /// A `have` is abstracted like a cdecl, as a `.default` binder
+    /// (`generalizeNondepLet := true`, `MetavarContext.lean:1330-1332`);
+    /// a genuine `let` is still refused.
     #[test]
-    fn mk_binding_names_a_refused_have_as_the_seam() {
+    fn mk_binding_generalizes_a_have_and_refuses_a_let() {
         with_prelude0_ctx(|ctx| {
             let nat = const_named(ctx, "Nat");
-            for (nondep, needle) in [(true, "have-decl (nondep)"), (false, "let-decl")] {
+            // ty != value, so using the value as the binder type is caught.
+            let zero = crate::test_support::const_dotted(ctx, "Nat", "zero");
+            for nondep in [true, false] {
                 let checkpoint = ctx.lctx_checkpoint();
                 let fvar = ctx
-                    .push_let_decl(None, nat, nat, nondep)
+                    .push_let_decl(None, nat, zero, nondep)
                     .expect("push_let_decl");
-                let err = ctx.mk_forall(std::slice::from_ref(&fvar), fvar);
+                let r = ctx.mk_lambda(std::slice::from_ref(&fvar), fvar);
                 ctx.lctx_restore(checkpoint);
-                let msg = format!("{:?}", err.expect_err("refused"));
-                assert!(msg.contains(needle), "nondep={nondep}: {msg}");
+                if nondep {
+                    let lam = r.expect("have abstracts");
+                    match ctx.node(lam) {
+                        Node::Lam {
+                            binder_info,
+                            binder_type,
+                            ..
+                        } => {
+                            assert_eq!(binder_info, leanr_kernel::BinderInfo::Default);
+                            assert_eq!(binder_type, nat, "binder over the have's TYPE");
+                        }
+                        other => panic!("expected a lam, got {other:?}"),
+                    }
+                } else {
+                    let msg = format!("{:?}", r.expect_err("let refused"));
+                    assert!(msg.contains("let-decl"), "{msg}");
+                }
             }
         });
     }

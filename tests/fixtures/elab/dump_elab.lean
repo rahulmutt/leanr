@@ -1261,17 +1261,18 @@ def opQueries : List (String × String) :=
   , ("op/rightact-pow-lit", "fun (z : Z) => z ^ 2")
   -- uncomparable `Nat`/`U`: plain elaboration through `HAdd Nat U U`
   , ("op/uncomparable",     "fun (n : Nat) (u : U) => n + u")
-  -- depth/stuck rows are over CLOSED constants (`vx`, `k0`, `fx`, `z0`
-  -- in the test-support suffix), not `fun` binders: under a binder the
-  -- uncomparable path leaves an `HAdd` goal pending past the binder, and
-  -- leanr_meta's `processAssignment` lacks `elimMVarDeps` (P3 spec known gap).
-  -- depth: `V 3 =?= V ?m` must NOT assign the outer `?m` -> uncomparable ->
-  -- `k0` stays `Nat` (instHAddVNat); without depth `k0` is coerced to `V 3`
-  , ("op/depth",            "vx + (V.mk : V _) + k0")
-  , ("op/depth-mid",        "vx + k0 + (V.mk : V _)")
-  -- isDefEqStuckEx: `F 3 =?= F ?m` would succeed by unfolding `F`; stuck
-  -- -> uncomparable -> `fx`, `F.mk _` stay `F 3` (instHAddFZ)
-  , ("op/stuck",            "fx + F.mk _ + z0")
+  -- depth/stuck rows, under `fun` binders (restored by the checkAssignment
+  -- slice: they had been respelled over closed constants because of the
+  -- elimMVarDeps / isSubPrefixOf gap). The `-closed` spellings over the
+  -- suffix constants (`vx`, `k0`, `fx`, `z0`) are kept: same paths, no binder.
+  -- depth: `V n =?= V ?m` must NOT assign the outer `?m` -> uncomparable
+  , ("op/depth",            "fun (n k : Nat) (x : V n) => x + (V.mk : V _) + k")
+  , ("op/depth-mid",        "fun (n k : Nat) (x : V n) => x + k + (V.mk : V _)")
+  , ("op/depth-closed",     "vx + (V.mk : V _) + k0")
+  , ("op/depth-mid-closed", "vx + k0 + (V.mk : V _)")
+  -- isDefEqStuckEx: `F n =?= F ?m` stuck -> uncomparable
+  , ("op/stuck",            "fun (n : Nat) (x : F n) (z : Z) => x + F.mk _ + z")
+  , ("op/stuck-closed",     "fx + F.mk _ + z0")
   -- … and with no mvar the same types ARE comparable: `x` is coerced
   , ("op/coe-unfold",       "fun (n : Nat) (x : F n) (z : Z) => x + z")
   -- binop_lazy%: the rhs is `fun _ : Unit => b`
@@ -1306,6 +1307,14 @@ def opQueries : List (String × String) :=
   -- a leaf that postpones (lval on an mvar-typed local) and resumes in
   -- `toTree`'s `synthesizeSyntheticMVars (postpone := .yes)`
   , ("op/postponed-binop-operand", "(fun x => x.1 + 0) (PProd.mk 1 2)")
+  -- checkAssignment slice (spec 2026-10-02 § Evidence): a binder-local
+  -- mvar must not be assigned to an outer one (isSubPrefixOf + ctxApprox).
+  , ("op/binder-F-hole",    "fun (n : Nat) (x : F n) => x + F.mk _")
+  , ("meta/at-hadd-V",      "fun (n : Nat) => @HAdd.hAdd _ _ _ _ (V.mk : V n) (V.mk : V _)")
+  , ("meta/beta-lt",        "(fun a => LT.lt a 2) z0")
+  , ("meta/beta-add",       "(fun a => a + 2) z0")
+  , ("meta/beta-beq",       "(fun a => BEq.beq a 2) z0")
+  , ("op/rel-lt-beta",      "(fun a => a < 2) z0")
   -- mutation-killing rows: `2` stays uncoerced behind a HOMOGENEOUS
   -- instance (`op/hetero-default` never reaches the leaves: no
   -- `HMul (Arr Nat)³`); a regular `binop%` whose max has no homogeneous
@@ -1343,9 +1352,8 @@ def opQueries : List (String × String) :=
   , ("op/rel-expected",     "fun (n : Nat) (z : Z) => (n = z : Prop)")
   -- `withSynthesizeLight` (Extra.lean:499-528): no default instance inside the
   -- relation, so `2 : ?α` waits for the postponed `x.1` (fixed by the
-  -- argument) instead of becoming `Nat`. The `x.1` spelling, not
-  -- `(fun a => a < 2) z0`: leanr fails that op-free (`DepthBudgetExhausted`
-  -- on `(fun a => LT.lt a 2) z0`, a pre-existing leanr_meta gap).
+  -- argument) instead of becoming `Nat`. The `(fun a => a < 2) z0`
+  -- spelling is covered by `op/rel-lt-beta` (checkAssignment slice).
   , ("op/rel-no-default",   "(fun x => x.1 < 2) (PProd.mk z0 z0)")
   -- Review Focus #5: relation operands are LEAVES of the outer tree
   , ("op/rel-of-rels",      "fun (a b : Nat) => (a < b) = (b < a)")
