@@ -1327,6 +1327,13 @@ def opQueries : List (String × String) :=
   , ("meta/synth-pi-beq-nat",    "(inferInstance : BEq Nat)")
   , ("meta/synth-pi-deceq-nat",  "(inferInstance : DecidableEq Nat)")
   , ("meta/synth-pi-beq-bool",   "(inferInstance : BEq Bool)")
+  -- synth pi-goals fix wave: `Pi.instInhabited`'s subgoal `Nat → Inhabited
+  -- Nat` reaches `consume`'s `removeUnusedArguments?` (SynthInstance.lean:559;
+  -- the oracle's `trace.Meta.synthInstance.unusedArgs` fires on it), and
+  -- `instBEqOfDecidableEq`'s subgoal under `(n : Nat) →` depends on `n`
+  -- (`?m n`, getSubgoals :325-327).
+  , ("meta/synth-pi-unused-subgoal", "(inferInstance : Inhabited (Nat → Nat))")
+  , ("meta/synth-pi-dep-subgoal",    "(inferInstance : (n : Nat) → BEq (Fin n))")
   -- mutation-killing rows: `2` stays uncoerced behind a HOMOGENEOUS
   -- instance (`op/hetero-default` never reaches the leaves: no
   -- `HMul (Arr Nat)³`); a regular `binop%` whose max has no homogeneous

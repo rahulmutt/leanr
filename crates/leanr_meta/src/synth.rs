@@ -1857,8 +1857,11 @@ impl<'e> MetaCtx<'e> {
     /// being a forall and `reducing` is set, `whnf` once and continue if
     /// that exposed another forall. Then run `k(xs, body)`.
     ///
-    /// `push_local_decl` installs an instance-implicit binder as a local
-    /// instance, as the oracle's telescope does. The ambient
+    /// `push_local_decl` installs ANY binder whose type is a class as a
+    /// local instance, whatever its binder info (`(h : Add N)` as well
+    /// as `[h : Add N]`). The oracle's telescope does the same:
+    /// `withNewLocalInstancesImp` (`Basic.lean:1407-1420`) tests
+    /// `isClass? decl.type` and never reads `binderInfo`. The ambient
     /// `lctx`/`local_names`/`local_instances` are restored on EVERY exit
     /// path (`Ok` or `Err`), so no telescope fvar outlives `k`.
     ///
@@ -2872,7 +2875,7 @@ impl<'e> MetaCtx<'e> {
     /// list too.
     ///
     /// **NAMED SEAM -- `removeUnusedArguments?` (called at :559, its
-    /// `some` arm :561-577).** When a subgoal's type has an unused
+    /// `some` arm :561-577).** When a SUBGOAL's type has an unused
     /// argument, the oracle tables the ARGUMENT-STRIPPED goal instead and
     /// transports answers back through a transformer (Tomas Skrivan's
     /// optimization, `hasUnusedArguments`/`removeUnusedArguments?`
@@ -2880,10 +2883,18 @@ impl<'e> MetaCtx<'e> {
     /// telescopes forall-shaped goals: leanr tables `A → C` (unused `A`)
     /// under the arrow itself and resolves it through `try_resolve`'s
     /// telescope, giving `fun _ => inst`; the oracle tables the stripped
-    /// `C` and transports with its transformer (`fun f _ => f`, built at
-    /// :529), giving the same term. So the absence is answer-neutral (a
-    /// tabling-granularity/perf difference), pinned by the Synth0 corpus
-    /// row `piUnused/synth/0`.
+    /// `C` and transports with its transformer (`fun redf _ => redf`,
+    /// built at :529). Only `consume` calls it, so only a subgoal reaches
+    /// it; a ROOT goal goes through `main`'s `newSubgoal` (:677-680)
+    /// instead. The Synth0 row `piUnused/synth/0` (root `N → Pri N`)
+    /// therefore pins only the root path, which is NOT the seam. The op
+    /// row `meta/synth-pi-unused-subgoal`, `(inferInstance : Inhabited
+    /// (Nat → Nat))`, pins the seam: `Pi.instInhabited`'s subgoal
+    /// `Nat → Inhabited Nat` fires the oracle's
+    /// `trace.Meta.synthInstance.unusedArgs`, and leanr matches the
+    /// oracle's `@Pi.instInhabited Nat (fun a => Nat) fun a =>
+    /// instInhabitedNat`. So the absence is answer-neutral as observed
+    /// (a tabling-granularity/perf difference).
     fn consume(&mut self, st: &mut SynthState, mut c: ConsumerNode) -> Result<(), MetaError> {
         let mctx = c.mctx.clone();
         let next = self.with_synth_mctx(&mctx, |ctx| {
@@ -3904,7 +3915,7 @@ mod tests {
 
     /// Review Focus 1: the outer snapshot carries the ambient local
     /// instance into the telescope (oracle `getSubgoals`' `localInsts`,
-    /// `SynthInstance.lean:317`; `getInstances`' locals, `:230-238`).
+    /// `SynthInstance.lean:317`; `getInstances`' locals, `:230-239`).
     #[test]
     fn pi_goal_uses_an_ambient_local_instance() {
         with_instances_ctx(|ctx| {
@@ -3928,17 +3939,68 @@ mod tests {
     /// Review Focus 4: a pi goal whose body has an expr mvar takes the
     /// `isDefEq mvar instVal` recheck path (`SynthInstance.lean:417`)
     /// with a pi-typed mvar.
+    ///
+    /// What each layer answers for `N → Add ?a`:
+    /// - The oracle's `synthInstance?` runs the search under
+    ///   `withNewMCtxDepth` with `isDefEqStuckEx := true`
+    ///   (`SynthInstance.lean:963`, `:978`), so the caller's `?a` is
+    ///   read-only. `getUnify` still keys it `.star`
+    ///   (`DiscrTree/Main.lean:396-412`), and `Add ?a =?= Add N` throws
+    ///   `isDefEqStuck`. `trySynthInstance` reports that as `.undef`
+    ///   (`:1014-1017`). leanr's `try_synth_instance` gives the same
+    ///   `Undef`, from its syntactic pre-test, because the forall head is
+    ///   not a class `Const`.
+    /// - leanr's bare `synth_instance` does not run on the depth model
+    ///   (`try_synth_instance`'s doc, residue 2). It treats `?a` as
+    ///   assignable inside its checkpoint/rollback, unifies `?a := N`
+    ///   through `instAddN`, and answers the mvar-free
+    ///   `fun _ => instAddN`. The rollback discards the search's
+    ///   `?a := N`, but `assign_out_params` then runs
+    ///   `isDefEq type (inferType result)` on the whole goal, out-params
+    ///   or not (oracle `assignOutParams`, `:825-845`, unconditional at
+    ///   `:842`), so `N → Add ?a =?= N → Add N` re-assigns `?a := N` in
+    ///   the caller's frame.
     #[test]
     fn pi_goal_with_mvar_body_does_not_error() {
         with_instances_ctx(|ctx| {
             let n = const_named(ctx, "N");
             let ty = type_sort(ctx);
-            let a = fresh_mvar(ctx, ty).0;
+            let (a, a_id) = fresh_mvar(ctx, ty);
             let add = const_named(ctx, "Add");
             let base = Some(ctx.view.store);
             let add_a = ctx.scratch.expr_app(base, add, a).expect("Add ?a");
             let pi = mk_arrow_for_test(ctx, n, add_a);
-            ctx.synth_instance(pi).expect("Ok(_), not Err");
+            let v = ctx
+                .synth_instance(pi)
+                .expect("Ok(_), not Err")
+                .expect("answered");
+            let v = ctx.instantiate_mvars(v).expect("inst");
+            let Node::Lam {
+                binder_type, body, ..
+            } = ctx.node(v)
+            else {
+                panic!("expected fun _ => instAddN, got {}", render_expr(ctx, v));
+            };
+            assert_eq!(binder_type, n);
+            assert_eq!(
+                body,
+                const_named(ctx, "instAddN"),
+                "got {}",
+                render_expr(ctx, v)
+            );
+            let a_val = ctx.instantiate_mvars(a).expect("inst ?a");
+            assert!(ctx.mctx.is_assigned(a_id), "assign_out_params assigns ?a");
+            assert_eq!(a_val, n, "?a := N, got {}", render_expr(ctx, a_val));
+            // Fresh `?b`: the `?a` above is now assigned, so `pi` is ground.
+            let (b, _) = fresh_mvar(ctx, ty);
+            let base = Some(ctx.view.store);
+            let add_b = ctx.scratch.expr_app(base, add, b).expect("Add ?b");
+            let pi_b = mk_arrow_for_test(ctx, n, add_b);
+            assert_eq!(
+                ctx.try_synth_instance(pi_b).expect("no error"),
+                LOption::Undef,
+                "the oracle's trySynthInstance answer"
+            );
         });
     }
 
@@ -3978,9 +4040,22 @@ mod tests {
             assert_eq!(args.len(), 3);
             assert_eq!(&args[..2], &[n, n]);
             assert_ne!(args[2], c, "the out-param position was replaced");
+            // oracle shape: the fresh out-param mvar is minted inside the
+            // telescope, so `mkForallFVars`' `elimMVarDeps` reverts the
+            // in-scope `x` (`MetavarContext.lean:1313`). The position reads
+            // `?n #0`, not a bare `?n` whose context still holds `x`.
+            let Node::App { f, arg } = ctx.node(args[2]) else {
+                panic!("expected ?n #0, got {}", render_expr(ctx, args[2]));
+            };
             assert!(
-                !ctx.data(args[2]).has_fvar(),
-                "no telescope fvar escapes the rebuilt pi"
+                matches!(ctx.node(f), Node::MVar { .. }),
+                "expected ?n #0, got {}",
+                render_expr(ctx, args[2])
+            );
+            assert!(
+                matches!(ctx.node(arg), Node::BVar { idx: 0 }),
+                "expected ?n #0, got {}",
+                render_expr(ctx, args[2])
             );
         });
     }

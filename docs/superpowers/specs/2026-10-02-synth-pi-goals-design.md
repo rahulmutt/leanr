@@ -56,7 +56,7 @@ The oracle has five telescope sites:
 
 | site | oracle | telescope |
 |---|---|---|
-| `getInstances` | `:202-243` (telescope at `:205`) | reducing |
+| `getInstances` | `:202-241` (telescope at `:205`) | reducing |
 | `getSubgoals` | `:317-339` (mint at `:325`) | none; it is passed `xs` |
 | `tryResolve` | `:346-419` (`:353`, `:374`) | reducing |
 | `preprocess` | `:737-773` | reducing |
@@ -96,9 +96,12 @@ fn with_forall_telescope<R>(
   `lctx_checkpoint`/`lctx_restore`, and it restores on every exit,
   including `Err`. This is the idiom leanr_elab's
   `forall_telescope_reducing` uses. No telescope fvar outlives `k`.
-- **Local instances.** `push_local_decl` installs an instance-implicit
-  binder as a local instance, which is what the oracle's telescope
-  does. `lctx_restore` uninstalls it (`local_instances.truncate_to`).
+- **Local instances.** `push_local_decl` installs any binder whose
+  type is a class as a local instance, whatever its binder info. That
+  is what the oracle's telescope does: `withNewLocalInstancesImp`
+  (`Basic.lean:1407-1420`) tests `isClass? decl.type` and never reads
+  `binderInfo`. `lctx_restore` uninstalls it
+  (`local_instances.truncate_to`).
 
 ### Per-site ports
 
@@ -116,7 +119,7 @@ they did before, so their behavior cannot change.
    telescope. The rewritten result is `mk_forall(xs, mkAppN c args)`
    (`:814`, `:818`). The early returns (`typeBody.isConst`, not a
    class, no out-params) return the original `type`, unchanged.
-3. **`get_instances`** (`instances.rs`, oracle `:202-243`). Take a
+3. **`get_instances`** (`instances.rs`, oracle `:202-241`). Take a
    snapshot of the local-instance candidates **before** opening the
    reducing telescope (oracle `:203-204`: "We must retrieve
    `localInstances` before we use `forallTelescopeReducing`"). Then
@@ -171,16 +174,23 @@ malformed term) still propagate, as everywhere else in synthesis.
 - **Closed:** `preprocess`'s and `try_resolve`'s pi-goal
   `Unsupported`.
 - **Kept, with a new rationale: `removeUnusedArguments?`
-  (`:512-531`, called from `consume` at `:558`).** Its doc in `consume` says
+  (`:512-531`, called from `consume` at `:559`).** Its doc in `consume` says
   "unreachable, because `try_resolve` refuses forall subgoals". That
   stops being true. The new doc says it is reachable and
-  answer-neutral. The oracle tables `N → C` under the argument-stripped
-  key and transports the answer back with
-  `fun f _ => f` (`:529`). leanr tables it under the arrow and resolves it
-  through `try_resolve`'s telescope. Both produce `fun _ => inst`. The
-  Synth0 row `piUnused/synth/0` pins this. If the oracle's term
-  differs, the seam is a bug, and the slice stops to re-scope with the
-  user before widening.
+  answer-neutral as observed. The oracle tables a subgoal `N → C` under
+  the argument-stripped key and transports the answer back with
+  `fun redf _ => redf` (`:529`). leanr tables it under the arrow and
+  resolves it through `try_resolve`'s telescope. Both produce
+  `fun _ => inst`. Only `consume` calls `removeUnusedArguments?`, so
+  only a SUBGOAL reaches it; a root goal goes through `main`'s
+  `newSubgoal` (`:677-680`). The Synth0 row `piUnused/synth/0` (root
+  `N → Pri N`) therefore pins only the root path, which is not the
+  seam. The ElabOp row `meta/synth-pi-unused-subgoal`,
+  `(inferInstance : Inhabited (Nat → Nat))`, pins the seam: the
+  oracle's `trace.Meta.synthInstance.unusedArgs` fires on its subgoal
+  `Nat → Inhabited Nat`, and leanr matches the oracle's term. If the
+  oracle's term differs, the seam is a bug, and the slice stops to
+  re-scope with the user before widening.
 
 ## Testing
 
@@ -213,7 +223,7 @@ plan briefs ship non-discriminating tests):
 | `piEta/synth/0` | same goal as `piRoot`; asserts the term is `instDecN`, not `fun a b => instDecN a b` | `mk_lambda` instead of `mk_lambda_eta` |
 | `piApplied/synth/0` | `∀ a : N, Dec (Eq a N.zero)`; expects `fun a => instDecN a N.zero` | `get_subgoals` mints `?m : d` and does not apply it to `xs` |
 | `piNested/synth/0` | `BE N` | nested pi subgoal (`try_resolve` seam restored) |
-| `piUnused/synth/0` | `N → Pri N` | the `removeUnusedArguments?` answer-neutrality claim (§ Seams) |
+| `piUnused/synth/0` | `N → Pri N` | the root path only (a root goal never reaches `removeUnusedArguments?`; the ElabOp row `meta/synth-pi-unused-subgoal` pins the seam, § Seams) |
 | `piInstBinder/synth/0` | `∀ [h : NoInst N], NoInst N` | `get_instances` reads local instances after the telescope |
 | `piBranch/synth/0` | `PB N` | the high-priority candidate's unsolvable pi subgoal aborts the whole search instead of failing its branch |
 
@@ -229,7 +239,7 @@ discriminates. The plan decides.
   regen, `op/beq-uncomparable-prop`) re-record
   against Prelude's `instBEqOfDecidableEq`. The plan reads the exact
   term off the regenerated oracle record and does not predict it here.
-  The diff of the regenerated corpus must touch only those three
+  The diff of the regenerated corpus must touch only those four
   records plus the new rows below. Any other moved record is reported
   in § Landed with a reason, not silently re-blessed.
 - Add these rows: `meta/synth-pi-beq-nat` `(inferInstance : BEq Nat)`,
@@ -307,8 +317,11 @@ One plan and one PR, in four tasks:
 Commits on `synth-pi-goals`: 4595e44 (spec), e4ab2be (plan), 549c8c9 (T1:
 forall telescope in `preprocess`/`preprocess_out_param`/`get_instances`),
 74920d5 (T2: `try_resolve`/`get_subgoals` pi goals, `mk_lambda_eta`),
-b6c3282 (T3: Synth0 oracle rows), and the T4 commit (ElabOp suffix drop,
-elab rows, docs, this ledger).
+b6c3282 (T3: Synth0 oracle rows), e84c9d7 (T4: ElabOp suffix drop,
+elab rows, docs, this ledger), and the final-review fix-wave commit that
+follows e84c9d7 (the `meta/synth-pi-{unused,dep}-subgoal` rows, the
+strengthened unit tests, the doc and cite fixes, and the edits to this
+ledger that name the fix wave).
 
 **Corpus counts.** Synth: 30 -> 37 compared records (seven `pi*` rows;
 `piEta` folded into `piRoot`). Op: 94 -> 97 (`CORPUS_FLOOR` = 97): three new
@@ -318,12 +331,27 @@ against `instBEqOfDecidableEq Bool instDecidableEqBool` in place of
 `op/beq-uncomparable-prop`. The fourth was not predicted by the spec: its
 source `(binop% PU n u) == True` is a Bool `==` that also went through the
 dropped suffix `BEq Bool`, and its only term change is that same
-substitution. No other op-queries id moved.
+substitution. No other op-queries id moved. Fix wave: 97 -> 99
+(`CORPUS_FLOOR` = 99), adding `meta/synth-pi-unused-subgoal` and
+`meta/synth-pi-dep-subgoal`. The regen's op-queries id diff shows only
+those two added ids, and no record was removed or changed.
 
-**Oracle verdicts as observed.** `piUnused`: `fun (_ : N) => instPriHigh`, so
-the `removeUnusedArguments?` absence is answer-neutral. `piInstBinder`:
-`ok=false` (the goal's own instance binders are not candidates). All seven
-records `near_budget:false`.
+**Oracle verdicts as observed.** `piUnused`: `fun (_ : N) => instPriHigh`.
+This is a root goal, so it never reaches `removeUnusedArguments?` (only
+`consume` calls it, `SynthInstance.lean:559`; a root goal goes through
+`main`'s `newSubgoal`, `:677-680`). It pins only the root path, which is
+not the seam. `meta/synth-pi-unused-subgoal`,
+`(inferInstance : Inhabited (Nat → Nat))`, pins the seam: the oracle's
+`trace.Meta.synthInstance.unusedArgs` fires on the subgoal
+`Nat → Inhabited Nat` (reduced type `Inhabited Nat`, transformer
+`fun redf a => redf`), the oracle answers
+`@Pi.instInhabited Nat (fun a => Nat) fun a => instInhabitedNat`, and
+leanr's record matches. So the absence is answer-neutral as observed.
+`meta/synth-pi-dep-subgoal`, `(inferInstance : (n : Nat) → BEq (Fin n))`:
+the oracle answers
+`fun n => instBEqOfDecidableEq (Fin n) (instDecidableEqFin n)`, and leanr's
+record matches. `piInstBinder`: `ok=false` (the goal's own instance
+binders are not candidates). All seven synth records `near_budget:false`.
 
 **piBranch binder change.** T3 changed `instPBHigh`'s binder from
 `[(a b : N) -> NoInst (Dec (Eq a b))]` to `[(x : N) -> CoeT N x NoBase]`: the
@@ -335,11 +363,11 @@ and the plan carry the new binder.
 
 | mutation | result |
 |---|---|
-| 1c `preprocess` non-reducing telescope | survives; EQUIVALENT (the rebuilt type is identical for `DecEqN N`) |
+| 1c `preprocess` non-reducing telescope | survives; EQUIVALENT only on `DecEqN N`, because that goal is mvar-free, so the classification is `NoMVars` either way and the rebuilt type is identical. NOT equivalent in general: for a pi goal with mvars and out-params hidden behind an `abbrev`, the non-reducing walk classifies on the unfolded `forallE` head and says `MVarsNoOutputParams` instead of `MVarsOutputParams`, so `preprocess_out_param` is skipped. UNTESTED GAP (no row or unit test has that shape). |
 | 1c' `with_forall_telescope` ignores `reducing` | killed by `piNested` |
 | 1b `get_instances` snapshots local instances inside the telescope | killed by `piInstBinder` |
 | 2a `mk_lambda` for `mk_lambda_eta` | killed by `piRoot`, `piReducible`, `piNested` |
-| 2b subgoal mvar not applied to `xs` | SURVIVES the oracle gate; killed only by the unit test `pi_goal_subgoals_are_applied_outer_mvars` |
+| 2b subgoal mvar not applied to `xs` (minted with `mk_aux_mvar(d)`: ambient lctx, not `∀ xs, d`) | killed by `oracle_op` row `meta/synth-pi-dep-subgoal` (fix wave; leanr errors `InstanceSynthesisFailed`) and the unit test `pi_goal_subgoals_are_applied_outer_mvars`. The synth corpus still does not kill it. |
 | 2c `outer` captured inside the telescope | killed by `piRoot`, `piReducible`, `piApplied`, `piNested` |
 | `try_resolve` `Unsupported` seam restored | killed by `piRoot`, `piReducible`, `piApplied`, `piNested`, `piUnused`, `piBranch` (synth), and in `oracle_op` by 7 rows: `meta/synth-pi-{beq-nat,deceq-nat,beq-bool}`, `op/beq-prop`, `op/bne-prop`, `op/beq-prop-bool`, `op/beq-uncomparable-prop` |
 | `try_resolve` `Err` instead of `Ok(None)` on `is_def_eq` failure under non-empty `xs` | killed by `piBranch` (only with the strengthened binder) |
@@ -347,10 +375,26 @@ and the plan carry the new binder.
 **Open follow-ups.**
 - Approach B: a shared meta/elab telescope.
 - Synthesis onto real depth.
-- Port `removeUnusedArguments?` (currently answer-neutral, `piUnused`).
+- Port `removeUnusedArguments?` (answer-neutral as observed on
+  `meta/synth-pi-unused-subgoal`; `piUnused` is a root goal and does not
+  reach it).
 - The `get_instances` non-class divergence.
-- An 8th oracle row with a solved, telescope-dependent instance subgoal
-  (e.g. an instance `[forall x, C x]`), to make mutation 2b oracle-observable.
+- ~~An 8th oracle row with a solved, telescope-dependent instance subgoal,
+  to make mutation 2b oracle-observable.~~ CLOSED [fix wave]:
+  `meta/synth-pi-dep-subgoal` (ElabOp, not Synth0).
+- Mutation 1c's untested shape: a pi goal with mvars and out-params behind
+  an `abbrev` (see the mutation table).
+- **Ranked follow-up (first; out of slice scope, but it blocks most natural
+  pi-subgoal rows):** `(inferInstance : Inhabited (Prod Nat Nat))`,
+  `(inferInstance : BEq (Prod Nat Nat))` and
+  `(inferInstance : BEq (Option Nat))` fail in leanr with
+  `InstanceSynthesisFailed`, both at 7d21d8b (before this slice) and at the
+  slice head, on the ElabOp environment. The oracle answers all three:
+  `@instInhabitedProd Nat Nat instInhabitedNat instInhabitedNat`,
+  `@instBEqProd Nat Nat (@instBEqOfDecidableEq Nat instDecidableEqNat)
+  (@instBEqOfDecidableEq Nat instDecidableEqNat)` and
+  `@Option.instBEq Nat (@instBEqOfDecidableEq Nat instDecidableEqNat)`. Not
+  root-caused in this slice.
 - Minor: `lctx_restore` drops the `lctx_snapshot` cache even when nothing was
   pushed, so each candidate re-clones (perf only).
 - Minor: binder-free goals take one extra `step()` per `try_resolve` and per

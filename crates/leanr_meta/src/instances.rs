@@ -481,7 +481,7 @@ impl<'e> MetaCtx<'e> {
     /// `InstanceTable::default()`, an empty table, for the duration of
     /// the call) and put back immediately after.
     pub(crate) fn get_instances(&mut self, goal: ExprId) -> Result<Vec<Instance>, MetaError> {
-        // oracle: `getInstances` (SynthInstance.lean:202-243) reads
+        // oracle: `getInstances` (SynthInstance.lean:202-241) reads
         // `localInstances` BEFORE `forallTelescopeReducing` (:203-205),
         // so the goal's own instance binders are never candidates.
         let local_insts = self.local_instances.to_vec();

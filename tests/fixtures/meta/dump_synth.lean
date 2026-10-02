@@ -470,19 +470,26 @@ is one that diverges under it:
                    survives HERE (every binder of `instDecN` is assigned
                    by `isDefEq` while `a` is still in scope); the
                    `synth.rs` unit test `pi_goal_subgoals_are_applied_
-                   outer_mvars` is what kills that one.
+                   outer_mvars` and the ElabOp row
+                   `meta/synth-pi-dep-subgoal` kill that one.
 * `piNested`     — `BE N` via `instBEOfDecEq [DecEqN α]`: a pi subgoal
                    hidden behind a definition, nested in the search.
                    Kills the seam, a telescope that ignores `reducing`
                    (the subgoal `DecEqN N` is never `whnf`'d open),
                    the un-eta'd answer and the inner-context mint.
-* `piUnused`     — `N → Pri N`, answer `fun _ => instPriHigh`. Pins the
-                   `removeUnusedArguments?` answer-neutrality claim
-                   (spec § Seams); also killed by the seam.
+* `piUnused`     — `N → Pri N`, answer `fun _ => instPriHigh`. A ROOT
+                   goal, so it pins only the root path, which is NOT
+                   the `removeUnusedArguments?` seam: the oracle calls
+                   that only from `consume` (SynthInstance.lean:559),
+                   and a root goal goes through `main`'s `newSubgoal`
+                   (:677-680). The ElabOp row
+                   `meta/synth-pi-unused-subgoal` pins the seam (spec
+                   § Seams). Also killed by the `try_resolve` seam.
 * `piInstBinder` — `∀ [h : NoInst N], NoInst N`, `ok:false`: the goal's
                    own instance binder is NOT a candidate (oracle
                    `getInstances` reads `localInstances` before its
-                   telescope). Kills snapshotting the local instances
+                   telescope: SynthInstance.lean:203-205). Kills
+                   snapshotting the local instances
                    inside the telescope.
 * `piBranch`     — `PB N`: the priority-5000 `instPBHigh`'s pi subgoal
                    `∀ x : N, CoeT N x NoBase` is tried and fails, and

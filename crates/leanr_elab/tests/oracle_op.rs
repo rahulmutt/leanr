@@ -177,7 +177,10 @@ fn oracle_op_gate() {
     // 94 -> 97 (synth pi-goals T4): meta/synth-pi-{beq-nat,deceq-nat,beq-bool};
     // op/beq-prop, op/bne-prop, op/beq-prop-bool, op/beq-uncomparable-prop
     // re-recorded (4 rows) against instBEqOfDecidableEq (suffix `BEq Bool` dropped).
-    const CORPUS_FLOOR: usize = 97;
+    // 97 -> 99 (synth pi-goals fix wave): meta/synth-pi-unused-subgoal (the
+    // `removeUnusedArguments?` seam, reached from `consume`) and
+    // meta/synth-pi-dep-subgoal (oracle killer for mutation 2b).
+    const CORPUS_FLOOR: usize = 99;
     assert!(
         replayed >= CORPUS_FLOOR,
         "op corpus shrank: {replayed} < {CORPUS_FLOOR}"
