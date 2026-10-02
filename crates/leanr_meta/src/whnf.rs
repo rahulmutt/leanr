@@ -3837,6 +3837,32 @@ mod tests {
     /// `MAX_SYNTH_PENDING_DEPTH`, not merely "synth_pending eventually
     /// terminates".
     #[test]
+    fn synth_pending_depth_guard_refuses_without_assigning() {
+        use crate::test_support::with_instances_ctx;
+        with_instances_ctx(|ctx| {
+            let (_goal, mvar) = stuck_mul_over_fresh_instance(ctx);
+            ctx.synth_pending_depth = MAX_SYNTH_PENDING_DEPTH + 1;
+            let progressed = ctx.synth_pending(mvar).unwrap();
+            assert!(
+                !progressed,
+                "must refuse once synth_pending_depth exceeds \
+                 MAX_SYNTH_PENDING_DEPTH, even though the goal is \
+                 otherwise identical to the resolving test above"
+            );
+            assert!(
+                !ctx.mctx().is_assigned(mvar),
+                "a refused attempt must not assign the mvar as a side \
+                 effect"
+            );
+        });
+    }
+
+    /// synth-real-depth Task 2. oracle `synthPendingImp` wraps its
+    /// `synthInstance?` in `catchInternalId isDefEqStuckExceptionId ..
+    /// (fun _ => pure none)` (`SynthInstance.lean:1052`) and returns
+    /// `false` on `none`. Goal `Add ?a` with `?a` minted OUTSIDE the
+    /// search: `Add N =?= Add ?a` meets the read-only `?a` and throws.
+    #[test]
     fn synth_pending_treats_a_stuck_search_as_no_progress() {
         use crate::test_support::{const_named, fresh_mvar, with_instances_ctx};
         with_instances_ctx(|ctx| {
@@ -3864,27 +3890,6 @@ mod tests {
             ctx.set_step_budget(1);
             assert!(ctx.synth_pending(mvar).is_err());
             assert!(!ctx.mctx().is_assigned(mvar));
-        });
-    }
-
-    #[test]
-    fn synth_pending_depth_guard_refuses_without_assigning() {
-        use crate::test_support::with_instances_ctx;
-        with_instances_ctx(|ctx| {
-            let (_goal, mvar) = stuck_mul_over_fresh_instance(ctx);
-            ctx.synth_pending_depth = MAX_SYNTH_PENDING_DEPTH + 1;
-            let progressed = ctx.synth_pending(mvar).unwrap();
-            assert!(
-                !progressed,
-                "must refuse once synth_pending_depth exceeds \
-                 MAX_SYNTH_PENDING_DEPTH, even though the goal is \
-                 otherwise identical to the resolving test above"
-            );
-            assert!(
-                !ctx.mctx().is_assigned(mvar),
-                "a refused attempt must not assign the mvar as a side \
-                 effect"
-            );
         });
     }
 
