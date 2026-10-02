@@ -6,10 +6,10 @@
 //! leanr's `TermElabM` owns its `MetaCtx` for its whole lifetime, so
 //! `TermElabM::new` applies it once at construction.
 //!
-//! `ctx_approx` is set for fidelity but is inert in leanr: its rescue
-//! lives in the oracle's slow `CheckAssignment.checkAssignmentAux`,
-//! which `assign.rs` names as a SEAM
-//! (`docs/superpowers/specs/2026-10-01-set-elab-config-design.md`).
+//! `ctx_approx` is live: it is read by the slow
+//! `CheckAssignment.checkAssignmentAux` path in `leanr_meta`'s
+//! `check_assignment.rs` (`checkMVar`'s restriction and `checkApp`'s
+//! rescue; `docs/superpowers/specs/2026-10-02-check-assignment-ctx-approx-design.md`).
 
 use leanr_meta::Config;
 

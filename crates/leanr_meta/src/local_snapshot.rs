@@ -160,7 +160,6 @@ impl LocalCtxSnapshot {
     /// so the answer is the same on both representations. `except` is by
     /// `NameId` because this struct has no `Store` to decode an `ExprId`
     /// (`MetaCtx::fvar_ids` decodes, the same split `reduced` uses).
-    #[allow(dead_code)] // wired in by checkAssignment T2
     pub(crate) fn is_sub_prefix_of(&self, other: &LocalCtxSnapshot, except: &[NameId]) -> bool {
         let mut j = 0;
         for e1 in &self.local_names {

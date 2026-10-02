@@ -2162,18 +2162,16 @@ impl<'e> MetaCtx<'e> {
         //    than the oracle: a universe unification the oracle refuses
         //    could succeed here, admitting a candidate the oracle
         //    rejects. Fixed here.
-        //  - `ctxApprox := true` -- set for fidelity to the wrapper, but
-        //    it is presently a NO-OP in this crate: nothing reads
-        //    `cfg.ctx_approx` (`grep -rn ctx_approx crates/` shows it
-        //    is only written -- here, `with_full_approx_def_eq`, and
-        //    `leanr_elab`'s `set_elab_config` -- and declared/defaulted
-        //    in `config.rs`). The plan-3 ctxApprox rescue lives in the oracle's
-        //    slow term-rewriting path, which this crate has not built;
-        //    a naive graft of it onto the bool-result path was reverted
-        //    as unsound (plan-3 notes). Setting the flag here does not
-        //    resurrect that graft -- it just matches the field to the
-        //    oracle's wrapper for the day a real consultation site
-        //    lands.
+        //  - `ctxApprox := true` -- live: it enables `check_mvar`'s
+        //    restriction of an out-of-scope mvar and `check_app`'s
+        //    constant-function rescue, both in the slow
+        //    `checkAssignmentAux` path (`check_assignment.rs`). The
+        //    restriction's depth guard (`expr_mvar_depth(id) !=
+        //    mctx.depth()`) is WEAKER here than the oracle's, because
+        //    this driver still runs without `withNewMCtxDepth` (the
+        //    bullet two items below): a caller's mvar is at the current
+        //    depth and so may be restricted mid-search. The search's own
+        //    `checkpoint`/`rollback` undoes such a restriction.
         //  - `isDefEqStuckEx := true` -- NAMED SEAM, not set here: the
         //    `Config` field (`is_def_eq_stuck_ex`) and the two ported
         //    throw sites (`level.rs`, `assign.rs`) now exist, but this

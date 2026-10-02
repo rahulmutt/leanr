@@ -18,7 +18,9 @@
 //! pattern args), `ctxApprox` (out-of-scope fvars inside `v`,
 //! `CheckAssignment.checkApp`'s rescue), `quasiPatternApprox` (a
 //! pattern arg that IS already in `?m`'s own local context) — is a
-//! named seam below returning `false`, citing task 7. `Config`'s four
+//! named seam below returning `false`, citing task 7. (Since the
+//! checkAssignment/ctxApprox slice, `ctxApprox` is no longer a seam:
+//! `check_assignment.rs` ports the slow path that consults it.) `Config`'s four
 //! `*_approx` fields (`config.rs`) all default `false`, matching the
 //! oracle's own defaults; this task's fixtures are chosen so none of
 //! these seams are ever needed to reach the oracle's own verdict.
@@ -60,10 +62,10 @@
 //!
 //! Metavariable-context depth is modelled (`mvar_ctx.rs`, macro/binop%
 //! P1). `isReadOnlyOrSyntheticOpaque` is ported at `unassigned_mvar_id`,
-//! `is_def_eq_singleton` and `ensure_type`. Still seamed: the
-//! `isSubPrefixOf` arm of `CheckAssignmentQuick` (`:1075`) and the slow
-//! `checkAssignment` mvar arm (ExprDefEq.lean:901), which leanr does not
-//! port. `elimMVar`'s depth-dependent `newMVarKind`
+//! `is_def_eq_singleton` and `ensure_type`. The quick and slow
+//! `checkAssignment` paths, including `isSubPrefixOf` and the
+//! `ctxApprox` restriction, are ported in `check_assignment.rs`.
+//! `elimMVar`'s depth-dependent `newMVarKind`
 //! (MetavarContext.lean:1187, :1195) is nondep R9, out of scope.
 
 use leanr_kernel::bank::terms::Node;
@@ -897,10 +899,10 @@ impl<'e> MetaCtx<'e> {
     /// `addLetDeps`, :559-640) looks at genuine lets declared
     /// POSITIONALLY between `xs[0]` and `xs.back` and adds the ones `v`
     /// uses as `let` binders. leanr does not port it. It is harmless
-    /// today only because `check_assignment_scope` already rejects any
-    /// genuine-let fvar in `v` that the mvar cannot see (see the
-    /// `checkFVar` seam there), so such an assignment fails before it
-    /// gets here. The guard below refuses a genuine let that is itself
+    /// today because `check_assignment` runs first and its slow path
+    /// (`checkFVar`, `check_assignment.rs`) replaces every genuine-let
+    /// fvar in `v` that the mvar cannot see by its value, so the `v`
+    /// that reaches here no longer mentions one. The guard below refuses a genuine let that is itself
     /// an `xs` entry, rather than abstracting it as a lambda and dropping
     /// its value.
     pub(crate) fn mk_lambda_fvars_with_let_deps(
@@ -973,24 +975,13 @@ impl<'e> MetaCtx<'e> {
     // checkAssignment / CheckAssignmentQuick.check / typeOccursCheck
     // ===================================================================
 
-    /// oracle: `checkAssignment` (ExprDefEq.lean:1151-1176). `hasCtxLocals`
-    /// (whether some pattern arg is itself already visible in `mvar_id`'s
-    /// own declared local context) is `false` on this crate's call path
-    /// UNLESS `quasiPatternApprox` is on and actually let a ctx-local
-    /// pattern arg through (`process_assignment`'s own loop, task 7):
-    /// with the flag off, every pattern arg found in `mvarDecl.lctx` is
-    /// still rejected before this function is ever reached, exactly as
-    /// before. Either way, this function's own machinery
-    /// (`check_assignment_scope`/`type_occurs_check`) does not itself
-    /// branch on `hasCtxLocals` — the oracle's `hasCtxLocals`-gated
-    /// choice between the "quick" check (`CheckAssignmentQuick.check`,
-    /// what `check_assignment_scope` transcribes) and the expensive,
-    /// term-REWRITING `CheckAssignment.checkAssignmentAux` (`ctxApprox`'s
-    /// real home, ExprDefEq.lean:864-1030) stays a named SEAM, folded
-    /// into `check_assignment_scope`'s own escalation-to-`None`/`false`
-    /// case — see that function's own doc comment for why `ctxApprox`
-    /// specifically cannot be soundly grafted into the quick, bool-only
-    /// path instead (task 7 finding).
+    /// oracle: `checkAssignment` (`ExprDefEq.lean:1151-1172`). The quick
+    /// check (`CheckAssignmentQuick.check`) first. If it says `false`,
+    /// the slow, term-rewriting `checkAssignmentAux` over the
+    /// instantiated value. The REWRITTEN term is returned and assigned,
+    /// never the original: a restricted mvar (`checkMVar` under
+    /// `ctxApprox`) or a followed let only exists in the rewrite. Both
+    /// live in `check_assignment.rs`.
     pub(crate) fn check_assignment(
         &mut self,
         mvar_id: MVarId,
@@ -1010,161 +1001,32 @@ impl<'e> MetaCtx<'e> {
         if !self.data(v).has_expr_mvar() && !self.data(v).has_fvar() {
             return Ok(Some(v));
         }
-        if !self.check_assignment_scope(mvar_id, fvars, v)? {
-            // SEAM: this function's own doc comment.
-            return Ok(None);
-        }
+        let decl_lctx = match self.mctx.decl(mvar_id) {
+            Some(d) => std::sync::Arc::clone(&d.lctx),
+            None => {
+                return Err(MetaError::MVar(format!(
+                    "check_assignment: unknown metavariable {mvar_id:?}"
+                )))
+            }
+        };
+        // :1161
+        let has_ctx_locals = fvars.iter().any(|f| {
+            self.fvar_id_of(*f)
+                .is_some_and(|id| decl_lctx.lctx().get(id).is_some())
+        });
+        let v = if self.check_assignment_scope(mvar_id, fvars, has_ctx_locals, v)? {
+            v
+        } else {
+            let vi = self.instantiate_mvars(v)?;
+            match self.check_assignment_aux(mvar_id, fvars, has_ctx_locals, vi)? {
+                Some(v2) => v2,
+                None => return Ok(None),
+            }
+        };
         if !self.type_occurs_check(mvar_id, v)? {
             return Ok(None);
         }
         Ok(Some(v))
-    }
-
-    /// oracle: `CheckAssignmentQuick.check` (ExprDefEq.lean:1083-1130).
-    /// The genuine content that survives: every FVAR met in `v` must be
-    /// either one of the abstracted pattern `fvars`, or already visible
-    /// in `mvar_id`'s own declared local context (`mvar_decl.lctx`) —
-    /// anything else is a real, oracle-agreeing out-of-scope rejection
-    /// (`throwOutOfScopeFVar`, :878 — not an approximation gap).
-    ///
-    /// SEAM (live): the ONE rescue for an out-of-scope fvar is
-    /// `checkFVar`'s arm for a GENUINE let (`.ldecl (nondep := false)`,
-    /// :873), which recurses into the let's value. leanr answers `false`
-    /// instead. Let and `have` elaboration do mint let-bound fvars, so
-    /// this is reachable. `?m =?= l`, with `l` a genuine `let l :=
-    /// Nat.zero` and `?m` minted outside it, is `true` on the oracle
-    /// (`?m := Nat.zero`) whatever `zetaDelta` says, since `checkFVar`
-    /// is not gated by it. Here the quick check fails; with `zeta_delta`
-    /// on (the default) a later zeta-delta unfold of `l` still reaches
-    /// `?m := N.zero`, but with it off the answer is `false`. Pinned by
-    /// `check_fvar_seam_shows_only_with_zeta_delta_off`. A `have`
-    /// (`nondep := true`) is "locally a cdecl" and takes the
-    /// `fvars.contains` test, as the oracle does.
-    ///
-    /// `mvar_id == id` (the metavariable being assigned occurring directly in `v`) is
-    /// the ONE non-approximated `MVar` case (:1113: `if mvarId' ==
-    /// mvarId then return false`). Every OTHER metavariable met is
-    /// SEAM: `isSubPrefixOf` (:1114) — this crate's `LocalContext`
-    /// exposes no positional/enumeration API to port that lctx-subset
-    /// check faithfully; at tier 1 (the `isSubPrefixOf` seam is
-    /// independent of the mctx-depth model), every declared mvar is treated as
-    /// mutually visible. `ctxApprox`'s rescue does NOT belong here at
-    /// all (task 7 finding): this function transcribes
-    /// `CheckAssignmentQuick.check`, which the oracle's own
-    /// `checkAssignment` driver only ever uses to decide whether the
-    /// SLOW, term-rewriting `CheckAssignment.checkAssignmentAux` path
-    /// is even needed (:1160-1163) — `ctxApprox`'s rescue lives
-    /// EXCLUSIVELY inside that slow path (`checkApp`/`checkMVar`,
-    /// :864-1030), which rebuilds the checked term (substituting the
-    /// rescued subterm) rather than returning a bare bool. Grafting the
-    /// rescue's SIDE EFFECT (assigning the inner mvar) onto this
-    /// function while still returning the ORIGINAL, un-rewritten `v` up
-    /// through `check_assignment`'s quick-success path (`pure v`,
-    /// :1162) would produce an assignment for `mvar_id` that still
-    /// syntactically references a variable outside its own declared
-    /// scope — ill-formed, not merely approximate. See
-    /// `check_assignment_scope_body`'s `Node::App` arm for the fuller
-    /// account (a first attempt at this task built exactly that grafted
-    /// version and reverted it).
-    fn check_assignment_scope(
-        &mut self,
-        mvar_id: MVarId,
-        fvars: &[ExprId],
-        e: ExprId,
-    ) -> Result<bool, MetaError> {
-        if !self.data(e).has_fvar() && !self.data(e).has_expr_mvar() {
-            return Ok(true);
-        }
-        self.guarded(|ctx| ctx.check_assignment_scope_body(mvar_id, fvars, e))
-    }
-
-    fn check_assignment_scope_body(
-        &mut self,
-        mvar_id: MVarId,
-        fvars: &[ExprId],
-        e: ExprId,
-    ) -> Result<bool, MetaError> {
-        match self.node(e) {
-            Node::FVar { id: Some(fid) } => {
-                let in_mvar_lctx = self
-                    .mctx
-                    .decl(mvar_id)
-                    .map(|d| d.lctx.lctx().get(fid).is_some())
-                    .unwrap_or(false);
-                if in_mvar_lctx {
-                    return Ok(true);
-                }
-                // oracle: `checkFVar` matches `.ldecl (nondep := false)`
-                // only; a `have` is "locally a cdecl" and falls through
-                // to the `fvars.contains` test (`ExprDefEq.lean:851-878`).
-                let is_let = self.lctx.get(fid).and_then(|d| d.value).is_some()
-                    && self.local_entry(fid).is_some_and(|e| !e.nondep);
-                if is_let {
-                    // SEAM (doc comment above): the oracle recurses into
-                    // the let's value; leanr refuses.
-                    return Ok(false);
-                }
-                Ok(fvars.contains(&e))
-            }
-            Node::MVar { id: Some(id) } => {
-                if MVarId(id) == mvar_id {
-                    return Ok(false);
-                }
-                // SEAM: `isSubPrefixOf` (doc comment above) — tier-1
-                // always true.
-                Ok(true)
-            }
-            // oracle: `checkApp`'s `ctxApprox` rescue (ExprDefEq.lean:
-            // 952-978) lives ONLY in the SLOW path this arm does not
-            // implement — see this function's own doc comment for why
-            // (`CheckAssignmentQuick.check`, the function THIS ARM
-            // transcribes, is a pure exception-free bool predicate,
-            // :1040-1080: its OWN `.app`/`.fvar` cases have no rescue at
-            // all, just `visit f <&&> visit a` and a plain out-of-scope
-            // `false`; `checkAssignment`'s outer driver, :1160-1163,
-            // only ever calls the SLOW, term-REWRITING
-            // `CheckAssignment.checkAssignmentAux` — a different
-            // function this crate does not build — when the quick check
-            // here returns `false`). A first attempt at this task
-            // (reverted) grafted the rescue into this bool-only
-            // function anyway: it could get the VERDICT right by
-            // mutating the inner mvar's assignment as a side effect,
-            // but `checkAssignment`'s quick-success path uses `v`
-            // UNCHANGED (`pure v`, :1162) — never the REWRITTEN term the
-            // real rescue produces — so the surviving syntactic subterm
-            // would still reference the rescued fvar, producing an
-            // assignment that is free in a variable outside its own
-            // declared scope. Left as a named SEAM instead: `ctxApprox`
-            // never fires via this path (task 7, spec risk 3 —
-            // acknowledged-thin, here meaning NOT reachable at all
-            // rather than merely narrow; see the task report for the
-            // full reasoning).
-            // Since `setElabConfig`
-            // (docs/superpowers/specs/2026-10-01-set-elab-config-design.md)
-            // `ctx_approx` is ON during elaboration, as in the oracle, and
-            // still inert here. That spec's probe found no corpus record
-            // and no candidate term whose oracle result depends on
-            // `ctxApprox`; port `checkAssignmentAux` when one appears.
-            Node::App { f, arg } => Ok(self.check_assignment_scope(mvar_id, fvars, f)?
-                && self.check_assignment_scope(mvar_id, fvars, arg)?),
-            Node::Lam {
-                binder_type, body, ..
-            }
-            | Node::Forall {
-                binder_type, body, ..
-            } => Ok(self.check_assignment_scope(mvar_id, fvars, binder_type)?
-                && self.check_assignment_scope(mvar_id, fvars, body)?),
-            Node::LetE {
-                ty, value, body, ..
-            } => Ok(self.check_assignment_scope(mvar_id, fvars, ty)?
-                && self.check_assignment_scope(mvar_id, fvars, value)?
-                && self.check_assignment_scope(mvar_id, fvars, body)?),
-            Node::MData { expr, .. } => self.check_assignment_scope(mvar_id, fvars, expr),
-            Node::Proj { structure, .. } | Node::ProjBig { structure, .. } => {
-                self.check_assignment_scope(mvar_id, fvars, structure)
-            }
-            _ => Ok(true),
-        }
     }
 
     /// oracle: `typeOccursCheck`/`typeOccursCheckImp` (ExprDefEq.lean:
@@ -2734,30 +2596,6 @@ mod tests {
         });
     }
 
-    /// oracle: `checkFVar` matches `.ldecl (nondep := false)`; a `have` is
-    /// "locally a cdecl", judged by membership in the abstracted fvars
-    /// (`ExprDefEq.lean:851-878`). A genuine let instead recurses into its
-    /// value; leanr's quick check returns `false` for it (the live
-    /// `checkFVar` seam), so it is out of scope even when listed in
-    /// `fvars`. The mvar is minted
-    /// BEFORE the decls so neither is in its lctx.
-    #[test]
-    fn check_assignment_scope_body_treats_a_have_as_a_cdecl() {
-        use crate::test_support::{const_named, with_prelude0_ctx};
-        with_prelude0_ctx(|ctx| {
-            let nat = const_named(ctx, "Nat");
-            let zero = const_named(ctx, "Nat.zero");
-            let cp = ctx.lctx_checkpoint();
-            let (_m, mid) = fresh_mvar(ctx, nat);
-            let h = ctx.push_let_decl(None, nat, zero, true).expect("have");
-            let l = ctx.push_let_decl(None, nat, zero, false).expect("let");
-            assert!(!ctx.check_assignment_scope_body(mid, &[], h).expect("h"));
-            assert!(ctx.check_assignment_scope_body(mid, &[h], h).expect("h"));
-            assert!(!ctx.check_assignment_scope_body(mid, &[l], l).expect("l"));
-            ctx.lctx_restore(cp);
-        });
-    }
-
     /// oracle: `hasLetDeclsInBetween` uses `LocalDecl.isLet`, false for a
     /// nondep ldecl (`LocalContext.lean:106-109`): a `have` among `xs`
     /// must not trigger the let-dependency seam; a genuine `let` does.
@@ -2828,33 +2666,54 @@ mod tests {
         });
     }
 
-    /// SEAM pin (see `check_assignment_scope`'s doc): `?m =?= l` for a
-    /// genuine let `l` outside `?m`'s context. Oracle (measured,
-    /// v4.33.0-rc1, over `Nat`): `true`, `?m := Nat.zero`, with
-    /// `zetaDelta` on AND off. leanr agrees only with it on; with it off
-    /// the quick check's refusal is final. Flip the `false` half when
-    /// `checkFVar`'s value-follow is ported.
+    /// oracle `checkFVar` (`ExprDefEq.lean:851-878`): `?m =?= l` for a
+    /// genuine let `l` outside `?m`'s context is `true`, with `?m :=
+    /// N.zero`, whatever `zetaDelta` says (measured, v4.33.0-rc1). The
+    /// slow path's let rescue gives that answer.
     #[test]
-    fn check_fvar_seam_shows_only_with_zeta_delta_off() {
+    fn check_fvar_follows_a_genuine_let_value_in_both_zeta_modes() {
         use crate::test_support::{const_dotted, const_named, with_prelude0_ctx};
         with_prelude0_ctx(|ctx| {
             let n = const_named(ctx, "N");
             let zero = const_dotted(ctx, "N", "zero");
-            for (zeta_delta, want) in [(true, true), (false, false)] {
+            for zeta_delta in [true, false] {
                 ctx.cfg.zeta_delta = zeta_delta;
                 let cp = ctx.lctx_checkpoint();
                 let (m, mid) = fresh_mvar(ctx, n);
                 let l = ctx.push_let_decl(None, n, zero, false).expect("let");
-                assert_eq!(
+                assert!(
                     ctx.is_def_eq(m, l).expect("defeq"),
-                    want,
                     "zeta_delta={zeta_delta}"
                 );
-                if want {
-                    assert_eq!(ctx.mctx.assignment(mid), Some(zero));
-                }
+                assert_eq!(ctx.mctx.assignment(mid), Some(zero), "?m := N.zero");
                 ctx.lctx_restore(cp);
             }
+        });
+    }
+
+    /// `isDefEqQuickMVarMVar`'s `checkpointDefEq` (`ExprDefEq.lean:1963-1976`):
+    /// direction 1 (`?o := ?i`) restricts `?i := ?aux`, then fails
+    /// `check_types_and_assign` (`N` vs `Sort 0`). The restriction must be
+    /// rolled back before direction 2 runs.
+    #[test]
+    fn failed_first_direction_rolls_back_the_restriction() {
+        use crate::test_support::{const_named, with_prelude0_ctx};
+        with_prelude0_ctx(|ctx| {
+            ctx.cfg.ctx_approx = true;
+            let n = const_named(ctx, "N");
+            let base = Some(ctx.view.store);
+            let z = ctx.scratch.level_zero(base).unwrap();
+            let s0 = ctx.scratch.expr_sort(base, z).unwrap();
+            let cp = ctx.lctx_checkpoint();
+            let (o, _) = fresh_mvar(ctx, n);
+            let _x = fresh_fvar(ctx, n, "x");
+            let (i, iid) = ctx.mk_aux_mvar(s0).unwrap();
+            assert_eq!(ctx.is_def_eq_mvar_mvar(o, i).unwrap(), Some(false));
+            assert!(
+                !ctx.mctx.is_assigned(iid),
+                "restriction leaked past rollback"
+            );
+            ctx.lctx_restore(cp);
         });
     }
 

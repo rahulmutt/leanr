@@ -11,9 +11,6 @@
 //! (`check`). The driver assigns the rewritten term, never the original
 //! (spec `2026-10-02-check-assignment-ctx-approx-design.md`).
 
-// Test callers only until checkAssignment T2 wires the driver; T2 removes this.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -64,6 +61,98 @@ impl<'e> MetaCtx<'e> {
     /// `LocalCtxSnapshot::is_sub_prefix_of` takes for `except`.
     pub(crate) fn fvar_ids(&self, xs: &[ExprId]) -> Vec<NameId> {
         xs.iter().filter_map(|x| self.fvar_id_of(*x)).collect()
+    }
+
+    /// oracle: `CheckAssignmentQuick.check` (`ExprDefEq.lean:1039-1086`).
+    /// A bool predicate. `false` means "the slow path decides", never
+    /// "reject". See `check_assignment_aux`.
+    pub(crate) fn check_assignment_scope(
+        &mut self,
+        mvar_id: MVarId,
+        fvars: &[ExprId],
+        has_ctx_locals: bool,
+        e: ExprId,
+    ) -> Result<bool, MetaError> {
+        if !self.data(e).has_fvar() && !self.data(e).has_expr_mvar() {
+            return Ok(true);
+        }
+        self.guarded(|ctx| ctx.check_assignment_scope_body(mvar_id, fvars, has_ctx_locals, e))
+    }
+
+    fn check_assignment_scope_body(
+        &mut self,
+        mvar_id: MVarId,
+        fvars: &[ExprId],
+        has_ctx_locals: bool,
+        e: ExprId,
+    ) -> Result<bool, MetaError> {
+        let hcl = has_ctx_locals;
+        match self.node(e) {
+            Node::FVar { id: Some(fid) } => {
+                let in_mvar_lctx = self
+                    .mctx
+                    .decl(mvar_id)
+                    .map(|d| d.lctx.lctx().get(fid).is_some())
+                    .unwrap_or(false);
+                if in_mvar_lctx {
+                    return Ok(true);
+                }
+                // oracle: `checkFVar` matches `.ldecl (nondep := false)`
+                // only; a `have` is "locally a cdecl" and falls through
+                // to the `fvars.contains` test (`ExprDefEq.lean:851-878`).
+                // A genuine let is `false` here: "need expensive
+                // CheckAssignment.check" (`:1066`), which follows it.
+                let is_let = self.lctx.get(fid).and_then(|d| d.value).is_some()
+                    && self.local_entry(fid).is_some_and(|e| !e.nondep);
+                if is_let {
+                    return Ok(false);
+                }
+                Ok(fvars.contains(&e))
+            }
+            // `:1070-1077`, in the oracle's order.
+            Node::MVar { id: Some(n) } => {
+                let id = MVarId(n);
+                if self.mctx.is_assigned(id) || id == mvar_id {
+                    return Ok(false);
+                }
+                let Some(inner) = self.mctx.decl(id).map(|d| Arc::clone(&d.lctx)) else {
+                    return Ok(false);
+                };
+                if has_ctx_locals {
+                    return Ok(false);
+                }
+                let Some(outer) = self.mctx.decl(mvar_id).map(|d| Arc::clone(&d.lctx)) else {
+                    return Ok(false);
+                };
+                let except = self.fvar_ids(fvars);
+                if !inner.is_sub_prefix_of(&outer, &except) {
+                    return Ok(false);
+                }
+                Ok(!self.mctx.is_delayed_assigned(id))
+            }
+            // visit f <&&> visit a (:1054); rescues are the slow path's
+            Node::App { f, arg } => Ok(self.check_assignment_scope(mvar_id, fvars, hcl, f)?
+                && self.check_assignment_scope(mvar_id, fvars, hcl, arg)?),
+            Node::Lam {
+                binder_type, body, ..
+            }
+            | Node::Forall {
+                binder_type, body, ..
+            } => Ok(
+                self.check_assignment_scope(mvar_id, fvars, hcl, binder_type)?
+                    && self.check_assignment_scope(mvar_id, fvars, hcl, body)?,
+            ),
+            Node::LetE {
+                ty, value, body, ..
+            } => Ok(self.check_assignment_scope(mvar_id, fvars, hcl, ty)?
+                && self.check_assignment_scope(mvar_id, fvars, hcl, value)?
+                && self.check_assignment_scope(mvar_id, fvars, hcl, body)?),
+            Node::MData { expr, .. } => self.check_assignment_scope(mvar_id, fvars, hcl, expr),
+            Node::Proj { structure, .. } | Node::ProjBig { structure, .. } => {
+                self.check_assignment_scope(mvar_id, fvars, hcl, structure)
+            }
+            _ => Ok(true),
+        }
     }
 
     /// oracle: `checkAssignmentAux` (`:954-956`) = `run (check v)`.
@@ -612,6 +701,160 @@ mod tests {
                 ctx.check_assignment_aux(oid, &[], false, redex),
                 Ok(Some(zero))
             );
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// `checkMVar` with the assigned mvar in a NON-empty ctx `{a}`
+    /// (`:897-900`): the inner mvar's ctx `{a, y}` with `fvars = [y]` is
+    /// a sub-prefix once `y` is subtracted, so it is returned unchanged
+    /// and nothing is assigned.
+    #[test]
+    fn check_mvar_subtracts_fvars_before_the_sub_prefix_test() {
+        with_prelude0_ctx(|ctx| {
+            ctx.cfg.ctx_approx = true;
+            let n = const_named(ctx, "N");
+            let cp = ctx.lctx_checkpoint();
+            let _a = fresh_fvar(ctx, n, "a");
+            let with_a = ctx.current_lctx();
+            let (_o, oid) = ctx
+                .mk_aux_mvar_at(with_a, n, MVarKind::Natural, None)
+                .unwrap();
+            let y = fresh_fvar(ctx, n, "y");
+            let (i, iid) = ctx.mk_aux_mvar(n).unwrap();
+            assert_eq!(ctx.check_assignment_aux(oid, &[y], false, i), Ok(Some(i)));
+            assert!(!ctx.mctx.is_assigned(iid), "a sub-prefix is not restricted");
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// `checkMVar`'s `toErase` fold (`:920-930`) with the assigned mvar
+    /// in ctx `{a}` and the inner one in `{a, x}`: the restriction KEEPS
+    /// `a` (the outer ctx has it) and drops `x`.
+    #[test]
+    fn check_mvar_restriction_keeps_what_the_outer_ctx_has() {
+        with_prelude0_ctx(|ctx| {
+            ctx.cfg.ctx_approx = true;
+            let n = const_named(ctx, "N");
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, n, "a");
+            let aid = ctx.fvar_id_of(a).unwrap();
+            let with_a = ctx.current_lctx();
+            let (_o, oid) = ctx
+                .mk_aux_mvar_at(with_a, n, MVarKind::Natural, None)
+                .unwrap();
+            let x = fresh_fvar(ctx, n, "x");
+            let xid = ctx.fvar_id_of(x).unwrap();
+            let (i, iid) = ctx.mk_aux_mvar(n).unwrap();
+            let aux = ctx
+                .check_assignment_aux(oid, &[], false, i)
+                .unwrap()
+                .expect("restricted");
+            assert_eq!(ctx.mctx.assignment(iid), Some(aux));
+            let lctx = ctx.mctx.decl(mvar_id(ctx, aux)).unwrap().lctx.clone();
+            assert!(lctx.lctx().get(aid).is_some(), "a kept");
+            assert!(lctx.lctx().get(xid).is_none(), "x erased");
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// oracle `CheckAssignmentQuick` mvar arm (`:1070-1077`): each of
+    /// the six conditions returns `false` ("use the slow path"). A
+    /// declared, unassigned, sub-prefix, non-delayed mvar returns `true`.
+    #[test]
+    fn quick_check_mvar_arm_falls_through_on_each_condition() {
+        with_prelude0_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let zero = const_dotted(ctx, "N", "zero");
+            let cp = ctx.lctx_checkpoint();
+            let (o, oid) = fresh_mvar(ctx, n);
+            let (ok, _) = fresh_mvar(ctx, n);
+            assert!(
+                ctx.check_assignment_scope(oid, &[], false, ok).unwrap(),
+                "sub-prefix"
+            );
+            let (asg, asg_id) = fresh_mvar(ctx, n);
+            ctx.mctx.assign(asg_id, zero).unwrap();
+            assert!(
+                !ctx.check_assignment_scope(oid, &[], false, asg).unwrap(),
+                "(1) assigned"
+            );
+            assert!(
+                !ctx.check_assignment_scope(oid, &[], false, o).unwrap(),
+                "(2) self"
+            );
+            let base = Some(ctx.view.store);
+            let s = ctx.scratch.intern_str(base, "_never_declared_q").unwrap();
+            let name = ctx.scratch.name_str(base, None, s).unwrap();
+            let ghost = ctx.scratch.expr_mvar(base, Some(name)).unwrap();
+            assert!(
+                !ctx.check_assignment_scope(oid, &[], false, ghost).unwrap(),
+                "(3) undeclared"
+            );
+            assert!(
+                !ctx.check_assignment_scope(oid, &[], true, ok).unwrap(),
+                "(4) has_ctx_locals"
+            );
+            let _x = fresh_fvar(ctx, n, "x");
+            let (inner, _) = ctx.mk_aux_mvar(n).unwrap();
+            assert!(
+                !ctx.check_assignment_scope(oid, &[], false, inner).unwrap(),
+                "(5) not sub-prefix"
+            );
+            let (d, did) = fresh_mvar(ctx, n);
+            let (p, pid) = fresh_mvar(ctx, n);
+            let _ = p;
+            ctx.mctx.assign_delayed(did, vec![], pid).unwrap();
+            assert!(
+                !ctx.check_assignment_scope(oid, &[], false, d).unwrap(),
+                "(6) delayed"
+            );
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// The driver returns the REWRITTEN term (`:1164-1168`), never the
+    /// original `v`.
+    #[test]
+    fn driver_returns_the_slow_path_rewrite() {
+        with_prelude0_ctx(|ctx| {
+            ctx.cfg.ctx_approx = true;
+            let n = const_named(ctx, "N");
+            let cp = ctx.lctx_checkpoint();
+            let (_o, oid) = fresh_mvar(ctx, n);
+            let _x = fresh_fvar(ctx, n, "x");
+            let (i, iid) = ctx.mk_aux_mvar(n).unwrap();
+            let got = ctx
+                .check_assignment(oid, &[], i)
+                .unwrap()
+                .expect("restricted");
+            assert_ne!(
+                got, i,
+                "assigning the original would rebuild the § Evidence cycle"
+            );
+            assert_eq!(ctx.mctx.assignment(iid), Some(got));
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// oracle: `checkFVar` matches `.ldecl (nondep := false)`; a `have` is
+    /// "locally a cdecl", judged by membership in the abstracted fvars
+    /// (`ExprDefEq.lean:851-878`). The QUICK check (`:1062-1068`) answers
+    /// `false` for a genuine let even when it is listed in `fvars`: that
+    /// means "slow path", and only the slow path follows its value. The
+    /// mvar is minted BEFORE the decls so neither is in its lctx.
+    #[test]
+    fn quick_check_treats_a_have_as_a_cdecl() {
+        with_prelude0_ctx(|ctx| {
+            let nat = const_named(ctx, "Nat");
+            let zero = const_named(ctx, "Nat.zero");
+            let cp = ctx.lctx_checkpoint();
+            let (_m, mid) = fresh_mvar(ctx, nat);
+            let h = ctx.push_let_decl(None, nat, zero, true).expect("have");
+            let l = ctx.push_let_decl(None, nat, zero, false).expect("let");
+            assert!(!ctx.check_assignment_scope(mid, &[], false, h).expect("h"));
+            assert!(ctx.check_assignment_scope(mid, &[h], false, h).expect("h"));
+            assert!(!ctx.check_assignment_scope(mid, &[l], false, l).expect("l"));
             ctx.lctx_restore(cp);
         });
     }
