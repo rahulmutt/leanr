@@ -43,9 +43,10 @@ pub enum MetaError {
     /// the question was never answered, and the payload names the seam
     /// (function + oracle citation + owning task) so a divergence is
     /// attributable instead of silently absorbed. Introduced by task B5
-    /// (`synth.rs`), whose `try_resolve` needs `forallTelescopeReducing`
-    /// over a FORALL-shaped synthesis goal (`SynthInstance.lean:351`) —
-    /// see that function's own doc comment.
+    /// for `synth.rs`'s `try_resolve` on forall-shaped goals; that seam
+    /// is closed (synth pi-goals slice, `forallTelescopeReducing` at
+    /// `SynthInstance.lean:353`), and the remaining users are named
+    /// at their raise sites (e.g. `coe.rs`).
     Unsupported(String),
     /// oracle: the three `throwError`s in `Meta/Coe.lean` that fire AFTER
     /// a coercion instance was found and expanded but the expansion has

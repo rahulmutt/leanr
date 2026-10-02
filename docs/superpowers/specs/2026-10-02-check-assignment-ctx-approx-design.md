@@ -530,6 +530,6 @@ Mutations (each applied, run, reverted):
 
 Full `mise run ci` is green, and no pre-existing record changed answer.
 
-Open: `synth.rs`'s `try_resolve` pi-goal SEAM (`SynthInstance.lean:361`)
+~~Open: `synth.rs`'s `try_resolve` pi-goal SEAM (`SynthInstance.lean:361`)
 also calls `mkLambdaFVars … (etaReduce := true)`. Whoever ports
-pi-shaped synthesis goals should use `mk_lambda_eta`.
+pi-shaped synthesis goals should use `mk_lambda_eta`.~~ CLOSED [synth pi-goals slice: `2026-10-02-synth-pi-goals-design.md` § Landed]; `try_resolve` uses `mk_lambda_eta`.

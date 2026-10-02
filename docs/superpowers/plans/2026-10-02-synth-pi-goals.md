@@ -512,7 +512,7 @@ class BE (α : Type) where be : N
 instance instBEOfDecEq [DecEqN α] : BE α := ⟨N.zero⟩
 class PB (α : Type) where pb : N
 instance (priority := 100) instPBLow : PB N := ⟨N.zero⟩
-instance (priority := 5000) instPBHigh [(a b : N) → NoInst (Dec (Eq a b))] : PB N := ⟨N.zero⟩
+instance (priority := 5000) instPBHigh [(x : N) → CoeT N x NoBase] : PB N := ⟨N.zero⟩
 ```
 
 If prelude-mode rejects any line (auto-bound `α`, the anonymous constructor), fix it minimally, e.g. `{α : Type}`, or `{ dec := N.zero }`. Keep the names.

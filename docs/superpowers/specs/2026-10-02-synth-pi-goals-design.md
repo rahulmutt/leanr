@@ -199,7 +199,7 @@ class BE (α : Type) where be : N
 instance instBEOfDecEq [DecEqN α] : BE α := ⟨N.zero⟩
 class PB (α : Type) where pb : N
 instance (priority := 100)  instPBLow  : PB N := ⟨N.zero⟩
-instance (priority := 5000) instPBHigh [(a b : N) → NoInst (Dec (Eq a b))] : PB N := ⟨N.zero⟩
+instance (priority := 5000) instPBHigh [(x : N) → CoeT N x NoBase] : PB N := ⟨N.zero⟩
 ```
 
 Add queries to `dump_synth.lean`'s `synthQueries`. Each row must be
@@ -225,7 +225,8 @@ discriminates. The plan decides.
 - Delete `instance : BEq Bool := ⟨fun _ b => b⟩` and its comment from
   `tests/fixtures/elab/elab_op_support.lean.in` (`:69-70`). Regenerate
   with `mise run fixtures:regen`.
-- `op/beq-prop`, `op/bne-prop` and `op/beq-prop-bool` re-record
+- `op/beq-prop`, `op/bne-prop` and `op/beq-prop-bool` (and, as found at
+  regen, `op/beq-uncomparable-prop`) re-record
   against Prelude's `instBEqOfDecidableEq`. The plan reads the exact
   term off the regenerated oracle record and does not predict it here.
   The diff of the regenerated corpus must touch only those three
@@ -303,4 +304,55 @@ One plan and one PR, in four tasks:
 
 ## Landed
 
-(Filled in at close-out.)
+Commits on `synth-pi-goals`: 4595e44 (spec), e4ab2be (plan), 549c8c9 (T1:
+forall telescope in `preprocess`/`preprocess_out_param`/`get_instances`),
+74920d5 (T2: `try_resolve`/`get_subgoals` pi goals, `mk_lambda_eta`),
+b6c3282 (T3: Synth0 oracle rows), and the T4 commit (ElabOp suffix drop,
+elab rows, docs, this ledger).
+
+**Corpus counts.** Synth: 30 -> 37 compared records (seven `pi*` rows;
+`piEta` folded into `piRoot`). Op: 94 -> 97 (`CORPUS_FLOOR` = 97): three new
+`meta/synth-pi-{beq-nat,deceq-nat,beq-bool}` rows. Four rows re-recorded
+against `instBEqOfDecidableEq Bool instDecidableEqBool` in place of
+`instBEqBool`: `op/beq-prop`, `op/bne-prop`, `op/beq-prop-bool`, and
+`op/beq-uncomparable-prop`. The fourth was not predicted by the spec: its
+source `(binop% PU n u) == True` is a Bool `==` that also went through the
+dropped suffix `BEq Bool`, and its only term change is that same
+substitution. No other op-queries id moved.
+
+**Oracle verdicts as observed.** `piUnused`: `fun (_ : N) => instPriHigh`, so
+the `removeUnusedArguments?` absence is answer-neutral. `piInstBinder`:
+`ok=false` (the goal's own instance binders are not candidates). All seven
+records `near_budget:false`.
+
+**piBranch binder change.** T3 changed `instPBHigh`'s binder from
+`[(a b : N) -> NoInst (Dec (Eq a b))]` to `[(x : N) -> CoeT N x NoBase]`: the
+original binder had no candidates, so `try_resolve` never ran on it and the
+row killed nothing. The oracle record is byte-identical. The snippet above
+and the plan carry the new binder.
+
+**Mutation table** (run on the committed fixtures).
+
+| mutation | result |
+|---|---|
+| 1c `preprocess` non-reducing telescope | survives; EQUIVALENT (the rebuilt type is identical for `DecEqN N`) |
+| 1c' `with_forall_telescope` ignores `reducing` | killed by `piNested` |
+| 1b `get_instances` snapshots local instances inside the telescope | killed by `piInstBinder` |
+| 2a `mk_lambda` for `mk_lambda_eta` | killed by `piRoot`, `piReducible`, `piNested` |
+| 2b subgoal mvar not applied to `xs` | SURVIVES the oracle gate; killed only by the unit test `pi_goal_subgoals_are_applied_outer_mvars` |
+| 2c `outer` captured inside the telescope | killed by `piRoot`, `piReducible`, `piApplied`, `piNested` |
+| `try_resolve` `Unsupported` seam restored | killed by `piRoot`, `piReducible`, `piApplied`, `piNested`, `piUnused`, `piBranch` (synth), and in `oracle_op` by 7 rows: `meta/synth-pi-{beq-nat,deceq-nat,beq-bool}`, `op/beq-prop`, `op/bne-prop`, `op/beq-prop-bool`, `op/beq-uncomparable-prop` |
+| `try_resolve` `Err` instead of `Ok(None)` on `is_def_eq` failure under non-empty `xs` | killed by `piBranch` (only with the strengthened binder) |
+
+**Open follow-ups.**
+- Approach B: a shared meta/elab telescope.
+- Synthesis onto real depth.
+- Port `removeUnusedArguments?` (currently answer-neutral, `piUnused`).
+- The `get_instances` non-class divergence.
+- An 8th oracle row with a solved, telescope-dependent instance subgoal
+  (e.g. an instance `[forall x, C x]`), to make mutation 2b oracle-observable.
+- Minor: `lctx_restore` drops the `lctx_snapshot` cache even when nothing was
+  pushed, so each candidate re-clones (perf only).
+- Minor: binder-free goals take one extra `step()` per `try_resolve` and per
+  preprocess/`get_instances` telescope. This matches the oracle and no
+  corpus record moved.

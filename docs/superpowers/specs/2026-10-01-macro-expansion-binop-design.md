@@ -699,6 +699,9 @@ Spec corrections:
   `op/beq-prop`, `op/bne-prop`, `op/beq-prop-bool` pin `instBEqBool`, not
   Prelude's `instBEqOfDecidableEq`. Fidelity caveat: those rows no longer
   exercise the Prelude route.
+  Reverted [synth pi-goals slice]: the suffix no longer declares `BEq Bool`;
+  the three rows pin `instBEqOfDecidableEq` (plus `op/beq-uncomparable-prop`,
+  which also went through the suffix instance).
 - Row `op/postponed-operand` became `op/postponed-binop-operand` (id clash
   with a P2 row).
 
@@ -727,10 +730,10 @@ Open follow-ups (owner suggestion in brackets):
   binder forms but regresses `op/postponed-binop-operand` with
   `DepthBudgetExhausted`. Whoever fixes it restores the binder forms of
   `op/depth`, `op/depth-mid`, `op/stuck` and re-runs T3 mutations (d), (h).~~ CLOSED; binder forms restored, T3 (d)/(h) re-run [checkAssignment slice: `2026-10-02-check-assignment-ctx-approx-design.md` § Landed].
-- synth pi-goal gap [synthesis slice]: `synth_instance` has no pi-shaped
+- ~~synth pi-goal gap [synthesis slice]: `synth_instance` has no pi-shaped
   goal support (`SynthInstance.lean:740-742`), so `(inferInstance : BEq Bool)`
   and `BEq Nat` fail. Fixing it drops the suffix `BEq Bool` and re-checks the
-  three rows against `instBEqOfDecidableEq`.
+  three rows against `instBEqOfDecidableEq`.~~ CLOSED [synth pi-goals slice: `2026-10-02-synth-pi-goals-design.md` § Landed].
 - ~~`(fun a => LT.lt a 2) z0` (also `a + 2`, `BEq.beq a 2`) gives
   `DepthBudgetExhausted` op-free; the oracle accepts [likely the same
   leanr_meta slice, not bisected]. `op/rel-no-default` uses `x.1 < 2` to
