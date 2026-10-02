@@ -21,7 +21,9 @@ use std::collections::HashMap;
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, NameId, Store};
 use leanr_kernel::{BinderInfo, EnvView};
-use leanr_meta::{Config, EnvExtensions, LocalCtxSnapshot, MVarDecl, MVarId, MVarKind, MetaCtx};
+use leanr_meta::{
+    Config, EnvExtensions, LocalCtxSnapshot, MVarDecl, MVarId, MVarKind, MetaCtx, MetaError,
+};
 
 mod support;
 use support::{decode_expr, encode_expr, fixture, replay_fixture, synth_name, EncSt};
@@ -38,27 +40,11 @@ use support::{decode_expr, encode_expr, fixture, replay_fixture, synth_name, Enc
 /// If a seam is closed, the corresponding entry must be REMOVED (the
 /// `compared` count assertion at the end of the gate is what forces
 /// that to be a deliberate edit rather than a silent drift).
-const SEAM_EXCLUSIONS: &[(&str, &str)] = &[(
-    "mvarGoal/synth/0",
-    "NAMED SEAM `withNewMCtxDepth (allowLevelAssignments := true)` — no mctx-depth model in \
-     this crate. Owner: M4b. Cited at `synth.rs::synth_instance_main` (\"`preprocess`/\
-     `preprocessOutParam`, and `withNewMCtxDepth (allowLevelAssignments := true)` — NAMED \
-     SEAM, no field/mechanism in this crate at all ... Owner M4b, citing \
-     SynthInstance.lean:958-968\") and at `level.rs`'s \"Depth / read-only seam\". \
-     Mechanism, confirmed by instrumenting the engine: the goal is `OfN ?n N` with `?n` \
-     minted OUTSIDE the search. The oracle runs `SynthInstance.main` under \
-     `withNewMCtxDepth`, so `?n` sits at a LOWER depth than the search's, and \
-     `AbstractMVars` leaves lower-depth metavariables alone (`AbstractMVars.lean:91`, \
-     `decl.depth != (← getMCtx).depth => return e`; the level twin at :59-60 says \
-     \"metavariables from lower depths are treated as constants\"). The oracle's answer \
-     therefore abstracts NOTHING, passes `wakeUp`'s root check `answer.result.numMVars == 0` \
-     (SynthInstance.lean:428), and comes back as `instOfNN ?n`. leanr has no depth notion, \
-     so `?n` is an ordinary current-depth mvar: `mk_answer`'s `abstract_mvars` abstracts it, \
-     `num_mvars() == 1`, and `wake_up`'s identical root check rejects the answer — leanr \
-     returns `Ok(None)` where the oracle returns `Some (instOfNN ?n)`. leanr's side is \
-     INCOMPLETENESS (a refused answer), never a wrong answer, so it stays within the \
-     crate's soundness contract.",
-)];
+// `mvarGoal/synth/0` (`OfN ?n N`) was the one entry. It closed in
+// synth-real-depth Task 1: under real depth `abstract_mvars` leaves the
+// caller's lower-depth `?n` alone (`AbstractMVars.lean:89-93`), so the
+// answer `instOfNN ?n` passes `wake_up`'s root check, as in the oracle.
+const SEAM_EXCLUSIONS: &[(&str, &str)] = &[];
 
 #[test]
 fn oracle_synth_gate() {
@@ -98,19 +84,11 @@ fn oracle_synth_gate() {
         // as a corpus diff.
         //
         // The one such record today is `stuck/synth/0` (`Add ?a`, `?a`
-        // minted OUTSIDE the search). It is the DOCUMENTED
-        // `isDefEqStuckEx` seam: `synthInstanceCore?`
-        // (`SynthInstance.lean:958-968`) runs `main` under
-        // `withNewMCtxDepth` with `isDefEqStuckEx := true`, so the
-        // oracle's first unification throws `isDefEqStuckException`;
-        // this crate has no `Config` field for `isDefEqStuckEx` at all
-        // and no mctx-depth model, so `?a` is simply assignable here and
-        // leanr answers `instAddN` instead of getting stuck. Seam owner:
-        // M4b — see `synth.rs::synth_instance_main`'s own
-        // `isDefEqStuckEx := true -- NAMED SEAM, not settable` comment
-        // and `config.rs`'s matching note. Excluding it is NOT a
-        // weakening of a comparison leanr could pass; there is no
-        // oracle verdict to compare against.
+        // minted OUTSIDE the search): the oracle's search runs under
+        // `withNewMCtxDepth` with `isDefEqStuckEx := true`
+        // (`SynthInstance.lean:963`, `:978`) and its first unification
+        // throws `isDefEqStuck`. leanr now throws `IsDefEqStuck` there
+        // too — `exc_record_stuck_synth_0_is_stuck_in_leanr_too` pins it.
         if kind == "exc" {
             skipped_exc.push(format!("{id}: {}", q["msg"]));
             continue;
@@ -463,8 +441,8 @@ fn oracle_synth_gate() {
     // number of records actually COMPARED, so deleting or `exc`-ing a
     // curated query fails here instead of quietly shrinking the corpus.
     assert_eq!(
-        compared, 37,
-        "expected 37 compared synthesis records (skipped `exc`: {skipped_exc:?}; \
+        compared, 38,
+        "expected 38 compared synthesis records (37 -> 38: synth-real-depth Task 1 closed the mvarGoal/synth/0 seam exclusion; skipped `exc`: {skipped_exc:?}; \
          skipped near-budget: {skipped_near_budget:?}; seam-excluded: \
          {skipped_seam:?}) — if the curated list in dump_synth.lean grew or shrank \
          deliberately, update this count; M4b-3 P4 task 1 added the six coe* records, \
@@ -475,24 +453,14 @@ fn oracle_synth_gate() {
     );
 }
 
-/// Pins what leanr ACTUALLY does on the one seam-excluded record
-/// (`SEAM_EXCLUSIONS`'s `mvarGoal/synth/0`), so the exclusion above is a
-/// documented, bounded divergence rather than an unexamined hole:
-///
-/// 1. leanr returns `Ok(None)` — INCOMPLETENESS (a refused answer),
-///    never a wrong instance and never an unsoundness. If this ever
-///    starts producing `Ok(Some(_))`, the term it produces has to be
-///    checked against the oracle's `instOfNN ?n`, and the exclusion
-///    removed; this assertion is what forces that conversation.
-/// 2. It is NOT an `Err`. In particular the goal metavariable IS
-///    declared by the gate before the call (task-B6 ledger note:
-///    `decode_expr` interns an mvar node without declaring it, and
-///    `synth_pending` raises `MetaError::MVar` on an undeclared one), so
-///    the search really did run — instrumenting the engine confirmed it
-///    reaches `wake_up` with a resolved candidate and rejects the answer
-///    only at the `num_mvars() == 0` root check.
-#[test]
-fn seam_excluded_mvar_goal_is_incompleteness_not_an_error() {
+/// Replays `Synth0.olean`, finds the committed record `id`, decodes its
+/// `goal`, and DECLARES its first goal mvar at depth 0 before handing the
+/// context to `f` (`decode_expr` interns mvar nodes without declaring
+/// them, and an undeclared mvar is not one the search can reason about).
+fn with_synth0_record<R>(
+    id: &str,
+    f: impl FnOnce(&mut MetaCtx<'_>, &serde_json::Value, ExprId, MVarId) -> R,
+) -> R {
     let support::Replayed {
         env,
         reducibility,
@@ -508,189 +476,61 @@ fn seam_excluded_mvar_goal_is_incompleteness_not_an_error() {
     } = replay_fixture("Synth0.olean");
     let queries =
         std::fs::read_to_string(fixture("synth-queries.jsonl")).expect("committed queries");
-    let mut seen = 0usize;
-    for line in queries.lines().filter(|l| !l.trim().is_empty()) {
-        let q: serde_json::Value = serde_json::from_str(line).expect("committed JSONL is valid");
-        if q["id"].as_str() != Some("mvarGoal/synth/0") {
-            continue;
-        }
-        seen += 1;
-        // The corpus still records the ORACLE's answer, untouched.
-        assert_eq!(q["ok"].as_bool(), Some(true));
-        assert_eq!(q["val"]["f"]["n"].as_str(), Some("instOfNN"));
-
-        let view: EnvView = env.view();
-        let base = Some(view.store);
-        let mut scratch = Store::scratch();
-        let mut fv = HashMap::new();
-        let mut mv: HashMap<u64, NameId> = HashMap::new();
-        let goal = decode_expr(&mut scratch, base, &q["goal"], &mut fv, &mut mv);
-        let ty = decode_expr(&mut scratch, base, &q["mvars"][0]["t"], &mut fv, &mut mv);
-        let idx = q["mvars"][0]["i"].as_u64().expect("mvars[0].i");
-        let nid = mv[&idx];
-        let mut ctx = MetaCtx::new(
-            view,
-            &mut scratch,
-            Config::default(),
-            EnvExtensions {
-                reducibility: &reducibility,
-                matchers: &matchers,
-                instances: &instances,
-                default_instances: &default_instances,
-                projection_fns: &projection_fns,
-                classes: &classes,
-                coe_decls: &coe_decls,
-                aux_recs: &aux_recs,
-                elab_as_elim: &elab_as_elim,
-                structures: &[],
-            },
-        );
-        ctx.mctx_mut().declare(
-            MVarId(nid),
-            MVarDecl {
-                user_name: None,
-                ty,
-                lctx: LocalCtxSnapshot::empty(),
-                kind: MVarKind::Natural,
-            },
-        );
-        let got = ctx.synth_instance(goal);
-        assert!(
-            matches!(got, Ok(None)),
-            "seam behavior changed: leanr now answers {got:?} for `OfN ?n N` (oracle: \
-             `some (instOfNN ?n)`). Re-examine SEAM_EXCLUSIONS — if the mctx-depth seam \
-             closed, DELETE the exclusion and let the gate compare the term."
-        );
-    }
-    assert_eq!(seen, 1, "mvarGoal/synth/0 must be present in the corpus");
+    let q: serde_json::Value = queries
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("valid JSONL"))
+        .find(|q| q["id"].as_str() == Some(id))
+        .unwrap_or_else(|| panic!("{id} must be present in the corpus"));
+    let view: EnvView = env.view();
+    let base = Some(view.store);
+    let mut scratch = Store::scratch();
+    let mut fv = HashMap::new();
+    let mut mv: HashMap<u64, NameId> = HashMap::new();
+    let goal = decode_expr(&mut scratch, base, &q["goal"], &mut fv, &mut mv);
+    let ty = decode_expr(&mut scratch, base, &q["mvars"][0]["t"], &mut fv, &mut mv);
+    let nid = mv[&q["mvars"][0]["i"].as_u64().expect("mvars[0].i")];
+    let mut ctx = MetaCtx::new(
+        view,
+        &mut scratch,
+        Config::default(),
+        EnvExtensions {
+            reducibility: &reducibility,
+            matchers: &matchers,
+            instances: &instances,
+            default_instances: &default_instances,
+            projection_fns: &projection_fns,
+            classes: &classes,
+            coe_decls: &coe_decls,
+            aux_recs: &aux_recs,
+            elab_as_elim: &elab_as_elim,
+            structures: &[],
+        },
+    );
+    ctx.mctx_mut().declare(
+        MVarId(nid),
+        MVarDecl {
+            user_name: None,
+            ty,
+            lctx: LocalCtxSnapshot::empty(),
+            kind: MVarKind::Natural,
+        },
+    );
+    f(&mut ctx, &q, goal, MVarId(nid))
 }
 
-/// Sibling of `seam_excluded_mvar_goal_is_incompleteness_not_an_error`,
-/// but for the `exc` record (`stuck/synth/0`, `Add ?a` with `?a : Type`
-/// minted OUTSIDE the search) rather than a `SEAM_EXCLUSIONS` entry —
-/// `oracle_synth_gate` above SKIPS `exc` records outright (there is no
-/// oracle verdict to agree with), which means nothing today pins what
-/// leanr itself does there. Without this test, closing the
-/// `isDefEqStuckEx` seam (giving this crate a `Config` field for it plus
-/// an mctx-depth model) could silently change leanr's answer with
-/// nothing failing.
-///
-/// THIS TEST PINS CURRENT, DIVERGENT BEHAVIOR — it is not a correctness
-/// claim. The oracle THROWS `isDefEqStuckException` on this exact goal:
-/// `synthInstanceCore?` runs `SynthInstance.main` under
-/// `withNewMCtxDepth` with `isDefEqStuckEx := true`
-/// (`SynthInstance.lean:963`), so the first unification against the
-/// lower-depth `?a` throws instead of assigning (the throw sites are
-/// `ExprDefEq.lean:1993-2018` and `:1954-1956`; `SynthInstance.lean:1052`
-/// is where `synthPending` CATCHES it). leanr has neither `isDefEqStuckEx` nor a
-/// depth model (same gap `SEAM_EXCLUSIONS`'s `mvarGoal/synth/0` entry and
-/// `synth.rs::synth_instance_main`'s own comment document), so it simply
-/// assigns `?a := N` and answers `instAddN`.
-///
-/// When the `isDefEqStuckEx` seam is closed, THIS TEST MUST BE UPDATED
-/// to expect stuck-not-an-answer (`Err` carrying whatever this crate's
-/// analogue of `isDefEqStuckException` becomes, once one exists) rather
-/// than `Ok(Some(instAddN))` — the failure message below says so.
+/// `stuck/synth/0` (`Add ?a`, `?a : Type` minted OUTSIDE the search) is
+/// an `exc` record: the oracle throws `isDefEqStuck`
+/// (`SynthInstance.lean:963` sets `isDefEqStuckEx`; the throw is
+/// `ExprDefEq.lean:1952-1956`). The gate skips `exc` records, so this
+/// test is what pins leanr's side: the same `IsDefEqStuck`, with `?a`
+/// left unassigned.
 #[test]
-fn exc_record_stuck_synth_0_pins_leanrs_current_divergent_answer() {
-    let support::Replayed {
-        env,
-        reducibility,
-        matchers,
-        instances,
-        default_instances,
-        projection_fns,
-        classes,
-        coe_decls,
-        aux_recs,
-        elab_as_elim,
-        structures: _,
-    } = replay_fixture("Synth0.olean");
-    let queries =
-        std::fs::read_to_string(fixture("synth-queries.jsonl")).expect("committed queries");
-    let mut seen = 0usize;
-    for line in queries.lines().filter(|l| !l.trim().is_empty()) {
-        let q: serde_json::Value = serde_json::from_str(line).expect("committed JSONL is valid");
-        if q["id"].as_str() != Some("stuck/synth/0") {
-            continue;
-        }
-        seen += 1;
-        // The corpus records that the ORACLE did not answer cleanly —
-        // this is an `exc` record, not a verdict to agree with.
+fn exc_record_stuck_synth_0_is_stuck_in_leanr_too() {
+    with_synth0_record("stuck/synth/0", |ctx, q, goal, a| {
         assert_eq!(q["q"].as_str(), Some("exc"));
         assert_eq!(q["msg"].as_str(), Some("internal exception #7"));
-
-        let view: EnvView = env.view();
-        let base = Some(view.store);
-        let mut scratch = Store::scratch();
-        let mut fv = HashMap::new();
-        let mut mv: HashMap<u64, NameId> = HashMap::new();
-        let goal = decode_expr(&mut scratch, base, &q["goal"], &mut fv, &mut mv);
-        let ty = decode_expr(&mut scratch, base, &q["mvars"][0]["t"], &mut fv, &mut mv);
-        let idx = q["mvars"][0]["i"].as_u64().expect("mvars[0].i");
-        let nid = mv[&idx];
-        let mut ctx = MetaCtx::new(
-            view,
-            &mut scratch,
-            Config::default(),
-            EnvExtensions {
-                reducibility: &reducibility,
-                matchers: &matchers,
-                instances: &instances,
-                default_instances: &default_instances,
-                projection_fns: &projection_fns,
-                classes: &classes,
-                coe_decls: &coe_decls,
-                aux_recs: &aux_recs,
-                elab_as_elim: &elab_as_elim,
-                structures: &[],
-            },
-        );
-        ctx.mctx_mut().declare(
-            MVarId(nid),
-            MVarDecl {
-                user_name: None,
-                ty,
-                lctx: LocalCtxSnapshot::empty(),
-                kind: MVarKind::Natural,
-            },
-        );
-        let got = ctx.synth_instance(goal);
-        let got = match got {
-            Ok(Some(v)) => match ctx.instantiate_mvars(v) {
-                Ok(v) => Ok(Some(v)),
-                Err(e) => panic!(
-                    "{}: instantiate_mvars on the answer errored: {e:?}",
-                    q["id"]
-                ),
-            },
-            other => other,
-        };
-        drop(ctx);
-        let got_name = match got {
-            Ok(Some(v)) => {
-                let mut est = EncSt::default();
-                let goal_reencoded = encode_expr(&scratch, base, goal, &mut est);
-                assert_eq!(
-                    goal_reencoded, q["goal"],
-                    "stuck/synth/0: re-encoded `goal` does not round-trip"
-                );
-                let got_val = encode_expr(&scratch, base, v, &mut est);
-                got_val["n"].as_str().map(str::to_string)
-            }
-            _ => None,
-        };
-        assert_eq!(
-            (got.is_ok(), got_name.as_deref()),
-            (true, Some("instAddN")),
-            "leanr's answer for `Add ?a` (`stuck/synth/0`) changed to {got:?}/{got_name:?} — \
-             this test PINS the CURRENT DIVERGENT behavior (oracle throws \
-             isDefEqStuckException here: SynthInstance.lean:963 `isDefEqStuckEx := true`; \
-             the throw is ExprDefEq.lean:1993-2018, and SynthInstance.lean:1052 is the \
-             catch site). If this changed because the \
-             `isDefEqStuckEx` seam closed, UPDATE this test to expect stuck-not-an-answer \
-             instead of silently accepting whatever leanr now returns."
-        );
-    }
-    assert_eq!(seen, 1, "stuck/synth/0 must be present in the corpus");
+        assert_eq!(ctx.synth_instance(goal), Err(MetaError::IsDefEqStuck));
+        assert!(!ctx.mctx().is_assigned(a));
+    });
 }
