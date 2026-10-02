@@ -248,3 +248,18 @@ fn explicit_paren_with_implicit_expected_type_is_rejected() {
 fn parse_whole_rejects_partial_parse() {
     let _ = parse_whole("a ⊕⊕ b", &elab_op_grammar());
 }
+
+/// macro/binop% P3 T1: the test-support suffix is in the fixture.
+#[test]
+fn elab_op_has_the_test_support_suffix() {
+    let r = support::replay_fixture_in("elab", "ElabOp.olean");
+    let snap = elab_op_grammar();
+    for src in [
+        "fun (n : Nat) (z : Z) (a : Arr Nat) (u : U) (x : V n) (y : F n) => z",
+        "Z.ofNat",
+        "V.mk",
+        "F.mk",
+    ] {
+        support::elab_src_in(&r, src, &snap).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+    }
+}

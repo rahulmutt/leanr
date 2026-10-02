@@ -7418,3 +7418,55 @@ macro_rules | `($x != $y) => `(binrel_no_prop% bne $x $y)
 @[inherit_doc] infix:50 " ≠ "  => Ne
 
 macro_rules | `($x ≠ $y) => `(binrel% Ne $x $y)
+-- ===== op test support (hand-written; macro/binop% spec § P3 › Test-support suffix) =====
+-- `Z` is the rows' `Int`: Prelude has no `Int` and no cross-type coercion.
+structure Z where
+  n : Nat
+def Z.ofNat (n : Nat) : Z := ⟨n⟩
+instance (n : Nat) : OfNat Z n := ⟨⟨n⟩⟩
+instance : Coe Nat Z := ⟨Z.ofNat⟩
+instance : Add Z := ⟨fun a b => ⟨a.n + b.n⟩⟩
+instance : Sub Z := ⟨fun a b => ⟨a.n - b.n⟩⟩
+instance : Mul Z := ⟨fun a b => ⟨a.n * b.n⟩⟩
+instance : Div Z := ⟨fun a b => ⟨a.n / b.n⟩⟩
+instance : Mod Z := ⟨fun a b => ⟨a.n % b.n⟩⟩
+instance : Neg Z := ⟨fun a => a⟩
+instance : AndOp Z := ⟨fun a _ => a⟩
+instance : OrOp Z := ⟨fun a _ => a⟩
+instance : XorOp Z := ⟨fun a _ => a⟩
+instance : Append Z := ⟨fun a _ => a⟩
+instance : HPow Z Nat Z := ⟨fun a _ => a⟩
+instance : SMul Nat Z := ⟨fun _ a => a⟩
+instance : OrElse Z := ⟨fun a _ => a⟩
+instance : AndThen Z := ⟨fun a _ => a⟩
+instance : LT Z := ⟨fun a b => a.n < b.n⟩
+instance : LE Z := ⟨fun a b => a.n ≤ b.n⟩
+instance : BEq Z := ⟨fun a b => a.n == b.n⟩
+-- A second `HMul` default instance (Prelude's `instHMul` is the first):
+-- `hasHeterogeneousDefaultInstances` needs more than one (Extra.lean:371).
+structure Arr (α : Type) where
+  x : α
+@[default_instance high] instance [Mul α] : HMul α (Arr α) (Arr α) := ⟨fun a as => ⟨a * as.x⟩⟩
+-- No coercion to or from `Nat`, so it is uncomparable with `Nat`. The
+-- heterogeneous `HAdd` lets the fallback path elaborate rather than error.
+structure U where
+  n : Nat
+instance : Add U := ⟨fun a _ => a⟩
+instance : HAdd Nat U U := ⟨fun _ u => u⟩
+-- Prelude has no `Decidable True/False` (they live in Init/Core); `==` on
+-- `Prop` coerces through `decide`.
+instance : Decidable True := .isTrue True.intro
+instance : Decidable False := .isFalse fun h => h
+-- The depth row: `V n =?= V ?m` with an outer `?m`.
+structure V (n : Nat) where
+  mk ::
+instance : Add (V n) := ⟨fun a _ => a⟩
+instance : Coe Nat (V n) := ⟨fun _ => V.mk⟩
+instance : HAdd (V n) Nat (V n) := ⟨fun a _ => a⟩
+-- The stuck row: `F n =?= F ?m` succeeds only by unfolding `F`, which
+-- `isDefEqStuckEx` forbids.
+def F (_ : Nat) : Type := Nat
+def F.mk (n : Nat) : F n := (0 : Nat)
+instance : Add (F n) := ⟨fun a _ => a⟩
+instance : HAdd (F n) Z Z := ⟨fun _ z => z⟩
+instance (x : F n) : CoeT (F n) x Z := ⟨⟨0⟩⟩

@@ -5,6 +5,7 @@
 # removed and the `public`/`meta` modifiers dropped (module-system
 # syntax a plain prelude file cannot carry). Run from the repo so elan
 # resolves the pinned toolchain: `mise run fixtures:regen-elab-op`.
+# A hand-written test-support suffix (elab_op_support.lean.in) follows.
 set -eu
 SRC="$(lean --print-prefix)/src/lean"
 strip() {
@@ -31,3 +32,8 @@ echo "-- ===== Init/Core.lean excerpts: Iff (:188-197), bne (:772-777), Ne (:875
 for r in 188,197 772,777 875,880; do
   sed -n "${r}p" "$SRC/Init/Core.lean"
 done
+# macro/binop% P3: hand-written test types (spec § P3 › Test-support
+# suffix). Not copied from Init; real Lean elaborates it, so the oracle
+# stays authoritative. It must declare no notation (the golden diff below
+# would catch one).
+cat "$(dirname "$0")/elab_op_support.lean.in"
