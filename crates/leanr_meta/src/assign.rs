@@ -906,29 +906,16 @@ impl<'e> MetaCtx<'e> {
     /// a genuine let that is itself an `xs` entry, rather than
     /// abstracting it as a lambda and dropping its value.
     ///
-    /// SEAM (etaReduce, P1 follow-up): the oracle calls `mkLambdaFVars xs
-    /// v (etaReduce := true)` (`ExprDefEq.lean:551,554`, v4.33.0-rc1),
-    /// and `mkLambda'` (`MetavarContext.lean:1281-1291`) turns `fun x =>
-    /// f x` (x not free in `f`) into `f`. leanr's `mk_lambda`/
-    /// `mk_binding` does not eta-reduce, so the assignment is
-    /// eta-expanded (`?m := fun x => f x` where the oracle assigns `?m :=
-    /// f`). This is NOT merely "equal up to eta":
-    /// (a) after `elimMVarDeps`, the body is exactly the delayed head
-    ///     `?i' #0`, so the oracle assigns `?m := ?i'` while leanr assigns
-    ///     `?m := fun x => ?i' x`. Where `?m` occurs UNAPPLIED,
-    ///     `instantiateMVars` differs: the oracle's bare delayed `?i'`
-    ///     (no args) never instantiates and stays an mvar, while leanr's
-    ///     `fun x => ?i' x` instantiates to `fun x => val` once `?i` is
-    ///     assigned — leanr can succeed where the oracle reports an
-    ///     unassigned mvar;
-    /// (b) plain `?f x =?= g x` gives syntactically different final terms
-    ///     (`congrArg (fun x => g x) h` vs `congrArg g h`), visible to an
-    ///     oracle-differential corpus.
-    /// Not a regression (the deleted `mk_lambda_over_fvars` never
-    /// eta-reduced either). Port sketch: an `eta_reduce` flag on
-    /// `mk_binding` used only here; the cost is re-checking the corpus.
+    /// The oracle calls `mkLambdaFVars xs v (etaReduce := true)`
+    /// (`ExprDefEq.lean:551,554`, v4.33.0-rc1), so this goes through
+    /// `mk_lambda_eta`: `mkLambda'` (`MetavarContext.lean:1281-1291`)
+    /// turns `fun x => f x` (x not free in `f`) into `f`. That is more
+    /// than "equal up to eta": after `elimMVarDeps` the body can be the
+    /// bare delayed head `?i' #0`, and `?m := ?i'` stays an unassigned
+    /// mvar wherever `?m` occurs unapplied, where `fun x => ?i' x` would
+    /// instantiate once `?i` is assigned.
     ///
-    /// elimMVarDeps runs here through `mk_lambda`, closing macro/binop%
+    /// elimMVarDeps runs here through `mk_lambda_eta`, closing macro/binop%
     /// § Landed › P3's TOP PRIORITY gap.
     pub(crate) fn mk_lambda_fvars_with_let_deps(
         &mut self,
@@ -948,9 +935,9 @@ impl<'e> MetaCtx<'e> {
         }
         // oracle `mkLambdaFVars` (`:554`): `mkBinding`, which runs
         // `elimMVarDeps` over the body and every binder type first
-        // (`MetaCtx::mk_lambda` -> `mk_binding`). A `have` among `xs` is
-        // abstracted as a lambda (`generalizeNondepLet := true`).
-        Ok(Some(self.mk_lambda(xs, v)?))
+        // (`MetaCtx::mk_lambda_eta` -> `mk_binding`). A `have` among `xs`
+        // is abstracted as a lambda (`generalizeNondepLet := true`).
+        Ok(Some(self.mk_lambda_eta(xs, v)?))
     }
 
     // ===================================================================
@@ -2647,16 +2634,11 @@ mod tests {
             let m_val = ctx.mctx.assignment(mid).expect("?m assigned");
             let m_val = ctx.instantiate_mvars(m_val).unwrap();
             assert!(!ctx.data(m_val).has_fvar(), "no fvar leaks into ?m's value");
-            // Shape-agnostic: the oracle eta-reduces (`?m := ?i'`), leanr
-            // does not (`?m := fun x => ?i' x`); see the SEAM (etaReduce)
-            // note on `mk_lambda_fvars_with_let_deps`.
-            let mut body = m_val;
-            while let Node::Lam { body: b, .. } = ctx.node(body) {
-                body = b;
-            }
-            let head = ctx.get_app_fn(body);
-            let Node::MVar { id: Some(aux) } = ctx.node(head) else {
-                panic!("body head is an mvar")
+            // `etaReduce := true` (`ExprDefEq.lean:551,554`): the body
+            // `?i' #0` eta-reduces, so `?m := ?i'` exactly, not
+            // `fun x => ?i' x`.
+            let Node::MVar { id: Some(aux) } = ctx.node(m_val) else {
+                panic!("?m := ?i', a bare mvar; got {:?}", ctx.node(m_val))
             };
             let aux = MVarId(aux);
             assert_ne!(aux, iid, "body head is the fresh ?i', not ?i itself");
@@ -2666,6 +2648,31 @@ mod tests {
                 .expect("?i' is delay-assigned");
             assert_eq!(d.mvar_id_pending, iid);
             assert_eq!(d.fvars, vec![x]);
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// oracle `mkLambdaFVarsWithLetDeps` eta-reduces (`etaReduce :=
+    /// true`, `ExprDefEq.lean:551,554`): `?f x =?= g x` assigns
+    /// `?f := g`, not `fun x => g x`.
+    #[test]
+    fn process_assignment_eta_reduces_the_pattern_lambda() {
+        use crate::test_support::{const_named, with_prelude0_ctx};
+        with_prelude0_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let n_to_n = mk_forall(ctx, n, n);
+            let cp = ctx.lctx_checkpoint();
+            let g = fresh_fvar(ctx, n_to_n, "g");
+            // `?f` must see `g` (`fresh_mvar`'s lctx is empty).
+            let lc = ctx.current_lctx();
+            let (f, fid) = ctx
+                .mk_aux_mvar_at(lc, n_to_n, MVarKind::Natural, None)
+                .unwrap();
+            let x = fresh_fvar(ctx, n, "x");
+            let fx = mk_app(ctx, f, x);
+            let gx = mk_app(ctx, g, x);
+            assert!(ctx.is_def_eq(fx, gx).unwrap());
+            assert_eq!(ctx.mctx.assignment(fid), Some(g), "?f := g");
             ctx.lctx_restore(cp);
         });
     }
