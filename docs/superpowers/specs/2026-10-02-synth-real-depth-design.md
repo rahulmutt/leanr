@@ -319,6 +319,11 @@ e68f4b3 docs: synth-real-depth plan; spec amendment 1 (depth-only walks, pins, r
   `IsDefEqStuck` mapped to `LOption::None` in `try_synth_instance`, killed
   (25 tests).
 
+**Task 2 gate.** No oracle-observable elab row for a stuck `synthPending`
+was in reach, so the `whnf.rs` unit tests
+(`synth_pending_treats_a_stuck_search_as_no_progress`,
+`synth_pending_still_propagates_a_budget_error`) are the gate.
+
 **Citations corrected.** `DiscrTree/Main.lean:395-411` is `:397-412`
 (`if cfg.isDefEqStuckEx` at 397, `return (.star, #[])` at 412); fixed in
 `synth.rs` (Task 1) and in this spec's § The oracle model (final sweep).

@@ -127,27 +127,12 @@ fn step_merges_new_pending_before_still_unsolved() {
 /// throws, `Err(IsDefEqStuck)` is "not ready yet" that survives to the
 /// next rung.
 ///
-/// UN-IGNORED by M4b-3 P3 task 2. It was ignored through P2a because
-/// `synth_instance` never runs under a new mctx depth with
-/// `isDefEqStuckEx` (`MetaError::IsDefEqStuck` is now constructible, but
-/// only under `with_def_eq_stuck_ex`, which synthesis does not set), and `synth_instance(Wrap ?m)` therefore answered
-/// `Ok(Some(..))` — it treated the CALLER's `?m` as assignable and chose
-/// the class's type parameter on the caller's behalf. The real oracle
-/// reports this stuck (verified against the pinned v4.33.0-rc1
-/// toolchain: `useWrap` alone gives "typeclass instance problem is
-/// stuck / Wrap ?m.1 / ... the type argument to `Wrap` is a
-/// metavariable"), via `SynthInstance.lean:978`'s `withNewMCtxDepth`
-/// making an OUTER-scope mvar read-only for the whole search.
-///
-/// `leanr_meta` now has the MCtx-depth / read-only-mvar model, but
-/// `synth_instance` is not yet on it (owner: the synthesis-onto-depth
-/// follow-up). What changed is that the ELABORATOR does not depend on
-/// it for this decision:
-/// `TermElabM::try_synth_instance` (`synthetic/ladder.rs`) reconstructs
-/// `trySynthInstance`'s `.undef` from the goal type, so a goal that
-/// still mentions an unassigned expr mvar is "not ready" instead of
-/// being answered by a guessed candidate. See that function's doc for
-/// exactly how much of the oracle's dynamic condition this covers.
+/// The `.undef` is dynamic: `synth_instance` runs its search under
+/// `with_new_mctx_depth` with `isDefEqStuckEx`, so `?m` (the caller's) is
+/// read-only and the read-only arm throws `MetaError::IsDefEqStuck`;
+/// `MetaCtx::try_synth_instance` catches it as `LOption::Undef`
+/// (`SynthInstance.lean:978`, `:1014-1017`). The oracle reports the same
+/// for `useWrap` alone: "typeclass instance problem is stuck / Wrap ?m.1".
 #[test]
 fn stuck_synthesis_is_not_ready_rather_than_failure() {
     support::with_app_harness("Nat.zero", |app| {
@@ -982,54 +967,23 @@ fn a_nat_literal_infers_as_the_fixture_nat() {
 /// fixpoint, then `instantiate_mvars` (oracle: `elabTermAndSynthesize`,
 /// `SyntheticMVars.lean:696-698`).
 ///
-/// **This is NOT the brief's original test.** The brief's own
-/// `entry_point_runs_the_fixpoint` asserted that `useWrap` (bare)
-/// elaborates fine under `elab_term` alone but is reported
-/// `StuckSyntheticMVar` under the real entry point — exactly the
-/// oracle's own behavior for that source text (re-confirmed against
-/// v4.33.0-rc1 during Task 7's investigation). It cannot pass today:
-/// `synth_instance` does not yet run under a new mctx depth with
-/// `isDefEqStuckEx` (`leanr_meta` can now construct
-/// `MetaError::IsDefEqStuck`, but only under `with_def_eq_stuck_ex`;
-/// wiring synthesis onto it is a follow-up of macro/binop% P1), so `synth_instance(Wrap ?m)` solves eagerly from the
-/// sole candidate instead of refusing — the ladder's stuck report is
-/// unreachable from any typeclass goal today. That exact scenario is
-/// already recorded, `#[ignore]`d with this same evidenced reason, as
-/// `bare_typeclass_application_is_reported_stuck` above — and since
-/// `elab_and_synthesize` (this file's own support helper) is re-pointed
-/// at the real `elab_term_and_synthesize` by this task rather than the
-/// hand-chained stand-in it used to be, that ignored test now already
-/// exercises the REAL entry point. It needs no changes here to go green
-/// the day the `leanr_meta` gap above closes — writing a second,
-/// differently-shaped ignored test for the identical scenario would
-/// only be duplicate bookkeeping.
-///
-/// So this test instead pins the piece of `elab_term_and_synthesize`
-/// that IS observable on today's grammar: an ordinary application with
-/// an implicit argument, `id Nat.zero`. Two things are asserted, each
-/// standing in for one half of the pipeline:
+/// The bare-`useWrap` stuck report is pinned by
+/// `bare_typeclass_application_is_reported_stuck` through the same real
+/// entry point; this test pins the two halves observable on an ordinary
+/// application, `id Nat.zero`:
 ///
 /// - **Instantiation matters.** `elab_term` alone elaborates `id
-///   Nat.zero` to `@id ?α Nat.zero` with `?α := Nat` ASSIGNED (by
-///   `finalize`'s own unification) but never SUBSTITUTED — the raw
-///   term still carries a bare `Expr.mvar` reference, which
-///   `elab_only`'s canonical encoding below still shows as a `"mvar"`
-///   node. `elab_term_and_synthesize`'s own `instantiate_mvars` call is
-///   what erases it. A version of the entry point that dropped that
-///   call would make the two encodings AGREE, so this comparison would
-///   catch it.
-/// - **The fixpoint's call is exercised, even though it cannot yet be
-///   shown to have any effect.** Every term in today's reachable
-///   grammar resolves its instance goals eagerly inside `finalize`'s
-///   own `synthesize_app_inst_mvars` (`app/state.rs`), so
-///   `pending_mvars` is already empty by the time
-///   `elab_term_and_synthesize` reaches
-///   `synthesize_synthetic_mvars_no_postponing` — the call runs (it is
-///   real code on the path, not skipped), but it is a measured no-op
-///   on `id Nat.zero` and on every other term this corpus can produce.
-///   Once the `leanr_meta` gap above closes, the case that WOULD tell
-///   "the fixpoint ran" apart from "the fixpoint was skipped" is
-///   `bare_typeclass_application_is_reported_stuck`'s own `useWrap`.
+///   Nat.zero` to `@id ?α Nat.zero` with `?α := Nat` assigned but not
+///   substituted, so `elab_only`'s canonical encoding still shows a
+///   `"mvar"` node. `elab_term_and_synthesize`'s `instantiate_mvars`
+///   erases it; dropping that call would make the encodings agree.
+/// - **The fixpoint's call is exercised.** `finalize`'s own
+///   `synthesize_app_inst_mvars` (`app/state.rs`) resolves instance goals
+///   eagerly, so `pending_mvars` is already empty when
+///   `synthesize_synthetic_mvars_no_postponing` runs; the call is a
+///   measured no-op here. The case that tells "the fixpoint ran" from "was
+///   skipped" is `bare_typeclass_application_is_reported_stuck`'s
+///   `useWrap`.
 #[test]
 fn entry_point_runs_the_fixpoint() {
     let raw =

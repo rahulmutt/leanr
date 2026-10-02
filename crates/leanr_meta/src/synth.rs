@@ -1675,14 +1675,16 @@ impl<'e> MetaCtx<'e> {
     /// over-approximated: an all-polymorphic candidate set (`Any ?a`,
     /// `tc/useAnyHole`) and a class with zero candidates (`NoInst ?a`,
     /// `noInstMVar/synth/0`) both answer here, as in the oracle.
-    /// Out-param mvars never get stuck: `preprocess_out_param` replaces
-    /// them before the search and `assign_out_params` assigns them after
-    /// it, at the caller's depth.
+    /// An mvar that occurs ONLY in out-param positions never gets stuck:
+    /// `preprocess_out_param` replaces it before the search and
+    /// `assign_out_params` assigns it after, at the caller's depth.
     ///
-    /// LEVEL mvars cannot make it stuck: `allow_level_assignments =
-    /// true` (`:978`) keeps the caller's level mvars assignable.
+    /// The caller's level mvars cannot make it stuck:
+    /// `allow_level_assignments = true` (`:978`) keeps them assignable.
     pub fn try_synth_instance(&mut self, ty: ExprId) -> Result<LOption<ExprId>, MetaError> {
-        // oracle: `let type ← instantiateMVars type` (:967).
+        // oracle: `trySynthInstance` has no such call; this mirrors
+        // `synthInstanceCore?`'s `let type ← instantiateMVars type`
+        // (`SynthInstance.lean:967`) so the stuck check sees the instantiated goal.
         let ty = self.instantiate_mvars(ty)?;
         match self.synth_instance(ty) {
             Ok(Some(val)) => Ok(LOption::Some(val)),
