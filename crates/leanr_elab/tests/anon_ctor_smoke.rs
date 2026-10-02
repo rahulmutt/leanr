@@ -86,14 +86,17 @@ fn no_explicit_fields() {
 /// is the test that catches "count from 0 instead of numParams".
 /// Oracle: "Type mismatch\n  Eq.refl\nhas type\n  ∀ (a : ?m.3), Eq a a\n
 /// but is expected to have type\n  Eq Nat.zero Nat.zero". The oracle's
-/// `mkCoe` postpones here (the type still holds an mvar), so the
-/// mismatch is reported by the stuck-coercion path; leanr's faithful
-/// counterpart is `StuckCoercion`, not the immediate `TypeMismatch`.
+/// `trySynthInstance (CoeT (∀ a : ?m, Eq a a) Eq.refl (Eq Nat.zero
+/// Nat.zero))` is `.none` (no `isDefEqStuck`), so `mkCoe`'s `| .none =>
+/// failure` (`TermElabM.lean:1307`) reports the mismatch immediately
+/// (`:1322`); the postponed `.coe` arm (`SyntheticMVars.lean:304-310`)
+/// would have appended "failed to create type class instance for",
+/// which the oracle's message lacks.
 #[test]
 fn eq_counts_fields_after_its_promoted_parameters() {
     match support::elab_and_synthesize("(⟨⟩ : Eq Nat.zero Nat.zero)") {
-        Err(ElabError::StuckCoercion { .. }) => {}
-        other => panic!("expected a stuck-coercion type mismatch, got {other:?}"),
+        Err(ElabError::TypeMismatch { .. }) => {}
+        other => panic!("expected an immediate type mismatch, got {other:?}"),
     }
 }
 

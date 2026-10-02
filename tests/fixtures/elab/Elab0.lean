@@ -232,6 +232,19 @@ def useWrap {a : Type} [Wrap a] (x : a) : a := Wrap.wrap x
 def usePair {a : Type} {b : Type} [Pair a b] (x : a) (y : b) : a := Pair.mk2 x y
 def useNoInst {a : Type} [NoInst a] (x : a) : a := x
 
+-- `Any` — residue 2 of synth-real-depth: ONE instance, polymorphic in
+-- the class argument. Synthesizing `Any ?a` assigns only search-local
+-- mvars, so the oracle answers `.some` and leaves the caller's `?a`
+-- alone (`useAny _` → `@useAny ?m (@instAnyAll ?m) ?x`). Like
+-- `Wrap`/`Pair`/`NoInst`, it must NEVER gain a `@[default_instance]`.
+class Any (a : Type) where
+  any : a -> a
+
+instance instAnyAll {a : Type} : Any a where
+  any := fun x => x
+
+def useAny {a : Type} [Any a] (x : a) : a := Any.any x
+
 -- === M4b-3 P3 corpus: literals and default instances ===
 --
 -- Copied VERBATIM from `Init` where the shape is what the emitted

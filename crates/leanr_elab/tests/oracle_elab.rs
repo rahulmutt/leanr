@@ -66,7 +66,9 @@ fn oracle_elab_gate() {
     // 276 -> 329 (M4b-4c P2): M4b-4b's 17 anon/* records, never folded in, plus the 36 elim/* and elimErr/* records.
     // 329 -> 331 (instantiateBetaRevRange nested redexes): elim/namedMotiveBareIh, elim/explicitAtBareIh.
     // 331 -> 333 (setElabConfig foApprox): elim/ndrec, elim/ndrecExpected.
-    const CORPUS_FLOOR: usize = 345;
+    //
+    // 345 -> 346 (synth-real-depth task 3): `tc/useAnyHole`.
+    const CORPUS_FLOOR: usize = 346;
     assert!(
         replayed >= CORPUS_FLOOR,
         "corpus shrank: replayed {replayed} records, floor is {CORPUS_FLOOR}. \

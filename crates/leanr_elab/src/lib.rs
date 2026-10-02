@@ -64,11 +64,12 @@
 //!   (`synthetic/ladder.rs`, wrapping
 //!   `synthesize_synthetic_mvars (postpone := yes)` +
 //!   `synthesize_using_default_loop`) exactly as the oracle's
-//!   `App.lean:638-646` does. `synthetic/ladder.rs`'s
-//!   `has_mvar_outside_out_params` is the positional exemption that
-//!   lets an `outParam` goal such as `Get Cell Nat ?elem` reach the
-//!   real search instead of postponing, while a goal with an mvar in a
-//!   NON-output position still postpones. `Elab0.lean` grows the first
+//!   `App.lean:638-646` does.
+//!   `MetaCtx::try_synth_instance` lets an `outParam` goal such as
+//!   `Get Cell Nat ?elem` reach the real search (the out-param mvar is
+//!   replaced before it and assigned after it), while a goal with an
+//!   mvar in a NON-output position postpones when the search throws
+//!   `IsDefEqStuck`. `Elab0.lean` grows the first
 //!   `outParam` class (`Get`, with `Cell`) to exercise the branch, a
 //!   fourth default-instance priority (75, `instFreshSeed` on `Fresh`)
 //!   between `instOfNatNat`'s 100 and `instOfNatTag`'s 50, and

@@ -347,6 +347,11 @@ What each entry exercises (task B7's brief):
                   `withNewMCtxDepth`, so `?a` is read-only there and
                   `isDefEqStuckEx := true` makes the first unification
                   throw. See this file's header on `"exc"` records.
+* `noInstMVar`  — `NoInst ?a`, `?a` minted OUTSIDE the search, ZERO
+                  candidates. `synthInstance?` answers `none` cleanly:
+                  no candidate means no unification, so nothing gets
+                  stuck. Residue 3 of synth-real-depth: leanr's old
+                  syntactic pre-test answered `.undef` here.
 * `coeChain/0..3` — the `CoeT` chain (M4b-3 P4, § Amendment 5 item 9).
                   `/0`: `CoeT N N.zero M`, one `Coe` step;
                   `/1`: `CoeT N N.zero Big`, TWO steps — solvable only
@@ -526,6 +531,7 @@ def synthQueries : List (Name × Nat × List FVarSpec × MetaM Expr) :=
       pure (mkApp (mkApp (mkApp (mkConst `Get [Level.zero, Level.zero, Level.zero]) nTy) nTy)
         (← mkFreshExprMVar type0)))
   , (`stuck,       0, [], do pure (cls1 `Add (← mkFreshExprMVar type0)))
+  , (`noInstMVar,  0, [], do pure (cls1 `NoInst (← mkFreshExprMVar type0)))
   , (`coeChain, 0, [], pure (mkApp3 (mkConst `CoeT [Level.one, Level.one]) nTy (mkConst `N.zero) (mkConst `M)))
   , (`coeChain, 1, [], pure (mkApp3 (mkConst `CoeT [Level.one, Level.one]) nTy (mkConst `N.zero) (mkConst `Big)))
   , (`coeChain, 2, [], pure (mkApp3 (mkConst `CoeT [Level.one, Level.one]) nTy (mkConst `N.zero) nTy))

@@ -22,7 +22,8 @@ use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, NameId, Store};
 use leanr_kernel::{BinderInfo, EnvView};
 use leanr_meta::{
-    Config, EnvExtensions, LocalCtxSnapshot, MVarDecl, MVarId, MVarKind, MetaCtx, MetaError,
+    Config, EnvExtensions, LOption, LocalCtxSnapshot, MVarDecl, MVarId, MVarKind, MetaCtx,
+    MetaError,
 };
 
 mod support;
@@ -441,8 +442,8 @@ fn oracle_synth_gate() {
     // number of records actually COMPARED, so deleting or `exc`-ing a
     // curated query fails here instead of quietly shrinking the corpus.
     assert_eq!(
-        compared, 38,
-        "expected 38 compared synthesis records (37 -> 38: synth-real-depth Task 1 closed the mvarGoal/synth/0 seam exclusion; skipped `exc`: {skipped_exc:?}; \
+        compared, 39,
+        "expected 39 compared synthesis records (38 -> 39: synth-real-depth Task 3 added noInstMVar/synth/0; 37 -> 38: synth-real-depth Task 1 closed the mvarGoal/synth/0 seam exclusion; skipped `exc`: {skipped_exc:?}; \
          skipped near-budget: {skipped_near_budget:?}; seam-excluded: \
          {skipped_seam:?}) — if the curated list in dump_synth.lean grew or shrank \
          deliberately, update this count; M4b-3 P4 task 1 added the six coe* records, \
@@ -532,5 +533,18 @@ fn exc_record_stuck_synth_0_is_stuck_in_leanr_too() {
         assert_eq!(q["msg"].as_str(), Some("internal exception #7"));
         assert_eq!(ctx.synth_instance(goal), Err(MetaError::IsDefEqStuck));
         assert!(!ctx.mctx().is_assigned(a));
+    });
+}
+
+/// Residue 3 of synth-real-depth: `NoInst ?a` with ZERO candidates. The
+/// oracle's `synthInstance?` answers `none` (`"ok":false` in the corpus):
+/// with no candidate, no unification runs and nothing gets stuck. So
+/// `trySynthInstance` (`SynthInstance.lean:1014-1017`) is `.none`, not
+/// `.undef`. The old syntactic pre-test answered `Undef` here.
+#[test]
+fn no_inst_mvar_goal_is_none_not_undef() {
+    with_synth0_record("noInstMVar/synth/0", |ctx, q, goal, _a| {
+        assert_eq!(q["ok"].as_bool(), Some(false));
+        assert_eq!(ctx.try_synth_instance(goal), Ok(LOption::None));
     });
 }

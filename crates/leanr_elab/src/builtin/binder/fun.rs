@@ -571,7 +571,7 @@ mod tests {
     // once WHNF has already answered "not a forall", so "keep the
     // stale value" and "drop it" are indistinguishable from THAT
     // vantage point — measured, not assumed, while writing
-    // `fun_more_binders_than_expected_pi_levels_is_a_stuck_coercion`
+    // `fun_more_binders_than_expected_pi_levels_is_a_type_mismatch`
     // (`tests/binder_smoke.rs`, renamed in fix round 1 from
     // `fun_propagation_stops_at_a_non_forall_expected_type`). Calling
     // the function directly is the only way to pin oracle detail 3

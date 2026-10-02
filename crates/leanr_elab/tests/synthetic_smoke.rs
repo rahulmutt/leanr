@@ -332,6 +332,21 @@ fn bare_typeclass_application_is_reported_stuck() {
     ));
 }
 
+/// Residue 3 of synth-real-depth, end to end. `useNoInst _`: the goal
+/// `NoInst ?a` has ZERO candidates, so the oracle's `trySynthInstance`
+/// is `.none` and elaboration fails with "failed to synthesize instance
+/// of type class NoInst ?m" (probed on Elab0). It is NOT a stuck
+/// problem: the old syntactic pre-test postponed it and the ladder
+/// reported `StuckSyntheticMVar`.
+#[test]
+fn hole_against_a_class_without_instances_is_a_synthesis_failure() {
+    let err = support::elab_and_synthesize("useNoInst _").expect_err("fails");
+    assert!(
+        matches!(err, leanr_elab::ElabError::InstanceSynthesisFailed { .. }),
+        "got {err:?}"
+    );
+}
+
 /// `postpone == .yes` does NOT report stuck — it leaves the mvar
 /// pending for an outer scheduler.
 ///

@@ -412,6 +412,8 @@ entry-point change and stay byte-identical across it.
 
   * `tc/useWrapNat` — the base shape: one instance-implicit parameter
     solved from the explicit argument's type.
+  * `tc/useAnyHole` — `Any ?a` whose only candidate is polymorphic
+    (synth-real-depth residue 2): answered, not postponed.
   * `tc/useWrapAscribed` — the same under an induced expected type, so
     `propagateExpectedType`'s `trySynthesizeAppInstMVars` call runs
     before the unification rather than after.
@@ -432,6 +434,7 @@ entry-point change and stay byte-identical across it.
     inspection. -/
 def instImplicitQueries : List (String × String) :=
   [ ("tc/useWrapNat",      "useWrap Nat.zero")
+  , ("tc/useAnyHole",      "useAny _")
   , ("tc/useWrapAscribed", "(useWrap Nat.zero : Nat)")
   , ("tc/atUseWrap",       "@useWrap Nat instWrapNat Nat.zero")
   , ("tc/atUseWrapHole",   "@useWrap Nat _ Nat.zero")
