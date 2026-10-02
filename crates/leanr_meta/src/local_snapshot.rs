@@ -149,6 +149,39 @@ impl LocalCtxSnapshot {
         &self.local_names
     }
 
+    /// oracle: `LocalContext.isSubPrefixOf` / `isSubPrefixOfAux`
+    /// (`LocalContext.lean:534-552`): `self` minus `except` is of the form
+    /// `x_1 ... x_n`, and `other` has a prefix `B_1* x_1 ... B_n* x_n`. That is,
+    /// an ORDERED subsequence, with gaps allowed in `other`.
+    ///
+    /// The oracle walks `PArray (Option LocalDecl)`, which may hold holes
+    /// (`none`) where a decl was erased. `local_names` is compacted on
+    /// erase with order preserved (`reduced`), and a hole never matches,
+    /// so the answer is the same on both representations. `except` is by
+    /// `NameId` because this struct has no `Store` to decode an `ExprId`
+    /// (`MetaCtx::fvar_ids` decodes, the same split `reduced` uses).
+    #[allow(dead_code)] // wired in by checkAssignment T2
+    pub(crate) fn is_sub_prefix_of(&self, other: &LocalCtxSnapshot, except: &[NameId]) -> bool {
+        let mut j = 0;
+        for e1 in &self.local_names {
+            if except.contains(&e1.id) {
+                continue;
+            }
+            loop {
+                match other.local_names.get(j) {
+                    None => return false,
+                    Some(e2) => {
+                        j += 1;
+                        if e2.id == e1.id {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
     /// The attribute row for `id` in THIS context — a metavariable's own,
     /// not the ambient one. `collect_forward_deps`, `mk_mvar_app` and
     /// `mk_aux_mvar_type_with` read it.
@@ -324,6 +357,44 @@ mod tests {
                 vec![a, c],
                 "declaration order is preserved for the survivors"
             );
+        });
+    }
+}
+
+#[cfg(test)]
+mod sub_prefix_tests {
+    use crate::test_support::{const_named, fresh_fvar, with_prelude0_ctx};
+
+    /// oracle: `LocalContext.isSubPrefixOf` (`LocalContext.lean:534-552`):
+    /// `lctx₁ - except` must be an ordered subsequence of `lctx₂`, with
+    /// gaps allowed.
+    #[test]
+    fn is_sub_prefix_of_is_an_ordered_subsequence_test() {
+        with_prelude0_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let cp = ctx.lctx_checkpoint();
+            let empty = ctx.current_lctx();
+            let x = fresh_fvar(ctx, n, "x");
+            let s_x = ctx.current_lctx();
+            let y = fresh_fvar(ctx, n, "y");
+            let _z = fresh_fvar(ctx, n, "z");
+            let s_xyz = ctx.current_lctx();
+            let (xid, yid) = (ctx.fvar_id_of(x).unwrap(), ctx.fvar_id_of(y).unwrap());
+            // `[x, z]`: `y` erased, so a GAP relative to `s_xyz`.
+            let s_xz = std::sync::Arc::new(s_xyz.reduced(&[(y, yid)], |f| ctx.fvar_id_of(f)));
+
+            assert!(empty.is_sub_prefix_of(&s_xyz, &[]));
+            assert!(s_x.is_sub_prefix_of(&s_xyz, &[]));
+            assert!(s_xyz.is_sub_prefix_of(&s_xyz, &[]));
+            assert!(s_xz.is_sub_prefix_of(&s_xyz, &[]), "gaps are allowed");
+            assert!(
+                !s_xyz.is_sub_prefix_of(&s_xz, &[]),
+                "y is missing on the right"
+            );
+            assert!(s_xyz.is_sub_prefix_of(&s_xz, &[yid]), "y is subtracted");
+            assert!(!s_x.is_sub_prefix_of(&empty, &[]));
+            assert!(s_x.is_sub_prefix_of(&empty, &[xid]));
+            ctx.lctx_restore(cp);
         });
     }
 }

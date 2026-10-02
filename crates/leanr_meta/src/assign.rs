@@ -630,7 +630,7 @@ impl<'e> MetaCtx<'e> {
     /// panics or errors) when the type's own Pi spine is too short even
     /// after `whnf` — every caller here treats `len != num_args` as the
     /// oracle's own `if xs.size != numArgs then pure false` guard.
-    fn forall_bounded_telescope(
+    pub(crate) fn forall_bounded_telescope(
         &mut self,
         ty: ExprId,
         num_args: usize,
@@ -858,7 +858,11 @@ impl<'e> MetaCtx<'e> {
     /// postponed-drain here would double-checkpoint — the exact same
     /// point `level.rs`'s `is_level_def_eq` doc comment makes about
     /// `isLevelDefEqAux` vs. the standalone `isLevelDefEq`.
-    fn check_types_and_assign(&mut self, mvar: ExprId, v: ExprId) -> Result<bool, MetaError> {
+    pub(crate) fn check_types_and_assign(
+        &mut self,
+        mvar: ExprId,
+        v: ExprId,
+    ) -> Result<bool, MetaError> {
         let mvar_id = match self.node(mvar) {
             Node::MVar { id: Some(id) } => MVarId(id),
             _ => return Ok(false),
@@ -899,7 +903,7 @@ impl<'e> MetaCtx<'e> {
     /// gets here. The guard below refuses a genuine let that is itself
     /// an `xs` entry, rather than abstracting it as a lambda and dropping
     /// its value.
-    fn mk_lambda_fvars_with_let_deps(
+    pub(crate) fn mk_lambda_fvars_with_let_deps(
         &mut self,
         xs: &[ExprId],
         v: ExprId,

@@ -15,6 +15,7 @@ mod assign;
 mod aux_recursor;
 mod cache;
 mod check;
+mod check_assignment;
 mod coe;
 mod config;
 mod defeq;
