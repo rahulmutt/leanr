@@ -1488,10 +1488,6 @@ enum PreprocessKind {
 
 /// oracle: `PreprocessResult` (`SynthInstance.lean:718-722`) minus
 /// `cacheKeyType`, which has no consumer here (see [`PreprocessKind`]).
-// `Debug` is required for the `preprocess_seams_a_pi_shaped_goal` test's
-// `panic!("... {other:?}")` fallback arm, which formats the whole
-// `Result<PreprocessResult, MetaError>` -- not in the brief's snippet,
-// but required to compile.
 #[derive(Debug)]
 struct PreprocessResult {
     ty: ExprId,
@@ -1853,29 +1849,104 @@ impl<'e> MetaCtx<'e> {
 }
 
 impl<'e> MetaCtx<'e> {
-    /// oracle: `preprocess` (`SynthInstance.lean:737-773`).
+    /// oracle: `forallTelescope` / `forallTelescopeReducing`
+    /// (`Lean/Meta/Basic.lean:1561`, `:1592`; worker
+    /// `forallTelescopeReducingAuxAux`, `:1453`). Walk syntactic
+    /// `forallE`s, pushing one local decl per binder; when the type stops
+    /// being a forall and `reducing` is set, `whnf` once and continue if
+    /// that exposed another forall. Then run `k(xs, body)`.
     ///
-    /// **The telescope reduces to a `whnf`.** The oracle opens
-    /// `forallTelescopeReducing type`, `whnf`s the body and rebuilds
-    /// with `mkForallFVars`. For a goal with NO leading binders -- every
-    /// goal any leanr caller produces today -- `xs` is empty and the
-    /// whole thing is exactly `whnf type`. A pi-shaped goal is a NAMED
-    /// SEAM rather than a silent identity: answering it needs an
-    /// fvar-telescope this crate does not have at the Meta layer, the
-    /// same gap `try_resolve` already seams
-    /// (`MetaError::Unsupported`'s own doc).
+    /// `push_local_decl` installs an instance-implicit binder as a local
+    /// instance, as the oracle's telescope does. The ambient
+    /// `lctx`/`local_names`/`local_instances` are restored on EVERY exit
+    /// path (`Ok` or `Err`), so no telescope fvar outlives `k`.
+    pub(crate) fn with_forall_telescope<R>(
+        &mut self,
+        ty: ExprId,
+        reducing: bool,
+        k: impl FnOnce(&mut MetaCtx<'e>, &[ExprId], ExprId) -> Result<R, MetaError>,
+    ) -> Result<R, MetaError> {
+        let checkpoint = self.lctx_checkpoint();
+        let result = (|| {
+            let base = Some(self.view.store);
+            let mut xs: Vec<ExprId> = Vec::new();
+            // oracle `process`'s `j`: index into `xs` where the current
+            // syntactic forall run started. Loose bvars in `cur` refer only
+            // to `xs[j..]` (`instantiateRevRange j fvars.size fvars`).
+            let mut j = 0usize;
+            let mut cur = ty;
+            loop {
+                self.step()?;
+                if let Node::Forall {
+                    binder_name,
+                    binder_type,
+                    body,
+                    binder_info,
+                } = self.node(cur)
+                {
+                    let d = instantiate_rev(
+                        self.scratch,
+                        base,
+                        binder_type,
+                        &xs[j..],
+                        &mut self.guard,
+                    )?;
+                    let x = self.push_local_decl(binder_name, d, binder_info)?;
+                    xs.push(x);
+                    cur = body;
+                    continue;
+                }
+                let t = instantiate_rev(self.scratch, base, cur, &xs[j..], &mut self.guard)?;
+                if !reducing {
+                    cur = t;
+                    break;
+                }
+                let r = self.whnf(t)?;
+                if matches!(self.node(r), Node::Forall { .. }) {
+                    // Re-base: `r` is closed w.r.t. every fvar so far.
+                    cur = r;
+                    j = xs.len();
+                    continue;
+                }
+                // oracle: `k fvars type` with the UN-whnf'd type (`process`'s `_` arm).
+                cur = t;
+                break;
+            }
+            k(self, &xs, cur)
+        })();
+        self.lctx_restore(checkpoint);
+        result
+    }
+
+    /// oracle: `preprocess` (`SynthInstance.lean:737-773`). Opens
+    /// `forallTelescopeReducing type`, `whnf`s the body, rebuilds the type
+    /// with `mkForallFVars` and classifies on the body. For a binder-free
+    /// goal `xs` is empty and this is exactly `whnf type`.
+    ///
+    /// The oracle also builds a normalized `cacheKeyType` (`:752-772`);
+    /// `PreprocessResult` has no such field (leanr computes its table key
+    /// separately, in `normalize_goal_key`), so nothing is written for it.
     fn preprocess(&mut self, ty: ExprId) -> Result<PreprocessResult, MetaError> {
         let ty = self.instantiate_mvars(ty)?;
-        let ty = self.whnf(ty)?;
-        if matches!(self.node(ty), Node::Forall { .. }) {
-            return Err(MetaError::Unsupported(
-                "synth_instance: pi-shaped synthesis goal needs forallTelescopeReducing + \
-                 mkForallFVars (SynthInstance.lean:740-742); no Meta-layer fvar telescope in \
-                 this crate. Owner: the slice that grows one -- same seam as `try_resolve`'s \
-                 (SynthInstance.lean:351)"
-                    .to_string(),
-            ));
-        }
+        self.with_forall_telescope(ty, true, |ctx, xs, body| {
+            let body = ctx.whnf(body)?;
+            let ty = if xs.is_empty() {
+                body
+            } else {
+                ctx.mk_forall(xs, body)?
+            };
+            ctx.preprocess_classify(ty, body)
+        })
+    }
+
+    /// The classification half of [`Self::preprocess`]: `noMVars` is
+    /// decided on the rebuilt `ty` (`:743`), every head/arg inspection on
+    /// the telescope `body` (the oracle's `typeBody`).
+    fn preprocess_classify(
+        &mut self,
+        ty: ExprId,
+        body: ExprId,
+    ) -> Result<PreprocessResult, MetaError> {
         // AUTHORIZED DIVERGENCE from the brief's Step 3 snippet (task-5
         // fix, spec review): the oracle's `!type.hasMVar` (`Expr.lean:
         // 567-569`: `hasExprMVar || hasLevelMVar`, consulted at
@@ -1898,7 +1969,7 @@ impl<'e> MetaCtx<'e> {
         // oracle: the `typeBody.isConst` workaround for parameterless
         // classes such as `ToLevel.{u}` (`:744-749`), then the
         // "head is not a constant" and "not a class" fallbacks.
-        let head = self.get_app_fn(ty);
+        let head = self.get_app_fn(body);
         // `name: Some(name)`, not the brief's bare `name` (this crate's
         // `Node::Const.name` is `Option<NameId>`, matching the idiom
         // every other call site in this crate already uses, e.g.
@@ -1914,7 +1985,7 @@ impl<'e> MetaCtx<'e> {
                 kind: PreprocessKind::MVarsNoOutputParams,
             });
         };
-        if head == ty {
+        if head == body {
             return Ok(PreprocessResult {
                 ty,
                 kind: PreprocessKind::MVarsNoOutputParams,
@@ -1947,10 +2018,22 @@ impl<'e> MetaCtx<'e> {
     /// caller's term is reconciled afterwards, by
     /// `MetaCtx::assign_out_params` (Task 7).
     ///
-    /// The oracle's `forallTelescope` here is the NON-reducing one and
-    /// leanr's goals are binder-free by the time `preprocess` has
-    /// seamed the pi case, so there is no telescope to open.
+    /// The oracle's `forallTelescope` here is the NON-reducing one; the
+    /// early arms return the original `type` unchanged, the rewritten arms
+    /// `mkForallFVars xs (mkAppN c args)` (`:814`, `:818`).
     fn preprocess_out_param(&mut self, ty: ExprId) -> Result<ExprId, MetaError> {
+        self.with_forall_telescope(ty, false, |ctx, xs, body| {
+            match ctx.preprocess_out_param_body(body)? {
+                None => Ok(ty),
+                Some(new_body) if xs.is_empty() => Ok(new_body),
+                Some(new_body) => ctx.mk_forall(xs, new_body),
+            }
+        })
+    }
+
+    /// The body of [`Self::preprocess_out_param`] on the telescope body;
+    /// `None` is the oracle's "return the original `type`".
+    fn preprocess_out_param_body(&mut self, ty: ExprId) -> Result<Option<ExprId>, MetaError> {
         let head = self.get_app_fn(ty);
         // `name: Some(name)`, matching `preprocess`'s own idiom just
         // above (this crate's `Node::Const.name` is `Option<NameId>`):
@@ -1961,13 +2044,13 @@ impl<'e> MetaCtx<'e> {
             levels,
         } = self.node(head)
         else {
-            return Ok(ty);
+            return Ok(None);
         };
         if head == ty {
             // oracle: the `typeBody.isConst` workaround (`:778` --
             // corrected from the brief's `:780`, which is the next
             // line, `let .const declName us := c | return type`).
-            return Ok(ty);
+            return Ok(None);
         }
         let out_params: Vec<usize> = self.get_out_param_positions(name).unwrap_or(&[]).to_vec();
         let out_levels: Vec<usize> = self
@@ -1976,7 +2059,7 @@ impl<'e> MetaCtx<'e> {
             .to_vec();
         if out_params.is_empty() && out_levels.is_empty() {
             // oracle: the empty early return (`:784`).
-            return Ok(ty);
+            return Ok(None);
         }
         // oracle: `preprocessLevels` (`:785-794` -- corrected from the
         // brief's `:786-795`, which starts one line late and ends one
@@ -2000,7 +2083,7 @@ impl<'e> MetaCtx<'e> {
         };
         if out_params.is_empty() {
             let args = self.get_app_args(ty);
-            return self.mk_app_spine(head, &args);
+            return Ok(Some(self.mk_app_spine(head, &args)?));
         }
         // oracle: `preprocessArgs` (`:795-811` -- corrected from the
         // brief's `:796-812`, which starts one line late, at the
@@ -2051,7 +2134,7 @@ impl<'e> MetaCtx<'e> {
             let base = Some(self.view.store);
             c_type = instantiate(self.scratch, base, body, *arg, &mut self.guard)?;
         }
-        self.mk_app_spine(head, &args)
+        Ok(Some(self.mk_app_spine(head, &args)?))
     }
 
     /// oracle: `assignOutParams` (`SynthInstance.lean:825-845` --
@@ -3589,7 +3672,7 @@ mod tests {
         });
     }
 
-    /// Test-only pi builder for [`preprocess_seams_a_pi_shaped_goal`]:
+    /// Test-only pi builder for [`preprocess_telescopes_a_pi_shaped_goal`]:
     /// a non-dependent arrow `dom -> body`, built with the store
     /// directly the way `three_binder_test_type` above builds binder
     /// shapes. Not a production `mk_arrow` -- this module's only caller
@@ -3635,26 +3718,80 @@ mod tests {
         });
     }
 
-    /// A pi-shaped synthesis goal (`∀ x, C x`) needs
-    /// `forallTelescopeReducing` + `mkForallFVars`, which this crate has
-    /// no fvar-telescope for at the Meta layer. NAMED SEAM, not a wrong
-    /// answer -- the same posture `try_resolve`'s forall-shaped-goal seam
-    /// already takes (`MetaError::Unsupported`'s own doc cites it).
+    /// oracle: `preprocess` (`SynthInstance.lean:737-773`) telescopes a
+    /// pi-shaped goal, `whnf`s the body and rebuilds with `mkForallFVars`.
     #[test]
-    fn preprocess_seams_a_pi_shaped_goal() {
+    fn preprocess_telescopes_a_pi_shaped_goal() {
         with_instances_ctx(|ctx| {
             let n = const_named(ctx, "N");
             let add_n = parse_goal(ctx, "Add N");
             let pi = mk_arrow_for_test(ctx, n, add_n);
-            match ctx.preprocess(pi) {
-                Err(MetaError::Unsupported(msg)) => {
-                    assert!(
-                        msg.contains("forallTelescope"),
-                        "seam names the mechanism: {msg}"
-                    );
-                }
-                other => panic!("expected a named seam, got {other:?}"),
-            }
+            let r = ctx.preprocess(pi).expect("pi goal preprocesses");
+            assert!(matches!(r.kind, PreprocessKind::NoMVars));
+            let Node::Forall {
+                binder_type, body, ..
+            } = ctx.node(r.ty)
+            else {
+                panic!("preprocess must return a forall, got {:?}", ctx.node(r.ty));
+            };
+            assert_eq!(binder_type, n);
+            assert_eq!(body, add_n, "closed body re-abstracted unchanged");
+        });
+    }
+
+    #[test]
+    fn with_forall_telescope_opens_and_restores() {
+        with_instances_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let add_n = parse_goal(ctx, "Add N");
+            let pi = mk_arrow_for_test(ctx, n, add_n);
+            let before = ctx.lctx_checkpoint();
+            let (len, body) = ctx
+                .with_forall_telescope(pi, true, |c, xs, body| {
+                    assert_eq!(c.lctx_checkpoint(), before + 1, "one fvar pushed");
+                    Ok((xs.len(), body))
+                })
+                .expect("telescope");
+            assert_eq!((len, body), (1, add_n));
+            assert_eq!(ctx.lctx_checkpoint(), before, "lctx restored on Ok");
+        });
+    }
+
+    #[test]
+    fn with_forall_telescope_restores_on_err() {
+        with_instances_ctx(|ctx| {
+            let add_n = parse_goal(ctx, "Add N");
+            // `[h : Add N] → Add N`: the binder is installed as a local instance.
+            let base = Some(ctx.view.store);
+            let pi = ctx
+                .scratch
+                .expr_forall(base, None, add_n, add_n, BinderInfo::InstImplicit)
+                .expect("pi");
+            let before = ctx.lctx_checkpoint();
+            let insts_before = ctx.local_instances.entries().len();
+            let r: Result<(), MetaError> = ctx.with_forall_telescope(pi, true, |c, _, _| {
+                assert_eq!(c.local_instances.entries().len(), insts_before + 1);
+                Err(MetaError::Infer("boom".into()))
+            });
+            assert!(r.is_err());
+            assert_eq!(ctx.lctx_checkpoint(), before, "lctx restored on Err");
+            assert_eq!(ctx.local_instances.entries().len(), insts_before);
+        });
+    }
+
+    /// Table keys of pi goals: closed `forall xs, C ..` with loose bvars in
+    /// the body must normalize structurally and deterministically.
+    #[test]
+    fn normalize_goal_key_handles_a_pi_goal() {
+        with_instances_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let add_n = parse_goal(ctx, "Add N");
+            let pi = mk_arrow_for_test(ctx, n, add_n);
+            let k1 = ctx.normalize_goal_key(pi).expect("key");
+            let k2 = ctx.normalize_goal_key(pi).expect("key");
+            let k_body = ctx.normalize_goal_key(add_n).expect("key");
+            assert_eq!(k1, k2);
+            assert_ne!(k1, k_body);
         });
     }
 
