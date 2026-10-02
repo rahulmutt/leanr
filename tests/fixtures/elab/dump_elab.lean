@@ -1252,7 +1252,9 @@ def opQueries : List (String × String) :=
   , ("op/coe-right",        "fun (n : Nat) (z : Z) => z + n")
   -- unknown `0` becomes `(0 : Z)`, not `↑(0 : Nat)` (Extra.lean:286-287)
   , ("op/unknown-numeral",  "fun (n : Nat) (z : Z) => (n + 0) + z")
-  -- `has_heterogeneous_default_instances`: `2` stays uncoerced, then `Nat`
+  -- `2` stays uncoerced; `has_homogeneous_instance` is false (no `HMul Arr³`).
+  -- `op/hetero-default-homog` is the row that exercises
+  -- `has_heterogeneous_default_instances`
   , ("op/hetero-default",   "fun (a : Arr Nat) => 2 * a")
   -- `rightact%` leaves the exponent a leaf, outside the analysis
   , ("op/rightact-pow",     "fun (n : Nat) (z : Z) => z ^ n")

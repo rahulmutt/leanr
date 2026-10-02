@@ -305,7 +305,7 @@ seam (`binop%` and the rest), so the order, hygiene, literal and
 postponement rows above are spelled with `App` notations where possible,
 and the rest move to P3.
 
-## P3 — the op elaborator (`crates/leanr_elab/src/builtin/op.rs`)
+## P3 — the op elaborator (`crates/leanr_elab/src/builtin/op/`)
 
 This transcribes `Lean/Elab/Extra.lean:154-566`.
 
@@ -413,13 +413,13 @@ distinguishable:
 | `a + b * c : Nat` | homogeneous, one tree |
 | `n + z`, `z + n` (`n : Nat`, `z : Z`) | leaf coercion to the max type, both orders |
 | `(n + 0) + z` | unknown `0` resolves to `Z`, not `↑(0 : Nat)` (oracle comment `:281-284`) |
-| `2 * a` (`a : Arr Nat`) | `has_heterogeneous_default_instances` keeps `2` uncoerced |
+| `2 * a` (`a : Arr Nat`) | uncoerced `2`, reaching `has_homogeneous_instance = false` *(corrected: `op/hetero-default-homog`, over `MArr`, is the row that exercises `has_heterogeneous_default_instances`)* |
 | `z ^ n` (`z : Z`, `n : Nat`) | `rightact` leaves the exponent alone |
 | `n + u` (`u : U`, no coercion either way) | uncomparable: fallback to plain elaboration |
 | `n = z`, `n < z` | binrel coercion, `is_pred` |
-| `(p == q)`, `p q : Prop` | `binrel_no_prop` → `Bool` |
+| `True == False` | `binrel_no_prop` → `Bool` *(corrected: `(p == q)` with `p q : Prop` is an oracle ERROR, there is no `Decidable p`)* |
 | `a <\|> b` | lazy `fun _ => b` |
-| `BitVec n` vs `BitVec ?m`-shaped row | output depends on P1's depth |
+| `V 3` vs `V ?m`-shaped row (`op/depth`) | output depends on P1's depth *(corrected: suffix `V`, not `BitVec`, which has no `Add` in Prelude)* |
 | `binop% NoSuch a b` | err row |
 
 Every one of the 24 op table rows also gets at least one corpus record
@@ -627,3 +627,115 @@ Open follow-ups:
   notation), so only the white-box bookkeeping test covers it. P3's
   `binop%` elaborator should add a corpus record that postpones a whole
   expansion.
+
+### P3: the op elaborator (`builtin/op/`)
+
+Commits: 0e6e5e1 (T1 test-support suffix + `sorryAx` corpus gate), 0b2dafd
+(T2 `UnknownConstant`, `AppCall` out-param flag, catchable `MetaError`,
+`OpKind::ALL`), 09cf8fc (T3 `binop%` elaborator: toTree/analyze/applyCoe/
+toExpr), b1741f2 (T4 `binrel%`/`binrel_no_prop%`), plus the T5 docs commit.
+Corpus 19 -> 81 rows (`CORPUS_FLOOR` 81; Elab0 floor 345 unchanged).
+
+Mutations run (all reverted):
+- T1: record-edit mutation (the plan's `Err`-arm mutation was unreachable),
+  KILLED. Re-run in T4 with the original `p == q` row: it first failed as an
+  ordinary divergence because the assert sat in the `Ok` arm; after moving
+  it ahead of leanr's result (R6) it panics "oracle record contains
+  sorryAx". KILLED.
+- T2: (b), (c) KILLED. (a) deferred to T3 (h).
+- T3: (a) drop `with_new_mctx_depth`: KILLED (`op/depth`, `op/depth-mid`,
+  `op/stuck`). (b) drop `with_def_eq_stuck_ex`: KILLED (`op/stuck`). (c)
+  heterogeneous-default always false: KILLED by `op/hetero-default-homog`
+  (new; `op/hetero-default` does not reach the leaves). (d) drop the final
+  `is_def_eq_guarded(ty, max)` record: SURVIVES (with no unknown leaf every
+  leaf type is already `max`, so the instance's out-param equals `max`).
+  (e) swap `has_coe` directions: KILLED (7 rows). (f) `has_homogeneous_
+  instance` always true: KILLED by `op/homog-literal-pow` (new). (g) drop
+  `mk_fun_unit`: KILLED (`op/lazy-*`). (h) `result_is_out_param_support:
+  true`: SURVIVES, unkillable by closed rows after R2 (below). (i) `leftact`
+  lhs via `go`: KILLED by `op/smul-op-lhs` (new). (j) `resolve_id` skips
+  locals: KILLED (`op/literal-local-head`). (k) recurse into a `·` paren:
+  SURVIVES (both paths reach `UnsupportedSyntax(cdot)`). (l) `binrel%` as a
+  tree: unreachable in T3, killed by T4 (m).
+- T4: (a) `is_pred = false`: KILLED. (b) drop `to_bool_if_necessary`:
+  survived the brief's rows (all take the max path); KILLED by
+  `op/beq-uncomparable-prop` (new). (c) drop the noProp switch: KILLED. (d)
+  `expected` into `analyze`: survived; KILLED by `op/rel-expected` (new).
+  (e2) full `with_synthesize(Yes)`: KILLED by `op/rel-no-default` (new).
+  (e1) no scope at all: SURVIVES (every goal the light scope could solve was
+  already tried by `to_tree`'s own synthesis). (f) resolve `f` inside the
+  scope: SURVIVES (`resolve_head` registers no synthetic mvars). (m)/(T3 l)
+  `binrel%` operand as a tree: `op/rel-of-rels` does NOT kill; KILLED by
+  `op/rel-of-coe-rels` (new). (m2) same for the literal arm: KILLED by
+  `op/rel-of-literal-rels` (new).
+
+Spec corrections:
+- The elaborator is the directory `builtin/op/` (`mod`, `tree`, `analyze`,
+  `to_expr`, `rel`), not `builtin/op.rs`.
+- `ElabError::UnknownConstant(String)` is a new top-level variant (the
+  nested `InvalidDottedIdentReason` one is unrelated).
+- Whole-expansion postponement is unreachable (see the correction under
+  Testing); P2's follow-up asking P3 for such a record is void.
+- `mk_app_m` is restricted to explicit binders: a non-explicit binder is an
+  `Unsupported` seam (see follow-ups).
+- The `sorryAx` gate: the dumper turns logged elaboration errors into
+  `sorryAx`, so `run_elab_corpus` asserts no oracle record mentions it. The
+  assert now runs ahead of leanr's result (R6), so an erroring leanr cannot
+  mask an oracle error.
+- Testing-table corrections (also in place above): `(p == q)`, `p q : Prop`
+  is an oracle ERROR, so the rows use `True == False` with the suffix's
+  `Decidable True/False`; the depth row uses suffix `V`, not `BitVec`; the
+  `2 * a` row's path is `has_homogeneous_instance = false`, and
+  `op/hetero-default-homog` is what exercises
+  `has_heterogeneous_default_instances`. The comment above `op/hetero-default`
+  in `dump_elab.lean` was corrected to match (comment only; fixtures not
+  regenerated).
+- R2: `op/depth`, `op/depth-mid`, `op/stuck` are respelled over closed suffix
+  constants (`vx`, `k0`, `fx`, `z0`) instead of `fun` binders, because of the
+  elimMVarDeps gap below. Same ids and discriminated paths.
+- R5: the suffix declares `instance : BEq Bool`, so the oracle records for
+  `op/beq-prop`, `op/bne-prop`, `op/beq-prop-bool` pin `instBEqBool`, not
+  Prelude's `instBEqOfDecidableEq`. Fidelity caveat: those rows no longer
+  exercise the Prelude route.
+- Row `op/postponed-operand` became `op/postponed-binop-operand` (id clash
+  with a P2 row).
+
+Open follow-ups (owner suggestion in brackets):
+- leanr_meta elimMVarDeps gap [a leanr_meta slice]: `assign.rs`
+  `mk_lambda_fvars_with_let_deps` -> `mk_lambda_over_fvars` uses raw
+  `abstract_fvars` with no `elimMVarDeps` (oracle `mkLambdaFVars`,
+  `ExprDefEq.lean:549-554`). Op-free repros (explicit `@` also passes
+  `resultIsOutParamSupport = false`; oracle accepts all):
+  `fun (n : Nat) => @HAdd.hAdd _ _ _ _ (V.mk : V n) (V.mk : V _)`
+  (StuckSyntheticMVar); `fun (n : Nat) (x : F n) (z : Z) => @HAdd.hAdd _ _ _ _
+  (@HAdd.hAdd _ _ _ _ x (F.mk _)) z` (InstanceSynthesisFailed);
+  `fun (n : Nat) (x : F n) => @HAdd.hAdd _ _ _ _ x (F.mk _)` returns a
+  SILENTLY WRONG `Ok` keeping `F.mk (?m n x)` where the oracle has `F.mk n`.
+  Reverted experiment: routing through `MetaCtx::mk_lambda` fixes the three
+  binder forms but regresses `op/postponed-binop-operand` with
+  `DepthBudgetExhausted`. Whoever fixes it restores the binder forms of
+  `op/depth`, `op/depth-mid`, `op/stuck` and re-runs T3 mutations (d), (h).
+- synth pi-goal gap [synthesis slice]: `synth_instance` has no pi-shaped
+  goal support (`SynthInstance.lean:740-742`), so `(inferInstance : BEq Bool)`
+  and `BEq Nat` fail. Fixing it drops the suffix `BEq Bool` and re-checks the
+  three rows against `instBEqOfDecidableEq`.
+- `(fun a => LT.lt a 2) z0` (also `a + 2`, `BEq.beq a 2`) gives
+  `DepthBudgetExhausted` op-free; the oracle accepts [likely the same
+  leanr_meta slice, not bisected]. `op/rel-no-default` uses `x.1 < 2` to
+  avoid it.
+- Info trees: no consumer yet [info-tree slice].
+- `withRef` positions: error positions only; `rel.rs` omits the oracle's
+  `withRef lhsStx/rhsStx` (`Extra.lean:531-532`) [error-position pass].
+- `mk_app_m` implicit/instance binders [op follow-up]: the `Unsupported`
+  seam propagates out of `has_homogeneous_instance` where the oracle's
+  `catch _` yields false, e.g. a literal `binop% Subtype.mk a b`.
+- `resolve_id` maps only `UnknownIdent` to `None` (the oracle catches all
+  `resolveName` errors) and `raw.split('.')` mis-splits `«a.b»` heads.
+- Minor: `OpKind::ALL`/`is_rel` lack a direct unit test;
+  `mk_const_with_level_params` doc omits the missing-name caveat;
+  `has_heterogeneous_default_instances` takes `&mut` but only reads;
+  `paren_inner` is a third copy of paren-inner navigation; `rel.rs` deep-
+  copies operand trees; the suffix comment at `elab_op_support.lean.in:69`
+  is over-long.
+- Survived mutations (T3 d, h, k; T4 e1, f) are unobservable today, see
+  reasons above.

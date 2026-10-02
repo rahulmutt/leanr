@@ -76,8 +76,8 @@ impl OpKind {
 /// land on real source.
 #[derive(Debug, Clone)]
 pub enum Expansion {
-    /// `binop% f a b` and the rest of the family. Elaborated by P3; until
-    /// then a named `UnsupportedSyntax` seam.
+    /// `binop% f a b` and the rest of the family. Elaborated by
+    /// `builtin::op` (macro/binop% P3).
     Op {
         kind: OpKind,
         f: &'static str,

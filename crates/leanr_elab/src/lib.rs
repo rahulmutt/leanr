@@ -130,7 +130,7 @@
 //!   notation and P4 SHIPPED `pipeProj`/`dotIdent`/`namedPattern`
 //!   (`app/head.rs`, `app/dot_ident.rs`). Still deferred, each a named
 //!   seam: `choice` the overloading slice, private field projections the slice that models private
-//!   names. `binop%` and its family — macro/binop% P3. The anonymous
+//!   names. The anonymous
 //!   constructor `⟨⟩` is elaborated by `builtin::anon_ctor` (M4b-4b); its
 //!   pattern position is left to the match slice.
 //! - **macro expansion** — `elab_term_core` expands through the
@@ -138,7 +138,9 @@
 //!   does. The table covers the `binop%` op family (24 rows) plus
 //!   `∧ ∨ ¬ ↔ <->`; every other Init notation and all non-Init
 //!   notations raise `UnsupportedSyntax(kind)` (table extension or the
-//!   VM slice).
+//!   VM slice). The op family itself is elaborated by `builtin::op`
+//!   (macro/binop% P3: `binop%`, `binop_lazy%`, `leftact%`, `rightact%`,
+//!   `unop%`, `binrel%`, `binrel_no_prop%`).
 //! - **`open`/alias/`export`/`_root_` resolution** — `resolve.rs`'s
 //!   `resolve_global_name` only resolves a global constant declared under
 //!   the name (or a prefix of it) exactly as written; namespace-prefix search, exported
