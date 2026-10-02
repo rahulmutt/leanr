@@ -174,7 +174,7 @@ fn oracle_op_gate() {
     // 81 -> 90 (checkAssignment T4): op/depth, op/depth-mid, op/stuck restored
     // to binder form (the closed spellings kept as `-closed`), plus
     // op/binder-F-hole, meta/at-hadd-V, meta/beta-{lt,add,beq}, op/rel-lt-beta.
-    const CORPUS_FLOOR: usize = 90;
+    const CORPUS_FLOOR: usize = 94;
     assert!(
         replayed >= CORPUS_FLOOR,
         "op corpus shrank: {replayed} < {CORPUS_FLOOR}"
