@@ -512,7 +512,7 @@ Open follow-ups:
   the `with_new_mctx_depth` Err-path test does not cover level assignment
   discard.
 
-### P2 (PR #NN): expansion hook, Init table, ElabOp harness
+### P2 (PR #60): expansion hook, Init table, ElabOp harness
 
 Commits: 496f202 (ElabOp + golden), 169c1c5 (table + expand), 68c62a6
 (hook + App + gate), 1b308e3 (op seam + postponement contract tests,
