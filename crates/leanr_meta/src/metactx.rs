@@ -1257,9 +1257,9 @@ impl<'e> MetaCtx<'e> {
     }
 
     /// oracle: `mkLambdaFVars xs e (etaReduce := true)`: [`Self::mk_lambda`]
-    /// with `mkLambda'`'s per-binder eta step. Only
-    /// `mk_lambda_fvars_with_let_deps` (`ExprDefEq.lean:551,554`) asks
-    /// for it.
+    /// with `mkLambda'`'s per-binder eta step. Two callers ask for it:
+    /// `mk_lambda_fvars_with_let_deps` (`ExprDefEq.lean:551,554`) and
+    /// synthesis's `try_resolve` (`SynthInstance.lean:374`).
     pub(crate) fn mk_lambda_eta(
         &mut self,
         fvars: &[ExprId],

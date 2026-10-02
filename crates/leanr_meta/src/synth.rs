@@ -374,6 +374,7 @@
 //! module carries an allow.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use leanr_kernel::bank::levels::LevelRow;
 use leanr_kernel::bank::terms::Node;
@@ -383,7 +384,7 @@ use leanr_kernel::{BinderInfo, Nat, MAX_REC_DEPTH};
 
 use crate::instances::Instance;
 use crate::metactx::MetaSnapshot;
-use crate::{LMVarId, MVarId, MVarKind, MetaCtx, MetaError, TransparencyMode};
+use crate::{LMVarId, LocalCtxSnapshot, MVarId, MVarKind, MetaCtx, MetaError, TransparencyMode};
 
 /// Stack-growth constants for [`KeyNormalizer`]'s own depth guard --
 /// restated from `metactx.rs::{RED_ZONE,STACK_CHUNK}` (private there),
@@ -1488,10 +1489,6 @@ enum PreprocessKind {
 
 /// oracle: `PreprocessResult` (`SynthInstance.lean:718-722`) minus
 /// `cacheKeyType`, which has no consumer here (see [`PreprocessKind`]).
-// `Debug` is required for the `preprocess_seams_a_pi_shaped_goal` test's
-// `panic!("... {other:?}")` fallback arm, which formats the whole
-// `Result<PreprocessResult, MetaError>` -- not in the brief's snippet,
-// but required to compile.
 #[derive(Debug)]
 struct PreprocessResult {
     ty: ExprId,
@@ -1853,29 +1850,114 @@ impl<'e> MetaCtx<'e> {
 }
 
 impl<'e> MetaCtx<'e> {
-    /// oracle: `preprocess` (`SynthInstance.lean:737-773`).
+    /// oracle: `forallTelescope` / `forallTelescopeReducing`
+    /// (`Lean/Meta/Basic.lean:1561`, `:1592`; worker
+    /// `forallTelescopeReducingAuxAux`, `:1453`). Walk syntactic
+    /// `forallE`s, pushing one local decl per binder; when the type stops
+    /// being a forall and `reducing` is set, `whnf` once and continue if
+    /// that exposed another forall. Then run `k(xs, body)`.
     ///
-    /// **The telescope reduces to a `whnf`.** The oracle opens
-    /// `forallTelescopeReducing type`, `whnf`s the body and rebuilds
-    /// with `mkForallFVars`. For a goal with NO leading binders -- every
-    /// goal any leanr caller produces today -- `xs` is empty and the
-    /// whole thing is exactly `whnf type`. A pi-shaped goal is a NAMED
-    /// SEAM rather than a silent identity: answering it needs an
-    /// fvar-telescope this crate does not have at the Meta layer, the
-    /// same gap `try_resolve` already seams
-    /// (`MetaError::Unsupported`'s own doc).
+    /// `push_local_decl` installs ANY binder whose type is a class as a
+    /// local instance, whatever its binder info (`(h : Add N)` as well
+    /// as `[h : Add N]`). The oracle's telescope does the same:
+    /// `withNewLocalInstancesImp` (`Basic.lean:1407-1420`) tests
+    /// `isClass? decl.type` and never reads `binderInfo`. The ambient
+    /// `lctx`/`local_names`/`local_instances` are restored on EVERY exit
+    /// path (`Ok` or `Err`), so no telescope fvar outlives `k`.
+    ///
+    /// A binder-free goal still pays one `step` and, when `reducing`, one
+    /// `whnf` of the whole type here (so `preprocess`, `get_instances`
+    /// and `try_resolve` each `whnf` a bare class application once more
+    /// than a hand-specialized `xs = []` path would). That is
+    /// oracle-faithful: `process`'s non-forall arm `whnf`s the type
+    /// whenever `reducing` holds, binders or not (`Basic.lean:1478`).
+    pub(crate) fn with_forall_telescope<R>(
+        &mut self,
+        ty: ExprId,
+        reducing: bool,
+        k: impl FnOnce(&mut MetaCtx<'e>, &[ExprId], ExprId) -> Result<R, MetaError>,
+    ) -> Result<R, MetaError> {
+        let checkpoint = self.lctx_checkpoint();
+        let result = (|| {
+            let base = Some(self.view.store);
+            let mut xs: Vec<ExprId> = Vec::new();
+            // oracle `process`'s `j`: index into `xs` where the current
+            // syntactic forall run started. Loose bvars in `cur` refer only
+            // to `xs[j..]` (`instantiateRevRange j fvars.size fvars`).
+            let mut j = 0usize;
+            let mut cur = ty;
+            loop {
+                self.step()?;
+                if let Node::Forall {
+                    binder_name,
+                    binder_type,
+                    body,
+                    binder_info,
+                } = self.node(cur)
+                {
+                    let d = instantiate_rev(
+                        self.scratch,
+                        base,
+                        binder_type,
+                        &xs[j..],
+                        &mut self.guard,
+                    )?;
+                    let x = self.push_local_decl(binder_name, d, binder_info)?;
+                    xs.push(x);
+                    cur = body;
+                    continue;
+                }
+                let t = instantiate_rev(self.scratch, base, cur, &xs[j..], &mut self.guard)?;
+                if !reducing {
+                    cur = t;
+                    break;
+                }
+                let r = self.whnf(t)?;
+                if matches!(self.node(r), Node::Forall { .. }) {
+                    // Re-base: `r` is closed w.r.t. every fvar so far.
+                    cur = r;
+                    j = xs.len();
+                    continue;
+                }
+                // oracle: `k fvars type` with the UN-whnf'd type (`process`'s `_` arm).
+                cur = t;
+                break;
+            }
+            k(self, &xs, cur)
+        })();
+        self.lctx_restore(checkpoint);
+        result
+    }
+
+    /// oracle: `preprocess` (`SynthInstance.lean:737-773`). Opens
+    /// `forallTelescopeReducing type`, `whnf`s the body, rebuilds the type
+    /// with `mkForallFVars` and classifies on the body. For a binder-free
+    /// goal `xs` is empty and this is exactly `whnf type`.
+    ///
+    /// The oracle also builds a normalized `cacheKeyType` (`:752-772`);
+    /// `PreprocessResult` has no such field (leanr computes its table key
+    /// separately, in `normalize_goal_key`), so nothing is written for it.
     fn preprocess(&mut self, ty: ExprId) -> Result<PreprocessResult, MetaError> {
         let ty = self.instantiate_mvars(ty)?;
-        let ty = self.whnf(ty)?;
-        if matches!(self.node(ty), Node::Forall { .. }) {
-            return Err(MetaError::Unsupported(
-                "synth_instance: pi-shaped synthesis goal needs forallTelescopeReducing + \
-                 mkForallFVars (SynthInstance.lean:740-742); no Meta-layer fvar telescope in \
-                 this crate. Owner: the slice that grows one -- same seam as `try_resolve`'s \
-                 (SynthInstance.lean:351)"
-                    .to_string(),
-            ));
-        }
+        self.with_forall_telescope(ty, true, |ctx, xs, body| {
+            let body = ctx.whnf(body)?;
+            let ty = if xs.is_empty() {
+                body
+            } else {
+                ctx.mk_forall(xs, body)?
+            };
+            ctx.preprocess_classify(ty, body)
+        })
+    }
+
+    /// The classification half of [`Self::preprocess`]: `noMVars` is
+    /// decided on the rebuilt `ty` (`:743`), every head/arg inspection on
+    /// the telescope `body` (the oracle's `typeBody`).
+    fn preprocess_classify(
+        &mut self,
+        ty: ExprId,
+        body: ExprId,
+    ) -> Result<PreprocessResult, MetaError> {
         // AUTHORIZED DIVERGENCE from the brief's Step 3 snippet (task-5
         // fix, spec review): the oracle's `!type.hasMVar` (`Expr.lean:
         // 567-569`: `hasExprMVar || hasLevelMVar`, consulted at
@@ -1898,7 +1980,7 @@ impl<'e> MetaCtx<'e> {
         // oracle: the `typeBody.isConst` workaround for parameterless
         // classes such as `ToLevel.{u}` (`:744-749`), then the
         // "head is not a constant" and "not a class" fallbacks.
-        let head = self.get_app_fn(ty);
+        let head = self.get_app_fn(body);
         // `name: Some(name)`, not the brief's bare `name` (this crate's
         // `Node::Const.name` is `Option<NameId>`, matching the idiom
         // every other call site in this crate already uses, e.g.
@@ -1914,7 +1996,7 @@ impl<'e> MetaCtx<'e> {
                 kind: PreprocessKind::MVarsNoOutputParams,
             });
         };
-        if head == ty {
+        if head == body {
             return Ok(PreprocessResult {
                 ty,
                 kind: PreprocessKind::MVarsNoOutputParams,
@@ -1947,10 +2029,22 @@ impl<'e> MetaCtx<'e> {
     /// caller's term is reconciled afterwards, by
     /// `MetaCtx::assign_out_params` (Task 7).
     ///
-    /// The oracle's `forallTelescope` here is the NON-reducing one and
-    /// leanr's goals are binder-free by the time `preprocess` has
-    /// seamed the pi case, so there is no telescope to open.
+    /// The oracle's `forallTelescope` here is the NON-reducing one; the
+    /// early arms return the original `type` unchanged, the rewritten arms
+    /// `mkForallFVars xs (mkAppN c args)` (`:814`, `:818`).
     fn preprocess_out_param(&mut self, ty: ExprId) -> Result<ExprId, MetaError> {
+        self.with_forall_telescope(ty, false, |ctx, xs, body| {
+            match ctx.preprocess_out_param_body(body)? {
+                None => Ok(ty),
+                Some(new_body) if xs.is_empty() => Ok(new_body),
+                Some(new_body) => ctx.mk_forall(xs, new_body),
+            }
+        })
+    }
+
+    /// The body of [`Self::preprocess_out_param`] on the telescope body;
+    /// `None` is the oracle's "return the original `type`".
+    fn preprocess_out_param_body(&mut self, ty: ExprId) -> Result<Option<ExprId>, MetaError> {
         let head = self.get_app_fn(ty);
         // `name: Some(name)`, matching `preprocess`'s own idiom just
         // above (this crate's `Node::Const.name` is `Option<NameId>`):
@@ -1961,13 +2055,13 @@ impl<'e> MetaCtx<'e> {
             levels,
         } = self.node(head)
         else {
-            return Ok(ty);
+            return Ok(None);
         };
         if head == ty {
             // oracle: the `typeBody.isConst` workaround (`:778` --
             // corrected from the brief's `:780`, which is the next
             // line, `let .const declName us := c | return type`).
-            return Ok(ty);
+            return Ok(None);
         }
         let out_params: Vec<usize> = self.get_out_param_positions(name).unwrap_or(&[]).to_vec();
         let out_levels: Vec<usize> = self
@@ -1976,7 +2070,7 @@ impl<'e> MetaCtx<'e> {
             .to_vec();
         if out_params.is_empty() && out_levels.is_empty() {
             // oracle: the empty early return (`:784`).
-            return Ok(ty);
+            return Ok(None);
         }
         // oracle: `preprocessLevels` (`:785-794` -- corrected from the
         // brief's `:786-795`, which starts one line late and ends one
@@ -2000,7 +2094,7 @@ impl<'e> MetaCtx<'e> {
         };
         if out_params.is_empty() {
             let args = self.get_app_args(ty);
-            return self.mk_app_spine(head, &args);
+            return Ok(Some(self.mk_app_spine(head, &args)?));
         }
         // oracle: `preprocessArgs` (`:795-811` -- corrected from the
         // brief's `:796-812`, which starts one line late, at the
@@ -2051,7 +2145,7 @@ impl<'e> MetaCtx<'e> {
             let base = Some(self.view.store);
             c_type = instantiate(self.scratch, base, body, *arg, &mut self.guard)?;
         }
-        self.mk_app_spine(head, &args)
+        Ok(Some(self.mk_app_spine(head, &args)?))
     }
 
     /// oracle: `assignOutParams` (`SynthInstance.lean:825-845` --
@@ -2441,34 +2535,32 @@ impl<'e> MetaCtx<'e> {
         Ok(())
     }
 
-    /// oracle: `tryResolve` (`SynthInstance.lean:345-420`). Runs under
+    /// oracle: `tryResolve` (`SynthInstance.lean:346-419`). Runs under
     /// the generator node's `mctx` (the caller's `with_synth_mctx`), in
     /// which `mvar` is unassigned.
     ///
-    /// **NAMED SEAM -- `forallTelescopeReducing mvarType` (:351), owned
-    /// by M4b.** The oracle telescopes a FORALL-shaped synthesis goal
-    /// (`∀ xs, C ..`) and solves `C ..` in the extended context, then
-    /// re-abstracts with `mkLambdaFVars xs instVal (etaReduce := true)`
-    /// (:361); `getSubgoals` correspondingly builds each subgoal mvar at
-    /// type `∀ xs, A_i` and applies it to `xs` so `?m xs` stays a
-    /// higher-order pattern (:317-330). None of that is transcribed
-    /// here: this function handles the `xs = #[]` case only. Rather than
-    /// answer `None` for a forall-shaped goal -- a SILENT WRONG ANSWER,
-    /// since such goals are genuinely solvable -- it reports
-    /// [`MetaError::Unsupported`], which is an unanswered question, not
-    /// a negative verdict. Not exercised by either fixture (every goal
-    /// in `Instances.olean`/`InstancesCyclic.olean` is a bare class
-    /// application).
+    /// The oracle captures the ambient `lctx`/`localInsts` (`:351-352`)
+    /// BEFORE opening `forallTelescopeReducing mvarType` (`:353`), so a
+    /// forall-shaped goal `∀ xs, C ..` is solved as `C ..` in the
+    /// extended context while every subgoal mvar is minted back in the
+    /// outer one (`getSubgoals`, `:317`). The answer is re-abstracted
+    /// with `mkLambdaFVars xs instVal (etaReduce := true)` (`:374`). For
+    /// a binder-free goal `xs` is empty, the abstraction is the identity
+    /// (`mkLambdaFVars`' own `xs.isEmpty` short-circuit,
+    /// `Meta/Basic.lean:1151`), and the only new work is the telescope's
+    /// one `step` + `whnf` of the goal type, which the oracle's
+    /// `forallTelescopeReducing` performs too (and which the old
+    /// forall-refusal check here already paid as a bare `whnf`).
     ///
-    /// This is the correct loud direction, but its BLAST RADIUS is
-    /// strictly larger than the oracle's: the oracle handles a
-    /// forall-shaped goal wherever it turns up in the search (root goal
-    /// or any nested subgoal) and keeps exploring every other branch,
-    /// whereas here a single forall-shaped subgoal anywhere in the
-    /// search aborts the WHOLE `synth_instance` call via `?`, even if
-    /// other candidates or other branches would have answered. M4b
-    /// should be aware this seam is not "isolated to the unsupported
-    /// goal" the way the oracle's per-branch handling is.
+    /// **`checkpoint` inside the telescope (`:418`, `getMCtx`).**
+    /// [`MetaCtx::checkpoint`] snapshots expr/level/delayed assignments
+    /// and postponed level constraints only; it holds NO local context
+    /// (`metactx.rs`, `MetaSnapshot`). So taking it inside the telescope
+    /// cannot re-install the telescope fvars on a later `rollback`, and
+    /// it is taken as is, with no lctx surgery. Every subgoal mvar it
+    /// mentions is declared at `outer`, and `instVal` is closed with
+    /// respect to `xs` after `mk_lambda_eta`, so nothing in it dangles
+    /// once `with_forall_telescope` restores the lctx.
     fn try_resolve(
         &mut self,
         mvar: ExprId,
@@ -2476,76 +2568,83 @@ impl<'e> MetaCtx<'e> {
     ) -> Result<Option<(MetaSnapshot, Vec<ExprId>)>, MetaError> {
         let mvar_type = self.infer_type(mvar)?;
         let mvar_type = self.instantiate_mvars(mvar_type)?;
-        // `forallTelescopeReducing` reduces before looking, so the check
-        // has to too -- a goal whose head unfolds to a forall must not
-        // slip through as if it were a bare class application.
-        let reduced = self.whnf(mvar_type)?;
-        if matches!(self.node(reduced), Node::Forall { .. }) {
-            return Err(MetaError::Unsupported(
-                "synth.rs::try_resolve: forall-shaped synthesis goal needs \
-                 forallTelescopeReducing (SynthInstance.lean:351) -- seam owned by M4b"
-                    .into(),
-            ));
-        }
-        let (mvars, inst_val, inst_type_body) = self.get_subgoals(inst)?;
-        // oracle: `subgoals := inst.synthOrder.map (mvars[·]!)` (:334).
-        // `synth_order` is decoded from untrusted `.olean` bytes (Global
-        // Constraints), so an out-of-range index is possible in
-        // principle; the oracle's `!` would panic. Dropping the
-        // candidate instead is incompleteness only -- NAMED SEAM, no
-        // real toolchain output can produce it (Lean computed the order
-        // against this very declaration's own telescope at
-        // registration).
-        let mut subgoals = Vec::with_capacity(inst.synth_order.len());
-        for &i in &inst.synth_order {
-            match mvars.get(i) {
-                Some(&m) => subgoals.push(m),
-                None => return Ok(None),
+        // oracle :351-353 -- capture `lctx`/`localInsts` BEFORE the telescope.
+        let outer = self.current_lctx();
+        self.with_forall_telescope(mvar_type, true, |ctx, xs, body| {
+            let (mvars, inst_val, inst_type_body) = ctx.get_subgoals(outer, xs, inst)?;
+            // oracle: `subgoals := inst.synthOrder.map (mvars[·]!)`
+            // (:338). `synth_order` is decoded from untrusted `.olean`
+            // bytes (Global Constraints), so an out-of-range index is
+            // possible in principle; the oracle's `!` would panic.
+            // Dropping the candidate instead is incompleteness only --
+            // NAMED SEAM, no real toolchain output can produce it (Lean
+            // computed the order against this very declaration's own
+            // telescope at registration).
+            let mut subgoals = Vec::with_capacity(inst.synth_order.len());
+            for &i in &inst.synth_order {
+                match mvars.get(i) {
+                    Some(&m) => subgoals.push(m),
+                    None => return Ok(None),
+                }
             }
-        }
-        if !self.is_def_eq(mvar_type, inst_type_body)? {
-            return Ok(None);
-        }
-        // oracle: :361-416 -- `mkLambdaFVars xs instVal` is the identity
-        // for `xs = #[]`. Then: assign `mvar` DIRECTLY when the goal
-        // type is metavariable-free (:412-414, the expensive redundant
-        // recheck skipped), else re-unify (:415-416, whose `isDefEqArgs`
-        // side effects elaboration depends on).
-        let goal_body = self.instantiate_mvars(mvar_type)?;
-        if !self.data(goal_body).has_expr_mvar() {
-            let Node::MVar { id: Some(id) } = self.node(mvar) else {
-                return Err(MetaError::MVar(
-                    "try_resolve: goal is not a metavariable reference".into(),
-                ));
+            if !ctx.is_def_eq(body, inst_type_body)? {
+                return Ok(None);
+            }
+            // oracle :374 -- `mkLambdaFVars xs instVal (etaReduce := true)`,
+            // the identity for `xs = #[]`. `mk_binding`'s `elim_mvar_deps`
+            // follows the subgoal mvars `is_def_eq` just assigned (oracle
+            // `elimApp`, `MetavarContext.lean:1230-1240`), so the eta step
+            // sees the instantiated spine, as in the oracle.
+            let inst_val = if xs.is_empty() {
+                inst_val
+            } else {
+                ctx.mk_lambda_eta(xs, inst_val)?
             };
-            self.mctx.assign(MVarId(id), inst_val)?;
-        } else if !self.is_def_eq(mvar, inst_val)? {
-            return Ok(None);
-        }
-        Ok(Some((self.checkpoint(), subgoals)))
+            // oracle :412-417 -- assign `mvar` DIRECTLY when the goal
+            // body is metavariable-free (the expensive redundant recheck
+            // skipped), else re-unify (whose `isDefEqArgs` side effects
+            // elaboration depends on).
+            let goal_body = ctx.instantiate_mvars(body)?;
+            if !ctx.data(goal_body).has_expr_mvar() {
+                let Node::MVar { id: Some(id) } = ctx.node(mvar) else {
+                    return Err(MetaError::MVar(
+                        "try_resolve: goal is not a metavariable reference".into(),
+                    ));
+                };
+                ctx.mctx.assign(MVarId(id), inst_val)?;
+            } else if !ctx.is_def_eq(mvar, inst_val)? {
+                return Ok(None);
+            }
+            // oracle :418 -- `getMCtx` inside the telescope; see the doc
+            // above for why no lctx is captured with it.
+            Ok(Some((ctx.checkpoint(), subgoals)))
+        })
     }
 
-    /// oracle: `getSubgoals` (`SynthInstance.lean:317-337`), specialized
-    /// to the `xs = #[]` case -- see [`MetaCtx::try_resolve`]'s own
-    /// doc for the named seam covering `xs != #[]`. With no telescope
-    /// variables, `mkForallFVars xs d` is `d`, `mkAppN mvar xs` is
-    /// `mvar`, and the whole thing reduces to: peel each `forallE`
-    /// binder off the instance's type, mint a fresh metavariable at that
-    /// binder's (substituted) type, apply it, and `whnf` whenever the
-    /// type stops being a syntactic forall to see whether more binders
-    /// hide behind a definition.
+    /// oracle: `getSubgoals` (`SynthInstance.lean:317-339`). For each
+    /// binder `d` of the instance's type, mint `?m : ∀ xs, d` at the
+    /// OUTER local context `outer` (`mkFreshExprMVarAt lctx localInsts
+    /// (← mkForallFVars xs d)`, `:325`) and apply it as `?m xs`; `whnf`
+    /// whenever the type stops being a syntactic forall to see whether
+    /// more binders hide behind a definition. The oracle states the two
+    /// invariants this buys (`:308-309`): "1- We want all metavariables
+    /// created by `synthInstance` to share the same local context. 2- We
+    /// want to ensure that applications such as `mvar xs` are higher
+    /// order patterns."
+    ///
+    /// leanr's `MVarDecl` has no `localInsts` field: a decl's local
+    /// instances are derived from its `lctx` snapshot, so `outer` is the
+    /// whole of the oracle's `(lctx, localInsts)` pair. For `xs = #[]`,
+    /// `mk_aux_mvar_at(outer, d, Natural, None)` with `outer =
+    /// current_lctx()` is exactly `mk_aux_mvar(d)` (`assign.rs`), and
+    /// `mkAppN ?m #[]` is `?m`.
     ///
     /// Returns `(all binder mvars in order, instVal, instTypeBody)`.
-    ///
-    /// Since M4b-3 P3 task 4 this is a CALLER of
-    /// [`MetaCtx::mk_const_with_fresh_mvar_levels`] and
-    /// [`MetaCtx::forall_meta_telescope_reducing`] rather than carrying
-    /// its own copies of both -- see those two for why they were
-    /// generalized out (the design spec's § Accessor ledger, P3's row,
-    /// the one non-additive item in the plan).
     #[allow(clippy::type_complexity)]
     fn get_subgoals(
         &mut self,
+        outer: Arc<LocalCtxSnapshot>,
+        xs: &[ExprId],
         inst: &Instance,
     ) -> Result<(Vec<ExprId>, ExprId, ExprId), MetaError> {
         let base = Some(self.view.store);
@@ -2561,25 +2660,46 @@ impl<'e> MetaCtx<'e> {
         // For a LOCAL instance this is a no-op by construction: `val` is
         // an fvar, so there are no universe arguments to refresh, which
         // is exactly the oracle's own treatment of locals.
-        let inst_val = self.mk_const_with_fresh_mvar_levels(inst.val)?;
-        let inst_type = self.infer_type(inst_val)?;
-        let (mvars, _bis, inst_type_body) = self.forall_meta_telescope_reducing(inst_type)?;
-        // oracle: `mkAppN candidate mvars` (:327 builds `instVal` as
-        // `mkApp instVal (mkAppN mvar xs)` per binder, and `xs = #[]`
-        // here). Applying after the telescope rather than inside it is
-        // the oracle's own shape (`getSubgoals` :317-339 vs.
-        // `synthesizeUsingDefaultInstance`'s
-        // `mkAppN candidate mvars`, `SyntheticMVars.lean:159`), and is
-        // BEHAVIOR-NEUTRAL here: every argument applied is a bare mvar
-        // reference and `inst_val` starts as an `Expr.const`, so the
-        // spine never contains a loose bvar and the per-iteration
-        // `instantiateRev` the old inlined loop ran over it was a
-        // no-op.
-        let mut applied = inst_val;
-        for m in &mvars {
-            applied = self.scratch.expr_app(base, applied, *m)?;
+        let mut inst_val = self.mk_const_with_fresh_mvar_levels(inst.val)?;
+        let mut inst_type = self.infer_type(inst_val)?;
+        let mut mvars: Vec<ExprId> = Vec::new();
+        let mut subst: Vec<ExprId> = Vec::new();
+        loop {
+            self.step()?;
+            if let Node::Forall {
+                binder_type, body, ..
+            } = self.node(inst_type)
+            {
+                let d = instantiate_rev(self.scratch, base, binder_type, &subst, &mut self.guard)?;
+                // oracle :325 -- `mkForallFVars xs d`, the identity for
+                // `xs = #[]` (`Meta/Basic.lean:1144-1145`).
+                let m_ty = if xs.is_empty() {
+                    d
+                } else {
+                    self.mk_forall(xs, d)?
+                };
+                let (m, _) =
+                    self.mk_aux_mvar_at(Arc::clone(&outer), m_ty, MVarKind::Natural, None)?;
+                let arg = self.mk_app_spine(m, xs)?;
+                subst.push(arg);
+                inst_val = self.scratch.expr_app(base, inst_val, arg)?;
+                inst_type = body;
+                mvars.push(m);
+            } else {
+                let t = instantiate_rev(self.scratch, base, inst_type, &subst, &mut self.guard)?;
+                inst_type = self.whnf(t)?;
+                subst.clear();
+                if !matches!(self.node(inst_type), Node::Forall { .. }) {
+                    break;
+                }
+            }
         }
-        Ok((mvars, applied, inst_type_body))
+        // `inst_val` never holds a loose bvar (every `arg` is closed), so
+        // the oracle's `instVal.instantiateRev subst` (:332, :336) is a
+        // no-op here and is not transcribed; `subst` is empty after the
+        // loop, so `instTypeBody := instType.instantiateRev subst` is
+        // `inst_type`.
+        Ok((mvars, inst_val, inst_type))
     }
 
     /// oracle: `forallMetaTelescopeReducing` (`Lean/Meta/Basic.lean:1757`,
@@ -2595,14 +2715,13 @@ impl<'e> MetaCtx<'e> {
     /// § Accessor ledger, the one non-additive item): the loop is
     /// fidelity-critical and duplicating it in `leanr_elab` for
     /// `synthesizeUsingDefaultInstance` would be worse than sharing it.
-    /// `get_subgoals` is now a caller; the binder infos are new -- it
-    /// discards them, `synthesizeUsingDefaultInstance` picks the
-    /// `InstImplicit` ones out as new pending goals
-    /// (`SyntheticMVars.lean:167-171`).
-    ///
-    /// Same `xs = #[]` specialization `get_subgoals` already documented:
-    /// `mkForallFVars xs d` is `d` and `mkAppN mvar xs` is `mvar`, so
-    /// the mvar is minted directly at the substituted domain.
+    /// `synthesizeUsingDefaultInstance` picks the `InstImplicit` binder
+    /// infos out as new pending goals (`SyntheticMVars.lean:167-171`).
+    /// Since the synth pi-goals slice `get_subgoals` no longer calls
+    /// this: it mints each mvar at `∀ xs, d` in the outer context and
+    /// applies it to `xs` (`SynthInstance.lean:325`), which this
+    /// ambient-context, telescope-free loop cannot express. The two
+    /// loops agree exactly when `xs = #[]`.
     #[allow(clippy::type_complexity)]
     pub fn forall_meta_telescope_reducing(
         &mut self,
@@ -2755,16 +2874,27 @@ impl<'e> MetaCtx<'e> {
     /// tail, since the head it already destructured is gone from its
     /// list too.
     ///
-    /// **NAMED SEAM -- `removeUnusedArguments?` (:556-575), owned by
-    /// M4b.** When a subgoal's type has an unused leading argument, the
-    /// oracle tables the ARGUMENT-STRIPPED goal instead and transports
-    /// answers back through a transformer (Tomas Skrivan's
-    /// optimization, :481-533). Not transcribed: it only ever applies to
-    /// a `hasUnusedArguments` (i.e. FORALL-shaped, :484-486) subgoal
-    /// type, which `try_resolve`'s own forall seam already refuses
-    /// upstream, so this branch is unreachable here rather than silently
-    /// skipped. Its absence is a tabling-granularity/perf difference, not
-    /// a different answer.
+    /// **NAMED SEAM -- `removeUnusedArguments?` (called at :559, its
+    /// `some` arm :561-577).** When a SUBGOAL's type has an unused
+    /// argument, the oracle tables the ARGUMENT-STRIPPED goal instead and
+    /// transports answers back through a transformer (Tomas Skrivan's
+    /// optimization, `hasUnusedArguments`/`removeUnusedArguments?`
+    /// :486-531). Not transcribed, and REACHABLE now that `try_resolve`
+    /// telescopes forall-shaped goals: leanr tables `A → C` (unused `A`)
+    /// under the arrow itself and resolves it through `try_resolve`'s
+    /// telescope, giving `fun _ => inst`; the oracle tables the stripped
+    /// `C` and transports with its transformer (`fun redf _ => redf`,
+    /// built at :529). Only `consume` calls it, so only a subgoal reaches
+    /// it; a ROOT goal goes through `main`'s `newSubgoal` (:677-680)
+    /// instead. The Synth0 row `piUnused/synth/0` (root `N → Pri N`)
+    /// therefore pins only the root path, which is NOT the seam. The op
+    /// row `meta/synth-pi-unused-subgoal`, `(inferInstance : Inhabited
+    /// (Nat → Nat))`, pins the seam: `Pi.instInhabited`'s subgoal
+    /// `Nat → Inhabited Nat` fires the oracle's
+    /// `trace.Meta.synthInstance.unusedArgs`, and leanr matches the
+    /// oracle's `@Pi.instInhabited Nat (fun a => Nat) fun a =>
+    /// instInhabitedNat`. So the absence is answer-neutral as observed
+    /// (a tabling-granularity/perf difference).
     fn consume(&mut self, st: &mut SynthState, mut c: ConsumerNode) -> Result<(), MetaError> {
         let mctx = c.mctx.clone();
         let next = self.with_synth_mctx(&mctx, |ctx| {
@@ -2814,7 +2944,7 @@ impl<'e> MetaCtx<'e> {
                 Ok(())
             }
             // oracle: `| none => newSubgoal cNode.mctx key mvar waiter`
-            // (:558, the `removeUnusedArguments? = none` branch -- see
+            // (:560, the `removeUnusedArguments? = none` branch -- see
             // this function's own seam note).
             None => self.new_subgoal(st, &mctx, key, mvar, waiter),
         }
@@ -3589,7 +3719,7 @@ mod tests {
         });
     }
 
-    /// Test-only pi builder for [`preprocess_seams_a_pi_shaped_goal`]:
+    /// Test-only pi builder for [`preprocess_telescopes_a_pi_shaped_goal`]:
     /// a non-dependent arrow `dom -> body`, built with the store
     /// directly the way `three_binder_test_type` above builds binder
     /// shapes. Not a production `mk_arrow` -- this module's only caller
@@ -3635,26 +3765,314 @@ mod tests {
         });
     }
 
-    /// A pi-shaped synthesis goal (`∀ x, C x`) needs
-    /// `forallTelescopeReducing` + `mkForallFVars`, which this crate has
-    /// no fvar-telescope for at the Meta layer. NAMED SEAM, not a wrong
-    /// answer -- the same posture `try_resolve`'s forall-shaped-goal seam
-    /// already takes (`MetaError::Unsupported`'s own doc cites it).
+    /// oracle: `preprocess` (`SynthInstance.lean:737-773`) telescopes a
+    /// pi-shaped goal, `whnf`s the body and rebuilds with `mkForallFVars`.
     #[test]
-    fn preprocess_seams_a_pi_shaped_goal() {
+    fn preprocess_telescopes_a_pi_shaped_goal() {
         with_instances_ctx(|ctx| {
             let n = const_named(ctx, "N");
             let add_n = parse_goal(ctx, "Add N");
             let pi = mk_arrow_for_test(ctx, n, add_n);
-            match ctx.preprocess(pi) {
-                Err(MetaError::Unsupported(msg)) => {
-                    assert!(
-                        msg.contains("forallTelescope"),
-                        "seam names the mechanism: {msg}"
-                    );
-                }
-                other => panic!("expected a named seam, got {other:?}"),
-            }
+            let r = ctx.preprocess(pi).expect("pi goal preprocesses");
+            assert!(matches!(r.kind, PreprocessKind::NoMVars));
+            let Node::Forall {
+                binder_type, body, ..
+            } = ctx.node(r.ty)
+            else {
+                panic!("preprocess must return a forall, got {:?}", ctx.node(r.ty));
+            };
+            assert_eq!(binder_type, n);
+            assert_eq!(body, add_n, "closed body re-abstracted unchanged");
+        });
+    }
+
+    #[test]
+    fn with_forall_telescope_opens_and_restores() {
+        with_instances_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let add_n = parse_goal(ctx, "Add N");
+            let pi = mk_arrow_for_test(ctx, n, add_n);
+            let before = ctx.lctx_checkpoint();
+            let (len, body) = ctx
+                .with_forall_telescope(pi, true, |c, xs, body| {
+                    assert_eq!(c.lctx_checkpoint(), before + 1, "one fvar pushed");
+                    Ok((xs.len(), body))
+                })
+                .expect("telescope");
+            assert_eq!((len, body), (1, add_n));
+            assert_eq!(ctx.lctx_checkpoint(), before, "lctx restored on Ok");
+        });
+    }
+
+    #[test]
+    fn with_forall_telescope_restores_on_err() {
+        with_instances_ctx(|ctx| {
+            let add_n = parse_goal(ctx, "Add N");
+            // `[h : Add N] → Add N`: the binder is installed as a local instance.
+            let base = Some(ctx.view.store);
+            let pi = ctx
+                .scratch
+                .expr_forall(base, None, add_n, add_n, BinderInfo::InstImplicit)
+                .expect("pi");
+            let before = ctx.lctx_checkpoint();
+            let insts_before = ctx.local_instances.entries().len();
+            let r: Result<(), MetaError> = ctx.with_forall_telescope(pi, true, |c, _, _| {
+                assert_eq!(c.local_instances.entries().len(), insts_before + 1);
+                Err(MetaError::Infer("boom".into()))
+            });
+            assert!(r.is_err());
+            assert_eq!(ctx.lctx_checkpoint(), before, "lctx restored on Err");
+            assert_eq!(ctx.local_instances.entries().len(), insts_before);
+        });
+    }
+
+    /// A root pi goal: `N → Add N` answers `fun _ => instAddN`
+    /// (`mkLambdaFVars xs instVal (etaReduce := true)`,
+    /// `SynthInstance.lean:374`; the body does not mention `x`, so no
+    /// eta step fires).
+    #[test]
+    fn synth_answers_a_pi_goal() {
+        with_instances_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let add_n = parse_goal(ctx, "Add N");
+            let pi = mk_arrow_for_test(ctx, n, add_n);
+            let v = ctx.synth_instance(pi).expect("no error").expect("answered");
+            let v = ctx.instantiate_mvars(v).expect("inst");
+            let Node::Lam {
+                binder_type, body, ..
+            } = ctx.node(v)
+            else {
+                panic!("expected a lambda, got {}", render_expr(ctx, v));
+            };
+            assert_eq!(binder_type, n);
+            assert_eq!(body, const_named(ctx, "instAddN"));
+        });
+    }
+
+    /// The eta step of `mkLambdaFVars xs instVal (etaReduce := true)`
+    /// (`SynthInstance.lean:374`) fires on `∀ n : N, OfN n N`: `instVal`
+    /// is `instOfNN (?m n)` with `?m := fun n => n` assigned by the
+    /// `isDefEq` just before, and `mkBinding`'s `elimMVarDeps`
+    /// (`MetavarContext.lean:1230-1240`, `elimApp`'s assigned-lambda
+    /// arm) betas it to `instOfNN n` before `mkLambda'` (`:1281-1291`)
+    /// eta-reduces to the bare constant.
+    #[test]
+    fn pi_goal_answer_is_eta_reduced() {
+        with_instances_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let of_n = const_named(ctx, "OfN");
+            let base = Some(ctx.view.store);
+            let b0 = ctx.scratch.expr_bvar(base, &Nat::from(0u64)).expect("#0");
+            let body = ctx.mk_app_spine(of_n, &[b0, n]).expect("OfN #0 N");
+            let pi = ctx
+                .scratch
+                .expr_forall(base, None, n, body, BinderInfo::Default)
+                .expect("pi");
+            let v = ctx.synth_instance(pi).expect("no error").expect("answered");
+            let v = ctx.instantiate_mvars(v).expect("inst");
+            assert_eq!(
+                v,
+                const_named(ctx, "instOfNN"),
+                "expected the eta-reduced constant, got {}",
+                render_expr(ctx, v)
+            );
+        });
+    }
+
+    /// `getSubgoals` mints each subgoal as `?m : ∀ xs, d` at the OUTER
+    /// context and applies it to `xs` (`SynthInstance.lean:325-327`).
+    /// `N → Add (Prod N N)` via `instAddProd [Add a] [Add b]` has
+    /// instance subgoals that outlive the telescope: each is itself the
+    /// pi goal `N → Add N`, answered `fun _ => instAddN` and beta'd back
+    /// in by `instantiate_mvars`. Minting them bare at the telescope's
+    /// context instead lets `mk_lambda_eta`'s `elim_mvar_deps` reroute
+    /// them, so the answer differs.
+    #[test]
+    fn pi_goal_subgoals_are_applied_outer_mvars() {
+        with_instances_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let add_pp = parse_goal(ctx, "Add (Prod N N)");
+            let flat = ctx
+                .synth_instance(add_pp)
+                .expect("no error")
+                .expect("answered");
+            let flat = ctx.instantiate_mvars(flat).expect("inst");
+            let pi = mk_arrow_for_test(ctx, n, add_pp);
+            let v = ctx.synth_instance(pi).expect("no error").expect("answered");
+            let v = ctx.instantiate_mvars(v).expect("inst");
+            let Node::Lam { body, .. } = ctx.node(v) else {
+                panic!("expected a lambda, got {}", render_expr(ctx, v));
+            };
+            assert_eq!(
+                body,
+                flat,
+                "got {}, want fun _ => {}",
+                render_expr(ctx, v),
+                render_expr(ctx, flat)
+            );
+        });
+    }
+
+    /// Review Focus 1: the outer snapshot carries the ambient local
+    /// instance into the telescope (oracle `getSubgoals`' `localInsts`,
+    /// `SynthInstance.lean:317`; `getInstances`' locals, `:230-239`).
+    #[test]
+    fn pi_goal_uses_an_ambient_local_instance() {
+        with_instances_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let add_n = parse_goal(ctx, "Add N");
+            let cp = ctx.lctx_checkpoint();
+            let h = ctx
+                .push_local_decl(None, add_n, BinderInfo::InstImplicit)
+                .expect("h");
+            let pi = mk_arrow_for_test(ctx, n, add_n);
+            let v = ctx.synth_instance(pi).expect("no error").expect("answered");
+            let v = ctx.instantiate_mvars(v).expect("inst");
+            let Node::Lam { body, .. } = ctx.node(v) else {
+                panic!("expected a lambda, got {}", render_expr(ctx, v));
+            };
+            assert_eq!(body, h, "local instance beats the global");
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// Review Focus 4: a pi goal whose body has an expr mvar takes the
+    /// `isDefEq mvar instVal` recheck path (`SynthInstance.lean:417`)
+    /// with a pi-typed mvar.
+    ///
+    /// What each layer answers for `N → Add ?a`:
+    /// - The oracle's `synthInstance?` runs the search under
+    ///   `withNewMCtxDepth` with `isDefEqStuckEx := true`
+    ///   (`SynthInstance.lean:963`, `:978`), so the caller's `?a` is
+    ///   read-only. `getUnify` still keys it `.star`
+    ///   (`DiscrTree/Main.lean:396-412`), and `Add ?a =?= Add N` throws
+    ///   `isDefEqStuck`. `trySynthInstance` reports that as `.undef`
+    ///   (`:1014-1017`). leanr's `try_synth_instance` gives the same
+    ///   `Undef`, from its syntactic pre-test, because the forall head is
+    ///   not a class `Const`.
+    /// - leanr's bare `synth_instance` does not run on the depth model
+    ///   (`try_synth_instance`'s doc, residue 2). It treats `?a` as
+    ///   assignable inside its checkpoint/rollback, unifies `?a := N`
+    ///   through `instAddN`, and answers the mvar-free
+    ///   `fun _ => instAddN`. The rollback discards the search's
+    ///   `?a := N`, but `assign_out_params` then runs
+    ///   `isDefEq type (inferType result)` on the whole goal, out-params
+    ///   or not (oracle `assignOutParams`, `:825-845`, unconditional at
+    ///   `:842`), so `N → Add ?a =?= N → Add N` re-assigns `?a := N` in
+    ///   the caller's frame.
+    #[test]
+    fn pi_goal_with_mvar_body_does_not_error() {
+        with_instances_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let ty = type_sort(ctx);
+            let (a, a_id) = fresh_mvar(ctx, ty);
+            let add = const_named(ctx, "Add");
+            let base = Some(ctx.view.store);
+            let add_a = ctx.scratch.expr_app(base, add, a).expect("Add ?a");
+            let pi = mk_arrow_for_test(ctx, n, add_a);
+            let v = ctx
+                .synth_instance(pi)
+                .expect("Ok(_), not Err")
+                .expect("answered");
+            let v = ctx.instantiate_mvars(v).expect("inst");
+            let Node::Lam {
+                binder_type, body, ..
+            } = ctx.node(v)
+            else {
+                panic!("expected fun _ => instAddN, got {}", render_expr(ctx, v));
+            };
+            assert_eq!(binder_type, n);
+            assert_eq!(
+                body,
+                const_named(ctx, "instAddN"),
+                "got {}",
+                render_expr(ctx, v)
+            );
+            let a_val = ctx.instantiate_mvars(a).expect("inst ?a");
+            assert!(ctx.mctx.is_assigned(a_id), "assign_out_params assigns ?a");
+            assert_eq!(a_val, n, "?a := N, got {}", render_expr(ctx, a_val));
+            // Fresh `?b`: the `?a` above is now assigned, so `pi` is ground.
+            let (b, _) = fresh_mvar(ctx, ty);
+            let base = Some(ctx.view.store);
+            let add_b = ctx.scratch.expr_app(base, add, b).expect("Add ?b");
+            let pi_b = mk_arrow_for_test(ctx, n, add_b);
+            assert_eq!(
+                ctx.try_synth_instance(pi_b).expect("no error"),
+                LOption::Undef,
+                "the oracle's trySynthInstance answer"
+            );
+        });
+    }
+
+    /// Task 1 review carry-over: a pi goal with an out-param and an mvar,
+    /// `N → Op N N ?c`. `preprocess` must classify on the telescope BODY
+    /// (`SynthInstance.lean:750-756`; classifying the rebuilt `ty` would
+    /// see a `forallE` head and say `MVarsNoOutputParams`), and
+    /// `preprocess_out_param` must rebuild the pi around the rewritten
+    /// body (`mkForallFVars xs (mkAppN c args)`, `:818`).
+    #[test]
+    fn pi_goal_with_an_out_param_mvar_preprocesses_on_the_body() {
+        with_instances_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let ty = type_sort(ctx);
+            let (c, _) = fresh_mvar(ctx, ty);
+            let op = const_named(ctx, "Op");
+            let op_body = ctx.mk_app_spine(op, &[n, n, c]).expect("Op N N ?c");
+            let pi = mk_arrow_for_test(ctx, n, op_body);
+
+            let r = ctx.preprocess(pi).expect("preprocess");
+            assert!(
+                matches!(r.kind, PreprocessKind::MVarsOutputParams),
+                "classified on the forall instead of its body: {:?}",
+                r.kind
+            );
+
+            let out = ctx.preprocess_out_param(pi).expect("out param");
+            let Node::Forall {
+                binder_type, body, ..
+            } = ctx.node(out)
+            else {
+                panic!("expected the pi rebuilt, got {}", render_expr(ctx, out));
+            };
+            assert_eq!(binder_type, n);
+            let args = ctx.get_app_args(body);
+            assert_eq!(ctx.get_app_fn(body), op);
+            assert_eq!(args.len(), 3);
+            assert_eq!(&args[..2], &[n, n]);
+            assert_ne!(args[2], c, "the out-param position was replaced");
+            // oracle shape: the fresh out-param mvar is minted inside the
+            // telescope, so `mkForallFVars`' `elimMVarDeps` reverts the
+            // in-scope `x` (`MetavarContext.lean:1313`). The position reads
+            // `?n #0`, not a bare `?n` whose context still holds `x`.
+            let Node::App { f, arg } = ctx.node(args[2]) else {
+                panic!("expected ?n #0, got {}", render_expr(ctx, args[2]));
+            };
+            assert!(
+                matches!(ctx.node(f), Node::MVar { .. }),
+                "expected ?n #0, got {}",
+                render_expr(ctx, args[2])
+            );
+            assert!(
+                matches!(ctx.node(arg), Node::BVar { idx: 0 }),
+                "expected ?n #0, got {}",
+                render_expr(ctx, args[2])
+            );
+        });
+    }
+
+    /// Table keys of pi goals: closed `forall xs, C ..` with loose bvars in
+    /// the body must normalize structurally and deterministically.
+    #[test]
+    fn normalize_goal_key_handles_a_pi_goal() {
+        with_instances_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let add_n = parse_goal(ctx, "Add N");
+            let pi = mk_arrow_for_test(ctx, n, add_n);
+            let k1 = ctx.normalize_goal_key(pi).expect("key");
+            let k2 = ctx.normalize_goal_key(pi).expect("key");
+            let k_body = ctx.normalize_goal_key(add_n).expect("key");
+            assert_eq!(k1, k2);
+            assert_ne!(k1, k_body);
         });
     }
 

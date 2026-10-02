@@ -222,13 +222,12 @@
 //! part of this TABLE (they never touch `instanceExtension` — see the
 //! `global_name: None` seam above); `get_instances` appends them at
 //! query time off `MetaCtx::local_instances`, between the sort and the
-//! reverse, so they come out ahead of every global. Still out of scope
-//! here is the `isClass?`/`forallTelescopeReducing` goal-telescoping
-//! `getInstances` itself does up front (`SynthInstance.lean:205-206`) —
-//! `get_instances` here takes an already-telescoped class application,
-//! matching every other B2/B1 query-side helper's contract; a future B5
-//! task owns stripping any leading binders off an actual synthesis
-//! goal before calling this.
+//! reverse, so they come out ahead of every global. `get_instances` also
+//! does the `forallTelescopeReducing` goal-telescoping `getInstances`
+//! does up front (`SynthInstance.lean:205`) via
+//! `MetaCtx::with_forall_telescope`, snapshotting the local instances
+//! BEFORE it opens (:203-204) so the goal's own instance binders are
+//! never candidates.
 //!
 //! # Default instances: read order, not re-sorted here
 //!
@@ -482,6 +481,22 @@ impl<'e> MetaCtx<'e> {
     /// `InstanceTable::default()`, an empty table, for the duration of
     /// the call) and put back immediately after.
     pub(crate) fn get_instances(&mut self, goal: ExprId) -> Result<Vec<Instance>, MetaError> {
+        // oracle: `getInstances` (SynthInstance.lean:202-241) reads
+        // `localInstances` BEFORE `forallTelescopeReducing` (:203-205),
+        // so the goal's own instance binders are never candidates.
+        let local_insts = self.local_instances.to_vec();
+        self.with_forall_telescope(goal, true, |ctx, _xs, body| {
+            ctx.get_instances_for_class_app(body, &local_insts)
+        })
+    }
+
+    /// [`Self::get_instances`] on the telescope body (a class application),
+    /// with the local instances snapshotted before the telescope opened.
+    fn get_instances_for_class_app(
+        &mut self,
+        goal: ExprId,
+        local_insts: &[crate::local_instance::LocalInstance],
+    ) -> Result<Vec<Instance>, MetaError> {
         // oracle: `getInstances` resolves the goal's class name
         // (`SynthInstance.lean:205-209`) BEFORE it touches the global
         // index (:210), and this transcription keeps that order for a
@@ -506,12 +521,8 @@ impl<'e> MetaCtx<'e> {
         // — incompleteness, never a wrong candidate, but a failure this
         // function cannot see.
         //
-        // Two deliberate differences from the oracle at this point, both
-        // pre-existing (see the module doc): this takes an
-        // ALREADY-telescoped class application, so there is no
-        // `forallTelescopeReducing` here — and hence no need for the
-        // oracle's own "read `localInstances` before the telescope
-        // updates them" precaution (:203-204); and a goal that is not a
+        // One deliberate difference from the oracle at this point,
+        // pre-existing (see the module doc): a goal that is not a
         // class is `None` here rather than the oracle's hard error
         // (:207-208). `None` only suppresses the local half below — the
         // global lookup is unchanged, so no existing caller's result
@@ -635,7 +646,7 @@ impl<'e> MetaCtx<'e> {
             // instances of its own (and `lctx_restore` then removes
             // them), so the live stack is a moving target here — the
             // same hazard the oracle's `:203-204` guards against.
-            for li in self.local_instances.to_vec() {
+            for li in local_insts.iter().cloned() {
                 // oracle: `if linst.className == className` (:231) —
                 // exact name equality, never defeq.
                 if li.class_name != class_name {
@@ -1508,6 +1519,29 @@ mod tests {
                  would make the search never solve the subgoal"
             );
             ctx.lctx_restore(cp);
+        });
+    }
+
+    /// oracle: `getInstances` reads `localInstances` BEFORE its
+    /// `forallTelescopeReducing` (SynthInstance.lean:203-205), so a goal's
+    /// own instance binder is never a candidate.
+    #[test]
+    fn get_instances_ignores_the_goals_own_instance_binder() {
+        with_instances_ctx(|ctx| {
+            let add_n = parse_goal(ctx, "Add N");
+            let base = Some(ctx.view.store);
+            let pi = ctx
+                .scratch
+                .expr_forall(base, None, add_n, add_n, BinderInfo::InstImplicit)
+                .expect("pi");
+            let found = ctx.get_instances(pi).expect("get_instances");
+            assert!(!found.is_empty(), "the global instAddN is still found");
+            for i in &found {
+                assert!(
+                    !matches!(ctx.node(i.val), Node::FVar { .. }),
+                    "the goal's own binder leaked in as a candidate"
+                );
+            }
         });
     }
 

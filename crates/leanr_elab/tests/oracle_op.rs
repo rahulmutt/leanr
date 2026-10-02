@@ -174,7 +174,13 @@ fn oracle_op_gate() {
     // 81 -> 90 (checkAssignment T4): op/depth, op/depth-mid, op/stuck restored
     // to binder form (the closed spellings kept as `-closed`), plus
     // op/binder-F-hole, meta/at-hadd-V, meta/beta-{lt,add,beq}, op/rel-lt-beta.
-    const CORPUS_FLOOR: usize = 94;
+    // 94 -> 97 (synth pi-goals T4): meta/synth-pi-{beq-nat,deceq-nat,beq-bool};
+    // op/beq-prop, op/bne-prop, op/beq-prop-bool, op/beq-uncomparable-prop
+    // re-recorded (4 rows) against instBEqOfDecidableEq (suffix `BEq Bool` dropped).
+    // 97 -> 99 (synth pi-goals fix wave): meta/synth-pi-unused-subgoal (the
+    // `removeUnusedArguments?` seam, reached from `consume`) and
+    // meta/synth-pi-dep-subgoal (oracle killer for mutation 2b).
+    const CORPUS_FLOOR: usize = 99;
     assert!(
         replayed >= CORPUS_FLOOR,
         "op corpus shrank: {replayed} < {CORPUS_FLOOR}"
@@ -281,7 +287,7 @@ fn elab_op_has_the_test_support_suffix() {
         "z0",
         // the mutation-killing rows' types (P3 T3)
         "fun (a : MArr Nat) => a",
-        // the closed `BEq Bool` of the `binrel_no_prop%` Prop rows (P3 T4)
+        // Prelude's `BEq Bool` through `instBEqOfDecidableEq`, a pi subgoal (synth pi-goals slice)
         "(inferInstance : BEq Bool)",
         // op/beq-uncomparable-prop's decidable `Prop` over `Nat`/`U` (P3 T4)
         "fun (n : Nat) (u : U) => (inferInstance : Decidable (PU n u))",

@@ -361,3 +361,23 @@ structure SortN where
   ty : Type
 
 instance instCoeSortSortN : CoeSort SortN Type := ⟨SortN.ty⟩
+
+-- === synth pi-goals slice (spec 2026-10-02-synth-pi-goals-design.md) ===
+-- Goals of the form `∀ xs, C ..` (SynthInstance.lean forallTelescopeReducing sites).
+class Dec (p : Prop) where dec : N
+instance instDecN (a b : N) : Dec (Eq a b) := ⟨N.zero⟩
+abbrev DecEqN (α : Type) := (a b : α) → Dec (Eq a b)
+class BE (α : Type) where be : N
+instance instBEOfDecEq [DecEqN α] : BE α := ⟨N.zero⟩
+class PB (α : Type) where pb : N
+instance (priority := 100) instPBLow : PB N := ⟨N.zero⟩
+-- `instPBHigh`'s pi subgoal must have a candidate the search actually
+-- TRIES, or `piBranch` discriminates nothing: the spec's original
+-- `[(a b : N) → NoInst (Dec (Eq a b))]` has no candidate at all, so
+-- `try_resolve` never runs on it (that record passed even against the
+-- pre-slice source). `CoeT N x NoBase` is retrieved by `instance : CoeT α
+-- a α` (tried first, declared last) and REJECTED by its `isDefEq`
+-- (`N` vs `NoBase`) under the telescope `x`; the remaining `CoeT`
+-- routes fail too (as in `coeChain/synth/3`), so the branch fails and
+-- the answer is `instPBLow`.
+instance (priority := 5000) instPBHigh [(x : N) → CoeT N x NoBase] : PB N := ⟨N.zero⟩
