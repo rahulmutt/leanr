@@ -692,9 +692,9 @@ Spec corrections:
   `has_heterogeneous_default_instances`. The comment above `op/hetero-default`
   in `dump_elab.lean` was corrected to match (comment only; fixtures not
   regenerated).
-- R2: `op/depth`, `op/depth-mid`, `op/stuck` are respelled over closed suffix
+- ~~R2: `op/depth`, `op/depth-mid`, `op/stuck` are respelled over closed suffix
   constants (`vx`, `k0`, `fx`, `z0`) instead of `fun` binders, because of the
-  elimMVarDeps gap below. Same ids and discriminated paths.
+  elimMVarDeps gap below. Same ids and discriminated paths.~~ Restored; closed spellings kept as `-closed` [checkAssignment slice: `2026-10-02-check-assignment-ctx-approx-design.md` § Landed].
 - R5: the suffix declares `instance : BEq Bool`, so the oracle records for
   `op/beq-prop`, `op/bne-prop`, `op/beq-prop-bool` pin `instBEqBool`, not
   Prelude's `instBEqOfDecidableEq`. Fidelity caveat: those rows no longer
@@ -703,7 +703,7 @@ Spec corrections:
   with a P2 row).
 
 Open follow-ups (owner suggestion in brackets):
-- **TOP PRIORITY, reachable from plain `+` notation (final-review probe,
+- ~~**TOP PRIORITY, reachable from plain `+` notation (final-review probe,
   2026-10-02).** The elimMVarDeps gap below is NOT confined to explicit `@`:
   ordinary `binop%` notation hits it. Against ElabOp,
   `fun (n : Nat) (x : F n) => x + F.mk _` returns a SILENTLY WRONG `Ok` in
@@ -712,8 +712,8 @@ Open follow-ups (owner suggestion in brackets):
   `@instHAdd (F n) (instAddF n)`. And
   `fun (n : Nat) (x : F n) (z : Z) => x + F.mk _ + z` is
   `Err(InstanceSynthesisFailed)` in leanr where the oracle elaborates it
-  (`@HAdd.hAdd (F n) Z Z (instHAddFZ n) (x + F.mk n) z`).
-- leanr_meta elimMVarDeps gap [a leanr_meta slice]: `assign.rs`
+  (`@HAdd.hAdd (F n) Z Z (instHAddFZ n) (x + F.mk n) z`).~~ CLOSED [checkAssignment slice: `2026-10-02-check-assignment-ctx-approx-design.md` § Landed].
+- ~~leanr_meta elimMVarDeps gap [a leanr_meta slice]: `assign.rs`
   `mk_lambda_fvars_with_let_deps` -> `mk_lambda_over_fvars` uses raw
   `abstract_fvars` with no `elimMVarDeps` (oracle `mkLambdaFVars`,
   `ExprDefEq.lean:549-554`). Op-free repros (explicit `@` also passes
@@ -726,15 +726,15 @@ Open follow-ups (owner suggestion in brackets):
   Reverted experiment: routing through `MetaCtx::mk_lambda` fixes the three
   binder forms but regresses `op/postponed-binop-operand` with
   `DepthBudgetExhausted`. Whoever fixes it restores the binder forms of
-  `op/depth`, `op/depth-mid`, `op/stuck` and re-runs T3 mutations (d), (h).
+  `op/depth`, `op/depth-mid`, `op/stuck` and re-runs T3 mutations (d), (h).~~ CLOSED; binder forms restored, T3 (d)/(h) re-run [checkAssignment slice: `2026-10-02-check-assignment-ctx-approx-design.md` § Landed].
 - synth pi-goal gap [synthesis slice]: `synth_instance` has no pi-shaped
   goal support (`SynthInstance.lean:740-742`), so `(inferInstance : BEq Bool)`
   and `BEq Nat` fail. Fixing it drops the suffix `BEq Bool` and re-checks the
   three rows against `instBEqOfDecidableEq`.
-- `(fun a => LT.lt a 2) z0` (also `a + 2`, `BEq.beq a 2`) gives
+- ~~`(fun a => LT.lt a 2) z0` (also `a + 2`, `BEq.beq a 2`) gives
   `DepthBudgetExhausted` op-free; the oracle accepts [likely the same
   leanr_meta slice, not bisected]. `op/rel-no-default` uses `x.1 < 2` to
-  avoid it.
+  avoid it.~~ CLOSED; corpus rows `meta/beta-{lt,add,beq}`, `op/rel-lt-beta` [checkAssignment slice: `2026-10-02-check-assignment-ctx-approx-design.md` § Landed].
 - Info trees: no consumer yet [info-tree slice].
 - `withRef` positions: error positions only; `rel.rs` omits the oracle's
   `withRef lhsStx/rhsStx` (`Extra.lean:531-532`) [error-position pass].
@@ -749,5 +749,6 @@ Open follow-ups (owner suggestion in brackets):
   `paren_inner` is a third copy of paren-inner navigation; `rel.rs` deep-
   copies operand trees; the suffix comment at `elab_op_support.lean.in:69`
   is over-long.
-- Survived mutations (T3 d, h, k; T4 e1, f) are unobservable today, see
-  reasons above.
+- Survived mutations (T3 d, k; T4 e1, f) are unobservable today, see
+  reasons above. T3 (h) is now KILLED by `meta/beta-add`; T3 (d) still
+  survives the restored binder rows (checkAssignment slice § Landed).

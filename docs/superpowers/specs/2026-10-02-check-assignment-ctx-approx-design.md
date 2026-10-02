@@ -337,3 +337,97 @@ One plan and one PR, with four tasks:
 
 T1 comes before T2 so that the stricter quick check never ships
 without the slow path behind it.
+
+## Landed
+
+PR #TBD (branch `check-assignment-ctx-approx`), four tasks:
+T1 7959a10, T2 ddb6840, T3 eee69ad + 62262c2, T4 (corpus rows and this
+close-out). Oracle pin unchanged (`leanprover/lean4:v4.33.0-rc1`).
+
+**Corpus** (`op-queries.jsonl`, `CORPUS_FLOOR` 81 -> 90): `op/depth`,
+`op/depth-mid`, `op/stuck` restored to their `fun`-binder spellings; the
+closed spellings are kept as `op/depth-closed`, `op/depth-mid-closed`,
+`op/stuck-closed` (records byte-identical to the old ones apart from the
+id). New: `op/binder-F-hole`, `meta/at-hadd-V`, `meta/beta-lt`,
+`meta/beta-add`, `meta/beta-beq`, `op/rel-lt-beta`. The oracle accepts all
+of them (no `sorryAx`), and leanr matches every record. No pre-existing
+record changed in any task.
+
+Mutations (each applied, run, reverted):
+- T1: (a) `is_sub_prefix_of` always true and (b) `except` ignored:
+  `is_sub_prefix_of_is_an_ordered_subsequence_test`. (c) no
+  `inner := ?aux`: `check_mvar_restricts_an_inner_mvar_under_ctx_approx`.
+  (d) the dependent-`fvars` rule removed:
+  `check_mvar_erases_a_dependent_fvars_entry`. (e) `ctx_approx` gate
+  removed: `check_mvar_refuses_without_ctx_approx`. (f) depth comparison
+  removed: `check_mvar_refuses_synthetic_opaque_and_other_depth`. (g)
+  head-beta retry removed: `check_retries_a_head_beta_target`. (h) let
+  rescue removed: `check_fvar_follows_lets_not_haves`. (i) `rescuable`
+  always false: `check_app_rescues_an_out_of_scope_mvar_app`. (j)
+  `has_ctx_locals` return removed: `check_mvar_refuses_under_has_ctx_locals`.
+  All KILLED.
+- T2: (a) driver assigns the original `v`, and (d) driver never calls the
+  slow path: `driver_returns_the_slow_path_rewrite`,
+  `check_fvar_follows_a_genuine_let_value_in_both_zeta_modes`. (b) no
+  rollback in `is_def_eq_mvar_mvar`:
+  `failed_first_direction_rolls_back_the_restriction`. (c) quick-check arm
+  (5) dropped and (e) delayed test -> `true`:
+  `quick_check_mvar_arm_falls_through_on_each_condition`. (f) `&except` ->
+  `&[]` in `check_mvar`: `check_mvar_subtracts_fvars_before_the_sub_prefix_test`.
+  (g) "keep what the outer ctx has" branch deleted:
+  `check_mvar_restriction_keeps_what_the_outer_ctx_has`. All KILLED. The
+  `check_fvar` pin flipped as planned (now
+  `check_fvar_follows_a_genuine_let_value_in_both_zeta_modes`).
+- T3: (a) swap reverted to raw abstraction: KILLED by
+  `process_assignment_eliminates_mvar_deps_on_the_pattern_fvars`. (b)
+  quick-check arm (5) skipped with the swap in place: KILLED by
+  `oracle_op_gate` (`op/postponed-binop-operand`, `DepthBudgetExhausted`,
+  as the § Evidence probe predicted) plus two unit tests.
+- T4, P3's survivors re-run against the restored binder rows: P3 T3 (d)
+  (drop the final `is_def_eq_guarded(ty, max)` in `to_expr`) still
+  SURVIVES the whole op corpus, binder rows included: with no unknown leaf
+  every leaf type is already `max`, so the homogeneous instance's
+  out-param already equals `max`. P3 T3 (h) (`result_is_out_param_support:
+  true` in `apply_op`) is now KILLED, by `meta/beta-add` (`TypeMismatch`);
+  the restored binder rows alone do not kill it.
+
+T3 test variant: the elimMVarDeps unit test uses a syntheticOpaque `?i`
+(a natural `?i` succeeds via `?i := ?m x` and never reaches the swap). It
+asserts that `?m`'s value, after stripping leading lambdas, has a fresh
+`?i'` head delay-assigned with fvars `[x]` and pending `?i`, so it does not
+depend on the binder shape (see the eta seam below).
+
+**`checkApp` / `assignToConstFun` coverage.** Mutation (i) (`rescuable`
+always false) survives `oracle_op`, `oracle_elab` and `seam_audit`. The
+oracle was probed with candidates c1-c4 (the plan's list), each
+elaborated with `ctxApprox` on and with
+`withConfig (fun c => { c with ctxApprox := false })`: the outputs are
+byte-identical, so none of them is `ctxApprox`-dependent.
+`checkApp`/`assignToConstFun` has unit coverage
+(`check_app_rescues_an_out_of_scope_mvar_app`) and no differential
+record. Mutation (i) survives the corpus. Candidates tried: c1-c4.
+
+Deviations from this spec:
+- `is_sub_prefix_of` takes `except: &[NameId]`, not `&[ExprId]`: the
+  `LocalCtxSnapshot` has no `Store` to decode an `ExprId`. Callers map
+  through `MetaCtx::fvar_ids`.
+- The slow path's private helpers are `ca_`-prefixed so they do not clash
+  with `check.rs`'s `check`/`check_app`.
+- `mk_binding` (`metactx.rs`) used to refuse a `have` as a SEAM. It now
+  abstracts a nondep ldecl as a Default binder, as the oracle does with
+  `generalizeNondepLet := true` (`MetavarContext.lean:1330-1332`). A
+  genuine let is still refused.
+- `op/binder-F-hole-chain` is not a separate row: its source is identical
+  to the restored `op/stuck`.
+- `op/rel-no-default` keeps its `x.1 < 2` spelling (its record pins
+  `withSynthesizeLight`). The `(fun a => a < 2) z0` spelling is a new row,
+  `op/rel-lt-beta`.
+
+Open follow-ups:
+- Eta SEAM: the oracle's `mkLambdaFVarsWithLetDeps` passes
+  `etaReduce := true` (`ExprDefEq.lean:551,554`), but leanr's
+  `mk_binding` does not eta-reduce, so leanr can assign
+  `?m := fun x => f x` where the oracle assigns `f`. Not ported; no corpus
+  record shows it yet. Documented on `mk_lambda_fvars_with_let_deps`.
+- `checkApp`/`assignToConstFun`: no differential record (above).
+- P3 T3 (d) remains unobservable (above).

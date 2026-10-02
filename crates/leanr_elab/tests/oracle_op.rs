@@ -171,7 +171,10 @@ fn oracle_op_gate() {
     // (`toBoolIfNecessary`), op/rel-expected (`analyze tree none`),
     // op/rel-no-default (`withSynthesizeLight`, not `withSynthesize`),
     // op/rel-of-coe-rels and op/rel-of-literal-rels (rel operands are leaves).
-    const CORPUS_FLOOR: usize = 81;
+    // 81 -> 90 (checkAssignment T4): op/depth, op/depth-mid, op/stuck restored
+    // to binder form (the closed spellings kept as `-closed`), plus
+    // op/binder-F-hole, meta/at-hadd-V, meta/beta-{lt,add,beq}, op/rel-lt-beta.
+    const CORPUS_FLOOR: usize = 90;
     assert!(
         replayed >= CORPUS_FLOOR,
         "op corpus shrank: {replayed} < {CORPUS_FLOOR}"
