@@ -85,23 +85,10 @@
 //!   elision, below).
 //! - (task B6, opus review round 1) `synth_pending`'s missing
 //!   `catchInternalId isDefEqStuckExceptionId` (`SynthInstance.lean:
-//!   1052`): the oracle CATCHES an internal `isDefEqStuck` exception
-//!   raised by the nested `synthInstance?` attempt and returns `false`
-//!   in its place; this crate's `synth_pending_body` instead lets
-//!   `MetaError::IsDefEqStuck` escape (via `?`) all the way out through
-//!   `sunfold_go_match` to `whnf`'s own caller. Direction: safe — an
-//!   `Err` surfaces where the oracle would have produced an `Ok`
-//!   ANSWER, never a WRONG one — but it IS a genuine, currently
-//!   unreconciled divergence in observable control flow (the
-//!   differential gate will report an ERROR where the oracle recorded
-//!   an answer for any query that routes a stuck sub-defeq through
-//!   here), not merely a stricter restatement of the oracle's own
-//!   discipline. See `synth_pending`'s own doc comment for why this
-//!   crate's Global Constraints forbid the alternative (collapsing
-//!   `IsDefEqStuck` to `false`) without also fixing this by actually
-//!   catching-and-reconciling it. Owner: M4b / future — no task number
-//!   assigned yet; this is a deliberate, tracked divergence, not a
-//!   silent one.
+//!   1052`): CLOSED in synth-real-depth Task 2. `synth_pending_body`
+//!   now catches `MetaError::IsDefEqStuck` from `synth_instance` and
+//!   returns `Ok(false)`, exactly as the oracle's `catch _ => pure
+//!   none` does; every other error still propagates.
 
 use leanr_kernel::bank::pools::DataValueRow;
 use leanr_kernel::bank::terms::Node;
@@ -1345,20 +1332,12 @@ impl<'e> MetaCtx<'e> {
     /// instance concept, so there is nothing to flush/reinstall on that
     /// axis.
     ///
-    /// `catchInternalId isDefEqStuckExceptionId` (:1052) is NOT
-    /// replicated here — NAMED SEAM (see the module doc's "Named seams"
-    /// list, above, for the full citation and owner): `IsDefEqStuck` is
-    /// this crate's own typed `MetaError` variant, not an internal
-    /// exception id, and this method's `?` on `synth_instance`'s result
-    /// PROPAGATES it untouched rather than catching it and returning
-    /// `false` the way the oracle's own `catch _ => pure none` does.
-    /// Direction: safe (an `Err` surfaces where the oracle would have
-    /// produced an `Ok` ANSWER, never a WRONG one) — but this crate's own
-    /// discipline (Global Constraints: `IsDefEqStuck` never collapses to
-    /// `false`) is a reason NOT to fix this by catching it here, not a
-    /// reason the divergence isn't real: a caller expecting bit-for-bit
-    /// oracle control flow will observe an `Err` where the oracle returns
-    /// `Ok(false)`.
+    /// `catchInternalId isDefEqStuckExceptionId` (:1052) is ported: a
+    /// stuck search (the caller's mvars are read-only under synthesis's
+    /// `withNewMCtxDepth`) is "no progress", `Ok(false)`, with nothing
+    /// assigned. This is the oracle's OWN catch site, so it does not
+    /// conflict with the crate rule that `is_def_eq` never collapses
+    /// `IsDefEqStuck` to `false`. Every other error still propagates.
     ///
     /// The final `mvarId.isAssigned` re-check (:1057-1058) is folded into
     /// an UPFRONT short-circuit here instead (`synth_pending`, below,
@@ -1429,9 +1408,13 @@ impl<'e> MetaCtx<'e> {
         self.synth_pending_depth += 1;
         let val = self.with_mvar_context(mvar, |s| s.synth_instance(ty));
         self.synth_pending_depth -= 1;
-        match val? {
-            None => Ok(false),
-            Some(val) => {
+        // oracle: `catchInternalId isDefEqStuckExceptionId
+        // (synthInstance? ..) (fun _ => pure none)` (:1052), then
+        // `none => return false`. ONLY `IsDefEqStuck` is caught.
+        match val {
+            Ok(None) | Err(MetaError::IsDefEqStuck) => Ok(false),
+            Err(e) => Err(e),
+            Ok(Some(val)) => {
                 if self.mctx.is_assigned(mvar) {
                     return Ok(false);
                 }
@@ -3853,6 +3836,37 @@ mod tests {
     /// would not fire at depth 2) — this is what actually pins
     /// `MAX_SYNTH_PENDING_DEPTH`, not merely "synth_pending eventually
     /// terminates".
+    #[test]
+    fn synth_pending_treats_a_stuck_search_as_no_progress() {
+        use crate::test_support::{const_named, fresh_mvar, with_instances_ctx};
+        with_instances_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("0");
+            let one = ctx.scratch.level_succ(base, zero).expect("1");
+            let type0 = ctx.scratch.expr_sort(base, one).expect("Type");
+            let (a, a_id) = fresh_mvar(ctx, type0);
+            let add = const_named(ctx, "Add");
+            let add_a = ctx.mk_app_spine(add, &[a]).expect("Add ?a");
+            let (_inst, inst_id) = fresh_mvar(ctx, add_a);
+            assert_eq!(ctx.synth_pending(inst_id), Ok(false));
+            assert!(!ctx.mctx().is_assigned(inst_id));
+            assert!(!ctx.mctx().is_assigned(a_id));
+        });
+    }
+
+    /// Only `IsDefEqStuck` is caught: a budget error inside the pending
+    /// search still propagates (oracle `catchInternalId` is id-specific).
+    #[test]
+    fn synth_pending_still_propagates_a_budget_error() {
+        use crate::test_support::with_instances_ctx;
+        with_instances_ctx(|ctx| {
+            let (_goal, mvar) = stuck_mul_over_fresh_instance(ctx);
+            ctx.set_step_budget(1);
+            assert!(ctx.synth_pending(mvar).is_err());
+            assert!(!ctx.mctx().is_assigned(mvar));
+        });
+    }
+
     #[test]
     fn synth_pending_depth_guard_refuses_without_assigning() {
         use crate::test_support::with_instances_ctx;
