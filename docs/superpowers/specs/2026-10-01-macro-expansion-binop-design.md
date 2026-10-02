@@ -408,16 +408,59 @@ distinguishable:
 | Row | Path |
 |---|---|
 | `a + b * c : Nat` | homogeneous, one tree |
-| `n + i`, `i + n` (`n : Nat`, `i : Int`) | leaf coercion to the max type, both orders |
-| `(n + 0) + i` | unknown `0` resolves to `Int`, not `↑(0 : Nat)` (oracle comment `:281-284`) |
-| heterogeneous default instance (`HMul α (Arr α) (Arr α)` style) | `has_heterogeneous_default_instances` |
-| `x ^ n` (`x : Int`, `n : Nat`) | `rightact` leaves the exponent alone |
-| uncomparable types | fallback to plain elaboration |
-| `n = i`, `n < i` | binrel coercion, `is_pred` |
+| `n + z`, `z + n` (`n : Nat`, `z : Z`) | leaf coercion to the max type, both orders |
+| `(n + 0) + z` | unknown `0` resolves to `Z`, not `↑(0 : Nat)` (oracle comment `:281-284`) |
+| `2 * a` (`a : Arr Nat`) | `has_heterogeneous_default_instances` keeps `2` uncoerced |
+| `z ^ n` (`z : Z`, `n : Nat`) | `rightact` leaves the exponent alone |
+| `n + u` (`u : U`, no coercion either way) | uncomparable: fallback to plain elaboration |
+| `n = z`, `n < z` | binrel coercion, `is_pred` |
 | `(p == q)`, `p q : Prop` | `binrel_no_prop` → `Bool` |
 | `a <\|> b` | lazy `fun _ => b` |
 | `BitVec n` vs `BitVec ?m`-shaped row | output depends on P1's depth |
+| a row whose whole `binop%` expansion postpones and resumes | P2 Landed seam: postponement of an `Expanded` target |
 | `binop% NoSuch a b` | err row |
+
+Every one of the 24 op table rows also gets at least one corpus record
+(P2 § Landed › Open follow-ups); the rows above double as some of them.
+
+#### Test-support suffix in ElabOp *(added 2026-10-02; the user chose this option)*
+
+ElabOp is Prelude + Coe + Notation only. It has `Nat`, `Fin`, `UInt8`
+and `BitVec`, but no `Int` and no cross-type coercion, so the rows above
+need their own types. `gen_elab_op.sh` appends a short, hand-written,
+clearly delimited section after the Core excerpts:
+
+- `structure Z` with `OfNat Z n`, `Add`/`Mul`/`LT`/`BEq` instances,
+  `HPow Z Nat Z`, and `instance : Coe Nat Z`. This is the "`Int`" of the
+  rows above.
+- `structure Arr (α : Type)` with
+  `@[default_instance high] instance [Mul α] : HMul α (Arr α) (Arr α)`.
+  Prelude's `instHMul` is already a default instance, so `HMul` has two,
+  which is what `hasHeterogeneousDefaultInstances` requires (`:367-378`,
+  `defInstances.length ≤ 1 → false`). This is the oracle docstring's own
+  `Array` example.
+- `structure U` with no coercion to or from `Nat`, for the uncomparable row.
+
+The real Lean elaborates this suffix, so the oracle stays
+authoritative. It is not copied from Init; the rejected alternatives were
+verbatim `Int`/`NatCast` excerpts (a large closure that is fragile across
+Init reshuffles) and Prelude-only types (too few coercions to
+discriminate). Exact instance spellings are settled in the plan by
+probing, and they must keep `oracle_op.rs`'s whole-source span check and
+the `op-expansions.jsonl` golden unchanged. The suffix declares no
+notation.
+
+#### Helpers P3 adds (verified absent 2026-10-02)
+
+`coerce_simple`, `mk_coe`, `elab_app_args`, `default_instances_of`,
+`with_synthesize_light`, `ensure_has_type`, `cleanup_annotations`,
+`try_synth_instance` and P1's depth API already exist. Three do not, and
+P3 adds them minimally:
+
+- a `with_local_decl` scope for `has_coe` (`:232-240`)
+- `mk_fun_unit` for `binop_lazy%`
+- a guarded `mk_app_m` for `has_homogeneous_instance`'s
+  `Cls max max max` (`:387-394`), where any error means false
 
 Mutations to run:
 
@@ -429,6 +472,7 @@ Mutations to run:
 - drop the final max-type record
 - drop `to_bool_if_necessary`
 - swap the two `has_coe` directions
+- make `has_homogeneous_instance` always true
 
 A surviving mutation gets a killing row.
 
