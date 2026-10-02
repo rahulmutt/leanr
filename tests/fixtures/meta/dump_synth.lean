@@ -442,7 +442,55 @@ What each entry exercises (task B7's brief):
                        entry is open for the whole query. Covered by
                        `a_closed_binders_instance_is_not_offered`
                        (Task 6) instead — recorded here so a later
-                       reader does not assume the corpus covers it. -/
+                       reader does not assume the corpus covers it.
+
+Synth pi-goals slice (spec `2026-10-02-synth-pi-goals-design.md`
+§ Testing) — goals of the form `∀ xs, C ..`, the
+`forallTelescopeReducing` sites of `SynthInstance.lean`. Each mutation
+named below was RUN against this gate (task 3), and the named record
+is one that diverges under it:
+* `piRoot`       — `∀ a b : N, Dec (Eq a b)`, answer `instDecN`.
+                   Kills restoring the pi-goal `Unsupported` seam and
+                   (as `piEta` would) `mk_lambda` for `mk_lambda_eta` in
+                   `try_resolve`: un-eta'd, the answer is `fun a b =>
+                   instDecN a b`. `piEta` is therefore NOT a separate
+                   record — the canonical `val` already discriminates.
+                   Also killed by minting the subgoal mvars at the
+                   INNER context (`outer` captured inside the telescope).
+* `piReducible`  — `DecEqN N` (an `abbrev` hiding the pi), answer
+                   `instDecN`. Kills the same three as `piRoot`. NOTE:
+                   a NON-reducing telescope in `preprocess` alone is
+                   equivalent here (`preprocess` `whnf`s the body
+                   anyway and rebuilds the same closed type); the
+                   reducing walk is pinned by `piNested` instead.
+* `piApplied`    — `∀ a : N, Dec (Eq a N.zero)`, answer
+                   `fun a => instDecN a N.zero` (not eta-reducible).
+                   Kills the seam and the inner-context mint. Minting
+                   `?m : d` at the ambient context unapplied to `xs`
+                   survives HERE (every binder of `instDecN` is assigned
+                   by `isDefEq` while `a` is still in scope); the
+                   `synth.rs` unit test `pi_goal_subgoals_are_applied_
+                   outer_mvars` is what kills that one.
+* `piNested`     — `BE N` via `instBEOfDecEq [DecEqN α]`: a pi subgoal
+                   hidden behind a definition, nested in the search.
+                   Kills the seam, a telescope that ignores `reducing`
+                   (the subgoal `DecEqN N` is never `whnf`'d open),
+                   the un-eta'd answer and the inner-context mint.
+* `piUnused`     — `N → Pri N`, answer `fun _ => instPriHigh`. Pins the
+                   `removeUnusedArguments?` answer-neutrality claim
+                   (spec § Seams); also killed by the seam.
+* `piInstBinder` — `∀ [h : NoInst N], NoInst N`, `ok:false`: the goal's
+                   own instance binder is NOT a candidate (oracle
+                   `getInstances` reads `localInstances` before its
+                   telescope). Kills snapshotting the local instances
+                   inside the telescope.
+* `piBranch`     — `PB N`: the priority-5000 `instPBHigh`'s pi subgoal
+                   `∀ x : N, CoeT N x NoBase` is tried and fails, and
+                   the search falls back to `instPBLow`. Kills the seam
+                   and `try_resolve` returning `Err` (not `Ok(None)`)
+                   when `isDefEq` fails under a non-empty telescope — a
+                   failing pi branch must not abort the whole search.
+                   (See `Synth0.lean` for why the subgoal is `CoeT`.) -/
 def synthQueries : List (Name × Nat × List FVarSpec × MetaM Expr) :=
   [ (`simple,      0, [], pure (cls1 `Add nTy))
   , (`simple,      1, [], pure (cls1 `Mul nTy))
@@ -535,6 +583,19 @@ def synthQueries : List (Name × Nat × List FVarSpec × MetaM Expr) :=
       , { userName := `f, bi := .default, type := pure (mkForall `_ BinderInfo.default nTy nTy) }
       ],
       pure (cls1 `Add nTy))
+  -- === synth pi-goals slice — see this file's header for what each
+  -- record kills. ===
+  , (`piRoot, 0, [], do
+      withLocalDeclD `a nTy fun a => withLocalDeclD `b nTy fun b => do
+        mkForallFVars #[a, b] (mkApp (mkConst `Dec) (← mkEq a b)))
+  , (`piReducible, 0, [], pure (mkApp (mkConst `DecEqN) nTy))
+  , (`piApplied, 0, [], do
+      withLocalDeclD `a nTy fun a => do
+        mkForallFVars #[a] (mkApp (mkConst `Dec) (← mkEq a (mkConst `N.zero))))
+  , (`piNested, 0, [], pure (mkApp (mkConst `BE) nTy))
+  , (`piUnused, 0, [], pure (mkForall `x BinderInfo.default nTy (cls1 `Pri nTy)))
+  , (`piInstBinder, 0, [], pure (mkForall `h BinderInfo.instImplicit (cls1 `NoInst nTy) (cls1 `NoInst nTy)))
+  , (`piBranch, 0, [], pure (mkApp (mkConst `PB) nTy))
   ]
 
 /-- Anything over this fraction (in percent) of the oracle's
