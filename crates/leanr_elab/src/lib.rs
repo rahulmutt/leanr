@@ -188,64 +188,21 @@
 //!   bare numeral's `OfNat ?α (lit v)` goal. Rung 5 (tactics) and the
 //!   stuck report that follows it (`report_stuck_synthetic_mvars`, only
 //!   under `postpone == .no`) are unchanged.
-//! - **`leanr_meta` cannot report a stuck typeclass goal; the
-//!   elaborator approximates it.**
-//!   `leanr_meta::error::MetaError` declares `IsDefEqStuck` (`error.rs:39`).
-//!   As of macro/binop% P1 it is constructed at two ported defeq sites, only
-//!   under `with_def_eq_stuck_ex`, which `synth_instance` does not yet use,
-//!   so synthesis still never reports stuck (the elab-side consumer is
-//!   `synthetic/ladder.rs:179`'s match arm);
-//!   `synth.rs`'s `synth_instance_main` (the private body
-//!   behind the public `synth_instance`) documents `isDefEqStuckEx`
-//!   (`Meta/Basic.lean` in the pinned oracle) as a named seam in its
-//!   inline `Config`-divergence list (`synth.rs:2175-2195` at this
-//!   writing) because `synth_instance` does not yet run under
-//!   `with_new_mctx_depth` with `isDefEqStuckEx` set (the depth model
-//!   itself now exists). The consequence, measured rather than assumed
-//!   and UNCHANGED: `MetaCtx::synth_instance(Wrap ?m)`
-//!   called directly still *succeeds*, assigning `?m` from whichever
-//!   candidate the search reaches first, where the pinned oracle refuses
-//!   and reports the goal stuck. That tier-1 divergence is pinned by
-//!   `leanr_meta`'s own gate — `tests/oracle_synth.rs`'s
-//!   `exc_record_stuck_synth_0_pins_leanrs_current_divergent_answer`,
-//!   whose doc says in as many words that it must be updated when the
-//!   seam closes. Owner: the synthesis-onto-depth follow-up
-//!   (macro/binop% P1 follow-up) — not scoped to any M4b-3 sub-slice.
-//!
-//!   What CHANGED (M4b-3 P3 task 2): the ELABORATOR no longer depends on
-//!   that seam for its own decision, so the consequences this entry used
-//!   to record no longer follow. `synthetic/ladder.rs`'s
-//!   `TermElabM::try_synth_instance` reconstructs `trySynthInstance`'s
-//!   `.undef` from the goal type — a goal still mentioning an unassigned
-//!   expr mvar is "not ready" instead of being answered by a guessed
-//!   candidate. So the ladder's `.undef` trichotomy arm IS reachable
-//!   from a typeclass goal, `report_stuck_synthetic_mvars` DOES fire
-//!   from one, and bare `useWrap` now errors `StuckSyntheticMVar` as the
-//!   oracle does. The three `tests/synthetic_smoke.rs` tests that were
-//!   `#[ignore]`d on this basis
-//!   (`stuck_synthesis_is_not_ready_rather_than_failure`,
-//!   `bare_typeclass_application_is_reported_stuck`,
-//!   `postpone_yes_leaves_the_mvar_pending`) are un-ignored and green.
-//!   (P2a task 9's entry-point test was shaped around the old behaviour;
-//!   it still passes and has not been revisited.)
-//!
-//!   What is STILL OPEN on the elaborator side is the price of that
-//!   reconstruction: it is exact in the safe direction (a goal with no
-//!   unassigned expr mvar can never be `.undef`, so ground goals still
-//!   reach the real search) but over-approximates in three cases —
-//!   of which residue 1 is closed by M4b-3 P2b-ii; two remain, and
-//!   those two do NOT share an owner. `try_synth_instance`'s own doc
-//!   enumerates all three with oracle citations; in short: (1)
-//!   `outParam` goals — CLOSED by M4b-3 P2b-ii's positional exemption
-//!   in `try_synth_instance` (§ Amendment 4 item 6), not by the depth
-//!   model; (2) an
-//!   all-polymorphic candidate set; (3) a zero-candidate class with an
-//!   mvar goal (`NoInst ?a`), where the oracle throws "failed to
-//!   synthesize" and leanr reports stuck — both error, so neither is a
-//!   record divergence. `dump_elab.lean`'s dumper drops any query whose
-//!   oracle side throws, so no corpus record can cover (3), which is
-//!   exactly why it is written down rather than left to be
-//!   rediscovered.
+//! - **Stuck typeclass goals are detected dynamically by the search.**
+//!   `MetaCtx::synth_instance` runs under `with_new_mctx_depth` with
+//!   `isDefEqStuckEx` set, so a candidate that needs one of the caller's
+//!   mvars assigned throws `MetaError::IsDefEqStuck`, and
+//!   `MetaCtx::try_synth_instance` reports it as `.undef` exactly as the
+//!   oracle's `trySynthInstance` does (the elab-side consumer is
+//!   `synthetic/ladder.rs`'s match arm). So the ladder's `.undef` arm is
+//!   reachable from a typeclass goal and bare `useWrap` errors
+//!   `StuckSyntheticMVar`; `leanr_meta`'s own gate pins the bare
+//!   `synth_instance` side in `tests/oracle_synth.rs`'s
+//!   `exc_record_stuck_synth_0_is_stuck_in_leanr_too`. Goals the oracle
+//!   answers answer here too: `outParam` goals (`Get Cell Nat ?elem`),
+//!   an all-polymorphic candidate set (`tc/useAnyHole`), and a
+//!   zero-candidate class with an mvar goal (`NoInst ?a` is `.none`, an
+//!   `InstanceSynthesisFailed`, not stuck).
 pub mod app; // M4b-3 P1
 pub mod builtin; // Tasks 4-6
 pub mod coe; // coercions

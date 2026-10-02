@@ -384,16 +384,13 @@ fn postpone_yes_leaves_the_mvar_pending() {
     });
 }
 
-/// **Residue 1 of `try_synth_instance`'s pre-test, retired (M4b-3
-/// P2b-ii).** A goal whose only unassigned mvar sits in an
-/// OUTPUT-PARAMETER position is answered by the oracle
+/// **`outParam` goals reach the real search (M4b-3 P2b-ii).** A goal
+/// whose only unassigned mvar sits in an OUTPUT-PARAMETER position is answered by the oracle
 /// (`preprocessOutParam` + `assignOutParams`, `SynthInstance.lean:775-861`,
 /// ported in P2b-i) and must now reach the real search here too — with
 /// the caller's mvar ASSIGNED as a result, which is the whole feature.
 ///
-/// Before this task the pre-test answered `Undef` on any expr mvar at
-/// all, and the ladder eventually raised `StuckSyntheticMVar` on a goal
-/// the oracle solves. Corpus record `outParam/getFst` pins the same fact
+/// Corpus record `outParam/getFst` pins the same fact
 /// end-to-end.
 #[test]
 fn out_param_position_mvar_reaches_the_real_search() {

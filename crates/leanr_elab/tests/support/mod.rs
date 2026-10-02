@@ -420,7 +420,7 @@ pub fn wrap_of_fresh_mvar(app: &mut leanr_elab::app::state::AppElab) -> leanr_ke
 /// `outParam (Type w)`). The oracle answers this goal — `preprocessOutParam`
 /// swaps `?e` for a search-local mvar and `assignOutParams` assigns the
 /// caller's `?e := Unit` afterwards (M4b-3 P2b-i ported both) — so the
-/// ladder pre-test must let it reach the real search.
+/// search must be allowed to answer it rather than report it stuck.
 ///
 /// Built like `wrap_of_fresh_mvar`: the fresh mvar's type is read off the
 /// partial application's own inferred type rather than re-elaborated.
