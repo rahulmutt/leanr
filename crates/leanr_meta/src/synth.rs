@@ -2171,7 +2171,12 @@ impl<'e> MetaCtx<'e> {
         //    this driver still runs without `withNewMCtxDepth` (the
         //    bullet two items below): a caller's mvar is at the current
         //    depth and so may be restricted mid-search. The search's own
-        //    `checkpoint`/`rollback` undoes such a restriction.
+        //    `checkpoint`/`rollback` undoes such a restriction's mctx
+        //    effect, but a restriction made inside the search can still
+        //    influence the ANSWER: `abstract_mvars` over the result can
+        //    capture the fresh `?aux` standing in for the caller's `?c`.
+        //    That is part of the existing `withNewMCtxDepth` read-only
+        //    seam (below), not a separate one.
         //  - `isDefEqStuckEx := true` -- NAMED SEAM, not set here: the
         //    `Config` field (`is_def_eq_stuck_ex`) and the two ported
         //    throw sites (`level.rs`, `assign.rs`) now exist, but this

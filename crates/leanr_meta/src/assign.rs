@@ -902,17 +902,31 @@ impl<'e> MetaCtx<'e> {
     /// today because `check_assignment` runs first and its slow path
     /// (`checkFVar`, `check_assignment.rs`) replaces every genuine-let
     /// fvar in `v` that the mvar cannot see by its value, so the `v`
-    /// that reaches here no longer mentions one. The guard below refuses a genuine let that is itself
-    /// an `xs` entry, rather than abstracting it as a lambda and dropping
-    /// its value.
+    /// that reaches here no longer mentions one. The guard below refuses
+    /// a genuine let that is itself an `xs` entry, rather than
+    /// abstracting it as a lambda and dropping its value.
     ///
-    /// SEAM (etaReduce): the oracle calls `mkLambdaFVars xs v (etaReduce
-    /// := true)` (`ExprDefEq.lean:551,554`, v4.33.0-rc1), and `mkLambda'`
-    /// (`MetavarContext.lean:1281-1290`) turns `fun x => f x` (x not free
-    /// in `f`) into `f`. leanr's `mk_lambda`/`mk_binding` does not
-    /// eta-reduce, so the assignment is eta-expanded (`?m := fun x => f x`
-    /// where the oracle assigns `?m := f`). Equivalent up to eta; not
-    /// ported here.
+    /// SEAM (etaReduce, P1 follow-up): the oracle calls `mkLambdaFVars xs
+    /// v (etaReduce := true)` (`ExprDefEq.lean:551,554`, v4.33.0-rc1),
+    /// and `mkLambda'` (`MetavarContext.lean:1281-1291`) turns `fun x =>
+    /// f x` (x not free in `f`) into `f`. leanr's `mk_lambda`/
+    /// `mk_binding` does not eta-reduce, so the assignment is
+    /// eta-expanded (`?m := fun x => f x` where the oracle assigns `?m :=
+    /// f`). This is NOT merely "equal up to eta":
+    /// (a) after `elimMVarDeps`, the body is exactly the delayed head
+    ///     `?i' #0`, so the oracle assigns `?m := ?i'` while leanr assigns
+    ///     `?m := fun x => ?i' x`. Where `?m` occurs UNAPPLIED,
+    ///     `instantiateMVars` differs: the oracle's bare delayed `?i'`
+    ///     (no args) never instantiates and stays an mvar, while leanr's
+    ///     `fun x => ?i' x` instantiates to `fun x => val` once `?i` is
+    ///     assigned — leanr can succeed where the oracle reports an
+    ///     unassigned mvar;
+    /// (b) plain `?f x =?= g x` gives syntactically different final terms
+    ///     (`congrArg (fun x => g x) h` vs `congrArg g h`), visible to an
+    ///     oracle-differential corpus.
+    /// Not a regression (the deleted `mk_lambda_over_fvars` never
+    /// eta-reduced either). Port sketch: an `eta_reduce` flag on
+    /// `mk_binding` used only here; the cost is re-checking the corpus.
     ///
     /// elimMVarDeps runs here through `mk_lambda`, closing macro/binop%
     /// § Landed › P3's TOP PRIORITY gap.
@@ -1048,12 +1062,12 @@ impl<'e> MetaCtx<'e> {
         }
     }
 
-    /// oracle: `Lean.occursCheck` (`Lean/Util/OccursCheck.lean:18-53`):
+    /// oracle: `Lean.occursCheck` (`Lean/Util/OccursCheck.lean:18-52`, v4.33.0-rc1):
     /// `true` iff `mvar_id` does NOT occur in `e`, following ASSIGNED
-    /// mvars (an unassigned mvar node simply isn't `mvar_id` and has
-    /// nothing further to recurse into — this crate's `MetavarContext`
-    /// has no delayed-assignment channel to also follow, matching this
-    /// module's other delayed-assignment elisions). This is THE occurs
+    /// mvars into their values and DELAYED-assigned mvars to their
+    /// pending mvar, as the oracle's `visitMVar` does (delayed
+    /// assignments are produced by `elimMVarDeps` on the
+    /// `process_assignment` path). This is THE occurs
     /// check the brief's step-1 test (`occurs_check_rejects_cycle`)
     /// exercises: `?m =?= N.succ ?m` walks into the `App`'s arg and
     /// meets `?m` itself.
@@ -1064,16 +1078,37 @@ impl<'e> MetaCtx<'e> {
         self.guarded(|ctx| ctx.occurs_check_body(mvar_id, e))
     }
 
+    /// oracle: `occursCheck.visitMVar` (`OccursCheck.lean:26-35`): an
+    /// assigned mvar is followed into its value; an unassigned one with a
+    /// delayed assignment is followed to its `mvarIdPending` (which is
+    /// itself compared, then followed the same way).
+    fn occurs_check_visit_mvar(
+        &mut self,
+        mvar_id: MVarId,
+        other: MVarId,
+    ) -> Result<bool, MetaError> {
+        if other == mvar_id {
+            return Ok(false);
+        }
+        if let Some(v) = self.mctx.assignment(other) {
+            return self.occurs_check(mvar_id, v);
+        }
+        match self.mctx.delayed_assignment(other) {
+            Some(d) => {
+                let pending = d.mvar_id_pending;
+                self.occurs_check_visit_mvar(mvar_id, pending)
+            }
+            None => Ok(true),
+        }
+    }
+
     fn occurs_check_body(&mut self, mvar_id: MVarId, e: ExprId) -> Result<bool, MetaError> {
         match self.node(e) {
             Node::MVar { id: Some(id) } => {
                 if MVarId(id) == mvar_id {
                     return Ok(false);
                 }
-                match self.mctx.assignment(MVarId(id)) {
-                    Some(v) => self.occurs_check(mvar_id, v),
-                    None => Ok(true),
-                }
+                self.occurs_check_visit_mvar(mvar_id, MVarId(id))
             }
             Node::App { f, arg } => {
                 Ok(self.occurs_check(mvar_id, f)? && self.occurs_check(mvar_id, arg)?)

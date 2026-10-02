@@ -130,7 +130,7 @@ impl<'e> MetaCtx<'e> {
                 }
                 Ok(!self.mctx.is_delayed_assigned(id))
             }
-            // visit f <&&> visit a (:1054); rescues are the slow path's
+            // visit f <&&> visit a (:1053); rescues are the slow path's
             Node::App { f, arg } => Ok(self.check_assignment_scope(mvar_id, fvars, hcl, f)?
                 && self.check_assignment_scope(mvar_id, fvars, hcl, arg)?),
             Node::Lam {
@@ -608,6 +608,36 @@ mod tests {
             let (m, mid) = fresh_mvar(ctx, n);
             ctx.mctx.assign(mid, zero).unwrap();
             assert_eq!(ctx.check_assignment_aux(oid, &[], false, m), Ok(Some(zero)));
+        });
+    }
+
+    /// `:892-896`: a delayed-assigned `?d` whose pending mvar is `?o`
+    /// itself fails the occurs check at the pending mvar.
+    #[test]
+    fn check_mvar_occurs_check_at_a_delayed_pending_mvar() {
+        with_prelude0_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let (_o, oid) = fresh_mvar(ctx, n);
+            let (d, did) = fresh_mvar(ctx, n);
+            ctx.mctx.assign_delayed(did, vec![], oid).unwrap();
+            assert_eq!(ctx.check_assignment_aux(oid, &[], false, d), Ok(None));
+        });
+    }
+
+    /// `:894` calls `Lean.occursCheck`, whose `visitMVar`
+    /// (`Util/OccursCheck.lean:26-35`) follows a delayed assignment's
+    /// pending mvar transitively: `?d` pends on `?p`, which pends on
+    /// `?o`, so `?o := ?d` is refused.
+    #[test]
+    fn check_mvar_occurs_check_follows_a_delayed_pending_chain() {
+        with_prelude0_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let (_o, oid) = fresh_mvar(ctx, n);
+            let (_p, pid) = fresh_mvar(ctx, n);
+            let (d, did) = fresh_mvar(ctx, n);
+            ctx.mctx.assign_delayed(pid, vec![], oid).unwrap();
+            ctx.mctx.assign_delayed(did, vec![], pid).unwrap();
+            assert_eq!(ctx.check_assignment_aux(oid, &[], false, d), Ok(None));
         });
     }
 

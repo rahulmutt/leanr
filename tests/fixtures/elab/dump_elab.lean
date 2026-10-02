@@ -1265,7 +1265,7 @@ def opQueries : List (String × String) :=
   -- slice: they had been respelled over closed constants because of the
   -- elimMVarDeps / isSubPrefixOf gap). The `-closed` spellings over the
   -- suffix constants (`vx`, `k0`, `fx`, `z0`) are kept: same paths, no binder.
-  -- depth: `V 3 =?= V ?m` must NOT assign the outer `?m` -> uncomparable
+  -- depth: `V n =?= V ?m` must NOT assign the outer `?m` -> uncomparable
   , ("op/depth",            "fun (n k : Nat) (x : V n) => x + (V.mk : V _) + k")
   , ("op/depth-mid",        "fun (n k : Nat) (x : V n) => x + k + (V.mk : V _)")
   , ("op/depth-closed",     "vx + (V.mk : V _) + k0")

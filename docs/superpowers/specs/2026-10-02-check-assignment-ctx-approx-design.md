@@ -397,7 +397,8 @@ Mutations (each applied, run, reverted):
   every leaf type is already `max`, so the homogeneous instance's
   out-param already equals `max`. P3 T3 (h) (`result_is_out_param_support:
   true` in `apply_op`) is now KILLED, by `meta/beta-add` (`TypeMismatch`);
-  the restored binder rows alone do not kill it.
+  whether the restored binder rows alone kill it was not separately
+  verified.
 
 T3 test variant: the elimMVarDeps unit test uses a syntheticOpaque `?i`
 (a natural `?i` succeeds via `?i := ?m x` and never reaches the swap). It
@@ -452,11 +453,41 @@ Deviations from this spec:
   `withSynthesizeLight`). The `(fun a => a < 2) z0` spelling is a new row,
   `op/rel-lt-beta`.
 
+Final-review fix pass:
+- `occurs_check` (`assign.rs`) now follows a delayed-assigned mvar to its
+  `mvarIdPending`, as the oracle's `occursCheck.visitMVar`
+  (`Util/OccursCheck.lean:26-35`) does. Delayed assignments do reach it
+  now: `elimMVarDeps` on the `process_assignment` path makes them. No
+  oracle corpus record changed answer under full `mise run ci`, so the
+  port was kept.
+- Mutations (each applied, run, reverted): (k) the port's delayed
+  follow removed (`None => Ok(true)`): KILLED by
+  `check_mvar_occurs_check_follows_a_delayed_pending_chain`. (l)
+  `check_mvar`'s occurs check at the pending mvar (`:892-896`) removed:
+  KILLED by `check_mvar_occurs_check_at_a_delayed_pending_mvar` (and the
+  chain test). (m) `mk_binding` uses a `have`'s VALUE as the binder type:
+  KILLED by `mk_binding_generalizes_a_have_and_refuses_a_let`, now
+  declared with value `Nat.zero` and type `Nat`. Before the fix the value
+  and type were both `Nat`, so (m) was unobservable.
+
 Open follow-ups:
-- Eta SEAM: the oracle's `mkLambdaFVarsWithLetDeps` passes
-  `etaReduce := true` (`ExprDefEq.lean:551,554`), but leanr's
-  `mk_binding` does not eta-reduce, so leanr can assign
-  `?m := fun x => f x` where the oracle assigns `f`. Not ported; no corpus
-  record shows it yet. Documented on `mk_lambda_fvars_with_let_deps`.
+- **P1 — Eta SEAM.** The oracle's `mkLambdaFVarsWithLetDeps` passes
+  `etaReduce := true` (`ExprDefEq.lean:551,554`), and `mkLambda'`
+  (`MetavarContext.lean:1281-1291`) reduces a `.app f (.bvar 0)` body.
+  leanr's `mk_binding` does not eta-reduce. This is more than "equal up to
+  eta": (a) after `elimMVarDeps` the body is exactly the delayed head
+  `?i' #0`, so the oracle assigns `?m := ?i'` and leanr assigns
+  `?m := fun x => ?i' x`. Where `?m` occurs UNAPPLIED, `instantiateMVars`
+  differs: the oracle's bare delayed `?i'` (no args) never instantiates
+  and stays an mvar, while leanr's `fun x => ?i' x` instantiates to
+  `fun x => val` once `?i` is assigned, so leanr can succeed where the
+  oracle reports an unassigned mvar. (b) Plain `?f x =?= g x` gives
+  syntactically different final terms (`congrArg (fun x => g x) h` vs
+  `congrArg g h`), visible to an oracle-differential corpus. Not a
+  regression: the deleted `mk_lambda_over_fvars` never eta-reduced
+  either. No corpus record shows it yet. Port sketch: an `eta_reduce`
+  flag on `mk_binding`, used only by `mk_lambda_fvars_with_let_deps`; the
+  cost is re-checking the corpus. Documented on
+  `mk_lambda_fvars_with_let_deps` (`assign.rs`).
 - `checkApp`/`assignToConstFun`: no differential record (above).
 - P3 T3 (d) remains unobservable (above).

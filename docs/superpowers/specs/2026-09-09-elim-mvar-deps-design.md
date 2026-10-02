@@ -129,9 +129,9 @@ What it does **not** ship, each with the reason:
 | --- | --- |
 | `mkAuxMVarType`'s ldecl arms | leanr's `LocalDecl` has no `nondep` field (see § Let-declarations) |
 | `revert` | no caller without a tactic framework |
-| `preserveOrder`, `etaReduce`, `usedOnly`, `mvarIdsToAbstract`, `quotContext` | no producer in leanr |
+| `preserveOrder`, `etaReduce`, `usedOnly`, `mvarIdsToAbstract`, `quotContext` | no producer in leanr (at the time; `etaReduce` has one since the checkAssignment slice — `mk_lambda_fvars_with_let_deps`, still unported: see its eta SEAM in `assign.rs` and `2026-10-02-check-assignment-ctx-approx-design.md` § Landed) |
 | `numScopeArgs` | no `MVarDecl` field, no `check_assignment` consumer (`assign.rs:226-227`) |
-| the occurs check's delayed channel, `isDefEq`'s delayed arms | `assign.rs:1124` already declares these; measured, not assumed (§ Verification) |
+| the occurs check's delayed channel, `isDefEq`'s delayed arms | `assign.rs:1124` already declares these; measured, not assumed (§ Verification). The occurs check's delayed channel has since been ported (checkAssignment slice, `2026-10-02-check-assignment-ctx-approx-design.md` § Landed) |
 | `newLocalInsts` filtering | **not a new seam** — leanr has no `LocalInstance` concept at all, an elision already declared at `instances.rs:96` |
 
 ## Global constraints
