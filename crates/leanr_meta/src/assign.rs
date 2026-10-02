@@ -905,6 +905,9 @@ impl<'e> MetaCtx<'e> {
     /// that reaches here no longer mentions one. The guard below refuses a genuine let that is itself
     /// an `xs` entry, rather than abstracting it as a lambda and dropping
     /// its value.
+    ///
+    /// elimMVarDeps runs here through `mk_lambda`, closing macro/binop%
+    /// § Landed › P3's TOP PRIORITY gap.
     pub(crate) fn mk_lambda_fvars_with_let_deps(
         &mut self,
         xs: &[ExprId],
@@ -921,54 +924,11 @@ impl<'e> MetaCtx<'e> {
                 }
             }
         }
-        Ok(Some(self.mk_lambda_over_fvars(xs, v)?))
-    }
-
-    /// Our own `mk_lambda`: `leanr_kernel::subst::mk_lambda` exists but
-    /// is NOT re-exported from that crate's public API (`lib.rs`'s
-    /// `pub use subst::{...}` list omits it) — `infer.rs`'s
-    /// `rebuild_forall` hit the identical gap for `mk_pi` and wrote its
-    /// own fold; this mirrors that exact idiom for `Lam` instead of
-    /// `Forall`, minus the let-binder branch: its only caller refuses a
-    /// genuine let, and a `have` is abstracted as a lambda (the oracle's
-    /// `generalizeNondepLet := true`).
-    fn mk_lambda_over_fvars(&mut self, xs: &[ExprId], body: ExprId) -> Result<ExprId, MetaError> {
-        let mut r = body;
-        let mut i = xs.len();
-        while i > 0 {
-            i -= 1;
-            r = abstract_fvars(
-                self.scratch,
-                Some(self.view.store),
-                r,
-                std::slice::from_ref(&xs[i]),
-                &mut self.guard,
-            )?;
-            let (binder_name, ty, binder_info) = match self.node(xs[i]) {
-                Node::FVar { id: Some(id) } => {
-                    let decl = self.lctx.get(id).ok_or_else(|| {
-                        MetaError::MVar("mk_lambda_over_fvars: telescope fvar not declared".into())
-                    })?;
-                    (decl.binder_name, decl.ty, decl.binder_info)
-                }
-                _ => {
-                    return Err(MetaError::MVar(
-                        "mk_lambda_over_fvars: pattern arg is not an fvar".into(),
-                    ))
-                }
-            };
-            let ty2 = abstract_fvars(
-                self.scratch,
-                Some(self.view.store),
-                ty,
-                &xs[..i],
-                &mut self.guard,
-            )?;
-            r = self
-                .scratch
-                .expr_lam(Some(self.view.store), binder_name, ty2, r, binder_info)?;
-        }
-        Ok(r)
+        // oracle `mkLambdaFVars` (`:554`): `mkBinding`, which runs
+        // `elimMVarDeps` over the body and every binder type first
+        // (`MetaCtx::mk_lambda` -> `mk_binding`). A `have` among `xs` is
+        // abstracted as a lambda (`generalizeNondepLet := true`).
+        Ok(Some(self.mk_lambda(xs, v)?))
     }
 
     // ===================================================================
@@ -2613,6 +2573,52 @@ mod tests {
             assert!(with_have.expect("have").is_some(), "have is not a let");
             let with_let = ctx.mk_lambda_fvars_with_let_deps(&[x, l], zero);
             assert!(with_let.expect("let").is_none(), "genuine let seams");
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// oracle `mkLambdaFVarsWithLetDeps` → `mkLambdaFVars` (`ExprDefEq.lean:549-554`)
+    /// runs `elimMVarDeps`. `?m x =?= ?i` with `?i` syntheticOpaque (so
+    /// `?i := ?m x` is impossible and `?m x := ?i` is the only direction)
+    /// and `x` in `?i`'s context: `?m := fun x => ?i' x` with `?i'`
+    /// DELAY-assigned (fvars `[x]`, pending `?i`). A raw abstraction
+    /// leaves `?i` itself under the binder and no delayed assignment.
+    /// "No fvar leaks" alone does not discriminate; the delayed
+    /// assignment does.
+    #[test]
+    fn process_assignment_eliminates_mvar_deps_on_the_pattern_fvars() {
+        use crate::test_support::{const_named, with_prelude0_ctx};
+        with_prelude0_ctx(|ctx| {
+            ctx.cfg.ctx_approx = true;
+            let n = const_named(ctx, "N");
+            let n_to_n = mk_forall(ctx, n, n);
+            let cp = ctx.lctx_checkpoint();
+            let (m, mid) = fresh_mvar(ctx, n_to_n);
+            let x = fresh_fvar(ctx, n, "x");
+            let lc = ctx.current_lctx();
+            let (i, iid) = ctx
+                .mk_aux_mvar_at(lc, n, MVarKind::SyntheticOpaque, None)
+                .unwrap();
+            let mx = mk_app(ctx, m, x);
+            assert!(ctx.is_def_eq(mx, i).unwrap());
+            let m_val = ctx.mctx.assignment(mid).expect("?m assigned");
+            let m_val = ctx.instantiate_mvars(m_val).unwrap();
+            assert!(!ctx.data(m_val).has_fvar(), "no fvar leaks into ?m's value");
+            let Node::Lam { body, .. } = ctx.node(m_val) else {
+                panic!("?m := fun x => ..")
+            };
+            let head = ctx.get_app_fn(body);
+            let Node::MVar { id: Some(aux) } = ctx.node(head) else {
+                panic!("body head is an mvar")
+            };
+            let aux = MVarId(aux);
+            assert_ne!(aux, iid, "body head is the fresh ?i', not ?i itself");
+            let d = ctx
+                .mctx
+                .delayed_assignment(aux)
+                .expect("?i' is delay-assigned");
+            assert_eq!(d.mvar_id_pending, iid);
+            assert_eq!(d.fvars, vec![x]);
             ctx.lctx_restore(cp);
         });
     }

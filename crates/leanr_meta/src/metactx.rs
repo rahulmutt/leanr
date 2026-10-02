@@ -1161,24 +1161,22 @@ impl<'e> MetaCtx<'e> {
                     // that drops the ldecl's value on the floor — a wrong
                     // `ExprId`, not a named seam.
                     //
-                    // SEAM (a `have`): the oracle's `mkBinding` runs with
-                    // `generalizeNondepLet := true` (the API default), and
-                    // its ldecl arm (`MetavarContext.lean:1330-1332`) then
-                    // abstracts a nondep ldecl as a `.default` binder like
-                    // a cdecl. That is out of this slice's scope, so a `have` is refused
-                    // too — under its own message, so one reaching here is
-                    // recognisable as the seam rather than a genuine let.
+                    // A `have` (nondep ldecl): the oracle's `mkBinding`
+                    // runs with `generalizeNondepLet := true` (the API
+                    // default), and its ldecl arm
+                    // (`MetavarContext.lean:1330-1332`) abstracts a nondep
+                    // ldecl as a `.default` binder like a cdecl.
                     if decl.value.is_some() {
                         let have = self.local_entry(id).is_some_and(|e| e.nondep);
-                        return Err(MetaError::Infer(if have {
-                            "mk_binding: have-decl (nondep) fvar in a cdecl telescope \
-                             (SEAM: oracle generalizes it to a default binder)"
-                                .into()
-                        } else {
-                            "mk_binding: let-decl fvar in a cdecl telescope".into()
-                        }));
+                        if !have {
+                            return Err(MetaError::Infer(
+                                "mk_binding: let-decl fvar in a cdecl telescope".into(),
+                            ));
+                        }
+                        (decl.binder_name, decl.ty, leanr_kernel::BinderInfo::Default)
+                    } else {
+                        (decl.binder_name, decl.ty, decl.binder_info)
                     }
-                    (decl.binder_name, decl.ty, decl.binder_info)
                 }
                 _ => {
                     return Err(MetaError::Infer(
@@ -2590,22 +2588,33 @@ mod tests {
         });
     }
 
-    /// A `have` is refused too (behaviour unchanged, the oracle would
-    /// generalize it), but under its own message so the seam is
-    /// recognisable; a genuine `let` keeps the old message.
+    /// A `have` is abstracted like a cdecl, as a `.default` binder
+    /// (`generalizeNondepLet := true`, `MetavarContext.lean:1330-1332`);
+    /// a genuine `let` is still refused.
     #[test]
-    fn mk_binding_names_a_refused_have_as_the_seam() {
+    fn mk_binding_generalizes_a_have_and_refuses_a_let() {
         with_prelude0_ctx(|ctx| {
             let nat = const_named(ctx, "Nat");
-            for (nondep, needle) in [(true, "have-decl (nondep)"), (false, "let-decl")] {
+            for nondep in [true, false] {
                 let checkpoint = ctx.lctx_checkpoint();
                 let fvar = ctx
                     .push_let_decl(None, nat, nat, nondep)
                     .expect("push_let_decl");
-                let err = ctx.mk_forall(std::slice::from_ref(&fvar), fvar);
+                let r = ctx.mk_lambda(std::slice::from_ref(&fvar), fvar);
                 ctx.lctx_restore(checkpoint);
-                let msg = format!("{:?}", err.expect_err("refused"));
-                assert!(msg.contains(needle), "nondep={nondep}: {msg}");
+                if nondep {
+                    let lam = r.expect("have abstracts");
+                    assert!(matches!(
+                        ctx.node(lam),
+                        Node::Lam {
+                            binder_info: leanr_kernel::BinderInfo::Default,
+                            ..
+                        }
+                    ));
+                } else {
+                    let msg = format!("{:?}", r.expect_err("let refused"));
+                    assert!(msg.contains("let-decl"), "{msg}");
+                }
             }
         });
     }
