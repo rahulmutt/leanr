@@ -63,9 +63,48 @@ impl From<leanr_kernel::KernelError> for MetaError {
     }
 }
 
+impl MetaError {
+    /// Whether the oracle's `try … catch _` catches this error. Runtime
+    /// exceptions (maxRecDepth <-> `DepthBudgetExhausted`, heartbeats <->
+    /// `StepBudgetExhausted`, kernel resource exhaustion) are not caught by
+    /// `Core.tryCatch`. `Unsupported` (a named leanr seam) and `MVar` (a
+    /// caller bug) are leanr gaps, not oracle exceptions. Shared by
+    /// `MetaCtx::is_def_eq_guarded` and the elaborator's `catch _` ports
+    /// (macro/binop% P3 `has_homogeneous_instance`).
+    pub fn is_oracle_catchable(&self) -> bool {
+        !matches!(
+            self,
+            MetaError::DepthBudgetExhausted
+                | MetaError::StepBudgetExhausted
+                | MetaError::Unsupported(_)
+                | MetaError::MVar(_)
+                | MetaError::Kernel(
+                    leanr_kernel::KernelError::BankExhausted
+                        | leanr_kernel::KernelError::DeepRecursion
+                )
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::MetaError;
+
+    #[test]
+    fn runtime_and_seam_errors_are_not_catchable() {
+        use leanr_kernel::KernelError;
+        for e in [
+            MetaError::DepthBudgetExhausted,
+            MetaError::StepBudgetExhausted,
+            MetaError::Unsupported("x".into()),
+            MetaError::MVar("x".into()),
+            MetaError::Kernel(KernelError::BankExhausted),
+            MetaError::Kernel(KernelError::DeepRecursion),
+        ] {
+            assert!(!e.is_oracle_catchable(), "{e:?}");
+        }
+        assert!(MetaError::IsDefEqStuck.is_oracle_catchable());
+    }
 
     #[test]
     fn kernel_errors_convert() {

@@ -173,6 +173,7 @@ pub(crate) fn elab_anon_ctor(
             explicit: false,
             ellipsis: false,
             stx: NodeOrToken::Node(node.clone()),
+            result_is_out_param_support: true,
         },
         kinds,
     )

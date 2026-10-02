@@ -166,6 +166,16 @@ impl<'e> TermElabM<'e> {
         &mut self,
         name: NameId,
     ) -> Result<ExprId, ElabError> {
+        let raw = self.mk_const_with_level_params(name)?;
+        Ok(self.mctx.mk_const_with_fresh_mvar_levels(raw)?)
+    }
+
+    /// oracle: `mkConstWithLevelParams` — `name` at its declared level
+    /// PARAMS. The first half of [`Self::mk_const_with_fresh_mvar_levels_of`];
+    /// `builtin::op`'s `mk_app_m` refreshes the levels itself, INSIDE a
+    /// `with_new_mctx_depth` scope, so the fresh level mvars are assignable
+    /// there.
+    pub(crate) fn mk_const_with_level_params(&mut self, name: NameId) -> Result<ExprId, ElabError> {
         let base = self.view.store;
         let params: Vec<NameId> = self
             .view
@@ -194,7 +204,7 @@ impl<'e> TermElabM<'e> {
             .store_mut()
             .expr_const(Some(base), Some(name), levels)
             .map_err(leanr_meta::MetaError::from)?;
-        Ok(self.mctx.mk_const_with_fresh_mvar_levels(raw)?)
+        Ok(raw)
     }
 
     /// Installs the elaborator's config (`crate::config::set_elab_config`)

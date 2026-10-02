@@ -34,6 +34,23 @@ pub enum OpKind {
 }
 
 impl OpKind {
+    pub const ALL: [OpKind; 7] = [
+        OpKind::BinOp,
+        OpKind::BinOpLazy,
+        OpKind::BinRel,
+        OpKind::BinRelNoProp,
+        OpKind::UnOp,
+        OpKind::LeftAct,
+        OpKind::RightAct,
+    ];
+
+    /// `binrel%`/`binrel_no_prop%`: elaborated by `elabBinRelCore`, and a
+    /// LEAF inside another op's tree (`toTree.go` matches only the other
+    /// five, `Extra.lean:193-198`).
+    pub fn is_rel(self) -> bool {
+        matches!(self, OpKind::BinRel | OpKind::BinRelNoProp)
+    }
+
     /// The kind of the literal form (`binop% f a b`, …), as `leanr_syntax`
     /// registers it (`builtin/term/term_app.rs`'s `register_binop_family`).
     pub fn syntax_kind(self) -> &'static str {

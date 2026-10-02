@@ -200,6 +200,7 @@ pub(crate) fn elab_app_expanded(
         explicit: false,
         ellipsis: false,
         stx: stx.clone(),
+        result_is_out_param_support: true,
     };
     lval::elab_app_lvals(elab, f, Vec::new(), call, kinds)
 }
@@ -453,6 +454,10 @@ pub struct AppCall {
     pub explicit: bool,
     pub ellipsis: bool,
     pub stx: SynElem,
+    /// oracle: `elabAppArgs`' `resultIsOutParamSupport` parameter (default
+    /// `true`). Only the `binop%` family passes `false` (`Extra.lean:321`,
+    /// `:324`, `:550`).
+    pub result_is_out_param_support: bool,
 }
 
 /// oracle: `elabAppAux` (`App.lean:2202-2217`) resolving the head, then
@@ -494,6 +499,7 @@ fn elab_app_aux(
         explicit,
         ellipsis,
         stx,
+        result_is_out_param_support: true,
     };
     let candidates = head::elab_app_fn(elab, &head, kinds, &explicit_levels, Vec::new(), call)?;
     overload::expect_single(candidates)
@@ -516,6 +522,7 @@ pub(crate) fn elab_app_args(
         explicit,
         ellipsis,
         stx,
+        result_is_out_param_support,
     } = call;
 
     // oracle: `elabAppArgs`'s first two lines — `let fType ← inferType f;
@@ -573,8 +580,11 @@ pub(crate) fn elab_app_args(
         // not shortcut to `true`: `Lean.Internal.coeM` is declared
         // since M4b-3 P2b-ii, so it is `true` for every non-`@`
         // application in the fixture corpus; computing it rather than
-        // shortcutting stays the rule.
-        result_is_out_param_support: env_contains_coe_m(elab)? && !explicit,
+        // shortcutting stays the rule. `&&` with the caller's flag,
+        // `App.lean:1355`.
+        result_is_out_param_support: result_is_out_param_support
+            && env_contains_coe_m(elab)?
+            && !explicit,
         // oracle: `Context.numImplicitParams` — the max over `namedArgs`.
         num_implicit_params: named_args
             .iter()
