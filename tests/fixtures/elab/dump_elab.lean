@@ -1311,11 +1311,52 @@ def opQueries : List (String × String) :=
   -- lhs is a LEAF, so `n + z` gets its own analysis (coerce `n`)
   , ("op/hetero-default-homog", "fun (a : MArr Nat) => 2 * a")
   , ("op/homog-literal-pow", "fun (n : Nat) (z : Z) => binop% HPow.hPow z n")
-  , ("op/smul-op-lhs",      "fun (n : Nat) (z a : Z) => (n + z) • a") ]
+  , ("op/smul-op-lhs",      "fun (n : Nat) (z a : Z) => (n + z) • a")
+  -- macro/binop% P3 T4: `binrel%`/`binrel_no_prop%` (Extra.lean:497-562)
+  -- coercion at the relation, `isPred := true`
+  , ("op/eq-coe",           "fun (n : Nat) (z : Z) => n = z")
+  , ("op/lt-coe",           "fun (n : Nat) (z : Z) => n < z")
+  -- the rest of the relation rows of the table
+  , ("op/ge",               "fun (a b : Z) => a ≥ b")
+  , ("op/ge-ascii",         "fun (a b : Z) => a >= b")
+  , ("op/le",               "fun (a b : Z) => a ≤ b")
+  , ("op/le-ascii",         "fun (a b : Z) => a <= b")
+  , ("op/gt",               "fun (a b : Z) => a > b")
+  , ("op/beq-coe",          "fun (n : Nat) (z : Z) => n == z")
+  , ("op/bne-coe",          "fun (n : Nat) (z : Z) => n != z")
+  , ("op/ne-coe",           "fun (n : Nat) (z : Z) => n ≠ z")
+  -- binrel_no_prop%: a `Prop` max type becomes `Bool` (decide)
+  , ("op/beq-prop",         "True == False")
+  , ("op/bne-prop",         "True != False")
+  , ("op/beq-prop-bool",    "fun (b : Bool) => True == b")
+  -- the uncomparable path's `toBoolIfNecessary` (no row above reaches it)
+  , ("op/beq-uncomparable-prop", "fun (n : Nat) (u : U) => (binop% PU n u) == True")
+  -- uncomparable operands: plain elaboration + `ensureHasType`
+  , ("op/rel-uncomparable", "fun (n : Nat) (u : U) => (n + u) = u")
+  -- an op tree under a relation, and an unknown numeral side
+  , ("op/rel-nested",       "fun (n : Nat) (z : Z) => n + n < z")
+  , ("op/rel-numeral",      "fun (z : Z) => 2 < z")
+  , ("op/rel-id-arg",       "fun (a b : Nat) => id (a < b)")
+  -- a KNOWN expected type, which the analysis must ignore (`analyze tree none`)
+  , ("op/rel-expected",     "fun (n : Nat) (z : Z) => (n = z : Prop)")
+  -- `withSynthesizeLight` (Extra.lean:499-528): no default instance inside the
+  -- relation, so `2 : ?α` waits for the postponed `x.1` (fixed by the
+  -- argument) instead of becoming `Nat`. The `x.1` spelling, not
+  -- `(fun a => a < 2) z0`: leanr fails that op-free (`DepthBudgetExhausted`
+  -- on `(fun a => LT.lt a 2) z0`, a pre-existing leanr_meta gap).
+  , ("op/rel-no-default",   "(fun x => x.1 < 2) (PProd.mk z0 z0)")
+  -- Review Focus #5: relation operands are LEAVES of the outer tree
+  , ("op/rel-of-rels",      "fun (a b : Nat) => (a < b) = (b < a)")
+  -- ... and only a coercing inner relation tells: as a binop subtree,
+  -- `LT.lt` has no homogeneous instance, so `n` would go uncoerced
+  , ("op/rel-of-coe-rels",  "fun (n : Nat) (z : Z) => (n < z) = (z < n)")
+  -- the same through literal `binrel%` operands (`toTree.go`'s literal arm)
+  , ("op/rel-of-literal-rels", "fun (n : Nat) (z : Z) => (binrel% LT.lt n z) = (binrel% LT.lt z n)") ]
 
 /-- macro/binop% P3: op queries the ORACLE rejects (`{"id","src","err"}`). -/
 def opErrQueries : List (String × String) :=
-  [ ("op/unknown-binop",    "fun (a b : Nat) => binop% NoSuch a b") ]
+  [ ("op/unknown-binop",    "fun (a b : Nat) => binop% NoSuch a b")
+  , ("op/unknown-binrel",   "fun (a b : Nat) => binrel% NoSuch a b") ]
 
 def emitErr (id src err : String) : IO Unit :=
   IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("err", err)]

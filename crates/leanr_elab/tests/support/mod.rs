@@ -1062,6 +1062,18 @@ pub fn run_elab_corpus(
                 return;
             }
 
+            // The dumper (`dump_elab.lean`) only catches THROWN errors; a
+            // LOGGED one becomes `sorryAx` in an apparently successful
+            // record (errToSorry). Such a record pins an oracle error as a
+            // term (macro/binop% P3). Checked BEFORE leanr's result is
+            // looked at: when leanr also errors, the record would otherwise
+            // read as an ordinary divergence (P3 T4, the T1 mutation rerun).
+            assert!(
+                !q["exp"].to_string().contains("\"sorryAx\""),
+                "{id}: the oracle record contains sorryAx -- the \
+                 query is an oracle ERROR; move it to the err queries"
+            );
+
             match got {
                 Ok(g) => {
                     // `base = Some(view.store)` (Task 5 reconciliation,
@@ -1123,15 +1135,6 @@ pub fn run_elab_corpus(
                     if !st.fvars.is_empty() {
                         leaked_fvars.push(format!("{id}: {got_json}"));
                     }
-                    // The dumper (`dump_elab.lean`) only catches THROWN
-                    // errors; a LOGGED one becomes `sorryAx` in an
-                    // apparently successful record (errToSorry). Such a
-                    // record pins an oracle error as a term (macro/binop% P3).
-                    assert!(
-                        !q["exp"].to_string().contains("\"sorryAx\""),
-                        "{id}: the oracle record contains sorryAx -- the \
-                         query is an oracle ERROR; move it to the err queries"
-                    );
                     if got_json != q["exp"] {
                         failures.push(format!("{id}: leanr={got_json} oracle={}", q["exp"]));
                     }

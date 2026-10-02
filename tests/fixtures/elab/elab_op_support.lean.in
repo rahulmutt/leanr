@@ -66,3 +66,9 @@ instance [Mul α] : Mul (MArr α) := ⟨fun a _ => a⟩
 @[default_instance high] instance [Mul α] : HMul α (MArr α) (MArr α) := ⟨fun a as => ⟨a * as.x⟩⟩
 -- A `leftact%` whose lhs is itself an op tree that needs its own coercion.
 instance : SMul Z Z := ⟨fun _ a => a⟩
+-- Closed `BEq Bool` (P3 T4): leanr's synth_instance lacks pi-shaped goals (`DecidableEq Bool`, SynthInstance.lean:740-742).
+instance : BEq Bool := ⟨fun _ b => b⟩
+-- An uncomparable `binrel_no_prop%` operand of type `Prop` (macro/binop% P3
+-- T4): `toBoolIfNecessary` (Extra.lean:557-562) must `decide` it.
+def PU (_ : Nat) (_ : U) : Prop := True
+instance (n : Nat) (u : U) : Decidable (PU n u) := .isTrue True.intro

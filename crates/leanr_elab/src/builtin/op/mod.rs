@@ -175,9 +175,10 @@ fn resolve_id(elab: &mut TermElabM, raw: &str) -> Result<Option<ExprId>, ElabErr
     }
 }
 
-/// White-box test hook: the declared constant `name` at fresh level mvars.
+/// The declared constant `name` at fresh level mvars (`rel.rs`'s `Bool`;
+/// also the white-box tests' hook).
 #[doc(hidden)]
-pub fn test_const(elab: &mut TermElabM, name: &str) -> Result<ExprId, ElabError> {
+pub fn mk_const_named(elab: &mut TermElabM, name: &str) -> Result<ExprId, ElabError> {
     let n = crate::app::head::intern_dotted(elab, name)?;
     if elab.view.get(n).is_none() {
         return Err(ElabError::UnknownConstant(name.to_string()));

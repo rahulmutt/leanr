@@ -71,8 +71,7 @@ pub(crate) fn to_tree_view(
 }
 
 /// oracle: `toTree` on an arbitrary operand (`binrel%`'s two sides,
-/// `:531-532`). Task 4's consumer.
-#[allow(dead_code)]
+/// `:531-532`).
 pub(crate) fn to_tree(
     elab: &mut TermElabM,
     s: &SynElem,
