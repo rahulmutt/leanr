@@ -164,8 +164,8 @@ a default instance" rule extends to `Any`.
 
 **Residue 3 — zero candidates.** Both sides error, so no corpus row is
 possible. Meta unit test: `try_synth_instance(NoInst ?a)` returns
-`LOption::None` (today `Undef`). Elab test in `synthetic_smoke.rs`: bare
-`useNoInst` (Elab0's `NoInst` has zero instances) changes its error kind
+`LOption::None` (today `Undef`). Elab test in `synthetic_smoke.rs`:
+`useNoInst _` (Elab0's `NoInst` has zero instances; Amendment 1 item 4) changes its error kind
 from `StuckSyntheticMVar` to `InstanceSynthesisFailed`, matching the
 oracle's "failed to synthesize" (confirm by probe).
 
@@ -234,6 +234,53 @@ One plan, one PR, four tasks matching §§ Task 1–4, on branch
 `synth-real-depth`. Touches `leanr_meta` (`synth.rs`, `whnf.rs`), the Elab0
 fixture and corpus, and `leanr_elab` tests. Merge on green CI per the
 standing workflow.
+
+## Amendment 1 (plan-writing, 2026-10-02)
+
+Found while writing the plan; each item stays inside the approved scope
+(core + forced neighbours) and changes no decision.
+
+1. **Task 1 also ports four depth-only checks in `synth.rs`.** The oracle
+   treats lower-depth mvars as CONSTANTS in `MkTableKey.normLevel`
+   (`SynthInstance.lean:120`), `MkTableKey.normExpr` via
+   `MVarId.isAssignable` (`:145`; `MetavarContext.lean:483-486`),
+   `AbstractMVars` level (`AbstractMVars.lean:56-60`) and expr (`:89-93`).
+   leanr's four walks (`KeyNormalizer::norm_level_body`/`norm_expr_body`,
+   `MVarAbstractor::level_body`/`expr_body`) collapse that to "every
+   declared mvar is current-depth" (the module doc's "flat-depth collapse").
+   Under real depth that collapse would abstract a caller's mvar out of an
+   answer and `wake_up`'s `num_mvars == 0` root check would reject it. Each
+   becomes a real depth comparison against `mctx.depth()`.
+2. **Task 1's gate is not fully byte-identical.** Three committed pins
+   document the current divergence and flip toward the oracle:
+   - `oracle_synth.rs` `SEAM_EXCLUSIONS` entry `mvarGoal/synth/0`
+     (`OfN ?n N`; oracle `some (instOfNN ?n)`) closes: the entry and its
+     sibling `seam_excluded_mvar_goal_is_incompleteness_not_an_error` are
+     deleted, and the gate's `compared` count goes 37 → 38.
+   - `exc_record_stuck_synth_0_pins_leanrs_current_divergent_answer`
+     (`Add ?a`; oracle throws `isDefEqStuck`) flips from
+     `Ok(Some(instAddN))` to `Err(IsDefEqStuck)`, as its own failure
+     message instructs.
+   - `synth.rs`'s `pi_goal_with_mvar_body_does_not_error` (`N → Add ?a`)
+     flips from answering `fun _ => instAddN` to `Err(IsDefEqStuck)`, with
+     `?a` left unassigned.
+   Everything else stays byte-identical.
+3. **The elab/op byte-identical gate runs at the end of Task 2, not
+   Task 1.** `synth_pending` calls `synth_instance` directly, so between
+   the two tasks an elab row could surface `Err(IsDefEqStuck)` that Task 2's
+   catch removes. Task 1 gates on `leanr_meta` alone.
+4. **Residue 3 gets an oracle row after all, at the meta layer.** The
+   elab-level "both sides error" argument holds, but `dump_synth.lean`
+   calls `synthInstance?`, which answers `NoInst ?a` cleanly with `none`.
+   Task 3 adds the Synth0 query `noInstMVar/synth/0` (no fixture change:
+   Synth0 already has the zero-instance `NoInst`) and an `oracle_synth.rs`
+   test that runs `try_synth_instance` on it and expects `LOption::None`.
+   The elab-level test stays, but its source is `useNoInst _`, not bare
+   `useNoInst`: a bare head never reaches instance synthesis (probe: `#check
+   useNoInst` prints the signature). Probed against the pinned oracle on
+   Elab0: `useNoInst _` → "failed to synthesize instance of type class
+   NoInst ?m"; `useWrap _` stays postponed; and residue 2's `useAny _` →
+   `@useAny ?m.1 (@instAnyAll ?m.1) ?m.3`.
 
 ## Landed
 
