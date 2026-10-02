@@ -2139,8 +2139,9 @@ impl<'e> MetaCtx<'e> {
         let PreprocessResult { ty, kind } = self.preprocess(ty)?;
         // oracle: `withNewMCtxDepth (allowLevelAssignments := true)`
         // (`SynthInstance.lean:978-1002`). `with_new_mctx_depth` restores
-        // the caller's mctx wholesale on BOTH paths, like
-        // `withNewMCtxDepthImp`'s `finally` (`Basic.lean:1974-1980`). The
+        // the caller's assignments and `postponed` on BOTH paths (as
+        // `withNewMCtxDepthImp`'s `finally`, `Basic.lean:1974-1980`, does
+        // for the whole mctx; declarations made inside persist). The
         // answer survives because `mk_answer` already abstracted it. Only
         // `.mvarsNoOutputParams` skips `preprocessOutParam`; `.noMVars`
         // runs it too, deliberately (the `OrderDual` note, `:981-999`).

@@ -126,7 +126,7 @@ Replace the whole test (doc comment included; it sits right after the `pi_goal_*
     /// `N → Add ?a` with `?a` minted OUTSIDE the search. The oracle runs
     /// the search under `withNewMCtxDepth` with `isDefEqStuckEx := true`
     /// (`SynthInstance.lean:963`, `:978`), so `?a` is read-only;
-    /// `getUnify` keys it `.star` (`DiscrTree/Main.lean:395-411`) and
+    /// `getUnify` keys it `.star` (`DiscrTree/Main.lean:397-412`) and
     /// `Add N =?= Add ?a` throws `isDefEqStuck`
     /// (`ExprDefEq.lean:1952-1956`). leanr now does the same: `Err`, and
     /// `?a` stays unassigned because the depth block rolls back on the

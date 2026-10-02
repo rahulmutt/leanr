@@ -63,7 +63,7 @@ into two PRs (§ Task 4).
   around its `synthInstance?` call (`:1052`) and treats it as `none`, i.e.
   returns `false`.
 - Under `isDefEqStuckEx`, the DiscrTree keys a read-only mvar as `.star`
-  (`DiscrTree/Main.lean:395-411`; the comment there explains why: `.other`
+  (`DiscrTree/Main.lean:397-412`; the comment there explains why: `.other`
   would wrongly report "no candidates"). leanr's `discr_path.rs` stars every
   mvar, so the INDEX already agrees; residue 2/3 behaviour is decided by
   unification alone.
@@ -284,4 +284,71 @@ Found while writing the plan; each item stays inside the approved scope
 
 ## Landed
 
-(Filled in at merge: corrections, mutations run, seams left.)
+Commits (`git log --oneline main..HEAD`, before this docs commit):
+
+```
+2a4c0f0 leanr_elab: docs no longer describe the deleted syntactic pre-test
+dfe88b6 leanr_meta: try_synth_instance reads IsDefEqStuck dynamically; drop the syntactic pre-test
+fe793b6 leanr_meta: restore depth-guard test doc; reorder synth_pending tests
+bcaa479 leanr_meta: synth_pending catches IsDefEqStuck (SynthInstance.lean:1052)
+91c912d leanr_meta: fix stale try_synth_instance doc after real depth
+44b300b leanr_meta: run typeclass synthesis under real mctx depth + isDefEqStuckEx
+e68f4b3 docs: synth-real-depth plan; spec amendment 1 (depth-only walks, pins, residue-3 oracle row)
+6007403 docs: synthesis onto real mctx depth — design spec
+```
+
+**Mutations (all reverted).**
+- Task 1: (a) checkpoint/rollback instead of the depth block, killed
+  (`pi_goal_with_mvar_body_is_stuck`, `exc_record_stuck_synth_0_is_stuck_in_leanr_too`,
+  `oracle_synth_gate`); (b) drop `is_def_eq_stuck_ex = true`, killed; (c)
+  `decl(mid).is_some()` in `norm_expr`, killed; (d) drop the level depth
+  check in `norm_level`, killed; (e), (f) drop the level / expr depth check
+  in `MVarAbstractor`, killed; (h1), (h2) compare `level_assign_depth()`,
+  killed; **(g) `with_new_mctx_depth(false, ..)` SURVIVED**: no test or
+  corpus row distinguishes `allowLevelAssignments` true from false (open
+  seam).
+- Task 2: (a) drop `| Err(IsDefEqStuck)` in `synth_pending_body`, killed
+  (`synth_pending_treats_a_stuck_search_as_no_progress`); (b) widen to
+  `Err(_) => Ok(false)`, killed (`synth_pending_still_propagates_a_budget_error`).
+  The budget error is raised inside the nested `synth_instance` search;
+  `synth_pending` has no `step()` of its own.
+- Task 3: (1) restore the syntactic pre-test, killed (3 tests:
+  `no_inst_mvar_goal_is_none_not_undef`, `oracle_elab_gate` `tc/useAnyHole`,
+  `hole_against_a_class_without_instances_is_a_synthesis_failure`); (2)
+  `is_def_eq_stuck_ex = false` in synthesis, killed (26 tests); (3)
+  `IsDefEqStuck` mapped to `LOption::None` in `try_synth_instance`, killed
+  (25 tests).
+
+**Citations corrected.** `DiscrTree/Main.lean:395-411` is `:397-412`
+(`if cfg.isDefEqStuckEx` at 397, `return (.star, #[])` at 412); fixed in
+`synth.rs` (Task 1) and in this spec's § The oracle model (final sweep).
+Also fixed in the final sweep: `level.rs`'s claim that synthesis's
+`SynthInstance.lean:963` setting "stays a follow-up", and `synth.rs`'s
+comment that `with_new_mctx_depth` restores the caller's mctx "wholesale"
+(it restores assignments and `postponed`; declarations made inside persist,
+`metactx.rs` ~537-540).
+
+**Triage outcome.** Full `mise run ci` was green with Tasks 1-3 in
+place. No neighbour was forced: neither `unstuckMVar` nor the DiscrTree
+stuck cases. Two smoke tests moved from `StuckCoercion` to `TypeMismatch`
+(`anon_ctor_smoke.rs` `eq_counts_fields_after_its_promoted_parameters`;
+`binder_smoke.rs` `fun_more_binders_than_expected_pi_levels_is_a_type_mismatch`,
+renamed from `..._is_a_stuck_coercion`). These are not forced neighbours:
+the oracle probe on Elab0 shows `trySynthInstance` returns `.none` for the
+`CoeT` goal, so `mkCoe` fails immediately (`TermElabM.lean:1307`, `:1322`);
+the old expectations encoded the pre-test's over-approximation.
+
+**Corpus counts.** synth compared 37 -> 39 (Task 1: 37 -> 38 by closing the
+`mvarGoal/synth/0` seam exclusion; Task 3: 38 -> 39 with
+`noInstMVar/synth/0`); elab floor 345 -> 346 (`tc/useAnyHole`); op floor
+99 unchanged.
+
+**Open seams.**
+- `unstuckMVar` + `isDefEqOnFailure` (`ExprDefEq.lean:1985-2025`), not ported.
+- DiscrTree stuck cases (`DiscrTree/Main.lean:359-386`), not ported.
+- Nondep R9.
+- The synthesis cache.
+- `checkMayHaveSideEffects` / `check result`.
+- Inner-scope declarations persisting with an inner depth stamp
+  (`with_new_mctx_depth` restores assignments and `postponed` only).
+- `allowLevelAssignments` true/false is not test-distinguished (mutation (g)).

@@ -23,8 +23,8 @@
 //! as `Config::is_def_eq_stuck_ex`. Two oracle throw sites are ported:
 //! the stuck tail of `isLevelDefEqAux` below (LevelDefEq.lean:167-173)
 //! and the `(None, None)` arm of `assign.rs` (ExprDefEq.lean:1949-1956).
-//! The flag is set only by `MetaCtx::with_def_eq_stuck_ex`; synthesis's
-//! own setting (SynthInstance.lean:963) stays a follow-up.
+//! The flag is set by `MetaCtx::with_def_eq_stuck_ex` and by synthesis
+//! itself (`synth_instance_main`, SynthInstance.lean:963).
 //!
 //! # Id-native discipline
 //!
