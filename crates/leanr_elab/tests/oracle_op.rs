@@ -90,3 +90,80 @@ fn golden_sources_parse_to_the_oracle_kind() {
         }
     }
 }
+
+use leanr_elab::macros::{self, init};
+
+/// The table and the oracle's golden file agree in BOTH directions: every
+/// golden kind has a row with the same expansion kind, head and arity,
+/// and every row's kind is in the golden file. Deleting a row, swapping
+/// a head, or swapping an op kind fails here.
+#[test]
+fn table_matches_oracle_expansions() {
+    let golden = golden();
+    let mut seen = std::collections::HashSet::new();
+    for g in &golden {
+        let kind = g["kind"].as_str().unwrap();
+        let row = init::lookup(kind).unwrap_or_else(|| panic!("table has no row for {kind}"));
+        assert_eq!(
+            row.expansion_kind(),
+            g["exp"].as_str().unwrap(),
+            "{kind}: expansion kind"
+        );
+        assert_eq!(row.f, g["f"].as_str().unwrap(), "{kind}: head");
+        assert_eq!(
+            row.arity() as u64,
+            g["arity"].as_u64().unwrap(),
+            "{kind}: arity"
+        );
+        seen.insert(kind.to_string());
+    }
+    for row in init::INIT_MACROS {
+        assert!(
+            seen.contains(row.kind),
+            "row {} has no oracle golden line",
+            row.kind
+        );
+    }
+    assert_eq!(init::INIT_MACROS.len(), 29);
+}
+
+/// `expand` over real ElabOp parse trees: operands in source order,
+/// taken from the notation node's own children.
+#[test]
+fn expand_reads_operands_in_order() {
+    let snap = elab_op_grammar();
+    for g in &golden() {
+        let src = g["src"].as_str().unwrap();
+        let (parsed, elem) = parse_whole(src, &snap);
+        let exp = macros::expand(&elem, &parsed.tree.kinds)
+            .unwrap_or_else(|e| panic!("{src}: {e:?}"))
+            .unwrap_or_else(|| panic!("{src}: no expansion"));
+        assert_eq!(exp.kind_name(), g["exp"].as_str().unwrap(), "{src}");
+        assert_eq!(exp.f(), g["f"].as_str().unwrap(), "{src}");
+        let texts: Vec<String> = exp.args().iter().map(|a| a.to_string()).collect();
+        let want: Vec<&str> = if g["arity"] == 1 {
+            vec!["a"]
+        } else {
+            vec!["a", "b"]
+        };
+        assert_eq!(
+            texts.iter().map(|s| s.trim()).collect::<Vec<_>>(),
+            want,
+            "{src}: operands"
+        );
+    }
+}
+
+/// A kind with no row is not expanded: `elab_term_core` must elaborate
+/// it as is.
+#[test]
+fn non_table_kinds_do_not_expand() {
+    let snap = elab_op_grammar();
+    for src in ["fun x => x", "binop% HAdd.hAdd a b", "(a)"] {
+        let (parsed, elem) = parse_whole(src, &snap);
+        assert!(
+            macros::expand(&elem, &parsed.tree.kinds).unwrap().is_none(),
+            "{src}"
+        );
+    }
+}
