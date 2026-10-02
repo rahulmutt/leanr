@@ -133,10 +133,12 @@
 //!   names. `binop%` and its family — macro/binop% P3. The anonymous
 //!   constructor `⟨⟩` is elaborated by `builtin::anon_ctor` (M4b-4b); its
 //!   pattern position is left to the match slice.
-//! - **macro expansion** — `elab_term_core` expands Init notations
-//!   through the hand-ported table (`macros/`) before dispatch, as
-//!   `elabTermAux` does. Other macro forms stay `UnsupportedSyntax`
-//!   until the VM slice.
+//! - **macro expansion** — `elab_term_core` expands through the
+//!   hand-ported table (`macros/`) before dispatch, as `elabTermAux`
+//!   does. The table covers the `binop%` op family (24 rows) plus
+//!   `∧ ∨ ¬ ↔ <->`; every other Init notation and all non-Init
+//!   notations raise `UnsupportedSyntax(kind)` (table extension or the
+//!   VM slice).
 //! - **`open`/alias/`export`/`_root_` resolution** — `resolve.rs`'s
 //!   `resolve_global_name` only resolves a global constant declared under
 //!   the name (or a prefix of it) exactly as written; namespace-prefix search, exported

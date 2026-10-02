@@ -92,6 +92,13 @@ impl Expansion {
     }
 }
 
+/// Env-agnostic by design: the table fires on the kind name alone and
+/// ignores the environment's macro attribute, so an environment that
+/// redeclares e.g. `«term_∧_»` with a different macro would still expand
+/// to `And`. Today unreachable (no same-file notation pipeline; core
+/// Init/Lean/Std do not override these kinds); the VM slice replaces the
+/// table.
+///
 /// oracle: `expandMacroImpl?` (`Lean/Elab/Util.lean:157-167`) over the
 /// table. `Ok(None)`: no row for this kind, so elaborate `elem` as is.
 pub fn expand(elem: &SynElem, kinds: &KindInterner) -> Result<Option<Expansion>, ElabError> {

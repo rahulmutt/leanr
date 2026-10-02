@@ -1116,8 +1116,8 @@ pub fn run_elab_corpus(
                     // shifting bytes.
                     //
                     // PLACEMENT: deliberately here, in the record replay,
-                    // and NOT in `tests/support`'s shared `elab_and_synthesize`
-                    // helper — a corpus regression should fail loudly at the
+                    // and NOT inside the shared `elab_and_synthesize`
+                    // helper (it lives in this corpus runner) — a corpus regression should fail loudly at the
                     // corpus, not inside a shared helper other tests also
                     // call for unrelated shapes.
                     if !st.fvars.is_empty() {

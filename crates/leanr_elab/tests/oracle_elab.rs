@@ -23,7 +23,7 @@ use leanr_syntax::builtin;
 fn oracle_elab_gate() {
     let replayed =
         support::run_elab_corpus("Elab0.olean", "elab-queries.jsonl", &builtin::snapshot());
-    // FLOOR on the corpus size. Everything above compares records that
+    // FLOOR on the corpus size. Everything `support::run_elab_corpus` does compares records that
     // are present; nothing above notices records that VANISHED, and a
     // shrinking corpus is silent by construction: `dump_elab.lean`
     // catches a throwing query, prints to stderr and DROPS it, so a

@@ -229,3 +229,22 @@ fn app_notations_elaborate() {
         support::elab_src_in(&r, &src, &snap).unwrap_or_else(|e| panic!("{src}: {e:?}"));
     }
 }
+
+/// Review Focus #2: the hook's recursive call must carry the caller's
+/// `implicit_lambda` flag. Oracle (`lean` against ElabOp) rejects
+/// `(@(True ∧ False) : {α : Type} → Prop)` with a type mismatch; passing
+/// `true` instead would accept it as `fun {α} => And True False`.
+#[test]
+fn explicit_paren_with_implicit_expected_type_is_rejected() {
+    let r = support::replay_fixture_in("elab", "ElabOp.olean");
+    let snap = elab_op_grammar();
+    let res = support::elab_src_in(&r, "(@(True ∧ False) : {α : Type} → Prop)", &snap);
+    assert!(res.is_err(), "oracle rejects; got {res:?}");
+}
+
+/// The whole-source span guard in `parse_whole` fires on a partial parse.
+#[test]
+#[should_panic(expected = "does not span the whole source")]
+fn parse_whole_rejects_partial_parse() {
+    let _ = parse_whole("a ⊕⊕ b", &elab_op_grammar());
+}

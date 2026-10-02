@@ -535,7 +535,8 @@ impl<'e> TermElabM<'e> {
             // elaborators, but none of them thread the node's own
             // `expected` straight through to an inner `elab_term`
             // call). A loop, because nesting depth is the user's. A
-            // flatten tail is an `anonymousCtor`, never a `paren`.
+            // flatten tail is an `anonymousCtor`, never a `paren`; an
+            // `Expanded` target is already past the hook.
             let TermTarget::Stx(elem) = target else {
                 return self.elab_using_elab_fns(target, kinds, expected, catch_ex_postpone);
             };

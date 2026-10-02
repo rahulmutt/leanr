@@ -515,8 +515,9 @@ Open follow-ups:
 ### P2 (PR #NN): expansion hook, Init table, ElabOp harness
 
 Commits: 496f202 (ElabOp + golden), 169c1c5 (table + expand), 68c62a6
-(hook + App + gate), the commit titled "op seam + postponement contract
-tests, docs, spec Landed (macro/binop% P2 T4)" (seams, postponement, docs).
+(hook + App + gate), 1b308e3 (op seam + postponement contract tests,
+docs, spec Landed; T4), c80dc69 (`with_record_elab` dedupe), and the
+commit titled "leanr_elab: final-review fixes (macro/binop% P2)".
 
 Mutations run (all reverted):
 - T1: (a) the `parse_whole` span assertion, KILLED (a scratch test on
@@ -561,6 +562,11 @@ Open follow-ups:
   `«term_>=_»`/`«term_<=_»`; the oracle gives `«term_≥_»`/`«term_≤_»`.
   This is unobservable after expansion (`KNOWN_PARSE_DIVERGENCES` in
   `oracle_op.rs`).
+- Remaining Init notations (`×`, `×'`, `∘`, `∣`, `<<<`, `>>>`, `~~~`,
+  `⁻¹`, `≍`, `&&`, `||`, `!`, `∈`, `::`, `<$>`, `>>=`) have no table row;
+  shapes `Expansion` cannot express (`∉` nested notation, `<*>`/`<*`/`*>`
+  synthesizing `fun`, `<|`, `|>`, `$`, `{x // p}`, `without_expected_type`,
+  `max_prec`) need a new shape. All raise `UnsupportedSyntax(kind)`.
 - P3: the op elaborator, plus corpus records for the 24 op rows.
 - Whole-notation postponement of an `Expanded` target is unreachable in
   P2 (App heads are consts with known types; no record postpones the
