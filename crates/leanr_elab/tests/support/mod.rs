@@ -1242,3 +1242,29 @@ pub fn parse_type(elab: &mut leanr_elab::TermElabM, src: &str) -> leanr_kernel::
     elab.elab_term(&elem, &parsed.tree.kinds, None)
         .unwrap_or_else(|e| panic!("parse_type: {src:?}: {e:?}"))
 }
+
+/// Parse `src` as ONE command (no `prelude`/`import` header) with the
+/// builtin grammar, the way `dump_decls.lean` runs
+/// `runParserCategory env `command src`. Panics on a parse error, or if
+/// `src` holds anything but exactly one command: a silent second command
+/// would be skipped by the gate. Returns the parse result (its `tree`
+/// owns the `KindInterner`) and the command node.
+pub fn parse_command(src: &str) -> (leanr_syntax::ParseResult, leanr_syntax::tree::SyntaxNode) {
+    let parsed = leanr_syntax::parse_module(src, &leanr_syntax::builtin::snapshot());
+    assert!(
+        parsed.errors.is_empty(),
+        "leanr parse errors for {src:?}: {:?}",
+        parsed.errors
+    );
+    let root = parsed.tree.root();
+    let cmds: Vec<leanr_syntax::tree::SyntaxNode> = root
+        .children()
+        .filter(|n| {
+            let k = parsed.tree.kinds.name(n.kind());
+            k != "Lean.Parser.Module.header" && k != "Lean.Parser.Command.eoi"
+        })
+        .collect();
+    assert_eq!(cmds.len(), 1, "{src:?} must be exactly one command");
+    let cmd = cmds[0].clone();
+    (parsed, cmd)
+}
