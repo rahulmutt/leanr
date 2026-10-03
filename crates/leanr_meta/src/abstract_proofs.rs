@@ -36,7 +36,8 @@ use std::collections::HashMap;
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, NameId};
 use leanr_kernel::{
-    instantiate_rev, ConstantInfo, ConstantVal, Declaration, DefinitionSafety, Nat, TheoremVal,
+    abstract_fvars, instantiate_rev, ConstantInfo, ConstantVal, Declaration, DefinitionSafety, Nat,
+    TheoremVal,
 };
 
 use crate::level_params::append_index_after;
@@ -102,8 +103,26 @@ fn is_atomic(node: &Node) -> bool {
 
 /// `visit`'s `MonadCacheT ExprStructEq Expr` (`AbstractNestedProofs.lean:70`):
 /// one map per `abstract_nested_proofs` call. Hash-consing makes `ExprId`
-/// equality structural, as `ExprStructEq` is.
-type VisitCache = HashMap<ExprId, ExprId>;
+/// equality structural, as `ExprStructEq` is. `log` records keys in
+/// insertion order so `anp_visit_binders` can find the entries made while
+/// visiting a telescope's binder types.
+#[derive(Default)]
+struct VisitCache {
+    map: HashMap<ExprId, ExprId>,
+    log: Vec<ExprId>,
+}
+
+impl VisitCache {
+    fn get(&self, e: &ExprId) -> Option<&ExprId> {
+        self.map.get(e)
+    }
+
+    fn insert(&mut self, k: ExprId, v: ExprId) {
+        if self.map.insert(k, v).is_none() {
+            self.log.push(k);
+        }
+    }
+}
 
 impl MetaCtx<'_> {
     /// oracle: `Meta.abstractNestedProofs` (`AbstractNestedProofs.lean:111-116`), `cache := true`.
@@ -115,7 +134,7 @@ impl MetaCtx<'_> {
         if self.is_proof(e)? {
             return Ok(e);
         }
-        let mut cache = VisitCache::new();
+        let mut cache = VisitCache::default();
         self.anp_visit(aux, &mut cache, e)
             .map_err(|err| self.pending_lookup_seam(aux, err))
     }
@@ -215,11 +234,24 @@ impl MetaCtx<'_> {
 
     /// oracle: the `lam` / `forallE` arms of `visit`
     /// (`AbstractNestedProofs.lean:100-102`) with `visitBinders` (`:77-89`).
-    /// Binders open one at a time, as `transform_lambda` does: instantiate
-    /// the domain with the fvars so far, visit it, push the local decl with
-    /// the VISITED type. The oracle opens the whole telescope first and
-    /// then visits each type, but a binder type cannot mention later
-    /// binders and the cache is shared, so the visits agree.
+    ///
+    /// The oracle opens the whole telescope with the ORIGINAL binder
+    /// types (`lambdaLetTelescope` / `forallTelescope`), visits every
+    /// binder type under that context (`:83`, in the ambient lctx), and
+    /// only then runs the body continuation under `withLCtx lctx` (`:89`),
+    /// where `lctx` has each decl's type replaced by its visited version
+    /// (`:84,88`, `modifyLocalDecl`). So a later binder's proof that
+    /// closes over an earlier binder sees that binder's RAW type, and the
+    /// aux theorem's binder domain keeps the raw proof.
+    ///
+    /// Phase 1 here pushes every binder with its original type and visits
+    /// each type. leanr's `LocalContext` has no `modifyLocalDecl` (it is
+    /// kernel-owned and keeps fvar ids fresh), so phase 2 restores and
+    /// re-pushes the telescope with the visited types under NEW fvars,
+    /// substituting old → new in each visited type. The oracle keeps the
+    /// fvar ids, so its `visit` cache entries made while visiting the types
+    /// still hit inside the body; to keep that, every entry phase 1 added
+    /// is copied with old → new substituted in key and value.
     ///
     /// Rebuild: `mkLambdaFVars (usedLetOnly := false) (generalizeNondepLet
     /// := false)` / `mkForallFVars` at its defaults. `generalizeNondepLet`
@@ -234,7 +266,10 @@ impl MetaCtx<'_> {
     ) -> Result<ExprId, MetaError> {
         let base = Some(self.view.store);
         let is_lambda = matches!(self.node(e), Node::Lam { .. });
-        let mut fvars: Vec<ExprId> = Vec::new();
+        let cp = self.lctx_checkpoint();
+        // Phase 1: open the telescope with the original binder types.
+        let mut xs: Vec<ExprId> = Vec::new();
+        let mut binders = Vec::new();
         let mut cur = e;
         loop {
             let (binder_name, binder_type, body, binder_info) = match self.node(cur) {
@@ -252,19 +287,59 @@ impl MetaCtx<'_> {
                 } if !is_lambda => (binder_name, binder_type, body, binder_info),
                 _ => break,
             };
-            let d = instantiate_rev(self.scratch, base, binder_type, &fvars, &mut self.guard)?;
-            let d = self.anp_visit(aux, cache, d)?;
+            let d = instantiate_rev(self.scratch, base, binder_type, &xs, &mut self.guard)?;
             let x = self.push_local_decl(binder_name, d, binder_info)?;
-            fvars.push(x);
+            xs.push(x);
+            binders.push((binder_name, d, binder_info));
             cur = body;
         }
-        let b = instantiate_rev(self.scratch, base, cur, &fvars, &mut self.guard)?;
+        // `:80-88`: visit every binder type under the original telescope.
+        let log_start = cache.log.len();
+        let mut types = Vec::with_capacity(binders.len());
+        for &(_, d, _) in &binders {
+            types.push(self.anp_visit(aux, cache, d)?);
+        }
+        // `:89` `withLCtx lctx`: re-open with the visited types.
+        self.lctx_restore(cp);
+        let mut ys: Vec<ExprId> = Vec::with_capacity(xs.len());
+        for (i, &(binder_name, _, binder_info)) in binders.iter().enumerate() {
+            let t = self.anp_replace_fvars(types[i], &xs[..i], &ys)?;
+            let y = self.push_local_decl(binder_name, t, binder_info)?;
+            ys.push(y);
+        }
+        // Entries the copy itself appends (past `log_end`) are not revisited.
+        let log_end = cache.log.len();
+        for i in log_start..log_end {
+            let k = cache.log[i];
+            if !self.data(k).has_fvar() {
+                continue;
+            }
+            let k2 = self.anp_replace_fvars(k, &xs, &ys)?;
+            if k2 != k {
+                let v2 = self.anp_replace_fvars(cache.map[&k], &xs, &ys)?;
+                cache.insert(k2, v2);
+            }
+        }
+        let b = instantiate_rev(self.scratch, base, cur, &ys, &mut self.guard)?;
         let b = self.anp_visit(aux, cache, b)?;
         if is_lambda {
-            self.mk_lambda(&fvars, b)
+            self.mk_lambda(&ys, b)
         } else {
-            self.mk_forall(&fvars, b)
+            self.mk_forall(&ys, b)
         }
+    }
+
+    /// `e[xs := ys]` for closed `e` (no loose bvars): abstract `xs`, then
+    /// instantiate with `ys`.
+    fn anp_replace_fvars(
+        &mut self,
+        e: ExprId,
+        xs: &[ExprId],
+        ys: &[ExprId],
+    ) -> Result<ExprId, MetaError> {
+        let base = Some(self.view.store);
+        let a = abstract_fvars(self.scratch, base, e, xs, &mut self.guard)?;
+        Ok(instantiate_rev(self.scratch, base, a, ys, &mut self.guard)?)
     }
 
     /// oracle: `AbstractNestedProofs.isNonTrivialProof`
@@ -681,6 +756,183 @@ mod tests {
                 pending_names(ctx, &aux),
                 vec!["foo4._proof_1", "foo4._proof_2"]
             );
+        });
+    }
+
+    /// `@Eq.rec.{2,1} N x (fun (b : N) (h : @Eq.{1} N x b) => Type) N x pf`,
+    /// a type that reduces to `N` by `Eq.rec` iota when `pf` is `rfl`.
+    fn eq_rec_n(ctx: &mut MetaCtx, x: ExprId, pf: ExprId) -> ExprId {
+        let base = Some(ctx.view.store);
+        let n_ty = c(ctx, "N");
+        let one = lit_level(ctx, 1);
+        let two = lit_level(ctx, 2);
+        let b_name = name(ctx, "b");
+        let h_name = name(ctx, "h");
+        let eq = cu(ctx, "Eq", &[one]);
+        let b0 = crate::test_support::bvar(ctx, 0);
+        let h_ty = ctx.mk_app_spine(eq, &[n_ty, x, b0]).unwrap();
+        let type0 = ctx.scratch.expr_sort(base, one).unwrap();
+        let inner = ctx
+            .scratch
+            .expr_lam(base, Some(h_name), h_ty, type0, BinderInfo::Default)
+            .unwrap();
+        let motive = ctx
+            .scratch
+            .expr_lam(base, Some(b_name), n_ty, inner, BinderInfo::Default)
+            .unwrap();
+        let rec = cu(ctx, "Eq.rec", &[two, one]);
+        ctx.mk_app_spine(rec, &[n_ty, x, motive, n_ty, x, pf])
+            .unwrap()
+    }
+
+    /// Final review Important #1: every binder TYPE is visited under the
+    /// telescope's ORIGINAL local context; only the body sees the visited
+    /// types (`visitBinders`, `AbstractNestedProofs.lean:77-89`: `visit
+    /// localDecl.type` runs in the ambient context, and `withLCtx lctx`
+    /// wraps only `k`). Oracle probe (v4.33.0-rc1, `Nat` for `N`):
+    ///
+    /// ```text
+    /// def fooP (a : @Eq.rec Nat (Nat.succ Nat.zero) (fun _ _ => Type) Nat
+    ///                 (Nat.succ Nat.zero) (@rfl Nat (Nat.succ Nat.zero)))
+    ///          (b : @Eq.rec Nat (Nat.succ a) (fun _ _ => Type) Nat
+    ///                 (Nat.succ a) (@rfl Nat (Nat.succ a))) : … := b
+    /// theorem fooP._proof_2 : ∀ (a : @Eq.rec Nat Nat.zero.succ (fun x x_1 => Type)
+    ///     Nat Nat.zero.succ (@rfl Nat Nat.zero.succ)), @Eq Nat (Nat.succ a) (Nat.succ a)
+    /// value: fun (a : @Eq.rec … fooP._proof_1) (b : @Eq.rec … (fooP._proof_2 a)) => b
+    /// ```
+    ///
+    /// `_proof_2`'s binder domain keeps the RAW `rfl`, not `fooP._proof_1`.
+    #[test]
+    fn binder_types_are_visited_under_the_original_lctx() {
+        with_meta0_ctx(|ctx| {
+            let foo_p = name(ctx, "fooP");
+            let succ = c(ctx, "N.succ");
+            let zero = c(ctx, "N.zero");
+            let a_name = name(ctx, "a");
+            let b_name = name(ctx, "b");
+            let sz = app(ctx, succ, zero);
+            let (eq_sz, pf1) = eq_rfl(ctx, sz);
+            let a_ty = eq_rec_n(ctx, sz, pf1);
+            let cp = ctx.lctx_checkpoint();
+            let a = ctx
+                .push_local_decl(Some(a_name), a_ty, BinderInfo::Default)
+                .unwrap();
+            let sa = app(ctx, succ, a);
+            let (eq_sa, pf2) = eq_rfl(ctx, sa);
+            let b_ty = eq_rec_n(ctx, sa, pf2);
+            let b = ctx
+                .push_local_decl(Some(b_name), b_ty, BinderInfo::Default)
+                .unwrap();
+            let e = ctx.mk_lambda(&[a, b], b).unwrap();
+            // The aux theorem's statement, as the oracle prints it.
+            let want_p2_ty = ctx.mk_forall(&[a], eq_sa).unwrap();
+            ctx.lctx_restore(cp);
+            ctx.infer_type(e).expect("the probe term is well typed");
+
+            let mut aux = AuxLemmas::new(foo_p);
+            let out = ctx.abstract_nested_proofs(&mut aux, e).unwrap();
+            assert_eq!(
+                pending_names(ctx, &aux),
+                vec!["fooP._proof_1", "fooP._proof_2"]
+            );
+            let Declaration::Thm(t1) = &aux.pending()[0] else {
+                panic!("thmDecl expected")
+            };
+            assert_eq!(t1.val.ty, eq_sz);
+            let Declaration::Thm(t2) = &aux.pending()[1] else {
+                panic!("thmDecl expected")
+            };
+            let Node::Forall { binder_type, .. } = ctx.node(t2.val.ty) else {
+                panic!("fooP._proof_2 must be a ∀")
+            };
+            assert_eq!(
+                binder_type, a_ty,
+                "fooP._proof_2's binder domain must keep the RAW proof"
+            );
+            assert_eq!(t2.val.ty, want_p2_ty);
+
+            // out = fun (a : E(succ zero)[_proof_1]) (b : E(succ a)[_proof_2 a]) => b
+            let p1 = cu(ctx, "fooP._proof_1", &[]);
+            let p2 = cu(ctx, "fooP._proof_2", &[]);
+            let a_ty2 = eq_rec_n(ctx, sz, p1);
+            let cp = ctx.lctx_checkpoint();
+            let a = ctx
+                .push_local_decl(Some(a_name), a_ty2, BinderInfo::Default)
+                .unwrap();
+            let sa = app(ctx, succ, a);
+            let p2a = app(ctx, p2, a);
+            let b_ty2 = eq_rec_n(ctx, sa, p2a);
+            let b = ctx
+                .push_local_decl(Some(b_name), b_ty2, BinderInfo::Default)
+                .unwrap();
+            let want = ctx.mk_lambda(&[a, b], b).unwrap();
+            ctx.lctx_restore(cp);
+            assert_eq!(out, want);
+        });
+    }
+
+    /// The oracle keeps the binder fvars when it swaps in the visited
+    /// types, so a proof cached while visiting a binder type still hits
+    /// in the body. Oracle probe (v4.33.0-rc1): `fooQ` = `fooP` with body
+    /// `@PProd.mk Nat (@Eq Nat (Nat.succ a) (Nat.succ a)) a (@rfl Nat
+    /// (Nat.succ a))` has exactly `_proof_1`, `_proof_2` (`#print
+    /// fooQ._proof_3` → unknown constant) and the body becomes
+    /// `@PProd.mk … a (fooQ._proof_2 a)`. leanr re-pushes under new fvars,
+    /// so this pins the cache copy in `anp_visit_binders`.
+    #[test]
+    fn binder_type_cache_entries_still_hit_in_the_body() {
+        with_meta0_ctx(|ctx| {
+            let foo_q = name(ctx, "fooQ");
+            let succ = c(ctx, "N.succ");
+            let zero = c(ctx, "N.zero");
+            let n_ty = c(ctx, "N");
+            let one = lit_level(ctx, 1);
+            let zero_l = lit_level(ctx, 0);
+            let mk = cu(ctx, "PProd.mk", &[one, zero_l]);
+            let a_name = name(ctx, "a");
+            let b_name = name(ctx, "b");
+            let sz = app(ctx, succ, zero);
+            let (_, pf1) = eq_rfl(ctx, sz);
+            let a_ty = eq_rec_n(ctx, sz, pf1);
+            let cp = ctx.lctx_checkpoint();
+            let a = ctx
+                .push_local_decl(Some(a_name), a_ty, BinderInfo::Default)
+                .unwrap();
+            let sa = app(ctx, succ, a);
+            let (eq_sa, pf2) = eq_rfl(ctx, sa);
+            let b_ty = eq_rec_n(ctx, sa, pf2);
+            let b = ctx
+                .push_local_decl(Some(b_name), b_ty, BinderInfo::Default)
+                .unwrap();
+            let body = ctx.mk_app_spine(mk, &[n_ty, eq_sa, a, pf2]).unwrap();
+            let e = ctx.mk_lambda(&[a, b], body).unwrap();
+            ctx.lctx_restore(cp);
+            ctx.infer_type(e).expect("the probe term is well typed");
+
+            let mut aux = AuxLemmas::new(foo_q);
+            let out = ctx.abstract_nested_proofs(&mut aux, e).unwrap();
+            assert_eq!(
+                pending_names(ctx, &aux),
+                vec!["fooQ._proof_1", "fooQ._proof_2"]
+            );
+            let p1 = cu(ctx, "fooQ._proof_1", &[]);
+            let p2 = cu(ctx, "fooQ._proof_2", &[]);
+            let a_ty2 = eq_rec_n(ctx, sz, p1);
+            let cp = ctx.lctx_checkpoint();
+            let a = ctx
+                .push_local_decl(Some(a_name), a_ty2, BinderInfo::Default)
+                .unwrap();
+            let sa = app(ctx, succ, a);
+            let (eq_sa, _) = eq_rfl(ctx, sa);
+            let p2a = app(ctx, p2, a);
+            let b_ty2 = eq_rec_n(ctx, sa, p2a);
+            let b = ctx
+                .push_local_decl(Some(b_name), b_ty2, BinderInfo::Default)
+                .unwrap();
+            let body = ctx.mk_app_spine(mk, &[n_ty, eq_sa, a, p2a]).unwrap();
+            let want = ctx.mk_lambda(&[a, b], body).unwrap();
+            ctx.lctx_restore(cp);
+            assert_eq!(out, want);
         });
     }
 
