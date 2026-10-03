@@ -1160,6 +1160,14 @@ def nsaQueries : List (String × String) :=
   -- `?w := fun x _ => Eq x x`, giving `(w : Eq x x)` (oracle,
   -- `pp.funBinderTypes`); `defaultCase` would fail (`n` escapes).
   , ("nsa/let-prefix-search",        "let f := fun x y w => w; fun (n : Nat) => f n Nat.zero (Eq.refl n)")
+  -- `expandDelayedAssigned?` (ExprDefEq.lean:1702-1729, call site :1885).
+  -- `x.1` in `h`'s binder type postpones (`x : ?α`), and leaving `x`'s
+  -- scope delayed-assigns `?new [x] := ?b`. `Nat.zero` against `?new P`
+  -- is stuck, so the coercion postpones. The resume solves `?b := x.1`
+  -- first, and the coercion's `isDefEq (?new P) Nat` then sees a raw
+  -- delayed app whose pending is solved: `instantiateMVars` expands it.
+  -- Without that arm `?new` is an unassignable head facing a rigid `Nat`.
+  , ("eda/coe-resume-after-pending", "(fun x (h : x.1) => h) (Prod.mk Nat Nat) Nat.zero")
   ]
 
 -- `expandFunBinders` (`Lean/Elab/Binders.lean:360-406`): `_` hole

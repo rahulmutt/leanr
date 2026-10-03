@@ -298,12 +298,11 @@ is `:1347-1354`; the function ends at `:1357`, not `:1359`), the
 `isDefEqMVarSelf` call `:1799-1801` is `:1800-1803`, `mkMVarApp` is
 `MetavarContext.lean:1090-1097` (not `:1093-1098`), the `elimMVar` kind
 split is `:1213` (not `:1212`), `mkFreshExprMVarAt` is
-`Meta/Basic.lean:850-860`, and `expandDelayedAssigned?` is `:1702-1725`.
+`Meta/Basic.lean:850-860`, and `expandDelayedAssigned?` is `:1702-1729`
+(corrected again by the follow-up below; `:1725` was the comment's end).
 
 **Open seams.**
-- `expandDelayedAssigned?` (`ExprDefEq.lean:1702-1725`, call sites
-  `:1885`/`:1887`) is not ported in `is_def_eq_mvar`; delayed assignments
-  themselves exist since #62. Previous docs wrongly called it moot.
+- ~~`expandDelayedAssigned?`~~ CLOSED by the follow-up below.
 - Mutations 7 and 8 are pinned only by unit tests (above), not by an
   oracle-probed row.
 - Seam R9 (`elim_mvar` uses `decl.kind` where the oracle's
@@ -316,4 +315,50 @@ split is `:1213` (not `:1212`), `mkFreshExprMVarAt` is
   `withNewMCtxDepth` over an outer-depth mvar). Code site:
   `crates/leanr_meta/src/mk_binding.rs:641` (`let kind = decl.kind;`)
   feeding the count below it. Follow-up: port `newMVarKind`.
-- The `elim.jsonl` / `structures.jsonl` regen drift from #65 remains.
+- ~~The `elim.jsonl` / `structures.jsonl` regen drift from #65~~ CLOSED by
+  the follow-up below (one fixtures commit: 13 `Any*` elim rows, 1
+  structure row).
+
+### expandDelayedAssigned? follow-up
+
+Bounded change (design approved in chat, no plan file). `is_def_eq_mvar`
+(`assign.rs`) now runs `expand_delayed_assigned` on `t`, then `s`, after
+the two `isAssigned` arms and before the assignability dispatch, as
+`isDefEqQuickOther` does (`ExprDefEq.lean:1885`/`:1887`). The helper is a
+1:1 port of `:1702-1729`. If `instantiateMVars` changes the term, it
+returns that (`:1706-1707`). Otherwise, only under
+`assignSyntheticOpaque` and with at least `fvars.size` args, it returns
+`?pending` applied to the remaining args (`:1726-1729`).
+
+**Reachability.** `isExprDefEqAuxImpl` instantiates both sides before
+the expensive path (`:2342-2343`), and `elabAppArgs` instantiates `fType`
+(`Elab/App.lean:1357`).
+So a raw delayed app with a solved pending reaches `isDefEqQuick` only as
+a top-level side. Corpus row `eda/coe-resume-after-pending`
+(`(fun x (h : x.1) => h) (Prod.mk Nat Nat) Nat.zero`) reaches that case.
+`x.1` postpones, and leaving `x`'s scope delayed-assigns `?new [x] := ?b`.
+`Nat.zero` against `?new P` is stuck, so the coercion postpones. The
+resume solves `?b` first, and then `isDefEq (?new P) Nat` hits arm 1.
+Pre-fix leanr failed it with `CoeExpansionMismatch`; the oracle accepts
+it (probed in prelude mode). The `.zero` variant never reaches the
+helper in leanr (checked with instrumentation; cause not traced).
+
+**Mutations** (each applied, run, reverted):
+1. Drop the `instantiateMVars` arm: killed by
+   `expand_delayed_assigned_follows_a_solved_pending_mvar` and by the
+   corpus row `eda/coe-resume-after-pending`.
+2. Drop the `assignSyntheticOpaque` guard: killed by
+   `expand_delayed_assigned_does_not_consume_when_a_guard_fails`.
+3. Drop the arity guard: killed by the same test.
+4. Drop the `s` call site: killed by `..._follows_a_solved_pending_mvar`.
+5. Consume no args (`?pending` applied to all of them): killed by
+   `expand_delayed_assigned_consumes_fvars_under_assign_synthetic_opaque`.
+6. Drop the `t` call site: killed by two unit tests.
+
+Mutations 2-5 are killed only by unit tests. No elab row reaches the
+`assignSyntheticOpaque` consume branch, whose only elaborator entry is
+default-instance resolution (`SyntheticMVars.lean:164`). That branch is
+pinned by unit tests only.
+
+**Corpus.** 359 → 360 (`eda/coe-resume-after-pending`). `elab-queries.jsonl`
+gained 1 line and changed none. Smoke tests did not move.
