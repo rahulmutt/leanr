@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, NameId};
 use leanr_meta::{MVarId, MVarKind, MetaSnapshot};
 
@@ -129,6 +130,18 @@ pub enum MVarErrorKind {
         app: ExprId,
     },
     Hole,
+    /// oracle: `.custom msgData` (`TermElabM.lean:121`). leanr keeps the
+    /// message's first line, the only part a gate compares.
+    Custom(String),
+}
+
+/// oracle: `structure LevelMVarErrorInfo` (`TermElabM.lean:146-151`),
+/// minus the `lctx`/`ref` used only for rendering the expression.
+#[derive(Debug, Clone)]
+pub struct LevelMVarErrorInfo {
+    pub expr: ExprId,
+    /// `msgData?`, as its first line.
+    pub msg: Option<String>,
 }
 
 /// oracle: `structure MVarErrorInfo` (`TermElabM.lean:135-139`).
@@ -152,6 +165,8 @@ pub(crate) struct SavedTermState {
     pending_mvars: Vec<MVarId>,
     synthetic_mvars: HashMap<MVarId, SyntheticMVarDecl>,
     mvar_error_infos: Vec<MVarErrorInfo>,
+    mvar_arg_names: HashMap<MVarId, NameId>,
+    level_mvar_error_infos: Vec<LevelMVarErrorInfo>,
 }
 
 impl<'e> TermElabM<'e> {
@@ -204,6 +219,34 @@ impl<'e> TermElabM<'e> {
             stx,
             kind: MVarErrorKind::Hole,
         });
+    }
+
+    /// oracle: `registerCustomErrorIfMVar` (`TermElabM.lean:882-885`) —
+    /// registers only if `e.getAppFn` is an mvar.
+    pub fn register_custom_error_if_mvar(&mut self, e: ExprId, stx: SynElem, msg: String) {
+        let base = Some(self.view.store);
+        let mut head = e;
+        while let Node::App { f, .. } = self.mctx.store().expr_node(base, head) {
+            head = f;
+        }
+        if let Node::MVar { id: Some(n) } = self.mctx.store().expr_node(base, head) {
+            self.mvar_error_infos.push(MVarErrorInfo {
+                mvar_id: MVarId(n),
+                stx,
+                kind: MVarErrorKind::Custom(msg),
+            });
+        }
+    }
+
+    /// oracle: `registerMVarArgName` (`TermElabM.lean:887-888`).
+    pub fn register_mvar_arg_name(&mut self, mvar_id: MVarId, name: NameId) {
+        self.mvar_arg_names.insert(mvar_id, name);
+    }
+
+    /// oracle: `registerLevelMVarErrorExprInfo` (`TermElabM.lean:963-964`).
+    pub fn register_level_mvar_error_expr_info(&mut self, expr: ExprId, msg: Option<String>) {
+        self.level_mvar_error_infos
+            .push(LevelMVarErrorInfo { expr, msg });
     }
 
     /// oracle: `saveContext` (`TermElabM.lean:1420-1428`), restricted to
@@ -336,6 +379,8 @@ impl<'e> TermElabM<'e> {
             pending_mvars: self.pending_mvars.clone(),
             synthetic_mvars: self.synthetic_mvars.clone(),
             mvar_error_infos: self.mvar_error_infos.clone(),
+            mvar_arg_names: self.mvar_arg_names.clone(),
+            level_mvar_error_infos: self.level_mvar_error_infos.clone(),
         }
     }
 
@@ -345,6 +390,8 @@ impl<'e> TermElabM<'e> {
         self.pending_mvars = saved.pending_mvars;
         self.synthetic_mvars = saved.synthetic_mvars;
         self.mvar_error_infos = saved.mvar_error_infos;
+        self.mvar_arg_names = saved.mvar_arg_names;
+        self.level_mvar_error_infos = saved.level_mvar_error_infos;
     }
 
     /// oracle: `withoutPostponing` (`TermElabM.lean:1049-1050`).

@@ -94,6 +94,9 @@ fn push_let_binders(
             }
             NodeOrToken::Token(tok) if kinds.name(tok.kind()) == "<ident>" => {
                 let name = intern_binder_name(elab, tok.text())?;
+                // `letIdBinders` reach `elabBinderViews` too, hence its
+                // `ensureAtomicBinderName` (`Binders.lean:213`).
+                super::ensure_atomic_binder_name(elab, Some(name))?;
                 let dom = fresh_type_mvar(elab)?;
                 let fvar = push_user_binder(elab, Some(name), dom, BinderInfo::Default)?;
                 fvars.push(fvar);

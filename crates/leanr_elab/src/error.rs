@@ -28,6 +28,12 @@ pub enum ElabError {
     TypeMismatch {
         expected: ExprId,
         got: ExprId,
+        /// `Some` when the mismatch is an application argument's
+        /// (`ensureArgType`, `App.lean:54-62`, passes `f?`), which the
+        /// oracle reports through `Meta.throwAppTypeMismatch`
+        /// (`Meta/Check.lean:250-270`) instead of `mkTypeMismatchError`
+        /// (`TermElabM.lean:1151-1153`).
+        app: Option<AppArgMismatch>,
     },
     Meta(MetaError),
     /// oracle: `addNamedArg`'s "Argument `x` was already set"
@@ -250,6 +256,45 @@ pub enum ElabError {
     /// caller's pending mvars back (its `finally`, no state restore) —
     /// the oracle's treatment of it too.
     Postpone,
+    /// oracle: `ensureAtomicBinderName` (`Elab/Binders.lean:188-191`):
+    /// "invalid binder name `n`, it must be atomic". Carries the rendered
+    /// (decoded) binder name.
+    InvalidBinderName(String),
+    /// oracle: `checkNotAlreadyDeclared` (`Elab/DeclModifiers.lean:40-44`),
+    /// reached from `expandDeclId` → `mkDeclName` → `applyVisibility`
+    /// (`:244-251`). Carries the rendered declaration name.
+    AlreadyDeclared(String),
+    /// oracle: `throwAlreadyDeclaredUniverseLevel` (`Elab/Exception.lean:43-44`),
+    /// from `expandDeclId`'s `.{…}` fold (`Elab/DeclModifiers.lean:333-339`).
+    UniverseAlreadyDeclared(String),
+    /// oracle: `sortDeclLevelParams` (`Elab/DeclUtil.lean:79-81`).
+    UnusedUniverseParam(String),
+    /// oracle: `MutualClosure.pushMain` (`Elab/MutualDef.lean:1051-1053`).
+    TheoremTypeNotProp(String),
+    /// oracle: the first error `logUnassignedUsingErrorInfos`
+    /// (`Term/TermElabM.lean:934-958`) logs, rendered to its first line by
+    /// `unassigned.rs` (`MVarErrorInfo.logError`, `:901-925`).
+    UnassignedMVars(String),
+    /// oracle: the first error `logUnassignedLevelMVarsUsingErrorInfos`
+    /// (`:997-1013`) logs (`LevelMVarErrorInfo.logError`, `:983-988`), or
+    /// `ensureNoUnassignedLevelMVarsAtPreDef`'s fallback
+    /// (`PreDefinition/Main.lean:76-97`). First line, rendered.
+    UnassignedLevelMVars(String),
+    /// The kernel rejected a declaration the elaborator built (`addDecl`).
+    /// The oracle's kernel messages start with `(kernel)`; leanr's
+    /// `KernelError` has no message layer, so there is no first line.
+    Kernel(leanr_kernel::KernelError),
+}
+
+/// The application context of an argument type mismatch: oracle
+/// `ensureArgType`'s `f` (`App.lean:54-62`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppArgMismatch {
+    /// The partial application the argument was being added to.
+    pub f: ExprId,
+    /// `f.getAppArgs.any (· == a)` (`Meta/Check.lean:254`): the oracle then
+    /// says "The last … argument" instead of "The argument".
+    pub arg_already_in_f: bool,
 }
 
 impl ElabError {
@@ -276,6 +321,7 @@ impl ElabError {
                 | ElabError::Internal(_)
                 | ElabError::Postpone
                 | ElabError::MaxRecDepth
+                | ElabError::Kernel(_)
         )
     }
 }
@@ -411,12 +457,38 @@ impl EliminatorErrorReason {
 }
 
 impl ElabError {
-    /// The oracle's first error line, for the variants the corpus gate
-    /// compares (`Eliminator`); `None` for every other variant.
+    /// The oracle's first error line, for every variant the corpus gates
+    /// compare; `None` for the rest.
     pub fn oracle_first_line(&self) -> Option<String> {
         match self {
             Self::Eliminator { reason } => Some(reason.oracle_first_line()),
             Self::UnknownConstant(n) => Some(format!("Unknown constant `{n}`")),
+            // oracle: `throwError m!"Unknown identifier `{n}`"` (probed:
+            // `def uib : Nat := nope`). leanr's `sort.rs` also raises
+            // `UnknownIdent` for an unknown universe name, which the oracle
+            // words differently; no corpus record reaches that.
+            Self::UnknownIdent(s) => Some(format!("Unknown identifier `{s}`")),
+            Self::TypeMismatch { app: None, .. } => Some("Type mismatch".into()),
+            Self::TypeMismatch { app: Some(a), .. } => Some(
+                if a.arg_already_in_f {
+                    "Application type mismatch: The last"
+                } else {
+                    "Application type mismatch: The argument"
+                }
+                .into(),
+            ),
+            Self::InvalidBinderName(n) => {
+                Some(format!("invalid binder name `{n}`, it must be atomic"))
+            }
+            Self::AlreadyDeclared(n) => Some(format!("`{n}` has already been declared")),
+            Self::UniverseAlreadyDeclared(u) => Some(format!(
+                "a universe level named `{u}` has already been declared"
+            )),
+            Self::UnusedUniverseParam(u) => Some(format!("unused universe parameter '{u}'")),
+            Self::TheoremTypeNotProp(n) => {
+                Some(format!("type of theorem `{n}` is not a proposition"))
+            }
+            Self::UnassignedMVars(line) | Self::UnassignedLevelMVars(line) => Some(line.clone()),
             _ => None,
         }
     }
@@ -489,5 +561,50 @@ mod tests {
             Some("failed to elaborate eliminator, invalid motive")
         );
         assert_eq!(ElabError::Postpone.oracle_first_line(), None);
+    }
+
+    #[test]
+    fn declaration_error_first_lines_are_the_oracles() {
+        // Each string is the plan-time oracle output for the decl corpus record named.
+        assert_eq!(
+            ElabError::AlreadyDeclared("pick".into())
+                .oracle_first_line()
+                .as_deref(),
+            Some("`pick` has already been declared") // err/already
+        );
+        assert_eq!(
+            ElabError::UniverseAlreadyDeclared("u".into())
+                .oracle_first_line()
+                .as_deref(),
+            Some("a universe level named `u` has already been declared") // err/univDup
+        );
+        assert_eq!(
+            ElabError::UnusedUniverseParam("u".into())
+                .oracle_first_line()
+                .as_deref(),
+            Some("unused universe parameter 'u'") // err/unusedUniv
+        );
+        assert_eq!(
+            ElabError::TheoremTypeNotProp("tnp".into())
+                .oracle_first_line()
+                .as_deref(),
+            Some("type of theorem `tnp` is not a proposition") // err/thmTypeNotProp
+        );
+        assert_eq!(
+            ElabError::UnassignedMVars("don't know how to synthesize placeholder".into())
+                .oracle_first_line()
+                .as_deref(),
+            Some("don't know how to synthesize placeholder")
+        );
+        assert_eq!(
+            ElabError::InvalidBinderName("a.b".into())
+                .oracle_first_line()
+                .as_deref(),
+            Some("invalid binder name `a.b`, it must be atomic") // probe: def f18 (a.b : Nat)
+        );
+        assert_eq!(
+            ElabError::Kernel(leanr_kernel::KernelError::BankExhausted).oracle_first_line(),
+            None
+        );
     }
 }

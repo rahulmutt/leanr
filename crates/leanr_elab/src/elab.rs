@@ -125,6 +125,11 @@ pub struct TermElabM<'e> {
     /// Registered by P2a, rendered by whichever slice grows a
     /// diagnostics layer (design spec § Amendment, item 2).
     pub mvar_error_infos: Vec<crate::synthetic::MVarErrorInfo>,
+    /// oracle: `Term.State.mvarArgNames` (`TermElabM.lean:189-199`).
+    pub mvar_arg_names: HashMap<MVarId, NameId>,
+    /// oracle: `Term.State.levelMVarErrorInfos` (`TermElabM.lean:187`).
+    /// Pushed; the oracle conses, so readers iterate in reverse.
+    pub level_mvar_error_infos: Vec<crate::synthetic::LevelMVarErrorInfo>,
     /// oracle: `Term.Context.mayPostpone` — a READER field there, a
     /// plain field here, saved/restored by `without_postponing` only:
     /// `with_saved_context` deliberately does NOT touch it (that
@@ -227,6 +232,8 @@ impl<'e> TermElabM<'e> {
             pending_mvars: Vec::new(),
             synthetic_mvars: HashMap::new(),
             mvar_error_infos: Vec::new(),
+            mvar_arg_names: HashMap::new(),
+            level_mvar_error_infos: Vec::new(),
             may_postpone: true,
             anon_tail_depth: 0,
         }
@@ -857,8 +864,7 @@ fn local_ident_of(
     let leanr_syntax::tree::NodeOrToken::Token(tok) = elem else {
         return Ok(None);
     };
-    let parts: Vec<&str> = tok.text().split('.').collect();
-    let prefixes = crate::app::head::intern_prefixes(elab, &parts)?;
+    let (_, prefixes) = crate::app::head::ident_prefixes(elab, tok.text())?;
     Ok(
         match crate::resolve::resolve_local_name(&elab.mctx, &prefixes) {
             Some((fvar, 0)) => Some(fvar),

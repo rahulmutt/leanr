@@ -45,4 +45,7 @@ pub mod state;
 
 pub use default_inst::{default_walk_log_reset, default_walk_log_take};
 pub use ladder::PostponeBehavior;
-pub use state::{MVarErrorInfo, MVarErrorKind, SavedContext, SyntheticMVarDecl, SyntheticMVarKind};
+pub use state::{
+    LevelMVarErrorInfo, MVarErrorInfo, MVarErrorKind, SavedContext, SyntheticMVarDecl,
+    SyntheticMVarKind,
+};

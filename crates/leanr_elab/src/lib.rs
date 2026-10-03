@@ -203,9 +203,19 @@
 //!   an all-polymorphic candidate set (`tc/useAnyHole`), and a
 //!   zero-candidate class with an mvar goal (`NoInst ?a` is `.none`, an
 //!   `InstanceSynthesisFailed`, not stuck).
+//! - **M4c-1** — command elaboration of ONE non-recursive
+//!   `def`/`theorem`/`abbrev`/`opaque`/`axiom`/`example`, in `command/`:
+//!   `DefView` (syntax + named seams), header (`expandDeclId`,
+//!   `elabHeaders`), body (`elabFunValues`), level params
+//!   (`levelMVarToParam*`, `sortDeclLevelParams`), the unassigned-mvar
+//!   report (`unassigned.rs`), `abstractNestedProofs`, and commit through
+//!   `Environment::add_decl_in` (an `example` is only kernel-checked).
+//!   Gated by `tests/oracle_decl.rs` over `decl-queries.jsonl`
+//!   (docs/superpowers/specs/2026-10-03-m4c1-single-decl-design.md).
 pub mod app; // M4b-3 P1
 pub mod builtin; // Tasks 4-6
 pub mod coe; // coercions
+pub mod command; // M4c-1 P2
 pub mod config; // setElabConfig
 pub mod dispatch;
 pub mod elab;
@@ -214,9 +224,10 @@ pub mod macros; // macro/binop% P2
 mod postpone;
 pub mod resolve; // Task 5
 pub mod synthetic; // M4b-3 P2a
+mod unassigned; // M4c-1 P2 Task 4
 
 pub use elab::TermElabM;
 pub use error::{
-    AnonCtorError, ElabError, EliminatorErrorReason, InvalidDottedIdentReason, InvalidFieldReason,
-    InvalidProjectionReason,
+    AnonCtorError, AppArgMismatch, ElabError, EliminatorErrorReason, InvalidDottedIdentReason,
+    InvalidFieldReason, InvalidProjectionReason,
 };

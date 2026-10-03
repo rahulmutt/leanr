@@ -1522,3 +1522,74 @@ fn no_seam_points_at_a_retired_closeout_label() {
         "the M4b-3 close-out retired these seams; stale label at {offenders:?}"
     );
 }
+
+/// M4c-1 P2: every declaration-level seam is reachable through
+/// `CommandElab::elab_decl` as a named `UnsupportedSyntax`, never a panic
+/// and never a wrong `Ok` (plan `2026-10-03-m4c1-p2-command-elab.md`
+/// § Global Constraints). One source per seam family; `command/view.rs`'s
+/// unit tests cover each `DefView` seam individually.
+#[test]
+fn declaration_seams_are_named_end_to_end() {
+    let cases: &[(&str, &str)] = &[
+        ("@[simp] def a : Nat := Nat.zero", "attributes"),
+        ("private def a : Nat := Nat.zero", "visibility modifier"),
+        ("def Foo.bar : Nat := Nat.zero", "M4c-2"),
+        ("def sr : Nat := sr", "recursive reference"),
+        (
+            "def f : Nat → Nat\n  | n => n",
+            "pattern-matching equations",
+        ),
+        ("instance : Wrap Nat := ⟨fun x => x⟩", "declaration kind"),
+        ("opaque o2 : Nat", "`opaque` without a value"),
+        ("def sl : Nat := let x := Nat.zero; x", "letToHave"),
+        ("def ab (a : α) : α := a", "auto-bound"),
+        ("namespace Foo", "command loop"),
+        // Term- and binder-layer seams reached through a declaration carry
+        // a slice label (`command::label_seam`).
+        (
+            "def lp.{u} (α : Sort (u+1)) : Nat := Nat.zero",
+            "Lean.Parser.Level.paren — later M4",
+        ),
+        ("def ss : Nat := sorry", "Lean.Parser.Term.sorry — later M4"),
+        (
+            "def fm : Nat → Nat := fun | x => x",
+            "fun: Lean.Parser.Term.matchAlts — later M4",
+        ),
+        // Not auto-bound: `expandBinderType`'s hole (probe: the oracle
+        // admits `f2.{u_1}`).
+        (
+            "def f2 {α} (a : α) : α := a",
+            "missing `: T` (`expandBinderType` hole) — later M4",
+        ),
+    ];
+    for (src, needle) in cases {
+        let got = support::with_command_elab(src, |ce, cmd, kinds| ce.elab_decl(cmd, kinds));
+        match got {
+            Err(leanr_elab::ElabError::UnsupportedSyntax(m)) => {
+                assert!(m.contains(needle), "{src:?}: seam {m:?} lacks {needle:?}")
+            }
+            other => panic!("{src:?}: expected a named seam, got {other:?}"),
+        }
+    }
+}
+
+/// The plan's temporary task seams (`not yet ported (M4c-1 P2 Task N)`) must
+/// all be gone once the plan lands.
+#[test]
+fn no_seam_points_at_an_m4c1_p2_task_label() {
+    let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    let needle = "not yet ported (M4c-1 P2 Task";
+    let mut offenders = Vec::new();
+    for path in walk_rs_files(src_dir) {
+        let text = std::fs::read_to_string(&path).expect("readable source");
+        for (n, line) in text.lines().enumerate() {
+            if line.contains(needle) {
+                offenders.push(format!("{}:{}", path.display(), n + 1));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "stale M4c-1 P2 task seam at {offenders:?}"
+    );
+}

@@ -964,15 +964,9 @@ fn next_arg_hole(app: &AppElab, kinds: &KindInterner) -> Option<()> {
 /// `PostponeBehavior::Partial` relies on — "this kind of metavariable
 /// are not synthetic opaque", `SyntheticMVars.lean:436-437`).
 ///
-/// The oracle's `mkInstMVar` also calls `registerMVarArgName
-/// arg.mvarId! argName` via `addNewArg` (`App.lean:428`) — pure
-/// diagnostics (`TermElabM.lean:887`, the `mvarErrorInfos`-adjacent
-/// "which parameter name does this mvar belong to" table this crate's
-/// deferred prose layer would need, design spec § Amendment, item 2).
-/// `add_new_arg` here, like `elab_and_add_new_arg`'s own
-/// `_binder_name` before it, takes no name parameter at all — the same
-/// established P1 precedent, not a new gap this task introduces — so
-/// `binder_name` is discarded rather than threaded to nowhere.
+/// The oracle's `registerMVarArgName` runs inside `addNewArg`
+/// (`App.lean:427-428`), which `add_new_arg` ports from the forall's own
+/// binder name, so `binder_name` is not needed here.
 fn mk_inst_mvar(
     app: &mut AppElab,
     ty: ExprId,
@@ -993,8 +987,10 @@ fn mk_inst_mvar(
 /// `get_f_type`, which is what makes `paramIdx`/`fArgs` the single
 /// source of truth).
 pub fn add_new_arg(app: &mut AppElab, arg: ExprId) -> Result<(), ElabError> {
-    let body = match app.node(app.st.f_type) {
-        Node::Forall { body, .. } => body,
+    let (body, binder_name) = match app.node(app.st.f_type) {
+        Node::Forall {
+            body, binder_name, ..
+        } => (body, binder_name),
         _ => {
             return Err(ElabError::IllFormedSyntax(
                 "add_new_arg on a non-forall fType".to_string(),
@@ -1017,6 +1013,14 @@ pub fn add_new_arg(app: &mut AppElab, arg: ExprId) -> Result<(), ElabError> {
     app.st.f = f;
     app.st.f_args.push(arg);
     app.st.f_type = body;
+    // oracle: `addNewArg` (`App.lean:427-428`): `if arg.isMVar then
+    // registerMVarArgName arg.mvarId! argName`, `argName` being the
+    // forall's binder name. An anonymous binder name is not registered:
+    // the oracle would render `[anonymous]`, and no fixture constant has
+    // one.
+    if let (Node::MVar { id: Some(m) }, Some(bn)) = (app.node(arg), binder_name) {
+        app.elab.register_mvar_arg_name(leanr_meta::MVarId(m), bn);
+    }
     Ok(())
 }
 
@@ -1059,6 +1063,43 @@ fn elab_and_add_new_arg(
     // (`mkSyntheticSorryFor` -> `mkLabeledSorry`), so elaboration
     // continues with a wrong-but-typed argument. leanr propagates the
     // error instead, and the `try … catch` collapses to the plain call.
-    let val = app.elab.ensure_has_type(&stx, Some(expected), val)?;
+    //
+    // oracle: `ensureArgType f arg expectedType` passes `f` as
+    // `throwTypeMismatchError`'s `f?` (`App.lean:54-62`,
+    // `TermElabM.lean:1151-1153`), so an argument mismatch is reported by
+    // `throwAppTypeMismatch f a` (`Meta/Check.lean:250-270`).
+    let f = app.st.f;
+    let val = match app.elab.ensure_has_type(&stx, Some(expected), val) {
+        Err(ElabError::TypeMismatch {
+            expected,
+            got,
+            app: None,
+        }) => {
+            let arg_already_in_f = app_spine_args(app, f).contains(&val);
+            return Err(ElabError::TypeMismatch {
+                expected,
+                got,
+                app: Some(crate::error::AppArgMismatch {
+                    f,
+                    arg_already_in_f,
+                }),
+            });
+        }
+        r => r?,
+    };
     add_new_arg(app, val)
+}
+
+/// `Expr.getAppArgs` of `e`: the arguments of its application spine, in
+/// order. Compared by `ExprId`, which is the oracle's structural `==`
+/// under hash-consing (`Meta/Check.lean:254`).
+fn app_spine_args(app: &AppElab, e: ExprId) -> Vec<ExprId> {
+    let mut args = Vec::new();
+    let mut cur = e;
+    while let Node::App { f, arg } = app.node(cur) {
+        args.push(arg);
+        cur = f;
+    }
+    args.reverse();
+    args
 }

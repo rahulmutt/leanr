@@ -196,9 +196,17 @@ impl ElimElab<'_, '_> {
                     NextArg::None => self.mk_implicit_arg(binder_type, binder_info)?,
                 }
             };
-            // oracle: `addArgAndContinue`. `saveArgInfo`'s
-            // `registerMVarArgName` is error-prose bookkeeping only and is
-            // not ported (`args.rs`'s `mk_inst_mvar` precedent).
+            // oracle: `addArgAndContinue` → `saveArgInfo arg binderName`
+            // (`App.lean:1275-1277`).
+            if let (Node::MVar { id: Some(m) }, Some(bn)) = (
+                self.elab
+                    .mctx
+                    .store()
+                    .expr_node(Some(self.elab.view.store), arg),
+                binder_name,
+            ) {
+                self.elab.register_mvar_arg_name(leanr_meta::MVarId(m), bn);
+            }
             self.idx += 1;
             let base = self.elab.view.store;
             self.f = self

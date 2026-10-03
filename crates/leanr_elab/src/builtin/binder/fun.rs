@@ -14,7 +14,7 @@ use super::{
     elab_type, extract_inst_binder_layout, fresh_type_mvar, intern_binder_name,
     intern_fun_binder_ident, user_binder_kind,
 };
-use crate::app::head::intern_prefixes;
+use crate::app::head::ident_prefixes;
 use crate::dispatch::{non_trivia_children, SynElem};
 use crate::elab::TermElabM;
 use crate::error::ElabError;
@@ -192,8 +192,7 @@ fn fun_binder_ids(
 /// resolution as an applied ident (`app::head::elab_app_fn_id`), so a
 /// dotted ident whose longest declared prefix is a constant counts.
 fn names_a_global(elab: &mut TermElabM, raw: &str) -> Result<bool, ElabError> {
-    let parts: Vec<&str> = raw.split('.').collect();
-    let prefixes = intern_prefixes(elab, &parts)?;
+    let (_, prefixes) = ident_prefixes(elab, raw)?;
     match resolve_global_name(&elab.view, &prefixes, raw) {
         Ok(_) | Err(ElabError::AmbiguousIdent(_)) => Ok(true),
         Err(ElabError::UnknownIdent(_)) => Ok(false),
@@ -492,10 +491,22 @@ pub fn elab_fun(
                 None => extract_fun_binder_views(elab, item, kinds)?,
             };
             for view in views {
+                // oracle: `ensureAtomicBinderName` before `elabType`
+                // (`Binders.lean:426-428`).
+                super::ensure_atomic_binder_name(elab, view.name)?;
                 let dom = match &view.ty {
                     Some(ty_elem) => elab_type(elab, ty_elem, kinds)?,
                     None => fresh_type_mvar(elab)?,
                 };
+                // oracle: `elabFunBinderViews` (`Binders.lean:428-429`) —
+                // `registerFailedToInferBinderTypeInfo` right after
+                // `elabType` (an elided type is `elabType` of a hole).
+                super::register_failed_to_infer_binder_type_info(
+                    elab,
+                    dom,
+                    view.name,
+                    view.ty.clone().unwrap_or_else(|| item.clone()),
+                );
                 // oracle: `elabFunBinderViews` mints the fvar
                 // (`Binders.lean:430-432`), runs `propagateExpectedType`
                 // (`:442`), and only THEN tests `isClass? type` (`:444`

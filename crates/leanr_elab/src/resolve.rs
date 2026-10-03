@@ -31,9 +31,10 @@ use crate::error::ElabError;
 /// names the first `k + 1` components. Returns the local and the number
 /// of field components.
 ///
-/// The order is the oracle's but is not observable yet: leanr interns a
-/// binder's name as ONE component (`builtin/binder/mod.rs`'s
-/// `intern_binder_name`), so only `prefixes[0]` can ever match.
+/// `intern_binder_name` (`builtin/binder/mod.rs`) interns the decoded
+/// name, so only a `let` name can have more than one component (every
+/// other binder passes `ensureAtomicBinderName`): `let a.b := v; a.b`
+/// matches the whole name, otherwise only `prefixes[0]` can match.
 pub fn resolve_local_name(mctx: &MetaCtx, prefixes: &[NameId]) -> Option<(ExprId, usize)> {
     let n = prefixes.len();
     prefixes
