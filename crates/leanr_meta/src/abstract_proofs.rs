@@ -105,11 +105,15 @@ fn is_atomic(node: &Node) -> bool {
 /// one map per `abstract_nested_proofs` call. Hash-consing makes `ExprId`
 /// equality structural, as `ExprStructEq` is. `log` records keys in
 /// insertion order so `anp_visit_binders` can find the entries made while
-/// visiting a telescope's binder types.
-#[derive(Default)]
+/// visiting a telescope's binder types. It also carries the two constant
+/// names the walk compares against, interned once per call.
 struct VisitCache {
     map: HashMap<ExprId, ExprId>,
     log: Vec<ExprId>,
+    /// `sorryAx` (`Expr.hasSorry`, `Util/Sorry.lean:28-29`).
+    sorry_ax: NameId,
+    /// `Lean.Grind.nestedProof` (`isNonTrivialProof`, `:52`).
+    nested_proof: NameId,
 }
 
 impl VisitCache {
@@ -134,9 +138,20 @@ impl MetaCtx<'_> {
         if self.is_proof(e)? {
             return Ok(e);
         }
-        let mut cache = VisitCache::default();
+        let mut cache = self.anp_visit_cache()?;
         self.anp_visit(aux, &mut cache, e)
             .map_err(|err| self.pending_lookup_seam(aux, err))
+    }
+
+    /// A fresh per-call `VisitCache`, with its two names interned once
+    /// (an intern error propagates rather than reading as "no match").
+    fn anp_visit_cache(&mut self) -> Result<VisitCache, MetaError> {
+        Ok(VisitCache {
+            map: HashMap::new(),
+            log: Vec::new(),
+            sorry_ax: self.anp_name(&["sorryAx"])?,
+            nested_proof: self.anp_name(&["Lean", "Grind", "nestedProof"])?,
+        })
     }
 
     /// The pending-aux lookup seam (module doc): an unknown-constant
@@ -181,7 +196,7 @@ impl MetaCtx<'_> {
         }
         self.step()?;
         let base = Some(self.view.store);
-        let r = if self.is_non_trivial_proof(aux, e)? && !self.has_sorry(e) {
+        let r = if self.is_non_trivial_proof(aux, cache, e)? && !self.has_sorry(cache, e) {
             self.abstract_proof(aux, cache, e)?
         } else {
             match node {
@@ -349,7 +364,12 @@ impl MetaCtx<'_> {
     /// (`AbstractNestedProofs.lean:40-65`). "In the env" (`origEnv.contains`,
     /// `:64`) also counts pending aux theorems, which the oracle has
     /// already added to the env at this point.
-    fn is_non_trivial_proof(&mut self, aux: &AuxLemmas, e: ExprId) -> Result<bool, MetaError> {
+    fn is_non_trivial_proof(
+        &mut self,
+        aux: &AuxLemmas,
+        cache: &VisitCache,
+        e: ExprId,
+    ) -> Result<bool, MetaError> {
         if !self.is_proof(e)? {
             return Ok(false);
         }
@@ -358,7 +378,7 @@ impl MetaCtx<'_> {
         // `Lean.Grind.nestedProof` (`Init/Grind/Util.lean:13,16`).
         let head = self.get_app_fn(e);
         if let Node::Const { name: Some(n), .. } = self.node(head) {
-            if self.name_is(n, &["Lean", "Grind", "nestedProof"]) {
+            if n == cache.nested_proof {
                 return Ok(false);
             }
         }
@@ -401,7 +421,7 @@ impl MetaCtx<'_> {
         let ty = self.guarded(|c| c.anp_visit(aux, cache, ty))?;
         // `:27`: `visit` only abstracts sorry-free proofs (`:91`), so this
         // is always `true` here; kept for parity.
-        let use_cache = !self.has_sorry(proof);
+        let use_cache = !self.has_sorry(cache, proof);
         self.mk_aux_theorem(aux, ty, proof, use_cache)
     }
 
@@ -491,21 +511,17 @@ impl MetaCtx<'_> {
         }
     }
 
-    /// Whether `n` is the hierarchical name `parts` (e.g. `["Lean", "Grind",
-    /// "nestedProof"]`), compared by interning `parts` (hash-consed names).
-    fn name_is(&mut self, n: NameId, parts: &[&str]) -> bool {
+    /// The hierarchical name `parts` (e.g. `["Lean", "Grind",
+    /// "nestedProof"]`), interned (hash-consed, so `NameId` equality is
+    /// name equality).
+    fn anp_name(&mut self, parts: &[&str]) -> Result<NameId, MetaError> {
         let base = Some(self.view.store);
         let mut acc = None;
         for p in parts {
-            let Ok(s) = self.scratch.intern_str(base, p) else {
-                return false;
-            };
-            let Ok(next) = self.scratch.name_str(base, acc, s) else {
-                return false;
-            };
-            acc = Some(next);
+            let s = self.scratch.intern_str(base, p)?;
+            acc = Some(self.scratch.name_str(base, acc, s)?);
         }
-        acc == Some(n)
+        acc.ok_or_else(|| MetaError::Infer("anp_name: empty name".into()))
     }
 
     /// Whether some `Const` in `e` satisfies `pred` (an `Expr.find?` over
@@ -546,13 +562,8 @@ impl MetaCtx<'_> {
 
     /// oracle: `Expr.hasSorry` (`Util/Sorry.lean:28-29`): some `Const`
     /// named `sorryAx`.
-    fn has_sorry(&mut self, e: ExprId) -> bool {
-        let base = Some(self.view.store);
-        let sorry = match self.scratch.intern_str(base, "sorryAx") {
-            Ok(s) => self.scratch.name_str(base, None, s).ok(),
-            Err(_) => None,
-        };
-        let Some(sorry) = sorry else { return false };
+    fn has_sorry(&self, cache: &VisitCache, e: ExprId) -> bool {
+        let sorry = cache.sorry_ax;
         self.find_const(e, |_, n| n == Some(sorry))
     }
 
@@ -1038,6 +1049,26 @@ mod tests {
                 }
                 assert!(aux.pending().is_empty());
             })
+        });
+    }
+
+    /// `has_sorry` matches a `sorryAx` constant anywhere in the term
+    /// (`Util/Sorry.lean:28-29`), through the name interned once in
+    /// `anp_visit_cache`. Meta0 has no `sorryAx`, so this checks the
+    /// syntactic scan only.
+    #[test]
+    fn has_sorry_finds_sorry_ax_through_the_interned_name() {
+        with_meta0_ctx(|ctx| {
+            let cache = ctx.anp_visit_cache().unwrap();
+            let n_ty = c(ctx, "N");
+            let zero = c(ctx, "N.zero");
+            let sorry = cu(ctx, "sorryAx", &[]);
+            let s = app(ctx, sorry, n_ty);
+            let succ = c(ctx, "N.succ");
+            let e = app(ctx, succ, s);
+            assert!(ctx.has_sorry(&cache, e));
+            let e2 = app(ctx, succ, zero);
+            assert!(!ctx.has_sorry(&cache, e2));
         });
     }
 }

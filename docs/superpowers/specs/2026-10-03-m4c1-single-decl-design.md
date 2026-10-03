@@ -132,6 +132,10 @@ Sources: `Elab/MutualDef.lean`, `Elab/PreDefinition/{Main,Basic}.lean`,
 
 ### `leanr_kernel` — one additive API (TCB-neutral)
 
+> **Superseded by Amendment 1 item 1:** the landed API is
+> `add_decl_in(&mut self, scratch: &mut Store, d)`; its scratch lifecycle
+> contract is in its doc comment (`crates/leanr_kernel/src/env.rs`).
+
 `Environment::add_decl_from_scratch(&mut self, scratch: &Store, d:
 Declaration) -> Result<(), KernelError>`. It promotes every id in `d` into
 `self.store` with the existing `bank::scratch::{promote, promote_name,
@@ -352,5 +356,12 @@ Mutation outcomes (from each commit body):
 - Task 6 (Closure): mutations 1-5 killed (5 is not equivalent, see item 6).
 - Task 7 (abstractNestedProofs): mutations 1-5 killed, 6 equivalent. R4 seam pin killed by removing the map_err.
 - Task 8 gate: (a) closure_new_level_param keeps `u`: gate test FAILS and `closure_renames_level_params_to_u_n` FAILS; (b) commit order swapped (main first): gate FAILS with UnknownConstant(foo2._proof_1); (c) Task 7 mutation 6 stays equivalent (single aux).
+
+Final review fixes (`final-findings.md`; new commits on top of `2aee529`):
+
+- `febfcd8` Important #1: `abstractNestedProofs` visits every binder type under the telescope's ORIGINAL lctx and only the body under the visited types (`visitBinders`, `AbstractNestedProofs.lean:77-89`). Before, an aux closing over an earlier binder got that binder's abstracted proof in its binder domain (silent wrong Ok). leanr re-pushes under new fvars (no kernel `modifyLocalDecl`), so the visit-cache entries from the type visits are copied old → new. Pins `binder_types_are_visited_under_the_original_lctx` and `binder_type_cache_entries_still_hit_in_the_body` (oracle probes `fooP`, `fooQ`). Amendment 1 item 4's seam trigger is reworded to body-only.
+- `a67fb6c` Important #2: `anp_visit`, `core_transform_visit` (`beta_reduce`) and `transform_visit` (`zeta_reduce`, pre-existing) recurse through `guarded`. A depth-100000 term no longer aborts with a stack overflow.
+- `ef77c86` Important #3: `add_decl_in`'s scratch lifecycle contract is documented (doc only), and `add_decl` points to it.
+- (this commit) Minors: `sorryAx` / `Lean.Grind.nestedProof` are interned once per `abstract_nested_proofs` call, and intern errors propagate; a closure pin covers simultaneous `u`/`u_1` renaming; this spec now points from `add_decl_from_scratch` to Amendment 1 item 1.
 
 Oracle cites corrected in the final sweep (code, plan and spec together): `Transform.lean:202` to `:204` (transform.rs); `CoreM.lean:80` to `:79` (`idx` field); `CoreM.lean:116-119` to `:117-120` (`isConflict`); `Level.lean:519-538` to `:519-537`; `DeclUtil.lean:79-89` to `:79-88`; `Environment.lean:2890-2902` to `:2890-2901`.

@@ -457,6 +457,62 @@ mod tests {
         });
     }
 
+    /// Final review minor: the renaming is SIMULTANEOUS. Originals `u` and
+    /// a literal `u_1` become `u_1` and `u_2` (`mkNewLevelParam`,
+    /// `Closure.lean:150-154`, keyed on the ORIGINAL level): the new
+    /// `u_1` (from `u`) is never confused with the original `u_1`.
+    #[test]
+    fn closure_renames_u_and_a_literal_u_1_simultaneously() {
+        with_meta0_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let u = lparam(ctx, "u");
+            let u1 = lparam(ctx, "u_1");
+            let sort_u = ctx.scratch.expr_sort(base, u).unwrap();
+            let sort_u1 = ctx.scratch.expr_sort(base, u1).unwrap();
+            let alpha = ctx
+                .push_local_decl(None, sort_u, BinderInfo::Default)
+                .unwrap();
+            let beta = ctx
+                .push_local_decl(None, sort_u1, BinderInfo::Default)
+                .unwrap();
+            let a = ctx
+                .push_local_decl(None, alpha, BinderInfo::Default)
+                .unwrap();
+            let b = ctx
+                .push_local_decl(None, beta, BinderInfo::Default)
+                .unwrap();
+            let pprod = cu(ctx, "PProd", &[u, u1]);
+            let mk = cu(ctx, "PProd.mk", &[u, u1]);
+            let ty = ctx.mk_app_spine(pprod, &[alpha, beta]).unwrap();
+            let val = ctx.mk_app_spine(mk, &[alpha, beta, a, b]).unwrap();
+            let r = ctx.mk_value_type_closure(ty, val).unwrap();
+            let name = |ctx: &mut crate::MetaCtx, s: &str| {
+                let id = ctx.scratch.intern_str(base, s).unwrap();
+                ctx.scratch.name_str(base, None, id).unwrap()
+            };
+            let (n1, n2) = (name(ctx, "u_1"), name(ctx, "u_2"));
+            assert_eq!(r.level_params, vec![n1, n2]);
+            assert_eq!(r.level_args, vec![u, u1], "the ORIGINAL levels, in order");
+            assert_eq!(r.expr_args, vec![alpha, beta, a, b]);
+            // ∀ (α : Sort u_1) (β : Sort u_2) (a : α) (b : β), PProd.{u_1,u_2} α β
+            let p1 = lparam(ctx, "u_1");
+            let p2 = lparam(ctx, "u_2");
+            let sort_p1 = ctx.scratch.expr_sort(base, p1).unwrap();
+            let sort_p2 = ctx.scratch.expr_sort(base, p2).unwrap();
+            let pprod_p = cu(ctx, "PProd", &[p1, p2]);
+            let (b1, b2, b3) = (bvar(ctx, 1), bvar(ctx, 2), bvar(ctx, 3));
+            let body = ctx.mk_app_spine(pprod_p, &[b3, b2]).unwrap();
+            let mut want = body;
+            for d in [b1, b1, sort_p2, sort_p1] {
+                want = ctx
+                    .scratch
+                    .expr_forall(base, None, d, want, BinderInfo::Default)
+                    .unwrap();
+            }
+            assert_eq!(r.ty, want);
+        });
+    }
+
     /// zetaDelta: a `let m := N.succ n` occurring in the term is inlined; the
     /// closure abstracts only `n`.
     #[test]
