@@ -1,5 +1,5 @@
 //! oracle: `Lean.Meta.abstractNestedProofs`
-//! (`Lean/Meta/AbstractNestedProofs.lean:17-117`) with `cache := true`,
+//! (`Lean/Meta/AbstractNestedProofs.lean:17-116`) with `cache := true`,
 //! plus the helpers it reaches: `mkAuxTheorem` (`Meta/Closure.lean:457-460`),
 //! `mkAuxLemma` (`Meta/Tactic/AuxLemma.lean:43-79`) and `mkAuxDeclName` /
 //! `DeclNameGenerator.mkUniqueName` (`CoreM.lean:149-153`, `:102-125`).
@@ -15,7 +15,16 @@
 //!   `:101`): P2 rejects `let` before this runs;
 //! - an aux whose type or value mentions an unsafe constant (the oracle's
 //!   unsafe opaque `defnDecl`, `AuxLemma.lean:51-58`): `add_decl_in`
-//!   rejects unsafe definitions.
+//!   rejects unsafe definitions;
+//! - a lookup of a PENDING aux constant (`pending_lookup_seam`). The spec
+//!   assumed none happens inside `abstractNestedProofs`, but one does: once
+//!   a binder type is rewritten to mention `foo._proof_k`, a later
+//!   `is_proof` on the body can `infer_type` through it (e.g. whnf's
+//!   `Eq.rec` iota, `to_ctor_when_k`, infers the major premise
+//!   `foo._proof_k n`). The oracle has already `addDecl`ed the aux, so it
+//!   succeeds; here the unknown-constant error naming a pending aux is
+//!   mapped to a named `Unsupported` until a pending-constant overlay
+//!   lands.
 //!
 //! Not modeled: private names. `mkUniqueName`'s `isConflict` also checks the
 //! private/public twin of each candidate (`CoreM.lean:116-119`), and `curr`
@@ -69,7 +78,7 @@ impl AuxLemmas {
     }
 
     /// Whether `n` names a pending aux theorem (only `Thm`s are pushed).
-    pub fn is_pending(&self, n: NameId) -> bool {
+    pub(crate) fn is_pending(&self, n: NameId) -> bool {
         self.pending
             .iter()
             .any(|d| matches!(d, Declaration::Thm(t) if t.val.name == n))
@@ -108,6 +117,30 @@ impl MetaCtx<'_> {
         }
         let mut cache = VisitCache::new();
         self.anp_visit(aux, &mut cache, e)
+            .map_err(|err| self.pending_lookup_seam(aux, err))
+    }
+
+    /// The pending-aux lookup seam (module doc): an unknown-constant
+    /// error naming a PENDING aux theorem becomes a named `Unsupported`.
+    /// Every other error passes through unchanged.
+    fn pending_lookup_seam(&self, aux: &AuxLemmas, err: MetaError) -> MetaError {
+        let msg = match &err {
+            MetaError::Infer(m) => m.clone(),
+            MetaError::Kernel(k @ leanr_kernel::KernelError::UnknownConstant(_)) => k.to_string(),
+            _ => return err,
+        };
+        let base = Some(self.view.store);
+        for d in &aux.pending {
+            let Declaration::Thm(t) = d else { continue };
+            let nm = self.scratch.to_name(base, Some(t.val.name));
+            if msg == format!("unknown constant '{nm}'") {
+                return MetaError::Unsupported(format!(
+                    "abstractNestedProofs: lookup of pending aux lemma {nm} — M4c-1 seam \
+                     (needs pending-constant overlay)"
+                ));
+            }
+        }
+        err
     }
 
     /// oracle: `AbstractNestedProofs.visit` (`AbstractNestedProofs.lean:72-106`).
@@ -648,6 +681,72 @@ mod tests {
                 pending_names(ctx, &aux),
                 vec!["foo4._proof_1", "foo4._proof_2"]
             );
+        });
+    }
+
+    /// Ruling R4 pin: the pending-aux lookup seam. Probe term
+    /// `fun (n : N) (x : @Eq.rec.{2,1} N (N.succ n) (fun b h => Type)
+    /// (N → N) (N.succ n) (@rfl.{1} N (N.succ n))) => x N.zero`:
+    /// visiting `x`'s domain abstracts the `rfl`, then the body's
+    /// `is_proof` infers through `Eq.rec` iota and looks up
+    /// `fooP._proof_1`, which is only pending.
+    #[test]
+    fn pending_aux_lookup_is_a_named_seam() {
+        with_meta0_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let foo_p = name(ctx, "fooP");
+            let n_ty = c(ctx, "N");
+            let succ = c(ctx, "N.succ");
+            let zero = c(ctx, "N.zero");
+            let one = lit_level(ctx, 1);
+            let two = lit_level(ctx, 2);
+            let n_name = name(ctx, "n");
+            let x_name = name(ctx, "x");
+            let b_name = name(ctx, "b");
+            let h_name = name(ctx, "h");
+            let cp = ctx.lctx_checkpoint();
+            let n = ctx
+                .push_local_decl(Some(n_name), n_ty, BinderInfo::Default)
+                .unwrap();
+            let sn = app(ctx, succ, n);
+            let (_, pf) = eq_rfl(ctx, sn);
+            // motive := fun (b : N) (h : @Eq.{1} N (N.succ n) b) => Type
+            let eq = cu(ctx, "Eq", &[one]);
+            let b0 = crate::test_support::bvar(ctx, 0);
+            let h_ty = ctx.mk_app_spine(eq, &[n_ty, sn, b0]).unwrap();
+            let type0 = ctx.scratch.expr_sort(base, one).unwrap();
+            let inner = ctx
+                .scratch
+                .expr_lam(base, Some(h_name), h_ty, type0, BinderInfo::Default)
+                .unwrap();
+            let motive = ctx
+                .scratch
+                .expr_lam(base, Some(b_name), n_ty, inner, BinderInfo::Default)
+                .unwrap();
+            let arrow = ctx
+                .scratch
+                .expr_forall(base, None, n_ty, n_ty, BinderInfo::Default)
+                .unwrap();
+            let rec = cu(ctx, "Eq.rec", &[two, one]);
+            let x_ty = ctx
+                .mk_app_spine(rec, &[n_ty, sn, motive, arrow, sn, pf])
+                .unwrap();
+            let x = ctx
+                .push_local_decl(Some(x_name), x_ty, BinderInfo::Default)
+                .unwrap();
+            let body = app(ctx, x, zero);
+            let e = ctx.mk_lambda(&[n, x], body).unwrap();
+            ctx.lctx_restore(cp);
+            ctx.infer_type(e).expect("the probe term is well typed");
+            let mut aux = AuxLemmas::new(foo_p);
+            match ctx.abstract_nested_proofs(&mut aux, e) {
+                Err(MetaError::Unsupported(m)) => assert_eq!(
+                    m,
+                    "abstractNestedProofs: lookup of pending aux lemma fooP._proof_1 — \
+                     M4c-1 seam (needs pending-constant overlay)"
+                ),
+                other => panic!("expected the pending-aux seam, got {other:?}"),
+            }
         });
     }
 
