@@ -169,30 +169,30 @@ pub(crate) fn extract_binder_group(
 }
 
 /// Push one bracketed binder group's names into the local context,
-/// returning their fvars in declaration order. The group's shared type
-/// elaborates ONCE, before its own names enter scope (so `(x y : T)`
-/// elaborates `T` in the context that excludes x and y) — the rule
-/// `elabBinders` follows for a single `bracketedBinder` item. Shared by
+/// returning their fvars in declaration order. oracle: `elabBinderViews`
+/// (`Binders.lean:208-223`) over the group's views. `toBinderViews`
+/// (`Binders.lean:140`) makes one view PER NAME sharing the type syntax,
+/// and each view runs `elabType` again inside the previous views' scope.
+/// So `(x y : T)` elaborates `T` twice: `(α β : Sort _)` gets two
+/// independent level mvars, and the second `T` sees `x`. Shared by
 /// `elab_binders_and_forall` (the `forall`/`depArrow` telescope) and
 /// `push_let_binders` (the `let`/`have` telescope), which differ only in
 /// what they do with the returned fvars (`mk_forall` vs. also
 /// `mk_lambda`-ing a value).
-fn push_binder_group(
+pub(crate) fn push_binder_group(
     elab: &mut TermElabM,
     g: &BinderGroup,
     kinds: &KindInterner,
 ) -> Result<Vec<ExprId>, ElabError> {
-    let dom = elab_type(elab, &g.ty, kinds)?;
-    // oracle: `elabBinderViews` (`Binders.lean:216-219`) — after
-    // `elabType`, before the binder is pushed. `push_binder_group` is the
-    // only leanr port of `elabBinderViews`, so this covers `forall`,
-    // `depArrow` and `let`/`have`'s own binders; `fun`
-    // (`elabFunBinderViews`) runs no such check.
-    if matches!(g.bi, BinderInfo::InstImplicit) {
-        check_inst_binder_type(elab, dom)?;
-    }
     let mut fvars = Vec::with_capacity(g.names.len());
     for &name in &g.names {
+        let dom = elab_type(elab, &g.ty, kinds)?;
+        // oracle: `elabBinderViews` (`Binders.lean:216-219`) — after
+        // `elabType`, before the binder is pushed. `fun`
+        // (`elabFunBinderViews`) runs no such check.
+        if matches!(g.bi, BinderInfo::InstImplicit) {
+            check_inst_binder_type(elab, dom)?;
+        }
         fvars.push(push_user_binder(elab, name, dom, g.bi)?);
     }
     Ok(fvars)

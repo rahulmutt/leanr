@@ -60,3 +60,43 @@ fn unknown_identifier_first_line() {
         Some("Unknown identifier `nope`")
     );
 }
+
+/// `∀ (α β : Sort _), α → β → α`: the two binder domains are `Sort ?u`
+/// and `Sort ?v` with DISTINCT level mvars (oracle `elabBinderViews`
+/// elaborates the group's type once per name, `Binders.lean:208-223`;
+/// probe: `def tw (α β : Sort _) …` gets `[u_1, u_2]`).
+#[test]
+fn binder_group_type_is_elaborated_per_name() {
+    use leanr_kernel::bank::terms::Node;
+    let r = support::replay_fixture_in("elab", "Elab0.olean");
+    support::with_record_elab(
+        &r,
+        "∀ (α β : Sort _), α → β → α",
+        &builtin::snapshot(),
+        |elab, elem, kinds| {
+            let e = elab
+                .elab_term_and_synthesize(elem, kinds, None)
+                .expect("elaborates");
+            let base = Some(elab.view.store);
+            let st = elab.mctx.store();
+            let Node::Forall {
+                binder_type: t1,
+                body,
+                ..
+            } = st.expr_node(base, e)
+            else {
+                panic!("outer forall")
+            };
+            let Node::Forall {
+                binder_type: t2, ..
+            } = st.expr_node(base, body)
+            else {
+                panic!("inner forall")
+            };
+            assert_ne!(
+                t1, t2,
+                "one shared `Sort ?u` for both binders: the group was elaborated once"
+            );
+        },
+    );
+}
