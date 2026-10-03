@@ -65,8 +65,8 @@
 //! `is_def_eq_singleton` and `ensure_type`. The quick and slow
 //! `checkAssignment` paths, including `isSubPrefixOf` and the
 //! `ctxApprox` restriction, are ported in `check_assignment.rs`.
-//! `elimMVar`'s depth-dependent `newMVarKind`
-//! (MetavarContext.lean:1187, :1195) is nondep R9, out of scope.
+//! `elimMVar`'s depth-dependent `newMVarKind` (MetavarContext.lean:1195)
+//! is ported in `mk_binding.rs`'s `elim_mvar`.
 
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::ExprId;

@@ -305,7 +305,7 @@ split is `:1213` (not `:1212`), `mkFreshExprMVarAt` is
 - ~~`expandDelayedAssigned?`~~ CLOSED by the follow-up below.
 - Mutations 7 and 8 are pinned only by unit tests (above), not by an
   oracle-probed row.
-- Seam R9 (`elim_mvar` uses `decl.kind` where the oracle's
+- ~~Seam R9~~ CLOSED by the newMVarKind follow-up below. (`elim_mvar` used `decl.kind` where the oracle's
   `mkMVarApp`/`addExprMVarDecl` use `newMVarKind`, `syntheticOpaque` for a
   non-assignable original) now also affects the count. For a
   non-assignable original the oracle's aux mvar counts lets and is
@@ -362,3 +362,34 @@ pinned by unit tests only.
 
 **Corpus.** 359 → 360 (`eda/coe-resume-after-pending`). `elab-queries.jsonl`
 gained 1 line and changed none. Smoke tests did not move.
+
+### newMVarKind follow-up (R9)
+
+Bounded change (design approved in chat, no plan file). `elim_mvar`
+(`mk_binding.rs`) now computes the oracle's `newMVarKind`
+(`MetavarContext.lean:1195`): `SyntheticOpaque` if the original is
+read-only (`!isAssignable`, i.e. from an outer depth), else the original's
+kind. It feeds all four aux-mvar sites: `mk_aux_mvar_type_with`, the
+`numScopeArgs` count, `mk_aux_mvar_at` and `mk_mvar_app`. The
+assign-vs-delay split still uses the ORIGINAL's kind (`:1213`), so a
+natural outer-depth original is still assigned outright.
+
+**Oracle probe** (scratch `run_meta`, v4.33.0-rc1): `mkLambdaFVars #[a, l]
+?m` under `withNewMCtxDepth`, where `l` is a let of `a` and `?m` is natural
+or synthetic. Result: `?m := ?aux a l`, `?aux` syntheticOpaque with
+`numScopeArgs` 2 and type `Type → Type → Type`. At the same depth, the
+result is `?aux a` (natural, count 1). The unit test
+`elim_mvar_gives_an_outer_depth_original_a_synthetic_opaque_aux` pins
+these values.
+
+**Mutations** (each applied, run, reverted). Each one below was killed by
+that test, on a distinct assert:
+1. `kind` at `mk_aux_mvar_type_with`: killed (no inner forall).
+2. `kind` at the `mvar_app_skips` count: killed (`numScopeArgs` 1).
+3. `kind` at `mk_aux_mvar_at`: killed (aux kind Natural).
+4. `kind` at `mk_mvar_app`: killed (let not applied).
+5. `new_kind` at the assign-vs-delay split: killed (original not assigned).
+
+No elab row reaches this path. The elaborator's `withNewMCtxDepth` sites
+only abstract fvars they create, and those are never in an outer mvar's
+lctx. Corpus unchanged.

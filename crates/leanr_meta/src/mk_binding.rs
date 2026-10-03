@@ -664,6 +664,16 @@ impl<'e> MetaCtx<'e> {
             visited.push(self.elim(xs, *a, cache)?);
         }
 
+        // oracle `:1195`, `newMVarKind`: an original from an outer depth
+        // (`!isAssignable`) gets a syntheticOpaque auxiliary, so the aux
+        // mvar is read-only to unification as the original was, and lets
+        // are applied and counted. Only the assign-vs-delay split below
+        // keeps the ORIGINAL's kind (`:1213` tests `mvarDecl.kind`).
+        let new_kind = if self.mctx.is_read_only(mvar_id) {
+            crate::MVarKind::SyntheticOpaque
+        } else {
+            kind
+        };
         let to_revert = self.collect_forward_deps(&mvar_lctx, to_revert)?;
         let new_lctx = self.reduce_local_context(&mvar_lctx, &to_revert)?;
         // oracle `:1204`, `withFreshCache do mkAuxMVarType …` — ONE
@@ -685,7 +695,7 @@ impl<'e> MetaCtx<'e> {
             &mvar_lctx,
             &to_revert,
             decl_ty,
-            kind,
+            new_kind,
             true,
             &mut aux_cache,
         )?;
@@ -694,11 +704,11 @@ impl<'e> MetaCtx<'e> {
         // applies, NOT `to_revert.len()`: it skips genuine lets.
         let applied = to_revert
             .iter()
-            .filter(|x| !self.mvar_app_skips(**x, &mvar_lctx, kind))
+            .filter(|x| !self.mvar_app_skips(**x, &mvar_lctx, new_kind))
             .count();
         let (new_mvar, new_id) =
-            self.mk_aux_mvar_at(new_lctx, new_ty, kind, None, decl_scope_args + applied)?;
-        let result = self.mk_mvar_app(new_mvar, &to_revert, &mvar_lctx, kind)?;
+            self.mk_aux_mvar_at(new_lctx, new_ty, new_kind, None, decl_scope_args + applied)?;
+        let result = self.mk_mvar_app(new_mvar, &to_revert, &mvar_lctx, new_kind)?;
 
         if kind != crate::MVarKind::SyntheticOpaque {
             // oracle `:1214-1215`.
@@ -1015,6 +1025,62 @@ mod tests {
             assert_eq!(assigned_head_scope_args(ctx, mid), 3);
             ctx.lctx_restore(cp);
         });
+    }
+
+    /// oracle `newMVarKind` (`MetavarContext.lean:1195`): an original
+    /// from an OUTER depth gets a `syntheticOpaque` auxiliary metavariable,
+    /// whatever its own kind. Oracle probe (`mkLambdaFVars #[a, l] ?m`
+    /// under `withNewMCtxDepth`, `l` a let of `a`, v4.33.0-rc1), for both
+    /// a natural and a synthetic `?m`: the original is assigned
+    /// `?aux a l`, and `?aux` is syntheticOpaque with `numScopeArgs` 2 and
+    /// type `Type → Type → Type`. Each of the four `new_kind` sites has
+    /// its own assert: the aux kind, the applied let, the count, and the
+    /// unused let turned into a forall by `mkAuxMVarType`.
+    #[test]
+    fn elim_mvar_gives_an_outer_depth_original_a_synthetic_opaque_aux() {
+        for kind in [crate::MVarKind::Natural, crate::MVarKind::Synthetic] {
+            with_ctx(|ctx| {
+                let base = Some(ctx.view.store);
+                let zero = ctx.scratch.level_zero(base).expect("level");
+                let one = ctx.scratch.level_succ(base, zero).expect("level");
+                let ty = ctx.scratch.expr_sort(base, one).expect("Type");
+                let cp = ctx.lctx_checkpoint();
+                let a = fresh_fvar(ctx, ty, "a");
+                let l = ctx.push_let_decl(None, ty, a, false).expect("let");
+                let lctx = ctx.current_lctx();
+                let (m, mid) = ctx
+                    .mk_aux_mvar_at(lctx, ty, kind, None, 0)
+                    .expect("mvar at depth 0");
+                ctx.with_new_mctx_depth(false, |ctx| {
+                    assert!(ctx.mctx().is_read_only(mid));
+                    let _ = ctx.elim_mvar_deps(&[a, l], m).expect("elim_mvar_deps");
+                    let assigned = ctx
+                        .mctx()
+                        .assignment(mid)
+                        .expect("the original's own kind still picks the assign branch");
+                    let head = ctx.get_app_fn(assigned);
+                    let Node::MVar { id: Some(n) } = ctx.node(head) else {
+                        panic!("the assignment's head is the auxiliary metavariable");
+                    };
+                    let aux = ctx.mctx().decl(crate::MVarId(n)).expect("declared");
+                    let (aux_kind, aux_nsa, aux_ty) = (aux.kind, aux.num_scope_args, aux.ty);
+                    assert_eq!(aux_kind, crate::MVarKind::SyntheticOpaque, "{kind:?}");
+                    let Node::App { arg, .. } = ctx.node(assigned) else {
+                        panic!("expected `?aux a l`");
+                    };
+                    assert_eq!(arg, l, "an opaque aux is applied to the let too");
+                    assert_eq!(aux_nsa, 2, "the applied let is counted");
+                    let Node::Forall { body, .. } = ctx.node(aux_ty) else {
+                        panic!("aux type binds `a`");
+                    };
+                    assert!(
+                        matches!(ctx.node(body), Node::Forall { .. }),
+                        "the unused let is kept as a forall for an opaque aux"
+                    );
+                });
+                ctx.lctx_restore(cp);
+            });
+        }
     }
 
     fn fvar_id(ctx: &crate::MetaCtx, e: leanr_kernel::bank::ExprId) -> leanr_kernel::bank::NameId {
