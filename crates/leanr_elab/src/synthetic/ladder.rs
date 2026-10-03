@@ -30,11 +30,10 @@ pub enum PostponeBehavior {
 }
 
 impl<'e> TermElabM<'e> {
-    // `try_synth_instance` and its positional stuck pre-test moved to
-    // `leanr_meta::MetaCtx::try_synth_instance` in M4b-3 P4 (design spec
-    // § Amendment 5 item 3): the oracle's `trySynthInstance` is
-    // Meta-level and `leanr_meta::coe` needs the same three-valued
-    // answer. The residue documentation moved with it.
+    // `try_synth_instance` lives on `leanr_meta::MetaCtx` (M4b-3 P4,
+    // design spec § Amendment 5 item 3): the oracle's `trySynthInstance`
+    // is Meta-level and `leanr_meta::coe` needs the same three-valued
+    // answer.
 
     /// The ordering core of `synthesizeSyntheticMVarsStep`
     /// (`SyntheticMVars.lean:573-594`), with the per-mvar outcome

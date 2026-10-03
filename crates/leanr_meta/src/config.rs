@@ -148,10 +148,11 @@ pub struct Config {
     ///   outside is at a different depth, so
     ///   `isReadOnlyOrSyntheticOpaque`'s FIRST arm
     ///   (`Basic.lean:981-982`) returns `true` before the kind is ever
-    ///   examined. Depth is this crate's standing tier-1 seam
-    ///   (`level.rs`'s module doc); wiring the flag in here without
-    ///   modelling depth would flip `Star`/`Other` keys the oracle keeps
-    ///   at `Other`.
+    ///   examined. Synthesis now runs on real depth, so the gate stays
+    ///   moot; wiring the flag in here would flip `Star`/`Other` keys the
+    ///   oracle keeps at `Other`. The DiscrTree stuck cases
+    ///   (`DiscrTree/Main.lean:359-386`) remain unported (synth-real-depth
+    ///   spec, § Landed open seams).
     ///
     /// `whnf.rs`'s `synth_pending` guard is NOT on this list: the
     /// oracle's `synthPendingImp` (`SynthInstance.lean:1033-1036`)

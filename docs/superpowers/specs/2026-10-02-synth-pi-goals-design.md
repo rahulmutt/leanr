@@ -374,7 +374,7 @@ and the plan carry the new binder.
 
 **Open follow-ups.**
 - Approach B: a shared meta/elab telescope.
-- Synthesis onto real depth.
+- Synthesis onto real depth. CLOSED by synth-real-depth (`2026-10-02-synth-real-depth-design.md`).
 - Port `removeUnusedArguments?` (answer-neutral as observed on
   `meta/synth-pi-unused-subgoal`; `piUnused` is a root goal and does not
   reach it).
@@ -385,16 +385,12 @@ and the plan carry the new binder.
 - Mutation 1c's untested shape: a pi goal with mvars and out-params behind
   an `abbrev` (see the mutation table).
 - **Ranked follow-up (first; out of slice scope, but it blocks most natural
-  pi-subgoal rows):** `(inferInstance : Inhabited (Prod Nat Nat))`,
-  `(inferInstance : BEq (Prod Nat Nat))` and
-  `(inferInstance : BEq (Option Nat))` fail in leanr with
-  `InstanceSynthesisFailed`, both at 7d21d8b (before this slice) and at the
-  slice head, on the ElabOp environment. The oracle answers all three:
-  `@instInhabitedProd Nat Nat instInhabitedNat instInhabitedNat`,
-  `@instBEqProd Nat Nat (@instBEqOfDecidableEq Nat instDecidableEqNat)
-  (@instBEqOfDecidableEq Nat instDecidableEqNat)` and
-  `@Option.instBEq Nat (@instBEqOfDecidableEq Nat instDecidableEqNat)`. Not
-  root-caused in this slice.
+  pi-subgoal rows):** ~~`Inhabited (Prod Nat Nat)`, `BEq (Prod Nat Nat)`
+  and `BEq (Option Nat)` fail in leanr while the oracle answers.~~ NOT A
+  BUG (corrected 2026-10-02, synth-real-depth spec § Housekeeping):
+  `instInhabitedProd`, `instBEqProd` and `Option.instBEq` are not in
+  `ElabOp.olean`, and the oracle on ElabOp (prelude + `import ElabOp`)
+  fails all three too. The recorded answers came from stock Init.
 - Minor: `lctx_restore` drops the `lctx_snapshot` cache even when nothing was
   pushed, so each candidate re-clones (perf only).
 - Minor: binder-free goals take one extra `step()` per `try_resolve` and per

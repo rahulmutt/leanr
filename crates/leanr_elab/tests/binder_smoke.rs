@@ -589,29 +589,18 @@ fn fun_binder_domain_comes_from_the_expected_type() {
 /// — a genuine, oracle-matching type mismatch, not a successful lambda:
 /// `fun x y => Nat.zero` really is a 2-argument function and `Nat ->
 /// Nat` can only type a 1-argument one, no matter how the non-`forallE`
-/// arm answers. `elab_json` (`elab_term_ensuring_type` alone, no
-/// fixpoint) cannot observe that: the outer ascription's
-/// `ensureHasType` finds the mismatch and defers it to a postponed
-/// `.coe` synthetic mvar (oracle: `synthesizeSyntheticMVar`'s `.coe`
-/// arm) that `elab_json`'s harness never forces, so it silently reports
-/// a bare unresolved `mvar` instead of the real answer — the brief's
-/// test passed for the wrong reason. `elab_and_synthesize` (the real
-/// top-level entry point: `elab_term` + the fixpoint +
-/// `instantiate_mvars`) forces it, surfacing `ElabError::StuckCoercion`
-/// — the oracle's own `.coe`-arm error (`SyntheticMVars.lean:304-310`),
-/// not `TypeMismatch` (`mkCoe`'s IMMEDIATE-failure variant): the
-/// failure is reached through the postponement ladder, matching the
-/// oracle's own two-phase shape.
-/// Renamed from `fun_propagation_stops_at_a_non_forall_expected_type`
-/// (fix round 1, minor): the OLD name described the mechanism
-/// (propagation stopping), but what this actually pins, end-to-end, is
-/// the downstream STUCK COERCION `ensureHasType` produces once that
-/// stopped propagation leaves an arity mismatch the fixpoint forces.
+/// arm answers. The outer ascription's `ensureHasType` runs `mkCoe`;
+/// the oracle's `trySynthInstance` on that `CoeT` goal is `.none`, so
+/// the mismatch is reported immediately (`TermElabM.lean:1307`,
+/// `:1322`) and the oracle message lacks the `.coe` arm's "failed to
+/// create type class instance for" suffix (`SyntheticMVars.lean:304-310`).
+/// `elab_and_synthesize` is used so a postponed coercion would still be
+/// forced and observed.
 #[test]
-fn fun_more_binders_than_expected_pi_levels_is_a_stuck_coercion() {
+fn fun_more_binders_than_expected_pi_levels_is_a_type_mismatch() {
     match support::elab_and_synthesize("(fun x y => Nat.zero : Nat -> Nat)") {
-        Err(leanr_elab::ElabError::StuckCoercion { .. }) => {}
-        other => panic!("expected a stuck coercion once forced, got {other:?}"),
+        Err(leanr_elab::ElabError::TypeMismatch { .. }) => {}
+        other => panic!("expected an immediate type mismatch, got {other:?}"),
     }
 }
 

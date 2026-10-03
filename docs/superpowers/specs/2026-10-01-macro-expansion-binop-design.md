@@ -555,7 +555,7 @@ Spec corrections:
 
 Open follow-ups:
 - Synthesis onto real depth + `isDefEqStuckEx` (`synth_instance` still on
-  rollback; `SynthInstance.lean:958-978`).
+  rollback; `SynthInstance.lean:958-978`). CLOSED by synth-real-depth (`2026-10-02-synth-real-depth-design.md`).
 - `discr_path` read-only arm.
 - Nondep R9 (`MetavarContext.lean:1187`, `:1195`).
 - `unstuckMVar` (with `isDefEqOnFailure`).

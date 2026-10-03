@@ -70,6 +70,7 @@
 {"exp":{"k":"const","n":"Nat.succ","us":[]},"id":"app/atBare","src":"@Nat.succ"}
 {"exp":{"k":"const","n":"List","us":[{"k":"zero"}]},"id":"app/univList","src":"List.{0}"}
 {"exp":{"a":{"k":"const","n":"Nat.zero","us":[]},"f":{"a":{"k":"const","n":"instWrapNat","us":[]},"f":{"a":{"k":"const","n":"Nat","us":[]},"f":{"k":"const","n":"useWrap","us":[]},"k":"app"},"k":"app"},"k":"app"},"id":"tc/useWrapNat","src":"useWrap Nat.zero"}
+{"exp":{"a":{"i":1,"k":"mvar"},"f":{"a":{"a":{"i":0,"k":"mvar"},"f":{"k":"const","n":"instAnyAll","us":[]},"k":"app"},"f":{"a":{"i":0,"k":"mvar"},"f":{"k":"const","n":"useAny","us":[]},"k":"app"},"k":"app"},"k":"app"},"id":"tc/useAnyHole","src":"useAny _"}
 {"exp":{"a":{"k":"const","n":"Nat.zero","us":[]},"f":{"a":{"k":"const","n":"instWrapNat","us":[]},"f":{"a":{"k":"const","n":"Nat","us":[]},"f":{"k":"const","n":"useWrap","us":[]},"k":"app"},"k":"app"},"k":"app"},"id":"tc/useWrapAscribed","src":"(useWrap Nat.zero : Nat)"}
 {"exp":{"a":{"k":"const","n":"Nat.zero","us":[]},"f":{"a":{"k":"const","n":"instWrapNat","us":[]},"f":{"a":{"k":"const","n":"Nat","us":[]},"f":{"k":"const","n":"useWrap","us":[]},"k":"app"},"k":"app"},"k":"app"},"id":"tc/atUseWrap","src":"@useWrap Nat instWrapNat Nat.zero"}
 {"exp":{"a":{"k":"const","n":"Nat.zero","us":[]},"f":{"a":{"k":"const","n":"instWrapNat","us":[]},"f":{"a":{"k":"const","n":"Nat","us":[]},"f":{"k":"const","n":"useWrap","us":[]},"k":"app"},"k":"app"},"k":"app"},"id":"tc/atUseWrapHole","src":"@useWrap Nat _ Nat.zero"}

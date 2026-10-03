@@ -107,18 +107,12 @@
 //! purpose (occurs-check-time assignment safety during unification, not table
 //! keying). Under the real oracle, a `MVarKind.syntheticOpaque` mvar IS
 //! renamed by `mkTableKey`: kind plays no role in `MVarId.isAssignable` at
-//! all, only depth does. This crate has per-mvar depth bookkeeping (side maps
-//! in `mvar_ctx.rs`, added by macro/binop% P1), but these table-key walks do
-//! NOT consult it yet (synthesis is still on rollback rather than
-//! `withNewMCtxDepth`), so under the old flat-depth collapse, which they
-//! still apply, `decl.depth == mctx.depth` / `getLevelDepth mvarId !=
-//! mctx.depth` are always (respectively) true/false for any DECLARED mvar --
-//! both walks below collapse the check to "always assignable" for every
-//! declared mvar, KIND INCLUDED: `norm_expr_body`'s mvar arm does not
-//! special-case `MVarKind::SyntheticOpaque` (it IS renamed, same as any other
-//! declared mvar), deliberately NOT mirroring
-//! `assign.rs::unassigned_mvar_id`'s kind check, because that check answers a
-//! different oracle question than this one does.
+//! all, only depth does. Both walks therefore compare the mvar's recorded
+//! depth (`mvar_ctx.rs`) against `mctx.depth()`: a lower-depth or undeclared
+//! mvar is a constant, and kind plays no role -- `norm_expr_body`'s mvar arm
+//! does not special-case `MVarKind::SyntheticOpaque`, deliberately NOT
+//! mirroring `assign.rs::unassigned_mvar_id`'s kind check, because that check
+//! answers a different oracle question than this one does.
 //!
 //! `mkTableKey`'s own doc (:195) states it "assumes `e` does not contain
 //! assigned metavariables" -- callers (`mkTableKeyFor`, :262-266) run
@@ -531,6 +525,14 @@ impl<'a, 'e> KeyNormalizer<'a, 'e> {
                 if let Some(v) = self.ctx.mctx.level_assignment(lid) {
                     return self.norm_level(v);
                 }
+                // oracle: `if getLevelDepth mvarId != mctx.depth then
+                // return u` (:120). Depth, NOT `levelAssignDepth`: a
+                // caller's level mvar stays assignable under
+                // `allowLevelAssignments := true` but is still a constant
+                // in the key.
+                if self.ctx.mctx.level_mvar_depth(lid) != self.ctx.mctx.depth() {
+                    return Ok(l);
+                }
                 if let Some(&renamed) = self.lmap.get(&lid) {
                     return Ok(renamed);
                 }
@@ -604,20 +606,15 @@ impl<'a, 'e> KeyNormalizer<'a, 'e> {
                     return self.norm_expr(v);
                 }
                 // oracle: `if !(← mvarId.isAssignable) then return e`
-                // (:151-152) -- `MVarId.isAssignable`
-                // (`MetavarContext.lean:483-486`) is DEPTH-ONLY (`decl.depth
-                // == mctx.depth`), a different function from
-                // `assign.rs::unassigned_mvar_id`'s `isReadOnlyOrSyntheticOpaque`
-                // check (see this module's own doc for why the two must not
-                // be conflated). Under the flat-depth collapse this walk still
-                // applies (it does not consult `mvar_ctx.rs`'s depth maps) that
-                // depth check is always true for any DECLARED mvar,
-                // `MVarKind` included -- a syntheticOpaque mvar IS renamed
-                // here, matching the real `mkTableKey`. `None` (no
-                // declaration at all) is the one genuine "not assignable"
-                // case left: not a mvar this crate's `MetavarContext` knows
-                // about, so nothing to rename by.
-                let assignable = self.ctx.mctx.decl(mid).is_some();
+                // (:145). `MVarId.isAssignable`
+                // (`MetavarContext.lean:483-486`) is DEPTH-ONLY,
+                // `decl.depth == mctx.depth`: kind plays no role, so a
+                // syntheticOpaque mvar at the current depth IS renamed.
+                // Not `assign.rs::unassigned_mvar_id`'s
+                // `isReadOnlyOrSyntheticOpaque` (a different oracle
+                // question; see the module doc). Undeclared -> no depth ->
+                // a constant (the oracle's `getDecl` would panic).
+                let assignable = self.ctx.mctx.expr_mvar_depth(mid) == Some(self.ctx.mctx.depth());
                 if !assignable {
                     return Ok(e);
                 }
@@ -1222,6 +1219,11 @@ impl<'a, 'e> MVarAbstractor<'a, 'e> {
                 if let Some(v) = self.ctx.mctx.level_assignment(lid) {
                     return self.level(v);
                 }
+                // oracle: `AbstractMVars.lean:56-60` -- "metavariables
+                // from lower depths are treated as constants".
+                if self.ctx.mctx.level_mvar_depth(lid) != self.ctx.mctx.depth() {
+                    return Ok(l);
+                }
                 if let Some(&renamed) = self.lmap.get(&lid) {
                     return Ok(renamed);
                 }
@@ -1276,10 +1278,11 @@ impl<'a, 'e> MVarAbstractor<'a, 'e> {
                     return self.expr(v);
                 }
                 // oracle: `if decl.depth != mctx.depth then return e`
-                // (:91-93) -- under this crate's flat-depth collapse
-                // (see this module's doc), the only "treated as a
-                // constant" case left is an mvar with no declaration at
-                // all, which has no type to abstract by either.
+                // (`AbstractMVars.lean:89-93`): a lower-depth mvar is a
+                // constant. Undeclared -> no depth -> a constant too.
+                if self.ctx.mctx.expr_mvar_depth(mid) != Some(self.ctx.mctx.depth()) {
+                    return Ok(e);
+                }
                 let Some(decl_ty) = self.ctx.mctx.decl(mid).map(|d| d.ty) else {
                     return Ok(e);
                 };
@@ -1590,27 +1593,26 @@ impl<'e> MetaCtx<'e> {
     /// [`MetaError::IsDefEqStuck`] propagated out of a subgoal
     /// unification, which is NEVER collapsed to "this candidate failed".
     ///
-    /// The SEARCH runs under ONE `checkpoint`/`rollback` pair -- this
-    /// crate's stand-in for the oracle's `withNewMCtxDepth`
-    /// (`SynthInstance.lean:978-1002`) -- so nothing the search assigned
-    /// is left on the caller's `mctx`; the answer is already fully
-    /// instantiated and metavariable-free on the expr side (`mk_answer`
-    /// -> `abstract_mvars`), so it survives that rollback.
+    /// The SEARCH runs under `with_new_mctx_depth(true, ..)` (oracle
+    /// `withNewMCtxDepth`, `SynthInstance.lean:978-1002`) -- so nothing
+    /// the search assigned is left on the caller's `mctx`; the answer is
+    /// already fully instantiated and metavariable-free on the expr side
+    /// (`mk_answer` -> `abstract_mvars`), so it survives the depth block.
     ///
     /// It does NOT follow that this call leaves the caller's `mctx`
-    /// untouched (task 7). `assign_out_params` runs AFTER the rollback,
+    /// untouched (task 7). `assign_out_params` runs AFTER the depth block,
     /// in the caller's own frame (`apply_abstract_result`, oracle
     /// `applyAbstractResult?` at `:1003`), and a successful synthesis of
     /// a class with output parameters DELIBERATELY assigns the caller's
     /// metavariables in those positions -- that assignment is a RESULT
-    /// of synthesis, and putting it inside the pair would discard it.
+    /// of synthesis, and putting it inside the block would discard it.
     /// A failed synthesis still leaves no assignment on the caller's
     /// mvars -- not the stronger "leaves the `mctx` as it found it": on
     /// the `assign_out_params -> false` path, `open_abstract_mvars_result`
     /// has already minted mvar DECLARATIONS into the caller's `mctx`
-    /// before the rollback runs (rollback restores ASSIGNMENTS only, not
-    /// declarations), and `preprocess`'s `whnf` runs outside the
-    /// checkpoint/rollback pair and can assign through `synth_pending`.
+    /// (outside the depth block, so nothing undoes them), and
+    /// `preprocess`'s `whnf` runs outside the depth block and can assign
+    /// through `synth_pending`.
     // Narrowed from this module's former blanket `#![allow(dead_code)]`
     // (removed by this task): `synth_instance` is the crate's typeclass-
     // synthesis ENTRY POINT, and every other item in this module and in
@@ -1664,188 +1666,32 @@ impl<'e> MetaCtx<'e> {
     /// — `synthInstance?` with `isDefEqStuckExceptionId` caught and
     /// reported as `.undef`.
     ///
-    /// **Why this is not just `synth_instance` with the error mapped.**
-    /// The oracle's `.undef` is a DYNAMIC signal: `synthInstanceCore?`
-    /// runs the entire search under `withNewMCtxDepth`
-    /// (`SynthInstance.lean:978`) with `isDefEqStuckEx := true`
-    /// (`:963`), which makes every metavariable the CALLER already owned
-    /// read-only for the duration. When a candidate's unification then
-    /// reaches `?a =?= Nat` with `?a` read-only and `Nat` not a
-    /// metavariable, neither side is assignable and
-    /// `ExprDefEq.lean:1908-1958`'s last branch throws
-    /// `isDefEqStuck` (`:1956`), which aborts the whole search — so the
-    /// answer is "ask me again once you have assigned `?a`", not
-    /// "`instWrapNat`".
+    /// The `.undef` is DYNAMIC: `synth_instance` runs its search under
+    /// `with_new_mctx_depth` with `is_def_eq_stuck_ex` set
+    /// (`synth_instance_main`), so the caller's mvars are read-only and
+    /// a candidate that needs one assigned throws
+    /// `MetaError::IsDefEqStuck` (the read-only arms in
+    /// `assign.rs`/`level.rs`). That replaced a syntactic pre-test that
+    /// over-approximated: an all-polymorphic candidate set (`Any ?a`,
+    /// `tc/useAnyHole`) and a class with zero candidates (`NoInst ?a`,
+    /// `noInstMVar/synth/0`) both answer here, as in the oracle.
+    /// An mvar that occurs ONLY in out-param positions never gets stuck:
+    /// `preprocess_out_param` replaces it before the search and
+    /// `assign_out_params` assigns it after, at the caller's depth.
     ///
-    /// `leanr_meta` now has an mctx-depth model and throws
-    /// `MetaError::IsDefEqStuck` at two ported sites under
-    /// `with_def_eq_stuck_ex`, but `synth_instance` does not yet run under
-    /// `with_new_mctx_depth` / `isDefEqStuckEx` (a follow-up of the
-    /// macro/binop% P1 slice). Its `synth_instance` therefore treats the
-    /// caller's `?a` as an ordinary assignable mvar and answers `Wrap ?a`
-    /// with whichever candidate it reaches first — silently choosing the
-    /// class's type parameter for the caller. That is a WRONG ANSWER, not
-    /// merely a missing postponement: with `Wrap Nat`/`Wrap Unit` both in
-    /// scope it picks `instWrapUnit` and then `(useWrap Nat.zero : Nat)`
-    /// fails to typecheck its own explicit argument.
-    ///
-    /// So the stuck condition is reconstructed here, from the goal type,
-    /// on the elaborator side of the seam:
-    ///
-    /// - **Exact in the safe direction.** Every site that can throw
-    ///   `isDefEqStuck` under this config — the non-assignable/
-    ///   non-assignable branch (`ExprDefEq.lean:1956`), the
-    ///   outer-depth `unstuckMVar` rescue (`:2018`), and
-    ///   `DiscrTree.getKeyArgs`'s reducible/matcher/recursor cases
-    ///   (`DiscrTree/Main.lean:359-386`, all guarded by
-    ///   `e.hasExprMVar`) — needs an unassigned EXPR metavariable
-    ///   reachable from the goal. A goal with none can never be
-    ///   `.undef`, so a ground goal still goes to the real search.
-    /// - **Over-approximating in the other direction, and that is the
-    ///   residual gap.** A goal that does mention an unassigned expr
-    ///   mvar was reported `.undef` here in three cases where the
-    ///   oracle does NOT report `.undef` — three, of which residue 1 is
-    ///   closed by M4b-3 P2b-ii; two remain. They are listed below
-    ///   WORST FIRST, and the two that remain do not share an owner —
-    ///   do not assume the mctx-depth model closes them both.
-    ///
-    /// **Residue 1 — `outParam` goals (the big one; owner: P2b-ii, NOT
-    /// the depth model).** `synthInstanceCore?` classifies the goal
-    /// through `preprocess` (`SynthInstance.lean:737-773`, called at `:968`)
-    /// into `.noMVars` / `.mvarsNoOutputParams` / `.mvarsOutputParams`
-    /// (`PreprocessKind`, `:706-716`). For `.mvarsOutputParams` the
-    /// dispatch at `:999-1002` runs `preprocessOutParam`
-    /// (`:775-818`), which REPLACES the caller's mvars sitting in
-    /// output-parameter positions with `mkFreshExprMVar`s — minted
-    /// inside the `withNewMCtxDepth` block at `:978`, hence at the NEW
-    /// depth, hence assignable — so the search never unifies against the
-    /// caller's mvar and never gets stuck on it. `applyAbstractResult?`
-    /// then runs `assignOutParams` (`:825-845`, called at `:880` and
-    /// `:936`) from `:1003`, i.e. AFTER the depth block has closed, and
-    /// that `isDefEq` assigns the caller's mvar at the outer depth. So
-    /// the standard binop shape `HAdd Nat Nat ?γ` is `.some` in the
-    /// oracle, with `?γ := Nat` assigned as a RESULT of synthesis —
-    /// while this function answers `Undef` and the ladder will
-    /// eventually raise `StuckSyntheticMVar` on a goal the oracle
-    /// answers.
-    ///
-    /// **Closed by M4b-3 P2b-ii.** `has_mvar_outside_out_params` below
-    /// exempts output-parameter positions, so `Op N N ?c` /
-    /// `Get Cell Nat ?e` reach the real search and P2b-i's
-    /// `assign_out_params` assigns the caller's mvar; a goal with an
-    /// mvar in a NON-output position (`Get Cell ?i ?e`) still postpones,
-    /// which the `GetElem` worked example requires. Residues 2 and 3
-    /// below are unchanged and still the depth model's.
-    ///
-    /// **Residue 2 — an all-polymorphic candidate set (owner: the
-    /// mctx-depth model).** If every candidate the search reaches is
-    /// polymorphic in the mvar's argument (`instWrapAny : ∀ α, Wrap α`),
-    /// unification assigns only search-local mvars and never the
-    /// caller's, so the oracle answers `.some`. Distinguishing that from
-    /// the `Wrap Nat`/`Wrap Unit` case genuinely needs read-only mvars —
-    /// no syntactic test on the goal can do it.
-    ///
-    /// **Residue 3 — a class with ZERO candidates and an mvar goal
-    /// (owner: the mctx-depth model; both sides error either way).**
-    /// `NoInst ?a` is `.none` in the oracle, not `.undef`: with no
-    /// candidates, `mkGeneratorNode?` registers nothing and no
-    /// unification ever runs, and the DiscrTree lookup does not throw
-    /// either (its stuck cases at `DiscrTree/Main.lean:359-386` fire
-    /// only for reducible / matcher / recursor heads, and a bare mvar
-    /// argument becomes `.star` at `:392-412`). So the oracle throws
-    /// "failed to synthesize instance" where leanr now postpones and
-    /// the ladder reports `StuckSyntheticMVar`. Both sides ERROR, and
-    /// `dump_elab.lean` drops any query whose oracle side throws, so no
-    /// corpus record can cover it — recorded here rather than left to be
-    /// rediscovered. The GROUND case (`NoInst Nat`) is unaffected and
-    /// still reaches `InstanceSynthesisFailed`
-    /// (`unsolvable_instance_is_a_synthesis_failure`).
-    ///
-    /// Until those are closed this errs toward postponement, which the
-    /// ladder can recover from, rather than toward committing to a
-    /// candidate, which it cannot.
-    ///
-    /// LEVEL metavariables are deliberately NOT part of the test:
-    /// `withNewMCtxDepth (allowLevelAssignments := true)` (`:978`) keeps
-    /// outer LEVEL mvars assignable, so `LevelDefEq.lean:167-171`'s
-    /// stuck throw needs a level mvar that is non-assignable for some
-    /// other reason. `has_expr_mvar` alone is the right predicate.
-    ///
-    /// The `MetaError::IsDefEqStuck` arm below is kept live: it is the
-    /// channel this function should be reading once `synth_instance` runs on
-    /// the depth model (which now exists), at which point the syntactic
-    /// pre-test becomes redundant for residues 2 and 3 and can be deleted
-    /// rather than rewritten.
-    ///
-    /// Precondition: `ty` is already `instantiate_mvars`-ed (the oracle's
-    /// own `let type ← instantiateMVars type`, `SynthInstance.lean:967`).
-    /// The `has_expr_mvar` bit is recomputed per constructed node, so on
-    /// an instantiated type it means exactly "mentions an UNASSIGNED expr
-    /// mvar"; on a stale one it would over-report.
-    ///
-    /// `ty` is `instantiate_mvars`-ed here (the oracle's own
-    /// `let type ← instantiateMVars type`, `:967`), so the pre-test's
-    /// `has_expr_mvar` reads "mentions an UNASSIGNED expr mvar".
+    /// The caller's level mvars cannot make it stuck:
+    /// `allow_level_assignments = true` (`:978`) keeps them assignable.
     pub fn try_synth_instance(&mut self, ty: ExprId) -> Result<LOption<ExprId>, MetaError> {
+        // oracle: `trySynthInstance` has no such call; this mirrors
+        // `synthInstanceCore?`'s `let type ← instantiateMVars type`
+        // (`SynthInstance.lean:967`) so the stuck check sees the instantiated goal.
         let ty = self.instantiate_mvars(ty)?;
-        if self.has_mvar_outside_out_params(ty) {
-            return Ok(LOption::Undef);
-        }
         match self.synth_instance(ty) {
             Ok(Some(val)) => Ok(LOption::Some(val)),
             Ok(None) => Ok(LOption::None),
             Err(MetaError::IsDefEqStuck) => Ok(LOption::Undef),
             Err(e) => Err(e),
         }
-    }
-
-    /// The stuck pre-test, POSITIONAL since M4b-3 P2b-ii: does `ty`
-    /// mention an unassigned expr mvar OUTSIDE its head class's
-    /// output-parameter argument positions?
-    ///
-    /// Why positional (design spec § Amendment 4 item 6). An mvar in an
-    /// output-parameter position is exactly what `preprocessOutParam`
-    /// (`SynthInstance.lean:775-817`) replaces with a search-local mvar
-    /// before the search runs, and what `assignOutParams` (`:847-861`)
-    /// assigns back afterwards — both ported in P2b-i
-    /// (`leanr_meta::synth.rs`) — so the search never unifies against
-    /// the caller's mvar and cannot get stuck on it. An mvar ANYWHERE
-    /// ELSE is still one the search would unify against directly, which
-    /// is the read-only-mvar stuck condition this pre-test reconstructs
-    /// (residues 2 and 3 in `try_synth_instance`'s own doc), so it
-    /// still postpones.
-    ///
-    /// Not class-level: the oracle's `PreprocessKind` (`:706-716`) only
-    /// says whether the CLASS has outParams, and `Get Cell ?i ?e` — a
-    /// class with outParams, an mvar in a non-output position — must
-    /// keep postponing or the `GetElem` worked example breaks.
-    ///
-    /// Conservative on every shape it cannot read: a non-`Const` head, an
-    /// unnamed `Const`, or a head that is not a class (`get_out_param_positions`
-    /// answers `None`) keeps today's behaviour, `Undef` on any expr mvar.
-    /// Argument positions are counted in APPLICATION order, matching
-    /// `ClassEntry.outParams` (`Class.lean:11-31`).
-    ///
-    /// Precondition: `ty` is already `instantiate_mvars`-ed, so
-    /// `has_expr_mvar` means "mentions an UNASSIGNED expr mvar".
-    pub(crate) fn has_mvar_outside_out_params(&self, ty: ExprId) -> bool {
-        if !self.data(ty).has_expr_mvar() {
-            return false;
-        }
-        let head = self.get_app_fn(ty);
-        let args = self.get_app_args(ty);
-        let Node::Const {
-            name: Some(class), ..
-        } = self.node(head)
-        else {
-            return true;
-        };
-        let Some(out_positions) = self.get_out_param_positions(class) else {
-            return true;
-        };
-        args.iter()
-            .enumerate()
-            .any(|(i, arg)| !out_positions.contains(&i) && self.data(*arg).has_expr_mvar())
     }
 }
 
@@ -2158,9 +2004,8 @@ impl<'e> MetaCtx<'e> {
     /// this is where the caller's output-parameter metavariables get
     /// assigned -- [`MetaCtx::preprocess_out_param`] having kept them out
     /// of the search entirely. It runs OUTSIDE the search's
-    /// `checkpoint`/`rollback` pair, which is this crate's stand-in for
-    /// the oracle's `withNewMCtxDepth`; inside it, the assignment would
-    /// be rolled back with everything else.
+    /// `with_new_mctx_depth` block; inside it, the assignment would be
+    /// rolled back with everything else.
     ///
     /// Two config overrides, both load-bearing and both taken verbatim
     /// from the oracle:
@@ -2261,38 +2106,21 @@ impl<'e> MetaCtx<'e> {
         //    constant-function rescue, both in the slow
         //    `checkAssignmentAux` path (`check_assignment.rs`). The
         //    restriction's depth guard (`expr_mvar_depth(id) !=
-        //    mctx.depth()`) is WEAKER here than the oracle's, because
-        //    this driver still runs without `withNewMCtxDepth` (the
-        //    bullet two items below): a caller's mvar is at the current
-        //    depth and so may be restricted mid-search. The search's own
-        //    `checkpoint`/`rollback` undoes such a restriction's mctx
-        //    effect, but a restriction made inside the search can still
-        //    influence the ANSWER: `abstract_mvars` over the result can
-        //    capture the fresh `?aux` standing in for the caller's `?c`.
-        //    That is part of the existing `withNewMCtxDepth` read-only
-        //    seam (below), not a separate one.
-        //  - `isDefEqStuckEx := true` -- NAMED SEAM, not set here: the
-        //    `Config` field (`is_def_eq_stuck_ex`) and the two ported
-        //    throw sites (`level.rs`, `assign.rs`) now exist, but this
-        //    driver does not yet flip the field (nor run under a new
-        //    mctx depth), because synthesis is still on rollback.
-        //    Follow-up of the macro/binop% P1 slice, citing
-        //    `SynthInstance.lean:958-968`.
-        //  - `withNewMCtxDepth (allowLevelAssignments := true)` -- NAMED
-        //    SEAM, not used here: the mctx-depth mechanism now exists
-        //    (`with_new_mctx_depth`), but this driver's `checkpoint`/`rollback`
-        //    pair in `synth_instance_preprocessed` stands in for the
-        //    wrapper's SCOPE without reproducing its READ-ONLY-ness:
-        //    an mvar minted by the caller stays assignable inside the
-        //    search here, where the oracle would treat it as opaque and
-        //    raise `isDefEqStuckEx`. Owner M4b, citing
-        //    `SynthInstance.lean:958-968`.
+        //    mctx.depth()`) is exact here: the caller's mvars sit below the
+        //    search's depth, so they are never restricted mid-search.
+        //  - `isDefEqStuckEx := true` -- set below. Together with
+        //    `synth_instance_preprocessed`'s `with_new_mctx_depth(true, ..)`
+        //    (`SynthInstance.lean:978`) it makes the caller's mvars
+        //    read-only during the search: an attempt to assign one
+        //    throws `MetaError::IsDefEqStuck` (#59's read-only arms in
+        //    `assign.rs`/`level.rs`), which `try_synth_instance` and
+        //    `synth_pending` report as "not now".
         //    `preprocess` and `preprocessOutParam` were on this list
         //    until M4b-3 P2b-i and are NOT seams any more: both are
         //    ported (`MetaCtx::preprocess`, task 5;
         //    `MetaCtx::preprocess_out_param`, task 6), and
         //    `synth_instance_preprocessed` below is where the classified
-        //    goal, the out-param replacement and the post-rollback
+        //    goal, the out-param replacement and the post-depth-block
         //    `assign_out_params` all live.
         let saved_cfg = self.cfg;
         self.cfg.transparency = TransparencyMode::Instances;
@@ -2300,6 +2128,7 @@ impl<'e> MetaCtx<'e> {
         self.cfg.ctx_approx = true;
         self.cfg.const_approx = false;
         self.cfg.univ_approx = false;
+        self.cfg.is_def_eq_stuck_ex = true;
         let r = self.synth_instance_preprocessed(ty);
         self.cfg = saved_cfg;
         r
@@ -2307,50 +2136,41 @@ impl<'e> MetaCtx<'e> {
 
     /// The `withConfig` body of `synthInstanceCore?`
     /// (`SynthInstance.lean:965-1006`): preprocess, then run the search
-    /// under this crate's `withNewMCtxDepth` stand-in (the
-    /// `checkpoint`/`rollback` pair), then apply the result OUTSIDE it.
+    /// under `with_new_mctx_depth(true, ..)`, then apply the result OUTSIDE it.
     fn synth_instance_preprocessed(&mut self, ty: ExprId) -> Result<Option<ExprId>, MetaError> {
         let PreprocessResult { ty, kind } = self.preprocess(ty)?;
-        let snap = self.checkpoint();
-        // oracle: the `withNewMCtxDepth` dispatch (`match kind`,
-        // `SynthInstance.lean:979-1002` -- corrected from the brief's
-        // `:983-1002`, matching task 5's own correction of the same
-        // citation). Only `.mvarsNoOutputParams` skips
-        // `preprocessOutParam` -- `.noMVars` runs it too, deliberately
-        // (the `OrderDual` note, `:981-999` -- corrected from the
-        // brief's `:984-999`; the note's own comment block opens at
-        // `:981`, not `:984`).
-        let searched = match kind {
-            PreprocessKind::MVarsNoOutputParams => Ok(ty),
-            PreprocessKind::NoMVars | PreprocessKind::MVarsOutputParams => {
-                self.preprocess_out_param(ty)
-            }
-        };
-        let abst = searched.and_then(|t| self.synth_instance_body(t));
-        // The rollback is this crate's `withNewMCtxDepth` boundary
-        // (`:978-1002`): the answer survives it because `mk_answer`
-        // already abstracted it (`abstract_mvars`), and everything below
-        // runs OUTSIDE it so `assign_out_params` can assign the caller's
-        // mvars for real (oracle: `applyAbstractResult?` at `:1003`, one
-        // line past the `withNewMCtxDepth` block's end).
-        //
-        // Ordering is load-bearing: `rollback` runs on the ERROR path
-        // too, so `abst?` is unwrapped only after it -- propagating the
-        // error first would leave the search's assignments on the
-        // caller's `mctx`.
-        self.rollback(snap);
-        self.apply_abstract_result(ty, abst?)
+        // oracle: `withNewMCtxDepth (allowLevelAssignments := true)`
+        // (`SynthInstance.lean:978-1002`). `with_new_mctx_depth` restores
+        // the caller's assignments and `postponed` on BOTH paths (as
+        // `withNewMCtxDepthImp`'s `finally`, `Basic.lean:1974-1980`, does
+        // for the whole mctx; declarations made inside persist). The
+        // answer survives because `mk_answer` already abstracted it. Only
+        // `.mvarsNoOutputParams` skips `preprocessOutParam`; `.noMVars`
+        // runs it too, deliberately (the `OrderDual` note, `:981-999`).
+        let abst = self.with_new_mctx_depth(true, |ctx| {
+            let searched = match kind {
+                PreprocessKind::MVarsNoOutputParams => Ok(ty),
+                PreprocessKind::NoMVars | PreprocessKind::MVarsOutputParams => {
+                    ctx.preprocess_out_param(ty)
+                }
+            };
+            searched.and_then(|t| ctx.synth_instance_body(t))
+        })?;
+        // oracle: `applyAbstractResult?` (`:1003`), OUTSIDE the depth
+        // block, so `assign_out_params` assigns the caller's mvars at
+        // their own depth.
+        self.apply_abstract_result(ty, abst)
     }
 
     /// Returns the search's answer still ABSTRACTED (`mk_answer` ->
     /// `abstract_mvars`), not opened. Task 7: the
     /// `open_abstract_mvars_result` call that used to sit on the last
     /// line moved to [`MetaCtx::apply_abstract_result`], which runs
-    /// AFTER `synth_instance_preprocessed`'s `rollback` -- opening it
-    /// here would mint mvars the rollback then discards, and the
+    /// AFTER `synth_instance_preprocessed`'s depth block closes -- opening it
+    /// here would mint mvars the block then discards, and the
     /// `assign_out_params` that consumes them would assign into a frame
     /// about to be thrown away. The abstracted form is exactly what
-    /// survives the rollback, which is why it is what crosses this
+    /// survives the block, which is why it is what crosses this
     /// boundary (oracle: `withNewMCtxDepth` returns an
     /// `Option AbstractMVarsResult`, `SynthInstance.lean:978-1002`).
     fn synth_instance_body(
@@ -3278,6 +3098,78 @@ mod tests {
         });
     }
 
+    // -----------------------------------------------------------------
+    // synth-real-depth Task 1: the four depth-only checks
+    // -----------------------------------------------------------------
+
+    /// oracle `MkTableKey.normExpr` (`SynthInstance.lean:145`):
+    /// `if !(← mvarId.isAssignable) then return e`, and `isAssignable`
+    /// (`MetavarContext.lean:483-486`) is `decl.depth == mctx.depth`. A
+    /// caller's mvar seen from inside a new depth is a CONSTANT in the
+    /// key; at its own depth it is renamed (the control).
+    #[test]
+    fn table_key_keeps_a_lower_depth_expr_mvar() {
+        with_instances_ctx(|ctx| {
+            let ty = type_sort(ctx);
+            let (a, _) = fresh_mvar(ctx, ty);
+            let add = const_named(ctx, "Add");
+            let base = Some(ctx.view.store);
+            let goal = ctx.scratch.expr_app(base, add, a).expect("Add ?a");
+            let inner = ctx
+                .with_new_mctx_depth(true, |c| c.normalize_goal_key(goal))
+                .unwrap();
+            assert_eq!(inner, GoalKey(goal), "?a must stay a constant");
+            let same_depth = ctx.normalize_goal_key(goal).unwrap();
+            assert_ne!(same_depth, GoalKey(goal), "control: renamed to _tc.0");
+        });
+    }
+
+    /// oracle `MkTableKey.normLevel` (`SynthInstance.lean:120`):
+    /// `if getLevelDepth mvarId != mctx.depth then return u`. Compared
+    /// against `depth`, NOT `levelAssignDepth`: under
+    /// `allowLevelAssignments := true` the caller's level mvar is still
+    /// assignable, but it is not renamed.
+    #[test]
+    fn table_key_keeps_a_lower_depth_level_mvar() {
+        with_instances_ctx(|ctx| {
+            let u = fresh_level_mvar_for_test(ctx);
+            let base = Some(ctx.view.store);
+            let goal = ctx.scratch.expr_sort(base, u).expect("Sort ?u");
+            let inner = ctx
+                .with_new_mctx_depth(true, |c| c.normalize_goal_key(goal))
+                .unwrap();
+            assert_eq!(inner, GoalKey(goal), "?u must stay a constant");
+            let same_depth = ctx.normalize_goal_key(goal).unwrap();
+            assert_ne!(same_depth, GoalKey(goal), "control: renamed to _tc.0");
+        });
+    }
+
+    /// oracle `AbstractMVars` (`AbstractMVars.lean:56-60` level,
+    /// `:89-93` expr): "metavariables from lower depths are treated as
+    /// constants". This is what lets `wake_up`'s root check
+    /// (`num_mvars() == 0`) accept an answer that mentions the caller's
+    /// mvar (Synth0 `mvarGoal/synth/0`, oracle `instOfNN ?n`).
+    #[test]
+    fn abstract_mvars_keeps_lower_depth_mvars() {
+        with_instances_ctx(|ctx| {
+            let ty = type_sort(ctx);
+            let (a, _) = fresh_mvar(ctx, ty);
+            let u = fresh_level_mvar_for_test(ctx);
+            let base = Some(ctx.view.store);
+            let sort_u = ctx.scratch.expr_sort(base, u).expect("Sort ?u");
+            let e = ctx.scratch.expr_app(base, sort_u, a).expect("app");
+            let inner = ctx
+                .with_new_mctx_depth(true, |c| c.abstract_mvars(e))
+                .unwrap();
+            assert_eq!(inner.num_mvars(), 0);
+            assert!(inner.param_names.is_empty());
+            assert_eq!(inner.expr, e);
+            let same_depth = ctx.abstract_mvars(e).unwrap();
+            assert_eq!(same_depth.num_mvars(), 1, "control");
+            assert_eq!(same_depth.param_names.len(), 1, "control");
+        });
+    }
+
     /// Companion to the shared-counter test above: an ASSIGNED level
     /// mvar must be resolved to its (recursively normalized) assignment
     /// FIRST, and that resolution must NOT consume a `next_idx` slot --
@@ -3936,32 +3828,17 @@ mod tests {
         });
     }
 
-    /// Review Focus 4: a pi goal whose body has an expr mvar takes the
-    /// `isDefEq mvar instVal` recheck path (`SynthInstance.lean:417`)
-    /// with a pi-typed mvar.
-    ///
-    /// What each layer answers for `N → Add ?a`:
-    /// - The oracle's `synthInstance?` runs the search under
-    ///   `withNewMCtxDepth` with `isDefEqStuckEx := true`
-    ///   (`SynthInstance.lean:963`, `:978`), so the caller's `?a` is
-    ///   read-only. `getUnify` still keys it `.star`
-    ///   (`DiscrTree/Main.lean:396-412`), and `Add ?a =?= Add N` throws
-    ///   `isDefEqStuck`. `trySynthInstance` reports that as `.undef`
-    ///   (`:1014-1017`). leanr's `try_synth_instance` gives the same
-    ///   `Undef`, from its syntactic pre-test, because the forall head is
-    ///   not a class `Const`.
-    /// - leanr's bare `synth_instance` does not run on the depth model
-    ///   (`try_synth_instance`'s doc, residue 2). It treats `?a` as
-    ///   assignable inside its checkpoint/rollback, unifies `?a := N`
-    ///   through `instAddN`, and answers the mvar-free
-    ///   `fun _ => instAddN`. The rollback discards the search's
-    ///   `?a := N`, but `assign_out_params` then runs
-    ///   `isDefEq type (inferType result)` on the whole goal, out-params
-    ///   or not (oracle `assignOutParams`, `:825-845`, unconditional at
-    ///   `:842`), so `N → Add ?a =?= N → Add N` re-assigns `?a := N` in
-    ///   the caller's frame.
+    /// `N → Add ?a` with `?a` minted OUTSIDE the search. The oracle runs
+    /// the search under `withNewMCtxDepth` with `isDefEqStuckEx := true`
+    /// (`SynthInstance.lean:963`, `:978`), so `?a` is read-only;
+    /// `getUnify` keys it `.star` (`DiscrTree/Main.lean:397-412`) and
+    /// `Add N =?= Add ?a` throws `isDefEqStuck`
+    /// (`ExprDefEq.lean:1952-1956`). leanr now does the same: `Err`, and
+    /// `?a` stays unassigned because the depth block rolls back on the
+    /// error path too. `trySynthInstance` reports it as `.undef`
+    /// (`:1014-1017`).
     #[test]
-    fn pi_goal_with_mvar_body_does_not_error() {
+    fn pi_goal_with_mvar_body_is_stuck() {
         with_instances_ctx(|ctx| {
             let n = const_named(ctx, "N");
             let ty = type_sort(ctx);
@@ -3970,34 +3847,10 @@ mod tests {
             let base = Some(ctx.view.store);
             let add_a = ctx.scratch.expr_app(base, add, a).expect("Add ?a");
             let pi = mk_arrow_for_test(ctx, n, add_a);
-            let v = ctx
-                .synth_instance(pi)
-                .expect("Ok(_), not Err")
-                .expect("answered");
-            let v = ctx.instantiate_mvars(v).expect("inst");
-            let Node::Lam {
-                binder_type, body, ..
-            } = ctx.node(v)
-            else {
-                panic!("expected fun _ => instAddN, got {}", render_expr(ctx, v));
-            };
-            assert_eq!(binder_type, n);
+            assert_eq!(ctx.synth_instance(pi), Err(MetaError::IsDefEqStuck));
+            assert!(!ctx.mctx.is_assigned(a_id), "rolled back on Err");
             assert_eq!(
-                body,
-                const_named(ctx, "instAddN"),
-                "got {}",
-                render_expr(ctx, v)
-            );
-            let a_val = ctx.instantiate_mvars(a).expect("inst ?a");
-            assert!(ctx.mctx.is_assigned(a_id), "assign_out_params assigns ?a");
-            assert_eq!(a_val, n, "?a := N, got {}", render_expr(ctx, a_val));
-            // Fresh `?b`: the `?a` above is now assigned, so `pi` is ground.
-            let (b, _) = fresh_mvar(ctx, ty);
-            let base = Some(ctx.view.store);
-            let add_b = ctx.scratch.expr_app(base, add, b).expect("Add ?b");
-            let pi_b = mk_arrow_for_test(ctx, n, add_b);
-            assert_eq!(
-                ctx.try_synth_instance(pi_b).expect("no error"),
+                ctx.try_synth_instance(pi).expect("no error"),
                 LOption::Undef,
                 "the oracle's trySynthInstance answer"
             );
@@ -4421,21 +4274,21 @@ mod tests {
         });
     }
 
-    /// `try_synth_instance` (M4b-3 P4 task 3) — the oracle's
-    /// `trySynthInstance` (`SynthInstance.lean:1014-1017`) behind the
-    /// positional stuck pre-test that moved here from
-    /// `leanr_elab::synthetic::ladder` (design spec § Amendment 5 item
-    /// 3). Four shapes over `Instances.olean`: a ground goal answers
+    /// `try_synth_instance` — the oracle's `trySynthInstance`
+    /// (`SynthInstance.lean:1014-1017`) over `Instances.olean`. Four
+    /// shapes: a ground goal answers
     /// `Some`; an mvar in an OUTPUT-parameter position still reaches the
     /// real search and is assigned by it (`Op N N ?c`, P2b-i); an mvar in
-    /// a NON-output position postpones (`Get N ?i ?e` — the `GetElem`
-    /// worked example depends on this); a class with no instance at all
+    /// a NON-output position postpones (`Get N ?i ?e`: `instGetN`'s
+    /// `Get N N N` meets the read-only `?i` and the search throws
+    /// `IsDefEqStuck` — the `GetElem` worked example depends on this); a
+    /// class with no instance at all
     /// answers `None`, not `Undef` — `Instances.lean` declares no `Mul`
     /// instance for `Prod`, so `Mul (Prod N N)` is the ground goal used
     /// for that case (controller ruling: the brief's `NoInst` class does
     /// not exist in this fixture).
     #[test]
-    fn try_synth_instance_is_three_valued_and_positional() {
+    fn try_synth_instance_is_three_valued() {
         use crate::synth::LOption;
         use crate::test_support::{const_named, with_instances_ctx};
         with_instances_ctx(|ctx| {
