@@ -327,6 +327,30 @@ There are two plans, one PR each:
 7. **Oracle name.** The nested-proof marker is `Lean.Grind.nestedProof`, not `Grind.nestedProof`.
 8. **Plan-cite drift.** Closure.lean cites drifted by about 13-25 lines, MetavarContext/Level cites by 1-3. All were corrected in code.
 
+## Amendment 2 (P2 plan-time findings, 2026-10-03)
+
+Every corpus record was run through the final dumper while the P2 plan (`docs/superpowers/plans/2026-10-03-m4c1-p2-command-elab.md`) was written. These findings refine the spec.
+
+1. **Async theorems report through snapshot tasks.** With `Elab.async=true`, every well-formed theorem takes `elabAsync`: `levelMVarToParamHeaders` runs before the `!type.hasMVar` test (`MutualDef.lean:1239-1247`). Its body errors go to `Command.State.snapshotTasks`, not `messages`. The dumper walks both. Without that, an ill-typed theorem dumps as `consts: []` with no error.
+2. **The theorem signature uses the type only.** `elabAsync` sorts level params from the header type alone (`:1281-1291`), so a universe used only in a proof is "unused". The rest of the theorem path is `finishElab`, shared with defs.
+3. **`u_N` order depends on the path.** For a theorem or a Prop-typed def, header level mvars become params early and join the header's `levelNames`, so they sort as user names, in declaration order (`u_1 … u_9, u_10`). For other defs and for axioms they are leftovers and sort lexicographically (`u_1, u_10, u_2, …`). The corpus pins both.
+4. **The value's binders are `cleanupAnnotations`'d** (`forallBoundedTelescope … (cleanupAnnotations := true)`, `:536`). An `optParam` binder stays in the type but not in the value.
+5. **A binder group's type is elaborated once per name** (`elabBinderViews`). leanr's `push_binder_group` elaborated it once per group, a pre-existing divergence in `forall`/`depArrow`/`let` binders. P2 fixes it.
+6. **`example` is kernel-checked.** It is `addDecl`'d under `withoutModifyingEnv`, so leanr runs `leanr_kernel::check_declaration` and discards the result, instead of skipping the commit (§ How a declaration flows, step 5).
+7. **Harness changes:**
+   - The environment's constant map is unordered, so `consts` is sorted by `Name.lt`. The gate sorts leanr's names with `name_cmp` and checks the admission order (aux first) separately.
+   - Compile errors are logged as errors, and Elab0 lacks the compiler's runtime support (`Nat.succ` needs `Nat.add`). Compilation stays a seam, and the corpus avoids values whose codegen needs missing constants.
+   - leanr's parser has no `binderDefault`. The explicit `optParam` spelling covers that path.
+8. **Error first lines need diagnostics leanr lacked:**
+   - `mvarArgNames`;
+   - the `.custom` error kind (failed-to-infer binder and definition types);
+   - `LevelMVarErrorInfo`;
+   - most-recent-first reporting;
+   - `Type mismatch` vs `Application type mismatch: The argument`/`The last` (`ensureArgType`'s `f?`).
+
+   P2 ports all of these as term-elaborator changes.
+9. **Corpus:** 79 records, up from about 35: 54 admitting and 25 erroring. The list is in the plan's Task 1.
+
 ## Landed
 
 ### P1 (declaration substrate)
