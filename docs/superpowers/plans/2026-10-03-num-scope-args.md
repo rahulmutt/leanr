@@ -289,7 +289,7 @@ In `check_assignment.rs` `check_mvar`, capture the count in the existing tuple a
             self.mk_aux_mvar_at(reduced, ty, MVarKind::Natural, None, inner_scope_args)?;
 ```
 
-`ctx_approx_const_fun` (`:442`) passes `0`, with the comment `// oracle :978 passes no numScopeArgs (default 0).` Open `ExprDefEq.lean` and correct `:978` to the line holding `mkAuxMVar ctx.mvarDecl.lctx` if it differs.
+`ctx_approx_const_fun` (`:442`) passes `0`, with the comment `// oracle :977 passes no numScopeArgs (default 0).` (Verified: `ExprDefEq.lean:977` is `let newMVar ← mkAuxMVar ctx.mvarDecl.lctx …`.)
 
 - [ ] **Step 7: Write the failing ctxApprox test**
 
