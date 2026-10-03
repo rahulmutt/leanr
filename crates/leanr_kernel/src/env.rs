@@ -506,16 +506,27 @@ impl Environment {
     /// cannot resolve a scratch id minted by some OTHER scratch store the
     /// caller may have used to build `d`.
     pub fn add_decl(&mut self, d: Declaration) -> Result<(), KernelError> {
-        let mut scratch = Store::scratch();
+        self.add_decl_in(&mut Store::scratch(), d)
+    }
+
+    /// [`Environment::add_decl`] over a CALLER-OWNED scratch store (M4c-1
+    /// P1): `d`'s ids may be scratch-region ids minted in `scratch` itself
+    /// (an elaborator's per-declaration store). `check_declaration`
+    /// resolves every id through `scratch` with `self.store` as base, and
+    /// `add_core` promotes each survivor (`promote_constant_info`), so no
+    /// separate promote walk over `d` is needed. On any check failure the
+    /// environment is left completely unchanged (`scratch` may have grown;
+    /// it is the caller's to drop).
+    pub fn add_decl_in(&mut self, scratch: &mut Store, d: Declaration) -> Result<(), KernelError> {
         let Admitted {
             survivors,
             quot_init,
         } = {
             let view = self.view();
-            check_declaration(view, &mut scratch, d)?
+            check_declaration(view, scratch, d)?
         };
         for ci in survivors {
-            self.add_core(&scratch, ci)?;
+            self.add_core(scratch, ci)?;
         }
         if quot_init {
             self.quot_initialized = true;

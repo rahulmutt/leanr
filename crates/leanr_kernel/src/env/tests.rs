@@ -603,3 +603,78 @@ fn check_declaration_returns_survivor_without_mutating_env() {
     // check_declaration must NOT have inserted anything into env.
     assert_eq!(env.len(), before);
 }
+
+// ---- add_decl_in (M4c-1 P1 task 1) -------------------------------------
+
+/// A declaration whose NAME (and type) live only in a caller-owned scratch
+/// store is checked against that store and admitted with persistent ids.
+#[test]
+fn add_decl_in_admits_a_declaration_built_in_a_caller_scratch_store() {
+    let mut env = mini::env();
+    let len_before = env.len();
+    let mut scratch = Store::scratch();
+    let name = scratch
+        .intern_name(Some(&env.store), &nm("scratchOnlyAx"))
+        .unwrap()
+        .unwrap();
+    assert!(
+        name.is_scratch(),
+        "precondition: the name is new, so scratch-region"
+    );
+    let ty = scratch
+        .intern_expr(Some(&env.store), &mini::sort0())
+        .unwrap();
+    env.add_decl_in(
+        &mut scratch,
+        Declaration::Axiom(AxiomVal {
+            val: ConstantVal {
+                name,
+                level_params: vec![],
+                ty,
+            },
+            is_unsafe: false,
+        }),
+    )
+    .unwrap();
+    assert_eq!(env.len(), len_before + 1);
+    let persistent = nm_id(&mut env, "scratchOnlyAx");
+    let ci = env
+        .get(persistent)
+        .expect("admitted under its persistent id")
+        .clone();
+    assert!(matches!(ci, ConstantInfo::Axiom(_)));
+    assert_no_scratch_ids(&env.store, &ci);
+}
+
+/// Review Focus 5: a rejected scratch-built declaration leaves no trace.
+#[test]
+fn add_decl_in_rejection_leaves_env_unchanged() {
+    let mut env = mini::env();
+    let len_before = env.len();
+    let mut scratch = Store::scratch();
+    let name = scratch
+        .intern_name(Some(&env.store), &nm("scratchBadThm"))
+        .unwrap()
+        .unwrap();
+    // `theorem scratchBadThm : B := bt` -- `B : Type`, not a Prop.
+    let ty = scratch
+        .intern_expr(Some(&env.store), &mini::cst("B", vec![]))
+        .unwrap();
+    let value = scratch
+        .intern_expr(Some(&env.store), &mini::cst("bt", vec![]))
+        .unwrap();
+    let r = env.add_decl_in(
+        &mut scratch,
+        Declaration::Thm(TheoremVal {
+            val: ConstantVal {
+                name,
+                level_params: vec![],
+                ty,
+            },
+            value,
+            all: vec![name],
+        }),
+    );
+    assert!(r.is_err(), "a non-Prop theorem type is rejected");
+    assert_eq!(env.len(), len_before);
+}
