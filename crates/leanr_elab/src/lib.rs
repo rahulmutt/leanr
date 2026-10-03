@@ -206,6 +206,7 @@
 pub mod app; // M4b-3 P1
 pub mod builtin; // Tasks 4-6
 pub mod coe; // coercions
+pub mod command; // M4c-1 P2
 pub mod config; // setElabConfig
 pub mod dispatch;
 pub mod elab;
