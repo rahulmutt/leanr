@@ -642,7 +642,7 @@ Expected: the smoke tests FAIL with `<no line: TypeMismatch { … }>` / `<no lin
     /// (`:244-251`). Carries the rendered declaration name.
     AlreadyDeclared(String),
     /// oracle: `throwAlreadyDeclaredUniverseLevel` (`Elab/Exception.lean:43-44`),
-    /// from `expandDeclId`'s `.{…}` fold (`Elab/DeclModifiers.lean:326-339`).
+    /// from `expandDeclId`'s `.{…}` fold (`Elab/DeclModifiers.lean:333-339`).
     UniverseAlreadyDeclared(String),
     /// oracle: `sortDeclLevelParams` (`Elab/DeclUtil.lean:79-81`).
     UnusedUniverseParam(String),
@@ -3075,7 +3075,7 @@ git commit -m "leanr_elab: theorems and Prop headers (levelMVarToParamHeaders, a
 - Consumes: P1's `AuxLemmas::new(decl_name)`, `MetaCtx::abstract_nested_proofs(&mut AuxLemmas, ExprId)`, `AuxLemmas::into_pending()`.
 - Produces: `elab_def` returns `Built::Add(aux… ++ [main])`.
 
-The oracle: `addNonRecAux` → `abstractNestedProofs preDef` (`PreDefinition/Basic.lean:120-127`, `:180` (the addNonRecAux region)). It is skipped for `theorem` and `example`, and runs under `withDeclNameForAuxNaming declName` (fresh `_proof_N`, index from 1). Each aux is `addDecl`'d immediately (`Meta/Tactic/AuxLemma.lean:43-73`), so it lands BEFORE the main declaration, and `getMaxHeight` sees the abstracted value (aux theorems contribute nothing). Amendment 1 items 2-4 hold:
+The oracle: `addNonRecAux` → `abstractNestedProofs preDef` (`PreDefinition/Basic.lean:120-127`, `:180`). It is skipped for `theorem` and `example`, and runs under `withDeclNameForAuxNaming declName` (fresh `_proof_N`, index from 1). Each aux is `addDecl`'d immediately (`Meta/Tactic/AuxLemma.lean:43-73`), so it lands BEFORE the main declaration, and `getMaxHeight` sees the abstracted value (aux theorems contribute nothing). Amendment 1 items 2-4 hold:
 - the per-declaration cache is observably identical to the env-wide one here;
 - pending aux names count as "in env";
 - a pending-aux lookup inside the walk is `MetaError::Unsupported` (a seam).
@@ -3099,7 +3099,7 @@ Expected: FAIL. `np/one` and the other aux-minting records admit no `_proof_N` a
 
 ```rust
     // `addNonRecAux` → `abstractNestedProofs` (`PreDefinition/Basic.lean:
-    // 120-127`, `:180` (the addNonRecAux region)): not for theorems or examples. The aux theorems are
+    // 120-127`, `:180`): not for theorems or examples. The aux theorems are
     // committed BEFORE the main declaration, as the oracle's `mkAuxLemma`
     // has already `addDecl`'d them (`Meta/Tactic/AuxLemma.lean:43-73`).
     let mut aux = AuxLemmas::new(id.name);

@@ -64,7 +64,7 @@ pub(super) fn expand_decl_id(elab: &mut TermElabM, view: &DefView) -> Result<Dec
 }
 
 /// oracle: `elabHeaders` runs under `withAutoBoundImplicit`
-/// (`MutualDef.lean:257`; `elabAxiom` too, `Declaration.lean:108`): an
+/// (`MutualDef.lean:257`; `elabAxiom` too, `Declaration.lean:109`): an
 /// unbound identifier or universe in a header is auto-bound, not an error.
 /// Auto-bound implicits are M4c-2.
 pub(super) fn unknown_ident_to_auto_bound_seam(e: ElabError) -> ElabError {

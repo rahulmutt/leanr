@@ -261,11 +261,11 @@ pub enum ElabError {
     /// (`:244-251`). Carries the rendered declaration name.
     AlreadyDeclared(String),
     /// oracle: `throwAlreadyDeclaredUniverseLevel` (`Elab/Exception.lean:43-44`),
-    /// from `expandDeclId`'s `.{…}` fold (`Elab/DeclModifiers.lean:326-339`).
+    /// from `expandDeclId`'s `.{…}` fold (`Elab/DeclModifiers.lean:333-339`).
     UniverseAlreadyDeclared(String),
     /// oracle: `sortDeclLevelParams` (`Elab/DeclUtil.lean:79-81`).
     UnusedUniverseParam(String),
-    /// oracle: `MutualClosure.pushMain` (`Elab/MutualDef.lean:1052-1053`).
+    /// oracle: `MutualClosure.pushMain` (`Elab/MutualDef.lean:1051-1053`).
     TheoremTypeNotProp(String),
     /// oracle: the first error `logUnassignedUsingErrorInfos`
     /// (`Term/TermElabM.lean:934-958`) logs, rendered to its first line by
