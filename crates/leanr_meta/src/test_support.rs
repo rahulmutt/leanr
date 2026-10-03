@@ -485,7 +485,6 @@ pub(crate) fn lparam(ctx: &mut MetaCtx, name: &str) -> leanr_kernel::bank::Level
 }
 
 /// `succ^n zero`.
-#[allow(dead_code)] // consumed by later M4c-1 P1 tasks (level_mvar_to_param tests)
 pub(crate) fn lit_level(ctx: &mut MetaCtx, n: u32) -> leanr_kernel::bank::LevelId {
     let base = Some(ctx.view.store);
     let mut l = ctx.scratch.level_zero(base).expect("level");

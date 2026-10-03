@@ -48,7 +48,9 @@ mod whnf;
 pub use config::{Config, ProjReduction};
 pub use discr_tree::DiscrTree;
 pub use error::MetaError;
-pub use level_params::{name_cmp, sort_decl_level_params, CollectLevelParams};
+pub use level_params::{
+    name_cmp, sort_decl_level_params, CollectLevelParams, LevelMVarToParamResult,
+};
 pub use local_decl_kind::LocalDeclKind;
 pub use local_snapshot::LocalCtxSnapshot;
 pub use metactx::{EnvExtensions, MetaCtx, MetaSnapshot, DEFAULT_STEP_BUDGET};

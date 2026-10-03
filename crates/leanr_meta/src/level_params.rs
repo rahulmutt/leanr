@@ -3,17 +3,19 @@
 //! (`Init/Meta/Defs.lean:322-325`), `CollectLevelParams`
 //! (`Lean/Util/CollectLevelParams.lean:17-72`), `sortDeclLevelParams`
 //! (`Lean/Elab/DeclUtil.lean:79-89`) and `levelMVarToParam`
-//! (`Lean/MetavarContext.lean:1426-1497`; Task 3).
+//! (`Lean/MetavarContext.lean:1403-1495`, namespace `LevelMVarToParam` plus
+//! `UnivMVarParamResult`/`levelMVarToParam`; Task 3).
 
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use leanr_kernel::bank::levels::LevelRow;
 use leanr_kernel::bank::names::NameRow;
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, LevelId, NameId, Store};
+use leanr_kernel::Nat;
 
-use crate::{MetaCtx, MetaError};
+use crate::{LMVarId, MVarId, MetaCtx, MetaError};
 
 /// oracle: `Name.cmp` (`Name.lean:67-80`): parents first; `num < str`;
 /// strings by `compare` (code-point lexicographic, which `str::cmp`'s
@@ -61,7 +63,6 @@ pub fn name_cmp(
 /// oracle: `Name.appendIndexAfter` (`Defs.lean:322-325`): `str p s` ->
 /// `str p (s ++ "_" ++ idx)`; otherwise `str n ("_" ++ idx)`. leanr names
 /// carry no macro scopes, so `modifyBase` is the identity.
-#[allow(dead_code)] // consumed by later M4c-1 P1 tasks (`_proof_N` naming)
 pub(crate) fn append_index_after(
     st: &mut Store,
     base: Option<&Store>,
@@ -157,6 +158,224 @@ impl MetaCtx<'_> {
             }
             _ => Ok(()),
         }
+    }
+}
+
+/// oracle: `UnivMVarParamResult` (`MetavarContext.lean:1483-1487`); the
+/// oracle's `mctx` field is updated in place on the `MetaCtx` instead.
+pub struct LevelMVarToParamResult {
+    pub expr: ExprId,
+    pub new_param_names: Vec<NameId>,
+    pub next_param_idx: u64,
+}
+
+/// oracle: `LevelMVarToParam.State` (`MetavarContext.lean:1409-1413`)
+/// plus the reader `Context`'s `alreadyUsedPred` (`:1405-1408`).
+struct L2P<'a> {
+    already_used: &'a [NameId],
+    next_idx: u64,
+    names: Vec<NameId>,
+    cache: HashMap<ExprId, ExprId>,
+}
+
+impl MetaCtx<'_> {
+    /// oracle: `levelMVarToParam` (`MetavarContext.lean:1489-1495`) as
+    /// called by `Term.levelMVarToParam` (`Elab/Term/TermElabM.lean:1059-1064`):
+    /// prefix `u`, `except := fun _ => false`. The cache is keyed by
+    /// `ExprId`, i.e. `ExprStructEq` for hash-consed terms.
+    pub fn level_mvar_to_param(
+        &mut self,
+        e: ExprId,
+        already_used: &[NameId],
+        next_param_idx: u64,
+    ) -> Result<LevelMVarToParamResult, MetaError> {
+        let mut st = L2P {
+            already_used,
+            next_idx: next_param_idx,
+            names: Vec::new(),
+            cache: HashMap::new(),
+        };
+        let expr = self.l2p_main(&mut st, e)?;
+        Ok(LevelMVarToParamResult {
+            expr,
+            new_param_names: st.names,
+            next_param_idx: st.next_idx,
+        })
+    }
+
+    /// oracle: `mkParamName` (`MetavarContext.lean:1426-1435`).
+    fn l2p_param_name(&mut self, st: &mut L2P) -> Result<NameId, MetaError> {
+        let base = Some(self.view.store);
+        let u_str = self.scratch.intern_str(base, "u")?;
+        let u = self.scratch.name_str(base, None, u_str)?;
+        loop {
+            let n = append_index_after(self.scratch, base, u, st.next_idx)?;
+            st.next_idx += 1;
+            if !st.already_used.contains(&n) {
+                st.names.push(n);
+                return Ok(n);
+            }
+        }
+    }
+
+    /// oracle: `visitLevel` (`MetavarContext.lean:1437-1453`).
+    fn l2p_level(&mut self, st: &mut L2P, u: LevelId) -> Result<LevelId, MetaError> {
+        let base = Some(self.view.store);
+        match *self.scratch.level_row(base, u) {
+            LevelRow::Succ(v) => {
+                let v2 = self.guarded(|c| c.l2p_level(st, v))?;
+                self.update_level_succ(u, v2)
+            }
+            LevelRow::Max(a, b) => {
+                let a2 = self.guarded(|c| c.l2p_level(st, a))?;
+                let b2 = self.guarded(|c| c.l2p_level(st, b))?;
+                self.update_level_max(u, a2, b2)
+            }
+            LevelRow::IMax(a, b) => {
+                let a2 = self.guarded(|c| c.l2p_level(st, a))?;
+                let b2 = self.guarded(|c| c.l2p_level(st, b))?;
+                self.update_level_imax(u, a2, b2)
+            }
+            LevelRow::Zero | LevelRow::Param(_) => Ok(u),
+            LevelRow::MVar(name) => {
+                let id =
+                    LMVarId(name.ok_or_else(|| MetaError::MVar("anonymous level mvar".into()))?);
+                match self.mctx.level_assignment(id) {
+                    Some(v) => self.guarded(|c| c.l2p_level(st, v)),
+                    None => {
+                        let p = self.l2p_param_name(st)?;
+                        let p = self.scratch.level_param(base, Some(p))?;
+                        self.mctx.assign_level(id, p)?;
+                        Ok(p)
+                    }
+                }
+            }
+        }
+    }
+
+    /// oracle: `main` (`MetavarContext.lean:1455-1469`). No binder is
+    /// opened: loose bvars are walked directly, as in the oracle.
+    fn l2p_main(&mut self, st: &mut L2P, e: ExprId) -> Result<ExprId, MetaError> {
+        let d = self.data(e);
+        if !d.has_expr_mvar() && !d.has_level_mvar() {
+            return Ok(e);
+        }
+        if let Some(&r) = st.cache.get(&e) {
+            return Ok(r);
+        }
+        self.step()?;
+        let base = Some(self.view.store);
+        let r = match self.node(e) {
+            Node::Proj {
+                type_name,
+                idx,
+                structure,
+            } => {
+                let s2 = self.guarded(|c| c.l2p_main(st, structure))?;
+                self.scratch
+                    .expr_proj(base, type_name, &Nat::from(idx as u64), s2)?
+            }
+            Node::ProjBig {
+                type_name,
+                idx,
+                structure,
+            } => {
+                let n = self.scratch.nat_at(base, idx).clone();
+                let s2 = self.guarded(|c| c.l2p_main(st, structure))?;
+                self.scratch.expr_proj(base, type_name, &n, s2)?
+            }
+            Node::Forall {
+                binder_name,
+                binder_type,
+                body,
+                binder_info,
+            } => {
+                let d2 = self.guarded(|c| c.l2p_main(st, binder_type))?;
+                let b2 = self.guarded(|c| c.l2p_main(st, body))?;
+                self.scratch
+                    .expr_forall(base, binder_name, d2, b2, binder_info)?
+            }
+            Node::Lam {
+                binder_name,
+                binder_type,
+                body,
+                binder_info,
+            } => {
+                let d2 = self.guarded(|c| c.l2p_main(st, binder_type))?;
+                let b2 = self.guarded(|c| c.l2p_main(st, body))?;
+                self.scratch
+                    .expr_lam(base, binder_name, d2, b2, binder_info)?
+            }
+            Node::LetE {
+                decl_name,
+                ty,
+                value,
+                body,
+                non_dep,
+            } => {
+                let t2 = self.guarded(|c| c.l2p_main(st, ty))?;
+                let v2 = self.guarded(|c| c.l2p_main(st, value))?;
+                let b2 = self.guarded(|c| c.l2p_main(st, body))?;
+                self.scratch
+                    .expr_let(base, decl_name, t2, v2, b2, non_dep)?
+            }
+            Node::App { .. } => {
+                let f = self.get_app_fn(e);
+                let args = self.get_app_args(e);
+                self.guarded(|c| c.l2p_visit_app(st, f, &args))?
+            }
+            Node::MData { data, expr } => {
+                let b2 = self.guarded(|c| c.l2p_main(st, expr))?;
+                self.scratch.expr_mdata(base, data, b2)?
+            }
+            Node::Const { name, levels } => {
+                let ls = self.scratch.level_list_at(base, levels).to_vec();
+                let mut out = Vec::with_capacity(ls.len());
+                for l in ls {
+                    out.push(self.l2p_level(st, l)?);
+                }
+                let ls2 = self.scratch.intern_level_list(base, &out)?;
+                self.scratch.expr_const(base, name, ls2)?
+            }
+            Node::Sort { level } => {
+                let l2 = self.l2p_level(st, level)?;
+                self.scratch.expr_sort(base, l2)?
+            }
+            Node::MVar { .. } => self.guarded(|c| c.l2p_visit_app(st, e, &[]))?,
+            _ => e,
+        };
+        st.cache.insert(e, r);
+        Ok(r)
+    }
+
+    /// oracle: `main.visitApp` (`MetavarContext.lean:1470-1476`): an
+    /// assigned expr-mvar head is replaced (args appended) and the result
+    /// head-beta'd; otherwise `mkAppN (← main f) (← args.mapM main)`.
+    fn l2p_visit_app(
+        &mut self,
+        st: &mut L2P,
+        f: ExprId,
+        args: &[ExprId],
+    ) -> Result<ExprId, MetaError> {
+        if let Node::MVar { id } = self.node(f) {
+            let id = MVarId(id.ok_or_else(|| MetaError::MVar("anonymous mvar".into()))?);
+            if let Some(v) = self.mctx.assignment(id) {
+                // `visitApp v args`: `v` is NOT re-split (oracle `match f`).
+                let r = self.guarded(|c| c.l2p_visit_app(st, v, args))?;
+                return self.head_beta(r);
+            }
+            let mut out = Vec::with_capacity(args.len());
+            for &a in args {
+                out.push(self.guarded(|c| c.l2p_main(st, a))?);
+            }
+            return self.mk_app_spine(f, &out);
+        }
+        let f2 = self.guarded(|c| c.l2p_main(st, f))?;
+        let mut out = Vec::with_capacity(args.len());
+        for &a in args {
+            out.push(self.guarded(|c| c.l2p_main(st, a))?);
+        }
+        self.mk_app_spine(f2, &out)
     }
 }
 
@@ -320,6 +539,178 @@ mod tests {
                 sort_decl_level_params(ctx.scratch, base, &[w], &[w, u], &[u]),
                 Ok(vec![u])
             );
+        });
+    }
+
+    use crate::test_support::lit_level;
+
+    fn sort_of(ctx: &mut MetaCtx, l: LevelId) -> ExprId {
+        let base = Some(ctx.view.store);
+        ctx.scratch.expr_sort(base, l).unwrap()
+    }
+
+    fn arrow(ctx: &mut MetaCtx, a: ExprId, b: ExprId) -> ExprId {
+        ctx.mk_arrow(a, b).unwrap()
+    }
+
+    /// `Sort ?u -> Sort ?v -> Sort ?u` becomes `Sort u_1 -> Sort u_2 -> Sort u_1`;
+    /// the mvars are ASSIGNED, so a second occurrence reuses the param.
+    #[test]
+    fn level_mvar_to_param_names_u_n_and_assigns() {
+        with_ctx(|ctx| {
+            let (mu, lu) = ctx.fresh_level_mvar().unwrap();
+            let (_mv, lv) = ctx.fresh_level_mvar().unwrap();
+            let (su, sv) = (sort_of(ctx, lu), sort_of(ctx, lv));
+            let inner = arrow(ctx, sv, su);
+            let e = arrow(ctx, su, inner);
+            let r = ctx.level_mvar_to_param(e, &[], 1).unwrap();
+            let (p1, p2) = (lparam(ctx, "u_1"), lparam(ctx, "u_2"));
+            let (s1, s2) = (sort_of(ctx, p1), sort_of(ctx, p2));
+            let inner2 = arrow(ctx, s2, s1);
+            assert_eq!(r.expr, arrow(ctx, s1, inner2));
+            assert_eq!(r.new_param_names, vec![nm(ctx, "u_1"), nm(ctx, "u_2")]);
+            assert_eq!(r.next_param_idx, 3);
+            assert_eq!(ctx.mctx().level_assignment(mu), Some(p1));
+        });
+    }
+
+    #[test]
+    fn level_mvar_to_param_skips_already_used_names() {
+        with_ctx(|ctx| {
+            let (_m, l) = ctx.fresh_level_mvar().unwrap();
+            let e = sort_of(ctx, l);
+            let used = [nm(ctx, "u_1")];
+            let r = ctx.level_mvar_to_param(e, &used, 1).unwrap();
+            let p2 = lparam(ctx, "u_2");
+            assert_eq!(r.expr, sort_of(ctx, p2));
+            assert_eq!(r.new_param_names, vec![nm(ctx, "u_2")]);
+            assert_eq!(r.next_param_idx, 3);
+        });
+    }
+
+    /// An assigned mvar is followed: `?w := succ ?u` gives `Sort (succ u_1)`.
+    #[test]
+    fn level_mvar_to_param_follows_level_assignments() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let (_mu, lu) = ctx.fresh_level_mvar().unwrap();
+            let (mw, lw) = ctx.fresh_level_mvar().unwrap();
+            let su = ctx.scratch.level_succ(base, lu).unwrap();
+            ctx.mctx_mut().assign_level(mw, su).unwrap();
+            let e = sort_of(ctx, lw);
+            let r = ctx.level_mvar_to_param(e, &[], 1).unwrap();
+            let p1 = lparam(ctx, "u_1");
+            let sp1 = ctx.scratch.level_succ(base, p1).unwrap();
+            assert_eq!(r.expr, sort_of(ctx, sp1));
+            assert_eq!(r.new_param_names, vec![nm(ctx, "u_1")]);
+        });
+    }
+
+    /// Binders, `const` levels and a mvar-free subterm: the domain and body
+    /// of a `lam`/`forall` are both rebuilt; a closed term is returned as is.
+    #[test]
+    fn level_mvar_to_param_rebuilds_binders_and_const_levels() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let (_m, l) = ctx.fresh_level_mvar().unwrap();
+            let c = cu(ctx, "F", &[l]);
+            let bi = BinderInfo::Default;
+            let lam = ctx.scratch.expr_lam(base, None, c, c, bi).unwrap();
+            let e = ctx.scratch.expr_forall(base, None, lam, lam, bi).unwrap();
+            let r = ctx.level_mvar_to_param(e, &[], 1).unwrap();
+            let p = lparam(ctx, "u_1");
+            let c2 = cu(ctx, "F", &[p]);
+            let lam2 = ctx.scratch.expr_lam(base, None, c2, c2, bi).unwrap();
+            let want = ctx.scratch.expr_forall(base, None, lam2, lam2, bi).unwrap();
+            assert_eq!(r.expr, want);
+            assert_eq!(r.new_param_names.len(), 1);
+            // Closed term: untouched, no names consumed.
+            let r2 = ctx.level_mvar_to_param(want, &[], 7).unwrap();
+            assert_eq!(r2.expr, want);
+            assert_eq!(r2.next_param_idx, 7);
+        });
+    }
+
+    /// An assigned expr-mvar head is instantiated and head-beta'd:
+    /// `?f (Sort ?u)` with `?f := fun x => x` gives `Sort u_1`.
+    #[test]
+    fn level_mvar_to_param_beta_reduces_assigned_mvar_heads() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let z = ctx.scratch.level_zero(base).unwrap();
+            let ty = ctx.scratch.expr_sort(base, z).unwrap();
+            let (f, mf) = crate::test_support::fresh_mvar(ctx, ty);
+            let bv = crate::test_support::bvar(ctx, 0);
+            let id = ctx
+                .scratch
+                .expr_lam(base, None, ty, bv, BinderInfo::Default)
+                .unwrap();
+            ctx.mctx_mut().assign(mf, id).unwrap();
+            let (_m, l) = ctx.fresh_level_mvar().unwrap();
+            let arg = sort_of(ctx, l);
+            let e = app(ctx, f, arg);
+            let r = ctx.level_mvar_to_param(e, &[], 1).unwrap();
+            let p1 = lparam(ctx, "u_1");
+            assert_eq!(r.expr, sort_of(ctx, p1));
+        });
+    }
+
+    /// `update_level_max` on CHANGED children uses `mkLevelMax'`, which
+    /// simplifies `max 1 0` to `1`; on UNCHANGED children it returns `orig`
+    /// unless `simpLevelMax'` fires.
+    #[test]
+    fn update_level_max_simplifies_like_mk_level_max_prime() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let (zero, one) = (lit_level(ctx, 0), lit_level(ctx, 1));
+            let u = lparam(ctx, "u");
+            let orig = ctx.scratch.level_max(base, u, zero).unwrap(); // max u 0
+            assert_eq!(ctx.update_level_max(orig, one, zero).unwrap(), one);
+            let v = lparam(ctx, "v");
+            let uv = ctx.scratch.level_max(base, u, v).unwrap();
+            assert_eq!(ctx.update_level_max(uv, u, v).unwrap(), uv);
+            // Unchanged children where `simpLevelMax'` fires: `max u 0` -> `u`.
+            assert_eq!(ctx.update_level_max(orig, u, zero).unwrap(), u);
+        });
+    }
+
+    /// `mkLevelIMaxCore` branch order, on changed AND unchanged children.
+    #[test]
+    fn update_level_imax_follows_mk_level_imax_core_branches() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = lit_level(ctx, 0);
+            let (u, v) = (lparam(ctx, "u"), lparam(ctx, "v"));
+            let sv = ctx.scratch.level_succ(base, v).unwrap();
+            // isNeverZero v: `imax u (succ v)` -> `max u (succ v)` even unchanged.
+            let orig = ctx.scratch.level_imax(base, u, sv).unwrap();
+            let want = ctx.scratch.level_max(base, u, sv).unwrap();
+            assert_eq!(ctx.update_level_imax(orig, u, sv).unwrap(), want);
+            // isZero v -> v (= 0).
+            let o2 = ctx.scratch.level_imax(base, u, v).unwrap();
+            assert_eq!(ctx.update_level_imax(o2, u, zero).unwrap(), zero);
+            // isZero u -> v.
+            assert_eq!(ctx.update_level_imax(o2, zero, v).unwrap(), v);
+            // u == v -> u.
+            assert_eq!(ctx.update_level_imax(o2, u, u).unwrap(), u);
+            // else: unchanged -> orig; changed -> raw imax.
+            assert_eq!(ctx.update_level_imax(o2, u, v).unwrap(), o2);
+            let w = lparam(ctx, "w");
+            let want = ctx.scratch.level_imax(base, w, v).unwrap();
+            assert_eq!(ctx.update_level_imax(o2, w, v).unwrap(), want);
+        });
+    }
+
+    #[test]
+    fn update_level_succ_keeps_orig_when_unchanged() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let u = lparam(ctx, "u");
+            let su = ctx.scratch.level_succ(base, u).unwrap();
+            assert_eq!(ctx.update_level_succ(su, u).unwrap(), su);
+            let v = lparam(ctx, "v");
+            let sv = ctx.scratch.level_succ(base, v).unwrap();
+            assert_eq!(ctx.update_level_succ(su, v).unwrap(), sv);
         });
     }
 }
