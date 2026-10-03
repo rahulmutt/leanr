@@ -980,9 +980,8 @@ def p2Queries : List (String × String) :=
   -- postponement (a pre-existing level gap, not P2's).
   , ("p2/lval-chain",              "(fun x => (x.1).1) (S2.mk (S1.mk Nat.zero) Nat.zero)")
   -- Postponed as an ARGUMENT, resumed under `x`'s binder (Review Focus 3).
-  -- In `lval-two-binders` `y`'s type is given: with both binder types
-  -- holes leanr fails `(fun x y => y) Nat.zero Nat.zero` too (a
-  -- pre-existing gap on `y`'s `?Y x` type, not P2's).
+  -- In `lval-two-binders` `y`'s type is given: the both-holes form is
+  -- `nsaQueries`' `p2/lval-two-binders-holes`.
   , ("p2/lval-in-arg",             "(fun x => Nat.succ x.1) (Prod.mk Nat.zero Nat.zero)")
   , ("p2/lval-two-binders",        "(fun x (y : Prod Nat Nat) => Prod.mk x.2 y.1) (Prod.mk Nat.zero Nat.zero) (Prod.mk Nat.zero Nat.zero)")
   -- `(e :)` drains its own postponements (`withSynthesize (postpone :=
@@ -1004,11 +1003,7 @@ def p2Queries : List (String × String) :=
   -- before the outer application assigns `?α := Nat → Nat`.
   , ("p2/app-fn-applied",          "(fun f => f Nat.zero) Nat.succ")
   , ("p2/app-fn-two-args",         "(fun f x => f x) Nat.succ Nat.zero")
-  -- Not recorded: `(fun x f => f x.1) (Prod.mk ..) Nat.succ`. `f : ?β' x`
-  -- after `elimMVarDeps`, and `?β' a =?= Nat → Nat` needs `numScopeArgs`
-  -- constant approximation (ExprDefEq.lean:1271-1278), which leanr_meta
-  -- lacks (fails identically without postponement:
-  -- `(fun (x : Nat) f => f) Nat.zero Nat.succ` is `StuckCoercion`).
+  -- `(fun x f => f x.1) …` is recorded in `nsaQueries` (`p2/app-fn-after-lval`).
   ]
 
 -- M4b-4a P3: generalized field notation (`findMethod?`, `addLValArg`,
@@ -1134,6 +1129,31 @@ def levelInstQueries : List (String × String) :=
   , ("lvl/prodNested3",       "Prod Nat (Prod Nat (Prod Nat Nat))")
   , ("lvl/pprodProdProp",     "PProd (Prod Nat Nat) Prop")
   , ("lvl/underBinder",       "fun (α : Type) => Prod α (Prod Nat α)")
+  ]
+
+/-- numScopeArgs slice (`docs/superpowers/specs/2026-10-03-num-scope-args-design.md`).
+Each binder-type hole's body-type mvar is abstracted by `elimMVar`, which
+sets the aux mvar's `numScopeArgs` (`MetavarContext.lean:1208`); the
+application then needs constant approximation through the
+`numScopeArgs == args.size` gate (`ExprDefEq.lean:1278`, `:1800`).
+Probed on the pin 2026-10-03 with `#check` (all accepted). -/
+def nsaQueries : List (String × String) :=
+  [ ("nsa/two-binders-snd",          "(fun x y => y) Nat.zero Nat.zero")
+  , ("nsa/two-binders-fst",          "(fun x y => x) Nat.zero Nat.zero")
+  , ("nsa/fn-after-annotated",       "(fun (x : Nat) f => f) Nat.zero Nat.succ")
+  -- Dropped in M4b-4a P2 for this gap (P2 § Landed).
+  , ("p2/app-fn-after-lval",         "(fun x f => f x.1) (Prod.mk Nat.zero Nat.zero) Nat.succ")
+  , ("nsa/lval-after-fn-binder",     "(fun f x => Nat.succ x.1) Nat.succ (Prod.mk Nat.zero Nat.zero)")
+  -- `p2/lval-two-binders`'s source before P2 annotated `y` to dodge this gap.
+  , ("p2/lval-two-binders-holes",    "(fun x y => Prod.mk x.2 y.1) (Prod.mk Nat.zero Nat.zero) (Prod.mk Nat.zero Nat.zero)")
+  -- `?w Nat.zero Nat.zero =?= Eq Nat.zero Nat.zero`: first-order
+  -- approximation wins before constant approximation (`useFOApprox`,
+  -- :1319-1320), giving `(w : Eq x y)` (oracle, `pp.funBinderTypes`).
+  , ("nsa/fo-before-const",          "(fun x y w => w) Nat.zero Nat.zero (Eq.refl Nat.zero)")
+  -- `n` is in `?w`'s own lctx, so `processAssignment` stops at arg 0
+  -- (:1329-1330): pattern prefix 0 → `defaultCase`, giving `(w : Eq n n)`
+  -- (oracle, `pp.funBinderTypes`).
+  , ("nsa/in-lctx-arg-default-case", "fun (n : Nat) => (fun x y w => w) n Nat.zero (Eq.refl n)")
   ]
 
 -- `expandFunBinders` (`Lean/Elab/Binders.lean:360-406`): `_` hole
@@ -1411,7 +1431,7 @@ unsafe def main (args : List String) : IO Unit := do
   let (mod, queries, errQueries) : Name × List (String × String) × List (String × String) :=
     match args with
     | ["ElabOp"] => (`ElabOp, opQueries, opErrQueries)
-    | _ => (`Elab0, strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries ++ closeoutExplicitQueries ++ nondepQueries ++ lvalIdxQueries ++ lvalFnQueries ++ p2Queries ++ p3Queries ++ p4Queries ++ anonQueries ++ anonTailQueries ++ levelInstQueries ++ funExpandQueries ++ elimQueries, elimErrQueries)
+    | _ => (`Elab0, strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries ++ closeoutExplicitQueries ++ nondepQueries ++ lvalIdxQueries ++ lvalFnQueries ++ p2Queries ++ p3Queries ++ p4Queries ++ anonQueries ++ anonTailQueries ++ levelInstQueries ++ funExpandQueries ++ elimQueries ++ nsaQueries, elimErrQueries)
   -- Must run before any `importModules (loadExts := true)` or the
   -- import throws internally (dump_syntax_elab.lean's module doc, same
   -- pitfall, confirmed here empirically by `dump_defeq.lean`).

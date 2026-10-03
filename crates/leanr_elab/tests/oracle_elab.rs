@@ -69,7 +69,9 @@ fn oracle_elab_gate() {
     //
     // 345 -> 346 (synth-real-depth task 3): `tc/useAnyHole`.
     // 346 -> 350 (level instantiation simplifies): the 4 lvl/* records.
-    const CORPUS_FLOOR: usize = 350;
+    // 350 -> 358 (numScopeArgs task 2): the 6 nsa/* gate records,
+    // p2/app-fn-after-lval and p2/lval-two-binders-holes.
+    const CORPUS_FLOOR: usize = 358;
     assert!(
         replayed >= CORPUS_FLOOR,
         "corpus shrank: replayed {replayed} records, floor is {CORPUS_FLOOR}. \

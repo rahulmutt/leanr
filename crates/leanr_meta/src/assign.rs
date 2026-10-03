@@ -241,16 +241,11 @@ impl<'e> MetaCtx<'e> {
             Some(id) => id,
             None => return Ok(false),
         };
-        // oracle gates the constant-function fallback
-        // (`assignConst`/`mkAuxMVar`, :1243-1271) on
-        // `mvarDecl.numScopeArgs == args.size || cfg.constApprox`.
-        // `numScopeArgs` (delayed-assignment scope tracking) has no
-        // analogue anywhere in this crate (no delayed-assignment
-        // machinery at all, module doc), so the gate collapses to
-        // `cfg.const_approx` alone (task 7) — which still defaults
-        // `false`, matching the oracle's own default, so this branch is
-        // dead on the `default` profile exactly as before.
-        if !self.cfg.const_approx {
+        // oracle :1799-1800: `if mvarDecl.numScopeArgs == args₁.size ||
+        // cfg.constApprox`. `num_scope_args` counts the args that model a
+        // binder dependency (`elim_mvar`, mk_binding.rs).
+        let num_scope_args = self.mctx.decl(mvar_id).map_or(0, |d| d.num_scope_args);
+        if num_scope_args != args1.len() && !self.cfg.const_approx {
             return Ok(false);
         }
         // oracle :1799-1801: `type <- inferType (mkAppN mvar args₁);
@@ -357,14 +352,10 @@ impl<'e> MetaCtx<'e> {
     /// (`processAssignmentFOApprox <||> processConstApprox .. i ..`),
     /// passing `i` as `patternVarPrefix` (:1319-1332). This function is
     /// transcribed as that exact same loop-with-accumulator (`i`
-    /// tracked via a plain `while`, `args` mutated in place) rather than
-    /// task 5/6's `for`-loop-building-a-separate-`sim_args`-Vec-and-
-    /// bailing-immediately shape: with every `*_approx` flag off, every
-    /// `use_fo_approx` call below immediately returns `Ok(false)` (both
-    /// `process_assignment_fo_approx`/`process_const_approx` bail on
-    /// their own flag check before doing anything else), so this is
-    /// observably IDENTICAL to task 5/6's `Ok(false)` seams on the
-    /// `default` profile — the regression task 6's own fixtures pin.
+    /// tracked via a plain `while`, `args` mutated in place). On the
+    /// default profile `use_fo_approx` can now succeed through
+    /// `process_const_approx` when the mvar's `num_scope_args` equals the
+    /// arg count (oracle gate :1278).
     pub(crate) fn process_assignment(
         &mut self,
         mvar_app: ExprId,
@@ -531,28 +522,10 @@ impl<'e> MetaCtx<'e> {
         }
     }
 
-    /// oracle: `processConstApprox` (ExprDefEq.lean:1271-1310), gated on
-    /// `self.cfg.const_approx`.
-    ///
-    /// The `mvarDecl.numScopeArgs != numArgs && !cfg.constApprox` guard
-    /// collapses to `!cfg.const_approx` alone — the SAME reasoning
-    /// `is_def_eq_mvar_self`'s own doc comment gives (`numScopeArgs`
-    /// tracks delayed-assignment scope, a feature this crate's
-    /// `MetavarContext` has no analogue for at all).
-    ///
-    /// The `patternVarPrefix > 0` branch (:1284-1309) — searching for
-    /// the LONGEST valid pattern prefix before falling back to a fully
-    /// constant function — is a named SEAM here: this crate always goes
-    /// straight to `defaultCase` (`assignConst mvar args.size v`,
-    /// :1273), which is the search's OWN eventual fallback too (every
-    /// `go` iteration that fails re-tries a SHORTER prefix, terminating
-    /// at `defaultCase` when none work). Skipping straight to
-    /// `defaultCase` can therefore only make this crate accept STRICTLY
-    /// FEWER constraints than the oracle (never more): sound, just
-    /// incomplete for the corner where an actual proper prefix would
-    /// have let SOME of `v`'s free vars stay bound rather than escape
-    /// entirely. Acknowledged-thin coverage, matching the brief's own
-    /// allowance for the const-approx corner.
+    /// oracle: `processConstApprox` (ExprDefEq.lean:1271-1309). Gate
+    /// (:1278): `numScopeArgs != numArgs && !cfg.constApprox` → `false`.
+    /// The `patternVarPrefix > 0` search (:1282-1309) is Task 3 of the
+    /// numScopeArgs plan; until then every caller goes to `defaultCase`.
     fn process_const_approx(
         &mut self,
         mvar: ExprId,
@@ -560,7 +533,11 @@ impl<'e> MetaCtx<'e> {
         _pattern_var_prefix: usize,
         v: ExprId,
     ) -> Result<bool, MetaError> {
-        if !self.cfg.const_approx {
+        let Node::MVar { id: Some(id) } = self.node(mvar) else {
+            return Ok(false);
+        };
+        let num_scope_args = self.mctx.decl(MVarId(id)).map_or(0, |d| d.num_scope_args);
+        if num_scope_args != args.len() && !self.cfg.const_approx {
             return Ok(false);
         }
         self.assign_const(mvar, args.len(), v)
@@ -1732,6 +1709,56 @@ mod tests {
                     assert_eq!(ctx.mctx.is_assigned(m_id), expected);
                 },
             );
+        }
+    }
+
+    /// An mvar minted at the EMPTY context with the given `num_scope_args`.
+    fn fresh_scoped_mvar(ctx: &mut MetaCtx, ty: ExprId, n: usize) -> (ExprId, MVarId) {
+        ctx.mk_aux_mvar_at(LocalCtxSnapshot::empty(), ty, MVarKind::Natural, None, n)
+            .expect("mvar")
+    }
+
+    /// oracle `processConstApprox` gate (`ExprDefEq.lean:1278`), default
+    /// profile (`const_approx` off): `?m N.zero =?= N.succ` with `?m : Sort
+    /// 0 -> Sort 0` is solved by constant approximation iff
+    /// `numScopeArgs == 1` (the arg count).
+    #[test]
+    fn num_scope_args_gates_process_const_approx_on_the_default_profile() {
+        for (n, expected) in [(1, true), (2, false), (0, false)] {
+            with_n_ctx_cfg(Config::default(), |ctx| {
+                let s0 = n_type(ctx);
+                let mvar_ty = mk_forall(ctx, s0, s0);
+                let (m_expr, m_id) = fresh_scoped_mvar(ctx, mvar_ty, n);
+                let zero = mk_const(ctx, "N.zero");
+                let succ = mk_const(ctx, "N.succ");
+                let lhs = mk_app(ctx, m_expr, zero);
+                assert_eq!(ctx.is_def_eq(lhs, succ).unwrap(), expected, "n={n}");
+                assert_eq!(ctx.mctx.is_assigned(m_id), expected, "n={n}");
+            });
+        }
+    }
+
+    /// oracle `isDefEqMVarSelf` gate (`ExprDefEq.lean:1800`), default
+    /// profile: `?m a =?= ?m b` (distinct `Sort 1` fvars, so pairwise
+    /// unification fails; see `const_approx_gates_is_def_eq_mvar_self_fallback`
+    /// for why `Sort 1`) falls back to constant approximation iff
+    /// `numScopeArgs == 1`.
+    #[test]
+    fn num_scope_args_gates_is_def_eq_mvar_self_on_the_default_profile() {
+        for (n, expected) in [(1, true), (2, false), (0, false)] {
+            with_n_ctx_cfg(Config::default(), |ctx| {
+                let z = ctx.scratch.level_zero(None).unwrap();
+                let one = ctx.scratch.level_succ(None, z).unwrap();
+                let sort1 = ctx.scratch.expr_sort(None, one).unwrap();
+                let mvar_ty = mk_forall(ctx, sort1, sort1);
+                let (m_expr, m_id) = fresh_scoped_mvar(ctx, mvar_ty, n);
+                let a = fresh_fvar(ctx, sort1, "a");
+                let b = fresh_fvar(ctx, sort1, "b");
+                let lhs = mk_app(ctx, m_expr, a);
+                let rhs = mk_app(ctx, m_expr, b);
+                assert_eq!(ctx.is_def_eq(lhs, rhs).unwrap(), expected, "n={n}");
+                assert_eq!(ctx.mctx.is_assigned(m_id), expected, "n={n}");
+            });
         }
     }
 
