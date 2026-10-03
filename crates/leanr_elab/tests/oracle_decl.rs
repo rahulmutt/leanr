@@ -75,6 +75,24 @@ const ENABLED: &[&str] = &[
     "err/defTypeHole",
     "err/levelMVarValue",
     "err/unknownIdBody",
+    // Task 7 — theorems and Prop-typed headers
+    "kind/theorem",
+    "kind/propDef",
+    "kind/abbrevProp",
+    "kind/opaqueProp",
+    "univ/thmElevenNumeric",
+    "univ/propDefElevenNumeric",
+    "univ/thmSortHole",
+    "univ/thmExplicit",
+    "univ/thmUserAndHole",
+    "univ/thmLevelOnlyBody",
+    "err/thmAlready",
+    "err/thmUnivValueOnly",
+    "err/thmTypeNotProp",
+    "err/propDefHeaderUniv",
+    "err/thmHeaderUnivByBody",
+    "err/thmTypeHole",
+    "err/levelMVarThm",
 ];
 
 #[test]

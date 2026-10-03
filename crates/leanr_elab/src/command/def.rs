@@ -13,12 +13,14 @@
 
 use std::collections::HashSet;
 
+use leanr_kernel::bank::levels::LevelRow;
 use leanr_kernel::bank::terms::Node;
-use leanr_kernel::bank::{ExprId, NameId};
+use leanr_kernel::bank::{ExprId, LevelId, NameId};
 use leanr_kernel::{
     ConstantVal, Declaration, DefinitionSafety, DefinitionVal, OpaqueVal, ReducibilityHints,
+    TheoremVal,
 };
-use leanr_meta::{sort_decl_level_params, CollectLevelParams};
+use leanr_meta::{sort_decl_level_params, CollectLevelParams, TransparencyMode};
 use leanr_syntax::kind::KindInterner;
 
 use super::header::{self, Header};
@@ -35,12 +37,26 @@ pub(super) fn elab_def(
 ) -> Result<Built, ElabError> {
     let id = header::expand_decl_id(elab, view)?;
     let header = header::elab_header(elab, view, &id, kinds)?;
+    let header = level_mvar_to_param_headers(elab, view.kind, header)?;
+    // `Elab.async` is on, as on the `lean` command line
+    // (`Elab/Frontend.lean:291-292`): a theorem whose header has no mvars
+    // takes `elabAsync` (`MutualDef.lean:1236-1242`). The test runs after
+    // the header conversion, so only expression mvars can block it.
+    let base = Some(elab.view.store);
+    let d = elab.mctx.store().expr_data(base, header.ty);
+    if view.kind == DefKind::Theorem && !d.has_expr_mvar() && !d.has_level_mvar() {
+        check_async_signature(elab, &header)?;
+    }
     let value = elab_value(elab, view, &header, kinds)?;
     // `finishElab` (`MutualDef.lean:1394-1401`): synthesize once more, then
     // instantiate the values and the headers.
     elab.synthesize_synthetic_mvars_no_postponing(kinds)?;
     let value = elab.mctx.instantiate_mvars(value)?;
     let ty = elab.mctx.instantiate_mvars(header.ty)?;
+    // `MutualClosure.pushMain` (`MutualDef.lean:1051-1053`).
+    if view.kind == DefKind::Theorem && !is_prop_full(elab, ty)? {
+        return Err(ElabError::TheoremTypeNotProp(id.short.clone()));
+    }
     // `levelMVarToParamTypesPreDecls` under `withLevelNames allUserLevelNames`
     // (`MutualDef.lean:1434`; `PreDefinition/Basic.lean:56-58`): TYPES only.
     let ty = elab.with_level_names(header.level_names.clone(), |elab| {
@@ -64,6 +80,80 @@ pub(super) fn elab_def(
     } else {
         Built::Add(vec![decl])
     })
+}
+
+/// oracle: `levelMVarToParamHeaders` (`MutualDef.lean:1148-1160`): a
+/// theorem's, or a Prop-typed declaration's, header universe mvars become
+/// `u_N` params eagerly, and the new names join the header's `levelNames`
+/// (so they order as user names in `sortDeclLevelParams`). Then every
+/// header type is instantiated.
+fn level_mvar_to_param_headers(
+    elab: &mut TermElabM,
+    kind: DefKind,
+    mut header: Header,
+) -> Result<Header, ElabError> {
+    if kind == DefKind::Theorem || is_prop_full(elab, header.ty)? {
+        let ty0 = header.ty;
+        let (ty, names) = elab.with_level_names(header.level_names.clone(), |elab| {
+            let ty = elab.level_mvar_to_param(ty0)?;
+            Ok((ty, elab.level_names.clone()))
+        })?;
+        header.ty = ty;
+        header.level_names = names;
+    }
+    header.ty = elab.mctx.instantiate_mvars(header.ty)?;
+    Ok(header)
+}
+
+/// oracle: `elabAsync`'s committed signature (`MutualDef.lean:1278-1298`):
+/// the level params come from the header TYPE alone, so a universe used
+/// only in the proof is "unused" (probe: `theorem ta.{u} : True :=
+/// (fun (_ : Sort u) => True.intro) PUnit.{u}`). The body then runs
+/// `finishElab` as for a definition.
+fn check_async_signature(elab: &mut TermElabM, header: &Header) -> Result<(), ElabError> {
+    let ty0 = header.ty;
+    // `withLevelNames allUserLevelNames <| levelMVarToParam type`
+    // (`:1281-1282`): a no-op after `level_mvar_to_param_headers`, kept for
+    // fidelity.
+    let ty = elab.with_level_names(header.level_names.clone(), |elab| {
+        elab.level_mvar_to_param(ty0)
+    })?;
+    let ty = elab.mctx.instantiate_mvars(ty)?;
+    // `collectLevelParams` over the type, `sortDeclLevelParams [] allUser used` (`:1288-1291`).
+    fix_level_params(elab, &[ty], &header.level_names)?;
+    // `Meta.letToHave type` (`:1293-1296`): the letToHave seam.
+    reject_let(elab, ty)
+}
+
+/// oracle: `Meta.isProp` (`Meta/InferType.lean:323-332`): `inferType`, then
+/// `whnfD`, then `isAlwaysZero` of the instantiated sort level. The
+/// `isPropQuick` pre-pass (`:302-314`) is skipped: it answers `true`/`false`
+/// only where this path gives the same answer. Unlike `MetaCtx::is_prop`
+/// (literal `zero` only), this uses the full `isAlwaysZero`, which accepts
+/// an unnormalized `imax u 0` or `max 0 0` (e.g. a declared `Sort` level;
+/// `infer_type`'s own `∀` sorts are already folded by `mkLevelIMax'`).
+fn is_prop_full(elab: &mut TermElabM, e: ExprId) -> Result<bool, ElabError> {
+    let ty = elab.mctx.infer_type(e)?;
+    let ty = elab
+        .mctx
+        .with_transparency(TransparencyMode::Default, |m| m.whnf(ty))?;
+    let ty = elab.mctx.instantiate_mvars(ty)?;
+    let base = Some(elab.view.store);
+    let Node::Sort { level } = elab.mctx.store().expr_node(base, ty) else {
+        return Ok(false);
+    };
+    Ok(is_always_zero(elab, level))
+}
+
+/// oracle: `isAlwaysZero` (`Meta/InferType.lean:261-267`; the same as
+/// `Level.isAlwaysZero`, `Level.lean:212-218`).
+fn is_always_zero(elab: &TermElabM, l: LevelId) -> bool {
+    match *elab.mctx.store().level_row(Some(elab.view.store), l) {
+        LevelRow::Zero => true,
+        LevelRow::Max(a, b) => is_always_zero(elab, a) && is_always_zero(elab, b),
+        LevelRow::IMax(_, b) => is_always_zero(elab, b),
+        LevelRow::Succ(_) | LevelRow::Param(_) | LevelRow::MVar(_) => false,
+    }
 }
 
 /// oracle: `elabFunValues`' per-header body (`MutualDef.lean:529-556`).
@@ -240,8 +330,64 @@ fn build_decl(
             is_unsafe: false,
             all: vec![name],
         }),
-        DefKind::Theorem | DefKind::Axiom => {
-            return Err(ElabError::Internal(format!("build_decl: {kind:?}")))
-        }
+        // `mkThmDecl` (`PreDefinition/Basic.lean:192-197`).
+        DefKind::Theorem => Declaration::Thm(TheoremVal {
+            val,
+            value,
+            all: vec![name],
+        }),
+        DefKind::Axiom => return Err(ElabError::Internal("build_decl: axiom".into())),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use leanr_kernel::bank::Store;
+    use leanr_kernel::{BinderInfo, Environment};
+    use leanr_meta::{Config, EnvExtensions, MetaCtx};
+
+    use crate::elab::TermElabM;
+
+    /// `is_prop_full` uses the full `isAlwaysZero`
+    /// (`Meta/InferType.lean:261-267`), not `MetaCtx::is_prop`'s literal
+    /// `zero` test. `oracle_decl_gate` cannot see the difference: both
+    /// `infer_type`s fold `imax u 0` to `0` (`mkLevelIMax'`), so this pins
+    /// it on an unnormalized declared type (Task 7 mutation 5). The oracle
+    /// agrees: `isPropQuick` on an fvar runs `isArrowProp` → `isAlwaysZero`
+    /// on the declared `Sort` (`:312`, `:276`).
+    #[test]
+    fn is_prop_full_uses_the_full_is_always_zero() {
+        let env = Environment::default();
+        let view = env.view();
+        let mut scratch = Store::scratch();
+        let mctx = MetaCtx::new(
+            view,
+            &mut scratch,
+            Config::default(),
+            EnvExtensions::default(),
+        );
+        let mut elab = TermElabM::new(mctx, view);
+        let u = super::super::header::intern_atomic(&mut elab, "u").unwrap();
+        let st = elab.mctx.store_mut();
+        let z = st.level_zero(None).unwrap();
+        let p = st.level_param(None, Some(u)).unwrap();
+        let imax_u_0 = st.level_imax(None, p, z).unwrap();
+        let max_0_imax = st.level_max(None, z, imax_u_0).unwrap();
+        let imax_0_u = st.level_imax(None, z, p).unwrap();
+        let local = |elab: &mut TermElabM, l| {
+            let s = elab.mctx.store_mut().expr_sort(None, l).unwrap();
+            elab.mctx
+                .push_local_decl(None, s, BinderInfo::Default)
+                .unwrap()
+        };
+        let a = local(&mut elab, imax_u_0);
+        let b = local(&mut elab, max_0_imax);
+        let c = local(&mut elab, imax_0_u);
+        assert!(super::is_prop_full(&mut elab, a).unwrap(), "imax u 0");
+        assert!(
+            super::is_prop_full(&mut elab, b).unwrap(),
+            "max 0 (imax u 0)"
+        );
+        assert!(!super::is_prop_full(&mut elab, c).unwrap(), "imax 0 u");
+    }
 }

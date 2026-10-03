@@ -77,9 +77,6 @@ impl<'x> CommandElab<'x> {
             let mctx = MetaCtx::new(env_view, &mut scratch, Config::default(), self.exts);
             let mut elab = TermElabM::new(mctx, env_view);
             match view.kind {
-                DefKind::Theorem => Err(ElabError::UnsupportedSyntax(
-                    "theorem — not yet ported (M4c-1 P2 Task 7)".into(),
-                )),
                 DefKind::Axiom => Err(ElabError::UnsupportedSyntax(
                     "axiom — not yet ported (M4c-1 P2 Task 9)".into(),
                 )),
