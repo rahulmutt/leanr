@@ -306,3 +306,51 @@ There are two plans, one PR each:
   `abstract_nested_proofs` ports, with unit tests.
 - **P2 command elaborator:** `DefView`, `CommandElab`, the pipeline,
   errors, the dumper, the corpus and the gate.
+
+## Amendment 1 (plan-time refinements and execution-time rulings)
+
+1. **The kernel API is `add_decl_in(&mut self, scratch: &mut Store, d)`.** It promotes every id of `d` into `self.store` (`promote_declaration`), then checks against a fresh scratch. The plan's first version skipped the promote walk. The P1 gate found that this breaks cross-declaration references inside one scratch store: the main declaration references the aux by its scratch NameId, but the kernel looks constants up by persistent id. The plan was corrected at execution time (ruling R5) back to the spec's original design. Promoted ids of a rejected declaration remain in the store as orphans unreachable from `constants`.
+2. **The aux-lemma cache is env-wide in the oracle.** In the probe, `foo3` reused `foo1._proof_1` from an earlier declaration. M4c-1's corpus resets the environment for each record, so a per-declaration cache (`AuxLemmas`) is observably identical there. M4c-2's file loop must lift the cache to `CommandElab` scope, keyed by type and level params, and must also keep the earlier declarations' aux names as conflicts.
+3. **Pending aux names count as "in the environment"** in two places: `mkUniqueName`'s conflict check, and `isNonTrivialProof`'s "constant not in env" test. In the oracle both see aux lemmas that `mkAuxLemma` has already added.
+4. **New named seams in P1:**
+   - a `letE` reached by `abstractNestedProofs` (unreachable from P2, which rejects `let` first);
+   - an unassigned mvar reached by the Closure walk (unreachable after `ensureNoUnassignedMVars`);
+   - an aux lemma over unsafe constants (the oracle's unsafe `defnDecl` would be rejected by `add_decl_in`);
+   - Closure with `zetaDelta := false` (`check` and dependent let-decls) is not ported, because no M4c-1 caller passes it;
+   - **`abstractNestedProofs` itself looks up a pending aux constant.** Trigger: a value binder's type holds a non-trivial proof, and the body's `is_proof`/`infer_type` whnf's through a K-like recursor (`Eq.rec` iota, `to_ctor_when_k`) over it. The oracle succeeds because `mkAuxLemma` has already called `addDecl`. leanr returns `MetaError::Unsupported("...pending aux lemma...M4c-1 seam...")`. The fix, a pending-constant overlay for infer/whnf, is deferred to a follow-up. This corrects the spec's claim that nothing looks up the aux constant before `addDecl`.
+5. **`levelMVarToParamHeaders` applies only to `theorem` or Prop-typed headers** (`MutualDef.lean:1148-1160`). Definition headers keep their level mvars until `levelMVarToParamTypesPreDecls` (`MutualDef.lean:1434`, `PreDefinition/Basic.lean:56-58`), which covers **types only**. A level mvar left in a value is an error (`ensureNoUnassignedLevelMVarsAtPreDef`, `PreDefinition/Main.lean:76-97`). This sharpens spec § The oracle model step 3, and P2's plan owns it.
+6. **Mutation rulings.** Task 6 mutation 5 (abstract decl i's type over all `xs`) is NOT equivalent, although the plan called it so: the range length shifts de Bruijn indices (oracle `abstractRange i xs`). It is killed by `closure_renames_level_params_to_u_n`. Task 7 mutation 6 (advance `next_idx` past the candidate) is EQUIVALENT in this port: `pending` never shrinks and the generator serves only `_proof`.
+7. **Oracle name.** The nested-proof marker is `Lean.Grind.nestedProof`, not `Grind.nestedProof`.
+8. **Plan-cite drift.** Closure.lean cites drifted by about 13-25 lines, MetavarContext/Level cites by 1-3. All were corrected in code.
+
+## Landed
+
+### P1 (declaration substrate)
+
+Commits (`git log --oneline main..HEAD`):
+
+- `5d6a14b` leanr_kernel: add_decl_in promotes the declaration before checking (R5)
+- `1f42e3f` leanr_meta: abstractNestedProofs pending-aux lookup seam (review R4)
+- `f7e8e77` leanr_meta: abstractNestedProofs + AuxLemmas accumulator (mkAuxLemma/mkAuxTheorem)
+- `e95f45f` leanr_meta: Closure.mkValueTypeClosure (zetaDelta := true)
+- `221b8a4` leanr_meta: Core.betaReduce + zetaReduce (transform_with)
+- `d1c3b7a` leanr_meta: getMaxHeight
+- `521352c` leanr_meta: correct Task 3 oracle cites
+- `8be6d50` leanr_meta: levelMVarToParam + Level.update*! simplifying rebuilds
+- `63ce557` leanr_meta: collectLevelParams, sortDeclLevelParams, Name.cmp ports
+- `f9efe6f` leanr_kernel: add_decl_in admits a declaration built in a caller scratch store
+- `0df1b6e` docs: M4c-1 P1 declaration-substrate plan
+- `cc033b2` docs: M4c-1 single-declaration elaboration — design spec
+- (this commit) leanr_meta: M4c-1 P1 gate, foo2 + aux committed over Meta0; spec amendment 1
+
+Mutation outcomes (from each commit body):
+
+- add_decl_in: scratch-less check FAILS both tests; add_core unpromoted FAILS the admit test; R5 promote step removed FAILS the cross-decl and admit tests.
+- Task 3 (levelMVarToParam and level-param ports): 6 mutations killed plus 5 more in collect/sort (all killed), and one equivalent (unchanged-max else_k builds raw max).
+- Task 4 (getMaxHeight): 3 mutations killed.
+- Task 5 (beta/zeta): 4 mutations killed.
+- Task 6 (Closure): mutations 1-5 killed (5 is not equivalent, see item 6).
+- Task 7 (abstractNestedProofs): mutations 1-5 killed, 6 equivalent. R4 seam pin killed by removing the map_err.
+- Task 8 gate: (a) closure_new_level_param keeps `u`: gate test FAILS and `closure_renames_level_params_to_u_n` FAILS; (b) commit order swapped (main first): gate FAILS with UnknownConstant(foo2._proof_1); (c) Task 7 mutation 6 stays equivalent (single aux).
+
+Oracle cites corrected in the final sweep (code, plan and spec together): `Transform.lean:202` to `:204` (transform.rs); `CoreM.lean:80` to `:79` (`idx` field); `CoreM.lean:116-119` to `:117-120` (`isConflict`); `Level.lean:519-538` to `:519-537`; `DeclUtil.lean:79-89` to `:79-88`; `Environment.lean:2890-2902` to `:2890-2901`.

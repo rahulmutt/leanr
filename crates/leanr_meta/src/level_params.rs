@@ -2,7 +2,7 @@
 //! `Name.cmp` (`Lean/Data/Name.lean:67-80`), `Name.appendIndexAfter`
 //! (`Init/Meta/Defs.lean:322-325`), `CollectLevelParams`
 //! (`Lean/Util/CollectLevelParams.lean:17-72`), `sortDeclLevelParams`
-//! (`Lean/Elab/DeclUtil.lean:79-89`) and `levelMVarToParam`
+//! (`Lean/Elab/DeclUtil.lean:79-88`) and `levelMVarToParam`
 //! (`Lean/MetavarContext.lean:1403-1495`, namespace `LevelMVarToParam` plus
 //! `UnivMVarParamResult`/`levelMVarToParam`; Task 3).
 
@@ -380,7 +380,7 @@ impl MetaCtx<'_> {
     }
 }
 
-/// oracle: `sortDeclLevelParams` (`DeclUtil.lean:79-89`). `scope_params`
+/// oracle: `sortDeclLevelParams` (`DeclUtil.lean:79-88`). `scope_params`
 /// and `all_user_params` are in REVERSE declaration order. `Err(u)` is
 /// the oracle's "unused universe parameter 'u'".
 pub fn sort_decl_level_params(

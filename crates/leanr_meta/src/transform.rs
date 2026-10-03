@@ -104,7 +104,7 @@ impl<'e> MetaCtx<'e> {
     /// defaults (`zetaDelta := true`, `zetaHave := true`, `beta := true`).
     /// `n` = local decls before the call; a decl at index >= n was opened
     /// by this `transform`, so its value is visible even if nondep
-    /// (`decl.value? (allowNondep := zetaHave && decl.index ≥ n)`, `:202`).
+    /// (`decl.value? (allowNondep := zetaHave && decl.index ≥ n)`, `:204`).
     pub fn zeta_reduce(&mut self, e: ExprId) -> Result<ExprId, MetaError> {
         let n = self.local_names.len();
         let mut pre = move |c: &mut MetaCtx<'e>, x: ExprId| -> Result<TransformStep, MetaError> {

@@ -82,7 +82,7 @@ Meta0 heights from `Meta0.olean` (`readModuleData`): `id` is `regular 1`, `count
 - Consumes: `check_declaration(view, &mut Store, Declaration)` (`env.rs:199`), `add_core(&Store, ConstantInfo)` (`env.rs:547`).
 - Produces: `pub fn add_decl_in(&mut self, scratch: &mut Store, d: Declaration) -> Result<(), KernelError>`. `add_decl(d)` becomes `self.add_decl_in(&mut Store::scratch(), d)`.
 
-Why no promote walk: `check_declaration` already resolves every id through `scratch.*(Some(view.store), …)`, so a declaration whose ids were minted in **this** scratch store checks correctly. Then `add_core` promotes each surviving `ConstantInfo` through `promote_constant_info`. The region contract in `add_decl`'s doc ("a freshly-created scratch cannot resolve a scratch id minted by some OTHER scratch store") is exactly what `add_decl_in` lifts.
+(Superseded by R5: `add_decl_in` DOES promote every id of `d` into `self.store` before checking; see Amendment 1 item 1. The paragraph below is the original, wrong claim.) Why no promote walk: `check_declaration` already resolves every id through `scratch.*(Some(view.store), …)`, so a declaration whose ids were minted in **this** scratch store checks correctly. Then `add_core` promotes each surviving `ConstantInfo` through `promote_constant_info`. The region contract in `add_decl`'s doc ("a freshly-created scratch cannot resolve a scratch id minted by some OTHER scratch store") is exactly what `add_decl_in` lifts.
 
 - [ ] **Step 1: Write the failing tests** (append to `env/tests.rs`)
 
@@ -227,7 +227,7 @@ The oracle code being ported:
 - `Name.cmp` (`Lean/Data/Name.lean:67-80`), where `Name.lt a b` is `a.cmp b == .lt`.
 - `Name.appendIndexAfter` (`Init/Meta/Defs.lean:322-325`). There are no macro scopes in leanr names, so `modifyBase` is the identity.
 - `CollectLevelParams` (`Lean/Util/CollectLevelParams.lean:11-72`).
-- `sortDeclLevelParams` (`Lean/Elab/DeclUtil.lean:79-89`).
+- `sortDeclLevelParams` (`Lean/Elab/DeclUtil.lean:79-88`).
 
 - [ ] **Step 1: Add the test helpers** to `test_support.rs`, next to `c`:
 
@@ -371,7 +371,7 @@ Expected: compile errors (the module and functions don't exist yet).
 //! `Name.cmp` (`Lean/Data/Name.lean:67-80`), `Name.appendIndexAfter`
 //! (`Init/Meta/Defs.lean:322-325`), `CollectLevelParams`
 //! (`Lean/Util/CollectLevelParams.lean:11-72`), `sortDeclLevelParams`
-//! (`Lean/Elab/DeclUtil.lean:79-89`) and `levelMVarToParam`
+//! (`Lean/Elab/DeclUtil.lean:79-88`) and `levelMVarToParam`
 //! (`Lean/MetavarContext.lean:1426-1497`; Task 3).
 
 use std::cmp::Ordering;
@@ -491,7 +491,7 @@ impl<'e> MetaCtx<'e> {
     }
 }
 
-/// oracle: `sortDeclLevelParams` (`DeclUtil.lean:79-89`). `scope_params`
+/// oracle: `sortDeclLevelParams` (`DeclUtil.lean:79-88`). `scope_params`
 /// and `all_user_params` are in REVERSE declaration order. `Err(u)` is
 /// the oracle's "unused universe parameter 'u'".
 pub fn sort_decl_level_params(
@@ -900,7 +900,7 @@ git commit -m "leanr_meta: levelMVarToParam + Level.update*! simplifying rebuild
 - Consumes: `EnvView::get` (`tc.rs:296`), `ConstantInfo::Defn`, `ReducibilityHints::Regular`.
 - Produces: `impl MetaCtx { pub fn get_max_height(&mut self, e: ExprId) -> Result<u32, MetaError> }`.
 
-The oracle (`Lean/Environment.lean:2890-2902`) runs `e.foldConsts 0` and, for each constant that resolves to a definition with `.regular h` hints, takes the max. `defHeightOverrideExt` is a non-persistent extension that only structural recursion writes, so it is empty in M4c-1; that is a named seam in the doc comment. A name that is not in the environment contributes nothing, and that includes a pending aux lemma, which is a theorem anyway.
+The oracle (`Lean/Environment.lean:2890-2901`) runs `e.foldConsts 0` and, for each constant that resolves to a definition with `.regular h` hints, takes the max. `defHeightOverrideExt` is a non-persistent extension that only structural recursion writes, so it is empty in M4c-1; that is a named seam in the doc comment. A name that is not in the environment contributes nothing, and that includes a pending aux lemma, which is a theorem anyway.
 
 - [ ] **Step 1: Write the failing test** (`max_height.rs` tests module; Meta0 heights pinned above)
 
@@ -935,7 +935,7 @@ Expected: compile error.
 - [ ] **Step 3: Implement**
 
 ```rust
-//! oracle: `getMaxHeight` (`Lean/Environment.lean:2890-2902`). Seam:
+//! oracle: `getMaxHeight` (`Lean/Environment.lean:2890-2901`). Seam:
 //! `defHeightOverrideExt` (`:2880-2888`) is not modelled — only
 //! structural recursion writes it, which M4c-1 does not elaborate.
 
@@ -1851,7 +1851,8 @@ git commit -m "leanr_meta: M4c-1 P1 gate — foo2 + aux committed over Meta0; sp
 
 ## Amendment 1 (plan-time refinements; append to the spec in Task 8)
 
-1. **The kernel API is `add_decl_in(&mut self, scratch: &mut Store, d)`, with no separate promote walk.** `check_declaration` already resolves ids through the caller's scratch store, and `add_core` already promotes each survivor (`promote_constant_info`). The spec's `add_decl_from_scratch` "promote, then `add_decl`" is replaced by this. The behavior is the same, and less code is involved.
+1. **(Superseded by R5; see the spec's Amendment 1 item 1.)** ~~The kernel API is `add_decl_in(&mut self, scratch: &mut Store, d)`, with no separate promote walk.~~ The P1 gate showed this breaks cross-declaration references in one scratch store; `add_decl_in` now promotes first (`promote_declaration`).
+   Original text: `check_declaration` already resolves ids through the caller's scratch store, and `add_core` already promotes each survivor (`promote_constant_info`). The spec's `add_decl_from_scratch` "promote, then `add_decl`" is replaced by this. The behavior is the same, and less code is involved.
 2. **The aux-lemma cache is env-wide in the oracle.** In the probe, `foo3` reused `foo1._proof_1` from an earlier declaration. M4c-1's corpus resets the environment for each record, so a per-declaration cache (`AuxLemmas`) is observably identical there. M4c-2's file loop must lift the cache to `CommandElab` scope, keyed by type and level params, and must also keep the earlier declarations' aux names as conflicts.
 3. **Pending aux names count as "in the environment"** in two places: `mkUniqueName`'s conflict check, and `isNonTrivialProof`'s "constant not in env" test. In the oracle both see aux lemmas that `mkAuxLemma` has already added.
 4. **New named seams in P1:**

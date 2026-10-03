@@ -1,4 +1,4 @@
-//! oracle: `getMaxHeight` (`Lean/Environment.lean:2890-2902`). Seam:
+//! oracle: `getMaxHeight` (`Lean/Environment.lean:2890-2901`). Seam:
 //! `defHeightOverrideExt` (`:2883-2888`) is not modelled — only
 //! structural recursion writes it, which M4c-1 does not elaborate.
 

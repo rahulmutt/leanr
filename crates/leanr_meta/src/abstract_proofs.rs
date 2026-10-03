@@ -27,7 +27,7 @@
 //!   lands.
 //!
 //! Not modeled: private names. `mkUniqueName`'s `isConflict` also checks the
-//! private/public twin of each candidate (`CoreM.lean:116-119`), and `curr`
+//! private/public twin of each candidate (`CoreM.lean:117-120`), and `curr`
 //! privatizes the candidate in a module (`:121-125`). leanr has no private
 //! names, and Elab0 is not a module.
 
@@ -48,7 +48,7 @@ use crate::{MetaCtx, MetaError};
 pub struct AuxLemmas {
     decl_name: NameId,
     /// `DeclNameGenerator.idx` for the `_proof` infix (starts at 1,
-    /// `CoreM.lean:80`).
+    /// `CoreM.lean:79`).
     next_idx: u64,
     /// `auxLemmasExt` key `type` → (name, levelParams). Per declaration
     /// in M4c-1 (see plan Amendment 1, item 2).
