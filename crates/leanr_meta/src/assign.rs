@@ -1756,7 +1756,9 @@ mod tests {
     }
 
     /// oracle: `processConstApprox`/`assignConst` (ExprDefEq.lean:
-    /// 1271-1310, :1243-1254), gated by `self.cfg.const_approx` —
+    /// 1271-1309, :1243-1254), gated by `self.cfg.const_approx` here
+    /// because `fresh_mvar` mints with `num_scope_args = 0` (the
+    /// numScopeArgs gate is shut) —
     /// `?m N.zero =?= N.succ` where `?m : Sort 0 -> Sort 0`. `N.zero` is
     /// again a non-fvar pattern arg (same seam site as the `fo_approx`
     /// test above), but this time the RHS `N.succ` is NOT an

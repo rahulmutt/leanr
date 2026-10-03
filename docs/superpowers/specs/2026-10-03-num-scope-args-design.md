@@ -54,7 +54,7 @@ Scope: `leanr_meta` only. `leanr_elab` picks the behaviour up through
   … addExprMVarDecl newMVarId … newMVarKind numScopeArgs
   ```
   `result.getAppNumArgs` is the number of fvars `mkMVarApp` actually applied.
-  `mkMVarApp` (`:1093-1098`) skips non-fvar entries and, for a
+  `mkMVarApp` (`:1090-1097`) skips non-fvar entries and, for a
   non-`syntheticOpaque` mvar, genuine let-bound fvars, so this can be
   **smaller than `toRevert.size`**. (leanr's `collect_forward_deps` returns
   fvars only, so the non-fvar arm is vacuous there; the let-skip is live.)
@@ -258,7 +258,7 @@ d4e3de8 leanr_meta: numScopeArgs opens the constApprox gates (isDefEqMVarSelf, p
 5b. Gate 2, refuse whenever `!const_approx`: killed by the same unit test (n=1) and by all 8 task-2 corpus rows.
 6. Prefix branch always `defaultCase`: killed by all four `prefix_search_*` unit tests and by corpus row `nsa/let-prefix-search` (the only row that fails).
 7. Drop the `is_type_correct` conjunct: killed by `prefix_search_type_checks_a_ctx_local_prefix` only.
-8. `cont` goes straight to `defaultCase` (no shorter-prefix retry): killed by `prefix_search_retries_a_shorter_prefix_before_the_default_case` only.
+8. `cont` goes straight to `defaultCase` (no shorter-prefix retry): killed by `prefix_search_retries_a_shorter_prefix_before_the_default_case` only. (The plan redefined mutation 8; spec §3's "shortest prefix first" mutation was not run, this retry-removal variant was.)
 9. `instantiate_forall` without `whnf`: killed by `instantiate_forall_whnfs_to_find_the_binder`.
 
 Mutations 4a, 4b and 5a are killed only by unit tests; no corpus row
@@ -266,7 +266,7 @@ covers gate 1 and the corpus is success-only. Mutations 7 and 8 are
 killed only by unit tests written from reading the oracle source
 (`ExprDefEq.lean:1303-1306` and `:1293-1298`); they were never
 oracle-probed, and no elab row reaches them (`nsa/let-prefix-search`
-succeeds at its first prefix, which is out of scope).
+succeeds at its first prefix, because `n` is outside `?w`'s scope (its lctx), so no shorter-prefix retry is reachable).
 
 **Corpus.** 350 → 359: `nsa/two-binders-snd`, `nsa/two-binders-fst`,
 `nsa/fn-after-annotated`, `nsa/lval-after-fn-binder`,
@@ -306,4 +306,14 @@ split is `:1213` (not `:1212`), `mkFreshExprMVarAt` is
   themselves exist since #62. Previous docs wrongly called it moot.
 - Mutations 7 and 8 are pinned only by unit tests (above), not by an
   oracle-probed row.
+- Seam R9 (`elim_mvar` uses `decl.kind` where the oracle's
+  `mkMVarApp`/`addExprMVarDecl` use `newMVarKind`, `syntheticOpaque` for a
+  non-assignable original) now also affects the count. For a
+  non-assignable original the oracle's aux mvar counts lets and is
+  unassignable; leanr's skips lets (count == applied args) and is
+  natural/assignable, so it passes the `numScopeArgs == args.len()` gate on
+  the default profile. Low severity (needs `mkLambdaFVars` under
+  `withNewMCtxDepth` over an outer-depth mvar). Code site:
+  `crates/leanr_meta/src/mk_binding.rs:641` (`let kind = decl.kind;`)
+  feeding the count below it. Follow-up: port `newMVarKind`.
 - The `elim.jsonl` / `structures.jsonl` regen drift from #65 remains.
