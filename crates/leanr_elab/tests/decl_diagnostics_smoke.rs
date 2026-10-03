@@ -100,3 +100,92 @@ fn binder_group_type_is_elaborated_per_name() {
         },
     );
 }
+
+/// Elaborate `src` (no synthesis failure expected), then report the first
+/// unassigned-mvar error the oracle's `logUnassignedUsingErrorInfos` would
+/// log for the mvars left in the result; and the level-mvar one.
+fn unassigned_first_lines(src: &str) -> (Option<String>, Option<String>) {
+    let r = support::replay_fixture_in("elab", "Elab0.olean");
+    support::with_record_elab(&r, src, &builtin::snapshot(), |elab, elem, kinds| {
+        let e = elab.elab_term(elem, kinds, None).expect("elaborates");
+        elab.synthesize_synthetic_mvars_no_postponing(kinds)
+            .expect("synthesizes");
+        let e = elab.mctx.instantiate_mvars(e).expect("instantiates");
+        let pending = elab.get_mvars(e).expect("get_mvars");
+        let expr_line = elab
+            .log_unassigned_using_error_infos(&pending)
+            .expect("log")
+            .and_then(|err| err.oracle_first_line());
+        let lpending = elab.get_level_mvars(e).expect("get_level_mvars");
+        let level_line = elab
+            .log_unassigned_level_mvars_using_error_infos(&lpending)
+            .expect("log levels")
+            .and_then(|err| err.oracle_first_line());
+        (expr_line, level_line)
+    })
+}
+
+#[test]
+fn hole_argument_names_its_parameter() {
+    // oracle: `def eh2 : Nat := pick _ Nat.zero`
+    assert_eq!(
+        unassigned_first_lines("pick _ Nat.zero").0.as_deref(),
+        Some("don't know how to synthesize placeholder for argument `x`")
+    );
+}
+
+#[test]
+fn most_recent_error_info_is_reported_first() {
+    // `mvarErrorInfos` is consed: the hole for `y` (registered last) is logged first.
+    assert_eq!(
+        unassigned_first_lines("pick _ _").0.as_deref(),
+        Some("don't know how to synthesize placeholder for argument `y`")
+    );
+}
+
+#[test]
+fn bare_hole_has_no_argument_name() {
+    // oracle: `def eh3 := _`
+    assert_eq!(
+        unassigned_first_lines("_").0.as_deref(),
+        Some("don't know how to synthesize placeholder")
+    );
+}
+
+#[test]
+fn implicit_argument_names_its_parameter() {
+    // oracle: `def eu := id`
+    assert_eq!(
+        unassigned_first_lines("id").0.as_deref(),
+        Some("don't know how to synthesize implicit argument `α`")
+    );
+}
+
+#[test]
+fn untyped_fun_binder_is_failed_to_infer() {
+    // oracle: `def eh4 := fun x => x`
+    assert_eq!(
+        unassigned_first_lines("fun x => x").0.as_deref(),
+        Some("Failed to infer type of binder `x`")
+    );
+}
+
+#[test]
+fn forall_binder_hole_is_failed_to_infer() {
+    // oracle (decl header analogue): `def eh (x : _) : Nat := Nat.zero`
+    assert_eq!(
+        unassigned_first_lines("∀ (x : _), Nat").0.as_deref(),
+        Some("Failed to infer type of binder `x`")
+    );
+}
+
+#[test]
+fn level_mvar_in_hole_binder_names_the_binder_type() {
+    // oracle: `def lv : Nat := (fun (_ : Sort _) => Nat.zero) PUnit`
+    assert_eq!(
+        unassigned_first_lines("(fun (_ : Sort _) => Nat.zero) PUnit")
+            .1
+            .as_deref(),
+        Some("Failed to infer universe levels in binder type")
+    );
+}

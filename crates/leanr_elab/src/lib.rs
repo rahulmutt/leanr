@@ -214,6 +214,7 @@ pub mod macros; // macro/binop% P2
 mod postpone;
 pub mod resolve; // Task 5
 pub mod synthetic; // M4b-3 P2a
+mod unassigned; // M4c-1 P2 Task 4
 
 pub use elab::TermElabM;
 pub use error::{

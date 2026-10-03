@@ -179,6 +179,32 @@ pub(crate) fn extract_binder_group(
 /// `push_let_binders` (the `let`/`have` telescope), which differ only in
 /// what they do with the returned fvars (`mk_forall` vs. also
 /// `mk_lambda`-ing a value).
+/// oracle: `registerFailedToInferBinderTypeInfo` (`Binders.lean:177-183`),
+/// called right after `elabType` by `elabBinderViews` and
+/// `elabFunBinderViews`.
+pub(crate) fn register_failed_to_infer_binder_type_info(
+    elab: &mut TermElabM,
+    ty: ExprId,
+    name: Option<NameId>,
+    stx: SynElem,
+) {
+    let msg = match name {
+        Some(n) if !elab.name_has_macro_scopes(n) => {
+            let base = Some(elab.view.store);
+            format!(
+                "type of binder `{}`",
+                elab.mctx.store().to_name(base, Some(n))
+            )
+        }
+        _ => "binder type".to_string(),
+    };
+    elab.register_custom_error_if_mvar(ty, stx, format!("Failed to infer {msg}"));
+    elab.register_level_mvar_error_expr_info(
+        ty,
+        Some(format!("Failed to infer universe levels in {msg}")),
+    );
+}
+
 pub(crate) fn push_binder_group(
     elab: &mut TermElabM,
     g: &BinderGroup,
@@ -187,6 +213,7 @@ pub(crate) fn push_binder_group(
     let mut fvars = Vec::with_capacity(g.names.len());
     for &name in &g.names {
         let dom = elab_type(elab, &g.ty, kinds)?;
+        register_failed_to_infer_binder_type_info(elab, dom, name, g.ty.clone());
         // oracle: `elabBinderViews` (`Binders.lean:216-219`) — after
         // `elabType`, before the binder is pushed. `fun`
         // (`elabFunBinderViews`) runs no such check.

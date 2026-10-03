@@ -964,15 +964,9 @@ fn next_arg_hole(app: &AppElab, kinds: &KindInterner) -> Option<()> {
 /// `PostponeBehavior::Partial` relies on — "this kind of metavariable
 /// are not synthetic opaque", `SyntheticMVars.lean:436-437`).
 ///
-/// The oracle's `mkInstMVar` also calls `registerMVarArgName
-/// arg.mvarId! argName` via `addNewArg` (`App.lean:428`) — pure
-/// diagnostics (`TermElabM.lean:887`, the `mvarErrorInfos`-adjacent
-/// "which parameter name does this mvar belong to" table this crate's
-/// deferred prose layer would need, design spec § Amendment, item 2).
-/// `add_new_arg` here, like `elab_and_add_new_arg`'s own
-/// `_binder_name` before it, takes no name parameter at all — the same
-/// established P1 precedent, not a new gap this task introduces — so
-/// `binder_name` is discarded rather than threaded to nowhere.
+/// The oracle's `registerMVarArgName` runs inside `addNewArg`
+/// (`App.lean:427-428`), which `add_new_arg` ports from the forall's own
+/// binder name, so `binder_name` is not needed here.
 fn mk_inst_mvar(
     app: &mut AppElab,
     ty: ExprId,
@@ -993,8 +987,10 @@ fn mk_inst_mvar(
 /// `get_f_type`, which is what makes `paramIdx`/`fArgs` the single
 /// source of truth).
 pub fn add_new_arg(app: &mut AppElab, arg: ExprId) -> Result<(), ElabError> {
-    let body = match app.node(app.st.f_type) {
-        Node::Forall { body, .. } => body,
+    let (body, binder_name) = match app.node(app.st.f_type) {
+        Node::Forall {
+            body, binder_name, ..
+        } => (body, binder_name),
         _ => {
             return Err(ElabError::IllFormedSyntax(
                 "add_new_arg on a non-forall fType".to_string(),
@@ -1017,6 +1013,14 @@ pub fn add_new_arg(app: &mut AppElab, arg: ExprId) -> Result<(), ElabError> {
     app.st.f = f;
     app.st.f_args.push(arg);
     app.st.f_type = body;
+    // oracle: `addNewArg` (`App.lean:427-428`): `if arg.isMVar then
+    // registerMVarArgName arg.mvarId! argName`, `argName` being the
+    // forall's binder name. An anonymous binder name is not registered:
+    // the oracle would render `[anonymous]`, and no fixture constant has
+    // one.
+    if let (Node::MVar { id: Some(m) }, Some(bn)) = (app.node(arg), binder_name) {
+        app.elab.register_mvar_arg_name(leanr_meta::MVarId(m), bn);
+    }
     Ok(())
 }
 

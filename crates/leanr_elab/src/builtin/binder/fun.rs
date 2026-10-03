@@ -496,6 +496,15 @@ pub fn elab_fun(
                     Some(ty_elem) => elab_type(elab, ty_elem, kinds)?,
                     None => fresh_type_mvar(elab)?,
                 };
+                // oracle: `elabFunBinderViews` (`Binders.lean:428-429`) —
+                // `registerFailedToInferBinderTypeInfo` right after
+                // `elabType` (an elided type is `elabType` of a hole).
+                super::register_failed_to_infer_binder_type_info(
+                    elab,
+                    dom,
+                    view.name,
+                    view.ty.clone().unwrap_or_else(|| item.clone()),
+                );
                 // oracle: `elabFunBinderViews` mints the fvar
                 // (`Binders.lean:430-432`), runs `propagateExpectedType`
                 // (`:442`), and only THEN tests `isClass? type` (`:444`
