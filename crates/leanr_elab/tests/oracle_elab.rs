@@ -71,7 +71,8 @@ fn oracle_elab_gate() {
     // 346 -> 350 (level instantiation simplifies): the 4 lvl/* records.
     // 350 -> 358 (numScopeArgs task 2): the 6 nsa/* gate records,
     // p2/app-fn-after-lval and p2/lval-two-binders-holes.
-    const CORPUS_FLOOR: usize = 358;
+    // 358 -> 359 (numScopeArgs task 3): nsa/let-prefix-search.
+    const CORPUS_FLOOR: usize = 359;
     assert!(
         replayed >= CORPUS_FLOOR,
         "corpus shrank: replayed {replayed} records, floor is {CORPUS_FLOOR}. \

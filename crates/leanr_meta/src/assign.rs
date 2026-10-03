@@ -72,6 +72,7 @@ use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::ExprId;
 use leanr_kernel::{abstract_fvars, instantiate_rev, Nat};
 
+use crate::local_snapshot::LocalCtxSnapshot;
 use crate::{MVarDecl, MVarId, MVarKind, MetaCtx, MetaError};
 
 impl<'e> MetaCtx<'e> {
@@ -241,14 +242,14 @@ impl<'e> MetaCtx<'e> {
             Some(id) => id,
             None => return Ok(false),
         };
-        // oracle :1799-1800: `if mvarDecl.numScopeArgs == args₁.size ||
+        // oracle :1800: `if mvarDecl.numScopeArgs == args₁.size ||
         // cfg.constApprox`. `num_scope_args` counts the args that model a
         // binder dependency (`elim_mvar`, mk_binding.rs).
         let num_scope_args = self.mctx.decl(mvar_id).map_or(0, |d| d.num_scope_args);
         if num_scope_args != args1.len() && !self.cfg.const_approx {
             return Ok(false);
         }
-        // oracle :1799-1801: `type <- inferType (mkAppN mvar args₁);
+        // oracle :1801-1803: `type <- inferType (mkAppN mvar args₁);
         // auxMVar <- mkAuxMVar mvarDecl.lctx mvarDecl.localInstances
         // type; assignConst mvar args₁.size auxMVar`.
         let mvar_app = self.mk_app_spine(mvar, args1)?;
@@ -522,25 +523,116 @@ impl<'e> MetaCtx<'e> {
         }
     }
 
-    /// oracle: `processConstApprox` (ExprDefEq.lean:1271-1309). Gate
-    /// (:1278): `numScopeArgs != numArgs && !cfg.constApprox` → `false`.
-    /// The `patternVarPrefix > 0` search (:1282-1309) is Task 3 of the
-    /// numScopeArgs plan; until then every caller goes to `defaultCase`.
+    /// oracle: `processConstApprox` (ExprDefEq.lean:1271-1309).
+    ///
+    /// Gate (:1278-1279): `numScopeArgs != numArgs && !cfg.constApprox` →
+    /// `false`. Prefix 0 → `defaultCase` (`assignConst mvar args.size v`,
+    /// :1273, always over the ORIGINAL `v`). Otherwise
+    /// `process_const_approx_prefix` searches for the longest valid
+    /// prefix (:1282-1309).
     fn process_const_approx(
         &mut self,
         mvar: ExprId,
         args: &[ExprId],
-        _pattern_var_prefix: usize,
+        pattern_var_prefix: usize,
         v: ExprId,
     ) -> Result<bool, MetaError> {
         let Node::MVar { id: Some(id) } = self.node(mvar) else {
             return Ok(false);
         };
-        let num_scope_args = self.mctx.decl(MVarId(id)).map_or(0, |d| d.num_scope_args);
+        let mvar_id = MVarId(id);
+        let Some(decl) = self.mctx.decl(mvar_id) else {
+            return Ok(false);
+        };
+        let (num_scope_args, mvar_ty, decl_lctx) = (
+            decl.num_scope_args,
+            decl.ty,
+            std::sync::Arc::clone(&decl.lctx),
+        );
         if num_scope_args != args.len() && !self.cfg.const_approx {
             return Ok(false);
         }
-        self.assign_const(mvar, args.len(), v)
+        if pattern_var_prefix == 0 {
+            return self.assign_const(mvar, args.len(), v);
+        }
+        // The oracle runs the search inside `forallBoundedTelescope`
+        // (:1286): the telescope's locals are popped on every exit.
+        let checkpoint = self.lctx_checkpoint();
+        let result = self.process_const_approx_prefix(
+            mvar,
+            mvar_id,
+            mvar_ty,
+            &decl_lctx,
+            args,
+            pattern_var_prefix,
+            v,
+        );
+        self.lctx_restore(checkpoint);
+        result
+    }
+
+    /// oracle :1282-1309, the `patternVarPrefix > 0` branch. The oracle's
+    /// `go`/`cont` recursion is tail-recursive, so it is a loop here:
+    /// each failed attempt abstracts the prefix's LAST arg into `v`, pops
+    /// it, and retries; an empty prefix that fails goes to `defaultCase`.
+    ///
+    /// No checkpoint per attempt, deliberately: the oracle's `<||>` /
+    /// `<&&>` are Bool combinators with no state rollback, and the
+    /// enclosing `isDefEq` checkpoint is the only one. Do not add one.
+    #[allow(clippy::too_many_arguments)]
+    fn process_const_approx_prefix(
+        &mut self,
+        mvar: ExprId,
+        mvar_id: MVarId,
+        mvar_ty: ExprId,
+        decl_lctx: &LocalCtxSnapshot,
+        args: &[ExprId],
+        pattern_var_prefix: usize,
+        v0: ExprId,
+    ) -> Result<bool, MetaError> {
+        let num_args = args.len();
+        let mut args_prefix: Vec<ExprId> = args[..pattern_var_prefix].to_vec();
+        // :1283-1286.
+        let ty = self.instantiate_forall(mvar_ty, &args_prefix)?;
+        let suffix_size = num_args - args_prefix.len();
+        let xs = self.forall_bounded_telescope(ty, suffix_size)?;
+        if xs.len() != suffix_size {
+            return self.assign_const(mvar, num_args, v0); // :1287-1288
+        }
+        let Some(mut v) = self.mk_lambda_fvars_with_let_deps(&xs, v0)? else {
+            return self.assign_const(mvar, num_args, v0); // :1290
+        };
+        loop {
+            // `go` (:1291-1308).
+            if let Some(v_new) = self.check_assignment(mvar_id, &args_prefix, v)? {
+                if let Some(v_new) = self.mk_lambda_fvars_with_let_deps(&args_prefix, v_new)? {
+                    let has_ctx_local = args_prefix.iter().any(|&a| {
+                        matches!(self.node(a), Node::FVar { id: Some(fid) }
+                            if decl_lctx.lctx().get(fid).is_some())
+                    });
+                    let assigned = if has_ctx_local {
+                        // :1303-1306 (discussion A2).
+                        self.is_type_correct(v_new)? && self.check_types_and_assign(mvar, v_new)?
+                    } else {
+                        self.check_types_and_assign(mvar, v_new)? // :1308
+                    };
+                    if assigned {
+                        return Ok(true);
+                    }
+                }
+            }
+            // `cont` (:1293-1298).
+            let Some(&last) = args_prefix.last() else {
+                return self.assign_const(mvar, num_args, v0);
+            };
+            match self.mk_lambda_fvars_with_let_deps(&[last], v)? {
+                None => return self.assign_const(mvar, num_args, v0),
+                Some(v2) => {
+                    v = v2;
+                    args_prefix.pop();
+                }
+            }
+        }
     }
 
     /// oracle: `assignConst` (ExprDefEq.lean:1243-1254): assign `mvar :=
@@ -643,6 +735,33 @@ impl<'e> MetaCtx<'e> {
             cur_ty = body;
         }
         Ok(xs)
+    }
+
+    /// oracle: `instantiateForall` (`Meta/Basic.lean:2142-2153`): for each
+    /// `p`, `whnf` the type, require a `forallE`, and `instantiate1` its
+    /// body with `p`.
+    pub(crate) fn instantiate_forall(
+        &mut self,
+        ty: ExprId,
+        ps: &[ExprId],
+    ) -> Result<ExprId, MetaError> {
+        let mut e = ty;
+        for &p in ps {
+            let t = self.whnf(e)?;
+            let Node::Forall { body, .. } = self.node(t) else {
+                return Err(MetaError::Infer(
+                    "invalid instantiateForall, too many parameters".into(),
+                ));
+            };
+            e = leanr_kernel::instantiate(
+                self.scratch,
+                Some(self.view.store),
+                body,
+                p,
+                &mut self.guard,
+            )?;
+        }
+        Ok(e)
     }
 
     /// oracle: `isTypeCorrect` (Check.lean:365-370): `try check e; true
@@ -1483,7 +1602,9 @@ mod tests {
     use leanr_kernel::bank::terms::Node;
 
     use crate::test_support::{fresh_fvar, fresh_mvar};
-    use crate::{Config, EnvExtensions, LocalCtxSnapshot, MVarDecl, MVarId, MVarKind, MetaCtx};
+    use crate::{
+        Config, EnvExtensions, LocalCtxSnapshot, MVarDecl, MVarId, MVarKind, MetaCtx, MetaError,
+    };
 
     /// A tiny bespoke environment (NOT `test_support::with_ctx`'s
     /// totally-empty one): `N.zero`/`N.succ` are declared as `Prop`-
@@ -1760,6 +1881,214 @@ mod tests {
                 assert_eq!(ctx.mctx.is_assigned(m_id), expected, "n={n}");
             });
         }
+    }
+
+    /// oracle `instantiateForall` (`Meta/Basic.lean:2142-2153`) whnf's
+    /// before each binder: `(fun _ => Sort 0 -> Sort 0) N.zero` is a
+    /// beta-redex whose whnf is a pi.
+    #[test]
+    fn instantiate_forall_whnfs_to_find_the_binder() {
+        with_n_ctx(|ctx| {
+            let s0 = n_type(ctx);
+            let pi = mk_forall(ctx, s0, s0);
+            let lam = ctx
+                .scratch
+                .expr_lam(
+                    Some(ctx.view.store),
+                    None,
+                    s0,
+                    pi,
+                    leanr_kernel::BinderInfo::Default,
+                )
+                .expect("lam");
+            let zero = mk_const(ctx, "N.zero");
+            let redex = mk_app(ctx, lam, zero);
+            assert_eq!(ctx.instantiate_forall(redex, &[zero]).unwrap(), s0);
+        });
+    }
+
+    /// Too many parameters is an error (`throwError "invalid
+    /// instantiateForall, too many parameters"`), not a panic.
+    #[test]
+    fn instantiate_forall_rejects_too_many_parameters() {
+        with_n_ctx(|ctx| {
+            let s0 = n_type(ctx);
+            let zero = mk_const(ctx, "N.zero");
+            assert!(matches!(
+                ctx.instantiate_forall(s0, &[zero]),
+                Err(MetaError::Infer(_))
+            ));
+        });
+    }
+
+    /// oracle `processConstApprox` (`ExprDefEq.lean:1282-1309`), default
+    /// profile: `?m a N.zero =?= N.f a`, `?m : Sort 0 -> Sort 0 -> Sort 0`
+    /// minted at the EMPTY context with `numScopeArgs = 2`, `a` an ambient
+    /// fvar. `a` is out of `?m`'s scope, so `processAssignment` reaches
+    /// `N.zero` (arg 1) and calls `processConstApprox` with prefix 1. The
+    /// prefix search assigns `?m := fun x _ => N.f x`. `defaultCase` alone
+    /// would fail: `a` escapes `fun _ _ => N.f a`.
+    #[test]
+    fn prefix_search_abstracts_an_out_of_scope_pattern_prefix() {
+        with_n_ctx_cfg(Config::default(), |ctx| {
+            let s0 = n_type(ctx);
+            let s0_s0 = mk_forall(ctx, s0, s0);
+            let mvar_ty = mk_forall(ctx, s0, s0_s0);
+            let (m, m_id) = fresh_scoped_mvar(ctx, mvar_ty, 2);
+            let a = fresh_fvar(ctx, s0, "a");
+            let zero = mk_const(ctx, "N.zero");
+            let succ = mk_const(ctx, "N.succ");
+            let f = mk_const(ctx, "N.f");
+            let m_a = mk_app(ctx, m, a);
+            let lhs = mk_app(ctx, m_a, zero);
+            let rhs = mk_app(ctx, f, a);
+            assert!(ctx.is_def_eq(lhs, rhs).unwrap());
+            assert!(ctx.mctx.is_assigned(m_id));
+            // `?m N.zero N.succ` => `N.f N.zero`: the first arg is abstracted.
+            let m_z = mk_app(ctx, m, zero);
+            let probe = mk_app(ctx, m_z, succ);
+            let inst = ctx.instantiate_mvars(probe).unwrap();
+            let got = ctx.head_beta(inst).unwrap();
+            let want = mk_app(ctx, f, zero);
+            assert_eq!(got, want);
+        });
+    }
+
+    /// The prefix branch is tried BEFORE `defaultCase` and they disagree.
+    /// `quasi_pattern_approx` on lets an fvar IN `?m`'s own lctx stay in
+    /// the pattern prefix (`ExprDefEq.lean:1329-1330`), which then
+    /// exercises the `isTypeCorrect` arm (:1303-1306). Prefix `[a]` gives
+    /// `fun x _ => N.f x`; `defaultCase` would give `fun _ _ => N.f a`.
+    #[test]
+    fn prefix_search_prefers_the_prefix_over_the_default_case() {
+        with_n_ctx_cfg(
+            Config {
+                quasi_pattern_approx: true,
+                ..Config::default()
+            },
+            |ctx| {
+                let s0 = n_type(ctx);
+                let s0_s0 = mk_forall(ctx, s0, s0);
+                let mvar_ty = mk_forall(ctx, s0, s0_s0);
+                let a = fresh_fvar(ctx, s0, "a");
+                let lctx = ctx.current_lctx();
+                let (m, _m_id) = ctx
+                    .mk_aux_mvar_at(lctx, mvar_ty, MVarKind::Natural, None, 2)
+                    .expect("mvar seeing `a`");
+                let zero = mk_const(ctx, "N.zero");
+                let succ = mk_const(ctx, "N.succ");
+                let f = mk_const(ctx, "N.f");
+                let m_a = mk_app(ctx, m, a);
+                let lhs = mk_app(ctx, m_a, zero);
+                let rhs = mk_app(ctx, f, a);
+                assert!(ctx.is_def_eq(lhs, rhs).unwrap());
+                let m_z = mk_app(ctx, m, zero);
+                let probe = mk_app(ctx, m_z, succ);
+                let inst = ctx.instantiate_mvars(probe).unwrap();
+                let got = ctx.head_beta(inst).unwrap();
+                let want = mk_app(ctx, f, zero);
+                assert_eq!(got, want, "prefix [a], not defaultCase's `N.f a`");
+            },
+        );
+    }
+
+    /// `cont` (`ExprDefEq.lean:1293-1298`) retries a SHORTER prefix, and
+    /// the empty prefix skips `isTypeCorrect` (no ctx-local in it), so an
+    /// ill-typed abstraction rejected at `[a]` is still assigned at `[]`
+    /// rather than falling to `defaultCase`. `g : (y : Sort 0) -> y ->
+    /// Sort 0`, `h : a`, all in `?m`'s lctx; `?m a N.zero =?= g a h`.
+    /// Abstracting `a` gives `fun x _ => g x h`, ill-typed (`h : a`, not
+    /// `x`): `isTypeCorrect` fails at `[a]`, `cont` abstracts `a` anyway
+    /// and `go #[]` assigns it. `defaultCase` would give `fun _ _ => g a h`.
+    #[test]
+    fn prefix_search_retries_a_shorter_prefix_before_the_default_case() {
+        with_n_ctx_cfg(
+            Config {
+                quasi_pattern_approx: true,
+                ..Config::default()
+            },
+            |ctx| {
+                let base = Some(ctx.view.store);
+                let s0 = n_type(ctx);
+                let s0_s0 = mk_forall(ctx, s0, s0);
+                let mvar_ty = mk_forall(ctx, s0, s0_s0);
+                // `(y : Sort 0) -> y -> Sort 0`.
+                let b0 = ctx
+                    .scratch
+                    .expr_bvar(base, &leanr_kernel::Nat::from(0u64))
+                    .expect("bvar");
+                let y_to_s0 = mk_forall(ctx, b0, s0);
+                let g_ty = mk_forall(ctx, s0, y_to_s0);
+                let a = fresh_fvar(ctx, s0, "a");
+                let g = fresh_fvar(ctx, g_ty, "g");
+                let h = fresh_fvar(ctx, a, "h");
+                let lctx = ctx.current_lctx();
+                let (m, m_id) = ctx
+                    .mk_aux_mvar_at(lctx, mvar_ty, MVarKind::Natural, None, 2)
+                    .expect("mvar seeing `a g h`");
+                let zero = mk_const(ctx, "N.zero");
+                let succ = mk_const(ctx, "N.succ");
+                let m_a = mk_app(ctx, m, a);
+                let lhs = mk_app(ctx, m_a, zero);
+                let g_a = mk_app(ctx, g, a);
+                let rhs = mk_app(ctx, g_a, h);
+                assert!(ctx.is_def_eq(lhs, rhs).unwrap());
+                assert!(ctx.mctx.is_assigned(m_id));
+                let m_z = mk_app(ctx, m, zero);
+                let probe = mk_app(ctx, m_z, succ);
+                let inst = ctx.instantiate_mvars(probe).unwrap();
+                let got = ctx.head_beta(inst).unwrap();
+                let g_z = mk_app(ctx, g, zero);
+                let want = mk_app(ctx, g_z, h);
+                assert_eq!(got, want, "retry at [], not defaultCase's `g a h`");
+            },
+        );
+    }
+
+    /// The `isTypeCorrect` arm (`ExprDefEq.lean:1303-1306`) runs `check`,
+    /// whose `isDefEq` assignments persist (no rollback, `check.rs`). An
+    /// unassigned EXPR mvar cannot reach it (`checkMVar` fails on any under
+    /// `hasCtxLocals`, :890-891), a LEVEL mvar can. `k : Sort 1 -> Sort 0`
+    /// and `a` in `?m`'s lctx, `?m a N.zero =?= k (Sort ?u)`: checking `fun
+    /// x _ => k (Sort ?u)` unifies `Sort (?u+1) =?= Sort 1`, assigning
+    /// `?u := 0`. `checkTypesAndAssign` alone only infers (`k _ : Sort 0`
+    /// without looking at the arg), so `?u` stays unassigned without it.
+    #[test]
+    fn prefix_search_type_checks_a_ctx_local_prefix() {
+        with_n_ctx_cfg(
+            Config {
+                quasi_pattern_approx: true,
+                ..Config::default()
+            },
+            |ctx| {
+                let s0 = n_type(ctx);
+                let base = Some(ctx.view.store);
+                let z = ctx.scratch.level_zero(base).expect("level");
+                let one = ctx.scratch.level_succ(base, z).expect("level");
+                let s1 = ctx.scratch.expr_sort(base, one).expect("sort 1");
+                let s0_s0 = mk_forall(ctx, s0, s0);
+                let mvar_ty = mk_forall(ctx, s0, s0_s0);
+                let k_ty = mk_forall(ctx, s1, s0);
+                let a = fresh_fvar(ctx, s0, "a");
+                let k = fresh_fvar(ctx, k_ty, "k");
+                let lctx = ctx.current_lctx();
+                let (m, m_id) = ctx
+                    .mk_aux_mvar_at(lctx, mvar_ty, MVarKind::Natural, None, 2)
+                    .expect("mvar seeing `a k`");
+                let (u_id, u) = ctx.fresh_level_mvar().expect("level mvar");
+                let sort_u = ctx.scratch.expr_sort(base, u).expect("sort ?u");
+                let zero = mk_const(ctx, "N.zero");
+                let m_a = mk_app(ctx, m, a);
+                let lhs = mk_app(ctx, m_a, zero);
+                let rhs = mk_app(ctx, k, sort_u);
+                assert!(ctx.is_def_eq(lhs, rhs).unwrap());
+                assert!(ctx.mctx.is_assigned(m_id));
+                assert!(
+                    ctx.mctx.is_level_assigned(u_id),
+                    "isTypeCorrect assigned `?u`"
+                );
+            },
+        );
     }
 
     #[test]

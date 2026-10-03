@@ -1154,6 +1154,12 @@ def nsaQueries : List (String × String) :=
   -- (:1329-1330): pattern prefix 0 → `defaultCase`, giving `(w : Eq n n)`
   -- (oracle, `pp.funBinderTypes`).
   , ("nsa/in-lctx-arg-default-case", "fun (n : Nat) => (fun x y w => w) n Nat.zero (Eq.refl n)")
+  -- `f`'s `w`-type mvar was abstracted over `x y` BEFORE `n` existed, so
+  -- `n` is out of its scope: `?w n Nat.zero =?= Eq n n` has pattern
+  -- prefix 1. `processConstApprox`'s prefix search (:1282-1309) assigns
+  -- `?w := fun x _ => Eq x x`, giving `(w : Eq x x)` (oracle,
+  -- `pp.funBinderTypes`); `defaultCase` would fail (`n` escapes).
+  , ("nsa/let-prefix-search",        "let f := fun x y w => w; fun (n : Nat) => f n Nat.zero (Eq.refl n)")
   ]
 
 -- `expandFunBinders` (`Lean/Elab/Binders.lean:360-406`): `_` hole
