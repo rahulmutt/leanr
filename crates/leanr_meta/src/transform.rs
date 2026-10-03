@@ -5,9 +5,9 @@
 //! (`:179-187`) over `transformWithCache` (`:97-176`) with `post` fixed at
 //! its default (`fun e => .done e`) and every flag at its default
 //! (`usedLetOnly := false`, except via `transform_used_let_only`; `skipConstInApp := false`; `transform` does
-//! not expose `skipInstances`). `betaReduce`, `zetaReduce`,
-//! `unfoldDeclsFrom` and the rest of that file have no consumer in M4b-3
-//! and are not ported. The cache (`checkCache` on `ExprStructEq`,
+//! not expose `skipInstances`). `Core.betaReduce` and `zetaReduce` were
+//! added for M4c-1 (`abstractNestedProofs`); `unfoldDeclsFrom` and the
+//! rest of that file are not ported. The cache (`checkCache` on `ExprStructEq`,
 //! `:110`) is a map keyed on `ExprId`, which hash-consing makes
 //! structural for free.
 
@@ -54,23 +54,171 @@ impl<'e> MetaCtx<'e> {
     /// loose bound variables: binders are opened with real local
     /// declarations, so any `MetaM` method is safe inside `pre`.
     pub fn transform(&mut self, input: ExprId, pre: Pre<'_, 'e>) -> Result<ExprId, MetaError> {
-        let mut st = TransformSt {
-            cache: HashMap::new(),
-            used_let_only: false,
-        };
-        self.transform_visit(input, pre, &mut st)
+        self.transform_with(input, pre, false)
     }
 
     /// oracle: `Meta.transform (usedLetOnly := true)` with the default
     /// `pre`/`post`: lets whose variable the rebuilt body does not
     /// mention are dropped (`mkLetFVars (usedLetOnly := true)`).
     pub fn transform_used_let_only(&mut self, input: ExprId) -> Result<ExprId, MetaError> {
+        let mut pre = |_: &mut MetaCtx<'e>, _| Ok(TransformStep::Continue(None));
+        self.transform_with(input, &mut pre, true)
+    }
+
+    /// oracle: `Meta.transform` (`Transform.lean:179-187`) with both
+    /// `pre` and `usedLetOnly` chosen by the caller (`post` and the other
+    /// flags at their defaults).
+    pub(crate) fn transform_with(
+        &mut self,
+        input: ExprId,
+        pre: Pre<'_, 'e>,
+        used_let_only: bool,
+    ) -> Result<ExprId, MetaError> {
         let mut st = TransformSt {
             cache: HashMap::new(),
-            used_let_only: true,
+            used_let_only,
         };
-        let mut pre = |_: &mut MetaCtx<'e>, _| Ok(TransformStep::Continue(None));
-        self.transform_visit(input, &mut pre, &mut st)
+        self.transform_visit(input, pre, &mut st)
+    }
+
+    /// oracle: `Core.betaReduce` (`Transform.lean:75-76`):
+    /// `transform e (pre := fun e => if e.isHeadBetaTarget then .visit e.headBeta else .continue)`.
+    /// `isHeadBetaTarget` here models only a `Lam` head (the same
+    /// narrowing `head_beta` documents, `whnf.rs`). Runs over
+    /// `Core.transform` (`:44-72`), which never opens binders.
+    pub fn beta_reduce(&mut self, e: ExprId) -> Result<ExprId, MetaError> {
+        let mut cache = HashMap::new();
+        let mut pre = |c: &mut MetaCtx<'e>, x: ExprId| -> Result<TransformStep, MetaError> {
+            let is_target = matches!(c.node(x), Node::App { .. })
+                && matches!(c.node(c.get_app_fn(x)), Node::Lam { .. });
+            Ok(if is_target {
+                TransformStep::Visit(c.head_beta(x)?)
+            } else {
+                TransformStep::Continue(None)
+            })
+        };
+        self.core_transform_visit(e, &mut pre, &mut cache)
+    }
+
+    /// oracle: `Meta.zetaReduce` (`Transform.lean:198-209`) at its
+    /// defaults (`zetaDelta := true`, `zetaHave := true`, `beta := true`).
+    /// `n` = local decls before the call; a decl at index >= n was opened
+    /// by this `transform`, so its value is visible even if nondep
+    /// (`decl.value? (allowNondep := zetaHave && decl.index ≥ n)`, `:202`).
+    pub fn zeta_reduce(&mut self, e: ExprId) -> Result<ExprId, MetaError> {
+        let n = self.local_names.len();
+        let mut pre = move |c: &mut MetaCtx<'e>, x: ExprId| -> Result<TransformStep, MetaError> {
+            let f = c.get_app_fn(x);
+            let Node::FVar { id: Some(fid) } = c.node(f) else {
+                return Ok(TransformStep::Continue(None));
+            };
+            let Some(pos) = c.local_names.iter().position(|en| en.id == fid) else {
+                return Ok(TransformStep::Continue(None));
+            };
+            let nondep = c.local_names[pos].nondep;
+            let value = match c.lctx.get(fid).and_then(|d| d.value) {
+                Some(v) if !nondep || pos >= n => v,
+                _ => return Ok(TransformStep::Continue(None)),
+            };
+            let v = c.instantiate_mvars(value)?;
+            let args = c.get_app_args(x);
+            Ok(TransformStep::Visit(c.beta_rev(v, &args)?))
+        };
+        self.transform_with(e, &mut pre, true)
+    }
+
+    /// oracle: `Core.transform`'s `visit` (`Transform.lean:51-71`) with
+    /// the default `post`: terms handed to `pre` may contain loose bvars,
+    /// and binders are rebuilt in place, never opened.
+    fn core_transform_visit(
+        &mut self,
+        e: ExprId,
+        pre: Pre<'_, 'e>,
+        cache: &mut Cache,
+    ) -> Result<ExprId, MetaError> {
+        if let Some(&r) = cache.get(&e) {
+            return Ok(r);
+        }
+        self.step()?;
+        let base = Some(self.view.store);
+        let r = match pre(self, e)? {
+            TransformStep::Done(r) => r,
+            TransformStep::Visit(e2) => self.core_transform_visit(e2, pre, cache)?,
+            TransformStep::Continue(e2) => {
+                let e = e2.unwrap_or(e);
+                match self.node(e) {
+                    Node::Forall {
+                        binder_name,
+                        binder_type,
+                        body,
+                        binder_info,
+                    } => {
+                        let d = self.core_transform_visit(binder_type, pre, cache)?;
+                        let b = self.core_transform_visit(body, pre, cache)?;
+                        self.scratch
+                            .expr_forall(base, binder_name, d, b, binder_info)?
+                    }
+                    Node::Lam {
+                        binder_name,
+                        binder_type,
+                        body,
+                        binder_info,
+                    } => {
+                        let d = self.core_transform_visit(binder_type, pre, cache)?;
+                        let b = self.core_transform_visit(body, pre, cache)?;
+                        self.scratch
+                            .expr_lam(base, binder_name, d, b, binder_info)?
+                    }
+                    Node::LetE {
+                        decl_name,
+                        ty,
+                        value,
+                        body,
+                        non_dep,
+                    } => {
+                        let t = self.core_transform_visit(ty, pre, cache)?;
+                        let v = self.core_transform_visit(value, pre, cache)?;
+                        let b = self.core_transform_visit(body, pre, cache)?;
+                        self.scratch.expr_let(base, decl_name, t, v, b, non_dep)?
+                    }
+                    Node::App { .. } => {
+                        let f = self.get_app_fn(e);
+                        let args = self.get_app_args(e);
+                        let mut r = self.core_transform_visit(f, pre, cache)?;
+                        for a in args {
+                            let a2 = self.core_transform_visit(a, pre, cache)?;
+                            r = self.scratch.expr_app(base, r, a2)?;
+                        }
+                        r
+                    }
+                    Node::MData { data, expr } => {
+                        let b = self.core_transform_visit(expr, pre, cache)?;
+                        self.scratch.expr_mdata(base, data, b)?
+                    }
+                    Node::Proj {
+                        type_name,
+                        idx,
+                        structure,
+                    } => {
+                        let b = self.core_transform_visit(structure, pre, cache)?;
+                        self.scratch
+                            .expr_proj(base, type_name, &Nat::from(idx as u64), b)?
+                    }
+                    Node::ProjBig {
+                        type_name,
+                        idx,
+                        structure,
+                    } => {
+                        let n = self.scratch.nat_at(base, idx).clone();
+                        let b = self.core_transform_visit(structure, pre, cache)?;
+                        self.scratch.expr_proj(base, type_name, &n, b)?
+                    }
+                    _ => e,
+                }
+            }
+        };
+        cache.insert(e, r);
+        Ok(r)
     }
 
     /// oracle: `visit` (`:109-172`) — `checkCache`, then `pre`, then
@@ -464,6 +612,92 @@ mod tests {
                 .expr_let(base, None, n, zero, body, false)
                 .unwrap();
             assert_eq!(ctx.transform_used_let_only(used).unwrap(), used);
+        });
+    }
+
+    use crate::test_support::{bvar, c, with_meta0_ctx};
+
+    /// `fun (y : N) => (fun (x : N) => N.succ x) y` becomes
+    /// `fun y => N.succ y`, under a binder: `Core.transform` does not open
+    /// it, so the body carries a loose bvar.
+    #[test]
+    fn beta_reduce_reduces_under_binders_without_opening_them() {
+        with_meta0_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let n = c(ctx, "N");
+            let succ = c(ctx, "N.succ");
+            let b0 = bvar(ctx, 0);
+            let sx = app(ctx, succ, b0);
+            let lam_x = ctx
+                .scratch
+                .expr_lam(base, None, n, sx, BinderInfo::Default)
+                .unwrap();
+            let redex = app(ctx, lam_x, b0);
+            let e = ctx
+                .scratch
+                .expr_lam(base, None, n, redex, BinderInfo::Default)
+                .unwrap();
+            let want = ctx
+                .scratch
+                .expr_lam(base, None, n, sx, BinderInfo::Default)
+                .unwrap();
+            assert_eq!(ctx.beta_reduce(e).unwrap(), want);
+        });
+    }
+
+    /// A `let` in the ambient context unfolds; a pre-existing `have` does not.
+    #[test]
+    fn zeta_reduce_unfolds_ambient_lets_but_not_ambient_haves() {
+        with_meta0_ctx(|ctx| {
+            let n = c(ctx, "N");
+            let zero = c(ctx, "N.zero");
+            let succ = c(ctx, "N.succ");
+            let a = ctx.push_let_decl(None, n, zero, false).unwrap();
+            let sa = app(ctx, succ, a);
+            let want = app(ctx, succ, zero);
+            assert_eq!(ctx.zeta_reduce(sa).unwrap(), want);
+            let h = ctx.push_let_decl(None, n, zero, true).unwrap();
+            let sh = app(ctx, succ, h);
+            assert_eq!(ctx.zeta_reduce(sh).unwrap(), sh);
+        });
+    }
+
+    /// An inner `let b := N.zero; N.succ b` is opened by `transform`,
+    /// unfolded, and (usedLetOnly) dropped: result `N.succ N.zero`.
+    #[test]
+    fn zeta_reduce_inlines_and_drops_an_inner_let() {
+        with_meta0_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let n = c(ctx, "N");
+            let zero = c(ctx, "N.zero");
+            let succ = c(ctx, "N.succ");
+            let b0 = bvar(ctx, 0);
+            let body = app(ctx, succ, b0);
+            let e = ctx
+                .scratch
+                .expr_let(base, None, n, zero, body, false)
+                .unwrap();
+            let want = app(ctx, succ, zero);
+            assert_eq!(ctx.zeta_reduce(e).unwrap(), want);
+        });
+    }
+
+    /// An inner `have` opened by `transform` (index >= n) IS unfolded.
+    #[test]
+    fn zeta_reduce_unfolds_a_have_opened_by_transform() {
+        with_meta0_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let n = c(ctx, "N");
+            let zero = c(ctx, "N.zero");
+            let succ = c(ctx, "N.succ");
+            let b0 = bvar(ctx, 0);
+            let body = app(ctx, succ, b0);
+            let e = ctx
+                .scratch
+                .expr_let(base, None, n, zero, body, true)
+                .unwrap();
+            let want = app(ctx, succ, zero);
+            assert_eq!(ctx.zeta_reduce(e).unwrap(), want);
         });
     }
 }
