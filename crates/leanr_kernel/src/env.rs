@@ -504,7 +504,10 @@ impl Environment {
     /// e.g. via `intern_module`/`from_modules`, or extracted from a
     /// `ConstantInfo` that was) — this method's freshly-created `scratch`
     /// cannot resolve a scratch id minted by some OTHER scratch store the
-    /// caller may have used to build `d`.
+    /// caller may have used to build `d`. A declaration built in a
+    /// caller-owned scratch store goes through [`Environment::add_decl_in`]
+    /// instead, which promotes it first (see its scratch lifecycle
+    /// contract).
     pub fn add_decl(&mut self, d: Declaration) -> Result<(), KernelError> {
         self.add_decl_in(&mut Store::scratch(), d)
     }
@@ -520,6 +523,18 @@ impl Environment {
     /// already-admitted one by its scratch id. On any check failure the
     /// set of constants is unchanged, but the promoted ids may remain in
     /// `self.store` as orphans, unreachable from `constants`.
+    ///
+    /// **Scratch lifecycle contract.** Build every declaration of the
+    /// batch in `scratch` BEFORE the first `add_decl_in`. After it, use
+    /// `scratch` only as the argument to further `add_decl_in` calls, then
+    /// drop it: interning NEW terms through it with `base = self.store`
+    /// after a promotion breaks "equal ids mean equal structure" (a
+    /// scratch row and the persistent row it was promoted to can then
+    /// both be reachable for one structure). M4c-2's file loop needs a
+    /// fresh scratch store per declaration. Ids from a DIFFERENT scratch
+    /// store are a caller error, not an `Err`: promotion indexes
+    /// `scratch` by the id's row, so it panics (index out of bounds) or
+    /// silently reads an unrelated row.
     pub fn add_decl_in(&mut self, scratch: &mut Store, d: Declaration) -> Result<(), KernelError> {
         let d = promote_declaration(&mut self.store, scratch, d)?;
         let mut check_scratch = Store::scratch();
