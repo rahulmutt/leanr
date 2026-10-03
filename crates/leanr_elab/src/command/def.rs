@@ -35,6 +35,19 @@ use crate::builtin::binder::fun::cleanup_annotations;
 use crate::elab::TermElabM;
 use crate::error::ElabError;
 
+/// oracle: `finishElab` (`Elab/MutualDef.lean:1343-1442`) →
+/// `addPreDefinitions` (`PreDefinition/Main.lean:288-356`) → `addNonRecAux`
+/// (`PreDefinition/Basic.lean:179-210`), for one non-recursive declaration.
+///
+/// Returns `Built::Add(aux _proof_N theorems ++ [main])`, the aux theorems
+/// first as the oracle's `mkAuxLemma` has `addDecl`'d them before the main
+/// declaration (`Meta/Tactic/AuxLemma.lean:43-73`), or `Built::Check` for an
+/// `example` (which never abstracts).
+///
+/// Partial failure: the aux theorems are only committed when this returns
+/// `Ok`. An error raised after `abstract_nested_proofs` but before `commit`
+/// drops them, whereas the oracle has already `addDecl`'d them. That is not
+/// observable for the seams that can fire there.
 pub(super) fn elab_def(
     elab: &mut TermElabM,
     view: &DefView,

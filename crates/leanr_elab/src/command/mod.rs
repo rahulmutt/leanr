@@ -62,7 +62,11 @@ impl<'x> CommandElab<'x> {
     /// persistent names in admission order (aux `_proof_N` theorems first,
     /// the main declaration last); empty for `example`. On `Err`, the
     /// constants already admitted (aux theorems before a rejected main
-    /// declaration) stay, as in the oracle.
+    /// declaration) stay: the oracle's `mkAuxLemma` `addDecl`s them as it
+    /// goes, and `liftCoreM` (`observing`, `Elab/Command.lean:219-220`) copies
+    /// the CoreM env back into the command state even when the run throws
+    /// (`runCore`, `:172-217`). Only declarations `Built::Add` carries
+    /// count here; see `def::elab_def` for the pre-commit failure case.
     pub fn elab_decl(
         &mut self,
         cmd: &SyntaxNode,
