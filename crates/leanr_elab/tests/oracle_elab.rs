@@ -68,7 +68,8 @@ fn oracle_elab_gate() {
     // 331 -> 333 (setElabConfig foApprox): elim/ndrec, elim/ndrecExpected.
     //
     // 345 -> 346 (synth-real-depth task 3): `tc/useAnyHole`.
-    const CORPUS_FLOOR: usize = 346;
+    // 346 -> 350 (level instantiation simplifies): the 4 lvl/* records.
+    const CORPUS_FLOOR: usize = 350;
     assert!(
         replayed >= CORPUS_FLOOR,
         "corpus shrank: replayed {replayed} records, floor is {CORPUS_FLOOR}. \

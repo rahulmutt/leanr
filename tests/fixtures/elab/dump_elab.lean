@@ -1120,10 +1120,20 @@ def anonQueries : List (String × String) :=
 -- resumed tail must see through its saved context.
 def anonTailQueries : List (String × String) :=
   [ ("anon/flat1",            "(⟨Nat.zero, Nat.zero, Nat.zero⟩ : Prod Nat (Prod Nat Nat))")
-  , ("anon/flat2",            "(⟨True.intro, True.intro, True.intro, True.intro⟩ : And True (And True (And True True)))")
+  , ("anon/flat2",            "(⟨Nat.zero, Nat.zero, Nat.zero, Nat.zero⟩ : Prod Nat (Prod Nat (Prod Nat Nat)))")
   , ("anon/tailPostponed",    "sameAs (⟨Nat.zero, Nat.zero, Nat.zero⟩ : Prod Nat _) (Prod.mk Nat.zero (Prod.mk Nat.zero Nat.zero))")
   , ("anon/tailUnderBinder",  "fun (n : Nat) => sameAs (⟨n, n, n⟩ : Prod Nat _) (Prod.mk n (Prod.mk n n))")
   , ("anon/flatK1",           "(⟨Nat.zero, Nat.zero⟩ : PB (Prod Nat Nat))")
+  ]
+
+-- Level instantiation simplifies (`instantiate_mvars.cpp:145-146` ->
+-- `update_max`, `level.cpp:293-300` -> `mk_max`, :81-110): a nested
+-- `Prod`'s second level is `0`, not `max 0 0`.
+def levelInstQueries : List (String × String) :=
+  [ ("lvl/prodNested2",       "Prod Nat (Prod Nat Nat)")
+  , ("lvl/prodNested3",       "Prod Nat (Prod Nat (Prod Nat Nat))")
+  , ("lvl/pprodProdProp",     "PProd (Prod Nat Nat) Prop")
+  , ("lvl/underBinder",       "fun (α : Type) => Prod α (Prod Nat α)")
   ]
 
 -- `expandFunBinders` (`Lean/Elab/Binders.lean:360-406`): `_` hole
@@ -1401,7 +1411,7 @@ unsafe def main (args : List String) : IO Unit := do
   let (mod, queries, errQueries) : Name × List (String × String) × List (String × String) :=
     match args with
     | ["ElabOp"] => (`ElabOp, opQueries, opErrQueries)
-    | _ => (`Elab0, strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries ++ closeoutExplicitQueries ++ nondepQueries ++ lvalIdxQueries ++ lvalFnQueries ++ p2Queries ++ p3Queries ++ p4Queries ++ anonQueries ++ anonTailQueries ++ funExpandQueries ++ elimQueries, elimErrQueries)
+    | _ => (`Elab0, strQueries ++ identQueries ++ sortAscHoleQueries ++ binderQueries ++ funQueries ++ letQueries ++ haveQueries ++ appExplicitQueries ++ appImplicitQueries ++ appPropagateQueries ++ appNamedQueries ++ appExplicitModeQueries ++ instImplicitQueries ++ numQueries ++ charQueries ++ scientificQueries ++ defaultPolyQueries ++ outParamQueries ++ coeQueries ++ elimMVarDepsQueries ++ p5BinderQueries ++ p5ImplicitLambdaQueries ++ p5ArgQueries ++ closeoutImplDetailQueries ++ closeoutBinderCheckQueries ++ closeoutLetBinderQueries ++ closeoutExplicitQueries ++ nondepQueries ++ lvalIdxQueries ++ lvalFnQueries ++ p2Queries ++ p3Queries ++ p4Queries ++ anonQueries ++ anonTailQueries ++ levelInstQueries ++ funExpandQueries ++ elimQueries, elimErrQueries)
   -- Must run before any `importModules (loadExts := true)` or the
   -- import throws internally (dump_syntax_elab.lean's module doc, same
   -- pitfall, confirmed here empirically by `dump_defeq.lean`).
