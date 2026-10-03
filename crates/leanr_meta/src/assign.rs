@@ -92,11 +92,7 @@ impl<'e> MetaCtx<'e> {
     /// equality (`etaEq`, :1858 — `isDefEqEta`'s own citation, task 6,
     /// `defeq.rs`'s module doc). The synthetic-mvar eager-synthesis
     /// branch (:1900-1905) is commented out in the ORACLE ITSELF, so it
-    /// is not transcribed either. `expandDelayedAssigned?`
-    /// (:1702-1725; call sites :1885/:1887) is NOT ported: it follows a
-    /// delayed assignment `?m [xs] := ?n` by consuming `xs.size` args,
-    /// and `MetavarContext` does record delayed assignments (#62), but
-    /// this function does not consult them, so it is an open seam.
+    /// is not transcribed either.
     pub(crate) fn is_def_eq_mvar(
         &mut self,
         t: ExprId,
@@ -120,6 +116,13 @@ impl<'e> MetaCtx<'e> {
                 let s2 = self.instantiate_mvars(s)?;
                 return self.is_def_eq_quick(t, s2);
             }
+        }
+        // oracle :1885 / :1887: follow a delayed assignment, `t` first.
+        if let Some(t2) = self.expand_delayed_assigned(t)? {
+            return self.is_def_eq_quick(t2, s);
+        }
+        if let Some(s2) = self.expand_delayed_assigned(s)? {
+            return self.is_def_eq_quick(t, s2);
         }
         let t_fn_mvar = self.unassigned_mvar_id(t_fn);
         let s_fn_mvar = self.unassigned_mvar_id(s_fn);
@@ -156,6 +159,40 @@ impl<'e> MetaCtx<'e> {
             }
             (Some(_), Some(_)) => self.is_def_eq_mvar_mvar(t, s),
         }
+    }
+
+    /// oracle: `expandDelayedAssigned?` (ExprDefEq.lean:1702-1729).
+    /// For `e = ?m as` with `?m #[xs] := ?pending`: if
+    /// `instantiateMVars` changes `e` (`?pending` is solved, so the
+    /// delayed application resolves), that result. Otherwise, only under
+    /// `assignSyntheticOpaque`, consume `xs.size` arguments and return
+    /// `?pending` applied to the rest (`:1726-1729`), so the constraint
+    /// is solved in `?pending`'s own local context. `None` when the head
+    /// is not a delayed-assigned mvar, or a guard fails.
+    fn expand_delayed_assigned(&mut self, e: ExprId) -> Result<Option<ExprId>, MetaError> {
+        let f = self.get_app_fn(e);
+        let Node::MVar { id: Some(name) } = self.node(f) else {
+            return Ok(None);
+        };
+        let Some(d) = self.mctx.delayed_assignment(MVarId(name)) else {
+            return Ok(None);
+        };
+        let (num_fvars, pending) = (d.fvars.len(), d.mvar_id_pending);
+        let e_new = self.instantiate_mvars(e)?;
+        if e_new != e {
+            return Ok(Some(e_new));
+        }
+        if !self.cfg.assign_synthetic_opaque {
+            return Ok(None);
+        }
+        let args = self.get_app_args(e);
+        if args.len() < num_fvars {
+            return Ok(None);
+        }
+        let pending_e = self
+            .scratch
+            .expr_mvar(Some(self.view.store), Some(pending.0))?;
+        Ok(Some(self.mk_app_spine(pending_e, &args[num_fvars..])?))
     }
 
     /// `isAssignable` (ExprDefEq.lean:1731-1733), restricted to the
@@ -3210,6 +3247,127 @@ mod tests {
             assert_eq!(
                 ctx.with_def_eq_stuck_ex(|ctx| ctx.is_def_eq(p, q)),
                 Ok(true)
+            );
+        });
+    }
+
+    // -------------------------------------------------------------------
+    // expandDelayedAssigned? (ExprDefEq.lean:1702-1729, call sites
+    // :1885/:1887)
+    // -------------------------------------------------------------------
+
+    /// `?new #[a] := ?p` (`?new` syntheticOpaque, as `elimMVar` mints
+    /// it, `MetavarContext.lean:1212-1226`), over one fresh fvar per
+    /// name. Returns `(new_e, pending, fvars)`; `?p` is left unassigned.
+    fn delayed_fixture(
+        ctx: &mut MetaCtx,
+        ty: ExprId,
+        fvar_names: &[&str],
+    ) -> (ExprId, MVarId, Vec<ExprId>) {
+        use crate::test_support::{fresh_fvar, fresh_mvar, fresh_mvar_of_kind};
+        let fvars: Vec<ExprId> = fvar_names.iter().map(|n| fresh_fvar(ctx, ty, n)).collect();
+        let (new_e, new_id) = fresh_mvar_of_kind(ctx, ty, MVarKind::SyntheticOpaque);
+        let (_, pending) = fresh_mvar(ctx, ty);
+        ctx.mctx_mut()
+            .assign_delayed(new_id, fvars.clone(), pending)
+            .expect("delayed");
+        (new_e, pending, fvars)
+    }
+
+    /// `:1708-1709`: once `?p` is solved, `instantiateMVars` rewrites
+    /// `?new b` to `b`, and the quick check retries on that. Without
+    /// the arm, `?new` is syntheticOpaque (unassignable) and `b` is
+    /// rigid, so the pair fell into the both-unassignable branch and
+    /// answered `false`. Both call sites: `t` (`:1885`), then `s`
+    /// (`:1887`).
+    #[test]
+    fn expand_delayed_assigned_follows_a_solved_pending_mvar() {
+        use crate::test_support::{fresh_fvar, with_ctx};
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+            let (new_e, pending, fvars) = delayed_fixture(ctx, sort0, &["a"]);
+            ctx.mctx_mut().assign(pending, fvars[0]).expect("?p := a");
+            let b = fresh_fvar(ctx, sort0, "b");
+            let applied = ctx.scratch.expr_app(base, new_e, b).expect("app");
+
+            assert_eq!(
+                ctx.is_def_eq_quick(applied, b).expect("quick"),
+                Some(true),
+                "t arm (:1885): ?new b, with ?new #[a] := ?p and ?p := a, is b"
+            );
+            assert_eq!(
+                ctx.is_def_eq_quick(b, applied).expect("quick"),
+                Some(true),
+                "s arm (:1887): the same, with the delayed app on the right"
+            );
+        });
+    }
+
+    /// `:1726-1729`: under `assignSyntheticOpaque`, an unsolved `?p`
+    /// is followed by consuming `fvars.size` arguments: `?new b c`
+    /// becomes `?p c`. With zero extra arguments that is `?p` itself,
+    /// so the constraint assigns `?p`, not `?new`.
+    #[test]
+    fn expand_delayed_assigned_consumes_fvars_under_assign_synthetic_opaque() {
+        use crate::test_support::{fresh_fvar, with_ctx};
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+            let one = ctx.scratch.level_succ(base, zero).expect("level");
+            let sort1 = ctx.scratch.expr_sort(base, one).expect("Sort 1");
+            let (new_e, pending, _) = delayed_fixture(ctx, sort1, &["a"]);
+            let b = fresh_fvar(ctx, sort1, "b");
+            // Closed, so it is in scope for `?p`'s (empty) lctx.
+            let c = sort0;
+            let applied = ctx.scratch.expr_app(base, new_e, b).expect("app");
+
+            let got = ctx
+                .with_assignable_synthetic_opaque(|ctx| ctx.is_def_eq_quick(applied, c))
+                .expect("quick");
+            assert_eq!(got, Some(true));
+            assert_eq!(
+                ctx.mctx.assignment(pending),
+                Some(c),
+                "?new b =?= c follows the delayed assignment to ?p =?= c"
+            );
+        });
+    }
+
+    /// The two `none` guards of the consume branch: `assignSyntheticOpaque`
+    /// off (`:1725`), and fewer arguments than abstracted fvars
+    /// (`:1727`). Neither may touch `?p`.
+    #[test]
+    fn expand_delayed_assigned_does_not_consume_when_a_guard_fails() {
+        use crate::test_support::{fresh_fvar, with_ctx};
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+
+            let one = ctx.scratch.level_succ(base, zero).expect("level");
+            let sort1 = ctx.scratch.expr_sort(base, one).expect("Sort 1");
+            // Closed, so `?p := c` would pass the scope check: only the
+            // guards keep `?p` unassigned.
+            let c = sort0;
+
+            // Flag off: `?new b` stays an unassignable head.
+            let (new_e, pending, _) = delayed_fixture(ctx, sort1, &["a"]);
+            let b = fresh_fvar(ctx, sort1, "b");
+            let applied = ctx.scratch.expr_app(base, new_e, b).expect("app");
+            let _ = ctx.is_def_eq_quick(applied, c);
+            assert_eq!(ctx.mctx.assignment(pending), None, "flag off: ?p untouched");
+
+            // Flag on, but `?new2 #[a2, b2] := ?p2` applied to one arg.
+            let (new2_e, pending2, _) = delayed_fixture(ctx, sort1, &["a2", "b2"]);
+            let applied2 = ctx.scratch.expr_app(base, new2_e, b).expect("app");
+            let _ = ctx.with_assignable_synthetic_opaque(|ctx| ctx.is_def_eq_quick(applied2, c));
+            assert_eq!(
+                ctx.mctx.assignment(pending2),
+                None,
+                "fewer args than fvars: ?p2 untouched"
             );
         });
     }
