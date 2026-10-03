@@ -1122,6 +1122,7 @@ mod tests {
                     ty: add_n,
                     lctx: LocalCtxSnapshot::empty(),
                     kind: MVarKind::SyntheticOpaque,
+                    num_scope_args: 0,
                 },
             );
 

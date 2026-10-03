@@ -57,6 +57,13 @@ pub struct MVarDecl {
     pub ty: ExprId,
     pub lctx: Arc<LocalCtxSnapshot>,
     pub kind: MVarKind,
+    /// oracle: `MetavarDecl.numScopeArgs` (`MetavarContext.lean:323`):
+    /// how many of this mvar's arguments model a potential dependency on
+    /// a binder (set by `elimMVar`, `:1208`) rather than a genuine
+    /// function argument. `isDefEqMVarSelf` (`ExprDefEq.lean:1800`) and
+    /// `processConstApprox` (`:1278`) allow constant approximation when
+    /// it equals the argument count, even with `constApprox` off.
+    pub num_scope_args: usize,
 }
 
 /// oracle: `DelayedMetavarAssignment` (`MetavarContext.lean:335`).
@@ -326,6 +333,7 @@ mod tests {
             ty,
             lctx: LocalCtxSnapshot::empty(),
             kind: MVarKind::Natural,
+            num_scope_args: 0,
         }
     }
 

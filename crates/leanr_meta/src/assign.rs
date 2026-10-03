@@ -716,7 +716,7 @@ impl<'e> MetaCtx<'e> {
     /// general form.
     pub(crate) fn mk_aux_mvar(&mut self, ty: ExprId) -> Result<(ExprId, MVarId), MetaError> {
         let lctx = self.current_lctx();
-        self.mk_aux_mvar_at(lctx, ty, MVarKind::Natural, None)
+        self.mk_aux_mvar_at(lctx, ty, MVarKind::Natural, None, 0)
     }
 
     /// `mk_aux_mvar` with the local context and kind chosen by the
@@ -736,12 +736,18 @@ impl<'e> MetaCtx<'e> {
     /// `user_name` is `forall_meta_telescope`'s binder name
     /// (`mkFreshExprMVar d k n`, `Meta/Basic.lean:1730`); every other
     /// caller passes `None`.
+    ///
+    /// `num_scope_args` is the oracle's `mkFreshExprMVarAt …
+    /// numScopeArgs` (`Meta/Basic.lean:851-859`). Only `elim_mvar` and
+    /// the ctxApprox restriction (`check_assignment.rs`) pass a non-zero
+    /// value; every other oracle mint uses the default 0.
     pub(crate) fn mk_aux_mvar_at(
         &mut self,
         lctx: std::sync::Arc<crate::LocalCtxSnapshot>,
         ty: ExprId,
         kind: MVarKind,
         user_name: Option<leanr_kernel::bank::NameId>,
+        num_scope_args: usize,
     ) -> Result<(ExprId, MVarId), MetaError> {
         let idx = self.expr_mvar_gen;
         self.expr_mvar_gen += 1;
@@ -758,6 +764,7 @@ impl<'e> MetaCtx<'e> {
                 ty,
                 lctx,
                 kind,
+                num_scope_args,
             },
         );
         let expr = self.scratch.expr_mvar(base, Some(name))?;
@@ -1927,6 +1934,7 @@ mod tests {
                     ty,
                     lctx: LocalCtxSnapshot::empty(),
                     kind: MVarKind::SyntheticOpaque,
+                    num_scope_args: 0,
                 },
             );
             let zero = mk_const(ctx, "N.zero");
@@ -2489,6 +2497,7 @@ mod tests {
                     sort0,
                     MVarKind::SyntheticOpaque,
                     None,
+                    0,
                 )
                 .expect("mk_aux_mvar_at");
 
@@ -2627,7 +2636,7 @@ mod tests {
             let x = fresh_fvar(ctx, n, "x");
             let lc = ctx.current_lctx();
             let (i, iid) = ctx
-                .mk_aux_mvar_at(lc, n, MVarKind::SyntheticOpaque, None)
+                .mk_aux_mvar_at(lc, n, MVarKind::SyntheticOpaque, None, 0)
                 .unwrap();
             let mx = mk_app(ctx, m, x);
             assert!(ctx.is_def_eq(mx, i).unwrap());
@@ -2666,7 +2675,7 @@ mod tests {
             // `?f` must see `g` (`fresh_mvar`'s lctx is empty).
             let lc = ctx.current_lctx();
             let (f, fid) = ctx
-                .mk_aux_mvar_at(lc, n_to_n, MVarKind::Natural, None)
+                .mk_aux_mvar_at(lc, n_to_n, MVarKind::Natural, None, 0)
                 .unwrap();
             let x = fresh_fvar(ctx, n, "x");
             let fx = mk_app(ctx, f, x);

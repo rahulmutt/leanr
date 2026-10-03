@@ -106,6 +106,7 @@ pub(crate) fn fresh_mvar_of_kind(
             ty,
             lctx: LocalCtxSnapshot::empty(),
             kind,
+            num_scope_args: 0,
         },
     );
     let expr = ctx

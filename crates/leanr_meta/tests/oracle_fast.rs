@@ -181,6 +181,7 @@ fn oracle_fast_gate() {
                                 ty,
                                 lctx: LocalCtxSnapshot::empty(),
                                 kind: MVarKind::Natural,
+                                num_scope_args: 0,
                             },
                         );
                     }
