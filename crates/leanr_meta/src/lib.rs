@@ -16,6 +16,7 @@ mod aux_recursor;
 mod cache;
 mod check;
 mod check_assignment;
+mod closure;
 mod coe;
 mod config;
 mod defeq;
@@ -46,6 +47,7 @@ mod transform;
 mod transparency;
 mod whnf;
 
+pub use closure::ClosureResult;
 pub use config::{Config, ProjReduction};
 pub use discr_tree::DiscrTree;
 pub use error::MetaError;

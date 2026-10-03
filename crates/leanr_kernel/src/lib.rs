@@ -58,7 +58,7 @@ pub use error::KernelError;
 pub use expr::{BinderInfo, DataValue, Expr, ExprData, ExprNode, KVMap, Literal};
 pub use guard::{RecGuard, MAX_REC_DEPTH};
 pub use level::Level;
-pub use local_ctx::{FVarIdGen, LocalContext, LocalDecl};
+pub use local_ctx::{fresh_fvar_id, FVarIdGen, LocalContext, LocalDecl};
 pub use name::Name;
 pub use num::{Int, Nat};
 pub use replay::{build_inductive_types, is_unsafe_or_partial, replay, ReplayError, ReplayStats};

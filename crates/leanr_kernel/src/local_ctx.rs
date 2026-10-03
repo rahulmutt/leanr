@@ -73,11 +73,15 @@ pub struct FVarIdGen {
 /// (id-twin of the Arc `fresh_fvar_id` free function). Kept as a free
 /// function (not a public method), same rationale as the Arc side: the
 /// brief's interface for `FVarIdGen` exposes only the `next: u64`
-/// field, and the two `LocalContext` methods below are the only
+/// field, and the two `LocalContext` methods below are the only in-crate
 /// callers. Re-interning `_kernel_fresh` on every call is idempotent —
 /// the dedup pool returns the same `NameId` back — so this stays cheap
 /// just like the Arc side's shared `Arc<Name>` prefix.
-fn fresh_fvar_id(
+///
+/// `pub` because `leanr_meta`'s `Closure` port mints fresh fvar ids that
+/// are never declared in any context (oracle `mkFreshFVarId`,
+/// `Lean/Meta/Closure.lean:241`); no logic change.
+pub fn fresh_fvar_id(
     st: &mut Store,
     base: Option<&Store>,
     gen: &mut FVarIdGen,
