@@ -258,11 +258,7 @@ impl<'e> MetaCtx<'e> {
         Ok(Arc::new(lctx.reduced(&pairs, |f| self.fvar_id_of(f))))
     }
 
-    /// oracle: `mkMVarApp` (`:1090-1097`) — `mvar` applied to `xs`, first
-    /// declared innermost, so that after abstraction the arguments read
-    /// `?new #(n-1) … #0`. A genuine let-bound fvar is skipped unless
-    /// `kind` is syntheticOpaque (see the loop body).
-    /// oracle `mkMVarApp` (`:1093-1098`): whether `x` is NOT applied.
+    /// oracle `mkMVarApp` (`:1090-1097`): whether `x` is NOT applied.
     /// A syntheticOpaque mvar applies every fvar; otherwise a genuine
     /// let-bound fvar is skipped. `LocalDecl.isLet` is FALSE for a nondep
     /// ldecl, so a `have` is applied like a cdecl. (The oracle also skips
@@ -276,6 +272,10 @@ impl<'e> MetaCtx<'e> {
             })
     }
 
+    /// oracle: `mkMVarApp` (`:1090-1097`) — `mvar` applied to `xs`, first
+    /// declared innermost, so that after abstraction the arguments read
+    /// `?new #(n-1) … #0`. A genuine let-bound fvar is skipped unless
+    /// `kind` is syntheticOpaque (see `mvar_app_skips`).
     pub(crate) fn mk_mvar_app(
         &mut self,
         mvar: ExprId,
@@ -972,7 +972,7 @@ mod tests {
         });
     }
 
-    /// `mkMVarApp` (`:1093-1098`) skips a genuine let-bound fvar for a
+    /// `mkMVarApp` (`:1090-1097`) skips a genuine let-bound fvar for a
     /// non-opaque mvar, so `getAppNumArgs` is 1, not `toRevert.size` = 2.
     #[test]
     fn elim_mvar_does_not_count_a_skipped_let() {
@@ -1858,7 +1858,7 @@ mod tests {
                         ctx.mctx().decl(new_id).expect("declared").num_scope_args,
                         1,
                         "the opaque branch sets numScopeArgs too (`:1208` runs before \
-                         the kind split at `:1212`)"
+                         the kind split at `:1213`)"
                     );
                     assert!(
                         ctx.mctx().assignment(mid).is_none(),

@@ -549,6 +549,9 @@ planned one at a time after their predecessor merges.
     `p2/lval-two-binders` source swap) and `(fun (x : Nat) f => f) Nat.zero
     Nat.succ`. Root cause: leanr has no `numScopeArgs` constant
     approximation (`Meta/ExprDefEq.lean:1271-1278`, `processConstApprox`).
+    CLOSED by the numScopeArgs slice
+    (`2026-10-03-num-scope-args-design.md`); `p2/app-fn-after-lval` is
+    recorded.
   - The same gap blocks the corpus record the plan wanted,
     `p2/app-fn-after-lval`: `(fun x f => f x.1) (Prod.mk Nat.zero Nat.zero)
     Nat.succ` gives `FunctionExpected` while the oracle accepts it. The

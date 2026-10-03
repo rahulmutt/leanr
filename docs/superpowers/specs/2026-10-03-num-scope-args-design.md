@@ -233,3 +233,77 @@ One plan, one PR, roughly:
 4. Doc sweep: remove the stale "no `numScopeArgs` analogue" comments
    (`assign.rs` ~94, ~246, ~537), verify every new citation by opening the
    line, § Landed.
+
+## Landed
+
+Commits (`git log --oneline 038fc82..HEAD`, before this docs commit):
+
+```
+c2b32dc leanr_meta: processConstApprox longest-prefix search + instantiateForall
+d4e3de8 leanr_meta: numScopeArgs opens the constApprox gates (isDefEqMVarSelf, processConstApprox)
+0030834 leanr_meta: MVarDecl.num_scope_args, set by elimMVar and the ctxApprox restriction
+14d8cff docs: plan citation fix (:977)
+28098c5 docs: numScopeArgs implementation plan
+740d50a docs: numScopeArgs + processConstApprox prefix search — design spec
+```
+
+**Mutations** (each applied, run, reverted):
+
+1. Drop `decl_scope_args +` in `elim_mvar`: killed by `elim_mvar_scope_args_accumulate_across_nested_abstractions`.
+2. `applied` replaced by `to_revert.len()`: killed by `elim_mvar_does_not_count_a_skipped_let`.
+3. ctxApprox restriction passes 0: killed by `check_mvar_restriction_inherits_num_scope_args`.
+4a. Gate 1 (`is_def_eq_mvar_self`), never refuse: killed by unit test `num_scope_args_gates_is_def_eq_mvar_self_on_the_default_profile` only (n=2 case).
+4b. Gate 1, refuse whenever `!const_approx`: killed by the same unit test only (n=1 case).
+5a. Gate 2 (`process_const_approx`), never refuse: killed by unit test `num_scope_args_gates_process_const_approx_on_the_default_profile` only (n=2 case).
+5b. Gate 2, refuse whenever `!const_approx`: killed by the same unit test (n=1) and by all 8 task-2 corpus rows.
+6. Prefix branch always `defaultCase`: killed by all four `prefix_search_*` unit tests and by corpus row `nsa/let-prefix-search` (the only row that fails).
+7. Drop the `is_type_correct` conjunct: killed by `prefix_search_type_checks_a_ctx_local_prefix` only.
+8. `cont` goes straight to `defaultCase` (no shorter-prefix retry): killed by `prefix_search_retries_a_shorter_prefix_before_the_default_case` only.
+9. `instantiate_forall` without `whnf`: killed by `instantiate_forall_whnfs_to_find_the_binder`.
+
+Mutations 4a, 4b and 5a are killed only by unit tests; no corpus row
+covers gate 1 and the corpus is success-only. Mutations 7 and 8 are
+killed only by unit tests written from reading the oracle source
+(`ExprDefEq.lean:1303-1306` and `:1293-1298`); they were never
+oracle-probed, and no elab row reaches them (`nsa/let-prefix-search`
+succeeds at its first prefix, which is out of scope).
+
+**Corpus.** 350 → 359: `nsa/two-binders-snd`, `nsa/two-binders-fst`,
+`nsa/fn-after-annotated`, `nsa/lval-after-fn-binder`,
+`nsa/fo-before-const`, `nsa/in-lctx-arg-default-case`,
+`p2/app-fn-after-lval`, `p2/lval-two-binders-holes` (task 2, 350 → 358)
+and `nsa/let-prefix-search` (task 3, 359). `elab-queries.jsonl` gained
+9 lines and changed none.
+
+**Smoke-test movement.** None. The only change under
+`crates/leanr_elab/tests` is `oracle_elab.rs`'s `CORPUS_FLOOR` (350 → 359).
+`synthetic_smoke.rs::stuck_coercion_is_reported_by_the_coe_reporter_arm`
+and `binder_smoke.rs::a_have_bound_variable_is_opaque_to_defeq` still pass
+unedited (oracle-rejected terms stay rejected).
+
+**Spec corrections.** The § Testing candidate row
+`fun (n : Nat) => (fun x y w => w) n Nat.zero (Eq.refl n)` does NOT reach
+the prefix branch: `n` is in the mvar's own lctx, so `processAssignment`
+stops at arg 0 (`ExprDefEq.lean:1329-1330`; the elaborator's
+`quasiPatternApprox := false` is `Elab/Config.lean:62`) and the oracle
+gives `(w : Eq n n)` (`defaultCase`). Recorded as
+`nsa/in-lctx-arg-default-case`; the discriminating row is
+`nsa/let-prefix-search` (oracle: `w : Eq x x`, prefix `[n]` abstracted).
+`p2/lval-two-binders` was kept, and its both-holes form added as
+`p2/lval-two-binders-holes`, rather than swapping the source back.
+Citation fixes found in the sweep: `process_assignment`'s per-argument
+cites (`:1320-1321`/`:1322-1323`/`:1327-1328` are on the pin
+`:1327-1328`/`:1329-1330`/`:1333-1334`; `:1345` is `:1346`; `:1346-1352`
+is `:1347-1354`; the function ends at `:1357`, not `:1359`), the
+`isDefEqMVarSelf` call `:1799-1801` is `:1800-1803`, `mkMVarApp` is
+`MetavarContext.lean:1090-1097` (not `:1093-1098`), the `elimMVar` kind
+split is `:1213` (not `:1212`), `mkFreshExprMVarAt` is
+`Meta/Basic.lean:850-860`, and `expandDelayedAssigned?` is `:1702-1725`.
+
+**Open seams.**
+- `expandDelayedAssigned?` (`ExprDefEq.lean:1702-1725`, call sites
+  `:1885`/`:1887`) is not ported in `is_def_eq_mvar`; delayed assignments
+  themselves exist since #62. Previous docs wrongly called it moot.
+- Mutations 7 and 8 are pinned only by unit tests (above), not by an
+  oracle-probed row.
+- The `elim.jsonl` / `structures.jsonl` regen drift from #65 remains.

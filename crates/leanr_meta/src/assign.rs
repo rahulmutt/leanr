@@ -92,10 +92,11 @@ impl<'e> MetaCtx<'e> {
     /// equality (`etaEq`, :1858 — `isDefEqEta`'s own citation, task 6,
     /// `defeq.rs`'s module doc). The synthetic-mvar eager-synthesis
     /// branch (:1900-1905) is commented out in the ORACLE ITSELF, so it
-    /// is not transcribed either. `expandDelayedAssigned?` (:1706-1725)
-    /// is permanently moot: this crate's `MetavarContext` has no
-    /// delayed-assignment concept at all (not a seam — a feature never
-    /// built this plan), so both its call sites are dead code here.
+    /// is not transcribed either. `expandDelayedAssigned?`
+    /// (:1702-1725; call sites :1885/:1887) is NOT ported: it follows a
+    /// delayed assignment `?m [xs] := ?n` by consuming `xs.size` args,
+    /// and `MetavarContext` does record delayed assignments (#62), but
+    /// this function does not consult them, so it is an open seam.
     pub(crate) fn is_def_eq_mvar(
         &mut self,
         t: ExprId,
@@ -335,7 +336,7 @@ impl<'e> MetaCtx<'e> {
         self.process_assignment(mvar_app, v2)
     }
 
-    /// oracle: `processAssignment` (ExprDefEq.lean:1313-1359), the
+    /// oracle: `processAssignment` (ExprDefEq.lean:1313-1357), the
     /// PATTERN case, now with all four expr-side approximations wired
     /// in at their real call sites (task 7 — every one of these was a
     /// named seam through task 6). `mvar_app` is the full `?m a₁ … aₙ`
@@ -351,7 +352,7 @@ impl<'e> MetaCtx<'e> {
     /// (unless `quasiPatternApprox`), or a non-fvar arg — the oracle
     /// does NOT abort outright; it falls to `useFOApprox args`
     /// (`processAssignmentFOApprox <||> processConstApprox .. i ..`),
-    /// passing `i` as `patternVarPrefix` (:1319-1332). This function is
+    /// passing `i` as `patternVarPrefix` (:1317-1332). This function is
     /// transcribed as that exact same loop-with-accumulator (`i`
     /// tracked via a plain `while`, `args` mutated in place). On the
     /// default profile `use_fo_approx` can now succeed through
@@ -375,7 +376,7 @@ impl<'e> MetaCtx<'e> {
             match self.node(arg) {
                 Node::FVar { id: Some(fid) } => {
                     if args[..i].contains(&arg) {
-                        // oracle :1320-1321: repeated pattern var.
+                        // oracle :1327-1328: repeated pattern var.
                         return self.use_fo_approx(mvar, &args, i, v);
                     }
                     let in_own_lctx = self
@@ -384,13 +385,13 @@ impl<'e> MetaCtx<'e> {
                         .map(|d| d.lctx.lctx().get(fid).is_some())
                         .unwrap_or(false);
                     if in_own_lctx && !self.cfg.quasi_pattern_approx {
-                        // oracle :1322-1323: ctx-local fvar, quasiPatternApprox off.
+                        // oracle :1329-1330: ctx-local fvar, quasiPatternApprox off.
                         return self.use_fo_approx(mvar, &args, i, v);
                     }
                     i += 1;
                 }
                 _ => {
-                    // oracle :1327-1328: non-fvar pattern argument.
+                    // oracle :1333-1334: non-fvar pattern argument.
                     return self.use_fo_approx(mvar, &args, i, v);
                 }
             }
@@ -406,13 +407,13 @@ impl<'e> MetaCtx<'e> {
             Some(v2) => v2,
         };
         let lam = match self.mk_lambda_fvars_with_let_deps(&args, checked)? {
-            // oracle :1345: `let some v ← mkLambdaFVarsWithLetDeps args v
+            // oracle :1346: `let some v ← mkLambdaFVarsWithLetDeps args v
             // | return false` — a bare `false`, NOT `useFOApprox`
             // (unlike every other failure exit in this function).
             None => return Ok(false),
             Some(l) => l,
         };
-        // oracle :1346-1352. With `quasiPatternApprox` off this is
+        // oracle :1347-1354. With `quasiPatternApprox` off this is
         // vacuously false by construction (every entry in `args` was
         // already rejected above were it ctx-local) — task 5/6's own
         // reasoning, now genuinely reachable when the flag is on.
@@ -441,7 +442,7 @@ impl<'e> MetaCtx<'e> {
     // ===================================================================
 
     /// oracle: `processAssignment`'s own local `useFOApprox` closure
-    /// (:1319-1321): `processAssignmentFOApprox mvar args v <||>
+    /// (:1319-1320): `processAssignmentFOApprox mvar args v <||>
     /// processConstApprox mvar args i v` — first-order approximation,
     /// then (only if that also fails) constant-function approximation.
     fn use_fo_approx(
@@ -834,7 +835,7 @@ impl<'e> MetaCtx<'e> {
     /// caller passes `None`.
     ///
     /// `num_scope_args` is the oracle's `mkFreshExprMVarAt …
-    /// numScopeArgs` (`Meta/Basic.lean:851-859`). Only `elim_mvar` and
+    /// numScopeArgs` (`Meta/Basic.lean:850-860`). Only `elim_mvar` and
     /// the ctxApprox restriction (`check_assignment.rs`) pass a non-zero
     /// value; every other oracle mint uses the default 0.
     pub(crate) fn mk_aux_mvar_at(
@@ -1792,7 +1793,7 @@ mod tests {
     }
 
     /// oracle: `isDefEqMVarSelf`'s OWN separate `constApprox` fallback
-    /// (ExprDefEq.lean:1799-1801) — a SECOND `constApprox` call site,
+    /// (ExprDefEq.lean:1800-1803) — a SECOND `constApprox` call site,
     /// distinct from `process_assignment`'s (the test above): `?m a =?=
     /// ?m b` (SAME mvar both sides) with `a ≠ b` DISTINCT fvars, so
     /// `is_def_eq_args`'s pairwise unification fails outright (`a` and
