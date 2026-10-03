@@ -30,6 +30,17 @@
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"AnonLoop.noConfusionType","rec":false,"recOn":false,"tag":false}
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[2],"motive":0},"n":"AnonLoop.rec","rec":true,"recOn":false,"tag":false}
 {"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"AnonLoop.recOn","rec":false,"recOn":true,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Any","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Any.any","rec":false,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,2],"motive":1},"n":"Any.casesOn","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Any.ctorIdx","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Any.mk","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Any.mk._flat_ctor","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Any.mk.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Any.noConfusion","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Any.noConfusionType","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"majors":[0,3],"motive":1},"n":"Any.rec","rec":true,"recOn":false,"tag":false}
+{"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[0,2],"motive":1},"n":"Any.recOn","rec":false,"recOn":true,"tag":false}
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Bi","rec":false,"recOn":false,"tag":false}
 {"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[1],"motive":0},"n":"Bi.casesOn","rec":false,"recOn":false,"tag":false}
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Bi.ctorIdx","rec":false,"recOn":false,"tag":false}
@@ -818,6 +829,7 @@
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"heq_of_eq","rec":false,"recOn":false,"tag":false}
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"id","rec":false,"recOn":false,"tag":false}
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instAddNat","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instAnyAll","rec":false,"recOn":false,"tag":false}
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeFunFn","rec":false,"recOn":false,"tag":false}
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeFunFnI","rec":false,"recOn":false,"tag":false}
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeFunFnJ","rec":false,"recOn":false,"tag":false}
@@ -871,6 +883,7 @@
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"sameAs","rec":false,"recOn":false,"tag":false}
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"semiOutParam","rec":false,"recOn":false,"tag":false}
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"takesInt","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"useAny","rec":false,"recOn":false,"tag":false}
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"useFresh","rec":false,"recOn":false,"tag":false}
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"useNoInst","rec":false,"recOn":false,"tag":false}
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"usePair","rec":false,"recOn":false,"tag":false}
