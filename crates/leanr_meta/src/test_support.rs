@@ -789,3 +789,33 @@ pub(crate) fn with_matcher_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
     );
     f(&mut ctx)
 }
+
+/// `fun (n : N) => N.succ^depth n` — a term deep enough to overflow an
+/// unguarded native recursion (final review Important #2).
+pub(crate) fn deep_succ_lambda(ctx: &mut MetaCtx, depth: usize) -> ExprId {
+    let n_ty = c(ctx, "N");
+    let succ = c(ctx, "N.succ");
+    let cp = ctx.lctx_checkpoint();
+    let n = ctx
+        .push_local_decl(None, n_ty, leanr_kernel::BinderInfo::Default)
+        .expect("push");
+    let mut body = n;
+    for _ in 0..depth {
+        body = app(ctx, succ, body);
+    }
+    let e = ctx.mk_lambda(&[n], body).expect("mk_lambda");
+    ctx.lctx_restore(cp);
+    e
+}
+
+/// Run `f` on a thread with an 8 MiB stack (the main-thread default), so
+/// a deep-term test measures `guarded`, not the 2 MiB test-thread stack.
+/// An unguarded recursion aborts the whole test binary (SIGABRT).
+pub(crate) fn on_8mib_stack(f: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(f)
+        .expect("spawn")
+        .join()
+        .expect("deep-term thread panicked");
+}

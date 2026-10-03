@@ -163,6 +163,9 @@ impl MetaCtx<'_> {
     }
 
     /// oracle: `AbstractNestedProofs.visit` (`AbstractNestedProofs.lean:72-106`).
+    /// Every recursive call goes through `guarded`, the leanr stand-in for
+    /// `checkSystem` (`:73`): a deep term ends in `DepthBudgetExhausted`,
+    /// not a stack overflow.
     fn anp_visit(
         &mut self,
         aux: &mut AuxLemmas,
@@ -194,7 +197,7 @@ impl MetaCtx<'_> {
                     ))
                 }
                 Node::MData { data, expr } => {
-                    let b = self.anp_visit(aux, cache, expr)?;
+                    let b = self.guarded(|c| c.anp_visit(aux, cache, expr))?;
                     self.scratch.expr_mdata(base, data, b)?
                 }
                 Node::Proj {
@@ -202,7 +205,7 @@ impl MetaCtx<'_> {
                     idx,
                     structure,
                 } => {
-                    let b = self.anp_visit(aux, cache, structure)?;
+                    let b = self.guarded(|c| c.anp_visit(aux, cache, structure))?;
                     self.scratch
                         .expr_proj(base, type_name, &Nat::from(idx as u64), b)?
                 }
@@ -212,15 +215,15 @@ impl MetaCtx<'_> {
                     structure,
                 } => {
                     let n = self.scratch.nat_at(base, idx).clone();
-                    let b = self.anp_visit(aux, cache, structure)?;
+                    let b = self.guarded(|c| c.anp_visit(aux, cache, structure))?;
                     self.scratch.expr_proj(base, type_name, &n, b)?
                 }
                 Node::App { .. } => {
                     let f = self.get_app_fn(e);
                     let args = self.get_app_args(e);
-                    let mut r = self.anp_visit(aux, cache, f)?;
+                    let mut r = self.guarded(|c| c.anp_visit(aux, cache, f))?;
                     for a in args {
-                        let a2 = self.anp_visit(aux, cache, a)?;
+                        let a2 = self.guarded(|c| c.anp_visit(aux, cache, a))?;
                         r = self.scratch.expr_app(base, r, a2)?;
                     }
                     r
@@ -297,7 +300,7 @@ impl MetaCtx<'_> {
         let log_start = cache.log.len();
         let mut types = Vec::with_capacity(binders.len());
         for &(_, d, _) in &binders {
-            types.push(self.anp_visit(aux, cache, d)?);
+            types.push(self.guarded(|c| c.anp_visit(aux, cache, d))?);
         }
         // `:89` `withLCtx lctx`: re-open with the visited types.
         self.lctx_restore(cp);
@@ -321,7 +324,7 @@ impl MetaCtx<'_> {
             }
         }
         let b = instantiate_rev(self.scratch, base, cur, &ys, &mut self.guard)?;
-        let b = self.anp_visit(aux, cache, b)?;
+        let b = self.guarded(|c| c.anp_visit(aux, cache, b))?;
         if is_lambda {
             self.mk_lambda(&ys, b)
         } else {
@@ -395,7 +398,7 @@ impl MetaCtx<'_> {
         let ty = self.infer_type(proof)?;
         let ty = self.beta_reduce(ty)?;
         let ty = self.zeta_reduce(ty)?;
-        let ty = self.anp_visit(aux, cache, ty)?;
+        let ty = self.guarded(|c| c.anp_visit(aux, cache, ty))?;
         // `:27`: `visit` only abstracts sorry-free proofs (`:91`), so this
         // is always `true` here; kept for parity.
         let use_cache = !self.has_sorry(proof);
@@ -1015,6 +1018,26 @@ mod tests {
             let mut aux = AuxLemmas::new(thm);
             assert_eq!(ctx.abstract_nested_proofs(&mut aux, pf).unwrap(), pf);
             assert!(aux.pending().is_empty());
+        });
+    }
+
+    /// Final review Important #2: `anp_visit` recurses through `guarded`,
+    /// so a deep term ends in `Ok` or `DepthBudgetExhausted`, never a
+    /// stack-overflow abort.
+    #[test]
+    fn deep_term_does_not_overflow_the_stack() {
+        crate::test_support::on_8mib_stack(|| {
+            with_meta0_ctx(|ctx| {
+                let e = crate::test_support::deep_succ_lambda(ctx, 100_000);
+                let deep = name(ctx, "deep");
+                let mut aux = AuxLemmas::new(deep);
+                match ctx.abstract_nested_proofs(&mut aux, e) {
+                    Ok(r) => assert_eq!(r, e),
+                    Err(MetaError::DepthBudgetExhausted) => {}
+                    Err(other) => panic!("expected Ok or DepthBudgetExhausted, got {other:?}"),
+                }
+                assert!(aux.pending().is_empty());
+            })
         });
     }
 }

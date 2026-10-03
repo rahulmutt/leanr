@@ -129,7 +129,9 @@ impl<'e> MetaCtx<'e> {
 
     /// oracle: `Core.transform`'s `visit` (`Transform.lean:51-71`) with
     /// the default `post`: terms handed to `pre` may contain loose bvars,
-    /// and binders are rebuilt in place, never opened.
+    /// and binders are rebuilt in place, never opened. Every recursive
+    /// call goes through `guarded` (deep terms end in
+    /// `DepthBudgetExhausted`, not a stack overflow).
     fn core_transform_visit(
         &mut self,
         e: ExprId,
@@ -143,7 +145,7 @@ impl<'e> MetaCtx<'e> {
         let base = Some(self.view.store);
         let r = match pre(self, e)? {
             TransformStep::Done(r) => r,
-            TransformStep::Visit(e2) => self.core_transform_visit(e2, pre, cache)?,
+            TransformStep::Visit(e2) => self.guarded(|c| c.core_transform_visit(e2, pre, cache))?,
             TransformStep::Continue(e2) => {
                 let e = e2.unwrap_or(e);
                 match self.node(e) {
@@ -153,8 +155,9 @@ impl<'e> MetaCtx<'e> {
                         body,
                         binder_info,
                     } => {
-                        let d = self.core_transform_visit(binder_type, pre, cache)?;
-                        let b = self.core_transform_visit(body, pre, cache)?;
+                        let d =
+                            self.guarded(|c| c.core_transform_visit(binder_type, pre, cache))?;
+                        let b = self.guarded(|c| c.core_transform_visit(body, pre, cache))?;
                         self.scratch
                             .expr_forall(base, binder_name, d, b, binder_info)?
                     }
@@ -164,8 +167,9 @@ impl<'e> MetaCtx<'e> {
                         body,
                         binder_info,
                     } => {
-                        let d = self.core_transform_visit(binder_type, pre, cache)?;
-                        let b = self.core_transform_visit(body, pre, cache)?;
+                        let d =
+                            self.guarded(|c| c.core_transform_visit(binder_type, pre, cache))?;
+                        let b = self.guarded(|c| c.core_transform_visit(body, pre, cache))?;
                         self.scratch
                             .expr_lam(base, binder_name, d, b, binder_info)?
                     }
@@ -176,23 +180,23 @@ impl<'e> MetaCtx<'e> {
                         body,
                         non_dep,
                     } => {
-                        let t = self.core_transform_visit(ty, pre, cache)?;
-                        let v = self.core_transform_visit(value, pre, cache)?;
-                        let b = self.core_transform_visit(body, pre, cache)?;
+                        let t = self.guarded(|c| c.core_transform_visit(ty, pre, cache))?;
+                        let v = self.guarded(|c| c.core_transform_visit(value, pre, cache))?;
+                        let b = self.guarded(|c| c.core_transform_visit(body, pre, cache))?;
                         self.scratch.expr_let(base, decl_name, t, v, b, non_dep)?
                     }
                     Node::App { .. } => {
                         let f = self.get_app_fn(e);
                         let args = self.get_app_args(e);
-                        let mut r = self.core_transform_visit(f, pre, cache)?;
+                        let mut r = self.guarded(|c| c.core_transform_visit(f, pre, cache))?;
                         for a in args {
-                            let a2 = self.core_transform_visit(a, pre, cache)?;
+                            let a2 = self.guarded(|c| c.core_transform_visit(a, pre, cache))?;
                             r = self.scratch.expr_app(base, r, a2)?;
                         }
                         r
                     }
                     Node::MData { data, expr } => {
-                        let b = self.core_transform_visit(expr, pre, cache)?;
+                        let b = self.guarded(|c| c.core_transform_visit(expr, pre, cache))?;
                         self.scratch.expr_mdata(base, data, b)?
                     }
                     Node::Proj {
@@ -200,7 +204,7 @@ impl<'e> MetaCtx<'e> {
                         idx,
                         structure,
                     } => {
-                        let b = self.core_transform_visit(structure, pre, cache)?;
+                        let b = self.guarded(|c| c.core_transform_visit(structure, pre, cache))?;
                         self.scratch
                             .expr_proj(base, type_name, &Nat::from(idx as u64), b)?
                     }
@@ -210,7 +214,7 @@ impl<'e> MetaCtx<'e> {
                         structure,
                     } => {
                         let n = self.scratch.nat_at(base, idx).clone();
-                        let b = self.core_transform_visit(structure, pre, cache)?;
+                        let b = self.guarded(|c| c.core_transform_visit(structure, pre, cache))?;
                         self.scratch.expr_proj(base, type_name, &n, b)?
                     }
                     _ => e,
@@ -234,14 +238,16 @@ impl<'e> MetaCtx<'e> {
             return Ok(r);
         }
         self.step()?;
-        let r = match pre(self, e)? {
-            TransformStep::Done(r) => r,
-            TransformStep::Visit(e2) => self.transform_visit(e2, pre, st)?,
+        // Every recursion of this traversal re-enters here, so one
+        // `guarded` bounds its depth (final review Important #2).
+        let r = self.guarded(|c| match pre(c, e)? {
+            TransformStep::Done(r) => Ok(r),
+            TransformStep::Visit(e2) => c.transform_visit(e2, pre, st),
             TransformStep::Continue(e2) => {
                 let e = e2.unwrap_or(e);
-                self.transform_children(e, pre, st)?
+                c.transform_children(e, pre, st)
             }
-        };
+        })?;
         st.cache.insert(e, r);
         Ok(r)
     }
@@ -698,6 +704,31 @@ mod tests {
                 .unwrap();
             let want = app(ctx, succ, zero);
             assert_eq!(ctx.zeta_reduce(e).unwrap(), want);
+        });
+    }
+
+    /// Final review Important #2: `beta_reduce` (`core_transform_visit`)
+    /// and `zeta_reduce` (`transform_visit`) recurse through `guarded`, so
+    /// a deep term ends in `Ok` or `DepthBudgetExhausted`, never a
+    /// stack-overflow abort.
+    #[test]
+    fn deep_term_does_not_overflow_the_stack() {
+        crate::test_support::on_8mib_stack(|| {
+            crate::test_support::with_meta0_ctx(|ctx| {
+                let e = crate::test_support::deep_succ_lambda(ctx, 100_000);
+                for (what, r) in [
+                    ("beta_reduce", ctx.beta_reduce(e)),
+                    ("zeta_reduce", ctx.zeta_reduce(e)),
+                ] {
+                    match r {
+                        Ok(r) => assert_eq!(r, e, "{what}"),
+                        Err(crate::MetaError::DepthBudgetExhausted) => {}
+                        Err(other) => {
+                            panic!("{what}: expected Ok or DepthBudgetExhausted, got {other:?}")
+                        }
+                    }
+                }
+            })
         });
     }
 }
