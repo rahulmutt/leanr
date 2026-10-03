@@ -93,12 +93,15 @@ pub fn elab_type(
     kinds: &KindInterner,
 ) -> Result<ExprId, ElabError> {
     let level = elab_opt_level(elab, node, kinds)?;
+    // `Some(base)`: `level` may be a persistent `Param` row (the ident
+    // arm of `elab_level`), which a `None`-based intern cannot hash.
+    let base = elab.view.store;
     let store = elab.mctx.store_mut();
     let succ = store
-        .level_succ(None, level)
+        .level_succ(Some(base), level)
         .map_err(leanr_meta::MetaError::from)?;
     let id = store
-        .expr_sort(None, succ)
+        .expr_sort(Some(base), succ)
         .map_err(leanr_meta::MetaError::from)?;
     Ok(id)
 }
@@ -110,9 +113,11 @@ pub fn elab_sort(
     kinds: &KindInterner,
 ) -> Result<ExprId, ElabError> {
     let level = elab_opt_level(elab, node, kinds)?;
+    // `Some(base)`: see `elab_type`.
+    let base = elab.view.store;
     let store = elab.mctx.store_mut();
     let id = store
-        .expr_sort(None, level)
+        .expr_sort(Some(base), level)
         .map_err(leanr_meta::MetaError::from)?;
     Ok(id)
 }
@@ -201,10 +206,14 @@ pub(crate) fn elab_level(
                 .name_str(Some(base), None, s)
                 .map_err(leanr_meta::MetaError::from)?;
             if elab.level_names.contains(&name_id) {
+                // `Some(base)`: a universe name such as `u` usually already
+                // exists in the environment's store, so `name_id` is a
+                // persistent id a `None`-based intern cannot hash. First
+                // reached by M4c-1's `.{u}` declaration headers.
                 Ok(elab
                     .mctx
                     .store_mut()
-                    .level_param(None, Some(name_id))
+                    .level_param(Some(base), Some(name_id))
                     .map_err(leanr_meta::MetaError::from)?)
             } else {
                 Err(ElabError::UnknownIdent(raw.to_string()))

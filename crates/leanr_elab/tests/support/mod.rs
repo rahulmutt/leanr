@@ -1268,3 +1268,196 @@ pub fn parse_command(src: &str) -> (leanr_syntax::ParseResult, leanr_syntax::tre
     let cmd = cmds[0].clone();
     (parsed, cmd)
 }
+
+/// Replay Elab0 into a fresh owned `Environment`, parse `src` as one
+/// command, and run `k` with a `CommandElab` over them. One replay per call:
+/// the spec's per-record environment (§ Harness).
+pub fn with_command_elab<R>(
+    src: &str,
+    k: impl FnOnce(
+        &mut leanr_elab::command::CommandElab<'_>,
+        &leanr_syntax::tree::SyntaxNode,
+        &leanr_syntax::kind::KindInterner,
+    ) -> R,
+) -> R {
+    let Replayed {
+        env,
+        reducibility,
+        matchers,
+        instances,
+        default_instances,
+        projection_fns,
+        classes,
+        coe_decls,
+        aux_recs,
+        elab_as_elim,
+        structures,
+    } = replay_fixture_in("elab", "Elab0.olean");
+    let exts = leanr_meta::EnvExtensions {
+        reducibility: &reducibility,
+        matchers: &matchers,
+        instances: &instances,
+        default_instances: &default_instances,
+        projection_fns: &projection_fns,
+        classes: &classes,
+        coe_decls: &coe_decls,
+        aux_recs: &aux_recs,
+        elab_as_elim: &elab_as_elim,
+        structures: &structures,
+    };
+    let (parsed, cmd) = parse_command(src);
+    let mut ce = leanr_elab::command::CommandElab::new(env, exts);
+    k(&mut ce, &cmd, &parsed.tree.kinds)
+}
+
+/// The canonical JSON of admitted constant `n`, in `dump_decls.lean`'s
+/// `constJ` shape.
+fn decl_const_json(
+    env: &leanr_kernel::Environment,
+    n: leanr_kernel::bank::NameId,
+) -> serde_json::Value {
+    use leanr_kernel::bank::{ExprId, NameId};
+    use leanr_kernel::{ConstantInfo, ReducibilityHints};
+    use serde_json::{json, Value};
+    let st = env.store();
+    let name = |n: NameId| json!(name_to_string(st, None, Some(n)));
+    let names = |ns: &[NameId]| Value::Array(ns.iter().map(|&n| name(n)).collect());
+    let enc = |e: ExprId| encode_expr(st, None, e, &mut EncSt::default());
+    let hints = |h: &ReducibilityHints| match h {
+        ReducibilityHints::Opaque => json!("opaque"),
+        ReducibilityHints::Abbrev => json!("abbrev"),
+        ReducibilityHints::Regular(k) => json!({ "regular": k }),
+    };
+    let ci = env.get(n).expect("admitted constant is in the environment");
+    let cv = ci.constant_val();
+    let mut o = serde_json::Map::new();
+    o.insert("name".into(), name(cv.name));
+    o.insert("levelParams".into(), names(&cv.level_params));
+    o.insert("type".into(), enc(cv.ty));
+    match ci {
+        ConstantInfo::Defn(d) => {
+            o.insert("kind".into(), json!("defn"));
+            o.insert("value".into(), enc(d.value));
+            o.insert("hints".into(), hints(&d.hints));
+            let safety = match d.safety {
+                leanr_kernel::DefinitionSafety::Safe => "safe",
+                leanr_kernel::DefinitionSafety::Unsafe => "unsafe",
+                leanr_kernel::DefinitionSafety::Partial => "partial",
+            };
+            o.insert("safety".into(), json!(safety));
+            o.insert("all".into(), names(&d.all));
+        }
+        ConstantInfo::Thm(t) => {
+            o.insert("kind".into(), json!("thm"));
+            o.insert("value".into(), enc(t.value));
+            o.insert("all".into(), names(&t.all));
+        }
+        ConstantInfo::Opaque(v) => {
+            o.insert("kind".into(), json!("opaque"));
+            o.insert("value".into(), enc(v.value));
+            o.insert("unsafe".into(), json!(v.is_unsafe));
+            o.insert("all".into(), names(&v.all));
+        }
+        ConstantInfo::Axiom(a) => {
+            o.insert("kind".into(), json!("axiom"));
+            o.insert("unsafe".into(), json!(a.is_unsafe));
+        }
+        other => panic!("elab_decl admitted an unexpected constant kind: {other:?}"),
+    }
+    Value::Object(o)
+}
+
+/// Elaborate every enabled `{id, src, consts|err}` record of
+/// `tests/fixtures/elab/<queries>` in its own fresh Elab0 environment and
+/// compare with the oracle: the admitted constants' canonical JSON (sorted
+/// by `Name.lt`, as the dumper sorts), or the first error line. Panics
+/// listing every divergence; returns the number of records checked.
+pub fn run_decl_corpus(queries: &str, enabled: impl Fn(&str) -> bool) -> usize {
+    use serde_json::Value;
+    let text = std::fs::read_to_string(fixture_in("elab", queries))
+        .unwrap_or_else(|e| panic!("committed decl corpus {queries}: {e}"));
+    let mut failures = Vec::new();
+    let mut checked = 0usize;
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let q: Value = serde_json::from_str(line).expect("committed JSONL is valid");
+        let id = q["id"].as_str().expect("id").to_string();
+        if !enabled(&id) {
+            continue;
+        }
+        checked += 1;
+        let src = q["src"].as_str().expect("src").to_string();
+        assert!(
+            !q.to_string().contains("\"sorryAx\""),
+            "{id}: the oracle record contains sorryAx — it is an oracle error"
+        );
+        with_command_elab(&src, |ce, cmd, kinds| {
+            let got = ce.elab_decl(cmd, kinds);
+            if let Some(want) = q.get("err").and_then(Value::as_str) {
+                match got {
+                    Err(e) => {
+                        let line = e.oracle_first_line();
+                        if line.as_deref() != Some(want) {
+                            failures.push(format!(
+                                "{id}: leanr error {e:?} (first line {line:?}); oracle {want:?}"
+                            ));
+                        }
+                    }
+                    Ok(ns) => failures.push(format!(
+                        "{id}: leanr admitted {} constant(s); oracle errors with {want:?}",
+                        ns.len()
+                    )),
+                }
+                return;
+            }
+            let want = q["consts"].as_array().expect("consts").clone();
+            let names = match got {
+                Ok(ns) => ns,
+                Err(e) => {
+                    failures.push(format!(
+                        "{id}: leanr error {e:?}; oracle admits {}",
+                        want.len()
+                    ));
+                    return;
+                }
+            };
+            let env = ce.env();
+            // Admission order: the main declaration last, every aux before it.
+            let rendered: Vec<String> = names
+                .iter()
+                .map(|&n| name_to_string(env.store(), None, Some(n)))
+                .collect();
+            if let Some((last, auxes)) = rendered.split_last() {
+                if last.contains("._proof_") || auxes.iter().any(|a| !a.contains("._proof_")) {
+                    failures.push(format!("{id}: admission order {rendered:?}"));
+                }
+            }
+            let mut sorted = names.clone();
+            sorted.sort_by(|a, b| leanr_meta::name_cmp(env.store(), None, Some(*a), Some(*b)));
+            let got_json: Vec<Value> = sorted.iter().map(|&n| decl_const_json(env, n)).collect();
+            let s = Value::Array(got_json.clone()).to_string();
+            for bad in [
+                "\"sorryAx\"",
+                "\"k\":\"fvar\"",
+                "\"k\":\"mvar\"",
+                "\"k\":\"lmvar\"",
+            ] {
+                if s.contains(bad) {
+                    failures.push(format!("{id}: admitted constant contains {bad}"));
+                }
+            }
+            if got_json != want {
+                failures.push(format!(
+                    "{id}:\n  leanr  {s}\n  oracle {}",
+                    Value::Array(want)
+                ));
+            }
+        });
+    }
+    assert!(
+        failures.is_empty(),
+        "{} decl divergence(s):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    checked
+}
