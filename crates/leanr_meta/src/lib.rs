@@ -10,6 +10,7 @@
 //!
 //! spec: docs/superpowers/specs/2026-07-20-m4a-meta-core-design.md
 
+mod abstract_proofs;
 mod assign;
 #[cfg(test)]
 mod aux_recursor;
@@ -47,6 +48,7 @@ mod transform;
 mod transparency;
 mod whnf;
 
+pub use abstract_proofs::AuxLemmas;
 pub use closure::ClosureResult;
 pub use config::{Config, ProjReduction};
 pub use discr_tree::DiscrTree;

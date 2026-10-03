@@ -177,6 +177,19 @@ impl<'e> MetaCtx<'e> {
         }
     }
 
+    /// oracle: `isProof` (InferType.lean:448-452), skipping `isProofQuick`
+    /// (an optimization over the same final answer): `isProof e =
+    /// isProp (inferType e)`, reusing [`MetaCtx::is_prop`] above with the
+    /// narrowing it documents (`isAlwaysZero` narrowed to literal
+    /// `Level::Zero`): incompleteness only.
+    ///
+    /// Moved here from `discr_path.rs` (M4c-1 P1 Task 7) unchanged, so
+    /// `discr_path`'s `ignoreArg` and `abstract_proofs` share one copy.
+    pub(crate) fn is_proof(&mut self, e: ExprId) -> Result<bool, MetaError> {
+        let ty = self.infer_type(e)?;
+        self.is_prop(ty)
+    }
+
     fn is_level_literal_zero(&self, level: LevelId) -> bool {
         matches!(
             *self.scratch.level_row(Some(self.view.store), level),

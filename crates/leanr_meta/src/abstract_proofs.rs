@@ -1,0 +1,669 @@
+//! oracle: `Lean.Meta.abstractNestedProofs`
+//! (`Lean/Meta/AbstractNestedProofs.lean:17-117`) with `cache := true`,
+//! plus the helpers it reaches: `mkAuxTheorem` (`Meta/Closure.lean:457-460`),
+//! `mkAuxLemma` (`Meta/Tactic/AuxLemma.lean:43-79`) and `mkAuxDeclName` /
+//! `DeclNameGenerator.mkUniqueName` (`CoreM.lean:149-153`, `:102-125`).
+//!
+//! The oracle `addDecl`s each aux theorem as soon as it is minted. leanr's
+//! `MetaCtx` reads a fixed `EnvView`, so the theorems collect in
+//! [`AuxLemmas::pending`] instead, and the caller commits them in order
+//! before the main declaration. Wherever the oracle asks "is this name in
+//! the env?", this port asks "is it in the env OR pending?".
+//!
+//! Seams (each returns `MetaError::Unsupported`):
+//! - a `letE` reached by the walk (the oracle's `lambdaLetTelescope` arm,
+//!   `:101`): P2 rejects `let` before this runs;
+//! - an aux whose type or value mentions an unsafe constant (the oracle's
+//!   unsafe opaque `defnDecl`, `AuxLemma.lean:51-58`): `add_decl_in`
+//!   rejects unsafe definitions.
+//!
+//! Not modeled: private names. `mkUniqueName`'s `isConflict` also checks the
+//! private/public twin of each candidate (`CoreM.lean:116-119`), and `curr`
+//! privatizes the candidate in a module (`:121-125`). leanr has no private
+//! names, and Elab0 is not a module.
+
+use std::collections::HashMap;
+
+use leanr_kernel::bank::terms::Node;
+use leanr_kernel::bank::{ExprId, NameId};
+use leanr_kernel::{
+    instantiate_rev, ConstantInfo, ConstantVal, Declaration, DefinitionSafety, Nat, TheoremVal,
+};
+
+use crate::level_params::append_index_after;
+use crate::{MetaCtx, MetaError};
+
+/// Aux theorems minted while abstracting one declaration's value, in
+/// creation order — the caller commits them, in order, BEFORE the main
+/// declaration (`Environment::add_decl_in`).
+pub struct AuxLemmas {
+    decl_name: NameId,
+    /// `DeclNameGenerator.idx` for the `_proof` infix (starts at 1,
+    /// `CoreM.lean:80`).
+    next_idx: u64,
+    /// `auxLemmasExt` key `type` → (name, levelParams). Per declaration
+    /// in M4c-1 (see plan Amendment 1, item 2).
+    cache: HashMap<ExprId, (NameId, Vec<NameId>)>,
+    pending: Vec<Declaration>,
+}
+
+impl AuxLemmas {
+    /// `withDeclNameForAuxNaming decl_name` (`CoreM.lean:158-169`, entered at
+    /// `PreDefinition/Basic.lean:125`): a fresh generator, prefix
+    /// `decl_name`, index 1.
+    pub fn new(decl_name: NameId) -> Self {
+        AuxLemmas {
+            decl_name,
+            next_idx: 1,
+            cache: HashMap::new(),
+            pending: Vec::new(),
+        }
+    }
+
+    pub fn pending(&self) -> &[Declaration] {
+        &self.pending
+    }
+
+    pub fn into_pending(self) -> Vec<Declaration> {
+        self.pending
+    }
+
+    /// Whether `n` names a pending aux theorem (only `Thm`s are pushed).
+    pub fn is_pending(&self, n: NameId) -> bool {
+        self.pending
+            .iter()
+            .any(|d| matches!(d, Declaration::Thm(t) if t.val.name == n))
+    }
+}
+
+/// oracle: `Expr.isAtomic` (`Expr.lean:1516-1523`).
+fn is_atomic(node: &Node) -> bool {
+    matches!(
+        node,
+        Node::Const { .. }
+            | Node::Sort { .. }
+            | Node::BVar { .. }
+            | Node::BVarBig { .. }
+            | Node::LitNat { .. }
+            | Node::LitStr { .. }
+            | Node::MVar { .. }
+            | Node::FVar { .. }
+    )
+}
+
+/// `visit`'s `MonadCacheT ExprStructEq Expr` (`AbstractNestedProofs.lean:70`):
+/// one map per `abstract_nested_proofs` call. Hash-consing makes `ExprId`
+/// equality structural, as `ExprStructEq` is.
+type VisitCache = HashMap<ExprId, ExprId>;
+
+impl MetaCtx<'_> {
+    /// oracle: `Meta.abstractNestedProofs` (`AbstractNestedProofs.lean:111-116`), `cache := true`.
+    pub fn abstract_nested_proofs(
+        &mut self,
+        aux: &mut AuxLemmas,
+        e: ExprId,
+    ) -> Result<ExprId, MetaError> {
+        if self.is_proof(e)? {
+            return Ok(e);
+        }
+        let mut cache = VisitCache::new();
+        self.anp_visit(aux, &mut cache, e)
+    }
+
+    /// oracle: `AbstractNestedProofs.visit` (`AbstractNestedProofs.lean:72-106`).
+    fn anp_visit(
+        &mut self,
+        aux: &mut AuxLemmas,
+        cache: &mut VisitCache,
+        e: ExprId,
+    ) -> Result<ExprId, MetaError> {
+        let node = self.node(e);
+        if is_atomic(&node) {
+            return Ok(e);
+        }
+        if let Some(&r) = cache.get(&e) {
+            return Ok(r);
+        }
+        self.step()?;
+        let base = Some(self.view.store);
+        let r = if self.is_non_trivial_proof(aux, e)? && !self.has_sorry(e) {
+            self.abstract_proof(aux, cache, e)?
+        } else {
+            match node {
+                Node::Lam { .. } | Node::Forall { .. } => {
+                    let cp = self.lctx_checkpoint();
+                    let r = self.anp_visit_binders(aux, cache, e);
+                    self.lctx_restore(cp);
+                    r?
+                }
+                Node::LetE { .. } => {
+                    return Err(MetaError::Unsupported(
+                        "abstractNestedProofs under let — letToHave follow-up (M4c-1 seam)".into(),
+                    ))
+                }
+                Node::MData { data, expr } => {
+                    let b = self.anp_visit(aux, cache, expr)?;
+                    self.scratch.expr_mdata(base, data, b)?
+                }
+                Node::Proj {
+                    type_name,
+                    idx,
+                    structure,
+                } => {
+                    let b = self.anp_visit(aux, cache, structure)?;
+                    self.scratch
+                        .expr_proj(base, type_name, &Nat::from(idx as u64), b)?
+                }
+                Node::ProjBig {
+                    type_name,
+                    idx,
+                    structure,
+                } => {
+                    let n = self.scratch.nat_at(base, idx).clone();
+                    let b = self.anp_visit(aux, cache, structure)?;
+                    self.scratch.expr_proj(base, type_name, &n, b)?
+                }
+                Node::App { .. } => {
+                    let f = self.get_app_fn(e);
+                    let args = self.get_app_args(e);
+                    let mut r = self.anp_visit(aux, cache, f)?;
+                    for a in args {
+                        let a2 = self.anp_visit(aux, cache, a)?;
+                        r = self.scratch.expr_app(base, r, a2)?;
+                    }
+                    r
+                }
+                _ => e,
+            }
+        };
+        cache.insert(e, r);
+        Ok(r)
+    }
+
+    /// oracle: the `lam` / `forallE` arms of `visit`
+    /// (`AbstractNestedProofs.lean:100-102`) with `visitBinders` (`:77-89`).
+    /// Binders open one at a time, as `transform_lambda` does: instantiate
+    /// the domain with the fvars so far, visit it, push the local decl with
+    /// the VISITED type. The oracle opens the whole telescope first and
+    /// then visits each type, but a binder type cannot mention later
+    /// binders and the cache is shared, so the visits agree.
+    ///
+    /// Rebuild: `mkLambdaFVars (usedLetOnly := false) (generalizeNondepLet
+    /// := false)` / `mkForallFVars` at its defaults. `generalizeNondepLet`
+    /// only matters for a `have` in the telescope, which cannot occur here:
+    /// the walk stops at a `lam`/`forallE` boundary, and `letE` is a seam.
+    /// The caller checkpoints/restores the lctx.
+    fn anp_visit_binders(
+        &mut self,
+        aux: &mut AuxLemmas,
+        cache: &mut VisitCache,
+        e: ExprId,
+    ) -> Result<ExprId, MetaError> {
+        let base = Some(self.view.store);
+        let is_lambda = matches!(self.node(e), Node::Lam { .. });
+        let mut fvars: Vec<ExprId> = Vec::new();
+        let mut cur = e;
+        loop {
+            let (binder_name, binder_type, body, binder_info) = match self.node(cur) {
+                Node::Lam {
+                    binder_name,
+                    binder_type,
+                    body,
+                    binder_info,
+                } if is_lambda => (binder_name, binder_type, body, binder_info),
+                Node::Forall {
+                    binder_name,
+                    binder_type,
+                    body,
+                    binder_info,
+                } if !is_lambda => (binder_name, binder_type, body, binder_info),
+                _ => break,
+            };
+            let d = instantiate_rev(self.scratch, base, binder_type, &fvars, &mut self.guard)?;
+            let d = self.anp_visit(aux, cache, d)?;
+            let x = self.push_local_decl(binder_name, d, binder_info)?;
+            fvars.push(x);
+            cur = body;
+        }
+        let b = instantiate_rev(self.scratch, base, cur, &fvars, &mut self.guard)?;
+        let b = self.anp_visit(aux, cache, b)?;
+        if is_lambda {
+            self.mk_lambda(&fvars, b)
+        } else {
+            self.mk_forall(&fvars, b)
+        }
+    }
+
+    /// oracle: `AbstractNestedProofs.isNonTrivialProof`
+    /// (`AbstractNestedProofs.lean:40-65`). "In the env" (`origEnv.contains`,
+    /// `:64`) also counts pending aux theorems, which the oracle has
+    /// already added to the env at this point.
+    fn is_non_trivial_proof(&mut self, aux: &AuxLemmas, e: ExprId) -> Result<bool, MetaError> {
+        if !self.is_proof(e)? {
+            return Ok(false);
+        }
+        // `e.isAppOf ``Grind.nestedProof` (`:52`): inside `namespace
+        // Lean.Meta` the double-backtick name resolves to
+        // `Lean.Grind.nestedProof` (`Init/Grind/Util.lean:13,16`).
+        let head = self.get_app_fn(e);
+        if let Node::Const { name: Some(n), .. } = self.node(head) {
+            if self.name_is(n, &["Lean", "Grind", "nestedProof"]) {
+                return Ok(false);
+            }
+        }
+        // `getLambdaBody` (`:35-38`) strips `lam` only; the body may keep
+        // loose bvars, and `withApp` is syntactic.
+        let mut body = e;
+        while let Node::Lam { body: b, .. } = self.node(body) {
+            body = b;
+        }
+        let f = self.get_app_fn(body);
+        let f_node = self.node(f);
+        if !is_atomic(&f_node) {
+            return Ok(true);
+        }
+        if let Node::Const { name, .. } = f_node {
+            let in_env = name.is_some_and(|n| self.view.get(n).is_some() || aux.is_pending(n));
+            if !in_env {
+                return Ok(true);
+            }
+        }
+        for a in self.get_app_args(body) {
+            if !is_atomic(&self.node(a)) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// oracle: `Meta.abstractProof` (`AbstractNestedProofs.lean:18-31`) with
+    /// `postprocessType := visit` (`:98`), sharing `visit`'s cache.
+    fn abstract_proof(
+        &mut self,
+        aux: &mut AuxLemmas,
+        cache: &mut VisitCache,
+        proof: ExprId,
+    ) -> Result<ExprId, MetaError> {
+        let ty = self.infer_type(proof)?;
+        let ty = self.beta_reduce(ty)?;
+        let ty = self.zeta_reduce(ty)?;
+        let ty = self.anp_visit(aux, cache, ty)?;
+        // `:27`: `visit` only abstracts sorry-free proofs (`:91`), so this
+        // is always `true` here; kept for parity.
+        let use_cache = !self.has_sorry(proof);
+        self.mk_aux_theorem(aux, ty, proof, use_cache)
+    }
+
+    /// oracle: `mkAuxTheorem` (`Meta/Closure.lean:457-460`) with
+    /// `zetaDelta := true` and `kind? := none` (so `_proof`).
+    fn mk_aux_theorem(
+        &mut self,
+        aux: &mut AuxLemmas,
+        ty: ExprId,
+        value: ExprId,
+        use_cache: bool,
+    ) -> Result<ExprId, MetaError> {
+        let r = self.mk_value_type_closure(ty, value)?;
+        let name = self.mk_aux_lemma(aux, r.level_params, r.ty, r.value, use_cache)?;
+        let base = Some(self.view.store);
+        let ls = self.scratch.intern_level_list(base, &r.level_args)?;
+        let c = self.scratch.expr_const(base, Some(name), ls)?;
+        self.mk_app_spine(c, &r.expr_args)
+    }
+
+    /// oracle: `mkAuxLemma` (`Meta/Tactic/AuxLemma.lean:43-79`) with
+    /// `kind? := none`, `inferRfl := false`, `forceExpose := false`,
+    /// `defeq := false`.
+    ///
+    /// The oracle key is `{type, isPrivate := !env.isExporting, defeq}`
+    /// (`:47`). `isExporting` is `false` outside a module
+    /// (`Environment.lean:614,652-654`), so every key in a non-module
+    /// file has `isPrivate := true` and the private retry (`:75-78`) looks
+    /// up keys nobody inserts. The cache is therefore keyed on `type`
+    /// alone. As in the oracle, a miss inserts even when `use_cache` is
+    /// `false` (`:68`).
+    fn mk_aux_lemma(
+        &mut self,
+        aux: &mut AuxLemmas,
+        level_params: Vec<NameId>,
+        ty: ExprId,
+        value: ExprId,
+        use_cache: bool,
+    ) -> Result<NameId, MetaError> {
+        if use_cache {
+            if let Some((name, lps)) = aux.cache.get(&ty) {
+                if *lps == level_params {
+                    return Ok(*name);
+                }
+            }
+        }
+        let name = self.mk_aux_decl_name(aux)?;
+        if self.has_unsafe(ty) || self.has_unsafe(value) {
+            return Err(MetaError::Unsupported(
+                "abstractNestedProofs: aux lemma over an unsafe constant \
+                 (unsafe opaque defnDecl, AuxLemma.lean:51-58) — M4c-1 seam"
+                    .into(),
+            ));
+        }
+        // `TheoremVal.all` defaults to `[name]` (`Declaration.lean:147`).
+        aux.pending.push(Declaration::Thm(TheoremVal {
+            val: ConstantVal {
+                name,
+                level_params: level_params.clone(),
+                ty,
+            },
+            value,
+            all: vec![name],
+        }));
+        aux.cache.insert(ty, (name, level_params));
+        Ok(name)
+    }
+
+    /// oracle: `mkAuxDeclName (kind := `_proof)` (`CoreM.lean:149-153`) over
+    /// `DeclNameGenerator.mkUniqueName` (`:102-125`). `base := namePrefix ++
+    /// _proof`; while `appendIndexAfter base idx` conflicts, `idx += 1`.
+    /// The generator is stored at the FOUND index, not past it (`:111`
+    /// returns `(curr g base, g)`), so the next call starts there, sees the
+    /// now-pending name, and moves on.
+    fn mk_aux_decl_name(&mut self, aux: &mut AuxLemmas) -> Result<NameId, MetaError> {
+        let base = Some(self.view.store);
+        let infix = self.scratch.intern_str(base, "_proof")?;
+        let base_name = self.scratch.name_str(base, Some(aux.decl_name), infix)?;
+        let mut idx = aux.next_idx;
+        loop {
+            let cand = append_index_after(self.scratch, base, base_name, idx)?;
+            if self.view.get(cand).is_none() && !aux.is_pending(cand) {
+                aux.next_idx = idx;
+                return Ok(cand);
+            }
+            idx += 1;
+        }
+    }
+
+    /// Whether `n` is the hierarchical name `parts` (e.g. `["Lean", "Grind",
+    /// "nestedProof"]`), compared by interning `parts` (hash-consed names).
+    fn name_is(&mut self, n: NameId, parts: &[&str]) -> bool {
+        let base = Some(self.view.store);
+        let mut acc = None;
+        for p in parts {
+            let Ok(s) = self.scratch.intern_str(base, p) else {
+                return false;
+            };
+            let Ok(next) = self.scratch.name_str(base, acc, s) else {
+                return false;
+            };
+            acc = Some(next);
+        }
+        acc == Some(n)
+    }
+
+    /// Whether some `Const` in `e` satisfies `pred` (an `Expr.find?` over
+    /// constants). Explicit stack plus a visited set: the term bank is a
+    /// DAG.
+    fn find_const(&self, e: ExprId, mut pred: impl FnMut(&Self, Option<NameId>) -> bool) -> bool {
+        let mut stack = vec![e];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(x) = stack.pop() {
+            if !seen.insert(x) {
+                continue;
+            }
+            match self.node(x) {
+                Node::Const { name, .. } => {
+                    if pred(self, name) {
+                        return true;
+                    }
+                }
+                Node::App { f, arg } => stack.extend([f, arg]),
+                Node::Lam {
+                    binder_type, body, ..
+                }
+                | Node::Forall {
+                    binder_type, body, ..
+                } => stack.extend([binder_type, body]),
+                Node::LetE {
+                    ty, value, body, ..
+                } => stack.extend([ty, value, body]),
+                Node::MData { expr, .. } => stack.push(expr),
+                Node::Proj { structure, .. } | Node::ProjBig { structure, .. } => {
+                    stack.push(structure)
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// oracle: `Expr.hasSorry` (`Util/Sorry.lean:28-29`): some `Const`
+    /// named `sorryAx`.
+    fn has_sorry(&mut self, e: ExprId) -> bool {
+        let base = Some(self.view.store);
+        let sorry = match self.scratch.intern_str(base, "sorryAx") {
+            Ok(s) => self.scratch.name_str(base, None, s).ok(),
+            Err(_) => None,
+        };
+        let Some(sorry) = sorry else { return false };
+        self.find_const(e, |_, n| n == Some(sorry))
+    }
+
+    /// oracle: `Environment.hasUnsafe` (`Environment.lean:2629-2638`): some
+    /// `Const` whose env entry is unsafe; a name not in the env is safe.
+    /// Pending aux theorems are never unsafe (they are `thmDecl`s).
+    fn has_unsafe(&self, e: ExprId) -> bool {
+        self.find_const(e, |ctx, n| {
+            let Some(n) = n else { return false };
+            match ctx.view.get(n) {
+                Some(ConstantInfo::Defn(v)) => v.safety == DefinitionSafety::Unsafe,
+                Some(ConstantInfo::Axiom(v)) => v.is_unsafe,
+                Some(ConstantInfo::Opaque(v)) => v.is_unsafe,
+                Some(ConstantInfo::Induct(v)) => v.is_unsafe,
+                Some(ConstantInfo::Ctor(v)) => v.is_unsafe,
+                Some(ConstantInfo::Rec(v)) => v.is_unsafe,
+                Some(ConstantInfo::Thm(_)) | Some(ConstantInfo::Quot(_)) | None => false,
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{app, c, cu, lit_level, render_name, with_meta0_ctx};
+    use leanr_kernel::{BinderInfo, Declaration};
+
+    fn name(ctx: &mut MetaCtx, s: &str) -> NameId {
+        let base = Some(ctx.view.store);
+        let mut n = None;
+        for part in s.split('.') {
+            let id = ctx.scratch.intern_str(base, part).unwrap();
+            n = Some(ctx.scratch.name_str(base, n, id).unwrap());
+        }
+        n.unwrap()
+    }
+
+    /// `fun (n : N) => @PProd.mk.{l1,l2} A B a b` with `n` bound; the closure
+    /// receives the opened `n` and returns (A, B, a, b).
+    fn lam_n_pprod(
+        ctx: &mut MetaCtx,
+        levels: (u32, u32),
+        parts: impl FnOnce(&mut MetaCtx, ExprId) -> (ExprId, ExprId, ExprId, ExprId),
+    ) -> ExprId {
+        let n_ty = c(ctx, "N");
+        let n_name = name(ctx, "n");
+        let cp = ctx.lctx_checkpoint();
+        let n = ctx
+            .push_local_decl(Some(n_name), n_ty, BinderInfo::Default)
+            .unwrap();
+        let (ta, tb, a, b) = parts(ctx, n);
+        let (l1, l2) = (lit_level(ctx, levels.0), lit_level(ctx, levels.1));
+        let mk = cu(ctx, "PProd.mk", &[l1, l2]);
+        let body = ctx.mk_app_spine(mk, &[ta, tb, a, b]).unwrap();
+        let r = ctx.mk_lambda(&[n], body).unwrap();
+        ctx.lctx_restore(cp);
+        r
+    }
+
+    /// `@Eq.{1} N x x` and `@rfl.{1} N x`.
+    fn eq_rfl(ctx: &mut MetaCtx, x: ExprId) -> (ExprId, ExprId) {
+        let one = lit_level(ctx, 1);
+        let n_ty = c(ctx, "N");
+        let eq = cu(ctx, "Eq", &[one]);
+        let rfl = cu(ctx, "rfl", &[one]);
+        (
+            ctx.mk_app_spine(eq, &[n_ty, x, x]).unwrap(),
+            ctx.mk_app_spine(rfl, &[n_ty, x]).unwrap(),
+        )
+    }
+
+    fn pending_names(ctx: &MetaCtx, aux: &AuxLemmas) -> Vec<String> {
+        aux.pending()
+            .iter()
+            .map(|d| match d {
+                Declaration::Thm(t) => render_name(ctx, t.val.name),
+                _ => panic!("thmDecl expected"),
+            })
+            .collect()
+    }
+
+    /// probe foo1: `⟨n, rfl⟩ : PProd N (N.succ n = N.succ n)` →
+    /// `foo1._proof_1 n`, one pending theorem.
+    #[test]
+    fn nested_proof_becomes_proof_1_applied_to_its_closure() {
+        with_meta0_ctx(|ctx| {
+            let foo1 = name(ctx, "foo1");
+            let succ = c(ctx, "N.succ");
+            let n_ty = c(ctx, "N");
+            let e = lam_n_pprod(ctx, (1, 0), |ctx, n| {
+                let sn = app(ctx, succ, n);
+                let (ty, pf) = eq_rfl(ctx, sn);
+                (n_ty, ty, n, pf)
+            });
+            let mut aux = AuxLemmas::new(foo1);
+            let out = ctx.abstract_nested_proofs(&mut aux, e).unwrap();
+            assert_eq!(aux.pending().len(), 1);
+            let Declaration::Thm(t) = &aux.pending()[0] else {
+                panic!("thmDecl expected")
+            };
+            assert_eq!(render_name(ctx, t.val.name), "foo1._proof_1");
+            assert!(t.val.level_params.is_empty());
+            // `TheoremVal.all` default `[name]` (Declaration.lean:147).
+            assert_eq!(t.all, vec![t.val.name]);
+            // out = fun n => @PProd.mk.{1,0} N (Eq ..) n (foo1._proof_1 n)
+            let p1 = cu(ctx, "foo1._proof_1", &[]);
+            let want = lam_n_pprod(ctx, (1, 0), |ctx, n| {
+                let sn = app(ctx, succ, n);
+                let (ty, _) = eq_rfl(ctx, sn);
+                let call = app(ctx, p1, n);
+                (n_ty, ty, n, call)
+            });
+            assert_eq!(out, want);
+        });
+    }
+
+    /// Review Focus 4 / probe foo5: `@rfl.{1} N n` has atomic args → kept.
+    #[test]
+    fn atomic_arg_proof_is_not_abstracted() {
+        with_meta0_ctx(|ctx| {
+            let foo5 = name(ctx, "foo5");
+            let n_ty = c(ctx, "N");
+            let e = lam_n_pprod(ctx, (1, 0), |ctx, n| {
+                let (ty, pf) = eq_rfl(ctx, n);
+                (n_ty, ty, n, pf)
+            });
+            let mut aux = AuxLemmas::new(foo5);
+            assert_eq!(ctx.abstract_nested_proofs(&mut aux, e).unwrap(), e);
+            assert!(aux.pending().is_empty());
+        });
+    }
+
+    /// Two identical proofs in one declaration share one aux. The two
+    /// occurrences are one `ExprId`, so `visit`'s own cache dedups them
+    /// before `mkAuxLemma` is reached (see the next test for the
+    /// `mkAuxLemma` cache).
+    #[test]
+    fn identical_proofs_share_one_aux() {
+        with_meta0_ctx(|ctx| {
+            let foo3 = name(ctx, "foo3");
+            let succ = c(ctx, "N.succ");
+            let e = lam_n_pprod(ctx, (0, 0), |ctx, n| {
+                let sn = app(ctx, succ, n);
+                let (ty, pf) = eq_rfl(ctx, sn);
+                (ty, ty, pf, pf)
+            });
+            let mut aux = AuxLemmas::new(foo3);
+            ctx.abstract_nested_proofs(&mut aux, e).unwrap();
+            assert_eq!(aux.pending().len(), 1);
+        });
+    }
+
+    /// Ruling R3: two DIFFERENT proof terms (`@rfl.{1} N (N.succ n)` and
+    /// `@Eq.refl.{1} N (N.succ n)`, distinct `ExprId`s) of the same
+    /// type share one aux through `mkAuxLemma`'s type-keyed cache
+    /// (`AuxLemma.lean:70-73`), not `visit`'s.
+    #[test]
+    fn different_proofs_of_one_type_share_one_aux() {
+        with_meta0_ctx(|ctx| {
+            let foo6 = name(ctx, "foo6");
+            let succ = c(ctx, "N.succ");
+            let one = lit_level(ctx, 1);
+            let n_ty = c(ctx, "N");
+            let eq_refl = cu(ctx, "Eq.refl", &[one]);
+            let e = lam_n_pprod(ctx, (0, 0), |ctx, n| {
+                let sn = app(ctx, succ, n);
+                let (ty, p1) = eq_rfl(ctx, sn);
+                let p2 = ctx.mk_app_spine(eq_refl, &[n_ty, sn]).unwrap();
+                assert_ne!(p1, p2, "the two proofs must be distinct ExprIds");
+                // Both inferred types reach the same ExprId after
+                // betaReduce/zetaReduce (`AbstractNestedProofs.lean:20-22`).
+                for p in [p1, p2] {
+                    let t = ctx.infer_type(p).unwrap();
+                    let t = ctx.beta_reduce(t).unwrap();
+                    let t = ctx.zeta_reduce(t).unwrap();
+                    assert_eq!(t, ty);
+                }
+                (ty, ty, p1, p2)
+            });
+            let mut aux = AuxLemmas::new(foo6);
+            ctx.abstract_nested_proofs(&mut aux, e).unwrap();
+            assert_eq!(pending_names(ctx, &aux), vec!["foo6._proof_1"]);
+        });
+    }
+
+    /// Review Focus 2: two DISTINCT proofs → `_proof_1`, `_proof_2`, though
+    /// neither is in the env yet.
+    #[test]
+    fn distinct_proofs_get_distinct_indices() {
+        with_meta0_ctx(|ctx| {
+            let foo4 = name(ctx, "foo4");
+            let succ = c(ctx, "N.succ");
+            let e = lam_n_pprod(ctx, (0, 0), |ctx, n| {
+                let sn = app(ctx, succ, n);
+                let ssn = app(ctx, succ, sn);
+                let (t1, p1) = eq_rfl(ctx, sn);
+                let (t2, p2) = eq_rfl(ctx, ssn);
+                (t1, t2, p1, p2)
+            });
+            let mut aux = AuxLemmas::new(foo4);
+            ctx.abstract_nested_proofs(&mut aux, e).unwrap();
+            assert_eq!(
+                pending_names(ctx, &aux),
+                vec!["foo4._proof_1", "foo4._proof_2"]
+            );
+        });
+    }
+
+    /// A value that is itself a proof is returned unchanged
+    /// (`AbstractNestedProofs.lean:112-114`).
+    #[test]
+    fn a_proof_value_is_not_abstracted_at_the_root() {
+        with_meta0_ctx(|ctx| {
+            let succ = c(ctx, "N.succ");
+            let zero = c(ctx, "N.zero");
+            let sz = app(ctx, succ, zero);
+            let (_, pf) = eq_rfl(ctx, sz);
+            let thm = name(ctx, "thm");
+            let mut aux = AuxLemmas::new(thm);
+            assert_eq!(ctx.abstract_nested_proofs(&mut aux, pf).unwrap(), pf);
+            assert!(aux.pending().is_empty());
+        });
+    }
+}
