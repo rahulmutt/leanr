@@ -107,6 +107,13 @@ const ENABLED: &[&str] = &[
     "np/twoBinders",
     "np/lambdaArg",
     "np/nestedTwice",
+    // Task 9 — axiom
+    "kind/axiom",
+    "univ/axiomSortHole",
+    "univ/axiomElevenLex",
+    "err/axiomUnusedUniv",
+    "err/axiomBinderHole",
+    "err/axiomTypeHole",
 ];
 
 #[test]
@@ -184,4 +191,11 @@ fn level_mvar_without_error_info_hits_the_fallback() {
         ),
         Ok(ns) => panic!("a value with an unassigned level mvar was admitted: {ns:?}"),
     }
+}
+
+#[test]
+fn axiom_header_unknown_ident_is_the_auto_bound_seam() {
+    // `elabAxiom` also runs under `withAutoBoundImplicit` (`Declaration.lean:109`).
+    let m = seam_message("axiom aa (a : α) : α");
+    assert!(m.contains("auto-bound"), "{m}");
 }

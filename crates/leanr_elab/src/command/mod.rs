@@ -11,6 +11,7 @@
 //! term-level `withLevelNames`/`levelMVarToParam`. This file owns
 //! [`CommandElab`] and the kernel commit.
 
+mod axiom;
 mod def;
 mod header;
 mod levels;
@@ -81,9 +82,7 @@ impl<'x> CommandElab<'x> {
             let mctx = MetaCtx::new(env_view, &mut scratch, Config::default(), self.exts);
             let mut elab = TermElabM::new(mctx, env_view);
             match view.kind {
-                DefKind::Axiom => Err(ElabError::UnsupportedSyntax(
-                    "axiom — not yet ported (M4c-1 P2 Task 9)".into(),
-                )),
+                DefKind::Axiom => axiom::elab_axiom(&mut elab, &view, kinds),
                 _ => def::elab_def(&mut elab, &view, kinds),
             }?
         };
