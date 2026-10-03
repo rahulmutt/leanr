@@ -203,6 +203,15 @@
 //!   an all-polymorphic candidate set (`tc/useAnyHole`), and a
 //!   zero-candidate class with an mvar goal (`NoInst ?a` is `.none`, an
 //!   `InstanceSynthesisFailed`, not stuck).
+//! - **M4c-1** — command elaboration of ONE non-recursive
+//!   `def`/`theorem`/`abbrev`/`opaque`/`axiom`/`example`, in `command/`:
+//!   `DefView` (syntax + named seams), header (`expandDeclId`,
+//!   `elabHeaders`), body (`elabFunValues`), level params
+//!   (`levelMVarToParam*`, `sortDeclLevelParams`), the unassigned-mvar
+//!   report (`unassigned.rs`), `abstractNestedProofs`, and commit through
+//!   `Environment::add_decl_in` (an `example` is only kernel-checked).
+//!   Gated by `tests/oracle_decl.rs` over `decl-queries.jsonl`
+//!   (docs/superpowers/specs/2026-10-03-m4c1-single-decl-design.md).
 pub mod app; // M4b-3 P1
 pub mod builtin; // Tasks 4-6
 pub mod coe; // coercions

@@ -41,8 +41,8 @@ These are the inputs most likely to bite a user that the happy-path corpus does 
 
 Every corpus record below was run through the final `dump_decls.lean` (Task 1) on 2026-10-03. Facts that shaped this plan, and are recorded in spec Amendment 2:
 
-- **Async theorems report through snapshot tasks.** With `Elab.async=true`, every well-formed theorem takes `elabAsync`. `levelMVarToParamHeaders` runs BEFORE the `!type.hasMVar` test (`MutualDef.lean:1239-1247`), so header level mvars no longer block it. Its body errors go to `Command.State.snapshotTasks`, not `messages`. Without walking them, `theorem tx … := <ill-typed>` dumps as `consts: []` with no error.
-- **The theorem signature check uses the type only.** `elabAsync` runs `sortDeclLevelParams` on the header type alone (`MutualDef.lean:1281-1291`). `theorem ta.{u} : True := (fun (_ : Sort u) => True.intro) PUnit.{u}` therefore fails with `unused universe parameter 'u'`.
+- **Async theorems report through snapshot tasks.** With `Elab.async=true`, every well-formed theorem takes `elabAsync`. `levelMVarToParamHeaders` runs BEFORE the `!type.hasMVar` test (`MutualDef.lean:1236-1242`), so header level mvars no longer block it. Its body errors go to `Command.State.snapshotTasks`, not `messages`. Without walking them, `theorem tx … := <ill-typed>` dumps as `consts: []` with no error.
+- **The theorem signature check uses the type only.** `elabAsync` runs `sortDeclLevelParams` on the header type alone (`MutualDef.lean:1288-1291`). `theorem ta.{u} : True := (fun (_ : Sort u) => True.intro) PUnit.{u}` therefore fails with `unused universe parameter 'u'`.
 - **`u_N` order depends on the path.**
   - For a theorem or a Prop-typed def, header level mvars become params in `levelMVarToParamHeaders`, which records them in the header's `levelNames`. `sortDeclLevelParams` then treats them as USER names, in declaration order: `u_1 … u_9, u_10, u_11`.
   - For other defs, they are converted later (`levelMVarToParamTypesPreDecls`, under `withLevelNames allUserLevelNames`). They count as leftovers and sort lexicographically: `u_1, u_10, u_11, u_2, …`.
@@ -91,7 +91,7 @@ Runs with LEAN_PATH set to this directory so `Elab0` resolves to the
 committed fixture and nothing else (the `dump_elab.lean` hermetic contract).
 
 `Elab.async` is set to `true`, matching the `lean` command line
-(`CoreM.lean:35`): a theorem then takes `elabAsync`
+(`Elab/Frontend.lean:291-292`; `CoreM.lean:35` declares it, default false): a theorem then takes `elabAsync`
 (`MutualDef.lean:1266`). An async body reports its errors through
 `Command.State.snapshotTasks`, NOT `messages`, so the error scan below walks
 both (an async error left out reads as a silently dropped theorem).
@@ -513,7 +513,7 @@ The oracle sources:
 - `checkNotAlreadyDeclared` (`Elab/DeclModifiers.lean:40-44`)
 - `throwAlreadyDeclaredUniverseLevel` (`Elab/Exception.lean:43-44`)
 - `sortDeclLevelParams` (`Elab/DeclUtil.lean:79-81`)
-- `pushMain` (`Elab/MutualDef.lean:1052-1053`)
+- `pushMain` (`Elab/MutualDef.lean:1051-1053`)
 - `throwTypeMismatchError` (`Elab/Term/TermElabM.lean:1134-1153`): `f? = none` → `mkTypeMismatchError`, whose first line is "Type mismatch"; `f? = some f` → `Meta.throwAppTypeMismatch f e` (`Meta/Check.lean:250-270`), with `argDescStr` "last…" when `f.getAppArgs.any (· == a)`
 - `ensureArgType` (`App.lean:54-62`), which passes `f`
 
@@ -646,7 +646,7 @@ Expected: the smoke tests FAIL with `<no line: TypeMismatch { … }>` / `<no lin
     UniverseAlreadyDeclared(String),
     /// oracle: `sortDeclLevelParams` (`Elab/DeclUtil.lean:79-81`).
     UnusedUniverseParam(String),
-    /// oracle: `MutualClosure.pushMain` (`Elab/MutualDef.lean:1052-1053`).
+    /// oracle: `MutualClosure.pushMain` (`Elab/MutualDef.lean:1051-1053`).
     TheoremTypeNotProp(String),
     /// oracle: the first error `logUnassignedUsingErrorInfos`
     /// (`Term/TermElabM.lean:934-958`) logs, rendered to its first line by
@@ -2325,7 +2325,7 @@ impl TermElabM<'_> {
 
 ```rust
 //! Declaration headers: oracle `expandDeclId` (`Elab/DeclModifiers.lean:
-//! 318-339`) and `elabHeaders`' per-view body (`Elab/MutualDef.lean:254-292`).
+//! 326-343`) and `elabHeaders`' per-view body (`Elab/MutualDef.lean:254-292`).
 
 use leanr_kernel::bank::{ExprId, NameId};
 use leanr_meta::{MVarKind, MetaError};
@@ -2360,7 +2360,7 @@ pub(super) fn intern_atomic(elab: &mut TermElabM, s: &str) -> Result<NameId, Ela
     Ok(st.name_str(Some(base), None, sid).map_err(MetaError::from)?)
 }
 
-/// oracle: `expandDeclId` (`DeclModifiers.lean:318-339`). The `.{…}` fold
+/// oracle: `expandDeclId` (`DeclModifiers.lean:326-343`). The `.{…}` fold
 /// conses onto the scope's level names (`[]` in M4c-1) and rejects a
 /// repeat. Then `mkDeclName` (`:263-286`) → `applyVisibility` (`:244-251`)
 /// → `checkNotAlreadyDeclared` (`:29-55`). The reserved-name and private
@@ -2388,7 +2388,7 @@ pub(super) fn expand_decl_id(elab: &mut TermElabM, view: &DefView) -> Result<Dec
 }
 
 /// oracle: `elabHeaders` runs under `withAutoBoundImplicit`
-/// (`MutualDef.lean:253-254`; `elabAxiom` too, `Declaration.lean:108`): an
+/// (`MutualDef.lean:253-254`; `elabAxiom` too, `Declaration.lean:109`): an
 /// unbound identifier or universe in a header is auto-bound, not an error.
 /// Auto-bound implicits are M4c-2.
 pub(super) fn unknown_ident_to_auto_bound_seam(e: ElabError) -> ElabError {
@@ -2914,8 +2914,8 @@ git commit -m "leanr_elab: CommandElab + def/abbrev/opaque/example pipeline; ora
 
 The oracle:
 - **`levelMVarToParamHeaders`** (`MutualDef.lean:1148-1160`): for a theorem, OR when `isProp header.type`, under `withLevelNames header.levelNames`: `type := levelMVarToParam type` and `levelNames := getLevelNames` (the new `u_N` join the header's names). Then `instantiateMVars` every header.
-- **The async test** (`:1239-1247`): `Elab.async && view.kind.isTheorem && !type.hasMVar` → `elabAsync`. Otherwise `elabSync`. The test runs AFTER the conversion, so only expression mvars block it.
-- **`elabAsync`'s signature** (`:1275-1297`):
+- **The async test** (`:1236-1242`): `Elab.async && view.kind.isTheorem && !type.hasMVar` → `elabAsync`. Otherwise `elabSync`. The test runs AFTER the conversion, so only expression mvars block it.
+- **`elabAsync`'s signature** (`:1278-1298`):
   - `type ← withLevelNames allUser (levelMVarToParam type)`, a no-op after the conversion, kept for fidelity;
   - `instantiateMVars`;
   - `collectLevelParams` over the TYPE ONLY;
@@ -2923,9 +2923,9 @@ The oracle:
   - `letToHave` on the type: a seam via `reject_let`.
 
   The body then runs `finishElab` as for a def, so the rest of the pipeline is shared.
-- **`pushMain`** (`:1052-1053`): a theorem whose type is not a proposition → `TheoremTypeNotProp`. This runs after the values and headers are instantiated, before `levelMVarToParamTypesPreDecls`.
+- **`pushMain`** (`:1051-1053`): a theorem whose type is not a proposition → `TheoremTypeNotProp`. This runs after the values and headers are instantiated, before `levelMVarToParamTypesPreDecls`.
 - **`Meta.isProp`** (`Meta/InferType.lean:323-332`): infer the type, `whnfD`, `Sort u` with `isAlwaysZero (instantiateLevelMVars u)` (`Level.lean:212-218`: `zero` → true, `max a b` → both, `imax _ b` → `b`, otherwise false). `MetaCtx::is_prop` narrows `isAlwaysZero` to a literal `zero`, which can miss `imax u 0` (the level of `∀ x, P` over a Prop body), so port the full test locally in `def.rs`. Do not change `leanr_meta`.
-- **`addNonRecAux`'s theorem arm** (`PreDefinition/Basic.lean:189-195`): `thmDecl { name, levelParams, type, value, all }`.
+- **`addNonRecAux`'s theorem arm** (`PreDefinition/Basic.lean:192-197`): `thmDecl { name, levelParams, type, value, all }`.
 
 - [ ] **Step 1: Enable the records (the failing test).** Append to `ENABLED` in `oracle_decl.rs`:
 
@@ -2949,9 +2949,9 @@ Expected: FAIL. The theorem records report `theorem — not yet ported (M4c-1 P2
 
 ```rust
     let header = level_mvar_to_param_headers(elab, view.kind, header)?;
-    // `Elab.async` is on, as on the `lean` command line (`CoreM.lean:35`):
+    // `Elab.async` is on, as on the `lean` command line (`Elab/Frontend.lean:291-292`; `CoreM.lean:35` declares it, default false):
     // a theorem whose header has no mvars takes `elabAsync`
-    // (`MutualDef.lean:1239-1247`).
+    // (`MutualDef.lean:1236-1242`).
     let base = Some(elab.view.store);
     let d = elab.mctx.store().expr_data(base, header.ty);
     if view.kind == DefKind::Theorem && !d.has_expr_mvar() && !d.has_level_mvar() {
@@ -2962,7 +2962,7 @@ Expected: FAIL. The theorem records report `theorem — not yet ported (M4c-1 P2
 (b) In `elab_def`, after `let ty = elab.mctx.instantiate_mvars(header.ty)?;` and BEFORE the `level_mvar_to_param` on types:
 
 ```rust
-    // `MutualClosure.pushMain` (`MutualDef.lean:1052-1053`).
+    // `MutualClosure.pushMain` (`MutualDef.lean:1051-1053`).
     if view.kind == DefKind::Theorem && !is_prop_full(elab, ty)? {
         return Err(ElabError::TheoremTypeNotProp(id.short.clone()));
     }
@@ -2971,7 +2971,7 @@ Expected: FAIL. The theorem records report `theorem — not yet ported (M4c-1 P2
 (c) In `build_decl`, replace the `DefKind::Theorem | DefKind::Axiom` arm with:
 
 ```rust
-        // `mkThmDecl` (`PreDefinition/Basic.lean:189-195`).
+        // `mkThmDecl` (`PreDefinition/Basic.lean:192-197`).
         DefKind::Theorem => Declaration::Thm(TheoremVal {
             val,
             value,
@@ -3004,7 +3004,7 @@ fn level_mvar_to_param_headers(
     Ok(header)
 }
 
-/// oracle: `elabAsync`'s committed signature (`MutualDef.lean:1281-1297`):
+/// oracle: `elabAsync`'s committed signature (`MutualDef.lean:1278-1298`):
 /// the level params come from the header TYPE alone, so a universe used
 /// only in the proof is "unused" (probe: `theorem ta.{u} : True :=
 /// (fun (_ : Sort u) => True.intro) PUnit.{u}`).
@@ -3075,7 +3075,7 @@ git commit -m "leanr_elab: theorems and Prop headers (levelMVarToParamHeaders, a
 - Consumes: P1's `AuxLemmas::new(decl_name)`, `MetaCtx::abstract_nested_proofs(&mut AuxLemmas, ExprId)`, `AuxLemmas::into_pending()`.
 - Produces: `elab_def` returns `Built::Add(aux… ++ [main])`.
 
-The oracle: `addNonRecAux` → `abstractNestedProofs preDef` (`PreDefinition/Basic.lean:120-127`, `:180`). It is skipped for `theorem` and `example`, and runs under `withDeclNameForAuxNaming declName` (fresh `_proof_N`, index from 1). Each aux is `addDecl`'d immediately (`Meta/Tactic/AuxLemma.lean:43-73`), so it lands BEFORE the main declaration, and `getMaxHeight` sees the abstracted value (aux theorems contribute nothing). Amendment 1 items 2-4 hold:
+The oracle: `addNonRecAux` → `abstractNestedProofs preDef` (`PreDefinition/Basic.lean:120-127`, `:180` (the addNonRecAux region)). It is skipped for `theorem` and `example`, and runs under `withDeclNameForAuxNaming declName` (fresh `_proof_N`, index from 1). Each aux is `addDecl`'d immediately (`Meta/Tactic/AuxLemma.lean:43-73`), so it lands BEFORE the main declaration, and `getMaxHeight` sees the abstracted value (aux theorems contribute nothing). Amendment 1 items 2-4 hold:
 - the per-declaration cache is observably identical to the env-wide one here;
 - pending aux names count as "in env";
 - a pending-aux lookup inside the walk is `MetaError::Unsupported` (a seam).
@@ -3099,7 +3099,7 @@ Expected: FAIL. `np/one` and the other aux-minting records admit no `_proof_N` a
 
 ```rust
     // `addNonRecAux` → `abstractNestedProofs` (`PreDefinition/Basic.lean:
-    // 120-127`, `:180`): not for theorems or examples. The aux theorems are
+    // 120-127`, `:180` (the addNonRecAux region)): not for theorems or examples. The aux theorems are
     // committed BEFORE the main declaration, as the oracle's `mkAuxLemma`
     // has already `addDecl`'d them (`Meta/Tactic/AuxLemma.lean:43-73`).
     let mut aux = AuxLemmas::new(id.name);
@@ -3159,7 +3159,7 @@ git commit -m "leanr_elab: abstractNestedProofs in the def pipeline; aux theorem
   - `builtin::binder::{extract_binder_group, push_binder_group, elab_type}`
 - Produces: `pub(super) fn elab_axiom(elab: &mut TermElabM, view: &DefView, kinds: &KindInterner) -> Result<Built, ElabError>`.
 
-The oracle: `elabAxiom` (`Elab/Declaration.lean:101-135`):
+The oracle: `elabAxiom` (`Elab/Declaration.lean:101-133`):
 1. `expandDeclId`.
 2. Under `withAutoBoundImplicit` and `withLevelNames allUserLevelNames`:
    - `elabBinders`;
@@ -3188,7 +3188,7 @@ and add:
 ```rust
 #[test]
 fn axiom_header_unknown_ident_is_the_auto_bound_seam() {
-    // `elabAxiom` also runs under `withAutoBoundImplicit` (`Declaration.lean:108`).
+    // `elabAxiom` also runs under `withAutoBoundImplicit` (`Declaration.lean:109`).
     let m = seam_message("axiom aa (a : α) : α");
     assert!(m.contains("auto-bound"), "{m}");
 }
@@ -3202,7 +3202,7 @@ Expected: FAIL with `axiom — not yet ported (M4c-1 P2 Task 9)`.
 - [ ] **Step 3: Implement `command/axiom.rs`.**
 
 ```rust
-//! `axiom`: oracle `elabAxiom` (`Elab/Declaration.lean:101-135`).
+//! `axiom`: oracle `elabAxiom` (`Elab/Declaration.lean:101-133`).
 
 use leanr_kernel::bank::ExprId;
 use leanr_kernel::{AxiomVal, ConstantVal, Declaration};

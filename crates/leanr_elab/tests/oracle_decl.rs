@@ -27,102 +27,13 @@ fn decl_corpus_sources_parse_as_one_command() {
     );
 }
 
-/// The records the pipeline handles so far. Tasks 7-9 of
-/// `docs/superpowers/plans/2026-10-03-m4c1-p2-command-elab.md` append theirs;
-/// Task 10 deletes this list and gates the whole corpus.
-const ENABLED: &[&str] = &[
-    // Task 6 — def/abbrev/opaque/example
-    "kind/def",
-    "kind/abbrev",
-    "kind/opaque",
-    "kind/example",
-    "kind/exampleParams",
-    "type/inferred",
-    "type/unify",
-    "type/lamValue",
-    "type/implicitBinder",
-    "type/instBinder",
-    "type/optParamCleanup",
-    "type/headerMVarSolvedByBody",
-    "type/groupHoles",
-    "univ/explicit1",
-    "univ/explicit2",
-    "univ/sortHole",
-    "univ/idBody",
-    "univ/order",
-    "univ/orderRev",
-    "univ/skipUsedName",
-    "univ/defElevenLex",
-    "univ/defHeaderUnivByBody",
-    "univ/abbrevUniv",
-    "height/pick",
-    "height/id",
-    "height/overThm",
-    "height/abbrev",
-    "height/explicitTy",
-    "err/already",
-    "err/univDup",
-    "err/unusedUniv",
-    "err/unusedUniv2",
-    "err/mismatch",
-    "err/exampleMismatch",
-    "err/appLast",
-    "err/unassignedImplicit",
-    "err/holeArg",
-    "err/holeBare",
-    "err/binderHole",
-    "err/funBinderType",
-    "err/defTypeHole",
-    "err/levelMVarValue",
-    "err/unknownIdBody",
-    // Task 7 — theorems and Prop-typed headers
-    "kind/theorem",
-    "kind/propDef",
-    "kind/abbrevProp",
-    "kind/opaqueProp",
-    "univ/thmElevenNumeric",
-    "univ/propDefElevenNumeric",
-    "univ/thmSortHole",
-    "univ/thmExplicit",
-    "univ/thmUserAndHole",
-    "univ/thmLevelOnlyBody",
-    "err/thmAlready",
-    "err/thmUnivValueOnly",
-    "err/thmTypeNotProp",
-    "err/propDefHeaderUniv",
-    "err/thmHeaderUnivByBody",
-    "err/thmTypeHole",
-    "err/levelMVarThm",
-    // Task 8 — abstractNestedProofs
-    "np/one",
-    "np/trivial",
-    "np/shared",
-    "np/distinct",
-    "np/binder",
-    "np/univ",
-    "np/theorem",
-    "np/example",
-    "np/abbrev",
-    "np/opaque",
-    "np/twoBinders",
-    "np/lambdaArg",
-    "np/nestedTwice",
-    // Task 9 — axiom
-    "kind/axiom",
-    "univ/axiomSortHole",
-    "univ/axiomElevenLex",
-    "err/axiomUnusedUniv",
-    "err/axiomBinderHole",
-    "err/axiomTypeHole",
-];
-
 #[test]
 fn oracle_decl_gate() {
-    let checked = support::run_decl_corpus("decl-queries.jsonl", |id| ENABLED.contains(&id));
-    assert_eq!(
-        checked,
-        ENABLED.len(),
-        "an ENABLED id is missing from the corpus"
+    let checked = support::run_decl_corpus("decl-queries.jsonl", |_| true);
+    assert!(
+        checked >= CORPUS_FLOOR,
+        "decl corpus shrank: checked {checked}, floor {CORPUS_FLOOR}. Check \
+         `dump_decls.lean`'s stderr for a dropped record, or lower the floor deliberately."
     );
 }
 

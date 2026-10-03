@@ -73,7 +73,7 @@ Sources: `Elab/MutualDef.lean`, `Elab/PreDefinition/{Main,Basic}.lean`,
    `MetavarContext.lean:1489`). Each level mvar left in the header type
    becomes a fresh `u_N`, skipping names already in use.
 4. **Sync vs. async.** `Elab.async` defaults to `false`, but the `lean`
-   command line sets it to `true` (`CoreM.lean:35`). With it on, a
+   command line sets it to `true` (`Elab/Frontend.lean:291-292`; the `CoreM.lean:35` default is `false`). With it on, a
    single `theorem` whose header type has no mvars takes `elabAsync`
    (`MutualDef.lean:1266`), which takes its level params **from the header
    type only**. Everything else takes `elabSync` → `finishElab`. leanr
@@ -331,8 +331,8 @@ There are two plans, one PR each:
 
 Every corpus record was run through the final dumper while the P2 plan (`docs/superpowers/plans/2026-10-03-m4c1-p2-command-elab.md`) was written. These findings refine the spec.
 
-1. **Async theorems report through snapshot tasks.** With `Elab.async=true`, every well-formed theorem takes `elabAsync`: `levelMVarToParamHeaders` runs before the `!type.hasMVar` test (`MutualDef.lean:1239-1247`). Its body errors go to `Command.State.snapshotTasks`, not `messages`. The dumper walks both. Without that, an ill-typed theorem dumps as `consts: []` with no error.
-2. **The theorem signature uses the type only.** `elabAsync` sorts level params from the header type alone (`:1281-1291`), so a universe used only in a proof is "unused". The rest of the theorem path is `finishElab`, shared with defs.
+1. **Async theorems report through snapshot tasks.** With `Elab.async=true`, every well-formed theorem takes `elabAsync`: `levelMVarToParamHeaders` runs before the `!type.hasMVar` test (`MutualDef.lean:1236-1242`). Its body errors go to `Command.State.snapshotTasks`, not `messages`. The dumper walks both. Without that, an ill-typed theorem dumps as `consts: []` with no error.
+2. **The theorem signature uses the type only.** `elabAsync` sorts level params from the header type alone (`:1288-1291`), so a universe used only in a proof is "unused". The rest of the theorem path is `finishElab`, shared with defs.
 3. **`u_N` order depends on the path.** For a theorem or a Prop-typed def, header level mvars become params early and join the header's `levelNames`, so they sort as user names, in declaration order (`u_1 … u_9, u_10`). For other defs and for axioms they are leftovers and sort lexicographically (`u_1, u_10, u_2, …`). The corpus pins both.
 4. **The value's binders are `cleanupAnnotations`'d** (`forallBoundedTelescope … (cleanupAnnotations := true)`, `:536`). An `optParam` binder stays in the type but not in the value.
 5. **A binder group's type is elaborated once per name** (`elabBinderViews`). leanr's `push_binder_group` elaborated it once per group, a pre-existing divergence in `forall`/`depArrow`/`let` binders. P2 fixes it.
@@ -389,3 +389,43 @@ Final review fixes (`final-findings.md`; new commits on top of `2aee529`):
 - (this commit) Minors: `sorryAx` / `Lean.Grind.nestedProof` are interned once per `abstract_nested_proofs` call, and intern errors propagate; a closure pin covers simultaneous `u`/`u_1` renaming; this spec now points from `add_decl_from_scratch` to Amendment 1 item 1.
 
 Oracle cites corrected in the final sweep (code, plan and spec together): `Transform.lean:202` to `:204` (transform.rs); `CoreM.lean:80` to `:79` (`idx` field); `CoreM.lean:116-119` to `:117-120` (`isConflict`); `Level.lean:519-538` to `:519-537`; `DeclUtil.lean:79-89` to `:79-88`; `Environment.lean:2890-2902` to `:2890-2901`.
+
+### P2 (command elaborator)
+
+Commits (`git log --oneline main..HEAD`):
+
+- `bc29f40` docs: M4c-1 P2 command-elaborator plan; spec amendment 2 (plan-time oracle findings)
+- `3288632` M4c-1 P2: dump_decls.lean oracle corpus (79 records) + parse gate
+- `84fd964` leanr_elab: declaration error variants + Type/Application type mismatch first lines
+- `6f00a34` leanr_elab: elaborate a binder group's type once per name (elabBinderViews)
+- `52600eb` leanr_elab: unassigned-mvar diagnostics (custom/level error infos, mvarArgNames, logUnassigned*)
+- `b629c57` leanr_elab: command::view — DefView decoding and M4c-1 named seams
+- `62ce25a` leanr_elab: CommandElab + def/abbrev/opaque/example pipeline; oracle_decl gate (43 records)
+- `1b45156` leanr_elab: theorems and Prop headers (levelMVarToParamHeaders, async signature, pushMain Prop check)
+- `dbb8600` leanr_elab: abstractNestedProofs in the def pipeline; aux theorems committed first
+- `2a438eb` leanr_elab: document elab_def aux ordering and partial failure; fix elab_decl persistence cite
+- `5ef73af` leanr_elab: axiom (elabAxiom); oracle_decl gate covers the whole corpus
+- (this commit) M4c-1 P2: full oracle_decl gate (79 records), declaration seam audit, docs, spec Landed
+
+Mutation outcomes (from each commit body):
+
+- Task 1 (corpus): `CORPUS_FLOOR` 79 -> 80 FAILS the parse gate.
+- Task 2 (error variants): 3 mutations killed (`arg_already_in_f`, the app remap in `args.rs`, the `TypeMismatch` arm strings); spine-vs-`f_args` compare is equivalent (the head is a constant).
+- Task 3 (`elabBinderViews`): hoisting `elab_type` out of the per-name loop FAILS `binder_group_type_is_elaborated_per_name`.
+- Task 4 (unassigned-mvar report): 6 mutations killed (oldest-first, `mvarArgNames` registration, `fun` and binder-group registration, level message, macro-scopes); dropping the visited skip is equivalent (leanr returns at its first error).
+- Task 5 (`DefView`): 5 mutations killed (dotted self-reference, `starts_with(name)`, modifiers, dotted names, the termination seam). The termination seam runs on a synthetic tree, because the parser has no `Termination.suffix` content.
+- Task 6 (pipeline): mutations 1-6 and 8-9 killed. Mutations 1 and 7 survived the corpus and got unit tests (`level_mvar_to_param_prepends_new_names_most_recent_first`, `level_mvar_without_error_info_hits_the_fallback`).
+- Task 7 (theorems): 5 mutations killed (header `is_prop_full`, async signature skip and its late-collect variant, the pushMain Prop check, keeping `header.level_names`); `is_prop_full` -> `MetaCtx::is_prop` is equivalent on the corpus (pinned by a unit test).
+- Task 8 (abstractNestedProofs): 4 mutations killed (main-before-aux, pre-abstraction height, skip abbrev, abstract example); abstracting a theorem is equivalent (proofs come back unchanged).
+- Task 9 (axiom): 3 mutations killed (sort order, skipping `ensureNoUnassignedMVars`, the auto-bound mapping).
+- Task 10 (gate): the `not yet ported (M4c-1 P2 Task N)` scan FAILS on a re-added label.
+
+Oracle cites corrected in the sweep (code, plan and spec together): `Elab.async` is set on in `Elab/Frontend.lean:291-292`, not `CoreM.lean:35` (which declares it with default `false`); the async test is `MutualDef.lean:1236-1242` (was 1239-1247); `elabAsync`'s signature is `:1278-1298` and its type-only level sort `:1288-1291`; `pushMain` is `:1051-1053`; `mkThmDecl` is `PreDefinition/Basic.lean:192-197`; `expandDeclId` is `DeclModifiers.lean:326-343`; `elabAxiom` is `Declaration.lean:101-133` with `withAutoBoundImplicit` at `:109`.
+
+Open seams carried forward:
+
+- M4c-2: the command loop, namespaces/`protected`/dotted names, auto-bound implicits (header unknown identifier or universe), the env-wide `auxLemmasExt` cache (Amendment 1 item 2). The header auto-bound seam also fires for a dotted unknown name, where the oracle says "Unknown identifier".
+- later M4: recursion (self-reference), `declValEqns`/`where`/termination hints, attributes, modifiers, `deriving`, `instance`/`structure`/`inductive`, `opaque` without a value, `letToHave`, compilation. The parser's missing `binderDefault` and its missing `Termination.suffix` content (`termination_by`/`decreasing_by` lex as application arguments, so from source they read "Unknown identifier `termination_by`" instead of the termination seam).
+- P1's pending-aux lookup seam (Amendment 1 item 4), now surfaced as `UnsupportedSyntax` by `def.rs`.
+- Aux theorems are dropped on an error between `abstract_nested_proofs` and `commit`.
+- `Kernel(_)` errors have no oracle first line.

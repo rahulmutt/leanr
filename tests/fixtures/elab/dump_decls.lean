@@ -8,7 +8,7 @@ Runs with LEAN_PATH set to this directory so `Elab0` resolves to the
 committed fixture and nothing else (the `dump_elab.lean` hermetic contract).
 
 `Elab.async` is set to `true`, matching the `lean` command line
-(`CoreM.lean:35`): a theorem then takes `elabAsync`
+(`Elab/Frontend.lean:291-292`; `CoreM.lean:35` declares it, default false): a theorem then takes `elabAsync`
 (`MutualDef.lean:1266`). An async body reports its errors through
 `Command.State.snapshotTasks`, NOT `messages`, so the error scan below walks
 both (an async error left out reads as a silently dropped theorem).
