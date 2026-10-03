@@ -73,7 +73,11 @@ impl<'e> TermElabM<'e> {
             Ok(LOption::Some(new_e)) => Ok(new_e),
             Ok(LOption::None) | Err(MetaError::CoeExpansionMismatch(_)) => {
                 let got = self.mctx.infer_type(e)?;
-                Err(ElabError::TypeMismatch { expected, got })
+                Err(ElabError::TypeMismatch {
+                    expected,
+                    got,
+                    app: None,
+                })
             }
             Ok(LOption::Undef) => {
                 let (mvar, id) =

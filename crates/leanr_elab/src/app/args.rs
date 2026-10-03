@@ -1059,6 +1059,43 @@ fn elab_and_add_new_arg(
     // (`mkSyntheticSorryFor` -> `mkLabeledSorry`), so elaboration
     // continues with a wrong-but-typed argument. leanr propagates the
     // error instead, and the `try … catch` collapses to the plain call.
-    let val = app.elab.ensure_has_type(&stx, Some(expected), val)?;
+    //
+    // oracle: `ensureArgType f arg expectedType` passes `f` as
+    // `throwTypeMismatchError`'s `f?` (`App.lean:54-62`,
+    // `TermElabM.lean:1151-1153`), so an argument mismatch is reported by
+    // `throwAppTypeMismatch f a` (`Meta/Check.lean:250-270`).
+    let f = app.st.f;
+    let val = match app.elab.ensure_has_type(&stx, Some(expected), val) {
+        Err(ElabError::TypeMismatch {
+            expected,
+            got,
+            app: None,
+        }) => {
+            let arg_already_in_f = app_spine_args(app, f).contains(&val);
+            return Err(ElabError::TypeMismatch {
+                expected,
+                got,
+                app: Some(crate::error::AppArgMismatch {
+                    f,
+                    arg_already_in_f,
+                }),
+            });
+        }
+        r => r?,
+    };
     add_new_arg(app, val)
+}
+
+/// `Expr.getAppArgs` of `e`: the arguments of its application spine, in
+/// order. Compared by `ExprId`, which is the oracle's structural `==`
+/// under hash-consing (`Meta/Check.lean:254`).
+fn app_spine_args(app: &AppElab, e: ExprId) -> Vec<ExprId> {
+    let mut args = Vec::new();
+    let mut cur = e;
+    while let Node::App { f, arg } = app.node(cur) {
+        args.push(arg);
+        cur = f;
+    }
+    args.reverse();
+    args
 }

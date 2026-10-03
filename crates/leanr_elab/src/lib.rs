@@ -217,6 +217,6 @@ pub mod synthetic; // M4b-3 P2a
 
 pub use elab::TermElabM;
 pub use error::{
-    AnonCtorError, ElabError, EliminatorErrorReason, InvalidDottedIdentReason, InvalidFieldReason,
-    InvalidProjectionReason,
+    AnonCtorError, AppArgMismatch, ElabError, EliminatorErrorReason, InvalidDottedIdentReason,
+    InvalidFieldReason, InvalidProjectionReason,
 };
