@@ -169,7 +169,7 @@ pub struct LevelMVarToParamResult {
     pub next_param_idx: u64,
 }
 
-/// oracle: `LevelMVarToParam.State` (`MetavarContext.lean:1409-1413`)
+/// oracle: `LevelMVarToParam.State` (`MetavarContext.lean:1410-1414`)
 /// plus the reader `Context`'s `alreadyUsedPred` (`:1405-1408`).
 struct L2P<'a> {
     already_used: &'a [NameId],
@@ -180,7 +180,7 @@ struct L2P<'a> {
 
 impl MetaCtx<'_> {
     /// oracle: `levelMVarToParam` (`MetavarContext.lean:1489-1495`) as
-    /// called by `Term.levelMVarToParam` (`Elab/Term/TermElabM.lean:1059-1064`):
+    /// called by `Term.levelMVarToParam` (`Elab/Term/TermElabM.lean:1059-1065`):
     /// prefix `u`, `except := fun _ => false`. The cache is keyed by
     /// `ExprId`, i.e. `ExprStructEq` for hash-consed terms.
     pub fn level_mvar_to_param(
@@ -218,7 +218,7 @@ impl MetaCtx<'_> {
         }
     }
 
-    /// oracle: `visitLevel` (`MetavarContext.lean:1437-1453`).
+    /// oracle: `visitLevel` (`MetavarContext.lean:1437-1454`).
     fn l2p_level(&mut self, st: &mut L2P, u: LevelId) -> Result<LevelId, MetaError> {
         let base = Some(self.view.store);
         match *self.scratch.level_row(base, u) {
@@ -253,7 +253,7 @@ impl MetaCtx<'_> {
         }
     }
 
-    /// oracle: `main` (`MetavarContext.lean:1455-1469`). No binder is
+    /// oracle: `main` (`MetavarContext.lean:1456-1471`). No binder is
     /// opened: loose bvars are walked directly, as in the oracle.
     fn l2p_main(&mut self, st: &mut L2P, e: ExprId) -> Result<ExprId, MetaError> {
         let d = self.data(e);
@@ -348,7 +348,7 @@ impl MetaCtx<'_> {
         Ok(r)
     }
 
-    /// oracle: `main.visitApp` (`MetavarContext.lean:1470-1476`): an
+    /// oracle: `main.visitApp` (`MetavarContext.lean:1472-1479`): an
     /// assigned expr-mvar head is replaced (args appended) and the result
     /// head-beta'd; otherwise `mkAppN (← main f) (← args.mapM main)`.
     fn l2p_visit_app(
@@ -364,18 +364,19 @@ impl MetaCtx<'_> {
                 let r = self.guarded(|c| c.l2p_visit_app(st, v, args))?;
                 return self.head_beta(r);
             }
-            let mut out = Vec::with_capacity(args.len());
-            for &a in args {
-                out.push(self.guarded(|c| c.l2p_main(st, a))?);
-            }
+            let out = self.l2p_args(st, args)?;
             return self.mk_app_spine(f, &out);
         }
         let f2 = self.guarded(|c| c.l2p_main(st, f))?;
-        let mut out = Vec::with_capacity(args.len());
-        for &a in args {
-            out.push(self.guarded(|c| c.l2p_main(st, a))?);
-        }
+        let out = self.l2p_args(st, args)?;
         self.mk_app_spine(f2, &out)
+    }
+
+    /// `args.mapM main`.
+    fn l2p_args(&mut self, st: &mut L2P, args: &[ExprId]) -> Result<Vec<ExprId>, MetaError> {
+        args.iter()
+            .map(|&a| self.guarded(|c| c.l2p_main(st, a)))
+            .collect()
     }
 }
 
@@ -415,7 +416,7 @@ pub fn sort_decl_level_params(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{app, cu, lparam, with_ctx};
+    use crate::test_support::{app, cu, lit_level, lparam, with_ctx};
     use leanr_kernel::bank::NameId;
     use leanr_kernel::BinderInfo;
 
@@ -541,8 +542,6 @@ mod tests {
             );
         });
     }
-
-    use crate::test_support::lit_level;
 
     fn sort_of(ctx: &mut MetaCtx, l: LevelId) -> ExprId {
         let base = Some(ctx.view.store);

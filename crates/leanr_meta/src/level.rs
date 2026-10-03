@@ -533,7 +533,7 @@ impl<'e> MetaCtx<'e> {
     // Small id-native Level primitives with no existing port
     // ===================================================================
 
-    /// oracle: `mkLevelMax'`/`mkLevelMaxCore` (Level.lean:518-538) — a
+    /// oracle: `mkLevelMax'`/`mkLevelMaxCore` (Level.lean:519-538) — a
     /// CHEAP, non-canonicalizing simplification, distinct from the
     /// kernel's full `mk_max`/[`Level::mk_max_pair`] (level.cpp:81-98,
     /// leanr_kernel's `level.rs`): no sorting, no flattening beyond one
@@ -553,7 +553,7 @@ impl<'e> MetaCtx<'e> {
         })
     }
 
-    /// oracle: `mkLevelMaxCore u v elseK` (Level.lean:518-533); shared by
+    /// oracle: `mkLevelMaxCore u v elseK` (Level.lean:519-533); shared by
     /// `mkLevelMax'` (`else_k` builds `max u v`) and `simpLevelMax'`
     /// (`else_k` returns the default).
     fn mk_level_max_core(
