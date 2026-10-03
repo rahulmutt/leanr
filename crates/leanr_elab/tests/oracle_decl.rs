@@ -93,6 +93,20 @@ const ENABLED: &[&str] = &[
     "err/thmHeaderUnivByBody",
     "err/thmTypeHole",
     "err/levelMVarThm",
+    // Task 8 — abstractNestedProofs
+    "np/one",
+    "np/trivial",
+    "np/shared",
+    "np/distinct",
+    "np/binder",
+    "np/univ",
+    "np/theorem",
+    "np/example",
+    "np/abbrev",
+    "np/opaque",
+    "np/twoBinders",
+    "np/lambdaArg",
+    "np/nestedTwice",
 ];
 
 #[test]

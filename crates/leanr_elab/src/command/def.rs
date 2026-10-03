@@ -10,6 +10,9 @@
 //! `ensureEqnReservedNamesAvailable` (root names only), `cleanupOfNat`
 //! (instances only), attributes, compilation, docs and info trees (spec
 //! seams).
+//!
+//! Non-theorem values go through `abstractNestedProofs`; the `_proof_N` aux
+//! theorems it mints are committed BEFORE the main declaration.
 
 use std::collections::HashSet;
 
@@ -20,7 +23,9 @@ use leanr_kernel::{
     ConstantVal, Declaration, DefinitionSafety, DefinitionVal, OpaqueVal, ReducibilityHints,
     TheoremVal,
 };
-use leanr_meta::{sort_decl_level_params, CollectLevelParams, TransparencyMode};
+use leanr_meta::{
+    sort_decl_level_params, AuxLemmas, CollectLevelParams, MetaError, TransparencyMode,
+};
 use leanr_syntax::kind::KindInterner;
 
 use super::header::{self, Header};
@@ -74,12 +79,30 @@ pub(super) fn elab_def(
     // order: after it); both orders end in a seam.
     reject_let(elab, ty)?;
     reject_let(elab, value)?;
-    let decl = build_decl(elab, view.kind, id.name, level_params, ty, value)?;
-    Ok(if view.kind == DefKind::Example {
-        Built::Check(decl)
+    // `addNonRecAux` → `abstractNestedProofs` (`PreDefinition/Basic.lean:
+    // 120-127`, `:180`): not for theorems or examples. The aux theorems are
+    // committed BEFORE the main declaration, as the oracle's `mkAuxLemma`
+    // has already `addDecl`'d them (`Meta/Tactic/AuxLemma.lean:43-73`).
+    let mut aux = AuxLemmas::new(id.name);
+    let value = if matches!(view.kind, DefKind::Theorem | DefKind::Example) {
+        value
     } else {
-        Built::Add(vec![decl])
-    })
+        elab.mctx
+            .abstract_nested_proofs(&mut aux, value)
+            .map_err(|e| match e {
+                // P1's named seams (Amendment 1 item 4), e.g. the pending-aux lookup.
+                MetaError::Unsupported(m) => ElabError::UnsupportedSyntax(m),
+                e => ElabError::Meta(e),
+            })?
+    };
+    // `getMaxHeight` sees the abstracted value: aux theorems add nothing.
+    let decl = build_decl(elab, view.kind, id.name, level_params, ty, value)?;
+    if view.kind == DefKind::Example {
+        return Ok(Built::Check(decl));
+    }
+    let mut decls = aux.into_pending();
+    decls.push(decl);
+    Ok(Built::Add(decls))
 }
 
 /// oracle: `levelMVarToParamHeaders` (`MutualDef.lean:1148-1160`): a
