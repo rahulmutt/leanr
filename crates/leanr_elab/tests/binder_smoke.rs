@@ -969,3 +969,111 @@ fn fun_ascribed_non_ident_binder_is_a_pattern_seam() {
         other => panic!("expected the pattern seam, got {other:?}"),
     }
 }
+
+/// oracle: `ensureAtomicBinderName` (`Binders.lean:188-191`, at `:426` for
+/// `fun`). Probe (v4.33.0-rc1): `fun (a.b : Nat) => a.b` and `fun a.b => …`
+/// both fail "invalid binder name `a.b`, it must be atomic".
+#[test]
+fn fun_dotted_binder_name_is_rejected() {
+    for src in [
+        "fun (a.b : Nat) => a.b",
+        "fun a.b => Nat.zero",
+        "forall (a.b : Nat), True",
+    ] {
+        match elab_result(src) {
+            Err(e) => assert_eq!(
+                e.oracle_first_line().as_deref(),
+                Some("invalid binder name `a.b`, it must be atomic"),
+                "{src}: {e:?}"
+            ),
+            Ok(_) => panic!("{src:?}: a dotted binder name was accepted"),
+        }
+    }
+}
+
+/// A quoted binder name is decoded (`ident.getId`): `«x»` binds `x`, so
+/// both spellings of a use find it, and `«x.y»` is one atomic component.
+/// Probes: `fun («x.y» : Nat) => «x.y»` elaborates.
+#[test]
+fn fun_quoted_binder_name_is_decoded() {
+    for src in [
+        "fun («x» : Nat) => x",
+        "fun («x» : Nat) => «x»",
+        "fun (x : Nat) => «x»",
+        "fun («x.y» : Nat) => «x.y»",
+    ] {
+        let j = elab_json(src);
+        assert_eq!(j["k"], "lam", "{src}: {j}");
+        assert_eq!(
+            j["b"]["k"], "bvar",
+            "{src}: the body must be the binder: {j}"
+        );
+    }
+}
+
+/// `getFunBinderIds?`'s global-name gate sees the decoded name: probe,
+/// `(fun («Nat») => Nat.zero : Nat → Nat)` fails exactly as `(Nat)` does
+/// (a pattern binder).
+#[test]
+fn fun_paren_binder_naming_a_quoted_global_is_a_pattern_seam() {
+    match elab_result("(fun («Nat») => Nat.zero : Nat → Nat)") {
+        Err(leanr_elab::ElabError::UnsupportedSyntax(msg)) => {
+            assert!(msg.contains("match slice"), "got {msg:?}");
+        }
+        other => panic!("expected the pattern seam, got {other:?}"),
+    }
+}
+
+/// `isLocalIdent?` sees the decoded name: probe, `fun x => («x» : {a :
+/// Type} → Nat)` elaborates to the same term as `fun x => (x : …)` (the
+/// implicit lambda is postponed until `x`'s type is known).
+#[test]
+fn quoted_local_ident_postpones_the_implicit_lambda() {
+    let plain = support::elab_and_synthesize("fun x => (x : {a : Type} -> Nat)").expect("plain");
+    let quoted =
+        support::elab_and_synthesize("fun x => («x» : {a : Type} -> Nat)").expect("quoted");
+    assert_eq!(quoted, plain);
+}
+
+/// `letIdBinders` go through `elabBinderViews`, so the atomic check
+/// applies: probe, `let f a.b := Nat.zero; Nat.zero` fails "invalid binder
+/// name `a.b`, it must be atomic".
+#[test]
+fn let_dotted_binder_name_is_rejected() {
+    match elab_result("let f a.b := Nat.zero; Nat.zero") {
+        Err(e) => assert_eq!(
+            e.oracle_first_line().as_deref(),
+            Some("invalid binder name `a.b`, it must be atomic"),
+            "{e:?}"
+        ),
+        Ok(_) => panic!("a dotted let binder name was accepted"),
+    }
+}
+
+/// `resolveId?` (the `binop%` head) sees the decoded name: probe,
+/// `fun (f : Nat → Nat → Nat) => binop% «f» Nat.zero Nat.zero` elaborates.
+#[test]
+fn binop_quoted_local_head_resolves() {
+    let src = "fun (f : Nat → Nat → Nat) => binop% «f» Nat.zero Nat.zero";
+    assert!(
+        support::elab_and_synthesize(src).is_ok(),
+        "{src:?}: {:?}",
+        support::elab_and_synthesize(src)
+    );
+}
+
+/// A `let` name is not checked for atomicity (`elabLetDeclAux` has no
+/// `ensureAtomicBinderName`). Probes: `let a.b := Nat.zero; a.b` and
+/// `let «a.b» := Nat.zero; «a.b»` both elaborate, the body being the
+/// let-bound variable.
+#[test]
+fn let_dotted_and_quoted_names_resolve() {
+    for src in ["let a.b := Nat.zero; a.b", "let «a.b» := Nat.zero; «a.b»"] {
+        let j = elab_json(src);
+        assert_eq!(j["k"], "let", "{src}: {j}");
+        assert_eq!(
+            j["b"]["k"], "bvar",
+            "{src}: the body must be the let variable: {j}"
+        );
+    }
+}

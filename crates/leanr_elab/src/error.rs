@@ -256,6 +256,10 @@ pub enum ElabError {
     /// caller's pending mvars back (its `finally`, no state restore) —
     /// the oracle's treatment of it too.
     Postpone,
+    /// oracle: `ensureAtomicBinderName` (`Elab/Binders.lean:188-191`):
+    /// "invalid binder name `n`, it must be atomic". Carries the rendered
+    /// (decoded) binder name.
+    InvalidBinderName(String),
     /// oracle: `checkNotAlreadyDeclared` (`Elab/DeclModifiers.lean:40-44`),
     /// reached from `expandDeclId` → `mkDeclName` → `applyVisibility`
     /// (`:244-251`). Carries the rendered declaration name.
@@ -473,6 +477,9 @@ impl ElabError {
                 }
                 .into(),
             ),
+            Self::InvalidBinderName(n) => {
+                Some(format!("invalid binder name `{n}`, it must be atomic"))
+            }
             Self::AlreadyDeclared(n) => Some(format!("`{n}` has already been declared")),
             Self::UniverseAlreadyDeclared(u) => Some(format!(
                 "a universe level named `{u}` has already been declared"
@@ -588,6 +595,12 @@ mod tests {
                 .oracle_first_line()
                 .as_deref(),
             Some("don't know how to synthesize placeholder")
+        );
+        assert_eq!(
+            ElabError::InvalidBinderName("a.b".into())
+                .oracle_first_line()
+                .as_deref(),
+            Some("invalid binder name `a.b`, it must be atomic") // probe: def f18 (a.b : Nat)
         );
         assert_eq!(
             ElabError::Kernel(leanr_kernel::KernelError::BankExhausted).oracle_first_line(),

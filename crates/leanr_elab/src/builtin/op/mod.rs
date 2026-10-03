@@ -162,11 +162,10 @@ pub(crate) fn resolve_head(elab: &mut TermElabM, head: &OpHead) -> Result<ExprId
 /// as `UnknownIdent`. Every other error propagates (`AmbiguousIdent` is
 /// the oracle's "ambiguous term" throw at `:2223`).
 ///
-/// The identifier is split on every `.`, `app::head::elab_app_fn_id`'s
-/// convention, so a local binder's name matches the same way.
+/// The identifier is decoded (`app::head::ident_prefixes`), as in
+/// `app::head::elab_app_fn_id`, so a local binder's name matches the same way.
 fn resolve_id(elab: &mut TermElabM, raw: &str) -> Result<Option<ExprId>, ElabError> {
-    let parts: Vec<&str> = raw.split('.').collect();
-    let prefixes = crate::app::head::intern_prefixes(elab, &parts)?;
+    let (_, prefixes) = crate::app::head::ident_prefixes(elab, raw)?;
     if let Some((fvar, n_fields)) = crate::resolve::resolve_local_name(&elab.mctx, &prefixes) {
         return Ok((n_fields == 0).then_some(fvar));
     }

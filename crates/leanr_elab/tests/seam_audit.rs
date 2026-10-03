@@ -1544,6 +1544,23 @@ fn declaration_seams_are_named_end_to_end() {
         ("def sl : Nat := let x := Nat.zero; x", "letToHave"),
         ("def ab (a : α) : α := a", "auto-bound"),
         ("namespace Foo", "command loop"),
+        // Term- and binder-layer seams reached through a declaration carry
+        // a slice label (`command::label_seam`).
+        (
+            "def lp.{u} (α : Sort (u+1)) : Nat := Nat.zero",
+            "Lean.Parser.Level.paren — later M4",
+        ),
+        ("def ss : Nat := sorry", "Lean.Parser.Term.sorry — later M4"),
+        (
+            "def fm : Nat → Nat := fun | x => x",
+            "fun: Lean.Parser.Term.matchAlts — later M4",
+        ),
+        // Not auto-bound: `expandBinderType`'s hole (probe: the oracle
+        // admits `f2.{u_1}`).
+        (
+            "def f2 {α} (a : α) : α := a",
+            "missing `: T` (`expandBinderType` hole) — later M4",
+        ),
     ];
     for (src, needle) in cases {
         let got = support::with_command_elab(src, |ce, cmd, kinds| ce.elab_decl(cmd, kinds));

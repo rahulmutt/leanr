@@ -314,7 +314,7 @@ There are two plans, one PR each:
 ## Amendment 1 (plan-time refinements and execution-time rulings)
 
 1. **The kernel API is `add_decl_in(&mut self, scratch: &mut Store, d)`.** It promotes every id of `d` into `self.store` (`promote_declaration`), then checks against a fresh scratch. The plan's first version skipped the promote walk. The P1 gate found that this breaks cross-declaration references inside one scratch store: the main declaration references the aux by its scratch NameId, but the kernel looks constants up by persistent id. The plan was corrected at execution time (ruling R5) back to the spec's original design. Promoted ids of a rejected declaration remain in the store as orphans unreachable from `constants`.
-2. **The aux-lemma cache is env-wide in the oracle.** In the probe, `foo3` reused `foo1._proof_1` from an earlier declaration. M4c-1's corpus resets the environment for each record, so a per-declaration cache (`AuxLemmas`) is observably identical there. M4c-2's file loop must lift the cache to `CommandElab` scope, keyed by type and level params, and must also keep the earlier declarations' aux names as conflicts.
+2. **The aux-lemma cache is env-wide in the oracle.** In the probe, `foo3` reused `foo1._proof_1` from an earlier declaration. M4c-1's corpus resets the environment for each record, so a per-declaration cache (`AuxLemmas`) is observably identical there, but only for ONE `elab_decl` per `CommandElab`. A second call on the same `CommandElab` that would mint an aux lemma after an earlier one was admitted is the named seam `aux-lemma reuse across declarations (auxLemmasExt) — M4c-2` (P2 final review C3; probe: an identical `nb` after `na` reuses `na._proof_1`). M4c-2's file loop must lift the cache to `CommandElab` scope, keyed by type and level params, and must also keep the earlier declarations' aux names as conflicts.
 3. **Pending aux names count as "in the environment"** in two places: `mkUniqueName`'s conflict check, and `isNonTrivialProof`'s "constant not in env" test. In the oracle both see aux lemmas that `mkAuxLemma` has already added.
 4. **New named seams in P1:**
    - a `letE` reached by `abstractNestedProofs` (unreachable from P2, which rejects `let` first);
@@ -429,3 +429,16 @@ Open seams carried forward:
 - P1's pending-aux lookup seam (Amendment 1 item 4), now surfaced as `UnsupportedSyntax` by `def.rs`.
 - Aux theorems are dropped on an error between `abstract_nested_proofs` and `commit`.
 - `Kernel(_)` errors have no oracle first line.
+- The gate encoder erases binder names (`dump_decls.lean`'s `biStr`). Binder names are pinned only by `oracle_decl.rs`'s `quoted_binder_name_is_decoded` and `binder_smoke.rs`'s quoted/dotted binder tests. Add a binder-name channel to the dumper at the next corpus regen.
+- After a kernel rejection of the main declaration, its aux theorems stay in the environment (as in the oracle). A re-declaration on the same `CommandElab` then collides on `foo._proof_1`, an error, never a wrong `Ok`. M4c-2, with the `auxLemmasExt` seam.
+- A binder with no type (`def f2 {α} (a : α)`) is the oracle's `expandBinderType` hole (`Binders.lean:24-28`), not auto-bound; the oracle admits `f2.{u_1}`. leanr seams it as ``binder group: missing `: T` (`expandBinderType` hole) — later M4``.
+- `def _root_ : Nat := …` is an oracle error ("invalid declaration name `_root_`, …", `DeclModifiers.lean:268-269`); leanr seams it with the dotted-name M4c-2 seam.
+- Names in messages are rendered without `«»` escaping (leanr's `Name` `Display`); the oracle escapes a component that needs it (`«a.b».c`). Only reachable for quoted names that contain `.` or non-identifier characters.
+
+Final review fixes (`.superpowers/sdd/2026-10-03-m4c1-p2-command-elab/final-findings.md`):
+
+- C1: identifiers are decoded (`«»` stripped, `ident.getId`) everywhere a source identifier becomes a `Name`: the declaration name and `.{u}` names (`view.rs`), `Sort u` level identifiers, binder names (`intern_binder_name`), and every lookup (`app::head::ident_prefixes`: `elab_app_fn_id`, `isLocalIdent?`, `fun`'s global-name gate, `binop%`'s `resolveId?`). `def «gq»` admits `gq`; `def «a.b»` admits the ATOMIC `«a.b»` (no longer a dotted seam); `def sr : Nat := «sr»` is the recursion seam.
+- C2: `ensureAtomicBinderName` (`Binders.lean:188-191`) in `push_binder_group` (`elabBinderViews`, `:213`), `fun` (`elabFunBinderViews`, `:426`) and the `let` telescope's bare-ident arm; `ElabError::InvalidBinderName`.
+- C3: the `auxLemmasExt` seam above (`CommandElab::aux_admitted`).
+- I4: `elab_decl` labels any unlabelled term/binder seam ` — later M4` (`command::label_seam`).
+- M5/M6: `push_binder_group`'s doc restored; `_root_x` is admitted (only `_root_` or a `_root_.` prefix seams).

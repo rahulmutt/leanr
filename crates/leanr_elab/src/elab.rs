@@ -864,8 +864,7 @@ fn local_ident_of(
     let leanr_syntax::tree::NodeOrToken::Token(tok) = elem else {
         return Ok(None);
     };
-    let parts: Vec<&str> = tok.text().split('.').collect();
-    let prefixes = crate::app::head::intern_prefixes(elab, &parts)?;
+    let (_, prefixes) = crate::app::head::ident_prefixes(elab, tok.text())?;
     Ok(
         match crate::resolve::resolve_local_name(&elab.mctx, &prefixes) {
             Some((fvar, 0)) => Some(fvar),

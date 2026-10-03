@@ -111,11 +111,14 @@ pub(crate) fn extract_binder_group(
         .and_then(|el| el.as_node())
         .ok_or_else(|| ElabError::UnsupportedSyntax("binder group: type slot".into()))?;
     let type_children = non_trivia_children(type_node);
-    // `[":", T]`; an empty type slot is the untyped-bracketed form we defer.
-    let ty = type_children
-        .get(1)
-        .cloned()
-        .ok_or_else(|| ElabError::UnsupportedSyntax("binder group: missing `: T`".into()))?;
+    // `[":", T]`. An empty type slot (`{α}`) is the oracle's
+    // `expandBinderType` hole (`Binders.lean:24-28`), not auto-bound: probe
+    // `def f2 {α} (a : α) : α := a` admits `f2.{u_1}`. Not ported yet.
+    let ty = type_children.get(1).cloned().ok_or_else(|| {
+        ElabError::UnsupportedSyntax(
+            "binder group: missing `: T` (`expandBinderType` hole) — later M4".into(),
+        )
+    })?;
 
     // Collect the raw name texts first, then intern (avoids overlapping
     // borrows of the store while walking the tree).
@@ -130,35 +133,19 @@ pub(crate) fn extract_binder_group(
         })
         .collect();
 
-    // `base = Some(elab.view.store)`, NOT the brief's literal `None`
-    // (Task 3 reconciliation): a binder name must intern to the exact
-    // same `NameId` a later bare-identifier occurrence of the same text
-    // resolves to (`app::head::intern_dotted`'s own convention, which
-    // this mirrors) — the local-scope lookup `app::head::elab_app_fn_id`
-    // performs (Task 3 addition, `elab.rs`) is a plain `NameId` equality check,
-    // so a base mismatch here would silently make `(a : Type), a` fail
-    // to find its own binder whenever `a`'s string already happens to
-    // be interned in the persistent store under a different base path.
-    // Binder names are still erased by the differential encoder, so
-    // this has no effect on the oracle gate either way — but the code
-    // must resolve correctly regardless.
-    let base = elab.view.store;
+    // `intern_binder_name`: the decoded name with `base =
+    // Some(elab.view.store)`, so a binder name is the exact `NameId` a later
+    // occurrence of the same identifier resolves to
+    // (`app::head::ident_prefixes`; `lctx_lookup_by_name` is a plain `NameId`
+    // equality check, and a base mismatch would make `(a : Type), a` miss its
+    // own binder). The gate erases binder names; `oracle_decl.rs`'s
+    // `quoted_binder_name_is_decoded` pins them.
     let mut names = Vec::with_capacity(name_texts.len());
     for t in name_texts {
-        let id = match t {
+        names.push(match t {
             None => None,
-            Some(text) => {
-                let store = elab.mctx.store_mut();
-                let s = store
-                    .intern_str(Some(base), &text)
-                    .map_err(leanr_meta::MetaError::from)?;
-                let n = store
-                    .name_str(Some(base), None, s)
-                    .map_err(leanr_meta::MetaError::from)?;
-                Some(n)
-            }
-        };
-        names.push(id);
+            Some(text) => Some(intern_binder_name(elab, &text)?),
+        });
     }
     if names.is_empty() {
         return Err(ElabError::UnsupportedSyntax(
@@ -168,17 +155,6 @@ pub(crate) fn extract_binder_group(
     Ok(BinderGroup { names, ty, bi })
 }
 
-/// Push one bracketed binder group's names into the local context,
-/// returning their fvars in declaration order. oracle: `elabBinderViews`
-/// (`Binders.lean:208-223`) over the group's views. `toBinderViews`
-/// (`Binders.lean:140`) makes one view PER NAME sharing the type syntax,
-/// and each view runs `elabType` again inside the previous views' scope.
-/// So `(x y : T)` elaborates `T` twice: `(α β : Sort _)` gets two
-/// independent level mvars, and the second `T` sees `x`. Shared by
-/// `elab_binders_and_forall` (the `forall`/`depArrow` telescope) and
-/// `push_let_binders` (the `let`/`have` telescope), which differ only in
-/// what they do with the returned fvars (`mk_forall` vs. also
-/// `mk_lambda`-ing a value).
 /// oracle: `registerFailedToInferBinderTypeInfo` (`Binders.lean:177-183`),
 /// called right after `elabType` by `elabBinderViews` and
 /// `elabFunBinderViews`.
@@ -205,6 +181,17 @@ pub(crate) fn register_failed_to_infer_binder_type_info(
     );
 }
 
+/// Push one bracketed binder group's names into the local context,
+/// returning their fvars in declaration order. oracle: `elabBinderViews`
+/// (`Binders.lean:208-223`) over the group's views. `toBinderViews`
+/// (`Binders.lean:140`) makes one view PER NAME sharing the type syntax,
+/// and each view runs `elabType` again inside the previous views' scope.
+/// So `(x y : T)` elaborates `T` twice: `(α β : Sort _)` gets two
+/// independent level mvars, and the second `T` sees `x`. Shared by
+/// `elab_binders_and_forall` (the `forall`/`depArrow` telescope) and
+/// `push_let_binders` (the `let`/`have` telescope), which differ only in
+/// what they do with the returned fvars (`mk_forall` vs. also
+/// `mk_lambda`-ing a value).
 pub(crate) fn push_binder_group(
     elab: &mut TermElabM,
     g: &BinderGroup,
@@ -212,6 +199,9 @@ pub(crate) fn push_binder_group(
 ) -> Result<Vec<ExprId>, ElabError> {
     let mut fvars = Vec::with_capacity(g.names.len());
     for &name in &g.names {
+        // oracle: `ensureAtomicBinderName` before `elabType`
+        // (`Binders.lean:213-214`).
+        ensure_atomic_binder_name(elab, name)?;
         let dom = elab_type(elab, &g.ty, kinds)?;
         register_failed_to_infer_binder_type_info(elab, dom, name, g.ty.clone());
         // oracle: `elabBinderViews` (`Binders.lean:216-219`) — after
@@ -364,21 +354,41 @@ fn fresh_type_mvar(elab: &mut TermElabM) -> Result<ExprId, ElabError> {
     elab.mk_fresh_expr_mvar(sort)
 }
 
-/// Intern a binder name from token text, `base = Some(view.store)` — the
+/// Intern a binder name from token text, decoded (`«»` stripped,
+/// `ident.getId`), `base = Some(view.store)` — the
 /// same convention `extract_binder_group` uses, so a body occurrence of
 /// the name resolves to this binder via `lctx_lookup_by_name` (a plain
 /// `NameId` equality check). Binder names are erased by the differential
 /// encoder, so this never affects the gate, but the code must resolve.
 fn intern_binder_name(elab: &mut TermElabM, text: &str) -> Result<NameId, ElabError> {
-    let base = elab.view.store;
-    let store = elab.mctx.store_mut();
-    let s = store
-        .intern_str(Some(base), text)
-        .map_err(leanr_meta::MetaError::from)?;
-    let n = store
-        .name_str(Some(base), None, s)
-        .map_err(leanr_meta::MetaError::from)?;
-    Ok(n)
+    let comps = crate::app::head::ident_components(text)?;
+    let parts: Vec<&str> = comps.iter().map(String::as_str).collect();
+    crate::app::head::intern_components(elab, &parts)
+}
+
+/// oracle: `ensureAtomicBinderName` (`Binders.lean:188-191`), called by
+/// `elabBinderViews` (`:213`) and `elabFunBinderViews` (`:426`) before the
+/// binder's `elabType`. The name is the decoded one (`intern_binder_name`),
+/// so `x.«y»` is rejected as `x.y` and `«x.y»` is atomic. leanr's source
+/// names carry no macro scopes, so `eraseMacroScopes` is the identity.
+/// An anonymous (`_`) binder is atomic.
+pub(crate) fn ensure_atomic_binder_name(
+    elab: &TermElabM,
+    name: Option<NameId>,
+) -> Result<(), ElabError> {
+    let Some(n) = name else { return Ok(()) };
+    let full = elab.mctx.store().to_name(Some(elab.view.store), Some(n));
+    let atomic = match &*full {
+        leanr_kernel::Name::Str { parent, .. } | leanr_kernel::Name::Num { parent, .. } => {
+            matches!(**parent, leanr_kernel::Name::Anonymous)
+        }
+        leanr_kernel::Name::Anonymous => true,
+    };
+    if atomic {
+        Ok(())
+    } else {
+        Err(ElabError::InvalidBinderName(full.to_string()))
+    }
 }
 
 /// The `instBinder` child layout `["[", optIdent(null), T, "]"]`: an

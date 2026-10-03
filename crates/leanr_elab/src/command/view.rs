@@ -6,6 +6,7 @@
 use leanr_syntax::kind::KindInterner;
 use leanr_syntax::tree::{NodeOrToken, SyntaxNode};
 
+use crate::app::head::ident_components;
 use crate::dispatch::{non_trivia_children, SynElem};
 use crate::error::ElabError;
 
@@ -21,7 +22,8 @@ pub(crate) enum DefKind {
 
 pub(crate) struct DefView {
     pub kind: DefKind,
-    /// The declaration's short name as written. `None` for `example`,
+    /// The declaration's short name, decoded (`«»` stripped) and atomic,
+    /// though the one component may contain `.` (`«a.b»`). `None` for `example`,
     /// whose name is `_example` (`DefView.lean:201-208`).
     pub name: Option<String>,
     /// The `declId` node (for messages); `None` for `example`.
@@ -195,15 +197,23 @@ fn decode_decl_id(
     kinds: &KindInterner,
 ) -> Result<(Option<String>, Vec<String>), ElabError> {
     let ch = non_trivia_children(id);
-    let name = match ch.first() {
+    let raw = match ch.first() {
         Some(NodeOrToken::Token(t)) if kinds.name(t.kind()) == "<ident>" => t.text().to_string(),
         _ => return Err(ill("declId name")),
     };
-    if name.contains('.') || name.starts_with("_root_") {
-        return Err(seam(format!(
-            "dotted declaration name `{name}` — M4c-2 (namespaces)"
-        )));
-    }
+    // `id.getId`: the decoded `Name`, `«»` escapes stripped (`«gq»` is
+    // `gq`, `«a.b»` the ATOMIC `a.b`). `mkDeclName` (`DeclModifiers.lean:
+    // 263-286`) prefixes the namespace and strips a `_root_` prefix
+    // (`:267-275`); a bare `_root_` is its error (`:268-269`). All M4c-2.
+    // `_root_x` is atomic and not `_root_`-prefixed.
+    let name = match ident_components(&raw)?.as_slice() {
+        [one] if one != "_root_" => one.clone(),
+        _ => {
+            return Err(seam(format!(
+                "dotted declaration name `{raw}` — M4c-2 (namespaces)"
+            )))
+        }
+    };
     let mut univs = Vec::new();
     if let Some(NodeOrToken::Node(opt)) = ch.get(1) {
         for el in non_trivia_children(opt) {
@@ -211,7 +221,15 @@ fn decode_decl_id(
                 for u in non_trivia_children(&list) {
                     match &u {
                         NodeOrToken::Token(t) if kinds.name(t.kind()) == "<ident>" => {
-                            univs.push(t.text().to_string())
+                            match ident_components(t.text())?.as_slice() {
+                                [one] => univs.push(one.clone()),
+                                _ => {
+                                    return Err(seam(format!(
+                                        "dotted universe name `{}` — later M4",
+                                        t.text()
+                                    )))
+                                }
+                            }
                         }
                         NodeOrToken::Token(t) if t.text() == "," => {}
                         _ => return Err(seam("universe hole in .{…} — later M4")),
@@ -298,17 +316,27 @@ fn check_no_self_reference(
     value: &SynElem,
     kinds: &KindInterner,
 ) -> Result<(), ElabError> {
-    let dotted = format!("{name}.");
-    let hit = |text: &str| text == name || text.starts_with(&dotted);
-    let is_hit =
-        |t: &leanr_syntax::tree::SyntaxToken| kinds.name(t.kind()) == "<ident>" && hit(t.text());
-    let found = match value {
-        NodeOrToken::Token(t) => is_hit(t),
-        NodeOrToken::Node(n) => n
-            .descendants_with_tokens()
-            .filter_map(|el| el.into_token())
-            .any(|t| is_hit(&t)),
+    // `name` is decoded; compare each identifier's DECODED first component,
+    // so `«sr»` and `«sr».foo` hit as `sr` and `sr.foo` do. The tree also
+    // holds zero-width `<ident>` tokens (e.g. inside `fun (_ : T)`), which
+    // name nothing.
+    let is_hit = |t: &leanr_syntax::tree::SyntaxToken| -> Result<bool, ElabError> {
+        Ok(kinds.name(t.kind()) == "<ident>"
+            && !t.text().is_empty()
+            && ident_components(t.text())?.first().map(String::as_str) == Some(name))
     };
+    let mut found = false;
+    match value {
+        NodeOrToken::Token(t) => found = is_hit(t)?,
+        NodeOrToken::Node(n) => {
+            for t in n.descendants_with_tokens().filter_map(|el| el.into_token()) {
+                if is_hit(&t)? {
+                    found = true;
+                    break;
+                }
+            }
+        }
+    }
     if found {
         return Err(seam(format!(
             "recursive reference to `{name}` — later M4 (recursion)"
@@ -400,9 +428,47 @@ mod tests {
     }
 
     #[test]
+    fn quoted_names_are_decoded() {
+        // Oracle probes: `«gq»` admits `gq`; `.{«u»}` gives the level `u`;
+        // `«a.b»` is ONE atomic component, admitted at the root.
+        assert_eq!(
+            view_of("def «gq» : Nat := Nat.zero")
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("gq")
+        );
+        let v = view_of("def gu2.{«u»} (α : Sort «u») (a : α) : α := a").unwrap();
+        assert_eq!(v.univ_names, vec!["u".to_string()]);
+        assert_eq!(
+            view_of("def «a.b» : Nat := Nat.zero")
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("a.b")
+        );
+        assert!(seam("def a.«b» : Nat := Nat.zero").contains("dotted declaration name"));
+    }
+
+    #[test]
+    fn root_prefix_is_matched_by_component() {
+        // Oracle probe: `def _root_x : Nat := Nat.zero` admits `_root_x`.
+        assert_eq!(
+            view_of("def _root_x : Nat := Nat.zero")
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("_root_x")
+        );
+        assert!(seam("def _root_ : Nat := Nat.zero").contains("dotted declaration name"));
+    }
+
+    #[test]
     fn self_reference_is_a_recursion_seam() {
         assert!(seam("def sr : Nat := sr").contains("recursive reference to `sr`"));
         assert!(seam("def sr : Nat := sr.foo").contains("recursive reference to `sr`"));
+        assert!(seam("def sr : Nat := «sr»").contains("recursive reference to `sr`"));
+        assert!(seam("def «sr» : Nat := sr").contains("recursive reference to `sr`"));
         // an unrelated identifier that merely starts with the name is not one
         assert!(view_of("def sr : Nat := srx").is_ok());
     }

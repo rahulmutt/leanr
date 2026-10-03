@@ -347,10 +347,8 @@ pub(super) fn elab_explicit_univs(
 /// `raw` is the identifier's raw source text — a single lexer token that
 /// already includes every `.`-separated component (`leanr_syntax::lex`'s
 /// `hierarchical_idents_are_one_token`), so a dotted name like
-/// `Nat.succ` arrives here as ONE string, split below exactly the way
-/// `intern_dotted` and every other dotted-name builder in this workspace
-/// does (`leanr_meta`'s own `intern_dotted`/`dotted_name` test helpers,
-/// `pub(crate)`/test-only there and so not reusable from this crate).
+/// `Nat.succ` arrives here as ONE string, decoded below by
+/// `ident_prefixes` (`«»` escapes stripped, as `ident.getId` does).
 fn elab_app_fn_id(
     elab: &mut TermElabM,
     elem: &SynElem,
@@ -360,11 +358,10 @@ fn elab_app_fn_id(
     call: AppCall,
     kinds: &KindInterner,
 ) -> Result<ExprId, ElabError> {
-    // `intern_dotted`'s convention (split on every `.`, `«»` kept), so a
-    // single-component prefix is the same `NameId` a binder of that text
-    // has (plan § Decisions).
-    let parts: Vec<&str> = raw.split('.').collect();
-    let prefixes = intern_prefixes(elab, &parts)?;
+    // The decoded name (`ident_prefixes`), so a single-component prefix is
+    // the same `NameId` a binder of that name has (`intern_binder_name`).
+    let (comps, prefixes) = ident_prefixes(elab, raw)?;
+    let parts: Vec<&str> = comps.iter().map(String::as_str).collect();
     // `resolveName`: every local prefix before any global (`:2180-2181`).
     //
     // M4b-2 (binders): a local variable shadows a same-named global
@@ -523,6 +520,20 @@ pub(crate) fn ident_components(raw: &str) -> Result<Vec<String>, ElabError> {
     }
 }
 
+/// `ident_components` then `intern_prefixes`: every prefix of an
+/// identifier token's DECODED name (`ident.getId`). The name every
+/// source-identifier lookup uses, so `«x»` and `x` find the same binder
+/// and `a.«b.c»` has the two components `a`, `b.c`.
+pub(crate) fn ident_prefixes(
+    elab: &mut TermElabM,
+    raw: &str,
+) -> Result<(Vec<String>, Vec<NameId>), ElabError> {
+    let comps = ident_components(raw)?;
+    let parts: Vec<&str> = comps.iter().map(String::as_str).collect();
+    let prefixes = intern_prefixes(elab, &parts)?;
+    Ok((comps, prefixes))
+}
+
 /// Intern every prefix of a dotted name: `prefixes[k]` is the name of
 /// `parts[..=k]`. Same store discipline as `intern_components` (below),
 /// which is the last element. `resolve::resolve_local_name` /
@@ -582,8 +593,9 @@ pub(crate) fn intern_components(elab: &mut TermElabM, parts: &[&str]) -> Result<
 /// misrouting hazard, which is how the divergence surfaced as an
 /// unrelated existing name (`Nat.brecOn.go`) rather than a clean miss).
 ///
-/// Splits on every `.` and keeps `«»` verbatim; `ident_components` is
-/// the escape-aware splitter (used for field names).
+/// Splits on every `.` and keeps `«»` verbatim: for the elaborator's own
+/// built-in names only. A SOURCE identifier goes through
+/// `ident_components` / `ident_prefixes`, which decode `«»`.
 pub(crate) fn intern_dotted(elab: &mut TermElabM, raw: &str) -> Result<NameId, ElabError> {
     let parts: Vec<&str> = raw.split('.').collect();
     intern_components(elab, &parts)

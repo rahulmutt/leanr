@@ -195,16 +195,11 @@ pub(crate) fn elab_level(
         ("<ident>", NodeOrToken::Token(tok)) => {
             let raw = tok.text();
             let base = elab.view.store;
-            let s = elab
-                .mctx
-                .store_mut()
-                .intern_str(Some(base), raw)
-                .map_err(leanr_meta::MetaError::from)?;
-            let name_id = elab
-                .mctx
-                .store_mut()
-                .name_str(Some(base), None, s)
-                .map_err(leanr_meta::MetaError::from)?;
+            // `stx.getId`: decoded, so `Sort «u»` is the level `u`
+            // (`command/view.rs` decodes the `.{«u»}` names the same way).
+            let comps = crate::app::head::ident_components(raw)?;
+            let parts: Vec<&str> = comps.iter().map(String::as_str).collect();
+            let name_id = crate::app::head::intern_components(elab, &parts)?;
             if elab.level_names.contains(&name_id) {
                 // `Some(base)`: a universe name such as `u` usually already
                 // exists in the environment's store, so `name_id` is a
