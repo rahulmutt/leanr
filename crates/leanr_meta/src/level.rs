@@ -533,7 +533,7 @@ impl<'e> MetaCtx<'e> {
     // Small id-native Level primitives with no existing port
     // ===================================================================
 
-    /// oracle: `mkLevelMax'`/`mkLevelMaxCore` (Level.lean:518-538) — a
+    /// oracle: `mkLevelMax'`/`mkLevelMaxCore` (Level.lean:519-537) — a
     /// CHEAP, non-canonicalizing simplification, distinct from the
     /// kernel's full `mk_max`/[`Level::mk_max_pair`] (level.cpp:81-98,
     /// leanr_kernel's `level.rs`): no sorting, no flattening beyond one
@@ -543,7 +543,25 @@ impl<'e> MetaCtx<'e> {
     /// DecLevel.lean call sites use `mkLevelMax'`, never the kernel's
     /// `mkLevelMax`/`mk_max_pair`), so reusing `leanr_kernel`'s
     /// `mk_max_pair` here would be transcribing the WRONG function.
-    fn mk_level_max_prime(&mut self, u: LevelId, v: LevelId) -> Result<LevelId, MetaError> {
+    pub(crate) fn mk_level_max_prime(
+        &mut self,
+        u: LevelId,
+        v: LevelId,
+    ) -> Result<LevelId, MetaError> {
+        self.mk_level_max_core(u, v, |c| {
+            Ok(c.scratch.level_max(Some(c.view.store), u, v)?)
+        })
+    }
+
+    /// oracle: `mkLevelMaxCore u v elseK` (Level.lean:519-533); shared by
+    /// `mkLevelMax'` (`else_k` builds `max u v`) and `simpLevelMax'`
+    /// (`else_k` returns the default).
+    fn mk_level_max_core(
+        &mut self,
+        u: LevelId,
+        v: LevelId,
+        else_k: impl FnOnce(&mut Self) -> Result<LevelId, MetaError>,
+    ) -> Result<LevelId, MetaError> {
         if u == v {
             return Ok(u);
         }
@@ -564,7 +582,80 @@ impl<'e> MetaCtx<'e> {
         if ub == vb {
             return Ok(if uk >= vk { u } else { v });
         }
-        Ok(self.scratch.level_max(Some(self.view.store), u, v)?)
+        else_k(self)
+    }
+
+    /// oracle: `mkLevelIMaxCore u v elseK` (Level.lean:542-547), branch
+    /// order verbatim: `isNeverZero v` -> `mkLevelMax'`; `isZero v` -> `v`;
+    /// `isZero u` -> `v`; `u == v` -> `u`; else `elseK`. Shared by
+    /// `mkLevelIMax'` and `simpLevelIMax'` (Level.lean:549-554).
+    fn mk_level_imax_core(
+        &mut self,
+        u: LevelId,
+        v: LevelId,
+        else_k: impl FnOnce(&mut Self) -> Result<LevelId, MetaError>,
+    ) -> Result<LevelId, MetaError> {
+        if self.level_is_never_zero(v)? {
+            self.mk_level_max_prime(u, v)
+        } else if self.level_is_zero(v) || self.level_is_zero(u) {
+            Ok(v)
+        } else if u == v {
+            Ok(u)
+        } else {
+            else_k(self)
+        }
+    }
+
+    /// oracle: `Level.updateSucc!Impl` (Level.lean:564-567). A non-`succ`
+    /// `orig` is the oracle's `panic!`; here it is an internal error.
+    pub(crate) fn update_level_succ(
+        &mut self,
+        orig: LevelId,
+        a2: LevelId,
+    ) -> Result<LevelId, MetaError> {
+        let base = Some(self.view.store);
+        match *self.scratch.level_row(base, orig) {
+            LevelRow::Succ(a) if a == a2 => Ok(orig),
+            LevelRow::Succ(_) => Ok(self.scratch.level_succ(base, a2)?),
+            _ => Err(MetaError::MVar("updateSucc!: succ level expected".into())),
+        }
+    }
+
+    /// oracle: `Level.updateMax!Impl` (Level.lean:575-578): unchanged
+    /// children -> `simpLevelMax' a2 b2 orig`; else `mkLevelMax'`.
+    /// `ptrEq` is id equality (hash-consed).
+    pub(crate) fn update_level_max(
+        &mut self,
+        orig: LevelId,
+        a2: LevelId,
+        b2: LevelId,
+    ) -> Result<LevelId, MetaError> {
+        match *self.scratch.level_row(Some(self.view.store), orig) {
+            LevelRow::Max(a, b) if a == a2 && b == b2 => {
+                self.mk_level_max_core(a2, b2, |_| Ok(orig))
+            }
+            LevelRow::Max(..) => self.mk_level_max_prime(a2, b2),
+            _ => Err(MetaError::MVar("updateMax!: max level expected".into())),
+        }
+    }
+
+    /// oracle: `Level.updateIMax!Impl` (Level.lean:586-589): unchanged
+    /// children -> `simpLevelIMax' a2 b2 orig`; else `mkLevelIMax'`.
+    pub(crate) fn update_level_imax(
+        &mut self,
+        orig: LevelId,
+        a2: LevelId,
+        b2: LevelId,
+    ) -> Result<LevelId, MetaError> {
+        match *self.scratch.level_row(Some(self.view.store), orig) {
+            LevelRow::IMax(a, b) if a == a2 && b == b2 => {
+                self.mk_level_imax_core(a2, b2, |_| Ok(orig))
+            }
+            LevelRow::IMax(..) => self.mk_level_imax_core(a2, b2, |c| {
+                Ok(c.scratch.level_imax(Some(c.view.store), a2, b2)?)
+            }),
+            _ => Err(MetaError::MVar("updateIMax!: imax level expected".into())),
+        }
     }
 
     /// oracle: the `subsumes` local of `mkLevelMaxCore` (Level.lean:

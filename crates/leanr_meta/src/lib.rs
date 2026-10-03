@@ -10,12 +10,14 @@
 //!
 //! spec: docs/superpowers/specs/2026-07-20-m4a-meta-core-design.md
 
+mod abstract_proofs;
 mod assign;
 #[cfg(test)]
 mod aux_recursor;
 mod cache;
 mod check;
 mod check_assignment;
+mod closure;
 mod coe;
 mod config;
 mod defeq;
@@ -28,11 +30,13 @@ mod instances;
 mod kabstract;
 mod lazy_delta;
 mod level;
+mod level_params;
 mod local_decl_kind;
 mod local_entry;
 mod local_instance;
 mod local_snapshot;
 mod loose_bvar;
+mod max_height;
 mod metactx;
 mod mk_binding;
 mod mvar_ctx;
@@ -44,9 +48,14 @@ mod transform;
 mod transparency;
 mod whnf;
 
+pub use abstract_proofs::AuxLemmas;
+pub use closure::ClosureResult;
 pub use config::{Config, ProjReduction};
 pub use discr_tree::DiscrTree;
 pub use error::MetaError;
+pub use level_params::{
+    name_cmp, sort_decl_level_params, CollectLevelParams, LevelMVarToParamResult,
+};
 pub use local_decl_kind::LocalDeclKind;
 pub use local_snapshot::LocalCtxSnapshot;
 pub use metactx::{EnvExtensions, MetaCtx, MetaSnapshot, DEFAULT_STEP_BUDGET};

@@ -603,3 +603,183 @@ fn check_declaration_returns_survivor_without_mutating_env() {
     // check_declaration must NOT have inserted anything into env.
     assert_eq!(env.len(), before);
 }
+
+// ---- add_decl_in (M4c-1 P1 task 1) -------------------------------------
+
+/// A declaration whose NAME (and type) live only in a caller-owned scratch
+/// store is checked against that store and admitted with persistent ids.
+#[test]
+fn add_decl_in_admits_a_declaration_built_in_a_caller_scratch_store() {
+    let mut env = mini::env();
+    let len_before = env.len();
+    let mut scratch = Store::scratch();
+    let name = scratch
+        .intern_name(Some(&env.store), &nm("scratchOnlyAx"))
+        .unwrap()
+        .unwrap();
+    assert!(
+        name.is_scratch(),
+        "precondition: the name is new, so scratch-region"
+    );
+    let ty = scratch
+        .intern_expr(Some(&env.store), &mini::sort0())
+        .unwrap();
+    env.add_decl_in(
+        &mut scratch,
+        Declaration::Axiom(AxiomVal {
+            val: ConstantVal {
+                name,
+                level_params: vec![],
+                ty,
+            },
+            is_unsafe: false,
+        }),
+    )
+    .unwrap();
+    assert_eq!(env.len(), len_before + 1);
+    let persistent = nm_id(&mut env, "scratchOnlyAx");
+    let ci = env
+        .get(persistent)
+        .expect("admitted under its persistent id")
+        .clone();
+    assert!(matches!(ci, ConstantInfo::Axiom(_)));
+    assert_no_scratch_ids(&env.store, &ci);
+}
+
+/// Review Focus 5: a rejected scratch-built declaration leaves no trace.
+#[test]
+fn add_decl_in_rejection_leaves_env_unchanged() {
+    let mut env = mini::env();
+    let len_before = env.len();
+    let mut scratch = Store::scratch();
+    let name = scratch
+        .intern_name(Some(&env.store), &nm("scratchBadThm"))
+        .unwrap()
+        .unwrap();
+    // `theorem scratchBadThm : B := bt` -- `B : Type`, not a Prop.
+    let ty = scratch
+        .intern_expr(Some(&env.store), &mini::cst("B", vec![]))
+        .unwrap();
+    let value = scratch
+        .intern_expr(Some(&env.store), &mini::cst("bt", vec![]))
+        .unwrap();
+    let r = env.add_decl_in(
+        &mut scratch,
+        Declaration::Thm(TheoremVal {
+            val: ConstantVal {
+                name,
+                level_params: vec![],
+                ty,
+            },
+            value,
+            all: vec![name],
+        }),
+    );
+    assert!(r.is_err(), "a non-Prop theorem type is rejected");
+    assert_eq!(env.len(), len_before);
+}
+
+/// R5: two declarations in ONE caller scratch store; the second references
+/// the first by its SCRATCH `NameId` after the first was admitted.
+#[test]
+fn add_decl_in_later_decl_references_earlier_one_by_scratch_id() {
+    let mut env = mini::env();
+    let len_before = env.len();
+    let mut scratch = Store::scratch();
+    let a = scratch
+        .intern_name(Some(&env.store), &nm("scratchA"))
+        .unwrap()
+        .unwrap();
+    let b = scratch
+        .intern_name(Some(&env.store), &nm("scratchB"))
+        .unwrap()
+        .unwrap();
+    assert!(a.is_scratch() && b.is_scratch());
+    let sort0 = scratch
+        .intern_expr(Some(&env.store), &mini::sort0())
+        .unwrap();
+    // Built BEFORE scratchA is admitted, so `scratchA` here is a scratch id
+    // (interning after admission would find the persistent name in base).
+    let ty = scratch
+        .intern_expr(Some(&env.store), &mini::cst("scratchA", vec![]))
+        .unwrap();
+    // axiom scratchA : Prop
+    env.add_decl_in(
+        &mut scratch,
+        Declaration::Axiom(AxiomVal {
+            val: ConstantVal {
+                name: a,
+                level_params: vec![],
+                ty: sort0,
+            },
+            is_unsafe: false,
+        }),
+    )
+    .unwrap();
+    // axiom scratchB : scratchA   (type mentions the earlier decl by scratch id)
+    env.add_decl_in(
+        &mut scratch,
+        Declaration::Axiom(AxiomVal {
+            val: ConstantVal {
+                name: b,
+                level_params: vec![],
+                ty,
+            },
+            is_unsafe: false,
+        }),
+    )
+    .unwrap();
+    assert_eq!(env.len(), len_before + 2);
+    let pb = nm_id(&mut env, "scratchB");
+    let ci = env.get(pb).expect("scratchB admitted").clone();
+    assert_no_scratch_ids(&env.store, &ci);
+}
+
+/// R5: promoted ids of a rejected declaration are harmless orphans: the
+/// constant count is unchanged and the same name is then admittable.
+#[test]
+fn add_decl_in_rejected_then_same_name_admitted() {
+    let mut env = mini::env();
+    let len_before = env.len();
+    let mut scratch = Store::scratch();
+    let name = scratch
+        .intern_name(Some(&env.store), &nm("scratchRetry"))
+        .unwrap()
+        .unwrap();
+    let bad_ty = scratch
+        .intern_expr(Some(&env.store), &mini::cst("B", vec![]))
+        .unwrap();
+    let value = scratch
+        .intern_expr(Some(&env.store), &mini::cst("bt", vec![]))
+        .unwrap();
+    let r = env.add_decl_in(
+        &mut scratch,
+        Declaration::Thm(TheoremVal {
+            val: ConstantVal {
+                name,
+                level_params: vec![],
+                ty: bad_ty,
+            },
+            value,
+            all: vec![name],
+        }),
+    );
+    assert!(r.is_err());
+    assert_eq!(env.len(), len_before);
+    let sort0 = scratch
+        .intern_expr(Some(&env.store), &mini::sort0())
+        .unwrap();
+    env.add_decl_in(
+        &mut scratch,
+        Declaration::Axiom(AxiomVal {
+            val: ConstantVal {
+                name,
+                level_params: vec![],
+                ty: sort0,
+            },
+            is_unsafe: false,
+        }),
+    )
+    .unwrap();
+    assert_eq!(env.len(), len_before + 1);
+}

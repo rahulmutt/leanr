@@ -476,6 +476,37 @@ pub(crate) fn c(ctx: &mut MetaCtx, name: &str) -> ExprId {
     const_expr_for(ctx, n.expect("non-empty name"))
 }
 
+/// `Level.param` for a root name.
+pub(crate) fn lparam(ctx: &mut MetaCtx, name: &str) -> leanr_kernel::bank::LevelId {
+    let base = Some(ctx.view.store);
+    let s = ctx.scratch.intern_str(base, name).expect("intern");
+    let n = ctx.scratch.name_str(base, None, s).expect("name");
+    ctx.scratch.level_param(base, Some(n)).expect("level")
+}
+
+/// `succ^n zero`.
+pub(crate) fn lit_level(ctx: &mut MetaCtx, n: u32) -> leanr_kernel::bank::LevelId {
+    let base = Some(ctx.view.store);
+    let mut l = ctx.scratch.level_zero(base).expect("level");
+    for _ in 0..n {
+        l = ctx.scratch.level_succ(base, l).expect("level");
+    }
+    l
+}
+
+/// `Expr.const` for a possibly dotted name with EXPLICIT universe levels
+/// (unlike [`c`], which fills every level with `zero`).
+pub(crate) fn cu(ctx: &mut MetaCtx, name: &str, levels: &[leanr_kernel::bank::LevelId]) -> ExprId {
+    let base = Some(ctx.view.store);
+    let mut n = None;
+    for part in name.split('.') {
+        let s = ctx.scratch.intern_str(base, part).expect("intern");
+        n = Some(ctx.scratch.name_str(base, n, s).expect("name"));
+    }
+    let ls = ctx.scratch.intern_level_list(base, levels).expect("levels");
+    ctx.scratch.expr_const(base, n, ls).expect("const")
+}
+
 pub(crate) fn app(ctx: &mut MetaCtx, f: ExprId, a: ExprId) -> ExprId {
     let base = Some(ctx.view.store);
     ctx.scratch.expr_app(base, f, a).expect("app")
@@ -757,4 +788,34 @@ pub(crate) fn with_matcher_ctx<R>(f: impl FnOnce(&mut MetaCtx) -> R) -> R {
         },
     );
     f(&mut ctx)
+}
+
+/// `fun (n : N) => N.succ^depth n` — a term deep enough to overflow an
+/// unguarded native recursion (final review Important #2).
+pub(crate) fn deep_succ_lambda(ctx: &mut MetaCtx, depth: usize) -> ExprId {
+    let n_ty = c(ctx, "N");
+    let succ = c(ctx, "N.succ");
+    let cp = ctx.lctx_checkpoint();
+    let n = ctx
+        .push_local_decl(None, n_ty, leanr_kernel::BinderInfo::Default)
+        .expect("push");
+    let mut body = n;
+    for _ in 0..depth {
+        body = app(ctx, succ, body);
+    }
+    let e = ctx.mk_lambda(&[n], body).expect("mk_lambda");
+    ctx.lctx_restore(cp);
+    e
+}
+
+/// Run `f` on a thread with an 8 MiB stack (the main-thread default), so
+/// a deep-term test measures `guarded`, not the 2 MiB test-thread stack.
+/// An unguarded recursion aborts the whole test binary (SIGABRT).
+pub(crate) fn on_8mib_stack(f: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(f)
+        .expect("spawn")
+        .join()
+        .expect("deep-term thread panicked");
 }

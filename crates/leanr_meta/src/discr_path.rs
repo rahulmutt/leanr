@@ -183,7 +183,7 @@
 //!   only.
 //! - `isAlwaysZero`'s general `max`/`imax`-recursive form and
 //!   `instantiateLevelMVars` (InferType.lean:261-267, :326, inside
-//!   `isProp`) — `is_proof` below delegates to the EXISTING
+//!   `isProp`) — `is_proof` (now in `lazy_delta.rs`) delegates to the EXISTING
 //!   `MetaCtx::is_prop` (`lazy_delta.rs`, already
 //!   `isDefEqProofIrrel`'s own `isProp` transcription) rather than a
 //!   second copy; that function's own doc comment already narrows
@@ -557,26 +557,12 @@ impl<'e> MetaCtx<'e> {
     /// `.default` transparency for the TYPE's own whnf regardless of
     /// `mk_path`'s ambient `.reducible` setting, saving/restoring around
     /// just that one nested call — the same primitive `is_proof`/`is_prop`
-    /// below reuse (via the existing `MetaCtx::is_prop`) rather than a
+    /// (`lazy_delta.rs`) reuse (via the existing `MetaCtx::is_prop`) rather than a
     /// second hand-rolled save/restore.
     fn is_type(&mut self, e: ExprId) -> Result<bool, MetaError> {
         let ty = self.infer_type(e)?;
         let w = self.whnf_default(ty)?;
         Ok(matches!(self.node(w), Node::Sort { .. }))
-    }
-
-    /// oracle: `isProof` (InferType.lean:448-451), skipping `isProofQuick`
-    /// (same "optimization only" posture as `is_type` above): `isProof e
-    /// = isProp (inferType e)`. `MetaCtx::is_prop` (`lazy_delta.rs`,
-    /// already `isDefEqProofIrrel`'s own transcription of `isProp`,
-    /// InferType.lean:323-330) is reused directly rather than duplicated —
-    /// same narrowing it already documents (`isAlwaysZero` narrowed to
-    /// literal `Level::Zero`, not the general `max`/`imax`-recursive
-    /// predicate): incompleteness-only, and this task's own fixture never
-    /// needs the general case either.
-    fn is_proof(&mut self, e: ExprId) -> Result<bool, MetaError> {
-        let ty = self.infer_type(e)?;
-        self.is_prop(ty)
     }
 
     /// oracle: `reduceDT` (Main.lean:213-214).

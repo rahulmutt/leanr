@@ -24,8 +24,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::decl::{
-    AxiomVal, ConstantInfo, ConstantVal, ConstructorVal, Declaration, DefinitionVal, InductiveVal,
-    OpaqueVal, QuotVal, RecursorRule, RecursorVal, TheoremVal,
+    AxiomVal, ConstantInfo, ConstantVal, ConstructorVal, Declaration, DefinitionVal, InductiveType,
+    InductiveVal, OpaqueVal, QuotVal, RecursorRule, RecursorVal, TheoremVal,
 };
 // `intern_constant_info`/`intern_declaration` are `#[cfg(test)]` in
 // `decl.rs` (term-bank phase 3's demotion — see its module doc); only
@@ -504,18 +504,49 @@ impl Environment {
     /// e.g. via `intern_module`/`from_modules`, or extracted from a
     /// `ConstantInfo` that was) — this method's freshly-created `scratch`
     /// cannot resolve a scratch id minted by some OTHER scratch store the
-    /// caller may have used to build `d`.
+    /// caller may have used to build `d`. A declaration built in a
+    /// caller-owned scratch store goes through [`Environment::add_decl_in`]
+    /// instead, which promotes it first (see its scratch lifecycle
+    /// contract).
     pub fn add_decl(&mut self, d: Declaration) -> Result<(), KernelError> {
-        let mut scratch = Store::scratch();
+        self.add_decl_in(&mut Store::scratch(), d)
+    }
+
+    /// [`Environment::add_decl`] over a CALLER-OWNED scratch store (M4c-1
+    /// P1, R5): `d`'s ids may be scratch-region ids minted in `scratch`
+    /// itself (an elaborator's per-declaration store). Every id in `d` is
+    /// first promoted into `self.store` (structural re-intern, so a
+    /// scratch name equal to an already-admitted constant lands on its
+    /// persistent id), and the all-persistent declaration is then checked
+    /// and admitted exactly as `add_decl` always did. This is what lets a
+    /// later declaration in the same scratch store reference an earlier,
+    /// already-admitted one by its scratch id. On any check failure the
+    /// set of constants is unchanged, but the promoted ids may remain in
+    /// `self.store` as orphans, unreachable from `constants`.
+    ///
+    /// **Scratch lifecycle contract.** Build every declaration of the
+    /// batch in `scratch` BEFORE the first `add_decl_in`. After it, use
+    /// `scratch` only as the argument to further `add_decl_in` calls, then
+    /// drop it: interning NEW terms through it with `base = self.store`
+    /// after a promotion breaks "equal ids mean equal structure" (a
+    /// scratch row and the persistent row it was promoted to can then
+    /// both be reachable for one structure). M4c-2's file loop needs a
+    /// fresh scratch store per declaration. Ids from a DIFFERENT scratch
+    /// store are a caller error, not an `Err`: promotion indexes
+    /// `scratch` by the id's row, so it panics (index out of bounds) or
+    /// silently reads an unrelated row.
+    pub fn add_decl_in(&mut self, scratch: &mut Store, d: Declaration) -> Result<(), KernelError> {
+        let d = promote_declaration(&mut self.store, scratch, d)?;
+        let mut check_scratch = Store::scratch();
         let Admitted {
             survivors,
             quot_init,
         } = {
             let view = self.view();
-            check_declaration(view, &mut scratch, d)?
+            check_declaration(view, &mut check_scratch, d)?
         };
         for ci in survivors {
-            self.add_core(&scratch, ci)?;
+            self.add_core(&check_scratch, ci)?;
         }
         if quot_init {
             self.quot_initialized = true;
@@ -784,6 +815,90 @@ pub(crate) fn promote_constant_info(
     ci: &ConstantInfo,
 ) -> Result<ConstantInfo, KernelError> {
     xlate_constant_info(&mut Promoter(base), scratch, ci)?.ok_or(KernelError::BankExhausted)
+}
+
+/// Promote every id in a `Declaration` into `base` (the declaration-level
+/// twin of `promote_constant_info`). Persistent ids pass through.
+fn promote_declaration(
+    base: &mut Store,
+    scratch: &Store,
+    d: Declaration,
+) -> Result<Declaration, KernelError> {
+    fn cv(base: &mut Store, scratch: &Store, v: ConstantVal) -> Result<ConstantVal, KernelError> {
+        let level_params = v
+            .level_params
+            .into_iter()
+            .map(|p| promote_name(base, scratch, p))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ConstantVal {
+            name: promote_name(base, scratch, v.name)?,
+            level_params,
+            ty: promote(base, scratch, v.ty)?,
+        })
+    }
+    fn names(
+        base: &mut Store,
+        scratch: &Store,
+        ns: Vec<NameId>,
+    ) -> Result<Vec<NameId>, KernelError> {
+        ns.into_iter()
+            .map(|n| promote_name(base, scratch, n))
+            .collect()
+    }
+    Ok(match d {
+        Declaration::Axiom(v) => Declaration::Axiom(AxiomVal {
+            val: cv(base, scratch, v.val)?,
+            is_unsafe: v.is_unsafe,
+        }),
+        Declaration::Defn(v) => Declaration::Defn(DefinitionVal {
+            val: cv(base, scratch, v.val)?,
+            value: promote(base, scratch, v.value)?,
+            hints: v.hints,
+            safety: v.safety,
+            all: names(base, scratch, v.all)?,
+        }),
+        Declaration::Thm(v) => Declaration::Thm(TheoremVal {
+            val: cv(base, scratch, v.val)?,
+            value: promote(base, scratch, v.value)?,
+            all: names(base, scratch, v.all)?,
+        }),
+        Declaration::Opaque(v) => Declaration::Opaque(OpaqueVal {
+            val: cv(base, scratch, v.val)?,
+            value: promote(base, scratch, v.value)?,
+            is_unsafe: v.is_unsafe,
+            all: names(base, scratch, v.all)?,
+        }),
+        Declaration::Quot => Declaration::Quot,
+        Declaration::Inductive {
+            lparams,
+            nparams,
+            types,
+            is_unsafe,
+        } => {
+            let lparams = names(base, scratch, lparams)?;
+            let mut out = Vec::with_capacity(types.len());
+            for t in types {
+                let ctors = t
+                    .ctors
+                    .into_iter()
+                    .map(|(n, ty)| {
+                        Ok((promote_name(base, scratch, n)?, promote(base, scratch, ty)?))
+                    })
+                    .collect::<Result<Vec<_>, KernelError>>()?;
+                out.push(InductiveType {
+                    name: promote_name(base, scratch, t.name)?,
+                    ty: promote(base, scratch, t.ty)?,
+                    ctors,
+                });
+            }
+            Declaration::Inductive {
+                lparams,
+                nparams,
+                types: out,
+                is_unsafe,
+            }
+        }
+    })
 }
 
 /// Read-only twin of `promote_constant_info`. Translates a scratch-region
