@@ -34,6 +34,7 @@ mod local_entry;
 mod local_instance;
 mod local_snapshot;
 mod loose_bvar;
+mod max_height;
 mod metactx;
 mod mk_binding;
 mod mvar_ctx;
