@@ -429,6 +429,7 @@ impl<'e> TermElabM<'e> {
                 ty,
                 lctx,
                 kind,
+                num_scope_args: 0,
             },
         );
         let mvar_id = self

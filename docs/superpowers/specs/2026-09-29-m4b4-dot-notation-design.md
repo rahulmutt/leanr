@@ -549,17 +549,21 @@ planned one at a time after their predecessor merges.
     `p2/lval-two-binders` source swap) and `(fun (x : Nat) f => f) Nat.zero
     Nat.succ`. Root cause: leanr has no `numScopeArgs` constant
     approximation (`Meta/ExprDefEq.lean:1271-1278`, `processConstApprox`).
+    CLOSED by the numScopeArgs slice
+    (`2026-10-03-num-scope-args-design.md`); `p2/app-fn-after-lval` is
+    recorded.
   - The same gap blocks the corpus record the plan wanted,
     `p2/app-fn-after-lval`: `(fun x f => f x.1) (Prod.mk Nat.zero Nat.zero)
     Nat.succ` gives `FunctionExpected` while the oracle accepts it. The
     record was dropped, so nothing tests the lval producer feeding an
-    mvar-typed app head.
+    mvar-typed app head. CLOSED — recorded as `p2/app-fn-after-lval`.
   - `(fun f x => Nat.succ x.1) Nat.succ (Prod.mk Nat.zero Nat.zero)` gives
     `InvalidProjection{TypeUnknown}` while the oracle accepts it. Probed:
     annotating only `f : Nat -> Nat` still fails, annotating `x : Prod Nat
     Nat` passes, so `x`'s type is a scope-dependent mvar (`?γ f`) resumed as
     `?γ Nat.succ =?= Prod Nat Nat`. Consistent with the `numScopeArgs` gap;
-    not confirmed by a fix.
+    not confirmed by a fix. CLOSED — recorded as
+    `nsa/lval-after-fn-binder`.
   - `p2/lval-reducible-alias` and the `fun (x : outParam _) => x.1`
     rejection do not pin `whnfR`; only `postpone_smoke.rs`'s
     `is_mvar_app_sees_through_reducible_definitions` does.

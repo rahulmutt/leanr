@@ -1060,6 +1060,7 @@ mod tests {
                     ty: sort0,
                     lctx: LocalCtxSnapshot::empty(),
                     kind: MVarKind::Natural,
+                    num_scope_args: 0,
                 },
             );
             let mexpr = ctx.scratch.expr_mvar(base, Some(m_name)).expect("mvar");

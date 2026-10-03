@@ -2907,6 +2907,7 @@ mod tests {
                     ty,
                     lctx: LocalCtxSnapshot::empty(),
                     kind: MVarKind::Natural,
+                    num_scope_args: 0,
                 },
             );
 

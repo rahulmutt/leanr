@@ -2455,7 +2455,7 @@ impl<'e> MetaCtx<'e> {
     /// leanr's `MVarDecl` has no `localInsts` field: a decl's local
     /// instances are derived from its `lctx` snapshot, so `outer` is the
     /// whole of the oracle's `(lctx, localInsts)` pair. For `xs = #[]`,
-    /// `mk_aux_mvar_at(outer, d, Natural, None)` with `outer =
+    /// `mk_aux_mvar_at(outer, d, Natural, None, 0)` with `outer =
     /// current_lctx()` is exactly `mk_aux_mvar(d)` (`assign.rs`), and
     /// `mkAppN ?m #[]` is `?m`.
     ///
@@ -2499,7 +2499,7 @@ impl<'e> MetaCtx<'e> {
                     self.mk_forall(xs, d)?
                 };
                 let (m, _) =
-                    self.mk_aux_mvar_at(Arc::clone(&outer), m_ty, MVarKind::Natural, None)?;
+                    self.mk_aux_mvar_at(Arc::clone(&outer), m_ty, MVarKind::Natural, None, 0)?;
                 let arg = self.mk_app_spine(m, xs)?;
                 subst.push(arg);
                 inst_val = self.scratch.expr_app(base, inst_val, arg)?;
@@ -2610,7 +2610,7 @@ impl<'e> MetaCtx<'e> {
                 MVarKind::Natural
             };
             let lctx = self.current_lctx();
-            let (m, _) = self.mk_aux_mvar_at(lctx, d, kind, binder_name)?;
+            let (m, _) = self.mk_aux_mvar_at(lctx, d, kind, binder_name, 0)?;
             mvars.push(m);
             bis.push(binder_info);
             cur = body;

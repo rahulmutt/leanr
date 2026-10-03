@@ -258,10 +258,24 @@ impl<'e> MetaCtx<'e> {
         Ok(Arc::new(lctx.reduced(&pairs, |f| self.fvar_id_of(f))))
     }
 
+    /// oracle `mkMVarApp` (`:1090-1097`): whether `x` is NOT applied.
+    /// A syntheticOpaque mvar applies every fvar; otherwise a genuine
+    /// let-bound fvar is skipped. `LocalDecl.isLet` is FALSE for a nondep
+    /// ldecl, so a `have` is applied like a cdecl. (The oracle also skips
+    /// non-fvar entries; leanr's `to_revert` holds fvars only, since
+    /// `collect_forward_deps` reads lctx entries.)
+    fn mvar_app_skips(&self, x: ExprId, lctx: &LocalCtxSnapshot, kind: crate::MVarKind) -> bool {
+        kind != crate::MVarKind::SyntheticOpaque
+            && self.fvar_id_of(x).is_some_and(|id| {
+                lctx.lctx().get(id).is_some_and(|d| d.value.is_some())
+                    && lctx.entry(id).is_some_and(|en| !en.nondep)
+            })
+    }
+
     /// oracle: `mkMVarApp` (`:1090-1097`) — `mvar` applied to `xs`, first
     /// declared innermost, so that after abstraction the arguments read
     /// `?new #(n-1) … #0`. A genuine let-bound fvar is skipped unless
-    /// `kind` is syntheticOpaque (see the loop body).
+    /// `kind` is syntheticOpaque (see `mvar_app_skips`).
     pub(crate) fn mk_mvar_app(
         &mut self,
         mvar: ExprId,
@@ -271,16 +285,7 @@ impl<'e> MetaCtx<'e> {
     ) -> Result<ExprId, MetaError> {
         let mut e = mvar;
         for x in xs {
-            // oracle `:1094-1097`: a syntheticOpaque metavariable applies
-            // every fvar; otherwise a genuine let-bound one is skipped.
-            // `LocalDecl.isLet` is FALSE for a nondep ldecl, so a `have`
-            // is applied like a cdecl.
-            let is_let = kind != crate::MVarKind::SyntheticOpaque
-                && self.fvar_id_of(*x).is_some_and(|id| {
-                    lctx.lctx().get(id).is_some_and(|d| d.value.is_some())
-                        && lctx.entry(id).is_some_and(|en| !en.nondep)
-                });
-            if is_let {
+            if self.mvar_app_skips(*x, lctx, kind) {
                 continue;
             }
             e = self.scratch.expr_app(Some(self.view.store), e, *x)?;
@@ -635,6 +640,7 @@ impl<'e> MetaCtx<'e> {
         };
         let kind = decl.kind;
         let decl_ty = decl.ty;
+        let decl_scope_args = decl.num_scope_args;
         let mvar_lctx = Arc::clone(&decl.lctx);
 
         let to_revert = self.get_in_scope(&mvar_lctx, xs);
@@ -683,7 +689,15 @@ impl<'e> MetaCtx<'e> {
             true,
             &mut aux_cache,
         )?;
-        let (new_mvar, new_id) = self.mk_aux_mvar_at(new_lctx, new_ty, kind, None)?;
+        // oracle `:1207-1208`: `numScopeArgs := mvarDecl.numScopeArgs +
+        // result.getAppNumArgs`. The count is what `mk_mvar_app` actually
+        // applies, NOT `to_revert.len()`: it skips genuine lets.
+        let applied = to_revert
+            .iter()
+            .filter(|x| !self.mvar_app_skips(**x, &mvar_lctx, kind))
+            .count();
+        let (new_mvar, new_id) =
+            self.mk_aux_mvar_at(new_lctx, new_ty, kind, None, decl_scope_args + applied)?;
         let result = self.mk_mvar_app(new_mvar, &to_revert, &mvar_lctx, kind)?;
 
         if kind != crate::MVarKind::SyntheticOpaque {
@@ -919,6 +933,89 @@ impl<'e> MetaCtx<'e> {
 mod tests {
     use crate::test_support::{fresh_fvar, fresh_mvar, with_ctx};
     use leanr_kernel::bank::terms::Node;
+
+    /// The `num_scope_args` of the head of `?mid`'s assignment (`?new
+    /// a…`), for a NON-opaque original, which `elim_mvar` assigns outright.
+    fn assigned_head_scope_args(ctx: &mut crate::MetaCtx, mid: crate::MVarId) -> usize {
+        let assigned = ctx
+            .mctx()
+            .assignment(mid)
+            .expect("a non-opaque original is assigned outright");
+        let head = ctx.get_app_fn(assigned);
+        let Node::MVar { id: Some(n) } = ctx.node(head) else {
+            panic!("the assignment's head is the auxiliary metavariable");
+        };
+        ctx.mctx()
+            .decl(crate::MVarId(n))
+            .expect("declared")
+            .num_scope_args
+    }
+
+    /// oracle `MetavarContext.lean:1207-1208`: the auxiliary mvar's
+    /// `numScopeArgs` is the original's plus `result.getAppNumArgs`.
+    /// Fresh original (0) abstracted over one fvar -> 1.
+    #[test]
+    fn elim_mvar_counts_the_applied_reverted_fvars() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            let lctx = ctx.current_lctx();
+            let (m, mid) = ctx
+                .mk_aux_mvar_at(lctx, sort0, crate::MVarKind::Natural, None, 0)
+                .expect("mvar under the binder");
+            let _ = ctx.elim_mvar_deps(&[a], m).expect("elim_mvar_deps");
+            assert_eq!(assigned_head_scope_args(ctx, mid), 1);
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// `mkMVarApp` (`:1090-1097`) skips a genuine let-bound fvar for a
+    /// non-opaque mvar, so `getAppNumArgs` is 1, not `toRevert.size` = 2.
+    #[test]
+    fn elim_mvar_does_not_count_a_skipped_let() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            let l = ctx.push_let_decl(None, sort0, a, false).expect("let");
+            let lctx = ctx.current_lctx();
+            let (m, mid) = ctx
+                .mk_aux_mvar_at(lctx, sort0, crate::MVarKind::Natural, None, 0)
+                .expect("mvar under the let");
+            let _ = ctx.elim_mvar_deps(&[a, l], m).expect("elim_mvar_deps");
+            assert_eq!(
+                assigned_head_scope_args(ctx, mid),
+                1,
+                "the let is reverted but not applied, so it is not counted"
+            );
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// A second abstraction adds to the count the first left: original
+    /// at 2, abstracted over one more fvar -> 3.
+    #[test]
+    fn elim_mvar_scope_args_accumulate_across_nested_abstractions() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+            let cp = ctx.lctx_checkpoint();
+            let a = fresh_fvar(ctx, sort0, "a");
+            let lctx = ctx.current_lctx();
+            let (m, mid) = ctx
+                .mk_aux_mvar_at(lctx, sort0, crate::MVarKind::Natural, None, 2)
+                .expect("an already-abstracted mvar");
+            let _ = ctx.elim_mvar_deps(&[a], m).expect("elim_mvar_deps");
+            assert_eq!(assigned_head_scope_args(ctx, mid), 3);
+            ctx.lctx_restore(cp);
+        });
+    }
 
     fn fvar_id(ctx: &crate::MetaCtx, e: leanr_kernel::bank::ExprId) -> leanr_kernel::bank::NameId {
         match ctx.node(e) {
@@ -1675,6 +1772,7 @@ mod tests {
                     ty: sort0,
                     lctx,
                     kind: crate::MVarKind::Natural,
+                    num_scope_args: 0,
                 },
             );
 
@@ -1742,7 +1840,7 @@ mod tests {
             let b = fresh_fvar(ctx, sort0, "b");
             let lctx = ctx.current_lctx();
             let (m, mid) = ctx
-                .mk_aux_mvar_at(lctx, sort0, crate::MVarKind::SyntheticOpaque, None)
+                .mk_aux_mvar_at(lctx, sort0, crate::MVarKind::SyntheticOpaque, None, 0)
                 .expect("opaque mvar under the binder");
 
             let out = ctx.elim_mvar_deps(&[a], m).expect("elim_mvar_deps");
@@ -1756,6 +1854,12 @@ mod tests {
                     };
                     let new_id = crate::MVarId(n);
                     assert_ne!(new_id, mid, "a FRESH metavariable");
+                    assert_eq!(
+                        ctx.mctx().decl(new_id).expect("declared").num_scope_args,
+                        1,
+                        "the opaque branch sets numScopeArgs too (`:1208` runs before \
+                         the kind split at `:1213`)"
+                    );
                     assert!(
                         ctx.mctx().assignment(mid).is_none(),
                         "the syntheticOpaque original is NOT assigned — only the \
@@ -1810,7 +1914,7 @@ mod tests {
             let a = fresh_fvar(ctx, sort0, "a");
             let lctx = ctx.current_lctx();
             let (m, mid) = ctx
-                .mk_aux_mvar_at(lctx, sort0, crate::MVarKind::Synthetic, None)
+                .mk_aux_mvar_at(lctx, sort0, crate::MVarKind::Synthetic, None, 0)
                 .expect("synthetic mvar under the binder");
 
             let _ = ctx.elim_mvar_deps(&[a], m).expect("elim_mvar_deps");
@@ -2093,7 +2197,13 @@ mod tests {
             // needs to touch it at all.
             let lctx_with_a = ctx.current_lctx();
             let (o, _oid) = ctx
-                .mk_aux_mvar_at(lctx_with_a, sort0, crate::MVarKind::SyntheticOpaque, None)
+                .mk_aux_mvar_at(
+                    lctx_with_a,
+                    sort0,
+                    crate::MVarKind::SyntheticOpaque,
+                    None,
+                    0,
+                )
                 .expect("?o under `a`");
 
             // `x` is the lambda's own fresh binder; only its scope is
@@ -2159,7 +2269,7 @@ mod tests {
             let a = fresh_fvar(ctx, sort0, "a");
             let lctx = ctx.current_lctx();
             let (m, mid) = ctx
-                .mk_aux_mvar_at(lctx, sort0, crate::MVarKind::SyntheticOpaque, None)
+                .mk_aux_mvar_at(lctx, sort0, crate::MVarKind::SyntheticOpaque, None, 0)
                 .expect("opaque mvar under the binder");
             let (_, pending) = ctx.mk_aux_mvar(sort0).expect("the pending mvar");
             // `z` is minted AFTER `?m`, so it is not in `?m`'s context
@@ -2234,7 +2344,7 @@ mod tests {
             let a = fresh_fvar(ctx, sort0, "a");
             let lctx_a = ctx.current_lctx();
             let (o, _oid) = ctx
-                .mk_aux_mvar_at(lctx_a, sort0, crate::MVarKind::SyntheticOpaque, None)
+                .mk_aux_mvar_at(lctx_a, sort0, crate::MVarKind::SyntheticOpaque, None, 0)
                 .expect("`?o` under `a`");
             let g_o = ctx.scratch.expr_app(base, g, o).expect("`g ?o`");
             let f_o = ctx.scratch.expr_app(base, f, o).expect("`f ?o`");
@@ -2244,7 +2354,7 @@ mod tests {
             let b = fresh_fvar(ctx, g_o, "b");
             let lctx_ab = ctx.current_lctx();
             let (m, _mid) = ctx
-                .mk_aux_mvar_at(lctx_ab, f_o, crate::MVarKind::Natural, None)
+                .mk_aux_mvar_at(lctx_ab, f_o, crate::MVarKind::Natural, None, 0)
                 .expect("`?m : f ?o` under `a`, `b`");
 
             let out = ctx.elim_mvar_deps(&[a, b], m).expect("elim_mvar_deps");
@@ -2316,12 +2426,12 @@ mod tests {
             let a = fresh_fvar(ctx, sort0, "a");
             let lctx_a = ctx.current_lctx();
             let (o, oid) = ctx
-                .mk_aux_mvar_at(lctx_a, sort0, crate::MVarKind::SyntheticOpaque, None)
+                .mk_aux_mvar_at(lctx_a, sort0, crate::MVarKind::SyntheticOpaque, None, 0)
                 .expect("`?o` under `a`");
             let b = fresh_fvar(ctx, o, "b");
             let lctx_ab = ctx.current_lctx();
             let (m, _mid) = ctx
-                .mk_aux_mvar_at(lctx_ab, o, crate::MVarKind::Natural, None)
+                .mk_aux_mvar_at(lctx_ab, o, crate::MVarKind::Natural, None, 0)
                 .expect("`?m : ?o` under `a`, `b`");
 
             let out = ctx.elim_mvar_deps(&[a, b], m).expect("elim_mvar_deps");

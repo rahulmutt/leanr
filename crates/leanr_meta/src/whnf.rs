@@ -3004,6 +3004,7 @@ mod tests {
                     ty: sort0,
                     lctx: LocalCtxSnapshot::empty(),
                     kind: MVarKind::Natural,
+                    num_scope_args: 0,
                 },
             );
             ctx.mctx_mut()
@@ -3980,6 +3981,7 @@ mod tests {
                     ty: mul_n,
                     lctx: LocalCtxSnapshot::empty(),
                     kind: MVarKind::SyntheticOpaque,
+                    num_scope_args: 0,
                 },
             );
             let progressed = ctx.synth_pending(m_id).unwrap();

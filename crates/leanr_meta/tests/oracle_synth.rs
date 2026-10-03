@@ -278,6 +278,7 @@ fn oracle_synth_gate() {
                     ty,
                     lctx: LocalCtxSnapshot::empty(),
                     kind: MVarKind::Natural,
+                    num_scope_args: 0,
                 },
             );
         }
@@ -515,6 +516,7 @@ fn with_synth0_record<R>(
             ty,
             lctx: LocalCtxSnapshot::empty(),
             kind: MVarKind::Natural,
+            num_scope_args: 0,
         },
     );
     f(&mut ctx, &q, goal, MVarId(nid))

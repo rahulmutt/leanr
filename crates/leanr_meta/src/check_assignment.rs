@@ -326,7 +326,12 @@ impl<'e> MetaCtx<'e> {
         let Some(decl) = self.mctx.decl(id) else {
             return Err(MetaError::MVar(format!("check_mvar: unknown metavariable {id:?}")).into());
         };
-        let (inner_lctx, inner_ty, inner_kind) = (Arc::clone(&decl.lctx), decl.ty, decl.kind);
+        let (inner_lctx, inner_ty, inner_kind, inner_scope_args) = (
+            Arc::clone(&decl.lctx),
+            decl.ty,
+            decl.kind,
+            decl.num_scope_args,
+        );
         if cx.has_ctx_locals {
             return Err(CheckErr::Failure); // :890
         }
@@ -357,7 +362,10 @@ impl<'e> MetaCtx<'e> {
         // (:931-933): `reduced` does both.
         let reduced = self.reduce_local_context(&inner_lctx, &to_erase)?;
         let ty = self.ca_check(cx, inner_ty)?;
-        let (aux, _) = self.mk_aux_mvar_at(reduced, ty, MVarKind::Natural, None)?;
+        // oracle `ExprDefEq.lean:936`: `mkAuxMVar lctx localInsts mvarType
+        // mvarDecl.numScopeArgs` — the restricted mvar inherits the count.
+        let (aux, _) =
+            self.mk_aux_mvar_at(reduced, ty, MVarKind::Natural, None, inner_scope_args)?;
         self.mctx.assign(id, aux)?;
         Ok(aux)
     }
@@ -437,9 +445,14 @@ impl<'e> MetaCtx<'e> {
         let mvar_ty = self.ca_check(cx, e_ty)?;
         // `mkAuxMVar ctx.mvarDecl.lctx ctx.mvarDecl.localInstances`:
         // the ASSIGNED mvar's ctx. The instances travel inside the
-        // snapshot.
-        let (new_mvar, _) =
-            self.mk_aux_mvar_at(Arc::clone(&cx.decl_lctx), mvar_ty, MVarKind::Natural, None)?;
+        // snapshot. oracle :977 passes no numScopeArgs (default 0).
+        let (new_mvar, _) = self.mk_aux_mvar_at(
+            Arc::clone(&cx.decl_lctx),
+            mvar_ty,
+            MVarKind::Natural,
+            None,
+            0,
+        )?;
         if self.assign_to_const_fun(f, num_args, new_mvar)? {
             Ok(new_mvar)
         } else {
@@ -512,6 +525,27 @@ mod tests {
         }
     }
 
+    /// oracle `ExprDefEq.lean:936`: the restricted aux mvar inherits the
+    /// inner mvar's `numScopeArgs`.
+    #[test]
+    fn check_mvar_restriction_inherits_num_scope_args() {
+        with_prelude0_ctx(|ctx| {
+            ctx.cfg.ctx_approx = true;
+            let n = const_named(ctx, "N");
+            let cp = ctx.lctx_checkpoint();
+            let (_o, oid) = fresh_mvar(ctx, n);
+            let _x = fresh_fvar(ctx, n, "x");
+            let lctx = ctx.current_lctx();
+            let (i, _iid) = ctx
+                .mk_aux_mvar_at(lctx, n, MVarKind::Natural, None, 3)
+                .expect("inner");
+            let out = ctx.check_assignment_aux(oid, &[], false, i).expect("check");
+            let aux = out.expect("restricted, not refused");
+            assert_eq!(ctx.mctx.decl(mvar_id(ctx, aux)).unwrap().num_scope_args, 3);
+            ctx.lctx_restore(cp);
+        });
+    }
+
     /// oracle `checkMVar` (`ExprDefEq.lean:880-938`): `?o` (empty ctx)
     /// `:= ?i` (ctx `{x}`). `?i`'s ctx is not a sub-prefix of `?o`'s, the
     /// depths are equal, it is natural, `ctxApprox` is on, and `{}` is a
@@ -570,7 +604,7 @@ mod tests {
             let _x = fresh_fvar(ctx, n, "x");
             let lctx = ctx.current_lctx();
             let (so, soid) = ctx
-                .mk_aux_mvar_at(lctx, n, MVarKind::SyntheticOpaque, None)
+                .mk_aux_mvar_at(lctx, n, MVarKind::SyntheticOpaque, None, 0)
                 .expect("opaque");
             assert_eq!(ctx.check_assignment_aux(oid, &[], false, so), Ok(None));
             assert!(!ctx.mctx.is_assigned(soid));
@@ -748,7 +782,7 @@ mod tests {
             let _a = fresh_fvar(ctx, n, "a");
             let with_a = ctx.current_lctx();
             let (_o, oid) = ctx
-                .mk_aux_mvar_at(with_a, n, MVarKind::Natural, None)
+                .mk_aux_mvar_at(with_a, n, MVarKind::Natural, None, 0)
                 .unwrap();
             let y = fresh_fvar(ctx, n, "y");
             let (i, iid) = ctx.mk_aux_mvar(n).unwrap();
@@ -771,7 +805,7 @@ mod tests {
             let aid = ctx.fvar_id_of(a).unwrap();
             let with_a = ctx.current_lctx();
             let (_o, oid) = ctx
-                .mk_aux_mvar_at(with_a, n, MVarKind::Natural, None)
+                .mk_aux_mvar_at(with_a, n, MVarKind::Natural, None, 0)
                 .unwrap();
             let x = fresh_fvar(ctx, n, "x");
             let xid = ctx.fvar_id_of(x).unwrap();
