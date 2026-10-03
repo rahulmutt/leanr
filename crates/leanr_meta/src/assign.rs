@@ -3257,7 +3257,7 @@ mod tests {
     // -------------------------------------------------------------------
 
     /// `?new #[a] := ?p` (`?new` syntheticOpaque, as `elimMVar` mints
-    /// it, `MetavarContext.lean:1212-1226`), over one fresh fvar per
+    /// it, `MetavarContext.lean:1213-1227`), over one fresh fvar per
     /// name. Returns `(new_e, pending, fvars)`; `?p` is left unassigned.
     fn delayed_fixture(
         ctx: &mut MetaCtx,
@@ -3274,7 +3274,7 @@ mod tests {
         (new_e, pending, fvars)
     }
 
-    /// `:1708-1709`: once `?p` is solved, `instantiateMVars` rewrites
+    /// `:1706-1707`: once `?p` is solved, `instantiateMVars` rewrites
     /// `?new b` to `b`, and the quick check retries on that. Without
     /// the arm, `?new` is syntheticOpaque (unassignable) and `b` is
     /// rigid, so the pair fell into the both-unassignable branch and
@@ -3337,8 +3337,8 @@ mod tests {
     }
 
     /// The two `none` guards of the consume branch: `assignSyntheticOpaque`
-    /// off (`:1725`), and fewer arguments than abstracted fvars
-    /// (`:1727`). Neither may touch `?p`.
+    /// off (`:1726`), and fewer arguments than abstracted fvars
+    /// (`:1728`). Neither may touch `?p`.
     #[test]
     fn expand_delayed_assigned_does_not_consume_when_a_guard_fails() {
         use crate::test_support::{fresh_fvar, with_ctx};
