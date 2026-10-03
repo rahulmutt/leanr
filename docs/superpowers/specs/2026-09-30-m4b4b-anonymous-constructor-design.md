@@ -294,8 +294,12 @@ PR #53. Branch `m4b4b-anonymous-constructor`, measured against `main`
   The suspected cause is unverified: `instantiate_level_mvars`
   (`leanr_meta/src/level.rs`) rebuilds `Max` without simplifying it,
   and its output now reaches the output term through
-  `instantiate_mvars_body`. **This is an open seam, for follow-up in
-  `leanr_meta`.**
+  `instantiate_mvars_body`. **Closed (2026-10-03):** the cause was
+  confirmed. `instantiate_level_mvars` now rebuilds through id-native
+  twins of the kernel's `mk_max`/`mk_imax`, as the compiled
+  instantiation does (`instantiate_mvars.cpp:145-146` -> `update_max`,
+  `level.cpp:293-300`). `anon/flat2` is back to the 3-deep `Prod`
+  source, and four `lvl/*` corpus records pin the fix.
 - **`(⟨⟩ : Eq Nat.zero Nat.zero)` is `StuckCoercion`, not
   `TypeMismatch`** (§ Testing names the variant; § Evidence says "Type mismatch", the oracle's prose). The oracle's `mkCoe`
   postpones because the type still holds an mvar, so the stuck-coercion
@@ -373,5 +377,5 @@ call is wrapped in `stacker::maybe_grow`, following the
 - **`TermTarget` is the growth point for the macro-expansion slice.**
   Synthesized syntax that leanr cannot build as a real node is carried
   as a target variant, as the flatten tail is.
-- **`Prod.{0, max 0 0}`** level normalization in `leanr_meta` (above).
+- ~~**`Prod.{0, max 0 0}`** level normalization in `leanr_meta` (above).~~ Closed 2026-10-03.
 - **Error positions** are unpinned (M6).

@@ -45,6 +45,10 @@
 //! comment), so this module transcribes all of them fresh, id-native,
 //! from `Lean/Level.lean` and `Lean/Meta/LevelDefEq.lean`/`DecLevel.lean`
 //! directly.
+//! The kernel's `mk_max`/`mk_imax`/`is_not_zero` (level.cpp:81-123,
+//! :160-172) get id-native twins too ([`MetaCtx::mk_max_kernel`],
+//! [`MetaCtx::mk_imax_kernel`]): `instantiate_level_mvars` rebuilds
+//! through them, as the compiled `instantiateLevelMVars` does.
 
 use leanr_kernel::bank::levels::LevelRow;
 use leanr_kernel::bank::{ExprId, LevelId};
@@ -632,10 +636,16 @@ impl<'e> MetaCtx<'e> {
     /// (assigned `.mvar` nodes replaced by their, recursively
     /// instantiated, assignment; everything else rebuilt only if a
     /// child actually changed, preserving the dedup-sharing the Arc side
-    /// gets from `Arc::ptr_eq`). Pure substitution — no renormalization
-    /// — matching that `isLevelDefEqAuxImpl` always follows this call
-    /// with a SEPARATE `.normalize` (:154-157), so whether this helper
-    /// simplifies eagerly cannot change the net result either way.
+    /// gets from `Arc::ptr_eq`). The compiled body is
+    /// `instantiate_lmvars_all_fn::visit` (src/library/
+    /// instantiate_mvars.cpp:131-167), which rebuilds `Max`/`IMax`
+    /// through `update_max` (kernel/level.cpp:293-300): a node whose
+    /// children are unchanged is returned as is, otherwise it goes
+    /// through the kernel's simplifying `mk_max`/`mk_imax`
+    /// ([`MetaCtx::mk_max_kernel`]/[`MetaCtx::mk_imax_kernel`]). That
+    /// simplification is observable: `instantiate_mvars_body` writes
+    /// this result straight into elaborated terms, so `Prod Nat (Prod
+    /// Nat Nat)` must come out `Prod.{0, 0}`, not `Prod.{0, max 0 0}`.
     ///
     /// `pub(crate)`, not private (M4b-3 P1 task 5 leanr_meta fix):
     /// `assign.rs::instantiate_mvars_body`'s new `Sort`/`Const` arms call
@@ -670,7 +680,7 @@ impl<'e> MetaCtx<'e> {
                 if a2 == a && b2 == b {
                     Ok(l)
                 } else {
-                    Ok(self.scratch.level_max(Some(self.view.store), a2, b2)?)
+                    self.mk_max_kernel(a2, b2)
                 }
             }
             LevelRow::IMax(a, b) => {
@@ -683,9 +693,77 @@ impl<'e> MetaCtx<'e> {
                 if a2 == a && b2 == b {
                     Ok(l)
                 } else {
-                    Ok(self.scratch.level_imax(Some(self.view.store), a2, b2)?)
+                    self.mk_imax_kernel(a2, b2)
                 }
             }
+        }
+    }
+
+    /// oracle: kernel/level.cpp:81-110 (`mk_max`), the id-native twin of
+    /// `leanr_kernel`'s [`Level::mk_max_pair`]. Hash-consing makes the
+    /// oracle's structural `==` plain id equality. NOT `mkLevelMax'`
+    /// ([`MetaCtx::mk_level_max_prime`]): that one also collapses
+    /// `max (succ ?w) 1` via `subsumes`, the kernel's does not.
+    fn mk_max_kernel(&mut self, l1: LevelId, l2: LevelId) -> Result<LevelId, MetaError> {
+        let (b1, k1) = self.level_to_offset(l1);
+        let (b2, k2) = self.level_to_offset(l2);
+        if self.level_is_explicit(l1) && self.level_is_explicit(l2) {
+            // `get_depth` of a numeral is its offset plus one.
+            return Ok(if k1 >= k2 { l1 } else { l2 });
+        }
+        if l1 == l2 {
+            return Ok(l1);
+        }
+        if self.level_is_zero(l1) {
+            return Ok(l2);
+        }
+        if self.level_is_zero(l2) {
+            return Ok(l1);
+        }
+        if let LevelRow::Max(a, b) = *self.scratch.level_row(Some(self.view.store), l2) {
+            if a == l1 || b == l1 {
+                return Ok(l2);
+            }
+        }
+        if let LevelRow::Max(a, b) = *self.scratch.level_row(Some(self.view.store), l1) {
+            if a == l2 || b == l2 {
+                return Ok(l1);
+            }
+        }
+        if b1 == b2 {
+            return Ok(if k1 > k2 { l1 } else { l2 });
+        }
+        Ok(self.scratch.level_max(Some(self.view.store), l1, l2)?)
+    }
+
+    /// oracle: kernel/level.cpp:112-123 (`mk_imax`), the id-native twin
+    /// of `leanr_kernel`'s [`Level::mk_imax_pair`].
+    fn mk_imax_kernel(&mut self, l1: LevelId, l2: LevelId) -> Result<LevelId, MetaError> {
+        if self.level_is_never_zero(l2)? {
+            return self.mk_max_kernel(l1, l2);
+        }
+        if self.level_is_zero(l2) {
+            return Ok(l2);
+        }
+        let (b1, k1) = self.level_to_offset(l1);
+        if self.level_is_zero(l1) || (k1 == 1 && self.level_is_zero(b1)) {
+            return Ok(l2);
+        }
+        if l1 == l2 {
+            return Ok(l1);
+        }
+        Ok(self.scratch.level_imax(Some(self.view.store), l1, l2)?)
+    }
+
+    /// oracle: kernel/level.cpp:160-172 (`is_not_zero`).
+    fn level_is_never_zero(&mut self, l: LevelId) -> Result<bool, MetaError> {
+        match *self.scratch.level_row(Some(self.view.store), l) {
+            LevelRow::Zero | LevelRow::Param(_) | LevelRow::MVar(_) => Ok(false),
+            LevelRow::Succ(_) => Ok(true),
+            LevelRow::Max(a, b) => {
+                self.guarded(|ctx| Ok(ctx.level_is_never_zero(a)? || ctx.level_is_never_zero(b)?))
+            }
+            LevelRow::IMax(_, b) => self.guarded(|ctx| ctx.level_is_never_zero(b)),
         }
     }
 
@@ -1120,6 +1198,169 @@ mod tests {
                 assert!(!ctx.mctx.is_level_assigned(r_id));
                 assert_eq!(ctx.postponed, pre);
             });
+        });
+    }
+
+    // ---------------------------------------------------------------
+    // `instantiate_level_mvars` rebuilds through the kernel's
+    // simplifying `mk_max`/`mk_imax` (instantiate_mvars.cpp:145-146 ->
+    // `update_max`, level.cpp:293-300 -> :81-123).
+    // ---------------------------------------------------------------
+
+    fn lvl_param(ctx: &mut crate::MetaCtx<'_>, s: &str) -> leanr_kernel::bank::LevelId {
+        let s = ctx.scratch.intern_str(None, s).unwrap();
+        let n = ctx.scratch.name_str(None, None, s).unwrap();
+        ctx.scratch.level_param(None, Some(n)).unwrap()
+    }
+
+    /// A declared level mvar, assigned to `val` when given.
+    fn lvl_mvar(
+        ctx: &mut crate::MetaCtx<'_>,
+        s: &str,
+        val: Option<leanr_kernel::bank::LevelId>,
+    ) -> leanr_kernel::bank::LevelId {
+        let si = ctx.scratch.intern_str(None, s).unwrap();
+        let n = ctx.scratch.name_str(None, None, si).unwrap();
+        let id = crate::LMVarId(n);
+        ctx.mctx.declare_level(id);
+        if let Some(v) = val {
+            ctx.mctx.assign_level(id, v).unwrap();
+        }
+        ctx.scratch.level_mvar(None, Some(n)).unwrap()
+    }
+
+    // The `Prod Nat (Prod Nat Nat)` shape: `max ?u ?v` with both
+    // assigned `0` is `0`, not `max 0 0` (oracle: `Prod.{0, 0}`).
+    #[test]
+    fn instantiate_simplifies_max_of_zeros() {
+        with_ctx(|ctx| {
+            let z = ctx.scratch.level_zero(None).unwrap();
+            let u = lvl_mvar(ctx, "?u", Some(z));
+            let v = lvl_mvar(ctx, "?v", Some(z));
+            let m = ctx.scratch.level_max(None, u, v).unwrap();
+            assert_eq!(ctx.instantiate_level_mvars(m).unwrap(), z);
+            // Nested, as at the outer `Prod` of a 3-deep chain.
+            let w = lvl_mvar(ctx, "?w", Some(z));
+            let mm = ctx.scratch.level_max(None, w, m).unwrap();
+            assert_eq!(ctx.instantiate_level_mvars(mm).unwrap(), z);
+        });
+    }
+
+    // level.cpp:82-83: two explicit levels keep the deeper one.
+    #[test]
+    fn instantiate_max_of_explicits_keeps_the_larger() {
+        with_ctx(|ctx| {
+            let z = ctx.scratch.level_zero(None).unwrap();
+            let one = ctx.scratch.level_succ(None, z).unwrap();
+            let two = ctx.scratch.level_succ(None, one).unwrap();
+            let a = lvl_mvar(ctx, "?a", Some(two));
+            let m = ctx.scratch.level_max(None, one, a).unwrap();
+            assert_eq!(ctx.instantiate_level_mvars(m).unwrap(), two);
+        });
+    }
+
+    // level.cpp:84-93: equal arms, a zero arm, and absorption into a
+    // `max` that already lists the other arm.
+    #[test]
+    fn instantiate_max_equal_zero_and_absorbed_arms() {
+        with_ctx(|ctx| {
+            let z = ctx.scratch.level_zero(None).unwrap();
+            let u = lvl_param(ctx, "u");
+            let v = lvl_param(ctx, "v");
+            let a = lvl_mvar(ctx, "?a", Some(u));
+            let uu = ctx.scratch.level_max(None, a, u).unwrap();
+            assert_eq!(ctx.instantiate_level_mvars(uu).unwrap(), u);
+            let b = lvl_mvar(ctx, "?b", Some(z));
+            let bu = ctx.scratch.level_max(None, b, u).unwrap();
+            assert_eq!(ctx.instantiate_level_mvars(bu).unwrap(), u);
+            let ub = ctx.scratch.level_max(None, u, b).unwrap();
+            assert_eq!(ctx.instantiate_level_mvars(ub).unwrap(), u);
+            // max u (max u v) = max u v  (:90-91)
+            let max_uv = ctx.scratch.level_max(None, u, v).unwrap();
+            let c = lvl_mvar(ctx, "?c", Some(max_uv));
+            let l = ctx.scratch.level_max(None, a, c).unwrap();
+            assert_eq!(ctx.instantiate_level_mvars(l).unwrap(), max_uv);
+            // max (max u v) u = max u v  (:92-93)
+            let r = ctx.scratch.level_max(None, c, a).unwrap();
+            assert_eq!(ctx.instantiate_level_mvars(r).unwrap(), max_uv);
+        });
+    }
+
+    // level.cpp:95-99: same base, larger offset wins.
+    #[test]
+    fn instantiate_max_same_base_keeps_the_larger_offset() {
+        with_ctx(|ctx| {
+            let u = lvl_param(ctx, "u");
+            let su = ctx.scratch.level_succ(None, u).unwrap();
+            let a = lvl_mvar(ctx, "?a", Some(su));
+            let m = ctx.scratch.level_max(None, u, a).unwrap();
+            assert_eq!(ctx.instantiate_level_mvars(m).unwrap(), su);
+        });
+    }
+
+    // The kernel's `mk_max` is NOT `mkLevelMax'`: `max (succ ?w) 1`
+    // stays a `max` (no explicit/same-base rule fires), where
+    // `mkLevelMax'`'s `subsumes` would collapse it to `succ ?w`.
+    #[test]
+    fn instantiate_max_is_the_kernel_mk_max_not_mk_level_max_prime() {
+        with_ctx(|ctx| {
+            let z = ctx.scratch.level_zero(None).unwrap();
+            let one = ctx.scratch.level_succ(None, z).unwrap();
+            let w = lvl_mvar(ctx, "?w", None);
+            let sw = ctx.scratch.level_succ(None, w).unwrap();
+            let a = lvl_mvar(ctx, "?a", Some(sw));
+            let m = ctx.scratch.level_max(None, a, one).unwrap();
+            let expect = ctx.scratch.level_max(None, sw, one).unwrap();
+            assert_eq!(ctx.instantiate_level_mvars(m).unwrap(), expect);
+        });
+    }
+
+    // update_max's `is_eqp` early exit (level.cpp:294-295): unchanged
+    // children leave even a reducible node alone.
+    #[test]
+    fn instantiate_leaves_an_unchanged_max_unsimplified() {
+        with_ctx(|ctx| {
+            let z = ctx.scratch.level_zero(None).unwrap();
+            let w = lvl_mvar(ctx, "?w", None);
+            let m = ctx.scratch.level_max(None, z, w).unwrap();
+            assert_eq!(ctx.instantiate_level_mvars(m).unwrap(), m);
+        });
+    }
+
+    // level.cpp:112-123 (`mk_imax`), reached through `update_max`'s
+    // non-`max` branch (:298-299).
+    #[test]
+    fn instantiate_simplifies_imax() {
+        with_ctx(|ctx| {
+            let z = ctx.scratch.level_zero(None).unwrap();
+            let one = ctx.scratch.level_succ(None, z).unwrap();
+            let u = lvl_param(ctx, "u");
+            let v = lvl_param(ctx, "v");
+            let su = ctx.scratch.level_succ(None, u).unwrap();
+            // rhs never zero -> mk_max: imax v (succ u) = max v (succ u)
+            let a = lvl_mvar(ctx, "?a", Some(su));
+            let l = ctx.scratch.level_imax(None, v, a).unwrap();
+            let expect = ctx.scratch.level_max(None, v, su).unwrap();
+            assert_eq!(ctx.instantiate_level_mvars(l).unwrap(), expect);
+            // imax u 0 = 0
+            let b = lvl_mvar(ctx, "?b", Some(z));
+            let l = ctx.scratch.level_imax(None, u, b).unwrap();
+            assert_eq!(ctx.instantiate_level_mvars(l).unwrap(), z);
+            // imax 0 u = u, imax 1 u = u
+            let l = ctx.scratch.level_imax(None, b, u).unwrap();
+            assert_eq!(ctx.instantiate_level_mvars(l).unwrap(), u);
+            let c = lvl_mvar(ctx, "?c", Some(one));
+            let l = ctx.scratch.level_imax(None, c, u).unwrap();
+            assert_eq!(ctx.instantiate_level_mvars(l).unwrap(), u);
+            // imax u u = u
+            let d = lvl_mvar(ctx, "?d", Some(u));
+            let l = ctx.scratch.level_imax(None, d, u).unwrap();
+            assert_eq!(ctx.instantiate_level_mvars(l).unwrap(), u);
+            // otherwise a raw imax
+            let e = lvl_mvar(ctx, "?e", Some(v));
+            let l = ctx.scratch.level_imax(None, e, u).unwrap();
+            let expect = ctx.scratch.level_imax(None, v, u).unwrap();
+            assert_eq!(ctx.instantiate_level_mvars(l).unwrap(), expect);
         });
     }
 }
