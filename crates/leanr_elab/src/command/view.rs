@@ -407,20 +407,25 @@ mod tests {
         assert!(seam("/-- d -/ def a : Nat := Nat.zero").contains("doc comment"));
         assert!(seam("@[simp] def a : Nat := Nat.zero").contains("attributes"));
         assert!(seam("private def a : Nat := Nat.zero").contains("visibility modifier"));
-        assert!(seam("protected def a : Nat := Nat.zero").contains("`protected`"));
+        let m = seam("protected def a : Nat := Nat.zero");
+        assert!(m.contains("`protected`") && m.ends_with(" — M4c-2b"), "{m}");
         assert!(seam("noncomputable def a : Nat := Nat.zero").contains("`meta`/`noncomputable`"));
         assert!(seam("unsafe def a : Nat := Nat.zero").contains("`unsafe`"));
         assert!(seam("partial def a : Nat := Nat.zero").contains("`partial`/`nonrec`"));
     }
 
     #[test]
-    fn dotted_decl_name_is_an_m4c2_seam() {
+    fn dotted_decl_name_is_an_m4c2b_seam() {
         let m = seam("def Foo.bar : Nat := Nat.zero");
         assert!(
             m.contains("dotted declaration name `Foo.bar`") && m.ends_with(" — M4c-2b"),
             "{m}"
         );
-        assert!(seam("def _root_.baz : Nat := Nat.zero").contains("dotted declaration name"));
+        let m = seam("def _root_.baz : Nat := Nat.zero");
+        assert!(
+            m.contains("dotted declaration name") && m.ends_with(" — M4c-2b"),
+            "{m}"
+        );
     }
 
     #[test]
