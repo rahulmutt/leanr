@@ -254,12 +254,11 @@ fn find_method_in(
     match crate::resolve::resolve_global_name_at_root(elab, full)?.as_slice() {
         [] => Ok(None),
         [c] => Ok(Some((s, *c))),
-        cs => Err(ElabError::UnsupportedSyntax(format!(
-            "ambiguous field name `{field}`: `{}` has {} candidates \
-             (`findMethod?`, App.lean:1466-1468) — M4c-2b-ii",
-            render(elab, full),
-            cs.len()
-        ))),
+        cs => Err(ElabError::AmbiguousFieldName {
+            field: field.to_string(),
+            full: render(elab, full),
+            cands: cs.iter().map(|&c| render(elab, c)).collect(),
+        }),
     }
 }
 

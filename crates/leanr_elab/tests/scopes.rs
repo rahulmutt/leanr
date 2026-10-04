@@ -506,14 +506,27 @@ fn field_notation_and_dot_ident_see_open_decls() {
     // Two opened `.two` candidates: oracle `Ambiguous term` (probed).
     let (_, stop) = run("def Foo.Nat.two : Nat := Nat.zero\ndef Bar.Nat.two : Nat := Nat.zero\nopen Foo Bar\ndef x : Nat := .two");
     assert_eq!(stop.expect("stops"), (3, "Ambiguous term".to_string()));
-    // Task 4: the oracle throws "Field name `g` is ambiguous"; still a seam.
-    let src = "def Foo.S1.g (_s : S1) : Nat := Nat.zero\ndef Bar.S1.g (_s : S1) : Nat := Nat.zero\nopen Foo Bar\ndef y (s : S1) : Nat := s.g";
+    // Two opened `S1.g`: `findMethod?`'s throw (probed).
+    let (_, stop) = run("def Foo.S1.g (_s : S1) : Nat := Nat.zero\ndef Bar.S1.g (_s : S1) : Nat := Nat.zero\nopen Foo Bar\ndef y (s : S1) : Nat := s.g");
+    assert_eq!(
+        stop.expect("stops"),
+        (3, "Field name `g` is ambiguous: `S1.g` has possible interpretations `Foo.S1.g`, `Bar.S1.g`".to_string())
+    );
+}
+
+/// `open X (p)` with `X` naming two namespaces: the oracle's "ambiguous
+/// identifier `p`, possible interpretations: [B.X.p, A.X.p]"
+/// (`Open.lean:75`) renders `mkConst`s, an `Expr` list, through the
+/// delaborator, so leanr seams it.
+#[test]
+fn open_explicit_ambiguity_is_a_delab_seam() {
+    let src = "namespace A.X\ndef p : Nat := Nat.zero\nend A.X\nnamespace B.X\ndef p : Nat := Nat.zero\nend B.X\nopen A B\nopen X (p)";
     let (_, stop) = run(src);
     let (at, m) = stop.expect("stops");
-    assert_eq!(at, 3, "{src:?}");
+    assert_eq!(at, 7, "{m}");
     assert!(
-        m.starts_with("SEAM ") && m.contains("2 candidates") && m.ends_with(" — M4c-2b-ii"),
-        "{src:?}: {m}"
+        m.starts_with("SEAM ") && m.ends_with(" — delab name rendering"),
+        "{m}"
     );
 }
 

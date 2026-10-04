@@ -52,6 +52,23 @@ pub enum ElabError {
     /// `constName` (row `overload/explicitUniv`). The check lives in
     /// `app::head::mk_const`.
     TooManyUniverseLevels(String),
+    /// oracle: `findMethod?`'s throw (`App.lean:1466-1468`). `cands` are
+    /// full names in `resolveGlobalName` order.
+    AmbiguousFieldName {
+        field: String,
+        full: String,
+        cands: Vec<String>,
+    },
+    /// oracle: `resolveUniqueNamespace` (`ResolveName.lean:353-356`),
+    /// ``s!"ambiguous namespace `{id}`, possible interpretations: `{nss}`"``.
+    /// `{nss}` is `List Name`'s `toString`.
+    AmbiguousNamespace {
+        id: String,
+        cands: Vec<String>,
+    },
+    /// oracle: `resolveNameUsingNamespacesCore`'s
+    /// `throwErrorWithNestedErrors "failed to open" exs` (`Open.lean:63-66`).
+    FailedToOpen(Vec<ElabError>),
     /// A syntax node whose shape contradicts the grammar (missing child,
     /// wrong node/token variant, a non-trailing `..`). Distinct from
     /// `UnsupportedSyntax`, which means "this construct's slice has not
@@ -509,6 +526,19 @@ impl ElabError {
                 Some(format!("too many explicit universe levels for `{n}`"))
             }
             Self::Overloaded(_) => Some("overloaded, errors ".into()),
+            Self::AmbiguousFieldName { field, full, cands } => Some(format!(
+                "Field name `{field}` is ambiguous: `{full}` has possible interpretations {}",
+                cands
+                    .iter()
+                    .map(|c| format!("`{c}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            Self::AmbiguousNamespace { id, cands } => Some(format!(
+                "ambiguous namespace `{id}`, possible interpretations: `[{}]`",
+                cands.join(", ")
+            )),
+            Self::FailedToOpen(_) => Some("failed to open, errors ".into()),
             Self::TypeMismatch { app: None, .. } => Some("Type mismatch".into()),
             Self::TypeMismatch { app: Some(a), .. } => Some(
                 if a.arg_already_in_f {
@@ -649,6 +679,31 @@ mod tests {
                 .oracle_first_line()
                 .as_deref(),
             Some("too many explicit universe levels for `B.u`") // overload/explicitUniv
+        );
+        assert_eq!(
+            ElabError::AmbiguousFieldName {
+                field: "g".into(),
+                full: "S1.g".into(),
+                cands: vec!["A.S1.g".into(), "B.S1.g".into()],
+            }
+            .oracle_first_line()
+            .as_deref(),
+            Some("Field name `g` is ambiguous: `S1.g` has possible interpretations `A.S1.g`, `B.S1.g`") // ambig/fieldName
+        );
+        assert_eq!(
+            ElabError::AmbiguousNamespace {
+                id: "X".into(),
+                cands: vec!["B.X".into(), "A.X".into()]
+            }
+            .oracle_first_line()
+            .as_deref(),
+            Some("ambiguous namespace `X`, possible interpretations: `[B.X, A.X]`") // ambig/openHiding
+        );
+        assert_eq!(
+            ElabError::FailedToOpen(vec![])
+                .oracle_first_line()
+                .as_deref(),
+            Some("failed to open, errors ") // ambig/openFailed
         );
     }
 

@@ -413,7 +413,12 @@ def fileQueries : List (String × String) := [
   ("overload/dotIdentPick", "namespace A\ndef Nat.two : Nat := Nat.zero\nend A\nnamespace B\ndef Nat.two (b : Bool) : Nat := Nat.zero\nend B\nopen A B\ndef t : Nat := .two"),
   ("overload/dotIdentArgs", "namespace A\ndef Nat.two : Nat := Nat.zero\nend A\nnamespace B\ndef Nat.two (b : Bool) : Nat := Nat.zero\nend B\nopen A B\ndef t : Nat := .two Bool.true"),
   ("overload/dotIdentAmbig", "namespace A\ndef Nat.two : Nat := Nat.zero\nend A\nnamespace B\ndef Nat.two : Nat := pick Nat.zero Nat.zero\nend B\nopen A B\ndef t : Nat := .two"),
-  ("overload/dotIdentAllFail", "namespace A\ndef Nat.two : Nat := Nat.zero\nend A\nnamespace B\ndef Nat.two (b : Bool) : Nat := Nat.zero\nend B\nopen A B\ndef t : Nat := .two Unit.unit")
+  ("overload/dotIdentAllFail", "namespace A\ndef Nat.two : Nat := Nat.zero\nend A\nnamespace B\ndef Nat.two (b : Bool) : Nat := Nat.zero\nend B\nopen A B\ndef t : Nat := .two Unit.unit"),
+  ("ambig/fieldName", "namespace A\ndef S1.g (s : S1) : Nat := Nat.zero\nend A\nnamespace B\ndef S1.g (s : S1) : Nat := Nat.zero\nend B\nopen A B\ndef t (s : S1) : Nat := s.g"),
+  ("ambig/openHiding", "namespace A.X\ndef p : Nat := Nat.zero\nend A.X\nnamespace B.X\ndef p : Nat := Nat.zero\nend B.X\nopen A B\nopen X hiding p"),
+  ("ambig/openRenaming", "namespace A.X\ndef p : Nat := Nat.zero\nend A.X\nnamespace B.X\ndef p : Nat := Nat.zero\nend B.X\nopen A B\nopen X renaming p → q"),
+  ("ambig/openFailed", "namespace A.X\ndef p : Nat := Nat.zero\nend A.X\nnamespace B.X\ndef p : Nat := Nat.zero\nend B.X\nopen A B\nopen X (r)"),
+  ("ambig/openFailedOne", "namespace A.X\ndef p : Nat := Nat.zero\nend A.X\nopen A\nopen X (r)")
 ]
 
 /-- The first error-severity message `s` logged, from `messages` and the
