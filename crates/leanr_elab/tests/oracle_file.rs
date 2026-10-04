@@ -35,3 +35,111 @@ fn file_corpus_sources_parse_into_the_oracle_commands() {
         "file corpus shrank: {n} < {CORPUS_FLOOR}"
     );
 }
+
+fn outcome(
+    src: &str,
+) -> (
+    Vec<Vec<String>>,
+    Option<(usize, leanr_elab::ElabError)>,
+    usize,
+) {
+    support::with_file_elab(src, |ce, cmds, kinds| {
+        let before = ce.env().len();
+        let out = ce.elab_commands(cmds, kinds);
+        let st = ce.env().store();
+        let done = out
+            .done
+            .iter()
+            .map(|ns| {
+                ns.iter()
+                    .map(|&n| support::name_to_string(st, None, Some(n)))
+                    .collect()
+            })
+            .collect();
+        // How many constants the run admitted in total.
+        (done, out.stopped, ce.env().len() - before)
+    })
+}
+
+fn stop_seam(src: &str) -> (usize, String) {
+    match outcome(src).1 {
+        Some((i, leanr_elab::ElabError::UnsupportedSyntax(m))) => (i, m),
+        other => panic!("{src:?}: expected a seam stop, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_error_mid_file_stops_the_loop() {
+    // Oracle: `la` logs a type mismatch and is still added (`errToSorry`),
+    // then `lb` and `lc` elaborate. leanr stops at `la` (spec decision 2).
+    let (done, stopped, added) =
+        outcome("def la : Nat := True.intro\ndef lb : Nat := Nat.zero\ndef lc : Nat := lb");
+    assert!(done.is_empty(), "{done:?}");
+    match stopped {
+        Some((0, e)) => assert_eq!(e.oracle_first_line().as_deref(), Some("Type mismatch")),
+        other => panic!("expected a stop at command 0, got {other:?}"),
+    }
+    assert_eq!(added, 0, "nothing at or after the stop is admitted");
+}
+
+#[test]
+fn a_mid_file_error_after_successes_keeps_them() {
+    let (done, stopped, added) =
+        outcome("def la : Nat := Nat.zero\ndef lb : Nat := True.intro\ndef lc : Nat := la");
+    assert_eq!(done, vec![vec!["la".to_string()]]);
+    assert!(matches!(stopped, Some((1, _))), "{stopped:?}");
+    assert_eq!(added, 1, "only `la`");
+}
+
+#[test]
+fn scope_commands_are_m4c2b_seams() {
+    for (src, i) in [
+        ("def la : Nat := Nat.zero\nnamespace Foo", 1),
+        ("section S", 0),
+        ("open Nat", 0),
+        ("def la : Nat := Nat.zero\nend", 1),
+    ] {
+        let (at, m) = stop_seam(src);
+        assert_eq!(at, i, "{src:?}");
+        assert!(m.ends_with(" — M4c-2b"), "{src:?}: {m}");
+    }
+}
+
+#[test]
+fn universe_and_variable_are_m4c2c_seams() {
+    for src in ["universe u", "variable (n : Nat)"] {
+        let (at, m) = stop_seam(src);
+        assert_eq!(at, 0);
+        assert!(m.ends_with(" — M4c-2c"), "{src:?}: {m}");
+    }
+}
+
+#[test]
+fn other_commands_are_later_m4_seams() {
+    for src in [
+        "#check Nat",
+        "#print Nat",
+        "mutual\ndef la : Nat := Nat.zero\nend",
+    ] {
+        let (_, m) = stop_seam(src);
+        assert!(m.ends_with(" — later M4"), "{src:?}: {m}");
+    }
+}
+
+#[test]
+fn empty_source_elaborates_nothing() {
+    for src in ["", "-- just a comment\n", "/- block -/"] {
+        let (done, stopped, _) = outcome(src);
+        assert!(
+            done.is_empty() && stopped.is_none(),
+            "{src:?}: {done:?} {stopped:?}"
+        );
+    }
+}
+
+#[test]
+fn oracle_file_gate() {
+    // M4c-2a Task 3 lifts the `aux/` filter (env-wide auxLemmasExt cache).
+    let checked = support::run_file_corpus("file-queries.jsonl", |id| !id.starts_with("aux/"));
+    assert!(checked >= 9, "non-aux file records: checked {checked}");
+}

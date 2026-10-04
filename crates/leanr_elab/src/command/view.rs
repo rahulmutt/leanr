@@ -64,7 +64,7 @@ impl DefView {
     ) -> Result<DefView, ElabError> {
         let ck = kinds.name(cmd.kind());
         if ck != "Lean.Parser.Command.declaration" {
-            return Err(seam(format!("command `{ck}` — M4c-2 (command loop)")));
+            return Err(super::command_seam(ck));
         }
         let ch = non_trivia_children(cmd);
         let mods = as_node(ch.first(), "declModifiers")?;
@@ -522,8 +522,8 @@ mod tests {
     fn unsupported_commands_are_named_seams() {
         assert!(seam("instance : Wrap Nat := ⟨fun x => x⟩").contains("declaration kind"));
         assert!(seam("structure S where\n  x : Nat").contains("declaration kind"));
-        assert!(seam("namespace Foo").contains("M4c-2 (command loop)"));
-        assert!(seam("#check Nat").contains("M4c-2 (command loop)"));
-        assert!(seam("mutual\ndef a : Nat := Nat.zero\nend").contains("M4c-2 (command loop)"));
+        assert!(seam("namespace Foo").ends_with(" — M4c-2b"));
+        assert!(seam("#check Nat").ends_with(" — later M4"));
+        assert!(seam("mutual\ndef a : Nat := Nat.zero\nend").ends_with(" — later M4"));
     }
 }

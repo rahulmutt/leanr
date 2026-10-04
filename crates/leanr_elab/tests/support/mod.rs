@@ -1243,12 +1243,6 @@ pub fn parse_type(elab: &mut leanr_elab::TermElabM, src: &str) -> leanr_kernel::
         .unwrap_or_else(|e| panic!("parse_type: {src:?}: {e:?}"))
 }
 
-/// Parse `src` as ONE command (no `prelude`/`import` header) with the
-/// builtin grammar, the way `dump_decls.lean` runs
-/// `runParserCategory env `command src`. Panics on a parse error, or if
-/// `src` holds anything but exactly one command: a silent second command
-/// would be skipped by the gate. Returns the parse result (its `tree`
-/// owns the `KindInterner`) and the command node.
 /// Parse `src` as a header-less module; every command node, in order
 /// (no `Module.header`, no `Command.eoi`). Panics on a parse error: the
 /// corpora are oracle-parsed, so one is a leanr parser bug.
@@ -1275,6 +1269,12 @@ pub fn parse_commands(
     (parsed, cmds)
 }
 
+/// Parse `src` as ONE command (no `prelude`/`import` header) with the
+/// builtin grammar, the way `dump_decls.lean` runs
+/// `runParserCategory env `command src`. Panics on a parse error, or if
+/// `src` holds anything but exactly one command: a silent second command
+/// would be skipped by the gate. Returns the parse result (its `tree`
+/// owns the `KindInterner`) and the command node.
 pub fn parse_command(src: &str) -> (leanr_syntax::ParseResult, leanr_syntax::tree::SyntaxNode) {
     let (parsed, cmds) = parse_commands(src);
     assert_eq!(cmds.len(), 1, "{src:?} must be exactly one command");
@@ -1292,6 +1292,29 @@ pub fn with_command_elab<R>(
         &leanr_syntax::tree::SyntaxNode,
         &leanr_syntax::kind::KindInterner,
     ) -> R,
+) -> R {
+    let (parsed, cmd) = parse_command(src);
+    with_elab0_command_elab(|ce| k(ce, &cmd, &parsed.tree.kinds))
+}
+
+/// `with_command_elab` for a multi-command source: every command node.
+pub fn with_file_elab<R>(
+    src: &str,
+    k: impl FnOnce(
+        &mut leanr_elab::command::CommandElab<'_>,
+        &[leanr_syntax::tree::SyntaxNode],
+        &leanr_syntax::kind::KindInterner,
+    ) -> R,
+) -> R {
+    let (parsed, cmds) = parse_commands(src);
+    with_elab0_command_elab(|ce| k(ce, &cmds, &parsed.tree.kinds))
+}
+
+/// Replay Elab0 into a fresh owned `Environment` and run `k` with a
+/// `CommandElab` over it. One replay per call: every corpus record gets
+/// its own environment.
+pub fn with_elab0_command_elab<R>(
+    k: impl FnOnce(&mut leanr_elab::command::CommandElab<'_>) -> R,
 ) -> R {
     let Replayed {
         env,
@@ -1318,9 +1341,51 @@ pub fn with_command_elab<R>(
         elab_as_elim: &elab_as_elim,
         structures: &structures,
     };
-    let (parsed, cmd) = parse_command(src);
     let mut ce = leanr_elab::command::CommandElab::new(env, exts);
-    k(&mut ce, &cmd, &parsed.tree.kinds)
+    k(&mut ce)
+}
+
+/// Compare the constants one command admitted (`names`, in admission
+/// order) with the oracle's `want` (sorted by `Name.lt`, `constJ` shape):
+/// the admission order (every `_proof_N` before the main declaration),
+/// no `sorryAx`/fvar/mvar/level-mvar, and the canonical JSON.
+pub fn check_consts(
+    id: &str,
+    env: &leanr_kernel::Environment,
+    names: &[leanr_kernel::bank::NameId],
+    want: &[serde_json::Value],
+    failures: &mut Vec<String>,
+) {
+    use serde_json::Value;
+    let rendered: Vec<String> = names
+        .iter()
+        .map(|&n| name_to_string(env.store(), None, Some(n)))
+        .collect();
+    if let Some((last, auxes)) = rendered.split_last() {
+        if last.contains("._proof_") || auxes.iter().any(|a| !a.contains("._proof_")) {
+            failures.push(format!("{id}: admission order {rendered:?}"));
+        }
+    }
+    let mut sorted = names.to_vec();
+    sorted.sort_by(|a, b| leanr_meta::name_cmp(env.store(), None, Some(*a), Some(*b)));
+    let got_json: Vec<Value> = sorted.iter().map(|&n| decl_const_json(env, n)).collect();
+    let s = Value::Array(got_json.clone()).to_string();
+    for bad in [
+        "\"sorryAx\"",
+        "\"k\":\"fvar\"",
+        "\"k\":\"mvar\"",
+        "\"k\":\"lmvar\"",
+    ] {
+        if s.contains(bad) {
+            failures.push(format!("{id}: admitted constant contains {bad}"));
+        }
+    }
+    if got_json != want {
+        failures.push(format!(
+            "{id}:\n  leanr  {s}\n  oracle {}",
+            Value::Array(want.to_vec())
+        ));
+    }
 }
 
 /// The canonical JSON of admitted constant `n`, in `dump_decls.lean`'s
@@ -1433,42 +1498,82 @@ pub fn run_decl_corpus(queries: &str, enabled: impl Fn(&str) -> bool) -> usize {
                     return;
                 }
             };
-            let env = ce.env();
-            // Admission order: the main declaration last, every aux before it.
-            let rendered: Vec<String> = names
-                .iter()
-                .map(|&n| name_to_string(env.store(), None, Some(n)))
-                .collect();
-            if let Some((last, auxes)) = rendered.split_last() {
-                if last.contains("._proof_") || auxes.iter().any(|a| !a.contains("._proof_")) {
-                    failures.push(format!("{id}: admission order {rendered:?}"));
-                }
-            }
-            let mut sorted = names.clone();
-            sorted.sort_by(|a, b| leanr_meta::name_cmp(env.store(), None, Some(*a), Some(*b)));
-            let got_json: Vec<Value> = sorted.iter().map(|&n| decl_const_json(env, n)).collect();
-            let s = Value::Array(got_json.clone()).to_string();
-            for bad in [
-                "\"sorryAx\"",
-                "\"k\":\"fvar\"",
-                "\"k\":\"mvar\"",
-                "\"k\":\"lmvar\"",
-            ] {
-                if s.contains(bad) {
-                    failures.push(format!("{id}: admitted constant contains {bad}"));
-                }
-            }
-            if got_json != want {
-                failures.push(format!(
-                    "{id}:\n  leanr  {s}\n  oracle {}",
-                    Value::Array(want)
-                ));
-            }
+            check_consts(&id, ce.env(), &names, &want, &mut failures);
         });
     }
     assert!(
         failures.is_empty(),
         "{} decl divergence(s):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    checked
+}
+
+/// Elaborate every enabled `{id, src, cmds}` record of
+/// `tests/fixtures/elab/<queries>` with `elab_commands` in its own fresh
+/// Elab0 environment and compare per command with the oracle
+/// (`check_consts`), plus the stop: leanr must stop exactly at the
+/// oracle's `err` (always the last command) with the same first line, or
+/// not at all. Panics listing every divergence; returns the number of
+/// records checked.
+pub fn run_file_corpus(queries: &str, enabled: impl Fn(&str) -> bool) -> usize {
+    use serde_json::Value;
+    let text = std::fs::read_to_string(fixture_in("elab", queries))
+        .unwrap_or_else(|e| panic!("committed file corpus {queries}: {e}"));
+    let mut failures = Vec::new();
+    let mut checked = 0usize;
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let q: Value = serde_json::from_str(line).expect("committed JSONL is valid");
+        let id = q["id"].as_str().expect("id").to_string();
+        if !enabled(&id) {
+            continue;
+        }
+        checked += 1;
+        let src = q["src"].as_str().expect("src").to_string();
+        assert!(
+            !q.to_string().contains("\"sorryAx\""),
+            "{id}: the oracle record contains sorryAx — it is an oracle error"
+        );
+        let want = q["cmds"].as_array().expect("cmds").clone();
+        with_file_elab(&src, |ce, cmds, kinds| {
+            assert_eq!(cmds.len(), want.len(), "{id}: command count");
+            let out = ce.elab_commands(cmds, kinds);
+            let want_err = want
+                .last()
+                .and_then(|c| c.get("err"))
+                .and_then(Value::as_str);
+            let n_ok = want.len() - usize::from(want_err.is_some());
+            match (&out.stopped, want_err) {
+                (None, None) => {}
+                (Some((i, e)), Some(w)) if *i == n_ok => {
+                    let line = e.oracle_first_line();
+                    if line.as_deref() != Some(w) {
+                        failures.push(format!(
+                            "{id}[{i}]: leanr error {e:?} (first line {line:?}); oracle {w:?}"
+                        ));
+                    }
+                }
+                (Some((i, e)), _) => failures.push(format!(
+                    "{id}[{i}]: leanr stopped with {e:?}; oracle {}",
+                    want[*i]
+                )),
+                (None, Some(w)) => failures.push(format!(
+                    "{id}: leanr elaborated every command; oracle's last errors with {w:?}"
+                )),
+            }
+            for (i, names) in out.done.iter().enumerate() {
+                let Some(w) = want[i]["consts"].as_array() else {
+                    failures.push(format!("{id}[{i}]: leanr admitted; oracle {}", want[i]));
+                    continue;
+                };
+                check_consts(&format!("{id}[{i}]"), ce.env(), names, w, &mut failures);
+            }
+        });
+    }
+    assert!(
+        failures.is_empty(),
+        "{} file divergence(s):\n{}",
         failures.len(),
         failures.join("\n")
     );
