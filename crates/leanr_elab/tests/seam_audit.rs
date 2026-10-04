@@ -1593,3 +1593,29 @@ fn no_seam_points_at_an_m4c1_p2_task_label() {
         "stale M4c-1 P2 task seam at {offenders:?}"
     );
 }
+
+/// The overloaded-elaboration slice RETIRED its own label. Overloaded identifiers and `.x` are
+/// elaborated (`app/overload.rs`). `findMethod?`'s and
+/// `resolveUniqueNamespace`'s ambiguity, and `failed to open`, are real
+/// errors. `choice` heads now seam as `— choice-node parsing`, and the
+/// `List Expr` ambiguity messages as `— delab name rendering`. A textual
+/// floor, like the gates above.
+#[test]
+fn no_seam_points_at_the_retired_m4c2b_ii_label() {
+    let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    let mut offenders = Vec::new();
+    for path in walk_rs_files(src_dir) {
+        let text = std::fs::read_to_string(&path).expect("readable source");
+        for (n, line) in text.lines().enumerate() {
+            if line.contains(concat!("M4c-2b", "-ii"))
+                || line.contains(concat!("overloading", " slice"))
+            {
+                offenders.push(format!("{}:{}", path.display(), n + 1));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "overload slice landed; stale label at {offenders:?}"
+    );
+}

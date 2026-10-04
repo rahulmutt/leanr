@@ -192,9 +192,9 @@ impl OpenState<'_> {
             [] => Err(ElabError::UnknownConstant(self.render(Some(decl)))),
             [c] => Ok(*c),
             _ => Err(ElabError::UnsupportedSyntax(format!(
-                "ambiguous identifier `{}` in `open` (the oracle's message renders a \
-                 `List Expr` of `mkConst`s, `Open.lean:75` / `ResolveName.lean:376`) \
-                 — delab name rendering",
+                "ambiguous identifier `{}` in `open` (`ensureNoOverload`'s \"Ambiguous \
+                 identifier\" renders a `List Expr` of `mkConst`s, \
+                 `ResolveName.lean:376`) — delab name rendering",
                 self.render(Some(decl))
             ))),
         }
@@ -233,9 +233,9 @@ impl OpenState<'_> {
         match found.as_slice() {
             [n] => Ok(*n),
             _ => Err(ElabError::UnsupportedSyntax(format!(
-                "ambiguous identifier `{}` in `open` (the oracle's message renders a \
-                 `List Expr` of `mkConst`s, `Open.lean:75` / `ResolveName.lean:376`) \
-                 — delab name rendering",
+                "ambiguous identifier `{}` in `open` (`resolveNameUsingNamespacesCore`'s \
+                 \"ambiguous identifier\" renders a `List Expr` of `mkConst`s, \
+                 `Open.lean:72`) — delab name rendering",
                 id.join(".")
             ))),
         }

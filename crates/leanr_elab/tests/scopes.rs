@@ -178,7 +178,7 @@ fn an_unclosed_namespace_at_end_of_input_is_fine() {
     );
 }
 
-/// M4c-2b-ii: two or more candidates are elaborated, not seamed. All three
+/// Two or more candidates are elaborated, not seamed. All three
 /// are oracle-probed `Ambiguous term` (rows `overload/rootAndOpen`,
 /// `overload/exportAlias`; `A.k`/`B.k`).
 #[test]
@@ -214,7 +214,7 @@ fn a_seam_in_one_candidate_stops_the_overload() {
 /// stages 1 and 2; only stage 3's `postpone := .no` drops `A.h`. Row
 /// `overload/stage3` cannot pin this: `NoInst ?a` fails outright inside
 /// the candidate (`trySynthInstance` is `.none`), in the oracle too.
-/// Oracle-probed (M4c-2b-ii Task 2, dump_decls `files` mode): `t := B.h`
+/// Oracle-probed (dump_decls `files` mode): `t := B.h`
 /// (the value is checked in the corpus encoding);
 /// `A.h` alone is `typeclass instance problem is stuck`.
 #[test]
@@ -238,7 +238,7 @@ fn stage_three_drops_a_stuck_instance_candidate() {
 /// Candidate order. `mkConsts` (`TermElabM.lean:2146-2158`) cons-folds
 /// `resolveGlobalName`'s `[A.f, B.f]` into `[B.f, A.f]`, and
 /// `mergeFailures` nests the errors in that order. Oracle-probed
-/// (M4c-2b-ii Task 2 fix round 1, dump_decls `files` mode, full message):
+/// (oracle-probed, dump_decls `files` mode, full message):
 /// `overloaded, errors` then B's `Function expected at` then A's
 /// `Application type mismatch: The argument`.
 #[test]
@@ -516,7 +516,7 @@ fn field_notation_and_dot_ident_see_open_decls() {
 
 /// `open X (p)` with `X` naming two namespaces: the oracle's "ambiguous
 /// identifier `p`, possible interpretations: [B.X.p, A.X.p]"
-/// (`Open.lean:75`) renders `mkConst`s, an `Expr` list, through the
+/// (`Open.lean:72`) renders `mkConst`s, an `Expr` list, through the
 /// delaborator, so leanr seams it.
 #[test]
 fn open_explicit_ambiguity_is_a_delab_seam() {

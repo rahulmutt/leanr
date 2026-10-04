@@ -173,7 +173,8 @@ pub(crate) fn elab_app_fn(
         ("Lean.Parser.Term.hole", _) => Err(ElabError::PlaceholderAsFunction),
         ("choice", _) => Err(ElabError::UnsupportedSyntax(
             "application head `choice` needs `elabAppFn`'s `choiceKind` fan-out \
-             (App.lean:2062-2065) — the overloading slice (M4c-2b-ii)"
+             (App.lean:2062-2065); leanr's parser never builds `choice` \
+             (longestMatch ties are first-wins) — choice-node parsing"
                 .to_string(),
         )),
         // oracle: `elabAppFn`'s generic arm (`App.lean:2120-2138`). With
@@ -182,7 +183,7 @@ pub(crate) fn elab_app_fn(
         // Otherwise it is elaborated with no expected type and handed to
         // `elabAppLVals`. `catchPostpone := !overloaded` (`:2121`) is
         // always `true` here, since `overloaded` is false until `choice`
-        // is routed (overloading slice), so `elab_term`'s catch applies.
+        // is routed (choice-node parsing), so `elab_term`'s catch applies.
         // `observing`'s restore-and-rethrow of a postponement
         // (`TermElabM.lean:586-589`) is subsumed by the enclosing
         // `elab_term`'s own restore, which rolls back to an earlier state.

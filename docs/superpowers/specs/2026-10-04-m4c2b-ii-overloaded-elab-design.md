@@ -211,3 +211,76 @@ unchanged; `seam_audit`; the full `mise run ci` (fmt and clippy included).
 - **`checkDeprecated`**: not modelled (no deprecation attributes in the
   corpus).
 - **Later M4** items listed in the M4c-2b-i spec are unchanged.
+
+## Plan amendments (plan-time oracle probes, 2026-10-04)
+
+- `elab_app_fn` returns `AppFn::{Done, Candidates}` instead of threading
+  an accumulator, and takes no `overloaded` flag: the oracle sets the
+  incoming flag only under `choice` (out of scope), so `overloaded` is
+  `fns.len() > 1` inside `elab_app_fn_resolutions`.
+- Rule 1 lives in `observing`: non-oracle errors are rethrown, never
+  captured, so `select` only ever sees oracle errors.
+- `open`'s two "ambiguous identifier" throws render `Expr` lists: they are
+  `— delab name rendering` seams, and `AmbiguousOpenIdent` is dropped.
+  `failed to open, errors ` is ported (`FailedToOpen`).
+- Nested namespaces never overload (the inner shadows), so the
+  `overload/nestedNs` rows are dropped.
+- `binder_name_gen` stays monotonic: `Core.SavedState.restore` rewinds
+  neither the name generator nor the macro scope.
+- `Elab0` gains `instCoeListNatInt : Coe (List Nat) Int`, to give
+  `getSuccesses` stage 2 a source-level discriminator. It is inert:
+  only `elim.jsonl` gains its record.
+- `mk_const` renders the resolved constant in
+  ``too many explicit universe levels for `B.u` `` (it rendered the source
+  text before, and the variant had no first line).
+- Identifier candidates run in `mkConsts`' REVERSED `resolveGlobalName`
+  order (`TermElabM.lean:2146-2158` cons-folds); `.x` candidates keep
+  `resolveGlobalName` order (`App.lean:2032-2033`, `mapM`).
+
+## Landed
+
+- PR: pending (the controller fills it at merge). Head before the
+  closing commit: 5315017; the closing commit is this one.
+- Corpus: 131 file-query records (`CORPUS_FLOOR` 131). `leanr_meta/src`
+  and the kernel are untouched; only `file-queries.jsonl` rows and one
+  `elim.jsonl` record (`instCoeListNatInt`) were added.
+- Shipped: `observing`/`apply_result`, `overload::select`
+  (`getSuccesses` stages 1-3, `Ambiguous term`, `mergeFailures`),
+  overloaded identifiers and `.x` through `elab_app_fn_resolutions`,
+  `AmbiguousFieldName`, `AmbiguousNamespace`, `FailedToOpen`, and the
+  `seam_audit` gate for the retired label.
+- Mutation results (each applied, confirmed failing, reverted):
+  - `observing`'s Ok arm without restore, capture-every-error, and
+    `apply_result` without restore: all caught by Task 1's unit tests.
+  - No `ensureHasType` in the candidate loop: caught by
+    `overload/expectedType`, `delayedCoeStuck`, `delayedCoeStage2`,
+    `argExpected`, `twoOverloads`; NOT by `overload/coe`.
+  - Skip stage 2: `overload/delayedCoeStage2`. Skip stage 3: only the
+    scopes test `stage_three_drops_a_stuck_instance_candidate`.
+  - `mk_const` lazily inside `observing`, and `TooManyUniverseLevels` from
+    source text: `overload/explicitUniv`.
+  - Candidate-order mutations: dropping the identifier reversal fails
+    `overloaded_candidates_run_in_mk_consts_order`; `.take(1)` on `.x`
+    fails `dotIdentArgs`, `dotIdentAmbig`, `dotIdentAllFail`, and `.rev()`
+    fails `dot_ident_candidates_keep_resolve_order`.
+  - `AmbiguousNamespace` candidates reversed: `ambig/openHiding` and
+    `openRenaming`; `AmbiguousFieldName` reversed: `ambig/fieldName`;
+    `errs.remove(0)` instead of `FailedToOpen`: `ambig/openFailed`.
+- Surprises:
+  - (a) Candidate fold order differs between the two paths (see Plan
+    amendments); each is pinned by a scopes test.
+  - (b) The plan's `overload/stage3` row fails at stage 1 (`NoInst`
+    fails inside the candidate, in the oracle too), so stage 3 is pinned
+    by `stage_three_drops_a_stuck_instance_candidate` (oracle-probed
+    `t := B.h`).
+  - (c) Mutation 1 (drop `ensureHasType`) is not caught by
+    `overload/coe`, since the outer `ensureHasType` inserts the coercion
+    when only one candidate succeeds; other rows catch it.
+  - (d) `open`'s all-failed catch admits any `UnsupportedSyntax` (it
+    stands for a delab-seam throw the oracle's catch would take); this is
+    wider than needed and is an open item.
+- Open seams: `choice` nodes (choice-node parsing: leanr's parser never
+  builds them); delab name rendering (`resolveId?`'s `Ambiguous term` with
+  two or more candidates in non-application position, and `open`'s two
+  `Expr`-list ambiguity throws, `ResolveName.lean:376` and
+  `Open.lean:72`).
