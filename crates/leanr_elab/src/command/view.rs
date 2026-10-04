@@ -175,7 +175,7 @@ fn check_modifiers(mods: &SyntaxNode) -> Result<(), ElabError> {
         "doc comment — later M4 (docs)",
         "attributes — later M4",
         "visibility modifier — later M4",
-        "`protected` — M4c-2 (namespaces)",
+        "`protected` — M4c-2b",
         "`meta`/`noncomputable` — later M4 (compilation)",
         "`unsafe` — later M4",
         "`partial`/`nonrec` — later M4 (recursion)",
@@ -204,15 +204,11 @@ fn decode_decl_id(
     // `id.getId`: the decoded `Name`, `«»` escapes stripped (`«gq»` is
     // `gq`, `«a.b»` the ATOMIC `a.b`). `mkDeclName` (`DeclModifiers.lean:
     // 263-286`) prefixes the namespace and strips a `_root_` prefix
-    // (`:267-275`); a bare `_root_` is its error (`:268-269`). All M4c-2.
+    // (`:267-275`); a bare `_root_` is its error (`:268-269`). All M4c-2b.
     // `_root_x` is atomic and not `_root_`-prefixed.
     let name = match ident_components(&raw)?.as_slice() {
         [one] if one != "_root_" => one.clone(),
-        _ => {
-            return Err(seam(format!(
-                "dotted declaration name `{raw}` — M4c-2 (namespaces)"
-            )))
-        }
+        _ => return Err(seam(format!("dotted declaration name `{raw}` — M4c-2b"))),
     };
     let mut univs = Vec::new();
     if let Some(NodeOrToken::Node(opt)) = ch.get(1) {
@@ -421,7 +417,7 @@ mod tests {
     fn dotted_decl_name_is_an_m4c2_seam() {
         let m = seam("def Foo.bar : Nat := Nat.zero");
         assert!(
-            m.contains("dotted declaration name `Foo.bar`") && m.contains("M4c-2"),
+            m.contains("dotted declaration name `Foo.bar`") && m.ends_with(" — M4c-2b"),
             "{m}"
         );
         assert!(seam("def _root_.baz : Nat := Nat.zero").contains("dotted declaration name"));

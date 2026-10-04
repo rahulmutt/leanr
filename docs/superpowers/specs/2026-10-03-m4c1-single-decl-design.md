@@ -424,13 +424,13 @@ Oracle cites corrected in the sweep (code, plan and spec together): `Elab.async`
 
 Open seams carried forward:
 
-- M4c-2: the command loop, namespaces/`protected`/dotted names, auto-bound implicits (header unknown identifier or universe), the env-wide `auxLemmasExt` cache (Amendment 1 item 2). The header auto-bound seam also fires for a dotted unknown name, where the oracle says "Unknown identifier".
+- M4c-2: the command loop, namespaces/`protected`/dotted names, auto-bound implicits (header unknown identifier or universe), (the env-wide `auxLemmasExt` cache and the command loop: CLOSED in M4c-2a). The header auto-bound seam also fires for a dotted unknown name, where the oracle says "Unknown identifier".
 - later M4: recursion (self-reference), `declValEqns`/`where`/termination hints, attributes, modifiers, `deriving`, `instance`/`structure`/`inductive`, `opaque` without a value, `letToHave`, compilation. The parser's missing `binderDefault` and its missing `Termination.suffix` content (`termination_by`/`decreasing_by` lex as application arguments, so from source they read "Unknown identifier `termination_by`" instead of the termination seam).
 - P1's pending-aux lookup seam (Amendment 1 item 4), now surfaced as `UnsupportedSyntax` by `def.rs`.
 - Aux theorems are dropped on an error between `abstract_nested_proofs` and `commit`.
 - `Kernel(_)` errors have no oracle first line.
 - The gate encoder erases binder names (`dump_decls.lean`'s `biStr`). Binder names are pinned only by `oracle_decl.rs`'s `quoted_binder_name_is_decoded` and `binder_smoke.rs`'s quoted/dotted binder tests. Add a binder-name channel to the dumper at the next corpus regen.
-- After a kernel rejection of the main declaration, its aux theorems stay in the environment (as in the oracle). A re-declaration on the same `CommandElab` then collides on `foo._proof_1`, an error, never a wrong `Ok`. M4c-2, with the `auxLemmasExt` seam.
+- After a kernel rejection of the main declaration, its aux theorems stay in the environment (as in the oracle). A re-declaration on the same `CommandElab` then collides on `foo._proof_1`, an error, never a wrong `Ok`. M4c-2, with the `auxLemmasExt` seam. (M4c-2a: the cache now keeps it; with the stop-at-first-error loop the re-declaration is unreachable through `elab_commands`)
 - A binder with no type (`def f2 {α} (a : α)`) is the oracle's `expandBinderType` hole (`Binders.lean:24-28`), not auto-bound; the oracle admits `f2.{u_1}`. leanr seams it as ``binder group: missing `: T` (`expandBinderType` hole) — later M4``.
 - `def _root_ : Nat := …` is an oracle error ("invalid declaration name `_root_`, …", `DeclModifiers.lean:268-269`); leanr seams it with the dotted-name M4c-2 seam.
 - Names in messages are rendered without `«»` escaping (leanr's `Name` `Display`); the oracle escapes a component that needs it (`«a.b».c`). Only reachable for quoted names that contain `.` or non-identifier characters.

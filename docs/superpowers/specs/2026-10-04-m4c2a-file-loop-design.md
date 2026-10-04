@@ -249,4 +249,26 @@ Each must fail a named test:
 
 ## Landed
 
-(filled in at merge)
+Commits (`git log --oneline main..HEAD`, before this one):
+
+- `a8f2a28` dump_decls.lean file mode + file corpus (15 records) + parse gate. Mutation: `CORPUS_FLOOR` 15 -> 16 FAILS `file_corpus_sources_parse_into_the_oracle_commands`.
+- `6c13f5c` `CommandElab::elab_commands` (stop at first error) + command seam table; file gate on non-aux records. Mutations: (1) keep looping past an error: `an_error_mid_file_stops_the_loop` FAILS (also `a_mid_file_error_after_successes_keeps_them`); (2) stopped index `i+1`: `oracle_file_gate` and `an_error_mid_file_stops_the_loop` FAIL (+3 others); (3) `open` moved to the M4c-2c arm: `scope_commands_are_m4c2b_seams` FAILS; (4) dropping the `if *i == n_ok` guard in `run_file_corpus`: all pass (equivalent harness mutation; the guard documents the generator invariant).
+- `2dd66c4` env-wide aux-lemma cache (`auxLemmasExt`) on `CommandElab`; full file gate (15 records). Mutations, each FAILED as named: (1) per-decl cache: `oracle_file_gate` fails aux/reuse, overwrite, reuseUniv, sharedLater, and `aux_lemma_is_reused_across_declarations` fails; (2) keep-first write-back: aux/overwrite[2], [3]; (3) `mk_aux_lemma` ignores level params: aux/overwrite[1] (`UnivParamArityMismatch`); (4) write back scratch ids captured before `add_decl_in`: four aux records, the reuse pin and `aux_admitted_before_a_failed_main_is_cached`; (5) no write-back: as (1) plus `aux_admitted_before_a_failed_main_is_cached`; (6) write back only after full success: `aux_admitted_before_a_failed_main_is_cached` fails (gates pass).
+- `b9efe23` aux-lemma key canonical across regions; base-interned level lists at the elaborator producers. Pins `aux_lemma_is_reused_with_a_char_literal_in_the_type` and `..._numeral_in_the_type` FAIL with neither half applied (`[nb._proof_1, nb]`); each half alone makes them pass (redundant for these shapes; both kept).
+- the Task 4 commit: seam sub-slice labels, docs, this section.
+
+Deviations from the plan:
+
+- The cache key is canonical. A third `leanr_meta` public item, `aux_lemma_key`, exists because the oracle's `AuxLemmaKey` `BEq` is `Expr.eqv` (alpha-equivalence, binder annotations ignored, `Lean/Expr.lean:804-812`). `aux/reuse` names its binder `n` in one def and `m` in the other.
+- `intern_level_list` takes `base = Some(..)` at five elaborator producers: `app/head.rs` `mk_const`, `builtin/lit/mod.rs` x2, `elab.rs` `mk_const_with_level_params`, and `builtin/op/to_expr.rs` `mk_fun_unit`. That lets the type ids of the cache keys dedupe against the environment. `aux_lemma_key` also re-interns `Const` level lists, `Sort` levels and literals through `base`.
+- Two oracle-probed pins were added, a char literal and a numeral in the aux type: `aux_lemma_is_reused_with_a_{char_literal,numeral}_in_the_type`.
+
+Seam labels: auto-bound is `M4c-2c`; `protected`, dotted and `_root_` names are `M4c-2b`; `namespace`/`section`/`end`/`open` are `M4c-2b`; `universe`/`variable` are `M4c-2c`.
+
+Open seams carried forward:
+
+- Error recovery (`errToSorry`, continuing past an error); the loop stops at the first `Err`.
+- The module header and `isPrivate`.
+- Every non-declaration command, by slice label: `namespace`/`section`/`end`/`open` M4c-2b, `universe`/`variable` M4c-2c, all others later M4.
+- Compile-error blind spot: the oracle logs code-generator errors that leanr cannot see, so a file corpus must avoid them.
+
