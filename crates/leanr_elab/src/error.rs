@@ -15,7 +15,6 @@ pub enum ElabError {
     /// oracle: `throwUnknownConstantAt` — the `binop%` family's head did not
     /// resolve (`Extra.lean:216`, `:223`, `:554`).
     UnknownConstant(String),
-    AmbiguousIdent(String),
     /// `ensureHasType`'s mismatch: `mkCoe`'s `.none` answer and its
     /// caught `MetaError::CoeExpansionMismatch` both land here
     /// (`TermElabM.lean:1307`, `:1313-1317`, `:1322`) — the coercion

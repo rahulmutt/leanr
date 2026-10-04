@@ -24,7 +24,7 @@ use crate::app::AppCall;
 use crate::dispatch::{non_trivia_children, SynElem};
 use crate::elab::TermElabM;
 use crate::error::ElabError;
-use crate::resolve::{resolve_global_name, resolve_local_name};
+use crate::resolve::resolve_local_name;
 
 /// Oracle `elabAppFn` (`App.lean:2060-2138`): returns FINISHED
 /// candidates (the oracle's `TermElabResult` array), because it threads
@@ -152,7 +152,7 @@ pub fn elab_app_fn(
         ("Lean.Parser.Term.hole", _) => Err(ElabError::PlaceholderAsFunction),
         ("choice", _) => Err(ElabError::UnsupportedSyntax(
             "application head `choice` needs `elabAppFn`'s `choiceKind` fan-out \
-             (App.lean:2062-2065) — the overloading slice (resolve_global_name)"
+             (App.lean:2062-2065) — the overloading slice (M4c-2b-ii)"
                 .to_string(),
         )),
         // oracle: `elabAppFn`'s generic arm (`App.lean:2120-2138`). With
@@ -380,13 +380,13 @@ fn elab_app_fn_id(
             }
             (fvar, n_fields, explicit_levels.to_vec())
         } else {
-            // `raw` (the identifier's own source text) doubles as the
-            // error-message `display` — see `resolve_global_name`'s doc
-            // for why a prefix (frequently a SCRATCH-region id, minted by
-            // `intern_prefixes` just above for any name not already
-            // interned in the persistent store) cannot safely be
-            // re-rendered through `view.store` alone.
-            let (cname, n_fields) = resolve_global_name(&elab.view, &prefixes, raw)?;
+            // `raw` (the identifier's own source text) doubles as
+            // `expect_one`'s error-message `display`: a prefix (frequently
+            // a SCRATCH-region id, minted by `intern_prefixes` just above
+            // for any name not already interned in the persistent store)
+            // cannot safely be re-rendered through `view.store` alone.
+            let cands = elab.resolve_global(&prefixes)?;
+            let (cname, n_fields) = crate::resolve::expect_one(cands, raw)?;
             // `mkConsts` (`:2145-2158`): with fields, the explicit levels
             // belong to the last field and the constant gets fresh ones.
             let (const_levels, proj_levels): (&[LevelId], &[LevelId]) = if n_fields == 0 {

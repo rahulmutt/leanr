@@ -1,9 +1,9 @@
 //! The overload shape guard. Oracle: `elabAppAux` (`App.lean:2202-2217`)
 //! takes `candidates`, and with more than one runs `getSuccesses` /
-//! ambiguity reporting / `mergeFailures`. That machinery is unreachable
-//! while `resolve_global_name` resolves only exact names (no `open`, no
-//! aliases, no `_root_`, no `choice` nodes), so it is NOT built
-//! speculatively — the shape is asserted instead.
+//! ambiguity reporting / `mergeFailures`. That machinery is overloaded
+//! elaboration, M4c-2b-ii: until it lands, an identifier with several
+//! candidates is seamed by `resolve::expect_one` before it gets here, and
+//! this guard asserts the shape instead.
 
 use leanr_kernel::bank::ExprId;
 
@@ -16,8 +16,7 @@ pub fn expect_single(candidates: Vec<ExprId>) -> Result<ExprId, ElabError> {
             "elab_app_fn returned no candidates".to_string(),
         )),
         n => Err(ElabError::UnsupportedSyntax(format!(
-            "overloaded application ({n} candidates) requires namespace/alias \
-             resolution — the slice that grows resolve_global_name owns this"
+            "overloaded application ({n} candidates) — M4c-2b-ii"
         ))),
     }
 }

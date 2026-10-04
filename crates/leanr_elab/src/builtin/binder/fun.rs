@@ -18,7 +18,6 @@ use crate::app::head::ident_prefixes;
 use crate::dispatch::{non_trivia_children, SynElem};
 use crate::elab::TermElabM;
 use crate::error::ElabError;
-use crate::resolve::resolve_global_name;
 
 /// oracle: `Expr.cleanupAnnotations` (`Lean/Expr.lean:1754-1756`; the
 /// definition itself — `:1748` is inside its docstring) —
@@ -193,11 +192,7 @@ fn fun_binder_ids(
 /// dotted ident whose longest declared prefix is a constant counts.
 fn names_a_global(elab: &mut TermElabM, raw: &str) -> Result<bool, ElabError> {
     let (_, prefixes) = ident_prefixes(elab, raw)?;
-    match resolve_global_name(&elab.view, &prefixes, raw) {
-        Ok(_) | Err(ElabError::AmbiguousIdent(_)) => Ok(true),
-        Err(ElabError::UnknownIdent(_)) => Ok(false),
-        Err(e) => Err(e),
-    }
+    Ok(!elab.resolve_global(&prefixes)?.is_empty())
 }
 
 /// `processAsPattern` (`Binders.lean:365-370`): the binder becomes a

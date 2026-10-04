@@ -99,14 +99,12 @@ pub(crate) fn mk_fresh_type_mvar_for(
 /// `Const` gets an id different from the structurally equal persistent
 /// one, which breaks id-keyed lookups such as the aux-lemma cache.
 ///
-/// **LATENT NAME-RESOLUTION TRAP — read before implementing `open`.**
-/// This helper (and its sibling [`const_no_levels`]) routes a
-/// HARD-CODED name — `"OfNat"`, `"OfNat.ofNat"`, `"OfScientific"`,
-/// `"OfScientific.ofScientific"`, `"Char.ofNat"`, `"Bool.true"`,
-/// `"Bool.false"` — through `resolve::resolve_global_name` (with the
-/// whole name as the only prefix, so never a field split), i.e. through
-/// USER-VISIBLE name resolution. The oracle does not: `elabNumLit`
-/// (`BuiltinTerm.lean:226`) writes
+/// **Absolute name, not resolution.** This helper (and its sibling
+/// [`const_no_levels`]) looks a HARD-CODED name — `"OfNat"`,
+/// `"OfNat.ofNat"`, `"OfScientific"`, `"OfScientific.ofScientific"`,
+/// `"Char.ofNat"`, `"Bool.true"`, `"Bool.false"` — up directly in the
+/// environment, bypassing user-visible name resolution. The oracle does
+/// the same: `elabNumLit` (`BuiltinTerm.lean:226`) writes
 ///
 /// ```text
 /// mkConst ``OfNat [u]
@@ -114,27 +112,17 @@ pub(crate) fn mk_fresh_type_mvar_for(
 ///
 /// and that double-backtick name literal is resolved and checked when
 /// `BuiltinTerm.lean` itself is compiled, so the elaborator holds an
-/// ABSOLUTE `Name` that no user syntax can redirect.
-///
-/// The two agree today only because `resolve_global_name` performs no
-/// namespace, `open`, alias or `_root_` search — its candidate set is
-/// `{name}` or `{}` per prefix (its own doc). When that search lands — deferred as
-/// a later slice at `lib.rs`'s deferral ledger, the
-/// "`open`/alias/`export`/`_root_` resolution" row — a user-`open`ed
-/// namespace containing its own `OfNat` could shadow the elaborator's
-/// constant and silently retarget a numeral's `OfNat` application.
-/// That slice must decide the strategy (most likely: bypass
-/// `resolve_global_name` here in favour of an absolute lookup, matching the
-/// oracle's compile-time-resolved name); this comment is the record
-/// that the decision is owed, not the decision.
+/// ABSOLUTE `Name` that no user syntax can redirect: a user `OfNat` in
+/// an opened or enclosing namespace never retargets a numeral.
 pub(crate) fn const_with_level(
     elab: &mut TermElabM,
     name: &str,
     u: LevelId,
 ) -> Result<ExprId, ElabError> {
     let cname = crate::app::head::intern_dotted(elab, name)?;
-    // One prefix, the whole name: exact lookup, never a field split.
-    let (resolved, _) = crate::resolve::resolve_global_name(&elab.view, &[cname], name)?;
+    if elab.view.get(cname).is_none() {
+        return Err(ElabError::UnknownConstant(name.to_string()));
+    }
     let base = elab.view.store;
     let levels = elab
         .mctx
@@ -143,7 +131,7 @@ pub(crate) fn const_with_level(
         .map_err(leanr_meta::MetaError::from)?;
     elab.mctx
         .store_mut()
-        .expr_const(Some(base), Some(resolved), levels)
+        .expr_const(Some(base), Some(cname), levels)
         .map_err(|e| ElabError::from(leanr_meta::MetaError::from(e)))
 }
 
@@ -154,8 +142,9 @@ pub(crate) fn const_with_level(
 /// otherwise identical to.
 pub(crate) fn const_no_levels(elab: &mut TermElabM, name: &str) -> Result<ExprId, ElabError> {
     let cname = crate::app::head::intern_dotted(elab, name)?;
-    // One prefix, the whole name: exact lookup, never a field split.
-    let (resolved, _) = crate::resolve::resolve_global_name(&elab.view, &[cname], name)?;
+    if elab.view.get(cname).is_none() {
+        return Err(ElabError::UnknownConstant(name.to_string()));
+    }
     let base = elab.view.store;
     let levels = elab
         .mctx
@@ -164,7 +153,7 @@ pub(crate) fn const_no_levels(elab: &mut TermElabM, name: &str) -> Result<ExprId
         .map_err(leanr_meta::MetaError::from)?;
     elab.mctx
         .store_mut()
-        .expr_const(Some(base), Some(resolved), levels)
+        .expr_const(Some(base), Some(cname), levels)
         .map_err(|e| ElabError::from(leanr_meta::MetaError::from(e)))
 }
 

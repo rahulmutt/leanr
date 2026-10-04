@@ -29,7 +29,7 @@ mod rel;
 pub mod to_expr;
 mod tree;
 
-use leanr_kernel::bank::ExprId;
+use leanr_kernel::bank::{ExprId, NameId};
 use leanr_syntax::kind::KindInterner;
 use leanr_syntax::tree::NodeOrToken;
 
@@ -158,9 +158,10 @@ pub(crate) fn resolve_head(elab: &mut TermElabM, head: &OpHead) -> Result<ExprId
 /// the candidates with NO leftover field projections, `none` if there is
 /// none. `resolveName` tries locals first (`:2180-2181`; a local hit hides
 /// the globals even when its projections are then filtered away). `catch
-/// _ => []` keeps only the not-found case: leanr's resolver reports a miss
-/// as `UnknownIdent`. Every other error propagates (`AmbiguousIdent` is
-/// the oracle's "ambiguous term" throw at `:2223`).
+/// _ => []` only ever catches the not-found case here: the candidate list
+/// is simply empty. Two or more is the oracle's "ambiguous term" throw
+/// (`:2223`, which pretty-prints the constants); leanr seams it with
+/// `resolve::expect_one`'s M4c-2b-ii text.
 ///
 /// The identifier is decoded (`app::head::ident_prefixes`), as in
 /// `app::head::elab_app_fn_id`, so a local binder's name matches the same way.
@@ -169,11 +170,16 @@ fn resolve_id(elab: &mut TermElabM, raw: &str) -> Result<Option<ExprId>, ElabErr
     if let Some((fvar, n_fields)) = crate::resolve::resolve_local_name(&elab.mctx, &prefixes) {
         return Ok((n_fields == 0).then_some(fvar));
     }
-    match crate::resolve::resolve_global_name(&elab.view, &prefixes, raw) {
-        Ok((cname, 0)) => Ok(Some(crate::app::head::mk_const(elab, cname, &[], raw)?)),
-        Ok(_) | Err(ElabError::UnknownIdent(_)) => Ok(None),
-        Err(e) => Err(e),
+    let fs: Vec<(NameId, usize)> = elab
+        .resolve_global(&prefixes)?
+        .into_iter()
+        .filter(|&(_, projs)| projs == 0)
+        .collect();
+    if fs.is_empty() {
+        return Ok(None);
     }
+    let (cname, _) = crate::resolve::expect_one(fs, raw)?;
+    Ok(Some(crate::app::head::mk_const(elab, cname, &[], raw)?))
 }
 
 /// The declared constant `name` at fresh level mvars (`rel.rs`'s `Bool`;
