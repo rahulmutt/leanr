@@ -29,6 +29,16 @@ order (every `_proof_N` before the main declaration) separately.
 A `declQueries` command that logs an error is reported on stderr and
 DROPPED (the gate's floor catches a shrinking corpus); a `declErrQueries`
 command that elaborates cleanly is reported on stderr and dropped.
+
+File mode (`lean --run dump_decls.lean files`, M4c-2a spec
+`docs/superpowers/specs/2026-10-04-m4c2a-file-loop-design.md` § Harness):
+each `fileQueries` source is parsed command by command and elaborated over
+ONE threaded `Command.State`, so later commands see earlier constants and
+the aux-lemma cache (`auxLemmasExt`). Record shape:
+  {"id","src","cmds":[{"consts":[C...]} | {"err":<string>}]}
+with one element per command up to and including the first error. A
+record whose error is not in its LAST command is reported on stderr and
+dropped (leanr stops at the first error, spec decision 2).
 -/
 -- NOT `import Elab0`: see `dump_elab.lean` (Elab0 is prelude-mode and
 -- collides with the real `Init` this file needs).
@@ -271,11 +281,98 @@ def runCmd (env : Environment) (opts : Options) (src : String) :
         let news := (s.env.constants.map₂.toList.map (·.1)).toArray.qsort Name.lt
         return .ok (.ok (news.filterMap fun n => (s.env.find? n).map constJ))
 
-unsafe def main (_args : List String) : IO Unit := do
+-- ===== file corpus (M4c-2a spec § Harness; every record probed at plan time) =====
+
+/-- Multi-command sources, one command per line. Each runs against one
+threaded `Command.State`; an `err` may only be the LAST command's result
+(M4c-2a decision 2: leanr stops at the first error, so nothing after it
+is comparable). -/
+def fileQueries : List (String × String) := [
+  ("chain/defRef", "def c1 : Nat := Nat.zero\ndef c2 : Nat := pick c1 c1"),
+  ("chain/thmAbbrev", "def c3 (n : Nat) : Nat := pick n n\nabbrev c4 : Nat := c3 Nat.zero\ntheorem c5 : Eq c4 c4 := rfl"),
+  ("chain/univ", "def idu.{u} (α : Sort u) (a : α) : α := a\ndef u1 : Nat := idu Nat Nat.zero\ndef u2 : Type := idu Type Nat"),
+  ("aux/reuse", "def na (n : Nat) : PProd Nat (Eq (Nat.succ n) (Nat.succ n)) := PProd.mk n rfl\ndef nb (m : Nat) : PProd Nat (Eq (Nat.succ m) (Nat.succ m)) := PProd.mk m rfl"),
+  ("aux/distinct", "def nc (n : Nat) : PProd Nat (Eq (Nat.succ n) (Nat.succ n)) := PProd.mk n rfl\ndef nd (n : Nat) : PProd Nat (Eq (Nat.succ (Nat.succ n)) (Nat.succ (Nat.succ n))) := PProd.mk n rfl"),
+  ("aux/overwrite", "def ow1.{u} (n : Nat) : PProd Nat (Eq (Nat.succ n) (Nat.succ n)) := PProd.mk n ((fun (_ : Sort u) => rfl) PUnit.{u})\ndef ow2 (n : Nat) : PProd Nat (Eq (Nat.succ n) (Nat.succ n)) := PProd.mk n rfl\ndef ow3 (n : Nat) : PProd Nat (Eq (Nat.succ n) (Nat.succ n)) := PProd.mk n rfl\ndef ow4.{u} (n : Nat) : PProd Nat (Eq (Nat.succ n) (Nat.succ n)) := PProd.mk n ((fun (_ : Sort u) => rfl) PUnit.{u})"),
+  ("aux/reuseUniv", "def pu1.{u} (n : Nat) : PProd Nat (Eq (Nat.succ n) (Nat.succ n)) := PProd.mk n ((fun (_ : Sort u) => rfl) PUnit.{u})\ndef pu2.{v} (n : Nat) : PProd Nat (Eq (Nat.succ n) (Nat.succ n)) := PProd.mk n ((fun (_ : Sort v) => rfl) PUnit.{v})"),
+  ("aux/sharedLater", "def ne (n : Nat) : PProd Nat (Eq (Nat.succ n) (Nat.succ n)) := PProd.mk n rfl\ndef nf (n : Nat) : PProd (Eq (Nat.succ n) (Nat.succ n)) (Eq (Nat.succ (Nat.succ n)) (Nat.succ (Nat.succ n))) := PProd.mk rfl rfl"),
+  ("example/between", "def x1 : Nat := Nat.zero\nexample : Nat := x1\ndef x2 : Nat := pick x1 x1"),
+  ("example/auxThenDef", "example (n : Nat) : PProd Nat (Eq (Nat.succ n) (Nat.succ n)) := PProd.mk n rfl\ndef ng (n : Nat) : PProd Nat (Eq (Nat.succ n) (Nat.succ n)) := PProd.mk n rfl"),
+  ("thm/auxNotAbstracted", "theorem th1 (n : Nat) : True := (fun (_ : PProd Nat (Eq (Nat.succ n) (Nat.succ n))) => True.intro) (PProd.mk n rfl)\ndef th2 (n : Nat) : PProd Nat (Eq (Nat.succ n) (Nat.succ n)) := PProd.mk n rfl"),
+  ("kinds/all", "axiom k1 : Nat\nopaque k2 : Nat := Nat.zero\ntheorem k3 : True := True.intro\nabbrev k4 := k2\nexample : True := k3\ndef k5 := pick k4 k4"),
+  ("err/dupLocal", "def dd : Nat := Nat.zero\ndef dd : Nat := pick Nat.zero Nat.zero"),
+  ("err/mismatchEarlier", "def me : Nat := Nat.zero\ndef mf : True := me"),
+  ("err/thmAfterDef", "def tq : Nat := Nat.zero\ntheorem tr : Eq tq Nat.zero := True.intro")
+]
+
+/-- The first error-severity message `s` logged, from `messages` and the
+async `snapshotTasks` (see the module doc), as its first line. -/
+def firstErr? (s : Command.State) : IO (Option String) := do
+  let snapMsgs := s.snapshotTasks.toList.flatMap fun t =>
+    t.get.getAll.toList.flatMap fun snap => snap.diagnostics.msgLog.toList
+  match ((s.messages.toList ++ snapMsgs).filter (·.severity == .error)).head? with
+  | some m => return some (((← m.data.toString).splitOn "\n").headD "")
+  | none => return none
+
+/-- Elaborate `src` command by command over ONE threaded `Command.State`.
+Returns `(results, nCommands)`: one `{"consts"}`/`{"err"}` per command up to
+and including the first error, and the number of commands the source
+parses into (the commands after an error are parsed, not elaborated). -/
+def runFile (env : Environment) (opts : Options) (src : String) :
+    IO (Except String (Array Json × Nat)) := do
+  let inputCtx := Parser.mkInputContext src "<dump_decls>"
+  let ctx : Command.Context :=
+    { fileName := "<dump_decls>", fileMap := inputCtx.fileMap, snap? := none, cancelTk? := none }
+  let mut st := Command.mkState env {} opts
+  let mut ps : Parser.ModuleParserState := {}
+  let mut out : Array Json := #[]
+  let mut n := 0
+  let mut stopped := false
+  repeat
+    let scope := st.scopes.head!
+    let pmctx : Parser.ParserModuleContext :=
+      { env := st.env, options := scope.opts, currNamespace := scope.currNamespace,
+        openDecls := scope.openDecls }
+    let (stx, ps', pmsgs) := Parser.parseCommand inputCtx pmctx ps {}
+    ps := ps'
+    if pmsgs.hasErrors then return .error "parse error"
+    if stx.isOfKind ``Parser.Command.eoi then break
+    n := n + 1
+    if stopped then continue
+    let before : NameSet :=
+      st.env.constants.map₂.toList.foldl (fun s (c, _) => s.insert c) {}
+    let r ← (((Command.elabCommandTopLevel stx).run ctx).run
+      { st with messages := {}, snapshotTasks := #[] }).toBaseIO
+    match r with
+    | .error ex =>
+      out := out.push (Json.mkObj [("err", ((← ex.toMessageData.toString).splitOn "\n").headD "")])
+      stopped := true
+    | .ok ((), s) =>
+      match ← firstErr? s with
+      | some e =>
+        out := out.push (Json.mkObj [("err", e)])
+        stopped := true
+      | none =>
+        let news := ((s.env.constants.map₂.toList.map (·.1)).filter (!before.contains ·)).toArray.qsort Name.lt
+        out := out.push (Json.mkObj [("consts", Json.arr (news.filterMap fun c => (s.env.find? c).map constJ))])
+        st := s
+  return .ok (out, n)
+
+unsafe def main (args : List String) : IO Unit := do
   Lean.enableInitializersExecution
   Lean.initSearchPath (← Lean.findSysroot)
   let env ← Lean.importModules #[{ module := `Elab0 }] {} (trustLevel := 0) (loadExts := true)
   let opts : Options := Elab.async.set {} true
+  if args == ["files"] then
+    for (id, src) in fileQueries do
+      match ← runFile env opts src with
+      | .error msg => IO.eprintln s!"dump_decls files: {id}: {msg}"
+      | .ok (cmds, n) =>
+        if cmds.size != n then
+          IO.eprintln s!"dump_decls files: {id}: an error before the last command ({cmds.size}/{n}); dropped"
+        else
+          IO.println <| Json.compress <| Json.mkObj [("id", id), ("src", src), ("cmds", Json.arr cmds)]
+    return
   for (id, src) in declQueries do
     match ← runCmd env opts src with
     | .error msg => IO.eprintln s!"dump_decls: {id}: {msg}"

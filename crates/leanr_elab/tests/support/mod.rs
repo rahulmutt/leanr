@@ -1249,7 +1249,15 @@ pub fn parse_type(elab: &mut leanr_elab::TermElabM, src: &str) -> leanr_kernel::
 /// `src` holds anything but exactly one command: a silent second command
 /// would be skipped by the gate. Returns the parse result (its `tree`
 /// owns the `KindInterner`) and the command node.
-pub fn parse_command(src: &str) -> (leanr_syntax::ParseResult, leanr_syntax::tree::SyntaxNode) {
+/// Parse `src` as a header-less module; every command node, in order
+/// (no `Module.header`, no `Command.eoi`). Panics on a parse error: the
+/// corpora are oracle-parsed, so one is a leanr parser bug.
+pub fn parse_commands(
+    src: &str,
+) -> (
+    leanr_syntax::ParseResult,
+    Vec<leanr_syntax::tree::SyntaxNode>,
+) {
     let parsed = leanr_syntax::parse_module(src, &leanr_syntax::builtin::snapshot());
     assert!(
         parsed.errors.is_empty(),
@@ -1264,6 +1272,11 @@ pub fn parse_command(src: &str) -> (leanr_syntax::ParseResult, leanr_syntax::tre
             k != "Lean.Parser.Module.header" && k != "Lean.Parser.Command.eoi"
         })
         .collect();
+    (parsed, cmds)
+}
+
+pub fn parse_command(src: &str) -> (leanr_syntax::ParseResult, leanr_syntax::tree::SyntaxNode) {
+    let (parsed, cmds) = parse_commands(src);
     assert_eq!(cmds.len(), 1, "{src:?} must be exactly one command");
     let cmd = cmds[0].clone();
     (parsed, cmd)
