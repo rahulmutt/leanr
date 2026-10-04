@@ -5,15 +5,22 @@
 //! field components.
 //!
 //! **Global side.** `resolve_global_name` is the oracle's candidate-list
-//! `resolveGlobalName` against a [`ResolveCtx`]: the current namespace
-//! (`resolveUsingNamespace`), `_root_` (`resolveExact`), the `open`
-//! declarations (`resolveOpenDecls`) and aliases (`getAliases`). It returns
-//! every candidate; a caller that needs one goes through [`expect_one`],
-//! whose two-or-more arm is the overloaded-elaboration seam (M4c-2b-ii).
-//! `resolve_namespace` is `ResolveName.resolveNamespace`. Not ported:
-//! `resolvePrivateName` (unreachable: no module header, `private` is
-//! seamed), reserved names (`containsDeclOrReserved` is `EnvView::get`;
-//! `realizeGlobalName`, e.g. `f.eq_1`, is not realized) and macro scopes
+//! `resolveGlobalName` against a [`ResolveCtx`] that `command/scope.rs`
+//! fills from the scope stack: the current namespace and every enclosing
+//! one, innermost first (`resolveUsingNamespace`), `_root_`-prefixed and
+//! non-atomic names (`resolveExact`), the `open` declarations — simple
+//! with `hiding`, explicit `(x)` and `renaming` (`resolveOpenDecls`) — and
+//! imported aliases (`getAliases`); a protected declaration is skipped
+//! when the identifier is atomic.
+//! It returns every candidate; a caller that needs one goes through
+//! [`expect_one`]. `resolve_namespace` is `ResolveName.resolveNamespace`
+//! (what `open`/`namespace` resolve against).
+//!
+//! **Not ported.** Overloaded elaboration: two or more candidates is
+//! [`expect_one`]'s named seam (M4c-2b-ii). `resolvePrivateName`
+//! (unreachable: no module header, `private` is seamed). Reserved-name
+//! realization (`containsDeclOrReserved` is `EnvView::get`;
+//! `realizeGlobalName`, e.g. `f.eq_1`, is not realized). Macro scopes
 //! (leanr names carry none, so `extractMacroScopes` is the identity).
 //!
 //! **Local side.** `resolve_local_name` ports `resolveLocalName` with

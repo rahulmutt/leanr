@@ -144,10 +144,12 @@
 //!   (macro/binop% P3: `binop%`, `binop_lazy%`, `leftact%`, `rightact%`,
 //!   `unop%`, `binrel%`, `binrel_no_prop%`).
 //! - **`open`/alias/`_root_` resolution** — SHIPPED in M4c-2b-i
-//!   (`resolve.rs`, `names.rs`): `resolve_global_name` is the oracle's
-//!   candidate-list `resolveGlobalName` against the `ResolveCtx` on
-//!   `TermElabM` (term-only callers get `ResolveCtx::root()`). `export`
-//!   (the command that adds aliases) is a later M4 slice.
+//!   (`resolve.rs`, `names.rs`, `command/scope.rs`): `resolve_global_name`
+//!   is the oracle's candidate-list `resolveGlobalName` against the
+//!   `ResolveCtx` on `TermElabM` (term-only callers get
+//!   `ResolveCtx::root()`). Still deferred: overloaded identifiers (two
+//!   or more `resolveGlobalName` candidates) — M4c-2b-ii; `export`/`private`
+//!   — later M4.
 //!
 //! See `dispatch.rs`'s doc comment for the kind-by-kind deferral table,
 //! `app/mod.rs`'s for the site-by-site seam index inside the

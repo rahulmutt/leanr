@@ -413,3 +413,61 @@ Each must fail a named test:
 4. The aux-decl matcher (`resolveLocalName` port).
 5. Corpus, docs (`resolve.rs`'s module doc, the `lib.rs` deferral ledger,
    `dispatch.rs`), and a § Landed section.
+
+## Landed
+
+Commits (`git log --oneline cf66ceb..HEAD`, after the spec `b1536bc` and the plan `fb8678c`, before this one):
+
+- `bb13c58` `leanr_olean` decodes `protectedExt`, `namespacesExt` and `aliasExtension`. `Elab0` gains a `Scope0` block. Fixture diff: `Elab0.lean`/`.olean` and `elim.jsonl` (+4 `Scope0` records); every other fixture is byte-identical. Mutations, each FAILED as named: (1) `namespacesExt` decoded via `name_req`: `name_tables_decode`; (2) alias pair swapped: `name_tables_decode`; (3) `protectedExt` arm deleted: `name_tables_decode`; (4) `alias_entry` tag unchecked: `alias_entry_rejects_malformed_shapes`.
+- `891bd66` `names.rs` (name algebra, `NameTables`, `register_name_prefixes`) and the candidate-list `resolve_global_name` against `ResolveCtx`; `expect_one` seams two or more candidates; callers migrated (the numeral helpers do an absolute lookup). Every existing gate is green with no fixture change. Mutations, each FAILED as named: (1) `resolve_using_namespace` outermost first: `enclosing_namespace_innermost_hit_wins`; (2) protected check without the `is_atomic` guard: `protected_is_skipped_only_for_atomic_ids`; (3) a simple open ignores `except`: `open_decls_simple_hiding_and_explicit`; (4) `resolve_exact` also for atomic ids: `root_prefix_is_stripped_by_resolve_exact`; (5) only the first candidate returned: `two_candidates_are_returned_and_expect_one_seams`; (6) `_`-last names registered: `register_name_prefixes_skips_underscore_last_components`.
+- `a79b949` `mk_const` raises `UnknownConstant` for an undeclared name instead of panicking. An alias target or an explicit open's decl reaches it unchecked. `alias_to_undeclared_target_is_unknown_constant` panicked before the fix and passes after.
+- `5419102` `command/scope.rs` (scope stack, `namespace`/`section`/`end`/`open`/`… in`), `elab_command` dispatch, `mkDeclName` in `header.rs` (dotted, `_root_` and `protected` names; reserved-name and field-shadow seams), prefix registration and the protected set on commit. Mutations, each applied and reverted: (1) `elab_end` pops 1 instead of `end_size`: PASSED as briefed (`end B` has end size 1 either way). It was strengthened with an oracle-probed `end A.B` case and then FAILED `namespaces_prefix_declarations_and_end_pops`. (2) No `register_name_prefixes` after commit: `open_forms` FAILED. (3) `open` resolves against the head scope's original open decls: `open_forms` FAILED. (4) No section push for `in`: `open_forms` FAILED. (5) Reserved check without the BV-suffix arm: `reserved_and_shadowing_names_seam` FAILED. (6) `eq_N` seamed regardless of the parent's kind: `reserved_and_shadowing_names_seam` FAILED. (7) `AlreadyDeclared` with the short name: `declaration_name_errors_are_the_oracles` FAILED.
+- `21ea69a` `resolve_local_name` with `matchAuxRecDecl?` and the `globalDeclFound`/`skipAuxDecl` workaround. A match is the recursion seam. `check_no_self_reference` is deleted. Mutations, each FAILED as named: (1) `aux_decl` never set: `recursive_references_seam_in_namespaces`; (2) the relaxed match dropped: the same test (`A.f` row); (3) `skip_aux` dropped: `non_recursive_self_like_references_elaborate` (`foo.aux`); (4) aux checked before regular locals: the same test (`def g (g : Nat)`); (5) `aux_decl` set before the header: the same test (`Eq x x` header).
+- The Task 5 commit adds the 71 records to the file corpus (89 total, `CORPUS_FLOOR` 89), the docs (`resolve.rs`, the `lib.rs` ledger, the `dispatch.rs` table) and this section. The corpus passed on the first run. Mutation: `const_with_level` routed back through `resolve_global` makes `oracle_file_gate` FAIL on `res/numeralShadow[2]` only (`incorrect number of universe levels for 'X.OfNat'`).
+
+Deviations from the plan:
+
+- **`namespaces` is `Vec<Option<NameId>>`.** `namespacesExt` carries the anonymous name, so the spec's `Vec<NameId>` became `Vec<Option<NameId>>`.
+- **`names::is_atomic(None)` is `true`.** This follows the oracle's `Name.isAtomic` (`| anonymous => true`), not the plan's `false`. No resolver path passes `None`.
+- **Two plan mutations were not discriminating.** Rulings R1 and R2 added the discriminators: `A.B.w` for the innermost-first walk, and a root `x` plus an open `S.x` giving two candidates for atomic `resolveExact`. Task 3's `end_size` mutation was strengthened with `end A.B`, as above.
+- **`mk_const` returns `UnknownConstant`** instead of panicking (ruling R4, `a79b949`).
+- **Term-level `open … in` has its own dispatch arm** (ruling R3). The bare-kind fallback carried no slice label.
+- **Open decls are stored newest-first** (ruling R6, `Elab/Open.lean` conses). No current test observes the order, because two or more candidates always seam.
+- **Task 3 changes, all oracle-probed:**
+  - `InvalidNamespace` names the prefix up to the LAST `_root_` (`ensureValidNamespace` recurses from the last component).
+  - The "Failed to infer type" message prints the expanded short name (`setDeclIdName`).
+  - `congr_eq_<n>` joins the reserved-name seam.
+  - `… in` runs its closing `end` through `end_scopes(None)`, so `open Scope0 in namespace Q` reports the oracle's missing-name error.
+  - `add_scope` has no `is_new_ns` parameter (only `activateScoped` reads it).
+  - `DeclId.short: String` is removed.
+- **Corpus order.** The plan-time probe file put `open/nsScopeFirst` before `open/prefixOnly`/`open/threaded`. The committed corpus follows the brief's order. The two files have the same 89 records (sorted `diff` is empty); only that one line moved.
+
+Seam labels:
+
+- **`M4c-2b-ii`:** overloaded identifiers (`resolve::expect_one`, `overloaded identifier … (n candidates)`) and `open`'s ambiguity paths (`scope.rs`'s `ambiguous`).
+- **`later M4`:**
+  - recursive reference (`recursive reference to … — later M4 (recursion)`);
+  - possibly reserved name (`isReservedName`);
+  - structure-field shadowing (the message needs name shortening);
+  - `open scoped`;
+  - section modifiers;
+  - term-level `open … in`;
+  - `export` and other non-declaration commands (the command catch-all);
+  - `private` (visibility modifier).
+- **`M4c-2c`:** auto-bound implicits, `universe`, `variable`.
+- The `M4c-2b` label is retired.
+
+Open seams carried forward:
+
+- **M4c-2b-ii:** overloaded elaboration (two or more `resolveGlobalName` candidates).
+- **Later M4:**
+  - `export` (the command that adds aliases);
+  - `private` and `resolvePrivateName`;
+  - `open scoped` / `activateScoped`;
+  - modified sections (`noncomputable`/`public`/`meta`/`@[expose]`);
+  - term-level `open … in`;
+  - recursion (an aux-decl match is a seam);
+  - reserved-name realization (`realizeGlobalName`, e.g. `f.eq_1`; the `MethodSpecs` predicate is not mirrored);
+  - the field-shadow message (needs the delaborator's name shortening).
+- **`end` messages:** they join raw header strings, so an escaped component (`«a.b»`) prints unescaped, unlike `decl_id_text`.
+- **Unchanged from M4c-2a:** stop at the first error, no module header, and the compile-error blind spot.

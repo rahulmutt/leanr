@@ -191,7 +191,8 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 ///   macro expansion in dispatch ................ P2 SHIPPED (macro/binop%) — macros/, elab.rs
 ///   remaining Init notations (×, ∘, ::, <$>, <|, …) table extension — some need an Expansion shape beyond App/Op
 ///   Mathlib (non-Init) notations ............... the VM slice — UnsupportedSyntax(kind)
-///   open / alias / export / _root_ resolution .. later slice
+///   open / alias / _root_ resolution ......... M4c-2b-i SHIPPED — resolve.rs, command/scope.rs
+///   overloaded identifiers .................... M4c-2b-ii
 /// ```
 /// The application arms above are registered, so the `M4b-3` seams in
 /// that list are raised from INSIDE `app::args`/`app::finalize`/
