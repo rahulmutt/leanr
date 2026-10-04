@@ -261,7 +261,7 @@ pub enum ElabError {
     InvalidBinderName(String),
     /// oracle: `checkNotAlreadyDeclared` (`Elab/DeclModifiers.lean:40-44`),
     /// reached from `expandDeclId` → `mkDeclName` → `applyVisibility`
-    /// (`:244-251`). Carries the rendered declaration name.
+    /// (`:244-251`). Carries the rendered FULL declaration name.
     AlreadyDeclared(String),
     /// oracle: `throwAlreadyDeclaredUniverseLevel` (`Elab/Exception.lean:43-44`),
     /// from `expandDeclId`'s `.{…}` fold (`Elab/DeclModifiers.lean:333-339`).
@@ -269,7 +269,37 @@ pub enum ElabError {
     /// oracle: `sortDeclLevelParams` (`Elab/DeclUtil.lean:79-81`).
     UnusedUniverseParam(String),
     /// oracle: `MutualClosure.pushMain` (`Elab/MutualDef.lean:1051-1053`).
+    /// Carries the rendered FULL declaration name.
     TheoremTypeNotProp(String),
+    /// oracle: `throwNoScope` (`Elab/BuiltinCommand.lean:182-184`): `end`
+    /// with only the root scope open.
+    EndNoScope,
+    /// oracle: `throwMissingName` (`Elab/BuiltinCommand.lean:186-189`): a
+    /// bare `end` closing a named scope. Carries that scope's name.
+    EndMissingName(String),
+    /// oracle: `throwTooManyScopeComponents` (`Elab/BuiltinCommand.lean:
+    /// 209-216`). Carries the name after `end`.
+    EndTooManyComponents(String),
+    /// oracle: `throwScopeNameMismatch` (`Elab/BuiltinCommand.lean:218-233`).
+    EndNameMismatch {
+        expected: String,
+        found: String,
+    },
+    /// oracle: `throwUnnecessaryScopeName` (`Elab/BuiltinCommand.lean:
+    /// 235-239`): a named `end` closing an anonymous section.
+    EndUnnecessaryName(String),
+    /// oracle: `resolveNamespaceCore` (`ResolveName.lean:334-338`): no
+    /// interpretation of a namespace identifier.
+    UnknownNamespace(String),
+    /// oracle: `mkDeclName` (`Elab/DeclModifiers.lean:281-283`).
+    ProtectedNotInNamespace,
+    /// oracle: `mkDeclName` (`Elab/DeclModifiers.lean:269-270`): the bare
+    /// declaration name `_root_`.
+    InvalidRootDeclName,
+    /// oracle: `ensureValidNamespace` (`Elab/Declaration.lean:18-25`): a
+    /// `_root_` component inside a `_root_`-prefixed declaration name.
+    /// Carries the name up to and including that component.
+    InvalidNamespace(String),
     /// oracle: the first error `logUnassignedUsingErrorInfos`
     /// (`Term/TermElabM.lean:934-958`) logs, rendered to its first line by
     /// `unassigned.rs` (`MVarErrorInfo.logError`, `:901-925`).
@@ -488,6 +518,31 @@ impl ElabError {
                 Some(format!("type of theorem `{n}` is not a proposition"))
             }
             Self::UnassignedMVars(line) | Self::UnassignedLevelMVars(line) => Some(line.clone()),
+            Self::EndNoScope => Some("Invalid `end`: There is no current scope to end".into()),
+            Self::EndMissingName(n) => Some(format!(
+                "Missing name after `end`: Expected the current scope name `{n}`"
+            )),
+            Self::EndTooManyComponents(h) => Some(format!(
+                "Invalid name after `end`: `{h}` contains too many components"
+            )),
+            Self::EndNameMismatch { expected, found } => Some(format!(
+                "Invalid name after `end`: Expected `{expected}`, but found `{found}`"
+            )),
+            Self::EndUnnecessaryName(h) => Some(format!(
+                "Unexpected name `{h}` after `end`: The current section is unnamed"
+            )),
+            Self::UnknownNamespace(n) => Some(format!("unknown namespace `{n}`")),
+            Self::ProtectedNotInNamespace => {
+                Some("protected declarations must be in a namespace".into())
+            }
+            Self::InvalidRootDeclName => Some(
+                "invalid declaration name `_root_`, `_root_` is a prefix used to refer to the \
+                 'root' namespace"
+                    .into(),
+            ),
+            Self::InvalidNamespace(n) => Some(format!(
+                "invalid namespace `{n}`, `_root_` is a reserved namespace"
+            )),
             _ => None,
         }
     }

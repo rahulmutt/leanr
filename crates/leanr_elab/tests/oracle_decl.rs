@@ -39,7 +39,7 @@ fn oracle_decl_gate() {
 
 fn decl_result(src: &str) -> Result<Vec<String>, leanr_elab::ElabError> {
     support::with_command_elab(src, |ce, cmd, kinds| {
-        ce.elab_decl(cmd, kinds).map(|ns| {
+        ce.elab_command(cmd, kinds).map(|ns| {
             ns.iter()
                 .map(|&n| support::name_to_string(ce.env().store(), None, Some(n)))
                 .collect()
@@ -79,7 +79,7 @@ fn example_is_checked_but_not_added() {
     support::with_command_elab("example : Nat := Nat.zero", |ce, cmd, kinds| {
         let before = ce.env().len();
         assert_eq!(
-            ce.elab_decl(cmd, kinds).expect("elaborates"),
+            ce.elab_command(cmd, kinds).expect("elaborates"),
             Vec::<leanr_kernel::bank::NameId>::new()
         );
         assert_eq!(ce.env().len(), before, "an example must not add constants");
@@ -118,7 +118,7 @@ fn with_main_const<R>(
 ) -> R {
     support::with_command_elab(src, |ce, cmd, kinds| {
         let ns = ce
-            .elab_decl(cmd, kinds)
+            .elab_command(cmd, kinds)
             .unwrap_or_else(|e| panic!("{src:?}: {e:?}"));
         let main = *ns.last().expect("a main declaration");
         k(ce.env(), main)
@@ -258,11 +258,13 @@ fn aux_lemma_is_reused_across_declarations() {
     let na = "def na (n : Nat) : PProd Nat (Eq (Nat.succ n) (Nat.succ n)) := PProd.mk n rfl";
     let nb = "def nb (n : Nat) : PProd Nat (Eq (Nat.succ n) (Nat.succ n)) := PProd.mk n rfl";
     support::with_command_elab(na, |ce, cmd, kinds| {
-        let first = ce.elab_decl(cmd, kinds).expect("na admits");
+        let first = ce.elab_command(cmd, kinds).expect("na admits");
         assert_eq!(first.len(), 2, "na._proof_1 then na");
         let before = ce.env().len();
         let (parsed, cmd2) = support::parse_command(nb);
-        let second = ce.elab_decl(&cmd2, &parsed.tree.kinds).expect("nb admits");
+        let second = ce
+            .elab_command(&cmd2, &parsed.tree.kinds)
+            .expect("nb admits");
         let st = ce.env().store();
         let names: Vec<String> = second
             .iter()
@@ -277,11 +279,11 @@ fn aux_lemma_is_reused_across_declarations() {
 /// `na._proof_1`, so `nb` admits only itself.
 fn assert_second_reuses(first_src: &str, second_src: &str, nb: &str) {
     support::with_command_elab(first_src, |ce, cmd, kinds| {
-        let first = ce.elab_decl(cmd, kinds).expect("first admits");
+        let first = ce.elab_command(cmd, kinds).expect("first admits");
         assert_eq!(first.len(), 2, "first: _proof_1 then the def");
         let (parsed, cmd2) = support::parse_command(second_src);
         let second = ce
-            .elab_decl(&cmd2, &parsed.tree.kinds)
+            .elab_command(&cmd2, &parsed.tree.kinds)
             .expect("second admits");
         let st = ce.env().store();
         let names: Vec<String> = second

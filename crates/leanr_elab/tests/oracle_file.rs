@@ -92,20 +92,6 @@ fn a_mid_file_error_after_successes_keeps_them() {
 }
 
 #[test]
-fn scope_commands_are_m4c2b_seams() {
-    for (src, i) in [
-        ("def la : Nat := Nat.zero\nnamespace Foo", 1),
-        ("section S", 0),
-        ("open Nat", 0),
-        ("def la : Nat := Nat.zero\nend", 1),
-    ] {
-        let (at, m) = stop_seam(src);
-        assert_eq!(at, i, "{src:?}");
-        assert!(m.ends_with(" — M4c-2b"), "{src:?}: {m}");
-    }
-}
-
-#[test]
 fn universe_and_variable_are_m4c2c_seams() {
     for src in ["universe u", "variable (n : Nat)"] {
         let (at, m) = stop_seam(src);

@@ -347,6 +347,11 @@ pub(crate) fn dispatch(
                 ))),
             }
         }
+        // Term-level `open … in` (spec § Out of scope): its own label, so
+        // the bare-kind fallback below does not swallow it.
+        ("Lean.Parser.Term.open", _) => Err(ElabError::UnsupportedSyntax(
+            "`Lean.Parser.Term.open` (term-level `open … in`) — later M4".into(),
+        )),
         (other, _) => Err(ElabError::UnsupportedSyntax(other.to_string())),
     }
 }

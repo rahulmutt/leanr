@@ -75,7 +75,7 @@ pub(super) fn elab_def(
     let ty = elab.mctx.instantiate_mvars(header.ty)?;
     // `MutualClosure.pushMain` (`MutualDef.lean:1051-1053`).
     if view.kind == DefKind::Theorem && !is_prop_full(elab, ty)? {
-        return Err(ElabError::TheoremTypeNotProp(id.short.clone()));
+        return Err(ElabError::TheoremTypeNotProp(full_name(elab, id.name)));
     }
     // `levelMVarToParamTypesPreDecls` under `withLevelNames allUserLevelNames`
     // (`MutualDef.lean:1434`; `PreDefinition/Basic.lean:56-58`): TYPES only.
@@ -88,7 +88,8 @@ pub(super) fn elab_def(
     // `fixLevelParams preDefs scopeLevelNames allUserLevelNames` (`:1437-1438`).
     let level_params = fix_level_params(elab, &[ty, value], &header.level_names)?;
     // `addPreDefinitions` → `ensureNoUnassignedMVarsAtPreDef` (`Main.lean:294`).
-    ensure_no_unassigned_mvars_at_pre_def(elab, &id.short, ty, value)?;
+    // `preDef.declName` (`PreDefinition/Main.lean:84-93`): the full name.
+    ensure_no_unassigned_mvars_at_pre_def(elab, &full_name(elab, id.name), ty, value)?;
     // `addNonRecAux` → `letToHaveType`/`letToHaveValue` (`Basic.lean:183-184`):
     // a seam (spec decision 5). Checked before `abstractNestedProofs` (oracle
     // order: after it); both orders end in a seam.
@@ -264,6 +265,12 @@ pub(super) fn fix_level_params(
 
 /// oracle: `ensureNoUnassignedMVarsAtPreDef` (`PreDefinition/Main.lean:99-108`)
 /// and `ensureNoUnassignedLevelMVarsAtPreDef` (`:76-97`, value only).
+/// The rendered declaration name, as the oracle's messages interpolate
+/// `declName`.
+fn full_name(elab: &TermElabM, name: NameId) -> String {
+    crate::names::render(elab.mctx.store(), Some(elab.view.store), Some(name))
+}
+
 pub(super) fn ensure_no_unassigned_mvars_at_pre_def(
     elab: &mut TermElabM,
     decl: &str,
