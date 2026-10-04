@@ -113,3 +113,81 @@ fn get_successes(
     }
     Ok(if r3.is_empty() { r1 } else { r3 })
 }
+
+#[cfg(test)]
+mod tests {
+    use leanr_kernel::bank::Store;
+    use leanr_kernel::{AxiomVal, ConstantInfo, ConstantVal, Environment};
+    use leanr_meta::{Config, EnvExtensions, MVarKind, MetaCtx};
+
+    use super::*;
+
+    /// One axiom `Foo : Prop`.
+    fn env_with_foo() -> Environment {
+        let mut env = Environment::default();
+        let prop = {
+            let store = env.store_mut();
+            let zero = store.level_zero(None).unwrap();
+            store.expr_sort(None, zero).unwrap()
+        };
+        let foo = {
+            let store = env.store_mut();
+            let s = store.intern_str(None, "Foo").unwrap();
+            store.name_str(None, None, s).unwrap()
+        };
+        env.admit_unchecked(ConstantInfo::Axiom(AxiomVal {
+            val: ConstantVal {
+                name: foo,
+                level_params: vec![],
+                ty: prop,
+            },
+            is_unsafe: false,
+        }))
+        .unwrap();
+        env
+    }
+
+    /// `getSuccesses`' stage-3 `catch _` (`App.lean:2174-2185`) takes oracle
+    /// errors only: a candidate whose pending work hits a seam (an omitted
+    /// `autoParam`'s tactic) must rethrow it, not be dropped as a failure
+    /// (spec Rule 1).
+    #[test]
+    fn stage_three_rethrows_a_non_oracle_error() {
+        let env = env_with_foo();
+        let view = env.view();
+        let mut scratch = Store::scratch();
+        let mctx = MetaCtx::new(
+            view,
+            &mut scratch,
+            Config::default(),
+            EnvExtensions::default(),
+        );
+        let mut elab = TermElabM::new(mctx, view);
+        let foo = crate::builtin::op::mk_const_named(&mut elab, "Foo").unwrap();
+        let prop = elab.mctx.infer_type(foo).unwrap();
+        let snap = leanr_syntax::builtin::snapshot();
+        let parsed = leanr_syntax::parse_term("Nat.zero", &snap);
+        let syn = parsed.tree.root().first_child_or_token().unwrap();
+        let kinds = (*parsed.tree.kinds).clone();
+        let mut cands = Vec::new();
+        for _ in 0..2 {
+            let syn = syn.clone();
+            let r = elab
+                .observing(|e| {
+                    let (_m, id) = e.mk_fresh_expr_mvar_of_kind(prop, MVarKind::Synthetic)?;
+                    e.register_synthetic_mvar(
+                        syn,
+                        id,
+                        SyntheticMVarKind::Tactic { param_name: None },
+                    );
+                    Ok(foo)
+                })
+                .unwrap();
+            cands.push(r);
+        }
+        match get_successes(&mut elab, &cands, &kinds) {
+            Err(ElabError::UnsupportedSyntax(_)) => {}
+            other => panic!("the seam must propagate, got {other:?}"),
+        }
+    }
+}

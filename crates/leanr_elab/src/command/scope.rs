@@ -194,8 +194,9 @@ impl OpenState<'_> {
             _ => Err(ElabError::UnsupportedSyntax(format!(
                 "ambiguous identifier `{}` in `open` (`ensureNoOverload`'s \"Ambiguous \
                  identifier\" renders a `List Expr` of `mkConst`s, \
-                 `ResolveName.lean:376`) — delab name rendering",
-                self.render(Some(decl))
+                 `ResolveName.lean:376`) — {}",
+                self.render(Some(decl)),
+                OPEN_RESOLVE_ID_SEAM
             ))),
         }
     }
@@ -215,12 +216,10 @@ impl OpenState<'_> {
             match self.resolve_id(ns, id) {
                 Ok(n) => found.push(n),
                 // `try … catch ex`: an oracle error, or the
-                // `UnsupportedSyntax` of `resolve_id`'s delab seam, which
+                // `UnsupportedSyntax` of `resolve_id`'s own delab seam (and no other), which
                 // stands for an oracle `throwError` the catch would take.
                 // `FailedToOpen`'s first line ignores its nested errors.
-                Err(e) if e.is_oracle_error() || matches!(e, ElabError::UnsupportedSyntax(_)) => {
-                    errs.push(e)
-                }
+                Err(e) if e.is_oracle_error() || is_open_resolve_id_seam(&e) => errs.push(e),
                 Err(e) => return Err(e),
             }
         }
@@ -536,5 +535,32 @@ impl CommandElab<'_> {
         // named scope open.
         self.end_scopes(None)?;
         Ok(names)
+    }
+}
+
+/// Label ending `resolve_id`'s `ensureNoOverload` seam; producer and the
+/// catch in `resolve_name_using_namespaces` share it.
+const OPEN_RESOLVE_ID_SEAM: &str = "delab name rendering";
+
+/// True only for `resolve_id`'s own delab seam, the one `UnsupportedSyntax`
+/// standing for an oracle `throwError` that `Open.lean:62`'s catch takes.
+fn is_open_resolve_id_seam(e: &ElabError) -> bool {
+    matches!(e, ElabError::UnsupportedSyntax(m) if m.contains("ensureNoOverload") && m.ends_with(OPEN_RESOLVE_ID_SEAM))
+}
+
+#[cfg(test)]
+mod open_seam_tests {
+    use super::*;
+
+    #[test]
+    fn catch_predicate_admits_only_the_delab_seam() {
+        let own = ElabError::UnsupportedSyntax(format!(
+            "ambiguous identifier `x` in `open` (`ensureNoOverload`'s) — {OPEN_RESOLVE_ID_SEAM}"
+        ));
+        assert!(is_open_resolve_id_seam(&own));
+        let other = ElabError::UnsupportedSyntax("some unrelated seam".into());
+        assert!(!is_open_resolve_id_seam(&other));
+        let near = ElabError::UnsupportedSyntax(format!("other — {OPEN_RESOLVE_ID_SEAM}"));
+        assert!(!is_open_resolve_id_seam(&near));
     }
 }

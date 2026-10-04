@@ -67,7 +67,7 @@ pub enum ElabError {
         cands: Vec<String>,
     },
     /// oracle: `resolveNameUsingNamespacesCore`'s
-    /// `throwErrorWithNestedErrors "failed to open" exs` (`Open.lean:63-66`).
+    /// `throwErrorWithNestedErrors "failed to open" exs` (`Open.lean:63-68`, the throw at `:68`).
     FailedToOpen(Vec<ElabError>),
     /// A syntax node whose shape contradicts the grammar (missing child,
     /// wrong node/token variant, a non-trailing `..`). Distinct from

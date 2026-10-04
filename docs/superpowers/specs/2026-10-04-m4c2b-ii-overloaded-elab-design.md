@@ -280,7 +280,8 @@ unchanged; `seam_audit`; the full `mise run ci` (fmt and clippy included).
     stands for a delab-seam throw the oracle's catch would take); this is
     wider than needed and is an open item.
 - Open seams: `choice` nodes (choice-node parsing: leanr's parser never
-  builds them); delab name rendering (`resolveId?`'s `Ambiguous term` with
-  two or more candidates in non-application position, and `open`'s two
+  builds them); delab name rendering (`resolveId?`'s lowercase `ambiguous term, use
+  fully qualified name, …` (`TermElabM.lean:2223`), reached only from
+  `binop%`-family ident heads (`builtin/op/mod.rs` `resolve_id`), and `open`'s two
   `Expr`-list ambiguity throws, `ResolveName.lean:376` and
   `Open.lean:72`).

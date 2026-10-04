@@ -45,7 +45,6 @@ pub mod state;
 
 pub use default_inst::{default_walk_log_reset, default_walk_log_take};
 pub use ladder::PostponeBehavior;
-// Consumed by the overload tasks that follow.
 pub use state::{
     LevelMVarErrorInfo, MVarErrorInfo, MVarErrorKind, SavedContext, SyntheticMVarDecl,
     SyntheticMVarKind,
