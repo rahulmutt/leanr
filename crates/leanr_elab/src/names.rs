@@ -315,10 +315,6 @@ pub(crate) fn mk_atomic(
 }
 
 /// The name as Lean prints it; `[anonymous]` for `None`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "first caller: the scope commands' error messages")
-)]
 pub(crate) fn render(st: &Store, base: Option<&Store>, n: Option<NameId>) -> String {
     match n {
         None => "[anonymous]".to_string(),

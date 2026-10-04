@@ -425,19 +425,23 @@ fn elab_app_fn_id(
 /// oracle: `mkConst` (`TermElabM.lean:2128-2136`). `display` is the
 /// identifier's source text, used only in the `TooManyUniverseLevels` error.
 ///
-/// Precondition: `cname` is declared. Both callers establish it —
-/// `elab_app_fn_id` via `resolve_global_name`, `lval::elab_app_lvals` by
-/// checking the `structureExt`-decoded `projFn` against the environment.
+/// An undeclared `cname` is `UnknownConstant` (the full name), as the
+/// oracle's `getConstInfo` throws. `resolve_global_name` can return one:
+/// alias targets and an explicit `open`'s declaration are not checked
+/// against the environment (`ResolveName.lean:85-92`, `:175-176`).
 pub(crate) fn mk_const(
     elab: &mut TermElabM,
     cname: NameId,
     explicit_levels: &[LevelId],
     display: &str,
 ) -> Result<ExprId, ElabError> {
-    let info = elab
-        .view
-        .get(cname)
-        .expect("mk_const callers pass only declared names (resolve_global_name / checked projFn)");
+    let Some(info) = elab.view.get(cname) else {
+        return Err(ElabError::UnknownConstant(crate::names::render(
+            elab.mctx.store(),
+            Some(elab.view.store),
+            Some(cname),
+        )));
+    };
     let n_params = info.constant_val().level_params.len();
     // oracle: `mkConst` errors when the user wrote MORE explicit levels
     // than the constant has parameters, rather than truncating.
@@ -450,9 +454,9 @@ pub(crate) fn mk_const(
         levels.push(elab.mk_fresh_level_mvar()?);
     }
     // `base = Some(elab.view.store)` from here on: `cname` is a
-    // PERSISTENT-region `NameId` (`resolve_global_name` only ever returns a
-    // name `EnvView::get` resolved, and every constant in `env.constants`
-    // is persistent-region by construction — `Environment::admit_unchecked`
+    // PERSISTENT-region `NameId` (`EnvView::get` just resolved it, and
+    // every constant in `env.constants` is persistent-region by
+    // construction — `Environment::admit_unchecked`
     // /decode never inserts a scratch id there). `Store::expr_const`'s
     // internal `name_hash_of` routes a persistent id through `base` when
     // `self` (the SCRATCH store `store_mut()` returns) isn't itself the
@@ -708,6 +712,58 @@ mod tests {
         match super::elab_app_fn(&mut elab, &elem, &parsed.tree.kinds, &[], Vec::new(), call) {
             Err(crate::ElabError::UnknownIdent(s)) => assert_eq!(s, "Bar"),
             other => panic!("expected UnknownIdent(\"Bar\"), got {other:?}"),
+        }
+    }
+
+    /// oracle: `mkConst` → `getConstInfo` throws ``Unknown constant `B.ex` ``
+    /// (`TermElabM.lean:2128-2136`). `resolveGlobalName` returns alias
+    /// targets without an environment check (`getAliases`,
+    /// `ResolveName.lean:85-92`), so an alias to an undeclared target (a
+    /// malformed .olean) reaches `mk_const`: an error, never a panic.
+    #[test]
+    fn alias_to_undeclared_target_is_unknown_constant() {
+        let mut env = env_with_foo();
+        let (ex, b_ex) = {
+            let store = env.store_mut();
+            let s_ex = store.intern_str(None, "ex").unwrap();
+            let s_b = store.intern_str(None, "B").unwrap();
+            let ex = store.name_str(None, None, s_ex).unwrap();
+            let b = store.name_str(None, None, s_b).unwrap();
+            (ex, store.name_str(None, Some(b), s_ex).unwrap())
+        };
+        let tables = crate::names::NameTables::new(&[], &[], &[(ex, b_ex)]);
+        let view = env.view();
+        let mut scratch = Store::scratch();
+        let mctx = MetaCtx::new(
+            view,
+            &mut scratch,
+            Config::default(),
+            EnvExtensions::default(),
+        );
+        let mut elab = TermElabM::new(mctx, view);
+        elab.resolve = crate::resolve::ResolveCtx {
+            ns: None,
+            open_decls: &[],
+            tables: &tables,
+            aux_decl: None,
+        };
+
+        let snap = builtin::snapshot();
+        let parsed = parse_term("ex", &snap);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        let elem = parsed.tree.root().first_child_or_token().expect("a term");
+        let call = crate::app::AppCall {
+            named_args: Vec::new(),
+            args: Vec::new(),
+            expected: None,
+            explicit: false,
+            ellipsis: false,
+            stx: elem.clone(),
+            result_is_out_param_support: true,
+        };
+        match super::elab_app_fn(&mut elab, &elem, &parsed.tree.kinds, &[], Vec::new(), call) {
+            Err(crate::ElabError::UnknownConstant(s)) => assert_eq!(s, "B.ex"),
+            other => panic!("expected UnknownConstant(\"B.ex\"), got {other:?}"),
         }
     }
 }
