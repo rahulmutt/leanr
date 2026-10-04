@@ -1,4 +1,7 @@
-//! Command elaboration (M4c). M4c-2a: a header-less source of many commands
+//! Command elaboration (M4c). M4c-2b-i: scopes, `open` and declaration
+//! names (`scope.rs`, `header.rs`'s `mkDeclName`), spec
+//! `docs/superpowers/specs/2026-10-04-m4c2b-scopes-design.md`.
+//! M4c-2a: a header-less source of many commands
 //! (`elab_commands`), spec `docs/superpowers/specs/2026-10-04-m4c2a-file-loop-design.md`.
 //! M4c-1: a single non-recursive
 //! `def`/`theorem`/`abbrev`/`opaque`/`axiom`/`example` becomes kernel
@@ -10,13 +13,15 @@
 //! per-view body; `def.rs` ports `finishElab` → `addPreDefinitions` →
 //! `addNonRecAux` for `def`/`abbrev`/`opaque`/`example` (value, level
 //! params, unassigned-mvar check, declaration build); `levels.rs` ports the
-//! term-level `withLevelNames`/`levelMVarToParam`. This file owns
-//! [`CommandElab`] and the kernel commit.
+//! term-level `withLevelNames`/`levelMVarToParam`; `scope.rs` holds the
+//! scope stack and the scope commands. This file owns [`CommandElab`],
+//! the command dispatch and the kernel commit.
 
 mod axiom;
 mod def;
 mod header;
 mod levels;
+mod scope;
 pub(crate) mod view;
 
 use leanr_kernel::bank::scratch::promote_name;
@@ -28,7 +33,10 @@ use leanr_syntax::tree::SyntaxNode;
 
 use crate::elab::TermElabM;
 use crate::error::ElabError;
-use view::{DefKind, DefView};
+use crate::names::NameTables;
+use crate::resolve::ResolveCtx;
+use scope::Scope;
+use view::{expand_decl_namespace, DefKind, DefView};
 
 /// What one declaration's elaboration scope hands to the commit step.
 pub(crate) enum Built {
@@ -53,8 +61,9 @@ pub struct FileOutcome {
     pub stopped: Option<(usize, ElabError)>,
 }
 
-/// The M4c-1 command elaborator: an environment that grows by one
-/// declaration per [`CommandElab::elab_decl`] (spec § Architecture, Approach A).
+/// The command elaborator: an environment that grows by one declaration
+/// per declaration command, and the oracle's scope stack
+/// (spec § Architecture, Approach A).
 ///
 /// Aux lemmas: the oracle's `mkAuxLemma` cache (`auxLemmasExt`,
 /// `Meta/Tactic/AuxLemma.lean:29-30`, looked up at `:70-78`) is
@@ -70,14 +79,22 @@ pub struct CommandElab<'x> {
     /// admission order, so a later same-type mint overwrites (`:68`).
     /// Environment-store ids only (see `commit`).
     aux_cache: AuxLemmaCache,
+    /// The oracle's `Command.State.scopes`, bottom-up: index 0 is the root
+    /// scope, the last entry the innermost (`scope.rs`).
+    scopes: Vec<Scope>,
+    /// `protectedExt`, `namespacesExt` and `aliasExtension`, grown as the
+    /// source declares names and opens namespaces.
+    tables: NameTables,
 }
 
 impl<'x> CommandElab<'x> {
-    pub fn new(env: Environment, exts: EnvExtensions<'x>) -> Self {
+    pub fn new(env: Environment, exts: EnvExtensions<'x>, tables: NameTables) -> Self {
         CommandElab {
             env,
             exts,
             aux_cache: AuxLemmaCache::new(),
+            scopes: vec![Scope::root()],
+            tables,
         }
     }
 
@@ -89,9 +106,11 @@ impl<'x> CommandElab<'x> {
         self.env
     }
 
-    /// Elaborate one declaration command. Returns the admitted constants'
-    /// persistent names in admission order (aux `_proof_N` theorems first,
-    /// the main declaration last); empty for `example`. On `Err`, the
+    /// Elaborate one command: a scope command (`namespace`, `section`,
+    /// `end`, `open`, `… in …`) or a declaration. Returns the admitted
+    /// constants' persistent names in admission order (aux `_proof_N`
+    /// theorems first, the main declaration last); empty for `example` and
+    /// the scope commands. On `Err`, the
     /// constants already admitted (aux theorems before a rejected main
     /// declaration) stay: the oracle's `mkAuxLemma` `addDecl`s them as it
     /// goes, and `liftCoreM` (`observing`, `Elab/Command.lean:219-220`) copies
@@ -102,12 +121,12 @@ impl<'x> CommandElab<'x> {
     /// Every `UnsupportedSyntax` carries a slice label: a term- or
     /// binder-layer seam that has none (`"Lean.Parser.Term.sorry"`) gets
     /// ` — later M4` (`label_seam`).
-    pub fn elab_decl(
+    pub fn elab_command(
         &mut self,
         cmd: &SyntaxNode,
         kinds: &KindInterner,
     ) -> Result<Vec<NameId>, ElabError> {
-        self.elab_decl_unlabelled(cmd, kinds).map_err(label_seam)
+        self.elab_command_unlabelled(cmd, kinds).map_err(label_seam)
     }
 
     /// Elaborate a header-less source's commands in order against this
@@ -119,11 +138,11 @@ impl<'x> CommandElab<'x> {
     /// `sorry` in place of the failing subterm (`errToSorry`), so every
     /// later command runs against an environment leanr does not have. Error
     /// recovery is a later slice. What the failed command committed before
-    /// failing stays (`elab_decl`'s contract).
+    /// failing stays (`elab_command`'s contract).
     pub fn elab_commands(&mut self, cmds: &[SyntaxNode], kinds: &KindInterner) -> FileOutcome {
         let mut done = Vec::with_capacity(cmds.len());
         for (i, cmd) in cmds.iter().enumerate() {
-            match self.elab_decl(cmd, kinds) {
+            match self.elab_command(cmd, kinds) {
                 Ok(names) => done.push(names),
                 Err(e) => {
                     return FileOutcome {
@@ -139,12 +158,49 @@ impl<'x> CommandElab<'x> {
         }
     }
 
-    fn elab_decl_unlabelled(
+    /// The command dispatch (oracle `elabCommand`'s table).
+    fn elab_command_unlabelled(
         &mut self,
         cmd: &SyntaxNode,
         kinds: &KindInterner,
     ) -> Result<Vec<NameId>, ElabError> {
-        let view = DefView::from_syntax(cmd, kinds)?;
+        let none = |r: Result<(), ElabError>| r.map(|()| Vec::new());
+        match kinds.name(cmd.kind()) {
+            "Lean.Parser.Command.namespace" => none(self.elab_namespace(cmd, kinds)),
+            "Lean.Parser.Command.section" => none(self.elab_section(cmd, kinds)),
+            "Lean.Parser.Command.end" => none(self.elab_end(cmd, kinds)),
+            "Lean.Parser.Command.open" => none(self.elab_open(cmd, kinds)),
+            "Lean.Parser.Command.in" => self.elab_in(cmd, kinds),
+            "Lean.Parser.Command.declaration" => self.elab_declaration(cmd, kinds),
+            other => Err(command_seam(other)),
+        }
+    }
+
+    /// oracle: `expandNamespacedDeclaration` (`Elab/Declaration.lean:
+    /// 149-158`): `def A.B.f` is `namespace A.B def f end A.B`, so the
+    /// namespace scopes are pushed around the declaration and always
+    /// popped. Then `elabDeclaration` in the head scope.
+    fn elab_declaration(
+        &mut self,
+        cmd: &SyntaxNode,
+        kinds: &KindInterner,
+    ) -> Result<Vec<NameId>, ElabError> {
+        let mut view = DefView::from_syntax(cmd, kinds)?;
+        let Some((ns, short)) = expand_decl_namespace(&view)? else {
+            return self.elab_declaration_in_scope(&view, kinds);
+        };
+        self.add_scopes(&ns, true)?;
+        view.name = Some(vec![short]);
+        let out = self.elab_declaration_in_scope(&view, kinds);
+        self.pop_scopes(ns.len());
+        out
+    }
+
+    fn elab_declaration_in_scope(
+        &mut self,
+        view: &DefView,
+        kinds: &KindInterner,
+    ) -> Result<Vec<NameId>, ElabError> {
         // One scratch store per declaration: `add_decl_in`'s scratch
         // lifecycle contract (`leanr_kernel/src/env.rs`).
         let mut scratch = Store::scratch();
@@ -152,12 +208,24 @@ impl<'x> CommandElab<'x> {
             let env_view = self.env.view();
             let mctx = MetaCtx::new(env_view, &mut scratch, Config::default(), self.exts);
             let mut elab = TermElabM::new(mctx, env_view);
+            let head = self.scopes.last().expect("the root scope is never popped");
+            elab.resolve = ResolveCtx {
+                ns: head.curr_namespace,
+                open_decls: &head.open_decls,
+                tables: &self.tables,
+                aux_decl: None,
+            };
             match view.kind {
-                DefKind::Axiom => axiom::elab_axiom(&mut elab, &view, kinds),
-                _ => def::elab_def(&mut elab, &view, kinds, &self.aux_cache),
+                DefKind::Axiom => axiom::elab_axiom(&mut elab, view, kinds),
+                _ => def::elab_def(&mut elab, view, kinds, &self.aux_cache),
             }?
         };
-        self.commit(&mut scratch, built)
+        let names = self.commit(&mut scratch, built)?;
+        // `applyVisibility`'s `addProtected` (`DeclModifiers.lean:249-250`).
+        if let (true, Some(&main)) = (view.protected, names.last()) {
+            self.tables.add_protected(main);
+        }
+        Ok(names)
     }
 
     fn commit(&mut self, scratch: &mut Store, built: Built) -> Result<Vec<NameId>, ElabError> {
@@ -184,6 +252,9 @@ impl<'x> CommandElab<'x> {
                     self.env
                         .add_decl_in(scratch, d)
                         .map_err(ElabError::Kernel)?;
+                    // `addDecl` → `registerNamePrefixes` (`AddDecl.lean:107`).
+                    self.tables
+                        .register_name_prefixes(self.env.store(), names[i]);
                     if i < n_aux {
                         // `mkAuxLemma` inserts right after the aux's own
                         // `addDecl` (`AuxLemma.lean:64-68`), so an aux stays
@@ -228,14 +299,10 @@ fn label_seam(e: ElabError) -> ElabError {
     }
 }
 
-/// The named seam for a command that is not a declaration, labelled with
-/// the slice that ports it (spec § Decomposition).
+/// The named seam for a command `elab_command` does not port, labelled
+/// with the slice that ports it (spec § Decomposition).
 pub(crate) fn command_seam(kind: &str) -> ElabError {
     let slice = match kind {
-        "Lean.Parser.Command.namespace"
-        | "Lean.Parser.Command.section"
-        | "Lean.Parser.Command.end"
-        | "Lean.Parser.Command.open" => "M4c-2b",
         "Lean.Parser.Command.universe" | "Lean.Parser.Command.variable" => "M4c-2c",
         _ => "later M4",
     };
@@ -308,7 +375,7 @@ mod tests {
             aux_recs: &[],
             elab_as_elim: &[],
         };
-        let mut ce = CommandElab::new(Environment::default(), exts);
+        let mut ce = CommandElab::new(Environment::default(), exts, NameTables::default());
         let mut scratch = Store::scratch();
         let (aux, main) = {
             let base = Some(ce.env.store());

@@ -60,7 +60,7 @@ fn oracle_synth_gate() {
         coe_decls,
         aux_recs,
         elab_as_elim,
-        structures: _,
+        ..
     } = replay_fixture("Synth0.olean");
 
     let queries =
@@ -474,7 +474,7 @@ fn with_synth0_record<R>(
         coe_decls,
         aux_recs,
         elab_as_elim,
-        structures: _,
+        ..
     } = replay_fixture("Synth0.olean");
     let queries =
         std::fs::read_to_string(fixture("synth-queries.jsonl")).expect("committed queries");

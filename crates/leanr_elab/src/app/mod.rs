@@ -60,7 +60,7 @@
 //!   optParam defaults / autoParam .................... P5 SHIPPED — args.rs
 //!   implicit-lambda insertion (the feature) .......... P5 SHIPPED — elab.rs
 //!   `@($t)`/`@$t` disabling implicit-lambda insertion . SHIPPED (close-out) — here, elab.rs
-//!   overload resolution (candidates > 1) ............. resolve_global_name slice  overload.rs
+//!   overload resolution (candidates > 1) ............. M4c-2b-ii  overload.rs, resolve.rs
 //!   elabAsElim / ElabElim (every shouldElabAsElim head) SHIPPED (M4b-4c) — app/elim.rs
 //!   dot notation: proj, fieldIdx, projFn/projIdx ..... P1 SHIPPED (M4b-4a) — lval.rs, head.rs, here
 //!   numImplicitParams (structure projection) ......... P1 SHIPPED (M4b-4a) — args.rs, lval.rs

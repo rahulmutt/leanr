@@ -948,6 +948,13 @@ impl<'s> InterpId<'s> {
         Ok((proj_fn, ctor_name, num_params, index, from_class))
     }
 
+    /// `AliasEntry = Name × Name` (`ResolveName.lean:61`): `Prod.mk` (tag 0,
+    /// two object fields, no scalars). Both names non-anonymous.
+    pub(crate) fn alias_entry(&mut self, r: &Raw) -> Result<(NameId, NameId), OleanError> {
+        let (f, _) = ctor(r, 0, 2, "AliasEntry")?;
+        Ok((self.name_req(&f[0])?, self.name_req(&f[1])?))
+    }
+
     /// `Lean.StructureInfo` — see `crate::StructureInfo`'s doc for the
     /// layout and the private extension name.
     fn structure_info(&mut self, r: &Raw) -> Result<crate::StructureInfo, OleanError> {
@@ -1030,6 +1037,9 @@ impl<'s> InterpId<'s> {
         let mut coe_decls = Vec::new();
         let mut aux_recs = Vec::new();
         let mut elab_as_elim = Vec::new();
+        let mut protected_names = Vec::new();
+        let mut namespaces = Vec::new();
+        let mut aliases = Vec::new();
         for pair in array(&f[4])? {
             let (pf, _) = ctor(pair, 0, 2, "ModuleData.entries pair")?;
             let ext_name = self.name(&pf[0])?;
@@ -1173,6 +1183,27 @@ impl<'s> InterpId<'s> {
                         elab_as_elim.push(self.name_req(e)?);
                     }
                 }
+                // TagDeclarationExtension (`Modifiers.lean:15`): bare names,
+                // the `Lean.auxRecExt` wire shape.
+                "Lean.protectedExt" => {
+                    for e in array(&pf[1])? {
+                        protected_names.push(self.name_req(e)?);
+                    }
+                }
+                // PRIVATE persistent extension (`Namespace.lean:23-40`):
+                // bare names, and the anonymous name IS an entry.
+                "_private.Lean.Namespace.0.Lean.namespacesExt" => {
+                    for e in array(&pf[1])? {
+                        namespaces.push(self.name(e)?);
+                    }
+                }
+                // `SimplePersistentEnvExtension AliasEntry`
+                // (`ResolveName.lean:68-72`), `AliasEntry = Name × Name`.
+                "Lean.aliasExtension" => {
+                    for e in array(&pf[1])? {
+                        aliases.push(self.alias_entry(e)?);
+                    }
+                }
                 // Plain `registerPersistentEnvExtension` (`Structure.lean:87-92`):
                 // bare `StructureInfo` ctors, no scoped wrapper. PRIVATE, hence the
                 // mangled key — see `crate::StructureInfo`'s doc.
@@ -1213,6 +1244,9 @@ impl<'s> InterpId<'s> {
             coe_decls,
             aux_recs,
             elab_as_elim,
+            protected_names,
+            namespaces,
+            aliases,
             structures,
         })
     }
@@ -1260,6 +1294,31 @@ mod tests {
 
     fn structure(field_names: Raw, fi: Raw, pi: Raw) -> Raw {
         ctor_raw(0, vec![name("S"), field_names, fi, pi], vec![])
+    }
+
+    /// `alias_entry` rejects every malformed `AliasEntry` with an
+    /// `OleanError`; the well-formed twin passes.
+    #[test]
+    fn alias_entry_rejects_malformed_shapes() {
+        let mut st = Store::persistent();
+        let mut it = InterpId::new(&mut st);
+        assert!(it
+            .alias_entry(&ctor_raw(0, vec![name("a"), name("B.a")], vec![]))
+            .is_ok());
+        // Wrong arity, wrong tag, anonymous halves, not a ctor.
+        assert!(it
+            .alias_entry(&ctor_raw(0, vec![name("a")], vec![]))
+            .is_err());
+        assert!(it
+            .alias_entry(&ctor_raw(1, vec![name("a"), name("B.a")], vec![]))
+            .is_err());
+        assert!(it
+            .alias_entry(&ctor_raw(0, vec![scalar(0), name("B.a")], vec![]))
+            .is_err());
+        assert!(it
+            .alias_entry(&ctor_raw(0, vec![name("a"), scalar(0)], vec![]))
+            .is_err());
+        assert!(it.alias_entry(&scalar(3)).is_err());
     }
 
     /// The structureExt decoders reject every malformed shape with an

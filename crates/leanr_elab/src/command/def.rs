@@ -29,12 +29,13 @@ use leanr_meta::{
 };
 use leanr_syntax::kind::KindInterner;
 
-use super::header::{self, Header};
+use super::header::{self, DeclId, Header};
 use super::view::{DefKind, DefView};
 use super::Built;
 use crate::builtin::binder::fun::cleanup_annotations;
 use crate::elab::TermElabM;
 use crate::error::ElabError;
+use crate::resolve::AuxDecl;
 
 /// oracle: `finishElab` (`Elab/MutualDef.lean:1343-1442`) →
 /// `addPreDefinitions` (`PreDefinition/Main.lean:288-356`) → `addNonRecAux`
@@ -67,7 +68,7 @@ pub(super) fn elab_def(
     if view.kind == DefKind::Theorem && !d.has_expr_mvar() && !d.has_level_mvar() {
         check_async_signature(elab, &header)?;
     }
-    let value = elab_value(elab, view, &header, kinds)?;
+    let value = elab_value(elab, view, &id, &header, kinds)?;
     // `finishElab` (`MutualDef.lean:1394-1401`): synthesize once more, then
     // instantiate the values and the headers.
     elab.synthesize_synthetic_mvars_no_postponing(kinds)?;
@@ -75,7 +76,7 @@ pub(super) fn elab_def(
     let ty = elab.mctx.instantiate_mvars(header.ty)?;
     // `MutualClosure.pushMain` (`MutualDef.lean:1051-1053`).
     if view.kind == DefKind::Theorem && !is_prop_full(elab, ty)? {
-        return Err(ElabError::TheoremTypeNotProp(id.short.clone()));
+        return Err(ElabError::TheoremTypeNotProp(full_name(elab, id.name)));
     }
     // `levelMVarToParamTypesPreDecls` under `withLevelNames allUserLevelNames`
     // (`MutualDef.lean:1434`; `PreDefinition/Basic.lean:56-58`): TYPES only.
@@ -88,7 +89,8 @@ pub(super) fn elab_def(
     // `fixLevelParams preDefs scopeLevelNames allUserLevelNames` (`:1437-1438`).
     let level_params = fix_level_params(elab, &[ty, value], &header.level_names)?;
     // `addPreDefinitions` → `ensureNoUnassignedMVarsAtPreDef` (`Main.lean:294`).
-    ensure_no_unassigned_mvars_at_pre_def(elab, &id.short, ty, value)?;
+    // `preDef.declName` (`PreDefinition/Main.lean:84-93`): the full name.
+    ensure_no_unassigned_mvars_at_pre_def(elab, &full_name(elab, id.name), ty, value)?;
     // `addNonRecAux` → `letToHaveType`/`letToHaveValue` (`Basic.lean:183-184`):
     // a seam (spec decision 5). Checked before `abstractNestedProofs` (oracle
     // order: after it); both orders end in a seam.
@@ -200,6 +202,7 @@ fn is_always_zero(elab: &TermElabM, l: LevelId) -> bool {
 fn elab_value(
     elab: &mut TermElabM,
     view: &DefView,
+    id: &DeclId,
     header: &Header,
     kinds: &KindInterner,
 ) -> Result<ExprId, ElabError> {
@@ -207,7 +210,13 @@ fn elab_value(
         .value
         .clone()
         .ok_or_else(|| ElabError::Internal("a definition without a value".into()))?;
-    elab.with_level_names(header.level_names.clone(), |elab| {
+    // `withFunLocalDecls` wraps only the bodies (`MutualDef.lean:1343`):
+    // the declaration's own aux local is in scope here, not in the header.
+    let outer = elab.resolve.aux_decl.replace(AuxDecl {
+        full: id.name,
+        short: id.short_name,
+    });
+    let out = elab.with_level_names(header.level_names.clone(), |elab| {
         let cp = elab.mctx.lctx_checkpoint();
         let out = (|| {
             // `forallBoundedTelescope header.type header.numParams
@@ -242,7 +251,9 @@ fn elab_value(
         })();
         elab.mctx.lctx_restore(cp);
         out
-    })
+    });
+    elab.resolve.aux_decl = outer;
+    out
 }
 
 /// oracle: `getLevelParamsPreDecls` (`PreDefinition/Basic.lean:66-73`):
@@ -264,6 +275,12 @@ pub(super) fn fix_level_params(
 
 /// oracle: `ensureNoUnassignedMVarsAtPreDef` (`PreDefinition/Main.lean:99-108`)
 /// and `ensureNoUnassignedLevelMVarsAtPreDef` (`:76-97`, value only).
+/// The rendered declaration name, as the oracle's messages interpolate
+/// `declName`.
+fn full_name(elab: &TermElabM, name: NameId) -> String {
+    crate::names::render(elab.mctx.store(), Some(elab.view.store), Some(name))
+}
+
 pub(super) fn ensure_no_unassigned_mvars_at_pre_def(
     elab: &mut TermElabM,
     decl: &str,

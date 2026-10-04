@@ -1524,7 +1524,7 @@ fn no_seam_points_at_a_retired_closeout_label() {
 }
 
 /// M4c-1 P2: every declaration-level seam is reachable through
-/// `CommandElab::elab_decl` as a named `UnsupportedSyntax`, never a panic
+/// `CommandElab::elab_command` as a named `UnsupportedSyntax`, never a panic
 /// and never a wrong `Ok` (plan `2026-10-03-m4c1-p2-command-elab.md`
 /// § Global Constraints). One source per seam family; `command/view.rs`'s
 /// unit tests cover each `DefView` seam individually.
@@ -1533,10 +1533,7 @@ fn declaration_seams_are_named_end_to_end() {
     let cases: &[(&str, &str)] = &[
         ("@[simp] def a : Nat := Nat.zero", "attributes"),
         ("private def a : Nat := Nat.zero", "visibility modifier"),
-        (
-            "def Foo.bar : Nat := Nat.zero",
-            "dotted declaration name `Foo.bar` — M4c-2b",
-        ),
+        ("open scoped Nat", "`open scoped`"),
         ("def sr : Nat := sr", "recursive reference"),
         (
             "def f : Nat → Nat\n  | n => n",
@@ -1546,10 +1543,7 @@ fn declaration_seams_are_named_end_to_end() {
         ("opaque o2 : Nat", "`opaque` without a value"),
         ("def sl : Nat := let x := Nat.zero; x", "letToHave"),
         ("def ab (a : α) : α := a", "auto-bound"),
-        (
-            "namespace Foo",
-            "command `Lean.Parser.Command.namespace` — M4c-2b",
-        ),
+        ("noncomputable section", "section modifier"),
         // Term- and binder-layer seams reached through a declaration carry
         // a slice label (`command::label_seam`).
         (
@@ -1569,7 +1563,7 @@ fn declaration_seams_are_named_end_to_end() {
         ),
     ];
     for (src, needle) in cases {
-        let got = support::with_command_elab(src, |ce, cmd, kinds| ce.elab_decl(cmd, kinds));
+        let got = support::with_command_elab(src, |ce, cmd, kinds| ce.elab_command(cmd, kinds));
         match got {
             Err(leanr_elab::ElabError::UnsupportedSyntax(m)) => {
                 assert!(m.contains(needle), "{src:?}: seam {m:?} lacks {needle:?}")

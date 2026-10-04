@@ -116,8 +116,9 @@
 //!   `elab_explicit`). `useImplicitLambda`'s `.postpone` arm SHIPPED in
 //!   M4b-4a P2 (`elab.rs`'s `UseImplicitLambda::Postpone`).
 //! - **overload resolution** (more than one candidate from
-//!   `elabAppFn`) — the slice that grows `resolve_global_name`, since it is
-//!   unreachable while only exact names resolve.
+//!   `elabAppFn`) — M4c-2b-ii. `resolve_global_name` returns every
+//!   candidate (M4c-2b-i); two or more is `resolve::expect_one`'s named
+//!   seam.
 //! - **`elabAsElim`** — SHIPPED in M4b-4c P2 (`app/elim.rs`): every
 //!   `shouldElabAsElim` head (`App.lean:1322-1328`) is diverted to
 //!   `ElimElab` by `app::elab_app_args`, exactly as `App.lean:1373-1383`
@@ -142,10 +143,13 @@
 //!   VM slice). The op family itself is elaborated by `builtin::op`
 //!   (macro/binop% P3: `binop%`, `binop_lazy%`, `leftact%`, `rightact%`,
 //!   `unop%`, `binrel%`, `binrel_no_prop%`).
-//! - **`open`/alias/`export`/`_root_` resolution** — `resolve.rs`'s
-//!   `resolve_global_name` only resolves a global constant declared under
-//!   the name (or a prefix of it) exactly as written; namespace-prefix search, exported
-//!   aliases, and root-qualification are a later slice.
+//! - **`open`/alias/`_root_` resolution** — SHIPPED in M4c-2b-i
+//!   (`resolve.rs`, `names.rs`, `command/scope.rs`): `resolve_global_name`
+//!   is the oracle's candidate-list `resolveGlobalName` against the
+//!   `ResolveCtx` on `TermElabM` (term-only callers get
+//!   `ResolveCtx::root()`). Still deferred: overloaded identifiers (two
+//!   or more `resolveGlobalName` candidates) — M4c-2b-ii; `export`/`private`
+//!   — later M4.
 //!
 //! See `dispatch.rs`'s doc comment for the kind-by-kind deferral table,
 //! `app/mod.rs`'s for the site-by-site seam index inside the
@@ -221,6 +225,7 @@ pub mod dispatch;
 pub mod elab;
 pub mod error;
 pub mod macros; // macro/binop% P2
+pub mod names; // M4c-2b-i
 mod postpone;
 pub mod resolve; // Task 5
 pub mod synthetic; // M4b-3 P2a

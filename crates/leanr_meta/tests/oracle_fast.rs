@@ -96,7 +96,7 @@ fn oracle_fast_gate() {
         coe_decls,
         aux_recs,
         elab_as_elim,
-        structures: _,
+        ..
     } = replay_fixture("Meta0.olean");
 
     let queries =

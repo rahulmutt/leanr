@@ -29,6 +29,7 @@ fn elab_json(src: &str) -> serde_json::Value {
         aux_recs,
         elab_as_elim,
         structures,
+        ..
     } = replay_fixture_in("elab", "Elab0.olean");
     let snap = builtin::snapshot();
     let view: EnvView = env.view();

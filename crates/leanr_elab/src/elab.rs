@@ -14,6 +14,7 @@ use leanr_syntax::tree::{NodeOrToken, SyntaxNode};
 
 use crate::dispatch::{self, SynElem};
 use crate::error::ElabError;
+use crate::resolve::ResolveCtx;
 
 /// What `elab_term_core` elaborates: a real syntax element, or the
 /// anonymous constructor's flatten TAIL — `args[from..]` of the outer
@@ -147,6 +148,10 @@ pub struct TermElabM<'e> {
     /// can run away on its own; the oracle counts from the ambient
     /// depth, so the exact cut-off differs, never whether one exists.
     anon_tail_depth: usize,
+    /// The command scope's resolution context (`currNamespace`,
+    /// `openDecls`, the name tables, the declaration being defined);
+    /// `ResolveCtx::root()` for term-only callers.
+    pub resolve: ResolveCtx<'e>,
 }
 
 impl<'e> TermElabM<'e> {
@@ -236,7 +241,19 @@ impl<'e> TermElabM<'e> {
             level_mvar_error_infos: Vec::new(),
             may_postpone: true,
             anon_tail_depth: 0,
+            resolve: ResolveCtx::root(),
         }
+    }
+
+    /// `resolveGlobalName` (`crate::resolve::resolve_global_name`) against
+    /// this elaborator's [`ResolveCtx`]: every candidate with its number of
+    /// trailing field components.
+    pub(crate) fn resolve_global(
+        &mut self,
+        prefixes: &[NameId],
+    ) -> Result<Vec<(NameId, usize)>, ElabError> {
+        let rc = self.resolve;
+        crate::resolve::resolve_global_name(self.mctx.store_mut(), &self.view, &rc, prefixes)
     }
 
     /// oracle: `Core.mkFreshUserName` (`Lean/CoreM.lean`) — a name the
@@ -852,7 +869,8 @@ fn use_implicit_lambda(
 /// as one token (`app/head.rs`'s own `hierarchical_idents_are_one_token`
 /// note) and `resolve::resolve_local_name` is `resolveLocalName`,
 /// leftover fields and all; a result with fields is not a local
-/// identifier.
+/// identifier. The declaration being defined is not a local here: matching
+/// it is the recursion seam, which propagates.
 fn local_ident_of(
     elab: &mut TermElabM,
     elem: &SynElem,
@@ -865,12 +883,10 @@ fn local_ident_of(
         return Ok(None);
     };
     let (_, prefixes) = crate::app::head::ident_prefixes(elab, tok.text())?;
-    Ok(
-        match crate::resolve::resolve_local_name(&elab.mctx, &prefixes) {
-            Some((fvar, 0)) => Some(fvar),
-            _ => None,
-        },
-    )
+    Ok(match crate::resolve::resolve_local_name(elab, &prefixes)? {
+        Some((fvar, 0)) => Some(fvar),
+        _ => None,
+    })
 }
 
 /// oracle: `elabImplicitLambda` (`TermElabM.lean:1806-1820`) — peel

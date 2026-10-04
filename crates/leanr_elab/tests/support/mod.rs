@@ -55,6 +55,7 @@ pub fn with_app_harness<R>(
         aux_recs,
         elab_as_elim,
         structures,
+        ..
     } = replay_fixture_in("elab", "Elab0.olean");
     let snap = builtin::snapshot();
 
@@ -793,6 +794,7 @@ fn with_doctored_elab_env<R>(
         aux_recs,
         elab_as_elim,
         mut structures,
+        ..
     } = replay_fixture_in("elab", "Elab0.olean");
     doctor(&mut structures);
     let view: EnvView = env.view();
@@ -1328,6 +1330,10 @@ pub fn with_elab0_command_elab<R>(
         aux_recs,
         elab_as_elim,
         structures,
+        protected_names,
+        namespaces,
+        aliases,
+        ..
     } = replay_fixture_in("elab", "Elab0.olean");
     let exts = leanr_meta::EnvExtensions {
         reducibility: &reducibility,
@@ -1341,7 +1347,8 @@ pub fn with_elab0_command_elab<R>(
         elab_as_elim: &elab_as_elim,
         structures: &structures,
     };
-    let mut ce = leanr_elab::command::CommandElab::new(env, exts);
+    let tables = leanr_elab::names::NameTables::new(&protected_names, &namespaces, &aliases);
+    let mut ce = leanr_elab::command::CommandElab::new(env, exts, tables);
     k(&mut ce)
 }
 
@@ -1440,7 +1447,7 @@ fn decl_const_json(
             o.insert("kind".into(), json!("axiom"));
             o.insert("unsafe".into(), json!(a.is_unsafe));
         }
-        other => panic!("elab_decl admitted an unexpected constant kind: {other:?}"),
+        other => panic!("elab_command admitted an unexpected constant kind: {other:?}"),
     }
     Value::Object(o)
 }
@@ -1469,7 +1476,7 @@ pub fn run_decl_corpus(queries: &str, enabled: impl Fn(&str) -> bool) -> usize {
             "{id}: the oracle record contains sorryAx — it is an oracle error"
         );
         with_command_elab(&src, |ce, cmd, kinds| {
-            let got = ce.elab_decl(cmd, kinds);
+            let got = ce.elab_command(cmd, kinds);
             if let Some(want) = q.get("err").and_then(Value::as_str) {
                 match got {
                     Err(e) => {

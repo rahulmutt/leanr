@@ -9,7 +9,7 @@ mod support;
 
 /// `wc -l tests/fixtures/elab/file-queries.jsonl` at the last deliberate
 /// regen. `>=`: adding a record is a one-line bump, not a failing gate.
-const CORPUS_FLOOR: usize = 18;
+const CORPUS_FLOOR: usize = 89;
 
 #[test]
 fn file_corpus_sources_parse_into_the_oracle_commands() {
@@ -89,20 +89,6 @@ fn a_mid_file_error_after_successes_keeps_them() {
     assert_eq!(done, vec![vec!["la".to_string()]]);
     assert!(matches!(stopped, Some((1, _))), "{stopped:?}");
     assert_eq!(added, 1, "only `la`");
-}
-
-#[test]
-fn scope_commands_are_m4c2b_seams() {
-    for (src, i) in [
-        ("def la : Nat := Nat.zero\nnamespace Foo", 1),
-        ("section S", 0),
-        ("open Nat", 0),
-        ("def la : Nat := Nat.zero\nend", 1),
-    ] {
-        let (at, m) = stop_seam(src);
-        assert_eq!(at, i, "{src:?}");
-        assert!(m.ends_with(" — M4c-2b"), "{src:?}: {m}");
-    }
 }
 
 #[test]

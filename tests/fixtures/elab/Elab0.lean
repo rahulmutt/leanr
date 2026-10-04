@@ -895,3 +895,19 @@ inductive False : Prop
 -- a body, and `@[elab_as_elim]` accepts an axiom (measured).
 @[elab_as_elim] axiom preElim (k : Nat) {motive : Nat → Prop}
     (z : motive Nat.zero) (n : Nat) : motive n
+
+-- M4c-2b-i: the imported side of name resolution (spec
+-- `docs/superpowers/specs/2026-10-04-m4c2b-scopes-design.md` § Elab0
+-- append): a protected declaration, nested namespaces, and a root alias
+-- from `export`. Appended last, so no earlier constant changes.
+namespace Scope0
+protected def hidden : Nat := Nat.zero
+def shown : Nat := Nat.zero
+namespace Inner
+def deep : Nat := Nat.zero
+end Inner
+end Scope0
+namespace Scope0Exp
+def ex : Nat := Nat.zero
+end Scope0Exp
+export Scope0Exp (ex)

@@ -55,6 +55,9 @@ pub struct Replayed {
     pub coe_decls: Vec<NameId>,
     pub aux_recs: Vec<NameId>,
     pub elab_as_elim: Vec<NameId>,
+    pub protected_names: Vec<NameId>,
+    pub namespaces: Vec<Option<NameId>>,
+    pub aliases: Vec<(NameId, NameId)>,
     pub structures: Vec<StructureInfo>,
 }
 
@@ -85,6 +88,9 @@ pub fn replay_fixture_in(subdir: &str, name: &str) -> Replayed {
         coe_decls: md.coe_decls,
         aux_recs: md.aux_recs,
         elab_as_elim: md.elab_as_elim,
+        protected_names: md.protected_names,
+        namespaces: md.namespaces,
+        aliases: md.aliases,
         structures: md.structures,
     }
 }

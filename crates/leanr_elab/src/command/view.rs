@@ -22,10 +22,15 @@ pub(crate) enum DefKind {
 
 pub(crate) struct DefView {
     pub kind: DefKind,
-    /// The declaration's short name, decoded (`«»` stripped) and atomic,
-    /// though the one component may contain `.` (`«a.b»`). `None` for `example`,
-    /// whose name is `_example` (`DefView.lean:201-208`).
-    pub name: Option<String>,
+    /// The declaration name's components as written, decoded (`«»`
+    /// stripped, so `«a.b»` is ONE component `a.b`); a leading `_root_` is
+    /// kept. `None` for `example`, whose name is `_example`
+    /// (`DefView.lean:201-208`). `CommandElab` replaces a dotted name by
+    /// its last component once [`expand_decl_namespace`] has opened the
+    /// namespace.
+    pub name: Option<Vec<String>>,
+    /// The `protected` modifier (`declModifiers` slot 3).
+    pub protected: bool,
     /// The `declId` node (for messages); `None` for `example`.
     pub decl_id: Option<SynElem>,
     /// `.{u, v}` names in source order.
@@ -68,7 +73,7 @@ impl DefView {
         }
         let ch = non_trivia_children(cmd);
         let mods = as_node(ch.first(), "declModifiers")?;
-        check_modifiers(&mods)?;
+        let protected = check_modifiers(&mods)?;
         let decl = as_node(ch.get(1), "declaration kind")?;
         let dk = kinds.name(decl.kind());
         let d = non_trivia_children(&decl);
@@ -154,12 +159,10 @@ impl DefView {
             None => None,
             Some(v) => Some(decode_decl_val(&as_node(Some(v), "declVal")?, kinds)?),
         };
-        if let (Some(n), Some(v)) = (&name, &value) {
-            check_no_self_reference(n, v, kinds)?;
-        }
         Ok(DefView {
             kind,
             name,
+            protected,
             decl_id,
             univ_names,
             binders,
@@ -169,47 +172,75 @@ impl DefView {
     }
 }
 
-/// declModifiers' 7 slots (`Command.lean:114-121`); M4c-1 accepts none.
-fn check_modifiers(mods: &SyntaxNode) -> Result<(), ElabError> {
+/// declModifiers' 7 slots (`Command.lean:114-121`). Only `protected`
+/// (slot 3) is accepted; returns whether it is present.
+fn check_modifiers(mods: &SyntaxNode) -> Result<bool, ElabError> {
+    const PROTECTED: usize = 3;
     const SEAMS: [&str; 7] = [
         "doc comment — later M4 (docs)",
         "attributes — later M4",
         "visibility modifier — later M4",
-        "`protected` — M4c-2b",
+        "",
         "`meta`/`noncomputable` — later M4 (compilation)",
         "`unsafe` — later M4",
         "`partial`/`nonrec` — later M4 (recursion)",
     ];
+    let mut protected = false;
     for (i, slot) in non_trivia_children(mods).iter().enumerate() {
         let empty = matches!(slot, NodeOrToken::Node(n) if is_empty(n));
-        if !empty {
+        if empty {
+            continue;
+        }
+        if i == PROTECTED {
+            protected = true;
+        } else {
             return Err(seam(
                 *SEAMS.get(i).unwrap_or(&"declaration modifier — later M4"),
             ));
         }
     }
-    Ok(())
+    Ok(protected)
+}
+
+/// oracle: `expandDeclNamespace?` (`Elab/Declaration.lean:90-99`) with
+/// `ensureValidNamespace` (`:18-25`): `def A.B.f` → `(["A","B"], "f")`;
+/// atomic, `_root_`-prefixed and nameless (`example`) → `None`. A
+/// `_root_`-prefixed name's remaining components are checked: the LAST
+/// `_root_` among them is the error (`ensureValidNamespace` checks the
+/// last component first, then recurses on the prefix), and the error
+/// names the prefix ending there.
+pub(crate) fn expand_decl_namespace(
+    view: &DefView,
+) -> Result<Option<(Vec<String>, String)>, ElabError> {
+    let Some(comps) = &view.name else {
+        return Ok(None);
+    };
+    match comps.as_slice() {
+        [root, rest @ ..] if root == "_root_" => {
+            if let Some(i) = rest.iter().rposition(|c| c == "_root_") {
+                return Err(ElabError::InvalidNamespace(rest[..=i].join(".")));
+            }
+            Ok(None)
+        }
+        [] | [_] => Ok(None),
+        [ns @ .., short] => Ok(Some((ns.to_vec(), short.clone()))),
+    }
 }
 
 /// `declId := ident >> optional (".{" >> sepBy1 (ident <|> hole) ", " >> "}")`.
 fn decode_decl_id(
     id: &SyntaxNode,
     kinds: &KindInterner,
-) -> Result<(Option<String>, Vec<String>), ElabError> {
+) -> Result<(Option<Vec<String>>, Vec<String>), ElabError> {
     let ch = non_trivia_children(id);
     let raw = match ch.first() {
         Some(NodeOrToken::Token(t)) if kinds.name(t.kind()) == "<ident>" => t.text().to_string(),
         _ => return Err(ill("declId name")),
     };
     // `id.getId`: the decoded `Name`, `«»` escapes stripped (`«gq»` is
-    // `gq`, `«a.b»` the ATOMIC `a.b`). `mkDeclName` (`DeclModifiers.lean:
-    // 263-286`) prefixes the namespace and strips a `_root_` prefix
-    // (`:267-275`); a bare `_root_` is its error (`:268-269`). All M4c-2b.
-    // `_root_x` is atomic and not `_root_`-prefixed.
-    let name = match ident_components(&raw)?.as_slice() {
-        [one] if one != "_root_" => one.clone(),
-        _ => return Err(seam(format!("dotted declaration name `{raw}` — M4c-2b"))),
-    };
+    // `gq`, `«a.b»` the ATOMIC `a.b`). Dotted and `_root_` names are
+    // `expand_decl_namespace`'s and `mkDeclName`'s (`header.rs`).
+    let name = ident_components(&raw)?;
     let mut univs = Vec::new();
     if let Some(NodeOrToken::Node(opt)) = ch.get(1) {
         for el in non_trivia_children(opt) {
@@ -303,44 +334,6 @@ fn decode_decl_val(v: &SyntaxNode, kinds: &KindInterner) -> Result<SynElem, Elab
     }
 }
 
-/// The oracle elaborates the body under `withFunLocalDecls`
-/// (`MutualDef.lean:1343`): the short name resolves to the function being
-/// defined, i.e. recursion. leanr has no recursion, so any use seams. The
-/// scan is conservative: a shadowing binder also seams (never a wrong `Ok`).
-fn check_no_self_reference(
-    name: &str,
-    value: &SynElem,
-    kinds: &KindInterner,
-) -> Result<(), ElabError> {
-    // `name` is decoded; compare each identifier's DECODED first component,
-    // so `«sr»` and `«sr».foo` hit as `sr` and `sr.foo` do. The tree also
-    // holds zero-width `<ident>` tokens (e.g. inside `fun (_ : T)`), which
-    // name nothing.
-    let is_hit = |t: &leanr_syntax::tree::SyntaxToken| -> Result<bool, ElabError> {
-        Ok(kinds.name(t.kind()) == "<ident>"
-            && !t.text().is_empty()
-            && ident_components(t.text())?.first().map(String::as_str) == Some(name))
-    };
-    let mut found = false;
-    match value {
-        NodeOrToken::Token(t) => found = is_hit(t)?,
-        NodeOrToken::Node(n) => {
-            for t in n.descendants_with_tokens().filter_map(|el| el.into_token()) {
-                if is_hit(&t)? {
-                    found = true;
-                    break;
-                }
-            }
-        }
-    }
-    if found {
-        return Err(seam(format!(
-            "recursive reference to `{name}` — later M4 (recursion)"
-        )));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,7 +364,7 @@ mod tests {
     fn decodes_a_def_with_universes_binders_type_and_value() {
         let v = view_of("def ue1.{u, v} (α : Sort u) {a : α} : α := a").unwrap();
         assert_eq!(v.kind, DefKind::Def);
-        assert_eq!(v.name.as_deref(), Some("ue1"));
+        assert_eq!(v.name, Some(vec!["ue1".to_string()]));
         assert_eq!(v.univ_names, vec!["u".to_string(), "v".to_string()]);
         assert_eq!(v.binders.len(), 2);
         assert!(v.ty.is_some() && v.value.is_some());
@@ -407,71 +400,98 @@ mod tests {
         assert!(seam("/-- d -/ def a : Nat := Nat.zero").contains("doc comment"));
         assert!(seam("@[simp] def a : Nat := Nat.zero").contains("attributes"));
         assert!(seam("private def a : Nat := Nat.zero").contains("visibility modifier"));
-        let m = seam("protected def a : Nat := Nat.zero");
-        assert!(m.contains("`protected`") && m.ends_with(" — M4c-2b"), "{m}");
+        assert!(
+            view_of("protected def a : Nat := Nat.zero")
+                .unwrap()
+                .protected
+        );
+        assert!(!view_of("def a : Nat := Nat.zero").unwrap().protected);
         assert!(seam("noncomputable def a : Nat := Nat.zero").contains("`meta`/`noncomputable`"));
         assert!(seam("unsafe def a : Nat := Nat.zero").contains("`unsafe`"));
         assert!(seam("partial def a : Nat := Nat.zero").contains("`partial`/`nonrec`"));
     }
 
+    fn name_of(src: &str) -> Option<Vec<String>> {
+        view_of(src).unwrap().name
+    }
+
+    fn comps(xs: &[&str]) -> Option<Vec<String>> {
+        Some(xs.iter().map(|s| s.to_string()).collect())
+    }
+
+    fn expanded(src: &str) -> Result<Option<(Vec<String>, String)>, ElabError> {
+        expand_decl_namespace(&view_of(src).unwrap())
+    }
+
     #[test]
-    fn dotted_decl_name_is_an_m4c2b_seam() {
-        let m = seam("def Foo.bar : Nat := Nat.zero");
-        assert!(
-            m.contains("dotted declaration name `Foo.bar`") && m.ends_with(" — M4c-2b"),
-            "{m}"
+    fn dotted_decl_names_decode_by_component() {
+        assert_eq!(
+            name_of("def Foo.bar : Nat := Nat.zero"),
+            comps(&["Foo", "bar"])
         );
-        let m = seam("def _root_.baz : Nat := Nat.zero");
-        assert!(
-            m.contains("dotted declaration name") && m.ends_with(" — M4c-2b"),
-            "{m}"
+        assert_eq!(
+            name_of("def _root_.baz : Nat := Nat.zero"),
+            comps(&["_root_", "baz"])
         );
+    }
+
+    #[test]
+    fn expand_decl_namespace_splits_off_the_short_name() {
+        assert_eq!(
+            expanded("def A.B.f : Nat := Nat.zero").unwrap(),
+            Some((vec!["A".to_string(), "B".to_string()], "f".to_string()))
+        );
+        for src in [
+            "def f : Nat := Nat.zero",
+            "def «a.b» : Nat := Nat.zero",
+            "def _root_.A.f : Nat := Nat.zero",
+            "def _root_ : Nat := Nat.zero",
+            "example : Nat := Nat.zero",
+        ] {
+            assert_eq!(expanded(src).unwrap(), None, "{src:?}");
+        }
+        // `ensureValidNamespace`: the last `_root_` after the prefix, named
+        // up to itself.
+        for (src, ns) in [
+            ("def _root_.A._root_.f : Nat := Nat.zero", "A._root_"),
+            ("def _root_._root_ : Nat := Nat.zero", "_root_"),
+            (
+                "def _root_.A._root_.B._root_.f : Nat := Nat.zero",
+                "A._root_.B._root_",
+            ),
+        ] {
+            match expanded(src) {
+                Err(ElabError::InvalidNamespace(n)) => assert_eq!(n, ns, "{src:?}"),
+                other => panic!("{src:?}: {other:?}"),
+            }
+        }
     }
 
     #[test]
     fn quoted_names_are_decoded() {
         // Oracle probes: `«gq»` admits `gq`; `.{«u»}` gives the level `u`;
         // `«a.b»` is ONE atomic component, admitted at the root.
-        assert_eq!(
-            view_of("def «gq» : Nat := Nat.zero")
-                .unwrap()
-                .name
-                .as_deref(),
-            Some("gq")
-        );
+        assert_eq!(name_of("def «gq» : Nat := Nat.zero"), comps(&["gq"]));
         let v = view_of("def gu2.{«u»} (α : Sort «u») (a : α) : α := a").unwrap();
         assert_eq!(v.univ_names, vec!["u".to_string()]);
-        assert_eq!(
-            view_of("def «a.b» : Nat := Nat.zero")
-                .unwrap()
-                .name
-                .as_deref(),
-            Some("a.b")
-        );
-        assert!(seam("def a.«b» : Nat := Nat.zero").contains("dotted declaration name"));
+        assert_eq!(name_of("def «a.b» : Nat := Nat.zero"), comps(&["a.b"]));
+        assert_eq!(name_of("def a.«b» : Nat := Nat.zero"), comps(&["a", "b"]));
     }
 
     #[test]
     fn root_prefix_is_matched_by_component() {
         // Oracle probe: `def _root_x : Nat := Nat.zero` admits `_root_x`.
         assert_eq!(
-            view_of("def _root_x : Nat := Nat.zero")
-                .unwrap()
-                .name
-                .as_deref(),
-            Some("_root_x")
+            name_of("def _root_x : Nat := Nat.zero"),
+            comps(&["_root_x"])
         );
-        assert!(seam("def _root_ : Nat := Nat.zero").contains("dotted declaration name"));
-    }
-
-    #[test]
-    fn self_reference_is_a_recursion_seam() {
-        assert!(seam("def sr : Nat := sr").contains("recursive reference to `sr`"));
-        assert!(seam("def sr : Nat := sr.foo").contains("recursive reference to `sr`"));
-        assert!(seam("def sr : Nat := «sr»").contains("recursive reference to `sr`"));
-        assert!(seam("def «sr» : Nat := sr").contains("recursive reference to `sr`"));
-        // an unrelated identifier that merely starts with the name is not one
-        assert!(view_of("def sr : Nat := srx").is_ok());
+        assert_eq!(
+            expanded("def _root_x.f : Nat := Nat.zero")
+                .unwrap()
+                .map(|e| e.0),
+            Some(vec!["_root_x".to_string()])
+        );
+        assert_eq!(name_of("def _root_ : Nat := Nat.zero"), comps(&["_root_"]));
     }
 
     #[test]
@@ -523,7 +543,7 @@ mod tests {
     fn unsupported_commands_are_named_seams() {
         assert!(seam("instance : Wrap Nat := ⟨fun x => x⟩").contains("declaration kind"));
         assert!(seam("structure S where\n  x : Nat").contains("declaration kind"));
-        assert!(seam("namespace Foo").ends_with(" — M4c-2b"));
+        assert!(seam("namespace Foo").contains("Lean.Parser.Command.namespace"));
         assert!(seam("#check Nat").ends_with(" — later M4"));
         assert!(seam("mutual\ndef a : Nat := Nat.zero\nend").ends_with(" — later M4"));
     }
