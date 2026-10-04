@@ -749,6 +749,10 @@
 {"aux":true,"brecOn":false,"casesOn":false,"info":{"majors":[1],"motive":0},"n":"S3.recOn","rec":false,"recOn":true,"tag":false}
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S3.toS2","rec":false,"recOn":false,"tag":false}
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"S3Alias","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Scope0.Inner.deep","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Scope0.hidden","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Scope0.shown","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Scope0Exp.ex","rec":false,"recOn":false,"tag":false}
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Seed","rec":false,"recOn":false,"tag":false}
 {"aux":true,"brecOn":false,"casesOn":true,"info":{"majors":[0,2],"motive":1},"n":"Seed.casesOn","rec":false,"recOn":false,"tag":false}
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"Seed.ctorIdx","rec":false,"recOn":false,"tag":false}

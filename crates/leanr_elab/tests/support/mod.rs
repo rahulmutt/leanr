@@ -55,6 +55,7 @@ pub fn with_app_harness<R>(
         aux_recs,
         elab_as_elim,
         structures,
+        ..
     } = replay_fixture_in("elab", "Elab0.olean");
     let snap = builtin::snapshot();
 
@@ -793,6 +794,7 @@ fn with_doctored_elab_env<R>(
         aux_recs,
         elab_as_elim,
         mut structures,
+        ..
     } = replay_fixture_in("elab", "Elab0.olean");
     doctor(&mut structures);
     let view: EnvView = env.view();
@@ -1328,6 +1330,7 @@ pub fn with_elab0_command_elab<R>(
         aux_recs,
         elab_as_elim,
         structures,
+        ..
     } = replay_fixture_in("elab", "Elab0.olean");
     let exts = leanr_meta::EnvExtensions {
         reducibility: &reducibility,

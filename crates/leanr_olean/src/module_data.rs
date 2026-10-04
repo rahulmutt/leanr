@@ -472,6 +472,19 @@ pub struct ModuleData {
     /// shape as `coe_decls` above (private declarations filtered out at
     /// the exported level, `Attributes.lean:192`).
     pub elab_as_elim: Vec<NameId>,
+    /// Decoded `Lean.protectedExt` (M4c-2b-i): a `TagDeclarationExtension`
+    /// (`Modifiers.lean:15`, `EnvExtension.lean:92-102`), so a bare,
+    /// `Name.quickLt`-sorted `Array Name` of the module's own protected
+    /// declarations.
+    pub protected_names: Vec<NameId>,
+    /// Decoded `namespacesExt` (`Namespace.lean:23`, PRIVATE: key
+    /// `_private.Lean.Namespace.0.Lean.namespacesExt`): every namespace the
+    /// module registered, as bare `Name`s. `None` is the anonymous name, which
+    /// a root `section` registers (`BuiltinCommand.lean:45-60`).
+    pub namespaces: Vec<Option<NameId>>,
+    /// Decoded `Lean.aliasExtension` (`ResolveName.lean:68-72`):
+    /// `AliasEntry = Name × Name`, alias -> target, in wire order.
+    pub aliases: Vec<(NameId, NameId)>,
     /// Typed decode of the structureExt entries (M4b-4a P1). All other
     /// extension entries stay opaque.
     pub structures: Vec<StructureInfo>,
@@ -634,6 +647,9 @@ impl ModuleData {
             coe_decls: std::mem::take(&mut base.coe_decls),
             aux_recs: std::mem::take(&mut base.aux_recs),
             elab_as_elim: std::mem::take(&mut base.elab_as_elim),
+            protected_names: std::mem::take(&mut base.protected_names),
+            namespaces: std::mem::take(&mut base.namespaces),
+            aliases: std::mem::take(&mut base.aliases),
             structures: std::mem::take(&mut base.structures),
         })
     }
@@ -1053,6 +1069,46 @@ mod tests {
         let mut env = Environment::default();
         let md = ModuleData::parse(&bytes, env.store_mut()).expect("decode");
         assert!(md.elab_as_elim.is_empty(), "Sample.olean tags nothing");
+    }
+
+    /// M4c-2b-i: `Lean.protectedExt` (a `TagDeclarationExtension`, bare
+    /// `Name`s), the PRIVATE `namespacesExt` (bare `Name`s, including the
+    /// anonymous name a root `section` registers) and `Lean.aliasExtension`
+    /// (`AliasEntry = Name × Name`). Shapes confirmed with `readModuleData`
+    /// on the appended Elab0 (plan § Plan-time oracle facts).
+    #[test]
+    fn name_tables_decode() {
+        let bytes = fixture("elab/Elab0.olean");
+        let mut env = Environment::default();
+        let md = ModuleData::parse(&bytes, env.store_mut()).expect("decode");
+        let render = |n: NameId| env.store().to_name(None, Some(n)).to_string();
+
+        let prot: Vec<String> = md.protected_names.iter().map(|n| render(*n)).collect();
+        for want in ["Scope0.hidden", "Nat.recOn", "Nat.below"] {
+            assert!(prot.iter().any(|p| p == want), "protectedExt lacks {want}");
+        }
+        for absent in ["Scope0.shown", "Nat.casesOn"] {
+            assert!(
+                !prot.iter().any(|p| p == absent),
+                "protectedExt has {absent}"
+            );
+        }
+
+        assert!(md.namespaces.contains(&None), "the anonymous namespace");
+        let ns: Vec<String> = md.namespaces.iter().flatten().map(|n| render(*n)).collect();
+        for want in ["Scope0", "Scope0.Inner", "Scope0Exp", "Lean", "Nat"] {
+            assert!(ns.iter().any(|n| n == want), "namespacesExt lacks {want}");
+        }
+
+        let aliases: Vec<(String, String)> = md
+            .aliases
+            .iter()
+            .map(|(a, t)| (render(*a), render(*t)))
+            .collect();
+        assert_eq!(
+            aliases,
+            vec![("ex".to_string(), "Scope0Exp.ex".to_string())]
+        );
     }
 
     /// `Lean.projectionFnInfoExt` decodes: `Semigroup.toMul` is a class
