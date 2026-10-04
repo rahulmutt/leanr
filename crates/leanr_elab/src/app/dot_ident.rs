@@ -3,9 +3,9 @@
 //! docs/superpowers/specs/2026-09-29-m4b4-dot-notation-design.md § P4.
 //!
 //! Not ported:
-//! - the local-context candidate (`:2034-2037`), since `C ++ id` is never
-//!   atomic and only a `let rec` / `where` aux declaration could match
-//!   (plan § Spec deviations 1);
+//! - overloaded candidates (`:2032`, two or more `C ++ id` under the
+//!   `open` declarations): the M4c-2b-ii seam, in `resolve::expect_one`'s
+//!   wording;
 //! - the logged earlier failures (`:2056`), because leanr has no message
 //!   log (spec § Seams after P4);
 //! - `addCompletionInfo` and the `reverseFieldLookup` hint, which are
@@ -28,8 +28,7 @@ fn dotted_err(id: &str, reason: InvalidDottedIdentReason) -> ElabError {
 }
 
 /// oracle: `resolveDottedIdentFn` (`App.lean:1985-2058`). Returns the one
-/// resolution: candidate resolution is exact-name (spec § Seams after
-/// P4), so there is never more than one.
+/// resolution; two or more candidates are seamed (module doc).
 pub(crate) fn resolve_dotted_ident_fn(
     elab: &mut TermElabM,
     raw: &str,
@@ -177,11 +176,31 @@ fn resolve_against(
             // `fullName := declName ++ id` (`:2027`), one string
             // component under `decl`'s own `NameId`.
             let full = child_name(elab, decl, id)?;
-            // `resolveGlobalName … fullName |>.filter (·.2.isEmpty)`
-            // (`:2029-2031`): exact name only (spec § Seams after P4).
-            if elab.view.get(full).is_some() {
-                let display = render(elab, full);
-                return mk_const(elab, full, explicit_levels, &display);
+            // `resolveGlobalName Name.anonymous (← getOpenDecls) fullName
+            // |>.filter (·.2.isEmpty)` (`:2029-2031`), then `mkConst` each
+            // (`:2032-2033`).
+            match crate::resolve::resolve_global_name_at_root(elab, full)?.as_slice() {
+                [] => {}
+                [c] => {
+                    let display = render(elab, *c);
+                    return mk_const(elab, *c, explicit_levels, &display);
+                }
+                cs => {
+                    return Err(ElabError::UnsupportedSyntax(format!(
+                        "overloaded identifier `.{id}` ({} candidates) — M4c-2b-ii",
+                        cs.len()
+                    )))
+                }
+            }
+            // `resolveLocalName fullName` with no fields (`:2034-2037`):
+            // a dotted `let` name, or the declaration's own aux local
+            // (`resolve_local_name`'s recursion seam).
+            let prefixes = name_prefixes(elab, full);
+            if let Some((fvar, 0)) = crate::resolve::resolve_local_name(elab, &prefixes)? {
+                if !explicit_levels.is_empty() {
+                    return Err(ElabError::InvalidExplicitUniversesForLocal(fvar));
+                }
+                return Ok(fvar);
             }
             // `:2038-2040`.
             Err(dotted_err(
@@ -205,9 +224,27 @@ fn resolve_against(
     }
 }
 
-/// `parent ++ s` for an atomic `s`. `base = Some(view store)`, so a
-/// declared name dedups to its persistent id (`head::intern_components`).
-fn child_name(elab: &mut TermElabM, parent: NameId, s: &str) -> Result<NameId, ElabError> {
+/// `n` and every proper non-anonymous prefix of it, shortest first:
+/// `resolve_local_name`'s `prefixes[k]` = the first `k + 1` components.
+fn name_prefixes(elab: &TermElabM, n: NameId) -> Vec<NameId> {
+    let base = Some(elab.view.store);
+    let mut out = vec![n];
+    while let Some(p) = crate::names::parent(elab.mctx.store(), base, *out.last().unwrap()) {
+        out.push(p);
+    }
+    out.reverse();
+    out
+}
+
+/// `parent ++ s` for an atomic `s`: one string component under
+/// `parent`'s own `NameId`, no render/parse round trip. `base = Some(view
+/// store)`, so a declared name dedups to its persistent id
+/// (`head::intern_components`).
+pub(crate) fn child_name(
+    elab: &mut TermElabM,
+    parent: NameId,
+    s: &str,
+) -> Result<NameId, ElabError> {
     let base = elab.view.store;
     let store = elab.mctx.store_mut();
     let sid = store.intern_str(Some(base), s).map_err(MetaError::from)?;

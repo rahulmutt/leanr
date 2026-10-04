@@ -425,6 +425,23 @@ Commits (`git log --oneline cf66ceb..HEAD`, after the spec `b1536bc` and the pla
 - `21ea69a` `resolve_local_name` with `matchAuxRecDecl?` and the `globalDeclFound`/`skipAuxDecl` workaround. A match is the recursion seam. `check_no_self_reference` is deleted. Mutations, each FAILED as named: (1) `aux_decl` never set: `recursive_references_seam_in_namespaces`; (2) the relaxed match dropped: the same test (`A.f` row); (3) `skip_aux` dropped: `non_recursive_self_like_references_elaborate` (`foo.aux`); (4) aux checked before regular locals: the same test (`def g (g : Nat)`); (5) `aux_decl` set before the header: the same test (`Eq x x` header).
 - The Task 5 commit adds the 71 records to the file corpus (89 total, `CORPUS_FLOOR` 89), the docs (`resolve.rs`, the `lib.rs` ledger, the `dispatch.rs` table) and this section. The corpus passed on the first run. Mutation: `const_with_level` routed back through `resolve_global` makes `oracle_file_gate` FAIL on `res/numeralShadow[2]` only (`incorrect number of universe levels for 'X.OfNat'`).
 
+Final-review fixes (one commit after `c040431`; all tests in `tests/scopes.rs`, oracle outputs probed with the pinned `lean` and `dump_decls.lean files`, not added to the corpus, which stays at 89):
+
+- **C1, a wrong `Ok`.** `resolve_lval_aux` now ports the local-context search for an aux decl (`App.lean:1556-1566`, `localRec`), which runs after `findField?` and before `findMethod?`. When `S ++ field` is the declaration being defined, it returns the recursion seam. Before the fix, `def S2.get (s : S2) : Nat := s.get` was admitted, calling `S1.get`; the oracle reports "fail to show termination". `S3.get` behaved the same way. `def Nat.foo (n : Nat) : Nat := n.foo` was `InvalidField` and is now the seam.
+- **I2.** `findMethod?`'s `find?` (`App.lean:1455-1468`) and `.x` (`:2029-2033`) call `resolve::resolve_global_name_at_root`: `resolveGlobalName` with the root namespace, the scope's `open` declarations and aliases, keeping the candidates with no fields. One candidate is used. Two or more are seamed as M4c-2b-ii (`ambiguous field name …` / `overloaded identifier `.x` …`); the oracle throws "Field name `g` is ambiguous" / "Ambiguous term". An existing exact name still wins through `resolveExact`, because `S ++ field` is never atomic. That case is pinned by oracle-probed rows with both `S1.g` and `Foo.S1.g` declared. `.x` also ports its `resolveLocalName fullName` fallback (`:2034-2037`), so `def Nat.two : Nat := .two` is the recursion seam (oracle: "fail to show termination"). Before the fix it was `InvalidDottedIdent`.
+- **m3.** `… in` truncates the scope stack back to its depth on entry when `cmd₁` or `cmd₂` errors. `add_scopes` leaves nothing pushed when it fails partway, so `elab_declaration`'s pop count and `namespace`/`section` stay balanced. A failing closing `end` still pops nothing, like the oracle's `elabEnd`, which throws before `popScopes`.
+- **Discriminators.** T3: `def g.eq_def` with an undeclared parent is admitted. T4: `def f … namespace A def _root_.B.f : Nat := f` is the recursion seam, reached only through the exact-user-name arm.
+- **Mutations, each applied, FAILED as named, then reverted:**
+  1. C1 check disabled: `recursive_references_seam_in_namespaces` (`S2.get` and `S3.get` admitted, `Nat.foo` `InvalidField`).
+  2. `|| aux.short == given` deleted: the same test (the T4 row is admitted, a wrong `Ok`).
+  3. `find_method_in` back to exact lookup: `field_notation_and_dot_ident_see_open_decls` (`InvalidField`).
+  4. `.x` back to exact lookup: the same test (`InvalidDottedIdent`).
+  5. `resolveExact` accumulates instead of returning: the same test (the exact-wins row seams with 2 candidates).
+  6. `.x`'s `resolveLocalName` fallback deleted: `recursive_references_seam_in_namespaces` (the `Nat.two` row).
+  7. `elab_in` without the truncate: `a_failed_in_command_pops_its_section`, checked separately for the `cmd₁`-error and `cmd₂`-error rows.
+  
+  `add_scopes`' rollback has no test, because `intern_onto` fails only when the store fails.
+
 Deviations from the plan:
 
 - **`namespaces` is `Vec<Option<NameId>>`.** `namespacesExt` carries the anonymous name, so the spec's `Vec<NameId>` became `Vec<Option<NameId>>`.
@@ -444,7 +461,10 @@ Deviations from the plan:
 
 Seam labels:
 
-- **`M4c-2b-ii`:** overloaded identifiers (`resolve::expect_one`, `overloaded identifier … (n candidates)`) and `open`'s ambiguity paths (`scope.rs`'s `ambiguous`).
+- **`M4c-2b-ii`:**
+  - overloaded identifiers (`resolve::expect_one`, `overloaded identifier … (n candidates)`), `.x` included;
+  - an ambiguous field name (`findMethod?`'s throw);
+  - `open`'s ambiguity paths (`scope.rs`'s `ambiguous`).
 - **`later M4`:**
   - recursive reference (`recursive reference to … — later M4 (recursion)`);
   - possibly reserved name (`isReservedName`);

@@ -263,15 +263,23 @@ impl CommandElab<'_> {
 
     /// oracle: `addScopes` (`BuiltinCommand.lean:62-71`): one scope per
     /// component; a namespace's is `curr ++ comp`, a section keeps `curr`.
+    /// On `Err` nothing stays pushed, so a caller pops only on `Ok`.
     pub(crate) fn add_scopes(
         &mut self,
         comps: &[String],
         is_new_ns: bool,
     ) -> Result<(), ElabError> {
+        let depth = self.scopes.len();
         for c in comps {
             let curr = self.head().curr_namespace;
             let ns = if is_new_ns {
-                intern_onto(self.env.store_mut(), None, curr, std::slice::from_ref(c))?
+                match intern_onto(self.env.store_mut(), None, curr, std::slice::from_ref(c)) {
+                    Ok(ns) => ns,
+                    Err(e) => {
+                        self.scopes.truncate(depth);
+                        return Err(e);
+                    }
+                }
             } else {
                 curr
             };
@@ -507,10 +515,25 @@ impl CommandElab<'_> {
         let ch = non_trivia_children(cmd);
         let cmd1 = node(ch.first(), "`in` command")?;
         let cmd2 = node(ch.get(2), "`in` body")?;
+        let depth = self.scopes.len();
         let curr = self.head().curr_namespace;
         self.add_scope("", curr);
-        let mut names = self.elab_command_unlabelled(&cmd1, kinds)?;
-        names.extend(self.elab_command_unlabelled(&cmd2, kinds)?);
+        let both = self
+            .elab_command_unlabelled(&cmd1, kinds)
+            .and_then(|mut names| {
+                names.extend(self.elab_command_unlabelled(&cmd2, kinds)?);
+                Ok(names)
+            });
+        let names = match both {
+            Ok(names) => names,
+            // The oracle logs the error and still runs the expansion's
+            // `end`; drop the section (and anything `cmd₁` opened in it)
+            // so nothing outlives the command.
+            Err(e) => {
+                self.scopes.truncate(depth);
+                return Err(e);
+            }
+        };
         // The expansion's closing bare `end`: it errors if `cmd₂` left a
         // named scope open.
         self.end_scopes(None)?;

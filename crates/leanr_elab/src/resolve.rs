@@ -120,11 +120,7 @@ pub fn resolve_local_name(
         if !skip_aux {
             if let Some(aux) = elab.resolve.aux_decl {
                 if match_aux_rec_decl(elab, aux, given)? || aux.short == given {
-                    let base = Some(elab.view.store);
-                    let shown = crate::names::render(elab.mctx.store(), base, Some(aux.short));
-                    return Err(ElabError::UnsupportedSyntax(format!(
-                        "recursive reference to `{shown}` — later M4 (recursion)"
-                    )));
+                    return Err(recursion_seam(elab, aux));
                 }
             }
         }
@@ -138,6 +134,35 @@ pub fn resolve_local_name(
         }
     }
     Ok(None)
+}
+
+/// A hit on the declaration's own aux local: leanr has no recursion
+/// (no `let rec` / `where`, no structural or well-founded compilation).
+pub(crate) fn recursion_seam(elab: &TermElabM, aux: AuxDecl) -> ElabError {
+    let base = Some(elab.view.store);
+    let shown = crate::names::render(elab.mctx.store(), base, Some(aux.short));
+    ElabError::UnsupportedSyntax(format!(
+        "recursive reference to `{shown}` — later M4 (recursion)"
+    ))
+}
+
+/// `resolveGlobalName fullName` with `currNamespace := .anonymous` and
+/// the scope's `openDecls`, keeping the candidates with no field
+/// components (`.filter (·.2.isEmpty) |>.map Prod.fst`): how field
+/// notation (`findMethod?`, `App.lean:1455-1463`) and `.x`
+/// (`App.lean:2029-2031`) look up `S ++ field`. Only the whole name can
+/// yield a zero-field candidate, so `full` alone is the prefix list and
+/// every candidate it returns has no fields.
+pub(crate) fn resolve_global_name_at_root(
+    elab: &mut TermElabM,
+    full: NameId,
+) -> Result<Vec<NameId>, ElabError> {
+    let rc = ResolveCtx {
+        ns: None,
+        ..elab.resolve
+    };
+    let cands = resolve_global_name(elab.mctx.store_mut(), &elab.view, &rc, &[full])?;
+    Ok(cands.into_iter().map(|(c, _)| c).collect())
 }
 
 /// oracle: `matchAuxRecDecl?` (`ResolveName.lean:497-548`) for the

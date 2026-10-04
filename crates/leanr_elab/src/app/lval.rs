@@ -48,9 +48,9 @@ impl LVal {
 }
 
 /// oracle: `LValResolution` (`App.lean:1435-1447`). `projFn`/`projIdx`
-/// since P1, `const` since P3; `localRec` is the only unported arm: it
-/// needs `auxDeclToFullName`, which has no leanr producer (the `let rec`
-/// slice).
+/// since P1, `const` since P3; `localRec` is the only unported arm: its
+/// one leanr producer, the declaration's own aux decl, is the recursion
+/// seam in `resolve_lval_aux` (no recursion before a later M4 slice).
 enum LValResolution {
     ProjFn {
         base: NameId,
@@ -199,11 +199,7 @@ fn match_const_structure(elab: &TermElabM, s: NameId) -> Option<usize> {
 
 /// oracle: `findMethod?` (`App.lean:1453-1477`): try `S.f`, then each
 /// namespace after `S` in `S`'s resolution order (a non-structure's is
-/// `[S]`). `resolveGlobalName` with `currNamespace := .anonymous` is
-/// exact-name lookup in leanr (spec § Seams after P4: `open`/aliases are
-/// the `open`/alias slice's), so a candidate list is empty or a
-/// singleton and the ambiguity throw (`:1466-1468`) cannot arise; see
-/// plan § Spec deviations 1.
+/// `[S]`).
 fn find_method(
     elab: &mut TermElabM,
     struct_name: NameId,
@@ -235,7 +231,10 @@ fn find_method(
     Ok(None)
 }
 
-/// `findMethod?`'s local `find?` (`App.lean:1455-1468`).
+/// `findMethod?`'s local `find?` (`App.lean:1455-1468`): `resolveGlobalName`
+/// at the root namespace under the scope's `open` declarations
+/// (`resolve::resolve_global_name_at_root`). Two or more candidates is
+/// the oracle's "Field name … is ambiguous" throw (`:1466-1468`), seamed.
 fn find_method_in(
     elab: &mut TermElabM,
     s: NameId,
@@ -250,19 +249,18 @@ fn find_method_in(
              App.lean:1456) — the slice that models private names"
         )));
     }
-    // `structName' ++ fieldName`: one string component under `s`'s own
-    // `NameId`, no render/parse round trip. `base = Some(view store)` so
-    // a declared name dedups to its persistent id (as in
-    // `head::intern_components`).
-    let base = elab.view.store;
-    let store = elab.mctx.store_mut();
-    let f = store
-        .intern_str(Some(base), field)
-        .map_err(MetaError::from)?;
-    let full = store
-        .name_str(Some(base), Some(s), f)
-        .map_err(MetaError::from)?;
-    Ok(elab.view.get(full).is_some().then_some((s, full)))
+    // `structName' ++ fieldName`.
+    let full = crate::app::dot_ident::child_name(elab, s, field)?;
+    match crate::resolve::resolve_global_name_at_root(elab, full)?.as_slice() {
+        [] => Ok(None),
+        [c] => Ok(Some((s, *c))),
+        cs => Err(ElabError::UnsupportedSyntax(format!(
+            "ambiguous field name `{field}`: `{}` has {} candidates \
+             (`findMethod?`, App.lean:1466-1468) — M4c-2b-ii",
+            render(elab, full),
+            cs.len()
+        ))),
+    }
 }
 
 /// oracle: `resolveLValAux` (`App.lean:1517-1616`), P1's arms.
@@ -338,10 +336,16 @@ fn resolve_lval_aux(
                     });
                 }
             }
-            // `:1557-1566`: the local-context search for an aux decl
-            // (`LValResolution.localRec`). leanr's local context never
-            // holds an aux decl (no `let rec` / `where` producer), so
-            // the oracle's loop finds nothing here too — nothing to port.
+            // `:1556-1566`: search the local context for an aux decl
+            // whose full name is `S ++ field` (`LValResolution.localRec`, a
+            // recursive call). leanr's only aux decl is the declaration
+            // being defined (`resolve.aux_decl`); a hit, with or without
+            // explicit universes, is the recursion seam.
+            if let Some(aux) = elab.resolve.aux_decl {
+                if crate::app::dot_ident::child_name(elab, s, name)? == aux.full {
+                    return Err(crate::resolve::recursion_seam(elab, aux));
+                }
+            }
             // `:1568-1569`.
             if let Some((base, const_name)) = find_method(elab, s, name)? {
                 return Ok(LValResolution::Const {

@@ -215,6 +215,7 @@ fn reserved_and_shadowing_names_seam() {
     }
     // Not reserved: the parent is an axiom / undeclared (oracle admits both).
     assert_eq!(run("axiom f : Nat\ndef f.eq_1 : Nat := Nat.zero").1, None);
+    assert_eq!(run("def g.eq_def : Nat := Nat.zero").1, None);
 }
 
 /// Review Focus 5.
@@ -288,6 +289,7 @@ fn oracle_probed_edge_cases() {
 /// Review Focus 3. Oracle: each is "fail to show termination for".
 #[test]
 fn recursive_references_seam_in_namespaces() {
+    let mut bad = Vec::new();
     for src in [
         "def x : Nat := Nat.zero\nnamespace A\ndef x : Nat := x",
         "theorem tt : True := True.intro\nnamespace A\ntheorem tt : True := tt",
@@ -301,13 +303,26 @@ fn recursive_references_seam_in_namespaces() {
         "def sr : Nat := «sr»",
         "def «sr» : Nat := sr",
         "def B.f : Nat := Nat.zero\nnamespace A\ndef B.f : Nat := B.f",
+        // T4: `matchAuxRecDecl?` fails (`A ++ f`, `f` are not `B.f`); only
+        // the exact-user-name pass (`ResolveName.lean:568-572`) finds it.
+        "def f : Nat := Nat.zero\nnamespace A\ndef _root_.B.f : Nat := f",
+        // C1: field notation's local-context search (`App.lean:1557-1566`,
+        // `LValResolution.localRec`) runs before `findMethod?`, so these
+        // are recursive calls, not `S1.get`/`InvalidField`.
+        "def S2.get (s : S2) : Nat := s.get",
+        "def S3.get (s : S3) : Nat := s.get",
+        "def Nat.foo (n : Nat) : Nat := n.foo",
+        // `.x`'s `resolveLocalName fullName` fallback (`App.lean:2034`).
+        "def Nat.two : Nat := .two",
     ] {
-        let m = run(src).1.expect("stops").1;
-        assert!(
-            m.contains("recursive reference") && m.ends_with(" — later M4 (recursion)"),
-            "{src:?}: {m}"
-        );
+        match run(src).1 {
+            Some((_, m))
+                if m.contains("recursive reference") && m.ends_with(" — later M4 (recursion)") => {
+            }
+            other => bad.push(format!("{src:?}: {other:?}")),
+        }
     }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
 
 /// `globalDeclFound` (`ResolveName.lean:580-622`): a global `foo.aux`
@@ -329,4 +344,108 @@ fn non_recursive_self_like_references_elaborate() {
         v(&[&["x"], &[], &["A.x"]])
     );
     assert_eq!(run("def sr : Nat := Nat.zero\ndef srx : Nat := sr").1, None);
+}
+
+/// The oracle's `dump_decls.lean files` output for a probe (run against
+/// the pinned toolchain, not committed to the corpus): each command's
+/// admitted constants.
+fn assert_oracle_consts(src: &str, want: &str) {
+    let want: Vec<serde_json::Value> = serde_json::from_str(want).expect("oracle JSON");
+    support::with_file_elab(src, |ce, cmds, kinds| {
+        let out = ce.elab_commands(cmds, kinds);
+        assert!(out.stopped.is_none(), "{src:?}: {:?}", out.stopped);
+        assert_eq!(out.done.len(), want.len(), "{src:?}");
+        let mut failures = Vec::new();
+        for (i, names) in out.done.iter().enumerate() {
+            let w = want[i]["consts"].as_array().expect("consts");
+            support::check_consts(&format!("{src:?}[{i}]"), ce.env(), names, w, &mut failures);
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    })
+}
+
+const S1_G: &str = r#"{"all":["S1.g"],"hints":{"regular":1},"kind":"defn","levelParams":[],"name":"S1.g","safety":"safe","type":{"b":{"k":"const","n":"Nat","us":[]},"bi":"d","k":"pi","t":{"k":"const","n":"S1","us":[]}},"value":{"b":{"k":"const","n":"Nat.zero","us":[]},"bi":"d","k":"lam","t":{"k":"const","n":"S1","us":[]}}}"#;
+const FOO_S1_G: &str = r#"{"all":["Foo.S1.g"],"hints":{"regular":1},"kind":"defn","levelParams":[],"name":"Foo.S1.g","safety":"safe","type":{"b":{"k":"const","n":"Nat","us":[]},"bi":"d","k":"pi","t":{"k":"const","n":"S1","us":[]}},"value":{"b":{"k":"const","n":"Nat.zero","us":[]},"bi":"d","k":"lam","t":{"k":"const","n":"S1","us":[]}}}"#;
+const NAT_TWO: &str = r#"{"all":["Nat.two"],"hints":{"regular":1},"kind":"defn","levelParams":[],"name":"Nat.two","safety":"safe","type":{"k":"const","n":"Nat","us":[]},"value":{"k":"const","n":"Nat.zero","us":[]}}"#;
+const FOO_NAT_TWO: &str = r#"{"all":["Foo.Nat.two"],"hints":{"regular":1},"kind":"defn","levelParams":[],"name":"Foo.Nat.two","safety":"safe","type":{"k":"const","n":"Nat","us":[]},"value":{"k":"const","n":"Nat.zero","us":[]}}"#;
+
+fn y_calls(g: &str) -> String {
+    format!(
+        r#"{{"all":["y"],"hints":{{"regular":2}},"kind":"defn","levelParams":[],"name":"y","safety":"safe","type":{{"b":{{"k":"const","n":"Nat","us":[]}},"bi":"d","k":"pi","t":{{"k":"const","n":"S1","us":[]}}}},"value":{{"b":{{"a":{{"i":0,"k":"bvar"}},"f":{{"k":"const","n":"{g}","us":[]}},"k":"app"}},"bi":"d","k":"lam","t":{{"k":"const","n":"S1","us":[]}}}}}}"#
+    )
+}
+
+fn x_is(c: &str) -> String {
+    format!(
+        r#"{{"all":["x"],"hints":{{"regular":2}},"kind":"defn","levelParams":[],"name":"x","safety":"safe","type":{{"k":"const","n":"Nat","us":[]}},"value":{{"k":"const","n":"{c}","us":[]}}}}"#
+    )
+}
+
+/// I2: `findMethod?` (`App.lean:1455-1468`) and `.x` (`:2029-2031`)
+/// resolve `S ++ field` with `resolveGlobalName` at the root namespace
+/// under the scope's `open` declarations; the exact name still wins
+/// (`resolveExact`: `S ++ field` is never atomic). Oracle outputs probed
+/// with `dump_decls.lean files`.
+#[test]
+fn field_notation_and_dot_ident_see_open_decls() {
+    assert_oracle_consts(
+        "def Foo.S1.g (_s : S1) : Nat := Nat.zero\nopen Foo\ndef y (s : S1) : Nat := s.g",
+        &format!(
+            r#"[{{"consts":[{FOO_S1_G}]}},{{"consts":[]}},{{"consts":[{}]}}]"#,
+            y_calls("Foo.S1.g")
+        ),
+    );
+    assert_oracle_consts(
+        "def Foo.Nat.two : Nat := Nat.zero\nopen Foo\ndef x : Nat := .two",
+        &format!(
+            r#"[{{"consts":[{FOO_NAT_TWO}]}},{{"consts":[]}},{{"consts":[{}]}}]"#,
+            x_is("Foo.Nat.two")
+        ),
+    );
+    assert_oracle_consts(
+        "def S1.g (_s : S1) : Nat := Nat.zero\ndef Foo.S1.g (_s : S1) : Nat := Nat.zero\nopen Foo\ndef y (s : S1) : Nat := s.g",
+        &format!(r#"[{{"consts":[{S1_G}]}},{{"consts":[{FOO_S1_G}]}},{{"consts":[]}},{{"consts":[{}]}}]"#, y_calls("S1.g")),
+    );
+    assert_oracle_consts(
+        "def Nat.two : Nat := Nat.zero\ndef Foo.Nat.two : Nat := Nat.zero\nopen Foo\ndef x : Nat := .two",
+        &format!(r#"[{{"consts":[{NAT_TWO}]}},{{"consts":[{FOO_NAT_TWO}]}},{{"consts":[]}},{{"consts":[{}]}}]"#, x_is("Nat.two")),
+    );
+    // Two opened candidates: the oracle throws "Field name `g` is
+    // ambiguous" / "Ambiguous term"; leanr seams (M4c-2b-ii).
+    for src in [
+        "def Foo.S1.g (_s : S1) : Nat := Nat.zero\ndef Bar.S1.g (_s : S1) : Nat := Nat.zero\nopen Foo Bar\ndef y (s : S1) : Nat := s.g",
+        "def Foo.Nat.two : Nat := Nat.zero\ndef Bar.Nat.two : Nat := Nat.zero\nopen Foo Bar\ndef x : Nat := .two",
+    ] {
+        let (_, stop) = run(src);
+        let (at, m) = stop.expect("stops");
+        assert_eq!(at, 3, "{src:?}");
+        assert!(
+            m.starts_with("SEAM ") && m.contains("2 candidates") && m.ends_with(" — M4c-2b-ii"),
+            "{src:?}: {m}"
+        );
+    }
+}
+
+/// m3: `cmd₁ in cmd₂` pops its section when either command errors, so
+/// neither the `open` nor the section outlives it.
+#[test]
+fn a_failed_in_command_pops_its_section() {
+    for src in [
+        "open Scope0 in\ndef f : Nat := nope\ndef g : Nat := shown\nend",
+        "open Nope in\ndef f : Nat := Nat.zero\ndef g : Nat := shown\nend",
+    ] {
+        support::with_file_elab(src, |ce, cmds, kinds| {
+            assert!(ce.elab_command(&cmds[0], kinds).is_err(), "{src:?}");
+            // The opened `Scope0` did not leak.
+            match ce.elab_command(&cmds[1], kinds) {
+                Err(ElabError::UnknownIdent(s)) => assert_eq!(s, "shown", "{src:?}"),
+                other => panic!("{src:?}: expected Unknown identifier, got {other:?}"),
+            }
+            // Nor did the section: only the root scope is left.
+            assert!(
+                matches!(ce.elab_command(&cmds[2], kinds), Err(ElabError::EndNoScope)),
+                "{src:?}"
+            );
+        })
+    }
 }
