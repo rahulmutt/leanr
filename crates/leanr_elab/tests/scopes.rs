@@ -284,3 +284,49 @@ fn oracle_probed_edge_cases() {
         assert_eq!(run(src).1, Some((at, line.to_string())), "{src:?}");
     }
 }
+
+/// Review Focus 3. Oracle: each is "fail to show termination for".
+#[test]
+fn recursive_references_seam_in_namespaces() {
+    for src in [
+        "def x : Nat := Nat.zero\nnamespace A\ndef x : Nat := x",
+        "theorem tt : True := True.intro\nnamespace A\ntheorem tt : True := tt",
+        "def x : Nat := Nat.zero\ndef A.x : Nat := x",
+        "namespace A\ndef f : Nat := A.f",
+        "def x : Nat := Nat.zero\nnamespace A\nopaque x : Nat := x",
+        "def x : Nat := Nat.zero\nnamespace A\nabbrev x : Nat := x",
+        "example : Nat := _example",
+        "def sr : Nat := sr.foo",
+        "def sr : Nat := sr",
+        "def sr : Nat := «sr»",
+        "def «sr» : Nat := sr",
+        "def B.f : Nat := Nat.zero\nnamespace A\ndef B.f : Nat := B.f",
+    ] {
+        let m = run(src).1.expect("stops").1;
+        assert!(
+            m.contains("recursive reference") && m.ends_with(" — later M4 (recursion)"),
+            "{src:?}: {m}"
+        );
+    }
+}
+
+/// `globalDeclFound` (`ResolveName.lean:580-622`): a global `foo.aux`
+/// beats the aux local `foo` with a field; axioms have no aux local; a
+/// binder shadows the aux local; the header has no aux local.
+#[test]
+fn non_recursive_self_like_references_elaborate() {
+    assert_eq!(
+        run("def foo.aux : Nat := Nat.zero\ndef foo : Nat := foo.aux").0,
+        v(&[&["foo.aux"], &["foo"]])
+    );
+    assert_eq!(
+        run("def x : Nat := Nat.zero\nnamespace A\naxiom x : Nat").1,
+        None
+    );
+    assert_eq!(run("def g (g : Nat) : Nat := g").1, None);
+    assert_eq!(
+        run("def x : Nat := Nat.zero\nnamespace A\ndef x : Eq x x := rfl").0,
+        v(&[&["x"], &[], &["A.x"]])
+    );
+    assert_eq!(run("def sr : Nat := Nat.zero\ndef srx : Nat := sr").1, None);
+}

@@ -16,18 +16,19 @@
 //! `realizeGlobalName`, e.g. `f.eq_1`, is not realized) and macro scopes
 //! (leanr names carry none, so `extractMacroScopes` is the identity).
 //!
-//! **Local side.** No auxiliary declarations yet (`let rec` / `where` and
-//! the declaration's own aux local have no producer), so
-//! `matchAuxRecDecl?` and the `globalDeclFound` / `skipAuxDecl`
-//! workaround, which only ever skips aux decls, have nothing to act on.
+//! **Local side.** `resolve_local_name` ports `resolveLocalName` with
+//! `matchAuxRecDecl?` and the `globalDeclFound` / `skipAuxDecl` workaround.
+//! The only aux declaration is the one being defined (`let rec` / `where`
+//! have no producer); leanr has no recursion, so matching it is the named
+//! recursion seam.
 
 use leanr_kernel::bank::{ExprId, NameId, Store};
 use leanr_kernel::EnvView;
-use leanr_meta::MetaCtx;
 
+use crate::elab::TermElabM;
 use crate::error::ElabError;
 use crate::names::{
-    append, is_atomic, is_prefix_of, mk_atomic, parent, replace_prefix, NameTables,
+    append, is_atomic, is_prefix_of, is_suffix_of, mk_atomic, parent, replace_prefix, NameTables,
 };
 
 /// oracle: `OpenDecl` (`Lean/Data/OpenDecl.lean:17-20`).
@@ -74,24 +75,96 @@ impl ResolveCtx<'static> {
     }
 }
 
-/// oracle: `resolveLocalName` (`ResolveName.lean:460-622`), reduced (see
-/// the module doc). Its `loop` (`:595-621`) tries the whole name first and
-/// then ever shorter prefixes; the first prefix that is a local's user
-/// name wins, and the components it dropped become fields. `prefixes[k]`
-/// names the first `k + 1` components. Returns the local and the number
-/// of field components.
+/// oracle: `resolveLocalName` (`ResolveName.lean:460-622`). Its `loop`
+/// (`:595-621`) tries the whole name first and then ever shorter
+/// prefixes; the first prefix that matches wins, and the components it
+/// dropped become fields. `prefixes[k]` names the first `k + 1`
+/// components. Per prefix, longest first:
+/// 1. A regular local whose user name is the prefix wins
+///    (`matchLocalDecl?`, `:468-471`; the reverse scan of `findLocalDecl?`,
+///    `:555-577`). `intern_binder_name` (`builtin/binder/mod.rs`) interns
+///    the decoded name, so only a `let` name can have more than one
+///    component.
+/// 2. Unless `skipAuxDecl`, the declaration being defined (`rc.aux_decl`,
+///    installed by `withFunLocalDecls`, `MutualDef.lean:359-366`) is tried
+///    with `matchAuxRecDecl?` (`:497-548`), then by exact user name (the
+///    second pass, `:568-572`). leanr has no aux local to return, so a
+///    hit is the recursion seam.
+/// 3. Else, unless a global was already found, `resolveGlobalName` on the
+///    prefix decides `globalDeclFound` for the next, shorter prefix
+///    (`:600-618`).
 ///
-/// `intern_binder_name` (`builtin/binder/mod.rs`) interns the decoded
-/// name, so only a `let` name can have more than one component (every
-/// other binder passes `ensureAtomicBinderName`): `let a.b := v; a.b`
-/// matches the whole name, otherwise only `prefixes[0]` can match.
-pub fn resolve_local_name(mctx: &MetaCtx, prefixes: &[NameId]) -> Option<(ExprId, usize)> {
+/// The aux local is OUTERMOST in the oracle's context, so every regular
+/// local is checked before it. Returns the local and its number of field
+/// components; `Err` is the recursion seam (or an interning error).
+pub fn resolve_local_name(
+    elab: &mut TermElabM,
+    prefixes: &[NameId],
+) -> Result<Option<(ExprId, usize)>, ElabError> {
     let n = prefixes.len();
-    prefixes
-        .iter()
-        .enumerate()
-        .rev()
-        .find_map(|(k, &p)| mctx.lctx_lookup_by_name(p).map(|fvar| (fvar, n - 1 - k)))
+    let mut global_found = false;
+    for (k, &given) in prefixes.iter().enumerate().rev() {
+        let projs = n - 1 - k;
+        if let Some(fvar) = elab.mctx.lctx_lookup_by_name(given) {
+            return Ok(Some((fvar, projs)));
+        }
+        // `findLocalDecl? … (skipAuxDecl := globalDeclFound && !projs.isEmpty)`.
+        let skip_aux = global_found && projs > 0;
+        if !skip_aux {
+            if let Some(aux) = elab.resolve.aux_decl {
+                if match_aux_rec_decl(elab, aux, given)? || aux.short == given {
+                    let base = Some(elab.view.store);
+                    let shown = crate::names::render(elab.mctx.store(), base, Some(aux.short));
+                    return Err(ElabError::UnsupportedSyntax(format!(
+                        "recursive reference to `{shown}` — later M4 (recursion)"
+                    )));
+                }
+            }
+        }
+        if !global_found
+            && elab
+                .resolve_global(&prefixes[..=k])?
+                .iter()
+                .any(|&(_, f)| f == 0)
+        {
+            global_found = true;
+        }
+    }
+    Ok(None)
+}
+
+/// oracle: `matchAuxRecDecl?` (`ResolveName.lean:497-548`) for the
+/// declaration being defined. leanr names carry no macro scopes and no
+/// private prefix (`private` is seamed), so the views are the names.
+/// When the current namespace is a prefix of the full name, the relaxed
+/// match: the aux local's name is a suffix of the given name, which is a
+/// suffix of the full name. Otherwise `go`: the given name under the
+/// namespace or any enclosing one equals the full name.
+fn match_aux_rec_decl(
+    elab: &mut TermElabM,
+    aux: AuxDecl,
+    given: NameId,
+) -> Result<bool, ElabError> {
+    let base = Some(elab.view.store);
+    let ns = elab.resolve.ns;
+    let st = elab.mctx.store_mut();
+    if is_prefix_of(st, base, ns, Some(aux.full)) {
+        return Ok(is_suffix_of(st, base, Some(aux.short), Some(given))
+            && is_suffix_of(st, base, Some(given), Some(aux.full)));
+    }
+    let mut cur = ns;
+    loop {
+        let cand = append(st, base, cur, Some(given)).map_err(leanr_meta::MetaError::from)?;
+        if cand == Some(aux.full) {
+            return Ok(true);
+        }
+        match cur {
+            Some(c) if crate::names::last_str(st, base, c).is_some() => {
+                cur = parent(st, base, c);
+            }
+            _ => return Ok(false),
+        }
+    }
 }
 
 /// oracle: `ResolveName.resolveGlobalName` (`ResolveName.lean:194-216`).

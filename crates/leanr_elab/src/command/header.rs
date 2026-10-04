@@ -19,10 +19,6 @@ pub(super) struct DeclId {
     pub name: NameId,
     /// `mkDeclName`'s `shortName`: the name the declaration's aux local
     /// carries (`withAuxDecl shortDeclName`, `MutualDef.lean:359-366`).
-    #[expect(
-        dead_code,
-        reason = "first reader: resolveLocalName's aux-decl match (plan Task 4)"
-    )]
     pub short_name: NameId,
     /// oracle order: head = last declared (`.{u, v}` → `[v, u]`).
     pub level_names: Vec<NameId>,

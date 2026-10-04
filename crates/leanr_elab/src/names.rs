@@ -219,13 +219,6 @@ pub(crate) fn is_prefix_of(
 /// component from the end. Components are compared by value (string
 /// text, numeral), so a scratch-region and a persistent-region id for
 /// equal components agree.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "first caller: resolveLocalName's relaxed aux-decl match"
-    )
-)]
 pub(crate) fn is_suffix_of(
     st: &Store,
     base: Option<&Store>,

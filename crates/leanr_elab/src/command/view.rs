@@ -159,10 +159,6 @@ impl DefView {
             None => None,
             Some(v) => Some(decode_decl_val(&as_node(Some(v), "declVal")?, kinds)?),
         };
-        // The short name after `expand_decl_namespace`: the last component.
-        if let (Some(n), Some(v)) = (name.as_ref().and_then(|n| n.last()), &value) {
-            check_no_self_reference(n, v, kinds)?;
-        }
         Ok(DefView {
             kind,
             name,
@@ -338,44 +334,6 @@ fn decode_decl_val(v: &SyntaxNode, kinds: &KindInterner) -> Result<SynElem, Elab
     }
 }
 
-/// The oracle elaborates the body under `withFunLocalDecls`
-/// (`MutualDef.lean:1343`): the short name resolves to the function being
-/// defined, i.e. recursion. leanr has no recursion, so any use seams. The
-/// scan is conservative: a shadowing binder also seams (never a wrong `Ok`).
-fn check_no_self_reference(
-    name: &str,
-    value: &SynElem,
-    kinds: &KindInterner,
-) -> Result<(), ElabError> {
-    // `name` is decoded; compare each identifier's DECODED first component,
-    // so `«sr»` and `«sr».foo` hit as `sr` and `sr.foo` do. The tree also
-    // holds zero-width `<ident>` tokens (e.g. inside `fun (_ : T)`), which
-    // name nothing.
-    let is_hit = |t: &leanr_syntax::tree::SyntaxToken| -> Result<bool, ElabError> {
-        Ok(kinds.name(t.kind()) == "<ident>"
-            && !t.text().is_empty()
-            && ident_components(t.text())?.first().map(String::as_str) == Some(name))
-    };
-    let mut found = false;
-    match value {
-        NodeOrToken::Token(t) => found = is_hit(t)?,
-        NodeOrToken::Node(n) => {
-            for t in n.descendants_with_tokens().filter_map(|el| el.into_token()) {
-                if is_hit(&t)? {
-                    found = true;
-                    break;
-                }
-            }
-        }
-    }
-    if found {
-        return Err(seam(format!(
-            "recursive reference to `{name}` — later M4 (recursion)"
-        )));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,16 +492,6 @@ mod tests {
             Some(vec!["_root_x".to_string()])
         );
         assert_eq!(name_of("def _root_ : Nat := Nat.zero"), comps(&["_root_"]));
-    }
-
-    #[test]
-    fn self_reference_is_a_recursion_seam() {
-        assert!(seam("def sr : Nat := sr").contains("recursive reference to `sr`"));
-        assert!(seam("def sr : Nat := sr.foo").contains("recursive reference to `sr`"));
-        assert!(seam("def sr : Nat := «sr»").contains("recursive reference to `sr`"));
-        assert!(seam("def «sr» : Nat := sr").contains("recursive reference to `sr`"));
-        // an unrelated identifier that merely starts with the name is not one
-        assert!(view_of("def sr : Nat := srx").is_ok());
     }
 
     #[test]

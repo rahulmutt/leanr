@@ -167,7 +167,7 @@ pub(crate) fn resolve_head(elab: &mut TermElabM, head: &OpHead) -> Result<ExprId
 /// `app::head::elab_app_fn_id`, so a local binder's name matches the same way.
 fn resolve_id(elab: &mut TermElabM, raw: &str) -> Result<Option<ExprId>, ElabError> {
     let (_, prefixes) = crate::app::head::ident_prefixes(elab, raw)?;
-    if let Some((fvar, n_fields)) = crate::resolve::resolve_local_name(&elab.mctx, &prefixes) {
+    if let Some((fvar, n_fields)) = crate::resolve::resolve_local_name(elab, &prefixes)? {
         return Ok((n_fields == 0).then_some(fvar));
     }
     let fs: Vec<(NameId, usize)> = elab

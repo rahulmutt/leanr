@@ -869,7 +869,8 @@ fn use_implicit_lambda(
 /// as one token (`app/head.rs`'s own `hierarchical_idents_are_one_token`
 /// note) and `resolve::resolve_local_name` is `resolveLocalName`,
 /// leftover fields and all; a result with fields is not a local
-/// identifier.
+/// identifier. The declaration being defined is not a local here: matching
+/// it is the recursion seam, which propagates.
 fn local_ident_of(
     elab: &mut TermElabM,
     elem: &SynElem,
@@ -882,12 +883,10 @@ fn local_ident_of(
         return Ok(None);
     };
     let (_, prefixes) = crate::app::head::ident_prefixes(elab, tok.text())?;
-    Ok(
-        match crate::resolve::resolve_local_name(&elab.mctx, &prefixes) {
-            Some((fvar, 0)) => Some(fvar),
-            _ => None,
-        },
-    )
+    Ok(match crate::resolve::resolve_local_name(elab, &prefixes)? {
+        Some((fvar, 0)) => Some(fvar),
+        _ => None,
+    })
 }
 
 /// oracle: `elabImplicitLambda` (`TermElabM.lean:1806-1820`) — peel

@@ -373,7 +373,7 @@ fn elab_app_fn_id(
     // fresh-level-mvar minting entirely: an fvar carries no separate
     // `levelParams` the way a global constant does.
     let (f, n_fields, proj_levels) =
-        if let Some((fvar, n_fields)) = resolve_local_name(&elab.mctx, &prefixes) {
+        if let Some((fvar, n_fields)) = resolve_local_name(elab, &prefixes)? {
             // `processLocal` (`:2172-2179`).
             if n_fields == 0 && !explicit_levels.is_empty() {
                 return Err(ElabError::InvalidExplicitUniversesForLocal(fvar));
