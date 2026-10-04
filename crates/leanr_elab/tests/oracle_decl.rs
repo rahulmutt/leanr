@@ -58,7 +58,7 @@ fn seam_message(src: &str) -> String {
 fn header_unknown_ident_is_the_auto_bound_seam() {
     // The oracle auto-binds `α` (probe: `def ab (a : α) : α := a` admits `ab.{u_1}`).
     let m = seam_message("def ab (a : α) : α := a");
-    assert!(m.contains("auto-bound") && m.contains("M4c-2"), "{m}");
+    assert!(m.contains("auto-bound") && m.ends_with(" — M4c-2c"), "{m}");
 }
 
 #[test]
@@ -251,9 +251,9 @@ fn quoted_self_reference_is_a_recursion_seam() {
 }
 
 #[test]
-fn aux_lemma_reuse_across_declarations_is_a_seam() {
-    // Oracle probe (env threaded across commands): after `na` admits
-    // `na._proof_1`, an identical `nb` REUSES it (`auxLemmasExt`,
+fn aux_lemma_is_reused_across_declarations() {
+    // Oracle probe (env threaded across commands, `aux/reuse`): after `na`
+    // admits `na._proof_1`, an identical `nb` REUSES it (`auxLemmasExt`,
     // `Meta/Tactic/AuxLemma.lean:70-73`) and admits only `nb`.
     let na = "def na (n : Nat) : PProd Nat (Eq (Nat.succ n) (Nat.succ n)) := PProd.mk n rfl";
     let nb = "def nb (n : Nat) : PProd Nat (Eq (Nat.succ n) (Nat.succ n)) := PProd.mk n rfl";
@@ -262,18 +262,54 @@ fn aux_lemma_reuse_across_declarations_is_a_seam() {
         assert_eq!(first.len(), 2, "na._proof_1 then na");
         let before = ce.env().len();
         let (parsed, cmd2) = support::parse_command(nb);
-        match ce.elab_decl(&cmd2, &parsed.tree.kinds) {
-            Err(leanr_elab::ElabError::UnsupportedSyntax(m)) => {
-                assert!(m.contains("auxLemmasExt") && m.contains("M4c-2"), "{m}")
-            }
-            other => panic!("nb: expected the aux-reuse seam, got {other:?}"),
-        }
-        assert_eq!(ce.env().len(), before, "the seam must add nothing");
-        // A later declaration that mints no aux lemma is unaffected.
-        let (parsed, cmd3) = support::parse_command("def nz : Nat := Nat.zero");
-        assert_eq!(
-            ce.elab_decl(&cmd3, &parsed.tree.kinds).expect("nz").len(),
-            1
-        );
+        let second = ce.elab_decl(&cmd2, &parsed.tree.kinds).expect("nb admits");
+        let st = ce.env().store();
+        let names: Vec<String> = second
+            .iter()
+            .map(|&n| support::name_to_string(st, None, Some(n)))
+            .collect();
+        assert_eq!(names, vec!["nb".to_string()]);
+        assert_eq!(ce.env().len(), before + 1);
     });
+}
+
+/// `na` then `nb` (same shape, different names): the oracle reuses
+/// `na._proof_1`, so `nb` admits only itself.
+fn assert_second_reuses(first_src: &str, second_src: &str, nb: &str) {
+    support::with_command_elab(first_src, |ce, cmd, kinds| {
+        let first = ce.elab_decl(cmd, kinds).expect("first admits");
+        assert_eq!(first.len(), 2, "first: _proof_1 then the def");
+        let (parsed, cmd2) = support::parse_command(second_src);
+        let second = ce
+            .elab_decl(&cmd2, &parsed.tree.kinds)
+            .expect("second admits");
+        let st = ce.env().store();
+        let names: Vec<String> = second
+            .iter()
+            .map(|&n| support::name_to_string(st, None, Some(n)))
+            .collect();
+        assert_eq!(names, vec![nb.to_string()]);
+    });
+}
+
+#[test]
+fn aux_lemma_is_reused_with_a_char_literal_in_the_type() {
+    // Oracle probe (`prelude import Elab0`, `#print cb`): `cb` uses
+    // `ca._proof_1`. The type holds `Char.ofNat`/`OfNat` literal constants,
+    // whose level lists other producers interned without the base.
+    assert_second_reuses(
+        "def ca (n : Nat) : PProd Nat (Eq 'a' 'a') := PProd.mk n rfl",
+        "def cb (n : Nat) : PProd Nat (Eq 'a' 'a') := PProd.mk n rfl",
+        "cb",
+    );
+}
+
+#[test]
+fn aux_lemma_is_reused_with_a_numeral_in_the_type() {
+    // Oracle probe: `lb` uses `la._proof_1` (`OfNat.ofNat` numerals).
+    assert_second_reuses(
+        "def la (n : Nat) : PProd Nat (Eq (2 : Nat) 2) := PProd.mk n rfl",
+        "def lb (n : Nat) : PProd Nat (Eq (2 : Nat) 2) := PProd.mk n rfl",
+        "lb",
+    );
 }

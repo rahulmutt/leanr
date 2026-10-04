@@ -240,10 +240,11 @@ run = [
 ]
 
 [tasks."fixtures:regen-decls"]
-description = "Regenerate the M4c-1 declaration corpus (dump_decls.lean elaborates each command against Elab0 with Elab.async=true and dumps the constants it added, or the first error line). Needs the elan toolchain; never runs in CI."
+description = "Regenerate the M4c-1 declaration corpus (dump_decls.lean elaborates each command against Elab0 with Elab.async=true and dumps the constants it added, or the first error line). Needs the elan toolchain; never runs in CI. With the 'files' argument it also writes the M4c-2a file corpus (one threaded Command.State per multi-command source)."
 depends = ["elan:bootstrap"]
 run = [
   "sh -c 'cd tests/fixtures/elab && LEAN_PATH=$PWD lean --run dump_decls.lean > decl-queries.jsonl'",
+  "sh -c 'cd tests/fixtures/elab && LEAN_PATH=$PWD lean --run dump_decls.lean files > file-queries.jsonl'",
 ]
 
 [tasks."fixtures:regen-notation"]

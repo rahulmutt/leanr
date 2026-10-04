@@ -93,11 +93,11 @@ pub(crate) fn mk_fresh_type_mvar_for(
 /// A fixture constant applied to exactly one universe level:
 /// `OfNat.{u}`, `OfNat.ofNat.{u}`, `OfScientific.{u}`.
 ///
-/// `base = Some(view.store)` for the const row (matching
-/// `app::head::elab_app_fn_id`, which is the only other site that
-/// builds a constant), `None` for the level list (matching that same
-/// site: `intern_level_list`'s `base` is dedup-only and never routes a
-/// child id, so `None` merely skips the persistent-side dedup lookup).
+/// `base = Some(view.store)` for the const row AND the level list.
+/// `intern_level_list`'s `base` is dedup-only (it never routes a child id),
+/// so passing it is safe; with `None` the list is a scratch row and the
+/// `Const` gets an id different from the structurally equal persistent
+/// one, which breaks id-keyed lookups such as the aux-lemma cache.
 ///
 /// **LATENT NAME-RESOLUTION TRAP — read before implementing `open`.**
 /// This helper (and its sibling [`const_no_levels`]) routes a
@@ -139,7 +139,7 @@ pub(crate) fn const_with_level(
     let levels = elab
         .mctx
         .store_mut()
-        .intern_level_list(None, &[u])
+        .intern_level_list(Some(base), &[u])
         .map_err(leanr_meta::MetaError::from)?;
     elab.mctx
         .store_mut()
@@ -160,7 +160,7 @@ pub(crate) fn const_no_levels(elab: &mut TermElabM, name: &str) -> Result<ExprId
     let levels = elab
         .mctx
         .store_mut()
-        .intern_level_list(None, &[])
+        .intern_level_list(Some(base), &[])
         .map_err(leanr_meta::MetaError::from)?;
     elab.mctx
         .store_mut()

@@ -33,15 +33,161 @@
 
 use std::collections::HashMap;
 
+use leanr_kernel::bank::levels::LevelRow;
 use leanr_kernel::bank::terms::Node;
-use leanr_kernel::bank::{ExprId, NameId};
+use leanr_kernel::bank::{ExprId, LevelId, NameId, Store};
 use leanr_kernel::{
-    abstract_fvars, instantiate_rev, ConstantInfo, ConstantVal, Declaration, DefinitionSafety, Nat,
-    TheoremVal,
+    abstract_fvars, instantiate_rev, BinderInfo, ConstantInfo, ConstantVal, Declaration,
+    DefinitionSafety, KernelError, Nat, TheoremVal,
 };
 
 use crate::level_params::append_index_after;
 use crate::{MetaCtx, MetaError};
+
+/// The `auxLemmasExt` state (`Meta/Tactic/AuxLemma.lean:25-30`): aux-lemma
+/// type → (name, levelParams). The oracle's key `AuxLemmaKey` (`:16-23`)
+/// also holds `isPrivate := !env.isExporting` and `defeq`. Without a
+/// `module` header `isExporting` is false, and `abstractNestedProofs`
+/// passes `defeq := false`, so both are constant and the key is the type
+/// alone, up to `BEq Expr` = `Expr.eqv`, which ignores binder names and
+/// binder info. `ExprId` equality is neither: a row's binder names are part
+/// of it, and a producer that interned a leaf (a level list, a literal)
+/// without the persistent `base` mints a scratch id for a term structurally
+/// equal to a persistent one. So keys are [`aux_lemma_key`]-canonical types:
+/// binder names/info erased, and every `Const`/`Sort`/literal leaf
+/// re-interned through `base`, whatever the producer did. `BVar`/`FVar`/
+/// `MVar` leaves are left as they are (they carry no `base`-dependent id).
+pub type AuxLemmaCache = HashMap<ExprId, (NameId, Vec<NameId>)>;
+
+/// The cache key of an aux-lemma type `e`: `e` with every binder name
+/// erased and every binder info reset to default, so two types that are
+/// equal under `Expr.eqv` (`Expr.lean`, "alpha equivalence", binder
+/// annotations ignored) intern to the same `ExprId`, and `Const` level
+/// lists, `Sort` levels and literals are rebuilt through `base`, so the key
+/// does not depend on which region a producer interned a leaf in.
+pub fn aux_lemma_key(
+    st: &mut Store,
+    base: Option<&Store>,
+    e: ExprId,
+) -> Result<ExprId, KernelError> {
+    fn go(
+        st: &mut Store,
+        base: Option<&Store>,
+        e: ExprId,
+        memo: &mut HashMap<ExprId, ExprId>,
+        depth: u32,
+    ) -> Result<ExprId, KernelError> {
+        if depth > 4096 {
+            return Err(KernelError::DeepRecursion);
+        }
+        if let Some(&r) = memo.get(&e) {
+            return Ok(r);
+        }
+        let r = match st.expr_node(base, e) {
+            Node::App { f, arg } => {
+                let f = go(st, base, f, memo, depth + 1)?;
+                let a = go(st, base, arg, memo, depth + 1)?;
+                st.expr_app(base, f, a)?
+            }
+            Node::Lam {
+                binder_type, body, ..
+            } => {
+                let t = go(st, base, binder_type, memo, depth + 1)?;
+                let b = go(st, base, body, memo, depth + 1)?;
+                st.expr_lam(base, None, t, b, BinderInfo::Default)?
+            }
+            Node::Forall {
+                binder_type, body, ..
+            } => {
+                let t = go(st, base, binder_type, memo, depth + 1)?;
+                let b = go(st, base, body, memo, depth + 1)?;
+                st.expr_forall(base, None, t, b, BinderInfo::Default)?
+            }
+            Node::LetE {
+                ty,
+                value,
+                body,
+                non_dep,
+                ..
+            } => {
+                let t = go(st, base, ty, memo, depth + 1)?;
+                let v = go(st, base, value, memo, depth + 1)?;
+                let b = go(st, base, body, memo, depth + 1)?;
+                st.expr_let(base, None, t, v, b, non_dep)?
+            }
+            Node::MData { data, expr } => {
+                let c = go(st, base, expr, memo, depth + 1)?;
+                st.expr_mdata(base, data, c)?
+            }
+            Node::Proj {
+                type_name,
+                idx,
+                structure,
+            } => {
+                let s = go(st, base, structure, memo, depth + 1)?;
+                st.expr_proj(base, type_name, &Nat::from(idx as u64), s)?
+            }
+            Node::ProjBig {
+                type_name,
+                idx,
+                structure,
+            } => {
+                let n = st.nat_at(base, idx).clone();
+                let s = go(st, base, structure, memo, depth + 1)?;
+                st.expr_proj(base, type_name, &n, s)?
+            }
+            Node::Sort { level } => {
+                let l = canon_level(st, base, level)?;
+                st.expr_sort(base, l)?
+            }
+            Node::Const { name, levels } => {
+                let ls: Vec<LevelId> = st.level_list_at(base, levels).to_vec();
+                let mut out = Vec::with_capacity(ls.len());
+                for l in ls {
+                    out.push(canon_level(st, base, l)?);
+                }
+                let levels = st.intern_level_list(base, &out)?;
+                st.expr_const(base, name, levels)?
+            }
+            Node::LitNat { v } => {
+                let n = st.nat_at(base, v).clone();
+                st.expr_lit_nat(base, &n)?
+            }
+            Node::LitStr { v } => {
+                let s = st.str_at(base, v).to_string();
+                st.expr_lit_str(base, &s)?
+            }
+            _ => e,
+        };
+        memo.insert(e, r);
+        Ok(r)
+    }
+    go(st, base, e, &mut HashMap::new(), 0)
+}
+
+/// Rebuild `l` bottom-up through `base`, so a level interned by a producer
+/// that skipped the base gets the persistent id of the same level.
+fn canon_level(st: &mut Store, base: Option<&Store>, l: LevelId) -> Result<LevelId, KernelError> {
+    match *st.level_row(base, l) {
+        LevelRow::Zero => st.level_zero(base),
+        LevelRow::Succ(a) => {
+            let a = canon_level(st, base, a)?;
+            st.level_succ(base, a)
+        }
+        LevelRow::Max(a, b) => {
+            let a = canon_level(st, base, a)?;
+            let b = canon_level(st, base, b)?;
+            st.level_max(base, a, b)
+        }
+        LevelRow::IMax(a, b) => {
+            let a = canon_level(st, base, a)?;
+            let b = canon_level(st, base, b)?;
+            st.level_imax(base, a, b)
+        }
+        LevelRow::Param(n) => st.level_param(base, n),
+        LevelRow::MVar(n) => st.level_mvar(base, n),
+    }
+}
 
 /// Aux theorems minted while abstracting one declaration's value, in
 /// creation order — the caller commits them, in order, BEFORE the main
@@ -51,21 +197,29 @@ pub struct AuxLemmas {
     /// `DeclNameGenerator.idx` for the `_proof` infix (starts at 1,
     /// `CoreM.lean:79`).
     next_idx: u64,
-    /// `auxLemmasExt` key `type` → (name, levelParams). Per declaration
-    /// in M4c-1 (see plan Amendment 1, item 2).
-    cache: HashMap<ExprId, (NameId, Vec<NameId>)>,
+    /// Seeded from the caller's environment-wide cache (`with_cache`);
+    /// `mk_aux_lemma` reads it and inserts what it mints.
+    cache: AuxLemmaCache,
     pending: Vec<Declaration>,
 }
 
 impl AuxLemmas {
     /// `withDeclNameForAuxNaming decl_name` (`CoreM.lean:158-169`, entered at
     /// `PreDefinition/Basic.lean:125`): a fresh generator, prefix
-    /// `decl_name`, index 1.
+    /// `decl_name`, index 1, and an empty aux-lemma cache.
     pub fn new(decl_name: NameId) -> Self {
+        Self::with_cache(decl_name, AuxLemmaCache::new())
+    }
+
+    /// `new`, seeded with the environment's `auxLemmasExt` state, so a
+    /// nested proof whose type an earlier declaration's aux lemma already
+    /// has reuses that constant (`AuxLemma.lean:70-73`). `cache`'s ids must
+    /// be resolvable from the caller's store: environment-store ids are.
+    pub fn with_cache(decl_name: NameId, cache: AuxLemmaCache) -> Self {
         AuxLemmas {
             decl_name,
             next_idx: 1,
-            cache: HashMap::new(),
+            cache,
             pending: Vec::new(),
         }
     }
@@ -461,8 +615,9 @@ impl MetaCtx<'_> {
         value: ExprId,
         use_cache: bool,
     ) -> Result<NameId, MetaError> {
+        let key = aux_lemma_key(self.scratch, Some(self.view.store), ty)?;
         if use_cache {
-            if let Some((name, lps)) = aux.cache.get(&ty) {
+            if let Some((name, lps)) = aux.cache.get(&key) {
                 if *lps == level_params {
                     return Ok(*name);
                 }
@@ -486,7 +641,7 @@ impl MetaCtx<'_> {
             value,
             all: vec![name],
         }));
-        aux.cache.insert(ty, (name, level_params));
+        aux.cache.insert(key, (name, level_params));
         Ok(name)
     }
 

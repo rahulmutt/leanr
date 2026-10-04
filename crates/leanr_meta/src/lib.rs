@@ -48,7 +48,7 @@ mod transform;
 mod transparency;
 mod whnf;
 
-pub use abstract_proofs::AuxLemmas;
+pub use abstract_proofs::{aux_lemma_key, AuxLemmaCache, AuxLemmas};
 pub use closure::ClosureResult;
 pub use config::{Config, ProjReduction};
 pub use discr_tree::DiscrTree;

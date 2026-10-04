@@ -64,7 +64,7 @@ impl DefView {
     ) -> Result<DefView, ElabError> {
         let ck = kinds.name(cmd.kind());
         if ck != "Lean.Parser.Command.declaration" {
-            return Err(seam(format!("command `{ck}` — M4c-2 (command loop)")));
+            return Err(super::command_seam(ck));
         }
         let ch = non_trivia_children(cmd);
         let mods = as_node(ch.first(), "declModifiers")?;
@@ -175,7 +175,7 @@ fn check_modifiers(mods: &SyntaxNode) -> Result<(), ElabError> {
         "doc comment — later M4 (docs)",
         "attributes — later M4",
         "visibility modifier — later M4",
-        "`protected` — M4c-2 (namespaces)",
+        "`protected` — M4c-2b",
         "`meta`/`noncomputable` — later M4 (compilation)",
         "`unsafe` — later M4",
         "`partial`/`nonrec` — later M4 (recursion)",
@@ -204,15 +204,11 @@ fn decode_decl_id(
     // `id.getId`: the decoded `Name`, `«»` escapes stripped (`«gq»` is
     // `gq`, `«a.b»` the ATOMIC `a.b`). `mkDeclName` (`DeclModifiers.lean:
     // 263-286`) prefixes the namespace and strips a `_root_` prefix
-    // (`:267-275`); a bare `_root_` is its error (`:268-269`). All M4c-2.
+    // (`:267-275`); a bare `_root_` is its error (`:268-269`). All M4c-2b.
     // `_root_x` is atomic and not `_root_`-prefixed.
     let name = match ident_components(&raw)?.as_slice() {
         [one] if one != "_root_" => one.clone(),
-        _ => {
-            return Err(seam(format!(
-                "dotted declaration name `{raw}` — M4c-2 (namespaces)"
-            )))
-        }
+        _ => return Err(seam(format!("dotted declaration name `{raw}` — M4c-2b"))),
     };
     let mut univs = Vec::new();
     if let Some(NodeOrToken::Node(opt)) = ch.get(1) {
@@ -411,20 +407,25 @@ mod tests {
         assert!(seam("/-- d -/ def a : Nat := Nat.zero").contains("doc comment"));
         assert!(seam("@[simp] def a : Nat := Nat.zero").contains("attributes"));
         assert!(seam("private def a : Nat := Nat.zero").contains("visibility modifier"));
-        assert!(seam("protected def a : Nat := Nat.zero").contains("`protected`"));
+        let m = seam("protected def a : Nat := Nat.zero");
+        assert!(m.contains("`protected`") && m.ends_with(" — M4c-2b"), "{m}");
         assert!(seam("noncomputable def a : Nat := Nat.zero").contains("`meta`/`noncomputable`"));
         assert!(seam("unsafe def a : Nat := Nat.zero").contains("`unsafe`"));
         assert!(seam("partial def a : Nat := Nat.zero").contains("`partial`/`nonrec`"));
     }
 
     #[test]
-    fn dotted_decl_name_is_an_m4c2_seam() {
+    fn dotted_decl_name_is_an_m4c2b_seam() {
         let m = seam("def Foo.bar : Nat := Nat.zero");
         assert!(
-            m.contains("dotted declaration name `Foo.bar`") && m.contains("M4c-2"),
+            m.contains("dotted declaration name `Foo.bar`") && m.ends_with(" — M4c-2b"),
             "{m}"
         );
-        assert!(seam("def _root_.baz : Nat := Nat.zero").contains("dotted declaration name"));
+        let m = seam("def _root_.baz : Nat := Nat.zero");
+        assert!(
+            m.contains("dotted declaration name") && m.ends_with(" — M4c-2b"),
+            "{m}"
+        );
     }
 
     #[test]
@@ -522,8 +523,8 @@ mod tests {
     fn unsupported_commands_are_named_seams() {
         assert!(seam("instance : Wrap Nat := ⟨fun x => x⟩").contains("declaration kind"));
         assert!(seam("structure S where\n  x : Nat").contains("declaration kind"));
-        assert!(seam("namespace Foo").contains("M4c-2 (command loop)"));
-        assert!(seam("#check Nat").contains("M4c-2 (command loop)"));
-        assert!(seam("mutual\ndef a : Nat := Nat.zero\nend").contains("M4c-2 (command loop)"));
+        assert!(seam("namespace Foo").ends_with(" — M4c-2b"));
+        assert!(seam("#check Nat").ends_with(" — later M4"));
+        assert!(seam("mutual\ndef a : Nat := Nat.zero\nend").ends_with(" — later M4"));
     }
 }

@@ -1533,7 +1533,10 @@ fn declaration_seams_are_named_end_to_end() {
     let cases: &[(&str, &str)] = &[
         ("@[simp] def a : Nat := Nat.zero", "attributes"),
         ("private def a : Nat := Nat.zero", "visibility modifier"),
-        ("def Foo.bar : Nat := Nat.zero", "M4c-2"),
+        (
+            "def Foo.bar : Nat := Nat.zero",
+            "dotted declaration name `Foo.bar` — M4c-2b",
+        ),
         ("def sr : Nat := sr", "recursive reference"),
         (
             "def f : Nat → Nat\n  | n => n",
@@ -1543,7 +1546,10 @@ fn declaration_seams_are_named_end_to_end() {
         ("opaque o2 : Nat", "`opaque` without a value"),
         ("def sl : Nat := let x := Nat.zero; x", "letToHave"),
         ("def ab (a : α) : α := a", "auto-bound"),
-        ("namespace Foo", "command loop"),
+        (
+            "namespace Foo",
+            "command `Lean.Parser.Command.namespace` — M4c-2b",
+        ),
         // Term- and binder-layer seams reached through a declaration carry
         // a slice label (`command::label_seam`).
         (
