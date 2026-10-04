@@ -24,7 +24,8 @@ use leanr_kernel::{
     TheoremVal,
 };
 use leanr_meta::{
-    sort_decl_level_params, AuxLemmas, CollectLevelParams, MetaError, TransparencyMode,
+    sort_decl_level_params, AuxLemmaCache, AuxLemmas, CollectLevelParams, MetaError,
+    TransparencyMode,
 };
 use leanr_syntax::kind::KindInterner;
 
@@ -52,6 +53,7 @@ pub(super) fn elab_def(
     elab: &mut TermElabM,
     view: &DefView,
     kinds: &KindInterner,
+    aux_cache: &AuxLemmaCache,
 ) -> Result<Built, ElabError> {
     let id = header::expand_decl_id(elab, view)?;
     let header = header::elab_header(elab, view, &id, kinds)?;
@@ -96,7 +98,9 @@ pub(super) fn elab_def(
     // 120-127`, `:180`): not for theorems or examples. The aux theorems are
     // committed BEFORE the main declaration, as the oracle's `mkAuxLemma`
     // has already `addDecl`'d them (`Meta/Tactic/AuxLemma.lean:43-73`).
-    let mut aux = AuxLemmas::new(id.name);
+    // The cache is the environment's (`auxLemmasExt`), seeded per
+    // declaration; `CommandElab::commit` writes back what is admitted.
+    let mut aux = AuxLemmas::with_cache(id.name, aux_cache.clone());
     let value = if matches!(view.kind, DefKind::Theorem | DefKind::Example) {
         value
     } else {

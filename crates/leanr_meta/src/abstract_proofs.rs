@@ -34,14 +34,108 @@
 use std::collections::HashMap;
 
 use leanr_kernel::bank::terms::Node;
-use leanr_kernel::bank::{ExprId, NameId};
+use leanr_kernel::bank::{ExprId, NameId, Store};
 use leanr_kernel::{
-    abstract_fvars, instantiate_rev, ConstantInfo, ConstantVal, Declaration, DefinitionSafety, Nat,
-    TheoremVal,
+    abstract_fvars, instantiate_rev, BinderInfo, ConstantInfo, ConstantVal, Declaration,
+    DefinitionSafety, KernelError, Nat, TheoremVal,
 };
 
 use crate::level_params::append_index_after;
 use crate::{MetaCtx, MetaError};
+
+/// The `auxLemmasExt` state (`Meta/Tactic/AuxLemma.lean:25-30`): aux-lemma
+/// type → (name, levelParams). The oracle's key `AuxLemmaKey` (`:16-23`)
+/// also holds `isPrivate := !env.isExporting` and `defeq`. Without a
+/// `module` header `isExporting` is false, and `abstractNestedProofs`
+/// passes `defeq := false`, so both are constant and the key is the type
+/// alone, up to `BEq Expr` = `Expr.eqv`, which ignores binder names and
+/// binder info. Hash-consing makes `ExprId` equality structural but NOT
+/// alpha-equivalent, so keys are [`aux_lemma_key`]-canonical types.
+pub type AuxLemmaCache = HashMap<ExprId, (NameId, Vec<NameId>)>;
+
+/// The cache key of an aux-lemma type `e`: `e` with every binder name
+/// erased and every binder info reset to default, so two types that are
+/// equal under `Expr.eqv` (`Expr.lean`, "alpha equivalence", binder
+/// annotations ignored) intern to the same `ExprId`. Interned in `st`
+/// (through `base`, which dedups against the persistent store).
+pub fn aux_lemma_key(
+    st: &mut Store,
+    base: Option<&Store>,
+    e: ExprId,
+) -> Result<ExprId, KernelError> {
+    fn go(
+        st: &mut Store,
+        base: Option<&Store>,
+        e: ExprId,
+        memo: &mut HashMap<ExprId, ExprId>,
+        depth: u32,
+    ) -> Result<ExprId, KernelError> {
+        if depth > 4096 {
+            return Err(KernelError::DeepRecursion);
+        }
+        if let Some(&r) = memo.get(&e) {
+            return Ok(r);
+        }
+        let r = match st.expr_node(base, e) {
+            Node::App { f, arg } => {
+                let f = go(st, base, f, memo, depth + 1)?;
+                let a = go(st, base, arg, memo, depth + 1)?;
+                st.expr_app(base, f, a)?
+            }
+            Node::Lam {
+                binder_type, body, ..
+            } => {
+                let t = go(st, base, binder_type, memo, depth + 1)?;
+                let b = go(st, base, body, memo, depth + 1)?;
+                st.expr_lam(base, None, t, b, BinderInfo::Default)?
+            }
+            Node::Forall {
+                binder_type, body, ..
+            } => {
+                let t = go(st, base, binder_type, memo, depth + 1)?;
+                let b = go(st, base, body, memo, depth + 1)?;
+                st.expr_forall(base, None, t, b, BinderInfo::Default)?
+            }
+            Node::LetE {
+                ty,
+                value,
+                body,
+                non_dep,
+                ..
+            } => {
+                let t = go(st, base, ty, memo, depth + 1)?;
+                let v = go(st, base, value, memo, depth + 1)?;
+                let b = go(st, base, body, memo, depth + 1)?;
+                st.expr_let(base, None, t, v, b, non_dep)?
+            }
+            Node::MData { data, expr } => {
+                let c = go(st, base, expr, memo, depth + 1)?;
+                st.expr_mdata(base, data, c)?
+            }
+            Node::Proj {
+                type_name,
+                idx,
+                structure,
+            } => {
+                let s = go(st, base, structure, memo, depth + 1)?;
+                st.expr_proj(base, type_name, &Nat::from(idx as u64), s)?
+            }
+            Node::ProjBig {
+                type_name,
+                idx,
+                structure,
+            } => {
+                let n = st.nat_at(base, idx).clone();
+                let s = go(st, base, structure, memo, depth + 1)?;
+                st.expr_proj(base, type_name, &n, s)?
+            }
+            _ => e,
+        };
+        memo.insert(e, r);
+        Ok(r)
+    }
+    go(st, base, e, &mut HashMap::new(), 0)
+}
 
 /// Aux theorems minted while abstracting one declaration's value, in
 /// creation order — the caller commits them, in order, BEFORE the main
@@ -51,21 +145,29 @@ pub struct AuxLemmas {
     /// `DeclNameGenerator.idx` for the `_proof` infix (starts at 1,
     /// `CoreM.lean:79`).
     next_idx: u64,
-    /// `auxLemmasExt` key `type` → (name, levelParams). Per declaration
-    /// in M4c-1 (see plan Amendment 1, item 2).
-    cache: HashMap<ExprId, (NameId, Vec<NameId>)>,
+    /// Seeded from the caller's environment-wide cache (`with_cache`);
+    /// `mk_aux_lemma` reads it and inserts what it mints.
+    cache: AuxLemmaCache,
     pending: Vec<Declaration>,
 }
 
 impl AuxLemmas {
     /// `withDeclNameForAuxNaming decl_name` (`CoreM.lean:158-169`, entered at
     /// `PreDefinition/Basic.lean:125`): a fresh generator, prefix
-    /// `decl_name`, index 1.
+    /// `decl_name`, index 1, and an empty aux-lemma cache.
     pub fn new(decl_name: NameId) -> Self {
+        Self::with_cache(decl_name, AuxLemmaCache::new())
+    }
+
+    /// `new`, seeded with the environment's `auxLemmasExt` state, so a
+    /// nested proof whose type an earlier declaration's aux lemma already
+    /// has reuses that constant (`AuxLemma.lean:70-73`). `cache`'s ids must
+    /// be resolvable from the caller's store: environment-store ids are.
+    pub fn with_cache(decl_name: NameId, cache: AuxLemmaCache) -> Self {
         AuxLemmas {
             decl_name,
             next_idx: 1,
-            cache: HashMap::new(),
+            cache,
             pending: Vec::new(),
         }
     }
@@ -461,8 +563,9 @@ impl MetaCtx<'_> {
         value: ExprId,
         use_cache: bool,
     ) -> Result<NameId, MetaError> {
+        let key = aux_lemma_key(self.scratch, Some(self.view.store), ty)?;
         if use_cache {
-            if let Some((name, lps)) = aux.cache.get(&ty) {
+            if let Some((name, lps)) = aux.cache.get(&key) {
                 if *lps == level_params {
                     return Ok(*name);
                 }
@@ -486,7 +589,7 @@ impl MetaCtx<'_> {
             value,
             all: vec![name],
         }));
-        aux.cache.insert(ty, (name, level_params));
+        aux.cache.insert(key, (name, level_params));
         Ok(name)
     }
 

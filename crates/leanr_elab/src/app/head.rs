@@ -462,24 +462,20 @@ pub(crate) fn mk_const(
     // read the WRONG name row in a release build per that same method's
     // documented hazard).
     //
-    // `intern_level_list` keeps `base = None`, and Task 8 RE-CHECKED
-    // that now that `explicit_levels` has a producer and a
-    // caller-supplied `LevelId` is no longer guaranteed to be
-    // freshly-minted scratch data: `intern_level_list`'s `base` is a
-    // DEDUP-ONLY parameter (`bank/mod.rs:564-584` — it consults
+    // `intern_level_list` takes `base = Some(..)` too (M4c-2a): its `base`
+    // is a DEDUP-ONLY parameter (`bank/mod.rs:564-584`: it consults
     // `b.level_lists` for an existing row and otherwise stores the
-    // `LevelId`s VERBATIM), unlike every `store_for`-routing accessor.
-    // It never resolves a child id, so no child's region can be
-    // misrouted by it, whatever `base` is; the only effect of `None` is
-    // skipping the persistent-side dedup lookup and minting a scratch
-    // row. Each `LevelId` inside is re-routed by its OWN scratch bit at
-    // every later read (`level_list_at` then `level_row`, both
-    // `base`-taking), so mixing regions inside the list is safe.
+    // `LevelId`s verbatim, never resolving a child), so passing it is safe
+    // whatever regions the ids are in. With `None` an empty list minted a
+    // scratch row beside the persistent one, so `Nat` was a scratch `Const`
+    // id distinct from the environment's, and ExprId equality stopped being
+    // structural: the env-wide aux-lemma cache (`AuxLemmaCache`, keyed by
+    // type id) then missed a type its own earlier declaration had cached.
     let base = elab.view.store;
     let levels_id = elab
         .mctx
         .store_mut()
-        .intern_level_list(None, &levels)
+        .intern_level_list(Some(base), &levels)
         .map_err(leanr_meta::MetaError::from)?;
     let id = elab
         .mctx

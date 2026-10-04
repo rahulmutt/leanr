@@ -139,7 +139,10 @@ fn empty_source_elaborates_nothing() {
 
 #[test]
 fn oracle_file_gate() {
-    // M4c-2a Task 3 lifts the `aux/` filter (env-wide auxLemmasExt cache).
-    let checked = support::run_file_corpus("file-queries.jsonl", |id| !id.starts_with("aux/"));
-    assert!(checked >= 9, "non-aux file records: checked {checked}");
+    let checked = support::run_file_corpus("file-queries.jsonl", |_| true);
+    assert!(
+        checked >= CORPUS_FLOOR,
+        "file corpus shrank: checked {checked}, floor {CORPUS_FLOOR}. Check \
+         `dump_decls.lean files`' stderr for a dropped record, or lower the floor deliberately."
+    );
 }

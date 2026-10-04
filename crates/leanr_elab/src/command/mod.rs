@@ -22,7 +22,7 @@ pub(crate) mod view;
 use leanr_kernel::bank::scratch::promote_name;
 use leanr_kernel::bank::{NameId, Store};
 use leanr_kernel::{check_declaration, Declaration, Environment};
-use leanr_meta::{Config, EnvExtensions, MetaCtx};
+use leanr_meta::{aux_lemma_key, AuxLemmaCache, Config, EnvExtensions, MetaCtx};
 use leanr_syntax::kind::KindInterner;
 use leanr_syntax::tree::SyntaxNode;
 
@@ -58,17 +58,18 @@ pub struct FileOutcome {
 ///
 /// Aux lemmas: the oracle's `mkAuxLemma` cache (`auxLemmasExt`,
 /// `Meta/Tactic/AuxLemma.lean:29-30`, looked up at `:70-78`) is
-/// ENVIRONMENT-wide, so a later declaration whose nested proof has the
-/// type of an earlier `_proof_N` reuses that constant instead of minting
-/// its own. leanr's `AuxLemmas` cache is per declaration, which is exact
-/// only while no earlier aux lemma exists. So once one has been admitted,
-/// a declaration that would mint aux lemmas is a named seam
-/// (`aux_lemma_reuse_seam`), raised before anything is committed.
+/// ENVIRONMENT-wide: a later declaration whose nested proof has the type
+/// (and level params) of an earlier `_proof_N` reuses that constant
+/// instead of minting its own. `aux_cache` is that state; each declaration's
+/// `AuxLemmas` is seeded from it.
 pub struct CommandElab<'x> {
     env: Environment,
     exts: EnvExtensions<'x>,
-    /// Some `_proof_N` aux theorem has been admitted into `env`.
-    aux_admitted: bool,
+    /// The environment's `auxLemmasExt` state (`Meta/Tactic/AuxLemma.lean:
+    /// 29-30`): every admitted `_proof_N`'s type → (name, levelParams), in
+    /// admission order, so a later same-type mint overwrites (`:68`).
+    /// Environment-store ids only (see `commit`).
+    aux_cache: AuxLemmaCache,
 }
 
 impl<'x> CommandElab<'x> {
@@ -76,7 +77,7 @@ impl<'x> CommandElab<'x> {
         CommandElab {
             env,
             exts,
-            aux_admitted: false,
+            aux_cache: AuxLemmaCache::new(),
         }
     }
 
@@ -153,7 +154,7 @@ impl<'x> CommandElab<'x> {
             let mut elab = TermElabM::new(mctx, env_view);
             match view.kind {
                 DefKind::Axiom => axiom::elab_axiom(&mut elab, &view, kinds),
-                _ => def::elab_def(&mut elab, &view, kinds),
+                _ => def::elab_def(&mut elab, &view, kinds, &self.aux_cache),
             }?
         };
         self.commit(&mut scratch, built)
@@ -167,9 +168,6 @@ impl<'x> CommandElab<'x> {
             }
             Built::Add(decls) => {
                 // `decls` = aux theorems ++ [main] (`def::elab_def`).
-                if decls.len() > 1 && self.aux_admitted {
-                    return Err(aux_lemma_reuse_seam());
-                }
                 // Promote the names first: after the first `add_decl_in` the
                 // scratch store may only be passed to further `add_decl_in`s.
                 // `promote_name` only reads it.
@@ -186,10 +184,29 @@ impl<'x> CommandElab<'x> {
                     self.env
                         .add_decl_in(scratch, d)
                         .map_err(ElabError::Kernel)?;
-                    // An aux theorem stays even if the main declaration is
-                    // then rejected, and the oracle's cache keeps it too.
                     if i < n_aux {
-                        self.aux_admitted = true;
+                        // `mkAuxLemma` inserts right after the aux's own
+                        // `addDecl` (`AuxLemma.lean:64-68`), so an aux stays
+                        // cached even if the main declaration is then
+                        // rejected. Read back from the ADMITTED constant:
+                        // its type and names are environment-store ids,
+                        // which the next declaration's scratch store
+                        // resolves to (it interns through its base).
+                        let cv = self
+                            .env
+                            .get(names[i])
+                            .ok_or_else(|| {
+                                ElabError::Internal(
+                                    "admitted aux lemma is not in the environment".into(),
+                                )
+                            })?
+                            .constant_val();
+                        let (name, lps, ty) = (cv.name, cv.level_params.clone(), cv.ty);
+                        // Keyed up to `Expr.eqv` (binder names/info
+                        // ignored), as `mk_aux_lemma` looks it up.
+                        let key = aux_lemma_key(self.env.store_mut(), None, ty)
+                            .map_err(ElabError::Kernel)?;
+                        self.aux_cache.insert(key, (name, lps));
                     }
                 }
                 Ok(names)
@@ -223,14 +240,6 @@ pub(crate) fn command_seam(kind: &str) -> ElabError {
         _ => "later M4",
     };
     ElabError::UnsupportedSyntax(format!("command `{kind}` — {slice}"))
-}
-
-/// See [`CommandElab`]'s doc. Conservative: it fires even when no earlier
-/// aux lemma has the same type (the oracle would then mint a fresh one).
-fn aux_lemma_reuse_seam() -> ElabError {
-    ElabError::UnsupportedSyntax(
-        "aux-lemma reuse across declarations (auxLemmasExt) — M4c-2".into(),
-    )
 }
 
 fn decl_name(d: &Declaration) -> Result<NameId, ElabError> {
@@ -276,5 +285,91 @@ mod tests {
             label_seam(ElabError::UnknownIdent("x".into())),
             ElabError::UnknownIdent(_)
         ));
+    }
+
+    #[test]
+    fn aux_admitted_before_a_failed_main_is_cached() {
+        // oracle: `mkAuxLemma` inserts into `auxLemmasExt` right after the
+        // aux's own `addDecl` (`Meta/Tactic/AuxLemma.lean:64-68`), so the
+        // entry survives the main declaration's rejection.
+        use leanr_kernel::{
+            BinderInfo, ConstantVal, DefinitionSafety, DefinitionVal, Nat, ReducibilityHints,
+            TheoremVal,
+        };
+        let exts = EnvExtensions {
+            reducibility: &[],
+            matchers: &[],
+            instances: &[],
+            default_instances: &[],
+            projection_fns: &[],
+            classes: &[],
+            coe_decls: &[],
+            structures: &[],
+            aux_recs: &[],
+            elab_as_elim: &[],
+        };
+        let mut ce = CommandElab::new(Environment::default(), exts);
+        let mut scratch = Store::scratch();
+        let (aux, main) = {
+            let base = Some(ce.env.store());
+            let s = &mut scratch;
+            let zero = s.level_zero(base).unwrap();
+            let prop = s.expr_sort(base, zero).unwrap();
+            let b0 = s.expr_bvar(base, &Nat::from(0u64)).unwrap();
+            let b1 = s.expr_bvar(base, &Nat::from(1u64)).unwrap();
+            // `t._proof_1 : ∀ (p : Prop) (h : p), p := fun p h => h`
+            let inner_ty = s
+                .expr_forall(base, None, b0, b1, BinderInfo::Default)
+                .unwrap();
+            let ty = s
+                .expr_forall(base, None, prop, inner_ty, BinderInfo::Default)
+                .unwrap();
+            let inner_val = s.expr_lam(base, None, b0, b0, BinderInfo::Default).unwrap();
+            let value = s
+                .expr_lam(base, None, prop, inner_val, BinderInfo::Default)
+                .unwrap();
+            let t = s.intern_str(base, "t").unwrap();
+            let t = s.name_str(base, None, t).unwrap();
+            let p1 = s.intern_str(base, "_proof_1").unwrap();
+            let p1 = s.name_str(base, Some(t), p1).unwrap();
+            let aux = Declaration::Thm(TheoremVal {
+                val: ConstantVal {
+                    name: p1,
+                    level_params: vec![],
+                    ty,
+                },
+                value,
+                all: vec![p1],
+            });
+            // `def t : Prop := Prop` is ill-typed (`Prop : Type`): the
+            // kernel rejects the main declaration after admitting the aux.
+            let main = Declaration::Defn(DefinitionVal {
+                val: ConstantVal {
+                    name: t,
+                    level_params: vec![],
+                    ty: prop,
+                },
+                value: prop,
+                hints: ReducibilityHints::Regular(1),
+                safety: DefinitionSafety::Safe,
+                all: vec![t],
+            });
+            (aux, main)
+        };
+        let r = ce.commit(&mut scratch, Built::Add(vec![aux, main]));
+        assert!(matches!(r, Err(ElabError::Kernel(_))), "{r:?}");
+        assert_eq!(ce.env.len(), 1, "the aux stays admitted");
+        assert_eq!(ce.aux_cache.len(), 1, "and cached");
+        let (&ty, &(name, ref lps)) = ce.aux_cache.iter().next().unwrap();
+        let cv = ce
+            .env
+            .get(name)
+            .expect("cached name is admitted")
+            .constant_val();
+        assert_eq!(
+            cv.ty, ty,
+            "keyed by the admitted type (already alpha-canonical)"
+        );
+        assert!(lps.is_empty());
     }
 }
