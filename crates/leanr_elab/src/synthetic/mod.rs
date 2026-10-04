@@ -49,3 +49,4 @@ pub use state::{
     LevelMVarErrorInfo, MVarErrorInfo, MVarErrorKind, SavedContext, SyntheticMVarDecl,
     SyntheticMVarKind,
 };
+pub(crate) use state::{SavedTermState, TermElabResult};

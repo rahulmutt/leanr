@@ -9,7 +9,7 @@ mod support;
 
 /// `wc -l tests/fixtures/elab/file-queries.jsonl` at the last deliberate
 /// regen. `>=`: adding a record is a one-line bump, not a failing gate.
-const CORPUS_FLOOR: usize = 89;
+const CORPUS_FLOOR: usize = 131;
 
 #[test]
 fn file_corpus_sources_parse_into_the_oracle_commands() {

@@ -116,9 +116,11 @@
 //!   `elab_explicit`). `useImplicitLambda`'s `.postpone` arm SHIPPED in
 //!   M4b-4a P2 (`elab.rs`'s `UseImplicitLambda::Postpone`).
 //! - **overload resolution** (more than one candidate from
-//!   `elabAppFn`) — M4c-2b-ii. `resolve_global_name` returns every
-//!   candidate (M4c-2b-i); two or more is `resolve::expect_one`'s named
-//!   seam.
+//!   `elabAppFn`) — landed. An overloaded IDENTIFIER or `.x` is elaborated:
+//!   `app::head::elab_app_fn_resolutions` runs each candidate under
+//!   `observing` and `app::overload::select` ports `getSuccesses` /
+//!   `Ambiguous term` / `mergeFailures`; `.x` candidates go through
+//!   the same path (`app/dot_ident.rs`).
 //! - **`elabAsElim`** — SHIPPED in M4b-4c P2 (`app/elim.rs`): every
 //!   `shouldElabAsElim` head (`App.lean:1322-1328`) is diverted to
 //!   `ElimElab` by `app::elab_app_args`, exactly as `App.lean:1373-1383`
@@ -131,7 +133,7 @@
 //!   `useImplicitLambda` produce). P3 SHIPPED generalized field
 //!   notation and P4 SHIPPED `pipeProj`/`dotIdent`/`namedPattern`
 //!   (`app/head.rs`, `app/dot_ident.rs`). Still deferred, each a named
-//!   seam: `choice` the overloading slice, private field projections the slice that models private
+//!   seam: `choice` choice-node parsing, private field projections the slice that models private
 //!   names. The anonymous
 //!   constructor `⟨⟩` is elaborated by `builtin::anon_ctor` (M4b-4b); its
 //!   pattern position is left to the match slice.
@@ -147,9 +149,9 @@
 //!   (`resolve.rs`, `names.rs`, `command/scope.rs`): `resolve_global_name`
 //!   is the oracle's candidate-list `resolveGlobalName` against the
 //!   `ResolveCtx` on `TermElabM` (term-only callers get
-//!   `ResolveCtx::root()`). Still deferred: overloaded identifiers (two
-//!   or more `resolveGlobalName` candidates) — M4c-2b-ii; `export`/`private`
-//!   — later M4.
+//!   `ResolveCtx::root()`). Overloaded identifiers (two or more
+//!   `resolveGlobalName` candidates) are elaborated; still deferred:
+//!   `export`/`private` — later M4.
 //!
 //! See `dispatch.rs`'s doc comment for the kind-by-kind deferral table,
 //! `app/mod.rs`'s for the site-by-site seam index inside the

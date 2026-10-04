@@ -12,6 +12,14 @@ pub enum ElabError {
     /// M4b slices; until then their kinds arrive here, never silently.
     UnsupportedSyntax(String),
     UnknownIdent(String),
+    /// oracle: `elabAppAux`'s `throwErrorAt f "Ambiguous term{indentD f}…"`
+    /// (`App.lean:2217`): two or more overloaded candidates survived
+    /// `getSuccesses`.
+    AmbiguousTerm,
+    /// oracle: `mergeFailures` (`App.lean:2190-2200`):
+    /// `throwErrorWithNestedErrors "overloaded" exs`. Every candidate
+    /// failed. The nested errors are kept in candidate order, for tests.
+    Overloaded(Vec<ElabError>),
     /// oracle: `throwUnknownConstantAt` — the `binop%` family's head did not
     /// resolve (`Extra.lean:216`, `:223`, `:554`).
     UnknownConstant(String),
@@ -39,12 +47,28 @@ pub enum ElabError {
     /// (`Arg.lean:55-59`).
     DuplicateNamedArg(String),
     /// oracle: `mkConst`'s "too many explicit universe levels for
-    /// '{constName}'" (`Lean/Elab/Term/TermElabM.lean:2128-2136`).
-    /// Carries the head identifier's raw source text. Reachable only
-    /// once `.{u, v}` explicit-universe syntax has a producer (M4b-3 P1
-    /// task 8); the check itself lives in `app::head::elab_app_fn_id`
-    /// from task 4 on, so the arm can never be silently skipped.
+    /// `{constName}`" (`Lean/Elab/Term/TermElabM.lean:2132`).
+    /// Carries the RESOLVED constant's name, as the oracle renders
+    /// `constName` (row `overload/explicitUniv`). The check lives in
+    /// `app::head::mk_const`.
     TooManyUniverseLevels(String),
+    /// oracle: `findMethod?`'s throw (`App.lean:1466-1468`). `cands` are
+    /// full names in `resolveGlobalName` order.
+    AmbiguousFieldName {
+        field: String,
+        full: String,
+        cands: Vec<String>,
+    },
+    /// oracle: `resolveUniqueNamespace` (`ResolveName.lean:353-356`),
+    /// ``s!"ambiguous namespace `{id}`, possible interpretations: `{nss}`"``.
+    /// `{nss}` is `List Name`'s `toString`.
+    AmbiguousNamespace {
+        id: String,
+        cands: Vec<String>,
+    },
+    /// oracle: `resolveNameUsingNamespacesCore`'s
+    /// `throwErrorWithNestedErrors "failed to open" exs` (`Open.lean:63-68`, the throw at `:68`).
+    FailedToOpen(Vec<ElabError>),
     /// A syntax node whose shape contradicts the grammar (missing child,
     /// wrong node/token variant, a non-trailing `..`). Distinct from
     /// `UnsupportedSyntax`, which means "this construct's slice has not
@@ -497,6 +521,24 @@ impl ElabError {
             // `UnknownIdent` for an unknown universe name, which the oracle
             // words differently; no corpus record reaches that.
             Self::UnknownIdent(s) => Some(format!("Unknown identifier `{s}`")),
+            Self::AmbiguousTerm => Some("Ambiguous term".into()),
+            Self::TooManyUniverseLevels(n) => {
+                Some(format!("too many explicit universe levels for `{n}`"))
+            }
+            Self::Overloaded(_) => Some("overloaded, errors ".into()),
+            Self::AmbiguousFieldName { field, full, cands } => Some(format!(
+                "Field name `{field}` is ambiguous: `{full}` has possible interpretations {}",
+                cands
+                    .iter()
+                    .map(|c| format!("`{c}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            Self::AmbiguousNamespace { id, cands } => Some(format!(
+                "ambiguous namespace `{id}`, possible interpretations: `[{}]`",
+                cands.join(", ")
+            )),
+            Self::FailedToOpen(_) => Some("failed to open, errors ".into()),
             Self::TypeMismatch { app: None, .. } => Some("Type mismatch".into()),
             Self::TypeMismatch { app: Some(a), .. } => Some(
                 if a.arg_already_in_f {
@@ -615,6 +657,54 @@ mod tests {
             Some("failed to elaborate eliminator, invalid motive")
         );
         assert_eq!(ElabError::Postpone.oracle_first_line(), None);
+    }
+
+    #[test]
+    fn overload_first_lines_are_the_oracles() {
+        // `App.lean:2217`: the term starts the next line (`indentD`).
+        assert_eq!(
+            ElabError::AmbiguousTerm.oracle_first_line().as_deref(),
+            Some("Ambiguous term")
+        );
+        // `Util.lean:262-263` + `Message.lean:859-860`: the list is an
+        // `indentD`, so line 1 ends with the space before it.
+        assert_eq!(
+            ElabError::Overloaded(vec![]).oracle_first_line().as_deref(),
+            Some("overloaded, errors ")
+        );
+        assert!(ElabError::AmbiguousTerm.is_oracle_error());
+        assert!(ElabError::Overloaded(vec![]).is_oracle_error());
+        assert_eq!(
+            ElabError::TooManyUniverseLevels("B.u".into())
+                .oracle_first_line()
+                .as_deref(),
+            Some("too many explicit universe levels for `B.u`") // overload/explicitUniv
+        );
+        assert_eq!(
+            ElabError::AmbiguousFieldName {
+                field: "g".into(),
+                full: "S1.g".into(),
+                cands: vec!["A.S1.g".into(), "B.S1.g".into()],
+            }
+            .oracle_first_line()
+            .as_deref(),
+            Some("Field name `g` is ambiguous: `S1.g` has possible interpretations `A.S1.g`, `B.S1.g`") // ambig/fieldName
+        );
+        assert_eq!(
+            ElabError::AmbiguousNamespace {
+                id: "X".into(),
+                cands: vec!["B.X".into(), "A.X".into()]
+            }
+            .oracle_first_line()
+            .as_deref(),
+            Some("ambiguous namespace `X`, possible interpretations: `[B.X, A.X]`") // ambig/openHiding
+        );
+        assert_eq!(
+            ElabError::FailedToOpen(vec![])
+                .oracle_first_line()
+                .as_deref(),
+            Some("failed to open, errors ") // ambig/openFailed
+        );
     }
 
     #[test]

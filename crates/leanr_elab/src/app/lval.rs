@@ -254,12 +254,11 @@ fn find_method_in(
     match crate::resolve::resolve_global_name_at_root(elab, full)?.as_slice() {
         [] => Ok(None),
         [c] => Ok(Some((s, *c))),
-        cs => Err(ElabError::UnsupportedSyntax(format!(
-            "ambiguous field name `{field}`: `{}` has {} candidates \
-             (`findMethod?`, App.lean:1466-1468) — M4c-2b-ii",
-            render(elab, full),
-            cs.len()
-        ))),
+        cs => Err(ElabError::AmbiguousFieldName {
+            field: field.to_string(),
+            full: render(elab, full),
+            cands: cs.iter().map(|&c| render(elab, c)).collect(),
+        }),
     }
 }
 
@@ -847,7 +846,7 @@ pub fn elab_app_lvals(
                          `structureExt` names for this field (App.lean:1862)"
                     )));
                 }
-                let proj_fn = crate::app::head::mk_const(elab, proj_fn_name, &levels, &proj_name)?;
+                let proj_fn = crate::app::head::mk_const(elab, proj_fn_name, &levels)?;
                 // `getConstInfoInduct baseStructName` (`:1864`).
                 let num_params = match elab.view.get(base) {
                     Some(ConstantInfo::Induct(ind)) => ind.num_params.to_usize(),
@@ -902,10 +901,9 @@ pub fn elab_app_lvals(
                 } else {
                     e
                 };
-                let display = render(elab, const_name);
                 // `mkConst constName levels` (`:1875`). `find_method` and
                 // the `Function` arm only return declared constants.
-                let const_fn = crate::app::head::mk_const(elab, const_name, &levels, &display)?;
+                let const_fn = crate::app::head::mk_const(elab, const_name, &levels)?;
                 if last {
                     // `:1878-1879`.
                     let args = std::mem::take(&mut call.args);

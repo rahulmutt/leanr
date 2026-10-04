@@ -60,13 +60,13 @@
 //!   optParam defaults / autoParam .................... P5 SHIPPED — args.rs
 //!   implicit-lambda insertion (the feature) .......... P5 SHIPPED — elab.rs
 //!   `@($t)`/`@$t` disabling implicit-lambda insertion . SHIPPED (close-out) — here, elab.rs
-//!   overload resolution (candidates > 1) ............. M4c-2b-ii  overload.rs, resolve.rs
+//!   overload resolution (candidates > 1) ............. landed  overload.rs, head.rs
 //!   elabAsElim / ElabElim (every shouldElabAsElim head) SHIPPED (M4b-4c) — app/elim.rs
 //!   dot notation: proj, fieldIdx, projFn/projIdx ..... P1 SHIPPED (M4b-4a) — lval.rs, head.rs, here
 //!   numImplicitParams (structure projection) ......... P1 SHIPPED (M4b-4a) — args.rs, lval.rs
 //!   generalized field notation (.const, Function.f) .. P3 SHIPPED (M4b-4a) — lval.rs
 //!   pipeProj / dotIdent / namedPattern heads, `@.f` .. P4 SHIPPED (M4b-4a) — head.rs, dot_ident.rs
-//!   `choice` heads ................................... overloading slice  head.rs
+//!   `choice` heads ................................... choice-node parsing  head.rs
 //!   private field projections ........................ private-names slice  lval.rs
 //! ```
 //!
@@ -192,7 +192,7 @@ pub(crate) fn elab_app_expanded(
     if elab.view.get(name).is_none() {
         return Err(ElabError::UnknownIdent(f.to_string()));
     }
-    let f = head::mk_const(elab, name, &[], f)?;
+    let f = head::mk_const(elab, name, &[])?;
     let call = AppCall {
         named_args: Vec::new(),
         args: args.iter().cloned().map(Arg::Stx).collect(),
@@ -447,6 +447,8 @@ fn peel_head(
 /// ellipsis`). Grouped so the recursion in `head::elab_app_fn` and the
 /// LVal loop in `lval::elab_app_lvals` pass one value, not six.
 /// `stx` is `Context::stx` (the WHOLE application — see that field's doc).
+/// `Clone`: an overloaded head elaborates the same call once per candidate.
+#[derive(Clone)]
 pub struct AppCall {
     pub named_args: Vec<NamedArg>,
     pub args: Vec<Arg>,
@@ -468,9 +470,10 @@ pub struct AppCall {
 /// above): `@f a b` and `f.{u} a` wrap the SAME head syntax the plain
 /// form has, so stripping the wrapper (setting `explicit := true` /
 /// collecting the explicit level list) before `elab_app_fn` keeps
-/// `head.rs` about NAMES only. `elab_app_fn` still names any remaining
-/// unported head (`choice` — the overloading slice) as a named seam rather than
-/// mis-elaborating it.
+/// `head.rs` about NAMES only. When `elab_app_fn` returns two or more
+/// candidates (an overloaded identifier), `overload::select` runs the
+/// oracle's `getSuccesses` and picks the survivor, or throws
+/// `Ambiguous term` / `overloaded, errors` (`App.lean:2207-2219`).
 ///
 /// Task 7 adds the 8th parameter (`stx`, `Context::stx`'s own doc),
 /// crossing clippy's default `too_many_arguments` threshold (7). Same
@@ -501,8 +504,10 @@ fn elab_app_aux(
         stx,
         result_is_out_param_support: true,
     };
-    let candidates = head::elab_app_fn(elab, &head, kinds, &explicit_levels, Vec::new(), call)?;
-    overload::expect_single(candidates)
+    match head::elab_app_fn(elab, &head, kinds, &explicit_levels, Vec::new(), call)? {
+        head::AppFn::Done(e) => Ok(e),
+        head::AppFn::Candidates(cands) => overload::select(elab, cands, kinds),
+    }
 }
 
 /// oracle: `elabAppArgs` (`App.lean:1351-1394`), building the

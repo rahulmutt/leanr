@@ -160,6 +160,7 @@ pub struct MVarErrorInfo {
 /// by [`TermElabM::restore_term_state`]. Crate-visible since M4b-4a P2:
 /// besides [`TermElabM::commit_when`], `elab.rs`'s `elab_using_elab_fns`
 /// and `ladder.rs`'s `resume_postponed` restore one.
+#[derive(Clone)]
 pub(crate) struct SavedTermState {
     meta: MetaSnapshot,
     pending_mvars: Vec<MVarId>,
@@ -403,5 +404,194 @@ impl<'e> TermElabM<'e> {
         let out = k(self);
         self.may_postpone = prev;
         out
+    }
+}
+
+/// oracle: `TermElabResult` (`TermElabM.lean:565`,
+/// `EStateM.Result Exception SavedState α`): a candidate's value or error
+/// together with the state it left behind. Produced by
+/// [`TermElabM::observing`]; consumed by [`TermElabM::apply_result`].
+/// Only oracle errors are ever captured (see `observing`).
+pub(crate) enum TermElabResult {
+    Ok(ExprId, SavedTermState),
+    Err(ElabError, SavedTermState),
+}
+
+impl<'e> TermElabM<'e> {
+    /// oracle: `observing` (`TermElabM.lean:574-590`). Saves the state, runs
+    /// `f`, captures the state `f` left, and restores the saved one.
+    ///
+    /// An ORACLE error is captured, as the oracle captures `.error`. Every
+    /// other error is rethrown: `Postpone` after restoring
+    /// (`postponeExceptionId`, `:587-589`), a seam (or `Meta`/`Internal`)
+    /// as is. A seam stands for behaviour leanr does not model, so it
+    /// cannot count as this candidate failing: the oracle might accept the
+    /// candidate (spec § Rule 1). Rethrowing stops the whole overloaded
+    /// elaboration at the first such error, in candidate order.
+    ///
+    /// The id generators are not part of [`SavedTermState`] and are never
+    /// rewound, as the oracle's `Core.SavedState.restore` (`CoreM.lean:407-410`)
+    /// rewinds neither `ngen` nor the macro scope.
+    pub(crate) fn observing(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<ExprId, ElabError>,
+    ) -> Result<TermElabResult, ElabError> {
+        let before = self.save_term_state();
+        match f(self) {
+            Ok(e) => {
+                let after = self.save_term_state();
+                self.restore_term_state(before);
+                Ok(TermElabResult::Ok(e, after))
+            }
+            Err(err) if err.is_oracle_error() => {
+                let after = self.save_term_state();
+                self.restore_term_state(before);
+                Ok(TermElabResult::Err(err, after))
+            }
+            Err(ElabError::Postpone) => {
+                self.restore_term_state(before);
+                Err(ElabError::Postpone)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// oracle: `applyResult` (`TermElabM.lean:592-596`): restore the
+    /// captured state, then return the value or rethrow the error.
+    pub(crate) fn apply_result(&mut self, r: TermElabResult) -> Result<ExprId, ElabError> {
+        match r {
+            TermElabResult::Ok(e, s) => {
+                self.restore_term_state(s);
+                Ok(e)
+            }
+            TermElabResult::Err(err, s) => {
+                self.restore_term_state(s);
+                Err(err)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use leanr_kernel::bank::terms::Node;
+    use leanr_kernel::bank::Store;
+    use leanr_kernel::{AxiomVal, ConstantInfo, ConstantVal, Environment};
+    use leanr_meta::{Config, EnvExtensions, MetaCtx};
+
+    use super::TermElabResult;
+    use crate::elab::TermElabM;
+    use crate::ElabError;
+
+    /// One axiom `Foo : Prop` (the `app::head::tests::env_with_foo` shape).
+    fn env_with_foo() -> Environment {
+        let mut env = Environment::default();
+        let prop = {
+            let store = env.store_mut();
+            let zero = store.level_zero(None).unwrap();
+            store.expr_sort(None, zero).unwrap()
+        };
+        let foo = {
+            let store = env.store_mut();
+            let s = store.intern_str(None, "Foo").unwrap();
+            store.name_str(None, None, s).unwrap()
+        };
+        env.admit_unchecked(ConstantInfo::Axiom(AxiomVal {
+            val: ConstantVal {
+                name: foo,
+                level_params: vec![],
+                ty: prop,
+            },
+            is_unsafe: false,
+        }))
+        .unwrap();
+        env
+    }
+
+    /// Runs `k` with a fresh elaborator, an unassigned mvar `?m : Prop`
+    /// (its id) and the constant `Foo`.
+    fn with_mvar(k: impl FnOnce(&mut TermElabM, leanr_meta::MVarId, leanr_kernel::bank::ExprId)) {
+        let env = env_with_foo();
+        let view = env.view();
+        let mut scratch = Store::scratch();
+        let mctx = MetaCtx::new(
+            view,
+            &mut scratch,
+            Config::default(),
+            EnvExtensions::default(),
+        );
+        let mut elab = TermElabM::new(mctx, view);
+        let foo = crate::builtin::op::mk_const_named(&mut elab, "Foo").unwrap();
+        let prop = elab.mctx.infer_type(foo).unwrap();
+        let m = elab.mk_fresh_expr_mvar(prop).unwrap();
+        let Node::MVar { id: Some(id) } = crate::app::lval::node(&elab, m) else {
+            panic!("mk_fresh_expr_mvar returned a non-mvar")
+        };
+        k(&mut elab, leanr_meta::MVarId(id), foo);
+    }
+
+    /// oracle `observing` (`TermElabM.lean:574-580`): the candidate's state
+    /// is captured, the state before it is restored; `applyResult`
+    /// (`:592-596`) restores the captured state.
+    #[test]
+    fn observing_restores_before_and_apply_result_restores_after() {
+        with_mvar(|elab, id, foo| {
+            let r = elab
+                .observing(|elab| {
+                    elab.mctx.mctx_mut().assign(id, foo)?;
+                    Ok(foo)
+                })
+                .unwrap();
+            assert!(matches!(r, TermElabResult::Ok(..)));
+            assert!(!elab.mctx.mctx().is_assigned(id), "before-state restored");
+            assert_eq!(elab.apply_result(r).unwrap(), foo);
+            assert!(elab.mctx.mctx().is_assigned(id), "after-state restored");
+        });
+    }
+
+    /// `:582-585`: an oracle error is captured with its state; `applyResult`
+    /// restores that state and rethrows.
+    #[test]
+    fn observing_captures_an_oracle_error_with_its_state() {
+        with_mvar(|elab, id, foo| {
+            let r = elab
+                .observing(|elab| {
+                    elab.mctx.mctx_mut().assign(id, foo)?;
+                    Err(ElabError::UnknownIdent("x".into()))
+                })
+                .unwrap();
+            assert!(matches!(
+                r,
+                TermElabResult::Err(ElabError::UnknownIdent(_), _)
+            ));
+            assert!(!elab.mctx.mctx().is_assigned(id));
+            assert!(matches!(
+                elab.apply_result(r),
+                Err(ElabError::UnknownIdent(_))
+            ));
+            assert!(elab.mctx.mctx().is_assigned(id));
+        });
+    }
+
+    /// `:586-590`: postponement restores the before-state and is rethrown.
+    #[test]
+    fn observing_rethrows_postpone_after_restoring() {
+        with_mvar(|elab, id, foo| {
+            let r = elab.observing(|elab| {
+                elab.mctx.mctx_mut().assign(id, foo)?;
+                Err(ElabError::Postpone)
+            });
+            assert!(matches!(r, Err(ElabError::Postpone)));
+            assert!(!elab.mctx.mctx().is_assigned(id));
+        });
+    }
+
+    /// Spec § Rule 1: a seam is never captured as a candidate's failure.
+    #[test]
+    fn observing_rethrows_a_seam() {
+        with_mvar(|elab, _, _| {
+            let r = elab.observing(|_| Err(ElabError::UnsupportedSyntax("x — later".into())));
+            assert!(matches!(r, Err(ElabError::UnsupportedSyntax(_))));
+        });
     }
 }

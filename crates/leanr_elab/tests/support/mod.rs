@@ -1397,7 +1397,7 @@ pub fn check_consts(
 
 /// The canonical JSON of admitted constant `n`, in `dump_decls.lean`'s
 /// `constJ` shape.
-fn decl_const_json(
+pub fn decl_const_json(
     env: &leanr_kernel::Environment,
     n: leanr_kernel::bank::NameId,
 ) -> serde_json::Value {

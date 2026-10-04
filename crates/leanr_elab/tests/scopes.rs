@@ -178,18 +178,111 @@ fn an_unclosed_namespace_at_end_of_input_is_fine() {
     );
 }
 
-/// Review Focus 2 (end to end).
+/// Two or more candidates are elaborated, not seamed. All three
+/// are oracle-probed `Ambiguous term` (rows `overload/rootAndOpen`,
+/// `overload/exportAlias`; `A.k`/`B.k`).
 #[test]
-fn ambiguous_identifiers_seam_end_to_end() {
+fn ambiguous_identifiers_are_ambiguous_terms() {
     for src in [
         "def shown : Nat := Nat.zero\nopen Scope0\ndef f : Nat := shown",
         "def Scope0.ex : Nat := Nat.zero\nopen Scope0\ndef f : Nat := ex",
         "namespace A\ndef k : Nat := Nat.zero\nend A\nnamespace B\ndef k : Nat := Nat.zero\nend B\nopen A B\ndef f : Nat := k",
     ] {
         let (_, stop) = run(src);
-        let m = stop.expect("stops").1;
-        assert!(m.starts_with("SEAM ") && m.ends_with(" — M4c-2b-ii"), "{src:?}: {m}");
+        assert_eq!(stop.expect("stops").1, "Ambiguous term", "{src:?}");
     }
+}
+
+/// Spec § Rule 1 (plan Review Focus 4). `B.f .t` reaches the recursion
+/// seam (`.t` against `Nat` is the declaration's own aux local, M4c-2b-i);
+/// `A.f .t` succeeds with `Bool.t`. The oracle reports `Ambiguous term`
+/// (plan-time probe), so selecting `A.f` would be a silent wrong Ok.
+#[test]
+fn a_seam_in_one_candidate_stops_the_overload() {
+    let src = "def Bool.t : Bool := Bool.true\nnamespace A\ndef f (b : Bool) : Nat := Nat.zero\nend A\nnamespace B\ndef f (n : Nat) : Nat := n\nend B\nopen A B\ndef Nat.t : Nat := f .t";
+    let (_, stop) = run(src);
+    let (at, m) = stop.expect("stops");
+    assert_eq!(at, 8, "{m}");
+    assert!(
+        m.starts_with("SEAM ") && m.contains("recursive reference to"),
+        "{m}"
+    );
+}
+
+/// `getSuccesses` stage 3 (`App.lean:2174-2185`). `A.h`'s `Wrap ?a` is
+/// stuck, not failed (`Wrap` has instances), so both candidates survive
+/// stages 1 and 2; only stage 3's `postpone := .no` drops `A.h`. Row
+/// `overload/stage3` cannot pin this: `NoInst ?a` fails outright inside
+/// the candidate (`trySynthInstance` is `.none`), in the oracle too.
+/// Oracle-probed (dump_decls `files` mode): `t := B.h`
+/// (the value is checked in the corpus encoding);
+/// `A.h` alone is `typeclass instance problem is stuck`.
+#[test]
+fn stage_three_drops_a_stuck_instance_candidate() {
+    let src = "namespace A\ndef h {a : Type} [Wrap a] : Nat := Nat.zero\nend A\nnamespace B\ndef h : Nat := Nat.zero\nend B\nopen A B\ndef t : Nat := h";
+    let value = support::with_file_elab(src, |ce, cmds, kinds| {
+        let out = ce.elab_commands(cmds, kinds);
+        assert!(out.stopped.is_none(), "{:?}", out.stopped);
+        let t = match out.done.last().map(Vec::as_slice) {
+            Some(&[t]) => t,
+            other => panic!("expected `t` alone, got {other:?}"),
+        };
+        support::decl_const_json(ce.env(), t)["value"].clone()
+    });
+    assert_eq!(
+        value,
+        serde_json::json!({"k": "const", "n": "B.h", "us": []})
+    );
+}
+
+/// Candidate order. `mkConsts` (`TermElabM.lean:2146-2158`) cons-folds
+/// `resolveGlobalName`'s `[A.f, B.f]` into `[B.f, A.f]`, and
+/// `mergeFailures` nests the errors in that order. Oracle-probed
+/// (oracle-probed, dump_decls `files` mode, full message):
+/// `overloaded, errors` then B's `Function expected at` then A's
+/// `Application type mismatch: The argument`.
+#[test]
+fn overloaded_candidates_run_in_mk_consts_order() {
+    let src = "namespace A\ndef f (n : Nat) : Nat := n\nend A\nnamespace B\ndef f : Bool := Bool.true\nend B\nopen A B\ndef t := f Unit.unit";
+    support::with_file_elab(src, |ce, cmds, kinds| {
+        match ce.elab_commands(cmds, kinds).stopped {
+            Some((7, ElabError::Overloaded(errs))) => assert!(
+                matches!(
+                    errs.as_slice(),
+                    [
+                        ElabError::FunctionExpected { .. },
+                        ElabError::TypeMismatch { app: Some(_), .. }
+                    ]
+                ),
+                "B's error must come first: {errs:?}"
+            ),
+            other => panic!("expected Overloaded at command 7, got {other:?}"),
+        }
+    });
+}
+
+/// `.x` candidates keep `resolveGlobalName` order: `resolveDottedIdentFn`
+/// uses `candidates.mapM` (`App.lean:2032-2033`), no cons-fold reversal
+/// (unlike `mkConsts`). With `open A B`, A runs first: A's `Nat.two` is a
+/// non-function (`Function expected`), B's takes the `Unit` argument.
+#[test]
+fn dot_ident_candidates_keep_resolve_order() {
+    let src = "namespace A\ndef Nat.two : Nat := Nat.zero\nend A\nnamespace B\ndef Nat.two (b : Bool) : Nat := Nat.zero\nend B\nopen A B\ndef t : Nat := .two Unit.unit";
+    support::with_file_elab(src, |ce, cmds, kinds| {
+        match ce.elab_commands(cmds, kinds).stopped {
+            Some((7, ElabError::Overloaded(errs))) => assert!(
+                matches!(
+                    errs.as_slice(),
+                    [
+                        ElabError::FunctionExpected { .. },
+                        ElabError::TypeMismatch { app: Some(_), .. }
+                    ]
+                ),
+                "A's error must come first: {errs:?}"
+            ),
+            other => panic!("expected Overloaded at command 7, got {other:?}"),
+        }
+    });
 }
 
 /// Review Focus 4.
@@ -410,20 +503,31 @@ fn field_notation_and_dot_ident_see_open_decls() {
         "def Nat.two : Nat := Nat.zero\ndef Foo.Nat.two : Nat := Nat.zero\nopen Foo\ndef x : Nat := .two",
         &format!(r#"[{{"consts":[{NAT_TWO}]}},{{"consts":[{FOO_NAT_TWO}]}},{{"consts":[]}},{{"consts":[{}]}}]"#, x_is("Nat.two")),
     );
-    // Two opened candidates: the oracle throws "Field name `g` is
-    // ambiguous" / "Ambiguous term"; leanr seams (M4c-2b-ii).
-    for src in [
-        "def Foo.S1.g (_s : S1) : Nat := Nat.zero\ndef Bar.S1.g (_s : S1) : Nat := Nat.zero\nopen Foo Bar\ndef y (s : S1) : Nat := s.g",
-        "def Foo.Nat.two : Nat := Nat.zero\ndef Bar.Nat.two : Nat := Nat.zero\nopen Foo Bar\ndef x : Nat := .two",
-    ] {
-        let (_, stop) = run(src);
-        let (at, m) = stop.expect("stops");
-        assert_eq!(at, 3, "{src:?}");
-        assert!(
-            m.starts_with("SEAM ") && m.contains("2 candidates") && m.ends_with(" — M4c-2b-ii"),
-            "{src:?}: {m}"
-        );
-    }
+    // Two opened `.two` candidates: oracle `Ambiguous term` (probed).
+    let (_, stop) = run("def Foo.Nat.two : Nat := Nat.zero\ndef Bar.Nat.two : Nat := Nat.zero\nopen Foo Bar\ndef x : Nat := .two");
+    assert_eq!(stop.expect("stops"), (3, "Ambiguous term".to_string()));
+    // Two opened `S1.g`: `findMethod?`'s throw (probed).
+    let (_, stop) = run("def Foo.S1.g (_s : S1) : Nat := Nat.zero\ndef Bar.S1.g (_s : S1) : Nat := Nat.zero\nopen Foo Bar\ndef y (s : S1) : Nat := s.g");
+    assert_eq!(
+        stop.expect("stops"),
+        (3, "Field name `g` is ambiguous: `S1.g` has possible interpretations `Foo.S1.g`, `Bar.S1.g`".to_string())
+    );
+}
+
+/// `open X (p)` with `X` naming two namespaces: the oracle's "ambiguous
+/// identifier `p`, possible interpretations: [B.X.p, A.X.p]"
+/// (`Open.lean:72`) renders `mkConst`s, an `Expr` list, through the
+/// delaborator, so leanr seams it.
+#[test]
+fn open_explicit_ambiguity_is_a_delab_seam() {
+    let src = "namespace A.X\ndef p : Nat := Nat.zero\nend A.X\nnamespace B.X\ndef p : Nat := Nat.zero\nend B.X\nopen A B\nopen X (p)";
+    let (_, stop) = run(src);
+    let (at, m) = stop.expect("stops");
+    assert_eq!(at, 7, "{m}");
+    assert!(
+        m.starts_with("SEAM ") && m.ends_with(" — delab name rendering"),
+        "{m}"
+    );
 }
 
 /// m3: `cmd₁ in cmd₂` pops its section when either command errors, so

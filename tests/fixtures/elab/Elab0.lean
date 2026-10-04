@@ -911,3 +911,10 @@ namespace Scope0Exp
 def ex : Nat := Nat.zero
 end Scope0Exp
 export Scope0Exp (ex)
+
+-- M4c-2b-ii: a coercion whose source carries a type argument, so an
+-- overloaded candidate of type `List ?a` against `Int` leaves a DELAYED
+-- coercion that default instances later resolve (`getSuccesses` stage 2,
+-- spec `docs/superpowers/specs/2026-10-04-m4c2b-ii-overloaded-elab-design.md`).
+-- Appended last, so no earlier constant changes.
+instance instCoeListNatInt : Coe (List Nat) Int := ⟨fun _ => Int.ofNat Nat.zero⟩

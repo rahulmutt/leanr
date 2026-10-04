@@ -183,7 +183,7 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 ///   generalized field notation (.const,
 ///     Function.f) .............................. P3 SHIPPED (M4b-4a) — lval.rs
 ///   private field projections (no fixture) ..... the slice that models private names
-///   choice ..................................... overloading slice
+///   choice ..................................... choice-node parsing
 ///   elabAsElim / ElabElim ...................... M4b-4c SHIPPED — app/elim.rs
 ///   anonymous constructor ⟨⟩ (term position) ... M4b-4b SHIPPED — builtin/anon_ctor.rs; pattern position: the match slice
 ///   binop% family, binrel% / binrel_no_prop%
@@ -192,7 +192,7 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 ///   remaining Init notations (×, ∘, ::, <$>, <|, …) table extension — some need an Expansion shape beyond App/Op
 ///   Mathlib (non-Init) notations ............... the VM slice — UnsupportedSyntax(kind)
 ///   open / alias / _root_ resolution ......... M4c-2b-i SHIPPED — resolve.rs, command/scope.rs
-///   overloaded identifiers .................... M4c-2b-ii
+///   overloaded identifiers .................... SHIPPED — app/overload.rs, app/head.rs
 /// ```
 /// The application arms above are registered, so the `M4b-3` seams in
 /// that list are raised from INSIDE `app::args`/`app::finalize`/

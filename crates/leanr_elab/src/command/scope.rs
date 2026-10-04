@@ -105,12 +105,6 @@ fn prefixes_of(st: &Store, base: Option<&Store>, n: NameId) -> Vec<NameId> {
     out
 }
 
-/// A seam for the overload / ambiguity paths `open` shares with
-/// M4c-2b-ii's overloaded elaboration.
-fn ambiguous(what: String) -> ElabError {
-    ElabError::UnsupportedSyntax(format!("{what} — M4c-2b-ii"))
-}
-
 /// `elabOpenDecl`'s local resolution state (`Elab/Open.lean:28-36`,
 /// `StateRefT'.run'` at `:75`): a scratch store over the environment, the
 /// head scope's namespace and a LOCAL copy of its open declarations, so
@@ -161,12 +155,13 @@ impl OpenState<'_> {
 
     /// oracle: `resolveUniqueNamespace` (`ResolveName.lean:353-356`).
     fn resolve_unique_namespace(&mut self, comps: &[String]) -> Result<Option<NameId>, ElabError> {
-        match self.resolve_namespace(comps)?.as_slice() {
+        let nss = self.resolve_namespace(comps)?;
+        match nss.as_slice() {
             [ns] => Ok(*ns),
-            _ => Err(ambiguous(format!(
-                "ambiguous namespace `{}`",
-                comps.join(".")
-            ))),
+            _ => Err(ElabError::AmbiguousNamespace {
+                id: comps.join("."),
+                cands: nss.iter().map(|&n| self.render(n)).collect(),
+            }),
         }
     }
 
@@ -196,9 +191,12 @@ impl OpenState<'_> {
         match cands.as_slice() {
             [] => Err(ElabError::UnknownConstant(self.render(Some(decl)))),
             [c] => Ok(*c),
-            _ => Err(ambiguous(format!(
-                "ambiguous identifier `{}` in `open`",
-                self.render(Some(decl))
+            _ => Err(ElabError::UnsupportedSyntax(format!(
+                "ambiguous identifier `{}` in `open` (`ensureNoOverload`'s \"Ambiguous \
+                 identifier\" renders a `List Expr` of `mkConst`s, \
+                 `ResolveName.lean:376`) — {}",
+                self.render(Some(decl)),
+                OPEN_RESOLVE_ID_SEAM
             ))),
         }
     }
@@ -206,7 +204,7 @@ impl OpenState<'_> {
     /// oracle: `resolveNameUsingNamespacesCore` (`Open.lean:53-72`): the
     /// per-namespace successes must be exactly one; when every namespace
     /// fails, one namespace's error is rethrown and several are `failed
-    /// to open` (with nested errors, a seam).
+    /// to open` (with the nested errors).
     fn resolve_name_using_namespaces(
         &mut self,
         nss: &[Option<NameId>],
@@ -217,11 +215,11 @@ impl OpenState<'_> {
         for &ns in nss {
             match self.resolve_id(ns, id) {
                 Ok(n) => found.push(n),
-                // `try … catch ex`: an oracle error, or a seam standing
-                // for one (`resolve_id`'s ambiguity).
-                Err(e) if e.is_oracle_error() || matches!(e, ElabError::UnsupportedSyntax(_)) => {
-                    errs.push(e)
-                }
+                // `try … catch ex`: an oracle error, or the
+                // `UnsupportedSyntax` of `resolve_id`'s own delab seam (and no other), which
+                // stands for an oracle `throwError` the catch would take.
+                // `FailedToOpen`'s first line ignores its nested errors.
+                Err(e) if e.is_oracle_error() || is_open_resolve_id_seam(&e) => errs.push(e),
                 Err(e) => return Err(e),
             }
         }
@@ -229,15 +227,14 @@ impl OpenState<'_> {
             if errs.len() == 1 {
                 return Err(errs.remove(0));
             }
-            return Err(ambiguous(format!(
-                "failed to open `{}` (nested errors)",
-                id.join(".")
-            )));
+            return Err(ElabError::FailedToOpen(errs));
         }
         match found.as_slice() {
             [n] => Ok(*n),
-            _ => Err(ambiguous(format!(
-                "ambiguous identifier `{}`",
+            _ => Err(ElabError::UnsupportedSyntax(format!(
+                "ambiguous identifier `{}` in `open` (`resolveNameUsingNamespacesCore`'s \
+                 \"ambiguous identifier\" renders a `List Expr` of `mkConst`s, \
+                 `Open.lean:72`) — delab name rendering",
                 id.join(".")
             ))),
         }
@@ -538,5 +535,32 @@ impl CommandElab<'_> {
         // named scope open.
         self.end_scopes(None)?;
         Ok(names)
+    }
+}
+
+/// Label ending `resolve_id`'s `ensureNoOverload` seam; producer and the
+/// catch in `resolve_name_using_namespaces` share it.
+const OPEN_RESOLVE_ID_SEAM: &str = "delab name rendering";
+
+/// True only for `resolve_id`'s own delab seam, the one `UnsupportedSyntax`
+/// standing for an oracle `throwError` that `Open.lean:62`'s catch takes.
+fn is_open_resolve_id_seam(e: &ElabError) -> bool {
+    matches!(e, ElabError::UnsupportedSyntax(m) if m.contains("ensureNoOverload") && m.ends_with(OPEN_RESOLVE_ID_SEAM))
+}
+
+#[cfg(test)]
+mod open_seam_tests {
+    use super::*;
+
+    #[test]
+    fn catch_predicate_admits_only_the_delab_seam() {
+        let own = ElabError::UnsupportedSyntax(format!(
+            "ambiguous identifier `x` in `open` (`ensureNoOverload`'s) — {OPEN_RESOLVE_ID_SEAM}"
+        ));
+        assert!(is_open_resolve_id_seam(&own));
+        let other = ElabError::UnsupportedSyntax("some unrelated seam".into());
+        assert!(!is_open_resolve_id_seam(&other));
+        let near = ElabError::UnsupportedSyntax(format!("other — {OPEN_RESOLVE_ID_SEAM}"));
+        assert!(!is_open_resolve_id_seam(&near));
     }
 }
