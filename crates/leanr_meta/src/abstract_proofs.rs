@@ -55,7 +55,8 @@ use crate::{MetaCtx, MetaError};
 /// without the persistent `base` mints a scratch id for a term structurally
 /// equal to a persistent one. So keys are [`aux_lemma_key`]-canonical types:
 /// binder names/info erased, and every `Const`/`Sort`/literal leaf
-/// re-interned through `base`, whatever the producer did.
+/// re-interned through `base`, whatever the producer did. `BVar`/`FVar`/
+/// `MVar` leaves are left as they are (they carry no `base`-dependent id).
 pub type AuxLemmaCache = HashMap<ExprId, (NameId, Vec<NameId>)>;
 
 /// The cache key of an aux-lemma type `e`: `e` with every binder name
