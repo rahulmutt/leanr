@@ -33,8 +33,9 @@
 
 use std::collections::HashMap;
 
+use leanr_kernel::bank::levels::LevelRow;
 use leanr_kernel::bank::terms::Node;
-use leanr_kernel::bank::{ExprId, NameId, Store};
+use leanr_kernel::bank::{ExprId, LevelId, NameId, Store};
 use leanr_kernel::{
     abstract_fvars, instantiate_rev, BinderInfo, ConstantInfo, ConstantVal, Declaration,
     DefinitionSafety, KernelError, Nat, TheoremVal,
@@ -49,15 +50,20 @@ use crate::{MetaCtx, MetaError};
 /// `module` header `isExporting` is false, and `abstractNestedProofs`
 /// passes `defeq := false`, so both are constant and the key is the type
 /// alone, up to `BEq Expr` = `Expr.eqv`, which ignores binder names and
-/// binder info. Hash-consing makes `ExprId` equality structural but NOT
-/// alpha-equivalent, so keys are [`aux_lemma_key`]-canonical types.
+/// binder info. `ExprId` equality is neither: a row's binder names are part
+/// of it, and a producer that interned a leaf (a level list, a literal)
+/// without the persistent `base` mints a scratch id for a term structurally
+/// equal to a persistent one. So keys are [`aux_lemma_key`]-canonical types:
+/// binder names/info erased, and every `Const`/`Sort`/literal leaf
+/// re-interned through `base`, whatever the producer did.
 pub type AuxLemmaCache = HashMap<ExprId, (NameId, Vec<NameId>)>;
 
 /// The cache key of an aux-lemma type `e`: `e` with every binder name
 /// erased and every binder info reset to default, so two types that are
 /// equal under `Expr.eqv` (`Expr.lean`, "alpha equivalence", binder
-/// annotations ignored) intern to the same `ExprId`. Interned in `st`
-/// (through `base`, which dedups against the persistent store).
+/// annotations ignored) intern to the same `ExprId`, and `Const` level
+/// lists, `Sort` levels and literals are rebuilt through `base`, so the key
+/// does not depend on which region a producer interned a leaf in.
 pub fn aux_lemma_key(
     st: &mut Store,
     base: Option<&Store>,
@@ -129,12 +135,57 @@ pub fn aux_lemma_key(
                 let s = go(st, base, structure, memo, depth + 1)?;
                 st.expr_proj(base, type_name, &n, s)?
             }
+            Node::Sort { level } => {
+                let l = canon_level(st, base, level)?;
+                st.expr_sort(base, l)?
+            }
+            Node::Const { name, levels } => {
+                let ls: Vec<LevelId> = st.level_list_at(base, levels).to_vec();
+                let mut out = Vec::with_capacity(ls.len());
+                for l in ls {
+                    out.push(canon_level(st, base, l)?);
+                }
+                let levels = st.intern_level_list(base, &out)?;
+                st.expr_const(base, name, levels)?
+            }
+            Node::LitNat { v } => {
+                let n = st.nat_at(base, v).clone();
+                st.expr_lit_nat(base, &n)?
+            }
+            Node::LitStr { v } => {
+                let s = st.str_at(base, v).to_string();
+                st.expr_lit_str(base, &s)?
+            }
             _ => e,
         };
         memo.insert(e, r);
         Ok(r)
     }
     go(st, base, e, &mut HashMap::new(), 0)
+}
+
+/// Rebuild `l` bottom-up through `base`, so a level interned by a producer
+/// that skipped the base gets the persistent id of the same level.
+fn canon_level(st: &mut Store, base: Option<&Store>, l: LevelId) -> Result<LevelId, KernelError> {
+    match *st.level_row(base, l) {
+        LevelRow::Zero => st.level_zero(base),
+        LevelRow::Succ(a) => {
+            let a = canon_level(st, base, a)?;
+            st.level_succ(base, a)
+        }
+        LevelRow::Max(a, b) => {
+            let a = canon_level(st, base, a)?;
+            let b = canon_level(st, base, b)?;
+            st.level_max(base, a, b)
+        }
+        LevelRow::IMax(a, b) => {
+            let a = canon_level(st, base, a)?;
+            let b = canon_level(st, base, b)?;
+            st.level_imax(base, a, b)
+        }
+        LevelRow::Param(n) => st.level_param(base, n),
+        LevelRow::MVar(n) => st.level_mvar(base, n),
+    }
 }
 
 /// Aux theorems minted while abstracting one declaration's value, in

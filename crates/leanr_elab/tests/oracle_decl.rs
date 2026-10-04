@@ -272,3 +272,44 @@ fn aux_lemma_is_reused_across_declarations() {
         assert_eq!(ce.env().len(), before + 1);
     });
 }
+
+/// `na` then `nb` (same shape, different names): the oracle reuses
+/// `na._proof_1`, so `nb` admits only itself.
+fn assert_second_reuses(first_src: &str, second_src: &str, nb: &str) {
+    support::with_command_elab(first_src, |ce, cmd, kinds| {
+        let first = ce.elab_decl(cmd, kinds).expect("first admits");
+        assert_eq!(first.len(), 2, "first: _proof_1 then the def");
+        let (parsed, cmd2) = support::parse_command(second_src);
+        let second = ce
+            .elab_decl(&cmd2, &parsed.tree.kinds)
+            .expect("second admits");
+        let st = ce.env().store();
+        let names: Vec<String> = second
+            .iter()
+            .map(|&n| support::name_to_string(st, None, Some(n)))
+            .collect();
+        assert_eq!(names, vec![nb.to_string()]);
+    });
+}
+
+#[test]
+fn aux_lemma_is_reused_with_a_char_literal_in_the_type() {
+    // Oracle probe (`prelude import Elab0`, `#print cb`): `cb` uses
+    // `ca._proof_1`. The type holds `Char.ofNat`/`OfNat` literal constants,
+    // whose level lists other producers interned without the base.
+    assert_second_reuses(
+        "def ca (n : Nat) : PProd Nat (Eq 'a' 'a') := PProd.mk n rfl",
+        "def cb (n : Nat) : PProd Nat (Eq 'a' 'a') := PProd.mk n rfl",
+        "cb",
+    );
+}
+
+#[test]
+fn aux_lemma_is_reused_with_a_numeral_in_the_type() {
+    // Oracle probe: `lb` uses `la._proof_1` (`OfNat.ofNat` numerals).
+    assert_second_reuses(
+        "def la (n : Nat) : PProd Nat (Eq (2 : Nat) 2) := PProd.mk n rfl",
+        "def lb (n : Nat) : PProd Nat (Eq (2 : Nat) 2) := PProd.mk n rfl",
+        "lb",
+    );
+}

@@ -27,7 +27,7 @@ pub fn mk_fun_unit(elab: &mut TermElabM, a: ExprId) -> Result<ExprId, ElabError>
     let unit = crate::app::head::intern_dotted(elab, "Unit")?;
     let store = elab.mctx.store_mut();
     let no_levels = store
-        .intern_level_list(None, &[])
+        .intern_level_list(Some(base), &[])
         .map_err(MetaError::from)?;
     let unit = store
         .expr_const(Some(base), Some(unit), no_levels)

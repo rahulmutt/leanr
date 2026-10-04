@@ -201,12 +201,12 @@ impl<'e> TermElabM<'e> {
             );
         }
         // `intern_level_list`'s `base` is dedup-only and never resolves a
-        // child id, so `None` is safe for a mixed-region list — the same
-        // reasoning `app/head.rs`'s `mk_const` records at length.
+        // child id, so `Some(base)` is safe for a mixed-region list, and it
+        // keeps the `Const` id equal to the persistent one (see `mk_const`).
         let levels = self
             .mctx
             .store_mut()
-            .intern_level_list(None, &levels)
+            .intern_level_list(Some(base), &levels)
             .map_err(leanr_meta::MetaError::from)?;
         let raw = self
             .mctx
