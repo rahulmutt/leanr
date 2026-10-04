@@ -12,6 +12,14 @@ pub enum ElabError {
     /// M4b slices; until then their kinds arrive here, never silently.
     UnsupportedSyntax(String),
     UnknownIdent(String),
+    /// oracle: `elabAppAux`'s `throwErrorAt f "Ambiguous term{indentD f}…"`
+    /// (`App.lean:2217`): two or more overloaded candidates survived
+    /// `getSuccesses`.
+    AmbiguousTerm,
+    /// oracle: `mergeFailures` (`App.lean:2190-2200`):
+    /// `throwErrorWithNestedErrors "overloaded" exs`. Every candidate
+    /// failed. The nested errors are kept in candidate order, for tests.
+    Overloaded(Vec<ElabError>),
     /// oracle: `throwUnknownConstantAt` — the `binop%` family's head did not
     /// resolve (`Extra.lean:216`, `:223`, `:554`).
     UnknownConstant(String),
@@ -497,6 +505,8 @@ impl ElabError {
             // `UnknownIdent` for an unknown universe name, which the oracle
             // words differently; no corpus record reaches that.
             Self::UnknownIdent(s) => Some(format!("Unknown identifier `{s}`")),
+            Self::AmbiguousTerm => Some("Ambiguous term".into()),
+            Self::Overloaded(_) => Some("overloaded, errors ".into()),
             Self::TypeMismatch { app: None, .. } => Some("Type mismatch".into()),
             Self::TypeMismatch { app: Some(a), .. } => Some(
                 if a.arg_already_in_f {
@@ -615,6 +625,23 @@ mod tests {
             Some("failed to elaborate eliminator, invalid motive")
         );
         assert_eq!(ElabError::Postpone.oracle_first_line(), None);
+    }
+
+    #[test]
+    fn overload_first_lines_are_the_oracles() {
+        // `App.lean:2217`: the term starts the next line (`indentD`).
+        assert_eq!(
+            ElabError::AmbiguousTerm.oracle_first_line().as_deref(),
+            Some("Ambiguous term")
+        );
+        // `Util.lean:262-263` + `Message.lean:859-860`: the list is an
+        // `indentD`, so line 1 ends with the space before it.
+        assert_eq!(
+            ElabError::Overloaded(vec![]).oracle_first_line().as_deref(),
+            Some("overloaded, errors ")
+        );
+        assert!(ElabError::AmbiguousTerm.is_oracle_error());
+        assert!(ElabError::Overloaded(vec![]).is_oracle_error());
     }
 
     #[test]
