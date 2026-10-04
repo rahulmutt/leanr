@@ -178,18 +178,50 @@ fn an_unclosed_namespace_at_end_of_input_is_fine() {
     );
 }
 
-/// Review Focus 2 (end to end).
+/// M4c-2b-ii: two or more candidates are elaborated, not seamed. All three
+/// are oracle-probed `Ambiguous term` (rows `overload/rootAndOpen`,
+/// `overload/exportAlias`; `A.k`/`B.k`).
 #[test]
-fn ambiguous_identifiers_seam_end_to_end() {
+fn ambiguous_identifiers_are_ambiguous_terms() {
     for src in [
         "def shown : Nat := Nat.zero\nopen Scope0\ndef f : Nat := shown",
         "def Scope0.ex : Nat := Nat.zero\nopen Scope0\ndef f : Nat := ex",
         "namespace A\ndef k : Nat := Nat.zero\nend A\nnamespace B\ndef k : Nat := Nat.zero\nend B\nopen A B\ndef f : Nat := k",
     ] {
         let (_, stop) = run(src);
-        let m = stop.expect("stops").1;
-        assert!(m.starts_with("SEAM ") && m.ends_with(" — M4c-2b-ii"), "{src:?}: {m}");
+        assert_eq!(stop.expect("stops").1, "Ambiguous term", "{src:?}");
     }
+}
+
+/// Spec § Rule 1 (plan Review Focus 4). `B.f .t` reaches the recursion
+/// seam (`.t` against `Nat` is the declaration's own aux local, M4c-2b-i);
+/// `A.f .t` succeeds with `Bool.t`. The oracle reports `Ambiguous term`
+/// (plan-time probe), so selecting `A.f` would be a silent wrong Ok.
+#[test]
+fn a_seam_in_one_candidate_stops_the_overload() {
+    let src = "def Bool.t : Bool := Bool.true\nnamespace A\ndef f (b : Bool) : Nat := Nat.zero\nend A\nnamespace B\ndef f (n : Nat) : Nat := n\nend B\nopen A B\ndef Nat.t : Nat := f .t";
+    let (_, stop) = run(src);
+    let (at, m) = stop.expect("stops");
+    assert_eq!(at, 8, "{m}");
+    assert!(
+        m.starts_with("SEAM ") && m.contains("recursive reference to"),
+        "{m}"
+    );
+}
+
+/// `getSuccesses` stage 3 (`App.lean:2174-2185`). `A.h`'s `Wrap ?a` is
+/// stuck, not failed (`Wrap` has instances), so both candidates survive
+/// stages 1 and 2; only stage 3's `postpone := .no` drops `A.h`. Row
+/// `overload/stage3` cannot pin this: `NoInst ?a` fails outright inside
+/// the candidate (`trySynthInstance` is `.none`), in the oracle too.
+/// Oracle-probed (M4c-2b-ii Task 2, dump_decls `files` mode): `t := B.h`;
+/// `A.h` alone is `typeclass instance problem is stuck`.
+#[test]
+fn stage_three_drops_a_stuck_instance_candidate() {
+    let src = "namespace A\ndef h {a : Type} [Wrap a] : Nat := Nat.zero\nend A\nnamespace B\ndef h : Nat := Nat.zero\nend B\nopen A B\ndef t : Nat := h";
+    let (done, stop) = run(src);
+    assert_eq!(stop, None);
+    assert_eq!(done.last().map(Vec::as_slice), Some(&["t".to_string()][..]));
 }
 
 /// Review Focus 4.

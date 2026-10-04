@@ -162,7 +162,7 @@ pub(crate) fn elab_anon_ctor(
     };
     // `:97`: `elabTerm newStx expectedType?` — the ORIGINAL expected
     // type, not its `whnf`.
-    let f = mk_const(elab, ctor, &[], &ctor_name)?;
+    let f = mk_const(elab, ctor, &[])?;
     crate::app::elab_app_args(
         elab,
         f,

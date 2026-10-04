@@ -47,11 +47,10 @@ pub enum ElabError {
     /// (`Arg.lean:55-59`).
     DuplicateNamedArg(String),
     /// oracle: `mkConst`'s "too many explicit universe levels for
-    /// '{constName}'" (`Lean/Elab/Term/TermElabM.lean:2128-2136`).
-    /// Carries the head identifier's raw source text. Reachable only
-    /// once `.{u, v}` explicit-universe syntax has a producer (M4b-3 P1
-    /// task 8); the check itself lives in `app::head::elab_app_fn_id`
-    /// from task 4 on, so the arm can never be silently skipped.
+    /// `{constName}`" (`Lean/Elab/Term/TermElabM.lean:2132`).
+    /// Carries the RESOLVED constant's name, as the oracle renders
+    /// `constName` (row `overload/explicitUniv`). The check lives in
+    /// `app::head::mk_const`.
     TooManyUniverseLevels(String),
     /// A syntax node whose shape contradicts the grammar (missing child,
     /// wrong node/token variant, a non-trailing `..`). Distinct from
@@ -506,6 +505,9 @@ impl ElabError {
             // words differently; no corpus record reaches that.
             Self::UnknownIdent(s) => Some(format!("Unknown identifier `{s}`")),
             Self::AmbiguousTerm => Some("Ambiguous term".into()),
+            Self::TooManyUniverseLevels(n) => {
+                Some(format!("too many explicit universe levels for `{n}`"))
+            }
             Self::Overloaded(_) => Some("overloaded, errors ".into()),
             Self::TypeMismatch { app: None, .. } => Some("Type mismatch".into()),
             Self::TypeMismatch { app: Some(a), .. } => Some(
@@ -642,6 +644,12 @@ mod tests {
         );
         assert!(ElabError::AmbiguousTerm.is_oracle_error());
         assert!(ElabError::Overloaded(vec![]).is_oracle_error());
+        assert_eq!(
+            ElabError::TooManyUniverseLevels("B.u".into())
+                .oracle_first_line()
+                .as_deref(),
+            Some("too many explicit universe levels for `B.u`") // overload/explicitUniv
+        );
     }
 
     #[test]

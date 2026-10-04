@@ -412,8 +412,6 @@ impl<'e> TermElabM<'e> {
 /// together with the state it left behind. Produced by
 /// [`TermElabM::observing`]; consumed by [`TermElabM::apply_result`].
 /// Only oracle errors are ever captured (see `observing`).
-// Unused until the overload elaborator lands (a later M4c-2b-ii task).
-#[allow(dead_code)]
 pub(crate) enum TermElabResult {
     Ok(ExprId, SavedTermState),
     Err(ElabError, SavedTermState),
@@ -434,8 +432,6 @@ impl<'e> TermElabM<'e> {
     /// The id generators are not part of [`SavedTermState`] and are never
     /// rewound, as the oracle's `Core.SavedState.restore` (`CoreM.lean:407-410`)
     /// rewinds neither `ngen` nor the macro scope.
-    // Unused until the overload elaborator lands (a later M4c-2b-ii task).
-    #[allow(dead_code)]
     pub(crate) fn observing(
         &mut self,
         f: impl FnOnce(&mut Self) -> Result<ExprId, ElabError>,
@@ -462,8 +458,6 @@ impl<'e> TermElabM<'e> {
 
     /// oracle: `applyResult` (`TermElabM.lean:592-596`): restore the
     /// captured state, then return the value or rethrow the error.
-    // Unused until the overload elaborator lands (a later M4c-2b-ii task).
-    #[allow(dead_code)]
     pub(crate) fn apply_result(&mut self, r: TermElabResult) -> Result<ExprId, ElabError> {
         match r {
             TermElabResult::Ok(e, s) => {

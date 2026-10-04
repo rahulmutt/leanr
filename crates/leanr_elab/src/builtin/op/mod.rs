@@ -140,7 +140,7 @@ pub(crate) fn resolve_head(elab: &mut TermElabM, head: &OpHead) -> Result<ExprId
             if elab.view.get(name).is_none() {
                 return Err(ElabError::UnknownConstant(f.to_string()));
             }
-            crate::app::head::mk_const(elab, name, &[], f)
+            crate::app::head::mk_const(elab, name, &[])
         }
         OpHead::Ident(elem) => {
             let raw = match elem {
@@ -160,8 +160,8 @@ pub(crate) fn resolve_head(elab: &mut TermElabM, head: &OpHead) -> Result<ExprId
 /// the globals even when its projections are then filtered away). `catch
 /// _ => []` only ever catches the not-found case here: the candidate list
 /// is simply empty. Two or more is the oracle's "ambiguous term" throw
-/// (`:2223`, which pretty-prints the constants); leanr seams it with
-/// `resolve::expect_one`'s M4c-2b-ii text.
+/// (`:2223`, which pretty-prints the constants); leanr seams it
+/// (`— delab name rendering`).
 ///
 /// The identifier is decoded (`app::head::ident_prefixes`), as in
 /// `app::head::elab_app_fn_id`, so a local binder's name matches the same way.
@@ -178,8 +178,19 @@ fn resolve_id(elab: &mut TermElabM, raw: &str) -> Result<Option<ExprId>, ElabErr
     if fs.is_empty() {
         return Ok(None);
     }
-    let (cname, _) = crate::resolve::expect_one(fs, raw)?;
-    Ok(Some(crate::app::head::mk_const(elab, cname, &[], raw)?))
+    let cname = match fs.as_slice() {
+        [(c, _)] => *c,
+        // oracle: `resolveId?`'s throw (`TermElabM.lean:2223`) renders the
+        // candidates as a `List Expr` through the delaborator.
+        _ => {
+            return Err(ElabError::UnsupportedSyntax(format!(
+                "ambiguous term `{raw}` ({} candidates; `resolveId?`'s message renders a \
+                 `List Expr`) — delab name rendering",
+                fs.len()
+            )))
+        }
+    };
+    Ok(Some(crate::app::head::mk_const(elab, cname, &[])?))
 }
 
 /// The declared constant `name` at fresh level mvars (`rel.rs`'s `Bool`;
@@ -190,5 +201,5 @@ pub fn mk_const_named(elab: &mut TermElabM, name: &str) -> Result<ExprId, ElabEr
     if elab.view.get(n).is_none() {
         return Err(ElabError::UnknownConstant(name.to_string()));
     }
-    crate::app::head::mk_const(elab, n, &[], name)
+    crate::app::head::mk_const(elab, n, &[])
 }

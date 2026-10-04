@@ -50,5 +50,4 @@ pub use state::{
     LevelMVarErrorInfo, MVarErrorInfo, MVarErrorKind, SavedContext, SyntheticMVarDecl,
     SyntheticMVarKind,
 };
-#[allow(unused_imports)]
 pub(crate) use state::{SavedTermState, TermElabResult};

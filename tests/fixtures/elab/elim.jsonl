@@ -846,6 +846,7 @@
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeHTCTOfCoeHTC","rec":false,"recOn":false,"tag":false}
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeHTCTOfCoeTailOfCoeHTC","rec":false,"recOn":false,"tag":false}
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeIntBig","rec":false,"recOn":false,"tag":false}
+{"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeListNatInt","rec":false,"recOn":false,"tag":false}
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeNatInt","rec":false,"recOn":false,"tag":false}
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeNatWrapper","rec":false,"recOn":false,"tag":false}
 {"aux":false,"brecOn":false,"casesOn":false,"info":{"err":"unexpected eliminator resulting type"},"n":"instCoeOTC","rec":false,"recOn":false,"tag":false}

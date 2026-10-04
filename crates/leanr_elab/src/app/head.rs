@@ -10,11 +10,11 @@
 //! by `ElabAppArgs.main` like any other application's. Keeping a
 //! separate leaf path would diverge on every polymorphic constant.
 //!
-//! `elab_app_fn` now returns FINISHED candidates, as the oracle's
+//! `elab_app_fn` returns FINISHED candidates, as the oracle's
 //! `elabAppFn` does: it owns the call into `elabAppArgs` (via
-//! `lval::elab_app_lvals`) and threads the pending LVal list. A Vec
-//! because the oracle returns a candidate ARRAY (overloaded names).
-//! Exactly-one is the only P1 shape; see `overload.rs`.
+//! `lval::elab_app_lvals`) and threads the pending LVal list. An
+//! overloaded identifier yields several, each under `observing`
+//! ([`AppFn::Candidates`]); `overload.rs` selects among them.
 
 use leanr_kernel::bank::{ExprId, LevelId, NameId};
 use leanr_syntax::kind::KindInterner;
@@ -25,6 +25,28 @@ use crate::dispatch::{non_trivia_children, SynElem};
 use crate::elab::TermElabM;
 use crate::error::ElabError;
 use crate::resolve::resolve_local_name;
+use crate::synthetic::TermElabResult;
+
+/// What `elabAppFn` (`App.lean:2060-2138`) produced.
+///
+/// The oracle always returns a `TermElabResult` array and `elabAppAux`
+/// `applyResult`s a lone candidate (`:2204-2206`). leanr returns one
+/// resolution as `Done` and never brackets it: with a single candidate,
+/// observing and then applying is the identity. It also skips a state
+/// snapshot on every application.
+pub(crate) enum AppFn {
+    Done(ExprId),
+    /// Two or more resolutions, each under `observing`.
+    /// `app::overload::select` picks.
+    Candidates(Vec<TermElabResult>),
+}
+
+/// One entry of `resolveName'`'s output (`TermElabM.lean:2201-2208`): the
+/// head, plus the `LVal`s its split-off field components become.
+pub(crate) struct Resolution {
+    pub f: ExprId,
+    pub fields: Vec<LVal>,
+}
 
 /// Oracle `elabAppFn` (`App.lean:2060-2138`): returns FINISHED
 /// candidates (the oracle's `TermElabResult` array), because it threads
@@ -35,14 +57,14 @@ use crate::resolve::resolve_local_name;
 /// `elabAsElim?` (`App.lean:1397-1431`) runs inside `elabAppArgs` on the
 /// FINAL head, after any LVals are resolved, so its port is
 /// `app/elim.rs`'s `elab_as_elim_info`, called from `elab_app_args`.
-pub fn elab_app_fn(
+pub(crate) fn elab_app_fn(
     elab: &mut TermElabM,
     elem: &SynElem,
     kinds: &KindInterner,
     explicit_levels: &[LevelId],
     lvals: Vec<LVal>,
     call: AppCall,
-) -> Result<Vec<ExprId>, ElabError> {
+) -> Result<AppFn, ElabError> {
     let kind = kinds.name(elem.kind());
     // The oracle's parser admits `.{us}` only after an identifier, a
     // `dotIdent` or a `proj` (`explicitUniv`'s `checkStackTop
@@ -69,15 +91,9 @@ pub fn elab_app_fn(
         )));
     }
     match (kind, elem) {
-        ("<ident>", leanr_syntax::tree::NodeOrToken::Token(tok)) => Ok(vec![elab_app_fn_id(
-            elab,
-            elem,
-            tok.text(),
-            explicit_levels,
-            lvals,
-            call,
-            kinds,
-        )?]),
+        ("<ident>", leanr_syntax::tree::NodeOrToken::Token(tok)) => {
+            elab_app_fn_id(elab, elem, tok.text(), explicit_levels, lvals, call, kinds)
+        }
         // oracle: `` `($(e).$idx:fieldIdx) `` / `` `($(e).$field:ident) ``
         // and their `.{us}` forms (`App.lean:2084-2097`). The explicit levels
         // peeled off a `.{us}` wrapper belong to the FIELD (the last
@@ -135,9 +151,9 @@ pub fn elab_app_fn(
                 explicit_levels,
                 call.expected,
             )?;
-            Ok(vec![crate::app::lval::elab_app_lvals(
+            Ok(AppFn::Done(crate::app::lval::elab_app_lvals(
                 elab, f, lvals, call, kinds,
-            )?])
+            )?))
         }
         // oracle: `` `($id:ident.{$us,*}) `` (`App.lean:2103-2105`) and the
         // proj `.{us}` arms (`:2087-2090`, `:2094-2097`), reached by
@@ -177,14 +193,14 @@ fn elab_app_fn_generic(
     kinds: &KindInterner,
     lvals: Vec<LVal>,
     call: AppCall,
-) -> Result<Vec<ExprId>, ElabError> {
+) -> Result<AppFn, ElabError> {
     if lvals.is_empty() && call.named_args.is_empty() && call.args.is_empty() {
-        Ok(vec![elab.elab_term(elem, kinds, call.expected)?])
+        Ok(AppFn::Done(elab.elab_term(elem, kinds, call.expected)?))
     } else {
         let f = elab.elab_term(elem, kinds, None)?;
-        Ok(vec![crate::app::lval::elab_app_lvals(
+        Ok(AppFn::Done(crate::app::lval::elab_app_lvals(
             elab, f, lvals, call, kinds,
-        )?])
+        )?))
     }
 }
 
@@ -357,7 +373,7 @@ fn elab_app_fn_id(
     lvals: Vec<LVal>,
     call: AppCall,
     kinds: &KindInterner,
-) -> Result<ExprId, ElabError> {
+) -> Result<AppFn, ElabError> {
     // The decoded name (`ident_prefixes`), so a single-component prefix is
     // the same `NameId` a binder of that name has (`intern_binder_name`).
     let (comps, prefixes) = ident_prefixes(elab, raw)?;
@@ -372,58 +388,107 @@ fn elab_app_fn_id(
     // straight through to `resolve_global_name`. A local hit bypasses
     // fresh-level-mvar minting entirely: an fvar carries no separate
     // `levelParams` the way a global constant does.
-    let (f, n_fields, proj_levels) =
-        if let Some((fvar, n_fields)) = resolve_local_name(elab, &prefixes)? {
-            // `processLocal` (`:2172-2179`).
-            if n_fields == 0 && !explicit_levels.is_empty() {
-                return Err(ElabError::InvalidExplicitUniversesForLocal(fvar));
-            }
-            (fvar, n_fields, explicit_levels.to_vec())
-        } else {
-            // `raw` (the identifier's own source text) doubles as
-            // `expect_one`'s error-message `display`: a prefix (frequently
-            // a SCRATCH-region id, minted by `intern_prefixes` just above
-            // for any name not already interned in the persistent store)
-            // cannot safely be re-rendered through `view.store` alone.
-            let cands = elab.resolve_global(&prefixes)?;
-            let (cname, n_fields) = crate::resolve::expect_one(cands, raw)?;
-            // `mkConsts` (`:2145-2158`): with fields, the explicit levels
-            // belong to the last field and the constant gets fresh ones.
+    let fns = if let Some((fvar, n_fields)) = resolve_local_name(elab, &prefixes)? {
+        // `processLocal` (`:2172-2179`).
+        if n_fields == 0 && !explicit_levels.is_empty() {
+            return Err(ElabError::InvalidExplicitUniversesForLocal(fvar));
+        }
+        let fields = field_name_lvals(elem, &parts, n_fields, explicit_levels);
+        vec![Resolution { f: fvar, fields }]
+    } else {
+        let cands = elab.resolve_global(&prefixes)?;
+        if cands.is_empty() {
+            // `elabAppFnId`'s `throwUnknownIdWithSuggestions` (`App.lean:1957`).
+            return Err(ElabError::UnknownIdent(raw.to_string()));
+        }
+        // `mkConsts` (`:2145-2158`) builds EVERY candidate's constant before
+        // `elabAppFnResolutions` tries any. Its fresh level mvars live
+        // outside the `observing` brackets, and a `mkConst` error is thrown
+        // before any candidate runs (row `overload/explicitUniv`). With
+        // fields, the explicit levels belong to the last field and the
+        // constant gets fresh ones.
+        let mut fns = Vec::with_capacity(cands.len());
+        for (cname, n_fields) in cands {
             let (const_levels, proj_levels): (&[LevelId], &[LevelId]) = if n_fields == 0 {
                 (explicit_levels, &[])
             } else {
                 (&[], explicit_levels)
             };
-            let display = parts[..parts.len() - n_fields].join(".");
-            (
-                mk_const(elab, cname, const_levels, &display)?,
-                n_fields,
-                proj_levels.to_vec(),
-            )
-        };
-    // `elabAppFnResolutions` (`:1933-1938`).
+            let f = mk_const(elab, cname, const_levels)?;
+            let fields = field_name_lvals(elem, &parts, n_fields, proj_levels);
+            fns.push(Resolution { f, fields });
+        }
+        fns
+    };
+    elab_app_fn_resolutions(elab, fns, lvals, call, kinds)
+}
+
+/// `elabAppFnResolutions`' field `LVal`s (`App.lean:1934-1938`): the last
+/// `n_fields` components of the identifier. `levels` go to the last one,
+/// and the first carries the composite `suffix?`.
+fn field_name_lvals(
+    elem: &SynElem,
+    parts: &[&str],
+    n_fields: usize,
+    levels: &[LevelId],
+) -> Vec<LVal> {
     let fields = &parts[parts.len() - n_fields..];
     let suffix = (!fields.is_empty()).then(|| fields.join("."));
-    let mut all: Vec<LVal> = fields
+    fields
         .iter()
         .enumerate()
         .map(|(i, c)| LVal::FieldName {
             r#ref: elem.clone(),
             name: (*c).to_string(),
             levels: if i + 1 == n_fields {
-                proj_levels.clone()
+                levels.to_vec()
             } else {
                 Vec::new()
             },
             suffix: if i == 0 { suffix.clone() } else { None },
         })
-        .collect();
-    all.extend(lvals);
-    crate::app::lval::elab_app_lvals(elab, f, all, call, kinds)
+        .collect()
 }
 
-/// oracle: `mkConst` (`TermElabM.lean:2128-2136`). `display` is the
-/// identifier's source text, used only in the `TooManyUniverseLevels` error.
+/// oracle: `elabAppFnResolutions` (`App.lean:1926-1950`). With more than
+/// one resolution the application is `overloaded` (`:1930`): each
+/// resolution is elaborated under `observing`, and its result must have
+/// the expected type (`ensureHasType`, `:1943`), since the expected type
+/// is what tells the candidates apart (row `overload/expectedType`).
+///
+/// The oracle's incoming `overloaded` flag is only ever `true` under a
+/// `choice` node (`:2062-2065`), which is out of scope (`elab_app_fn`'s
+/// `choice` arm). So here `overloaded` is exactly `fns.len() > 1`.
+/// `errToSorry := false` (`:1932`) is leanr's only mode: it stops at
+/// the first error.
+pub(crate) fn elab_app_fn_resolutions(
+    elab: &mut TermElabM,
+    fns: Vec<Resolution>,
+    lvals: Vec<LVal>,
+    call: AppCall,
+    kinds: &KindInterner,
+) -> Result<AppFn, ElabError> {
+    if fns.len() == 1 {
+        let Resolution { f, mut fields } = fns.into_iter().next().expect("len == 1");
+        fields.extend(lvals);
+        return Ok(AppFn::Done(crate::app::lval::elab_app_lvals(
+            elab, f, fields, call, kinds,
+        )?));
+    }
+    let mut out = Vec::with_capacity(fns.len());
+    for Resolution { f, mut fields } in fns {
+        fields.extend(lvals.iter().cloned());
+        let call = call.clone();
+        out.push(elab.observing(|elab| {
+            let (stx, expected) = (call.stx.clone(), call.expected);
+            let e = crate::app::lval::elab_app_lvals(elab, f, fields, call, kinds)?;
+            elab.ensure_has_type(&stx, expected, e)
+        })?);
+    }
+    Ok(AppFn::Candidates(out))
+}
+
+/// oracle: `mkConst` (`TermElabM.lean:2128-2136`).
 ///
 /// An undeclared `cname` is `UnknownConstant` (the full name), as the
 /// oracle's `getConstInfo` throws. `resolve_global_name` can return one:
@@ -433,20 +498,20 @@ pub(crate) fn mk_const(
     elab: &mut TermElabM,
     cname: NameId,
     explicit_levels: &[LevelId],
-    display: &str,
 ) -> Result<ExprId, ElabError> {
+    let render = |elab: &TermElabM| {
+        crate::names::render(elab.mctx.store(), Some(elab.view.store), Some(cname))
+    };
     let Some(info) = elab.view.get(cname) else {
-        return Err(ElabError::UnknownConstant(crate::names::render(
-            elab.mctx.store(),
-            Some(elab.view.store),
-            Some(cname),
-        )));
+        return Err(ElabError::UnknownConstant(render(elab)));
     };
     let n_params = info.constant_val().level_params.len();
     // oracle: `mkConst` errors when the user wrote MORE explicit levels
-    // than the constant has parameters, rather than truncating.
+    // than the constant has parameters (``too many explicit universe levels
+    // for `{constName}` ``, `:2132`: the RESOLVED name, row
+    // `overload/explicitUniv`), rather than truncating.
     if explicit_levels.len() > n_params {
-        return Err(ElabError::TooManyUniverseLevels(display.to_string()));
+        return Err(ElabError::TooManyUniverseLevels(render(elab)));
     }
     let mut levels = Vec::with_capacity(n_params);
     levels.extend_from_slice(explicit_levels);
@@ -709,7 +774,9 @@ mod tests {
             stx: elem.clone(),
             result_is_out_param_support: true,
         };
-        match super::elab_app_fn(&mut elab, &elem, &parsed.tree.kinds, &[], Vec::new(), call) {
+        match super::elab_app_fn(&mut elab, &elem, &parsed.tree.kinds, &[], Vec::new(), call)
+            .map(|_| ())
+        {
             Err(crate::ElabError::UnknownIdent(s)) => assert_eq!(s, "Bar"),
             other => panic!("expected UnknownIdent(\"Bar\"), got {other:?}"),
         }
@@ -761,7 +828,9 @@ mod tests {
             stx: elem.clone(),
             result_is_out_param_support: true,
         };
-        match super::elab_app_fn(&mut elab, &elem, &parsed.tree.kinds, &[], Vec::new(), call) {
+        match super::elab_app_fn(&mut elab, &elem, &parsed.tree.kinds, &[], Vec::new(), call)
+            .map(|_| ())
+        {
             Err(crate::ElabError::UnknownConstant(s)) => assert_eq!(s, "B.ex"),
             other => panic!("expected UnknownConstant(\"B.ex\"), got {other:?}"),
         }

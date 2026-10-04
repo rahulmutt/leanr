@@ -4,8 +4,7 @@
 //!
 //! Not ported:
 //! - overloaded candidates (`:2032`, two or more `C ++ id` under the
-//!   `open` declarations): the M4c-2b-ii seam, in `resolve::expect_one`'s
-//!   wording;
+//!   `open` declarations): a named M4c-2b-ii seam;
 //! - the logged earlier failures (`:2056`), because leanr has no message
 //!   log (spec § Seams after P4);
 //! - `addCompletionInfo` and the `reverseFieldLookup` hint, which are
@@ -181,10 +180,7 @@ fn resolve_against(
             // (`:2032-2033`).
             match crate::resolve::resolve_global_name_at_root(elab, full)?.as_slice() {
                 [] => {}
-                [c] => {
-                    let display = render(elab, *c);
-                    return mk_const(elab, *c, explicit_levels, &display);
-                }
+                [c] => return mk_const(elab, *c, explicit_levels),
                 cs => {
                     return Err(ElabError::UnsupportedSyntax(format!(
                         "overloaded identifier `.{id}` ({} candidates) — M4c-2b-ii",

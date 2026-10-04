@@ -12,12 +12,12 @@
 //! with `hiding`, explicit `(x)` and `renaming` (`resolveOpenDecls`) — and
 //! imported aliases (`getAliases`); a protected declaration is skipped
 //! when the identifier is atomic.
-//! It returns every candidate; a caller that needs one goes through
-//! [`expect_one`]. `resolve_namespace` is `ResolveName.resolveNamespace`
+//! It returns every candidate: `app::head::elab_app_fn_id` elaborates
+//! each one when there are several (overloaded elaboration,
+//! `app::overload`). `resolve_namespace` is `ResolveName.resolveNamespace`
 //! (what `open`/`namespace` resolve against).
 //!
-//! **Not ported.** Overloaded elaboration: two or more candidates is
-//! [`expect_one`]'s named seam (M4c-2b-ii). `resolvePrivateName`
+//! **Not ported.** `resolvePrivateName`
 //! (unreachable: no module header, `private` is seamed). Reserved-name
 //! realization (`containsDeclOrReserved` is `EnvView::get`;
 //! `realizeGlobalName`, e.g. `f.eq_1`, is not realized). Macro scopes
@@ -353,22 +353,6 @@ fn resolve_open_decls(
     Ok(resolved)
 }
 
-/// One candidate, or the error the caller's oracle path raises: none is
-/// `Unknown identifier`; two or more is overloaded elaboration
-/// (`elabAppFnResolutions` → `elabAppAux` candidates), M4c-2b-ii.
-pub fn expect_one(
-    cands: Vec<(NameId, usize)>,
-    display: &str,
-) -> Result<(NameId, usize), ElabError> {
-    match cands.len() {
-        0 => Err(ElabError::UnknownIdent(display.to_string())),
-        1 => Ok(cands[0]),
-        n => Err(ElabError::UnsupportedSyntax(format!(
-            "overloaded identifier `{display}` ({n} candidates) — M4c-2b-ii"
-        ))),
-    }
-}
-
 /// oracle: `ResolveName.resolveNamespace` (`ResolveName.lean:252-255`):
 /// `resolveNamespaceUsingScope?` (`:220-230`; the innermost enclosing
 /// namespace `ns'` with `ns' ++ id` a namespace, else at the root `id`
@@ -423,7 +407,7 @@ pub fn resolve_namespace(
 
 #[cfg(test)]
 mod tests {
-    use super::{expect_one, resolve_global_name, resolve_namespace, OpenDecl, ResolveCtx};
+    use super::{resolve_global_name, resolve_namespace, OpenDecl, ResolveCtx};
     use crate::names::NameTables;
     use leanr_kernel::bank::{NameId, Store};
     use leanr_kernel::{AxiomVal, ConstantInfo, ConstantVal, Environment};
@@ -509,9 +493,8 @@ mod tests {
         assert_eq!(resolve(&env, &ResolveCtx::root(), &[foo]), vec![(foo, 0)]);
     }
 
-    /// An undeclared name has no candidates, and `expect_one` turns that
-    /// into `UnknownIdent` with the caller-supplied display text (the
-    /// scratch-region pipeline is covered by
+    /// An undeclared name has no candidates (`elab_app_fn_id` turns that
+    /// into `UnknownIdent`; the scratch-region pipeline is covered by
     /// `app::head::tests::unknown_ident_via_real_scratch_pipeline`).
     #[test]
     fn unknown_ident_when_not_declared() {
@@ -519,10 +502,6 @@ mod tests {
         let nope = name_id(&mut env, "Nope");
         let cands = resolve(&env, &ResolveCtx::root(), &[nope]);
         assert!(cands.is_empty());
-        match expect_one(cands, "Nope") {
-            Err(crate::ElabError::UnknownIdent(s)) => assert_eq!(s, "Nope"),
-            other => panic!("expected UnknownIdent, got {other:?}"),
-        }
     }
 
     /// `resolveGlobalName`'s `loop` (ResolveName.lean:197-215): the longest
@@ -690,7 +669,7 @@ mod tests {
 
     /// :204-212: root hit plus an open hit are BOTH returned (two candidates).
     #[test]
-    fn two_candidates_are_returned_and_expect_one_seams() {
+    fn two_candidates_are_returned() {
         let mut env = Environment::default();
         let shown = name_id(&mut env, "shown");
         let scope0 = name_id(&mut env, "Scope0");
@@ -704,14 +683,6 @@ mod tests {
         }];
         let cands = resolve(&env, &rc(None, &open, &t), &[shown]);
         assert_eq!(cands.len(), 2, "{cands:?}");
-        match expect_one(cands, "shown") {
-            Err(crate::ElabError::UnsupportedSyntax(m)) => assert!(
-                m.contains("overloaded identifier `shown` (2 candidates) — M4c-2b-ii"),
-                "{m}"
-            ),
-            other => panic!("expected the M4c-2b-ii seam, got {other:?}"),
-        }
-        assert_eq!(expect_one(vec![(shown, 1)], "shown").unwrap(), (shown, 1));
     }
 
     /// :252-255 + :220-239: scope first (innermost), then open decls; `_root_` stripped at the root.

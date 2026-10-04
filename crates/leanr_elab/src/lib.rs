@@ -116,9 +116,11 @@
 //!   `elab_explicit`). `useImplicitLambda`'s `.postpone` arm SHIPPED in
 //!   M4b-4a P2 (`elab.rs`'s `UseImplicitLambda::Postpone`).
 //! - **overload resolution** (more than one candidate from
-//!   `elabAppFn`) — M4c-2b-ii. `resolve_global_name` returns every
-//!   candidate (M4c-2b-i); two or more is `resolve::expect_one`'s named
-//!   seam.
+//!   `elabAppFn`) — M4c-2b-ii. An overloaded IDENTIFIER is elaborated:
+//!   `app::head::elab_app_fn_resolutions` runs each candidate under
+//!   `observing` and `app::overload::select` ports `getSuccesses` /
+//!   `Ambiguous term` / `mergeFailures`. Overloaded `.c` dot identifiers
+//!   are still a named seam (`app/dot_ident.rs`).
 //! - **`elabAsElim`** — SHIPPED in M4b-4c P2 (`app/elim.rs`): every
 //!   `shouldElabAsElim` head (`App.lean:1322-1328`) is diverted to
 //!   `ElimElab` by `app::elab_app_args`, exactly as `App.lean:1373-1383`
