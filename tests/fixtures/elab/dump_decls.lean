@@ -409,7 +409,11 @@ def fileQueries : List (String × String) := [
   ("overload/argExpected", "namespace A\ndef c : Nat := Nat.zero\nend A\nnamespace B\ndef c : Bool := Bool.true\nend B\nopen A B\ndef t := pick c Nat.zero"),
   ("overload/underFun", "namespace A\ndef f (n : Nat) : Nat := n\nend A\nnamespace B\ndef f (b : Bool) : Bool := b\nend B\nopen A B\ndef t : Nat → Nat := fun x => f x"),
   ("overload/inType", "namespace A\ndef c : Nat := Nat.zero\nend A\nnamespace B\ndef c : Bool := Bool.true\nend B\nopen A B\ndef t (h : Eq c Nat.zero) : Nat := Nat.zero"),
-  ("overload/twoOverloads", "namespace A\ndef f (n : Nat) : Nat := n\nend A\nnamespace B\ndef f (b : Bool) : Bool := b\nend B\nopen A B\nnamespace A\ndef c : Nat := Nat.zero\nend A\nnamespace B\ndef c : Bool := Bool.true\nend B\nopen A B\ndef t := f c")
+  ("overload/twoOverloads", "namespace A\ndef f (n : Nat) : Nat := n\nend A\nnamespace B\ndef f (b : Bool) : Bool := b\nend B\nopen A B\nnamespace A\ndef c : Nat := Nat.zero\nend A\nnamespace B\ndef c : Bool := Bool.true\nend B\nopen A B\ndef t := f c"),
+  ("overload/dotIdentPick", "namespace A\ndef Nat.two : Nat := Nat.zero\nend A\nnamespace B\ndef Nat.two (b : Bool) : Nat := Nat.zero\nend B\nopen A B\ndef t : Nat := .two"),
+  ("overload/dotIdentArgs", "namespace A\ndef Nat.two : Nat := Nat.zero\nend A\nnamespace B\ndef Nat.two (b : Bool) : Nat := Nat.zero\nend B\nopen A B\ndef t : Nat := .two Bool.true"),
+  ("overload/dotIdentAmbig", "namespace A\ndef Nat.two : Nat := Nat.zero\nend A\nnamespace B\ndef Nat.two : Nat := pick Nat.zero Nat.zero\nend B\nopen A B\ndef t : Nat := .two"),
+  ("overload/dotIdentAllFail", "namespace A\ndef Nat.two : Nat := Nat.zero\nend A\nnamespace B\ndef Nat.two (b : Bool) : Nat := Nat.zero\nend B\nopen A B\ndef t : Nat := .two Unit.unit")
 ]
 
 /-- The first error-severity message `s` logged, from `messages` and the

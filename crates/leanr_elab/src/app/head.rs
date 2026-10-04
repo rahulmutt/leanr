@@ -145,15 +145,20 @@ pub(crate) fn elab_app_fn(
         // fields. `.{us}` arrive as `explicit_levels` (`app::peel_head`).
         ("Lean.Parser.Term.dotIdent", _) => {
             let raw = dot_ident_text(elem)?;
-            let f = crate::app::dot_ident::resolve_dotted_ident_fn(
+            let fs = crate::app::dot_ident::resolve_dotted_ident_fn(
                 elab,
                 &raw,
                 explicit_levels,
                 call.expected,
             )?;
-            Ok(AppFn::Done(crate::app::lval::elab_app_lvals(
-                elab, f, lvals, call, kinds,
-            )?))
+            let fns = fs
+                .into_iter()
+                .map(|f| Resolution {
+                    f,
+                    fields: Vec::new(),
+                })
+                .collect();
+            elab_app_fn_resolutions(elab, fns, lvals, call, kinds)
         }
         // oracle: `` `($id:ident.{$us,*}) `` (`App.lean:2103-2105`) and the
         // proj `.{us}` arms (`:2087-2090`, `:2094-2097`), reached by

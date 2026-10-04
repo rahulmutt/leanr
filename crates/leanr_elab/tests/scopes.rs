@@ -261,6 +261,30 @@ fn overloaded_candidates_run_in_mk_consts_order() {
     });
 }
 
+/// `.x` candidates keep `resolveGlobalName` order: `resolveDottedIdentFn`
+/// uses `candidates.mapM` (`App.lean:2032-2033`), no cons-fold reversal
+/// (unlike `mkConsts`). With `open A B`, A runs first: A's `Nat.two` is a
+/// non-function (`Function expected`), B's takes the `Unit` argument.
+#[test]
+fn dot_ident_candidates_keep_resolve_order() {
+    let src = "namespace A\ndef Nat.two : Nat := Nat.zero\nend A\nnamespace B\ndef Nat.two (b : Bool) : Nat := Nat.zero\nend B\nopen A B\ndef t : Nat := .two Unit.unit";
+    support::with_file_elab(src, |ce, cmds, kinds| {
+        match ce.elab_commands(cmds, kinds).stopped {
+            Some((7, ElabError::Overloaded(errs))) => assert!(
+                matches!(
+                    errs.as_slice(),
+                    [
+                        ElabError::FunctionExpected { .. },
+                        ElabError::TypeMismatch { app: Some(_), .. }
+                    ]
+                ),
+                "A's error must come first: {errs:?}"
+            ),
+            other => panic!("expected Overloaded at command 7, got {other:?}"),
+        }
+    });
+}
+
 /// Review Focus 4.
 #[test]
 fn reserved_and_shadowing_names_seam() {
@@ -479,20 +503,18 @@ fn field_notation_and_dot_ident_see_open_decls() {
         "def Nat.two : Nat := Nat.zero\ndef Foo.Nat.two : Nat := Nat.zero\nopen Foo\ndef x : Nat := .two",
         &format!(r#"[{{"consts":[{NAT_TWO}]}},{{"consts":[{FOO_NAT_TWO}]}},{{"consts":[]}},{{"consts":[{}]}}]"#, x_is("Nat.two")),
     );
-    // Two opened candidates: the oracle throws "Field name `g` is
-    // ambiguous" / "Ambiguous term"; leanr seams (M4c-2b-ii).
-    for src in [
-        "def Foo.S1.g (_s : S1) : Nat := Nat.zero\ndef Bar.S1.g (_s : S1) : Nat := Nat.zero\nopen Foo Bar\ndef y (s : S1) : Nat := s.g",
-        "def Foo.Nat.two : Nat := Nat.zero\ndef Bar.Nat.two : Nat := Nat.zero\nopen Foo Bar\ndef x : Nat := .two",
-    ] {
-        let (_, stop) = run(src);
-        let (at, m) = stop.expect("stops");
-        assert_eq!(at, 3, "{src:?}");
-        assert!(
-            m.starts_with("SEAM ") && m.contains("2 candidates") && m.ends_with(" — M4c-2b-ii"),
-            "{src:?}: {m}"
-        );
-    }
+    // Two opened `.two` candidates: oracle `Ambiguous term` (probed).
+    let (_, stop) = run("def Foo.Nat.two : Nat := Nat.zero\ndef Bar.Nat.two : Nat := Nat.zero\nopen Foo Bar\ndef x : Nat := .two");
+    assert_eq!(stop.expect("stops"), (3, "Ambiguous term".to_string()));
+    // Task 4: the oracle throws "Field name `g` is ambiguous"; still a seam.
+    let src = "def Foo.S1.g (_s : S1) : Nat := Nat.zero\ndef Bar.S1.g (_s : S1) : Nat := Nat.zero\nopen Foo Bar\ndef y (s : S1) : Nat := s.g";
+    let (_, stop) = run(src);
+    let (at, m) = stop.expect("stops");
+    assert_eq!(at, 3, "{src:?}");
+    assert!(
+        m.starts_with("SEAM ") && m.contains("2 candidates") && m.ends_with(" — M4c-2b-ii"),
+        "{src:?}: {m}"
+    );
 }
 
 /// m3: `cmd₁ in cmd₂` pops its section when either command errors, so

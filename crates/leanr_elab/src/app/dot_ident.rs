@@ -2,9 +2,11 @@
 //! (`Lean/Elab/App.lean:1985-2058`, pinned v4.33.0-rc1). Design:
 //! docs/superpowers/specs/2026-09-29-m4b4-dot-notation-design.md § P4.
 //!
+//! Overloaded candidates (two or more `C ++ id` under the `open`
+//! declarations, `:2032`) are returned as a list and go through
+//! `head::elab_app_fn_resolutions`.
+//!
 //! Not ported:
-//! - overloaded candidates (`:2032`, two or more `C ++ id` under the
-//!   `open` declarations): a named M4c-2b-ii seam;
 //! - the logged earlier failures (`:2056`), because leanr has no message
 //!   log (spec § Seams after P4);
 //! - `addCompletionInfo` and the `reverseFieldLookup` hint, which are
@@ -26,14 +28,14 @@ fn dotted_err(id: &str, reason: InvalidDottedIdentReason) -> ElabError {
     }
 }
 
-/// oracle: `resolveDottedIdentFn` (`App.lean:1985-2058`). Returns the one
-/// resolution; two or more candidates are seamed (module doc).
+/// oracle: `resolveDottedIdentFn` (`App.lean:1985-2058`). Returns every
+/// resolution (non-empty), in `resolveGlobalName` order.
 pub(crate) fn resolve_dotted_ident_fn(
     elab: &mut TermElabM,
     raw: &str,
     explicit_levels: &[LevelId],
     expected: Option<ExprId>,
-) -> Result<ExprId, ElabError> {
+) -> Result<Vec<ExprId>, ElabError> {
     // `id.getId.eraseMacroScopes` (`App.lean:2080`), escape-aware: `.«a.b»`
     // is atomic. This name is only ever appended to a constant's
     // namespace, never matched against a binder, so the escape convention
@@ -132,7 +134,7 @@ fn go(
     explicit_levels: &[LevelId],
     result_type: ExprId,
     expected: ExprId,
-) -> Result<ExprId, ElabError> {
+) -> Result<Vec<ExprId>, ElabError> {
     let result_type = elab.mctx.instantiate_mvars(result_type)?;
     match resolve_against(elab, id, explicit_levels, result_type, expected) {
         Ok(e) => Ok(e),
@@ -155,7 +157,7 @@ fn resolve_against(
     explicit_levels: &[LevelId],
     result_type: ExprId,
     expected: ExprId,
-) -> Result<ExprId, ElabError> {
+) -> Result<Vec<ExprId>, ElabError> {
     let head = app_fn(elab, result_type);
     // `:2020`.
     elab.try_postpone_if_mvar(head)?;
@@ -177,16 +179,16 @@ fn resolve_against(
             let full = child_name(elab, decl, id)?;
             // `resolveGlobalName Name.anonymous (← getOpenDecls) fullName
             // |>.filter (·.2.isEmpty)` (`:2029-2031`), then `mkConst` each
-            // (`:2032-2033`).
-            match crate::resolve::resolve_global_name_at_root(elab, full)?.as_slice() {
-                [] => {}
-                [c] => return mk_const(elab, *c, explicit_levels),
-                cs => {
-                    return Err(ElabError::UnsupportedSyntax(format!(
-                        "overloaded identifier `.{id}` ({} candidates) — M4c-2b-ii",
-                        cs.len()
-                    )))
-                }
+            // (`:2032-2033`). `candidates.mapM` keeps `resolveGlobalName`
+            // order (no `mkConsts` cons-fold reversal, cf. `elab_app_fn_id`).
+            // Every candidate is a resolution for `elabAppFnResolutions`
+            // (`:2082`), overloaded when two or more.
+            let cands = crate::resolve::resolve_global_name_at_root(elab, full)?;
+            if !cands.is_empty() {
+                return cands
+                    .into_iter()
+                    .map(|c| mk_const(elab, c, explicit_levels))
+                    .collect();
             }
             // `resolveLocalName fullName` with no fields (`:2034-2037`):
             // a dotted `let` name, or the declaration's own aux local
@@ -196,7 +198,7 @@ fn resolve_against(
                 if !explicit_levels.is_empty() {
                     return Err(ElabError::InvalidExplicitUniversesForLocal(fvar));
                 }
-                return Ok(fvar);
+                return Ok(vec![fvar]);
             }
             // `:2038-2040`.
             Err(dotted_err(
