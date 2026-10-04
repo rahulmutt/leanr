@@ -214,14 +214,51 @@ fn a_seam_in_one_candidate_stops_the_overload() {
 /// stages 1 and 2; only stage 3's `postpone := .no` drops `A.h`. Row
 /// `overload/stage3` cannot pin this: `NoInst ?a` fails outright inside
 /// the candidate (`trySynthInstance` is `.none`), in the oracle too.
-/// Oracle-probed (M4c-2b-ii Task 2, dump_decls `files` mode): `t := B.h`;
+/// Oracle-probed (M4c-2b-ii Task 2, dump_decls `files` mode): `t := B.h`
+/// (the value is checked in the corpus encoding);
 /// `A.h` alone is `typeclass instance problem is stuck`.
 #[test]
 fn stage_three_drops_a_stuck_instance_candidate() {
     let src = "namespace A\ndef h {a : Type} [Wrap a] : Nat := Nat.zero\nend A\nnamespace B\ndef h : Nat := Nat.zero\nend B\nopen A B\ndef t : Nat := h";
-    let (done, stop) = run(src);
-    assert_eq!(stop, None);
-    assert_eq!(done.last().map(Vec::as_slice), Some(&["t".to_string()][..]));
+    let value = support::with_file_elab(src, |ce, cmds, kinds| {
+        let out = ce.elab_commands(cmds, kinds);
+        assert!(out.stopped.is_none(), "{:?}", out.stopped);
+        let t = match out.done.last().map(Vec::as_slice) {
+            Some(&[t]) => t,
+            other => panic!("expected `t` alone, got {other:?}"),
+        };
+        support::decl_const_json(ce.env(), t)["value"].clone()
+    });
+    assert_eq!(
+        value,
+        serde_json::json!({"k": "const", "n": "B.h", "us": []})
+    );
+}
+
+/// Candidate order. `mkConsts` (`TermElabM.lean:2146-2158`) cons-folds
+/// `resolveGlobalName`'s `[A.f, B.f]` into `[B.f, A.f]`, and
+/// `mergeFailures` nests the errors in that order. Oracle-probed
+/// (M4c-2b-ii Task 2 fix round 1, dump_decls `files` mode, full message):
+/// `overloaded, errors` then B's `Function expected at` then A's
+/// `Application type mismatch: The argument`.
+#[test]
+fn overloaded_candidates_run_in_mk_consts_order() {
+    let src = "namespace A\ndef f (n : Nat) : Nat := n\nend A\nnamespace B\ndef f : Bool := Bool.true\nend B\nopen A B\ndef t := f Unit.unit";
+    support::with_file_elab(src, |ce, cmds, kinds| {
+        match ce.elab_commands(cmds, kinds).stopped {
+            Some((7, ElabError::Overloaded(errs))) => assert!(
+                matches!(
+                    errs.as_slice(),
+                    [
+                        ElabError::FunctionExpected { .. },
+                        ElabError::TypeMismatch { app: Some(_), .. }
+                    ]
+                ),
+                "B's error must come first: {errs:?}"
+            ),
+            other => panic!("expected Overloaded at command 7, got {other:?}"),
+        }
+    });
 }
 
 /// Review Focus 4.

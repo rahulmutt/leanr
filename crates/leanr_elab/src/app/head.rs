@@ -418,6 +418,14 @@ fn elab_app_fn_id(
             let fields = field_name_lvals(elem, &parts, n_fields, proj_levels);
             fns.push(Resolution { f, fields });
         }
+        // `mkConsts` is `candidates.foldlM (init := []) … return (const, …)
+        // :: result` (`TermElabM.lean:2146-2158`): it calls `mkConst` in
+        // `resolveGlobalName` order (so a `mkConst` error fires in that
+        // order, above) but returns the list REVERSED, and
+        // `elabAppFnResolutions` folds over that. With `open A B` the
+        // candidates run B before A (test
+        // `overloaded_candidates_run_in_mk_consts_order`).
+        fns.reverse();
         fns
     };
     elab_app_fn_resolutions(elab, fns, lvals, call, kinds)
