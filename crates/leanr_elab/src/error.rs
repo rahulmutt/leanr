@@ -279,6 +279,13 @@ pub enum ElabError {
     /// caller's pending mvars back (its `finally`, no state restore) —
     /// the oracle's treatment of it too.
     Postpone,
+    /// oracle: the internal `autoBoundImplicit` exception
+    /// (`Elab/Exception.lean:20`, `:31-40`), carrying the atomic name's
+    /// one component. Thrown by `auto_bound::unknown_ident`, caught only
+    /// by `TermElabM::with_auto_bound_implicit`. Internal, like
+    /// `Postpone`: [`ElabError::is_oracle_error`] is `false` for it, so
+    /// every generic catch rethrows it (spec Amendment 1 item 4).
+    AutoBoundImplicitLocal(String),
     /// oracle: `ensureAtomicBinderName` (`Elab/Binders.lean:188-191`):
     /// "invalid binder name `n`, it must be atomic". Carries the rendered
     /// (decoded) binder name.
@@ -391,6 +398,9 @@ impl ElabError {
                 | ElabError::Meta(_)
                 | ElabError::Internal(_)
                 | ElabError::Postpone
+                // internal, like Postpone: every generic catch rethrows it
+                // (spec Amendment 1 item 4).
+                | ElabError::AutoBoundImplicitLocal(_)
                 | ElabError::MaxRecDepth
                 | ElabError::Kernel(_)
         )

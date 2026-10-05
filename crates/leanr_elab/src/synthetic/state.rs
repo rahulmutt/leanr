@@ -317,6 +317,9 @@ impl<'e> TermElabM<'e> {
     ///
     /// `level_names` is NOT snapshotted: it is scoped by
     /// `with_saved_context` alone and no path below `f` touches it.
+    /// The auto-bound retry loop (`auto_bound.rs`) is the exception: it
+    /// snapshots `level_names` itself, as the oracle's `Term.SavedState`
+    /// does.
     /// The three fresh-name counters are likewise not restored —
     /// rewinding them would let a rolled-back attempt's names be REUSED
     /// by the next attempt, which is exactly the collision the counters

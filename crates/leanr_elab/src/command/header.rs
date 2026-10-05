@@ -32,7 +32,7 @@ pub(super) struct Header {
     pub num_params: usize,
 }
 
-pub(super) fn intern_atomic(elab: &mut TermElabM, s: &str) -> Result<NameId, ElabError> {
+pub(crate) fn intern_atomic(elab: &mut TermElabM, s: &str) -> Result<NameId, ElabError> {
     let base = elab.view.store;
     let st = elab.mctx.store_mut();
     let sid = st.intern_str(Some(base), s).map_err(MetaError::from)?;

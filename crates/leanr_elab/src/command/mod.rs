@@ -26,7 +26,7 @@
 
 mod axiom;
 mod def;
-mod header;
+pub(crate) mod header;
 mod levels;
 mod scope;
 mod vars;

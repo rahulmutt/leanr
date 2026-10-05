@@ -404,8 +404,8 @@ fn elab_app_fn_id(
     } else {
         let cands = elab.resolve_global(&prefixes)?;
         if cands.is_empty() {
-            // `elabAppFnId`'s `throwUnknownIdWithSuggestions` (`App.lean:1957`).
-            return Err(ElabError::UnknownIdent(raw.to_string()));
+            // `elabAppFnId`'s `throwUnknownIdWithSuggestions` (`App.lean:1957-1975`).
+            return Err(crate::auto_bound::unknown_ident(elab, &comps, raw));
         }
         // `mkConsts` (`:2145-2158`) builds EVERY candidate's constant before
         // `elabAppFnResolutions` tries any. Its fresh level mvars live

@@ -241,6 +241,7 @@
 //!   id's components with `.`, so an escaped id (`«a.b»`) renders
 //!   differently from the oracle.
 pub mod app; // M4b-3 P1
+mod auto_bound; // M4c-2c-ii
 pub mod builtin; // Tasks 4-6
 pub mod coe; // coercions
 pub mod command; // M4c-1 P2
@@ -253,6 +254,8 @@ pub mod names; // M4c-2b-i
 mod postpone;
 pub mod resolve; // Task 5
 pub mod synthetic; // M4b-3 P2a
+#[cfg(test)]
+mod test_support;
 mod unassigned; // M4c-1 P2 Task 4
 
 pub use elab::TermElabM;

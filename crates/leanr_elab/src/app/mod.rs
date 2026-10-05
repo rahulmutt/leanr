@@ -190,6 +190,12 @@ pub(crate) fn elab_app_expanded(
 ) -> Result<ExprId, ElabError> {
     let name = head::intern_dotted(elab, f)?;
     if elab.view.get(name).is_none() {
+        // `throwUnknownIdWithSuggestions` (`App.lean:1960-1975`) on a
+        // quotation identifier: it is macro-scoped, so
+        // `checkValidAutoBoundImplicitName`'s `.str .anonymous` arm never
+        // matches and it is never auto-bound — a plain unknown identifier
+        // even under `with_auto_bound_implicit`. (Auto-binding it would
+        // also retry forever: `f` is looked up in the environment only.)
         return Err(ElabError::UnknownIdent(f.to_string()));
     }
     let f = head::mk_const(elab, name, &[])?;

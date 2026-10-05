@@ -152,6 +152,17 @@ pub struct TermElabM<'e> {
     /// `openDecls`, the name tables, the declaration being defined);
     /// `ResolveCtx::root()` for term-only callers.
     pub resolve: ResolveCtx<'e>,
+    /// oracle: `Term.Context.autoBoundImplicitContext`
+    /// (`TermElabM.lean:314-326`): `Some` inside
+    /// `with_auto_bound_implicit`, `None` outside it and inside
+    /// `without_auto_bound_implicit` (`auto_bound.rs`).
+    pub(crate) auto_bound: Option<crate::auto_bound::AutoBoundCtx>,
+    /// oracle: `Term.Context.autoBoundImplicitForbidden`
+    /// (`TermElabM.lean:327-335`), as the list of
+    /// names the predicate accepts (`with_auto_bound_forbidden`).
+    pub(crate) auto_bound_forbidden: Vec<NameId>,
+    /// The `autoImplicit` / `relaxedAutoImplicit` options.
+    pub(crate) options: crate::auto_bound::ElabOptions,
 }
 
 impl<'e> TermElabM<'e> {
@@ -242,6 +253,9 @@ impl<'e> TermElabM<'e> {
             may_postpone: true,
             anon_tail_depth: 0,
             resolve: ResolveCtx::root(),
+            auto_bound: None,
+            auto_bound_forbidden: Vec::new(),
+            options: crate::auto_bound::ElabOptions::default(),
         }
     }
 
