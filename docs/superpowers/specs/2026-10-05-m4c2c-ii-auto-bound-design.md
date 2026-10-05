@@ -272,3 +272,59 @@ predicate.
 - Any option other than the two: `— later M4`.
 - Term-level `set_option … in`: unchanged (out of scope).
 - Unobservable: stale `sectionFVars` on the rebuild branch; inlay hints.
+
+## Amendment 1 (plan time, 2026-10-05)
+
+Oracle probes of the 89 P1 rows (scratch `target/m4c2ciiprobe/`) changed
+four points of the design above:
+
+1. **`setMVarUserNamesAt` is not ported.** It names an mvar binder with
+   `mkFreshUserName` — the parameter name plus a fresh MACRO SCOPE (`α✝`)
+   — so the name is inaccessible: `theorem am3 : Eq a a := rfl` then
+   `am3 (α := Nat)` fails with ``Invalid argument name `α` for function
+   `am3` ``. The dumper erases binder names, and a macro-scoped name never
+   matches a named argument, so the only observable property is "the mvar
+   binder's name is not accessible". leanr's mvar arm names the binder
+   with the mvar's `user_name` if it has one, else a fresh
+   `_leanr_mkbinding_fresh.N` (leanr's macro-scope stand-in, recognised by
+   `name_has_macro_scopes`). The `header.rs` comment calling
+   `mkForallFVars'` message-only stays true for leanr.
+2. **`throwInvalidNamedArg` is ported (first line only)** so the row
+   above can pin (1): `App.lean:400-403` → ``Invalid argument name `n`
+   for function `f` `` (`` for function`` alone when the head is not a
+   constant). The deprecated-argument linter branch is not ported (no
+   `Elab0` constant carries `deprecated_arg`).
+3. **The note line is not modelled.** The disabled/strict notes render
+   on the THIRD line (`Unknown identifier `α`\n\nNote: …`), and every
+   gate compares the first line only. `checkValidAutoBoundImplicitName`'s
+   `.error` arm therefore returns plain `UnknownIdent`; there is no
+   `AutoBoundNote`.
+4. **The catch-site audit collapses to one predicate.** Every generic
+   catch in `leanr_elab` (`observing`, `commit_when`, the ladder's
+   `postpone_on_error`, `elab_using_elab_fns`, overload/lval/dot-ident
+   rethrows) either rethrows or gates on `ElabError::is_oracle_error()`.
+   Adding `AutoBoundImplicitLocal` to that predicate's exclusion list
+   (beside `Postpone`) is the whole audit; `auto/catchOverload` (the
+   exception escapes `observing`, the retry binds `x`, and BOTH
+   candidates then succeed ⇒ "Ambiguous term") pins it.
+
+Further probed facts the plan relies on:
+
+- The "depends on explicitly provided argument" error is unreachable
+  from source: an auto's type mvar is declared outside the explicit
+  binders, so `(x : β)` fails first with "Application type mismatch"
+  (`auto/negDependsExplicit`). Ported, pinned by a unit test only.
+- Level order: def/theorem use the post-header `levelNames`, so explicit
+  `.{v}` and scope names come first, then auto universes in discovery
+  order, then `u_N` (`al3` ⇒ `[v, u]`, `al9` ⇒ `[u, u_1]`). `elabAxiom`
+  sorts against `expandDeclId`'s names, so axiom auto universes are
+  lexicographic leftovers (`al16` ⇒ `[u, v]`; `al19.{w}` ⇒ `[w, v]`).
+- Retry rewinds `levelNames`: `def al13 (α : Sort u) (x : β) …` ⇒
+  `[u, u_1]` (a non-rewinding loop would push `u` twice).
+- Section variables precede header autos (`ai20` ⇒ `{β} (b) {α} (x)`).
+- `set_option autoImplicit 1` ⇒ ``set_option value type mismatch: The
+  value`` (first line).
+- `abstract_fvars` is kernel code (`leanr_kernel/src/subst.rs`, TCB).
+  The mvar-aware abstraction is a new `leanr_meta`-local traversal used
+  only when `xs` contains an mvar; fvar-only telescopes keep the kernel
+  path byte-for-byte.
