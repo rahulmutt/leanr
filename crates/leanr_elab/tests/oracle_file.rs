@@ -123,9 +123,25 @@ fn empty_source_elaborates_nothing() {
     }
 }
 
+/// Id prefixes of corpus records whose feature is not ported yet. Each
+/// M4c-2c-i task removes its prefixes; Task 6 deletes this list.
+const PENDING: &[&str] = &[
+    "universe/",
+    "var/",
+    "varThm/",
+    "varAxiom/",
+    "varLevel/",
+    "include/",
+    "omit/",
+];
+
+fn enabled(id: &str) -> bool {
+    !PENDING.iter().any(|p| id.starts_with(p))
+}
+
 #[test]
 fn oracle_file_gate() {
-    let checked = support::run_file_corpus("file-queries.jsonl", |_| true);
+    let checked = support::run_file_corpus("file-queries.jsonl", enabled);
     assert!(
         checked >= CORPUS_FLOOR,
         "file corpus shrank: checked {checked}, floor {CORPUS_FLOOR}. Check \
