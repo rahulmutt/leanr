@@ -1,0 +1,274 @@
+# M4c-2c-ii — auto-bound implicits — design
+
+Status: approved in brainstorming 2026-10-05 (architectural path).
+Second half of M4c-2c, after 2c-i (#75, ad9e955) and its follow-ups
+(#76, 5c47cdd).
+
+Pinned oracle: `leanprover/lean4:v4.33.0-rc1`. Citations were opened
+against that toolchain's `src/lean/Lean` while brainstorming; they are
+still subject to the "verify at plan time" rule (cites drift by 1-2 lines).
+
+## Goal
+
+Every unbound identifier or universe name in a declaration header or a
+`variable` binder currently hits a `— M4c-2c-ii` seam. This slice ports
+the oracle's auto-bound implicit machinery, plus the two options that
+govern it (`autoImplicit`, `relaxedAutoImplicit`), so those headers
+elaborate as the oracle does — including Mathlib's `autoImplicit false`
+error messages.
+
+**Success:**
+- Every new corpus row matches the oracle: per command, the same
+  constants (full ConstantInfo, binder names included), or for a last
+  command that errors, the same first error line.
+- No `— M4c-2c-ii` label remains after P2.
+- Every existing corpus stays green; `mise run ci` passes.
+
+## User decisions
+
+1. **Options:** port `set_option autoImplicit` and
+   `set_option relaxedAutoImplicit` (command and `set_option … in`) via a
+   minimal scoped options record. Any other option name is a
+   `— later M4` seam. Rejected: defaults only (leaves Mathlib's
+   disabled-mode errors unported); a general options registry (no other
+   consumer yet).
+2. **Cut:** one spec, two PRs.
+   - **P1:** the retry loop + `addAutoBoundImplicits` in def/theorem/
+     axiom headers; universe-name auto-bound; mvar binders (additive
+     `leanr_meta` `mk_binding` arm, `collectUnassignedMVars`,
+     `mkForallFVars'`); `set_option`.
+   - **P2:** `variable` binder auto-bound and `runTermElabM`'s
+     mvar-rebuild branch.
+3. **Approach A:** faithful exception-and-retry. Rejected: B, a syntax
+   pre-scan for unresolved identifiers (resolution depends on
+   elaboration — notation/macro expansion, macro scopes, dotted names,
+   overloads — and binder order is elaboration-time discovery order);
+   C, binding in place without restart (the new fvar must precede
+   already-elaborated binders, so earlier mvars' lctxs could never see
+   it).
+
+## Oracle behaviour
+
+- **`withAutoBoundImplicit k`** (`Elab/Term/TermElabM.lean:1959-1980`):
+  if `autoImplicit` is on, loop: save state; run `k` with
+  `autoBoundImplicitContext := some ctx`; on the internal
+  `autoBoundImplicit` exception (`Exception.lean:20,31-37`) carrying `n`,
+  `s.restore (restoreInfo := true)`, `withLocalDecl n .implicit
+  (← mkFreshTypeMVar)`, push the fvar onto `ctx`, loop. Other exceptions
+  propagate. If off: run `k` with `some {autoImplicitEnabled := false}`
+  (still "in an auto-bound context" — this is what makes the disabled
+  note fire). `withoutAutoBoundImplicit` sets `none` (`:1982-1983`).
+- **`withAutoBoundImplicitForbiddenPred`** (`:1985-1986`): ORs a
+  predicate into `autoBoundImplicitForbidden`. `elabHeaders` forbids the
+  views' short names (`MutualDef.lean:213`); `elabAxiom` forbids its own
+  (`Declaration.lean:110`).
+- **Throw site** — `throwUnknownIdWithSuggestions` (`App.lean:1960-1975`):
+  if not forbidden and the context is `some`:
+  `checkValidAutoBoundImplicitName n allowed relaxed` (`AutoBound.lean`):
+  - `.ok true` ⇒ `throwAutoBoundImplicitLocal n`;
+  - `.ok false` ⇒ plain "Unknown identifier";
+  - `.error note` ⇒ "Unknown identifier" plus the note: either
+    ``It is not possible to treat `x` as an implicitly bound variable
+    here because the `autoImplicit` option is set to `false`.`` or
+    ``… because it has multiple characters while the
+    `relaxedAutoImplicit` option is set to `false`.``
+  Eligible names are atomic (`.str .anonymous s`, non-empty, no macro
+  scopes). Strict mode (`relaxed = false`) accepts a single character
+  followed by digits, subscripts, `_` or `'` (`isValidAutoBoundSuffix`).
+- **Universe levels** — `elabLevel` ident arm (`Level.lean:79-84`): an
+  unknown name is consed onto `levelNames` (no exception, no retry) iff
+  `autoBoundImplicit` (= the context's `autoImplicitEnabled`,
+  `TermElabM.lean:818`) and `isValidAutoBoundLevelName` (strict mode:
+  first char lowercase + valid suffix); else ``unknown universe level
+  `u` ``. `levelNames` is `Term.State`, so the retry loop's restore
+  rewinds it.
+- **`addAutoBoundImplicits xs`** (`TermElabM.lean:2071-2090`): for each
+  auto, in order, first `collectUnassignedMVars (← inferType auto)`
+  (`:1993-2016`, dependency-first, deduplicated) then the auto itself;
+  then for each fvar auto and each `x ∈ xs`, if the auto's decl depends
+  on `x`: ``invalid auto implicit argument `a`, it depends on explicitly
+  provided argument `x` ``. Returns `autos ++ xs` (may contain mvars).
+- **`mkForallFVars'`** (`Meta/ForEachExpr.lean:127-140`): if any `x`
+  `shouldInferBinderName`, set user names on mvars in the binder types
+  from the parameter names they fill (`setMVarUserNamesAt`), abstract,
+  then reset those names. With mvars in `xs`, this decides the stored
+  binder names (`theorem t : a = a` ⇒ `∀ {α : Sort u_1} {a : α}, a = a`).
+- **`MkBinding.mkBinding`** mvar arm (`MetavarContext.lean:1339-1347`):
+  binder type `mvarDecl.type.headBeta`, abstracted over `xs[..i]`; name
+  `userName`, or `mkFreshBinderName` if anonymous; binder info
+  `binderInfoForMVars` (default `.implicit`). `mvarIdsToAbstract`
+  (`:1364`) makes the mvars in `xs` abstractable.
+- **Call sites:**
+  - `elabHeaders` (`MutualDef.lean:257-277`): `withDeclName` →
+    `withAutoBoundImplicit` → `withLevelNames` → binders, type,
+    `synthesizeSyntheticMVarsNoPostponing` → `addAutoBoundImplicits` →
+    `mkForallFVars'` → `levelNames ← getLevelNames`; `numParams :=
+    xs.size` (autos included).
+  - `elabAxiom` (`Declaration.lean:109-116`): same shape, then
+    `mkForallFVars vars type (usedOnly := true)`.
+  - `elabVariable` (`BuiltinCommand.lean:419-425`): sanity run under
+    `withSynthesize ∘ withAutoBoundImplicit`, `addAutoBoundImplicits`
+    result discarded. `varDecls` stores binder syntax only.
+  - `runTermElabM` (`Command.lean:774-800`): `withAutoBoundImplicit
+    (elabBinders scope.varDecls …)` → `synthesizeSyntheticMVarsNoPostponing`
+    → `sectionFVars` → `resetMessageLog` → `addAutoBoundImplicits xs none`
+    → all fvars ⇒ `withoutAutoBoundImplicit (elabFn xs)`; else
+    `mkForallFVars' xs (Sort 0)` and, under `withLCtx {} {}`,
+    `forallBoundedTelescope … xs.size` ⇒ `withoutAutoBoundImplicit
+    (elabFn xs')`. `sectionFVars` is built BEFORE the rebuild (it maps to
+    the stale fvars on that branch).
+  - `runTactic` runs `withoutAutoBoundImplicit` (`SyntheticMVars.lean:474`).
+- **`set_option`** (`BuiltinCommand.lean:516`, `SetOption.lean:58`):
+  updates the scope's options; `set_option … in` scopes it to one
+  command.
+
+## Design
+
+### Core mechanism (`leanr_elab`, P1)
+
+**`TermElabM` state** (reader-like; saved/restored around scopes):
+- `auto_bound: Option<AutoBoundCtx>`,
+  `AutoBoundCtx { enabled: bool, bound: Vec<ExprId> }`.
+- `auto_bound_forbidden: Vec<NameId>`.
+- `options: ElabOptions { auto_implicit: bool, relaxed_auto_implicit:
+  bool }`, both default `true`, seeded from the command scope.
+
+**Error variant:** `ElabError::AutoBoundImplicitLocal(NameId)`. Internal;
+never rendered. `UnknownIdent` gains an optional note
+(`UnknownIdent(String, Option<AutoBoundNote>)`) that renders the
+disabled/strict note; whether the note reaches the first error line the
+gate compares is probed at plan time.
+
+**Throw sites:** the unknown-global paths at `app/head.rs:408` and
+`app/mod.rs:193` run the oracle guard in order (forbidden ⇒ plain;
+context `some` ⇒ `check_valid_auto_bound_implicit_name`). Dotted and
+macro-scoped names are ineligible. `app/lval.rs` unknown-field paths are
+not throw sites (the oracle's are not either; confirm at plan time).
+
+**Universe levels:** `builtin/sort.rs:214` follows `Level.lean:79-84`
+(push onto `level_names`, no retry).
+
+**`with_auto_bound_implicit(k)`:** if enabled, loop: save
+`save_term_state()` + `level_names` + `mctx.lctx_checkpoint()`; run `k`
+with `auto_bound = Some(ctx)`; on `AutoBoundImplicitLocal(n)` restore all
+three, declare `n` (`.implicit`, `mk_fresh_type_mvar`), push onto `ctx`,
+loop. Other errors propagate. If disabled: run `k` with
+`Some(ctx { enabled: false })`. Outer `auto_bound` is restored on exit.
+`without_auto_bound_implicit(k)` is the `None` twin.
+`with_auto_bound_forbidden(names, k)` extends the forbidden list.
+
+`save_term_state`'s doc (`synthetic/state.rs`) says `level_names` is not
+snapshotted because no path below `f` touches it; that stays true for
+`commit_when`, but the retry loop does touch it, so the loop snapshots it
+itself. The doc is amended to say so.
+
+**`add_auto_bound_implicits(xs)`:** port of `addAutoBoundImplicits` +
+`collectUnassignedMVars`; returns `autos ++ xs`.
+
+**Catch-site audit.** The internal exception must pass through every
+catch that the oracle's counterpart does not intercept (`observing`,
+`exceptionToSorry`, `commitWhen`, coercion and unifier fallbacks,
+postpone/resume, `elab_using_elab_fns`). The plan tabulates each of the
+~24 `Err(e) =>` / `or_else` / `commit_when` sites in `leanr_elab`
+against its oracle catch (`.error` only vs everything) and fixes
+divergences; a probe row pins each observable class.
+
+### Headers (P1)
+
+- `elab_header` (`command/header.rs`): `with_auto_bound_forbidden(short
+  names)` → `with_auto_bound_implicit` → `with_level_names` → binders,
+  type, `synthesize_synthetic_mvars_no_postponing` →
+  `add_auto_bound_implicits` → `mk_forall_fvars'`. `num_params` counts
+  autos. The returned `level_names` include auto-bound universes and
+  feed `sortDeclLevelParams` (ordering probed at plan time). The body
+  telescope re-pushes the autos so header and body share it.
+- `elab_axiom` (`command/axiom.rs`): same wrapping.
+- `unknown_ident_to_auto_bound_seam` is deleted (header and axiom).
+- **`mk_forall_fvars'`** is ported for real (`shouldInferBinderName`,
+  `setMVarUserNamesAt`, name reset); the `header.rs` comment calling it
+  message-only is wrong once mvars are binders.
+
+### `leanr_meta` additive arm (P1)
+
+Under the M4b TCB-neutral accessor precedent:
+`MetaCtx::mk_binding` gains the mvar arm (`MetavarContext.lean:
+1339-1347`) instead of erroring "telescope entry is not an fvar";
+`abstract_range` / `elim_mvar_deps` treat mvars in `xs` as abstractable
+(`mvarIdsToAbstract`). Fvar-only callers are unchanged. Unit tests in
+`leanr_meta` pin type/name/binder-info and the anonymous-name fallback.
+
+### `set_option` (P1)
+
+- `Scope.options: ElabOptions`, inherited by nested scopes, restored at
+  `end`.
+- Dispatch arm `Lean.Parser.Command.set_option`; `set_option … in` via
+  the existing `elab_in`.
+- Only `autoImplicit` / `relaxedAutoImplicit` with `true`/`false`. A bad
+  value gets the oracle's error (probed). Any other name:
+  ``set_option `<name>` — later M4``.
+- Term-level `set_option … in` stays out of scope.
+
+### `variable` binders (P2)
+
+- **`elab_variable`:** the sanity run becomes `with_synthesize(
+  with_auto_bound_implicit(elab_binders → add_auto_bound_implicits))`,
+  result discarded. `variable_auto_bound_seam` is deleted.
+- **`elab_section_vars` (`runTermElabM`):** under
+  `with_auto_bound_implicit`; then `synthesize_synthetic_mvars_no_postponing`;
+  `add_auto_bound_implicits(xs)`.
+  - All fvars ⇒ `without_auto_bound_implicit(elab_fn(xs))`. The autos are
+    ordinary leading section vars; `header_sec_vars` / `used_vars` keep
+    them iff something kept depends on them. Replaces 2c-i's `Internal`
+    guard.
+  - Mvars present (rebuild branch) ⇒ `mk_forall_fvars'(xs, Sort 0)`,
+    then under an empty lctx and empty local instances,
+    `forall_bounded_telescope(ty, xs.len())` ⇒ `elab_fn(xs')`. Whether
+    `leanr_meta` already has both pieces is a plan-time check; if not,
+    another additive accessor.
+  - The stale-`sectionFVars` quirk is recorded as an unobservable
+    divergence (leanr does not resolve hygienic section-var references
+    through `section_fvars`).
+- Header autos land after section autos and before header binders, as
+  in the oracle.
+
+## Testing
+
+Rows go into `tests/oracle_decl.rs` (single declarations) and
+`tests/oracle_file.rs` (`set_option`, `variable`, multi-command). Every
+row is oracle-probed at plan time.
+
+| family | covers |
+|---|---|
+| `auto/ident*` | `def f (x : α)`, multiple autos and discovery order, auto used only in the return type, auto in axiom and theorem |
+| `auto/mvarBinder*` | `theorem t : a = a`: mvar binders, `setMVarUserNamesAt` names, anonymous-name fallback |
+| `auto/level*` | `Sort u` auto, with explicit `.{v}`, order in `sortDeclLevelParams`, with scope `universe` |
+| `auto/neg*` | dotted name, the decl's own short name (forbidden), depends-on-explicit error, unknown ident in the body (no auto) |
+| `auto/catch*` | one row per oracle catch class from the audit (overloaded argument, coercion site, postponed elaborator) |
+| `opt/*` | `autoImplicit false` + note; `relaxedAutoImplicit false` strict suffix (`α₁`, `X12` pass; `foo` noted); `set_option … in`; scoping across `section`/`end`; non-whitelisted option seam |
+| `varAuto/*` (P2) | all-fvar branch; rebuild branch; inclusion via dependency; header autos after section autos; `include` of an auto ⇒ undeclared |
+
+**Mutation discipline:** each plan task names the mutations its rows
+must kill and records them in the commit body. Minimum set: drop the
+`level_names` restore; swallow the auto-bound error at one catch site;
+`.default` instead of `.implicit` for mvar binders; skip
+`collectUnassignedMVars`; reverse the autos order; drop the forbidden
+predicate.
+
+## Plan-time probes (front-loaded risks)
+
+1. The binder-name hygiene `setMVarUserNamesAt` produces (`α` vs `α✝`)
+   and the anonymous fallback name.
+2. The catch-site audit table: which leanr sites diverge.
+3. `u_N` / auto-bound universe ordering in `sortDeclLevelParams`, on
+   both the def and async-theorem paths.
+4. Whether `forall_bounded_telescope` and an empty-lctx scope exist in
+   `leanr_meta`.
+5. The rendering of the note line and of a bad `set_option` value.
+
+## Seams after this slice
+
+- P1 leaves `variable` binder auto-bound as `— M4c-2c-ii P2`; P2 removes
+  it.
+- Any option other than the two: `— later M4`.
+- Term-level `set_option … in`: unchanged (out of scope).
+- Unobservable: stale `sectionFVars` on the rebuild branch; inlay hints.
