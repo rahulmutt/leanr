@@ -9,7 +9,7 @@
 //! only), `variable {α}` binder-annotation updates (`— later M4`);
 //! `withUsed`'s local-context erasure (`removeUnused` erases the unused
 //! variables from the lctx and local instances, `Meta/CollectFVars.lean:
-//! 62`), as nothing elaborates under that context after the closure
+//! 63`), as nothing elaborates under that context after the closure
 //! (the theorem regime's erasure IS modelled: its body runs there); and
 //! `elabFunValues`' `cleanupAnnotations` on every local declaration's
 //! type (`MutualDef.lean:535`), as `elab_section_vars` stores no
@@ -196,7 +196,7 @@ pub(super) fn remove_unused(
 }
 
 /// oracle `withUsed` (`MutualDef.lean:595-611`; `Expr.collectFVars`
-/// instantiates first, `Meta/CollectFVars.lean:17-19`), also the axiom's
+/// instantiates first, `Meta/CollectFVars.lean:18-20`), also the axiom's
 /// `mkForallFVars vars type (usedOnly := true)` (`Declaration.lean:118`).
 pub(super) fn used_vars(
     elab: &mut TermElabM,

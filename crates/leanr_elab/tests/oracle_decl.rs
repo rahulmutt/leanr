@@ -8,7 +8,7 @@ mod support;
 
 /// `wc -l tests/fixtures/elab/decl-queries.jsonl` at the last deliberate
 /// regen. `>=`: adding a record is a one-line bump, not a failing gate.
-const CORPUS_FLOOR: usize = 79;
+const CORPUS_FLOOR: usize = 89;
 
 #[test]
 fn decl_corpus_sources_parse_as_one_command() {

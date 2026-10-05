@@ -852,6 +852,10 @@ impl<'e> MetaCtx<'e> {
                     )?
                 }
                 None => {
+                    // oracle: `handleCDecl`'s `type.headBeta`
+                    // (`MetavarContext.lean:1319`); the let arm above
+                    // (`:1333-1336`) does not beta.
+                    let ty = self.head_beta(ty)?;
                     let ty2 = abstract_fvars(
                         self.scratch,
                         Some(self.view.store),
@@ -1021,6 +1025,39 @@ mod tests {
                 .expr_forall(base, None, n_ty, n_ty, BinderInfo::Default)
                 .expect("forall");
             assert_eq!(t, expected, "infer(fun (x : N) => x) must equal N -> N");
+        });
+    }
+
+    /// oracle: `inferLambdaType`'s `mkForallFVars` (InferType.lean:191)
+    /// head-betas each binder domain (`MetavarContext.lean:1319`) but not
+    /// the body type: `fun (x : (fun _ => N) N.zero) => x` infers to
+    /// `N -> (fun _ => N) N.zero` (probed against the pinned toolchain).
+    #[test]
+    fn lambda_infer_head_betas_the_domain_only() {
+        with_prelude0_ctx(|ctx| {
+            let n_name = single(ctx, "N");
+            let zero_name = dotted(ctx, "N", "zero");
+            let n_ty = const_expr(ctx, n_name);
+            let zero = const_expr(ctx, zero_name);
+            let base = Some(ctx.view.store);
+            let k = ctx
+                .scratch
+                .expr_lam(base, None, n_ty, n_ty, BinderInfo::Default)
+                .expect("lam");
+            let redex = ctx.scratch.expr_app(base, k, zero).expect("app");
+            let bvar0 = ctx.scratch.expr_bvar(base, &Nat::from(0u64)).expect("bvar");
+            let lam = ctx
+                .scratch
+                .expr_lam(base, None, redex, bvar0, BinderInfo::Default)
+                .expect("lam");
+
+            let t = ctx.infer_type(lam).expect("infer");
+
+            let expected = ctx
+                .scratch
+                .expr_forall(base, None, n_ty, redex, BinderInfo::Default)
+                .expect("forall");
+            assert_eq!(t, expected);
         });
     }
 

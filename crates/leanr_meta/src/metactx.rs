@@ -1200,6 +1200,11 @@ impl<'e> MetaCtx<'e> {
                     ))
                 }
             };
+            // oracle: `handleCDecl`'s `let type := type.headBeta`
+            // (`MetavarContext.lean:1319`), so a binder written
+            // `(h : (fun _ => p) n)` stores `p`. Head only: a nested
+            // redex, and the body, keep theirs.
+            let ty = self.head_beta(ty)?;
             // oracle: `abstractRange xs i type` (`:1320`) — note the
             // FULL `fvars`, not `&fvars[..i]`: a binder type has its
             // metavariable dependencies eliminated with respect to
