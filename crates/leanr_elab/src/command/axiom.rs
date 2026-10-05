@@ -9,7 +9,7 @@ use leanr_syntax::kind::KindInterner;
 
 use super::def::fix_level_params;
 use super::header::{expand_decl_id, unknown_ident_to_auto_bound_seam};
-use super::vars::SecVars;
+use super::vars::{self, SecVars};
 use super::view::DefView;
 use super::Built;
 use crate::builtin::binder::{elab_type, extract_binder_group, push_binder_group};
@@ -23,12 +23,6 @@ pub(super) fn elab_axiom(
     sv: &SecVars,
 ) -> Result<Built, ElabError> {
     let id = expand_decl_id(elab, view)?;
-    // `mkForallFVars vars type (usedOnly := true)` (`Declaration.lean:118`).
-    if !sv.fvars.is_empty() {
-        return Err(ElabError::UnsupportedSyntax(
-            "section variables in an axiom — M4c-2c-i Task 4".into(),
-        ));
-    }
     let scope = elab.level_names.clone();
     let ty_stx = view
         .ty
@@ -47,6 +41,11 @@ pub(super) fn elab_axiom(
                 elab.synthesize_synthetic_mvars_no_postponing(kinds)?;
                 let ty = elab.mctx.instantiate_mvars(ty)?;
                 let ty = elab.mctx.mk_forall(&xs, ty)?;
+                // `mkForallFVars vars type (usedOnly := true)`
+                // (`Declaration.lean:118`): only the section variables the
+                // type uses — no `include`, no instance closure.
+                let kept = vars::used_vars(elab, &sv.fvars, &[ty])?;
+                let ty = elab.mctx.mk_forall(&kept, ty)?;
                 // `Term.levelMVarToParam type` (`Declaration.lean:119`); the
                 // new names extend only this scope's level names.
                 elab.level_mvar_to_param(ty)

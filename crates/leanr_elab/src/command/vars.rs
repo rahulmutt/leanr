@@ -12,6 +12,7 @@ use std::collections::HashSet;
 
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::ExprId;
+use leanr_kernel::BinderInfo;
 use leanr_syntax::kind::KindInterner;
 use leanr_syntax::tree::{NodeOrToken, SyntaxNode};
 
@@ -27,14 +28,11 @@ use crate::error::ElabError;
 pub(super) struct SecVars {
     /// One fvar per binder id of `Scope::var_decls`, in order.
     pub fvars: Vec<ExprId>,
-    /// `Scope::var_uids`, parallel to `fvars`. Read by the theorem/axiom
-    /// regimes (M4c-2c-i Tasks 4-5).
-    #[allow(dead_code)]
+    /// `Scope::var_uids`, parallel to `fvars`. Read by the theorem
+    /// regime ([`header_sec_vars`]).
     pub uids: Vec<u32>,
-    /// `Scope::included_vars` / `omitted_vars` (Tasks 4-5).
-    #[allow(dead_code)]
+    /// `Scope::included_vars` / `omitted_vars`.
     pub included: Vec<u32>,
-    #[allow(dead_code)]
     pub omitted: Vec<u32>,
 }
 
@@ -195,6 +193,107 @@ pub(super) fn used_vars(
         collect_fvars(elab, e, &mut used);
     }
     remove_unused(elab, vars, &mut used)
+}
+
+/// oracle `withHeaderSecVars` (`Elab/MutualDef.lean:455-490`): the
+/// section variables a theorem keeps — those its headers reference, the
+/// `include`d ones, their transitive dependencies, then every
+/// non-`omit`ted instance variable whose type mentions only kept fvars
+/// (scanned in variable order, so an instance can only be covered by
+/// what precedes it in the scan). With `check`, a kept variable the
+/// scope `omit`s is an error. Returns the kept variables in order; the
+/// caller erases the rest from the body's context (`removeUnused` +
+/// `withLCtx`, `:461-462`).
+pub(super) fn header_sec_vars(
+    elab: &mut TermElabM,
+    sv: &SecVars,
+    header_tys: &[ExprId],
+    check: bool,
+) -> Result<Vec<ExprId>, ElabError> {
+    let mut used = HashSet::new();
+    // directly referenced in headers (`Expr.collectFVars` instantiates).
+    for &t in header_tys {
+        let t = elab.mctx.instantiate_mvars(t)?;
+        collect_fvars(elab, t, &mut used);
+    }
+    // included by `include`
+    for (&x, uid) in sv.fvars.iter().zip(&sv.uids) {
+        if sv.included.contains(uid) {
+            used.insert(x);
+        }
+    }
+    // transitively referenced
+    add_dependencies(elab, &mut used)?;
+    // The oracle scans `used` in insertion order and reports the first
+    // omitted one; this scans in variable order. They differ only in
+    // WHICH name is reported when two omitted variables are referenced.
+    if check {
+        for (&x, uid) in sv.fvars.iter().zip(&sv.uids) {
+            if used.contains(&x) && sv.omitted.contains(uid) {
+                let name = local_decl(elab, x)?.binder_name;
+                return Err(ElabError::OmitReferenced(crate::names::render(
+                    elab.mctx.store(),
+                    Some(elab.view.store),
+                    name,
+                )));
+            }
+        }
+    }
+    // instances whose type's fvars are all kept, in variable order
+    for (&x, uid) in sv.fvars.iter().zip(&sv.uids) {
+        if sv.omitted.contains(uid) {
+            continue;
+        }
+        let d = local_decl(elab, x)?;
+        if d.binder_info == BinderInfo::InstImplicit {
+            let ty = elab.mctx.instantiate_mvars(d.ty)?;
+            let mut fs = HashSet::new();
+            collect_fvars(elab, ty, &mut fs);
+            if fs.iter().all(|f| used.contains(f)) {
+                used.insert(x);
+            }
+        }
+    }
+    remove_unused(elab, &sv.fvars, &mut used)
+}
+
+/// oracle `CollectFVars.State.addDependencies` (`Meta/CollectFVars.lean:
+/// 27-49`): close `used` over the (instantiated) types — and let values —
+/// of its members' declarations. An fvar the current context does not
+/// declare is skipped (the oracle's `find?` → `return ()`). The oracle's
+/// worklist runs in insertion order; the fixpoint is the same set.
+fn add_dependencies(elab: &mut TermElabM, used: &mut HashSet<ExprId>) -> Result<(), ElabError> {
+    let mut work: Vec<ExprId> = used.iter().copied().collect();
+    while let Some(x) = work.pop() {
+        let Some(d) = lookup_local_decl(elab, x) else {
+            continue;
+        };
+        let mut fs = HashSet::new();
+        for e in std::iter::once(d.ty).chain(d.value) {
+            let e = elab.mctx.instantiate_mvars(e)?;
+            collect_fvars(elab, e, &mut fs);
+        }
+        for f in fs {
+            if used.insert(f) {
+                work.push(f);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The current context's declaration of fvar `x`, if it declares one.
+fn lookup_local_decl(elab: &mut TermElabM, x: ExprId) -> Option<leanr_kernel::LocalDecl> {
+    let Node::FVar { id: Some(id) } = elab.mctx.store().expr_node(Some(elab.view.store), x) else {
+        return None;
+    };
+    elab.mctx.current_lctx().lctx().get(id).cloned()
+}
+
+/// oracle `getFVarLocalDecl`: a section variable's declaration.
+fn local_decl(elab: &mut TermElabM, x: ExprId) -> Result<leanr_kernel::LocalDecl, ElabError> {
+    lookup_local_decl(elab, x)
+        .ok_or_else(|| ElabError::Internal("section variable not in the local context".into()))
 }
 
 /// oracle: `collectFVars` (`Lean/Util/CollectFVars.lean`) — add every

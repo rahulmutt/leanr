@@ -111,19 +111,6 @@ fn variable_seams_carry_their_slice() {
 }
 
 #[test]
-fn section_variables_in_a_theorem_or_axiom_wait_for_task_4() {
-    // Deleted by Task 4.
-    for src in [
-        "variable (n : Nat)\ntheorem t : Eq n n := rfl",
-        "variable (n : Nat)\naxiom a : Eq n n",
-    ] {
-        let (at, m) = stop_seam(src);
-        assert_eq!(at, 1, "{src:?}");
-        assert!(m.ends_with(" — M4c-2c-i Task 4"), "{src:?}: {m}");
-    }
-}
-
-#[test]
 fn other_commands_are_later_m4_seams() {
     for src in [
         "#check Nat",
@@ -148,7 +135,7 @@ fn empty_source_elaborates_nothing() {
 
 /// Id prefixes of corpus records whose feature is not ported yet. Each
 /// M4c-2c-i task removes its prefixes; Task 6 deletes this list.
-const PENDING: &[&str] = &["varThm/", "varAxiom/", "varLevel/", "include/", "omit/"];
+const PENDING: &[&str] = &["varAxiom/include", "include/", "omit/"];
 
 fn enabled(id: &str) -> bool {
     !PENDING.iter().any(|p| id.starts_with(p))

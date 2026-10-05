@@ -63,43 +63,64 @@ pub(super) fn elab_def(
     let scope = elab.level_names.clone();
     let header = header::elab_header(elab, view, &id, kinds)?;
     let header = level_mvar_to_param_headers(elab, view.kind, header)?;
+    let is_thm = view.kind == DefKind::Theorem;
+    // `elabFunValues`' `withHeaderSecVars vars sc #[header]` (`MutualDef.lean:
+    // 534`; also `elabAsync`'s, `:1279`): the theorem's kept section
+    // variables, checked against `omit`.
+    let kept = if is_thm {
+        vars::header_sec_vars(elab, sv, &[header.ty], true)?
+    } else {
+        Vec::new()
+    };
     // `Elab.async` is on, as on the `lean` command line
     // (`Elab/Frontend.lean:291-292`): a theorem whose header has no mvars
     // takes `elabAsync` (`MutualDef.lean:1236-1242`). The test runs after
     // the header conversion, so only expression mvars can block it.
     let base = Some(elab.view.store);
     let d = elab.mctx.store().expr_data(base, header.ty);
-    if view.kind == DefKind::Theorem && !d.has_expr_mvar() && !d.has_level_mvar() {
-        check_async_signature(elab, &header, &scope)?;
+    if is_thm && !d.has_expr_mvar() && !d.has_level_mvar() {
+        check_async_signature(elab, &header, &kept, &scope)?;
     }
-    let value = elab_value(elab, view, &id, &header, kinds)?;
+    // A theorem body runs in the RESTRICTED context: the section variables
+    // `withHeaderSecVars` drops are erased (`removeUnused` → `withLCtx`,
+    // `:461-462`), so a proof naming one fails to resolve it.
+    let value = if is_thm {
+        let erase: Vec<ExprId> = sv
+            .fvars
+            .iter()
+            .copied()
+            .filter(|x| !kept.contains(x))
+            .collect();
+        let prev = elab.mctx.erase_locals(&erase)?;
+        let value = elab_value(elab, view, &id, &header, kinds);
+        elab.mctx.install_lctx(prev);
+        value?
+    } else {
+        elab_value(elab, view, &id, &header, kinds)?
+    };
     // `finishElab` (`MutualDef.lean:1394-1401`): synthesize once more, then
     // instantiate the values and the headers.
     elab.synthesize_synthetic_mvars_no_postponing(kinds)?;
     let value = elab.mctx.instantiate_mvars(value)?;
     let ty = elab.mctx.instantiate_mvars(header.ty)?;
     // `MutualClosure.pushMain` (`MutualDef.lean:1051-1053`).
-    if view.kind == DefKind::Theorem && !is_prop_full(elab, ty)? {
+    if is_thm && !is_prop_full(elab, ty)? {
         return Err(ElabError::TheoremTypeNotProp(full_name(elab, id.name)));
     }
-    // `withUsed vars headers values` → `MutualClosure.main` (`MutualDef.lean:
-    // 1420-1426`): the used section variables close the type and value.
+    // `withHeaderSecVars (check := false)` for a theorem, else `withUsed
+    // vars headers values` → `MutualClosure.main` (`MutualDef.lean:
+    // 1421-1424`): the kept section variables close the type and value.
     // BEFORE `levelMVarToParamTypesPreDecls`, `fixLevelParams` and
     // `abstractNestedProofs`, which all see the closed terms.
-    let (ty, value) = if view.kind == DefKind::Theorem {
-        if !sv.fvars.is_empty() {
-            return Err(ElabError::UnsupportedSyntax(
-                "section variables in a theorem — M4c-2c-i Task 4".into(),
-            ));
-        }
-        (ty, value)
+    let kept = if is_thm {
+        vars::header_sec_vars(elab, sv, &[ty], false)?
     } else {
-        let kept = vars::used_vars(elab, &sv.fvars, &[ty, value])?;
-        (
-            elab.mctx.mk_forall(&kept, ty)?,
-            elab.mctx.mk_lambda(&kept, value)?,
-        )
+        vars::used_vars(elab, &sv.fvars, &[ty, value])?
     };
+    let (ty, value) = (
+        elab.mctx.mk_forall(&kept, ty)?,
+        elab.mctx.mk_lambda(&kept, value)?,
+    );
     // `levelMVarToParamTypesPreDecls` under `withLevelNames allUserLevelNames`
     // (`MutualDef.lean:1434`; `PreDefinition/Basic.lean:56-58`): TYPES only.
     let ty = elab.with_level_names(header.level_names.clone(), |elab| {
@@ -177,12 +198,16 @@ fn level_mvar_to_param_headers(
 fn check_async_signature(
     elab: &mut TermElabM,
     header: &Header,
+    kept: &[ExprId],
     scope: &[NameId],
 ) -> Result<(), ElabError> {
-    let ty0 = header.ty;
+    // `withHeaderSecVars … fun vars => mkForallFVars vars header.type`
+    // (`:1279-1280`): the kept section variables' universes count.
+    let ty0 = elab.mctx.mk_forall(kept, header.ty)?;
     // `withLevelNames allUserLevelNames <| levelMVarToParam type`
-    // (`:1281-1282`): a no-op after `level_mvar_to_param_headers`, kept for
-    // fidelity.
+    // (`:1281-1282`): names the kept section variables' universe mvars
+    // (the header's own are already params) BEFORE the body runs, so the
+    // body cannot pin them (`varLevel/thmBodyPinsHole`).
     let ty = elab.with_level_names(header.level_names.clone(), |elab| {
         elab.level_mvar_to_param(ty0)
     })?;

@@ -474,6 +474,7 @@ def fileQueries : List (String × String) := [
   ("varLevel/holeAndExplicit", "variable (α : Type _)\ndef vl6.{v} (β : Sort v) (a : α) : α := a"),
   ("varLevel/twoDecls", "variable (α : Type _)\ndef vl7 (a : α) : α := a\ndef vl8 (a : α) : α := a"),
   ("varLevel/scopeAndExplicitThm", "universe u\nvariable (α : Sort u)\ntheorem vt9.{v} (β : Sort v) (a : α) (b : β) : Eq a a := rfl"),
+  ("varLevel/thmBodyPinsHole", "variable (α : Type _) (P : α → Prop) (x : α)\ntheorem vl9 (h : P x) : P x := (fun (_ : Type) => h) α"),
   ("include/basic", "variable (n : Nat)\ninclude n\ntheorem vi1 : Eq Nat.zero Nat.zero := rfl"),
   ("include/in", "variable (n : Nat)\ninclude n in\ntheorem vi2 : Eq Nat.zero Nat.zero := rfl\ntheorem vi3 : Eq Nat.zero Nat.zero := rfl"),
   ("include/undeclared", "variable (n : Nat)\ninclude m"),
