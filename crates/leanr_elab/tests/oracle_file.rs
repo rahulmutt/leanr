@@ -8,9 +8,9 @@
 mod support;
 
 /// `wc -l tests/fixtures/elab/file-queries.jsonl` at the last deliberate
-/// regen (M4c-2c-i final review: 214). `>=`: adding a record is a one-line bump, not a
+/// regen (M4c-2c-ii P1: 308). `>=`: adding a record is a one-line bump, not a
 /// failing gate.
-const CORPUS_FLOOR: usize = 216;
+const CORPUS_FLOOR: usize = 308;
 
 #[test]
 fn file_corpus_sources_parse_into_the_oracle_commands() {
@@ -142,12 +142,33 @@ fn empty_source_elaborates_nothing() {
     }
 }
 
+/// M4c-2c-ii P1 rows not yet passing: each task deletes its prefixes
+/// (Task 4: `auto/ident` … `auto/with`; Task 5: `auto/level`; Task 6:
+/// `auto/namedArg`; Task 7: `opt/`). Empty at the end of P1.
+const PENDING: &[&str] = &[
+    "auto/ident",
+    "auto/mvar",
+    "auto/neg",
+    "auto/catch",
+    "auto/with",
+    "auto/level",
+    "auto/namedArg",
+    "opt/",
+];
+
 #[test]
 fn oracle_file_gate() {
-    let checked = support::run_file_corpus("file-queries.jsonl", |_| true);
+    let checked = support::run_file_corpus("file-queries.jsonl", |id| {
+        !PENDING.iter().any(|p| id.starts_with(p))
+    });
+    let pending = std::fs::read_to_string(support::fixture_in("elab", "file-queries.jsonl"))
+        .expect("corpus")
+        .lines()
+        .filter(|l| PENDING.iter().any(|p| l.contains(&format!("\"id\":\"{p}"))))
+        .count();
     assert!(
-        checked >= CORPUS_FLOOR,
-        "file corpus shrank: checked {checked}, floor {CORPUS_FLOOR}. Check \
+        checked + pending >= CORPUS_FLOOR,
+        "file corpus shrank: checked {checked} + pending {pending}, floor {CORPUS_FLOOR}. Check \
          `dump_decls.lean files`' stderr for a dropped record, or lower the floor deliberately."
     );
 }
