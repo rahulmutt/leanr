@@ -30,6 +30,7 @@ use leanr_meta::{
 use leanr_syntax::kind::KindInterner;
 
 use super::header::{self, DeclId, Header};
+use super::vars::{self, SecVars};
 use super::view::{DefKind, DefView};
 use super::Built;
 use crate::builtin::binder::fun::cleanup_annotations;
@@ -55,6 +56,7 @@ pub(super) fn elab_def(
     view: &DefView,
     kinds: &KindInterner,
     aux_cache: &AuxLemmaCache,
+    sv: &SecVars,
 ) -> Result<Built, ElabError> {
     let id = header::expand_decl_id(elab, view)?;
     // `scopeLevelNames`, read before any `with_level_names`.
@@ -80,6 +82,24 @@ pub(super) fn elab_def(
     if view.kind == DefKind::Theorem && !is_prop_full(elab, ty)? {
         return Err(ElabError::TheoremTypeNotProp(full_name(elab, id.name)));
     }
+    // `withUsed vars headers values` → `MutualClosure.main` (`MutualDef.lean:
+    // 1420-1426`): the used section variables close the type and value.
+    // BEFORE `levelMVarToParamTypesPreDecls`, `fixLevelParams` and
+    // `abstractNestedProofs`, which all see the closed terms.
+    let (ty, value) = if view.kind == DefKind::Theorem {
+        if !sv.fvars.is_empty() {
+            return Err(ElabError::UnsupportedSyntax(
+                "section variables in a theorem — M4c-2c-i Task 4".into(),
+            ));
+        }
+        (ty, value)
+    } else {
+        let kept = vars::used_vars(elab, &sv.fvars, &[ty, value])?;
+        (
+            elab.mctx.mk_forall(&kept, ty)?,
+            elab.mctx.mk_lambda(&kept, value)?,
+        )
+    };
     // `levelMVarToParamTypesPreDecls` under `withLevelNames allUserLevelNames`
     // (`MutualDef.lean:1434`; `PreDefinition/Basic.lean:56-58`): TYPES only.
     let ty = elab.with_level_names(header.level_names.clone(), |elab| {

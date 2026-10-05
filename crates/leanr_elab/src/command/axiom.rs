@@ -9,6 +9,7 @@ use leanr_syntax::kind::KindInterner;
 
 use super::def::fix_level_params;
 use super::header::{expand_decl_id, unknown_ident_to_auto_bound_seam};
+use super::vars::SecVars;
 use super::view::DefView;
 use super::Built;
 use crate::builtin::binder::{elab_type, extract_binder_group, push_binder_group};
@@ -19,8 +20,15 @@ pub(super) fn elab_axiom(
     elab: &mut TermElabM,
     view: &DefView,
     kinds: &KindInterner,
+    sv: &SecVars,
 ) -> Result<Built, ElabError> {
     let id = expand_decl_id(elab, view)?;
+    // `mkForallFVars vars type (usedOnly := true)` (`Declaration.lean:118`).
+    if !sv.fvars.is_empty() {
+        return Err(ElabError::UnsupportedSyntax(
+            "section variables in an axiom — M4c-2c-i Task 4".into(),
+        ));
+    }
     let scope = elab.level_names.clone();
     let ty_stx = view
         .ty

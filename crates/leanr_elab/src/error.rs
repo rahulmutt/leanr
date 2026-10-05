@@ -539,6 +539,9 @@ impl ElabError {
                 cands.join(", ")
             )),
             Self::FailedToOpen(_) => Some("failed to open, errors ".into()),
+            // oracle `ensureType` (`Term/TermElabM.lean:1948`):
+            // "type expected, got\n  (e : T)".
+            Self::TypeExpected { .. } => Some("type expected, got".into()),
             Self::TypeMismatch { app: None, .. } => Some("Type mismatch".into()),
             Self::TypeMismatch { app: Some(a), .. } => Some(
                 if a.arg_already_in_f {

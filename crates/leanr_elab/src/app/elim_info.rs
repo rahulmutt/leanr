@@ -12,6 +12,7 @@ use leanr_kernel::bank::{ExprId, NameId};
 
 use crate::app::lval::{app_args, app_fn, node};
 use crate::app::state::open_forall_telescope_reducing;
+use crate::command::vars::collect_fvars;
 use crate::elab::TermElabM;
 use crate::error::{ElabError, EliminatorErrorReason as R};
 
@@ -175,7 +176,7 @@ fn children(n: Node) -> impl Iterator<Item = ExprId> {
 /// satisfies `p`. Iterative, and each shared subterm is visited once
 /// (hash-consing makes `ExprId` equality structural equality). `prune`
 /// skips a subterm and everything under it.
-fn any_subterm(
+pub(crate) fn any_subterm(
     elab: &TermElabM<'_>,
     e: ExprId,
     prune: impl Fn(&TermElabM<'_>, ExprId) -> bool,
@@ -197,26 +198,12 @@ fn any_subterm(
 }
 
 /// Whether `e` contains no free variable (the `hasFVar` data bit).
-fn has_no_fvar(elab: &TermElabM<'_>, e: ExprId) -> bool {
+pub(crate) fn has_no_fvar(elab: &TermElabM<'_>, e: ExprId) -> bool {
     !elab
         .mctx
         .store()
         .expr_data(Some(elab.view.store), e)
         .has_fvar()
-}
-
-/// oracle: `collectFVars` (`Lean/Util/CollectFVars.lean`) — add every
-/// `fvar` subterm of `e` to `set`. Hash-consing makes the fvar's
-/// `ExprId` its identity.
-fn collect_fvars(elab: &TermElabM<'_>, e: ExprId, set: &mut HashSet<ExprId>) {
-    let mut found = Vec::new();
-    any_subterm(elab, e, has_no_fvar, |_, e, n| {
-        if matches!(n, Node::FVar { .. }) {
-            found.push(e);
-        }
-        false
-    });
-    set.extend(found);
 }
 
 /// oracle `App.lean:1043`, `isFirstOrder`:

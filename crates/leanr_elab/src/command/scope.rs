@@ -34,6 +34,15 @@ pub(crate) struct Scope {
     /// oracle `Scope.levelNames` (`Command/Scope.lean:42`), NEWEST FIRST;
     /// persistent-store ids. Cloned into nested scopes, dropped at `end`.
     pub level_names: Vec<NameId>,
+    /// oracle `Scope.varDecls` (`Command/Scope.lean:52`): bracketed-binder
+    /// syntax, re-elaborated per run (`vars.rs`).
+    pub var_decls: Vec<SyntaxNode>,
+    /// oracle `Scope.varUIds` (`:61`): one id per binder id of
+    /// `var_decls`, flattened, in order.
+    pub var_uids: Vec<u32>,
+    /// oracle `Scope.includedVars` / `omittedVars` (`:63-65`): uids.
+    pub included_vars: Vec<u32>,
+    pub omitted_vars: Vec<u32>,
 }
 
 impl Scope {
@@ -43,6 +52,10 @@ impl Scope {
             curr_namespace: None,
             open_decls: Vec::new(),
             level_names: Vec::new(),
+            var_decls: Vec::new(),
+            var_uids: Vec::new(),
+            included_vars: Vec::new(),
+            omitted_vars: Vec::new(),
         }
     }
 }

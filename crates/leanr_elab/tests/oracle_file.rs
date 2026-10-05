@@ -92,10 +92,35 @@ fn a_mid_file_error_after_successes_keeps_them() {
 }
 
 #[test]
-fn variable_is_an_m4c2c_seam() {
-    let (at, m) = stop_seam("variable (n : Nat)");
+fn variable_seams_carry_their_slice() {
+    // Oracle: `variable {α}` with no prior `α` declares a hole-typed
+    // variable (`replaceBinderAnnotation`, `BuiltinCommand.lean:343`).
+    let (at, m) = stop_seam("variable {α}");
     assert_eq!(at, 0);
-    assert!(m.ends_with(" — M4c-2c"), "{m}");
+    assert!(
+        m.contains("binder-annotation update") && m.ends_with(" — later M4"),
+        "{m}"
+    );
+    // Oracle auto-binds `β` (`runTermElabM`'s `withAutoBoundImplicit`).
+    let (at, m) = stop_seam("variable (x : β)");
+    assert_eq!(at, 0);
+    assert!(
+        m.contains("`variable` binder") && m.ends_with(" — M4c-2c-ii"),
+        "{m}"
+    );
+}
+
+#[test]
+fn section_variables_in_a_theorem_or_axiom_wait_for_task_4() {
+    // Deleted by Task 4.
+    for src in [
+        "variable (n : Nat)\ntheorem t : Eq n n := rfl",
+        "variable (n : Nat)\naxiom a : Eq n n",
+    ] {
+        let (at, m) = stop_seam(src);
+        assert_eq!(at, 1, "{src:?}");
+        assert!(m.ends_with(" — M4c-2c-i Task 4"), "{src:?}: {m}");
+    }
 }
 
 #[test]
@@ -123,14 +148,7 @@ fn empty_source_elaborates_nothing() {
 
 /// Id prefixes of corpus records whose feature is not ported yet. Each
 /// M4c-2c-i task removes its prefixes; Task 6 deletes this list.
-const PENDING: &[&str] = &[
-    "var/",
-    "varThm/",
-    "varAxiom/",
-    "varLevel/",
-    "include/",
-    "omit/",
-];
+const PENDING: &[&str] = &["varThm/", "varAxiom/", "varLevel/", "include/", "omit/"];
 
 fn enabled(id: &str) -> bool {
     !PENDING.iter().any(|p| id.starts_with(p))

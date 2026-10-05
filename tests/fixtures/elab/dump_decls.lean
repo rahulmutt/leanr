@@ -454,6 +454,7 @@ def fileQueries : List (String × String) := [
   ("var/errType", "variable (n : Nat)\nvariable (x : Nat.zero)"),
   ("var/errLaterDecl", "variable (n : Nat)\ndef vf18 : Nat := m"),
   ("var/noType", "variable (n : Nat)\ndef vf19 := n"),
+  ("var/levelMVar", "variable (α : Sort _)\ndef vf20 (a : α) : α := a"),
   ("varThm/header", "variable (n : Nat)\ntheorem vt1 : Eq n n := rfl"),
   ("varThm/unused", "variable (n : Nat)\ntheorem vt2 : Eq Nat.zero Nat.zero := rfl"),
   ("varThm/bodyOnly", "variable (n : Nat)\ntheorem vt3 : Eq Nat.zero Nat.zero := (fun (_ : Nat) => rfl) n"),

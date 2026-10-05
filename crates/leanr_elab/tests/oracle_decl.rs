@@ -58,7 +58,10 @@ fn seam_message(src: &str) -> String {
 fn header_unknown_ident_is_the_auto_bound_seam() {
     // The oracle auto-binds `α` (probe: `def ab (a : α) : α := a` admits `ab.{u_1}`).
     let m = seam_message("def ab (a : α) : α := a");
-    assert!(m.contains("auto-bound") && m.ends_with(" — M4c-2c"), "{m}");
+    assert!(
+        m.contains("auto-bound") && m.ends_with(" — M4c-2c-ii"),
+        "{m}"
+    );
 }
 
 #[test]
