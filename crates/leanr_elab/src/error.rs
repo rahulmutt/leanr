@@ -299,6 +299,13 @@ pub enum ElabError {
     /// a theorem header (or an `include`d variable) references a section
     /// variable the scope `omit`s. Carries the variable's user name.
     OmitReferenced(String),
+    /// oracle: `elabInclude` (`Elab/BuiltinCommand.lean:560`): an
+    /// `include`d id names no binder of the scope's `variable`s. Carries
+    /// the id.
+    IncludeUndeclared(String),
+    /// oracle: `elabOmit` (`Elab/BuiltinCommand.lean:600-602`): an `omit`
+    /// item matched no section variable. Carries the item's text.
+    OmitUnmatched(String),
     /// oracle: `throwNoScope` (`Elab/BuiltinCommand.lean:182-184`): `end`
     /// with only the root scope open.
     EndNoScope,
@@ -569,6 +576,12 @@ impl ElabError {
             Self::OmitReferenced(x) => {
                 Some(format!("cannot omit referenced section variable `{x}`"))
             }
+            Self::IncludeUndeclared(x) => Some(format!(
+                "invalid 'include', variable `{x}` has not been declared in the current scope"
+            )),
+            Self::OmitUnmatched(o) => Some(format!(
+                "`{o}` did not match any variables in the current scope"
+            )),
             Self::UnassignedMVars(line) | Self::UnassignedLevelMVars(line) => Some(line.clone()),
             Self::EndNoScope => Some("Invalid `end`: There is no current scope to end".into()),
             Self::EndMissingName(n) => Some(format!(
@@ -749,6 +762,18 @@ mod tests {
                 .oracle_first_line()
                 .as_deref(),
             Some("cannot omit referenced section variable `n`") // omit/referenced
+        );
+        assert_eq!(
+            ElabError::IncludeUndeclared("m".into())
+                .oracle_first_line()
+                .as_deref(),
+            Some("invalid 'include', variable `m` has not been declared in the current scope") // include/undeclared
+        );
+        assert_eq!(
+            ElabError::OmitUnmatched("[Wrap Nat]".into())
+                .oracle_first_line()
+                .as_deref(),
+            Some("`[Wrap Nat]` did not match any variables in the current scope") // omit/unmatchedInst
         );
         assert_eq!(
             ElabError::UnassignedMVars("don't know how to synthesize placeholder".into())

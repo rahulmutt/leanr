@@ -143,7 +143,7 @@ fn check_motive_type(
 }
 
 /// The immediate subterms `Expr.find?`/`collectFVars` descend into.
-fn children(n: Node) -> impl Iterator<Item = ExprId> {
+fn children(n: Node) -> impl DoubleEndedIterator<Item = ExprId> {
     let (a, b, c) = match n {
         Node::App { f, arg } => (Some(f), Some(arg), None),
         Node::Lam {
@@ -192,7 +192,10 @@ pub(crate) fn any_subterm(
         if p(elab, e, &n) {
             return true;
         }
-        stack.extend(children(n));
+        // Reversed, so subterms pop in the oracle's left-to-right
+        // pre-order (`f` before `a`, domain before body): the order
+        // `collect_fvars` reports fvars in.
+        stack.extend(children(n).rev());
     }
     false
 }

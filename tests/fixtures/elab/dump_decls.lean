@@ -496,7 +496,9 @@ def fileQueries : List (String × String) := [
   ("omit/def", "variable (n : Nat)\nomit n\ndef vo7 : Nat := n"),
   ("omit/axiom", "variable (n : Nat)\nomit n\naxiom vo8 : Eq n n"),
   ("omit/instDefeq", "variable {a : Type} [Dflt a] (x : a)\nomit [Dflt _] in\ntheorem vo9 : Eq x x := rfl"),
-  ("omit/twoMatch", "variable {a : Type} {b : Type} [Dflt a] [Dflt b] (x : a) (y : b)\nomit [Dflt _] in\ntheorem vo10 : Eq (PProd.mk x y) (PProd.mk x y) := rfl")
+  ("omit/twoMatch", "variable {a : Type} {b : Type} [Dflt a] [Dflt b] (x : a) (y : b)\nomit [Dflt _] in\ntheorem vo10 : Eq (PProd.mk x y) (PProd.mk x y) := rfl"),
+  ("omit/referencedOrder", "variable (m : Nat) (n : Nat)\nomit m n in\ntheorem vo11 : Eq n m := rfl"),
+  ("omit/referencedAnonInst", "variable {a : Type} [Dflt a]\nomit [Dflt a] in\ntheorem vo12 : Eq (Dflt.val : a) Dflt.val := rfl")
 ]
 
 /-- The first error-severity message `s` logged, from `messages` and the

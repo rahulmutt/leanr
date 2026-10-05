@@ -135,7 +135,7 @@ fn empty_source_elaborates_nothing() {
 
 /// Id prefixes of corpus records whose feature is not ported yet. Each
 /// M4c-2c-i task removes its prefixes; Task 6 deletes this list.
-const PENDING: &[&str] = &["varAxiom/include", "include/", "omit/"];
+const PENDING: &[&str] = &[];
 
 fn enabled(id: &str) -> bool {
     !PENDING.iter().any(|p| id.starts_with(p))

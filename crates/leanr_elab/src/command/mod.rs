@@ -179,6 +179,8 @@ impl<'x> CommandElab<'x> {
             "Lean.Parser.Command.end" => none(self.elab_end(cmd, kinds)),
             "Lean.Parser.Command.universe" => none(self.elab_universe(cmd, kinds)),
             "Lean.Parser.Command.variable" => none(self.elab_variable(cmd, kinds)),
+            "Lean.Parser.Command.include" => none(self.elab_include(cmd, kinds)),
+            "Lean.Parser.Command.omit" => none(self.elab_omit(cmd, kinds)),
             "Lean.Parser.Command.open" => none(self.elab_open(cmd, kinds)),
             "Lean.Parser.Command.in" => self.elab_in(cmd, kinds),
             "Lean.Parser.Command.declaration" => self.elab_declaration(cmd, kinds),
