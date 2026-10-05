@@ -1,4 +1,8 @@
-//! Command elaboration (M4c). M4c-2b-i: scopes, `open` and declaration
+//! Command elaboration (M4c). M4c-2c-i: scope universe names and section
+//! variables — `universe`/`variable`/`include`/`omit` and the per-kind
+//! inclusion regimes (`vars.rs`, `scope.rs`), spec
+//! `docs/superpowers/specs/2026-10-05-m4c2c-i-universe-variable-design.md`.
+//! M4c-2b-i: scopes, `open` and declaration
 //! names (`scope.rs`, `header.rs`'s `mkDeclName`), spec
 //! `docs/superpowers/specs/2026-10-04-m4c2b-scopes-design.md`.
 //! M4c-2a: a header-less source of many commands
@@ -12,9 +16,12 @@
 //! out-of-scope seams; `header.rs` ports `expandDeclId` and `elabHeaders`'
 //! per-view body; `def.rs` ports `finishElab` → `addPreDefinitions` →
 //! `addNonRecAux` for `def`/`abbrev`/`opaque`/`example` (value, level
-//! params, unassigned-mvar check, declaration build); `levels.rs` ports the
-//! term-level `withLevelNames`/`levelMVarToParam`; `scope.rs` holds the
-//! scope stack and the scope commands. This file owns [`CommandElab`],
+//! params, unassigned-mvar check, declaration build); `axiom.rs` builds an
+//! `axiom`; `levels.rs` ports the term-level
+//! `withLevelNames`/`levelMVarToParam`; `scope.rs` holds the scope stack
+//! and the scope commands (including `universe`); `vars.rs` holds the
+//! section-variable runner, `variable`/`include`/`omit` and the inclusion
+//! helpers. This file owns [`CommandElab`],
 //! the command dispatch and the kernel commit.
 
 mod axiom;
@@ -22,6 +29,7 @@ mod def;
 mod header;
 mod levels;
 mod scope;
+mod vars;
 pub(crate) mod view;
 
 use leanr_kernel::bank::scratch::promote_name;
@@ -29,13 +37,15 @@ use leanr_kernel::bank::{NameId, Store};
 use leanr_kernel::{check_declaration, Declaration, Environment};
 use leanr_meta::{aux_lemma_key, AuxLemmaCache, Config, EnvExtensions, MetaCtx};
 use leanr_syntax::kind::KindInterner;
-use leanr_syntax::tree::SyntaxNode;
+use leanr_syntax::tree::{NodeOrToken, SyntaxNode};
 
+use crate::dispatch::non_trivia_children;
 use crate::elab::TermElabM;
 use crate::error::ElabError;
 use crate::names::NameTables;
 use crate::resolve::ResolveCtx;
 use scope::Scope;
+use vars::SecVars;
 use view::{expand_decl_namespace, DefKind, DefView};
 
 /// What one declaration's elaboration scope hands to the commit step.
@@ -85,6 +95,10 @@ pub struct CommandElab<'x> {
     /// `protectedExt`, `namespacesExt` and `aliasExtension`, grown as the
     /// source declares names and opens namespaces.
     tables: NameTables,
+    /// The next section-variable uid (`elabVariable`'s fresh macro-scoped
+    /// `varUIds`, `BuiltinCommand.lean:428`). The oracle's uids are only
+    /// map keys, so a counter is enough.
+    next_var_uid: u32,
 }
 
 impl<'x> CommandElab<'x> {
@@ -95,6 +109,7 @@ impl<'x> CommandElab<'x> {
             aux_cache: AuxLemmaCache::new(),
             scopes: vec![Scope::root()],
             tables,
+            next_var_uid: 0,
         }
     }
 
@@ -169,6 +184,10 @@ impl<'x> CommandElab<'x> {
             "Lean.Parser.Command.namespace" => none(self.elab_namespace(cmd, kinds)),
             "Lean.Parser.Command.section" => none(self.elab_section(cmd, kinds)),
             "Lean.Parser.Command.end" => none(self.elab_end(cmd, kinds)),
+            "Lean.Parser.Command.universe" => none(self.elab_universe(cmd, kinds)),
+            "Lean.Parser.Command.variable" => none(self.elab_variable(cmd, kinds)),
+            "Lean.Parser.Command.include" => none(self.elab_include(cmd, kinds)),
+            "Lean.Parser.Command.omit" => none(self.elab_omit(cmd, kinds)),
             "Lean.Parser.Command.open" => none(self.elab_open(cmd, kinds)),
             "Lean.Parser.Command.in" => self.elab_in(cmd, kinds),
             "Lean.Parser.Command.declaration" => self.elab_declaration(cmd, kinds),
@@ -201,10 +220,32 @@ impl<'x> CommandElab<'x> {
         view: &DefView,
         kinds: &KindInterner,
     ) -> Result<Vec<NameId>, ElabError> {
-        // One scratch store per declaration: `add_decl_in`'s scratch
-        // lifecycle contract (`leanr_kernel/src/env.rs`).
+        let (built, mut scratch) = self.with_term_elab(kinds, |elab, sv| match view.kind {
+            DefKind::Axiom => axiom::elab_axiom(elab, view, kinds, sv),
+            _ => def::elab_def(elab, view, kinds, &self.aux_cache, sv),
+        })?;
+        let names = self.commit(&mut scratch, built)?;
+        // `applyVisibility`'s `addProtected` (`DeclModifiers.lean:249-250`).
+        if let (true, Some(&main)) = (view.protected, names.last()) {
+            self.tables.add_protected(main);
+        }
+        Ok(names)
+    }
+
+    /// One scratch `TermElabM` over the environment with the head scope's
+    /// resolution context, level names and section variables (oracle
+    /// `runTermElabM`, `Elab/Command.lean:774-797`); `f` runs with the
+    /// variables in the local context. Returns `f`'s result and the
+    /// scratch store (for `commit`): one scratch store per run,
+    /// `add_decl_in`'s scratch lifecycle contract
+    /// (`leanr_kernel/src/env.rs`).
+    fn with_term_elab<R>(
+        &self,
+        kinds: &KindInterner,
+        f: impl FnOnce(&mut TermElabM, &SecVars) -> Result<R, ElabError>,
+    ) -> Result<(R, Store), ElabError> {
         let mut scratch = Store::scratch();
-        let built = {
+        let out = {
             let env_view = self.env.view();
             let mctx = MetaCtx::new(env_view, &mut scratch, Config::default(), self.exts);
             let mut elab = TermElabM::new(mctx, env_view);
@@ -215,17 +256,87 @@ impl<'x> CommandElab<'x> {
                 tables: &self.tables,
                 aux_decl: None,
             };
-            match view.kind {
-                DefKind::Axiom => axiom::elab_axiom(&mut elab, view, kinds),
-                _ => def::elab_def(&mut elab, view, kinds, &self.aux_cache),
-            }?
+            // `liftTermElabM`: the scope's `levelNames` seed the term context.
+            elab.level_names = head.level_names.clone();
+            let fvars = vars::elab_section_vars(&mut elab, &head.var_decls, kinds)?;
+            if fvars.len() != head.var_uids.len() {
+                return Err(ElabError::Internal(
+                    "section variables: one uid per binder id".into(),
+                ));
+            }
+            let sv = SecVars {
+                fvars,
+                uids: head.var_uids.clone(),
+                included: head.included_vars.clone(),
+                omitted: head.omitted_vars.clone(),
+            };
+            f(&mut elab, &sv)
+        }?;
+        Ok((out, scratch))
+    }
+
+    /// oracle: `elabVariable` (`BuiltinCommand.lean:415-430`):
+    /// `[<atom> "variable", null(bracketedBinder+)]`.
+    pub(crate) fn elab_variable(
+        &mut self,
+        cmd: &SyntaxNode,
+        kinds: &KindInterner,
+    ) -> Result<(), ElabError> {
+        let binders: Vec<SyntaxNode> = match non_trivia_children(cmd).get(1) {
+            Some(NodeOrToken::Node(n)) => non_trivia_children(n)
+                .into_iter()
+                .map(|el| match el {
+                    NodeOrToken::Node(b) => Ok(b),
+                    NodeOrToken::Token(_) => Err(ElabError::IllFormedSyntax(
+                        "variable: expected a bracketed binder".into(),
+                    )),
+                })
+                .collect::<Result<_, _>>()?,
+            _ => {
+                return Err(ElabError::IllFormedSyntax(
+                    "variable: expected a binder list".into(),
+                ))
+            }
         };
-        let names = self.commit(&mut scratch, built)?;
-        // `applyVisibility`'s `addProtected` (`DeclModifiers.lean:249-250`).
-        if let (true, Some(&main)) = (view.protected, names.last()) {
-            self.tables.add_protected(main);
+        // `replaceBinderAnnotation` (`:343-413`) acts on a typeless binder:
+        // `(x)`/`{x}`/`⦃x⦄` always, `[x]` when `x` is a section variable.
+        let head = self.scopes.last().expect("the root scope is never popped");
+        let mut var_ids = Vec::new();
+        for b in &head.var_decls {
+            var_ids.extend(vars::bracketed_binder_ids(b, kinds)?);
         }
-        Ok(names)
+        for b in &binders {
+            let update = vars::typeless_binder(b, kinds)
+                || vars::inst_binder_ident(b, kinds)?.is_some_and(|id| var_ids.contains(&Some(id)));
+            if update {
+                return Err(ElabError::UnsupportedSyntax(
+                    "variable binder-annotation update (`replaceBinderAnnotation`) — later M4"
+                        .into(),
+                ));
+            }
+        }
+        // The sanity elaboration (`:419-425`): the scope's variables, then these.
+        self.with_term_elab(kinds, |elab, _| {
+            vars::elab_section_vars(elab, &binders, kinds).map(|_| ())
+        })?;
+        // `:427-429`: one fresh uid per binder id.
+        let mut n_ids = 0usize;
+        for b in &binders {
+            n_ids += vars::bracketed_binder_ids(b, kinds)?.len();
+        }
+        let first = self.next_var_uid;
+        let end = u32::try_from(n_ids)
+            .ok()
+            .and_then(|n| first.checked_add(n))
+            .ok_or_else(|| ElabError::Internal("section variable uid overflow".into()))?;
+        self.next_var_uid = end;
+        let head = self
+            .scopes
+            .last_mut()
+            .expect("the root scope is never popped");
+        head.var_decls.extend(binders);
+        head.var_uids.extend(first..end);
+        Ok(())
     }
 
     fn commit(&mut self, scratch: &mut Store, built: Built) -> Result<Vec<NameId>, ElabError> {
@@ -300,13 +411,11 @@ fn label_seam(e: ElabError) -> ElabError {
 }
 
 /// The named seam for a command `elab_command` does not port, labelled
-/// with the slice that ports it (spec § Decomposition).
+/// with the slice that ports it (spec § Decomposition). Since M4c-2c-i
+/// (`universe`/`variable`/`include`/`omit` became dispatch arms) every
+/// remaining command is `— later M4`.
 pub(crate) fn command_seam(kind: &str) -> ElabError {
-    let slice = match kind {
-        "Lean.Parser.Command.universe" | "Lean.Parser.Command.variable" => "M4c-2c",
-        _ => "later M4",
-    };
-    ElabError::UnsupportedSyntax(format!("command `{kind}` — {slice}"))
+    ElabError::UnsupportedSyntax(format!("command `{kind}` — later M4"))
 }
 
 fn decl_name(d: &Declaration) -> Result<NameId, ElabError> {

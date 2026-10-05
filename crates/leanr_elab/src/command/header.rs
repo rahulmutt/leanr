@@ -42,10 +42,10 @@ pub(super) fn intern_atomic(elab: &mut TermElabM, s: &str) -> Result<NameId, Ela
 }
 
 /// oracle: `expandDeclId` (`DeclModifiers.lean:326-343`). The `.{…}` fold
-/// conses onto the scope's level names (`[]` in M4c-1) and rejects a
+/// conses onto the scope's level names and rejects a
 /// repeat. Then `mkDeclName` (`:263-286`) over `elab.resolve.ns`.
 pub(super) fn expand_decl_id(elab: &mut TermElabM, view: &DefView) -> Result<DeclId, ElabError> {
-    let mut level_names: Vec<NameId> = Vec::new();
+    let mut level_names: Vec<NameId> = elab.level_names.clone();
     for u in &view.univ_names {
         let id = intern_atomic(elab, u)?;
         if level_names.contains(&id) {
@@ -263,11 +263,11 @@ fn numbered(s: &str, prefix: &str) -> bool {
 /// oracle: `elabHeaders` runs under `withAutoBoundImplicit`
 /// (`MutualDef.lean:257`; `elabAxiom` too, `Declaration.lean:109`): an
 /// unbound identifier or universe in a header is auto-bound, not an error.
-/// Auto-bound implicits are M4c-2c.
+/// Auto-bound implicits are M4c-2c-ii.
 pub(super) fn unknown_ident_to_auto_bound_seam(e: ElabError) -> ElabError {
     match e {
         ElabError::UnknownIdent(s) => ElabError::UnsupportedSyntax(format!(
-            "unbound `{s}` in a declaration header (auto-bound implicit) — M4c-2c"
+            "unbound `{s}` in a declaration header (auto-bound implicit) — M4c-2c-ii"
         )),
         e => e,
     }

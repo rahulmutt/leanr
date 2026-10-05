@@ -31,6 +31,18 @@ pub(crate) struct Scope {
     /// NEWEST FIRST, as the oracle's list (`Elab/Open.lean:46` conses):
     /// `resolve_open_decls` / `resolve_namespace` walk it in this order.
     pub open_decls: Vec<OpenDecl>,
+    /// oracle `Scope.levelNames` (`Command/Scope.lean:42`), NEWEST FIRST;
+    /// persistent-store ids. Cloned into nested scopes, dropped at `end`.
+    pub level_names: Vec<NameId>,
+    /// oracle `Scope.varDecls` (`Command/Scope.lean:52`): bracketed-binder
+    /// syntax, re-elaborated per run (`vars.rs`).
+    pub var_decls: Vec<SyntaxNode>,
+    /// oracle `Scope.varUIds` (`:61`): one id per binder id of
+    /// `var_decls`, flattened, in order.
+    pub var_uids: Vec<u32>,
+    /// oracle `Scope.includedVars` / `omittedVars` (`:63-65`): uids.
+    pub included_vars: Vec<u32>,
+    pub omitted_vars: Vec<u32>,
 }
 
 impl Scope {
@@ -39,6 +51,11 @@ impl Scope {
             header: String::new(),
             curr_namespace: None,
             open_decls: Vec::new(),
+            level_names: Vec::new(),
+            var_decls: Vec::new(),
+            var_uids: Vec::new(),
+            included_vars: Vec::new(),
+            omitted_vars: Vec::new(),
         }
     }
 }
@@ -395,6 +412,30 @@ impl CommandElab<'_> {
             }
         }
         self.pop_scopes(end_size);
+        Ok(())
+    }
+
+    /// oracle: `elabUniverse` (`BuiltinCommand.lean:283-284`) →
+    /// `addUnivLevel` (`Command.lean:831-837`): per name, the
+    /// already-declared error, else cons onto the head scope's names.
+    pub(crate) fn elab_universe(
+        &mut self,
+        cmd: &SyntaxNode,
+        kinds: &KindInterner,
+    ) -> Result<(), ElabError> {
+        let ch = non_trivia_children(cmd);
+        for comps in idents(ch.get(1), kinds)? {
+            let id = intern_onto(self.env.store_mut(), None, None, &comps)?
+                .ok_or_else(|| ill("empty universe name"))?;
+            let head = self
+                .scopes
+                .last_mut()
+                .expect("the root scope is never popped");
+            if head.level_names.contains(&id) {
+                return Err(ElabError::UniverseAlreadyDeclared(comps.join(".")));
+            }
+            head.level_names.insert(0, id);
+        }
         Ok(())
     }
 

@@ -142,7 +142,7 @@ fn check_motive_type(
 }
 
 /// The immediate subterms `Expr.find?`/`collectFVars` descend into.
-fn children(n: Node) -> impl Iterator<Item = ExprId> {
+fn children(n: Node) -> impl DoubleEndedIterator<Item = ExprId> {
     let (a, b, c) = match n {
         Node::App { f, arg } => (Some(f), Some(arg), None),
         Node::Lam {
@@ -191,7 +191,10 @@ fn any_subterm(
         if p(elab, e, &n) {
             return true;
         }
-        stack.extend(children(n));
+        // Reversed, so subterms pop in the oracle's left-to-right
+        // pre-order (`f` before `a`, domain before body): the order
+        // `collect_fvars` reports fvars in.
+        stack.extend(children(n).rev());
     }
     false
 }
@@ -208,7 +211,13 @@ fn has_no_fvar(elab: &TermElabM<'_>, e: ExprId) -> bool {
 /// oracle: `collectFVars` (`Lean/Util/CollectFVars.lean`) — add every
 /// `fvar` subterm of `e` to `set`. Hash-consing makes the fvar's
 /// `ExprId` its identity.
-fn collect_fvars(elab: &TermElabM<'_>, e: ExprId, set: &mut HashSet<ExprId>) {
+pub(crate) fn collect_fvars(elab: &TermElabM<'_>, e: ExprId, set: &mut HashSet<ExprId>) {
+    set.extend(fvars_in_order(elab, e));
+}
+
+/// The distinct `fvar` subterms of `e`, in first-visit pre-order
+/// (`any_subterm`'s order).
+pub(crate) fn fvars_in_order(elab: &TermElabM<'_>, e: ExprId) -> Vec<ExprId> {
     let mut found = Vec::new();
     any_subterm(elab, e, has_no_fvar, |_, e, n| {
         if matches!(n, Node::FVar { .. }) {
@@ -216,7 +225,7 @@ fn collect_fvars(elab: &TermElabM<'_>, e: ExprId, set: &mut HashSet<ExprId>) {
         }
         false
     });
-    set.extend(found);
+    found
 }
 
 /// oracle `App.lean:1043`, `isFirstOrder`:

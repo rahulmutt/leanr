@@ -663,6 +663,18 @@ impl<'e> MetaCtx<'e> {
         previous
     }
 
+    /// The current local context with every fvar in `xs` erased, installed
+    /// as the ambient one (oracle `withLCtx lctx localInsts` after
+    /// `removeUnused`, `Elab/MutualDef.lean:461-462`). Returns the context
+    /// it replaced; the caller reinstalls it with `install_lctx`. Built on
+    /// `reduce_local_context`, so local instances are filtered and
+    /// renumbered with the decls. Additive: no existing path calls it.
+    pub fn erase_locals(&mut self, xs: &[ExprId]) -> Result<Arc<LocalCtxSnapshot>, MetaError> {
+        let cur = self.current_lctx();
+        let reduced = self.reduce_local_context(&cur, xs)?;
+        Ok(self.install_lctx(reduced))
+    }
+
     /// oracle: `MVarId.withContext` / `withMVarContextImp`
     /// (`Meta/Basic.lean:2043-2052`) — `withLocalContextImp mvarDecl.lctx
     /// mvarDecl.localInstances x`. Runs `f` with the metavariable's own
@@ -2558,6 +2570,54 @@ mod tests {
             assert!(ctx.local_entry(hid).is_none());
             let _previous = ctx.install_lctx(snap);
             assert!(ctx.local_entry(hid).expect("reinstalled row").nondep);
+        });
+    }
+
+    /// `erase_locals` drops the named fvar from the names, the decls and the
+    /// local instances, keeps the others, and the returned snapshot puts
+    /// all of it back.
+    #[test]
+    fn erase_locals_drops_the_decl_and_its_instance_and_reinstalls() {
+        with_class_ctx(|ctx, add| {
+            let add_n = class_app(ctx, add);
+            let n = const_named(ctx, "N");
+            let name = |ctx: &mut MetaCtx, s: &str| {
+                let base = Some(ctx.view.store);
+                let s = ctx.scratch.intern_str(base, s).expect("intern");
+                ctx.scratch.name_str(base, None, s).expect("name")
+            };
+            let (na, ni, nb) = (name(ctx, "a"), name(ctx, "i"), name(ctx, "b"));
+            let cp = ctx.lctx_checkpoint();
+            let a = ctx
+                .push_local_decl(Some(na), n, BinderInfo::Default)
+                .expect("a");
+            let i = ctx
+                .push_local_decl(Some(ni), add_n, BinderInfo::InstImplicit)
+                .expect("i");
+            let b = ctx
+                .push_local_decl(Some(nb), n, BinderInfo::Default)
+                .expect("b");
+            assert_eq!(ctx.local_instances.entries().len(), 1);
+
+            let prev = ctx.erase_locals(&[i]).expect("erase");
+            assert_eq!(ctx.lctx_lookup_by_name(ni), None, "`i` is erased");
+            assert!(
+                ctx.local_instances.entries().is_empty(),
+                "its local instance goes with it"
+            );
+            assert_eq!(ctx.lctx_lookup_by_name(na), Some(a));
+            assert_eq!(ctx.lctx_lookup_by_name(nb), Some(b));
+            let ib = fvar_id(ctx, b);
+            assert!(ctx.lctx.get(fvar_id(ctx, i)).is_none(), "decl erased");
+            assert!(ctx.lctx.get(ib).is_some(), "`b`'s decl kept");
+
+            ctx.install_lctx(prev);
+            assert_eq!(ctx.lctx_lookup_by_name(ni), Some(i));
+            assert_eq!(ctx.lctx_lookup_by_name(na), Some(a));
+            assert_eq!(ctx.lctx_lookup_by_name(nb), Some(b));
+            assert_eq!(ctx.local_instances.entries().len(), 1);
+            assert_eq!(ctx.local_instances.entries()[0].fvar, i);
+            ctx.lctx_restore(cp);
         });
     }
 

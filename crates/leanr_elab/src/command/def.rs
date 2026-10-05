@@ -30,6 +30,7 @@ use leanr_meta::{
 use leanr_syntax::kind::KindInterner;
 
 use super::header::{self, DeclId, Header};
+use super::vars::{self, SecVars};
 use super::view::{DefKind, DefView};
 use super::Built;
 use crate::builtin::binder::fun::cleanup_annotations;
@@ -55,29 +56,73 @@ pub(super) fn elab_def(
     view: &DefView,
     kinds: &KindInterner,
     aux_cache: &AuxLemmaCache,
+    sv: &SecVars,
 ) -> Result<Built, ElabError> {
     let id = header::expand_decl_id(elab, view)?;
+    // `scopeLevelNames`, read before any `with_level_names`.
+    let scope = elab.level_names.clone();
     let header = header::elab_header(elab, view, &id, kinds)?;
     let header = level_mvar_to_param_headers(elab, view.kind, header)?;
+    let is_thm = view.kind == DefKind::Theorem;
+    // `elabFunValues`' `withHeaderSecVars vars sc #[header]` (`MutualDef.lean:
+    // 534`; also `elabAsync`'s, `:1279`): the theorem's kept section
+    // variables, checked against `omit`.
+    let kept = if is_thm {
+        vars::header_sec_vars(elab, sv, &[header.ty], true)?
+    } else {
+        Vec::new()
+    };
     // `Elab.async` is on, as on the `lean` command line
     // (`Elab/Frontend.lean:291-292`): a theorem whose header has no mvars
     // takes `elabAsync` (`MutualDef.lean:1236-1242`). The test runs after
     // the header conversion, so only expression mvars can block it.
     let base = Some(elab.view.store);
     let d = elab.mctx.store().expr_data(base, header.ty);
-    if view.kind == DefKind::Theorem && !d.has_expr_mvar() && !d.has_level_mvar() {
-        check_async_signature(elab, &header)?;
-    }
-    let value = elab_value(elab, view, &id, &header, kinds)?;
+    let async_sig = if is_thm && !d.has_expr_mvar() && !d.has_level_mvar() {
+        Some(check_async_signature(elab, &header, &kept, &scope)?)
+    } else {
+        None
+    };
+    // A theorem body runs in the RESTRICTED context: the section variables
+    // `withHeaderSecVars` drops are erased (`removeUnused` → `withLCtx`,
+    // `:461-462`), so a proof naming one fails to resolve it.
+    let value = if is_thm {
+        let erase: Vec<ExprId> = sv
+            .fvars
+            .iter()
+            .copied()
+            .filter(|x| !kept.contains(x))
+            .collect();
+        let prev = elab.mctx.erase_locals(&erase)?;
+        let value = elab_value(elab, view, &id, &header, kinds);
+        elab.mctx.install_lctx(prev);
+        value?
+    } else {
+        elab_value(elab, view, &id, &header, kinds)?
+    };
     // `finishElab` (`MutualDef.lean:1394-1401`): synthesize once more, then
     // instantiate the values and the headers.
     elab.synthesize_synthetic_mvars_no_postponing(kinds)?;
     let value = elab.mctx.instantiate_mvars(value)?;
     let ty = elab.mctx.instantiate_mvars(header.ty)?;
     // `MutualClosure.pushMain` (`MutualDef.lean:1051-1053`).
-    if view.kind == DefKind::Theorem && !is_prop_full(elab, ty)? {
+    if is_thm && !is_prop_full(elab, ty)? {
         return Err(ElabError::TheoremTypeNotProp(full_name(elab, id.name)));
     }
+    // `withHeaderSecVars (check := false)` for a theorem, else `withUsed
+    // vars headers values` → `MutualClosure.main` (`MutualDef.lean:
+    // 1421-1424`): the kept section variables close the type and value.
+    // BEFORE `levelMVarToParamTypesPreDecls`, `fixLevelParams` and
+    // `abstractNestedProofs`, which all see the closed terms.
+    let kept = if is_thm {
+        vars::header_sec_vars(elab, sv, &[ty], false)?
+    } else {
+        vars::used_vars(elab, &sv.fvars, &[ty, value])?
+    };
+    let (ty, value) = (
+        elab.mctx.mk_forall(&kept, ty)?,
+        elab.mctx.mk_lambda(&kept, value)?,
+    );
     // `levelMVarToParamTypesPreDecls` under `withLevelNames allUserLevelNames`
     // (`MutualDef.lean:1434`; `PreDefinition/Basic.lean:56-58`): TYPES only.
     let ty = elab.with_level_names(header.level_names.clone(), |elab| {
@@ -87,7 +132,28 @@ pub(super) fn elab_def(
     let ty = elab.mctx.instantiate_mvars(ty)?;
     let value = elab.mctx.instantiate_mvars(value)?;
     // `fixLevelParams preDefs scopeLevelNames allUserLevelNames` (`:1437-1438`).
-    let level_params = fix_level_params(elab, &[ty, value], &header.level_names)?;
+    let level_params = fix_level_params(elab, &[ty, value], &scope, &header.level_names)?;
+    // `elabAsync`'s `AddConstAsyncResult.commitConst` (`Environment.lean:
+    // 1104-1105`): the finished theorem's level params must equal the
+    // signature's. A scope universe used only in the proof is in the
+    // former (the value's) but not the latter (the type's, where a scope
+    // name is exempt from "unused"): `universe/thmBodyOnlyScope`.
+    if let Some(sig) = async_sig {
+        if sig != level_params {
+            let render = |ns: &[NameId]| {
+                let base = Some(elab.view.store);
+                let ns: Vec<String> = ns
+                    .iter()
+                    .map(|&n| crate::names::render(elab.mctx.store(), base, Some(n)))
+                    .collect();
+                format!("[{}]", ns.join(", "))
+            };
+            return Err(ElabError::AsyncLevelParamsMismatch {
+                got: render(&level_params),
+                expected: render(&sig),
+            });
+        }
+    }
     // `addPreDefinitions` → `ensureNoUnassignedMVarsAtPreDef` (`Main.lean:294`).
     // `preDef.declName` (`PreDefinition/Main.lean:84-93`): the full name.
     ensure_no_unassigned_mvars_at_pre_def(elab, &full_name(elab, id.name), ty, value)?;
@@ -152,19 +218,35 @@ fn level_mvar_to_param_headers(
 /// only in the proof is "unused" (probe: `theorem ta.{u} : True :=
 /// (fun (_ : Sort u) => True.intro) PUnit.{u}`). The body then runs
 /// `finishElab` as for a definition.
-fn check_async_signature(elab: &mut TermElabM, header: &Header) -> Result<(), ElabError> {
-    let ty0 = header.ty;
+///
+/// Returns the signature's level params, which `elab_def` compares with
+/// the finished theorem's (`commitConst`'s level-param check). Not
+/// modelled: `commitConst`'s TYPE-equality check (`Environment.lean:
+/// 1106-1107`, "constant has type … but expected …"); no reproducer is
+/// known, since the finished type is the same closed, instantiated header
+/// type.
+fn check_async_signature(
+    elab: &mut TermElabM,
+    header: &Header,
+    kept: &[ExprId],
+    scope: &[NameId],
+) -> Result<Vec<NameId>, ElabError> {
+    // `withHeaderSecVars … fun vars => mkForallFVars vars header.type`
+    // (`:1279-1280`): the kept section variables' universes count.
+    let ty0 = elab.mctx.mk_forall(kept, header.ty)?;
     // `withLevelNames allUserLevelNames <| levelMVarToParam type`
-    // (`:1281-1282`): a no-op after `level_mvar_to_param_headers`, kept for
-    // fidelity.
+    // (`:1281-1282`): names the kept section variables' universe mvars
+    // (the header's own are already params) BEFORE the body runs, so the
+    // body cannot pin them (`varLevel/thmBodyPinsHole`).
     let ty = elab.with_level_names(header.level_names.clone(), |elab| {
         elab.level_mvar_to_param(ty0)
     })?;
     let ty = elab.mctx.instantiate_mvars(ty)?;
-    // `collectLevelParams` over the type, `sortDeclLevelParams [] allUser used` (`:1288-1291`).
-    fix_level_params(elab, &[ty], &header.level_names)?;
+    // `collectLevelParams` over the type, `sortDeclLevelParams scope allUser used` (`:1288-1291`).
+    let level_params = fix_level_params(elab, &[ty], scope, &header.level_names)?;
     // `Meta.letToHave type` (`:1293-1296`): the letToHave seam.
-    reject_let(elab, ty)
+    reject_let(elab, ty)?;
+    Ok(level_params)
 }
 
 /// oracle: `Meta.isProp` (`Meta/InferType.lean:323-332`): `inferType`, then
@@ -257,10 +339,11 @@ fn elab_value(
 }
 
 /// oracle: `getLevelParamsPreDecls` (`PreDefinition/Basic.lean:66-73`):
-/// collect from each expression, then `sortDeclLevelParams [] allUser used`.
+/// collect from each expression, then `sortDeclLevelParams scope allUser used`.
 pub(super) fn fix_level_params(
     elab: &mut TermElabM,
     exprs: &[ExprId],
+    scope: &[NameId],
     all_user: &[NameId],
 ) -> Result<Vec<NameId>, ElabError> {
     let mut s = CollectLevelParams::default();
@@ -268,7 +351,7 @@ pub(super) fn fix_level_params(
         elab.mctx.collect_level_params(&mut s, e)?;
     }
     let base = Some(elab.view.store);
-    sort_decl_level_params(elab.mctx.store(), base, &[], all_user, &s.params).map_err(|u| {
+    sort_decl_level_params(elab.mctx.store(), base, scope, all_user, &s.params).map_err(|u| {
         ElabError::UnusedUniverseParam(elab.mctx.store().to_name(base, Some(u)).to_string())
     })
 }

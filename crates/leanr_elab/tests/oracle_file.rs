@@ -8,8 +8,9 @@
 mod support;
 
 /// `wc -l tests/fixtures/elab/file-queries.jsonl` at the last deliberate
-/// regen. `>=`: adding a record is a one-line bump, not a failing gate.
-const CORPUS_FLOOR: usize = 131;
+/// regen (M4c-2c-i final review: 214). `>=`: adding a record is a one-line bump, not a
+/// failing gate.
+const CORPUS_FLOOR: usize = 214;
 
 #[test]
 fn file_corpus_sources_parse_into_the_oracle_commands() {
@@ -92,12 +93,30 @@ fn a_mid_file_error_after_successes_keeps_them() {
 }
 
 #[test]
-fn universe_and_variable_are_m4c2c_seams() {
-    for src in ["universe u", "variable (n : Nat)"] {
-        let (at, m) = stop_seam(src);
-        assert_eq!(at, 0);
-        assert!(m.ends_with(" — M4c-2c"), "{src:?}: {m}");
-    }
+fn variable_seams_carry_their_slice() {
+    // Oracle: `variable {α}` with no prior `α` declares a hole-typed
+    // variable (`replaceBinderAnnotation`, `BuiltinCommand.lean:343`).
+    let (at, m) = stop_seam("variable {α}");
+    assert_eq!(at, 0);
+    assert!(
+        m.contains("binder-annotation update") && m.ends_with(" — later M4"),
+        "{m}"
+    );
+    // `[inst]` naming an existing section variable is an update too
+    // (`replaceBinderAnnotation`'s instBinder case): the second command.
+    let (at, m) = stop_seam("variable {a : Type} [inst : Dflt a]\nvariable [inst]");
+    assert_eq!(at, 1);
+    assert!(
+        m.contains("binder-annotation update") && m.ends_with(" — later M4"),
+        "{m}"
+    );
+    // Oracle auto-binds `β` (`runTermElabM`'s `withAutoBoundImplicit`).
+    let (at, m) = stop_seam("variable (x : β)");
+    assert_eq!(at, 0);
+    assert!(
+        m.contains("`variable` binder") && m.ends_with(" — M4c-2c-ii"),
+        "{m}"
+    );
 }
 
 #[test]
