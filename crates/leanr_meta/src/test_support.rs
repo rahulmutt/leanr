@@ -116,6 +116,58 @@ pub(crate) fn fresh_mvar_of_kind(
     (expr, id)
 }
 
+/// [`fresh_mvar`] with a declared `user_name` (M4c-2c-ii P1 task 2):
+/// `mk_binding`'s mvar arm names the binder after it
+/// (`MetavarContext.lean:1343`), so the test that pins that needs one.
+/// Same counter and empty local context as [`fresh_mvar`].
+pub(crate) fn fresh_named_mvar(ctx: &mut MetaCtx, ty: ExprId, user_name: &str) -> ExprId {
+    let (e, id) = fresh_mvar(ctx, ty);
+    let base = Some(ctx.view.store);
+    let s = ctx.scratch.intern_str(base, user_name).expect("intern");
+    let n = ctx.scratch.name_str(base, None, s).expect("name");
+    redeclare(ctx, id, |d| d.user_name = Some(n));
+    e
+}
+
+/// [`fresh_mvar`] declared at the CURRENT local context (M4c-2c-ii P1
+/// task 2), so `elimMVarDeps` sees the fvars in scope — the shape a
+/// telescope mvar minted after an earlier telescope fvar has.
+pub(crate) fn fresh_mvar_in_lctx(ctx: &mut MetaCtx, ty: ExprId) -> ExprId {
+    let (e, id) = fresh_mvar(ctx, ty);
+    let lctx = ctx.current_lctx();
+    redeclare(ctx, id, |d| d.lctx = lctx);
+    e
+}
+
+/// Re-declare `id` with `edit` applied to a copy of its declaration
+/// (`MVarDecl` has no `Clone`: `LocalContext` has none).
+fn redeclare(ctx: &mut MetaCtx, id: MVarId, edit: impl FnOnce(&mut MVarDecl)) {
+    let d = ctx.mctx_mut().decl(id).expect("just declared");
+    let mut decl = MVarDecl {
+        user_name: d.user_name,
+        ty: d.ty,
+        lctx: std::sync::Arc::clone(&d.lctx),
+        kind: d.kind,
+        num_scope_args: d.num_scope_args,
+    };
+    edit(&mut decl);
+    ctx.mctx_mut().declare(id, decl);
+}
+
+/// `Expr.const Nat []`'s level-filled form over a fixture that declares
+/// `Nat` (`with_prelude0_ctx`); the name the M4c-2c-ii P1 task 2 brief uses.
+pub(crate) fn nat_ty(ctx: &mut MetaCtx) -> ExprId {
+    const_named(ctx, "Nat")
+}
+
+/// The `binder_name` `push_local_decl` recorded for the fvar `x`.
+pub(crate) fn lctx_decl_name(ctx: &MetaCtx, x: ExprId) -> Option<NameId> {
+    let leanr_kernel::bank::terms::Node::FVar { id: Some(id) } = ctx.node(x) else {
+        panic!("lctx_decl_name: not an fvar")
+    };
+    ctx.lctx.get(id).expect("declared fvar").binder_name
+}
+
 /// Mint a fresh free variable of type `ty`, declared directly in
 /// `ctx.lctx` (task 6, promoted here per the task brief: `defeq.rs`'s
 /// own `is_def_eq_binding_shallow_body` is the production-code idiom

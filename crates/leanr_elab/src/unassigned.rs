@@ -157,12 +157,13 @@ impl TermElabM<'_> {
 
     /// oracle: `Name.hasMacroScopes` (`Init/Prelude.lean`): the last string
     /// component is `_hyg`, looking through numeric components. leanr's own
-    /// fresh names (`_leanr_elab_*`) stand in for the oracle's macro-scoped
-    /// ones, so they count as well.
+    /// fresh names (`_leanr_*`: `leanr_elab`'s `_leanr_elab_*`, `leanr_meta`'s
+    /// `mkFreshBinderName` stand-in `_leanr_mkbinding_fresh.<n>`) stand in for
+    /// the oracle's macro-scoped ones, so they count as well.
     pub(crate) fn name_has_macro_scopes(&self, n: NameId) -> bool {
         let base = Some(self.view.store);
         let s = self.mctx.store().to_name(base, Some(n)).to_string();
-        if s.starts_with("_leanr_elab_") {
+        if s.starts_with("_leanr_") {
             return true;
         }
         s.split('.')
@@ -244,5 +245,59 @@ impl TermElabM<'_> {
             }
         }
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use leanr_kernel::bank::{NameId, Store};
+    use leanr_kernel::{Environment, Nat};
+    use leanr_meta::{Config, EnvExtensions, MetaCtx};
+
+    use crate::elab::TermElabM;
+
+    /// `a.b.<n>…` with numeric components where `parts` holds a number.
+    fn name(elab: &mut TermElabM<'_>, parts: &[&str]) -> NameId {
+        let s = elab.mctx.store_mut();
+        let mut n = None;
+        for p in parts {
+            n = Some(match p.parse::<u64>() {
+                Ok(k) => {
+                    let k = s.intern_nat(None, &Nat::from(k)).unwrap();
+                    s.name_num(None, n, k).unwrap()
+                }
+                Err(_) => {
+                    let p = s.intern_str(None, p).unwrap();
+                    s.name_str(None, n, p).unwrap()
+                }
+            });
+        }
+        n.unwrap()
+    }
+
+    /// leanr's fresh-name stand-ins for macro scopes count as macro-scoped:
+    /// `leanr_elab`'s `_leanr_elab_*` and `leanr_meta`'s
+    /// `mkFreshBinderName` stand-in `_leanr_mkbinding_fresh.<n>` (an
+    /// auto-bound mvar binder is inaccessible, spec Amendment 1 item 1).
+    #[test]
+    fn leanr_fresh_names_count_as_macro_scoped() {
+        let env = Environment::default();
+        let view = env.view();
+        let mut scratch = Store::scratch();
+        let mctx = MetaCtx::new(
+            view,
+            &mut scratch,
+            Config::default(),
+            EnvExtensions::default(),
+        );
+        let mut elab = TermElabM::new(mctx, view);
+        let mk = name(&mut elab, &["_leanr_mkbinding_fresh", "3"]);
+        let el = name(&mut elab, &["_leanr_elab_binder_fresh", "0"]);
+        let hyg = name(&mut elab, &["x", "_@", "M", "_hyg", "2"]);
+        let plain = name(&mut elab, &["α"]);
+        assert!(elab.name_has_macro_scopes(mk));
+        assert!(elab.name_has_macro_scopes(el));
+        assert!(elab.name_has_macro_scopes(hyg));
+        assert!(!elab.name_has_macro_scopes(plain));
     }
 }
