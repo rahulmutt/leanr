@@ -218,6 +218,25 @@
 //!   `Environment::add_decl_in` (an `example` is only kernel-checked).
 //!   Gated by `tests/oracle_decl.rs` over `decl-queries.jsonl`
 //!   (docs/superpowers/specs/2026-10-03-m4c1-single-decl-design.md).
+//! - **M4c-2c-i** — scope universe names and section variables
+//!   (`command/scope.rs`, `command/vars.rs`): the `universe`, `variable`,
+//!   `include` and `omit` commands; scope level names threaded into
+//!   `expandDeclId`, `fixLevelParams` and the async signature; a faithful
+//!   `runTermElabM` (each declaration re-elaborates the scope's binder
+//!   syntax) and the three inclusion regimes — def/abbrev/opaque/example
+//!   `withUsed`, theorem `withHeaderSecVars` (body in the restricted lctx,
+//!   via `leanr_meta`'s additive `MetaCtx::erase_locals`), axiom
+//!   `mkForallFVars (usedOnly := true)`. Gated by `tests/oracle_file.rs`
+//!   (corpus 131 → 211;
+//!   docs/superpowers/specs/2026-10-05-m4c2c-i-universe-variable-design.md).
+//!   Open seams: auto-bound implicits in headers and `variable` binders
+//!   (`— M4c-2c-ii`); the `variable {α}` / `variable [x]`
+//!   binder-annotation update (`replaceBinderAnnotation`, `— later M4`).
+//!   Known rendering limits: `OmitUnmatched` prints the item's source text
+//!   with whitespace collapsed, not the oracle's syntax formatter (a
+//!   comment inside the brackets differs); `IncludeUndeclared` joins the
+//!   id's components with `.`, so an escaped id (`«a.b»`) renders
+//!   differently from the oracle.
 pub mod app; // M4b-3 P1
 pub mod builtin; // Tasks 4-6
 pub mod coe; // coercions

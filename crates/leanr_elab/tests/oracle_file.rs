@@ -8,8 +8,9 @@
 mod support;
 
 /// `wc -l tests/fixtures/elab/file-queries.jsonl` at the last deliberate
-/// regen. `>=`: adding a record is a one-line bump, not a failing gate.
-const CORPUS_FLOOR: usize = 131;
+/// regen (M4c-2c-i: 211). `>=`: adding a record is a one-line bump, not a
+/// failing gate.
+const CORPUS_FLOOR: usize = 211;
 
 #[test]
 fn file_corpus_sources_parse_into_the_oracle_commands() {
@@ -133,17 +134,9 @@ fn empty_source_elaborates_nothing() {
     }
 }
 
-/// Id prefixes of corpus records whose feature is not ported yet. Each
-/// M4c-2c-i task removes its prefixes; Task 6 deletes this list.
-const PENDING: &[&str] = &[];
-
-fn enabled(id: &str) -> bool {
-    !PENDING.iter().any(|p| id.starts_with(p))
-}
-
 #[test]
 fn oracle_file_gate() {
-    let checked = support::run_file_corpus("file-queries.jsonl", enabled);
+    let checked = support::run_file_corpus("file-queries.jsonl", |_| true);
     assert!(
         checked >= CORPUS_FLOOR,
         "file corpus shrank: checked {checked}, floor {CORPUS_FLOOR}. Check \

@@ -1,4 +1,8 @@
-//! Command elaboration (M4c). M4c-2b-i: scopes, `open` and declaration
+//! Command elaboration (M4c). M4c-2c-i: scope universe names and section
+//! variables — `universe`/`variable`/`include`/`omit` and the per-kind
+//! inclusion regimes (`vars.rs`, `scope.rs`), spec
+//! `docs/superpowers/specs/2026-10-05-m4c2c-i-universe-variable-design.md`.
+//! M4c-2b-i: scopes, `open` and declaration
 //! names (`scope.rs`, `header.rs`'s `mkDeclName`), spec
 //! `docs/superpowers/specs/2026-10-04-m4c2b-scopes-design.md`.
 //! M4c-2a: a header-less source of many commands
@@ -12,9 +16,12 @@
 //! out-of-scope seams; `header.rs` ports `expandDeclId` and `elabHeaders`'
 //! per-view body; `def.rs` ports `finishElab` → `addPreDefinitions` →
 //! `addNonRecAux` for `def`/`abbrev`/`opaque`/`example` (value, level
-//! params, unassigned-mvar check, declaration build); `levels.rs` ports the
-//! term-level `withLevelNames`/`levelMVarToParam`; `scope.rs` holds the
-//! scope stack and the scope commands. This file owns [`CommandElab`],
+//! params, unassigned-mvar check, declaration build); `axiom.rs` builds an
+//! `axiom`; `levels.rs` ports the term-level
+//! `withLevelNames`/`levelMVarToParam`; `scope.rs` holds the scope stack
+//! and the scope commands (including `universe`); `vars.rs` holds the
+//! section-variable runner, `variable`/`include`/`omit` and the inclusion
+//! helpers. This file owns [`CommandElab`],
 //! the command dispatch and the kernel commit.
 
 mod axiom;
@@ -401,7 +408,9 @@ fn label_seam(e: ElabError) -> ElabError {
 }
 
 /// The named seam for a command `elab_command` does not port, labelled
-/// with the slice that ports it (spec § Decomposition).
+/// with the slice that ports it (spec § Decomposition). Since M4c-2c-i
+/// (`universe`/`variable`/`include`/`omit` became dispatch arms) every
+/// remaining command is `— later M4`.
 pub(crate) fn command_seam(kind: &str) -> ElabError {
     ElabError::UnsupportedSyntax(format!("command `{kind}` — later M4"))
 }

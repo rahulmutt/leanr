@@ -237,3 +237,71 @@ fields, `universe`, level-name threading; (3) runner + `variable`;
 - `unusedSectionVars` lint, `deprecated.oldSectionVars`, `set_option`.
 - Mutual / recursive declarations, `let rec` (the `toLift` part of
   `collectUsed`): unchanged seams.
+
+## Landed
+
+- PR: pending (the controller fills it at merge). Commits: e8701ce
+  (corpus rows, pending), a14d0ea (universe names), 30a75ae (runner,
+  `variable`, `withUsed`), 0331c1d (theorem/axiom regimes, restricted
+  theorem body), ec0741c (`include`/`omit`), and the closing commit
+  (floor, docs, ledger).
+- Corpus: 131 → 211 file-query records (`CORPUS_FLOOR` 211; the
+  `PENDING` filter is deleted). 76 planned rows plus four oracle-probed
+  rows added mid-slice to kill surviving mutations: `var/levelMVar`
+  (Task 3, closure-after-`abstractNestedProofs`), `varLevel/thmBodyPinsHole`
+  (Task 4, async signature sorted before abstraction),
+  `omit/referencedOrder` and `omit/referencedAnonInst` (Task 5, omit
+  check order and `inst✝` rendering). `decl-queries.jsonl` unchanged.
+  `leanr_kernel` untouched; `leanr_meta` gains one additive accessor,
+  `MetaCtx::erase_locals` (with a unit test).
+- Deviations: Plan amendments 1-7 (reuse `UniverseAlreadyDeclared`;
+  `OmitUnmatched` renders source text; the undeclared-omit branch dropped;
+  abstraction before `abstractNestedProofs`; `u_N` ordering via
+  abstracting before `levelMVarToParam`; no sync-theorem row; variable
+  auto-bound seam wording). Task 3 extras: `ElabError::TypeExpected`
+  gained its oracle first line (`type expected, got`, for `var/errType`),
+  and the typeless `variable [x]` arm (`typelessBinder?`'s `[$id]`) is the
+  same `— later M4` binder-annotation-update seam as `variable {α}` when
+  `x` names a section variable, otherwise an ordinary instance binder.
+- Mutation results (each applied, gate run with
+  `cargo test -p leanr_elab --test oracle_file oracle_file_gate`,
+  reverted):
+  - Task 1: `enabled` forced true → FAILED on the new rows (`— M4c-2c`
+    seam stops).
+  - Task 2: `fix_level_params` given `&[]` → `universe/unusedScope`,
+    `universe/axiomUnusedScope`; `expand_decl_id` from `Vec::new()` →
+    broad `universe/*`; `elab_universe` push instead of cons →
+    `universe/order`, `universe/thmOrder`.
+  - Task 3: `used_vars` over the type only → `var/defBody` and many
+    more; `kept` not reversed → `var/order`, `var/multiCmd`,
+    `var/instDef*`; closure after `abstract_nested_proofs` → only the new
+    `var/levelMVar` (`var/auxProof` cannot see it).
+  - Task 4: no lctx erase → `varThm/bodyOnly`,
+    `varThm/instUsedInProofOnly`; skip the inst loop → `varThm/inst`,
+    `varThm/instCoveredByBinder`; inst loop ignoring "all fvars kept" →
+    `varThm/instNotCovered`; axiom via `header_sec_vars` →
+    `varAxiom/inst`; async signature sorted before `mk_forall(kept)` →
+    only the new `varLevel/thmBodyPinsHole`.
+  - Task 5: include not clearing omitted → `omit/thenInclude`; omit not
+    clearing included → `omit/includeThenOmit`; `[T]` by `ExprId`
+    equality → `omit/instDefeq`, `omit/twoMatch`; break after first match
+    → `omit/twoMatch`, `omit/referencedOrder`; def consulting `include` →
+    `include/def`; omit check in variable order → `omit/referencedOrder`;
+    anonymous inst via `names::render` → `omit/referencedAnonInst`.
+- Surviving mutation: `remove_unused` skipping the type-fvar step
+  survives. On the theorem path it is unobservable, as in the oracle:
+  `addDependencies` has already closed `used`. Only the def/axiom
+  `used_vars` path can observe it, and no row pins it. The Task 6
+  candidate row (`variable (n : Nat) (h : (fun (_ : Nat) => True) n)` +
+  a def using `h`) diverges for an unrelated reason: the oracle's
+  binder type is beta-reduced (`h : True`), leanr keeps the redex
+  `(fun _ => True) n`. The same divergence shows on a plain def header
+  binder (`def f (n : Nat) (h : (fun (_ : Nat) => True) n)`), so it is a
+  pre-existing binder-type gap, not a section-variable one. The row was
+  not added; pinning the type step waits on that gap or a redex-free
+  probe.
+- Open seams: auto-bound implicits (`— M4c-2c-ii`); the `variable {α}` /
+  `variable [x]` binder-annotation update (`— later M4`); `OmitUnmatched`
+  source-text rendering (comments inside the item differ);
+  `IncludeUndeclared` renders the id by joining components, so escaped
+  ids differ from the oracle.
