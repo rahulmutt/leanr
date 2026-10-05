@@ -322,3 +322,17 @@ fields, `universe`, level-name threading; (3) runner + `variable`;
   reproducer). Not modelled and unobservable today: `withUsed`'s lctx
   erasure and `elabFunValues`' `cleanupAnnotations` on section-variable
   declarations (see the `command/vars.rs` module doc).
+- **Follow-ups closed (branch `binder-head-beta`, 2026-10-05).** (1) The
+  beta-redex binder type: the oracle's `MkBinding.mkBinding` head-betas
+  each binder domain (`MetavarContext.lean:1319`). leanr's three ports of
+  it (`MetaCtx::mk_binding`, `infer.rs` `rebuild_forall`, `whnf.rs`
+  `rebuild_lambda`) now do the same. The 10 `beta/*` decl rows include
+  `retNot`/`nestedNot` negatives that kill body-beta and deep-beta
+  mutations. `synth.rs` and `closure.rs` are correctly beta-free:
+  `LocalContext.mkLambda` and Closure's `mkBinding` don't beta. (2)
+  `commitConst` now runs after the unassigned-mvar and `letToHave`
+  checks (`MutualDef.lean:1324`, then `:1331`; rows
+  `universe/thmBodyOnlyScope{LevelMVar,Hole}`). The kernel check still
+  runs after it in leanr (oracle: `addDecl` comes first), and no
+  reproducer is known. (3) The `vars.rs` cites: `CollectFVars.lean:63`
+  and `:18-20`.
