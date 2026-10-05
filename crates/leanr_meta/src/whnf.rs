@@ -1677,6 +1677,9 @@ impl<'e> MetaCtx<'e> {
                 std::slice::from_ref(&fvars[i]),
                 &mut self.guard,
             )?;
+            // oracle: `handleCDecl`'s `type.headBeta`
+            // (`MetavarContext.lean:1319`).
+            let ty = self.head_beta(ty)?;
             let ty2 = abstract_fvars(
                 self.scratch,
                 Some(self.view.store),
@@ -4089,6 +4092,39 @@ mod tests {
                  local_names/current_lctx while it is still open"
             );
             ctx.lctx_restore(pre);
+        });
+    }
+
+    /// oracle: `go`'s `.lam` arm rebuilds with `mkLambdaFVars`
+    /// (WHNF.lean:753), whose `mkBinding` head-betas each binder domain
+    /// (`MetavarContext.lean:1319`): `fun (_ : (fun (_ : Sort 1) =>
+    /// Sort 0) (Sort 0)) => Sort 0` comes back as `fun (_ : Sort 0) =>
+    /// Sort 0`.
+    #[test]
+    fn sunfold_go_lam_head_betas_the_rebuilt_domain() {
+        with_prelude0_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let z = ctx.scratch.level_zero(base).expect("level");
+            let one = ctx.scratch.level_succ(base, z).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, z).expect("sort");
+            let sort1 = ctx.scratch.expr_sort(base, one).expect("sort");
+            let k = ctx
+                .scratch
+                .expr_lam(base, None, sort1, sort0, leanr_kernel::BinderInfo::Default)
+                .expect("lam");
+            let redex = ctx.scratch.expr_app(base, k, sort0).expect("app");
+            let lam = ctx
+                .scratch
+                .expr_lam(base, None, redex, sort0, leanr_kernel::BinderInfo::Default)
+                .expect("lam");
+            let pre = ctx.lctx_checkpoint();
+            let r = ctx.sunfold_go_lam(lam).expect("sunfold_go_lam");
+            ctx.lctx_restore(pre);
+            let expected = ctx
+                .scratch
+                .expr_lam(base, None, sort0, sort0, leanr_kernel::BinderInfo::Default)
+                .expect("lam");
+            assert_eq!(r, Some(expected));
         });
     }
 }

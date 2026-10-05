@@ -229,7 +229,20 @@ def declQueries : List (String × String) := [
   ("np/opaque", "opaque np8 (n : Nat) : PProd Nat (Eq (Nat.succ n) (Nat.succ n)) := PProd.mk n rfl"),
   ("np/twoBinders", "def npb (n : Nat) (m : Nat) : PProd Nat (Eq (Nat.succ m) (Nat.succ m)) := PProd.mk n rfl"),
   ("np/lambdaArg", "def npl (n : Nat) : Nat := (fun (_ : Eq (Nat.succ n) (Nat.succ n)) => n) rfl"),
-  ("np/nestedTwice", "def npn (n : Nat) : PProd Nat (PProd Nat (Eq (Nat.succ n) (Nat.succ n))) := PProd.mk n (PProd.mk n rfl)")
+  ("np/nestedTwice", "def npn (n : Nat) : PProd Nat (PProd Nat (Eq (Nat.succ n) (Nat.succ n))) := PProd.mk n (PProd.mk n rfl)"),
+  -- `mkBinding` head-betas each binder domain (`MetavarContext.lean:1319`);
+  -- a return type, a nested redex and an `→` domain (`Binders.lean:297`,
+  -- plain `mkForall`) keep theirs.
+  ("beta/thm", "theorem bt1 (n : Nat) (h : (fun (m : Nat) => Eq m m) n) : Eq n n := h"),
+  ("beta/axiom", "axiom bt2 (n : Nat) (h : (fun (m : Nat) => Eq m m) n) : Eq n n"),
+  ("beta/def", "def bt3 (n : Nat) (k : (fun (_ : Nat) => Nat) n) : Nat := k"),
+  ("beta/fun", "def bt4 : Nat → Nat := fun (x : (fun (_ : Nat) => Nat) Nat.zero) => x"),
+  ("beta/forall", "def bt5 : Prop := ∀ (n : Nat) (h : (fun (m : Nat) => Eq m m) n), Eq n n"),
+  ("beta/retNot", "def bt6 (n : Nat) : (fun (_ : Nat) => Nat) n := n"),
+  ("beta/nestedNot", "def bt7 (n : Nat) (p : PProd ((fun (_ : Nat) => Nat) n) Nat) : Nat := n"),
+  ("beta/arrowNot", "def bt8 : (fun (_ : Nat) => Nat) Nat.zero → Nat := fun x => x"),
+  ("beta/multi", "def bt11 (n : Nat) (k : (fun (_ : Nat) (_ : Nat) => Nat) n n) : Nat := k"),
+  ("beta/implicit", "def bt12 {n : (fun (_ : Nat) => Nat) Nat.zero} : Nat := n")
 ]
 
 def declErrQueries : List (String × String) := [
