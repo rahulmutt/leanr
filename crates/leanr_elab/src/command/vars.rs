@@ -6,7 +6,15 @@
 //! Not modelled: the `unusedSectionVars` lint (a warning; the gate keeps
 //! errors only), `deprecated.oldSectionVars`, auto-bound implicits
 //! (`— M4c-2c-ii`), the mvar-rebuild branch of `runTermElabM` (auto-bound
-//! only), `variable {α}` binder-annotation updates (`— later M4`).
+//! only), `variable {α}` binder-annotation updates (`— later M4`);
+//! `withUsed`'s local-context erasure (`removeUnused` erases the unused
+//! variables from the lctx and local instances, `Meta/CollectFVars.lean:
+//! 62`), as nothing elaborates under that context after the closure
+//! (the theorem regime's erasure IS modelled: its body runs there); and
+//! `elabFunValues`' `cleanupAnnotations` on every local declaration's
+//! type (`MutualDef.lean:535`), as `elab_section_vars` stores no
+//! annotations a section-variable type could carry. Neither is
+//! observable today.
 //! An unmatched `omit` item is reported by its source text with
 //! whitespace runs collapsed, standing in for the oracle's syntax
 //! formatter (`{o}`).
@@ -19,7 +27,7 @@ use leanr_kernel::{BinderInfo, Name};
 use leanr_syntax::kind::KindInterner;
 use leanr_syntax::tree::{NodeOrToken, SyntaxNode};
 
-use crate::app::elim_info::{any_subterm, has_no_fvar};
+use crate::app::elim_info::{collect_fvars, fvars_in_order};
 use crate::app::head::ident_components;
 use crate::builtin::binder::{extract_binder_group, push_binder_group};
 use crate::dispatch::{non_trivia_children, SynElem};
@@ -328,13 +336,6 @@ fn local_decl(elab: &mut TermElabM, x: ExprId) -> Result<leanr_kernel::LocalDecl
         .ok_or_else(|| ElabError::Internal("section variable not in the local context".into()))
 }
 
-/// oracle: `collectFVars` (`Lean/Util/CollectFVars.lean`) — add every
-/// `fvar` subterm of `e` to `set`. Hash-consing makes the fvar's
-/// `ExprId` its identity.
-pub(crate) fn collect_fvars(elab: &TermElabM<'_>, e: ExprId, set: &mut HashSet<ExprId>) {
-    set.extend(fvars_in_order(elab, e));
-}
-
 /// [`collect_fvars`] keeping the oracle's discovery order (`main`'s
 /// left-to-right pre-order: `f` before `a`, domain before body).
 fn collect_fvars_ordered(elab: &TermElabM<'_>, e: ExprId, st: &mut FVarState) {
@@ -343,25 +344,18 @@ fn collect_fvars_ordered(elab: &TermElabM<'_>, e: ExprId, st: &mut FVarState) {
     }
 }
 
-/// The distinct `fvar` subterms of `e`, in first-visit pre-order
-/// (`any_subterm`'s order).
-fn fvars_in_order(elab: &TermElabM<'_>, e: ExprId) -> Vec<ExprId> {
-    let mut found = Vec::new();
-    any_subterm(elab, e, has_no_fvar, |_, e, n| {
-        if matches!(n, Node::FVar { .. }) {
-            found.push(e);
-        }
-        false
-    });
-    found
-}
-
 /// One `omit` item, resolved (`elabOmit`'s `Sum Name Expr`).
 enum OmitItem {
     /// `x` or `[x : T]`: matched by user name.
     Name(Vec<String>),
     /// `[T]`: the syntax, elaborated per run before matching.
     Type(SynElem),
+}
+
+/// An [`OmitItem`] ready to match: a `[T]` item's type elaborated.
+enum OmitMatch<'a> {
+    Name(&'a [String]),
+    Type(ExprId),
 }
 
 /// Whether binder name `n` is the hierarchical name `comps` (oracle
@@ -496,11 +490,13 @@ impl CommandElab<'_> {
             elab.synthesize_synthetic_mvars_no_postponing(kinds)?;
             // `withoutErrToSorry (elabTermAndSynthesize ty none)`, in item
             // order, before any matching.
-            let mut tys = Vec::with_capacity(items.len());
+            let mut matchers = Vec::with_capacity(items.len());
             for (item, _) in &items {
-                tys.push(match item {
-                    OmitItem::Type(t) => Some(elab.elab_term_and_synthesize(t, kinds, None)?),
-                    OmitItem::Name(_) => None,
+                matchers.push(match item {
+                    OmitItem::Name(n) => OmitMatch::Name(n),
+                    OmitItem::Type(t) => {
+                        OmitMatch::Type(elab.elab_term_and_synthesize(t, kinds, None)?)
+                    }
                 });
             }
             let mut used = vec![false; items.len()];
@@ -509,17 +505,16 @@ impl CommandElab<'_> {
                 let d = local_decl(elab, x)?;
                 // `findIdxM?`: the FIRST item that matches this variable.
                 let mut hit = None;
-                for (i, (item, _)) in items.iter().enumerate() {
-                    let ok = match (item, tys[i]) {
-                        (OmitItem::Name(n), _) => name_is(elab, d.binder_name, n),
-                        (OmitItem::Type(_), Some(t)) => {
+                for (i, m) in matchers.iter().enumerate() {
+                    let ok = match *m {
+                        OmitMatch::Name(n) => name_is(elab, d.binder_name, n),
+                        OmitMatch::Type(t) => {
                             // `isDefEq ty ldecl.type <* setMCtx mctx`.
                             let cp = elab.mctx.checkpoint();
                             let ok = elab.mctx.is_def_eq(t, d.ty);
                             elab.mctx.rollback(cp);
                             ok?
                         }
-                        (OmitItem::Type(_), None) => unreachable!("elaborated above"),
                     };
                     if ok {
                         hit = Some(i);

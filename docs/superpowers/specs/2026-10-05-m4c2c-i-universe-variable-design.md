@@ -243,15 +243,18 @@ fields, `universe`, level-name threading; (3) runner + `variable`;
 - PR: pending (the controller fills it at merge). Commits: e8701ce
   (corpus rows, pending), a14d0ea (universe names), 30a75ae (runner,
   `variable`, `withUsed`), 0331c1d (theorem/axiom regimes, restricted
-  theorem body), ec0741c (`include`/`omit`), and the closing commit
-  (floor, docs, ledger).
-- Corpus: 131 → 211 file-query records (`CORPUS_FLOOR` 211; the
+  theorem body), ec0741c (`include`/`omit`), fe95b43 (floor, docs,
+  ledger), and the final-review fix wave (F1 `commitConst` level-param
+  check, F2 type-step rows, minors).
+- Corpus: 131 → 214 file-query records (`CORPUS_FLOOR` 214; the
   `PENDING` filter is deleted). 76 planned rows plus four oracle-probed
   rows added mid-slice to kill surviving mutations: `var/levelMVar`
   (Task 3, closure-after-`abstractNestedProofs`), `varLevel/thmBodyPinsHole`
   (Task 4, async signature sorted before abstraction),
   `omit/referencedOrder` and `omit/referencedAnonInst` (Task 5, omit
-  check order and `inst✝` rendering). `decl-queries.jsonl` unchanged.
+  check order and `inst✝` rendering). The final review added three
+  more: `universe/thmBodyOnlyScope` (F1) and `var/typeDepDef`,
+  `varAxiom/typeDep` (F2). `decl-queries.jsonl` unchanged.
   `leanr_kernel` untouched; `leanr_meta` gains one additive accessor,
   `MetaCtx::erase_locals` (with a unit test).
 - Deviations: Plan amendments 1-7 (reuse `UniverseAlreadyDeclared`;
@@ -288,20 +291,34 @@ fields, `universe`, level-name threading; (3) runner + `variable`;
     → `omit/twoMatch`, `omit/referencedOrder`; def consulting `include` →
     `include/def`; omit check in variable order → `omit/referencedOrder`;
     anonymous inst via `names::render` → `omit/referencedAnonInst`.
-- Surviving mutation: `remove_unused` skipping the type-fvar step
-  survives. On the theorem path it is unobservable, as in the oracle:
-  `addDependencies` has already closed `used`. Only the def/axiom
-  `used_vars` path can observe it, and no row pins it. The Task 6
-  candidate row (`variable (n : Nat) (h : (fun (_ : Nat) => True) n)` +
-  a def using `h`) diverges for an unrelated reason: the oracle's
-  binder type is beta-reduced (`h : True`), leanr keeps the redex
-  `(fun _ => True) n`. The same divergence shows on a plain def header
-  binder (`def f (n : Nat) (h : (fun (_ : Nat) => True) n)`), so it is a
-  pre-existing binder-type gap, not a section-variable one. The row was
-  not added; pinning the type step waits on that gap or a redex-free
-  probe.
+  - Final review F1: the async theorem path's level-param comparison
+    deleted → only the new `universe/thmBodyOnlyScope` (leanr admitted
+    `ra.{u}`; the oracle fails `AddConstAsyncResult.commitConst:
+    constant has level params [u] but expected []`).
+  - Final review F2: `remove_unused` skipping the type-fvar step →
+    `var/typeDepDef` and `varAxiom/typeDep` (`Kernel(HasFVars)`).
+- Surviving mutation: none. `remove_unused`'s type-fvar step, which
+  survived Task 6 (on the theorem path it is unobservable, as in the
+  oracle, since `addDependencies` has already closed `used`), is now
+  killed on the def/axiom `used_vars` path by the redex-free rows
+  `var/typeDepDef` and `varAxiom/typeDep` (`variable {a : Type} (f : a →
+  Nat) (x : a)`: `a` is used only through `f`'s and `x`'s types). The
+  earlier candidate (`h : (fun (_ : Nat) => True) n`) still diverges
+  for an unrelated, pre-existing reason: the oracle beta-reduces the
+  binder type, leanr keeps the redex (also on a plain def header
+  binder).
+- Async signature: `elabAsync` commits a signature whose level params
+  come from the type alone, so a scope universe used only in the proof
+  makes `commitConst` (`Environment.lean:1104-1105`) fail. leanr now
+  compares the two lists on the async path (`ElabError::
+  AsyncLevelParamsMismatch`; `List Name` renders as `[u, v]`, probed).
+  `commitConst`'s type-equality check (`:1106-1107`) is unmodelled: no
+  reproducer is known.
 - Open seams: auto-bound implicits (`— M4c-2c-ii`); the `variable {α}` /
   `variable [x]` binder-annotation update (`— later M4`); `OmitUnmatched`
   source-text rendering (comments inside the item differ);
   `IncludeUndeclared` renders the id by joining components, so escaped
-  ids differ from the oracle.
+  ids differ from the oracle. `commitConst`'s type-equality check (no
+  reproducer). Not modelled and unobservable today: `withUsed`'s lctx
+  erasure and `elabFunValues`' `cleanupAnnotations` on section-variable
+  declarations (see the `command/vars.rs` module doc).

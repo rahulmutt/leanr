@@ -295,6 +295,13 @@ pub enum ElabError {
     /// oracle: `MutualClosure.pushMain` (`Elab/MutualDef.lean:1051-1053`).
     /// Carries the rendered FULL declaration name.
     TheoremTypeNotProp(String),
+    /// oracle: `AddConstAsyncResult.commitConst` (`Environment.lean:
+    /// 1104-1105`): an async theorem's finished level params differ from
+    /// its signature's. Both carry the rendered `List Name` (`[u, v]`).
+    AsyncLevelParamsMismatch {
+        got: String,
+        expected: String,
+    },
     /// oracle: `withHeaderSecVars`' `check` (`Elab/MutualDef.lean:474-478`):
     /// a theorem header (or an `include`d variable) references a section
     /// variable the scope `omit`s. Carries the variable's user name.
@@ -573,6 +580,9 @@ impl ElabError {
             Self::TheoremTypeNotProp(n) => {
                 Some(format!("type of theorem `{n}` is not a proposition"))
             }
+            Self::AsyncLevelParamsMismatch { got, expected } => Some(format!(
+                "AddConstAsyncResult.commitConst: constant has level params {got} but expected {expected}"
+            )),
             Self::OmitReferenced(x) => {
                 Some(format!("cannot omit referenced section variable `{x}`"))
             }
@@ -756,6 +766,18 @@ mod tests {
                 .oracle_first_line()
                 .as_deref(),
             Some("type of theorem `tnp` is not a proposition") // err/thmTypeNotProp
+        );
+        assert_eq!(
+            ElabError::AsyncLevelParamsMismatch {
+                got: "[u, v]".into(),
+                expected: "[]".into()
+            }
+            .oracle_first_line()
+            .as_deref(),
+            // universe/thmBodyOnlyScope; `[u, v]` probed with two scope names.
+            Some(
+                "AddConstAsyncResult.commitConst: constant has level params [u, v] but expected []"
+            )
         );
         assert_eq!(
             ElabError::OmitReferenced("n".into())

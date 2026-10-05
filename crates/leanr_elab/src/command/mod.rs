@@ -29,7 +29,7 @@ mod def;
 mod header;
 mod levels;
 mod scope;
-pub(crate) mod vars;
+mod vars;
 pub(crate) mod view;
 
 use leanr_kernel::bank::scratch::promote_name;
@@ -325,14 +325,17 @@ impl<'x> CommandElab<'x> {
             n_ids += vars::bracketed_binder_ids(b, kinds)?.len();
         }
         let first = self.next_var_uid;
-        self.next_var_uid += u32::try_from(n_ids)
-            .map_err(|_| ElabError::Internal("section variable uid overflow".into()))?;
+        let end = u32::try_from(n_ids)
+            .ok()
+            .and_then(|n| first.checked_add(n))
+            .ok_or_else(|| ElabError::Internal("section variable uid overflow".into()))?;
+        self.next_var_uid = end;
         let head = self
             .scopes
             .last_mut()
             .expect("the root scope is never popped");
         head.var_decls.extend(binders);
-        head.var_uids.extend(first..first + n_ids as u32);
+        head.var_uids.extend(first..end);
         Ok(())
     }
 

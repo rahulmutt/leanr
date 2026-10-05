@@ -78,9 +78,11 @@ pub(super) fn elab_def(
     // the header conversion, so only expression mvars can block it.
     let base = Some(elab.view.store);
     let d = elab.mctx.store().expr_data(base, header.ty);
-    if is_thm && !d.has_expr_mvar() && !d.has_level_mvar() {
-        check_async_signature(elab, &header, &kept, &scope)?;
-    }
+    let async_sig = if is_thm && !d.has_expr_mvar() && !d.has_level_mvar() {
+        Some(check_async_signature(elab, &header, &kept, &scope)?)
+    } else {
+        None
+    };
     // A theorem body runs in the RESTRICTED context: the section variables
     // `withHeaderSecVars` drops are erased (`removeUnused` → `withLCtx`,
     // `:461-462`), so a proof naming one fails to resolve it.
@@ -131,6 +133,27 @@ pub(super) fn elab_def(
     let value = elab.mctx.instantiate_mvars(value)?;
     // `fixLevelParams preDefs scopeLevelNames allUserLevelNames` (`:1437-1438`).
     let level_params = fix_level_params(elab, &[ty, value], &scope, &header.level_names)?;
+    // `elabAsync`'s `AddConstAsyncResult.commitConst` (`Environment.lean:
+    // 1104-1105`): the finished theorem's level params must equal the
+    // signature's. A scope universe used only in the proof is in the
+    // former (the value's) but not the latter (the type's, where a scope
+    // name is exempt from "unused"): `universe/thmBodyOnlyScope`.
+    if let Some(sig) = async_sig {
+        if sig != level_params {
+            let render = |ns: &[NameId]| {
+                let base = Some(elab.view.store);
+                let ns: Vec<String> = ns
+                    .iter()
+                    .map(|&n| crate::names::render(elab.mctx.store(), base, Some(n)))
+                    .collect();
+                format!("[{}]", ns.join(", "))
+            };
+            return Err(ElabError::AsyncLevelParamsMismatch {
+                got: render(&level_params),
+                expected: render(&sig),
+            });
+        }
+    }
     // `addPreDefinitions` → `ensureNoUnassignedMVarsAtPreDef` (`Main.lean:294`).
     // `preDef.declName` (`PreDefinition/Main.lean:84-93`): the full name.
     ensure_no_unassigned_mvars_at_pre_def(elab, &full_name(elab, id.name), ty, value)?;
@@ -195,12 +218,19 @@ fn level_mvar_to_param_headers(
 /// only in the proof is "unused" (probe: `theorem ta.{u} : True :=
 /// (fun (_ : Sort u) => True.intro) PUnit.{u}`). The body then runs
 /// `finishElab` as for a definition.
+///
+/// Returns the signature's level params, which `elab_def` compares with
+/// the finished theorem's (`commitConst`'s level-param check). Not
+/// modelled: `commitConst`'s TYPE-equality check (`Environment.lean:
+/// 1106-1107`, "constant has type … but expected …"); no reproducer is
+/// known, since the finished type is the same closed, instantiated header
+/// type.
 fn check_async_signature(
     elab: &mut TermElabM,
     header: &Header,
     kept: &[ExprId],
     scope: &[NameId],
-) -> Result<(), ElabError> {
+) -> Result<Vec<NameId>, ElabError> {
     // `withHeaderSecVars … fun vars => mkForallFVars vars header.type`
     // (`:1279-1280`): the kept section variables' universes count.
     let ty0 = elab.mctx.mk_forall(kept, header.ty)?;
@@ -213,9 +243,10 @@ fn check_async_signature(
     })?;
     let ty = elab.mctx.instantiate_mvars(ty)?;
     // `collectLevelParams` over the type, `sortDeclLevelParams scope allUser used` (`:1288-1291`).
-    fix_level_params(elab, &[ty], scope, &header.level_names)?;
+    let level_params = fix_level_params(elab, &[ty], scope, &header.level_names)?;
     // `Meta.letToHave type` (`:1293-1296`): the letToHave seam.
-    reject_let(elab, ty)
+    reject_let(elab, ty)?;
+    Ok(level_params)
 }
 
 /// oracle: `Meta.isProp` (`Meta/InferType.lean:323-332`): `inferType`, then

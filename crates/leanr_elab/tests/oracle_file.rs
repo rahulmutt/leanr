@@ -8,9 +8,9 @@
 mod support;
 
 /// `wc -l tests/fixtures/elab/file-queries.jsonl` at the last deliberate
-/// regen (M4c-2c-i: 211). `>=`: adding a record is a one-line bump, not a
+/// regen (M4c-2c-i final review: 214). `>=`: adding a record is a one-line bump, not a
 /// failing gate.
-const CORPUS_FLOOR: usize = 211;
+const CORPUS_FLOOR: usize = 214;
 
 #[test]
 fn file_corpus_sources_parse_into_the_oracle_commands() {
@@ -98,6 +98,14 @@ fn variable_seams_carry_their_slice() {
     // variable (`replaceBinderAnnotation`, `BuiltinCommand.lean:343`).
     let (at, m) = stop_seam("variable {α}");
     assert_eq!(at, 0);
+    assert!(
+        m.contains("binder-annotation update") && m.ends_with(" — later M4"),
+        "{m}"
+    );
+    // `[inst]` naming an existing section variable is an update too
+    // (`replaceBinderAnnotation`'s instBinder case): the second command.
+    let (at, m) = stop_seam("variable {a : Type} [inst : Dflt a]\nvariable [inst]");
+    assert_eq!(at, 1);
     assert!(
         m.contains("binder-annotation update") && m.ends_with(" — later M4"),
         "{m}"
