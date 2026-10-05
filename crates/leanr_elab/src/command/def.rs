@@ -57,6 +57,8 @@ pub(super) fn elab_def(
     aux_cache: &AuxLemmaCache,
 ) -> Result<Built, ElabError> {
     let id = header::expand_decl_id(elab, view)?;
+    // `scopeLevelNames`, read before any `with_level_names`.
+    let scope = elab.level_names.clone();
     let header = header::elab_header(elab, view, &id, kinds)?;
     let header = level_mvar_to_param_headers(elab, view.kind, header)?;
     // `Elab.async` is on, as on the `lean` command line
@@ -66,7 +68,7 @@ pub(super) fn elab_def(
     let base = Some(elab.view.store);
     let d = elab.mctx.store().expr_data(base, header.ty);
     if view.kind == DefKind::Theorem && !d.has_expr_mvar() && !d.has_level_mvar() {
-        check_async_signature(elab, &header)?;
+        check_async_signature(elab, &header, &scope)?;
     }
     let value = elab_value(elab, view, &id, &header, kinds)?;
     // `finishElab` (`MutualDef.lean:1394-1401`): synthesize once more, then
@@ -87,7 +89,7 @@ pub(super) fn elab_def(
     let ty = elab.mctx.instantiate_mvars(ty)?;
     let value = elab.mctx.instantiate_mvars(value)?;
     // `fixLevelParams preDefs scopeLevelNames allUserLevelNames` (`:1437-1438`).
-    let level_params = fix_level_params(elab, &[ty, value], &header.level_names)?;
+    let level_params = fix_level_params(elab, &[ty, value], &scope, &header.level_names)?;
     // `addPreDefinitions` → `ensureNoUnassignedMVarsAtPreDef` (`Main.lean:294`).
     // `preDef.declName` (`PreDefinition/Main.lean:84-93`): the full name.
     ensure_no_unassigned_mvars_at_pre_def(elab, &full_name(elab, id.name), ty, value)?;
@@ -152,7 +154,11 @@ fn level_mvar_to_param_headers(
 /// only in the proof is "unused" (probe: `theorem ta.{u} : True :=
 /// (fun (_ : Sort u) => True.intro) PUnit.{u}`). The body then runs
 /// `finishElab` as for a definition.
-fn check_async_signature(elab: &mut TermElabM, header: &Header) -> Result<(), ElabError> {
+fn check_async_signature(
+    elab: &mut TermElabM,
+    header: &Header,
+    scope: &[NameId],
+) -> Result<(), ElabError> {
     let ty0 = header.ty;
     // `withLevelNames allUserLevelNames <| levelMVarToParam type`
     // (`:1281-1282`): a no-op after `level_mvar_to_param_headers`, kept for
@@ -161,8 +167,8 @@ fn check_async_signature(elab: &mut TermElabM, header: &Header) -> Result<(), El
         elab.level_mvar_to_param(ty0)
     })?;
     let ty = elab.mctx.instantiate_mvars(ty)?;
-    // `collectLevelParams` over the type, `sortDeclLevelParams [] allUser used` (`:1288-1291`).
-    fix_level_params(elab, &[ty], &header.level_names)?;
+    // `collectLevelParams` over the type, `sortDeclLevelParams scope allUser used` (`:1288-1291`).
+    fix_level_params(elab, &[ty], scope, &header.level_names)?;
     // `Meta.letToHave type` (`:1293-1296`): the letToHave seam.
     reject_let(elab, ty)
 }
@@ -257,10 +263,11 @@ fn elab_value(
 }
 
 /// oracle: `getLevelParamsPreDecls` (`PreDefinition/Basic.lean:66-73`):
-/// collect from each expression, then `sortDeclLevelParams [] allUser used`.
+/// collect from each expression, then `sortDeclLevelParams scope allUser used`.
 pub(super) fn fix_level_params(
     elab: &mut TermElabM,
     exprs: &[ExprId],
+    scope: &[NameId],
     all_user: &[NameId],
 ) -> Result<Vec<NameId>, ElabError> {
     let mut s = CollectLevelParams::default();
@@ -268,7 +275,7 @@ pub(super) fn fix_level_params(
         elab.mctx.collect_level_params(&mut s, e)?;
     }
     let base = Some(elab.view.store);
-    sort_decl_level_params(elab.mctx.store(), base, &[], all_user, &s.params).map_err(|u| {
+    sort_decl_level_params(elab.mctx.store(), base, scope, all_user, &s.params).map_err(|u| {
         ElabError::UnusedUniverseParam(elab.mctx.store().to_name(base, Some(u)).to_string())
     })
 }

@@ -21,6 +21,7 @@ pub(super) fn elab_axiom(
     kinds: &KindInterner,
 ) -> Result<Built, ElabError> {
     let id = expand_decl_id(elab, view)?;
+    let scope = elab.level_names.clone();
     let ty_stx = view
         .ty
         .clone()
@@ -49,7 +50,7 @@ pub(super) fn elab_axiom(
     // `sortDeclLevelParams scopeLevelNames allUserLevelNames usedParams`
     // (`:120-122`) against the ORIGINAL user names: leftovers sort
     // lexicographically.
-    let level_params = fix_level_params(elab, &[ty], &id.level_names)?;
+    let level_params = fix_level_params(elab, &[ty], &scope, &id.level_names)?;
     let ty = elab.mctx.instantiate_mvars(ty)?;
     // `Term.ensureNoUnassignedMVars decl` (`:132`; `TermElabM.lean:1041-1044`).
     let pending = elab.get_mvars(ty)?;

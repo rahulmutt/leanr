@@ -169,6 +169,7 @@ impl<'x> CommandElab<'x> {
             "Lean.Parser.Command.namespace" => none(self.elab_namespace(cmd, kinds)),
             "Lean.Parser.Command.section" => none(self.elab_section(cmd, kinds)),
             "Lean.Parser.Command.end" => none(self.elab_end(cmd, kinds)),
+            "Lean.Parser.Command.universe" => none(self.elab_universe(cmd, kinds)),
             "Lean.Parser.Command.open" => none(self.elab_open(cmd, kinds)),
             "Lean.Parser.Command.in" => self.elab_in(cmd, kinds),
             "Lean.Parser.Command.declaration" => self.elab_declaration(cmd, kinds),
@@ -209,6 +210,8 @@ impl<'x> CommandElab<'x> {
             let mctx = MetaCtx::new(env_view, &mut scratch, Config::default(), self.exts);
             let mut elab = TermElabM::new(mctx, env_view);
             let head = self.scopes.last().expect("the root scope is never popped");
+            // `liftTermElabM`: the scope's `levelNames` seed the term context.
+            elab.level_names = head.level_names.clone();
             elab.resolve = ResolveCtx {
                 ns: head.curr_namespace,
                 open_decls: &head.open_decls,
@@ -303,7 +306,7 @@ fn label_seam(e: ElabError) -> ElabError {
 /// with the slice that ports it (spec § Decomposition).
 pub(crate) fn command_seam(kind: &str) -> ElabError {
     let slice = match kind {
-        "Lean.Parser.Command.universe" | "Lean.Parser.Command.variable" => "M4c-2c",
+        "Lean.Parser.Command.variable" => "M4c-2c",
         _ => "later M4",
     };
     ElabError::UnsupportedSyntax(format!("command `{kind}` — {slice}"))

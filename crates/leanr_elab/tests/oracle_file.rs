@@ -92,12 +92,10 @@ fn a_mid_file_error_after_successes_keeps_them() {
 }
 
 #[test]
-fn universe_and_variable_are_m4c2c_seams() {
-    for src in ["universe u", "variable (n : Nat)"] {
-        let (at, m) = stop_seam(src);
-        assert_eq!(at, 0);
-        assert!(m.ends_with(" — M4c-2c"), "{src:?}: {m}");
-    }
+fn variable_is_an_m4c2c_seam() {
+    let (at, m) = stop_seam("variable (n : Nat)");
+    assert_eq!(at, 0);
+    assert!(m.ends_with(" — M4c-2c"), "{m}");
 }
 
 #[test]
@@ -126,7 +124,6 @@ fn empty_source_elaborates_nothing() {
 /// Id prefixes of corpus records whose feature is not ported yet. Each
 /// M4c-2c-i task removes its prefixes; Task 6 deletes this list.
 const PENDING: &[&str] = &[
-    "universe/",
     "var/",
     "varThm/",
     "varAxiom/",

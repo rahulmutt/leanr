@@ -42,10 +42,10 @@ pub(super) fn intern_atomic(elab: &mut TermElabM, s: &str) -> Result<NameId, Ela
 }
 
 /// oracle: `expandDeclId` (`DeclModifiers.lean:326-343`). The `.{…}` fold
-/// conses onto the scope's level names (`[]` in M4c-1) and rejects a
+/// conses onto the scope's level names and rejects a
 /// repeat. Then `mkDeclName` (`:263-286`) over `elab.resolve.ns`.
 pub(super) fn expand_decl_id(elab: &mut TermElabM, view: &DefView) -> Result<DeclId, ElabError> {
-    let mut level_names: Vec<NameId> = Vec::new();
+    let mut level_names: Vec<NameId> = elab.level_names.clone();
     for u in &view.univ_names {
         let id = intern_atomic(elab, u)?;
         if level_names.contains(&id) {
