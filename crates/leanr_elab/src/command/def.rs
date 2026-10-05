@@ -133,11 +133,22 @@ pub(super) fn elab_def(
     let value = elab.mctx.instantiate_mvars(value)?;
     // `fixLevelParams preDefs scopeLevelNames allUserLevelNames` (`:1437-1438`).
     let level_params = fix_level_params(elab, &[ty, value], &scope, &header.level_names)?;
+    // `addPreDefinitions` → `ensureNoUnassignedMVarsAtPreDef` (`Main.lean:294`).
+    // `preDef.declName` (`PreDefinition/Main.lean:84-93`): the full name.
+    ensure_no_unassigned_mvars_at_pre_def(elab, &full_name(elab, id.name), ty, value)?;
+    // `addNonRecAux` → `letToHaveType`/`letToHaveValue` (`Basic.lean:183-184`):
+    // a seam (spec decision 5). Checked before `abstractNestedProofs` (oracle
+    // order: after it); both orders end in a seam.
+    reject_let(elab, ty)?;
+    reject_let(elab, value)?;
     // `elabAsync`'s `AddConstAsyncResult.commitConst` (`Environment.lean:
     // 1104-1105`): the finished theorem's level params must equal the
     // signature's. A scope universe used only in the proof is in the
     // former (the value's) but not the latter (the type's, where a scope
-    // name is exempt from "unused"): `universe/thmBodyOnlyScope`.
+    // name is exempt from "unused"): `universe/thmBodyOnlyScope`. It runs
+    // after `finishElab`'s `addPreDefinitions` (`MutualDef.lean:1324`, then
+    // `:1331`), so an unassigned-mvar error wins:
+    // `universe/thmBodyOnlyScopeHole`.
     if let Some(sig) = async_sig {
         if sig != level_params {
             let render = |ns: &[NameId]| {
@@ -154,14 +165,6 @@ pub(super) fn elab_def(
             });
         }
     }
-    // `addPreDefinitions` → `ensureNoUnassignedMVarsAtPreDef` (`Main.lean:294`).
-    // `preDef.declName` (`PreDefinition/Main.lean:84-93`): the full name.
-    ensure_no_unassigned_mvars_at_pre_def(elab, &full_name(elab, id.name), ty, value)?;
-    // `addNonRecAux` → `letToHaveType`/`letToHaveValue` (`Basic.lean:183-184`):
-    // a seam (spec decision 5). Checked before `abstractNestedProofs` (oracle
-    // order: after it); both orders end in a seam.
-    reject_let(elab, ty)?;
-    reject_let(elab, value)?;
     // `addNonRecAux` → `abstractNestedProofs` (`PreDefinition/Basic.lean:
     // 120-127`, `:180`): not for theorems or examples. The aux theorems are
     // committed BEFORE the main declaration, as the oracle's `mkAuxLemma`

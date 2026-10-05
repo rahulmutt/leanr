@@ -448,6 +448,10 @@ def fileQueries : List (String × String) := [
   ("universe/axiomUnusedScope", "universe u v\naxiom aus (α : Sort v) : α"),
   ("universe/inNamespace", "namespace A\nuniverse u\ndef un (α : Sort u) : Sort u := α\nend A"),
   ("universe/thmBodyOnlyScope", "universe u\ntheorem ra : Eq Nat.zero Nat.zero := (fun (_ : Sort u) => rfl) PUnit"),
+  -- Doubly broken: `elabAsync` runs `addPreDefinitions` (its unassigned-
+  -- mvar check) before `commitConst`, so the mvar error wins.
+  ("universe/thmBodyOnlyScopeLevelMVar", "universe u\ntheorem rb : Eq Nat.zero Nat.zero := (fun (_ : Sort u) (_ : Sort _) => rfl) PUnit PUnit"),
+  ("universe/thmBodyOnlyScopeHole", "universe u\ntheorem rc : Eq Nat.zero Nat.zero := (fun (_ : Sort u) (_ : Nat) => rfl) PUnit _"),
   ("var/defBody", "variable (n : Nat)\ndef vf1 : Nat := n"),
   ("var/defUnused", "variable (n : Nat)\ndef vf2 : Nat := Nat.zero"),
   ("var/defHeader", "variable (n : Nat)\ndef vf3 (m : Nat) (h : Eq n m) : Nat := m"),
