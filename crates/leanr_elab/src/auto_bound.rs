@@ -82,7 +82,7 @@ pub(crate) fn check_valid_auto_bound_implicit_name(
     }
 }
 
-/// `isValidAutoBoundLevelName` (`AutoBound.lean:69-71`). `String.front`'s
+/// `isValidAutoBoundLevelName` (`AutoBound.lean:69-72`). `String.front`'s
 /// `Char.isLower` is ASCII `a`-`z` only.
 pub(crate) fn is_valid_auto_bound_level_name(s: &str, relaxed: bool) -> bool {
     !s.is_empty()

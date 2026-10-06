@@ -52,7 +52,7 @@ error messages.
 - **`withAutoBoundImplicit k`** (`Elab/Term/TermElabM.lean:1959-1980`):
   if `autoImplicit` is on, loop: save state; run `k` with
   `autoBoundImplicitContext := some ctx`; on the internal
-  `autoBoundImplicit` exception (`Exception.lean:20,31-37`) carrying `n`,
+  `autoBoundImplicit` exception (`Exception.lean:20,31-41`) carrying `n`,
   `s.restore (restoreInfo := true)`, `withLocalDecl n .implicit
   (← mkFreshTypeMVar)`, push the fvar onto `ctx`, loop. Other exceptions
   propagate. If off: run `k` with `some {autoImplicitEnabled := false}`
