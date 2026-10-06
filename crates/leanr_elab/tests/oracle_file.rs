@@ -8,9 +8,9 @@
 mod support;
 
 /// `wc -l tests/fixtures/elab/file-queries.jsonl` at the last deliberate
-/// regen (M4c-2c-ii P1: 308). `>=`: adding a record is a one-line bump, not a
+/// regen (M4c-2c-ii P2: 376). `>=`: adding a record is a one-line bump, not a
 /// failing gate.
-const CORPUS_FLOOR: usize = 311;
+const CORPUS_FLOOR: usize = 376;
 
 #[test]
 fn file_corpus_sources_parse_into_the_oracle_commands() {
@@ -160,16 +160,15 @@ fn empty_source_elaborates_nothing() {
     }
 }
 
-/// M4c-2c-ii P1 rows not yet passing: each task deletes its prefixes
-/// (Task 4: `auto/ident` … `auto/with`; Task 5: `auto/level`; Task 6:
-/// `auto/namedArg`; Task 7: `opt/`). Empty: P1 complete.
-const PENDING: &[&str] = &[];
+/// M4c-2c-ii P2 rows not yet passing: Task 2 narrows `varAuto/` to
+/// `varAuto/rebuild`, Task 3 empties the list.
+const PENDING: &[&str] = &["varAuto/"];
 
 /// Rows whose divergence is a pre-existing gap outside auto-bound, gated
 /// by EXACT id: `(id, reason)`. Each reason names an oracle-probed variant
 /// WITHOUT auto-bound that diverges the same way (the inline variant
 /// source in each reason is the reproducer; the 2026-10-05 scratch probe
-/// files are not committed). Survives P1; an entry leaves when its gap is
+/// files are not committed). Survives P1 and P2; an entry leaves when its gap is
 /// fixed.
 const KNOWN_GAPS: &[(&str, &str)] = &[
     (
