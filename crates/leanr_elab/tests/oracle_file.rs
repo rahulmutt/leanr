@@ -120,21 +120,17 @@ fn variable_seams_carry_their_slice() {
         m.contains("binder-annotation update") && m.ends_with(" — later M4"),
         "{m}"
     );
-    // Oracle auto-binds `β` (`runTermElabM`'s `withAutoBoundImplicit`).
-    let (at, m) = stop_seam("variable (x : β)");
-    assert_eq!(at, 0);
-    assert!(
-        m.contains("`variable` binder") && m.ends_with(" — M4c-2c-ii"),
-        "{m}"
-    );
-    // ... and a universe name the same way (`Level.lean:78-85`), never
-    // the body's "unknown universe level" (not a corpus row: P2's).
-    let (at, m) = stop_seam("variable (α : Sort w)");
-    assert_eq!(at, 0);
-    assert!(
-        m.contains("unbound universe `w` in a `variable` binder") && m.ends_with(" — M4c-2c-ii"),
-        "{m}"
-    );
+}
+
+#[test]
+fn variable_binders_auto_bind() {
+    // Oracle: `elabVariable`'s sanity run is `withAutoBoundImplicit`
+    // (`BuiltinCommand.lean:419-425`), for identifiers and universes.
+    for src in ["variable (x : β)", "variable (α : Sort w)"] {
+        let (done, stopped, _) = outcome(src);
+        assert!(stopped.is_none(), "{src:?}: {stopped:?}");
+        assert_eq!(done.len(), 1, "{src:?}");
+    }
 }
 
 #[test]
@@ -160,9 +156,9 @@ fn empty_source_elaborates_nothing() {
     }
 }
 
-/// M4c-2c-ii P2 rows not yet passing: Task 2 narrows `varAuto/` to
-/// `varAuto/rebuild`, Task 3 empties the list.
-const PENDING: &[&str] = &["varAuto/"];
+/// M4c-2c-ii P2 rows not yet passing: Task 3 (the rebuild branch)
+/// empties the list.
+const PENDING: &[&str] = &["varAuto/rebuild"];
 
 /// Rows whose divergence is a pre-existing gap outside auto-bound, gated
 /// by EXACT id: `(id, reason)`. Each reason names an oracle-probed variant

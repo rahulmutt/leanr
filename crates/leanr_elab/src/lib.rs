@@ -233,8 +233,8 @@
 //!   Auto-bound implicits in def/theorem/axiom headers landed in M4c-2c-ii
 //!   P1 (`auto_bound`; corpus 308;
 //!   docs/superpowers/specs/2026-10-05-m4c2c-ii-auto-bound-design.md
-//!   § Landed). Open seams: auto-bound implicits in `variable` binders
-//!   and unknown universes there (`— M4c-2c-ii`, P2); the `variable {α}` / `variable [x]`
+//!   § Landed); in `variable` binders in P2 (`runTermElabM`'s all-fvar
+//!   branch; the mvar-rebuild branch is P2 Task 3). Open seams: the `variable {α}` / `variable [x]`
 //!   binder-annotation update (`replaceBinderAnnotation`, `— later M4`).
 //!   Unmodelled: `commitConst`'s type-equality check (no known
 //!   reproducer).

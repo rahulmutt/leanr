@@ -44,6 +44,7 @@ use crate::elab::TermElabM;
 use crate::error::ElabError;
 use crate::names::NameTables;
 use crate::resolve::ResolveCtx;
+use crate::synthetic::PostponeBehavior;
 use scope::Scope;
 use vars::SecVars;
 use view::{expand_decl_namespace, DefKind, DefView};
@@ -260,15 +261,11 @@ impl<'x> CommandElab<'x> {
             // `liftTermElabM`: the scope's `levelNames` seed the term context.
             elab.level_names = head.level_names.clone();
             elab.options = head.options;
-            let fvars = vars::elab_section_vars(&mut elab, &head.var_decls, kinds)?;
-            if fvars.len() != head.var_uids.len() {
-                return Err(ElabError::Internal(
-                    "section variables: one uid per binder id".into(),
-                ));
-            }
+            let (fvars, section_fvars) =
+                vars::elab_section_vars(&mut elab, &head.var_decls, &head.var_uids, kinds)?;
             let sv = SecVars {
                 fvars,
-                uids: head.var_uids.clone(),
+                section_fvars,
                 included: head.included_vars.clone(),
                 omitted: head.omitted_vars.clone(),
             };
@@ -317,9 +314,16 @@ impl<'x> CommandElab<'x> {
                 ));
             }
         }
-        // The sanity elaboration (`:419-425`): the scope's variables, then these.
+        // The sanity elaboration (`:419-425`): under the scope's variables,
+        // `withSynthesize (withAutoBoundImplicit (elabBinders binders
+        // (addAutoBoundImplicits ·)))`, result discarded.
         self.with_term_elab(kinds, |elab, _| {
-            vars::elab_section_vars(elab, &binders, kinds).map(|_| ())
+            elab.with_synthesize(PostponeBehavior::No, kinds, |elab| {
+                elab.with_auto_bound_implicit(|elab| {
+                    let xs = vars::elab_binders(elab, &binders, kinds)?;
+                    elab.add_auto_bound_implicits(&xs).map(|_| ())
+                })
+            })
         })?;
         // `:427-429`: one fresh uid per binder id.
         let mut n_ids = 0usize;
