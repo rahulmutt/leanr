@@ -230,8 +230,11 @@
 //!   `mkForallFVars (usedOnly := true)`. Gated by `tests/oracle_file.rs`
 //!   (corpus 131 → 214;
 //!   docs/superpowers/specs/2026-10-05-m4c2c-i-universe-variable-design.md).
-//!   Open seams: auto-bound implicits in headers and `variable` binders
-//!   (`— M4c-2c-ii`); the `variable {α}` / `variable [x]`
+//!   Auto-bound implicits in def/theorem/axiom headers landed in M4c-2c-ii
+//!   P1 (`auto_bound`; corpus 308;
+//!   docs/superpowers/specs/2026-10-05-m4c2c-ii-auto-bound-design.md
+//!   § Landed). Open seams: auto-bound implicits in `variable` binders
+//!   and unknown universes there (`— M4c-2c-ii`, P2); the `variable {α}` / `variable [x]`
 //!   binder-annotation update (`replaceBinderAnnotation`, `— later M4`).
 //!   Unmodelled: `commitConst`'s type-equality check (no known
 //!   reproducer).

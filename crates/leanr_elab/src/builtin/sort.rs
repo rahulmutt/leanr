@@ -186,7 +186,7 @@ pub(crate) fn elab_level(
             }
             Ok(level)
         }
-        // oracle: the `identKind` arm (`Level.lean:79-86`) — a level
+        // oracle: the `identKind` arm (`Level.lean:78-85`) — a level
         // PARAMETER reference: already in `levelNames`
         // (`elab.level_names`), or auto-bound into it inside an enabled
         // `withAutoBoundImplicit` context (declaration headers, M4c-2c-ii).

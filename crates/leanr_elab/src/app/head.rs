@@ -404,7 +404,7 @@ fn elab_app_fn_id(
     } else {
         let cands = elab.resolve_global(&prefixes)?;
         if cands.is_empty() {
-            // `elabAppFnId`'s `throwUnknownIdWithSuggestions` (`App.lean:1957-1975`).
+            // `elabAppFnId`'s `throwUnknownIdWithSuggestions` (`App.lean:1960-1974`).
             return Err(crate::auto_bound::unknown_ident(elab, &comps, raw));
         }
         // `mkConsts` (`:2145-2158`) builds EVERY candidate's constant before

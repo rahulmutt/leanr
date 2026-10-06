@@ -127,7 +127,7 @@ fn variable_seams_carry_their_slice() {
         m.contains("`variable` binder") && m.ends_with(" — M4c-2c-ii"),
         "{m}"
     );
-    // ... and a universe name the same way (`Level.lean:79-86`), never
+    // ... and a universe name the same way (`Level.lean:78-85`), never
     // the body's "unknown universe level" (not a corpus row: P2's).
     let (at, m) = stop_seam("variable (α : Sort w)");
     assert_eq!(at, 0);
@@ -167,30 +167,31 @@ const PENDING: &[&str] = &[];
 
 /// Rows whose divergence is a pre-existing gap outside auto-bound, gated
 /// by EXACT id: `(id, reason)`. Each reason names an oracle-probed variant
-/// WITHOUT auto-bound that diverges the same way (scratch probes
-/// `target/m4c2ciiprobe/v.jsonl`, `v2.jsonl`, 2026-10-05). Survives P1;
-/// an entry leaves when its gap is fixed.
+/// WITHOUT auto-bound that diverges the same way (the inline variant
+/// source in each reason is the reproducer; the 2026-10-05 scratch probe
+/// files are not committed). Survives P1; an entry leaves when its gap is
+/// fixed.
 const KNOWN_GAPS: &[(&str, &str)] = &[
     (
         "auto/negDependsExplicit",
-        "coercion gap: leanr StuckCoercion, oracle `Application type mismatch` (v2.jsonl \
-         v/depNoAuto: `def f2 (y : _) (β : Type) (h : Eq (y : β) y) : Nat := Nat.zero`)",
+        "coercion gap: leanr StuckCoercion, oracle `Application type mismatch` (variant \
+         depNoAuto: `def f2 (y : _) (β : Type) (h : Eq (y : β) y) : Nat := Nat.zero`)",
     ),
     (
         "auto/negDependsExplicitAx",
-        "coercion gap: leanr StuckCoercion, oracle `Application type mismatch` (v2.jsonl \
-         v/depNoAutoAx: `axiom f2a (y : _) (β : Type) (h : Eq (y : β) y) : Nat`)",
+        "coercion gap: leanr StuckCoercion, oracle `Application type mismatch` (variant \
+         depNoAutoAx: `axiom f2a (y : _) (β : Type) (h : Eq (y : β) y) : Nat`)",
     ),
     (
         "auto/catchInst",
         "resolution gap: dotted `Wrap.val` (no such field) is `Unknown identifier` in leanr, \
-         `Unknown constant` in the oracle (v2.jsonl v/instNoAuto2: \
+         `Unknown constant` in the oracle (variant instNoAuto2: \
          `axiom f5 (h : Wrap.val Nat) : Nat`)",
     ),
     (
         "auto/withUsedVarThm",
-        "level gap: header type has `Eq.{max(u_1,1)}`, oracle `Eq.{max(1,u_1)}` (v.jsonl \
-         v/thmSortHole: `variable {β : Type} (b : β)` + `theorem t1 {α : Sort _} (x : α) : \
+        "level gap: header type has `Eq.{max(u_1,1)}`, oracle `Eq.{max(1,u_1)}` (variant \
+         thmSortHole: `variable {β : Type} (b : β)` + `theorem t1 {α : Sort _} (x : α) : \
          Eq (PProd.mk x b) (PProd.mk x b) := rfl`)",
     ),
 ];

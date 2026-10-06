@@ -10,6 +10,8 @@
 //! subterms through, an `MVar` node is matched against the `MVar`
 //! entries of `xs` exactly as an `FVar` node is against the `FVar`
 //! entries, and an entry only ever matches a node of its own kind.
+//! Keep in sync with `leanr_kernel::subst::abstract_go` (TCB, so this
+//! copy lives here; a fix to either must be mirrored in the other).
 
 use std::collections::HashMap;
 

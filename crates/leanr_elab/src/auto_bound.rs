@@ -82,7 +82,7 @@ pub(crate) fn check_valid_auto_bound_implicit_name(
     }
 }
 
-/// `isValidAutoBoundLevelName` (`AutoBound.lean:69-72`). `String.front`'s
+/// `isValidAutoBoundLevelName` (`AutoBound.lean:69-71`). `String.front`'s
 /// `Char.isLower` is ASCII `a`-`z` only.
 pub(crate) fn is_valid_auto_bound_level_name(s: &str, relaxed: bool) -> bool {
     !s.is_empty()
@@ -91,7 +91,7 @@ pub(crate) fn is_valid_auto_bound_level_name(s: &str, relaxed: bool) -> bool {
 }
 
 /// oracle: `elabAppFnId`'s `throwUnknownIdWithSuggestions`
-/// (`App.lean:1960-1975`). The `isExporting` private-name hint is not
+/// (`App.lean:1960-1974`). The `isExporting` private-name hint is not
 /// modelled (no private names — later M4). `allowed` reads
 /// `options.auto_implicit`, as the oracle reads `autoImplicit.get`; inside
 /// a context that equals its `enabled`.
@@ -503,7 +503,7 @@ mod tests {
     }
 
     /// oracle: `levelNames` is `Term.State`, so the retry's `s.restore`
-    /// rewinds a universe the failed attempt auto-bound (`Level.lean:83`).
+    /// rewinds a universe the failed attempt auto-bound (`Level.lean:82`).
     /// On every source path this is unobservable (each failed attempt's
     /// universes are a prefix of the next attempt's, and `elab_level`
     /// skips a name already present; the header's own `with_level_names`
@@ -524,7 +524,7 @@ mod tests {
         });
     }
 
-    /// An unknown universe binds in place, newest first (`Level.lean:83`'s
+    /// An unknown universe binds in place, newest first (`Level.lean:82`'s
     /// `paramName :: s.levelNames`) — no retry — and only in an enabled
     /// context; outside one it is "unknown universe level".
     #[test]

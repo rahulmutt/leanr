@@ -2840,7 +2840,7 @@ mod tests {
     /// that arm `elimMVar` would assign `?β := ?new y` and the body would
     /// keep `?new #1`. `?β : y` also pins that the mvar binder's type is
     /// abstracted over the EARLIER entries (`abstractRange xs i type`,
-    /// `:1341`).
+    /// `:1342`).
     #[test]
     fn mk_lambda_leaves_a_telescope_mvar_to_the_abstraction() {
         use crate::test_support::{app, bvar, cu, fresh_fvar, fresh_mvar_in_lctx};

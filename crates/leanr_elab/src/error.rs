@@ -12,7 +12,7 @@ pub enum ElabError {
     /// M4b slices; until then their kinds arrive here, never silently.
     UnsupportedSyntax(String),
     UnknownIdent(String),
-    /// oracle: `elabLevel`'s `identKind` arm (`Level.lean:79-86`):
+    /// oracle: `elabLevel`'s `identKind` arm (`Level.lean:78-85`):
     /// `throwError "unknown universe level `{mkIdent paramName}`"` — the
     /// name is not in `levelNames` and cannot be auto-bound (outside a
     /// header, auto-implicits off, or not a valid level name).
@@ -293,7 +293,7 @@ pub enum ElabError {
     /// the oracle's treatment of it too.
     Postpone,
     /// oracle: the internal `autoBoundImplicit` exception
-    /// (`Elab/Exception.lean:20`, `:31-40`), carrying the atomic name's
+    /// (`Elab/Exception.lean:20`, `:31-41`), carrying the atomic name's
     /// one component. Thrown by `auto_bound::unknown_ident`, caught only
     /// by `TermElabM::with_auto_bound_implicit`. Internal, like
     /// `Postpone`: [`ElabError::is_oracle_error`] is `false` for it, so
@@ -571,7 +571,7 @@ impl ElabError {
             Self::UnknownConstant(n) => Some(format!("Unknown constant `{n}`")),
             // oracle: `throwError m!"Unknown identifier `{n}`"` (probed:
             // `def uib : Nat := nope`). An unknown universe name is its own
-            // variant, worded by `Level.lean:85`.
+            // variant, worded by `Level.lean:84`.
             Self::UnknownIdent(s) => Some(format!("Unknown identifier `{s}`")),
             Self::UnknownUniverseLevel(s) => Some(format!("unknown universe level `{s}`")),
             Self::AmbiguousTerm => Some("Ambiguous term".into()),
@@ -626,6 +626,9 @@ impl ElabError {
             Self::UniverseAlreadyDeclared(u) => Some(format!(
                 "a universe level named `{u}` has already been declared"
             )),
+            // Deliberate truncation: the oracle's message continues past
+            // "The value" (the value and option type); the gate compares
+            // only the first line.
             Self::SetOptionTypeMismatch => {
                 Some("set_option value type mismatch: The value".into())
             }

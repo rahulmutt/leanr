@@ -4,9 +4,10 @@
 //! 595-611`; `Declaration.lean:118`).
 //!
 //! Not modelled: the `unusedSectionVars` lint (a warning; the gate keeps
-//! errors only), `deprecated.oldSectionVars`, auto-bound implicits
-//! (`— M4c-2c-ii`), the mvar-rebuild branch of `runTermElabM` (auto-bound
-//! only), `variable {α}` binder-annotation updates (`— later M4`);
+//! errors only), `deprecated.oldSectionVars`, auto-bound implicits in
+//! `variable` binders (header auto-bound landed in M4c-2c-ii P1; the
+//! `variable` seam, `— M4c-2c-ii`, is P2), the mvar-rebuild branch of
+//! `runTermElabM` (auto-bound only; P2), `variable {α}` binder-annotation updates (`— later M4`);
 //! `withUsed`'s local-context erasure (`removeUnused` erases the unused
 //! variables from the lctx and local instances, `Meta/CollectFVars.lean:
 //! 63`), as nothing elaborates under that context after the closure

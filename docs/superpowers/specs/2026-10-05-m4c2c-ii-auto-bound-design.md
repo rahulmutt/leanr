@@ -62,7 +62,7 @@ error messages.
   predicate into `autoBoundImplicitForbidden`. `elabHeaders` forbids the
   views' short names (`MutualDef.lean:213`); `elabAxiom` forbids its own
   (`Declaration.lean:110`).
-- **Throw site** — `throwUnknownIdWithSuggestions` (`App.lean:1960-1975`):
+- **Throw site** — `throwUnknownIdWithSuggestions` (`App.lean:1960-1974`):
   if not forbidden and the context is `some`:
   `checkValidAutoBoundImplicitName n allowed relaxed` (`AutoBound.lean`):
   - `.ok true` ⇒ `throwAutoBoundImplicitLocal n`;
@@ -75,14 +75,14 @@ error messages.
   Eligible names are atomic (`.str .anonymous s`, non-empty, no macro
   scopes). Strict mode (`relaxed = false`) accepts a single character
   followed by digits, subscripts, `_` or `'` (`isValidAutoBoundSuffix`).
-- **Universe levels** — `elabLevel` ident arm (`Level.lean:79-84`): an
+- **Universe levels** — `elabLevel` ident arm (`Level.lean:78-85`): an
   unknown name is consed onto `levelNames` (no exception, no retry) iff
   `autoBoundImplicit` (= the context's `autoImplicitEnabled`,
   `TermElabM.lean:818`) and `isValidAutoBoundLevelName` (strict mode:
   first char lowercase + valid suffix); else ``unknown universe level
   `u` ``. `levelNames` is `Term.State`, so the retry loop's restore
   rewinds it.
-- **`addAutoBoundImplicits xs`** (`TermElabM.lean:2071-2090`): for each
+- **`addAutoBoundImplicits xs`** (`TermElabM.lean:2071-2089`): for each
   auto, in order, first `collectUnassignedMVars (← inferType auto)`
   (`:1993-2016`, dependency-first, deduplicated) then the auto itself;
   then for each fvar auto and each `x ∈ xs`, if the auto's decl depends
@@ -109,7 +109,7 @@ error messages.
   - `elabVariable` (`BuiltinCommand.lean:419-425`): sanity run under
     `withSynthesize ∘ withAutoBoundImplicit`, `addAutoBoundImplicits`
     result discarded. `varDecls` stores binder syntax only.
-  - `runTermElabM` (`Command.lean:774-800`): `withAutoBoundImplicit
+  - `runTermElabM` (`Command.lean:774-798`): `withAutoBoundImplicit
     (elabBinders scope.varDecls …)` → `synthesizeSyntheticMVarsNoPostponing`
     → `sectionFVars` → `resetMessageLog` → `addAutoBoundImplicits xs none`
     → all fvars ⇒ `withoutAutoBoundImplicit (elabFn xs)`; else
@@ -145,7 +145,7 @@ context `some` ⇒ `check_valid_auto_bound_implicit_name`). Dotted and
 macro-scoped names are ineligible. `app/lval.rs` unknown-field paths are
 not throw sites (the oracle's are not either; confirm at plan time).
 
-**Universe levels:** `builtin/sort.rs:214` follows `Level.lean:79-84`
+**Universe levels:** `builtin/sort.rs:214` follows `Level.lean:78-85`
 (push onto `level_names`, no retry).
 
 **`with_auto_bound_implicit(k)`:** if enabled, loop: save
@@ -328,3 +328,87 @@ Further probed facts the plan relies on:
   The mvar-aware abstraction is a new `leanr_meta`-local traversal used
   only when `xs` contains an mvar; fvar-only telescopes keep the kernel
   path byte-for-byte.
+
+## Landed
+
+### P1 (headers)
+
+- PR: pending (the controller fills it at merge). Commits: 8352b47
+  (`leanr_meta` mvar entries in `mk_binding`), 58e9f57 (corpus rows,
+  staged), 1e3f19d (retry loop + throw sites), 57fe644
+  (`addAutoBoundImplicits`, def/theorem/axiom wiring), 05b94d4
+  (universe names), 18dc6ec (`throwInvalidNamedArg`), 928e9ba
+  (`set_option autoImplicit` / `relaxedAutoImplicit`), then the close-out.
+- Corpus: file-query floor 308 (`CORPUS_FLOOR`; the plan said 309 --
+  Task 1 dropped `auto/identInBinderDefault` because leanr's parser
+  rejects binder defaults `(y : T := v)`; re-add it when they parse).
+  The single-declaration corpus (`oracle_decl`, 79 records) is
+  unchanged. The `PENDING` filter is empty.
+- `KNOWN_GAPS` (4 rows, exact-id gated, each a pre-existing gap outside
+  auto-bound that diverges identically without an auto; each is a
+  follow-up):
+  - `auto/negDependsExplicit`, `auto/negDependsExplicitAx`: coercion
+    (leanr `StuckCoercion`, oracle `Application type mismatch`).
+  - `auto/catchInst`: dotted unknown `Wrap.val` is `Unknown identifier`
+    in leanr, `Unknown constant` in the oracle.
+  - `auto/withUsedVarThm`: header level order `max(u_1,1)` vs the
+    oracle's `max(1,u_1)` -- a possible wrong-Ok level-order bug that
+    deserves its own slice.
+- Mutations (full text in each commit body, `git log --format=%B`):
+  - `leanr_meta` (8352b47): `.default` for the mvar arm; drop the
+    `mvarIdsToAbstract` arm in `elim_app` (the brief's test survived, a
+    new `?β : y` test kills it); ignore `user_name`; per-binder step back
+    to kernel `abstract_fvars`; `abstract_go` never matches an MVar;
+    `mk_aux_mvar_type` keeps an anonymous name; macro-scope prefix.
+    Equivalent: "abstract_vars always takes the new traversal" and
+    "abstract_range back to kernel `abstract_fvars`" (all tests pass;
+    the per-binder loop already abstracts earlier entries).
+  - Task 3: drop `AutoBoundImplicitLocal` from `is_oracle_error`; skip
+    the lctx restore (a new test; the brief's survived); ignore the
+    forbidden predicate; `relaxed` for `allowed`; `char::is_lowercase`;
+    macro-head through `unknown_ident` (hangs).
+  - Task 4: collect-before-push order; skip `collect_unassigned_mvars`;
+    drop the forbidden name (def/theorem and axiom); reverse bound
+    order; `num_params` before autos; count the exception as an oracle
+    error (`auto/catchOverload`); disable the no-progress guard;
+    disable the depends-on-explicit check; double the recursion cap.
+  - Task 5: drop the loop's `level_names` restore; `push` for
+    `insert(0, ..)`; ignore `relaxed`; axiom passes post-header names;
+    `is_some_and(enabled)`; `parts.len() == 1`; auto-bind outside a
+    context; drop the `variable` seam arm.
+  - Task 6: mvar-arm binder name; report the LAST named arg (two-arg
+    case added); drop the `func` suffix.
+  - Task 7: no seeded options; options on the root scope; swap the two
+    field mappings; force the relaxed flag in `sort.rs`.
+- Surviving or equivalent mutations: Task 5 (a') is equivalent
+  (`elab_level` skips already-bound names and a failed attempt's
+  universes are a prefix of the next's), the restore half is killed by
+  `the_retry_rewinds_level_names`; Task 7 (c) does not discriminate on
+  `opt/strictBad` (both options off give the same error) but is caught
+  by `opt/strictOk`, `opt/strictLevelOk`, `opt/offLevel`; Task 4 (j) is
+  bounded, not killed (the cap is doubled, not removed -- removing it
+  would loop); the two `leanr_meta` equivalents above.
+- Deviations from this spec: `app/mod.rs` macro-quotation heads stay a
+  plain `UnknownIdent` (the "Throw sites" list names `app/mod.rs:193`,
+  which is NOT a throw site); `AutoBoundImplicitLocal` carries a
+  `String`, not a `NameId`; `AutoImplicitDependsOnExplicit` carries
+  rendered Strings; the retry loop is bounded by `MAX_REC_DEPTH`
+  (oracle `withIncRecDepth`, `TermElabM.lean:1963`) plus a no-progress
+  guard (Internal error). The `variable` seam keeps the label
+  `— M4c-2c-ii` (not `… P2`; `variable_seams_carry_their_slice` pins
+  it) and also covers unknown universes in `variable` binders.
+- Open seams / follow-ups: P2 `variable` auto-bound and the
+  `runTermElabM` mvar-rebuild branch; `setMVarUserNamesAt`; the "note"
+  line (line 3 of the message, unobservable to the gate); the
+  deprecated-arg linter and the "perhaps you meant" hint are
+  unmodelled; `save_term_state` does not snapshot `level_names` (the
+  oracle's `SavedState.restore` does) so a backtracked header branch
+  could leak an auto-bound universe name (no reproducer);
+  `_leanr_`-prefixed names are excluded from auto-bound idents (the
+  oracle would bind a user ident literally named `_leanr_*`) but are not
+  rejected for level names; `header_unknown_ident_is_auto_bound`
+  asserts only `is_ok()`.
+- Cite sweep: every oracle `file:line` this branch added was opened
+  against `v4.33.0-rc1`; the Level.lean ident arm is :78-85, the
+  throw-site function `App.lean:1960-1974`, `addAutoBoundImplicits`
+  `TermElabM.lean:2071-2089`, `runTermElabM` `Command.lean:774-798`.
