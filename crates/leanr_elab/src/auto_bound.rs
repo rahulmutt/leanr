@@ -23,7 +23,6 @@ use crate::error::ElabError;
 #[derive(Clone, Debug)]
 pub(crate) struct AutoBoundCtx {
     /// `autoImplicitEnabled`: the `autoImplicit` option at entry.
-    #[allow(dead_code)] // read by universe auto-binding (P1 Task 5)
     pub enabled: bool,
     /// `boundVariables`: the auto-bound fvars, in discovery order.
     pub bound: Vec<ExprId>,
@@ -85,7 +84,6 @@ pub(crate) fn check_valid_auto_bound_implicit_name(
 
 /// `isValidAutoBoundLevelName` (`AutoBound.lean:69-72`). `String.front`'s
 /// `Char.isLower` is ASCII `a`-`z` only.
-#[allow(dead_code)] // called by universe auto-binding (P1 Task 5)
 pub(crate) fn is_valid_auto_bound_level_name(s: &str, relaxed: bool) -> bool {
     !s.is_empty()
         && (relaxed
@@ -352,7 +350,7 @@ impl TermElabM<'_> {
     }
 
     /// oracle: `withoutAutoBoundImplicit` (`TermElabM.lean:1982-1983`).
-    #[allow(dead_code)] // called by P1 Task 5 / P2
+    #[allow(dead_code)] // P2: `runTermElabM`'s `elabFn` (`Command.lean:791`, `:798`)
     pub(crate) fn without_auto_bound_implicit<R>(
         &mut self,
         k: impl FnOnce(&mut Self) -> Result<R, ElabError>,
@@ -501,6 +499,81 @@ mod tests {
                 entry + 2,
                 "α and the retry's `x`; the failed attempt's `x` was dropped"
             );
+        });
+    }
+
+    /// oracle: `levelNames` is `Term.State`, so the retry's `s.restore`
+    /// rewinds a universe the failed attempt auto-bound (`Level.lean:83`).
+    /// On every source path this is unobservable (each failed attempt's
+    /// universes are a prefix of the next attempt's, and `elab_level`
+    /// skips a name already present; the header's own `with_level_names`
+    /// inside the loop also rewinds), so `k` pushes unconditionally here.
+    #[test]
+    fn the_retry_rewinds_level_names() {
+        with_elab0(|elab, kinds| {
+            let stx = parse_term(kinds, "List α");
+            let v = crate::command::header::intern_atomic(elab, "v").unwrap();
+            let names = elab
+                .with_auto_bound_implicit(|elab| {
+                    elab.level_names.insert(0, v);
+                    crate::builtin::binder::elab_type(elab, &stx, kinds)?;
+                    Ok(elab.level_names.clone())
+                })
+                .expect("auto-bound");
+            assert_eq!(names, vec![v], "pushed once per surviving attempt");
+        });
+    }
+
+    /// An unknown universe binds in place, newest first (`Level.lean:83`'s
+    /// `paramName :: s.levelNames`) — no retry — and only in an enabled
+    /// context; outside one it is "unknown universe level".
+    #[test]
+    fn an_unknown_universe_binds_in_place_newest_first() {
+        with_elab0(|elab, kinds| {
+            let stx = parse_term(kinds, "Sort v → Sort u → Sort v");
+            let attempts = std::cell::Cell::new(0);
+            let names = elab
+                .with_auto_bound_implicit(|elab| {
+                    attempts.set(attempts.get() + 1);
+                    crate::builtin::binder::elab_type(elab, &stx, kinds)?;
+                    Ok(elab.level_names.clone())
+                })
+                .expect("auto-bound");
+            let names: Vec<String> = names.into_iter().map(|n| elab.name_str(n)).collect();
+            assert_eq!(names, ["u", "v"]);
+            assert_eq!(attempts.get(), 1, "a universe never retries");
+            elab.level_names.clear();
+            let e = crate::builtin::binder::elab_type(elab, &stx, kinds).unwrap_err();
+            assert_eq!(
+                e.oracle_first_line().as_deref(),
+                Some("unknown universe level `v`")
+            );
+            elab.options.auto_implicit = false;
+            let e = elab
+                .with_auto_bound_implicit(|elab| {
+                    crate::builtin::binder::elab_type(elab, &stx, kinds)
+                })
+                .unwrap_err();
+            assert!(
+                matches!(e, ElabError::UnknownUniverseLevel(ref s) if s == "v"),
+                "a disabled context: {e:?}"
+            );
+            // `isValidAutoBoundLevelName`: atomic only; strict (`relaxed`
+            // off) wants a lowercase head.
+            elab.options.auto_implicit = true;
+            for (src, opts_relaxed, bad) in [("Sort a.b", true, "a.b"), ("Sort U", false, "U")] {
+                elab.options.relaxed_auto_implicit = opts_relaxed;
+                let stx = parse_term(kinds, src);
+                let e = elab
+                    .with_auto_bound_implicit(|elab| {
+                        crate::builtin::binder::elab_type(elab, &stx, kinds)
+                    })
+                    .unwrap_err();
+                assert!(
+                    matches!(e, ElabError::UnknownUniverseLevel(ref s) if s == bad),
+                    "{src}: {e:?}"
+                );
+            }
         });
     }
 

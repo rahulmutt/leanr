@@ -12,6 +12,11 @@ pub enum ElabError {
     /// M4b slices; until then their kinds arrive here, never silently.
     UnsupportedSyntax(String),
     UnknownIdent(String),
+    /// oracle: `elabLevel`'s `identKind` arm (`Level.lean:79-86`):
+    /// `throwError "unknown universe level `{mkIdent paramName}`"` — the
+    /// name is not in `levelNames` and cannot be auto-bound (outside a
+    /// header, auto-implicits off, or not a valid level name).
+    UnknownUniverseLevel(String),
     /// oracle: `elabAppAux`'s `throwErrorAt f "Ambiguous term{indentD f}…"`
     /// (`App.lean:2217`): two or more overloaded candidates survived
     /// `getSuccesses`.
@@ -555,10 +560,10 @@ impl ElabError {
             Self::Eliminator { reason } => Some(reason.oracle_first_line()),
             Self::UnknownConstant(n) => Some(format!("Unknown constant `{n}`")),
             // oracle: `throwError m!"Unknown identifier `{n}`"` (probed:
-            // `def uib : Nat := nope`). leanr's `sort.rs` also raises
-            // `UnknownIdent` for an unknown universe name, which the oracle
-            // words differently; no corpus record reaches that.
+            // `def uib : Nat := nope`). An unknown universe name is its own
+            // variant, worded by `Level.lean:85`.
             Self::UnknownIdent(s) => Some(format!("Unknown identifier `{s}`")),
+            Self::UnknownUniverseLevel(s) => Some(format!("unknown universe level `{s}`")),
             Self::AmbiguousTerm => Some("Ambiguous term".into()),
             // oracle `App.lean:409`: "Function expected at{indentExpr f}\n…".
             Self::FunctionExpected { .. } => Some("Function expected at".into()),

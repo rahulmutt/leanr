@@ -162,11 +162,15 @@ pub(super) fn elab_section_vars(
 /// `runTermElabM` and `elabVariable` run under `withAutoBoundImplicit`
 /// (`Command.lean:777`, `BuiltinCommand.lean:419`); headers do since
 /// M4c-2c-ii P1, `variable` binders do not yet (outside a loop an unknown
-/// identifier is a plain `UnknownIdent`, renamed into this seam).
+/// identifier is a plain `UnknownIdent`, and an unknown universe a plain
+/// `UnknownUniverseLevel`, both renamed into this seam).
 fn variable_auto_bound_seam(e: ElabError) -> ElabError {
     match e {
         ElabError::UnknownIdent(s) => ElabError::UnsupportedSyntax(format!(
             "unbound `{s}` in a `variable` binder (auto-bound implicit) — M4c-2c-ii"
+        )),
+        ElabError::UnknownUniverseLevel(s) => ElabError::UnsupportedSyntax(format!(
+            "unbound universe `{s}` in a `variable` binder (auto-bound implicit) — M4c-2c-ii"
         )),
         e => e,
     }

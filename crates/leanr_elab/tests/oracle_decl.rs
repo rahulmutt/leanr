@@ -63,10 +63,16 @@ fn header_unknown_ident_is_auto_bound() {
 }
 
 #[test]
-fn header_unknown_universe_is_the_auto_bound_seam() {
+fn header_unknown_universe_is_auto_bound() {
     // probe: `def uuh (α : Sort w) : Sort w := α` admits `uuh.{w}`.
-    let m = seam_message("def uuh (α : Sort w) : Sort w := α");
-    assert!(m.contains("auto-bound"), "{m}");
+    assert!(decl_result("def uuh (α : Sort w) : Sort w := α").is_ok());
+    match decl_result("def uub : Nat := (fun (_ : Sort w) => Nat.zero) Nat") {
+        Err(e) => assert_eq!(
+            e.oracle_first_line().as_deref(),
+            Some("unknown universe level `w`")
+        ),
+        Ok(ns) => panic!("body universe must not auto-bind: {ns:?}"),
+    }
 }
 
 #[test]
