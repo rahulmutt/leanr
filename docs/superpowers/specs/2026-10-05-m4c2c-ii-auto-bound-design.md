@@ -452,8 +452,8 @@ identifier").
   guard (Internal error). The `variable` seam keeps the label
   `— M4c-2c-ii` (not `… P2`; `variable_seams_carry_their_slice` pins
   it) and also covers unknown universes in `variable` binders.
-- Open seams / follow-ups: P2 `variable` auto-bound and the
-  `runTermElabM` mvar-rebuild branch; `setMVarUserNamesAt`; the "note"
+- Open seams / follow-ups: (CLOSED in P2: `variable` auto-bound and the
+  `runTermElabM` mvar-rebuild branch); `setMVarUserNamesAt`; the "note"
   line (line 3 of the message, unobservable to the gate); the
   deprecated-arg linter and the "perhaps you meant" hint are
   unmodelled;
@@ -478,3 +478,43 @@ identifier").
   against `v4.33.0-rc1`; the Level.lean ident arm is :78-85, the
   throw-site function `App.lean:1960-1974`, `addAutoBoundImplicits`
   `TermElabM.lean:2071-2089`, `runTermElabM` `Command.lean:774-798`.
+
+### P2 (variable binders)
+
+- Commits: 25456a8 (Task 1, 65 oracle-probed `varAuto` rows, staged),
+  dbd69af (Task 2: all-fvar branch, `sectionFVars` uid map,
+  `OmitUndeclared`), 0ad03eb (Task 3: `runTermElabM` rebuild branch,
+  stale `sectionFVars`), then this close-out.
+- Corpus: file-query floor 376 (65 rows). `KNOWN_GAPS` added: none.
+- Mutations (measured results; they override the commit bodies):
+  - Task 2: (a) `section_fvars` built after `add_auto_bound_implicits`
+    fails `varAuto/includeX`, `omitAuto`, `omitReferenced`,
+    `omitInstKept`; (b) `None => continue` in `elab_omit` is killed by
+    `varAuto/omitAuto`, NOT `varAuto/omitTypeAuto` (its `[Wrap α]`
+    matches the instance, which has a uid); (c) dropping the inner
+    `with_auto_bound_implicit` in the sanity run fails
+    `variable_binders_auto_bind` and `varAuto/def` + 32 more; (d) autos
+    after the binder fvars fails `varAuto/afterExplicit`, `varAuto/def`
+    + 11 more; (e) seeding `elab.options` after `elab_section_vars`
+    fails `varAuto/offAfter`; (f) `uid_of` always `None` fails the
+    `include/*` and `omit/*` rows; (g) no `InvalidBinderAnnotation`
+    first-line arm fails the first-line test and `varAuto/notClass`.
+  - Task 3: (a) `section_fvars` from the last `var_uids.len()` of `ys`
+    fails `rebuildInclude`, `rebuildIncludeH`, `rebuildOmitName`,
+    `rebuildOmitRefH`, `rebuildOmitInstIgnored` and
+    `omit_type_pattern_without_uid_errors`; (b) skipping
+    `install_empty_lctx` fails `varAuto/rebuildBodyUnknown`; (c) always
+    rebuilding kills include rows vi1, vi2, vi5-vi10 (not vi3/vi4) and
+    `varAuto/includeX`; (d) `forall_bounded_telescope(.., len - 1)` fails
+    all 24 rebuild-reaching rows and the omit test; (e)
+    `install_empty_lctx` not installing fails its unit test; (f)
+    `OmitUndeclared` via `names::render` fails
+    `omit_type_pattern_without_uid_errors`.
+- Survivors: none.
+- Deviations: `OmitUndeclared` for an mvar binder or anonymous instance
+  prints leanr's `fvar_message_name` (e.g. `inst✝`), not the oracle's
+  hygienic hash name; the rebuild never reinstalls the outer lctx;
+  Task 2 also gave `InvalidBinderAnnotation` an oracle first line
+  (`Binders.lean:218`, for `varAuto/notClass`). `leanr_meta` additive
+  changes: `forall_bounded_telescope` is `pub`, plus
+  `MetaCtx::install_empty_lctx`.

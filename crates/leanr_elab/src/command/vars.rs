@@ -14,6 +14,9 @@
 //! type (`MutualDef.lean:535`), as `elab_section_vars` stores no
 //! annotations a section-variable type could carry. Neither is
 //! observable today.
+//! Auto-bound implicits and the mvar-rebuild branch (M4c-2c-ii P2) are
+//! modelled; `SecVars::section_fvars` is the oracle's pre-rebuild
+//! `sectionFVars`.
 //! An unmatched `omit` item is reported by its source text with
 //! whitespace runs collapsed, standing in for the oracle's syntax
 //! formatter (`{o}`).

@@ -233,16 +233,19 @@
 //!   Auto-bound implicits in def/theorem/axiom headers landed in M4c-2c-ii
 //!   P1 (`auto_bound`; corpus 308;
 //!   docs/superpowers/specs/2026-10-05-m4c2c-ii-auto-bound-design.md
-//!   § Landed); in `variable` binders in P2 (`runTermElabM`'s all-fvar
-//!   branch; the mvar-rebuild branch is P2 Task 3). Open seams: the `variable {α}` / `variable [x]`
-//!   binder-annotation update (`replaceBinderAnnotation`, `— later M4`).
+//!   § Landed). Auto-bound implicits in `variable` binders and
+//!   `runTermElabM`'s mvar-rebuild branch (stale `sectionFVars`,
+//!   faithfully) landed in P2 (corpus 376). Open seams: the
+//!   `variable {α}` / `variable [x]` binder-annotation update (`replaceBinderAnnotation`, `— later M4`).
 //!   Unmodelled: `commitConst`'s type-equality check (no known
 //!   reproducer).
 //!   Known rendering limits: `OmitUnmatched` prints the item's source text
 //!   with whitespace collapsed, not the oracle's syntax formatter (a
 //!   comment inside the brackets differs); `IncludeUndeclared` joins the
 //!   id's components with `.`, so an escaped id (`«a.b»`) renders
-//!   differently from the oracle.
+//!   differently from the oracle; `OmitUndeclared` for an mvar binder or an
+//!   anonymous instance prints leanr's binder name, not the oracle's
+//!   hygienic hash name.
 pub mod app; // M4b-3 P1
 mod auto_bound; // M4c-2c-ii
 pub mod builtin; // Tasks 4-6
