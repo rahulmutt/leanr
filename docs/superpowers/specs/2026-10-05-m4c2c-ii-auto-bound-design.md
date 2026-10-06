@@ -329,6 +329,48 @@ Further probed facts the plan relies on:
   only when `xs` contains an mvar; fvar-only telescopes keep the kernel
   path byte-for-byte.
 
+## Amendment 2 (P2 plan time, 2026-10-06)
+
+Oracle probes of the 65 P2 rows (scratch `target/m4c2ciip2probe/`,
+`expected.txt`) overturn one claim of § "`variable` binders (P2)" and add
+one error:
+
+1. **The stale `sectionFVars` is observable.** `runTermElabM` builds
+   `sectionFVars` (uid ↦ fvar, `Command.lean:782-784`) from the binders'
+   fvars BEFORE `addAutoBoundImplicits` and the rebuild, so on the rebuild
+   branch no member of `elabFn`'s `xs` has a uid. Every uid-keyed lookup
+   then misses:
+   - `include n` has no effect on a theorem (`varAuto/rebuildInclude`
+     ⇒ `va42 : True`; the all-fvar twin keeps `(n : Nat)`);
+   - an `omit`ted instance is kept again (`varAuto/rebuildOmitInstIgnored`
+     ⇒ `∀ [Wrap Nat], True`);
+   - `omit n` fails (item 2).
+   leanr ports the map faithfully: `SecVars` carries `section_fvars:
+   Vec<(u32, ExprId)>` built from the pre-rebuild fvars, and every
+   include/omit/instance lookup goes through it. The § P2 sentence
+   calling the quirk unobservable is withdrawn.
+2. **`elabOmit`'s "not declared" arm** (`BuiltinCommand.lean:598-599`):
+   `omit` matches against every run variable, autos included; a match
+   with no uid is ``invalid 'omit', `a` has not been declared in the
+   current scope`` (new `ElabError::OmitUndeclared`, carrying the
+   binder's user name). Reached by an auto (`varAuto/omitAuto`) and by
+   every variable on the rebuild branch (`varAuto/rebuildOmitName`).
+   Unpinnable sub-case: a `[T]` item matching an mvar binder or an
+   anonymous instance binder; the oracle prints a hash-bearing hygienic
+   name (`inst._@.843228007._hygCtx._hyg.8`), and leanr prints its own
+   binder name. leanr still errors.
+3. **`leanr_meta` additions** (additive, TCB-neutral, M4b precedent):
+   `forall_bounded_telescope` becomes `pub` (it was `pub(crate)`), plus a
+   new `MetaCtx::install_empty_lctx` (oracle `withLCtx {} {}`).
+
+Confirmed as designed: autos lead the run (`{α} {β} (x) (n) (y)` across
+two `variable` commands); header autos follow section variables; a
+header `α` after a rebuild is a fresh auto, because the mvar binder is
+inaccessible (`varAuto/rebuildHeaderAlphaThm`); section-variable
+universes join `levelNames` (`varAuto/levelHeader` ⇒ `[u, v]`); options
+are read at each re-elaboration (`varAuto/offAfter` ⇒ "Unknown
+identifier").
+
 ## Landed
 
 ### P1 (headers)
