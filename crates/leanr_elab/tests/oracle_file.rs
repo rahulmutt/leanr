@@ -70,6 +70,16 @@ fn stop_seam(src: &str) -> (usize, String) {
 }
 
 #[test]
+fn set_option_other_names_are_later_m4_seams() {
+    let (at, m) = stop_seam("set_option pp.all true");
+    assert_eq!(at, 0);
+    assert!(
+        m.contains("set_option") && m.ends_with(" — later M4"),
+        "{m}"
+    );
+}
+
+#[test]
 fn an_error_mid_file_stops_the_loop() {
     // Oracle: `la` logs a type mismatch and is still added (`errToSorry`),
     // then `lb` and `lc` elaborate. leanr stops at `la` (spec decision 2).
@@ -152,8 +162,8 @@ fn empty_source_elaborates_nothing() {
 
 /// M4c-2c-ii P1 rows not yet passing: each task deletes its prefixes
 /// (Task 4: `auto/ident` … `auto/with`; Task 5: `auto/level`; Task 6:
-/// `auto/namedArg`; Task 7: `opt/`). Empty at the end of P1.
-const PENDING: &[&str] = &["opt/"];
+/// `auto/namedArg`; Task 7: `opt/`). Empty: P1 complete.
+const PENDING: &[&str] = &[];
 
 /// Rows whose divergence is a pre-existing gap outside auto-bound, gated
 /// by EXACT id: `(id, reason)`. Each reason names an oracle-probed variant

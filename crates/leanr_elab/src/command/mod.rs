@@ -189,6 +189,7 @@ impl<'x> CommandElab<'x> {
             "Lean.Parser.Command.include" => none(self.elab_include(cmd, kinds)),
             "Lean.Parser.Command.omit" => none(self.elab_omit(cmd, kinds)),
             "Lean.Parser.Command.open" => none(self.elab_open(cmd, kinds)),
+            "Lean.Parser.Command.set_option" => none(self.elab_set_option(cmd, kinds)),
             "Lean.Parser.Command.in" => self.elab_in(cmd, kinds),
             "Lean.Parser.Command.declaration" => self.elab_declaration(cmd, kinds),
             other => Err(command_seam(other)),
@@ -258,6 +259,7 @@ impl<'x> CommandElab<'x> {
             };
             // `liftTermElabM`: the scope's `levelNames` seed the term context.
             elab.level_names = head.level_names.clone();
+            elab.options = head.options;
             let fvars = vars::elab_section_vars(&mut elab, &head.var_decls, kinds)?;
             if fvars.len() != head.var_uids.len() {
                 return Err(ElabError::Internal(

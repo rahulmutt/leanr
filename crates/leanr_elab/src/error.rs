@@ -319,6 +319,9 @@ pub enum ElabError {
     /// oracle: `throwAlreadyDeclaredUniverseLevel` (`Elab/Exception.lean:43-44`),
     /// from `expandDeclId`'s `.{…}` fold (`Elab/DeclModifiers.lean:333-339`).
     UniverseAlreadyDeclared(String),
+    /// oracle: `validateOptionValue` (`SetOption.lean`): a non-Bool value
+    /// for a Bool option (`opt/badValue`).
+    SetOptionTypeMismatch,
     /// oracle: `sortDeclLevelParams` (`Elab/DeclUtil.lean:79-81`).
     UnusedUniverseParam(String),
     /// oracle: `MutualClosure.pushMain` (`Elab/MutualDef.lean:1051-1053`).
@@ -623,6 +626,9 @@ impl ElabError {
             Self::UniverseAlreadyDeclared(u) => Some(format!(
                 "a universe level named `{u}` has already been declared"
             )),
+            Self::SetOptionTypeMismatch => {
+                Some("set_option value type mismatch: The value".into())
+            }
             Self::UnusedUniverseParam(u) => Some(format!("unused universe parameter '{u}'")),
             Self::TheoremTypeNotProp(n) => {
                 Some(format!("type of theorem `{n}` is not a proposition"))
