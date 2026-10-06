@@ -1,12 +1,13 @@
-//! Section variables: oracle `runTermElabM` (`Elab/Command.lean:774-797`),
+//! Section variables: oracle `runTermElabM` (`Elab/Command.lean:774-798`),
 //! `variable` / `include` / `omit` (`Elab/BuiltinCommand.lean:415-430,
 //! 551-607`) and the inclusion regimes (`MutualDef.lean:455-490,
 //! 595-611`; `Declaration.lean:118`).
 //!
 //! Not modelled: the `unusedSectionVars` lint (a warning; the gate keeps
-//! errors only), `deprecated.oldSectionVars`, auto-bound implicits
-//! (`— M4c-2c-ii`), the mvar-rebuild branch of `runTermElabM` (auto-bound
-//! only), `variable {α}` binder-annotation updates (`— later M4`);
+//! errors only), `deprecated.oldSectionVars`, auto-bound implicits in
+//! `variable` binders (header auto-bound landed in M4c-2c-ii P1; the
+//! `variable` seam, `— M4c-2c-ii`, is P2), the mvar-rebuild branch of
+//! `runTermElabM` (auto-bound only; P2), `variable {α}` binder-annotation updates (`— later M4`);
 //! `withUsed`'s local-context erasure (`removeUnused` erases the unused
 //! variables from the lctx and local instances, `Meta/CollectFVars.lean:
 //! 63`), as nothing elaborates under that context after the closure
@@ -159,13 +160,18 @@ pub(super) fn elab_section_vars(
     Ok(xs)
 }
 
-/// The variable-binder twin of `header::unknown_ident_to_auto_bound_seam`:
 /// `runTermElabM` and `elabVariable` run under `withAutoBoundImplicit`
-/// (`Command.lean:777`, `BuiltinCommand.lean:419`).
+/// (`Command.lean:777`, `BuiltinCommand.lean:419`); headers do since
+/// M4c-2c-ii P1, `variable` binders do not yet (outside a loop an unknown
+/// identifier is a plain `UnknownIdent`, and an unknown universe a plain
+/// `UnknownUniverseLevel`, both renamed into this seam).
 fn variable_auto_bound_seam(e: ElabError) -> ElabError {
     match e {
         ElabError::UnknownIdent(s) => ElabError::UnsupportedSyntax(format!(
             "unbound `{s}` in a `variable` binder (auto-bound implicit) — M4c-2c-ii"
+        )),
+        ElabError::UnknownUniverseLevel(s) => ElabError::UnsupportedSyntax(format!(
+            "unbound universe `{s}` in a `variable` binder (auto-bound implicit) — M4c-2c-ii"
         )),
         e => e,
     }

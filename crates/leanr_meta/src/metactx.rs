@@ -236,6 +236,16 @@ pub struct MetaCtx<'e> {
     /// `FVarIdGen` (an expr-mvar name must not collide with either a
     /// level-mvar or an fvar name).
     pub(crate) expr_mvar_gen: u64,
+    /// Monotone counter backing `mk_fresh_binder_name` (oracle:
+    /// `MkBinding.mkFreshBinderName`, `MetavarContext.lean:977-979`) —
+    /// the same "fixed prefix + counter" idiom as `level_mvar_gen`, own
+    /// prefix `_leanr_mkbinding_fresh`.
+    pub(crate) binder_name_gen: u64,
+    /// oracle: `MkBinding.Context.mvarIdsToAbstract` (`MetavarContext.lean:
+    /// 968`, set at `:1364`): the mvars of the current top-level
+    /// `mkBinding` telescope. `elimApp` leaves them in place (`:1242-1243`)
+    /// so the abstraction can turn them into binders.
+    pub(crate) mvar_ids_to_abstract: Vec<MVarId>,
     /// Decoded `Lean.projectionFnInfoExt` entries (task B6), keyed by
     /// the projection function's own name — oracle `getProjectionFnInfo?`
     /// (`ProjFns.lean:37-59`, a plain `NameMap` point lookup). Consulted
@@ -469,6 +479,8 @@ impl<'e> MetaCtx<'e> {
             sunfold_match_alt,
             level_mvar_gen: 0,
             expr_mvar_gen: 0,
+            binder_name_gen: 0,
+            mvar_ids_to_abstract: Vec::new(),
             projection_fns,
         }
     }
@@ -1139,7 +1151,44 @@ impl<'e> MetaCtx<'e> {
     /// `postponed_coe_under_a_binder_abstracts_via_elim_mvar_deps`
     /// (`tests/seam_audit.rs`), which asserted the WRONG answer until
     /// the elimMVarDeps slice landed and asserts the oracle's now.
+    ///
+    /// # Metavariable entries
+    ///
+    /// A telescope entry may also be an unassigned metavariable (oracle
+    /// `mkBinding`'s else arm, `MetavarContext.lean:1339-1347`): it
+    /// becomes an `.implicit` binder (`binderInfoForMVars`'s default,
+    /// `:1363`) over its declared type, named by its `user_name` or a
+    /// fresh `_leanr_mkbinding_fresh.<n>`. Its occurrences are left in
+    /// place by `elimMVarDeps` (`mvar_ids_to_abstract`, `:1364`) and
+    /// abstracted by `abstract_vars`. An fvar-only telescope takes
+    /// exactly the kernel `abstract_fvars` path, as before.
     fn mk_binding(
+        &mut self,
+        is_lambda: bool,
+        eta_reduce: bool,
+        fvars: &[ExprId],
+        body: ExprId,
+    ) -> Result<ExprId, MetaError> {
+        // oracle `MetavarContext.mkBinding` (`:1363-1365`): the
+        // telescope's mvars, for `elimApp` to leave alone. Scoped to this
+        // call (the oracle's reader context); a nested `mk_binding`
+        // reached from inside sets its own and this one is restored.
+        let to_abstract: Vec<MVarId> = fvars
+            .iter()
+            .filter_map(|&x| match self.node(x) {
+                Node::MVar { id: Some(n) } => Some(MVarId(n)),
+                _ => None,
+            })
+            .collect();
+        let outer = std::mem::replace(&mut self.mvar_ids_to_abstract, to_abstract);
+        let out = self.mk_binding_telescope(is_lambda, eta_reduce, fvars, body);
+        self.mvar_ids_to_abstract = outer;
+        out
+    }
+
+    /// oracle: `MkBinding.mkBinding` (`MetavarContext.lean:1312-1347`);
+    /// see [`Self::mk_binding`].
+    fn mk_binding_telescope(
         &mut self,
         is_lambda: bool,
         eta_reduce: bool,
@@ -1157,13 +1206,7 @@ impl<'e> MetaCtx<'e> {
         let mut i = fvars.len();
         while i > 0 {
             i -= 1;
-            r = abstract_fvars(
-                self.scratch,
-                Some(self.view.store),
-                r,
-                std::slice::from_ref(&fvars[i]),
-                &mut self.guard,
-            )?;
+            r = self.abstract_vars(r, std::slice::from_ref(&fvars[i]))?;
             let (binder_name, ty, binder_info) = match self.node(fvars[i]) {
                 Node::FVar { id: Some(id) } => {
                     let decl = self.lctx.get(id).ok_or_else(|| {
@@ -1194,9 +1237,25 @@ impl<'e> MetaCtx<'e> {
                         (decl.binder_name, decl.ty, decl.binder_info)
                     }
                 }
+                Node::MVar { id: Some(n) } => {
+                    // oracle `MetavarContext.lean:1339-1347`.
+                    let decl = self.mctx.decl(MVarId(n)).ok_or_else(|| {
+                        MetaError::Infer("mk_binding: telescope mvar not declared".into())
+                    })?;
+                    let (user_name, ty) = (decl.user_name, decl.ty);
+                    let name = match user_name {
+                        Some(n) => Some(n),
+                        // `mkFreshBinderName` (`:977`): a macro-scoped `x`;
+                        // leanr's stand-in, recognised by `leanr_elab`'s
+                        // `name_has_macro_scopes`.
+                        None => Some(self.mk_fresh_binder_name()?),
+                    };
+                    // `binderInfoForMVars`, default `.implicit` (`:1363`).
+                    (name, ty, leanr_kernel::BinderInfo::Implicit)
+                }
                 _ => {
                     return Err(MetaError::Infer(
-                        "mk_binding: telescope entry is not an fvar".into(),
+                        "mk_binding: telescope entry is neither an fvar nor an mvar".into(),
                     ))
                 }
             };
@@ -1221,6 +1280,24 @@ impl<'e> MetaCtx<'e> {
             };
         }
         Ok(r)
+    }
+
+    /// oracle: `mkFreshBinderName` (`MetavarContext.lean:977-979`), which
+    /// adds a fresh macro scope to `x`. leanr has no macro scopes here, so
+    /// it mints `_leanr_mkbinding_fresh.<n>`, the "fixed prefix + monotone
+    /// counter" idiom of `level.rs`'s `fresh_level_mvar`; `leanr_elab`'s
+    /// `name_has_macro_scopes` treats every `_leanr_` name as
+    /// macro-scoped, so the binder is inaccessible as the oracle's is.
+    pub(crate) fn mk_fresh_binder_name(&mut self) -> Result<NameId, MetaError> {
+        let idx = self.binder_name_gen;
+        self.binder_name_gen += 1;
+        let base = Some(self.view.store);
+        let prefix_str = self.scratch.intern_str(base, "_leanr_mkbinding_fresh")?;
+        let prefix = self.scratch.name_str(base, None, prefix_str)?;
+        let idx_id = self
+            .scratch
+            .intern_nat(base, &leanr_kernel::Nat::from(idx))?;
+        Ok(self.scratch.name_num(base, Some(prefix), idx_id)?)
     }
 
     /// oracle: `mkLambda'` (`MetavarContext.lean:1281-1291`). With
@@ -2696,6 +2773,163 @@ mod tests {
             let err = ctx.mk_forall(std::slice::from_ref(&fvar), fvar);
             ctx.lctx_restore(checkpoint);
             assert!(err.is_err(), "expected Err for an ldecl fvar, got {err:?}");
+        });
+    }
+
+    /// oracle: `mkForallFVars #[?α, x] (Eq ?α x x)` with `x : ?α` — the
+    /// shape `theorem t : a = a` produces. `mkBinding`'s mvar arm
+    /// (`MetavarContext.lean:1339-1347`) makes `?α` an `.implicit`
+    /// binder over its declared type, named by `mkFreshBinderName`
+    /// (leanr: `_leanr_mkbinding_fresh.<n>`), and `Expr.abstractRange`
+    /// turns every `?α` occurrence into a bvar.
+    #[test]
+    fn mk_forall_abstracts_an_mvar_entry_as_an_implicit_binder() {
+        use crate::test_support::{app, bvar, cu, fresh_fvar};
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let u = ctx.scratch.level_zero(base).expect("level");
+            let sort = ctx.scratch.expr_sort(base, u).expect("sort");
+            let (alpha, _) = fresh_mvar(ctx, sort);
+            let x = fresh_fvar(ctx, alpha, "x");
+            let eq = cu(ctx, "Eq", &[u]);
+            let body = app(ctx, eq, alpha);
+            let body = app(ctx, body, x);
+            let body = app(ctx, body, x);
+            let r = ctx
+                .mk_forall(&[alpha, x], body)
+                .expect("mvar entry accepted");
+            // ∀ {_ : Sort 0} (x : #0), Eq #1 #0 #0
+            let Node::Forall {
+                binder_type,
+                body: b1,
+                binder_info,
+                binder_name,
+            } = ctx.node(r)
+            else {
+                panic!("outer forall")
+            };
+            assert_eq!(binder_info, BinderInfo::Implicit);
+            assert_eq!(binder_type, sort);
+            let name = render_name(ctx, binder_name.expect("named binder"));
+            assert!(name.starts_with("_leanr_mkbinding_fresh"), "{name}");
+            let Node::Forall {
+                binder_type: t2,
+                body: b2,
+                binder_info: bi2,
+                ..
+            } = ctx.node(b1)
+            else {
+                panic!("inner forall")
+            };
+            assert_eq!(bi2, BinderInfo::Default);
+            assert!(
+                matches!(ctx.node(t2), Node::BVar { idx: 0 }),
+                "x : #0 (the abstracted mvar)"
+            );
+            let (b_1, b_0) = (bvar(ctx, 1), bvar(ctx, 0));
+            let expected = app(ctx, eq, b_1);
+            let expected = app(ctx, expected, b_0);
+            let expected = app(ctx, expected, b_0);
+            assert_eq!(b2, expected, "Eq #1 #0 #0");
+        });
+    }
+
+    /// A telescope mvar is LEFT for the abstraction by `elimMVarDeps`
+    /// (`mvarIdsToAbstract`, `MetavarContext.lean:1242-1243`) even when
+    /// its own local context holds an earlier telescope fvar — without
+    /// that arm `elimMVar` would assign `?β := ?new y` and the body would
+    /// keep `?new #1`. `?β : y` also pins that the mvar binder's type is
+    /// abstracted over the EARLIER entries (`abstractRange xs i type`,
+    /// `:1342`).
+    #[test]
+    fn mk_lambda_leaves_a_telescope_mvar_to_the_abstraction() {
+        use crate::test_support::{app, bvar, cu, fresh_fvar, fresh_mvar_in_lctx};
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let u = ctx.scratch.level_zero(base).expect("level");
+            let sort = ctx.scratch.expr_sort(base, u).expect("sort");
+            let y = fresh_fvar(ctx, sort, "y");
+            let beta = fresh_mvar_in_lctx(ctx, y);
+            let Node::MVar { id: Some(beta_id) } = ctx.node(beta) else {
+                panic!("mvar")
+            };
+            let eq = cu(ctx, "Eq", &[u]);
+            let body = app(ctx, eq, y);
+            let body = app(ctx, body, beta);
+            let r = ctx.mk_lambda(&[y, beta], body).expect("ok");
+            assert!(
+                ctx.mctx.assignment(crate::MVarId(beta_id)).is_none(),
+                "?β is not eliminated into an aux mvar"
+            );
+            // fun (y : Sort 0) {_ : #0} => Eq #1 #0
+            let Node::Lam { body: b1, .. } = ctx.node(r) else {
+                panic!("outer lam")
+            };
+            let Node::Lam {
+                binder_type,
+                binder_info,
+                body: b2,
+                ..
+            } = ctx.node(b1)
+            else {
+                panic!("inner lam")
+            };
+            assert_eq!(binder_info, BinderInfo::Implicit);
+            assert!(
+                matches!(ctx.node(binder_type), Node::BVar { idx: 0 }),
+                "?β : #0"
+            );
+            let (b_1, b_0) = (bvar(ctx, 1), bvar(ctx, 0));
+            let expected = app(ctx, eq, b_1);
+            let expected = app(ctx, expected, b_0);
+            assert_eq!(b2, expected, "Eq #1 #0");
+        });
+    }
+
+    /// An mvar declared with user name `β` names its binder `β`
+    /// (`MetavarContext.lean:1343`), not a fresh name.
+    #[test]
+    fn mk_forall_keeps_a_named_mvar_user_name() {
+        use crate::test_support::fresh_named_mvar;
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let u = ctx.scratch.level_zero(base).expect("level");
+            let sort = ctx.scratch.expr_sort(base, u).expect("sort");
+            let beta = fresh_named_mvar(ctx, sort, "β");
+            let r = ctx.mk_forall(&[beta], beta).expect("ok");
+            let Node::Forall { binder_name, .. } = ctx.node(r) else {
+                panic!("forall")
+            };
+            assert_eq!(render_name(ctx, binder_name.expect("named")), "β");
+        });
+    }
+
+    /// The fvar-only path is still the kernel's `abstract_fvars`: the
+    /// same `ExprId` as building the binders by hand over it.
+    #[test]
+    fn mk_forall_over_fvars_only_is_unchanged() {
+        use crate::test_support::{app, c, fresh_fvar, lctx_decl_name, nat_ty};
+        with_prelude0_ctx(|ctx| {
+            let nat = nat_ty(ctx);
+            let x = fresh_fvar(ctx, nat, "x");
+            let y = fresh_fvar(ctx, nat, "y");
+            let eq = c(ctx, "Eq");
+            let body = app(ctx, eq, nat);
+            let body = app(ctx, body, x);
+            let body = app(ctx, body, y);
+            let r = ctx.mk_forall(&[x, y], body).expect("ok");
+            let base = Some(ctx.view.store);
+            let b = abstract_fvars(ctx.scratch, base, body, &[x, y], &mut ctx.guard).unwrap();
+            let (nx, ny) = (lctx_decl_name(ctx, x), lctx_decl_name(ctx, y));
+            let inner = ctx
+                .scratch
+                .expr_forall(base, ny, nat, b, BinderInfo::Default)
+                .unwrap();
+            let expected = ctx
+                .scratch
+                .expr_forall(base, nx, nat, inner, BinderInfo::Default)
+                .unwrap();
+            assert_eq!(r, expected);
         });
     }
 

@@ -43,6 +43,9 @@ pub(crate) struct Scope {
     /// oracle `Scope.includedVars` / `omittedVars` (`:63-65`): uids.
     pub included_vars: Vec<u32>,
     pub omitted_vars: Vec<u32>,
+    /// oracle `Scope.opts`, restricted to the two options M4c-2c-ii ports;
+    /// cloned into nested scopes, dropped at `end`.
+    pub options: crate::auto_bound::ElabOptions,
 }
 
 impl Scope {
@@ -56,6 +59,7 @@ impl Scope {
             var_uids: Vec::new(),
             included_vars: Vec::new(),
             omitted_vars: Vec::new(),
+            options: crate::auto_bound::ElabOptions::default(),
         }
     }
 }
@@ -412,6 +416,44 @@ impl CommandElab<'_> {
             }
         }
         self.pop_scopes(end_size);
+        Ok(())
+    }
+
+    /// oracle: `elabSetOption` (`BuiltinCommand.lean:516`,
+    /// `SetOption.lean:58`), for `autoImplicit` / `relaxedAutoImplicit`.
+    pub(crate) fn elab_set_option(
+        &mut self,
+        cmd: &SyntaxNode,
+        _kinds: &KindInterner,
+    ) -> Result<(), ElabError> {
+        let ch = non_trivia_children(cmd);
+        let text = |e: Option<&SynElem>| match e {
+            Some(NodeOrToken::Node(n)) => n.text().to_string().trim().to_string(),
+            Some(NodeOrToken::Token(t)) => t.text().trim().to_string(),
+            None => String::new(),
+        };
+        let name = text(ch.get(1));
+        let val = text(ch.get(3));
+        let field: fn(&mut crate::auto_bound::ElabOptions) -> &mut bool = match name.as_str() {
+            "autoImplicit" => |o| &mut o.auto_implicit,
+            "relaxedAutoImplicit" => |o| &mut o.relaxed_auto_implicit,
+            other => {
+                return Err(ElabError::UnsupportedSyntax(format!(
+                    "set_option `{other}` (only autoImplicit/relaxedAutoImplicit are modelled) — later M4"
+                )))
+            }
+        };
+        let b = match val.as_str() {
+            "true" => true,
+            "false" => false,
+            // probe `opt/badValue`: a numeral (or string) for a Bool option.
+            _ => return Err(ElabError::SetOptionTypeMismatch),
+        };
+        let head = self
+            .scopes
+            .last_mut()
+            .expect("the root scope is never popped");
+        *field(&mut head.options) = b;
         Ok(())
     }
 

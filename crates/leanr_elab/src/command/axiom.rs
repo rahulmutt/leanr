@@ -8,7 +8,7 @@ use leanr_kernel::{AxiomVal, ConstantVal, Declaration};
 use leanr_syntax::kind::KindInterner;
 
 use super::def::fix_level_params;
-use super::header::{expand_decl_id, unknown_ident_to_auto_bound_seam};
+use super::header::expand_decl_id;
 use super::vars::{self, SecVars};
 use super::view::DefView;
 use super::Built;
@@ -28,10 +28,13 @@ pub(super) fn elab_axiom(
         .ty
         .clone()
         .ok_or_else(|| ElabError::Internal("axiom without a type".into()))?;
-    let ty: ExprId = elab
-        .with_level_names(id.level_names.clone(), |elab| {
-            let cp = elab.mctx.lctx_checkpoint();
-            let out = (|| {
+    // `Declaration.lean:109-111`: `withAutoBoundImplicit` around
+    // `withAutoBoundImplicitForbiddenPred (shortName == ·)` (the two
+    // commute), then `withLevelNames allUserLevelNames`.
+    let ty: ExprId = elab.with_auto_bound_forbidden(&[id.short_name], |elab| {
+        let cp = elab.mctx.lctx_checkpoint();
+        let out = elab.with_auto_bound_implicit(|elab| {
+            elab.with_level_names(id.level_names.clone(), |elab| {
                 let mut xs = Vec::new();
                 for b in &view.binders {
                     let g = extract_binder_group(elab, b, kinds)?;
@@ -39,6 +42,8 @@ pub(super) fn elab_axiom(
                 }
                 let ty = elab_type(elab, &ty_stx, kinds)?;
                 elab.synthesize_synthetic_mvars_no_postponing(kinds)?;
+                // `Term.addAutoBoundImplicits xs` (`:115`).
+                let xs = elab.add_auto_bound_implicits(&xs)?;
                 let ty = elab.mctx.instantiate_mvars(ty)?;
                 let ty = elab.mctx.mk_forall(&xs, ty)?;
                 // `mkForallFVars vars type (usedOnly := true)`
@@ -49,11 +54,11 @@ pub(super) fn elab_axiom(
                 // `Term.levelMVarToParam type` (`Declaration.lean:119`); the
                 // new names extend only this scope's level names.
                 elab.level_mvar_to_param(ty)
-            })();
-            elab.mctx.lctx_restore(cp);
-            out
-        })
-        .map_err(unknown_ident_to_auto_bound_seam)?;
+            })
+        });
+        elab.mctx.lctx_restore(cp);
+        out
+    })?;
     // `sortDeclLevelParams scopeLevelNames allUserLevelNames usedParams`
     // (`:120-122`) against the ORIGINAL user names: leftovers sort
     // lexicographically.

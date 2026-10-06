@@ -168,6 +168,11 @@ pub(crate) struct SavedTermState {
     mvar_error_infos: Vec<MVarErrorInfo>,
     mvar_arg_names: HashMap<MVarId, NameId>,
     level_mvar_error_infos: Vec<LevelMVarErrorInfo>,
+    /// `Term.State.levelNames` (`TermElabM.lean:181`). Since M4c-2c-ii
+    /// the universe-name auto-bound (`builtin/sort.rs`) pushes onto it in
+    /// place, so a failed overload candidate or a rolled-back
+    /// `commit_when` must drop the names it bound.
+    level_names: Vec<NameId>,
 }
 
 impl<'e> TermElabM<'e> {
@@ -315,8 +320,13 @@ impl<'e> TermElabM<'e> {
     /// tables are snapshotted too. `elab.rs`'s `elab_using_elab_fns` and
     /// `ladder.rs`'s `resume_postponed` use the same pair since M4b-4a P2.
     ///
-    /// `level_names` is NOT snapshotted: it is scoped by
-    /// `with_saved_context` alone and no path below `f` touches it.
+    /// `level_names` IS snapshotted, as `Term.SavedState.restore`'s
+    /// `set s.elab` (`TermElabM.lean:424`) writes back all of
+    /// `Term.State`, `levelNames` included: since M4c-2c-ii the
+    /// universe-name auto-bound pushes onto it inside backtracking
+    /// scopes (`observing` overload candidates, `commit_when`, the
+    /// auto-bound retry loop), so a rolled-back attempt must not leave
+    /// its names behind.
     /// The three fresh-name counters are likewise not restored —
     /// rewinding them would let a rolled-back attempt's names be REUSED
     /// by the next attempt, which is exactly the collision the counters
@@ -382,10 +392,12 @@ impl<'e> TermElabM<'e> {
             mvar_error_infos: self.mvar_error_infos.clone(),
             mvar_arg_names: self.mvar_arg_names.clone(),
             level_mvar_error_infos: self.level_mvar_error_infos.clone(),
+            level_names: self.level_names.clone(),
         }
     }
 
-    /// oracle: `Term.SavedState.restore` (`TermElabM.lean:420-427`).
+    /// oracle: `Term.SavedState.restore` (`TermElabM.lean:420-427`);
+    /// `set s.elab` (`:424`) restores `level_names` too.
     pub(crate) fn restore_term_state(&mut self, saved: SavedTermState) {
         self.mctx.rollback(saved.meta);
         self.pending_mvars = saved.pending_mvars;
@@ -393,6 +405,7 @@ impl<'e> TermElabM<'e> {
         self.mvar_error_infos = saved.mvar_error_infos;
         self.mvar_arg_names = saved.mvar_arg_names;
         self.level_mvar_error_infos = saved.level_mvar_error_infos;
+        self.level_names = saved.level_names;
     }
 
     /// oracle: `withoutPostponing` (`TermElabM.lean:1049-1050`).

@@ -12,6 +12,11 @@ pub enum ElabError {
     /// M4b slices; until then their kinds arrive here, never silently.
     UnsupportedSyntax(String),
     UnknownIdent(String),
+    /// oracle: `elabLevel`'s `identKind` arm (`Level.lean:78-85`):
+    /// `throwError "unknown universe level `{mkIdent paramName}`"` — the
+    /// name is not in `levelNames` and cannot be auto-bound (outside a
+    /// header, auto-implicits off, or not a valid level name).
+    UnknownUniverseLevel(String),
     /// oracle: `elabAppAux`'s `throwErrorAt f "Ambiguous term{indentD f}…"`
     /// (`App.lean:2217`): two or more overloaded candidates survived
     /// `getSuccesses`.
@@ -118,6 +123,13 @@ pub enum ElabError {
         synthesized: ExprId,
         inferred: ExprId,
     },
+    /// oracle: `throwInvalidNamedArg` (`App.lean:34-52`). `func` is the
+    /// head constant when `s.f.getAppFn` is one. The "perhaps you meant"
+    /// hint is prose (deferred).
+    InvalidNamedArg {
+        name: String,
+        func: Option<String>,
+    },
     /// oracle: `"Function expected at .. but this term has type .."`
     /// (`App.lean:409-411`). Carries the head and its type; the oracle's
     /// `.note` hint about indentation mishaps (`App.lean:404-408`) is
@@ -213,8 +225,9 @@ pub enum ElabError {
     /// no catch site handles it ([`ElabError::is_oracle_error`] is
     /// `false`). leanr
     /// counts only the recursions that can run away on their own
-    /// (`addLValArg.go`, `App.lean:1749`, and the anonymous-constructor
-    /// flatten tail, `elab.rs`'s `dispatch_target` / `anon_tail_depth`)
+    /// (`addLValArg.go`, `App.lean:1749`, the anonymous-constructor
+    /// flatten tail, `elab.rs`'s `dispatch_target` / `anon_tail_depth`,
+    /// and `withAutoBoundImplicit`'s retry `loop`, `TermElabM.lean:1963`)
     /// against the oracle's
     /// `defaultMaxRecDepth` (512, `Init/Prelude.lean:4836`); the oracle
     /// counts from the ambient depth, so the exact cut-off differs,
@@ -279,6 +292,22 @@ pub enum ElabError {
     /// caller's pending mvars back (its `finally`, no state restore) —
     /// the oracle's treatment of it too.
     Postpone,
+    /// oracle: the internal `autoBoundImplicit` exception
+    /// (`Elab/Exception.lean:20`, `:31-41`), carrying the atomic name's
+    /// one component. Thrown by `auto_bound::unknown_ident`, caught only
+    /// by `TermElabM::with_auto_bound_implicit`. Internal, like
+    /// `Postpone`: [`ElabError::is_oracle_error`] is `false` for it, so
+    /// every generic catch rethrows it (spec Amendment 1 item 4).
+    AutoBoundImplicitLocal(String),
+    /// oracle: `addAutoBoundImplicits`' `throwError "invalid auto implicit
+    /// argument `{auto}`, it depends on explicitly provided argument
+    /// `{x}`"` (`Term/TermElabM.lean:2083-2088`). Carries both fvars' user
+    /// names, rendered at the throw site. Unreachable from source (spec
+    /// Amendment 1): pinned by a unit test only.
+    AutoImplicitDependsOnExplicit {
+        auto: String,
+        x: String,
+    },
     /// oracle: `ensureAtomicBinderName` (`Elab/Binders.lean:188-191`):
     /// "invalid binder name `n`, it must be atomic". Carries the rendered
     /// (decoded) binder name.
@@ -290,6 +319,9 @@ pub enum ElabError {
     /// oracle: `throwAlreadyDeclaredUniverseLevel` (`Elab/Exception.lean:43-44`),
     /// from `expandDeclId`'s `.{…}` fold (`Elab/DeclModifiers.lean:333-339`).
     UniverseAlreadyDeclared(String),
+    /// oracle: `validateOptionValue` (`SetOption.lean`): a non-Bool value
+    /// for a Bool option (`opt/badValue`).
+    SetOptionTypeMismatch,
     /// oracle: `sortDeclLevelParams` (`Elab/DeclUtil.lean:79-81`).
     UnusedUniverseParam(String),
     /// oracle: `MutualClosure.pushMain` (`Elab/MutualDef.lean:1051-1053`).
@@ -391,6 +423,9 @@ impl ElabError {
                 | ElabError::Meta(_)
                 | ElabError::Internal(_)
                 | ElabError::Postpone
+                // internal, like Postpone: every generic catch rethrows it
+                // (spec Amendment 1 item 4).
+                | ElabError::AutoBoundImplicitLocal(_)
                 | ElabError::MaxRecDepth
                 | ElabError::Kernel(_)
         )
@@ -535,11 +570,26 @@ impl ElabError {
             Self::Eliminator { reason } => Some(reason.oracle_first_line()),
             Self::UnknownConstant(n) => Some(format!("Unknown constant `{n}`")),
             // oracle: `throwError m!"Unknown identifier `{n}`"` (probed:
-            // `def uib : Nat := nope`). leanr's `sort.rs` also raises
-            // `UnknownIdent` for an unknown universe name, which the oracle
-            // words differently; no corpus record reaches that.
+            // `def uib : Nat := nope`). An unknown universe name is its own
+            // variant, worded by `Level.lean:84`.
             Self::UnknownIdent(s) => Some(format!("Unknown identifier `{s}`")),
+            Self::UnknownUniverseLevel(s) => Some(format!("unknown universe level `{s}`")),
             Self::AmbiguousTerm => Some("Ambiguous term".into()),
+            Self::InvalidNamedArg { name, func } => Some(match func {
+                Some(f) => format!("Invalid argument name `{name}` for function `{f}`"),
+                None => format!("Invalid argument name `{name}` for function"),
+            }),
+            // oracle `App.lean:409`: "Function expected at{indentExpr f}\n…".
+            Self::FunctionExpected { .. } => Some("Function expected at".into()),
+            // oracle `BuiltinNotation.lean:47-48` (`throwExpTypeUnknown`).
+            Self::InvalidAnonymousCtor(AnonCtorError::ExpectedTypeUnknown) => Some(
+                "Invalid `⟨...⟩` notation: The expected type of this term could not be determined"
+                    .into(),
+            ),
+            Self::AutoImplicitDependsOnExplicit { auto, x } => Some(format!(
+                "invalid auto implicit argument `{auto}`, it depends on explicitly provided \
+                 argument `{x}`"
+            )),
             Self::TooManyUniverseLevels(n) => {
                 Some(format!("too many explicit universe levels for `{n}`"))
             }
@@ -576,6 +626,12 @@ impl ElabError {
             Self::UniverseAlreadyDeclared(u) => Some(format!(
                 "a universe level named `{u}` has already been declared"
             )),
+            // Deliberate truncation: the oracle's message continues past
+            // "The value" (the value and option type); the gate compares
+            // only the first line.
+            Self::SetOptionTypeMismatch => {
+                Some("set_option value type mismatch: The value".into())
+            }
             Self::UnusedUniverseParam(u) => Some(format!("unused universe parameter '{u}'")),
             Self::TheoremTypeNotProp(n) => {
                 Some(format!("type of theorem `{n}` is not a proposition"))

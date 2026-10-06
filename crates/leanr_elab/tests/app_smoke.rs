@@ -658,6 +658,38 @@ fn elab_src(src: &str) -> Result<leanr_kernel::bank::ExprId, leanr_elab::ElabErr
     })
 }
 
+/// oracle: `throwInvalidNamedArg` (`App.lean:34-52`) via
+/// `synthesizePendingAndNormalizeFunType` (`App.lean:381-403`): a
+/// leftover named argument is reported BEFORE "Function expected".
+/// Probed against the oracle (v4.33.0-rc1): `Nat.succ (zz := Nat.zero)`
+/// and `Nat.succ Nat.zero (zz := Nat.zero)` both say "... for function
+/// `Nat.succ`"; a lambda head (not a constant) drops the suffix.
+#[test]
+fn an_unmatched_named_argument_is_invalid_argument_name() {
+    for (src, want) in [
+        (
+            "Nat.succ (zz := Nat.zero)",
+            "Invalid argument name `zz` for function `Nat.succ`",
+        ),
+        (
+            "Nat.succ Nat.zero (zz := Nat.zero)",
+            "Invalid argument name `zz` for function `Nat.succ`",
+        ),
+        // The FIRST leftover named argument is the one reported.
+        (
+            "Nat.succ (zz := Nat.zero) (yy := Nat.zero)",
+            "Invalid argument name `zz` for function `Nat.succ`",
+        ),
+        (
+            "(fun (x : Nat) => x) (zz := Nat.zero)",
+            "Invalid argument name `zz` for function",
+        ),
+    ] {
+        let e = elab_src(src).expect_err(src);
+        assert_eq!(e.oracle_first_line().as_deref(), Some(want), "{src}");
+    }
+}
+
 /// oracle: `mkConst` (`TermElabM.lean:2128-2136`) — "too many explicit
 /// universe levels" is an ERROR, not a truncation. Elab0's `List` has
 /// exactly one level parameter, so `List.{0, 0}` is the case.

@@ -23,7 +23,6 @@
 
 use std::sync::Arc;
 
-use leanr_kernel::abstract_fvars;
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, NameId};
 use leanr_kernel::Nat;
@@ -321,13 +320,7 @@ impl<'e> MetaCtx<'e> {
         e: ExprId,
     ) -> Result<ExprId, MetaError> {
         let e = self.elim_mvar_deps(xs, e)?;
-        Ok(abstract_fvars(
-            self.scratch,
-            Some(self.view.store),
-            e,
-            &xs[..i],
-            &mut self.guard,
-        )?)
+        self.abstract_vars(e, &xs[..i])
     }
 
     /// oracle: `abstractRangeAux` (`:1165-1167`) — the oracle's
@@ -357,13 +350,7 @@ impl<'e> MetaCtx<'e> {
         cache: &mut ElimCache,
     ) -> Result<ExprId, MetaError> {
         let e = self.visit_guarded(xs, e, cache)?;
-        Ok(abstract_fvars(
-            self.scratch,
-            Some(self.view.store),
-            e,
-            &xs[..i],
-            &mut self.guard,
-        )?)
+        self.abstract_vars(e, &xs[..i])
     }
 
     /// oracle: `visit` (`:1101`) — this port calls it `elim`. The
@@ -606,6 +593,18 @@ impl<'e> MetaCtx<'e> {
                         return self.visit_guarded(xs, applied, cache);
                     }
                     return self.elim_app(xs, new_f, args, cache);
+                }
+                None if self.mvar_ids_to_abstract.contains(&mid) => {
+                    // oracle `:1242-1243`: a metavariable of the current
+                    // `mkBinding` telescope is left in place, for the
+                    // abstraction to turn into a binder;
+                    // `return mkAppN f (← args.mapM (visit xs))`.
+                    let mut out = f;
+                    for a in args {
+                        let a2 = self.elim(xs, *a, cache)?;
+                        out = self.scratch.expr_app(Some(self.view.store), out, a2)?;
+                    }
+                    return Ok(out);
                 }
                 None => {
                     let (out, _) = self.elim_mvar(xs, mid, args, cache)?;
@@ -862,7 +861,13 @@ impl<'e> MetaCtx<'e> {
                     // oracle `:1160-1161` (mvar arm): same `headBeta`,
                     // before the abstraction below.
                     let ty = self.head_beta(ty)?;
-                    (user_name, ty, leanr_kernel::BinderInfo::Implicit)
+                    // oracle `:1162`: an anonymous mvar gets
+                    // `mkFreshBinderName`, as in `mk_binding`'s mvar arm.
+                    let name = match user_name {
+                        Some(n) => n,
+                        None => self.mk_fresh_binder_name()?,
+                    };
+                    (Some(name), ty, leanr_kernel::BinderInfo::Implicit)
                 }
             };
             let binder_ty = self.abstract_range_aux(xs, i, binder_ty, cache)?;
@@ -1873,6 +1878,28 @@ mod tests {
                 }
                 other => panic!("expected Forall, got {other:?}"),
             }
+        });
+    }
+
+    /// The same arm with an ANONYMOUS mvar: oracle `:1162` names the
+    /// binder `mkFreshBinderName`, leanr `_leanr_mkbinding_fresh.<n>`
+    /// (shared with `mk_binding`'s mvar arm).
+    #[test]
+    fn mk_aux_mvar_type_names_an_anonymous_reverted_mvar_freshly() {
+        with_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let zero = ctx.scratch.level_zero(base).expect("level");
+            let sort0 = ctx.scratch.expr_sort(base, zero).expect("Sort 0");
+            let (m, _) = fresh_mvar(ctx, sort0);
+            let snap = ctx.current_lctx();
+            let ty = ctx
+                .mk_aux_mvar_type(&snap, &[m], sort0, crate::MVarKind::Natural, true)
+                .expect("mk_aux_mvar_type");
+            let Node::Forall { binder_name, .. } = ctx.node(ty) else {
+                panic!("expected Forall")
+            };
+            let name = crate::test_support::render_name(ctx, binder_name.expect("named"));
+            assert!(name.starts_with("_leanr_mkbinding_fresh"), "{name}");
         });
     }
 

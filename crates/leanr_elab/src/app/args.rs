@@ -134,11 +134,25 @@ fn synthesize_pending_and_normalize_fun_type(
         Err(leanr_meta::MetaError::Unsupported(m)) => return Err(ElabError::UnsupportedSyntax(m)),
         Err(e) => return Err(ElabError::from(e)),
     }
-    // The oracle's remaining arms are diagnostics: a deprecated-argument
-    // linter, `throwInvalidNamedArg` (which needs `foundNamedArgs`
-    // rendering leanr does not do), and the "Function expected" error.
-    // Only the last changes control flow, so only it is ported.
-    //
+    // oracle: the `else` of `synthesizePendingAndNormalizeFunType`
+    // (`App.lean:381-403`): a leftover named argument is reported
+    // BEFORE "Function expected" — `for namedArg in s.namedArgs` throws
+    // on the first one, naming `s.f.getAppFn` when it is a constant
+    // (`:400-402`, `throwInvalidNamedArg` at `:34-52`). The
+    // deprecated-argument linter branch (`:386-399`) is not ported (no
+    // `Elab0` constant carries `deprecated_arg`); the "perhaps you meant"
+    // hint is prose after the first line.
+    if let Some(na) = app.st.named_args.first() {
+        let head = app.app_fn(app.st.f);
+        let func = match app.node(head) {
+            Node::Const { name: Some(n), .. } => Some(app.elab.name_str(n)),
+            _ => None,
+        };
+        return Err(ElabError::InvalidNamedArg {
+            name: na.name.clone(),
+            func,
+        });
+    }
     // An `fType` still an unassigned mvar here is reached only with
     // postponement off: `elab_app_args` postpones it first while
     // `may_postpone` holds (`App.lean:1366-1367`), and

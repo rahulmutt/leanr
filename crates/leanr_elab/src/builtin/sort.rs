@@ -50,10 +50,9 @@
 //! itself pins) hits an uncaught internal auto-bound-implicit signal
 //! even in the REAL Lean elaborator — `level_names` is populated by an
 //! enclosing declaration's binder-collection pass, which does not exist
-//! for a bare standalone term. The ident branch below is still fully
-//! implemented (a direct, correct transcription, argued sound in its
-//! own right) even though nothing in the committed corpus can reach it
-//! today.
+//! for a bare standalone term. The ident branch below is reached by
+//! declaration headers (`.{u}` names since M4c-1, auto-bound universe
+//! names since M4c-2c-ii; `tests/oracle_file.rs`' `auto/level*` rows).
 
 use leanr_kernel::bank::{ExprId, LevelId};
 use leanr_syntax::kind::KindInterner;
@@ -187,11 +186,10 @@ pub(crate) fn elab_level(
             }
             Ok(level)
         }
-        // oracle: the `identKind` arm — a level PARAMETER reference,
-        // valid only if already in `levelNames` (`elab.level_names`;
-        // `autoBoundImplicit`'s auto-binding path is out of scope, see
-        // this module's own doc — confirmed unreachable via this
-        // crate's own standalone-term harness anyway).
+        // oracle: the `identKind` arm (`Level.lean:78-85`) — a level
+        // PARAMETER reference: already in `levelNames`
+        // (`elab.level_names`), or auto-bound into it inside an enabled
+        // `withAutoBoundImplicit` context (declaration headers, M4c-2c-ii).
         ("<ident>", NodeOrToken::Token(tok)) => {
             let raw = tok.text();
             let base = elab.view.store;
@@ -200,18 +198,38 @@ pub(crate) fn elab_level(
             let comps = crate::app::head::ident_components(raw)?;
             let parts: Vec<&str> = comps.iter().map(String::as_str).collect();
             let name_id = crate::app::head::intern_components(elab, &parts)?;
-            if elab.level_names.contains(&name_id) {
-                // `Some(base)`: a universe name such as `u` usually already
-                // exists in the environment's store, so `name_id` is a
-                // persistent id a `None`-based intern cannot hash. First
-                // reached by M4c-1's `.{u}` declaration headers.
+            // `Some(base)`: a universe name such as `u` usually already
+            // exists in the environment's store, so `name_id` is a
+            // persistent id a `None`-based intern cannot hash. First
+            // reached by M4c-1's `.{u}` declaration headers.
+            let param = |elab: &mut TermElabM| -> Result<LevelId, ElabError> {
                 Ok(elab
                     .mctx
                     .store_mut()
                     .level_param(Some(base), Some(name_id))
                     .map_err(leanr_meta::MetaError::from)?)
+            };
+            if elab.level_names.contains(&name_id) {
+                param(elab)
+            } else if elab.auto_bound.as_ref().is_some_and(|c| c.enabled)
+                && parts.len() == 1
+                && crate::auto_bound::is_valid_auto_bound_level_name(
+                    parts[0],
+                    elab.options.relaxed_auto_implicit,
+                )
+            {
+                // `(← read).autoBoundImplicit` is the context's
+                // `autoImplicitEnabled` (`TermElabM.lean:818`);
+                // `modify fun s => { s with levelNames := paramName :: s.levelNames }`.
+                // No retry: the name is bound in place. Any enclosing
+                // backtrack rewinds it with the rest of `Term.State`
+                // (`restore_term_state` snapshots `level_names`): a later
+                // retry of `withAutoBoundImplicit`, a failed `observing`
+                // overload candidate, a rolled-back `commit_when`.
+                elab.level_names.insert(0, name_id);
+                param(elab)
             } else {
-                Err(ElabError::UnknownIdent(raw.to_string()))
+                Err(ElabError::UnknownUniverseLevel(raw.to_string()))
             }
         }
         // oracle: `Lean.Parser.Level.hole` -> `mkFreshLevelMVar`.

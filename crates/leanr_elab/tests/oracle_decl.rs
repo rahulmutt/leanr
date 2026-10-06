@@ -55,20 +55,24 @@ fn seam_message(src: &str) -> String {
 }
 
 #[test]
-fn header_unknown_ident_is_the_auto_bound_seam() {
-    // The oracle auto-binds `α` (probe: `def ab (a : α) : α := a` admits `ab.{u_1}`).
-    let m = seam_message("def ab (a : α) : α := a");
-    assert!(
-        m.contains("auto-bound") && m.ends_with(" — M4c-2c-ii"),
-        "{m}"
-    );
+fn header_unknown_ident_is_auto_bound() {
+    // probe: `def ab (a : α) : α := a` admits `ab.{u_1}`; `elabAxiom` also
+    // runs under `withAutoBoundImplicit` (`Declaration.lean:109`).
+    assert!(decl_result("def ab (a : α) : α := a").is_ok());
+    assert!(decl_result("axiom aa (a : α) : α").is_ok());
 }
 
 #[test]
-fn header_unknown_universe_is_the_auto_bound_seam() {
+fn header_unknown_universe_is_auto_bound() {
     // probe: `def uuh (α : Sort w) : Sort w := α` admits `uuh.{w}`.
-    let m = seam_message("def uuh (α : Sort w) : Sort w := α");
-    assert!(m.contains("auto-bound"), "{m}");
+    assert!(decl_result("def uuh (α : Sort w) : Sort w := α").is_ok());
+    match decl_result("def uub : Nat := (fun (_ : Sort w) => Nat.zero) Nat") {
+        Err(e) => assert_eq!(
+            e.oracle_first_line().as_deref(),
+            Some("unknown universe level `w`")
+        ),
+        Ok(ns) => panic!("body universe must not auto-bind: {ns:?}"),
+    }
 }
 
 #[test]
@@ -105,13 +109,6 @@ fn level_mvar_without_error_info_hits_the_fallback() {
         ),
         Ok(ns) => panic!("a value with an unassigned level mvar was admitted: {ns:?}"),
     }
-}
-
-#[test]
-fn axiom_header_unknown_ident_is_the_auto_bound_seam() {
-    // `elabAxiom` also runs under `withAutoBoundImplicit` (`Declaration.lean:109`).
-    let m = seam_message("axiom aa (a : α) : α");
-    assert!(m.contains("auto-bound"), "{m}");
 }
 
 /// The admitted main declaration's `NameId` for `src` (the last name).
