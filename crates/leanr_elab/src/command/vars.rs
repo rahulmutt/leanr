@@ -1,4 +1,4 @@
-//! Section variables: oracle `runTermElabM` (`Elab/Command.lean:774-797`),
+//! Section variables: oracle `runTermElabM` (`Elab/Command.lean:774-798`),
 //! `variable` / `include` / `omit` (`Elab/BuiltinCommand.lean:415-430,
 //! 551-607`) and the inclusion regimes (`MutualDef.lean:455-490,
 //! 595-611`; `Declaration.lean:118`).

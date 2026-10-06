@@ -221,10 +221,11 @@ pub(crate) fn elab_level(
                 // `(← read).autoBoundImplicit` is the context's
                 // `autoImplicitEnabled` (`TermElabM.lean:818`);
                 // `modify fun s => { s with levelNames := paramName :: s.levelNames }`.
-                // No retry: the name is bound in place. A later retry of
-                // the enclosing `withAutoBoundImplicit` rewinds it with the
-                // rest of the attempt (`with_level_names` inside the loop on
-                // the header path).
+                // No retry: the name is bound in place. Any enclosing
+                // backtrack rewinds it with the rest of `Term.State`
+                // (`restore_term_state` snapshots `level_names`): a later
+                // retry of `withAutoBoundImplicit`, a failed `observing`
+                // overload candidate, a rolled-back `commit_when`.
                 elab.level_names.insert(0, name_id);
                 param(elab)
             } else {

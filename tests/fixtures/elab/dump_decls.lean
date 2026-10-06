@@ -610,7 +610,10 @@ def fileQueries : List (String × String) := [
   ("auto/identNestedBinder", "axiom ai26 (g : ∀ (y : Nat), Eq y z) : Nat"),
   ("auto/negThmBody", "theorem an9 (x : α) : Eq x x := zz"),
   ("auto/withSectionShadow", "variable (α : Type)\ndef ai24 (x : α) : α := x"),
-  ("auto/identThirty", "axiom ai27 (x0 : t0) (x1 : t1) (x2 : t2) (x3 : t3) (x4 : t4) (x5 : t5) (x6 : t6) (x7 : t7) (x8 : t8) (x9 : t9) (x10 : t10) (x11 : t11) (x12 : t12) (x13 : t13) (x14 : t14) (x15 : t15) (x16 : t16) (x17 : t17) (x18 : t18) (x19 : t19) (x20 : t20) (x21 : t21) (x22 : t22) (x23 : t23) (x24 : t24) (x25 : t25) (x26 : t26) (x27 : t27) (x28 : t28) (x29 : t29) : Nat")
+  ("auto/identThirty", "axiom ai27 (x0 : t0) (x1 : t1) (x2 : t2) (x3 : t3) (x4 : t4) (x5 : t5) (x6 : t6) (x7 : t7) (x8 : t8) (x9 : t9) (x10 : t10) (x11 : t11) (x12 : t12) (x13 : t13) (x14 : t14) (x15 : t15) (x16 : t16) (x17 : t17) (x18 : t18) (x19 : t19) (x20 : t20) (x21 : t21) (x22 : t22) (x23 : t23) (x24 : t24) (x25 : t25) (x26 : t26) (x27 : t27) (x28 : t28) (x29 : t29) : Nat"),
+  ("auto/levelOverloadNamedLeak", "namespace A\ndef f.{w1, w2} (a : Type w1) (b : Type w2) : Type := Nat\nend A\nnamespace B\ndef f.{w2} (b : Type w2) : Type := Nat\nend B\nopen A B\ndef g (h : f (a := Sort u) (b := Sort v)) : Nat := Nat.zero"),
+  ("auto/levelOverloadNamedLeakThm", "namespace A\ndef f.{w1, w2} (a : Type w1) (b : Type w2) : Type := Nat\nend A\nnamespace B\ndef f.{w2} (b : Type w2) : Type := Nat\nend B\nopen A B\ntheorem g (h : f (a := Sort u) (b := Sort v)) : Eq h h := rfl"),
+  ("auto/levelOverloadMismatchLeak", "namespace A\ndef f.{w1, w2} (a : Type w1) (b : Type w2) : Type := Nat\nend A\nnamespace B\ndef f (b : Type 5) (a : Type 6) : Type := Nat\nend B\nopen A B\ndef g (h : f (a := Sort u) (b := Sort v)) : Nat := Nat.zero")
 ]
 
 /-- The first error-severity message `s` logged, from `messages` and the

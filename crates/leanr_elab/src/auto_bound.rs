@@ -172,16 +172,15 @@ impl TermElabM<'_> {
         use crate::error::MAX_REC_DEPTH;
         let mut depth: usize = 0;
         loop {
-            // `saveState`: `Term.State` (incl. `levelNames`) + the lctx,
-            // which the oracle scopes by the reader.
+            // `saveState`: `Term.State` (incl. `levelNames`, which
+            // `save_term_state` snapshots) + the lctx, which the oracle
+            // scopes by the reader.
             let saved = self.save_term_state();
-            let level_names = self.level_names.clone();
             let lctx = self.mctx.lctx_checkpoint();
             match k(self) {
                 Err(ElabError::AutoBoundImplicitLocal(n)) => {
                     // `s.restore (restoreInfo := true)`
                     self.restore_term_state(saved);
-                    self.level_names = level_names;
                     self.mctx.lctx_restore(lctx);
                     let name = crate::command::header::intern_atomic(self, &n)?;
                     // Not the oracle's fast-fail ahead of the depth cap
@@ -258,8 +257,19 @@ impl TermElabM<'_> {
         }
         // `:2080-2085`
         for &auto in &autos {
-            let Some(decl) = self.fvar_decl(auto) else {
-                continue; // `auto.isFVar` (an fvar always has a decl here)
+            // `if auto.isFVar`: a collected mvar is skipped.
+            let Node::FVar { id: Some(id) } =
+                self.mctx.store().expr_node(Some(self.view.store), auto)
+            else {
+                continue;
+            };
+            // `auto.fvarId!.getDecl`: an auto is declared in the lctx the
+            // header is elaborated in, so a missing decl is a leanr bug,
+            // never a silent skip of the depends-on-explicit check.
+            let Some(decl) = self.mctx.current_lctx().lctx().get(id).cloned() else {
+                return Err(ElabError::Internal(format!(
+                    "auto-bound implicit {auto:?} has no local declaration"
+                )));
             };
             for &x in xs {
                 if self.local_decl_depends_on_fvar(decl.ty, x)? {

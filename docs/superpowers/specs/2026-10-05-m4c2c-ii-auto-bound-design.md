@@ -338,10 +338,18 @@ Further probed facts the plan relies on:
   staged), 1e3f19d (retry loop + throw sites), 57fe644
   (`addAutoBoundImplicits`, def/theorem/axiom wiring), 05b94d4
   (universe names), 18dc6ec (`throwInvalidNamedArg`), 928e9ba
-  (`set_option autoImplicit` / `relaxedAutoImplicit`), then the close-out.
-- Corpus: file-query floor 308 (`CORPUS_FLOOR`; the plan said 309 --
+  (`set_option autoImplicit` / `relaxedAutoImplicit`), then the close-out
+  and the final-review fix wave (`level_names` in `SavedTermState`).
+- Corpus: file-query floor 311 (`CORPUS_FLOOR`; the plan said 309 --
   Task 1 dropped `auto/identInBinderDefault` because leanr's parser
-  rejects binder defaults `(y : T := v)`; re-add it when they parse).
+  rejects binder defaults `(y : T := v)`; re-add it when they parse --
+  and the final-review fix wave added 3 rows,
+  `auto/levelOverloadNamedLeak`, `auto/levelOverloadNamedLeakThm`,
+  `auto/levelOverloadMismatchLeak`: a failed overload candidate that
+  auto-bound `Sort u`/`Sort v` must not leak those names; leanr was a
+  wrong-Ok with levelParams `[v, u]` vs the oracle's `[u, v]` until
+  `save_term_state` snapshotted `level_names`, as
+  `Term.SavedState.restore`'s `set s.elab`, `TermElabM.lean:424`, does).
   The single-declaration corpus (`oracle_decl`, 79 records) is
   unchanged. The `PENDING` filter is empty.
 - `KNOWN_GAPS` (4 rows, exact-id gated, each a pre-existing gap outside
@@ -372,7 +380,12 @@ Further probed facts the plan relies on:
     order; `num_params` before autos; count the exception as an oracle
     error (`auto/catchOverload`); disable the no-progress guard;
     disable the depends-on-explicit check; double the recursion cap.
-  - Task 5: drop the loop's `level_names` restore; `push` for
+  - Final-review fix: drop the `level_names` restore in
+    `restore_term_state` ⇒ the 3 `auto/levelOverload*Leak` rows and
+    `the_retry_rewinds_level_names` fail (the loop's own redundant
+    snapshot was removed, so that unit test now pins this restore).
+  - Task 5: drop the loop's `level_names` restore (now
+    `restore_term_state`'s, see above); `push` for
     `insert(0, ..)`; ignore `relaxed`; axiom passes post-header names;
     `is_some_and(enabled)`; `parts.len() == 1`; auto-bind outside a
     context; drop the `variable` seam arm.
@@ -401,13 +414,24 @@ Further probed facts the plan relies on:
   `runTermElabM` mvar-rebuild branch; `setMVarUserNamesAt`; the "note"
   line (line 3 of the message, unobservable to the gate); the
   deprecated-arg linter and the "perhaps you meant" hint are
-  unmodelled; `save_term_state` does not snapshot `level_names` (the
-  oracle's `SavedState.restore` does) so a backtracked header branch
-  could leak an auto-bound universe name (no reproducer);
+  unmodelled;
   `_leanr_`-prefixed names are excluded from auto-bound idents (the
   oracle would bind a user ident literally named `_leanr_*`) but are not
   rejected for level names; `header_unknown_ident_is_auto_bound`
   asserts only `is_ok()`.
+- Pre-existing gaps found by the final review (not auto-bound; each a
+  follow-up):
+  - HIGH: `auto/withUsedVarThm` (`max(u_1,1)` vs `max(1,u_1)`) IS a
+    wrong-Ok on main too, not only under auto-bound -- its own slice.
+  - `InstanceSynthesisFailed` has no oracle first line (oracle "failed
+    to synthesize instance of type class"; probe `rv/autoInstArg`).
+  - A postponed `⟨…⟩` whose universe constraint stays unsolved reaches
+    the kernel as `Kernel(AppTypeMismatch)`; the oracle reports "stuck
+    at solving universe constraint".
+  - `rv/scopeOrder`: `StuckCoercion` vs the oracle's "Application type
+    mismatch" (same class as the `KNOWN_GAPS` coercion rows).
+- Perf note: `oracle_file` takes ~6 min; that is per-row harness setup
+  (~0.8-1 s/row), not the auto-bound retry loop.
 - Cite sweep: every oracle `file:line` this branch added was opened
   against `v4.33.0-rc1`; the Level.lean ident arm is :78-85, the
   throw-site function `App.lean:1960-1974`, `addAutoBoundImplicits`
