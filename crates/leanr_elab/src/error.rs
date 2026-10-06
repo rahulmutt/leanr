@@ -213,8 +213,9 @@ pub enum ElabError {
     /// no catch site handles it ([`ElabError::is_oracle_error`] is
     /// `false`). leanr
     /// counts only the recursions that can run away on their own
-    /// (`addLValArg.go`, `App.lean:1749`, and the anonymous-constructor
-    /// flatten tail, `elab.rs`'s `dispatch_target` / `anon_tail_depth`)
+    /// (`addLValArg.go`, `App.lean:1749`, the anonymous-constructor
+    /// flatten tail, `elab.rs`'s `dispatch_target` / `anon_tail_depth`,
+    /// and `withAutoBoundImplicit`'s retry `loop`, `TermElabM.lean:1963`)
     /// against the oracle's
     /// `defaultMaxRecDepth` (512, `Init/Prelude.lean:4836`); the oracle
     /// counts from the ambient depth, so the exact cut-off differs,
@@ -286,6 +287,15 @@ pub enum ElabError {
     /// `Postpone`: [`ElabError::is_oracle_error`] is `false` for it, so
     /// every generic catch rethrows it (spec Amendment 1 item 4).
     AutoBoundImplicitLocal(String),
+    /// oracle: `addAutoBoundImplicits`' `throwError "invalid auto implicit
+    /// argument `{auto}`, it depends on explicitly provided argument
+    /// `{x}`"` (`Term/TermElabM.lean:2083-2088`). Carries both fvars' user
+    /// names, rendered at the throw site. Unreachable from source (spec
+    /// Amendment 1): pinned by a unit test only.
+    AutoImplicitDependsOnExplicit {
+        auto: String,
+        x: String,
+    },
     /// oracle: `ensureAtomicBinderName` (`Elab/Binders.lean:188-191`):
     /// "invalid binder name `n`, it must be atomic". Carries the rendered
     /// (decoded) binder name.
@@ -550,6 +560,17 @@ impl ElabError {
             // words differently; no corpus record reaches that.
             Self::UnknownIdent(s) => Some(format!("Unknown identifier `{s}`")),
             Self::AmbiguousTerm => Some("Ambiguous term".into()),
+            // oracle `App.lean:409`: "Function expected at{indentExpr f}\n…".
+            Self::FunctionExpected { .. } => Some("Function expected at".into()),
+            // oracle `BuiltinNotation.lean:47-48` (`throwExpTypeUnknown`).
+            Self::InvalidAnonymousCtor(AnonCtorError::ExpectedTypeUnknown) => Some(
+                "Invalid `⟨...⟩` notation: The expected type of this term could not be determined"
+                    .into(),
+            ),
+            Self::AutoImplicitDependsOnExplicit { auto, x } => Some(format!(
+                "invalid auto implicit argument `{auto}`, it depends on explicitly provided \
+                 argument `{x}`"
+            )),
             Self::TooManyUniverseLevels(n) => {
                 Some(format!("too many explicit universe levels for `{n}`"))
             }

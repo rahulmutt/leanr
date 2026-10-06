@@ -260,34 +260,32 @@ fn numbered(s: &str, prefix: &str) -> bool {
     last_was_digit
 }
 
-/// oracle: `elabHeaders` runs under `withAutoBoundImplicit`
-/// (`MutualDef.lean:257`; `elabAxiom` too, `Declaration.lean:109`): an
-/// unbound identifier or universe in a header is auto-bound, not an error.
-/// Auto-bound implicits are M4c-2c-ii.
-pub(super) fn unknown_ident_to_auto_bound_seam(e: ElabError) -> ElabError {
-    match e {
-        ElabError::UnknownIdent(s) => ElabError::UnsupportedSyntax(format!(
-            "unbound `{s}` in a declaration header (auto-bound implicit) — M4c-2c-ii"
-        )),
-        e => e,
-    }
-}
-
-/// oracle: `elabHeaders`' per-view body (`MutualDef.lean:257-291`), under
-/// `withLevelNames levelNames`.
+/// oracle: `elabHeaders` (`MutualDef.lean:213`, `:257-277`):
+/// `withAutoBoundImplicitForbiddenPred` (the views' short names) around
+/// `withDeclName ∘ withAutoBoundImplicit ∘ withLevelNames`. The caller
+/// brackets the lctx so the autos the loop declares are dropped with the
+/// binders.
+///
+/// `with_level_names` restores the OUTER names on exit while
+/// `header_in_scope` copies the post-header names into
+/// `Header.level_names`; on this path every retry therefore restarts from
+/// `id.level_names`.
 pub(super) fn elab_header(
     elab: &mut TermElabM,
     view: &DefView,
     id: &DeclId,
     kinds: &KindInterner,
 ) -> Result<Header, ElabError> {
-    elab.with_level_names(id.level_names.clone(), |elab| {
+    elab.with_auto_bound_forbidden(&[id.short_name], |elab| {
         let cp = elab.mctx.lctx_checkpoint();
-        let out = header_in_scope(elab, view, kinds);
+        let out = elab.with_auto_bound_implicit(|elab| {
+            elab.with_level_names(id.level_names.clone(), |elab| {
+                header_in_scope(elab, view, kinds)
+            })
+        });
         elab.mctx.lctx_restore(cp);
         out
     })
-    .map_err(unknown_ident_to_auto_bound_seam)
 }
 
 fn header_in_scope(
@@ -328,8 +326,10 @@ fn header_in_scope(
         }
     };
     elab.synthesize_synthetic_mvars_no_postponing(kinds)?;
-    // `mkForallFVars' xs type` (`:277`) only sets mvar user names for
-    // messages.
+    // `addAutoBoundImplicits xs` (`:276`), then `mkForallFVars' xs type`
+    // (`:277`), whose `setMVarUserNamesAt` is unobservable (spec
+    // Amendment 1 item 1).
+    let xs = elab.add_auto_bound_implicits(&xs)?;
     let ty = elab.mctx.mk_forall(&xs, ty)?;
     let ty = elab.mctx.instantiate_mvars(ty)?;
     // `:280-283`. The oracle logs and continues; the first error line is
@@ -343,6 +343,8 @@ fn header_in_scope(
     Ok(Header {
         ty,
         level_names: elab.level_names.clone(),
+        // `numParams := xs.size` (`:286`): the autos count, and the body
+        // re-opens them with the binders (`forallBoundedTelescope`).
         num_params: xs.len(),
     })
 }

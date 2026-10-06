@@ -159,9 +159,10 @@ pub(super) fn elab_section_vars(
     Ok(xs)
 }
 
-/// The variable-binder twin of `header::unknown_ident_to_auto_bound_seam`:
 /// `runTermElabM` and `elabVariable` run under `withAutoBoundImplicit`
-/// (`Command.lean:777`, `BuiltinCommand.lean:419`).
+/// (`Command.lean:777`, `BuiltinCommand.lean:419`); headers do since
+/// M4c-2c-ii P1, `variable` binders do not yet (outside a loop an unknown
+/// identifier is a plain `UnknownIdent`, renamed into this seam).
 fn variable_auto_bound_seam(e: ElabError) -> ElabError {
     match e {
         ElabError::UnknownIdent(s) => ElabError::UnsupportedSyntax(format!(

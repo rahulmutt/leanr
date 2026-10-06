@@ -9,12 +9,12 @@
 //! the name as an implicit local of a fresh type, and runs the attempt
 //! again.
 
-// Nothing calls the loop until M4c-2c-ii P1 Task 4 (headers) and Task 5
-// (level names) wire it in; remove this then.
-#![allow(dead_code)]
+use std::collections::HashSet;
 
+use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, NameId};
 use leanr_kernel::BinderInfo;
+use leanr_meta::{MVarId, MetaError};
 
 use crate::elab::TermElabM;
 use crate::error::ElabError;
@@ -23,6 +23,7 @@ use crate::error::ElabError;
 #[derive(Clone, Debug)]
 pub(crate) struct AutoBoundCtx {
     /// `autoImplicitEnabled`: the `autoImplicit` option at entry.
+    #[allow(dead_code)] // read by universe auto-binding (P1 Task 5)
     pub enabled: bool,
     /// `boundVariables`: the auto-bound fvars, in discovery order.
     pub bound: Vec<ExprId>,
@@ -84,6 +85,7 @@ pub(crate) fn check_valid_auto_bound_implicit_name(
 
 /// `isValidAutoBoundLevelName` (`AutoBound.lean:69-72`). `String.front`'s
 /// `Char.isLower` is ASCII `a`-`z` only.
+#[allow(dead_code)] // called by universe auto-binding (P1 Task 5)
 pub(crate) fn is_valid_auto_bound_level_name(s: &str, relaxed: bool) -> bool {
     !s.is_empty()
         && (relaxed
@@ -95,12 +97,21 @@ pub(crate) fn is_valid_auto_bound_level_name(s: &str, relaxed: bool) -> bool {
 /// modelled (no private names — later M4). `allowed` reads
 /// `options.auto_implicit`, as the oracle reads `autoImplicit.get`; inside
 /// a context that equals its `enabled`.
+///
+/// The forbidden test is `NameId` equality with `.str .anonymous comps[0]`
+/// without interning it: hash-consing makes that NameId equal exactly the
+/// atomic names whose one component is `comps[0]`, so the test compares
+/// the decoded component (never the `«»`-escaped rendering).
 pub(crate) fn unknown_ident(elab: &TermElabM, comps: &[String], raw: &str) -> ElabError {
     let forbidden = match comps {
-        [s] => elab
-            .auto_bound_forbidden
-            .iter()
-            .any(|&n| elab.name_str(n) == *s),
+        [s] => {
+            let base = Some(elab.view.store);
+            let st = elab.mctx.store();
+            elab.auto_bound_forbidden.iter().any(|&n| {
+                crate::names::is_atomic(st, base, Some(n))
+                    && crate::names::last_str(st, base, n) == Some(s.as_str())
+            })
+        }
         _ => false,
     };
     if !forbidden && elab.auto_bound.is_some() {
@@ -128,8 +139,10 @@ impl TermElabM<'_> {
     /// The autos' local decls live in the lctx the CALLER brackets; each
     /// attempt's lctx checkpoint is taken AFTER the autos pushed so far,
     /// so rewinding a failed attempt keeps them (the oracle's nested
-    /// `withLocalDecl … fun x => loop …`). The oracle's
-    /// `withIncRecDepth`/`checkSystem` per retry are not modelled.
+    /// `withLocalDecl … fun x => loop …`). Each retry counts as one
+    /// `withIncRecDepth` level (`:1963`) against
+    /// [`crate::error::MAX_REC_DEPTH`], as `app/lval.rs`'s `addLValArg.go`
+    /// does; `checkSystem` is not modelled.
     pub(crate) fn with_auto_bound_implicit<R>(
         &mut self,
         mut k: impl FnMut(&mut Self) -> Result<R, ElabError>,
@@ -155,6 +168,11 @@ impl TermElabM<'_> {
         &mut self,
         k: &mut impl FnMut(&mut Self) -> Result<R, ElabError>,
     ) -> Result<R, ElabError> {
+        // `withIncRecDepth` (`TermElabM.lean:1963`) around every attempt:
+        // the oracle's `loop` recurses once per retry, so the retries
+        // count against `defaultMaxRecDepth`; see `ElabError::MaxRecDepth`.
+        use crate::error::MAX_REC_DEPTH;
+        let mut depth: usize = 0;
         loop {
             // `saveState`: `Term.State` (incl. `levelNames`) + the lctx,
             // which the oracle scopes by the reader.
@@ -167,9 +185,25 @@ impl TermElabM<'_> {
                     self.restore_term_state(saved);
                     self.level_names = level_names;
                     self.mctx.lctx_restore(lctx);
+                    let name = crate::command::header::intern_atomic(self, &n)?;
+                    // Not the oracle's fast-fail ahead of the depth cap
+                    // below: a name thrown again after it was bound can
+                    // only repeat until maxRecDepth (the bound local is in
+                    // scope for every later attempt), so a regressed throw
+                    // site fails at once with a precise message.
+                    if self.auto_bound_has_name(name) {
+                        return Err(ElabError::Internal(format!(
+                            "auto-bound retry made no progress: `{n}` was thrown again after \
+                             it was bound"
+                        )));
+                    }
+                    // The retry's `withIncRecDepth` (`:1963`).
+                    if depth + 1 >= MAX_REC_DEPTH {
+                        return Err(ElabError::MaxRecDepth);
+                    }
+                    depth += 1;
                     // `withLocalDecl n .implicit (← mkFreshTypeMVar)`
                     let ty = self.mk_fresh_type_mvar()?;
-                    let name = crate::command::header::intern_atomic(self, &n)?;
                     let x = self
                         .mctx
                         .push_local_decl(Some(name), ty, BinderInfo::Implicit)?;
@@ -184,7 +218,141 @@ impl TermElabM<'_> {
         }
     }
 
+    /// Some auto bound so far is named `name`.
+    fn auto_bound_has_name(&mut self, name: NameId) -> bool {
+        let bound = match &self.auto_bound {
+            Some(c) => c.bound.clone(),
+            None => return false,
+        };
+        bound.into_iter().any(|x| {
+            self.fvar_decl(x)
+                .is_some_and(|d| d.binder_name == Some(name))
+        })
+    }
+
+    /// The current local context's declaration of fvar `x`, if any.
+    fn fvar_decl(&mut self, x: ExprId) -> Option<leanr_kernel::LocalDecl> {
+        let Node::FVar { id: Some(id) } = self.mctx.store().expr_node(Some(self.view.store), x)
+        else {
+            return None;
+        };
+        self.mctx.current_lctx().lctx().get(id).cloned()
+    }
+
+    /// oracle: `addAutoBoundImplicits xs none` (`TermElabM.lean:2071-2089`)
+    /// with `collectUnassignedMVars` (`:1991-2015`): each auto, in
+    /// discovery order, preceded by the unassigned mvars of its type not
+    /// collected yet. Returns `autos ++ xs`. No inlay hint (no info tree).
+    pub(crate) fn add_auto_bound_implicits(
+        &mut self,
+        xs: &[ExprId],
+    ) -> Result<Vec<ExprId>, ElabError> {
+        let todo = self
+            .auto_bound
+            .as_ref()
+            .map(|c| c.bound.clone())
+            .unwrap_or_default();
+        let mut autos: Vec<ExprId> = Vec::new();
+        for auto in todo {
+            let ty = self.mctx.infer_type(auto)?;
+            self.collect_unassigned_mvars(ty, &mut autos)?;
+            autos.push(auto);
+        }
+        // `:2080-2085`
+        for &auto in &autos {
+            let Some(decl) = self.fvar_decl(auto) else {
+                continue; // `auto.isFVar` (an fvar always has a decl here)
+            };
+            for &x in xs {
+                if self.local_decl_depends_on_fvar(decl.ty, x)? {
+                    return Err(ElabError::AutoImplicitDependsOnExplicit {
+                        auto: self.fvar_user_name(auto),
+                        x: self.fvar_user_name(x),
+                    });
+                }
+            }
+        }
+        autos.extend_from_slice(xs);
+        Ok(autos)
+    }
+
+    fn fvar_user_name(&mut self, x: ExprId) -> String {
+        match self.fvar_decl(x).and_then(|d| d.binder_name) {
+            Some(n) => self.name_str(n),
+            None => "_".to_string(),
+        }
+    }
+
+    /// Approximates `localDeclDependsOn localDecl x` (`:2084`): `x` occurs
+    /// in the instantiated decl type. The oracle also follows the lctxs of
+    /// the type's unassigned mvars; reachable only by the unit test (spec
+    /// Amendment 1: the error is unreachable from source).
+    fn local_decl_depends_on_fvar(&mut self, ty: ExprId, x: ExprId) -> Result<bool, ElabError> {
+        let ty = self.mctx.instantiate_mvars(ty)?;
+        let mut fvars = HashSet::new();
+        crate::app::elim_info::collect_fvars(self, ty, &mut fvars);
+        Ok(fvars.contains(&x))
+    }
+
+    /// `collectUnassignedMVars type init` (`:1991-2015`) with `init` =
+    /// `result`: dependency-first, each mvar once, skipping assigned ones
+    /// and ones already in `result`. Mvars are compared by `MVarId` (the
+    /// oracle's `mkMVar` equality).
+    fn collect_unassigned_mvars(
+        &mut self,
+        ty: ExprId,
+        result: &mut Vec<ExprId>,
+    ) -> Result<(), ElabError> {
+        let mut todo: std::collections::VecDeque<MVarId> = self.get_mvars(ty)?.into();
+        if todo.is_empty() {
+            return Ok(());
+        }
+        let base = Some(self.view.store);
+        let mvar_of = |elab: &Self, e: ExprId| match elab.mctx.store().expr_node(base, e) {
+            Node::MVar { id: Some(n) } => Some(MVarId(n)),
+            _ => None,
+        };
+        // `go mvarIds.toList init init`: `visited` starts as `init`.
+        let mut in_result: Vec<MVarId> = result.iter().filter_map(|&e| mvar_of(self, e)).collect();
+        let mut visited: Vec<MVarId> = in_result.clone();
+        while let Some(m) = todo.pop_front() {
+            // pushed BEFORE the assigned/contained checks (`:2003`).
+            visited.push(m);
+            if self.mctx.mctx().is_assigned(m) || in_result.contains(&m) {
+                continue;
+            }
+            let mty = self
+                .mctx
+                .mctx()
+                .decl(m)
+                .ok_or_else(|| ElabError::Internal("undeclared mvar".into()))?
+                .ty;
+            let fresh: Vec<MVarId> = self
+                .get_mvars(mty)?
+                .into_iter()
+                .filter(|n| !visited.contains(n))
+                .collect();
+            if fresh.is_empty() {
+                let e = self
+                    .mctx
+                    .store_mut()
+                    .expr_mvar(base, Some(m.0))
+                    .map_err(MetaError::from)?;
+                result.push(e);
+                in_result.push(m);
+            } else {
+                // `go (mvarIdsNew.toList ++ mvarId :: mvarIds)`
+                todo.push_front(m);
+                for n in fresh.into_iter().rev() {
+                    todo.push_front(n);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// oracle: `withoutAutoBoundImplicit` (`TermElabM.lean:1982-1983`).
+    #[allow(dead_code)] // called by P1 Task 5 / P2
     pub(crate) fn without_auto_bound_implicit<R>(
         &mut self,
         k: impl FnOnce(&mut Self) -> Result<R, ElabError>,
@@ -417,6 +585,153 @@ mod tests {
                 "{e:?}"
             );
             assert!(elab.auto_bound.is_none());
+        });
+    }
+
+    #[test]
+    fn an_auto_depending_on_an_explicit_binder_is_rejected() {
+        // Unreachable from source (spec Amendment 1); constructed directly.
+        with_elab0(|elab, _| {
+            let nat = crate::builtin::op::mk_const_named(elab, "Nat").unwrap();
+            let eq = crate::builtin::op::mk_const_named(elab, "Eq").unwrap();
+            let xn = crate::command::header::intern_atomic(elab, "x").unwrap();
+            let an = crate::command::header::intern_atomic(elab, "a").unwrap();
+            let x = elab
+                .mctx
+                .push_local_decl(Some(xn), nat, BinderInfo::Default)
+                .unwrap();
+            let base = Some(elab.view.store);
+            let st = elab.mctx.store_mut();
+            let ty = st.expr_app(base, eq, nat).unwrap();
+            let ty = st.expr_app(base, ty, x).unwrap();
+            let ty = st.expr_app(base, ty, x).unwrap(); // Eq Nat x x
+            let a = elab
+                .mctx
+                .push_local_decl(Some(an), ty, BinderInfo::Implicit)
+                .unwrap();
+            elab.auto_bound = Some(AutoBoundCtx {
+                enabled: true,
+                bound: vec![a],
+            });
+            let e = elab.add_auto_bound_implicits(&[x]).unwrap_err();
+            assert_eq!(
+                e.oracle_first_line().as_deref(),
+                Some(
+                    "invalid auto implicit argument `a`, it depends on explicitly provided \
+                     argument `x`"
+                ),
+                "{e:?}"
+            );
+            // An explicit binder the auto does not mention is fine.
+            let y = elab
+                .mctx
+                .push_local_decl(Some(xn), nat, BinderInfo::Default)
+                .unwrap();
+            assert_eq!(elab.add_auto_bound_implicits(&[y]).unwrap(), vec![a, y]);
+        });
+    }
+
+    /// `collectUnassignedMVars`: an auto's type mvar precedes it, and a
+    /// mvar in that mvar's type precedes both (dependency-first); each
+    /// mvar is collected once across autos.
+    #[test]
+    fn add_auto_bound_implicits_puts_type_mvars_first() {
+        with_elab0(|elab, _| {
+            // ?t : Sort ?u, ?m : ?t, a : C ?m ?t (as an app of fresh mvars)
+            let t = elab.mk_fresh_type_mvar().unwrap();
+            let m = elab.mk_fresh_expr_mvar(t).unwrap();
+            let c = elab.mk_fresh_type_mvar().unwrap();
+            let base = Some(elab.view.store);
+            let ty = elab.mctx.store_mut().expr_app(base, c, m).unwrap();
+            let an = crate::command::header::intern_atomic(elab, "a").unwrap();
+            let bn = crate::command::header::intern_atomic(elab, "b").unwrap();
+            let a = elab
+                .mctx
+                .push_local_decl(Some(an), ty, BinderInfo::Implicit)
+                .unwrap();
+            let b = elab
+                .mctx
+                .push_local_decl(Some(bn), t, BinderInfo::Implicit)
+                .unwrap();
+            elab.auto_bound = Some(AutoBoundCtx {
+                enabled: true,
+                bound: vec![a, b],
+            });
+            let out = elab.add_auto_bound_implicits(&[]).unwrap();
+            // `c`'s own type `Sort ?v` has no expr mvar; `?m : ?t` pulls `?t`
+            // in first; `b : ?t` adds nothing new.
+            assert_eq!(out, vec![c, t, m, a, b]);
+        });
+    }
+
+    /// Not the oracle's (which caps the loop at maxRecDepth): a name thrown
+    /// again after it was bound fails fast instead of retrying to the cap.
+    #[test]
+    fn a_name_thrown_after_it_was_bound_stops_the_loop() {
+        with_elab0(|elab, _| {
+            let mut attempts = 0;
+            let e = elab
+                .with_auto_bound_implicit(|_| -> Result<(), ElabError> {
+                    attempts += 1;
+                    Err(ElabError::AutoBoundImplicitLocal("x".into()))
+                })
+                .unwrap_err();
+            assert!(
+                matches!(e, ElabError::Internal(ref m) if m.contains("no progress")),
+                "{e:?}"
+            );
+            assert_eq!(attempts, 2, "bound once, then the repeat is refused");
+            assert!(elab.auto_bound.is_none());
+        });
+    }
+
+    /// oracle: every retry runs under `withIncRecDepth`
+    /// (`TermElabM.lean:1963`). A throw site that names a fresh, distinct
+    /// local every attempt slips past the no-progress guard; the depth cap
+    /// still ends the loop (so a regressed guard can never hang or OOM).
+    #[test]
+    fn endless_fresh_names_hit_the_rec_depth_cap() {
+        with_elab0(|elab, _| {
+            let entry = elab.mctx.lctx_checkpoint();
+            let mut attempts = 0usize;
+            let e = elab
+                .with_auto_bound_implicit(|_| -> Result<(), ElabError> {
+                    attempts += 1;
+                    Err(ElabError::AutoBoundImplicitLocal(format!("x{attempts}")))
+                })
+                .unwrap_err();
+            assert!(matches!(e, ElabError::MaxRecDepth), "{e:?}");
+            assert!(!e.is_oracle_error(), "a runtime exception: never caught");
+            assert_eq!(
+                attempts,
+                crate::error::MAX_REC_DEPTH,
+                "depths 0..MAX_REC_DEPTH, as `addLValArg.go`'s count"
+            );
+            assert!(elab.auto_bound.is_none(), "the context is scoped");
+            // The caller brackets the autos' lctx (`elab_header`); the loop
+            // itself pushed exactly one local per retry.
+            assert_eq!(
+                elab.mctx.lctx_checkpoint(),
+                entry + crate::error::MAX_REC_DEPTH - 1
+            );
+        });
+    }
+
+    /// The forbidden test compares the decoded component, not the
+    /// `«»`-escaped rendering of the forbidden name.
+    #[test]
+    fn a_forbidden_name_needing_escapes_is_not_auto_bound() {
+        with_elab0(|elab, kinds| {
+            let f = crate::command::header::intern_atomic(elab, "a b").unwrap();
+            let stx = parse_term(kinds, "List «a b»");
+            let e = elab
+                .with_auto_bound_forbidden(&[f], |elab| {
+                    elab.with_auto_bound_implicit(|elab| {
+                        crate::builtin::binder::elab_type(elab, &stx, kinds)
+                    })
+                })
+                .unwrap_err();
+            assert!(matches!(e, ElabError::UnknownIdent(_)), "{e:?}");
         });
     }
 }

@@ -210,6 +210,13 @@ pub(crate) fn elab_level(
                     .store_mut()
                     .level_param(Some(base), Some(name_id))
                     .map_err(leanr_meta::MetaError::from)?)
+            } else if elab.auto_bound.is_some() {
+                // Universe auto-binding (`Level.lean:79-84`) is P1 Task 5;
+                // until then a header's unknown universe stays a seam.
+                Err(ElabError::UnsupportedSyntax(format!(
+                    "unbound universe `{raw}` in a declaration header (auto-bound implicit) \
+                     — M4c-2c-ii"
+                )))
             } else {
                 Err(ElabError::UnknownIdent(raw.to_string()))
             }
