@@ -4,8 +4,7 @@
 //! 595-611`; `Declaration.lean:118`).
 //!
 //! Not modelled: the `unusedSectionVars` lint (a warning; the gate keeps
-//! errors only), `deprecated.oldSectionVars`, the mvar-rebuild branch of
-//! `runTermElabM` (auto-bound only; M4c-2c-ii P2 Task 3),
+//! errors only), `deprecated.oldSectionVars`,
 //! `variable {α}` binder-annotation updates (`— later M4`);
 //! `withUsed`'s local-context erasure (`removeUnused` erases the unused
 //! variables from the lctx and local instances, `Meta/CollectFVars.lean:
@@ -182,7 +181,9 @@ pub(super) fn elab_binders(
 /// binders' fvars, then `addAutoBoundImplicits`. The loop leaves the
 /// autos in the local context and resets the auto-bound context on exit,
 /// which is the oracle's `withoutAutoBoundImplicit (elabFn xs)` for the
-/// caller. Returns (`elabFn`'s xs, `sectionFVars`).
+/// caller. When an auto-bound mvar survives in `xs`, the rebuild branch
+/// re-opens them as fresh fvars in an empty context (the caller's scratch
+/// run continues there). Returns (`elabFn`'s xs, `sectionFVars`).
 pub(super) fn elab_section_vars(
     elab: &mut TermElabM,
     var_decls: &[SyntaxNode],
@@ -211,12 +212,24 @@ pub(super) fn elab_section_vars(
     if all_fvars {
         return Ok((xs, section_fvars));
     }
-    // `:791-797`, the rebuild branch.
-    Err(ElabError::UnsupportedSyntax(
-        "auto-bound mvar in a section variable's type (`runTermElabM` rebuild) — \
-         M4c-2c-ii P2 Task 3"
-            .into(),
-    ))
+    // `:792-798`, the rebuild branch: abstract the mvars (and fvars) of
+    // `xs` over a placeholder `Sort 0` (`mkForallFVars'`; leanr's mvar arm
+    // names mvar binders inaccessibly, spec Amendment 1), then reopen the
+    // telescope in an EMPTY context (`withLCtx {} {}`), so the old fvars
+    // cannot be reached. `section_fvars` keeps the OLD fvars: the oracle's
+    // stale map (spec Amendment 2). The replaced context is never
+    // reinstalled: `elabFn` runs to the end of this scratch run inside
+    // it, as the oracle's `withLCtx` scope does.
+    let prop = crate::builtin::sort::mk_prop(elab)?;
+    let ctx_ty = elab.mctx.mk_forall(&xs, prop)?;
+    let _outer = elab.mctx.install_empty_lctx();
+    let ys = elab.mctx.forall_bounded_telescope(ctx_ty, xs.len())?;
+    if ys.len() != xs.len() {
+        return Err(ElabError::Internal(
+            "runTermElabM rebuild: telescope shorter than xs".into(),
+        ));
+    }
+    Ok((ys, section_fvars))
 }
 
 /// oracle `removeUnused` (`Meta/CollectFVars.lean:53-65`): scan `vars`
@@ -575,13 +588,7 @@ impl CommandElab<'_> {
                         }
                         // `:598-599`: an auto, or any variable after a
                         // rebuild (stale `sectionFVars`).
-                        None => {
-                            return Err(ElabError::OmitUndeclared(crate::names::render(
-                                elab.mctx.store(),
-                                Some(elab.view.store),
-                                d.binder_name,
-                            )))
-                        }
+                        None => return Err(ElabError::OmitUndeclared(fvar_message_name(elab, &d))),
                     }
                 }
             }

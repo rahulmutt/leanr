@@ -134,6 +134,21 @@ fn variable_binders_auto_bind() {
 }
 
 #[test]
+fn omit_type_pattern_without_uid_errors() {
+    // Rebuild branch: `[Wrap Nat]` matches the anonymous instance, which
+    // has no uid (stale `sectionFVars`). The oracle prints a hygienic
+    // hash name (`inst._@.…`) the gate cannot pin; leanr must still
+    // error, never `Ok` (spec Amendment 2).
+    let (_, stopped, _) = outcome("variable (h : Eq a a) [Wrap Nat]\nomit [Wrap Nat]");
+    match stopped {
+        Some((1, leanr_elab::ElabError::OmitUndeclared(n))) => {
+            assert_ne!(n, "[anonymous]", "rendered as a message fvar");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn other_commands_are_later_m4_seams() {
     for src in [
         "#check Nat",
@@ -156,9 +171,8 @@ fn empty_source_elaborates_nothing() {
     }
 }
 
-/// M4c-2c-ii P2 rows not yet passing: Task 3 (the rebuild branch)
-/// empties the list.
-const PENDING: &[&str] = &["varAuto/rebuild"];
+/// Empty: M4c-2c-ii P2 complete.
+const PENDING: &[&str] = &[];
 
 /// Rows whose divergence is a pre-existing gap outside auto-bound, gated
 /// by EXACT id: `(id, reason)`. Each reason names an oracle-probed variant
