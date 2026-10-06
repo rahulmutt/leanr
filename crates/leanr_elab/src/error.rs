@@ -123,6 +123,13 @@ pub enum ElabError {
         synthesized: ExprId,
         inferred: ExprId,
     },
+    /// oracle: `throwInvalidNamedArg` (`App.lean:34-52`). `func` is the
+    /// head constant when `s.f.getAppFn` is one. The "perhaps you meant"
+    /// hint is prose (deferred).
+    InvalidNamedArg {
+        name: String,
+        func: Option<String>,
+    },
     /// oracle: `"Function expected at .. but this term has type .."`
     /// (`App.lean:409-411`). Carries the head and its type; the oracle's
     /// `.note` hint about indentation mishaps (`App.lean:404-408`) is
@@ -565,6 +572,10 @@ impl ElabError {
             Self::UnknownIdent(s) => Some(format!("Unknown identifier `{s}`")),
             Self::UnknownUniverseLevel(s) => Some(format!("unknown universe level `{s}`")),
             Self::AmbiguousTerm => Some("Ambiguous term".into()),
+            Self::InvalidNamedArg { name, func } => Some(match func {
+                Some(f) => format!("Invalid argument name `{name}` for function `{f}`"),
+                None => format!("Invalid argument name `{name}` for function"),
+            }),
             // oracle `App.lean:409`: "Function expected at{indentExpr f}\n…".
             Self::FunctionExpected { .. } => Some("Function expected at".into()),
             // oracle `BuiltinNotation.lean:47-48` (`throwExpTypeUnknown`).

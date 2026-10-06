@@ -153,7 +153,7 @@ fn empty_source_elaborates_nothing() {
 /// M4c-2c-ii P1 rows not yet passing: each task deletes its prefixes
 /// (Task 4: `auto/ident` … `auto/with`; Task 5: `auto/level`; Task 6:
 /// `auto/namedArg`; Task 7: `opt/`). Empty at the end of P1.
-const PENDING: &[&str] = &["auto/namedArg", "opt/"];
+const PENDING: &[&str] = &["opt/"];
 
 /// Rows whose divergence is a pre-existing gap outside auto-bound, gated
 /// by EXACT id: `(id, reason)`. Each reason names an oracle-probed variant
