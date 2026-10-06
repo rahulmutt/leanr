@@ -680,7 +680,7 @@ impl<'e> MetaCtx<'e> {
     /// `removeUnused`, `Elab/MutualDef.lean:461-462`). Returns the context
     /// it replaced; the caller reinstalls it with `install_lctx`. Built on
     /// `reduce_local_context`, so local instances are filtered and
-    /// renumbered with the decls. Additive: no existing path calls it.
+    /// renumbered with the decls. Called by the theorem regime in `leanr_elab`'s `command/def.rs`.
     pub fn erase_locals(&mut self, xs: &[ExprId]) -> Result<Arc<LocalCtxSnapshot>, MetaError> {
         let cur = self.current_lctx();
         let reduced = self.reduce_local_context(&cur, xs)?;

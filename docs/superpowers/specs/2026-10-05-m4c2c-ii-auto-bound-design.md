@@ -268,10 +268,10 @@ predicate.
 ## Seams after this slice
 
 - P1 leaves `variable` binder auto-bound as `— M4c-2c-ii P2`; P2 removes
-  it.
+  it. (done in P2)
 - Any option other than the two: `— later M4`.
 - Term-level `set_option … in`: unchanged (out of scope).
-- Unobservable: stale `sectionFVars` on the rebuild branch; inlay hints.
+- Unobservable: stale `sectionFVars` on the rebuild branch; inlay hints. (withdrawn: observable — see Amendment 2)
 
 ## Amendment 1 (plan time, 2026-10-05)
 
@@ -451,7 +451,7 @@ identifier").
   (oracle `withIncRecDepth`, `TermElabM.lean:1963`) plus a no-progress
   guard (Internal error). The `variable` seam keeps the label
   `— M4c-2c-ii` (not `… P2`; `variable_seams_carry_their_slice` pins
-  it) and also covers unknown universes in `variable` binders.
+  it) and also covers unknown universes in `variable` binders. (superseded in P2: the label is removed; that test now pins only the `— later M4` annotation-update seam)
 - Open seams / follow-ups: (CLOSED in P2: `variable` auto-bound and the
   `runTermElabM` mvar-rebuild branch); `setMVarUserNamesAt`; the "note"
   line (line 3 of the message, unobservable to the gate); the
