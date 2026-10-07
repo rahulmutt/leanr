@@ -3477,8 +3477,14 @@ mod tests {
         });
     }
 
-    /// Review Focus 2: an `Err` inside the scope restores the flag, the
-    /// set and every cache (`withTrackingZetaDelta`'s `finally`s).
+    /// oracle: `withTrackingZetaDelta` (`Meta/Basic.lean:1242-1245`) is
+    /// `withFreshCache` + `trackZetaDelta := true` + `withResetZetaDeltaFVarIds`
+    /// (`:1227-1233`), whose `try x finally modify …zetaDeltaFVarIdsSaved`
+    /// (`:1230-1233`) puts the OUTER set back on every exit, a throw
+    /// included; the reader-scoped flag and the fresh cache unwind too.
+    /// Pinned: the scope starts with an empty set and a fresh cache, and
+    /// a seeded outer set, the flag and the outer cache all survive both
+    /// an `Ok` and an `Err` exit.
     #[test]
     fn tracking_scope_restores_on_err() {
         with_prelude0_ctx(|ctx| {
@@ -3486,13 +3492,29 @@ mod tests {
             ctx.infer_type(n).expect("warm the infer cache");
             let warm = ctx.infer_cache.len();
             assert!(warm > 0);
+            let seed = ctx.scratch.intern_str(None, "outerSeed").expect("intern");
+            let seed = ctx.scratch.name_str(None, None, seed).expect("name");
+            ctx.zeta_delta_fvar_ids.insert(seed);
+            let outer: HashSet<NameId> = [seed].into_iter().collect();
+
+            let ok: Result<(), MetaError> = ctx.with_tracking_zeta_delta(|c| {
+                assert!(c.zeta_delta_fvar_ids().is_empty(), "set reset inside");
+                assert!(c.infer_cache.is_empty(), "fresh cache inside the scope");
+                Ok(())
+            });
+            assert!(ok.is_ok());
+            assert!(!ctx.track_zeta_delta);
+            assert_eq!(ctx.zeta_delta_fvar_ids(), &outer, "outer set after Ok");
+            assert_eq!(ctx.infer_cache.len(), warm, "outer cache after Ok");
+
             let r: Result<(), MetaError> = ctx.with_tracking_zeta_delta(|c| {
+                assert!(c.zeta_delta_fvar_ids().is_empty(), "set reset inside");
                 assert!(c.infer_cache.is_empty(), "fresh cache inside the scope");
                 Err(MetaError::Infer("boom".into()))
             });
             assert!(r.is_err());
             assert!(!ctx.track_zeta_delta);
-            assert!(ctx.zeta_delta_fvar_ids().is_empty());
+            assert_eq!(ctx.zeta_delta_fvar_ids(), &outer, "outer set after Err");
             assert_eq!(ctx.infer_cache.len(), warm, "outer cache restored");
         });
     }

@@ -1358,7 +1358,7 @@ impl<'e> MetaCtx<'e> {
     /// principle assign this SAME mvar via its own subgoal unification
     /// before returning here) so double-assignment is impossible either
     /// way.
-    fn synth_pending(&mut self, mvar: MVarId) -> Result<bool, MetaError> {
+    pub(crate) fn synth_pending(&mut self, mvar: MVarId) -> Result<bool, MetaError> {
         self.guarded(|s| s.synth_pending_body(mvar))
     }
 

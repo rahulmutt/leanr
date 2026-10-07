@@ -240,7 +240,7 @@ Plan-time findings (docs/superpowers/plans/2026-10-07-let-to-have.md, lines 30-5
 3. Zeta-delta records are backtrackable (`SavedState.restore`, `Meta/Basic.lean:596`) but survive `withNewMCtxDepth` (`:1974-1980`).
 4. The fresh-cache scope is equivalent in leanr (every cached entry is fvar-free; top-level `is_def_eq` clears the defeq caches). It is ported for fidelity.
 5. The async theorem header pass is unobservable (`check_async_signature` returns only level params); it is not ported.
-6. Audit result: no fixes beyond the whnf easy-cases FVar record. The oracle records in exactly `WHNF.lean:408` and `LetToHave.lean:164-181`.
+6. Audit result: no fixes beyond the whnf easy-cases FVar record. The oracle records in exactly three places: `WHNF.lean:408` (whnf easy-cases `.fvar`), `LetToHave.lean:174` (inside `visitDepExpr`, `:164-181`), and `LetToHave.lean:188` (`checkMVar`'s invalid-delayed-assignment arm, which marks every enclosing `letFVars`; ported at `let_to_have.rs` "An invalid delayed assignment").
 7. Corpus is 42 `lth/*` rows (3 pending seams and `auxProofNoLet` excluded; `lth/instance` dropped).
 
 Execution amendments:
@@ -255,7 +255,7 @@ Execution amendments:
 
 ## Landed
 
-Commits (branch d-let-to-have): ba40d09 (T2 zeta-delta tracking), 25950d1 + 1cc6b49 (T3 abstractNestedProofs letE arm), 3403d2a (T4 `let_to_have` port), bb1e98b + 886c643 (T1 42 `lth/*` rows, floor 490 -> 532), a0b796a (T5 wired into `def.rs`/`axiom.rs`; all 42 rows green), then this close-out.
+Commits (branch d-let-to-have): ba40d09 (T2 zeta-delta tracking), 25950d1 + 1cc6b49 (T3 abstractNestedProofs letE arm), 3403d2a (T4 `let_to_have` port), bb1e98b + 886c643 (T1 42 `lth/*` rows, floor 490 -> 532), a0b796a (T5 wired into `def.rs`, replacing its three `reject_let` calls; `axiom.rs` is untouched, since oracle `elabAxiom` runs no `letToHave` and leanr's axiom path never called `reject_let`; all 42 rows green), then this close-out.
 
 Mutations (run, reverted; details in each commit body):
 
@@ -272,6 +272,8 @@ Mutations (run, reverted; details in each commit body):
 
 T5b's literal "drop Theorem from the kind gate" is equivalent (`pushMain` already rejects non-Prop theorem types). T5h is killed only by the oracle_decl seam test (d28 is the first to return Ok), no file row.
 
+Final-review C1 (fixed, not seamed). Deleting `reject_let` exposed a silent wrong Ok: `def e6 : Nat := let x := 1; PProd.fst (PProd.mk x (rfl : Eq x (Nat.succ Nat.zero)))` admitted the let value `@OfNat.ofNat Nat 1 (OfNat.mk (Nat.succ Nat.zero))`, where the oracle has `instOfNatNat 1`. Root cause, in `leanr_meta` and not letToHave itself: the numeral's `OfNat ?α 1` instance is still pending when the body's `rfl` check zeta-unfolds `x`, which leaves `Nat.succ Nat.zero =?= ?inst.1`. The oracle (trace probed) refuses the class-singleton solution, because `isDefEqSingleton` returns false on a class (`ExprDefEq.lean:2127`, issue #2011). It then reaches `isDefEqOnFailure` → `unstuckMVar` (`:2022-2026`, `:1985-1991`), which runs `synthPending` on `?inst` and retries. leanr elided the `isClass` guard ("no class registry") and had `isDefEqOnFailure` as a silent-`false` seam, so the singleton arm assigned `?inst := OfNat.mk v`. Without a `let`, the instance is synthesized before the comparison, which is why only the let path diverged. Fix: the `isClass` guard in `lazy_delta.rs::is_def_eq_singleton` (via `ClassTable::is_class_name`), plus `defeq.rs::is_def_eq_on_failure`/`unstuck_mvar`, wired at the oracle's three call sites (`:2174` and `:2178` after a `checkpointDefEq`-wrapped `isDefEqApp`, and `:2232`). It includes the `isDefEqStuckEx` outer-depth throw. `tryUnificationHints` stays a named seam. Pinned by 8 `lth/num*` rows (the reviewer's 2 plus 6 variants; floor 532 -> 540) and 3 unit tests. Mutations: guard removed → 5 rows plus 2 unit tests fail; `is_def_eq_on_failure` stubbed → 5 rows plus 1 unit test fail; the `isDefEqApp` fallback alone removed → `app_congruence_failure_falls_back_to_on_failure` fails (oracle-probed: `true`, `?m := instMyAddN`).
+
 Open seams:
 
 - pending-constant overlay (d28/d29/d30 raise the seam; `abstract_proofs.rs` and `let_to_have.rs` are its two callers);
@@ -281,3 +283,7 @@ Open seams:
 - `unsafe` stays seamed at `view.rs`;
 - `etaStruct := .all` is not modelled in `with_infer_type_config`;
 - `cleanupAnnotations` stripping is untested.
+- found in the C1 wave, loud and not fixed: `let x := 0; … (rfl : Eq x Nat.zero)` is a `StuckCoercion` in leanr but Ok in the oracle. The failing subproblem is `Nat.zero =?= 0` (a literal), which the oracle settles and leanr does not. Likely the `isDefEqOffset` seam (`lazy_delta.rs`), so not specific to `let`;
+- found in the C1 wave, loud: `let x := 1; … (rfl : Eq (Nat.succ Nat.zero) x)` (operands swapped) hits the pending-constant seam above (`e14._proof_1`);
+- `tryUnificationHints` (`ExprDefEq.lean:2026`) is still a silent `false`, because no unification-hint table is decoded;
+- `isDefEqApp` same-head order: leanr compares head levels before the args, while the oracle compares args before levels (`:2171`). The `fromClass` `withImplicitConfig` bump in `isDefEqProj` is also still elided.

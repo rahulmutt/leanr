@@ -57,8 +57,9 @@
 //! - [`MetaCtx::is_def_eq_native`] — `isDefEqNative` (ExprDefEq.lean:
 //!   186-193), compiled-eval support. Permanently out of scope (no
 //!   native evaluator in a pure-Rust toolchain).
-//! - `isDefEqProjInst`/`isDefEqOnFailure` are cited, not ported, at
-//!   their call site in `defeq.rs::is_def_eq_expensive`.
+//! - `isDefEqProjInst` is cited, not ported, at its call site in
+//!   `defeq.rs::is_def_eq_expensive`; `isDefEqOnFailure` is ported
+//!   there (`is_def_eq_on_failure`) except `tryUnificationHints`.
 
 use leanr_kernel::bank::levels::LevelRow;
 use leanr_kernel::bank::terms::Node;
@@ -450,14 +451,27 @@ impl<'e> MetaCtx<'e> {
     /// `isDefEqProj` `where`-clause helper: solve `(?m ..).1 =?= v` (or
     /// the symmetric `v =?= (?m ..).1`) by assigning `?m` to
     /// `⟨.., v⟩` when `structName` is a single-field non-recursive
-    /// structure. `isClass` elided (always `false` — no class registry,
-    /// same posture as `is_def_eq_proj`'s own doc).
+    /// structure.
+    ///
+    /// The `isClass` refusal (:2127-2145, issue #2011) is ported: a class
+    /// instance mvar is left to TC resolution (`synthPending` on the
+    /// stuck projection) rather than solved as `⟨v⟩`. Without it,
+    /// `let x := 1; (rfl : Eq x (Nat.succ Nat.zero))` assigned the still
+    /// pending `OfNat ?α 1` instance `OfNat.mk (Nat.succ Nat.zero)` where
+    /// the oracle synthesizes `instOfNatNat 1` (spec
+    /// 2026-10-07-let-to-have-design.md § Landed, C1).
     fn is_def_eq_singleton(
         &mut self,
         struct_name: NameId,
         structure: ExprId,
         v: ExprId,
     ) -> Result<bool, MetaError> {
+        // oracle: `if isClass (← getEnv) structName then return false`
+        // (ExprDefEq.lean:2127) — the env-level `classExtension` read,
+        // which `is_class_name` is built from.
+        if self.classes.is_class_name(struct_name) {
+            return Ok(false);
+        }
         if !self.view.is_structure_like(struct_name) {
             return Ok(false);
         }
@@ -1116,14 +1130,21 @@ mod tests {
     /// -> `isReadOnlyOrSyntheticOpaque` (Basic.lean:979-986) -> the
     /// flag. `Add` is `Instances.olean`'s single-field non-recursive
     /// structure (`class Add (a : Type u) where add : a -> a -> a`), so
-    /// `(?m : Add N).0 =?= v` is exactly the singleton shape.
+    /// `(?m : Add N).0 =?= v` is exactly the singleton shape. `Add` is
+    /// a CLASS, which `isDefEqSingleton` refuses outright (:2127), so the
+    /// class table is emptied first: the fixture has no single-field
+    /// non-class structure, and this test pins the assignability gate,
+    /// not the class refusal (see
+    /// `is_def_eq_singleton_refuses_a_class_structure`).
     #[test]
     fn assign_synthetic_opaque_gates_is_def_eq_singleton() {
+        use crate::instances::ClassTable;
         use crate::test_support::{const_dotted, const_named, fresh_mvar, with_instances_ctx};
         use crate::{LocalCtxSnapshot, MVarDecl, MVarKind};
         use leanr_kernel::bank::terms::Node;
 
         with_instances_ctx(|ctx| {
+            ctx.classes = ClassTable::build(&[]);
             let n = const_named(ctx, "N");
             let add = const_named(ctx, "Add");
             let add_n = ctx.mk_app_spine(add, &[n]).expect("Add N");
@@ -1181,13 +1202,16 @@ mod tests {
 
     /// Depth half of `isAssignable` at `is_def_eq_singleton`: an mvar
     /// minted OUTSIDE `with_new_mctx_depth` is read-only inside it.
-    /// oracle: `isReadOnlyOrSyntheticOpaque` (Basic.lean:979-985).
+    /// oracle: `isReadOnlyOrSyntheticOpaque` (Basic.lean:979-985). Class
+    /// table emptied for the same reason as the test above.
     #[test]
     fn outer_mvar_is_read_only_at_is_def_eq_singleton() {
+        use crate::instances::ClassTable;
         use crate::test_support::{const_dotted, const_named, fresh_mvar, with_instances_ctx};
         use leanr_kernel::bank::terms::Node;
 
         with_instances_ctx(|ctx| {
+            ctx.classes = ClassTable::build(&[]);
             let n = const_named(ctx, "N");
             let add = const_named(ctx, "Add");
             let add_n = ctx.mk_app_spine(add, &[n]).expect("Add N");
@@ -1215,6 +1239,105 @@ mod tests {
             // Positive control: outside the scope it assigns.
             assert!(ctx.is_def_eq_proj(proj, v).expect("is_def_eq_proj"));
             assert!(ctx.mctx().is_assigned(m_id));
+        });
+    }
+
+    /// `(?m : Add N).0 =?= Add.add N instAddN` with `?m` a plain
+    /// (assignable) instance mvar and `Add` a registered CLASS.
+    fn class_singleton_problem(
+        ctx: &mut crate::MetaCtx,
+    ) -> (
+        leanr_kernel::bank::ExprId,
+        leanr_kernel::bank::ExprId,
+        crate::MVarId,
+        leanr_kernel::bank::ExprId,
+    ) {
+        use crate::test_support::{const_dotted, const_named, fresh_mvar};
+        use leanr_kernel::bank::terms::Node;
+        let n = const_named(ctx, "N");
+        let add = const_named(ctx, "Add");
+        let add_n = ctx.mk_app_spine(add, &[n]).expect("Add N");
+        let (m_expr, m_id) = fresh_mvar(ctx, add_n);
+        let add_add = const_dotted(ctx, "Add", "add");
+        let inst_add_n = const_named(ctx, "instAddN");
+        let v = ctx
+            .mk_app_spine(add_add, &[n, inst_add_n])
+            .expect("Add.add N instAddN");
+        let add_name = match ctx.node(add) {
+            Node::Const { name: Some(nm), .. } => nm,
+            _ => panic!("Add is not a bare const"),
+        };
+        let base = Some(ctx.view.store);
+        let proj = ctx
+            .scratch
+            .expr_proj(base, Some(add_name), &Nat::from(0u64), m_expr)
+            .expect("proj");
+        (proj, v, m_id, inst_add_n)
+    }
+
+    /// oracle: `isDefEqSingleton`'s `if isClass (← getEnv) structName
+    /// then return false` (ExprDefEq.lean:2127, issue #2011). A class
+    /// instance mvar must be left to TC resolution, never solved as
+    /// `Add.mk v` — that structural solution is what made
+    /// `let x := 1; (rfl : Eq x (Nat.succ Nat.zero))` admit
+    /// `OfNat.mk (Nat.succ Nat.zero)` where the oracle has
+    /// `instOfNatNat 1` (spec 2026-10-07-let-to-have-design.md § Landed).
+    #[test]
+    fn is_def_eq_singleton_refuses_a_class_structure() {
+        use crate::test_support::with_instances_ctx;
+        with_instances_ctx(|ctx| {
+            let (proj, v, m_id, _) = class_singleton_problem(ctx);
+            assert!(!ctx.is_def_eq_proj(proj, v).expect("is_def_eq_proj"));
+            assert!(!ctx.mctx().is_assigned(m_id), "no `Add.mk v` solution");
+        });
+    }
+
+    /// oracle: `isDefEqOnFailure` -> `unstuckMVar` (ExprDefEq.lean:
+    /// 2022-2026, 1985-1991): the full `is_def_eq` on the class-singleton
+    /// shape synthesizes the stuck instance mvar (`synthPending`) and
+    /// re-runs, so `?m` ends up `instAddN` — not `Add.mk v`.
+    #[test]
+    fn on_failure_synthesizes_the_stuck_instance_mvar() {
+        use crate::test_support::with_instances_ctx;
+        with_instances_ctx(|ctx| {
+            let (proj, v, m_id, inst_add_n) = class_singleton_problem(ctx);
+            assert!(ctx.is_def_eq(proj, v).expect("is_def_eq"));
+            let m = ctx.mctx().assignment(m_id).expect("?m assigned");
+            let m = ctx.instantiate_mvars(m).expect("instantiate");
+            assert_eq!(m, inst_add_n, "?m := instAddN via synthPending");
+        });
+    }
+
+    /// oracle: `isDefEqApp`'s `isDefEqOnFailure` fallback (ExprDefEq.lean:
+    /// 2177-2178), after its `checkpointDefEq`-wrapped congruence fails:
+    /// `Add.add N ?m x (f y) =?= f y` delta-reduces to the App/App pair
+    /// `?m.1 x (f y) =?= f y`, whose congruence fails; unsticking `?m`
+    /// (`instAddN`, whose field is `fun _ b => b`) then beta-reduces the
+    /// left side to `f y`.
+    #[test]
+    fn app_congruence_failure_falls_back_to_on_failure() {
+        use crate::test_support::{
+            const_dotted, const_named, fresh_fvar, fresh_mvar, with_instances_ctx,
+        };
+        with_instances_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            let add = const_named(ctx, "Add");
+            let add_n = ctx.mk_app_spine(add, &[n]).expect("Add N");
+            let (m_expr, m_id) = fresh_mvar(ctx, add_n);
+            let n_to_n = ctx.mk_arrow(n, n).expect("N -> N");
+            let f = fresh_fvar(ctx, n_to_n, "f");
+            let x = fresh_fvar(ctx, n, "x");
+            let y = fresh_fvar(ctx, n, "y");
+            let fy = ctx.mk_app_spine(f, &[y]).expect("f y");
+            let add_add = const_dotted(ctx, "Add", "add");
+            let lhs = ctx
+                .mk_app_spine(add_add, &[n, m_expr, x, fy])
+                .expect("Add.add N ?m x (f y)");
+            assert!(ctx.is_def_eq(lhs, fy).expect("is_def_eq"));
+            let inst_add_n = const_named(ctx, "instAddN");
+            let m = ctx.mctx().assignment(m_id).expect("?m assigned");
+            let m = ctx.instantiate_mvars(m).expect("instantiate");
+            assert_eq!(m, inst_add_n);
         });
     }
 }

@@ -845,7 +845,18 @@ def fileQueries : List (String × String) := [
   ("lth/auxProofHave", "def d35 : PProd Nat Nat := have x := Nat.zero; PProd.mk Nat.zero (PProd.fst (PProd.mk x (eq_of_heq (HEq.refl x))))"),
   ("lth/auxProofOutsideLet", "def d36 : PProd Nat (Eq Nat.zero Nat.zero) := PProd.mk (let x := Nat.zero; x) (eq_of_heq (HEq.refl Nat.zero))"),
   ("lth/letUnderLamTypeOnly", "def d37 : Nat -> Nat := fun (n : (let T := Nat; T)) => n"),
-  ("lth/auxProofInLetValue", "def d38 : Nat := let p := PProd.mk Nat.zero (eq_of_heq (HEq.refl Nat.zero)); PProd.fst p")
+  ("lth/auxProofInLetValue", "def d38 : Nat := let p := PProd.mk Nat.zero (eq_of_heq (HEq.refl Nat.zero)); PProd.fst p"),
+  -- C1 (final review): a numeral let value whose `OfNat` instance is still
+  -- pending when the body unifies `x` (isDefEqOnFailure/synthPending, not
+  -- the class-singleton `OfNat.mk` solution)
+  ("lth/numLetRfl", "def e6 : Nat := let x := 1; PProd.fst (PProd.mk x (rfl : Eq x (Nat.succ Nat.zero)))"),
+  ("lth/numLetRflPick", "def m5 : Eq Nat.zero Nat.zero := let x := 1; PProd.fst (PProd.mk (rfl : Eq Nat.zero Nat.zero) (rfl : Eq x (Nat.succ (pick Nat.zero Nat.zero))))"),
+  ("lth/numLetThm", "theorem e12 : Eq (Nat.succ Nat.zero) (Nat.succ Nat.zero) := let x := 1; (rfl : Eq x (Nat.succ Nat.zero))"),
+  ("lth/numLetTwo", "def e15 : Nat := let x := 2; PProd.fst (PProd.mk x (rfl : Eq x (Nat.succ (Nat.succ Nat.zero))))"),
+  ("lth/numLetChain", "def e16 : Nat := let x := 1; let y := x; PProd.fst (PProd.mk y (rfl : Eq y (Nat.succ Nat.zero)))"),
+  ("lth/numHaveRfl", "def e8 : Nat := have x := 1; PProd.fst (PProd.mk x (Eq.refl x))"),
+  ("lth/numLetTyped", "def e9 : Nat := let x : Nat := 1; PProd.fst (PProd.mk x (rfl : Eq x (Nat.succ Nat.zero)))"),
+  ("lth/numNoLet", "def e7 : Nat := PProd.fst (PProd.mk 1 (rfl : Eq 1 (Nat.succ Nat.zero)))")
 ]
 
 /-- The first error-severity message `s` logged, from `messages` and the

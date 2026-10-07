@@ -30,10 +30,11 @@
 //! eta/eta-struct/proj/native/nat/offset/delta/projInst/stringLit/
 //! unitLike arms (wired in [`MetaCtx::is_def_eq_expensive`] below) —
 //! all actually IMPLEMENTED in `lazy_delta.rs`, except `isDefEqNative`/
-//! `isDefEqOffset` (permanently/plan-3 named seams, `isDefEqProjInst`
-//! (class-projection registry, undecoded everywhere in this crate) and
-//! `isDefEqOnFailure` (unification hints, M4b), both cited at their
-//! call site below and never silently dropped.
+//! `isDefEqOffset` (permanently/plan-3 named seams) and
+//! `isDefEqProjInst` (class-projection registry, undecoded everywhere in
+//! this crate), cited at its call site below. `isDefEqOnFailure` is
+//! ported ([`MetaCtx::is_def_eq_on_failure`]) except its
+//! `tryUnificationHints` half (no unification-hint table).
 //!
 //! # A transcription correction (brief vs. pinned source)
 //!
@@ -424,15 +425,13 @@ impl<'e> MetaCtx<'e> {
     /// silently skipped from the sequence — see their own doc comments
     /// in `lazy_delta.rs`). Unchanged from task 3: Const/Const
     /// (:2225-2226) and App/App via `isDefEqApp`'s spine walk
-    /// (:2166-2178, simplified). Two arms remain named-but-uncommitted
-    /// seams at their call site below, both because the class-
-    /// projection registry they would need is undecoded EVERYWHERE
-    /// else in this crate too (`whnf.rs`'s own
-    /// `unfold_proj_inst_when_instances`/`get_stuck_mvar` notes):
-    /// - `isDefEqProjInst` (:2229, `unfoldProjInstWhenInstances?`-gated,
-    ///   `.instances`/`.implicit` transparency only).
-    /// - `isDefEqOnFailure` (:2232, unification hints :2022-2028) —
-    ///   M4b.
+    /// (:2166-2178, simplified). One arm remains a named-but-uncommitted
+    /// seam at its call site below, because the class-projection
+    /// registry it would need is undecoded EVERYWHERE else in this crate
+    /// too (`whnf.rs`'s own `unfold_proj_inst_when_instances` notes):
+    /// `isDefEqProjInst` (:2229, `unfoldProjInstWhenInstances?`-gated,
+    /// `.instances`/`.implicit` transparency only). `isDefEqOnFailure`
+    /// (:2174, :2178, :2232) is ported as [`MetaCtx::is_def_eq_on_failure`].
     ///
     /// (A `Sort`/`Sort` pair never reaches this function at all, as of
     /// task 4: `is_def_eq_quick`'s `.sort` arm calls the DECISIVE
@@ -515,9 +514,6 @@ impl<'e> MetaCtx<'e> {
             (Node::App { .. }, Node::App { .. }) => {
                 let t_fn = self.get_app_fn(t2);
                 let s_fn = self.get_app_fn(s2);
-                if !self.is_def_eq_core(t_fn, s_fn)? {
-                    return Ok(false);
-                }
                 let t_args = self.get_app_args(t2);
                 let s_args = self.get_app_args(s2);
                 // oracle: `isDefEqApp` (:2166-2178) delegates arg
@@ -525,8 +521,19 @@ impl<'e> MetaCtx<'e> {
                 // `assign.rs::is_def_eq_args` (extracted from this
                 // arm's own former inline pairwise walk so
                 // `isDefEqMVarSelf` can share it too, per that
-                // function's own citation).
-                self.is_def_eq_args(t_fn, &t_args, &s_args)
+                // function's own citation). Both of its branches run
+                // the congruence under `checkpointDefEq` and fall back
+                // to `isDefEqOnFailure` (:2174, :2178); bare
+                // checkpoint/rollback as at `lazy_delta.rs`'s
+                // `checkpointDefEq` (:1503-1508) site.
+                let snap = self.checkpoint();
+                let ok = self.is_def_eq_core(t_fn, s_fn)?
+                    && self.is_def_eq_args(t_fn, &t_args, &s_args)?;
+                if ok {
+                    return Ok(true);
+                }
+                self.rollback(snap);
+                self.is_def_eq_on_failure(t2, s2)
             }
             // oracle :2229-2231, reached only when `t`/`s` are neither
             // both `Const` nor both `App` (the real oracle's own
@@ -541,11 +548,54 @@ impl<'e> MetaCtx<'e> {
                 if self.is_def_eq_unit_like(t2, s2)? {
                     return Ok(true);
                 }
-                // SEAM: isDefEqOnFailure (:2232, unification hints) —
-                // M4b.
-                Ok(false)
+                // oracle :2232.
+                self.is_def_eq_on_failure(t2, s2)
             }
         }
+    }
+
+    /// oracle: `isDefEqOnFailure` (ExprDefEq.lean:2022-2026): try to
+    /// unstick `t`, then `s`, by synthesizing the pending instance mvar
+    /// each is stuck on, re-running the comparison on success.
+    ///
+    /// `tryUnificationHints` (:2026) stays a NAMED SEAM (`false`): this
+    /// crate decodes no `unificationHintExtension`, so a problem only a
+    /// unification hint solves fails here.
+    pub(crate) fn is_def_eq_on_failure(&mut self, t: ExprId, s: ExprId) -> Result<bool, MetaError> {
+        if let Some(t2) = self.unstuck_mvar(t)? {
+            return self.is_def_eq_core(t2, s);
+        }
+        if let Some(s2) = self.unstuck_mvar(s)? {
+            return self.is_def_eq_core(t, s2);
+        }
+        // SEAM: tryUnificationHints t s <||> tryUnificationHints s t
+        // (:2026) — no unification-hint table.
+        Ok(false)
+    }
+
+    /// oracle: `unstuckMVar` (ExprDefEq.lean:1985-2020), returning the
+    /// `successK` argument (`e` instantiated, :1990) or `None` for
+    /// `failK`. `getStuckMVar?` is `whnf.rs::get_stuck_mvar` and
+    /// `Meta.synthPending` is `whnf.rs::synth_pending` (the
+    /// `synthPendingImp` port). The `isDefEqStuckEx` throw (:1993-2018,
+    /// issue #2736): a stuck mvar from an OUTER depth aborts the
+    /// enclosing synthesis rather than failing quietly.
+    fn unstuck_mvar(&mut self, e: ExprId) -> Result<Option<ExprId>, MetaError> {
+        let Some(mvar) = self.get_stuck_mvar(e)? else {
+            return Ok(None);
+        };
+        if self.synth_pending(mvar)? {
+            return Ok(Some(self.instantiate_mvars(e)?));
+        }
+        if self.cfg.is_def_eq_stuck_ex {
+            // `mvarId.getDecl` (:2016) throws on an undeclared mvar;
+            // `synth_pending` above already raised that error.
+            let depth = self.mctx.expr_mvar_depth(mvar).unwrap_or(0);
+            if depth < self.mctx.depth() {
+                return Err(MetaError::IsDefEqStuck);
+            }
+        }
+        Ok(None)
     }
 }
 
