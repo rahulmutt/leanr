@@ -1687,6 +1687,20 @@ impl<'e> MetaCtx<'e> {
             .unwrap_or(ReducibilityStatus::Semireducible)
     }
 
+    /// oracle: `setReducibilityStatusCore` (`ReducibilityAttrs.lean`,
+    /// reached from the `@[reducible]` attribute's `addAttr`, `:180-184`)
+    /// for a constant declared AFTER the imported environment: the
+    /// command elaborator records an in-file `abbrev`'s status here
+    /// (`mkDefViewOfAbbrev` adds `@[reducible]`, `Elab/DefView.lean:
+    /// 143-144`), since [`MetaCtx::new`] only sees the imported
+    /// `reducibility` entries.
+    ///
+    /// Additive and TCB-neutral: meta-level transparency only; the
+    /// kernel's `ReducibilityHints` are untouched.
+    pub fn set_reducibility_status(&mut self, n: NameId, status: ReducibilityStatus) {
+        self.reducibility.insert(n, status);
+    }
+
     pub fn matcher_of(&self, n: NameId) -> Option<&MatcherEntry> {
         self.matchers.get(&n)
     }

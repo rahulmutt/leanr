@@ -35,7 +35,9 @@ pub(crate) mod view;
 use leanr_kernel::bank::scratch::promote_name;
 use leanr_kernel::bank::{NameId, Store};
 use leanr_kernel::{check_declaration, Declaration, Environment};
-use leanr_meta::{aux_lemma_key, AuxLemmaCache, Config, EnvExtensions, MetaCtx};
+use leanr_meta::{
+    aux_lemma_key, AuxLemmaCache, Config, EnvExtensions, MetaCtx, ReducibilityStatus,
+};
 use leanr_syntax::kind::KindInterner;
 use leanr_syntax::tree::{NodeOrToken, SyntaxNode};
 
@@ -90,6 +92,16 @@ pub struct CommandElab<'x> {
     /// admission order, so a later same-type mint overwrites (`:68`).
     /// Environment-store ids only (see `commit`).
     aux_cache: AuxLemmaCache,
+    /// The in-file part of `reducibilityAttrs`: every `abbrev` this
+    /// elaborator admitted, by full (environment-store) name.
+    /// `mkDefViewOfAbbrev` adds `@[reducible]` (`Elab/DefView.lean:
+    /// 143-144`), an `afterTypeChecking` attribute
+    /// (`ReducibilityAttrs.lean:196-202`), so the name is recorded only
+    /// once the declaration is admitted: an abbrev the kernel rejects is
+    /// never reducible. `exts.reducibility` holds only the imported
+    /// entries, so `with_term_elab` overlays these onto each `MetaCtx`.
+    /// Explicit `@[reducible]`/`instance` reducibility are not ported.
+    reducible_overlay: Vec<NameId>,
     /// The oracle's `Command.State.scopes`, bottom-up: index 0 is the root
     /// scope, the last entry the innermost (`scope.rs`).
     scopes: Vec<Scope>,
@@ -108,6 +120,7 @@ impl<'x> CommandElab<'x> {
             env,
             exts,
             aux_cache: AuxLemmaCache::new(),
+            reducible_overlay: Vec::new(),
             scopes: vec![Scope::root()],
             tables,
             next_var_uid: 0,
@@ -227,6 +240,9 @@ impl<'x> CommandElab<'x> {
             _ => def::elab_def(elab, view, kinds, &self.aux_cache, sv),
         })?;
         let names = self.commit(&mut scratch, built)?;
+        if let (DefKind::Abbrev, Some(&main)) = (view.kind, names.last()) {
+            self.reducible_overlay.push(main);
+        }
         // `applyVisibility`'s `addProtected` (`DeclModifiers.lean:249-250`).
         if let (true, Some(&main)) = (view.protected, names.last()) {
             self.tables.add_protected(main);
@@ -249,7 +265,10 @@ impl<'x> CommandElab<'x> {
         let mut scratch = Store::scratch();
         let out = {
             let env_view = self.env.view();
-            let mctx = MetaCtx::new(env_view, &mut scratch, Config::default(), self.exts);
+            let mut mctx = MetaCtx::new(env_view, &mut scratch, Config::default(), self.exts);
+            for &n in &self.reducible_overlay {
+                mctx.set_reducibility_status(n, ReducibilityStatus::Reducible);
+            }
             let mut elab = TermElabM::new(mctx, env_view);
             let head = self.scopes.last().expect("the root scope is never popped");
             elab.resolve = ResolveCtx {
