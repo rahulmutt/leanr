@@ -150,9 +150,9 @@ impl<'e> TermElabM<'e> {
             SyntheticMVarKind::Postponed { ref ctx, tail_from } => {
                 elab.resume_postponed(ctx, &decl.stx, tail_from, mvar_id, postpone_on_error, kinds)
             }
-            SyntheticMVarKind::Coe { expected_type, e } => {
-                elab.synthesize_coe_mvar(mvar_id, expected_type, e)
-            }
+            SyntheticMVarKind::Coe {
+                expected_type, e, ..
+            } => elab.synthesize_coe_mvar(mvar_id, expected_type, e),
             SyntheticMVarKind::Tactic { ref param_name } => {
                 // oracle: the `.tactic` arm runs the tactic only when
                 // `runTactics && !(delayOnMVars && (← mvarId.getType >>=

@@ -73,6 +73,11 @@ pub enum SyntheticMVarKind {
     Coe {
         expected_type: ExprId,
         e: ExprId,
+        /// The oracle's `f?` (`TermElabM.lean:81`): `Some` when
+        /// `ensureArgType` registered the mvar, so the stuck reporter
+        /// throws `throwAppTypeMismatch f e`. The oracle's `header?` and
+        /// `mkErrorMsg?` are not modelled: no leanr caller passes one.
+        f: Option<ExprId>,
     },
     Tactic {
         param_name: Option<String>,

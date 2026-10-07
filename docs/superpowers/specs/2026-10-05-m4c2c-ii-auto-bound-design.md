@@ -399,6 +399,9 @@ identifier").
   follow-up):
   - `auto/negDependsExplicit`, `auto/negDependsExplicitAx`: coercion
     (leanr `StuckCoercion`, oracle `Application type mismatch`).
+    CLOSED 2026-10-07: the `.coe` synthetic mvar now keeps the oracle's
+    `f?`, so the stuck reporter raises `throwAppTypeMismatch`
+    (`coeStuck/*` rows).
   - `auto/catchInst`: dotted unknown `Wrap.val` is `Unknown identifier`
     in leanr, `Unknown constant` in the oracle.
   - `auto/withUsedVarThm`: header level order `max(u_1,1)` vs the
@@ -477,7 +480,8 @@ identifier").
     the kernel as `Kernel(AppTypeMismatch)`; the oracle reports "stuck
     at solving universe constraint".
   - `rv/scopeOrder`: `StuckCoercion` vs the oracle's "Application type
-    mismatch" (same class as the `KNOWN_GAPS` coercion rows).
+    mismatch" (same class as the `KNOWN_GAPS` coercion rows; closed with
+    them on 2026-10-07).
 - Perf note: `oracle_file` takes ~6 min; that is per-row harness setup
   (~0.8-1 s/row), not the auto-bound retry loop.
 - Cite sweep: every oracle `file:line` this branch added was opened

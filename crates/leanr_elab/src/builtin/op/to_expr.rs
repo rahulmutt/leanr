@@ -381,7 +381,7 @@ fn apply_coe_go(
             if elab.mctx.is_def_eq_guarded(max, ty)? {
                 Ok(t.clone())
             } else {
-                let val = elab.mk_coe(r#ref, max, *val)?;
+                let val = elab.mk_coe(r#ref, max, *val, None)?;
                 Ok(Tree::Term {
                     r#ref: r#ref.clone(),
                     val,

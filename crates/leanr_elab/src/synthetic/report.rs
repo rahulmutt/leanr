@@ -101,15 +101,24 @@ impl<'e> TermElabM<'e> {
             // of that binder, so `inferType e` needs the mvar's own
             // local context reinstalled — the binder has closed by the
             // time the reporter runs.
-            SyntheticMVarKind::Coe { expected_type, e } => {
-                self.with_mvar_local_context(mvar_id, |elab| {
-                    let got = elab.mctx.infer_type(e)?;
-                    Err(ElabError::StuckCoercion {
+            //
+            // `throwTypeMismatchError … f?`: with `f? = some f` (an
+            // `ensureArgType` registration) it is `throwAppTypeMismatch`,
+            // the same error `mkCoe`'s immediate failure raises there.
+            SyntheticMVarKind::Coe {
+                expected_type,
+                e,
+                f,
+            } => self.with_mvar_local_context(mvar_id, |elab| {
+                let got = elab.mctx.infer_type(e)?;
+                Err(match f {
+                    Some(_) => elab.type_mismatch(expected_type, got, e, f),
+                    None => ElabError::StuckCoercion {
                         expected: expected_type,
                         got,
-                    })
+                    },
                 })
-            }
+            }),
             // oracle: `SyntheticMVars.lean:311-315`'s `.tactic` arm —
             // reachable only once a real `by`/tactic-framework evaluator
             // occupies rung 5 (`ladder.rs`) and can answer `false` for a

@@ -18,22 +18,25 @@
 //!   just calls it;
 //! - the REPORTER arm, `reportStuckSyntheticMVar`'s `.coe`
 //!   (`SyntheticMVars.lean:304-310`), is small enough to stay inline,
-//!   so its body is in `synthetic/report.rs:104` beside the
+//!   so its body is in `synthetic/report.rs:108` beside the
 //!   `.typeClass` and `.tactic` arms it is dispatched against. It is
 //!   elaborator-tier P4 all the same — named here so a reader after the
 //!   slice's full extent does not have to hunt for it.
 //!
 //! Dropped, with no term impact: `withTraceNode`, `pushInfoLeaf`'s
 //! `CoeExpansionTrace`, `withoutMacroStackAtErr`, and the
-//! `errorMsgHeader?`/`mkErrorMsg?`/`mkImmedErrorMsg?`/`f?` message
-//! payloads (leanr defers the prose layer, design spec § Amendment item 2).
+//! `errorMsgHeader?`/`mkErrorMsg?`/`mkImmedErrorMsg?` message payloads
+//! (leanr defers the prose layer, design spec § Amendment item 2; no
+//! leanr caller supplies one yet). `f?` is kept: it picks the error's
+//! first line ("Application type mismatch" vs "Type mismatch"), both on
+//! `mkCoe`'s immediate failure and in the stuck reporter.
 
 use leanr_kernel::bank::ExprId;
 use leanr_meta::{LOption, MVarId, MVarKind, MetaError, TransparencyMode};
 
 use crate::dispatch::SynElem;
 use crate::elab::TermElabM;
-use crate::error::ElabError;
+use crate::error::{AppArgMismatch, ElabError};
 use crate::synthetic::state::SyntheticMVarKind;
 
 impl<'e> TermElabM<'e> {
@@ -63,21 +66,22 @@ impl<'e> TermElabM<'e> {
     /// never one — and keeping the underlying error is arguably the
     /// better report. It is a divergence all the same, recorded here
     /// rather than left to be rediscovered.
+    ///
+    /// `f` is the oracle's `f?`: `Some` only from `ensureArgType`
+    /// (`App.lean:54-56`). It is stored in the `.coe` mvar for the stuck
+    /// reporter, as `:1310` does.
     pub(crate) fn mk_coe(
         &mut self,
         stx: &SynElem,
         expected: ExprId,
         e: ExprId,
+        f: Option<ExprId>,
     ) -> Result<ExprId, ElabError> {
         match self.mctx.coerce(e, expected) {
             Ok(LOption::Some(new_e)) => Ok(new_e),
             Ok(LOption::None) | Err(MetaError::CoeExpansionMismatch(_)) => {
                 let got = self.mctx.infer_type(e)?;
-                Err(ElabError::TypeMismatch {
-                    expected,
-                    got,
-                    app: None,
-                })
+                Err(self.type_mismatch(expected, got, e, f))
             }
             Ok(LOption::Undef) => {
                 let (mvar, id) =
@@ -88,6 +92,7 @@ impl<'e> TermElabM<'e> {
                     SyntheticMVarKind::Coe {
                         expected_type: expected,
                         e,
+                        f,
                     },
                 );
                 Ok(mvar)
@@ -103,11 +108,25 @@ impl<'e> TermElabM<'e> {
     /// defeq mismatch) at every site that used to open-code it:
     /// `elab_term_ensuring_type`, the `($e :)` ascription arm, and
     /// `elab_and_add_new_arg` (`ensureArgType`, `App.lean:54-62`).
+    ///
+    /// This is the `f? := none` call; `ensureArgType`'s `f? := some f`
+    /// goes through [`Self::ensure_has_type_core`].
     pub(crate) fn ensure_has_type(
         &mut self,
         stx: &SynElem,
         expected: Option<ExprId>,
         e: ExprId,
+    ) -> Result<ExprId, ElabError> {
+        self.ensure_has_type_core(stx, expected, e, None)
+    }
+
+    /// `ensureHasType` with its `f?` argument (`TermElabM.lean:1334-1340`).
+    pub(crate) fn ensure_has_type_core(
+        &mut self,
+        stx: &SynElem,
+        expected: Option<ExprId>,
+        e: ExprId,
+        f: Option<ExprId>,
     ) -> Result<ExprId, ElabError> {
         let Some(expected) = expected else {
             return Ok(e);
@@ -116,7 +135,28 @@ impl<'e> TermElabM<'e> {
         if self.mctx.is_def_eq(e_type, expected)? {
             return Ok(e);
         }
-        self.mk_coe(stx, expected, e)
+        self.mk_coe(stx, expected, e, f)
+    }
+
+    /// oracle: `throwTypeMismatchError`'s dispatch on `f?`
+    /// (`TermElabM.lean:1151-1153`): `none` is `mkTypeMismatchError`'s
+    /// "Type mismatch", `some f` is `Meta.throwAppTypeMismatch f e`
+    /// (`Meta/Check.lean:250-270`), which says "The last … argument" when
+    /// `f.getAppArgs.any (· == e)`. `f` is used as captured, with no
+    /// `instantiateMVars`, as the oracle does. Shared by `mkCoe`'s
+    /// immediate failure and the stuck reporter's `.coe` arm.
+    pub(crate) fn type_mismatch(
+        &self,
+        expected: ExprId,
+        got: ExprId,
+        e: ExprId,
+        f: Option<ExprId>,
+    ) -> ElabError {
+        let app = f.map(|f| AppArgMismatch {
+            f,
+            arg_already_in_f: crate::app::lval::app_args(self, f).contains(&e),
+        });
+        ElabError::TypeMismatch { expected, got, app }
     }
 
     /// oracle: the `.coe` arm of `synthesizeSyntheticMVar`

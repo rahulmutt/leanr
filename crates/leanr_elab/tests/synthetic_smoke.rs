@@ -1306,6 +1306,7 @@ fn coe_arm_assigns_e_itself_when_types_became_defeq() {
             leanr_elab::synthetic::state::SyntheticMVarKind::Coe {
                 expected_type: alias,
                 e: zero,
+                f: None,
             },
         );
         app.elab
@@ -1321,17 +1322,25 @@ fn coe_arm_assigns_e_itself_when_types_became_defeq() {
 /// names a coercion that never became solvable. `pairW n` alone leaves
 /// `?a` unassigned forever: `CoeT Nat n (Wrapper ?a)` is `.undef` at
 /// registration AND at every retry, so the fixpoint ends with the
-/// `.coe` mvar pending and the reporter raises `StuckCoercion` — the
-/// oracle's `throwTypeMismatchError … "failed to create type class
-/// instance for …"`. The dumper drops this query on the oracle side —
-/// measured against the pin, `dump_elab` prints `elaboration failed for
-/// … Application type mismatch: the argument n has type Nat but is
-/// expected to have type Wrapper (?m n)` and emits nothing — which is
-/// why it is a smoke test and not a record.
+/// `.coe` mvar pending. The mvar was registered by `ensureArgType`
+/// (`App.lean:54-56`), which stores `f? = some f`, so the reporter's
+/// `throwTypeMismatchError … f?` (`TermElabM.lean:1151-1153`) becomes
+/// `throwAppTypeMismatch f n`. Measured against the pin: `dump_elab`
+/// prints `Application type mismatch: the argument n has type Nat but
+/// is expected to have type Wrapper (?m n)` and drops the query, which
+/// is why this is a smoke test; the file rows `coeStuck/arg*` pin the
+/// same arm as records.
 #[test]
 fn stuck_coercion_is_reported_by_the_coe_reporter_arm() {
     match support::elab_and_synthesize("fun (n : Nat) => pairW n") {
-        Err(leanr_elab::ElabError::StuckCoercion { .. }) => {}
-        other => panic!("expected StuckCoercion, got {other:?}"),
+        Err(leanr_elab::ElabError::TypeMismatch {
+            app:
+                Some(leanr_elab::error::AppArgMismatch {
+                    arg_already_in_f: false,
+                    ..
+                }),
+            ..
+        }) => {}
+        other => panic!("expected an application type mismatch, got {other:?}"),
     }
 }
