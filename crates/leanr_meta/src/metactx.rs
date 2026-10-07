@@ -1437,7 +1437,7 @@ impl<'e> MetaCtx<'e> {
 
     /// oracle: `mkLambdaFVars xs e (usedLetOnly := false)
     /// (generalizeNondepLet := false)` (`MetavarContext.lean:1312-1347`, the
-    /// ldecl arm `:1327-1336` with both flags off): a cdecl becomes `lam`,
+    /// ldecl arm `:1330-1336` with both flags off): a cdecl becomes `lam`,
     /// and EVERY ldecl becomes `letE` with the decl's own `nondep` (a `have`
     /// stays a `have`; an unused let is kept).
     pub(crate) fn mk_lambda_let_fvars(
@@ -1459,7 +1459,6 @@ impl<'e> MetaCtx<'e> {
                 .get(id)
                 .ok_or_else(|| MetaError::Infer("mk_lambda_let_fvars: fvar not declared".into()))?;
             let (name, ty, bi, value) = (decl.binder_name, decl.ty, decl.binder_info, decl.value);
-            let decl_ty = ty;
             r = match value {
                 Some(v) => {
                     let ty = abstract_fvars(self.scratch, base, ty, &fvars[..i], &mut self.guard)?;
@@ -1470,7 +1469,7 @@ impl<'e> MetaCtx<'e> {
                 None => {
                     // oracle `handleCDecl`'s `type.headBeta` (`:1319`); the
                     // ldecl arm (`:1331-1334`) has none.
-                    let ty = self.head_beta(decl_ty)?;
+                    let ty = self.head_beta(ty)?;
                     let ty = abstract_fvars(self.scratch, base, ty, &fvars[..i], &mut self.guard)?;
                     self.scratch.expr_lam(base, name, ty, r, bi)?
                 }

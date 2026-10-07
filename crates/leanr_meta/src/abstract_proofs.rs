@@ -486,15 +486,14 @@ impl MetaCtx<'_> {
             binders.push((binder_name, d, binder_info, let_val));
             cur = body;
         }
-        // `:80-88`: visit every binder type under the original telescope.
+        // `:80-88`: per binder, visit its type (`:83`), then its let/have
+        // value (`:85-86`, `allowNondep := true`), all under the original
+        // telescope, so aux lemmas number in the oracle's creation order.
         let log_start = cache.log.len();
         let mut types = Vec::with_capacity(binders.len());
-        for &(_, d, _, _) in &binders {
-            types.push(self.guarded(|c| c.anp_visit(aux, cache, d))?);
-        }
-        // `:85-86`: then each let/have value (`allowNondep := true`).
         let mut values: Vec<Option<(ExprId, bool)>> = Vec::with_capacity(binders.len());
-        for &(_, _, _, let_val) in &binders {
+        for &(_, d, _, let_val) in &binders {
+            types.push(self.guarded(|c| c.anp_visit(aux, cache, d))?);
             values.push(match let_val {
                 Some((v, nd)) => Some((self.guarded(|c| c.anp_visit(aux, cache, v))?, nd)),
                 None => None,
@@ -1264,6 +1263,77 @@ mod tests {
             let mut aux = AuxLemmas::new(foo);
             let r = ctx.abstract_nested_proofs(&mut aux, e).unwrap();
             assert_eq!(r, want);
+        });
+    }
+
+    /// oracle `visitBinders` (`AbstractNestedProofs.lean:77-89`) visits PER
+    /// binder: type (`:83`), then that binder's value (`:85-86`), then the
+    /// next binder. Aux lemmas number by creation, so a proof in a let VALUE
+    /// precedes a proof in the NEXT binder's TYPE:
+    /// `fun n => let u : Eq (s n) (s n) := rfl (s n); fun (x : Eq.rec .. (rfl (s (s n)))) => x`
+    /// numbers `rfl (s n)` as `_proof_1`, `rfl (s (s n))` as `_proof_2`.
+    #[test]
+    fn a_let_value_proof_is_numbered_before_the_next_binders_type_proof() {
+        with_meta0_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let foo = name(ctx, "fooQ");
+            let n_ty = c(ctx, "N");
+            let succ = c(ctx, "N.succ");
+            let one = lit_level(ctx, 1);
+            let two = lit_level(ctx, 2);
+            let (n_name, u_name, x_name) = (name(ctx, "n"), name(ctx, "u"), name(ctx, "x"));
+            let (b_name, h_name) = (name(ctx, "b"), name(ctx, "h"));
+            let cp = ctx.lctx_checkpoint();
+            let n = ctx
+                .push_local_decl(Some(n_name), n_ty, BinderInfo::Default)
+                .unwrap();
+            let sn = app(ctx, succ, n);
+            let ssn = app(ctx, succ, sn);
+            let (u_ty, pf1) = eq_rfl(ctx, sn);
+            let (_, pf2) = eq_rfl(ctx, ssn);
+            let u = ctx.push_let_decl(Some(u_name), u_ty, pf1, false).unwrap();
+            let eq = cu(ctx, "Eq", &[one]);
+            let b0 = crate::test_support::bvar(ctx, 0);
+            let h_ty = ctx.mk_app_spine(eq, &[n_ty, ssn, b0]).unwrap();
+            let type0 = ctx.scratch.expr_sort(base, one).unwrap();
+            let inner = ctx
+                .scratch
+                .expr_lam(base, Some(h_name), h_ty, type0, BinderInfo::Default)
+                .unwrap();
+            let motive = ctx
+                .scratch
+                .expr_lam(base, Some(b_name), n_ty, inner, BinderInfo::Default)
+                .unwrap();
+            let arrow = ctx
+                .scratch
+                .expr_forall(base, None, n_ty, n_ty, BinderInfo::Default)
+                .unwrap();
+            let rec = cu(ctx, "Eq.rec", &[two, one]);
+            let x_ty = ctx
+                .mk_app_spine(rec, &[n_ty, ssn, motive, arrow, ssn, pf2])
+                .unwrap();
+            let x = ctx
+                .push_local_decl(Some(x_name), x_ty, BinderInfo::Default)
+                .unwrap();
+            let e = ctx.mk_lambda_let_fvars(&[n, u, x], x).unwrap();
+            ctx.lctx_restore(cp);
+            ctx.infer_type(e).expect("the probe term is well typed");
+            let mut aux = AuxLemmas::new(foo);
+            ctx.abstract_nested_proofs(&mut aux, e).unwrap();
+            assert_eq!(pending_names(ctx, &aux), ["fooQ._proof_1", "fooQ._proof_2"]);
+            // `_proof_1` proves the let VALUE's `rfl (s n)`.
+            let cp = ctx.lctx_checkpoint();
+            let n = ctx
+                .push_local_decl(Some(n_name), n_ty, BinderInfo::Default)
+                .unwrap();
+            let sn = app(ctx, succ, n);
+            let (_, want) = eq_rfl(ctx, sn);
+            let want = ctx.mk_lambda(&[n], want).unwrap();
+            ctx.lctx_restore(cp);
+            let Declaration::Thm(t) = &aux.pending()[0] else {
+                panic!("thmDecl expected")
+            };
+            assert_eq!(t.value, want);
         });
     }
 
