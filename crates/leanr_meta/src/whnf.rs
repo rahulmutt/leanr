@@ -70,9 +70,9 @@
 //! - [`MetaCtx::to_ctor_if_lit`]'s `LitStr` arm — string-literal
 //!   `toCtorIfLit` (:27-28; no tier-1 corpus query needs it yet).
 //! - the `FVar` arm of `whnf_easy_cases` — `isImplementationDetail`/
-//!   `zetaDeltaSet`/`trackZetaDelta` (:399-407) are elaborator-context
-//!   channels that do not exist yet; only `cfg.zeta_delta` is modeled.
-//!   Arrives with the term elaborator (M4b).
+//!   `zetaDeltaSet` (:399-407) are elaborator-context channels with no
+//!   producer yet; `cfg.zeta_delta` and `trackZetaDelta` (:407-408) are
+//!   modeled.
 //! - (task 6) `hasMatchPatternAttribute` (:504-505, inside
 //!   `can_unfold_at_matcher`) — the `@[match_pattern]` attribute
 //!   extension is undecoded; always `false` here.
@@ -244,10 +244,10 @@ impl<'e> MetaCtx<'e> {
                 // matched by the oracle's fallback `_ => return e` and
                 // NEVER followed, regardless of `cfg.zetaDelta`). Of
                 // those genuine lets, the VALUE is followed only when
-                // gated by `cfg.zetaDelta` (the `isImplementationDetail`/
-                // `zetaDeltaSet`/`trackZetaDelta` channels are
-                // elaborator context this crate does not have yet —
-                // seam, see module doc).
+                // gated by `cfg.zetaDelta`, and recorded when
+                // `trackZetaDelta` is on (`:407-408`; the
+                // `isImplementationDetail`/`zetaDeltaSet` channels remain
+                // a seam, see module doc).
                 //
                 // A `have` (`nondep := true`) is never followed, so the
                 // decl's `LocalEntry` row must say the let is genuine.
@@ -261,10 +261,16 @@ impl<'e> MetaCtx<'e> {
                     let followed = id
                         .filter(|_| self.cfg.zeta_delta)
                         .and_then(|i| self.lctx.get(i).and_then(|d| d.value).map(|v| (i, v)))
-                        .filter(|&(i, _)| self.local_entry(i).is_some_and(|e| !e.nondep))
-                        .map(|(_, v)| v);
+                        .filter(|&(i, _)| self.local_entry(i).is_some_and(|e| !e.nondep));
                     match followed {
-                        Some(v) => v,
+                        Some((i, v)) => {
+                            // oracle: `if (← read).trackZetaDelta then
+                            // addZetaDeltaFVarId fvarId`.
+                            if self.track_zeta_delta {
+                                self.zeta_delta_fvar_ids.insert(i);
+                            }
+                            v
+                        }
                         None => return Ok(EasyOrHard::Easy(e)),
                     }
                 }

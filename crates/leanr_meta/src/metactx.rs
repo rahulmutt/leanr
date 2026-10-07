@@ -156,6 +156,14 @@ pub struct MetaCtx<'e> {
     /// `checkpointDefEq`, Basic.lean:2446) — unsafe to keep across calls
     /// because the result depends on mctx state and config.
     pub(crate) defeq_cache_transient: HashMap<(u64, ExprId, ExprId), bool>,
+    /// oracle: `Meta.Context.trackZetaDelta` (`Meta/Basic.lean`, read at
+    /// `WHNF.lean:407`). Set only by [`MetaCtx::with_tracking_zeta_delta`].
+    pub(crate) track_zeta_delta: bool,
+    /// oracle: `Meta.State.zetaDeltaFVarIds` (`Meta/Basic.lean:443-444`):
+    /// the genuine let-fvars `whnf` unfolded while `track_zeta_delta` was
+    /// on. Backtrackable like the mctx: part of [`MetaSnapshot`]
+    /// (`SavedState.restore`, `:596`).
+    pub(crate) zeta_delta_fvar_ids: HashSet<NameId>,
     /// ReducibilityStatus per constant; absent => Semireducible.
     reducibility: HashMap<NameId, ReducibilityStatus>,
     matchers: HashMap<NameId, MatcherEntry>,
@@ -457,6 +465,8 @@ impl<'e> MetaCtx<'e> {
             postponed: Vec::new(),
             defeq_cache_perm: HashMap::new(),
             defeq_cache_transient: HashMap::new(),
+            track_zeta_delta: false,
+            zeta_delta_fvar_ids: HashSet::new(),
             reducibility,
             matchers,
             instances,
@@ -525,6 +535,50 @@ impl<'e> MetaCtx<'e> {
         r
     }
 
+    /// oracle: `withFreshCache` (`Meta/Basic.lean:1183-1190`): run `f`
+    /// with every Meta cache empty, then restore the saved caches.
+    ///
+    /// leanr's whnf/whnf_core/infer caches hold fvar-free keys only
+    /// (`cacheable`) and top-level `is_def_eq` clears both defeq caches, so
+    /// no cached answer can hide a let-fvar unfold today. The scope is kept
+    /// for fidelity; its mutation is recorded as equivalent.
+    pub(crate) fn with_fresh_cache<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let whnf = std::mem::take(&mut self.whnf_cache);
+        let whnf_core = std::mem::take(&mut self.whnf_core_cache);
+        let infer = std::mem::take(&mut self.infer_cache);
+        let perm = std::mem::take(&mut self.defeq_cache_perm);
+        let transient = std::mem::take(&mut self.defeq_cache_transient);
+        let r = f(self);
+        self.whnf_cache = whnf;
+        self.whnf_core_cache = whnf_core;
+        self.infer_cache = infer;
+        self.defeq_cache_perm = perm;
+        self.defeq_cache_transient = transient;
+        r
+    }
+
+    /// oracle: `withTrackingZetaDelta` (`Meta/Basic.lean:1243-1245`):
+    /// `withFreshCache`, `trackZetaDelta := true`, and a cleared
+    /// `zetaDeltaFVarIds` restored on exit (`withResetZetaDeltaFVarIds`,
+    /// `:1227-1233`). Records made inside do not persist. `f` returns rather
+    /// than unwinds, so the restore covers `Err` too.
+    pub fn with_tracking_zeta_delta<R>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<R, MetaError>,
+    ) -> Result<R, MetaError> {
+        let saved_track = std::mem::replace(&mut self.track_zeta_delta, true);
+        let saved_set = std::mem::take(&mut self.zeta_delta_fvar_ids);
+        let r = self.with_fresh_cache(f);
+        self.track_zeta_delta = saved_track;
+        self.zeta_delta_fvar_ids = saved_set;
+        r
+    }
+
+    /// oracle: `getZetaDeltaFVarIds` (`Meta/Basic.lean:1214-1215`).
+    pub fn zeta_delta_fvar_ids(&self) -> &HashSet<NameId> {
+        &self.zeta_delta_fvar_ids
+    }
+
     /// oracle: `fullApproxDefEq` (`Basic.lean:2094-2105`): `withConfig`
     /// setting `foApprox`, `ctxApprox`, `quasiPatternApprox` and
     /// `constApprox`. Additive. The defeq cache key is derived from the
@@ -567,7 +621,11 @@ impl<'e> MetaCtx<'e> {
         self.postponed.clear();
         self.defeq_cache_transient.clear();
         let r = f(self);
+        // `withNewMCtxDepthImp` (`Meta/Basic.lean:1974-1980`) restores only
+        // `mctx` and `postponed`: zeta-delta records made inside survive.
+        let zeta = std::mem::take(&mut self.zeta_delta_fvar_ids);
         self.rollback(snap);
+        self.zeta_delta_fvar_ids = zeta;
         self.mctx.set_depths(depth, level_assign_depth);
         self.defeq_cache_transient.clear();
         r
@@ -2065,6 +2123,7 @@ impl<'e> MetaCtx<'e> {
             level_assignments,
             delayed_assignments,
             postponed: self.postponed.clone(),
+            zeta_delta_fvar_ids: self.zeta_delta_fvar_ids.clone(),
         }
     }
 
@@ -2076,6 +2135,7 @@ impl<'e> MetaCtx<'e> {
             snap.delayed_assignments,
         );
         self.postponed = snap.postponed;
+        self.zeta_delta_fvar_ids = snap.zeta_delta_fvar_ids;
     }
 
     /// oracle: `withAssignableSyntheticOpaque` (`Lean/Meta/Basic.lean:1312-1313`)
@@ -2175,13 +2235,15 @@ pub struct MetaSnapshot {
     level_assignments: HashMap<LMVarId, LevelId>,
     delayed_assignments: HashMap<MVarId, crate::DelayedMVarAssignment>,
     postponed: Vec<(LevelId, LevelId)>,
+    /// `SavedState.restore` restores `zetaDeltaFVarIds` (`Meta/Basic.lean:596`).
+    zeta_delta_fvar_ids: HashSet<NameId>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::{
-        class_app, const_named, fresh_mvar, render_name, with_class_ctx, with_ctx,
+        class_app, const_dotted, const_named, fresh_mvar, render_name, with_class_ctx, with_ctx,
         with_instances_ctx, with_prelude0_ctx,
     };
     use crate::MetaError;
@@ -3231,6 +3293,104 @@ mod tests {
             assert_eq!(ctx.get_app_fn(app), f);
             assert_eq!(ctx.get_app_args(app), vec![a, a]);
             assert_eq!(ctx.get_app_num_args(app), 2);
+        });
+    }
+
+    /// oracle: `whnfEasyCases` records a followed genuine let under
+    /// `trackZetaDelta` (`WHNF.lean:404-408`); a `have` is never followed.
+    #[test]
+    fn tracking_records_a_let_never_a_have() {
+        with_prelude0_ctx(|ctx| {
+            let nat = const_named(ctx, "N");
+            let zero = const_dotted(ctx, "N", "zero");
+            let cp = ctx.lctx_checkpoint();
+            let h = ctx.push_let_decl(None, nat, zero, true).expect("have");
+            let l = ctx.push_let_decl(None, nat, zero, false).expect("let");
+            let (hid, lid) = (ctx.fvar_id_of(h).unwrap(), ctx.fvar_id_of(l).unwrap());
+            // Tracking off: following `l` records nothing.
+            ctx.whnf(l).expect("whnf");
+            assert!(ctx.zeta_delta_fvar_ids().is_empty());
+            let seen = ctx
+                .with_tracking_zeta_delta(|c| {
+                    c.whnf(h)?;
+                    c.whnf(l)?;
+                    Ok(c.zeta_delta_fvar_ids().clone())
+                })
+                .expect("tracked");
+            assert!(seen.contains(&lid), "a followed let is recorded");
+            assert!(!seen.contains(&hid), "a have is never recorded");
+            // `withTrackingZetaDelta`: records do not persist past the scope.
+            assert!(ctx.zeta_delta_fvar_ids().is_empty());
+            assert!(!ctx.track_zeta_delta);
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// oracle: `checkpointDefEq` restores the saved state on failure
+    /// (`Meta/Basic.lean:2463-2468`), and `SavedState.restore` includes
+    /// `zetaDeltaFVarIds` (`:596`): a FAILED `isDefEq` forgets what it unfolded.
+    #[test]
+    fn a_failed_def_eq_discards_its_zeta_delta_records() {
+        with_prelude0_ctx(|ctx| {
+            let nat = const_named(ctx, "N");
+            let zero = const_dotted(ctx, "N", "zero");
+            let succ = const_dotted(ctx, "N", "succ");
+            let one = ctx.mk_app_spine(succ, &[zero]).expect("app");
+            let cp = ctx.lctx_checkpoint();
+            let l = ctx.push_let_decl(None, nat, zero, false).expect("let");
+            let lid = ctx.fvar_id_of(l).unwrap();
+            let (failed, ok) = ctx
+                .with_tracking_zeta_delta(|c| {
+                    assert!(!c.is_def_eq(l, one)?, "N.zero is not N.succ N.zero");
+                    let failed = c.zeta_delta_fvar_ids().contains(&lid);
+                    assert!(c.is_def_eq(l, zero)?);
+                    Ok((failed, c.zeta_delta_fvar_ids().contains(&lid)))
+                })
+                .expect("tracked");
+            assert!(!failed, "the failed defeq's record is rolled back");
+            assert!(ok, "the successful defeq's record stays");
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// oracle: `withNewMCtxDepthImp` restores only `mctx`/`postponed`
+    /// (`Meta/Basic.lean:1974-1980`): records made inside SURVIVE it.
+    #[test]
+    fn new_mctx_depth_keeps_zeta_delta_records() {
+        with_prelude0_ctx(|ctx| {
+            let nat = const_named(ctx, "N");
+            let zero = const_dotted(ctx, "N", "zero");
+            let cp = ctx.lctx_checkpoint();
+            let l = ctx.push_let_decl(None, nat, zero, false).expect("let");
+            let lid = ctx.fvar_id_of(l).unwrap();
+            let kept = ctx
+                .with_tracking_zeta_delta(|c| {
+                    c.with_new_mctx_depth(false, |c| c.whnf(l))?;
+                    Ok(c.zeta_delta_fvar_ids().contains(&lid))
+                })
+                .expect("tracked");
+            assert!(kept);
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// Review Focus 2: an `Err` inside the scope restores the flag, the
+    /// set and every cache (`withTrackingZetaDelta`'s `finally`s).
+    #[test]
+    fn tracking_scope_restores_on_err() {
+        with_prelude0_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            ctx.infer_type(n).expect("warm the infer cache");
+            let warm = ctx.infer_cache.len();
+            assert!(warm > 0);
+            let r: Result<(), MetaError> = ctx.with_tracking_zeta_delta(|c| {
+                assert!(c.infer_cache.is_empty(), "fresh cache inside the scope");
+                Err(MetaError::Infer("boom".into()))
+            });
+            assert!(r.is_err());
+            assert!(!ctx.track_zeta_delta);
+            assert!(ctx.zeta_delta_fvar_ids().is_empty());
+            assert_eq!(ctx.infer_cache.len(), warm, "outer cache restored");
         });
     }
 
