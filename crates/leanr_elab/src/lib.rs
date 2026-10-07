@@ -235,8 +235,13 @@
 //!   docs/superpowers/specs/2026-10-05-m4c2c-ii-auto-bound-design.md
 //!   § Landed). Auto-bound implicits in `variable` binders and
 //!   `runTermElabM`'s mvar-rebuild branch (stale `sectionFVars`,
-//!   faithfully) landed in P2 (corpus 376). Open seams: the
-//!   `variable {α}` / `variable [x]` binder-annotation update (`replaceBinderAnnotation`, `— later M4`).
+//!   faithfully) landed in P2 (corpus 376). The `variable {x}` /
+//!   `variable [x]` binder-annotation update of a typed variable
+//!   (`replaceBinderAnnotation`: newest-first scan, split in place,
+//!   redundant and instance-implicit errors) landed after it (corpus 437,
+//!   rows `vu/*`). Open seams: a typeless binder declaring a new variable
+//!   (`variable {z}`, or an update's residue `variable {x z}`) needs the
+//!   `expandBinderType` hole (`— later M4`).
 //!   Unmodelled: `commitConst`'s type-equality check (no known
 //!   reproducer).
 //!   Known rendering limits: `OmitUnmatched` prints the item's source text

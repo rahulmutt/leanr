@@ -35,8 +35,9 @@ pub(crate) struct Scope {
     /// persistent-store ids. Cloned into nested scopes, dropped at `end`.
     pub level_names: Vec<NameId>,
     /// oracle `Scope.varDecls` (`Command/Scope.lean:52`): bracketed-binder
-    /// syntax, re-elaborated per run (`vars.rs`).
-    pub var_decls: Vec<SyntaxNode>,
+    /// syntax, re-elaborated per run (`vars.rs`); binder-annotation
+    /// updates split and re-annotate entries in place.
+    pub var_decls: Vec<super::vars::VarDecl>,
     /// oracle `Scope.varUIds` (`:61`): one id per binder id of
     /// `var_decls`, flattened, in order.
     pub var_uids: Vec<u32>,

@@ -3,9 +3,14 @@
 //! 551-607`) and the inclusion regimes (`MutualDef.lean:455-490,
 //! 595-611`; `Declaration.lean:118`).
 //!
+//! Binder-annotation updates (`variable {x}`, `replaceBinderAnnotation`,
+//! `BuiltinCommand.lean:343-413`) are modelled for typed variables
+//! ([`VarDecl`], [`plan_annotation_update`]); a typeless binder that
+//! declares a NEW variable (`variable {z}`, or the residue of an update)
+//! needs the `expandBinderType` hole (`— later M4`).
+//!
 //! Not modelled: the `unusedSectionVars` lint (a warning; the gate keeps
-//! errors only), `deprecated.oldSectionVars`,
-//! `variable {α}` binder-annotation updates (`— later M4`);
+//! errors only), `deprecated.oldSectionVars`;
 //! `withUsed`'s local-context erasure (`removeUnused` erases the unused
 //! variables from the lctx and local instances, `Meta/CollectFVars.lean:
 //! 63`), as nothing elaborates under that context after the closure
@@ -31,12 +36,18 @@ use leanr_syntax::tree::{NodeOrToken, SyntaxNode};
 
 use crate::app::elim_info::{collect_fvars, fvars_in_order};
 use crate::app::head::ident_components;
-use crate::builtin::binder::{extract_binder_group, push_binder_group};
+use crate::builtin::binder::{
+    binder_info_of, extract_binder_group, push_binder_group, BinderGroup,
+};
 use crate::dispatch::{non_trivia_children, SynElem};
 use crate::elab::TermElabM;
 use crate::error::ElabError;
 
 use super::CommandElab;
+
+/// The decoded ids of a bracketed binder, in order; `None` for `_` and
+/// for an anonymous `[C α]`.
+pub(super) type BinderIds = Vec<Option<Vec<String>>>;
 
 /// oracle `sectionFVars`: binder-id uid ↦ fvar, in binder order.
 pub(super) type SectionFVars = Vec<(u32, ExprId)>;
@@ -178,6 +189,214 @@ pub(super) fn elab_binders(
     Ok(xs)
 }
 
+/// One entry of oracle `Scope.varDecls` (`Command/Scope.lean:52`). A
+/// `variable` binder is stored as written (`only: None`, `bi` its own
+/// annotation). A binder-annotation update replaces a matched binder by
+/// one `mkBinder` per id (`BuiltinCommand.lean:377-386`, `($id : ty)` with
+/// the new or the old annotation): leanr keeps the ORIGINAL node, the
+/// index of the kept id in it, and the annotation, which is all
+/// `mkBinder`'s syntax carries.
+#[derive(Clone, Debug)]
+pub(crate) struct VarDecl {
+    pub node: SyntaxNode,
+    /// `Some(i)`: only the node's `i`-th binder id.
+    pub only: Option<usize>,
+    pub bi: BinderInfo,
+}
+
+impl VarDecl {
+    /// A `variable` binder as written.
+    pub(super) fn new(node: SyntaxNode, kinds: &KindInterner) -> Result<VarDecl, ElabError> {
+        let kind = kinds.name(node.kind());
+        let bi = binder_info_of(kind)
+            .ok_or_else(|| ElabError::UnsupportedSyntax(format!("bracketed binder: {kind}")))?;
+        Ok(VarDecl {
+            node,
+            only: None,
+            bi,
+        })
+    }
+
+    /// `getBracketedBinderIds` of the binder this entry stands for.
+    pub(super) fn ids(&self, kinds: &KindInterner) -> Result<BinderIds, ElabError> {
+        let ids = bracketed_binder_ids(&self.node, kinds)?;
+        match self.only {
+            None => Ok(ids),
+            Some(i) => ids
+                .get(i)
+                .cloned()
+                .map(|id| vec![id])
+                .ok_or_else(|| ElabError::Internal("variable: binder id index".into())),
+        }
+    }
+
+    /// The binder group `elabBinders` elaborates for this entry.
+    fn group(&self, elab: &mut TermElabM, kinds: &KindInterner) -> Result<BinderGroup, ElabError> {
+        let mut g = extract_binder_group(elab, &self.node, kinds)?;
+        if let Some(i) = self.only {
+            let name = *g
+                .names
+                .get(i)
+                .ok_or_else(|| ElabError::Internal("variable: binder id index".into()))?;
+            g.names = vec![name];
+        }
+        g.bi = self.bi;
+        Ok(g)
+    }
+
+    /// `ty?`: whether the binder carries `: T` (an `instBinder` always does).
+    fn has_type(&self, kinds: &KindInterner) -> bool {
+        !typeless_binder(&self.node, kinds)
+    }
+}
+
+/// oracle `elabBinder` over one [`VarDecl`]: its fvars, left in the local
+/// context.
+pub(super) fn elab_var_decl(
+    elab: &mut TermElabM,
+    d: &VarDecl,
+    kinds: &KindInterner,
+) -> Result<Vec<ExprId>, ElabError> {
+    let g = d.group(elab, kinds)?;
+    push_binder_group(elab, &g, kinds)
+}
+
+/// [`elab_binders`] over the scope's [`VarDecl`]s.
+fn elab_var_decls(
+    elab: &mut TermElabM,
+    var_decls: &[VarDecl],
+    kinds: &KindInterner,
+) -> Result<Vec<ExprId>, ElabError> {
+    let mut xs = Vec::new();
+    for d in var_decls {
+        xs.extend(elab_var_decl(elab, d, kinds)?);
+    }
+    Ok(xs)
+}
+
+/// oracle `typelessBinder?` (`BuiltinCommand.lean:320-325`): the ids (a
+/// `_` hole is `None`) and annotation of `(ids*)`/`{ids*}`/`⦃ids*⦄`, or of
+/// an anonymous `[id]` whose type is a bare identifier.
+pub(super) fn typeless_binder_ids(
+    binder: &SyntaxNode,
+    kinds: &KindInterner,
+) -> Result<Option<(BinderIds, BinderInfo)>, ElabError> {
+    if typeless_binder(binder, kinds) {
+        let bi = binder_info_of(kinds.name(binder.kind()))
+            .ok_or_else(|| ElabError::Internal("typeless binder kind".into()))?;
+        return Ok(Some((bracketed_binder_ids(binder, kinds)?, bi)));
+    }
+    Ok(inst_binder_ident(binder, kinds)?.map(|id| (vec![Some(id)], BinderInfo::InstImplicit)))
+}
+
+/// What `replaceBinderAnnotation` (`BuiltinCommand.lean:343-413`) decided
+/// for one typeless binder.
+#[derive(Debug)]
+pub(super) struct AnnotationUpdate {
+    /// `modifiedVarDecls`: the scope's new `varDecls`, in order.
+    pub new_decls: Option<Vec<VarDecl>>,
+    /// The new instance-implicit binders `:392-399` elaborates, with the id
+    /// text for the error.
+    pub inst_checks: Vec<(VarDecl, String)>,
+    /// `None`: no id matched, the binder itself is returned (`:413`).
+    /// `Some(ids)`: the unmatched ids, returned as typeless binders
+    /// (`:405-411`); empty when every id matched.
+    pub residue: Option<BinderIds>,
+}
+
+/// `:397-399`'s `catch e => throwErrorAt binder m!"cannot update …"`:
+/// an oracle error from the `[x : T]` check becomes the update failure; a
+/// seam, a runtime or an internal failure is not an oracle `.error`, and
+/// is rethrown as itself. Known first-line divergence (not a wrong-Ok):
+/// the oracle's `Command.tryCatch` (`Command.lean:85-93`) re-throws only
+/// interrupts, so it wraps runtime errors such as maxRecDepth too, where
+/// leanr rethrows `MaxRecDepth` unwrapped.
+pub(super) fn inst_update_error(e: ElabError, id: &str) -> ElabError {
+    if e.is_oracle_error() {
+        ElabError::CannotUpdateToInstImplicit(id.to_string())
+    } else {
+        e
+    }
+}
+
+/// oracle `containsId` (`:328-329`): a `_` never matches.
+fn contains_id(ids: &[Option<Vec<String>>], id: &Option<Vec<String>>) -> bool {
+    id.is_some() && ids.contains(id)
+}
+
+/// The scan of `replaceBinderAnnotation` (`BuiltinCommand.lean:343-413`)
+/// for one typeless binder with ids `binder_ids` and annotation `bi`, over
+/// the scope's `var_decls`. Newest first, to respect shadowing (`:351`): a
+/// matched id is erased, so an older declaration of the same name is never
+/// looked at again. The default-value arm (`:354-357`) is unreachable
+/// while the parser rejects binder defaults.
+pub(super) fn plan_annotation_update(
+    var_decls: &[VarDecl],
+    mut binder_ids: BinderIds,
+    bi: BinderInfo,
+    kinds: &KindInterner,
+) -> Result<AnnotationUpdate, ElabError> {
+    let ini = binder_ids.len();
+    let mut new_decls = Vec::with_capacity(var_decls.len());
+    let mut inst_checks = Vec::new();
+    let mut modified = false;
+    for d in var_decls.iter().rev() {
+        // The anonymous `[C α]` (`:365-366`'s `_` arm, kept as is) needs no
+        // arm of its own: its only id is `None`, which `contains_id` never
+        // matches, so it is never redundant and never split.
+        let ids = d.ids(kinds)?;
+        if d.bi == bi {
+            // no update: a redundant annotation is an error (`:367-372`).
+            if binder_ids.iter().any(|b| contains_id(&ids, b)) {
+                return Err(ElabError::RedundantBinderUpdate);
+            }
+            new_decls.push(d.clone());
+        } else if binder_ids.iter().all(|b| !contains_id(&ids, b)) {
+            new_decls.push(d.clone());
+        } else {
+            // split: one binder per id, the matched ones re-annotated
+            // (`:387-402`; pushed in reverse, `new_decls` is reversed below).
+            for (j, id) in ids.iter().enumerate().rev() {
+                let only = Some(d.only.unwrap_or(j));
+                let hit = id
+                    .as_ref()
+                    .and_then(|id| binder_ids.iter().position(|b| b.as_ref() == Some(id)));
+                match hit {
+                    Some(p) => {
+                        binder_ids.remove(p);
+                        modified = true;
+                        let text = id.as_ref().map(|c| c.join(".")).unwrap_or_default();
+                        // `mkBinder`'s `.instImplicit` arm (`:382-385`).
+                        if bi == BinderInfo::InstImplicit && !d.has_type(kinds) {
+                            return Err(ElabError::CannotUpdateToInstImplicit(text));
+                        }
+                        let nb = VarDecl {
+                            node: d.node.clone(),
+                            only,
+                            bi,
+                        };
+                        if bi == BinderInfo::InstImplicit {
+                            inst_checks.push((nb.clone(), text));
+                        }
+                        new_decls.push(nb);
+                    }
+                    None => new_decls.push(VarDecl {
+                        node: d.node.clone(),
+                        only,
+                        bi: d.bi,
+                    }),
+                }
+            }
+        }
+    }
+    new_decls.reverse();
+    Ok(AnnotationUpdate {
+        new_decls: modified.then_some(new_decls),
+        inst_checks,
+        residue: (binder_ids.len() != ini).then_some(binder_ids),
+    })
+}
+
 /// oracle `runTermElabM` up to `elabFn` (`Command.lean:776-798`):
 /// `withAutoBoundImplicit (elabBinders varDecls …)`,
 /// `synthesizeSyntheticMVarsNoPostponing`, `sectionFVars` from the
@@ -189,12 +408,12 @@ pub(super) fn elab_binders(
 /// run continues there). Returns (`elabFn`'s xs, `sectionFVars`).
 pub(super) fn elab_section_vars(
     elab: &mut TermElabM,
-    var_decls: &[SyntaxNode],
+    var_decls: &[VarDecl],
     var_uids: &[u32],
     kinds: &KindInterner,
 ) -> Result<(Vec<ExprId>, SectionFVars), ElabError> {
     let (xs, section_fvars) = elab.with_auto_bound_implicit(|elab| {
-        let xs = elab_binders(elab, var_decls, kinds)?;
+        let xs = elab_var_decls(elab, var_decls, kinds)?;
         elab.synthesize_synthetic_mvars_no_postponing(kinds)?;
         if xs.len() != var_uids.len() {
             return Err(ElabError::Internal(
@@ -477,8 +696,8 @@ impl CommandElab<'_> {
         };
         let head = self.scopes.last().expect("the root scope is never popped");
         let mut names = Vec::new();
-        for b in &head.var_decls {
-            names.extend(bracketed_binder_ids(b, kinds)?);
+        for d in &head.var_decls {
+            names.extend(d.ids(kinds)?);
         }
         let mut uids = Vec::new();
         for id in ids {
@@ -607,5 +826,111 @@ impl CommandElab<'_> {
         head.omitted_vars.extend(&omitted);
         head.included_vars.retain(|u| !omitted.contains(u));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bracketed binders of every `variable` command in `src`, in order,
+    /// as [`VarDecl`]s (bypassing elaboration).
+    fn var_decls(src: &str) -> (Vec<VarDecl>, std::sync::Arc<KindInterner>) {
+        let parsed = leanr_syntax::parse_module(src, &leanr_syntax::builtin::snapshot());
+        assert!(parsed.errors.is_empty(), "{src:?}: {:?}", parsed.errors);
+        let kinds = parsed.tree.kinds.clone();
+        let mut out = Vec::new();
+        for cmd in parsed.tree.root().children() {
+            if kinds.name(cmd.kind()) != "Lean.Parser.Command.variable" {
+                continue;
+            }
+            let Some(NodeOrToken::Node(list)) = non_trivia_children(&cmd).get(1).cloned() else {
+                panic!("variable: binder list");
+            };
+            for el in non_trivia_children(&list) {
+                let NodeOrToken::Node(b) = el else {
+                    panic!("variable: binder")
+                };
+                out.push(VarDecl::new(b, &kinds).expect("binder kind"));
+            }
+        }
+        (out, kinds)
+    }
+
+    fn id(s: &str) -> Option<Vec<String>> {
+        Some(vec![s.to_string()])
+    }
+
+    #[test]
+    fn an_inst_update_of_a_typeless_variable_needs_a_type() {
+        // `mkBinder`'s `.instImplicit` arm (`BuiltinCommand.lean:382-385`).
+        // Unreachable from source while a typeless variable seams on the
+        // `expandBinderType` hole (oracle row `vu/instNoType`: `variable
+        // (x)` then `variable [x]`), so the scan is driven directly.
+        let (decls, kinds) = var_decls("variable (x)");
+        let e = plan_annotation_update(&decls, vec![id("x")], BinderInfo::InstImplicit, &kinds)
+            .expect_err("no type to annotate");
+        assert_eq!(
+            e.oracle_first_line().as_deref(),
+            Some("cannot update binder annotation of variable `x` to instance implicit:")
+        );
+        // A typeless variable re-annotated to anything else is fine.
+        let plan = plan_annotation_update(&decls, vec![id("x")], BinderInfo::Implicit, &kinds)
+            .expect("typeless implicit update");
+        assert_eq!(plan.new_decls.map(|d| d[0].bi), Some(BinderInfo::Implicit));
+    }
+
+    #[test]
+    fn a_split_keeps_the_other_ids_in_place() {
+        // `:387-402`: `(x y z : Nat)` + `{y}` → `(x)`, `{y}`, `(z)`.
+        let (decls, kinds) = var_decls("variable (x y z : Nat)");
+        let plan = plan_annotation_update(&decls, vec![id("y")], BinderInfo::Implicit, &kinds)
+            .expect("update");
+        let new = plan.new_decls.expect("modified");
+        let got: Vec<_> = new.iter().map(|d| (d.only, d.bi)).collect();
+        assert_eq!(
+            got,
+            vec![
+                (Some(0), BinderInfo::Default),
+                (Some(1), BinderInfo::Implicit),
+                (Some(2), BinderInfo::Default),
+            ]
+        );
+        assert_eq!(plan.residue, Some(Vec::new()));
+        assert!(plan.inst_checks.is_empty());
+    }
+
+    #[test]
+    fn unmatched_ids_are_the_residue() {
+        // `:405-411`: some id matched, the rest come back.
+        let (decls, kinds) = var_decls("variable (x : Nat)");
+        let plan =
+            plan_annotation_update(&decls, vec![id("x"), id("z")], BinderInfo::Implicit, &kinds)
+                .expect("update");
+        assert_eq!(plan.residue, Some(vec![id("z")]));
+        // `:413`: nothing matched — the binder itself, scope untouched.
+        let plan = plan_annotation_update(&decls, vec![id("z")], BinderInfo::Implicit, &kinds)
+            .expect("no update");
+        assert_eq!(plan.residue, None);
+        assert!(plan.new_decls.is_none());
+    }
+
+    #[test]
+    fn only_oracle_errors_become_the_inst_update_failure() {
+        let wrapped = inst_update_error(
+            ElabError::InvalidBinderAnnotation {
+                ty: ExprId::from_index(0, false).expect("index 0"),
+            },
+            "x",
+        );
+        assert!(matches!(wrapped, ElabError::CannotUpdateToInstImplicit(ref s) if s == "x"));
+        for e in [
+            ElabError::UnsupportedSyntax("seam — later M4".into()),
+            ElabError::Internal("boom".into()),
+            ElabError::MaxRecDepth,
+        ] {
+            let want = format!("{e:?}");
+            assert_eq!(format!("{:?}", inst_update_error(e, "x")), want);
+        }
     }
 }

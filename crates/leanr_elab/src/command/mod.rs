@@ -297,23 +297,55 @@ impl<'x> CommandElab<'x> {
                 ))
             }
         };
-        // `replaceBinderAnnotation` (`:343-413`) acts on a typeless binder:
-        // `(x)`/`{x}`/`⦃x⦄` always, `[x]` when `x` is a section variable.
-        let head = self.scopes.last().expect("the root scope is never popped");
-        let mut var_ids = Vec::new();
-        for b in &head.var_decls {
-            var_ids.extend(vars::bracketed_binder_ids(b, kinds)?);
-        }
-        for b in &binders {
-            let update = vars::typeless_binder(b, kinds)
-                || vars::inst_binder_ident(b, kinds)?.is_some_and(|id| var_ids.contains(&Some(id)));
-            if update {
-                return Err(ElabError::UnsupportedSyntax(
-                    "variable binder-annotation update (`replaceBinderAnnotation`) — later M4"
-                        .into(),
-                ));
+        // `binders.flatMapM replaceBinderAnnotation` (`:417`): each binder
+        // sees the scope the previous ones updated.
+        let mut kept = Vec::with_capacity(binders.len());
+        let mut typeless_residue = false;
+        for b in binders {
+            let Some((ids, bi)) = vars::typeless_binder_ids(&b, kinds)? else {
+                kept.push(b);
+                continue;
+            };
+            let head = self.scopes.last().expect("the root scope is never popped");
+            let plan = vars::plan_annotation_update(&head.var_decls, ids, bi, kinds)?;
+            // `:392-399`: each new `[x : T]` must elaborate as an instance
+            // binder, under the scope's (not yet updated) variables. Only an
+            // oracle error is reported as the update failure; a seam or an
+            // internal failure propagates as itself.
+            for (nb, id) in &plan.inst_checks {
+                self.with_term_elab(kinds, |elab, _| {
+                    elab.with_synthesize(PostponeBehavior::No, kinds, |elab| {
+                        elab.with_auto_bound_implicit(|elab| {
+                            vars::elab_var_decl(elab, nb, kinds).map(|_| ())
+                        })
+                    })
+                })
+                .map_err(|e| vars::inst_update_error(e, id))?;
+            }
+            if let Some(new_decls) = plan.new_decls {
+                // `:403-404`; `varUIds` is untouched: a split keeps one entry
+                // per id, in order.
+                self.scopes
+                    .last_mut()
+                    .expect("the root scope is never popped")
+                    .var_decls = new_decls;
+            }
+            match plan.residue {
+                // `:413`: no id matched — `b` declares new variables.
+                None => kept.push(b),
+                Some(rest) => typeless_residue |= !rest.is_empty(),
             }
         }
+        // `:405-411`: the unmatched ids come back as typeless binders,
+        // which elaborate through the `expandBinderType` hole.
+        if typeless_residue {
+            return Err(ElabError::UnsupportedSyntax(
+                "variable: typeless binder after a binder-annotation update \
+                 (`expandBinderType` hole) — later M4"
+                    .into(),
+            ));
+        }
+        let binders = kept;
         // The sanity elaboration (`:419-425`): under the scope's variables,
         // `withSynthesize (withAutoBoundImplicit (elabBinders binders
         // (addAutoBoundImplicits ·)))`, result discarded.
@@ -340,7 +372,9 @@ impl<'x> CommandElab<'x> {
             .scopes
             .last_mut()
             .expect("the root scope is never popped");
-        head.var_decls.extend(binders);
+        for b in binders {
+            head.var_decls.push(vars::VarDecl::new(b, kinds)?);
+        }
         head.var_uids.extend(first..end);
         Ok(())
     }

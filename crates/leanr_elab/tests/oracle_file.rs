@@ -8,9 +8,9 @@
 mod support;
 
 /// `wc -l tests/fixtures/elab/file-queries.jsonl` at the last deliberate
-/// regen (unknown constant / synthesis / invalid field first lines: 434). `>=`: adding a record is a one-line bump, not a
-/// failing gate.
-const CORPUS_FLOOR: usize = 434;
+/// regen (`variable` binder-annotation update: 462). `>=`: adding a record is a one-line bump,
+/// not a failing gate.
+const CORPUS_FLOOR: usize = 462;
 
 #[test]
 fn file_corpus_sources_parse_into_the_oracle_commands() {
@@ -105,19 +105,20 @@ fn a_mid_file_error_after_successes_keeps_them() {
 #[test]
 fn variable_seams_carry_their_slice() {
     // Oracle: `variable {α}` with no prior `α` declares a hole-typed
-    // variable (`replaceBinderAnnotation`, `BuiltinCommand.lean:343`).
+    // variable (`replaceBinderAnnotation` returns the binder itself,
+    // `BuiltinCommand.lean:413`; `expandBinderType`, `Binders.lean:24-28`).
     let (at, m) = stop_seam("variable {α}");
     assert_eq!(at, 0);
     assert!(
-        m.contains("binder-annotation update") && m.ends_with(" — later M4"),
+        m.contains("expandBinderType") && m.ends_with(" — later M4"),
         "{m}"
     );
-    // `[inst]` naming an existing section variable is an update too
-    // (`replaceBinderAnnotation`'s instBinder case): the second command.
-    let (at, m) = stop_seam("variable {a : Type} [inst : Dflt a]\nvariable [inst]");
+    // The residue of an update (`z`, `:405-411`) is a typeless binder too
+    // (oracle row `vu/residue`: `u9` elaborates).
+    let (at, m) = stop_seam("variable (x : Nat)\nvariable {x z}\ndef u9 : Nat := x");
     assert_eq!(at, 1);
     assert!(
-        m.contains("binder-annotation update") && m.ends_with(" — later M4"),
+        m.contains("expandBinderType") && m.ends_with(" — later M4"),
         "{m}"
     );
 }
