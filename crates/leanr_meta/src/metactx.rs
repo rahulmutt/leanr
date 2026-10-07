@@ -535,6 +535,32 @@ impl<'e> MetaCtx<'e> {
         r
     }
 
+    /// oracle: `withInferTypeConfig` (`Meta/InferType.lean:228-234`):
+    /// `withAtLeastTransparency .default` (`Meta/Basic.lean:1306-1309`,
+    /// raise only when `TransparencyMode.lt`, `TransparencyMode.lean:37-47`,
+    /// which `TransparencyMode`'s hand-written `Ord` matches), then beta,
+    /// iota, zeta, zetaHave and zetaDelta on and `proj := .yesWithDelta`.
+    /// `etaStruct := .all` is not ported: leanr's `Config` has no
+    /// `etaStruct` field. The oracle skips the `withConfig` when every
+    /// field already has its value; setting them unconditionally is the
+    /// same config. The whole config is restored, as `withReader` does;
+    /// the defeq cache key covers the whole `Config`.
+    pub(crate) fn with_infer_type_config<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let saved = self.cfg;
+        if self.cfg.transparency < TransparencyMode::Default {
+            self.cfg.transparency = TransparencyMode::Default;
+        }
+        self.cfg.beta = true;
+        self.cfg.iota = true;
+        self.cfg.zeta = true;
+        self.cfg.zeta_have = true;
+        self.cfg.zeta_delta = true;
+        self.cfg.proj = crate::ProjReduction::YesWithDelta;
+        let r = f(self);
+        self.cfg = saved;
+        r
+    }
+
     /// oracle: `withFreshCache` (`Meta/Basic.lean:1183-1190`): run `f`
     /// with every Meta cache empty, then restore the saved caches.
     ///
@@ -1061,6 +1087,45 @@ impl<'e> MetaCtx<'e> {
         non_dep: bool,
         kind: LocalDeclKind,
     ) -> Result<ExprId, MetaError> {
+        let (fvar, depth) = self.push_let_decl_inner(name, ty, value, non_dep, kind)?;
+        // oracle: `withLetDeclImp` (`Basic.lean:1905-1911`) routes
+        // through the same `withNewFVar` as `push_local_decl` — a
+        // let-bound instance counts too.
+        self.install_local_instance_for(fvar, ty, depth, kind)?;
+        self.lctx_snapshot = None;
+        Ok(fvar)
+    }
+
+    /// The ldecl twin of [`Self::push_local_decl_without_instance`]: a bare
+    /// `LocalContext.mkLetDecl`, with NO `isClass?` test. For a pass that
+    /// extends the context directly instead of through `withLetDecl`, as
+    /// `letToHave`'s `lctx.mkLetDecl` does (`LetToHave.lean:330`). The test
+    /// is not neutral there: `is_class` can `whnf` the type, and under
+    /// zeta-delta tracking that records the let fvars it unfolds.
+    pub(crate) fn push_let_decl_without_instance(
+        &mut self,
+        name: Option<NameId>,
+        ty: ExprId,
+        value: ExprId,
+        non_dep: bool,
+    ) -> Result<ExprId, MetaError> {
+        let (fvar, _depth) =
+            self.push_let_decl_inner(name, ty, value, non_dep, LocalDeclKind::Default)?;
+        self.lctx_snapshot = None;
+        Ok(fvar)
+    }
+
+    /// The mint-and-push half shared by `push_let_decl_with_kind` and
+    /// `push_let_decl_without_instance`. Returns `(fvar, depth)`, as
+    /// `push_local_decl_inner` does.
+    fn push_let_decl_inner(
+        &mut self,
+        name: Option<NameId>,
+        ty: ExprId,
+        value: ExprId,
+        non_dep: bool,
+        kind: LocalDeclKind,
+    ) -> Result<(ExprId, usize), MetaError> {
         debug_assert_eq!(
             self.local_names.len(),
             self.lctx.save(),
@@ -1091,12 +1156,7 @@ impl<'e> MetaCtx<'e> {
             nondep: non_dep,
             kind,
         });
-        // oracle: `withLetDeclImp` (`Basic.lean:1905-1911`) routes
-        // through the same `withNewFVar` as `push_local_decl` — a
-        // let-bound instance counts too.
-        self.install_local_instance_for(fvar, ty, depth, kind)?;
-        self.lctx_snapshot = None;
-        Ok(fvar)
+        Ok((fvar, depth))
     }
 
     /// Install `fvar` as a local instance if its type is a class.
