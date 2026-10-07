@@ -527,11 +527,16 @@ pub(crate) fn mk_const(
     if explicit_levels.len() > n_params {
         return Err(ElabError::TooManyUniverseLevels(render(elab)));
     }
+    // oracle: `explicitLevels ++ (← mkFreshLevelMVars numMissingLevels)`
+    // (`:2108-2109`). `mkFreshLevelMVars` conses (`Meta/Basic.lean:897-899`),
+    // so the missing levels are in REVERSE creation order; `Level.normalize`
+    // sorts level mvars by name, so this is observable (`lvl/nest3`).
     let mut levels = Vec::with_capacity(n_params);
     levels.extend_from_slice(explicit_levels);
     for _ in explicit_levels.len()..n_params {
         levels.push(elab.mk_fresh_level_mvar()?);
     }
+    levels[explicit_levels.len()..].reverse();
     // `base = Some(elab.view.store)` from here on: `cname` is a
     // PERSISTENT-region `NameId` (`EnvView::get` just resolved it, and
     // every constant in `env.constants` is persistent-region by

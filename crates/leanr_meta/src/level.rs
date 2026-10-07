@@ -914,6 +914,25 @@ impl<'e> MetaCtx<'e> {
         Ok((id, level_id))
     }
 
+    /// oracle: `mkFreshLevelMVars` (`Meta/Basic.lean:897-899`) --
+    /// `num.foldM (init := []) fun _ _ us => return (← mkFreshLevelMVar)::us`.
+    /// The fold CONSES, so the result is in REVERSE creation order: the
+    /// first element is the LAST mvar minted. `Level.normalize` sorts
+    /// level mvars by name, so the order is observable (`lvl/nest3`).
+    /// Callers mirroring a forward `mapM fun _ => mkFreshLevelMVar`
+    /// must not use this.
+    ///
+    /// Not yet ported, but must use this when they are:
+    /// `Structure.lean:201` and `StructInst.lean:410/1031`.
+    pub fn mk_fresh_level_mvars(&mut self, num: usize) -> Result<Vec<LevelId>, MetaError> {
+        let mut us = Vec::with_capacity(num);
+        for _ in 0..num {
+            us.push(self.fresh_level_mvar()?.1);
+        }
+        us.reverse();
+        Ok(us)
+    }
+
     // ===================================================================
     // processPostponed / processPostponedStep
     // ===================================================================
@@ -969,6 +988,7 @@ impl<'e> MetaCtx<'e> {
 #[cfg(test)]
 mod tests {
     use crate::test_support::{fresh_fvar, with_ctx, with_prelude0_ctx};
+    use leanr_kernel::Nat;
 
     #[test]
     fn ground_levels() {
@@ -983,6 +1003,25 @@ mod tests {
             let u = ctx.scratch.level_param(None, Some(un)).unwrap();
             let m = ctx.scratch.level_max(None, z, u).unwrap();
             assert!(ctx.is_level_def_eq(m, u).unwrap());
+        });
+    }
+
+    /// `mkFreshLevelMVars` conses (`Meta/Basic.lean:897-899`): the
+    /// returned list is in REVERSE creation order.
+    #[test]
+    fn mk_fresh_level_mvars_returns_reverse_creation_order() {
+        with_ctx(|ctx| {
+            let start = ctx.level_mvar_gen;
+            let us = ctx.mk_fresh_level_mvars(3).unwrap();
+            let minted = |ctx: &mut crate::MetaCtx, k: u64| {
+                let p = ctx.scratch.intern_str(None, "_leanr_lvl_fresh").unwrap();
+                let pn = ctx.scratch.name_str(None, None, p).unwrap();
+                let kn = ctx.scratch.intern_nat(None, &Nat::from(k)).unwrap();
+                let n = ctx.scratch.name_num(None, Some(pn), kn).unwrap();
+                ctx.scratch.level_mvar(None, Some(n)).unwrap()
+            };
+            let want: Vec<_> = (0..3).rev().map(|i| minted(ctx, start + i)).collect();
+            assert_eq!(us, want);
         });
     }
 
