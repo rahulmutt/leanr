@@ -717,7 +717,33 @@ def fileQueries : List (String × String) := [
   ("lvl/elimRec3", "axiom lv12 {α : Sort u} {β : Sort v} {γ : Sort w} (p : PProd α (PProd β γ)) : Eq (PProd.rec (motive := fun _ => PProd β γ) (fun _ b => b) p) p.2"),
   ("lvl/elimRecHole", "axiom lv13 {α : Sort u} {β : Sort v} {γ : Sort w} (p : PProd α (PProd β γ)) : Eq (PProd.rec (motive := fun _ => _) (fun a b => PProd.mk b a) p) (PProd.mk p.2 p.1)"),
   ("lvl/elimRecSwap", "theorem lv14 {α : Sort u} {β : Sort v} (p : PProd α β) : Eq (PProd.rec (motive := fun _ => PProd β α) (fun a b => PProd.mk b a) p) (PProd.mk p.2 p.1) := Eq.refl _"),
-  ("lvl/elimRecNest", "theorem lv15 {α : Sort u} {β : Sort v} {γ : Sort w} (p : PProd α (PProd β γ)) : Eq (PProd.rec (motive := fun _ => PProd (PProd γ β) α) (fun a b => PProd.mk (PProd.mk b.2 b.1) a) p) (PProd.mk (PProd.mk p.2.2 p.2.1) p.1) := Eq.refl _")
+  ("lvl/elimRecNest", "theorem lv15 {α : Sort u} {β : Sort v} {γ : Sort w} (p : PProd α (PProd β γ)) : Eq (PProd.rec (motive := fun _ => PProd (PProd γ β) α) (fun a b => PProd.mk (PProd.mk b.2 b.1) a) p) (PProd.mk (PProd.mk p.2.2 p.2.1) p.1) := Eq.refl _"),
+  -- worktree A: unknown constant / synth / invalid field
+  ("unkConst/structPrefix", "def uc1 : Nat := Tag.nope"),
+  ("unkConst/classPrefix", "def uc2 : Nat := Wrap.val"),
+  ("unkConst/inductivePrefix", "def uc3 : Nat := Nat.nope"),
+  ("unkConst/boolPrefix", "def uc4 : Bool := Bool.nope"),
+  ("unkConst/defPrefix", "def uc5 : Nat := pick.nope"),
+  ("unkConst/polyPrefix", "def uc6 : Nat := PProd.nope"),
+  ("unkConst/twoFields", "def uc7 : Nat := Nat.nope.more"),
+  ("unkConst/applied", "def uc8 : Nat := Nat.nope Nat.zero"),
+  ("unkConst/axiomBinder", "axiom uc9 (h : Wrap.val Nat) : Nat"),
+  ("unkConst/thmType", "theorem uc10 : Nat.nope := rfl"),
+  ("unkConst/ctorValue", "def uc11 : Nat := Nat.zero.nope"),
+  ("unkConst/instValue", "def uc12 : Nat := instWrapNat.nope"),
+  ("unkConst/localNat", "def uc13 (x : Nat) : Nat := x.nope"),
+  ("unkConst/localType", "def uc14 (x : Type) : x := x.nope"),
+  ("unkConst/unknownPrefix", "def uc15 : Nat := Foo.bar"),
+  ("synthFail/noInst", "def sf1 : Nat := useNoInst Nat.zero"),
+  ("synthFail/wrapBool", "def sf2 : Bool := Wrap.wrap (a := Bool) Bool.true"),
+  ("synthFail/pairBoolNat", "def sf3 : Bool := usePair Bool.true Nat.zero"),
+  ("synthFail/thm", "theorem sf4 : Eq (useNoInst Nat.zero) Nat.zero := rfl"),
+  ("synthFail/binder", "def sf5 (h : Eq (useNoInst Nat.zero) Nat.zero) : Nat := Nat.zero"),
+  ("synthFail/axiom", "axiom sf6 : Eq (useNoInst Nat.zero) Nat.zero"),
+  ("synthFail/explicitHole", "def sf7 : Nat := @useNoInst Nat _ Nat.zero"),
+  ("synthFail/afterOk", "def sf8 : Nat := Nat.zero\ndef sf9 : Nat := useNoInst sf8"),
+  ("unkConst/parenSort", "def uc17 : Nat := (Nat).nope"),
+  ("unkConst/parenFun", "def uc18 : Nat := (pick).nope")
 ]
 
 /-- The first error-severity message `s` logged, from `messages` and the

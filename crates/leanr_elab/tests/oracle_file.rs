@@ -8,9 +8,9 @@
 mod support;
 
 /// `wc -l tests/fixtures/elab/file-queries.jsonl` at the last deliberate
-/// regen (stuck `.coe` app mismatch: 409). `>=`: adding a record is a one-line bump, not a
+/// regen (unknown constant / synthesis / invalid field first lines: 434). `>=`: adding a record is a one-line bump, not a
 /// failing gate.
-const CORPUS_FLOOR: usize = 409;
+const CORPUS_FLOOR: usize = 434;
 
 #[test]
 fn file_corpus_sources_parse_into_the_oracle_commands() {
@@ -180,12 +180,7 @@ const PENDING: &[&str] = &[];
 /// is the reproducer; the 2026-10-05 scratch probe files are not
 /// committed); the `lvl/*` rows are their own reproducers. An entry leaves
 /// when its gap is fixed.
-const KNOWN_GAPS: &[(&str, &str)] = &[(
-    "auto/catchInst",
-    "resolution gap: dotted `Wrap.val` (no such field) is `Unknown identifier` in leanr, \
-         `Unknown constant` in the oracle (variant instNoAuto2: \
-         `axiom f5 (h : Wrap.val Nat) : Nat`)",
-)];
+const KNOWN_GAPS: &[(&str, &str)] = &[];
 
 #[test]
 fn oracle_file_gate() {

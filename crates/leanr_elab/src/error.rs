@@ -587,6 +587,26 @@ impl ElabError {
             // variant, worded by `Level.lean:84`.
             Self::UnknownIdent(s) => Some(format!("Unknown identifier `{s}`")),
             Self::UnknownUniverseLevel(s) => Some(format!("unknown universe level `{s}`")),
+            // oracle `TermElabM.lean:1288`: the goal follows on the next
+            // line (`indentExpr`).
+            Self::InstanceSynthesisFailed { .. } => {
+                Some("failed to synthesize instance of type class".into())
+            }
+            // oracle `App.lean:1599-1600`, `:1610-1612` and
+            // `throwInvalidFieldAt` (`:1624-1626`): `e` follows on the next
+            // line (`indentExpr`).
+            Self::InvalidField { field, reason, .. } => Some(match reason {
+                InvalidFieldReason::NotFound { full_name } => format!(
+                    "Invalid field `{field}`: The environment does not contain `{full_name}`, so \
+                     it is not possible to project the field `{field}` from an expression"
+                ),
+                InvalidFieldReason::TypeUnknown => "Invalid field notation: Type of".into(),
+                InvalidFieldReason::NotConstApp => {
+                    "Invalid field notation: Field projection operates on types of the form \
+                     `C ...` where C is a constant. The expression"
+                        .into()
+                }
+            }),
             Self::AmbiguousTerm => Some("Ambiguous term".into()),
             Self::InvalidNamedArg { name, func } => Some(match func {
                 Some(f) => format!("Invalid argument name `{name}` for function `{f}`"),
@@ -752,6 +772,24 @@ mod tests {
                 .oracle_first_line()
                 .as_deref(),
             Some("Unknown constant `NoSuch`")
+        );
+    }
+
+    #[test]
+    fn invalid_field_type_unknown_first_line_is_the_oracles() {
+        // `App.lean:1599-1600`; no file row reaches the mvar-typed arm
+        // (the `NotFound`/`NotConstApp` arms are pinned by `unkConst/*`).
+        let e = ExprId::from_index(0, false).expect("index 0");
+        assert_eq!(
+            ElabError::InvalidField {
+                e,
+                e_type: e,
+                field: "f".into(),
+                reason: InvalidFieldReason::TypeUnknown,
+            }
+            .oracle_first_line()
+            .as_deref(),
+            Some("Invalid field notation: Type of")
         );
     }
 

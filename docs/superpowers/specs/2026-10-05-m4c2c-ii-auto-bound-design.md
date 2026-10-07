@@ -404,6 +404,11 @@ identifier").
     (`coeStuck/*` rows).
   - `auto/catchInst`: dotted unknown `Wrap.val` is `Unknown identifier`
     in leanr, `Unknown constant` in the oracle.
+    CLOSED 2026-10-07: `resolveLValAux`'s `c ++ suffix` arms
+    (`App.lean:1584-1586`, `:1606-1608`) now raise `UnknownConstant`, as
+    `throwUnknownNameWithSuggestions (idOrConst := "constant")` does
+    (`Lean/IdentifierSuggestion.lean:142`) (`unkConst/*` rows).
+    `KNOWN_GAPS` is now empty.
   - `auto/withUsedVarThm`: header level order `max(u_1,1)` vs the
     oracle's `max(1,u_1)` -- a possible wrong-Ok level-order bug that
     deserves its own slice.

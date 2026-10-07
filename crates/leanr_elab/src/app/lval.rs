@@ -383,11 +383,13 @@ fn resolve_lval_aux(
                 });
             }
             // `:1584-1586`: a field split off an identifier whose base is a
-            // constant names the constant `c ++ suffix`.
+            // constant names the constant `c ++ suffix`, reported by
+            // `throwUnknownNameWithSuggestions (idOrConst := "constant")`
+            // as "Unknown constant" (`Lean/IdentifierSuggestion.lean:142`).
             if let (Node::Const { name: Some(c), .. }, Some(suffix)) =
                 (node(elab, app_fn(elab, e)), suffix)
             {
-                return Err(ElabError::UnknownIdent(format!(
+                return Err(ElabError::UnknownConstant(format!(
                     "{}.{suffix}",
                     render(elab, c)
                 )));
@@ -415,7 +417,7 @@ fn resolve_lval_aux(
             if let (Node::Const { name: Some(c), .. }, Some(suffix)) =
                 (node(elab, app_fn(elab, e)), suffix)
             {
-                return Err(ElabError::UnknownIdent(format!(
+                return Err(ElabError::UnknownConstant(format!(
                     "{}.{suffix}",
                     render(elab, c)
                 )));
