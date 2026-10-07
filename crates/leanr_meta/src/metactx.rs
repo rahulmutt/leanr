@@ -680,11 +680,26 @@ impl<'e> MetaCtx<'e> {
     /// `removeUnused`, `Elab/MutualDef.lean:461-462`). Returns the context
     /// it replaced; the caller reinstalls it with `install_lctx`. Built on
     /// `reduce_local_context`, so local instances are filtered and
-    /// renumbered with the decls. Additive: no existing path calls it.
+    /// renumbered with the decls. Called by the theorem regime in `leanr_elab`'s `command/def.rs`.
     pub fn erase_locals(&mut self, xs: &[ExprId]) -> Result<Arc<LocalCtxSnapshot>, MetaError> {
         let cur = self.current_lctx();
         let reduced = self.reduce_local_context(&cur, xs)?;
         Ok(self.install_lctx(reduced))
+    }
+
+    /// oracle `withLCtx {} {}` (`Elab/Command.lean:797`, `runTermElabM`'s
+    /// rebuild branch): install an empty local context with no local
+    /// instances, returning the one it replaced (reinstall it with
+    /// `install_lctx`). Fvar ids stay fresh (`fvar_gen` is not reset), so
+    /// no new fvar can collide with one of the replaced context's.
+    /// Additive: only that branch calls it.
+    pub fn install_empty_lctx(&mut self) -> Arc<LocalCtxSnapshot> {
+        let empty = Arc::new(LocalCtxSnapshot::new(
+            LocalContext::default(),
+            Vec::new(),
+            Vec::new(),
+        ));
+        self.install_lctx(empty)
     }
 
     /// oracle: `MVarId.withContext` / `withMVarContextImp`
@@ -2700,6 +2715,35 @@ mod tests {
             assert_eq!(ctx.local_instances.entries().len(), 1);
             assert_eq!(ctx.local_instances.entries()[0].fvar, i);
             ctx.lctx_restore(cp);
+        });
+    }
+
+    /// `withLCtx {} {}` (`Elab/Command.lean:797`): the installed context
+    /// has no decls and no local instances; the returned snapshot puts
+    /// the old one back.
+    #[test]
+    fn install_empty_lctx_clears_decls_and_instances_and_reinstalls() {
+        with_class_ctx(|ctx, add| {
+            let add_n = class_app(ctx, add);
+            let n = const_named(ctx, "N");
+            let base = Some(ctx.view.store);
+            let s = ctx.scratch.intern_str(base, "a").expect("intern");
+            let na = ctx.scratch.name_str(base, None, s).expect("name");
+            let a = ctx
+                .push_local_decl(Some(na), n, BinderInfo::Default)
+                .expect("a");
+            ctx.push_local_decl(None, add_n, BinderInfo::InstImplicit)
+                .expect("i");
+            assert_eq!(ctx.local_instances.entries().len(), 1);
+
+            let prev = ctx.install_empty_lctx();
+            assert_eq!(ctx.lctx_checkpoint(), 0, "no decls");
+            assert!(ctx.local_instances.entries().is_empty(), "no instances");
+            assert_eq!(ctx.lctx_lookup_by_name(na), None);
+
+            ctx.install_lctx(prev);
+            assert_eq!(ctx.lctx_lookup_by_name(na), Some(a));
+            assert_eq!(ctx.local_instances.entries().len(), 1);
         });
     }
 

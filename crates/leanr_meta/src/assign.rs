@@ -739,7 +739,8 @@ impl<'e> MetaCtx<'e> {
     /// panics or errors) when the type's own Pi spine is too short even
     /// after `whnf` — every caller here treats `len != num_args` as the
     /// oracle's own `if xs.size != numArgs then pure false` guard.
-    pub(crate) fn forall_bounded_telescope(
+    /// `pub` for `leanr_elab`'s `runTermElabM` rebuild (M4c-2c-ii P2).
+    pub fn forall_bounded_telescope(
         &mut self,
         ty: ExprId,
         num_args: usize,

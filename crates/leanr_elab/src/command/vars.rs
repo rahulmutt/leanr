@@ -4,10 +4,8 @@
 //! 595-611`; `Declaration.lean:118`).
 //!
 //! Not modelled: the `unusedSectionVars` lint (a warning; the gate keeps
-//! errors only), `deprecated.oldSectionVars`, auto-bound implicits in
-//! `variable` binders (header auto-bound landed in M4c-2c-ii P1; the
-//! `variable` seam, `— M4c-2c-ii`, is P2), the mvar-rebuild branch of
-//! `runTermElabM` (auto-bound only; P2), `variable {α}` binder-annotation updates (`— later M4`);
+//! errors only), `deprecated.oldSectionVars`,
+//! `variable {α}` binder-annotation updates (`— later M4`);
 //! `withUsed`'s local-context erasure (`removeUnused` erases the unused
 //! variables from the lctx and local instances, `Meta/CollectFVars.lean:
 //! 63`), as nothing elaborates under that context after the closure
@@ -16,6 +14,9 @@
 //! type (`MutualDef.lean:535`), as `elab_section_vars` stores no
 //! annotations a section-variable type could carry. Neither is
 //! observable today.
+//! Auto-bound implicits and the mvar-rebuild branch (M4c-2c-ii P2) are
+//! modelled; `SecVars::section_fvars` is the oracle's pre-rebuild
+//! `sectionFVars`.
 //! An unmatched `omit` item is reported by its source text with
 //! whitespace runs collapsed, standing in for the oracle's syntax
 //! formatter (`{o}`).
@@ -37,17 +38,37 @@ use crate::error::ElabError;
 
 use super::CommandElab;
 
-/// The head scope's section variables, elaborated for one run
-/// (`runTermElabM`'s `xs` and `sectionFVars`, `Command.lean:777-783`).
+/// oracle `sectionFVars`: binder-id uid ↦ fvar, in binder order.
+pub(super) type SectionFVars = Vec<(u32, ExprId)>;
+
+/// One run of the head scope's section variables (oracle `runTermElabM`,
+/// `Command.lean:774-798`): what `elabFn` receives plus `sectionFVars`.
 pub(super) struct SecVars {
-    /// One fvar per binder id of `Scope::var_decls`, in order.
+    /// `elabFn`'s `xs`: the auto-bound implicits (each preceded by the
+    /// unassigned mvars of its type, `addAutoBoundImplicits`), then one
+    /// fvar per binder id. On the rebuild branch these are the fresh
+    /// telescope's fvars.
     pub fvars: Vec<ExprId>,
-    /// `Scope::var_uids`, parallel to `fvars`. Read by the theorem
-    /// regime ([`header_sec_vars`]).
-    pub uids: Vec<u32>,
+    /// oracle `sectionFVars` (`Command.lean:782-784`): binder-id uid ↦
+    /// the fvar elaborated for it, built BEFORE `addAutoBoundImplicits`
+    /// and the rebuild. Autos never have a uid, and on the rebuild branch
+    /// no member of `fvars` has one (the oracle's stale map, observable:
+    /// `varAuto/rebuildInclude`, spec Amendment 2).
+    pub section_fvars: SectionFVars,
     /// `Scope::included_vars` / `omitted_vars`.
     pub included: Vec<u32>,
     pub omitted: Vec<u32>,
+}
+
+impl SecVars {
+    /// `revSectionFVars[x]?` (`MutualDef.lean:457-459`,
+    /// `BuiltinCommand.lean:585-587`).
+    pub fn uid_of(&self, x: ExprId) -> Option<u32> {
+        self.section_fvars
+            .iter()
+            .find(|&&(_, f)| f == x)
+            .map(|&(u, _)| u)
+    }
 }
 
 fn ill(what: &str) -> ElabError {
@@ -142,39 +163,76 @@ pub(super) fn inst_binder_ident(
     }
 }
 
-/// oracle `runTermElabM`'s `elabBinders scope.varDecls` +
-/// `synthesizeSyntheticMVarsNoPostponing` (`Command.lean:777-780`): one
-/// fvar per binder id, local instances registered.
-pub(super) fn elab_section_vars(
+/// oracle `elabBinders` over bracketed binder syntax: one fvar per binder
+/// id, in order, left in the local context.
+pub(super) fn elab_binders(
     elab: &mut TermElabM,
-    var_decls: &[SyntaxNode],
+    binders: &[SyntaxNode],
     kinds: &KindInterner,
 ) -> Result<Vec<ExprId>, ElabError> {
     let mut xs = Vec::new();
-    for b in var_decls {
-        let g = extract_binder_group(elab, b, kinds).map_err(variable_auto_bound_seam)?;
-        xs.extend(push_binder_group(elab, &g, kinds).map_err(variable_auto_bound_seam)?);
+    for b in binders {
+        let g = extract_binder_group(elab, b, kinds)?;
+        xs.extend(push_binder_group(elab, &g, kinds)?);
     }
-    elab.synthesize_synthetic_mvars_no_postponing(kinds)
-        .map_err(variable_auto_bound_seam)?;
     Ok(xs)
 }
 
-/// `runTermElabM` and `elabVariable` run under `withAutoBoundImplicit`
-/// (`Command.lean:777`, `BuiltinCommand.lean:419`); headers do since
-/// M4c-2c-ii P1, `variable` binders do not yet (outside a loop an unknown
-/// identifier is a plain `UnknownIdent`, and an unknown universe a plain
-/// `UnknownUniverseLevel`, both renamed into this seam).
-fn variable_auto_bound_seam(e: ElabError) -> ElabError {
-    match e {
-        ElabError::UnknownIdent(s) => ElabError::UnsupportedSyntax(format!(
-            "unbound `{s}` in a `variable` binder (auto-bound implicit) — M4c-2c-ii"
-        )),
-        ElabError::UnknownUniverseLevel(s) => ElabError::UnsupportedSyntax(format!(
-            "unbound universe `{s}` in a `variable` binder (auto-bound implicit) — M4c-2c-ii"
-        )),
-        e => e,
+/// oracle `runTermElabM` up to `elabFn` (`Command.lean:776-798`):
+/// `withAutoBoundImplicit (elabBinders varDecls …)`,
+/// `synthesizeSyntheticMVarsNoPostponing`, `sectionFVars` from the
+/// binders' fvars, then `addAutoBoundImplicits`. The loop leaves the
+/// autos in the local context and resets the auto-bound context on exit,
+/// which is the oracle's `withoutAutoBoundImplicit (elabFn xs)` for the
+/// caller. When an auto-bound mvar survives in `xs`, the rebuild branch
+/// re-opens them as fresh fvars in an empty context (the caller's scratch
+/// run continues there). Returns (`elabFn`'s xs, `sectionFVars`).
+pub(super) fn elab_section_vars(
+    elab: &mut TermElabM,
+    var_decls: &[SyntaxNode],
+    var_uids: &[u32],
+    kinds: &KindInterner,
+) -> Result<(Vec<ExprId>, SectionFVars), ElabError> {
+    let (xs, section_fvars) = elab.with_auto_bound_implicit(|elab| {
+        let xs = elab_binders(elab, var_decls, kinds)?;
+        elab.synthesize_synthetic_mvars_no_postponing(kinds)?;
+        if xs.len() != var_uids.len() {
+            return Err(ElabError::Internal(
+                "section variables: one uid per binder id".into(),
+            ));
+        }
+        let section_fvars: SectionFVars =
+            var_uids.iter().copied().zip(xs.iter().copied()).collect();
+        let xs = elab.add_auto_bound_implicits(&xs)?;
+        Ok((xs, section_fvars))
+    })?;
+    let all_fvars = xs.iter().all(|&x| {
+        matches!(
+            elab.mctx.store().expr_node(Some(elab.view.store), x),
+            Node::FVar { .. }
+        )
+    });
+    if all_fvars {
+        return Ok((xs, section_fvars));
     }
+    // `:792-798`, the rebuild branch: abstract the mvars (and fvars) of
+    // `xs` over a placeholder `Sort 0` (`mkForallFVars'`; leanr's mvar arm
+    // names mvar binders inaccessibly, spec Amendment 1), then reopen the
+    // telescope in an EMPTY context (`withLCtx {} {}`), so the old fvars
+    // cannot be reached. `section_fvars` keeps the OLD fvars: the oracle's
+    // stale map (spec Amendment 2). The replaced context is never
+    // reinstalled: `elabFn` runs to the end of this scratch run inside
+    // it, as the oracle's `withLCtx` scope does.
+    let prop = crate::builtin::sort::mk_prop(elab)?;
+    let ctx_ty = elab.mctx.mk_forall(&xs, prop)?;
+    let _outer = elab.mctx.install_empty_lctx();
+    let ys = elab.mctx.forall_bounded_telescope(ctx_ty, xs.len())?;
+    if ys.len() != xs.len() {
+        return Err(ElabError::Internal(
+            "runTermElabM rebuild: telescope shorter than xs".into(),
+        ));
+    }
+    Ok((ys, section_fvars))
 }
 
 /// oracle `removeUnused` (`Meta/CollectFVars.lean:53-65`): scan `vars`
@@ -239,8 +297,8 @@ pub(super) fn header_sec_vars(
         collect_fvars_ordered(elab, t, &mut used);
     }
     // included by `include`
-    for (&x, uid) in sv.fvars.iter().zip(&sv.uids) {
-        if sv.included.contains(uid) {
+    for &x in &sv.fvars {
+        if sv.uid_of(x).is_some_and(|u| sv.included.contains(&u)) {
             used.add(x);
         }
     }
@@ -250,17 +308,15 @@ pub(super) fn header_sec_vars(
     // order is reported.
     if check {
         for &x in &used.ids {
-            if let Some(i) = sv.fvars.iter().position(|&f| f == x) {
-                if sv.omitted.contains(&sv.uids[i]) {
-                    let d = local_decl(elab, x)?;
-                    return Err(ElabError::OmitReferenced(fvar_message_name(elab, &d)));
-                }
+            if sv.uid_of(x).is_some_and(|u| sv.omitted.contains(&u)) {
+                let d = local_decl(elab, x)?;
+                return Err(ElabError::OmitReferenced(fvar_message_name(elab, &d)));
             }
         }
     }
     // instances whose type's fvars are all kept, in variable order
-    for (&x, uid) in sv.fvars.iter().zip(&sv.uids) {
-        if sv.omitted.contains(uid) {
+    for &x in &sv.fvars {
+        if sv.uid_of(x).is_some_and(|u| sv.omitted.contains(&u)) {
             continue;
         }
         let d = local_decl(elab, x)?;
@@ -507,7 +563,7 @@ impl CommandElab<'_> {
             }
             let mut used = vec![false; items.len()];
             let mut omitted = Vec::new();
-            for (&x, &uid) in sv.fvars.iter().zip(&sv.uids) {
+            for &x in &sv.fvars {
                 let d = local_decl(elab, x)?;
                 // `findIdxM?`: the FIRST item that matches this variable.
                 let mut hit = None;
@@ -527,11 +583,16 @@ impl CommandElab<'_> {
                         break;
                     }
                 }
-                // Every run variable is a section variable, so the
-                // oracle's `revSectionFVars` miss (`:599`) cannot happen.
                 if let Some(i) = hit {
-                    omitted.push(uid);
-                    used[i] = true;
+                    match sv.uid_of(x) {
+                        Some(uid) => {
+                            omitted.push(uid);
+                            used[i] = true;
+                        }
+                        // `:598-599`: an auto, or any variable after a
+                        // rebuild (stale `sectionFVars`).
+                        None => return Err(ElabError::OmitUndeclared(fvar_message_name(elab, &d))),
+                    }
                 }
             }
             if let Some(i) = used.iter().position(|u| !u) {

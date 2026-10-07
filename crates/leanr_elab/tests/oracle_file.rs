@@ -8,9 +8,9 @@
 mod support;
 
 /// `wc -l tests/fixtures/elab/file-queries.jsonl` at the last deliberate
-/// regen (M4c-2c-ii P1: 308). `>=`: adding a record is a one-line bump, not a
+/// regen (M4c-2c-ii P2: 376). `>=`: adding a record is a one-line bump, not a
 /// failing gate.
-const CORPUS_FLOOR: usize = 311;
+const CORPUS_FLOOR: usize = 376;
 
 #[test]
 fn file_corpus_sources_parse_into_the_oracle_commands() {
@@ -120,21 +120,32 @@ fn variable_seams_carry_their_slice() {
         m.contains("binder-annotation update") && m.ends_with(" — later M4"),
         "{m}"
     );
-    // Oracle auto-binds `β` (`runTermElabM`'s `withAutoBoundImplicit`).
-    let (at, m) = stop_seam("variable (x : β)");
-    assert_eq!(at, 0);
-    assert!(
-        m.contains("`variable` binder") && m.ends_with(" — M4c-2c-ii"),
-        "{m}"
-    );
-    // ... and a universe name the same way (`Level.lean:78-85`), never
-    // the body's "unknown universe level" (not a corpus row: P2's).
-    let (at, m) = stop_seam("variable (α : Sort w)");
-    assert_eq!(at, 0);
-    assert!(
-        m.contains("unbound universe `w` in a `variable` binder") && m.ends_with(" — M4c-2c-ii"),
-        "{m}"
-    );
+}
+
+#[test]
+fn variable_binders_auto_bind() {
+    // Oracle: `elabVariable`'s sanity run is `withAutoBoundImplicit`
+    // (`BuiltinCommand.lean:419-425`), for identifiers and universes.
+    for src in ["variable (x : β)", "variable (α : Sort w)"] {
+        let (done, stopped, _) = outcome(src);
+        assert!(stopped.is_none(), "{src:?}: {stopped:?}");
+        assert_eq!(done.len(), 1, "{src:?}");
+    }
+}
+
+#[test]
+fn omit_type_pattern_without_uid_errors() {
+    // Rebuild branch: `[Wrap Nat]` matches the anonymous instance, which
+    // has no uid (stale `sectionFVars`). The oracle prints a hygienic
+    // hash name (`inst._@.…`) the gate cannot pin; leanr must still
+    // error, never `Ok` (spec Amendment 2).
+    let (_, stopped, _) = outcome("variable (h : Eq a a) [Wrap Nat]\nomit [Wrap Nat]");
+    match stopped {
+        Some((1, leanr_elab::ElabError::OmitUndeclared(n))) => {
+            assert_ne!(n, "[anonymous]", "rendered as a message fvar");
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 #[test]
@@ -160,16 +171,14 @@ fn empty_source_elaborates_nothing() {
     }
 }
 
-/// M4c-2c-ii P1 rows not yet passing: each task deletes its prefixes
-/// (Task 4: `auto/ident` … `auto/with`; Task 5: `auto/level`; Task 6:
-/// `auto/namedArg`; Task 7: `opt/`). Empty: P1 complete.
+/// Empty: M4c-2c-ii P2 complete.
 const PENDING: &[&str] = &[];
 
 /// Rows whose divergence is a pre-existing gap outside auto-bound, gated
 /// by EXACT id: `(id, reason)`. Each reason names an oracle-probed variant
 /// WITHOUT auto-bound that diverges the same way (the inline variant
 /// source in each reason is the reproducer; the 2026-10-05 scratch probe
-/// files are not committed). Survives P1; an entry leaves when its gap is
+/// files are not committed). Survives P1 and P2; an entry leaves when its gap is
 /// fixed.
 const KNOWN_GAPS: &[(&str, &str)] = &[
     (

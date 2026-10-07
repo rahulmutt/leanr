@@ -345,6 +345,14 @@ pub enum ElabError {
     /// oracle: `elabOmit` (`Elab/BuiltinCommand.lean:600-602`): an `omit`
     /// item matched no section variable. Carries the item's text.
     OmitUnmatched(String),
+    /// oracle: `elabOmit` (`Elab/BuiltinCommand.lean:598-599`): an `omit`
+    /// item matched a run variable that has no section-variable uid (an
+    /// auto-bound implicit, or any variable on `runTermElabM`'s rebuild
+    /// branch, whose `sectionFVars` is stale). Carries the binder's user
+    /// name. For an mvar binder or an anonymous instance the oracle prints
+    /// a hygienic name with a hash in it, which the gate cannot pin; leanr
+    /// prints its own binder name there.
+    OmitUndeclared(String),
     /// oracle: `throwNoScope` (`Elab/BuiltinCommand.lean:182-184`): `end`
     /// with only the root scope open.
     EndNoScope,
@@ -586,6 +594,11 @@ impl ElabError {
                 "Invalid `⟨...⟩` notation: The expected type of this term could not be determined"
                     .into(),
             ),
+            // oracle `Binders.lean:218`: the type follows on the next
+            // line (`indentExpr`).
+            Self::InvalidBinderAnnotation { .. } => {
+                Some("invalid binder annotation, type is not a class instance".into())
+            }
             Self::AutoImplicitDependsOnExplicit { auto, x } => Some(format!(
                 "invalid auto implicit argument `{auto}`, it depends on explicitly provided \
                  argument `{x}`"
@@ -647,6 +660,9 @@ impl ElabError {
             )),
             Self::OmitUnmatched(o) => Some(format!(
                 "`{o}` did not match any variables in the current scope"
+            )),
+            Self::OmitUndeclared(x) => Some(format!(
+                "invalid 'omit', `{x}` has not been declared in the current scope"
             )),
             Self::UnassignedMVars(line) | Self::UnassignedLevelMVars(line) => Some(line.clone()),
             Self::EndNoScope => Some("Invalid `end`: There is no current scope to end".into()),
@@ -852,6 +868,20 @@ mod tests {
                 .oracle_first_line()
                 .as_deref(),
             Some("`[Wrap Nat]` did not match any variables in the current scope") // omit/unmatchedInst
+        );
+        assert_eq!(
+            ElabError::OmitUndeclared("a".into())
+                .oracle_first_line()
+                .as_deref(),
+            Some("invalid 'omit', `a` has not been declared in the current scope") // varAuto/omitAuto
+        );
+        assert_eq!(
+            ElabError::InvalidBinderAnnotation {
+                ty: ExprId::from_index(0, false).expect("index 0")
+            }
+            .oracle_first_line()
+            .as_deref(),
+            Some("invalid binder annotation, type is not a class instance") // varAuto/notClass
         );
         assert_eq!(
             ElabError::UnassignedMVars("don't know how to synthesize placeholder".into())
