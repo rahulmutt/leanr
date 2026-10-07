@@ -773,7 +773,36 @@ def fileQueries : List (String × String) := [
   ("vu/seqInCmd", "variable (x : Nat)\nvariable {x} (x)\ndef u32 : Nat := x"),
   ("vu/shadowRedundant", "variable {x : Nat}\nvariable (x : Nat)\nvariable {x}\ndef u33 : Nat := x"),
   ("vu/instDownTheorem", "variable (a : Type) [w : Wrap a]\nvariable (w)\ntheorem u34 (y : a) : Eq y y := rfl"),
-  ("vu/updateDepInst", "variable (a : Type) [w : Wrap a]\nvariable {a}\ntheorem u35 (y : a) : Eq y y := rfl")
+  ("vu/updateDepInst", "variable (a : Type) [w : Wrap a]\nvariable {a}\ntheorem u35 (y : a) : Eq y y := rfl"),
+  -- worktree B: term-level open … in (`elabOpen`, BuiltinTerm.lean:400-408)
+  ("tOpen/simple", "def t1 : Nat := open Nat in zero"),
+  ("tOpen/binderType", "namespace N\ndef T : Type := Nat\nend N\ndef t2 (x : open N in T) : Nat := x"),
+  ("tOpen/only", "namespace A\ndef a1 : Nat := Nat.zero\ndef a2 : Nat := Nat.zero\nend A\ndef t3 : Nat := open A (a1) in a1"),
+  ("tOpen/onlyOther", "namespace A\ndef a1 : Nat := Nat.zero\ndef a2 : Nat := Nat.zero\nend A\ndef t4 : Nat := open A (a1) in a2"),
+  ("tOpen/hidingOk", "namespace A\ndef a1 : Nat := Nat.zero\ndef a2 : Nat := Nat.zero\nend A\ndef t5 : Nat := open A hiding a1 in a2"),
+  ("tOpen/hidingHidden", "namespace A\ndef a1 : Nat := Nat.zero\ndef a2 : Nat := Nat.zero\nend A\ndef t6 : Nat := open A hiding a1 in a1"),
+  ("tOpen/renaming", "namespace A\ndef a1 : Nat := Nat.zero\nend A\ndef t7 : Nat := open A renaming a1 → b in b"),
+  ("tOpen/renamingOld", "namespace A\ndef a1 : Nat := Nat.zero\nend A\ndef t8 : Nat := open A renaming a1 → b in a1"),
+  ("tOpen/scopeEnds", "def t9 : PProd Nat Nat := PProd.mk (open Nat in zero) zero"),
+  ("tOpen/nested", "namespace A.B\ndef c : Nat := Nat.zero\nend A.B\ndef t10 : Nat := open A in open B in c"),
+  ("tOpen/nestedNoOuter", "namespace A.B\ndef c : Nat := Nat.zero\nend A.B\ndef t11 : Nat := open B in c"),
+  ("tOpen/ambiguous", "namespace A\ndef f : Nat := Nat.zero\nend A\nnamespace B\ndef f : Nat := Nat.zero\nend B\ndef t12 : Nat := open A B in f"),
+  ("tOpen/unknownNs", "def t13 : Nat := open Foo in Nat.zero"),
+  ("tOpen/postponed", "def sel {a : Type} (x y : a) : a := x\ndef t14 := sel (open Nat in ⟨zero, zero⟩) (PProd.mk Nat.zero Nat.zero)"),
+  ("tOpen/postponedOutside", "def sel {a : Type} (x y : a) : a := x\ndef t15 := sel (open Nat in ⟨Nat.zero, Nat.zero⟩) (PProd.mk zero Nat.zero)"),
+  ("tOpen/withCmdOpen", "namespace A\ndef a1 : Nat := Nat.zero\nend A\nopen A\ndef t16 : PProd Nat Nat := open Nat in PProd.mk a1 zero"),
+  ("tOpen/inNamespace", "namespace A.B\ndef c : Nat := Nat.zero\nend A.B\nnamespace A\ndef t17 : Nat := open B in c\nend A"),
+  ("tOpen/afterCmd", "def t19 : Nat := open Nat in zero\ndef t20 : Nat := zero"),
+  ("tOpen/onlyAmbig", "namespace A\ndef f : Nat := Nat.zero\nend A\nnamespace B\ndef f : Nat := Nat.zero\nend B\ndef t21 : Nat := open A B in open A (f) in f"),
+  ("tOpen/thm", "theorem t22 : Eq Nat.zero Nat.zero := open Nat in @rfl Nat zero"),
+  ("tOpen/postponedBefore", "def sel {a : Type} (x y : a) : a := x\ndef t23 := sel ⟨zero, zero⟩ (open Nat in PProd.mk zero zero)"),
+  ("tOpen/postponedBeforeOk", "def sel {a : Type} (x y : a) : a := x\ndef t24 := sel ⟨Nat.zero, Nat.zero⟩ (open Nat in PProd.mk zero zero)"),
+  ("tOpen/postponedNested", "def sel {a : Type} (x y : a) : a := x\ndef t25 := open Nat in sel ⟨zero, zero⟩ (PProd.mk zero zero)"),
+  ("tOpen/resumeNoLeak", "def sel {a : Type} (x y : a) : a := x\ndef t26 (h : Eq (sel (open Nat in ⟨zero, zero⟩) (PProd.mk Nat.zero Nat.zero)) (PProd.mk Nat.zero Nat.zero)) : Nat := zero"),
+  ("tOpen/resumeNoLeakOk", "def sel {a : Type} (x y : a) : a := x\ndef t27 (h : Eq (sel (open Nat in ⟨zero, zero⟩) (PProd.mk Nat.zero Nat.zero)) (PProd.mk Nat.zero Nat.zero)) : Nat := Nat.zero"),
+  ("tOpen/dotIdent", "def t28 : Nat := open Nat in .zero"),
+  ("tOpen/dotIdentArg", "def t29 : PProd Nat Nat := PProd.mk (open Nat in .zero) Nat.zero"),
+  ("tOpen/orderAmbig", "namespace A.X\ndef p : Nat := Nat.zero\nend A.X\nnamespace B.X\ndef p : Nat := Nat.zero\nend B.X\ndef t30 : Nat := open A B in open X hiding p in Nat.zero")
 ]
 
 /-- The first error-severity message `s` logged, from `messages` and the

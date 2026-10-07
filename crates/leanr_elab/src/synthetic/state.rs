@@ -3,6 +3,7 @@
 //! `Lean/Elab/Term/TermElabM.lean`. The scheduling itself is `ladder.rs`.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, NameId};
@@ -11,19 +12,17 @@ use leanr_meta::{MVarId, MVarKind, MetaSnapshot};
 use crate::dispatch::SynElem;
 use crate::elab::TermElabM;
 use crate::error::ElabError;
+use crate::resolve::OpenDecl;
 
 /// oracle: `structure SavedContext` (`TermElabM.lean:46-53`).
 ///
 /// The oracle saves exactly seven fields: `declName?`, `options`,
 /// `openDecls`, `macroStack`, `errToSorry`, `levelNames`,
-/// `fixedTermElabs`. leanr models `levelNames` alone — `declName?`,
-/// `options`, `openDecls`, `macroStack`, `errToSorry` and
-/// `fixedTermElabs` have no leanr counterpart yet: there is no command
-/// layer, no options plumbing, no `open` resolution (`resolve.rs`'s own
-/// deferral), no macro stack (`dispatch.rs` never expands a macro), and
-/// no `errToSorry` recovery or fixed-elabs registry. Each arrives with
-/// the slice that adds the concept; adding empty placeholders now would
-/// be speculative surface.
+/// `fixedTermElabs`. leanr models `levelNames` and `openDecls` (the
+/// term-level `open … in`, `builtin::open`, changes it mid-term) —
+/// `declName?`, `options`, `macroStack`, `errToSorry` and
+/// `fixedTermElabs` are not saved yet. Each arrives with the slice that
+/// needs it; adding empty placeholders now would be speculative surface.
 ///
 /// `mayPostpone` is NOT one of the seven — it is a `Context` reader
 /// field (`Context.mayPostpone : Bool := true`, `TermElabM.lean:303`)
@@ -36,6 +35,8 @@ use crate::error::ElabError;
 #[derive(Debug, Clone)]
 pub struct SavedContext {
     pub level_names: Vec<NameId>,
+    /// oracle `SavedContext.openDecls` (`TermElabM.lean:49`).
+    pub open_decls: Rc<[OpenDecl]>,
 }
 
 /// oracle: `inductive SyntheticMVarKind` (`TermElabM.lean:65-92`).
@@ -261,10 +262,11 @@ impl<'e> TermElabM<'e> {
     }
 
     /// oracle: `saveContext` (`TermElabM.lean:1420-1428`), restricted to
-    /// the field leanr has (see `SavedContext`).
+    /// the fields leanr has (see `SavedContext`).
     pub fn save_context(&self) -> SavedContext {
         SavedContext {
             level_names: self.level_names.clone(),
+            open_decls: self.resolve.open_decls.clone(),
         }
     }
 
@@ -282,8 +284,10 @@ impl<'e> TermElabM<'e> {
         k: impl FnOnce(&mut Self) -> Result<R, ElabError>,
     ) -> Result<R, ElabError> {
         let prev_levels = std::mem::replace(&mut self.level_names, saved.level_names.clone());
+        let prev_opens = std::mem::replace(&mut self.resolve.open_decls, saved.open_decls.clone());
         let out = k(self);
         self.level_names = prev_levels;
+        self.resolve.open_decls = prev_opens;
         out
     }
 

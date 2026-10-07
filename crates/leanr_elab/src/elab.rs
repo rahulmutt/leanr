@@ -266,7 +266,7 @@ impl<'e> TermElabM<'e> {
         &mut self,
         prefixes: &[NameId],
     ) -> Result<Vec<(NameId, usize)>, ElabError> {
-        let rc = self.resolve;
+        let rc = self.resolve.clone();
         crate::resolve::resolve_global_name(self.mctx.store_mut(), &self.view, &rc, prefixes)
     }
 

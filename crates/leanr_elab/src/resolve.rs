@@ -29,6 +29,8 @@
 //! have no producer); leanr has no recursion, so matching it is the named
 //! recursion seam.
 
+use std::rc::Rc;
+
 use leanr_kernel::bank::{ExprId, NameId, Store};
 use leanr_kernel::EnvView;
 
@@ -60,11 +62,12 @@ pub struct AuxDecl {
 
 /// What resolution reads from the command scope: `currNamespace`,
 /// `openDecls`, the environment's name tables and the declaration being
-/// defined.
-#[derive(Clone, Copy)]
+/// defined. `open_decls` is shared, not borrowed: a term-level `open … in`
+/// (`builtin::open`) installs a list it built itself for the body only.
+#[derive(Clone)]
 pub struct ResolveCtx<'a> {
     pub ns: Option<NameId>,
-    pub open_decls: &'a [OpenDecl],
+    pub open_decls: Rc<[OpenDecl]>,
     pub tables: &'a NameTables,
     pub aux_decl: Option<AuxDecl>,
 }
@@ -75,7 +78,7 @@ impl ResolveCtx<'static> {
     pub fn root() -> ResolveCtx<'static> {
         ResolveCtx {
             ns: None,
-            open_decls: &[],
+            open_decls: Rc::from([]),
             tables: NameTables::empty(),
             aux_decl: None,
         }
@@ -159,7 +162,7 @@ pub(crate) fn resolve_global_name_at_root(
 ) -> Result<Vec<NameId>, ElabError> {
     let rc = ResolveCtx {
         ns: None,
-        ..elab.resolve
+        ..elab.resolve.clone()
     };
     let cands = resolve_global_name(elab.mctx.store_mut(), &elab.view, &rc, &[full])?;
     Ok(cands.into_iter().map(|(c, _)| c).collect())
@@ -327,7 +330,7 @@ fn resolve_open_decls(
     mut resolved: Vec<NameId>,
 ) -> Result<Vec<NameId>, ElabError> {
     let base = Some(view.store);
-    for d in rc.open_decls {
+    for d in rc.open_decls.iter() {
         match d {
             OpenDecl::Simple { ns, except } => {
                 if except.contains(&id) {
@@ -394,7 +397,7 @@ pub fn resolve_namespace(
             }
         }
     }
-    for d in rc.open_decls {
+    for d in rc.open_decls.iter() {
         if let OpenDecl::Simple { ns, except } = d {
             let cand = append(st, base, *ns, Some(id)).map_err(leanr_meta::MetaError::from)?;
             if rc.tables.is_namespace(cand) && !except.contains(&id) {
@@ -473,10 +476,10 @@ mod tests {
         *prefixes(env, s).last().unwrap()
     }
 
-    fn rc<'a>(ns: Option<NameId>, open: &'a [OpenDecl], t: &'a NameTables) -> ResolveCtx<'a> {
+    fn rc<'a>(ns: Option<NameId>, open: &[OpenDecl], t: &'a NameTables) -> ResolveCtx<'a> {
         ResolveCtx {
             ns,
-            open_decls: open,
+            open_decls: open.into(),
             tables: t,
             aux_decl: None,
         }

@@ -192,6 +192,7 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 ///   remaining Init notations (×, ∘, ::, <$>, <|, …) table extension — some need an Expansion shape beyond App/Op
 ///   Mathlib (non-Init) notations ............... the VM slice — UnsupportedSyntax(kind)
 ///   open / alias / _root_ resolution ......... M4c-2b-i SHIPPED — resolve.rs, command/scope.rs
+///   term-level open … in ...................... SHIPPED — builtin/open.rs (`open scoped`: later M4)
 ///   overloaded identifiers .................... SHIPPED — app/overload.rs, app/head.rs
 /// ```
 /// The application arms above are registered, so the `M4b-3` seams in
@@ -348,11 +349,11 @@ pub(crate) fn dispatch(
                 ))),
             }
         }
-        // Term-level `open … in` (spec § Out of scope): its own label, so
-        // the bare-kind fallback below does not swallow it.
-        ("Lean.Parser.Term.open", _) => Err(ElabError::UnsupportedSyntax(
-            "`Lean.Parser.Term.open` (term-level `open … in`) — later M4".into(),
-        )),
+        // oracle: `@[builtin_term_elab «open»] elabOpen`
+        // (`BuiltinTerm.lean:400-408`).
+        ("Lean.Parser.Term.open", NodeOrToken::Node(node)) => {
+            crate::builtin::open::elab_open(elab, node, kinds, expected)
+        }
         (other, _) => Err(ElabError::UnsupportedSyntax(other.to_string())),
     }
 }
