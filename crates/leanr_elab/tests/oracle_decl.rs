@@ -76,9 +76,30 @@ fn header_unknown_universe_is_auto_bound() {
 }
 
 #[test]
-fn let_and_have_in_a_value_are_the_let_to_have_seam() {
-    assert!(seam_message("def sl : Nat := let x := Nat.zero; x").contains("letToHave"));
-    assert!(seam_message("def sh : Nat := have x := Nat.zero; x").contains("letToHave"));
+fn let_and_have_in_a_value_are_admitted() {
+    assert!(decl_result("def sl : Nat := let x := Nat.zero; x").is_ok());
+    assert!(decl_result("def sh : Nat := have x := Nat.zero; x").is_ok());
+}
+
+/// Plan-time finding 2: a proof abstracted under a genuine `let` is checked
+/// by letToHave's `visitConst` (`LetToHave.lean:201-208`) while still
+/// pending: the M4c-1 pending-constant seam. Oracle (probed 2026-10-07):
+/// d28 → value `have`, d29 → `have`, d30 → `let`. Also the order pin: with
+/// letToHave BEFORE abstractNestedProofs, d29 elaborates (no pending
+/// lookup) instead of seaming.
+#[test]
+fn a_proof_abstracted_under_a_let_is_the_pending_constant_seam() {
+    for src in [
+        "def d28 : PProd Nat (Eq Nat.zero Nat.zero) := let x := Nat.zero; PProd.mk x (eq_of_heq (HEq.refl Nat.zero))",
+        "def d29 : PProd Nat (Eq Nat.zero Nat.zero) := let x := Nat.zero; PProd.mk x (eq_of_heq (HEq.refl x))",
+        "def d30 : PProd Nat Nat := let x := Nat.zero; PProd.mk Nat.zero (PProd.fst (PProd.mk x (eq_of_heq (HEq.refl x))))",
+    ] {
+        let m = seam_message(src);
+        assert!(
+            m.starts_with("letToHave: lookup of pending aux lemma") && m.contains("pending-constant overlay"),
+            "{src}: {m}"
+        );
+    }
 }
 
 #[test]

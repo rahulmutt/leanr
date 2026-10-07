@@ -1541,7 +1541,6 @@ fn declaration_seams_are_named_end_to_end() {
         ),
         ("instance : Wrap Nat := ⟨fun x => x⟩", "declaration kind"),
         ("opaque o2 : Nat", "`opaque` without a value"),
-        ("def sl : Nat := let x := Nat.zero; x", "letToHave"),
         ("noncomputable section", "section modifier"),
         // Term- and binder-layer seams reached through a declaration carry
         // a slice label (`command::label_seam`).

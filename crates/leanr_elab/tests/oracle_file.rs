@@ -172,8 +172,8 @@ fn empty_source_elaborates_nothing() {
     }
 }
 
-/// `lth/`: staged by the letToHave plan's Task 1; Task 5 removes it.
-const PENDING: &[&str] = &["lth/"];
+/// Empty: letToHave complete.
+const PENDING: &[&str] = &[];
 
 /// Rows whose divergence is a known pre-existing gap, gated by EXACT id:
 /// `(id, reason)`. Each `auto/*` reason names an oracle-probed variant

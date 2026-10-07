@@ -12,9 +12,9 @@
 //! seams).
 //!
 //! Non-theorem values go through `abstractNestedProofs`; the `_proof_N` aux
-//! theorems it mints are committed BEFORE the main declaration.
-
-use std::collections::HashSet;
+//! theorems it mints are committed BEFORE the main declaration. Then
+//! `letToHaveType`/`letToHaveValue` (`PreDefinition/Basic.lean:99-118`,
+//! called at `:184-185`) turn non-dependent `let`s into `have`s.
 
 use leanr_kernel::bank::levels::LevelRow;
 use leanr_kernel::bank::terms::Node;
@@ -136,11 +136,6 @@ pub(super) fn elab_def(
     // `addPreDefinitions` → `ensureNoUnassignedMVarsAtPreDef` (`Main.lean:294`).
     // `preDef.declName` (`PreDefinition/Main.lean:84-93`): the full name.
     ensure_no_unassigned_mvars_at_pre_def(elab, &full_name(elab, id.name), ty, value)?;
-    // `addNonRecAux` → `letToHaveType`/`letToHaveValue` (`Basic.lean:183-184`):
-    // a seam (spec decision 5). Checked before `abstractNestedProofs` (oracle
-    // order: after it); both orders end in a seam.
-    reject_let(elab, ty)?;
-    reject_let(elab, value)?;
     // `elabAsync`'s `AddConstAsyncResult.commitConst` (`Environment.lean:
     // 1104-1105`): the finished theorem's level params must equal the
     // signature's. A scope universe used only in the proof is in the
@@ -166,7 +161,7 @@ pub(super) fn elab_def(
         }
     }
     // `addNonRecAux` → `abstractNestedProofs` (`PreDefinition/Basic.lean:
-    // 120-127`, `:180`): not for theorems or examples. The aux theorems are
+    // 120-127`, `:183`): not for theorems or examples. The aux theorems are
     // committed BEFORE the main declaration, as the oracle's `mkAuxLemma`
     // has already `addDecl`'d them (`Meta/Tactic/AuxLemma.lean:43-73`).
     // The cache is the environment's (`auxLemmasExt`), seeded per
@@ -177,12 +172,15 @@ pub(super) fn elab_def(
     } else {
         elab.mctx
             .abstract_nested_proofs(&mut aux, value)
-            .map_err(|e| match e {
-                // P1's named seams (Amendment 1 item 4), e.g. the pending-aux lookup.
-                MetaError::Unsupported(m) => ElabError::UnsupportedSyntax(m),
-                e => ElabError::Meta(e),
-            })?
+            .map_err(meta_seam)?
     };
+    // `addNonRecAux` → `letToHaveType` then `letToHaveValue`
+    // (`PreDefinition/Basic.lean:184-185`; the value pass under the non-recursive
+    // branch's `cleanupValue := true`, `Main.lean:308-310`), AFTER `abstractNestedProofs`
+    // (`:183`). `cleanup.letToHave` is not modelled (`set_option` seams
+    // every other option), so it is on.
+    let ty = let_to_have_type(elab, view.kind, &aux, ty)?;
+    let value = let_to_have_value(elab, view.kind, &aux, ty, value)?;
     // `getMaxHeight` sees the abstracted value: aux theorems add nothing.
     let decl = build_decl(elab, view.kind, id.name, level_params, ty, value)?;
     if view.kind == DefKind::Example {
@@ -247,8 +245,10 @@ fn check_async_signature(
     let ty = elab.mctx.instantiate_mvars(ty)?;
     // `collectLevelParams` over the type, `sortDeclLevelParams scope allUser used` (`:1288-1291`).
     let level_params = fix_level_params(elab, &[ty], scope, &header.level_names)?;
-    // `Meta.letToHave type` (`:1293-1296`): the letToHave seam.
-    reject_let(elab, ty)?;
+    // `Meta.letToHave type` (`:1293-1296`) is not run here: this function
+    // returns only the signature's level params, which letToHave never
+    // changes, and the committed theorem type is the main path's (whose
+    // `letToHaveType` runs in `elab_def`). Unobservable in leanr.
     Ok(level_params)
 }
 
@@ -397,44 +397,49 @@ pub(super) fn ensure_no_unassigned_mvars_at_pre_def(
     )))
 }
 
-/// The `letToHave` seam (spec decision 5): any `let`/`have` left in the
-/// final type or value.
-pub(super) fn reject_let(elab: &TermElabM, e: ExprId) -> Result<(), ElabError> {
-    let base = Some(elab.view.store);
-    let mut seen: HashSet<ExprId> = HashSet::new();
-    let mut stack = vec![e];
-    while let Some(t) = stack.pop() {
-        if !seen.insert(t) {
-            continue;
-        }
-        match elab.mctx.store().expr_node(base, t) {
-            Node::LetE { .. } => {
-                return Err(ElabError::UnsupportedSyntax(
-                    "`let`/`have` in a declaration's type or value (letToHave) — later M4".into(),
-                ))
-            }
-            Node::App { f, arg } => {
-                stack.push(f);
-                stack.push(arg);
-            }
-            Node::Lam {
-                binder_type, body, ..
-            }
-            | Node::Forall {
-                binder_type, body, ..
-            } => {
-                stack.push(binder_type);
-                stack.push(body);
-            }
-            Node::MData { expr, .. } => stack.push(expr),
-            Node::Proj { structure, .. } | Node::ProjBig { structure, .. } => stack.push(structure),
-            _ => {}
-        }
+/// oracle: `letToHaveType` (`PreDefinition/Basic.lean:113-118`): every kind
+/// but `example`.
+fn let_to_have_type(
+    elab: &mut TermElabM,
+    kind: DefKind,
+    aux: &AuxLemmas,
+    ty: ExprId,
+) -> Result<ExprId, ElabError> {
+    if kind == DefKind::Example {
+        return Ok(ty);
     }
-    Ok(())
+    elab.mctx.let_to_have(aux, ty).map_err(meta_seam)
 }
 
-/// `addNonRecAux`'s declaration (`PreDefinition/Basic.lean:185-208`).
+/// oracle: `letToHaveValue` (`PreDefinition/Basic.lean:99-108`): not for
+/// `theorem`/`example`/`opaque`, an `unsafe` declaration (unreachable:
+/// `view.rs` seams `unsafe`), or a Prop-typed one (`Meta.isProp`).
+fn let_to_have_value(
+    elab: &mut TermElabM,
+    kind: DefKind,
+    aux: &AuxLemmas,
+    ty: ExprId,
+    value: ExprId,
+) -> Result<ExprId, ElabError> {
+    if matches!(kind, DefKind::Theorem | DefKind::Example | DefKind::Opaque) {
+        return Ok(value);
+    }
+    if is_prop_full(elab, ty)? {
+        return Ok(value);
+    }
+    elab.mctx.let_to_have(aux, value).map_err(meta_seam)
+}
+
+/// A `MetaError::Unsupported` is a named seam (P1's pending-aux lookup,
+/// Amendment 1 item 4); every other error passes through.
+fn meta_seam(e: MetaError) -> ElabError {
+    match e {
+        MetaError::Unsupported(m) => ElabError::UnsupportedSyntax(m),
+        e => ElabError::Meta(e),
+    }
+}
+
+/// `addNonRecAux`'s declaration (`PreDefinition/Basic.lean:186-214`).
 fn build_decl(
     elab: &mut TermElabM,
     kind: DefKind,
@@ -449,7 +454,7 @@ fn build_decl(
         ty,
     };
     Ok(match kind {
-        // `mkDefDecl` (`:185-190`): `regular (getMaxHeight env value + 1)`, safe.
+        // `mkDefDecl` (`:186-191`): `regular (getMaxHeight env value + 1)`, safe.
         DefKind::Def | DefKind::Example => {
             let h = elab.mctx.get_max_height(value)?;
             Declaration::Defn(DefinitionVal {
