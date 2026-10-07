@@ -1014,7 +1014,44 @@ def fileQueries : List (String × String) := [
   ("priv/msgUnivDup", "private def q39.{u, u} : Nat := Nat.zero"),
   ("priv/msgPiField", "private def q40 : Nat → Nat := fun n => n\ndef r18 : Nat := q40.foo"),
   -- `private abbrev`: the reducible overlay holds the private (mangled) name
-  ("priv/abbrevClass", "private abbrev PW := Wrap\ndef r19 [PW Nat] : Nat := Wrap.wrap Nat.zero")
+  ("priv/abbrevClass", "private abbrev PW := Wrap\ndef r19 [PW Nat] : Nat := Wrap.wrap Nat.zero"),
+  -- worktree B: isDefEqOffset + UnitLike fall-through (Offset.lean:118-163;
+  -- isDefEqApp -> projInst/stringLit/unitLike/onFailure tail, ExprDefEq.lean:2166-2232)
+  ("unitLike/u1", "def u1 (a b : Nat) (f : Nat → Unit) : Eq (f a) (f b) := rfl"),
+  ("unitLike/u2punit", "def u2 (a b : Nat) (f : Nat → PUnit.{1}) : Eq (f a) (f b) := rfl"),
+  ("unitLike/u4OE", "def u4 (a b : Nat) (f : Nat → OE) : Eq (f a) (f b) := rfl"),
+  ("unitLike/u7heads", "def u7 (f g : Nat → Unit) (a : Nat) : Eq (f a) (g a) := rfl"),
+  ("unitLike/t6", "def t6 (f : Tag → Unit) (a : Tag) : Eq (f a) (f 0) := rfl"),
+  ("offset/n7", "def n7 : Eq 0 Nat.zero := rfl"),
+  ("offset/n7rev", "def n8 : Eq Nat.zero 0 := rfl"),
+  ("offset/n22h", "def n22 (x : Nat) (h : Eq x 0) : Eq x Nat.zero := h"),
+  ("offset/n23h", "def n23 (h : Eq Nat.zero Nat.zero) : Eq 0 0 := h"),
+  ("offset/t1tag", "def t1 : Eq (0 : Tag) (Tag.mk Nat.zero) := rfl"),
+  ("offset/t4tagof", "def t4 : Eq (OfNat.ofNat 0 : Tag) (Tag.mk Nat.zero) := rfl"),
+  ("offset/ty1", "def ty1 (f : Nat → Type) (h : f 0) : f Nat.zero := h"),
+  ("offset/ty2", "def ty2 (f : Nat → Type) (h : f Nat.zero) : f 0 := h"),
+  ("offset/pick0", "def pk : Eq (pick 0 Nat.zero) Nat.zero := rfl"),
+  ("offset/li1", "def li1 : Eq (Wrap.wrap 0) Nat.zero := rfl"),
+  ("offset/rflx0", "def lt3 : Eq Nat.zero Nat.zero := let x := 0; (rfl : Eq x 0)"),
+  ("offset/rflxZero", "def lt4 : Eq Nat.zero Nat.zero := let x := 0; PProd.fst (PProd.mk (rfl : Eq x Nat.zero) x)"),
+  ("offset/rflx5", "def lt5 : Eq Nat.zero Nat.zero := let x := Nat.zero; (rfl : Eq x 0)"),
+  ("offset/rflx6", "def lt6 : Eq 0 0 := let x := Nat.zero; (rfl : Eq x x)"),
+  ("offset/m1", "def m1 : Eq (Nat.succ 1) 2 := (rfl : Eq (Nat.succ _) 2)"),
+  ("offset/m3", "def m3 := (rfl : Eq (Nat.succ _) 2)"),
+  ("offset/m4", "def m4 := (rfl : Eq 3 (Nat.succ (Nat.succ _)))"),
+  ("offset/m5", "def m5 := (rfl : Eq (Add.add _ 1) 3)"),
+  ("offset/m7", "def m7 := (rfl : Eq (Nat.succ _) (Nat.succ (Nat.succ Nat.zero)))"),
+  ("offset/n13neg", "def n13 : Eq 0 (Nat.succ Nat.zero) := rfl"),
+  ("offset/n14neg", "def n14 : Eq 1 Nat.zero := rfl"),
+  ("offset/n17neg", "def n17 (x : Nat) : Eq (Nat.succ x) 0 := rfl"),
+  ("offset/n18neg", "def n18 (x : Nat) : Eq (Nat.succ x) 1 := rfl"),
+  ("offset/n21addneg", "def n21 : Eq (Add.add 1 0) 0 := rfl"),
+  ("offset/t3tagneg", "def t3 : Eq (1 : Tag) (Tag.mk Nat.zero) := rfl"),
+  ("offset/m6neg", "def m6 := (rfl : Eq (Nat.succ _) Nat.zero)"),
+  ("offset/n16neg", "def n16 (x : Nat) : Eq (Nat.succ x) (Nat.succ (Nat.succ x)) := rfl"),
+  ("offset/m8", "def m8 (y : Nat) := (rfl : Eq (Nat.succ _) (Nat.succ (Nat.succ y)))"),
+  ("offset/n19add", "def n19 (x : Nat) : Eq (Add.add x 1) (Nat.succ x) := rfl"),
+  ("offset/n20add", "def n20 : Eq (Add.add 0 1) 1 := rfl")
 ]
 
 /-- The first error-severity message `s` logged, from `messages` and the

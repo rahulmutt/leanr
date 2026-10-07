@@ -29,8 +29,8 @@
 //! [`MetaCtx::is_def_eq_core`] below), and `isExprDefEqExpensive`'s
 //! eta/eta-struct/proj/native/nat/offset/delta/projInst/stringLit/
 //! unitLike arms (wired in [`MetaCtx::is_def_eq_expensive`] below) —
-//! all actually IMPLEMENTED in `lazy_delta.rs`, except `isDefEqNative`/
-//! `isDefEqOffset` (permanently/plan-3 named seams) and
+//! all actually IMPLEMENTED in `lazy_delta.rs` (`isDefEqOffset` in
+//! `offset.rs`), except `isDefEqNative` (a permanent named seam) and
 //! `isDefEqProjInst` (class-projection registry, undecoded everywhere in
 //! this crate), cited at its call site below. `isDefEqOnFailure` is
 //! ported ([`MetaCtx::is_def_eq_on_failure`]) except its
@@ -420,12 +420,17 @@ impl<'e> MetaCtx<'e> {
     /// fills every arm tasks 3-5 left as a named seam — eta (both
     /// directions), projection, the post-eta/proj `whnfCore` recheck,
     /// native/nat/offset/delta, structure eta (both directions) — all
-    /// actually implemented in `lazy_delta.rs` except `isDefEqNative`/
-    /// `isDefEqOffset`, which stay NAMED SEAMS wired below (never
-    /// silently skipped from the sequence — see their own doc comments
-    /// in `lazy_delta.rs`). Unchanged from task 3: Const/Const
-    /// (:2225-2226) and App/App via `isDefEqApp`'s spine walk
-    /// (:2166-2178, simplified). One arm remains a named-but-uncommitted
+    /// actually implemented in `lazy_delta.rs` (offset in `offset.rs`)
+    /// except `isDefEqNative`, which stays a NAMED SEAM wired below (never
+    /// silently skipped from the sequence — see its own doc comment in
+    /// `lazy_delta.rs`). Const/Const (:2225-2226) and App/App via
+    /// [`MetaCtx::is_def_eq_app`] (:2166-2178). When `isDefEqApp` fails,
+    /// the App/App pair falls through to the same tail as every other
+    /// shape (:2227-2232) — the oracle's `else if (← pure t.isApp <&&>
+    /// pure s.isApp <&&> isDefEqApp t s) then return true else ..` — so
+    /// an App/App pair runs `isDefEqOnFailure` twice (once inside
+    /// `isDefEqApp`, once at :2232) and can still succeed by
+    /// `isDefEqUnitLike`. One arm remains a named-but-uncommitted
     /// seam at its call site below, because the class-projection
     /// registry it would need is undecoded EVERYWHERE else in this crate
     /// too (`whnf.rs`'s own `unfold_proj_inst_when_instances` notes):
@@ -468,7 +473,7 @@ impl<'e> MetaCtx<'e> {
         if let Some(b) = self.is_def_eq_nat(t2, s2)? {
             return Ok(b);
         }
-        // oracle :2216: `isDefEqOffset` — plan-3 seam.
+        // oracle :2216: `isDefEqOffset` (`offset.rs`).
         if let Some(b) = self.is_def_eq_offset(t2, s2)? {
             return Ok(b);
         }
@@ -483,23 +488,82 @@ impl<'e> MetaCtx<'e> {
         if self.is_def_eq_eta_struct(t2, s2)? || self.is_def_eq_eta_struct(s2, t2)? {
             return Ok(true);
         }
-        match (self.node(t2), self.node(s2)) {
+        // oracle :2223-2224: both `Const` decides here, with no tail.
+        if let (
+            Node::Const {
+                name: n1,
+                levels: ls1,
+            },
+            Node::Const {
+                name: n2,
+                levels: ls2,
+            },
+        ) = (self.node(t2), self.node(s2))
+        {
+            if n1 != n2 {
+                return Ok(false);
+            }
+            // oracle: `isListLevelDefEqAux` (task 4's `is_def_eq_levels`),
+            // same as the `is_def_eq_quick` Const arm above.
+            let us = self
+                .scratch
+                .level_list_at(Some(self.view.store), ls1)
+                .to_vec();
+            let vs = self
+                .scratch
+                .level_list_at(Some(self.view.store), ls2)
+                .to_vec();
+            return self.is_def_eq_levels(&us, &vs);
+        }
+        // oracle :2225-2226.
+        if matches!(self.node(t2), Node::App { .. })
+            && matches!(self.node(s2), Node::App { .. })
+            && self.is_def_eq_app(t2, s2)?
+        {
+            return Ok(true);
+        }
+        // oracle :2228-2232, reached by every pair that is not both
+        // `Const` — including an App/App pair whose `isDefEqApp` failed.
+        // SEAM: isDefEqProjInst (:2228) — see this function's own doc
+        // comment.
+        if let Some(b) = self.is_def_eq_string_lit(t2, s2)? {
+            return Ok(b);
+        }
+        if self.is_def_eq_unit_like(t2, s2)? {
+            return Ok(true);
+        }
+        self.is_def_eq_on_failure(t2, s2)
+    }
+
+    /// oracle: `isDefEqApp` (ExprDefEq.lean:2166-2178). Both branches run
+    /// the congruence under `checkpointDefEq` and fall back to
+    /// `isDefEqOnFailure` (bare checkpoint/rollback as at `lazy_delta.rs`'s
+    /// `checkpointDefEq` site). Argument comparison is `isDefEqArgs`
+    /// (:371-421, `assign.rs::is_def_eq_args`).
+    ///
+    /// Same-name `Const` heads compare the ARGUMENTS before the universe
+    /// levels (:2169-2172; the oracle points at `tryHeuristic`'s comment:
+    /// argument unification can assign level mvars the level check needs).
+    /// Any other pair of heads compares the heads first, then the args
+    /// (:2175).
+    fn is_def_eq_app(&mut self, t: ExprId, s: ExprId) -> Result<bool, MetaError> {
+        let t_fn = self.get_app_fn(t);
+        let s_fn = self.get_app_fn(s);
+        let t_args = self.get_app_args(t);
+        let s_args = self.get_app_args(s);
+        let snap = self.checkpoint();
+        let ok = match (self.node(t_fn), self.node(s_fn)) {
             (
                 Node::Const {
-                    name: n1,
+                    name: Some(n1),
                     levels: ls1,
                 },
                 Node::Const {
-                    name: n2,
+                    name: Some(n2),
                     levels: ls2,
                 },
-            ) => {
-                if n1 != n2 {
-                    Ok(false)
-                } else {
-                    // oracle: `isListLevelDefEqAux` (task 4's
-                    // `is_def_eq_levels`), same as the `is_def_eq_quick`
-                    // Const arm above.
+            ) if n1 == n2 => {
+                self.is_def_eq_args(t_fn, &t_args, &s_args)? && {
                     let us = self
                         .scratch
                         .level_list_at(Some(self.view.store), ls1)
@@ -508,50 +572,16 @@ impl<'e> MetaCtx<'e> {
                         .scratch
                         .level_list_at(Some(self.view.store), ls2)
                         .to_vec();
-                    self.is_def_eq_levels(&us, &vs)
+                    self.is_def_eq_levels(&us, &vs)?
                 }
             }
-            (Node::App { .. }, Node::App { .. }) => {
-                let t_fn = self.get_app_fn(t2);
-                let s_fn = self.get_app_fn(s2);
-                let t_args = self.get_app_args(t2);
-                let s_args = self.get_app_args(s2);
-                // oracle: `isDefEqApp` (:2166-2178) delegates arg
-                // comparison to `isDefEqArgs` (:371-421) — task 5's
-                // `assign.rs::is_def_eq_args` (extracted from this
-                // arm's own former inline pairwise walk so
-                // `isDefEqMVarSelf` can share it too, per that
-                // function's own citation). Both of its branches run
-                // the congruence under `checkpointDefEq` and fall back
-                // to `isDefEqOnFailure` (:2174, :2178); bare
-                // checkpoint/rollback as at `lazy_delta.rs`'s
-                // `checkpointDefEq` (:1503-1508) site.
-                let snap = self.checkpoint();
-                let ok = self.is_def_eq_core(t_fn, s_fn)?
-                    && self.is_def_eq_args(t_fn, &t_args, &s_args)?;
-                if ok {
-                    return Ok(true);
-                }
-                self.rollback(snap);
-                self.is_def_eq_on_failure(t2, s2)
-            }
-            // oracle :2229-2231, reached only when `t`/`s` are neither
-            // both `Const` nor both `App` (the real oracle's own
-            // `if .. then .. else if .. isDefEqApp .. else ..`
-            // structure, ExprDefEq.lean:2223-2231).
-            _ => {
-                // SEAM: isDefEqProjInst (:2229) — see this function's
-                // own doc comment.
-                if let Some(b) = self.is_def_eq_string_lit(t2, s2)? {
-                    return Ok(b);
-                }
-                if self.is_def_eq_unit_like(t2, s2)? {
-                    return Ok(true);
-                }
-                // oracle :2232.
-                self.is_def_eq_on_failure(t2, s2)
-            }
+            _ => self.is_def_eq_core(t_fn, s_fn)? && self.is_def_eq_args(t_fn, &t_args, &s_args)?,
+        };
+        if ok {
+            return Ok(true);
         }
+        self.rollback(snap);
+        self.is_def_eq_on_failure(t, s)
     }
 
     /// oracle: `isDefEqOnFailure` (ExprDefEq.lean:2022-2026): try to

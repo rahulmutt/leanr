@@ -43,6 +43,7 @@ mod max_height;
 mod metactx;
 mod mk_binding;
 mod mvar_ctx;
+mod offset;
 mod structure;
 mod synth;
 #[cfg(test)]

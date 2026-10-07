@@ -23,9 +23,9 @@
 //! # A deliberate subset of the oracle's fields
 //!
 //! The oracle's `Config`/`toKey` covers 19 fields; this `Config` covers
-//! 17. That gap is intentional, not an oversight: `offset_cnstrs` and
-//! `eta_struct` arrive with the features that consult them, and
-//! `ASSERT_CONFIG_SIZE` forces
+//! 18. That gap is intentional, not an oversight: `eta_struct` arrives
+//! with the feature that consults it (`offset_cnstrs` arrived with
+//! `isDefEqOffset`, `offset.rs`), and `ASSERT_CONFIG_SIZE` forces
 //! the cache-key decision at that point rather than letting a field
 //! silently default to "unconsulted" (`assign_synthetic_opaque` was the
 //! third such deferred field until M4b-3 P3 task 4, which added it
@@ -166,6 +166,12 @@ pub struct Config {
     /// unassignable mvar throws [`crate::MetaError::IsDefEqStuck`]
     /// instead of answering `false`.
     pub is_def_eq_stuck_ex: bool,
+    /// Solve `Nat` offset constraints (`?x + 1 =?= e`, `0 =?= Nat.zero`)
+    /// arithmetically. oracle: `Config.offsetCnstrs` (Basic.lean:146-147,
+    /// default `true`), consulted only by `isDefEqOffset`
+    /// (Offset.lean:128). IN the cache key (Basic.lean:210, `<<< 11`): it
+    /// changes which terms unify.
+    pub offset_cnstrs: bool,
 }
 
 /// Breaks the build when `Config` changes size — i.e. when a field is
@@ -174,7 +180,7 @@ pub struct Config {
 /// `cache_key`, then update this constant. See the module doc for the
 /// two Lean bugs this guards against.
 const ASSERT_CONFIG_SIZE: () = assert!(
-    std::mem::size_of::<Config>() == 17,
+    std::mem::size_of::<Config>() == 18,
     "Config changed size: a field was added or removed. Decide whether \
      it is semantically relevant to definitional equality and therefore \
      belongs in Config::cache_key, then update this assertion. A field \
@@ -207,6 +213,8 @@ impl Default for Config {
             assign_synthetic_opaque: false,
             // Oracle default: Basic.lean:134, `isDefEqStuckEx : Bool := false`.
             is_def_eq_stuck_ex: false,
+            // Oracle default: Basic.lean:147, `offsetCnstrs : Bool := true`.
+            offset_cnstrs: true,
         }
     }
 }
@@ -248,6 +256,8 @@ mod tests {
         assert!(!c.assign_synthetic_opaque);
         // Basic.lean:134, `isDefEqStuckEx : Bool := false`.
         assert!(!c.is_def_eq_stuck_ex);
+        // Basic.lean:147, `offsetCnstrs : Bool := true`.
+        assert!(c.offset_cnstrs);
     }
 
     // Plan-2 additions match the oracle defaults (Basic.lean): iota,
@@ -381,11 +391,15 @@ mod tests {
                 assign_synthetic_opaque: !base.assign_synthetic_opaque,
                 ..base
             },
+            Config {
+                offset_cnstrs: !base.offset_cnstrs,
+                ..base
+            },
         ];
 
         // One mutation per field: if this count drifts from the field
         // count, a field is untested.
-        assert_eq!(mutations.len(), 16);
+        assert_eq!(mutations.len(), 17);
 
         for (i, m) in mutations.iter().enumerate() {
             assert_ne!(m.cache_key(), k, "mutation {i} did not change the key");
