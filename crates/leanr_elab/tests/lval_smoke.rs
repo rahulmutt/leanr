@@ -540,8 +540,8 @@ fn identifier_field_split_rejections_match_the_oracle() {
         ("Nat.rec.foo", "Nat.rec.foo"),
     ] {
         match support::elab_and_synthesize(src) {
-            Err(ElabError::UnknownIdent(s)) => assert_eq!(s, name, "{src}"),
-            other => panic!("{src}: expected UnknownIdent({name}), got {other:?}"),
+            Err(ElabError::UnknownConstant(s)) => assert_eq!(s, name, "{src}"),
+            other => panic!("{src}: expected UnknownConstant({name}), got {other:?}"),
         }
     }
     // Review Focus 3: an fvar base never takes the suffix arm; the second
