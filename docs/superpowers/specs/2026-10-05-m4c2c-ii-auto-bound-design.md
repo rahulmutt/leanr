@@ -465,6 +465,11 @@ identifier").
   follow-up):
   - HIGH: `auto/withUsedVarThm` (`max(u_1,1)` vs `max(1,u_1)`) IS a
     wrong-Ok on main too, not only under auto-bound -- its own slice.
+    (CLOSED by the Meta `Level.normalize` port, branch
+    `meta-level-normalize`: leanr_meta ran the kernel's `level.cpp`
+    normalize where Meta runs the pure-Lean `Level.lean:382` one. The
+    sibling gap it exposed -- oracle `mkFreshLevelMVars` hands out level
+    mvars in reverse order -- is `KNOWN_GAPS` `lvl/nest3`/`lvl/nest3Mk`.)
   - `InstanceSynthesisFailed` has no oracle first line (oracle "failed
     to synthesize instance of type class"; probe `rv/autoInstArg`).
   - A postponed `⟨…⟩` whose universe constraint stays unsolved reaches
