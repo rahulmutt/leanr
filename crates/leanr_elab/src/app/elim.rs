@@ -9,6 +9,7 @@ use leanr_meta::{MVarId, MVarKind};
 use leanr_syntax::kind::KindInterner;
 use leanr_syntax::tree::NodeOrToken;
 
+use crate::app::args::ensure_arg_type;
 use crate::app::elim_info::{get_elab_elim_info, ElabElimInfo};
 use crate::app::expand::{Arg, NamedArg};
 use crate::app::lval;
@@ -188,9 +189,10 @@ impl ElimElab<'_, '_> {
                             Some(binder_type),
                         )?
                     }
+                    // oracle: `ensureArgType (← get).f val binderType` (`:1315`).
                     NextArg::Some(Arg::Expr(v)) => {
                         let stx = self.stx.clone();
-                        self.elab.ensure_has_type(&stx, Some(binder_type), v)?
+                        ensure_arg_type(self.elab, &stx, self.f, v, binder_type)?
                     }
                     NextArg::Undef => return self.finalize(kinds),
                     NextArg::None => self.mk_implicit_arg(binder_type, binder_info)?,
@@ -248,11 +250,11 @@ impl ElimElab<'_, '_> {
         match arg {
             Arg::Expr(v) => {
                 let stx = self.stx.clone();
-                self.elab.ensure_has_type(&stx, Some(expected), v)
+                ensure_arg_type(self.elab, &stx, self.f, v, expected)
             }
             Arg::Stx(stx) => {
                 let v = self.elab.elab_term(&stx, kinds, Some(expected))?;
-                self.elab.ensure_has_type(&stx, Some(expected), v)
+                ensure_arg_type(self.elab, &stx, self.f, v, expected)
             }
             Arg::AnonCtorTail { node, from } => {
                 let r = NodeOrToken::Node(node.clone());
@@ -261,7 +263,7 @@ impl ElimElab<'_, '_> {
                     kinds,
                     Some(expected),
                 )?;
-                self.elab.ensure_has_type(&r, Some(expected), v)
+                ensure_arg_type(self.elab, &r, self.f, v, expected)
             }
         }
     }

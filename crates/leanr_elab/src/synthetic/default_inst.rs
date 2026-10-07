@@ -198,7 +198,7 @@ impl<'e> TermElabM<'e> {
         // rather than opening its own. See this module's doc for why
         // this is not optional. `with_mvar_local_context` is the ladder's
         // existing helper, the same one `synthesize_synthetic_mvar`
-        // (`ladder.rs:149`) and the stuck reporter (`report.rs:105`) use.
+        // (`ladder.rs:148`) and the stuck reporter (`report.rs:112`) use.
         self.with_mvar_local_context(mvar_id, |elab| {
             let Some(class) = elab.pending_class_name(mvar_id)? else {
                 return Ok(false);

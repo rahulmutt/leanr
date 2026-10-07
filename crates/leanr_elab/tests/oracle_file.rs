@@ -8,9 +8,9 @@
 mod support;
 
 /// `wc -l tests/fixtures/elab/file-queries.jsonl` at the last deliberate
-/// regen (reverse-order `mkFreshLevelMVars`: 391). `>=`: adding a record is a one-line bump, not a
+/// regen (stuck `.coe` app mismatch: 409). `>=`: adding a record is a one-line bump, not a
 /// failing gate.
-const CORPUS_FLOOR: usize = 391;
+const CORPUS_FLOOR: usize = 409;
 
 #[test]
 fn file_corpus_sources_parse_into_the_oracle_commands() {
@@ -180,24 +180,12 @@ const PENDING: &[&str] = &[];
 /// is the reproducer; the 2026-10-05 scratch probe files are not
 /// committed); the `lvl/*` rows are their own reproducers. An entry leaves
 /// when its gap is fixed.
-const KNOWN_GAPS: &[(&str, &str)] = &[
-    (
-        "auto/negDependsExplicit",
-        "coercion gap: leanr StuckCoercion, oracle `Application type mismatch` (variant \
-         depNoAuto: `def f2 (y : _) (β : Type) (h : Eq (y : β) y) : Nat := Nat.zero`)",
-    ),
-    (
-        "auto/negDependsExplicitAx",
-        "coercion gap: leanr StuckCoercion, oracle `Application type mismatch` (variant \
-         depNoAutoAx: `axiom f2a (y : _) (β : Type) (h : Eq (y : β) y) : Nat`)",
-    ),
-    (
-        "auto/catchInst",
-        "resolution gap: dotted `Wrap.val` (no such field) is `Unknown identifier` in leanr, \
+const KNOWN_GAPS: &[(&str, &str)] = &[(
+    "auto/catchInst",
+    "resolution gap: dotted `Wrap.val` (no such field) is `Unknown identifier` in leanr, \
          `Unknown constant` in the oracle (variant instNoAuto2: \
          `axiom f5 (h : Wrap.val Nat) : Nat`)",
-    ),
-];
+)];
 
 #[test]
 fn oracle_file_gate() {

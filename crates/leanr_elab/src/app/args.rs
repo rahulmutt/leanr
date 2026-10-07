@@ -18,6 +18,8 @@ use leanr_syntax::tree::NodeOrToken;
 
 use crate::app::expand::{Arg, NamedArg};
 use crate::app::state::AppElab;
+use crate::dispatch::SynElem;
+use crate::elab::TermElabM;
 use crate::error::ElabError;
 use crate::synthetic::{PostponeBehavior, SyntheticMVarKind};
 
@@ -1069,51 +1071,30 @@ fn elab_and_add_new_arg(
             Some(expected),
         )?,
     };
-    // oracle: `ensureArgType` = `ensureHasType expectedType arg none f`
-    // (`App.lean:54-62`); its `errToSorry` recovery arm is error
-    // recovery leanr does not do — `exceptionToSorry`
-    // (`TermElabM.lean:1365-1367`) logs the exception and puts a
-    // synthetic `sorry` TERM in the argument's place
-    // (`mkSyntheticSorryFor` -> `mkLabeledSorry`), so elaboration
-    // continues with a wrong-but-typed argument. leanr propagates the
-    // error instead, and the `try … catch` collapses to the plain call.
-    //
-    // oracle: `ensureArgType f arg expectedType` passes `f` as
-    // `throwTypeMismatchError`'s `f?` (`App.lean:54-62`,
-    // `TermElabM.lean:1151-1153`), so an argument mismatch is reported by
-    // `throwAppTypeMismatch f a` (`Meta/Check.lean:250-270`).
     let f = app.st.f;
-    let val = match app.elab.ensure_has_type(&stx, Some(expected), val) {
-        Err(ElabError::TypeMismatch {
-            expected,
-            got,
-            app: None,
-        }) => {
-            let arg_already_in_f = app_spine_args(app, f).contains(&val);
-            return Err(ElabError::TypeMismatch {
-                expected,
-                got,
-                app: Some(crate::error::AppArgMismatch {
-                    f,
-                    arg_already_in_f,
-                }),
-            });
-        }
-        r => r?,
-    };
+    let val = ensure_arg_type(app.elab, &stx, f, val, expected)?;
     add_new_arg(app, val)
 }
 
-/// `Expr.getAppArgs` of `e`: the arguments of its application spine, in
-/// order. Compared by `ExprId`, which is the oracle's structural `==`
-/// under hash-consing (`Meta/Check.lean:254`).
-fn app_spine_args(app: &AppElab, e: ExprId) -> Vec<ExprId> {
-    let mut args = Vec::new();
-    let mut cur = e;
-    while let Node::App { f, arg } = app.node(cur) {
-        args.push(arg);
-        cur = f;
-    }
-    args.reverse();
-    args
+/// oracle: `ensureArgType` (`App.lean:54-62`) = `ensureHasType
+/// expectedType arg none f`: `f` is the partial application the argument
+/// joins, and an immediate or stuck coercion failure is reported through
+/// `throwAppTypeMismatch f arg` (`TermElabM.lean:1151-1153`). Callers:
+/// `elabAndAddNewArg` (`:438`, `:442`) and elab-as-elim's `elabArg` and
+/// postponed-major arm (`:1269`, `:1272`, `:1315`).
+///
+/// Its `errToSorry` recovery arm is error recovery leanr does not do:
+/// `exceptionToSorry` (`TermElabM.lean:1365-1367`) logs the exception
+/// and puts a synthetic `sorry` TERM in the argument's place
+/// (`mkSyntheticSorryFor` -> `mkLabeledSorry`), so elaboration continues
+/// with a wrong-but-typed argument. leanr propagates the error instead,
+/// and the `try … catch` collapses to the plain call.
+pub(crate) fn ensure_arg_type(
+    elab: &mut TermElabM<'_>,
+    stx: &SynElem,
+    f: ExprId,
+    arg: ExprId,
+    expected: ExprId,
+) -> Result<ExprId, ElabError> {
+    elab.ensure_has_type_core(stx, Some(expected), arg, Some(f))
 }

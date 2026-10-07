@@ -36,7 +36,9 @@ pub enum ElabError {
     /// raised directly by every defeq-mismatch site; since P4 it is
     /// raised only from inside `coe::mk_coe`/`ensure_has_type`, reached
     /// through `elab_term_ensuring_type`, the `($e :)` ascription arm,
-    /// and `elab_and_add_new_arg`'s `ensureArgType`.
+    /// and `ensureArgType` (`app::args::ensure_arg_type`, which sets
+    /// `app`). The stuck reporter raises it too, for an `ensureArgType`
+    /// coercion that never became solvable.
     TypeMismatch {
         expected: ExprId,
         got: ExprId,
@@ -106,7 +108,10 @@ pub enum ElabError {
     /// "failed to create type class instance for {mvar type}"`. A
     /// distinct variant from `TypeMismatch` (which `mkCoe`'s IMMEDIATE
     /// failure keeps, `TermElabM.lean:1317,1322`) so a test can tell
-    /// "stuck" from "impossible". The mvar's type IS `expected`.
+    /// "stuck" from "impossible". The mvar's type IS `expected`. Only the
+    /// `f? = none` case: a stuck `ensureArgType` coercion is reported as
+    /// `TypeMismatch { app: Some(..) }`, as the oracle's
+    /// `throwAppTypeMismatch` is. Both print "Type mismatch" first.
     StuckCoercion {
         expected: ExprId,
         got: ExprId,
@@ -623,7 +628,11 @@ impl ElabError {
             // oracle `ensureType` (`Term/TermElabM.lean:1948`):
             // "type expected, got\n  (e : T)".
             Self::TypeExpected { .. } => Some("type expected, got".into()),
-            Self::TypeMismatch { app: None, .. } => Some("Type mismatch".into()),
+            // `mkTypeMismatchError` with no header (`TermElabM.lean:1131`),
+            // which the stuck reporter's `f? = none` arm also raises.
+            Self::TypeMismatch { app: None, .. } | Self::StuckCoercion { .. } => {
+                Some("Type mismatch".into())
+            }
             Self::TypeMismatch { app: Some(a), .. } => Some(
                 if a.arg_already_in_f {
                     "Application type mismatch: The last"
