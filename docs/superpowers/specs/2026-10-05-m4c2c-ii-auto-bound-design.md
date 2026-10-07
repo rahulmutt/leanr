@@ -469,7 +469,8 @@ identifier").
     `meta-level-normalize`: leanr_meta ran the kernel's `level.cpp`
     normalize where Meta runs the pure-Lean `Level.lean:382` one. The
     sibling gap it exposed -- oracle `mkFreshLevelMVars` hands out level
-    mvars in reverse order -- is `KNOWN_GAPS` `lvl/nest3`/`lvl/nest3Mk`.)
+    mvars in reverse order -- was `KNOWN_GAPS` `lvl/nest3`/`lvl/nest3Mk`,
+    CLOSED by branch `level-mvars-reverse-order`: `MetaCtx::mk_fresh_level_mvars`.)
   - `InstanceSynthesisFailed` has no oracle first line (oracle "failed
     to synthesize instance of type class"; probe `rv/autoInstArg`).
   - A postponed `⟨…⟩` whose universe constraint stays unsolved reaches

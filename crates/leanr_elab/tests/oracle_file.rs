@@ -8,9 +8,9 @@
 mod support;
 
 /// `wc -l tests/fixtures/elab/file-queries.jsonl` at the last deliberate
-/// regen (Meta `Level.normalize` port: 387). `>=`: adding a record is a one-line bump, not a
+/// regen (reverse-order `mkFreshLevelMVars`: 391). `>=`: adding a record is a one-line bump, not a
 /// failing gate.
-const CORPUS_FLOOR: usize = 387;
+const CORPUS_FLOOR: usize = 391;
 
 #[test]
 fn file_corpus_sources_parse_into_the_oracle_commands() {
@@ -196,18 +196,6 @@ const KNOWN_GAPS: &[(&str, &str)] = &[
         "resolution gap: dotted `Wrap.val` (no such field) is `Unknown identifier` in leanr, \
          `Unknown constant` in the oracle (variant instNoAuto2: \
          `axiom f5 (h : Wrap.val Nat) : Nat`)",
-    ),
-    (
-        "lvl/nest3",
-        "level-mvar order gap: oracle `mkFreshLevelMVars` (Meta/Basic.lean:899-901) conses, so \
-         `PProd.{?u.6, ?u.5}` gets its mvars in reverse creation order and `Level.normalize` \
-         sorts the inner `PProd` level to `max (max 1 w) v`; leanr creates them forward and \
-         gets `max (max 1 v) w`",
-    ),
-    (
-        "lvl/nest3Mk",
-        "level-mvar order gap: as `lvl/nest3` (oracle `PProd.{u, max (max 1 w) v}`, leanr \
-         `PProd.{u, max (max 1 v) w}`)",
     ),
 ];
 

@@ -2480,7 +2480,7 @@ impl<'e> MetaCtx<'e> {
         // For a LOCAL instance this is a no-op by construction: `val` is
         // an fvar, so there are no universe arguments to refresh, which
         // is exactly the oracle's own treatment of locals.
-        let mut inst_val = self.mk_const_with_fresh_mvar_levels(inst.val)?;
+        let mut inst_val = self.update_const_with_fresh_level_mvars(inst.val)?;
         let mut inst_type = self.infer_type(inst_val)?;
         let mut mvars: Vec<ExprId> = Vec::new();
         let mut subst: Vec<ExprId> = Vec::new();
@@ -2640,7 +2640,10 @@ impl<'e> MetaCtx<'e> {
     /// `synthesizeUsingDefaultInstance` (`SyntheticMVars.lean:157`)
     /// needs the same "replace every universe argument with a fresh
     /// level mvar" step for a default-instance CONSTANT, not only for a
-    /// tabled `Instance`. The body is unchanged.
+    /// tabled `Instance`. Since the level-mvar order fix the levels come
+    /// from [`MetaCtx::mk_fresh_level_mvars`] (REVERSE order, as
+    /// `mkFreshLevelMVarsFor`); `getInstances`' forward `mapM` refresh
+    /// is [`Self::update_const_with_fresh_level_mvars`].
     ///
     /// One difference from the oracle's signature, deliberate: the
     /// oracle takes a `Name` and looks the declaration's `levelParams`
@@ -2664,11 +2667,38 @@ impl<'e> MetaCtx<'e> {
         if arity == 0 {
             return Ok(val);
         }
+        let fresh = self.mk_fresh_level_mvars(arity)?;
+        let base = Some(self.view.store);
+        let levels2 = self.scratch.intern_level_list(base, &fresh)?;
+        Ok(self.scratch.expr_const(base, name, levels2)?)
+    }
+
+    /// oracle: `e.val.updateConst! (← us.mapM (fun _ => mkFreshLevelMVar))`
+    /// (`getInstances`, `SynthInstance.lean:225`) and `mkFun`'s
+    /// `cinfo.levelParams.mapM fun _ => mkFreshLevelMVar`
+    /// (`AppBuilder.lean:338`): every universe argument of a `Const`
+    /// replaced by a fresh level mvar, minted in FORWARD order -- unlike
+    /// [`Self::mk_const_with_fresh_mvar_levels`], whose oracle
+    /// `mkFreshLevelMVars` conses (reverse order). `Level.normalize`
+    /// sorts level mvars by name, so the order is observable. A
+    /// non-`Const` `val` is returned unchanged (see
+    /// `mk_const_with_fresh_mvar_levels`).
+    pub fn update_const_with_fresh_level_mvars(
+        &mut self,
+        val: ExprId,
+    ) -> Result<ExprId, MetaError> {
+        let base = Some(self.view.store);
+        let Node::Const { name, levels } = self.node(val) else {
+            return Ok(val);
+        };
+        let arity = self.scratch.level_list_at(base, levels).len();
+        if arity == 0 {
+            return Ok(val);
+        }
         let mut fresh = Vec::with_capacity(arity);
         for _ in 0..arity {
             fresh.push(self.fresh_level_mvar()?.1);
         }
-        let base = Some(self.view.store);
         let levels2 = self.scratch.intern_level_list(base, &fresh)?;
         Ok(self.scratch.expr_const(base, name, levels2)?)
     }
@@ -4377,6 +4407,46 @@ mod tests {
     /// `get_subgoals`, so the passthrough for non-`Const` values is
     /// load-bearing rather than incidental: refreshing (or erroring on)
     /// an fvar here would corrupt every local-instance candidate.
+    /// Level-mvar ORDER of the two refresh helpers: the oracle's
+    /// `mkConstWithFreshMVarLevels` goes through the consing
+    /// `mkFreshLevelMVars` (REVERSE creation order, `Meta/Basic.lean:897-899`),
+    /// `getInstances`' `us.mapM fun _ => mkFreshLevelMVar`
+    /// (`SynthInstance.lean:225`) is FORWARD. `Level.normalize` sorts
+    /// level mvars by name, so swapping either is observable.
+    #[test]
+    fn fresh_level_refresh_helpers_mint_in_oracle_order() {
+        with_instances_ctx(|ctx| {
+            let minted = |ctx: &mut MetaCtx, k: u64| {
+                let base = Some(ctx.view.store);
+                let p = ctx.scratch.intern_str(base, "_leanr_lvl_fresh").unwrap();
+                let pn = ctx.scratch.name_str(base, None, p).unwrap();
+                let kn = ctx.scratch.intern_nat(base, &Nat::from(k)).unwrap();
+                let n = ctx.scratch.name_num(base, Some(pn), kn).unwrap();
+                ctx.scratch.level_mvar(base, Some(n)).unwrap()
+            };
+            let levels_of = |ctx: &MetaCtx, e: ExprId| {
+                let Node::Const { levels, .. } = ctx.node(e) else {
+                    panic!("expected a constant")
+                };
+                ctx.scratch
+                    .level_list_at(Some(ctx.view.store), levels)
+                    .to_vec()
+            };
+            let c = const_named_at_levels(ctx, "Foo", &[0, 0]);
+            let start = ctx.level_mvar_gen;
+            let rev = ctx.mk_const_with_fresh_mvar_levels(c).expect("refresh");
+            let fwd = ctx.update_const_with_fresh_level_mvars(c).expect("refresh");
+            let want_rev = vec![minted(ctx, start + 1), minted(ctx, start)];
+            let want_fwd = vec![minted(ctx, start + 2), minted(ctx, start + 3)];
+            assert_eq!(
+                levels_of(ctx, rev),
+                want_rev,
+                "mkConstWithFreshMVarLevels: reverse"
+            );
+            assert_eq!(levels_of(ctx, fwd), want_fwd, "getInstances mapM: forward");
+        });
+    }
+
     #[test]
     fn mk_const_with_fresh_mvar_levels_passes_an_fvar_through_unchanged() {
         with_ctx(|ctx| {

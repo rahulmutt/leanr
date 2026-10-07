@@ -202,8 +202,9 @@ pub fn mk_app_m(
         .mctx
         .with_new_mctx_depth(false, |m| -> Result<Option<ExprId>, MetaError> {
             // `mkFun` (`:336-341`): fresh level mvars, minted at the inner
-            // depth, so this scope may assign them.
-            let f = m.mk_const_with_fresh_mvar_levels(raw)?;
+            // depth, so this scope may assign them -- in FORWARD order
+            // (`levelParams.mapM`, `AppBuilder.lean:338`).
+            let f = m.update_const_with_fresh_level_mvars(raw)?;
             let mut acc = f;
             let mut f_ty = m.infer_type(f)?;
             for &a in args {

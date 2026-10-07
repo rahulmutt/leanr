@@ -694,7 +694,12 @@ def fileQueries : List (String × String) := [
   ("lvl/nest3Mk", "axiom lv8 {α : Sort u} {β : Sort v} {γ : Sort w} (x : α) (y : β) (z : γ) : Eq (PProd.mk x (PProd.mk y z)) (PProd.mk x (PProd.mk y z))"),
   ("lvl/imaxOrder", "axiom lv9 {α : Sort u} {β : Sort v} (p : PProd (α → β) α) : Eq p p"),
   ("lvl/succSubsumes", "axiom lv10 {α : Type u} (p : PProd α α) : Eq p p"),
-  ("lvl/paramOrder", "axiom lv11 {α : Sort v} {β : Sort u} (p : PProd α β) : Eq p p")
+  ("lvl/paramOrder", "axiom lv11 {α : Sort v} {β : Sort u} (p : PProd α β) : Eq p p"),
+  -- recursor (elab-as-elim) heads: `PProd.rec` has three level params
+  ("lvl/elimRec3", "axiom lv12 {α : Sort u} {β : Sort v} {γ : Sort w} (p : PProd α (PProd β γ)) : Eq (PProd.rec (motive := fun _ => PProd β γ) (fun _ b => b) p) p.2"),
+  ("lvl/elimRecHole", "axiom lv13 {α : Sort u} {β : Sort v} {γ : Sort w} (p : PProd α (PProd β γ)) : Eq (PProd.rec (motive := fun _ => _) (fun a b => PProd.mk b a) p) (PProd.mk p.2 p.1)"),
+  ("lvl/elimRecSwap", "theorem lv14 {α : Sort u} {β : Sort v} (p : PProd α β) : Eq (PProd.rec (motive := fun _ => PProd β α) (fun a b => PProd.mk b a) p) (PProd.mk p.2 p.1) := Eq.refl _"),
+  ("lvl/elimRecNest", "theorem lv15 {α : Sort u} {β : Sort v} {γ : Sort w} (p : PProd α (PProd β γ)) : Eq (PProd.rec (motive := fun _ => PProd (PProd γ β) α) (fun a b => PProd.mk (PProd.mk b.2 b.1) a) p) (PProd.mk (PProd.mk p.2.2 p.2.1) p.1) := Eq.refl _")
 ]
 
 /-- The first error-severity message `s` logged, from `messages` and the
