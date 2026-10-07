@@ -30,6 +30,7 @@ mod infer;
 mod instances;
 mod kabstract;
 mod lazy_delta;
+mod let_to_have;
 mod level;
 mod level_normalize;
 mod level_params;

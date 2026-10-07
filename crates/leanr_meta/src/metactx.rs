@@ -156,6 +156,14 @@ pub struct MetaCtx<'e> {
     /// `checkpointDefEq`, Basic.lean:2446) — unsafe to keep across calls
     /// because the result depends on mctx state and config.
     pub(crate) defeq_cache_transient: HashMap<(u64, ExprId, ExprId), bool>,
+    /// oracle: `Meta.Context.trackZetaDelta` (`Meta/Basic.lean`, read at
+    /// `WHNF.lean:407`). Set only by [`MetaCtx::with_tracking_zeta_delta`].
+    pub(crate) track_zeta_delta: bool,
+    /// oracle: `Meta.State.zetaDeltaFVarIds` (`Meta/Basic.lean:443-444`):
+    /// the genuine let-fvars `whnf` unfolded while `track_zeta_delta` was
+    /// on. Backtrackable like the mctx: part of [`MetaSnapshot`]
+    /// (`SavedState.restore`, `:596`).
+    pub(crate) zeta_delta_fvar_ids: HashSet<NameId>,
     /// ReducibilityStatus per constant; absent => Semireducible.
     reducibility: HashMap<NameId, ReducibilityStatus>,
     matchers: HashMap<NameId, MatcherEntry>,
@@ -457,6 +465,8 @@ impl<'e> MetaCtx<'e> {
             postponed: Vec::new(),
             defeq_cache_perm: HashMap::new(),
             defeq_cache_transient: HashMap::new(),
+            track_zeta_delta: false,
+            zeta_delta_fvar_ids: HashSet::new(),
             reducibility,
             matchers,
             instances,
@@ -525,6 +535,76 @@ impl<'e> MetaCtx<'e> {
         r
     }
 
+    /// oracle: `withInferTypeConfig` (`Meta/InferType.lean:228-234`):
+    /// `withAtLeastTransparency .default` (`Meta/Basic.lean:1306-1309`,
+    /// raise only when `TransparencyMode.lt`, `TransparencyMode.lean:37-47`,
+    /// which `TransparencyMode`'s hand-written `Ord` matches), then beta,
+    /// iota, zeta, zetaHave and zetaDelta on and `proj := .yesWithDelta`.
+    /// `etaStruct := .all` is not ported: leanr's `Config` has no
+    /// `etaStruct` field. The oracle skips the `withConfig` when every
+    /// field already has its value; setting them unconditionally is the
+    /// same config. The whole config is restored, as `withReader` does;
+    /// the defeq cache key covers the whole `Config`.
+    pub(crate) fn with_infer_type_config<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let saved = self.cfg;
+        if self.cfg.transparency < TransparencyMode::Default {
+            self.cfg.transparency = TransparencyMode::Default;
+        }
+        self.cfg.beta = true;
+        self.cfg.iota = true;
+        self.cfg.zeta = true;
+        self.cfg.zeta_have = true;
+        self.cfg.zeta_delta = true;
+        self.cfg.proj = crate::ProjReduction::YesWithDelta;
+        let r = f(self);
+        self.cfg = saved;
+        r
+    }
+
+    /// oracle: `withFreshCache` (`Meta/Basic.lean:1183-1190`): run `f`
+    /// with every Meta cache empty, then restore the saved caches.
+    ///
+    /// leanr's whnf/whnf_core/infer caches hold fvar-free keys only
+    /// (`cacheable`) and top-level `is_def_eq` clears both defeq caches, so
+    /// no cached answer can hide a let-fvar unfold today. The scope is kept
+    /// for fidelity; its mutation is recorded as equivalent.
+    pub(crate) fn with_fresh_cache<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let whnf = std::mem::take(&mut self.whnf_cache);
+        let whnf_core = std::mem::take(&mut self.whnf_core_cache);
+        let infer = std::mem::take(&mut self.infer_cache);
+        let perm = std::mem::take(&mut self.defeq_cache_perm);
+        let transient = std::mem::take(&mut self.defeq_cache_transient);
+        let r = f(self);
+        self.whnf_cache = whnf;
+        self.whnf_core_cache = whnf_core;
+        self.infer_cache = infer;
+        self.defeq_cache_perm = perm;
+        self.defeq_cache_transient = transient;
+        r
+    }
+
+    /// oracle: `withTrackingZetaDelta` (`Meta/Basic.lean:1243-1245`):
+    /// `withFreshCache`, `trackZetaDelta := true`, and a cleared
+    /// `zetaDeltaFVarIds` restored on exit (`withResetZetaDeltaFVarIds`,
+    /// `:1227-1233`). Records made inside do not persist. `f` returns rather
+    /// than unwinds, so the restore covers `Err` too.
+    pub fn with_tracking_zeta_delta<R>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<R, MetaError>,
+    ) -> Result<R, MetaError> {
+        let saved_track = std::mem::replace(&mut self.track_zeta_delta, true);
+        let saved_set = std::mem::take(&mut self.zeta_delta_fvar_ids);
+        let r = self.with_fresh_cache(f);
+        self.track_zeta_delta = saved_track;
+        self.zeta_delta_fvar_ids = saved_set;
+        r
+    }
+
+    /// oracle: `getZetaDeltaFVarIds` (`Meta/Basic.lean:1214-1215`).
+    pub fn zeta_delta_fvar_ids(&self) -> &HashSet<NameId> {
+        &self.zeta_delta_fvar_ids
+    }
+
     /// oracle: `fullApproxDefEq` (`Basic.lean:2094-2105`): `withConfig`
     /// setting `foApprox`, `ctxApprox`, `quasiPatternApprox` and
     /// `constApprox`. Additive. The defeq cache key is derived from the
@@ -567,7 +647,11 @@ impl<'e> MetaCtx<'e> {
         self.postponed.clear();
         self.defeq_cache_transient.clear();
         let r = f(self);
+        // `withNewMCtxDepthImp` (`Meta/Basic.lean:1974-1980`) restores only
+        // `mctx` and `postponed`: zeta-delta records made inside survive.
+        let zeta = std::mem::take(&mut self.zeta_delta_fvar_ids);
         self.rollback(snap);
+        self.zeta_delta_fvar_ids = zeta;
         self.mctx.set_depths(depth, level_assign_depth);
         self.defeq_cache_transient.clear();
         r
@@ -1003,6 +1087,45 @@ impl<'e> MetaCtx<'e> {
         non_dep: bool,
         kind: LocalDeclKind,
     ) -> Result<ExprId, MetaError> {
+        let (fvar, depth) = self.push_let_decl_inner(name, ty, value, non_dep, kind)?;
+        // oracle: `withLetDeclImp` (`Basic.lean:1905-1911`) routes
+        // through the same `withNewFVar` as `push_local_decl` — a
+        // let-bound instance counts too.
+        self.install_local_instance_for(fvar, ty, depth, kind)?;
+        self.lctx_snapshot = None;
+        Ok(fvar)
+    }
+
+    /// The ldecl twin of [`Self::push_local_decl_without_instance`]: a bare
+    /// `LocalContext.mkLetDecl`, with NO `isClass?` test. For a pass that
+    /// extends the context directly instead of through `withLetDecl`, as
+    /// `letToHave`'s `lctx.mkLetDecl` does (`LetToHave.lean:330`). The test
+    /// is not neutral there: `is_class` can `whnf` the type, and under
+    /// zeta-delta tracking that records the let fvars it unfolds.
+    pub(crate) fn push_let_decl_without_instance(
+        &mut self,
+        name: Option<NameId>,
+        ty: ExprId,
+        value: ExprId,
+        non_dep: bool,
+    ) -> Result<ExprId, MetaError> {
+        let (fvar, _depth) =
+            self.push_let_decl_inner(name, ty, value, non_dep, LocalDeclKind::Default)?;
+        self.lctx_snapshot = None;
+        Ok(fvar)
+    }
+
+    /// The mint-and-push half shared by `push_let_decl_with_kind` and
+    /// `push_let_decl_without_instance`. Returns `(fvar, depth)`, as
+    /// `push_local_decl_inner` does.
+    fn push_let_decl_inner(
+        &mut self,
+        name: Option<NameId>,
+        ty: ExprId,
+        value: ExprId,
+        non_dep: bool,
+        kind: LocalDeclKind,
+    ) -> Result<(ExprId, usize), MetaError> {
         debug_assert_eq!(
             self.local_names.len(),
             self.lctx.save(),
@@ -1033,12 +1156,7 @@ impl<'e> MetaCtx<'e> {
             nondep: non_dep,
             kind,
         });
-        // oracle: `withLetDeclImp` (`Basic.lean:1905-1911`) routes
-        // through the same `withNewFVar` as `push_local_decl` — a
-        // let-bound instance counts too.
-        self.install_local_instance_for(fvar, ty, depth, kind)?;
-        self.lctx_snapshot = None;
-        Ok(fvar)
+        Ok((fvar, depth))
     }
 
     /// Install `fvar` as a local instance if its type is a class.
@@ -1375,6 +1493,49 @@ impl<'e> MetaCtx<'e> {
         body: ExprId,
     ) -> Result<ExprId, MetaError> {
         self.mk_binding(true, true, fvars, body)
+    }
+
+    /// oracle: `mkLambdaFVars xs e (usedLetOnly := false)
+    /// (generalizeNondepLet := false)` (`MetavarContext.lean:1312-1347`, the
+    /// ldecl arm `:1330-1336` with both flags off): a cdecl becomes `lam`,
+    /// and EVERY ldecl becomes `letE` with the decl's own `nondep` (a `have`
+    /// stays a `have`; an unused let is kept).
+    pub(crate) fn mk_lambda_let_fvars(
+        &mut self,
+        fvars: &[ExprId],
+        body: ExprId,
+    ) -> Result<ExprId, MetaError> {
+        let base = Some(self.view.store);
+        let body = self.elim_mvar_deps(fvars, body)?;
+        let mut r = abstract_fvars(self.scratch, base, body, fvars, &mut self.guard)?;
+        for i in (0..fvars.len()).rev() {
+            let Node::FVar { id: Some(id) } = self.node(fvars[i]) else {
+                return Err(MetaError::Infer(
+                    "mk_lambda_let_fvars: telescope entry is not an fvar".into(),
+                ));
+            };
+            let decl = self
+                .lctx
+                .get(id)
+                .ok_or_else(|| MetaError::Infer("mk_lambda_let_fvars: fvar not declared".into()))?;
+            let (name, ty, bi, value) = (decl.binder_name, decl.ty, decl.binder_info, decl.value);
+            r = match value {
+                Some(v) => {
+                    let ty = abstract_fvars(self.scratch, base, ty, &fvars[..i], &mut self.guard)?;
+                    let v = abstract_fvars(self.scratch, base, v, &fvars[..i], &mut self.guard)?;
+                    let nondep = self.local_entry(id).is_some_and(|e| e.nondep);
+                    self.scratch.expr_let(base, name, ty, v, r, nondep)?
+                }
+                None => {
+                    // oracle `handleCDecl`'s `type.headBeta` (`:1319`); the
+                    // ldecl arm (`:1331-1334`) has none.
+                    let ty = self.head_beta(ty)?;
+                    let ty = abstract_fvars(self.scratch, base, ty, &fvars[..i], &mut self.guard)?;
+                    self.scratch.expr_lam(base, name, ty, r, bi)?
+                }
+            };
+        }
+        Ok(r)
     }
 
     /// oracle: `mkLetFVars #[fvar] body (usedLetOnly := false)
@@ -2065,6 +2226,7 @@ impl<'e> MetaCtx<'e> {
             level_assignments,
             delayed_assignments,
             postponed: self.postponed.clone(),
+            zeta_delta_fvar_ids: self.zeta_delta_fvar_ids.clone(),
         }
     }
 
@@ -2076,6 +2238,7 @@ impl<'e> MetaCtx<'e> {
             snap.delayed_assignments,
         );
         self.postponed = snap.postponed;
+        self.zeta_delta_fvar_ids = snap.zeta_delta_fvar_ids;
     }
 
     /// oracle: `withAssignableSyntheticOpaque` (`Lean/Meta/Basic.lean:1312-1313`)
@@ -2175,13 +2338,15 @@ pub struct MetaSnapshot {
     level_assignments: HashMap<LMVarId, LevelId>,
     delayed_assignments: HashMap<MVarId, crate::DelayedMVarAssignment>,
     postponed: Vec<(LevelId, LevelId)>,
+    /// `SavedState.restore` restores `zetaDeltaFVarIds` (`Meta/Basic.lean:596`).
+    zeta_delta_fvar_ids: HashSet<NameId>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::{
-        class_app, const_named, fresh_mvar, render_name, with_class_ctx, with_ctx,
+        class_app, const_dotted, const_named, fresh_mvar, render_name, with_class_ctx, with_ctx,
         with_instances_ctx, with_prelude0_ctx,
     };
     use crate::MetaError;
@@ -3231,6 +3396,126 @@ mod tests {
             assert_eq!(ctx.get_app_fn(app), f);
             assert_eq!(ctx.get_app_args(app), vec![a, a]);
             assert_eq!(ctx.get_app_num_args(app), 2);
+        });
+    }
+
+    /// oracle: `whnfEasyCases` records a followed genuine let under
+    /// `trackZetaDelta` (`WHNF.lean:404-408`); a `have` is never followed.
+    #[test]
+    fn tracking_records_a_let_never_a_have() {
+        with_prelude0_ctx(|ctx| {
+            let nat = const_named(ctx, "N");
+            let zero = const_dotted(ctx, "N", "zero");
+            let cp = ctx.lctx_checkpoint();
+            let h = ctx.push_let_decl(None, nat, zero, true).expect("have");
+            let l = ctx.push_let_decl(None, nat, zero, false).expect("let");
+            let (hid, lid) = (ctx.fvar_id_of(h).unwrap(), ctx.fvar_id_of(l).unwrap());
+            // Tracking off: following `l` records nothing.
+            ctx.whnf(l).expect("whnf");
+            assert!(ctx.zeta_delta_fvar_ids().is_empty());
+            let seen = ctx
+                .with_tracking_zeta_delta(|c| {
+                    c.whnf(h)?;
+                    c.whnf(l)?;
+                    Ok(c.zeta_delta_fvar_ids().clone())
+                })
+                .expect("tracked");
+            assert!(seen.contains(&lid), "a followed let is recorded");
+            assert!(!seen.contains(&hid), "a have is never recorded");
+            // `withTrackingZetaDelta`: records do not persist past the scope.
+            assert!(ctx.zeta_delta_fvar_ids().is_empty());
+            assert!(!ctx.track_zeta_delta);
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// oracle: `checkpointDefEq` restores the saved state on failure
+    /// (`Meta/Basic.lean:2463-2468`), and `SavedState.restore` includes
+    /// `zetaDeltaFVarIds` (`:596`): a FAILED `isDefEq` forgets what it unfolded.
+    #[test]
+    fn a_failed_def_eq_discards_its_zeta_delta_records() {
+        with_prelude0_ctx(|ctx| {
+            let nat = const_named(ctx, "N");
+            let zero = const_dotted(ctx, "N", "zero");
+            let succ = const_dotted(ctx, "N", "succ");
+            let one = ctx.mk_app_spine(succ, &[zero]).expect("app");
+            let cp = ctx.lctx_checkpoint();
+            let l = ctx.push_let_decl(None, nat, zero, false).expect("let");
+            let lid = ctx.fvar_id_of(l).unwrap();
+            let (failed, ok) = ctx
+                .with_tracking_zeta_delta(|c| {
+                    assert!(!c.is_def_eq(l, one)?, "N.zero is not N.succ N.zero");
+                    let failed = c.zeta_delta_fvar_ids().contains(&lid);
+                    assert!(c.is_def_eq(l, zero)?);
+                    Ok((failed, c.zeta_delta_fvar_ids().contains(&lid)))
+                })
+                .expect("tracked");
+            assert!(!failed, "the failed defeq's record is rolled back");
+            assert!(ok, "the successful defeq's record stays");
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// oracle: `withNewMCtxDepthImp` restores only `mctx`/`postponed`
+    /// (`Meta/Basic.lean:1974-1980`): records made inside SURVIVE it.
+    #[test]
+    fn new_mctx_depth_keeps_zeta_delta_records() {
+        with_prelude0_ctx(|ctx| {
+            let nat = const_named(ctx, "N");
+            let zero = const_dotted(ctx, "N", "zero");
+            let cp = ctx.lctx_checkpoint();
+            let l = ctx.push_let_decl(None, nat, zero, false).expect("let");
+            let lid = ctx.fvar_id_of(l).unwrap();
+            let kept = ctx
+                .with_tracking_zeta_delta(|c| {
+                    c.with_new_mctx_depth(false, |c| c.whnf(l))?;
+                    Ok(c.zeta_delta_fvar_ids().contains(&lid))
+                })
+                .expect("tracked");
+            assert!(kept);
+            ctx.lctx_restore(cp);
+        });
+    }
+
+    /// oracle: `withTrackingZetaDelta` (`Meta/Basic.lean:1242-1245`) is
+    /// `withFreshCache` + `trackZetaDelta := true` + `withResetZetaDeltaFVarIds`
+    /// (`:1227-1233`), whose `try x finally modify …zetaDeltaFVarIdsSaved`
+    /// (`:1230-1233`) puts the OUTER set back on every exit, a throw
+    /// included; the reader-scoped flag and the fresh cache unwind too.
+    /// Pinned: the scope starts with an empty set and a fresh cache, and
+    /// a seeded outer set, the flag and the outer cache all survive both
+    /// an `Ok` and an `Err` exit.
+    #[test]
+    fn tracking_scope_restores_on_err() {
+        with_prelude0_ctx(|ctx| {
+            let n = const_named(ctx, "N");
+            ctx.infer_type(n).expect("warm the infer cache");
+            let warm = ctx.infer_cache.len();
+            assert!(warm > 0);
+            let seed = ctx.scratch.intern_str(None, "outerSeed").expect("intern");
+            let seed = ctx.scratch.name_str(None, None, seed).expect("name");
+            ctx.zeta_delta_fvar_ids.insert(seed);
+            let outer: HashSet<NameId> = [seed].into_iter().collect();
+
+            let ok: Result<(), MetaError> = ctx.with_tracking_zeta_delta(|c| {
+                assert!(c.zeta_delta_fvar_ids().is_empty(), "set reset inside");
+                assert!(c.infer_cache.is_empty(), "fresh cache inside the scope");
+                Ok(())
+            });
+            assert!(ok.is_ok());
+            assert!(!ctx.track_zeta_delta);
+            assert_eq!(ctx.zeta_delta_fvar_ids(), &outer, "outer set after Ok");
+            assert_eq!(ctx.infer_cache.len(), warm, "outer cache after Ok");
+
+            let r: Result<(), MetaError> = ctx.with_tracking_zeta_delta(|c| {
+                assert!(c.zeta_delta_fvar_ids().is_empty(), "set reset inside");
+                assert!(c.infer_cache.is_empty(), "fresh cache inside the scope");
+                Err(MetaError::Infer("boom".into()))
+            });
+            assert!(r.is_err());
+            assert!(!ctx.track_zeta_delta);
+            assert_eq!(ctx.zeta_delta_fvar_ids(), &outer, "outer set after Err");
+            assert_eq!(ctx.infer_cache.len(), warm, "outer cache restored");
         });
     }
 

@@ -8,9 +8,10 @@
 mod support;
 
 /// `wc -l tests/fixtures/elab/file-queries.jsonl` at the last deliberate
-/// regen (term-level `open … in`: 490). `>=`: adding a record is a one-line bump,
+/// regen (letToHave: 490 + 42 + 8 C1 `lth/num*` rows = 540). `>=`: adding a
+/// record is a one-line bump,
 /// not a failing gate.
-const CORPUS_FLOOR: usize = 490;
+const CORPUS_FLOOR: usize = 540;
 
 #[test]
 fn file_corpus_sources_parse_into_the_oracle_commands() {
@@ -172,7 +173,7 @@ fn empty_source_elaborates_nothing() {
     }
 }
 
-/// Empty: M4c-2c-ii P2 complete.
+/// Empty: letToHave complete.
 const PENDING: &[&str] = &[];
 
 /// Rows whose divergence is a known pre-existing gap, gated by EXACT id:

@@ -11,8 +11,6 @@
 //! the env?", this port asks "is it in the env OR pending?".
 //!
 //! Seams (each returns `MetaError::Unsupported`):
-//! - a `letE` reached by the walk (the oracle's `lambdaLetTelescope` arm,
-//!   `:101`): P2 rejects `let` before this runs;
 //! - an aux whose type or value mentions an unsafe constant (the oracle's
 //!   unsafe opaque `defnDecl`, `AuxLemma.lean:51-58`): `add_decl_in`
 //!   rejects unsafe definitions;
@@ -24,7 +22,8 @@
 //!   `foo._proof_k n`). The oracle has already `addDecl`ed the aux, so it
 //!   succeeds; here the unknown-constant error naming a pending aux is
 //!   mapped to a named `Unsupported` until a pending-constant overlay
-//!   lands.
+//!   lands. Two callers now hit it: this pass and `let_to_have`
+//!   (`LetToHave.lean:201-208`, check mode on `d._proof_N`).
 //!
 //! Not modeled: private names. `mkUniqueName`'s `isConflict` also checks the
 //! private/public twin of each candidate (`CoreM.lean:117-120`), and `curr`
@@ -294,7 +293,7 @@ impl MetaCtx<'_> {
         }
         let mut cache = self.anp_visit_cache()?;
         self.anp_visit(aux, &mut cache, e)
-            .map_err(|err| self.pending_lookup_seam(aux, err))
+            .map_err(|err| self.pending_lookup_seam(aux, err, "abstractNestedProofs"))
     }
 
     /// A fresh per-call `VisitCache`, with its two names interned once
@@ -311,7 +310,12 @@ impl MetaCtx<'_> {
     /// The pending-aux lookup seam (module doc): an unknown-constant
     /// error naming a PENDING aux theorem becomes a named `Unsupported`.
     /// Every other error passes through unchanged.
-    fn pending_lookup_seam(&self, aux: &AuxLemmas, err: MetaError) -> MetaError {
+    pub(crate) fn pending_lookup_seam(
+        &self,
+        aux: &AuxLemmas,
+        err: MetaError,
+        who: &str,
+    ) -> MetaError {
         let msg = match &err {
             MetaError::Infer(m) => m.clone(),
             MetaError::Kernel(k @ leanr_kernel::KernelError::UnknownConstant(_)) => k.to_string(),
@@ -323,7 +327,7 @@ impl MetaCtx<'_> {
             let nm = self.scratch.to_name(base, Some(t.val.name));
             if msg == format!("unknown constant '{nm}'") {
                 return MetaError::Unsupported(format!(
-                    "abstractNestedProofs: lookup of pending aux lemma {nm} — M4c-1 seam \
+                    "{who}: lookup of pending aux lemma {nm} — M4c-1 seam \
                      (needs pending-constant overlay)"
                 ));
             }
@@ -354,16 +358,11 @@ impl MetaCtx<'_> {
             self.abstract_proof(aux, cache, e)?
         } else {
             match node {
-                Node::Lam { .. } | Node::Forall { .. } => {
+                Node::Lam { .. } | Node::LetE { .. } | Node::Forall { .. } => {
                     let cp = self.lctx_checkpoint();
                     let r = self.anp_visit_binders(aux, cache, e);
                     self.lctx_restore(cp);
                     r?
-                }
-                Node::LetE { .. } => {
-                    return Err(MetaError::Unsupported(
-                        "abstractNestedProofs under let — letToHave follow-up (M4c-1 seam)".into(),
-                    ))
                 }
                 Node::MData { data, expr } => {
                     let b = self.guarded(|c| c.anp_visit(aux, cache, expr))?;
@@ -425,10 +424,11 @@ impl MetaCtx<'_> {
     /// still hit inside the body; to keep that, every entry phase 1 added
     /// is copied with old → new substituted in key and value.
     ///
-    /// Rebuild: `mkLambdaFVars (usedLetOnly := false) (generalizeNondepLet
-    /// := false)` / `mkForallFVars` at its defaults. `generalizeNondepLet`
-    /// only matters for a `have` in the telescope, which cannot occur here:
-    /// the walk stops at a `lam`/`forallE` boundary, and `letE` is a seam.
+    /// A `letE` joins a lambda telescope (`lambdaLetTelescope`): its VALUE is
+    /// visited after the types (`:85-86`, `have` values too), phase 2
+    /// re-pushes it as a let decl, and the rebuild is `mk_lambda_let_fvars`
+    /// (`mkLambdaFVars (usedLetOnly := false) (generalizeNondepLet :=
+    /// false)`). A forall telescope uses `mkForallFVars` at its defaults.
     /// The caller checkpoints/restores the lctx.
     fn anp_visit_binders(
         &mut self,
@@ -437,46 +437,81 @@ impl MetaCtx<'_> {
         e: ExprId,
     ) -> Result<ExprId, MetaError> {
         let base = Some(self.view.store);
-        let is_lambda = matches!(self.node(e), Node::Lam { .. });
+        let is_lambda = matches!(self.node(e), Node::Lam { .. } | Node::LetE { .. });
         let cp = self.lctx_checkpoint();
         // Phase 1: open the telescope with the original binder types.
         let mut xs: Vec<ExprId> = Vec::new();
         let mut binders = Vec::new();
         let mut cur = e;
         loop {
-            let (binder_name, binder_type, body, binder_info) = match self.node(cur) {
+            let (binder_name, binder_type, body, binder_info, let_val) = match self.node(cur) {
                 Node::Lam {
                     binder_name,
                     binder_type,
                     body,
                     binder_info,
-                } if is_lambda => (binder_name, binder_type, body, binder_info),
+                } if is_lambda => (binder_name, binder_type, body, binder_info, None),
+                Node::LetE {
+                    decl_name: binder_name,
+                    ty: binder_type,
+                    value,
+                    body,
+                    non_dep,
+                } if is_lambda => (
+                    binder_name,
+                    binder_type,
+                    body,
+                    BinderInfo::Default,
+                    Some((value, non_dep)),
+                ),
                 Node::Forall {
                     binder_name,
                     binder_type,
                     body,
                     binder_info,
-                } if !is_lambda => (binder_name, binder_type, body, binder_info),
+                } if !is_lambda => (binder_name, binder_type, body, binder_info, None),
                 _ => break,
             };
             let d = instantiate_rev(self.scratch, base, binder_type, &xs, &mut self.guard)?;
-            let x = self.push_local_decl(binder_name, d, binder_info)?;
+            let (x, let_val) = match let_val {
+                Some((value, non_dep)) => {
+                    let v = instantiate_rev(self.scratch, base, value, &xs, &mut self.guard)?;
+                    (
+                        self.push_let_decl(binder_name, d, v, non_dep)?,
+                        Some((v, non_dep)),
+                    )
+                }
+                None => (self.push_local_decl(binder_name, d, binder_info)?, None),
+            };
             xs.push(x);
-            binders.push((binder_name, d, binder_info));
+            binders.push((binder_name, d, binder_info, let_val));
             cur = body;
         }
-        // `:80-88`: visit every binder type under the original telescope.
+        // `:80-88`: per binder, visit its type (`:83`), then its let/have
+        // value (`:85-86`, `allowNondep := true`), all under the original
+        // telescope, so aux lemmas number in the oracle's creation order.
         let log_start = cache.log.len();
         let mut types = Vec::with_capacity(binders.len());
-        for &(_, d, _) in &binders {
+        let mut values: Vec<Option<(ExprId, bool)>> = Vec::with_capacity(binders.len());
+        for &(_, d, _, let_val) in &binders {
             types.push(self.guarded(|c| c.anp_visit(aux, cache, d))?);
+            values.push(match let_val {
+                Some((v, nd)) => Some((self.guarded(|c| c.anp_visit(aux, cache, v))?, nd)),
+                None => None,
+            });
         }
         // `:89` `withLCtx lctx`: re-open with the visited types.
         self.lctx_restore(cp);
         let mut ys: Vec<ExprId> = Vec::with_capacity(xs.len());
-        for (i, &(binder_name, _, binder_info)) in binders.iter().enumerate() {
+        for (i, &(binder_name, _, binder_info, _)) in binders.iter().enumerate() {
             let t = self.anp_replace_fvars(types[i], &xs[..i], &ys)?;
-            let y = self.push_local_decl(binder_name, t, binder_info)?;
+            let y = match values[i] {
+                Some((v, nd)) => {
+                    let v2 = self.anp_replace_fvars(v, &xs[..i], &ys)?;
+                    self.push_let_decl(binder_name, t, v2, nd)?
+                }
+                None => self.push_local_decl(binder_name, t, binder_info)?,
+            };
             ys.push(y);
         }
         // Entries the copy itself appends (past `log_end`) are not revisited.
@@ -495,7 +530,7 @@ impl MetaCtx<'_> {
         let b = instantiate_rev(self.scratch, base, cur, &ys, &mut self.guard)?;
         let b = self.guarded(|c| c.anp_visit(aux, cache, b))?;
         if is_lambda {
-            self.mk_lambda(&ys, b)
+            self.mk_lambda_let_fvars(&ys, b)
         } else {
             self.mk_forall(&ys, b)
         }
@@ -1168,6 +1203,138 @@ mod tests {
                 ),
                 other => panic!("expected the pending-aux seam, got {other:?}"),
             }
+        });
+    }
+
+    /// oracle `:101`: `lambdaLetTelescope` + `mkLambdaFVars (usedLetOnly :=
+    /// false) (generalizeNondepLet := false)`: a proof-free let/have
+    /// telescope rebuilds to the SAME term. An unused let is kept, and a
+    /// `have` stays a `have` (not a lambda).
+    #[test]
+    fn a_proof_free_let_telescope_round_trips() {
+        with_meta0_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let n = c(ctx, "N");
+            let zero = c(ctx, "N.zero");
+            let b0 = ctx.scratch.expr_bvar(base, &Nat::from(0u64)).unwrap();
+            let b1 = ctx.scratch.expr_bvar(base, &Nat::from(1u64)).unwrap();
+            // let x : N := N.zero; have y : N := x; let u : N := N.zero; y
+            let u = ctx
+                .scratch
+                .expr_let(base, None, n, zero, b1, false)
+                .unwrap();
+            let y = ctx.scratch.expr_let(base, None, n, b0, u, true).unwrap();
+            let e = ctx.scratch.expr_let(base, None, n, zero, y, false).unwrap();
+            ctx.infer_type(e).expect("well typed");
+            let foo = name(ctx, "fooL");
+            let mut aux = AuxLemmas::new(foo);
+            let r = ctx
+                .abstract_nested_proofs(&mut aux, e)
+                .expect("no seam under let");
+            assert_eq!(r, e, "a proof-free telescope is rebuilt identically");
+            assert!(aux.into_pending().is_empty());
+        });
+    }
+
+    /// `mkBinding`'s `handleCDecl` head-betas a binder type
+    /// (`MetavarContext.lean:1319`); the lambda arm of the walk must keep
+    /// doing so now that it rebuilds through `mk_lambda_let_fvars`
+    /// (regression: corpus `beta/arrowNot`).
+    #[test]
+    fn a_lambda_binder_type_redex_is_head_beta_reduced() {
+        with_meta0_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let n = c(ctx, "N");
+            let zero = c(ctx, "N.zero");
+            let b0 = ctx.scratch.expr_bvar(base, &Nat::from(0u64)).unwrap();
+            let k = ctx
+                .scratch
+                .expr_lam(base, None, n, n, BinderInfo::Default)
+                .unwrap();
+            let redex = ctx.scratch.expr_app(base, k, zero).unwrap();
+            let e = ctx
+                .scratch
+                .expr_lam(base, None, redex, b0, BinderInfo::Default)
+                .unwrap();
+            let want = ctx
+                .scratch
+                .expr_lam(base, None, n, b0, BinderInfo::Default)
+                .unwrap();
+            let foo = name(ctx, "fooB");
+            let mut aux = AuxLemmas::new(foo);
+            let r = ctx.abstract_nested_proofs(&mut aux, e).unwrap();
+            assert_eq!(r, want);
+        });
+    }
+
+    /// oracle `visitBinders` (`AbstractNestedProofs.lean:77-89`) visits PER
+    /// binder: type (`:83`), then that binder's value (`:85-86`), then the
+    /// next binder. Aux lemmas number by creation, so a proof in a let VALUE
+    /// precedes a proof in the NEXT binder's TYPE:
+    /// `fun n => let u : Eq (s n) (s n) := rfl (s n); fun (x : Eq.rec .. (rfl (s (s n)))) => x`
+    /// numbers `rfl (s n)` as `_proof_1`, `rfl (s (s n))` as `_proof_2`.
+    #[test]
+    fn a_let_value_proof_is_numbered_before_the_next_binders_type_proof() {
+        with_meta0_ctx(|ctx| {
+            let base = Some(ctx.view.store);
+            let foo = name(ctx, "fooQ");
+            let n_ty = c(ctx, "N");
+            let succ = c(ctx, "N.succ");
+            let one = lit_level(ctx, 1);
+            let two = lit_level(ctx, 2);
+            let (n_name, u_name, x_name) = (name(ctx, "n"), name(ctx, "u"), name(ctx, "x"));
+            let (b_name, h_name) = (name(ctx, "b"), name(ctx, "h"));
+            let cp = ctx.lctx_checkpoint();
+            let n = ctx
+                .push_local_decl(Some(n_name), n_ty, BinderInfo::Default)
+                .unwrap();
+            let sn = app(ctx, succ, n);
+            let ssn = app(ctx, succ, sn);
+            let (u_ty, pf1) = eq_rfl(ctx, sn);
+            let (_, pf2) = eq_rfl(ctx, ssn);
+            let u = ctx.push_let_decl(Some(u_name), u_ty, pf1, false).unwrap();
+            let eq = cu(ctx, "Eq", &[one]);
+            let b0 = crate::test_support::bvar(ctx, 0);
+            let h_ty = ctx.mk_app_spine(eq, &[n_ty, ssn, b0]).unwrap();
+            let type0 = ctx.scratch.expr_sort(base, one).unwrap();
+            let inner = ctx
+                .scratch
+                .expr_lam(base, Some(h_name), h_ty, type0, BinderInfo::Default)
+                .unwrap();
+            let motive = ctx
+                .scratch
+                .expr_lam(base, Some(b_name), n_ty, inner, BinderInfo::Default)
+                .unwrap();
+            let arrow = ctx
+                .scratch
+                .expr_forall(base, None, n_ty, n_ty, BinderInfo::Default)
+                .unwrap();
+            let rec = cu(ctx, "Eq.rec", &[two, one]);
+            let x_ty = ctx
+                .mk_app_spine(rec, &[n_ty, ssn, motive, arrow, ssn, pf2])
+                .unwrap();
+            let x = ctx
+                .push_local_decl(Some(x_name), x_ty, BinderInfo::Default)
+                .unwrap();
+            let e = ctx.mk_lambda_let_fvars(&[n, u, x], x).unwrap();
+            ctx.lctx_restore(cp);
+            ctx.infer_type(e).expect("the probe term is well typed");
+            let mut aux = AuxLemmas::new(foo);
+            ctx.abstract_nested_proofs(&mut aux, e).unwrap();
+            assert_eq!(pending_names(ctx, &aux), ["fooQ._proof_1", "fooQ._proof_2"]);
+            // `_proof_1` proves the let VALUE's `rfl (s n)`.
+            let cp = ctx.lctx_checkpoint();
+            let n = ctx
+                .push_local_decl(Some(n_name), n_ty, BinderInfo::Default)
+                .unwrap();
+            let sn = app(ctx, succ, n);
+            let (_, want) = eq_rfl(ctx, sn);
+            let want = ctx.mk_lambda(&[n], want).unwrap();
+            ctx.lctx_restore(cp);
+            let Declaration::Thm(t) = &aux.pending()[0] else {
+                panic!("thmDecl expected")
+            };
+            assert_eq!(t.value, want);
         });
     }
 
