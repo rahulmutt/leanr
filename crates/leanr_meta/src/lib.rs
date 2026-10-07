@@ -31,6 +31,7 @@ mod instances;
 mod kabstract;
 mod lazy_delta;
 mod level;
+mod level_normalize;
 mod level_params;
 mod local_decl_kind;
 mod local_entry;

@@ -8,9 +8,9 @@
 mod support;
 
 /// `wc -l tests/fixtures/elab/file-queries.jsonl` at the last deliberate
-/// regen (M4c-2c-ii P2: 376). `>=`: adding a record is a one-line bump, not a
+/// regen (Meta `Level.normalize` port: 387). `>=`: adding a record is a one-line bump, not a
 /// failing gate.
-const CORPUS_FLOOR: usize = 376;
+const CORPUS_FLOOR: usize = 387;
 
 #[test]
 fn file_corpus_sources_parse_into_the_oracle_commands() {
@@ -174,12 +174,12 @@ fn empty_source_elaborates_nothing() {
 /// Empty: M4c-2c-ii P2 complete.
 const PENDING: &[&str] = &[];
 
-/// Rows whose divergence is a pre-existing gap outside auto-bound, gated
-/// by EXACT id: `(id, reason)`. Each reason names an oracle-probed variant
-/// WITHOUT auto-bound that diverges the same way (the inline variant
-/// source in each reason is the reproducer; the 2026-10-05 scratch probe
-/// files are not committed). Survives P1 and P2; an entry leaves when its gap is
-/// fixed.
+/// Rows whose divergence is a known pre-existing gap, gated by EXACT id:
+/// `(id, reason)`. Each `auto/*` reason names an oracle-probed variant
+/// WITHOUT auto-bound that diverges the same way (the inline variant source
+/// is the reproducer; the 2026-10-05 scratch probe files are not
+/// committed); the `lvl/*` rows are their own reproducers. An entry leaves
+/// when its gap is fixed.
 const KNOWN_GAPS: &[(&str, &str)] = &[
     (
         "auto/negDependsExplicit",
@@ -198,10 +198,16 @@ const KNOWN_GAPS: &[(&str, &str)] = &[
          `axiom f5 (h : Wrap.val Nat) : Nat`)",
     ),
     (
-        "auto/withUsedVarThm",
-        "level gap: header type has `Eq.{max(u_1,1)}`, oracle `Eq.{max(1,u_1)}` (variant \
-         thmSortHole: `variable {β : Type} (b : β)` + `theorem t1 {α : Sort _} (x : α) : \
-         Eq (PProd.mk x b) (PProd.mk x b) := rfl`)",
+        "lvl/nest3",
+        "level-mvar order gap: oracle `mkFreshLevelMVars` (Meta/Basic.lean:899-901) conses, so \
+         `PProd.{?u.6, ?u.5}` gets its mvars in reverse creation order and `Level.normalize` \
+         sorts the inner `PProd` level to `max (max 1 w) v`; leanr creates them forward and \
+         gets `max (max 1 v) w`",
+    ),
+    (
+        "lvl/nest3Mk",
+        "level-mvar order gap: as `lvl/nest3` (oracle `PProd.{u, max (max 1 w) v}`, leanr \
+         `PProd.{u, max (max 1 v) w}`)",
     ),
 ];
 

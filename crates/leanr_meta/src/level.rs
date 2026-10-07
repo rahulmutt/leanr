@@ -30,10 +30,10 @@
 //!
 //! Every traversal below walks `LevelId`s through `Store::level_row`
 //! (the `oracle_fast.rs::encode_level` idiom), never materializing an
-//! `Arc<Level>` except in the two leaf helpers where a kernel routine
-//! has no id-native twin: [`MetaCtx::level_normalize`] (`Level::
-//! normalize` — sorting/dedup has no cheap id-native port) is the only
-//! one. `to_offset`'s `Succ`-peeling loop, by contrast, DOES have a
+//! `Arc<Level>` except in one leaf helper with no id-native twin:
+//! [`MetaCtx::level_normalize`] (Meta's `Level.normalize`, ported on
+//! `Arc<Level>` in `level_normalize.rs` — sorting/dedup has no cheap
+//! id-native port). `to_offset`'s `Succ`-peeling loop, by contrast, DOES have a
 //! trivial id-native twin ([`MetaCtx::level_to_offset`]) so it is
 //! reimplemented directly rather than materializing.
 //!
@@ -52,7 +52,7 @@
 
 use leanr_kernel::bank::levels::LevelRow;
 use leanr_kernel::bank::{ExprId, LevelId};
-use leanr_kernel::{Level, Nat};
+use leanr_kernel::Nat;
 
 use crate::{LMVarId, MetaCtx, MetaError};
 
@@ -585,6 +585,18 @@ impl<'e> MetaCtx<'e> {
         else_k(self)
     }
 
+    /// oracle: `mkLevelIMax'` (Level.lean:549-551): `mkLevelIMaxCore`
+    /// falling back to a raw `imax u v`.
+    pub(crate) fn mk_level_imax_prime(
+        &mut self,
+        u: LevelId,
+        v: LevelId,
+    ) -> Result<LevelId, MetaError> {
+        self.mk_level_imax_core(u, v, |c| {
+            Ok(c.scratch.level_imax(Some(c.view.store), u, v)?)
+        })
+    }
+
     /// oracle: `mkLevelIMaxCore u v elseK` (Level.lean:542-547), branch
     /// order verbatim: `isNeverZero v` -> `mkLevelMax'`; `isZero v` -> `v`;
     /// `isZero u` -> `v`; `u == v` -> `u`; else `elseK`. Shared by
@@ -707,14 +719,16 @@ impl<'e> MetaCtx<'e> {
         (cur, k)
     }
 
-    /// oracle: `Level.normalize` (level.cpp:439-501, ported as
-    /// [`Level::normalize`] in `leanr_kernel`). No id-native twin exists
-    /// (the sort/dedup pass genuinely needs the `Arc<Level>` shape), so
-    /// this is the one sanctioned `Store::to_level`/`intern_level`
-    /// materialize-then-rebuild leaf the module doc promises.
-    fn level_normalize(&mut self, l: LevelId) -> Result<LevelId, MetaError> {
+    /// oracle: `Level.normalize` (Level.lean:382-406), the pure-Lean
+    /// one Meta calls -- NOT the kernel's `level.cpp:439-501`
+    /// (`leanr_kernel::Level::normalize`); see `level_normalize.rs` for how they
+    /// differ. No id-native twin exists (the sort/dedup pass needs the
+    /// `Arc<Level>` shape), so this is the one sanctioned
+    /// `Store::to_level`/`intern_level` materialize-then-rebuild leaf
+    /// the module doc promises.
+    pub(crate) fn level_normalize(&mut self, l: LevelId) -> Result<LevelId, MetaError> {
         let arc = self.scratch.to_level(Some(self.view.store), l);
-        let normalized = Level::normalize(&arc, &mut self.guard)?;
+        let normalized = crate::level_normalize::normalize(&arc, &mut self.guard)?;
         Ok(self
             .scratch
             .intern_level(Some(self.view.store), &normalized)?)
