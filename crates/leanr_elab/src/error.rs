@@ -358,6 +358,14 @@ pub enum ElabError {
     /// a hygienic name with a hash in it, which the gate cannot pin; leanr
     /// prints its own binder name there.
     OmitUndeclared(String),
+    /// oracle: `replaceBinderAnnotation` (`Elab/BuiltinCommand.lean:
+    /// 369-371`): `variable {x}` where the newest `x` already is implicit.
+    RedundantBinderUpdate,
+    /// oracle: `replaceBinderAnnotation` (`Elab/BuiltinCommand.lean:
+    /// 383-385`, `:397-399`): `variable [x]` on a variable declared without
+    /// a type, or whose `[x : T]` fails to elaborate (the cause follows on
+    /// the next line). Carries the id.
+    CannotUpdateToInstImplicit(String),
     /// oracle: `throwNoScope` (`Elab/BuiltinCommand.lean:182-184`): `end`
     /// with only the root scope open.
     EndNoScope,
@@ -693,6 +701,10 @@ impl ElabError {
             Self::OmitUndeclared(x) => Some(format!(
                 "invalid 'omit', `{x}` has not been declared in the current scope"
             )),
+            Self::RedundantBinderUpdate => Some("redundant binder annotation update".into()),
+            Self::CannotUpdateToInstImplicit(x) => Some(format!(
+                "cannot update binder annotation of variable `{x}` to instance implicit:"
+            )),
             Self::UnassignedMVars(line) | Self::UnassignedLevelMVars(line) => Some(line.clone()),
             Self::EndNoScope => Some("Invalid `end`: There is no current scope to end".into()),
             Self::EndMissingName(n) => Some(format!(
@@ -921,6 +933,18 @@ mod tests {
                 .oracle_first_line()
                 .as_deref(),
             Some("invalid 'omit', `a` has not been declared in the current scope") // varAuto/omitAuto
+        );
+        assert_eq!(
+            ElabError::RedundantBinderUpdate
+                .oracle_first_line()
+                .as_deref(),
+            Some("redundant binder annotation update") // vu/redundant
+        );
+        assert_eq!(
+            ElabError::CannotUpdateToInstImplicit("x".into())
+                .oracle_first_line()
+                .as_deref(),
+            Some("cannot update binder annotation of variable `x` to instance implicit:") // vu/instInvalid
         );
         assert_eq!(
             ElabError::InvalidBinderAnnotation {

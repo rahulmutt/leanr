@@ -743,7 +743,37 @@ def fileQueries : List (String × String) := [
   ("synthFail/explicitHole", "def sf7 : Nat := @useNoInst Nat _ Nat.zero"),
   ("synthFail/afterOk", "def sf8 : Nat := Nat.zero\ndef sf9 : Nat := useNoInst sf8"),
   ("unkConst/parenSort", "def uc17 : Nat := (Nat).nope"),
-  ("unkConst/parenFun", "def uc18 : Nat := (pick).nope")
+  ("unkConst/parenFun", "def uc18 : Nat := (pick).nope"),
+  -- worktree C: variable binder-annotation update (`replaceBinderAnnotation`,
+  -- typed variables only; typeless binders wait on the `expandBinderType` hole)
+  ("vu/implicit", "variable (x : Nat)\nvariable {x}\ndef u1 : Nat := x"),
+  ("vu/explicit", "variable {x : Nat}\nvariable (x)\ndef u2 : Nat := x"),
+  ("vu/strict", "variable (x : Nat)\nvariable ⦃x⦄\ndef u3 : Nat := x"),
+  ("vu/instUp", "variable (a : Type) (w : Wrap a)\nvariable [w]\ndef u4 (y : a) : a := Wrap.wrap y"),
+  ("vu/instDown", "variable (a : Type) [w : Wrap a]\nvariable (w)\ndef u5 (y : a) : a := Wrap.wrap y"),
+  ("vu/redundant", "variable {x : Nat}\nvariable {x}"),
+  ("vu/split", "variable (x y : Nat)\nvariable {x}\ndef u8 : PProd Nat Nat := PProd.mk x y"),
+  ("vu/instInvalid", "variable (x : Nat)\nvariable [x]"),
+  ("vu/section", "variable (x : Nat)\nsection\nvariable {x}\ndef u12a : Nat := x\nend\ndef u12b : Nat := x"),
+  ("vu/shadow", "variable (x : Nat)\nvariable (x : Nat)\nvariable {x}\ndef u13 : Nat := x"),
+  ("vu/dependent", "variable (a : Type) (x : a)\nvariable {a}\ndef u14 : a := x"),
+  ("vu/autoBound", "variable (x : α)\nvariable {x}\ndef u15 : α := x"),
+  ("vu/include", "variable (x : Nat)\ninclude x\nvariable {x}\ntheorem u16 : Eq Nat.zero Nat.zero := rfl"),
+  ("vu/instTheorem", "variable (a : Type) (w : Wrap a)\nvariable [w]\ntheorem u17 (y : a) : Eq y y := rfl"),
+  ("vu/mixed", "variable (x : Nat)\nvariable {x} (n : Nat)\ndef u18 : PProd Nat Nat := PProd.mk x n"),
+  ("vu/twoBinders", "variable {x y : Nat}\nvariable (x) {y}"),
+  ("vu/instToImplicit", "variable (a : Type) [w : Wrap a]\nvariable {w}\ndef u21 (y : a) : a := @Wrap.wrap a w y"),
+  ("vu/omitThenUpdate", "variable (a : Type) [w : Wrap a]\nomit w\nvariable {w}\ntheorem u22 (y : a) : Eq y y := rfl"),
+  ("vu/updateThenUse", "variable (x : Nat)\nvariable {x}\ndef u23 : Nat := x\ndef u24 : Nat := u23"),
+  ("vu/instAnonUnaffected", "variable (a : Type) [Wrap a]\nvariable {a}\ntheorem u26 (y : a) : Eq y y := rfl"),
+  ("vu/omitInst", "variable (a : Type) (w : Wrap a)\nomit w\nvariable [w]\ntheorem u28 (y : a) : Eq y y := rfl"),
+  ("vu/order", "variable (x : Nat) (y : Nat)\nvariable {x}\ndef u30 : PProd Nat Nat := PProd.mk y x"),
+  ("vu/instTwice", "variable (a : Type) (w : Wrap a)\nvariable [w]\nvariable [w]"),
+  ("vu/strictToImplicit", "variable ⦃x : Nat⦄\nvariable {x}\ndef u31 : Nat := x"),
+  ("vu/seqInCmd", "variable (x : Nat)\nvariable {x} (x)\ndef u32 : Nat := x"),
+  ("vu/shadowRedundant", "variable {x : Nat}\nvariable (x : Nat)\nvariable {x}\ndef u33 : Nat := x"),
+  ("vu/instDownTheorem", "variable (a : Type) [w : Wrap a]\nvariable (w)\ntheorem u34 (y : a) : Eq y y := rfl"),
+  ("vu/updateDepInst", "variable (a : Type) [w : Wrap a]\nvariable {a}\ntheorem u35 (y : a) : Eq y y := rfl")
 ]
 
 /-- The first error-severity message `s` logged, from `messages` and the

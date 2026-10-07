@@ -233,7 +233,10 @@ fields, `universe`, level-name threading; (3) runner + `variable`;
 ## Out of scope (named seams or unchanged)
 
 - Auto-bound implicits everywhere: `— M4c-2c-ii`.
-- `variable {α}` binder-annotation update: `— later M4`.
+- `variable {α}` binder-annotation update: `— later M4`. (2026-10-07:
+  ported for typed variables, rows `vu/*`, corpus 437; a typeless binder
+  that declares a new variable still waits on the `expandBinderType`
+  hole.)
 - `unusedSectionVars` lint, `deprecated.oldSectionVars`, `set_option`.
 - Mutual / recursive declarations, `let rec` (the `toLift` part of
   `collectUsed`): unchanged seams.

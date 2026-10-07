@@ -61,7 +61,7 @@ pub(crate) struct BinderGroup {
 /// handled by `extract_binder_group`'s own `instBinder` branch (Task 3;
 /// it calls the shared `extract_inst_binder_layout` helper rather than
 /// walking that layout again here).
-fn binder_info_of(kind: &str) -> Option<BinderInfo> {
+pub(crate) fn binder_info_of(kind: &str) -> Option<BinderInfo> {
     match kind {
         "Lean.Parser.Term.explicitBinder" => Some(BinderInfo::Default),
         "Lean.Parser.Term.implicitBinder" => Some(BinderInfo::Implicit),
