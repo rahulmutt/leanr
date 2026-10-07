@@ -905,7 +905,30 @@ def fileQueries : List (String × String) := [
   ("abbrevNb/secVarAbbrev", "variable (n : Nat)\nabbrev nb17 := pick n n\ndef nb18 : Nat := nb17 Nat.zero"),
   ("abbrevNb/instArgExplicit", "abbrev W2 := Wrap\ndef nb19 (w : W2 Nat) : Nat := @useWrap Nat w Nat.zero"),
   ("abbrevNb/binderTypeUnify", "abbrev N2 := Nat\ndef nb20 (f : N2 -> Nat) : Nat := f Nat.zero"),
-  ("abbrevNb/abbrevProp", "abbrev Q := Eq Nat.zero Nat.zero\ndef nb21 (h : Q) : Eq Nat.zero Nat.zero := h")
+  ("abbrevNb/abbrevProp", "abbrev Q := Eq Nat.zero Nat.zero\ndef nb21 (h : Q) : Eq Nat.zero Nat.zero := h"),
+  -- worktree C: inferType rebuild of let/lambda telescopes
+  -- (`inferLambdaType`'s `mkForallFVars`, MkBinding.mkBinding: a binder's
+  -- type/value is abstracted at its own depth, and an outer let used ONLY
+  -- by an inner binder's type/value is still kept)
+  ("inferLet/chain", "def lt2 : Nat := let T := Nat; let U := T; let y : U := Nat.zero; y"),
+  ("inferLet/chain3", "def c3 : Nat := let T := Nat; let U := T; let V := U; let y : V := Nat.zero; y"),
+  ("inferLet/chainFun", "def c13 : Nat := let T := Nat; let U := T; (fun (q : U) => q) Nat.zero"),
+  ("inferLet/lamT", "def c14 : Nat → Nat := let T := Nat; fun (q : T) => Nat.zero"),
+  ("inferLet/dropMid", "def c15 : (b : Type) → (a : Type) → a → a := fun (b : Type) (a : Type) => let L := Nat; fun (q : a) => q"),
+  ("inferLet/dropMidNat", "def c16 (b : Type) (a : Type) : a → a := let L := Nat; fun (q : a) => q"),
+  ("inferLet/chainNoUse", "def c4 : Nat := let T := Nat; let U := T; Nat.zero"),
+  ("inferLet/chainAscr", "def c5 : Nat := let T := Nat; let U := T; (Nat.zero : U)"),
+  ("inferLet/chainYT", "def c6 : Nat := let T := Nat; let U := T; let y : T := Nat.zero; y"),
+  ("inferLet/chainNoY", "def c7 : Nat := let T := Nat; let U := T; let y : U := Nat.zero; Nat.zero"),
+  ("inferLet/oneY", "def c8 : Nat := let T := Nat; let y : T := Nat.zero; y"),
+  ("inferLet/thm", "theorem c9 : Eq Nat.zero Nat.zero := let T := Nat; let U := T; let y : U := Nat.zero; rfl"),
+  ("inferLet/have", "def c10 : Nat := have T := Nat; have U := T; have y : U := Nat.zero; y"),
+  ("inferLet/typePos", "def c11 : (let T := Nat; let U := T; U) := Nat.zero"),
+  ("inferLet/chainUseU", "def c12 : Type := let T := Nat; let U := T; U"),
+  -- the same telescopes with the decl type inferred (no header type)
+  ("inferLet/noTypeChain", "def n10 := let T := Nat; let U := T; let y : U := Nat.zero; y"),
+  ("inferLet/noTypeLamT", "def n14 := let T := Nat; fun (q : T) => Nat.zero"),
+  ("inferLet/numChain", "def n7 : Nat := let T := Nat; let U := T; let y : U := 1; y")
 ]
 
 /-- The first error-severity message `s` logged, from `messages` and the
