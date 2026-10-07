@@ -165,18 +165,29 @@ fn resolve_against(
         Node::Const {
             name: Some(decl), ..
         } => {
-            let decl_str = render(elab, decl);
-            // `isInaccessiblePrivateName` / `privateToUserName`
-            // (`:2024-2027`): leanr models no private names.
-            if decl_str.starts_with("_private.") {
+            // `isInaccessiblePrivateName` (`:2024-2025`,
+            // `ResolveName.lean:278-292`): outside a `module`, a private
+            // name is accessible iff this file declared it.
+            let base = Some(elab.view.store);
+            let main = elab.resolve.main_module;
+            let st = elab.mctx.store_mut();
+            let user = crate::names::private_to_user_name(st, base, Some(decl))
+                .map_err(MetaError::from)?
+                .ok_or_else(|| ElabError::Internal("anonymous user name".into()))?;
+            if user != decl
+                && crate::names::mk_private_name(st, base, main, user).map_err(MetaError::from)?
+                    != decl
+            {
                 return Err(ElabError::UnsupportedSyntax(format!(
-                    "`.{id}` against the private type `{decl_str}` (`isInaccessiblePrivateName`, \
-                     App.lean:2024) — the slice that models private names"
+                    "`.{id}` against the imported private type `{}` (`isInaccessiblePrivateName`, \
+                     App.lean:2024) — later M4 (module system)",
+                    render(elab, decl)
                 )));
             }
-            // `fullName := declName ++ id` (`:2027`), one string
-            // component under `decl`'s own `NameId`.
-            let full = child_name(elab, decl, id)?;
+            // `fullName := privateToUserName declName ++ id` (`:2026-2027`),
+            // one string component under the user name's `NameId`.
+            let full = child_name(elab, user, id)?;
+            let decl_str = render(elab, user);
             // `resolveGlobalName Name.anonymous (← getOpenDecls) fullName
             // |>.filter (·.2.isEmpty)` (`:2029-2031`), then `mkConst` each
             // (`:2032-2033`). `candidates.mapM` keeps `resolveGlobalName`

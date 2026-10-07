@@ -97,24 +97,18 @@ fn mk_decl_name(
         (decl, short, ns)
     };
     check_if_shadowing_structure_field(elab, decl)?;
-    // `applyVisibility` (`:244-251`) → `checkNotAlreadyDeclared`
-    // (`:29-55`): no `private` (seamed), so only the first two checks.
-    let st = elab.mctx.store();
-    if elab.view.get(decl).is_some() {
-        return Err(ElabError::AlreadyDeclared(names::render(
-            st,
-            base,
-            Some(decl),
-        )));
-    }
-    if is_possibly_reserved(elab, decl) {
-        return Err(ElabError::UnsupportedSyntax(format!(
-            "possibly reserved name `{}` (isReservedName) — later M4",
-            names::render(st, base, Some(decl))
-        )));
-    }
+    // `applyVisibility` (`:244-251`): outside a `module`,
+    // `isInferredPublic` is `!private` (`:84-85`). Its `addProtected` is
+    // `CommandElab`'s, once the declaration is admitted.
+    let decl = if view.modifiers.private {
+        names::mk_private_name(elab.mctx.store_mut(), base, elab.resolve.main_module, decl)
+            .map_err(MetaError::from)?
+    } else {
+        decl
+    };
+    check_not_already_declared(elab, decl)?;
     // `:278-284`.
-    if !view.protected {
+    if !view.modifiers.protected {
         return Ok((decl, short));
     }
     let st = elab.mctx.store();
@@ -130,6 +124,47 @@ fn mk_decl_name(
         None if names::is_atomic(st, base, Some(short)) => Err(ElabError::ProtectedNotInNamespace),
         None => Ok((decl, short)),
     }
+}
+
+/// oracle: `checkNotAlreadyDeclared` (`DeclModifiers.lean:29-55`): a
+/// private declaration may not shadow a public one, nor a public one a
+/// private one, though their names differ. Messages print the user name
+/// (`privateToUserName?`).
+fn check_not_already_declared(elab: &mut TermElabM, decl: NameId) -> Result<(), ElabError> {
+    let base = Some(elab.view.store);
+    let main = elab.resolve.main_module;
+    let st = elab.mctx.store_mut();
+    let private = names::is_private(st, base, Some(decl));
+    let user = names::private_to_user_name(st, base, Some(decl))
+        .map_err(MetaError::from)?
+        .ok_or_else(|| ElabError::Internal("anonymous user name".into()))?;
+    let as_private = names::mk_private_name(st, base, main, decl).map_err(MetaError::from)?;
+    let st = elab.mctx.store();
+    let render = |n: NameId| names::render(st, base, Some(n));
+    // `:40-43`.
+    if elab.view.get(decl).is_some() {
+        return Err(if private {
+            ElabError::PrivateAlreadyDeclared(render(user))
+        } else {
+            ElabError::AlreadyDeclared(render(decl))
+        });
+    }
+    // `:45-46`.
+    if is_possibly_reserved(elab, user) || is_possibly_reserved(elab, as_private) {
+        return Err(ElabError::UnsupportedSyntax(format!(
+            "possibly reserved name `{}` (isReservedName) — later M4",
+            render(decl)
+        )));
+    }
+    // `:47-49`: for a private `decl` this is `decl` itself, checked above.
+    if elab.view.get(as_private).is_some() {
+        return Err(ElabError::PrivateCounterpartDeclared(render(decl)));
+    }
+    // `:50-55`.
+    if private && elab.view.get(user).is_some() {
+        return Err(ElabError::NonPrivateDeclared(render(user)));
+    }
+    Ok(())
 }
 
 /// oracle: `checkIfShadowingStructureField` (`DeclModifiers.lean:253-261`)

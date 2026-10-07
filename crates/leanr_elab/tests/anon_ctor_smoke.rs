@@ -101,8 +101,8 @@ fn eq_counts_fields_after_its_promoted_parameters() {
 }
 
 /// The oracle accepts a private constructor from its own module
-/// (`_private.Anon.0.PrivMk.mk`); leanr models no private names, so any
-/// `_private.` constructor is the crate-wide seam (spec § Architecture,
+/// (`_private.Anon.0.PrivMk.mk`); to leanr it is an IMPORTED private name, so
+/// it is the imported-private-names seam (spec § Architecture,
 /// step 5).
 #[test]
 fn private_constructor_is_the_private_names_seam() {

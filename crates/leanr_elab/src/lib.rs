@@ -133,8 +133,8 @@
 //!   `useImplicitLambda` produce). P3 SHIPPED generalized field
 //!   notation and P4 SHIPPED `pipeProj`/`dotIdent`/`namedPattern`
 //!   (`app/head.rs`, `app/dot_ident.rs`). Still deferred, each a named
-//!   seam: `choice` choice-node parsing, private field projections the slice that models private
-//!   names. The anonymous
+//!   seam: `choice` choice-node parsing, imported private field projections (module
+//!   system). The anonymous
 //!   constructor `⟨⟩` is elaborated by `builtin::anon_ctor` (M4b-4b); its
 //!   pattern position is left to the match slice.
 //! - **macro expansion** — `elab_term_core` expands through the

@@ -97,16 +97,21 @@ impl NameTables {
         self.protected.insert(n);
     }
 
-    /// oracle: `registerNamePrefixes` (`AddDecl.lean:54-66`). `n` must be
+    /// oracle: `registerNamePrefixes` (`AddDecl.lean:54-66`) over the
+    /// user name (`privateToUserName`, `:56`: a private name registers
+    /// the namespaces of the name it was declared as). `n` must be
     /// readable from `st` alone (a persistent name in the persistent
-    /// store). A last component starting with `_` registers nothing;
-    /// otherwise `go` registers each proper prefix while it is a
-    /// `isNamespaceName` (`:49-52`, a chain of string components).
-    /// `privateToUserName` is the identity: `private` is seamed.
-    pub fn register_name_prefixes(&mut self, st: &Store, n: NameId) {
+    /// store), which the user name is interned into. A last component
+    /// starting with `_` registers nothing; otherwise `go` registers each
+    /// proper prefix while it is a `isNamespaceName` (`:49-52`, a chain of
+    /// string components).
+    pub fn register_name_prefixes(&mut self, st: &mut Store, n: NameId) -> Result<(), KernelError> {
+        let Some(n) = private_to_user_name(st, None, Some(n))? else {
+            return Ok(());
+        };
         match last_str(st, None, n) {
             Some(s) if !s.starts_with('_') => {}
-            _ => return,
+            _ => return Ok(()),
         }
         let mut cur = n;
         // `go`: `.str p _ => if isNamespaceName p then go (register p) p`.
@@ -119,7 +124,90 @@ impl NameTables {
                 _ => break,
             }
         }
+        Ok(())
     }
+}
+
+/// oracle: `privateHeader` (`PrivateName.lean:27`).
+const PRIVATE_HEADER: &str = "_private";
+
+/// oracle: `isPrivateName` (`PrivateName.lean:32-35`): the root
+/// component is the string `_private`.
+pub(crate) fn is_private(st: &Store, base: Option<&Store>, n: Option<NameId>) -> bool {
+    let mut cur = n;
+    while let Some(c) = cur {
+        match *st.name_row(base, c) {
+            NameRow::Str { parent: None, part } => return st.str_at(base, part) == PRIVATE_HEADER,
+            NameRow::Str { parent, .. } | NameRow::Num { parent, .. } => cur = parent,
+        }
+    }
+    false
+}
+
+/// oracle: `isPrivatePrefix` (`PrivateName.lean:41-50`): `p.0` with `p` a
+/// chain of string components rooted at `_private`.
+fn is_private_prefix(st: &Store, base: Option<&Store>, n: NameId) -> bool {
+    let NameRow::Num { parent, part } = *st.name_row(base, n) else {
+        return false;
+    };
+    if !st.nat_at(base, part).is_zero() {
+        return false;
+    }
+    let mut cur = parent;
+    while let Some(c) = cur {
+        match *st.name_row(base, c) {
+            NameRow::Str { parent: None, part } => return st.str_at(base, part) == PRIVATE_HEADER,
+            NameRow::Str { parent, .. } => cur = parent,
+            NameRow::Num { .. } => return false,
+        }
+    }
+    false
+}
+
+/// oracle: `privateToUserName` (`PrivateName.lean:52-64`): a private
+/// name's components below its private prefix; any other name itself.
+pub(crate) fn private_to_user_name(
+    st: &mut Store,
+    base: Option<&Store>,
+    n: Option<NameId>,
+) -> Result<Option<NameId>, KernelError> {
+    if !is_private(st, base, n) {
+        return Ok(n);
+    }
+    // `privateToUserNameAux`: rebuild every component above the first
+    // (innermost-out) private prefix; a name with none is anonymous.
+    let mut rows = Vec::new();
+    let mut cur = n;
+    while let Some(c) = cur {
+        if is_private_prefix(st, base, c) {
+            break;
+        }
+        let row = *st.name_row(base, c);
+        rows.push(row);
+        cur = parent(st, base, c);
+    }
+    let mut out = None;
+    for row in rows.into_iter().rev() {
+        out = Some(push_row(st, base, out, row)?);
+    }
+    Ok(out)
+}
+
+/// oracle: `mkPrivateName` (`Modifiers.lean:23-26`) →
+/// `mkPrivateNameCore` (`PrivateName.lean:29-30`):
+/// `.num (_private ++ mainModule) 0 ++ privateToUserName n`.
+pub(crate) fn mk_private_name(
+    st: &mut Store,
+    base: Option<&Store>,
+    main_module: Option<NameId>,
+    n: NameId,
+) -> Result<NameId, KernelError> {
+    let header = mk_atomic(st, base, PRIVATE_HEADER)?;
+    let pre = append(st, base, Some(header), main_module)?;
+    let zero = st.intern_nat(base, &leanr_kernel::Nat::from(0u64))?;
+    let pre = st.name_num(base, pre, zero)?;
+    let user = private_to_user_name(st, base, Some(n))?;
+    Ok(append(st, base, Some(pre), user)?.expect("the private prefix is non-anonymous"))
 }
 
 /// oracle: `isNamespaceName` (`AddDecl.lean:49-52`): a non-anonymous
@@ -307,6 +395,17 @@ pub(crate) fn mk_atomic(
     st.name_str(base, None, sid)
 }
 
+/// A constant's name as `MessageData.ofConstName` prints it: a private
+/// name shows its user name.
+pub(crate) fn render_const(
+    st: &mut Store,
+    base: Option<&Store>,
+    n: NameId,
+) -> Result<String, KernelError> {
+    let user = private_to_user_name(st, base, Some(n))?;
+    Ok(render(st, base, user))
+}
+
 /// The name as Lean prints it; `[anonymous]` for `None`.
 pub(crate) fn render(st: &Store, base: Option<&Store>, n: Option<NameId>) -> String {
     match n {
@@ -341,16 +440,65 @@ mod tests {
         let abf = mk(&mut st, "A.B.f");
         let proof = mk(&mut st, "A._proof_1");
         let mut t = NameTables::default();
-        t.register_name_prefixes(&st, abf);
+        t.register_name_prefixes(&mut st, abf).unwrap();
         assert!(t.is_namespace(Some(ab)));
         assert!(t.is_namespace(Some(a)));
         assert!(!t.is_namespace(Some(abf)));
         assert!(!t.is_namespace(None));
 
         let mut t = NameTables::default();
-        t.register_name_prefixes(&st, proof);
+        t.register_name_prefixes(&mut st, proof).unwrap();
         assert!(!t.is_namespace(Some(a)));
         assert!(!t.is_namespace(Some(proof)));
+
+        // `:56`: a private name registers its user name's prefixes, never
+        // the private prefix's.
+        let priv_abf = mk_private_name(&mut st, None, None, abf).unwrap();
+        let mut t = NameTables::default();
+        t.register_name_prefixes(&mut st, priv_abf).unwrap();
+        assert!(t.is_namespace(Some(ab)));
+        assert!(t.is_namespace(Some(a)));
+        let header = mk(&mut st, "_private");
+        assert!(!t.is_namespace(Some(header)));
+    }
+
+    /// `PrivateName.lean`/`Modifiers.lean:23-26`: with an anonymous main
+    /// module `A.f` is `_private.0.A.f`; `mkPrivateName` of a private name
+    /// re-roots its user name; `privateToUserName` inverts it and is the
+    /// identity elsewhere.
+    #[test]
+    fn private_names_round_trip() {
+        let mut st = Store::persistent();
+        let af = mk(&mut st, "A.f");
+        let p = mk_private_name(&mut st, None, None, af).unwrap();
+        assert_eq!(render(&st, None, Some(p)), "_private.0.A.f");
+        assert!(is_private(&st, None, Some(p)));
+        assert!(!is_private(&st, None, Some(af)));
+        assert!(!is_private(&st, None, None));
+        assert_eq!(
+            private_to_user_name(&mut st, None, Some(p)).unwrap(),
+            Some(af)
+        );
+        assert_eq!(
+            private_to_user_name(&mut st, None, Some(af)).unwrap(),
+            Some(af)
+        );
+        assert_eq!(mk_private_name(&mut st, None, None, p).unwrap(), p);
+        // A named main module: `_private.M.N.0.A.f`, still invertible.
+        let mn = mk(&mut st, "M.N");
+        let q = mk_private_name(&mut st, None, Some(mn), p).unwrap();
+        assert_eq!(render(&st, None, Some(q)), "_private.M.N.0.A.f");
+        assert_eq!(
+            private_to_user_name(&mut st, None, Some(q)).unwrap(),
+            Some(af)
+        );
+        // A bare `_private.x` (no `.0`) is private with no prefix to strip.
+        let bare = mk(&mut st, "_private.x");
+        assert!(is_private(&st, None, Some(bare)));
+        assert_eq!(
+            private_to_user_name(&mut st, None, Some(bare)).unwrap(),
+            Some(bare)
+        );
     }
 
     /// `addAliasEntry` (`ResolveName.lean:63-66`) prepends a new target and

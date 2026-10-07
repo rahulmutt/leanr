@@ -92,7 +92,7 @@ pub(crate) fn is_valid_auto_bound_level_name(s: &str, relaxed: bool) -> bool {
 
 /// oracle: `elabAppFnId`'s `throwUnknownIdWithSuggestions`
 /// (`App.lean:1960-1974`). The `isExporting` private-name hint is not
-/// modelled (no private names — later M4). `allowed` reads
+/// modelled (leanr never exports: module system, later M4). `allowed` reads
 /// `options.auto_implicit`, as the oracle reads `autoImplicit.get`; inside
 /// a context that equals its `enabled`.
 ///

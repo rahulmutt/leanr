@@ -17,8 +17,11 @@
 //! `app::overload`). `resolve_namespace` is `ResolveName.resolveNamespace`
 //! (what `open`/`namespace` resolve against).
 //!
-//! **Not ported.** `resolvePrivateName`
-//! (unreachable: no module header, `private` is seamed). Reserved-name
+//! Private declarations: `resolve_private_name` at the oracle's three
+//! call sites (qualified, exact, plain), outside a `module`.
+//!
+//! **Not ported.** `resolvePrivateName`'s `import all` search (no
+//! module system). Reserved-name
 //! realization (`containsDeclOrReserved` is `EnvView::get`;
 //! `realizeGlobalName`, e.g. `f.eq_1`, is not realized). Macro scopes
 //! (leanr names carry none, so `extractMacroScopes` is the identity).
@@ -37,7 +40,8 @@ use leanr_kernel::EnvView;
 use crate::elab::TermElabM;
 use crate::error::ElabError;
 use crate::names::{
-    append, is_atomic, is_prefix_of, is_suffix_of, mk_atomic, parent, replace_prefix, NameTables,
+    append, is_atomic, is_prefix_of, is_suffix_of, mk_atomic, mk_private_name, parent,
+    private_to_user_name, replace_prefix, NameTables,
 };
 
 /// oracle: `OpenDecl` (`Lean/Data/OpenDecl.lean:17-20`).
@@ -70,6 +74,9 @@ pub struct ResolveCtx<'a> {
     pub open_decls: Rc<[OpenDecl]>,
     pub tables: &'a NameTables,
     pub aux_decl: Option<AuxDecl>,
+    /// `env.mainModule`: the module whose private names
+    /// `resolvePrivateName` looks up (`CommandElab`'s `main_module`).
+    pub main_module: Option<NameId>,
 }
 
 impl ResolveCtx<'static> {
@@ -81,6 +88,7 @@ impl ResolveCtx<'static> {
             open_decls: Rc::from([]),
             tables: NameTables::empty(),
             aux_decl: None,
+            main_module: None,
         }
     }
 }
@@ -169,8 +177,9 @@ pub(crate) fn resolve_global_name_at_root(
 }
 
 /// oracle: `matchAuxRecDecl?` (`ResolveName.lean:497-548`) for the
-/// declaration being defined. leanr names carry no macro scopes and no
-/// private prefix (`private` is seamed), so the views are the names.
+/// declaration being defined, the full name's private prefix stripped
+/// (`:499-500`). leanr names carry no macro scopes, so the views are the
+/// names.
 /// When the current namespace is a prefix of the full name, the relaxed
 /// match: the aux local's name is a suffix of the given name, which is a
 /// suffix of the full name. Otherwise `go`: the given name under the
@@ -183,14 +192,17 @@ fn match_aux_rec_decl(
     let base = Some(elab.view.store);
     let ns = elab.resolve.ns;
     let st = elab.mctx.store_mut();
-    if is_prefix_of(st, base, ns, Some(aux.full)) {
+    // `:499-500`: the private prefix is cleaned up first.
+    let full =
+        private_to_user_name(st, base, Some(aux.full)).map_err(leanr_meta::MetaError::from)?;
+    if is_prefix_of(st, base, ns, full) {
         return Ok(is_suffix_of(st, base, Some(aux.short), Some(given))
-            && is_suffix_of(st, base, Some(given), Some(aux.full)));
+            && is_suffix_of(st, base, Some(given), full));
     }
     let mut cur = ns;
     loop {
         let cand = append(st, base, cur, Some(given)).map_err(leanr_meta::MetaError::from)?;
-        if cand == Some(aux.full) {
+        if cand == full {
             return Ok(true);
         }
         match cur {
@@ -225,11 +237,15 @@ pub fn resolve_global_name(
         // `match resolveUsingNamespace … with | resolvedIds@(_ :: _) => …`.
         let mut found = resolve_using_namespace(st, view, rc, id, rc.ns)?;
         if found.is_empty() {
-            if let Some(exact) = resolve_exact(st, view, id)? {
+            if let Some(exact) = resolve_exact(st, view, rc, id)? {
                 return Ok(vec![(exact, projs)]);
             }
             if view.get(id).is_some() {
                 found.push(id);
+            }
+            // `:209`: the private `id` goes in front.
+            if let Some(p) = resolve_private_name(st, view, rc, id)? {
+                found.insert(0, p);
             }
             found = resolve_open_decls(st, view, rc, id, found)?;
             let mut al = rc
@@ -267,10 +283,32 @@ fn resolve_qualified_name(
         .expect("`ns ++ id` with `id` non-anonymous is non-anonymous");
     let atomic = is_atomic(st, base, Some(id));
     let mut out = rc.tables.get_aliases(resolved, atomic);
-    if (!atomic || !rc.tables.is_protected(resolved)) && view.get(resolved).is_some() {
-        out.insert(0, resolved);
+    // The protected test reads the PUBLIC `ns ++ id` while `addProtected`
+    // tagged the private name, so a `private protected` declaration
+    // resolves by its atomic name (oracle quirk, probed).
+    if !atomic || !rc.tables.is_protected(resolved) {
+        if view.get(resolved).is_some() {
+            out.insert(0, resolved);
+        } else if let Some(p) = resolve_private_name(st, view, rc, resolved)? {
+            out.insert(0, p);
+        }
     }
     Ok(out)
+}
+
+/// oracle: `resolvePrivateName` (`ResolveName.lean:118-131`) outside a
+/// `module` (no `import all`) and not exporting: `mkPrivateName declName`
+/// if declared (`containsDeclOrReserved` is `EnvView::get`, as elsewhere
+/// here).
+fn resolve_private_name(
+    st: &mut Store,
+    view: &EnvView,
+    rc: &ResolveCtx,
+    decl: NameId,
+) -> Result<Option<NameId>, ElabError> {
+    let p = mk_private_name(st, Some(view.store), rc.main_module, decl)
+        .map_err(leanr_meta::MetaError::from)?;
+    Ok(view.get(p).is_some().then_some(p))
 }
 
 /// oracle: `resolveUsingNamespace` (`ResolveName.lean:146-151`): `ns` and
@@ -305,16 +343,28 @@ fn root_namespace(st: &mut Store, view: &EnvView) -> Result<NameId, ElabError> {
 }
 
 /// oracle: `resolveExact` (`ResolveName.lean:154-162`): for a non-atomic
-/// `id` only, `id` with a leading `_root_` dropped, if declared.
-fn resolve_exact(st: &mut Store, view: &EnvView, id: NameId) -> Result<Option<NameId>, ElabError> {
+/// `id` only, `id` with a leading `_root_` dropped, if declared, else its
+/// private name (so `_root_.p` reaches a private `p`).
+fn resolve_exact(
+    st: &mut Store,
+    view: &EnvView,
+    rc: &ResolveCtx,
+    id: NameId,
+) -> Result<Option<NameId>, ElabError> {
     let base = Some(view.store);
     if is_atomic(st, base, Some(id)) {
         return Ok(None);
     }
     let root = root_namespace(st, view)?;
-    let resolved = replace_prefix(st, base, Some(id), Some(root), None)
-        .map_err(leanr_meta::MetaError::from)?;
-    Ok(resolved.filter(|&r| view.get(r).is_some()))
+    let Some(resolved) = replace_prefix(st, base, Some(id), Some(root), None)
+        .map_err(leanr_meta::MetaError::from)?
+    else {
+        return Ok(None);
+    };
+    if view.get(resolved).is_some() {
+        return Ok(Some(resolved));
+    }
+    resolve_private_name(st, view, rc, resolved)
 }
 
 /// oracle: `resolveOpenDecls` (`ResolveName.lean:165-185`), each hit
@@ -482,6 +532,7 @@ mod tests {
             open_decls: open.into(),
             tables: t,
             aux_decl: None,
+            main_module: None,
         }
     }
 

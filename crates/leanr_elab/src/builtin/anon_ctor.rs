@@ -110,12 +110,13 @@ pub(crate) fn elab_anon_ctor(
         }
     };
     let ctor_name = render(elab, ctor);
-    // `:61-62` `isInaccessiblePrivateName`: leanr models no private
-    // names (the same seam as `app/lval.rs` and `app/dot_ident.rs`).
+    // `:61-62` `isInaccessiblePrivateName`: a private constructor is
+    // imported (leanr declares no structures), and accessibility of
+    // imported private names is the module system's.
     if ctor_name.starts_with("_private.") {
         return Err(ElabError::UnsupportedSyntax(format!(
             "`⟨…⟩` with the private constructor `{ctor_name}` (`isInaccessiblePrivateName`, \
-             BuiltinNotation.lean:61) — the slice that models private names"
+             BuiltinNotation.lean:61) — later M4 (imported private names)"
         )));
     }
     // `:63` `getConstInfoCtor`.

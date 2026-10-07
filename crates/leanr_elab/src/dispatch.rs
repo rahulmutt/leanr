@@ -182,7 +182,7 @@ pub fn elaborator_name_for(kind: &str) -> Option<&'static str> {
 ///   Term.pipeProj / dotIdent / namedPattern .... P4 SHIPPED (M4b-4a) — app/head.rs, app/dot_ident.rs
 ///   generalized field notation (.const,
 ///     Function.f) .............................. P3 SHIPPED (M4b-4a) — lval.rs
-///   private field projections (no fixture) ..... the slice that models private names
+///   private field projections (no fixture) ..... later M4 (needs `structure` with private fields)
 ///   choice ..................................... choice-node parsing
 ///   elabAsElim / ElabElim ...................... M4b-4c SHIPPED — app/elim.rs
 ///   anonymous constructor ⟨⟩ (term position) ... M4b-4b SHIPPED — builtin/anon_ctor.rs; pattern position: the match slice

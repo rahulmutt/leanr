@@ -1532,7 +1532,10 @@ fn no_seam_points_at_a_retired_closeout_label() {
 fn declaration_seams_are_named_end_to_end() {
     let cases: &[(&str, &str)] = &[
         ("@[simp] def a : Nat := Nat.zero", "attributes"),
-        ("private def a : Nat := Nat.zero", "visibility modifier"),
+        // `private` and doc comments elaborate; `unsafe` stays seamed
+        // (the kernel admits no unsafe declarations).
+        ("unsafe def a : Nat := Nat.zero", "`unsafe`"),
+        ("public def a : Nat := Nat.zero", "`public`"),
         ("open scoped Nat", "`open scoped`"),
         ("def sr : Nat := sr", "recursive reference"),
         (

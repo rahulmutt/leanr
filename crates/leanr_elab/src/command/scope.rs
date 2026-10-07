@@ -138,6 +138,8 @@ pub(crate) struct OpenState<'a, 's> {
     pub(crate) tables: &'a NameTables,
     pub(crate) ns: Option<NameId>,
     pub(crate) open_decls: Vec<OpenDecl>,
+    /// `mainModule`, for `resolvePrivateName` (`ResolveCtx::main_module`).
+    pub(crate) main_module: Option<NameId>,
 }
 
 impl OpenState<'_, '_> {
@@ -168,6 +170,7 @@ impl OpenState<'_, '_> {
             open_decls: self.open_decls.as_slice().into(),
             tables: self.tables,
             aux_decl: None,
+            main_module: self.main_module,
         };
         let out = resolve_namespace(self.st, &self.view, &rc, id)?;
         if out.is_empty() {
@@ -204,6 +207,7 @@ impl OpenState<'_, '_> {
             open_decls: self.open_decls.as_slice().into(),
             tables: self.tables,
             aux_decl: None,
+            main_module: self.main_module,
         };
         let cands: Vec<NameId> = resolve_global_name(self.st, &self.view, &rc, &prefixes)?
             .into_iter()
@@ -500,6 +504,7 @@ impl CommandElab<'_> {
                 tables: &self.tables,
                 ns: head.curr_namespace,
                 open_decls: head.open_decls.clone(),
+                main_module: self.main_module,
             };
             elab_open_decl(&mut s, &decl, kinds)?;
             s.open_decls
