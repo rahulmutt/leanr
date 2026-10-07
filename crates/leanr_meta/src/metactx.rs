@@ -1435,6 +1435,50 @@ impl<'e> MetaCtx<'e> {
         self.mk_binding(true, true, fvars, body)
     }
 
+    /// oracle: `mkLambdaFVars xs e (usedLetOnly := false)
+    /// (generalizeNondepLet := false)` (`MetavarContext.lean:1312-1347`, the
+    /// ldecl arm `:1327-1336` with both flags off): a cdecl becomes `lam`,
+    /// and EVERY ldecl becomes `letE` with the decl's own `nondep` (a `have`
+    /// stays a `have`; an unused let is kept).
+    pub(crate) fn mk_lambda_let_fvars(
+        &mut self,
+        fvars: &[ExprId],
+        body: ExprId,
+    ) -> Result<ExprId, MetaError> {
+        let base = Some(self.view.store);
+        let body = self.elim_mvar_deps(fvars, body)?;
+        let mut r = abstract_fvars(self.scratch, base, body, fvars, &mut self.guard)?;
+        for i in (0..fvars.len()).rev() {
+            let Node::FVar { id: Some(id) } = self.node(fvars[i]) else {
+                return Err(MetaError::Infer(
+                    "mk_lambda_let_fvars: telescope entry is not an fvar".into(),
+                ));
+            };
+            let decl = self
+                .lctx
+                .get(id)
+                .ok_or_else(|| MetaError::Infer("mk_lambda_let_fvars: fvar not declared".into()))?;
+            let (name, ty, bi, value) = (decl.binder_name, decl.ty, decl.binder_info, decl.value);
+            let decl_ty = ty;
+            r = match value {
+                Some(v) => {
+                    let ty = abstract_fvars(self.scratch, base, ty, &fvars[..i], &mut self.guard)?;
+                    let v = abstract_fvars(self.scratch, base, v, &fvars[..i], &mut self.guard)?;
+                    let nondep = self.local_entry(id).is_some_and(|e| e.nondep);
+                    self.scratch.expr_let(base, name, ty, v, r, nondep)?
+                }
+                None => {
+                    // oracle `handleCDecl`'s `type.headBeta` (`:1319`); the
+                    // ldecl arm (`:1331-1334`) has none.
+                    let ty = self.head_beta(decl_ty)?;
+                    let ty = abstract_fvars(self.scratch, base, ty, &fvars[..i], &mut self.guard)?;
+                    self.scratch.expr_lam(base, name, ty, r, bi)?
+                }
+            };
+        }
+        Ok(r)
+    }
+
     /// oracle: `mkLetFVars #[fvar] body (usedLetOnly := false)
     /// (generalizeNondepLet := false)` — abstract `body` over the single
     /// let-bound `fvar` and wrap in `Expr.letE`, carrying `non_dep`
