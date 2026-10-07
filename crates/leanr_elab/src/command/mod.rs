@@ -28,7 +28,7 @@ mod axiom;
 mod def;
 pub(crate) mod header;
 mod levels;
-mod scope;
+pub(crate) mod scope;
 mod vars;
 pub(crate) mod view;
 
@@ -254,7 +254,7 @@ impl<'x> CommandElab<'x> {
             let head = self.scopes.last().expect("the root scope is never popped");
             elab.resolve = ResolveCtx {
                 ns: head.curr_namespace,
-                open_decls: &head.open_decls,
+                open_decls: head.open_decls.as_slice().into(),
                 tables: &self.tables,
                 aux_decl: None,
             };

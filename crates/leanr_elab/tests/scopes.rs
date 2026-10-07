@@ -317,9 +317,11 @@ fn deferred_scope_forms_are_named_seams() {
     for (src, needle) in [
         ("open scoped Scope0", "`open scoped`"),
         ("noncomputable section", "section modifier"),
+        // Term-level `open … in` is ported (`builtin::open`); its
+        // `scoped` form shares the command's seam.
         (
-            "def f : Nat := open Scope0 in shown",
-            "Lean.Parser.Term.open",
+            "def f : Nat := open scoped Scope0 in shown",
+            "`open scoped`",
         ),
     ] {
         let m = run(src).1.expect("stops").1;

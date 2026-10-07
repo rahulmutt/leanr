@@ -8,9 +8,9 @@
 mod support;
 
 /// `wc -l tests/fixtures/elab/file-queries.jsonl` at the last deliberate
-/// regen (`variable` binder-annotation update: 462). `>=`: adding a record is a one-line bump,
+/// regen (term-level `open … in`: 490). `>=`: adding a record is a one-line bump,
 /// not a failing gate.
-const CORPUS_FLOOR: usize = 462;
+const CORPUS_FLOOR: usize = 490;
 
 #[test]
 fn file_corpus_sources_parse_into_the_oracle_commands() {

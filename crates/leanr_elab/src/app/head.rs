@@ -829,7 +829,7 @@ mod tests {
         let mut elab = TermElabM::new(mctx, view);
         elab.resolve = crate::resolve::ResolveCtx {
             ns: None,
-            open_decls: &[],
+            open_decls: std::rc::Rc::from([]),
             tables: &tables,
             aux_decl: None,
         };

@@ -91,7 +91,7 @@ fn idents(el: Option<&SynElem>, kinds: &KindInterner) -> Result<Vec<Vec<String>>
         .collect()
 }
 
-fn node(el: Option<&SynElem>, what: &str) -> Result<SyntaxNode, ElabError> {
+pub(crate) fn node(el: Option<&SynElem>, what: &str) -> Result<SyntaxNode, ElabError> {
     match el {
         Some(NodeOrToken::Node(n)) => Ok(n.clone()),
         _ => Err(ill(what)),
@@ -128,29 +128,30 @@ fn prefixes_of(st: &Store, base: Option<&Store>, n: NameId) -> Vec<NameId> {
 }
 
 /// `elabOpenDecl`'s local resolution state (`Elab/Open.lean:28-36`,
-/// `StateRefT'.run'` at `:75`): a scratch store over the environment, the
-/// head scope's namespace and a LOCAL copy of its open declarations, so
-/// `open A B` resolves `B` with `A` already open.
-struct OpenState<'a> {
-    st: Store,
-    view: EnvView<'a>,
-    tables: &'a NameTables,
-    ns: Option<NameId>,
-    open_decls: Vec<OpenDecl>,
+/// `StateRefT'.run'` at `:75`): a store over the environment (the
+/// command's own scratch, or a term elaborator's), the current namespace
+/// and a LOCAL copy of the open declarations, so `open A B` resolves `B`
+/// with `A` already open.
+pub(crate) struct OpenState<'a, 's> {
+    pub(crate) st: &'s mut Store,
+    pub(crate) view: EnvView<'a>,
+    pub(crate) tables: &'a NameTables,
+    pub(crate) ns: Option<NameId>,
+    pub(crate) open_decls: Vec<OpenDecl>,
 }
 
-impl OpenState<'_> {
+impl OpenState<'_, '_> {
     fn base(&self) -> Option<&Store> {
         Some(self.view.store)
     }
 
     fn intern(&mut self, comps: &[String]) -> Result<NameId, ElabError> {
         let base = Some(self.view.store);
-        intern_onto(&mut self.st, base, None, comps)?.ok_or_else(|| ill("empty identifier"))
+        intern_onto(self.st, base, None, comps)?.ok_or_else(|| ill("empty identifier"))
     }
 
     fn render(&self, n: Option<NameId>) -> String {
-        names::render(&self.st, self.base(), n)
+        names::render(self.st, self.base(), n)
     }
 
     /// `addOpenDecl` (`Open.lean:45-46`): cons.
@@ -164,11 +165,11 @@ impl OpenState<'_> {
         let id = self.intern(comps)?;
         let rc = ResolveCtx {
             ns: self.ns,
-            open_decls: &self.open_decls,
+            open_decls: self.open_decls.as_slice().into(),
             tables: self.tables,
             aux_decl: None,
         };
-        let out = resolve_namespace(&mut self.st, &self.view, &rc, id)?;
+        let out = resolve_namespace(self.st, &self.view, &rc, id)?;
         if out.is_empty() {
             return Err(ElabError::UnknownNamespace(self.render(Some(id))));
         }
@@ -193,19 +194,18 @@ impl OpenState<'_> {
     /// components; none is `Unknown constant`, two or more ambiguous).
     fn resolve_id(&mut self, ns: Option<NameId>, id: &[String]) -> Result<NameId, ElabError> {
         let base = Some(self.view.store);
-        let decl =
-            intern_onto(&mut self.st, base, ns, id)?.ok_or_else(|| ill("empty identifier"))?;
+        let decl = intern_onto(self.st, base, ns, id)?.ok_or_else(|| ill("empty identifier"))?;
         if self.view.get(decl).is_some() {
             return Ok(decl);
         }
-        let prefixes = prefixes_of(&self.st, base, decl);
+        let prefixes = prefixes_of(self.st, base, decl);
         let rc = ResolveCtx {
             ns: self.ns,
-            open_decls: &self.open_decls,
+            open_decls: self.open_decls.as_slice().into(),
             tables: self.tables,
             aux_decl: None,
         };
-        let cands: Vec<NameId> = resolve_global_name(&mut self.st, &self.view, &rc, &prefixes)?
+        let cands: Vec<NameId> = resolve_global_name(self.st, &self.view, &rc, &prefixes)?
             .into_iter()
             .filter(|&(_, projs)| projs == 0)
             .map(|(c, _)| c)
@@ -491,71 +491,18 @@ impl CommandElab<'_> {
         kinds: &KindInterner,
     ) -> Result<(), ElabError> {
         let decl = node(non_trivia_children(cmd).get(1), "openDecl")?;
-        let ch = non_trivia_children(&decl);
-        let (open_decls, st) = {
+        let mut st = Store::scratch();
+        let open_decls = {
             let head = self.head();
             let mut s = OpenState {
-                st: Store::scratch(),
+                st: &mut st,
                 view: self.env.view(),
                 tables: &self.tables,
                 ns: head.curr_namespace,
                 open_decls: head.open_decls.clone(),
             };
-            match kinds.name(decl.kind()) {
-                // `$nss*` (`:77-83`).
-                "Lean.Parser.Command.openSimple" => {
-                    for ns in idents(ch.first(), kinds)? {
-                        for r in s.resolve_namespace(&ns)? {
-                            s.add_open_decl(OpenDecl::Simple {
-                                ns: r,
-                                except: Vec::new(),
-                            });
-                        }
-                    }
-                }
-                // `$ns ($ids*)` (`:90-97`).
-                "Lean.Parser.Command.openOnly" => {
-                    let nss = s.resolve_namespace(&ident(ch.first(), kinds)?)?;
-                    for id in idents(ch.get(2), kinds)? {
-                        let decl = s.resolve_name_using_namespaces(&nss, &id)?;
-                        let id = s.intern(&id)?;
-                        s.add_open_decl(OpenDecl::Explicit { id, decl });
-                    }
-                }
-                // `$ns hiding $ids*` (`:98-107`).
-                "Lean.Parser.Command.openHiding" => {
-                    let ns = s.resolve_unique_namespace(&ident(ch.first(), kinds)?)?;
-                    let mut except = Vec::new();
-                    for id in idents(ch.get(2), kinds)? {
-                        s.resolve_id(ns, &id)?;
-                        except.push(s.intern(&id)?);
-                    }
-                    s.add_open_decl(OpenDecl::Simple { ns, except });
-                }
-                // `$ns renaming $[$froms → $tos],*` (`:108-116`).
-                "Lean.Parser.Command.openRenaming" => {
-                    let ns = s.resolve_unique_namespace(&ident(ch.first(), kinds)?)?;
-                    let items = node(ch.get(2), "renaming items")?;
-                    for item in non_trivia_children(&items) {
-                        let NodeOrToken::Node(item) = item else {
-                            continue; // `,`
-                        };
-                        let parts = non_trivia_children(&item);
-                        let from = ident(parts.first(), kinds)?;
-                        let to = ident(parts.get(2), kinds)?;
-                        let decl = s.resolve_id(ns, &from)?;
-                        let id = s.intern(&to)?;
-                        s.add_open_decl(OpenDecl::Explicit { id, decl });
-                    }
-                }
-                "Lean.Parser.Command.openScoped" => {
-                    return Err(ElabError::UnsupportedSyntax(
-                        "`open scoped` (scoped extensions) — later M4".into(),
-                    ))
-                }
-                other => return Err(ill(&format!("openDecl kind {other}"))),
-            }
-            (s.open_decls, s.st)
+            elab_open_decl(&mut s, &decl, kinds)?;
+            s.open_decls
         };
         // Promote every name the scope keeps into the persistent store.
         let base = self.env.store_mut();
@@ -630,6 +577,75 @@ const OPEN_RESOLVE_ID_SEAM: &str = "delab name rendering";
 /// standing for an oracle `throwError` that `Open.lean:62`'s catch takes.
 fn is_open_resolve_id_seam(e: &ElabError) -> bool {
     matches!(e, ElabError::UnsupportedSyntax(m) if m.contains("ensureNoOverload") && m.ends_with(OPEN_RESOLVE_ID_SEAM))
+}
+
+/// oracle: `elabOpenDecl` (`Open.lean:74-118`), shared by the command
+/// (`CommandElab::elab_open`) and the term-level `open … in`
+/// (`builtin::open`, oracle `elabOpen`, `BuiltinTerm.lean:400-408`): grows
+/// `s.open_decls` from `openDecl`'s children. `s` starts from the current
+/// namespace and open declarations, as the oracle's `StateRefT'.run'`
+/// does (`:75`).
+pub(crate) fn elab_open_decl(
+    s: &mut OpenState,
+    decl: &SyntaxNode,
+    kinds: &KindInterner,
+) -> Result<(), ElabError> {
+    let ch = non_trivia_children(decl);
+    match kinds.name(decl.kind()) {
+        // `$nss*` (`:77-83`).
+        "Lean.Parser.Command.openSimple" => {
+            for ns in idents(ch.first(), kinds)? {
+                for r in s.resolve_namespace(&ns)? {
+                    s.add_open_decl(OpenDecl::Simple {
+                        ns: r,
+                        except: Vec::new(),
+                    });
+                }
+            }
+        }
+        // `$ns ($ids*)` (`:90-97`).
+        "Lean.Parser.Command.openOnly" => {
+            let nss = s.resolve_namespace(&ident(ch.first(), kinds)?)?;
+            for id in idents(ch.get(2), kinds)? {
+                let decl = s.resolve_name_using_namespaces(&nss, &id)?;
+                let id = s.intern(&id)?;
+                s.add_open_decl(OpenDecl::Explicit { id, decl });
+            }
+        }
+        // `$ns hiding $ids*` (`:98-107`).
+        "Lean.Parser.Command.openHiding" => {
+            let ns = s.resolve_unique_namespace(&ident(ch.first(), kinds)?)?;
+            let mut except = Vec::new();
+            for id in idents(ch.get(2), kinds)? {
+                s.resolve_id(ns, &id)?;
+                except.push(s.intern(&id)?);
+            }
+            s.add_open_decl(OpenDecl::Simple { ns, except });
+        }
+        // `$ns renaming $[$froms → $tos],*` (`:108-116`).
+        "Lean.Parser.Command.openRenaming" => {
+            let ns = s.resolve_unique_namespace(&ident(ch.first(), kinds)?)?;
+            let items = node(ch.get(2), "renaming items")?;
+            for item in non_trivia_children(&items) {
+                let NodeOrToken::Node(item) = item else {
+                    continue; // `,`
+                };
+                let parts = non_trivia_children(&item);
+                let from = ident(parts.first(), kinds)?;
+                let to = ident(parts.get(2), kinds)?;
+                let decl = s.resolve_id(ns, &from)?;
+                let id = s.intern(&to)?;
+                s.add_open_decl(OpenDecl::Explicit { id, decl });
+            }
+        }
+        "Lean.Parser.Command.openScoped" => {
+            return Err(ElabError::UnsupportedSyntax(
+                "`open scoped` (scoped extensions) — later M4".into(),
+            ))
+        }
+        other => return Err(ill(&format!("openDecl kind {other}"))),
+    }
+    Ok(())
 }
 
 #[cfg(test)]
