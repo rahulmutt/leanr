@@ -22,7 +22,8 @@
 //!   `foo._proof_k n`). The oracle has already `addDecl`ed the aux, so it
 //!   succeeds; here the unknown-constant error naming a pending aux is
 //!   mapped to a named `Unsupported` until a pending-constant overlay
-//!   lands.
+//!   lands. Two callers now hit it: this pass and `let_to_have`
+//!   (`LetToHave.lean:201-208`, check mode on `d._proof_N`).
 //!
 //! Not modeled: private names. `mkUniqueName`'s `isConflict` also checks the
 //! private/public twin of each candidate (`CoreM.lean:117-120`), and `curr`

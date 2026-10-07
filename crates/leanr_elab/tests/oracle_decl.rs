@@ -85,8 +85,8 @@ fn let_and_have_in_a_value_are_admitted() {
 /// by letToHave's `visitConst` (`LetToHave.lean:201-208`) while still
 /// pending: the M4c-1 pending-constant seam. Oracle (probed 2026-10-07):
 /// d28 → value `have`, d29 → `have`, d30 → `let`. Also the order pin: with
-/// letToHave BEFORE abstractNestedProofs, d29 elaborates (no pending
-/// lookup) instead of seaming.
+/// letToHave BEFORE abstractNestedProofs, d28 is the first to return Ok
+/// (no pending lookup) instead of seaming.
 #[test]
 fn a_proof_abstracted_under_a_let_is_the_pending_constant_seam() {
     for src in [

@@ -442,3 +442,4 @@ Final review fixes (`.superpowers/sdd/2026-10-03-m4c1-p2-command-elab/final-find
 - C3: the `auxLemmasExt` seam above (`CommandElab::aux_admitted`).
 - I4: `elab_decl` labels any unlabelled term/binder seam ` — later M4` (`command::label_seam`).
 - M5/M6: `push_binder_group`'s doc restored; `_root_x` is admitted (only `_root_` or a `_root_.` prefix seams).
+- `letToHave` seam CLOSED (letToHaveType/Value ported, PR "port Meta.letToHave"): see docs/superpowers/specs/2026-10-07-let-to-have-design.md § Landed.

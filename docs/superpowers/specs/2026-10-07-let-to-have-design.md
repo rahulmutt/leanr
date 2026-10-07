@@ -230,3 +230,54 @@ reading the flag inverted; the type pass on axioms; both header-pass sites
   buildable, record it as a seam.
 - **Performance:** the pass re-infers types under a fresh cache. That is
   acceptable at corpus scale; note it for M4 Mathlib slices.
+
+## Plan amendments
+
+Plan-time findings (docs/superpowers/plans/2026-10-07-let-to-have.md, lines 30-57) that override this spec:
+
+1. `abstractNestedProofs` returned `Unsupported` on every `letE`; Task 3 ports the oracle's `letE` arm (`lambdaLetTelescope`, per-binder visit, `mkLambdaFVars (usedLetOnly := false)`).
+2. After abstraction, check mode reaches `visitConst` on a still-pending `d._proof_N`: the pending-constant seam. `auxProofLet*` rows (oracle H, H, L) became seam unit tests, not corpus rows. `auxProofLetDep` also kills the "letToHave before abstraction" mutation.
+3. Zeta-delta records are backtrackable (`SavedState.restore`, `Meta/Basic.lean:596`) but survive `withNewMCtxDepth` (`:1974-1980`).
+4. The fresh-cache scope is equivalent in leanr (every cached entry is fvar-free; top-level `is_def_eq` clears the defeq caches). It is ported for fidelity.
+5. The async theorem header pass is unobservable (`check_async_signature` returns only level params); it is not ported.
+6. Audit result: no fixes beyond the whnf easy-cases FVar record. The oracle records in exactly `WHNF.lean:408` and `LetToHave.lean:164-181`.
+7. Corpus is 42 `lth/*` rows (3 pending seams and `auxProofNoLet` excluded; `lth/instance` dropped).
+
+Execution amendments:
+
+- The plan's `mk_lambda_let_fvars` omitted the oracle's head-beta of cdecl binder types (`MetavarContext.lean:1319`); fixed in 25950d1.
+- Review found the let-binder visit order was types-then-values; the oracle interleaves per binder (`AbstractNestedProofs.lean:77-89`). It is now interleaved, which matters for `_proof_N` numbering (1cc6b49).
+- `visitProj` is ported step by step (3403d2a).
+- Telescope lets are pushed without `isClass?`. leanr keeps the outer local instances where the oracle clears them: a documented narrowing (3403d2a).
+- T4h was first recorded as equivalent. It is NOT: a prefix-cache hit on a delayed `?m` makes the `visitDepExpr` args path load-bearing; a new test pins it (3403d2a).
+- Corpus floor 490 -> 532 (bb1e98b, 886c643).
+- Executed order: T2, T3, T4, then T1, T5, T6, because A, C and B had to merge first.
+
+## Landed
+
+Commits (branch d-let-to-have): ba40d09 (T2 zeta-delta tracking), 25950d1 + 1cc6b49 (T3 abstractNestedProofs letE arm), 3403d2a (T4 `let_to_have` port), bb1e98b + 886c643 (T1 42 `lth/*` rows, floor 490 -> 532), a0b796a (T5 wired into `def.rs`/`axiom.rs`; all 42 rows green), then this close-out.
+
+Mutations (run, reverted; details in each commit body):
+
+| Task | Mutation | Outcome |
+|---|---|---|
+| T2 | a drop insert, b record before nondep filter, c snapshot without set, d drop mctx-depth carve-out, f unrestored flag | killed (`tracking_*`, `a_failed_def_eq_*`, `new_mctx_depth_*`) |
+| T2 | e skip fresh cache | killed by cache assertion only; record behaviour equivalent (finding 4) |
+| T3 | a mk_lambda rebuild, b drop unused let, d drop cdecl headBeta | killed |
+| T3 | c skip let-value visit | survived at T3; killed in T5 by `lth/auxProofInLetValue` |
+| T4 | a, b, c, e, f, g, h, i, j, k, l | killed (see 3403d2a) |
+| T4 | d `check()` always true | killed only via the ill-typed cache probe; equivalent on well-typed input |
+| T5 | a, b, c, d, e, f, h, i, j, k | killed (rows or unit tests; see a0b796a) |
+| T5 | g type+value pass on example | equivalent (examples are only kernel-checked, never abstract) |
+
+T5b's literal "drop Theorem from the kind gate" is equivalent (`pushMain` already rejects non-Prop theorem types). T5h is killed only by the oracle_decl seam test (d28 is the first to return Ok), no file row.
+
+Open seams:
+
+- pending-constant overlay (d28/d29/d30 raise the seam; `abstract_proofs.rs` and `let_to_have.rs` are its two callers);
+- `cleanup.letToHave` as an option (`set_option` seam);
+- `zetaDeltaSet` / `isImplementationDetail` in whnf (no elab producer);
+- the `instance` command is unported (`lth/instance`);
+- `unsafe` stays seamed at `view.rs`;
+- `etaStruct := .all` is not modelled in `with_infer_type_config`;
+- `cleanupAnnotations` stripping is untested.
