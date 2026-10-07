@@ -8,7 +8,7 @@
 mod support;
 
 /// `wc -l tests/fixtures/elab/file-queries.jsonl` at the last deliberate
-/// regen (term-level `open … in`: 490). `>=`: adding a record is a one-line bump,
+/// regen (letToHave: 490 + 42 = 532). `>=`: adding a record is a one-line bump,
 /// not a failing gate.
 const CORPUS_FLOOR: usize = 532;
 
