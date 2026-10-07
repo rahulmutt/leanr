@@ -678,7 +678,23 @@ def fileQueries : List (String × String) := [
   ("varAuto/rebuildNamedAuto", "variable (h : Eq a a)\ntheorem va59 (k : Eq h h) : True := True.intro\nexample : True := va59 (a := Nat.zero) rfl rfl"),
   ("varAuto/rebuildSectionEnd", "section\nvariable (h : Eq a a)\nend\nvariable (n : Nat)\ninclude n\ntheorem va61 : True := True.intro"),
   ("varAuto/rebuildHeaderAlpha", "variable (h : Eq a a)\ndef va62 (x : α) : α := x"),
-  ("varAuto/rebuildHeaderAlphaThm", "variable (h : Eq a a)\ntheorem va63 (x : α) (k : Eq h h) : Eq x x := rfl")
+  ("varAuto/rebuildHeaderAlphaThm", "variable (h : Eq a a)\ntheorem va63 (x : α) (k : Eq h h) : Eq x x := rfl"),
+  -- Meta's `Level.normalize` (Level.lean:382, pure Lean) is not the kernel's
+  -- (level.cpp:439): left-nested `accMax` rebuild, `ctorToNat` order
+  -- (param < imax), and `Name.lt`. `Eq`'s level is unified while PProd.mk's
+  -- level mvars are still open (eqMk*), or after they are assigned (eqFVar*,
+  -- nest3, imaxOrder, ...), and both paths go through isLevelDefEqAux's normalize.
+  ("lvl/eqMk", "axiom lv1 {α : Sort u} {β : Type} (x : α) (b : β) : Eq (PProd.mk x b) (PProd.mk x b)"),
+  ("lvl/eqMkThm", "theorem lv2 {α : Sort u} {β : Type} (x : α) (b : β) : Eq (PProd.mk x b) (PProd.mk x b) := rfl"),
+  ("lvl/eqMkDef", "def lv3 {α : Sort u} {β : Type} (x : α) (b : β) : Eq (PProd.mk x b) (PProd.mk x b) := rfl"),
+  ("lvl/eqMkHole", "theorem lv4 {α : Sort _} {β : Type} (x : α) (b : β) : Eq (PProd.mk x b) (PProd.mk x b) := rfl"),
+  ("lvl/eqFVar", "axiom lv5 {α : Sort u} {β : Type} (p : PProd α β) : Eq p p"),
+  ("lvl/eqFVarRev", "axiom lv6 {α : Sort u} {β : Type} (p : PProd β α) : Eq p p"),
+  ("lvl/nest3", "axiom lv7 {α : Sort u} {β : Sort v} {γ : Sort w} (p : PProd α (PProd β γ)) : Eq p p"),
+  ("lvl/nest3Mk", "axiom lv8 {α : Sort u} {β : Sort v} {γ : Sort w} (x : α) (y : β) (z : γ) : Eq (PProd.mk x (PProd.mk y z)) (PProd.mk x (PProd.mk y z))"),
+  ("lvl/imaxOrder", "axiom lv9 {α : Sort u} {β : Sort v} (p : PProd (α → β) α) : Eq p p"),
+  ("lvl/succSubsumes", "axiom lv10 {α : Type u} (p : PProd α α) : Eq p p"),
+  ("lvl/paramOrder", "axiom lv11 {α : Sort v} {β : Sort u} (p : PProd α β) : Eq p p")
 ]
 
 /-- The first error-severity message `s` logged, from `messages` and the

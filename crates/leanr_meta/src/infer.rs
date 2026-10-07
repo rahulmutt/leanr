@@ -41,8 +41,7 @@
 use leanr_kernel::bank::terms::Node;
 use leanr_kernel::bank::{ExprId, LevelId, LevelsId, NameId};
 use leanr_kernel::{
-    abstract_fvars, instantiate, instantiate_level_params, instantiate_rev, ConstantInfo, Level,
-    Nat,
+    abstract_fvars, instantiate, instantiate_level_params, instantiate_rev, ConstantInfo, Nat,
 };
 
 use crate::{MVarId, MetaCtx, MetaError};
@@ -625,34 +624,16 @@ impl<'e> MetaCtx<'e> {
         )?;
         // oracle: `xs.foldrM (init := lvl) fun x lvl => .. mkLevelIMax'
         // xTypeLvl lvl` then `mkSort lvl.normalize` (InferType.lean:
-        // 181-185) — the fold via the SIMPLIFYING `mkLevelIMax'`
-        // (Level.lean:549-551, `mkLevelIMaxCore` :542-547), not plain
-        // interning, then a final `.normalize`.
-        //
-        // `Level::mk_imax_pair` (level.rs:273, citing kernel
-        // `level.cpp:112-121`) is the public primitive this crate can
-        // reach for the fold; it agrees with `mkLevelIMax'` on every
-        // branch (never-zero RHS ⇒ delegate to max; RHS zero ⇒ RHS;
-        // LHS zero ⇒ RHS; structurally equal ⇒ either) EXCEPT one extra
-        // case Lean's `mkLevelIMaxCore` does not have: `l1` is
-        // syntactically `1` (`is_one`, level.rs:284) also short-circuits
-        // to `l2`. Oracle wins where they'd diverge — but the final
-        // `Level::normalize` below (kernel `level.cpp:439-501`, which
-        // Lean's own `Level.normalize` used at :185 is bound to) rebuilds
-        // any `IMax` node's canonical form via `to_offset` and this SAME
-        // `mk_imax_pair` regardless of how the input was folded, so this
-        // extra intermediate simplification cannot change the final,
-        // normalized `Sort` this method returns.
-        let body_lvl = self.get_level(inst)?;
-        let mut r = self.scratch.to_level(Some(self.view.store), body_lvl);
+        // 181-185): the fold through the simplifying `mkLevelIMax'`
+        // (Level.lean:549-551), then Meta's pure-Lean `Level.normalize`
+        // (Level.lean:382), not the kernel's.
+        let mut r = self.get_level(inst)?;
         let mut i = us.len();
         while i > 0 {
             i -= 1;
-            let x_lvl = self.scratch.to_level(Some(self.view.store), us[i]);
-            r = Level::mk_imax_pair(x_lvl, r, &mut self.guard)?;
+            r = self.mk_level_imax_prime(us[i], r)?;
         }
-        let r = Level::normalize(&r, &mut self.guard)?;
-        let r_id = self.scratch.intern_level(Some(self.view.store), &r)?;
+        let r_id = self.level_normalize(r)?;
         Ok(self.scratch.expr_sort(Some(self.view.store), r_id)?)
     }
 
@@ -1221,7 +1202,7 @@ mod tests {
     /// (`InferType.lean:185`). `∀ (x : N), N`'s two binder levels are
     /// both `1` (`N : Sort 1`), so the imax fold produces `imax 1 1`;
     /// unnormalized that is a distinct `IMax` level row, but `imax 1 1`
-    /// is definitionally `1`, and `Level::normalize` must collapse it to
+    /// is definitionally `1`, and `Level.normalize` must collapse it to
     /// the SAME interned id as `Sort (succ zero)` — pinning that the
     /// fold+normalize path, not a raw `level_imax` intern, is what runs.
     #[test]
