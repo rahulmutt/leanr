@@ -465,6 +465,9 @@ fn build_decl(
                 all: vec![name],
             })
         }
+        // The kernel hint only; the `@[reducible]` status
+        // `mkDefViewOfAbbrev` adds is recorded by `CommandElab` once the
+        // declaration is admitted (`reducible_overlay`).
         DefKind::Abbrev => Declaration::Defn(DefinitionVal {
             val,
             value,

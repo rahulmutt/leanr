@@ -56,6 +56,9 @@ pub use closure::ClosureResult;
 pub use config::{Config, ProjReduction};
 pub use discr_tree::DiscrTree;
 pub use error::MetaError;
+/// [`MetaCtx::set_reducibility_status`]'s argument, re-exported so a
+/// caller (the command elaborator) needs no `leanr_olean` dependency.
+pub use leanr_olean::ReducibilityStatus;
 pub use level_params::{
     name_cmp, sort_decl_level_params, CollectLevelParams, LevelMVarToParamResult,
 };

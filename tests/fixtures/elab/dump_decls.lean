@@ -856,7 +856,56 @@ def fileQueries : List (String × String) := [
   ("lth/numLetChain", "def e16 : Nat := let x := 1; let y := x; PProd.fst (PProd.mk y (rfl : Eq y (Nat.succ Nat.zero)))"),
   ("lth/numHaveRfl", "def e8 : Nat := have x := 1; PProd.fst (PProd.mk x (Eq.refl x))"),
   ("lth/numLetTyped", "def e9 : Nat := let x : Nat := 1; PProd.fst (PProd.mk x (rfl : Eq x (Nat.succ Nat.zero)))"),
-  ("lth/numNoLet", "def e7 : Nat := PProd.fst (PProd.mk 1 (rfl : Eq 1 (Nat.succ Nat.zero)))")
+  ("lth/numNoLet", "def e7 : Nat := PProd.fst (PProd.mk 1 (rfl : Eq 1 (Nat.succ Nat.zero)))"),
+  -- worktree A: in-file abbrev reducibility (`mkDefViewOfAbbrev` adds
+  -- `@[reducible]`, DefView.lean:143-144): class-ness and instance
+  -- defeq must see through an `abbrev` elaborated earlier in the file;
+  -- the `def` rows are the semireducible controls
+  ("abbrevRed/re3", "abbrev W2 := Wrap\nvariable (w : W2 Nat)\ndef re3 : Nat := Wrap.wrap Nat.zero"),
+  ("abbrevRed/appliedAbbrevVar", "abbrev W3 (a : Type) := Wrap a\nvariable (w : W3 Nat)\ndef ar1 : Nat := Wrap.wrap Nat.zero"),
+  ("abbrevRed/re2", "abbrev W2 := Wrap\ndef re2 [W2 Nat] : Nat := Nat.zero"),
+  ("abbrevRed/abbrevOfAbbrev", "abbrev W2 := Wrap\nabbrev W5 := W2\ndef r1 [W5 Nat] : Nat := Nat.zero"),
+  ("abbrevRed/nsAbbrev", "namespace N\nabbrev W := Wrap\nend N\ndef r2 [N.W Nat] : Nat := Nat.zero"),
+  ("abbrevRed/dottedAbbrev", "abbrev M.W := Wrap\ndef ar2 [M.W Nat] : Nat := Nat.zero"),
+  ("abbrevRed/typedAbbrev", "abbrev W7 : Type → Type := Wrap\ndef r10 [W7 Nat] : Nat := Nat.zero"),
+  ("abbrevRed/appliedAbbrev", "abbrev W3 (a : Type) := Wrap a\ndef ar3 [W3 Nat] : Nat := Nat.zero"),
+  ("abbrevRed/outParamAbbrev", "abbrev G := Get\ndef r5 [G Cell Nat Unit] : Nat := Nat.zero"),
+  ("abbrevRed/outParamAbbrevUse", "abbrev G2 (c : Type) := Get c Nat\ndef r6 {e : Type} [G2 Cell e] (c : Cell) : Cell := getFst c"),
+  ("abbrevRed/varInst", "abbrev W2 := Wrap\nvariable [w : W2 Nat]\ndef ar4 : Nat := Wrap.wrap Nat.zero"),
+  ("abbrevRed/varUpd", "abbrev W2 := Wrap\nvariable (w : W2 Nat)\nvariable [w]\ndef ar5 : Nat := Wrap.wrap Nat.zero"),
+  ("abbrevRed/anonVarInst", "abbrev W2 := Wrap\nvariable [W2 Nat]\ndef r7 : Nat := useWrap Nat.zero"),
+  ("abbrevRed/useWrap", "abbrev W2 := Wrap\ndef ar6 [W2 Nat] (x : Nat) : Nat := useWrap x"),
+  ("abbrevRed/argSynth", "abbrev N2 := Nat\ndef r3 (x : N2) : N2 := useWrap x"),
+  ("abbrevRed/localInstDefeq", "abbrev N2 := Nat\ndef r9 [Wrap N2] (x : Nat) : Nat := useWrap x"),
+  ("abbrevRed/abbrevInstVar", "abbrev N2 := Nat\nvariable [Wrap N2]\ndef r11 (x : Nat) : Nat := useWrap x"),
+  ("abbrevRed/openInAbbrev", "open Wrap in abbrev W8 := Wrap\ndef ar7 [W8 Nat] : Nat := Nat.zero"),
+  ("abbrevRed/defNotAbbrev", "def W4 := Wrap\nvariable (w : W4 Nat)\ndef ar8 : Nat := Wrap.wrap Nat.zero"),
+  ("abbrevRed/localInstDefeqDef", "def N3 := Nat\ndef r9b [Wrap N3] (x : Nat) : Nat := useWrap x"),
+  -- worktree A neighbours: numerals, coercions, lazy-delta and theorem
+  -- types through an in-file abbrev (and their `def` controls)
+  ("abbrevNb/numeral", "abbrev N2 := Nat\ndef nb1 : N2 := 1"),
+  ("abbrevNb/numeralDef", "def N3 := Nat\ndef nb2 : N3 := 1"),
+  ("abbrevNb/coeArg", "abbrev N2 := Nat\ndef nb3 (x : N2) : Int := takesInt x"),
+  ("abbrevNb/coeAscr", "abbrev N2 := Nat\ndef nb4 (x : N2) : Int := x"),
+  ("abbrevNb/coeArgDef", "def N3 := Nat\ndef nb5 (x : N3) : Int := takesInt x"),
+  ("abbrevNb/coeTarget", "abbrev WN := Wrapper Nat\ndef nb6 (n : Nat) : WN := n"),
+  ("abbrevNb/coeTargetDef", "def WD := Wrapper Nat\ndef nb6b (n : Nat) : WD := n"),
+  ("abbrevNb/defeqUnfold", "abbrev F (x : Nat) := pick x x\ntheorem nb7 : Eq (F Nat.zero) (pick Nat.zero Nat.zero) := rfl"),
+  ("abbrevNb/defeqUnfoldDef", "def F2 (x : Nat) := pick x x\ntheorem nb7b : Eq (F2 Nat.zero) Nat.zero := rfl"),
+  ("abbrevNb/lazyDeltaMix", "abbrev F (x : Nat) := pick x x\ndef G (x : Nat) := F x\ntheorem nb8 : Eq (G Nat.zero) (F Nat.zero) := rfl"),
+  ("abbrevNb/thmTypeOnly", "abbrev P := Eq Nat.zero Nat.zero\ntheorem nb9 : P := rfl"),
+  ("abbrevNb/thmTypeOnlyDef", "def P2 := Eq Nat.zero Nat.zero\ntheorem nb10 : P2 := rfl"),
+  ("abbrevNb/fieldNotation", "abbrev WN := Wrapper Nat\ndef nb11 (w : WN) : Nat := w.val"),
+  ("abbrevNb/argAscribed", "abbrev N2 := Nat\ndef nb12 : N2 := useWrap (Nat.zero : N2)"),
+  ("abbrevNb/outParamCont", "abbrev C2 := Cell\ndef nb13 (c : C2) : C2 := getFst c"),
+  ("abbrevNb/univAbbrev", "abbrev PP.{u} (a : Type u) := PProd a a\ndef nb14 (x : PP Nat) : Nat := x.fst"),
+  ("abbrevNb/autoBoundInst", "abbrev W2 := Wrap\ndef nb15 [W2 α] (x : α) : α := useWrap x"),
+  ("abbrevNb/exampleInst", "abbrev W2 := Wrap\nexample [W2 Nat] : Nat := Nat.zero"),
+  ("abbrevNb/varThm", "abbrev W2 := Wrap\nvariable {a : Type} [W2 a] (x : a)\ntheorem nb16 : Eq (useWrap x) (useWrap x) := rfl"),
+  ("abbrevNb/secVarAbbrev", "variable (n : Nat)\nabbrev nb17 := pick n n\ndef nb18 : Nat := nb17 Nat.zero"),
+  ("abbrevNb/instArgExplicit", "abbrev W2 := Wrap\ndef nb19 (w : W2 Nat) : Nat := @useWrap Nat w Nat.zero"),
+  ("abbrevNb/binderTypeUnify", "abbrev N2 := Nat\ndef nb20 (f : N2 -> Nat) : Nat := f Nat.zero"),
+  ("abbrevNb/abbrevProp", "abbrev Q := Eq Nat.zero Nat.zero\ndef nb21 (h : Q) : Eq Nat.zero Nat.zero := h")
 ]
 
 /-- The first error-severity message `s` logged, from `messages` and the
