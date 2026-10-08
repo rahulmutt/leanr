@@ -29,8 +29,8 @@ pub(crate) struct DefView {
     /// its last component once [`expand_decl_namespace`] has opened the
     /// namespace.
     pub name: Option<Vec<String>>,
-    /// The `protected` modifier (`declModifiers` slot 3).
-    pub protected: bool,
+    /// The accepted `declModifiers` slots.
+    pub modifiers: Modifiers,
     /// The `declId` node (for messages); `None` for `example`.
     pub decl_id: Option<SynElem>,
     /// `.{u, v}` names in source order.
@@ -73,7 +73,7 @@ impl DefView {
         }
         let ch = non_trivia_children(cmd);
         let mods = as_node(ch.first(), "declModifiers")?;
-        let protected = check_modifiers(&mods)?;
+        let modifiers = check_modifiers(&mods, kinds)?;
         let decl = as_node(ch.get(1), "declaration kind")?;
         let dk = kinds.name(decl.kind());
         let d = non_trivia_children(&decl);
@@ -162,7 +162,7 @@ impl DefView {
         Ok(DefView {
             kind,
             name,
-            protected,
+            modifiers,
             decl_id,
             univ_names,
             binders,
@@ -172,34 +172,67 @@ impl DefView {
     }
 }
 
-/// declModifiers' 7 slots (`Command.lean:114-121`). Only `protected`
-/// (slot 3) is accepted; returns whether it is present.
-fn check_modifiers(mods: &SyntaxNode) -> Result<bool, ElabError> {
+/// The `declModifiers` leanr elaborates: oracle `Modifiers`
+/// (`Elab/DeclModifiers.lean:125-138`) without the seamed fields. `unsafe`
+/// (slot 5) becomes a field here once the kernel admits unsafe
+/// declarations.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Modifiers {
+    /// `private` (slot 2, `Visibility.private`). Outside a `module`
+    /// `isInferredPublic` (`:84-85`) is `!isPrivate`, so this alone decides
+    /// whether `applyVisibility` makes the name private.
+    pub private: bool,
+    /// `protected` (slot 3).
+    pub protected: bool,
+}
+
+/// oracle: `elabModifiers` (`DeclModifiers.lean:208-237`) over
+/// declModifiers' 7 slots (`Parser/Command.lean:114-121`). Accepted: the
+/// doc comment (slot 0: it lands in the doc extension and never reaches
+/// the kernel, so it is dropped), `private` (slot 2) and `protected`
+/// (slot 3).
+fn check_modifiers(mods: &SyntaxNode, kinds: &KindInterner) -> Result<Modifiers, ElabError> {
+    const DOC: usize = 0;
+    const VISIBILITY: usize = 2;
     const PROTECTED: usize = 3;
     const SEAMS: [&str; 7] = [
-        "doc comment — later M4 (docs)",
+        "",
         "attributes — later M4",
-        "visibility modifier — later M4",
+        "",
         "",
         "`meta`/`noncomputable` — later M4 (compilation)",
-        "`unsafe` — later M4",
+        "`unsafe` — later M4 (the kernel admits no unsafe declarations)",
         "`partial`/`nonrec` — later M4 (recursion)",
     ];
-    let mut protected = false;
+    let mut out = Modifiers::default();
     for (i, slot) in non_trivia_children(mods).iter().enumerate() {
-        let empty = matches!(slot, NodeOrToken::Node(n) if is_empty(n));
-        if empty {
+        if matches!(slot, NodeOrToken::Node(n) if is_empty(n)) {
             continue;
         }
-        if i == PROTECTED {
-            protected = true;
-        } else {
-            return Err(seam(
-                *SEAMS.get(i).unwrap_or(&"declaration modifier — later M4"),
-            ));
+        match i {
+            DOC => {}
+            VISIBILITY => match slot {
+                NodeOrToken::Node(n)
+                    if matches!(non_trivia_children(n).first(),
+                        Some(NodeOrToken::Node(v))
+                            if kinds.name(v.kind()) == "Lean.Parser.Command.private") =>
+                {
+                    out.private = true
+                }
+                // `public` differs from no modifier only in a `module`
+                // (`isInferredPublic`), whose checks `elabVisibility`
+                // (`:88-118`) makes.
+                _ => return Err(seam("`public` visibility — later M4 (module system)")),
+            },
+            PROTECTED => out.protected = true,
+            _ => {
+                return Err(seam(
+                    *SEAMS.get(i).unwrap_or(&"declaration modifier — later M4"),
+                ))
+            }
         }
     }
-    Ok(protected)
+    Ok(out)
 }
 
 /// oracle: `expandDeclNamespace?` (`Elab/Declaration.lean:90-99`) with
@@ -397,15 +430,33 @@ mod tests {
 
     #[test]
     fn modifiers_are_named_seams() {
-        assert!(seam("/-- d -/ def a : Nat := Nat.zero").contains("doc comment"));
-        assert!(seam("@[simp] def a : Nat := Nat.zero").contains("attributes"));
-        assert!(seam("private def a : Nat := Nat.zero").contains("visibility modifier"));
-        assert!(
-            view_of("protected def a : Nat := Nat.zero")
-                .unwrap()
-                .protected
+        let mods = |src: &str| view_of(src).unwrap().modifiers;
+        let (private, protected) = (
+            Modifiers {
+                private: true,
+                protected: false,
+            },
+            Modifiers {
+                private: false,
+                protected: true,
+            },
         );
-        assert!(!view_of("def a : Nat := Nat.zero").unwrap().protected);
+        assert_eq!(
+            mods("/-- d -/ def a : Nat := Nat.zero"),
+            Modifiers::default()
+        );
+        assert!(seam("@[simp] def a : Nat := Nat.zero").contains("attributes"));
+        assert!(seam("public def a : Nat := Nat.zero").contains("`public`"));
+        assert_eq!(mods("private def a : Nat := Nat.zero"), private);
+        assert_eq!(mods("protected def a : Nat := Nat.zero"), protected);
+        assert_eq!(
+            mods("/-- d -/ private protected def a : Nat := Nat.zero"),
+            Modifiers {
+                private: true,
+                protected: true
+            }
+        );
+        assert_eq!(mods("def a : Nat := Nat.zero"), Modifiers::default());
         assert!(seam("noncomputable def a : Nat := Nat.zero").contains("`meta`/`noncomputable`"));
         assert!(seam("unsafe def a : Nat := Nat.zero").contains("`unsafe`"));
         assert!(seam("partial def a : Nat := Nat.zero").contains("`partial`/`nonrec`"));

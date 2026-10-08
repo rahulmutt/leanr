@@ -146,8 +146,12 @@ fn synthesize_pending_and_normalize_fun_type(
     // hint is prose after the first line.
     if let Some(na) = app.st.named_args.first() {
         let head = app.app_fn(app.st.f);
+        // `.ofConstName` (`:51`): a private function shows its user name.
         let func = match app.node(head) {
-            Node::Const { name: Some(n), .. } => Some(app.elab.name_str(n)),
+            Node::Const { name: Some(n), .. } => Some(
+                crate::names::render_const(app.elab.mctx.store_mut(), Some(app.elab.view.store), n)
+                    .map_err(leanr_meta::MetaError::from)?,
+            ),
             _ => None,
         };
         return Err(ElabError::InvalidNamedArg {

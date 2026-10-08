@@ -321,6 +321,18 @@ pub enum ElabError {
     /// reached from `expandDeclId` → `mkDeclName` → `applyVisibility`
     /// (`:244-251`). Carries the rendered FULL declaration name.
     AlreadyDeclared(String),
+    /// oracle: `checkNotAlreadyDeclared` (`DeclModifiers.lean:40-43`): the
+    /// PRIVATE declaration name is taken. Carries the rendered user name
+    /// (`privateToUserName?`).
+    PrivateAlreadyDeclared(String),
+    /// oracle: `checkNotAlreadyDeclared` (`DeclModifiers.lean:47-49`): a
+    /// public declaration whose private counterpart exists. Carries the
+    /// rendered declaration name.
+    PrivateCounterpartDeclared(String),
+    /// oracle: `checkNotAlreadyDeclared` (`DeclModifiers.lean:50-55`): a
+    /// private declaration whose public (user) name exists. Carries the
+    /// rendered user name.
+    NonPrivateDeclared(String),
     /// oracle: `throwAlreadyDeclaredUniverseLevel` (`Elab/Exception.lean:43-44`),
     /// from `expandDeclId`'s `.{…}` fold (`Elab/DeclModifiers.lean:333-339`).
     UniverseAlreadyDeclared(String),
@@ -673,6 +685,15 @@ impl ElabError {
                 Some(format!("invalid binder name `{n}`, it must be atomic"))
             }
             Self::AlreadyDeclared(n) => Some(format!("`{n}` has already been declared")),
+            Self::PrivateAlreadyDeclared(n) => {
+                Some(format!("private declaration `{n}` has already been declared"))
+            }
+            Self::PrivateCounterpartDeclared(n) => Some(format!(
+                "a private declaration `{n}` has already been declared"
+            )),
+            Self::NonPrivateDeclared(n) => Some(format!(
+                "a non-private declaration `{n}` has already been declared"
+            )),
             Self::UniverseAlreadyDeclared(u) => Some(format!(
                 "a universe level named `{u}` has already been declared"
             )),
@@ -880,6 +901,22 @@ mod tests {
                 .as_deref(),
             Some("`pick` has already been declared") // err/already
         );
+        for (e, want) in [
+            (
+                ElabError::PrivateAlreadyDeclared("p1".into()),
+                "private declaration `p1` has already been declared", // priv/clashPriv
+            ),
+            (
+                ElabError::PrivateCounterpartDeclared("p3".into()),
+                "a private declaration `p3` has already been declared", // priv/pubAfterPriv
+            ),
+            (
+                ElabError::NonPrivateDeclared("p2".into()),
+                "a non-private declaration `p2` has already been declared", // priv/afterPub
+            ),
+        ] {
+            assert_eq!(e.oracle_first_line().as_deref(), Some(want));
+        }
         assert_eq!(
             ElabError::UniverseAlreadyDeclared("u".into())
                 .oracle_first_line()

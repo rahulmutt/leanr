@@ -240,24 +240,27 @@ fn find_method_in(
     s: NameId,
     field: &str,
 ) -> Result<Option<(NameId, NameId)>, ElabError> {
-    let s_str = render(elab, s);
-    // `privateToUserName structName'` (`:1456`): leanr models no private
-    // names (plan § Spec deviations 4).
-    if s_str.starts_with("_private.") {
-        return Err(ElabError::UnsupportedSyntax(format!(
-            "`.{field}` on the private structure `{s_str}` (`privateToUserName`, \
-             App.lean:1456) — the slice that models private names"
-        )));
-    }
-    // `structName' ++ fieldName`.
-    let full = crate::app::dot_ident::child_name(elab, s, field)?;
+    // `privateToUserName structName' ++ fieldName` (`:1456`): a private
+    // type's methods live in its user name's namespace.
+    let user =
+        crate::names::private_to_user_name(elab.mctx.store_mut(), Some(elab.view.store), Some(s))
+            .map_err(leanr_meta::MetaError::from)?
+            .ok_or_else(|| ElabError::Internal("anonymous user name".into()))?;
+    let full = crate::app::dot_ident::child_name(elab, user, field)?;
     match crate::resolve::resolve_global_name_at_root(elab, full)?.as_slice() {
         [] => Ok(None),
         [c] => Ok(Some((s, *c))),
         cs => Err(ElabError::AmbiguousFieldName {
             field: field.to_string(),
             full: render(elab, full),
-            cands: cs.iter().map(|&c| render(elab, c)).collect(),
+            // `.ofConstName` prints a private candidate's user name.
+            cands: cs
+                .iter()
+                .map(|&c| {
+                    crate::names::render_const(elab.mctx.store_mut(), Some(elab.view.store), c)
+                })
+                .collect::<Result<_, _>>()
+                .map_err(leanr_meta::MetaError::from)?,
         }),
     }
 }
@@ -340,8 +343,18 @@ fn resolve_lval_aux(
             // recursive call). leanr's only aux decl is the declaration
             // being defined (`resolve.aux_decl`); a hit, with or without
             // explicit universes, is the recursion seam.
+            // `fullName := privateToUserName structName ++ field`
+            // (`:1558`), against the aux decl's user name (`:1562`).
+            let base = Some(elab.view.store);
+            let st = elab.mctx.store_mut();
+            let user_s = crate::names::private_to_user_name(st, base, Some(s))
+                .map_err(leanr_meta::MetaError::from)?
+                .ok_or_else(|| ElabError::Internal("anonymous user name".into()))?;
             if let Some(aux) = elab.resolve.aux_decl {
-                if crate::app::dot_ident::child_name(elab, s, name)? == aux.full {
+                let aux_user =
+                    crate::names::private_to_user_name(elab.mctx.store_mut(), base, Some(aux.full))
+                        .map_err(leanr_meta::MetaError::from)?;
+                if Some(crate::app::dot_ident::child_name(elab, user_s, name)?) == aux_user {
                     return Err(crate::resolve::recursion_seam(elab, aux));
                 }
             }
@@ -356,7 +369,7 @@ fn resolve_lval_aux(
             }
             // `throwInvalidFieldAt ref fieldName fullName` (`:1578`); the
             // exporting-scope `declHint` retry (`:1570-1577`) is prose.
-            let full_name = format!("{}.{name}", render(elab, s));
+            let full_name = format!("{}.{name}", render(elab, user_s));
             Err(field_err(name, InvalidFieldReason::NotFound { full_name }))
         }
         // `:1580-1588`.
@@ -828,14 +841,15 @@ pub fn elab_app_lvals(
                     )));
                 };
                 let proj_name = render(elab, proj_fn_name);
-                // `isInaccessiblePrivateName` (`:1860-1861`). leanr does
-                // not model private-name accessibility (module scoping of
-                // `_private` names), so a private projection is a seam,
+                // `isInaccessiblePrivateName` (`:1860-1861`). A private
+                // projection is imported (leanr declares no structures),
+                // and imported private-name accessibility is the module
+                // system's, so it is a seam,
                 // not a guess.
                 if proj_name.starts_with("_private.") {
                     return Err(ElabError::UnsupportedSyntax(format!(
                         "private field projection `{proj_name}` (`isInaccessiblePrivateName`, \
-                         App.lean:1860-1861) — the slice that models private names"
+                         App.lean:1860-1861) — later M4 (imported private names)"
                     )));
                 }
                 // `mkConst info.projFn levels` (`:1862`). `projFn` is

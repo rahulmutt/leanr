@@ -40,6 +40,7 @@ pub(crate) fn elab_open(
             tables,
             ns: elab.resolve.ns,
             open_decls: elab.resolve.open_decls.to_vec(),
+            main_module: elab.resolve.main_module,
         };
         elab_open_decl(&mut s, &decl, kinds)?;
         s.open_decls

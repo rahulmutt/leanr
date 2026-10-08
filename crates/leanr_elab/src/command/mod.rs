@@ -112,6 +112,14 @@ pub struct CommandElab<'x> {
     /// `varUIds`, `BuiltinCommand.lean:428`). The oracle's uids are only
     /// map keys, so a counter is enough.
     next_var_uid: u32,
+    /// `Environment.mainModule` (`env.header.mainModule`): the module whose
+    /// private names this file mints (`mkPrivateName`, `Modifiers.lean:
+    /// 23-26`). `None` (anonymous) is what the header-less sources the
+    /// oracle corpus elaborates have, so `private def f` is
+    /// `_private.0.f`. A real build MUST set it to the module's name
+    /// (`set_main_module`) before elaborating, or its private names will
+    /// collide with every other module's.
+    main_module: Option<NameId>,
 }
 
 impl<'x> CommandElab<'x> {
@@ -124,7 +132,13 @@ impl<'x> CommandElab<'x> {
             scopes: vec![Scope::root()],
             tables,
             next_var_uid: 0,
+            main_module: None,
         }
+    }
+
+    /// Set `mainModule` (a persistent-store name; see the field).
+    pub fn set_main_module(&mut self, m: Option<NameId>) {
+        self.main_module = m;
     }
 
     pub fn env(&self) -> &Environment {
@@ -244,7 +258,8 @@ impl<'x> CommandElab<'x> {
             self.reducible_overlay.push(main);
         }
         // `applyVisibility`'s `addProtected` (`DeclModifiers.lean:249-250`).
-        if let (true, Some(&main)) = (view.protected, names.last()) {
+        // The tag sits on the declared (for `private`, the private) name.
+        if let (true, Some(&main)) = (view.modifiers.protected, names.last()) {
             self.tables.add_protected(main);
         }
         Ok(names)
@@ -276,6 +291,7 @@ impl<'x> CommandElab<'x> {
                 open_decls: head.open_decls.as_slice().into(),
                 tables: &self.tables,
                 aux_decl: None,
+                main_module: self.main_module,
             };
             // `liftTermElabM`: the scope's `levelNames` seed the term context.
             elab.level_names = head.level_names.clone();
@@ -424,7 +440,8 @@ impl<'x> CommandElab<'x> {
                         .map_err(ElabError::Kernel)?;
                     // `addDecl` → `registerNamePrefixes` (`AddDecl.lean:107`).
                     self.tables
-                        .register_name_prefixes(self.env.store(), names[i]);
+                        .register_name_prefixes(self.env.store_mut(), names[i])
+                        .map_err(ElabError::Kernel)?;
                     if i < n_aux {
                         // `mkAuxLemma` inserts right after the aux's own
                         // `addDecl` (`AuxLemma.lean:64-68`), so an aux stays

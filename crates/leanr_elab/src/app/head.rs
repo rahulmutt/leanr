@@ -832,6 +832,7 @@ mod tests {
             open_decls: std::rc::Rc::from([]),
             tables: &tables,
             aux_decl: None,
+            main_module: None,
         };
 
         let snap = builtin::snapshot();
