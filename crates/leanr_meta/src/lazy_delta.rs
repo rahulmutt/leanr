@@ -52,8 +52,6 @@
 //!
 //! # Named seams (never silent `false`)
 //!
-//! - [`MetaCtx::is_def_eq_offset`] — `isDefEqOffset` (Meta/Offset.lean:
-//!   118-144), gated on `Config.offsetCnstrs` (unmodeled). Task 7+.
 //! - [`MetaCtx::is_def_eq_native`] — `isDefEqNative` (ExprDefEq.lean:
 //!   186-193), compiled-eval support. Permanently out of scope (no
 //!   native evaluator in a pure-Rust toolchain).
@@ -936,7 +934,7 @@ impl<'e> MetaCtx<'e> {
     /// against the current store — the same idiom `whnf.rs::intern_dotted`
     /// uses, restated locally (that helper is module-private and tied to
     /// the matcher-unfold allowlist's own concerns).
-    fn dotted(&mut self, parts: &[&str]) -> Result<NameId, MetaError> {
+    pub(crate) fn dotted(&mut self, parts: &[&str]) -> Result<NameId, MetaError> {
         let base = Some(self.view.store);
         let mut name = None;
         for part in parts {
@@ -947,20 +945,8 @@ impl<'e> MetaCtx<'e> {
     }
 
     // =======================================================================
-    // Named seams: isDefEqOffset / isDefEqNative
+    // Named seam: isDefEqNative (isDefEqOffset is ported in `offset.rs`)
     // =======================================================================
-
-    /// SEAM: oracle `isDefEqOffset` (Meta/Offset.lean:118-144, `?x + k
-    /// =?= n` on `Nat`). Gated on `Config.offsetCnstrs`, a field this
-    /// plan's `Config` does not carry (`config.rs`'s own doc: fields
-    /// arrive with the feature that consults them). Always `Ok(None)`.
-    pub(crate) fn is_def_eq_offset(
-        &mut self,
-        _t: ExprId,
-        _s: ExprId,
-    ) -> Result<Option<bool>, MetaError> {
-        Ok(None)
-    }
 
     /// SEAM: oracle `isDefEqNative` (ExprDefEq.lean:186-193, compiled
     /// `Lean.reduceBool`/`Lean.reduceNat` support via `reduceNative?`).

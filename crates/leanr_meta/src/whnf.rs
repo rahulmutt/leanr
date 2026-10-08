@@ -112,7 +112,7 @@ use crate::{MVarId, MVarKind, MetaCtx, MetaError, ProjReduction, TransparencyMod
 /// (`type_checker.cpp:586`): that is the KERNEL's own, separate,
 /// much-larger threshold for `Nat.rec`/`whnf`'s internal reduction (a
 /// different oracle layer entirely) — the two must not be conflated.
-const EXPONENTIATION_THRESHOLD: usize = 256;
+pub(crate) const EXPONENTIATION_THRESHOLD: usize = 256;
 
 /// oracle: `maxSynthPendingDepth`, default `1` (`Meta/Basic.lean:458-
 /// 461`), consulted by `synthPendingImp` (`SynthInstance.lean:1044-

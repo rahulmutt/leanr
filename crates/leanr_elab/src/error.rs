@@ -752,6 +752,19 @@ impl ElabError {
             Self::InvalidNamespace(n) => Some(format!(
                 "invalid namespace `{n}`, `_root_` is a reserved namespace"
             )),
+            // oracle `throwUnknownConstant` (`Exception.lean:156-165`), as
+            // `inferType` raises it (`infer.rs`'s `unknown constant '…'`):
+            // e.g. a `mkNatAdd` term (`HAdd.hAdd`) assigned in an
+            // environment without `HAdd` (row `offset/m8`).
+            Self::Meta(MetaError::Infer(m)) => m
+                .strip_prefix("unknown constant '")
+                .and_then(|n| n.strip_suffix('\''))
+                .map(|n| format!("Unknown constant `{n}`")),
+            // oracle `KernelException.toMessageData`'s `declTypeMismatch`
+            // arm (`Message.lean:874`); the types follow (`indentExpr`).
+            Self::Kernel(leanr_kernel::KernelError::DefTypeMismatch(n)) => Some(format!(
+                "(kernel) declaration type mismatch, '{n}' has type"
+            )),
             _ => None,
         }
     }
@@ -1005,6 +1018,30 @@ mod tests {
         );
         assert_eq!(
             ElabError::Kernel(leanr_kernel::KernelError::BankExhausted).oracle_first_line(),
+            None
+        );
+        // Row `offset/n19add`: the elaborator accepts `Add.add x 1 =?=
+        // Nat.succ x` by `isDefEqOffset`, the kernel does not.
+        assert_eq!(
+            ElabError::Kernel(leanr_kernel::KernelError::DefTypeMismatch(
+                std::sync::Arc::new(leanr_kernel::Name::Str {
+                    parent: std::sync::Arc::new(leanr_kernel::Name::Anonymous),
+                    part: "n19".into(),
+                },)
+            ))
+            .oracle_first_line()
+            .as_deref(),
+            Some("(kernel) declaration type mismatch, 'n19' has type")
+        );
+        assert_eq!(
+            ElabError::Meta(MetaError::Infer("unknown constant 'HAdd.hAdd'".into()))
+                .oracle_first_line()
+                .as_deref(),
+            Some("Unknown constant `HAdd.hAdd`")
+        );
+        assert_eq!(
+            ElabError::Meta(MetaError::Infer("unknown constant (anonymous)".into()))
+                .oracle_first_line(),
             None
         );
     }
