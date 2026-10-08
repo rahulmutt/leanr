@@ -747,17 +747,17 @@ impl<'e> MetaCtx<'e> {
     ///
     /// A LET-bound telescope entry (`decl.value.is_some()`) is NOT
     /// always rebuilt as a `Forall`: `MkBinding.mkBinding`'s `ldecl` arm
-    /// (:1327-1335) only takes the `handleCDecl` (regular-binder) path
+    /// (:1330-1338) only takes the `handleCDecl` (regular-binder) path
     /// when `generalizeNondepLet && nondep` — always false here since
     /// `inferLambdaType` hardcodes `generalizeNondepLet := false` — so a
     /// let entry always falls to `else if !usedLetOnly || e.hasLooseBVar
     /// 0`; since `usedLetOnly = true`, that's exactly `e.hasLooseBVar 0`
     /// on the JUST-abstracted body: if the let-bound variable is
-    /// actually used, wrap in `LetE` (:1333); if not, DROP the binder
-    /// entirely (`e.lowerLooseBVars 1 1`, :1335) — the accumulated body
+    /// actually used, wrap in `LetE` (:1336); if not, DROP the binder
+    /// entirely (`e.lowerLooseBVars 1 1`, :1338) — the accumulated body
     /// is already correct as-is, since nothing in it refers to this
     /// slot. This is genuinely different machinery from `leanr_kernel`'s
-    /// own `subst::mk_binding` (`subst.rs:1020-1048`, oracle
+    /// own `subst::mk_binding` (`subst.rs:1216-1244`, oracle
     /// `local_ctx.cpp:93-115`): that kernel-internal telescope helper
     /// also branches on `decl.value` (`Some` ⇒ `expr_let`), but it is a
     /// DIFFERENT function serving kernel-internal admission and has no
@@ -768,15 +768,30 @@ impl<'e> MetaCtx<'e> {
     /// git history for the compile probe that confirmed this) stands in
     /// for `abstractRange`.
     ///
-    /// No `lowerLooseBVars` primitive is exposed by this crate for the
-    /// drop case, but none is needed: `abstract_go`'s every combinator
-    /// (subst.rs:589-729) reconstructs a node only when a child actually
-    /// changed, else returns the untouched input id, so abstracting an
-    /// fvar that never occurs in `r` is a structural no-op — `r` is
-    /// already exactly the "with this slot removed" result. Comparing
-    /// the abstraction's output against its input (`used = r != before`)
-    /// is therefore an exact stand-in for the oracle's `hasLooseBVar 0`
-    /// probe on the freshly-abstracted body.
+    /// The oracle abstracts the body ONCE against the whole telescope
+    /// (`abstractRange xs xs.size e`, :1313), each kept binder's
+    /// type/value against its outer fvars (`abstractRange xs i`, :1320,
+    /// :1334-1335), and `lowerLooseBVars 1 1` on a drop (:1326, :1338).
+    /// This port instead abstracts ONE fvar per step, innermost first,
+    /// over the accumulated `r` — which by then already contains the
+    /// inner binders' types/values with their outer fvars still free.
+    /// So no `lowerLooseBVars` is needed: an fvar's bvar index is fixed
+    /// only once its own used-test has decided whether its binder stays,
+    /// and an outer let used ONLY by an inner binder's type/value (`let T
+    /// := Nat; let U := T; let y : U := …; y`) is seen as used. The two
+    /// orders give the same result. Pre-abstracting `ty`/`value` against
+    /// `&fvars[..i]` (as the oracle's batch order does) would be WRONG
+    /// here: those bvars would be invisible to the outer used-tests and
+    /// would not be lowered when an outer binder drops (rows
+    /// `inferLet/chain`, `inferLet/lamT`, `inferLet/dropMid`).
+    ///
+    /// `abstract_go`'s every combinator (subst.rs:765-929) reconstructs
+    /// a node only when a child actually changed, else returns the
+    /// untouched input id, so abstracting an fvar that never occurs in
+    /// `r` is a structural no-op. Comparing the abstraction's output
+    /// against its input (`used = r != before`) is therefore an exact
+    /// stand-in for the oracle's `hasLooseBVar 0` probe on the
+    /// freshly-abstracted body.
     fn rebuild_forall(&mut self, fvars: &[ExprId], body_ty: ExprId) -> Result<ExprId, MetaError> {
         let mut r = body_ty;
         let mut i = fvars.len();
@@ -808,46 +823,35 @@ impl<'e> MetaCtx<'e> {
                 // Unused let: drop the binder entirely (`r` is already
                 // correct — see this method's doc comment).
                 Some(_) if !used => r,
-                Some(value) => {
-                    let ty2 = abstract_fvars(
-                        self.scratch,
-                        Some(self.view.store),
-                        ty,
-                        &fvars[..i],
-                        &mut self.guard,
-                    )?;
-                    let value2 = abstract_fvars(
-                        self.scratch,
-                        Some(self.view.store),
-                        value,
-                        &fvars[..i],
-                        &mut self.guard,
-                    )?;
-                    self.scratch.expr_let(
-                        Some(self.view.store),
-                        binder_name,
-                        ty2,
-                        value2,
-                        r,
-                        false,
-                    )?
-                }
+                // `ty`/`value` are wrapped with their OUTER fvars still
+                // free (see the doc comment): the next iterations'
+                // single-fvar abstraction of `r` reaches them at the right
+                // depth, and their uses count toward the outer binders'
+                // used-tests.
+                Some(value) => self.scratch.expr_let(
+                    Some(self.view.store),
+                    binder_name,
+                    ty,
+                    value,
+                    r,
+                    // NOTE: the oracle passes the decl's own `nondep`
+                    // (`mkLet n type value e nondep`, MetavarContext.lean:
+                    // 1336); hard-coded `false` here. No row observes
+                    // the bit yet: every probed `have` whose type is
+                    // inferred (`inferLet/have`, and `have` telescopes as
+                    // implicit-arg / no-type-def values) errors "Type
+                    // mismatch" in the oracle and in leanr alike.
+                    false,
+                )?,
                 None => {
                     // oracle: `handleCDecl`'s `type.headBeta`
                     // (`MetavarContext.lean:1319`); the let arm above
-                    // (`:1333-1336`) does not beta.
+                    // (`:1334-1336`) does not beta.
                     let ty = self.head_beta(ty)?;
-                    let ty2 = abstract_fvars(
-                        self.scratch,
-                        Some(self.view.store),
-                        ty,
-                        &fvars[..i],
-                        &mut self.guard,
-                    )?;
                     self.scratch.expr_forall(
                         Some(self.view.store),
                         binder_name,
-                        ty2,
+                        ty,
                         r,
                         binder_info,
                     )?
@@ -1195,6 +1199,94 @@ mod tests {
                 "infer(let x := N.zero; x) must not have a Forall head, got {:?}",
                 ctx.node(t)
             );
+        });
+    }
+
+    /// oracle: `MkBinding.mkBinding` (MetavarContext.lean:1312-1338) via
+    /// `inferLambdaType` (InferType.lean:188-191). `let T := N; let U :=
+    /// T; let y : U := N.zero; y` infers to `let T := N; let U := T; U`:
+    /// `y` is dropped, `U` is used by the body type, and `T` is used ONLY
+    /// by `U`'s value — it must be kept, and `U`'s value must be `#0`
+    /// (the pre-fix result was `let U := #0; U` with `T` dropped, a loose
+    /// bvar). File rows: `inferLet/chain*`.
+    #[test]
+    fn let_chain_keeps_a_let_used_only_by_an_inner_value() {
+        with_prelude0_ctx(|ctx| {
+            let n_name = single(ctx, "N");
+            let n_ty = const_expr(ctx, n_name);
+            let zero_name = dotted(ctx, "N", "zero");
+            let zero = const_expr(ctx, zero_name);
+            let base = Some(ctx.view.store);
+            let z = ctx.scratch.level_zero(base).expect("level");
+            let one = ctx.scratch.level_succ(base, z).expect("succ");
+            let sort1 = ctx.scratch.expr_sort(base, one).expect("sort");
+            let b0 = ctx.scratch.expr_bvar(base, &Nat::from(0u64)).expect("bvar");
+
+            // let T : Sort 1 := N; let U : Sort 1 := T; let y : U := N.zero; y
+            let y_let = ctx
+                .scratch
+                .expr_let(base, None, b0, zero, b0, false)
+                .expect("let");
+            let u_let = ctx
+                .scratch
+                .expr_let(base, None, sort1, b0, y_let, false)
+                .expect("let");
+            let e = ctx
+                .scratch
+                .expr_let(base, None, sort1, n_ty, u_let, false)
+                .expect("let");
+
+            let t = ctx.infer_type(e).expect("infer");
+
+            let u_want = ctx
+                .scratch
+                .expr_let(base, None, sort1, b0, b0, false)
+                .expect("let");
+            let want = ctx
+                .scratch
+                .expr_let(base, None, sort1, n_ty, u_want, false)
+                .expect("let");
+            assert_eq!(t, want, "got {:?}", ctx.node(t));
+        });
+    }
+
+    /// The `forall` arm of the same rebuild: `let T := N; fun (q : T) =>
+    /// N.zero` infers to `let T := N; T -> N` — `T` occurs only in the
+    /// lambda binder's TYPE (pre-fix: `T` dropped, `q : #0` loose).
+    /// File rows: `inferLet/lamT`, `inferLet/dropMid`.
+    #[test]
+    fn let_used_only_by_a_lambda_binder_type_is_kept() {
+        with_prelude0_ctx(|ctx| {
+            let n_name = single(ctx, "N");
+            let n_ty = const_expr(ctx, n_name);
+            let zero_name = dotted(ctx, "N", "zero");
+            let zero = const_expr(ctx, zero_name);
+            let base = Some(ctx.view.store);
+            let z = ctx.scratch.level_zero(base).expect("level");
+            let one = ctx.scratch.level_succ(base, z).expect("succ");
+            let sort1 = ctx.scratch.expr_sort(base, one).expect("sort");
+            let b0 = ctx.scratch.expr_bvar(base, &Nat::from(0u64)).expect("bvar");
+
+            let lam = ctx
+                .scratch
+                .expr_lam(base, None, b0, zero, BinderInfo::Default)
+                .expect("lam");
+            let e = ctx
+                .scratch
+                .expr_let(base, None, sort1, n_ty, lam, false)
+                .expect("let");
+
+            let t = ctx.infer_type(e).expect("infer");
+
+            let pi = ctx
+                .scratch
+                .expr_forall(base, None, b0, n_ty, BinderInfo::Default)
+                .expect("forall");
+            let want = ctx
+                .scratch
+                .expr_let(base, None, sort1, n_ty, pi, false)
+                .expect("let");
+            assert_eq!(t, want, "got {:?}", ctx.node(t));
         });
     }
 

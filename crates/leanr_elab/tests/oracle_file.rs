@@ -9,10 +9,9 @@ mod support;
 
 /// `wc -l tests/fixtures/elab/file-queries.jsonl` at the last deliberate
 /// regen (abbrev reducibility: 540 + 20 `abbrevRed/*` + 23 `abbrevNb/*` rows =
-/// 583). `>=`: adding a
-/// record is a one-line bump,
-/// not a failing gate.
-const CORPUS_FLOOR: usize = 583;
+/// 583; inferType rebuild: 583 + 18 `inferLet/*` rows = 601). `>=`: adding
+/// a record is a one-line bump, not a failing gate.
+const CORPUS_FLOOR: usize = 601;
 
 #[test]
 fn file_corpus_sources_parse_into_the_oracle_commands() {
